@@ -26,6 +26,7 @@ public static class ServiceCollectionExtensions
         // Core repositories
         services.AddSingleton<UserTokenVersionStore>();
         services.AddSingleton<OrgRepository>();
+        services.AddSingleton<ArtifactInventoryRepository>();
         services.AddSingleton<PackageRepository>();
         services.AddSingleton<PackageVersionFilesRepository>();
         services.AddSingleton<NuGetSymbolIndexRepository>();
@@ -72,6 +73,13 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<CacheArtifactRepository>();
         services.AddSingleton<TenantArtifactAccessRepository>();
         services.AddSingleton<CacheAccessRecorder>();
+        // Serialises the shared-key refcount check + physical delete of a content-addressed
+        // proxy-cache blob key; shared by the LRU eviction pass and the local_only claim purge so
+        // both agree on one physical blob before either deletes it.
+        services.AddSingleton<CacheBlobKeyLock>();
+        // The only physical proxy-cache blob delete — both cache-tier eviction paths route
+        // through it for the locked refcount guard.
+        services.AddSingleton<CacheOrphanBlobDeleter>();
 
         // Name-claim mechanism
         services.AddSingleton<ClaimRepository>();

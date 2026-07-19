@@ -96,4 +96,27 @@ public sealed class BlocklistRepositoryTests : IClassFixture<InMemoryDbFixture>
 
         Assert.Empty(await repo.ListAsync(orgId));
     }
+
+    [Fact]
+    public async Task AddThatRacesAnInFlightListFill_DoesNotServeThePreBlockListForATtl()
+    {
+        // Fill-after-invalidate race on the hot proxy/publish gate: IsBlockedAsync reads the DB
+        // (no matching pattern yet); concurrently an operator adds a block, whose INSERT +
+        // cache-eviction lands mid-fill. The fill then caches the pre-block list AFTER the
+        // eviction, so a package the operator just blocked stays installable for a full 60s TTL.
+        // The hook fires the racing AddAsync between the list read and its cache write — fails on
+        // the pre-guard code, passes on the generation-token fix.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        var hooked = new AfterDbReadHookStore(_fixture.Store);
+        var repo = new BlocklistRepository(hooked, new MemoryCache(new MemoryCacheOptions()), TimeProvider.System);
+
+        hooked.AfterRead = async () => await repo.AddAsync(orgId, "^pkg:npm/evil-.*");
+
+        // The fill reads the empty list, then the hook adds the block + evicts, then the fill caches.
+        Assert.False(await repo.IsBlockedAsync(orgId, "pkg:npm/evil-x@1.0.0")); // read pre-block list
+
+        // Killer assertion: the next check must enforce the newly-added block, not serve a stale
+        // pre-block list cached by the racing fill.
+        Assert.True(await repo.IsBlockedAsync(orgId, "pkg:npm/evil-x@1.0.0"));
+    }
 }

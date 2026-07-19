@@ -11,11 +11,22 @@ public sealed class SystemAdminRepository
 {
     private readonly IMetadataStore _db;
     private readonly TimeProvider _time;
+    private readonly UserTokenVersionStore? _tokenVersions;
+    private readonly Identity.SystemAdminTokenVersionStore? _adminTokenVersions;
+    private readonly TrustedDeviceService? _trustedDevices;
 
-    public SystemAdminRepository(IMetadataStore db, TimeProvider? time = null)
+    public SystemAdminRepository(
+        IMetadataStore db,
+        TimeProvider? time = null,
+        UserTokenVersionStore? tokenVersions = null,
+        TrustedDeviceService? trustedDevices = null,
+        Identity.SystemAdminTokenVersionStore? adminTokenVersions = null)
     {
         _db = db;
         _time = time ?? TimeProvider.System;
+        _tokenVersions = tokenVersions;
+        _trustedDevices = trustedDevices;
+        _adminTokenVersions = adminTokenVersions;
     }
 
     /// <summary>
@@ -26,6 +37,12 @@ public sealed class SystemAdminRepository
     ///
     /// This is a deliberately simple flow that works without an email service: no token table,
     /// no signed link. The temporary password is high-entropy and rotation is mandatory.
+    ///
+    /// An operator reset is the compromise-response control, so it cuts off every credential
+    /// minted under the old password exactly like the self-service change-password path: it bumps
+    /// <c>token_version</c> (staling outstanding session JWTs via the <c>tver</c> claim), rotates
+    /// the Identity <c>security_stamp</c>, revokes the user's API tokens (<c>user_tokens</c> rows),
+    /// evicts the cached token version, and drops remembered trusted devices.
     /// </summary>
     public async Task<(string TemporaryPassword, DateTimeOffset IssuedAt)?> IssuePasswordResetAsync(
         string email, string tenantSlug, CancellationToken ct = default)
@@ -34,24 +51,56 @@ public sealed class SystemAdminRepository
         string hash = BCrypt.Net.BCrypt.HashPassword(raw, workFactor: 12);
         var now = _time.GetUtcNow();
         string nowStr = now.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string stamp = Guid.NewGuid().ToString();
 
         await using var conn = await _db.OpenAsync(ct);
+
+        // Resolve the target user across tenants so the credential-invalidation writes below can
+        // key on the users PK (and so cache/trusted-device invalidation has the id to work with).
         // xtenant: operator support flow resolves a tenant user by (email, slug) across tenants.
-        int rows = await conn.ExecuteAsync(
+        string? userId = await conn.ExecuteScalarAsync<string?>(
+            """
+            SELECT u.id FROM users u
+            JOIN orgs o ON o.id = u.tenant_id
+            WHERE lower(u.email) = lower(@email) AND o.slug = @tenantSlug
+            """,
+            new { email, tenantSlug });
+        if (userId is null)
+        {
+            return null;
+        }
+
+        // Rotating the Identity security_stamp alongside token_version keeps the Identity model
+        // consistent with the credential change; token_version remains the canonical per-request
+        // session-invalidation signal.
+        // xtenant: keyed by the users PK resolved above.
+        await conn.ExecuteAsync(
             """
             UPDATE users SET
                 password_hash = @hash,
                 must_change_password = 1,
-                password_reset_issued_at = @now
-            WHERE id IN (
-                SELECT u.id FROM users u
-                JOIN orgs o ON o.id = u.tenant_id
-                WHERE lower(u.email) = lower(@email) AND o.slug = @tenantSlug
-            )
+                password_reset_issued_at = @now,
+                token_version = token_version + 1,
+                security_stamp = @stamp
+            WHERE id = @id
             """,
-            new { hash, now = nowStr, email, tenantSlug });
+            new { hash, now = nowStr, stamp, id = userId });
 
-        return rows > 0 ? (raw, now) : null;
+        // Revoke (delete) the user's API tokens — a reset credential must cut off everything
+        // minted under the old one. user_id is FK-bound to users.id, which is already tenant-scoped.
+        // xtenant: user_tokens.user_id is FK-bound to the resolved users row.
+        await conn.ExecuteAsync(
+            "DELETE FROM user_tokens WHERE user_id = @id", new { id = userId });
+
+        // Evict the cached token_version so the stale session dies immediately on this node, and
+        // drop trusted-device records so remembered devices no longer bypass TOTP.
+        _tokenVersions?.Invalidate(userId);
+        if (_trustedDevices is not null)
+        {
+            await _trustedDevices.DeleteAllForUserAsync(userId, "tenant", ct);
+        }
+
+        return (raw, now);
     }
 
     public async Task<int> CountAsync(CancellationToken ct = default)
@@ -234,23 +283,45 @@ public sealed class SystemAdminRepository
     }
 
     /// <summary>
-    /// Issues a new password for another admin. Sets <c>must_change_password = 1</c> and stamps
-    /// <c>password_reset_issued_at</c>. The plaintext is generated and hashed by the caller so
-    /// it can be returned in the response exactly once.
+    /// Issues a new password for another admin. Sets <c>must_change_password = 1</c>, stamps
+    /// <c>password_reset_issued_at</c>, and cuts off the target admin's existing sessions and
+    /// remembered devices exactly like the self-rotate path: bumps <c>token_version</c> (rotating
+    /// <c>security_stamp</c> alongside) so outstanding session JWTs stale immediately, evicts the
+    /// cached token version, and drops trusted-device rows. The plaintext is generated and hashed
+    /// by the caller so it can be returned in the response exactly once.
     /// </summary>
     public async Task<bool> ResetPasswordAsync(string id, string newPasswordHash, DateTimeOffset issuedAt, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+        // Rotating the Identity security_stamp alongside token_version keeps the Identity model
+        // consistent with the credential change; token_version remains the canonical per-request
+        // session-invalidation signal.
+        string stamp = Guid.NewGuid().ToString();
         int affected = await conn.ExecuteAsync(
             """
             UPDATE system_admins
             SET password_hash = @hash,
                 must_change_password = 1,
-                password_reset_issued_at = @issuedAt
+                password_reset_issued_at = @issuedAt,
+                token_version = token_version + 1,
+                security_stamp = @stamp
             WHERE id = @id
             """,
-            new { id, hash = newPasswordHash, issuedAt = issuedAt.ToString("yyyy-MM-ddTHH:mm:ssZ") });
-        return affected > 0;
+            new { id, hash = newPasswordHash, stamp, issuedAt = issuedAt.ToString("yyyy-MM-ddTHH:mm:ssZ") });
+        if (affected == 0)
+        {
+            return false;
+        }
+
+        // Evict the cached token_version so the stale session dies immediately on this node, and
+        // drop trusted-device records so remembered devices no longer bypass TOTP.
+        _adminTokenVersions?.Invalidate(id);
+        if (_trustedDevices is not null)
+        {
+            await _trustedDevices.DeleteAllForUserAsync(id, "system", ct);
+        }
+
+        return true;
     }
 
     /// <summary>

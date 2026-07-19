@@ -1,4 +1,8 @@
+using System.IdentityModel.Tokens.Jwt;
 using System.Net;
+using System.Security.Claims;
+using System.Text;
+using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Storage;
 using Dependably.Tests.Infrastructure;
@@ -9,6 +13,7 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using Microsoft.IdentityModel.Tokens;
 using IApplicationBuilder = Microsoft.AspNetCore.Builder.IApplicationBuilder;
 using IStartupFilter = Microsoft.AspNetCore.Hosting.IStartupFilter;
 
@@ -17,12 +22,15 @@ namespace Dependably.Tests.Integration.OpenApi;
 /// <summary>
 /// Verifies that the management OpenAPI document (<c>/openapi/management.json</c>)
 /// and the management Swagger UI shell (<c>/api/v1/docs/</c>) and its static
-/// assets are gated behind the metrics IP allowlist, while the protocol document
-/// (<c>/openapi/protocol.json</c>) and protocol UI (<c>/docs/</c>) remain public.
+/// assets are gated behind the metrics IP allowlist AND an authenticated
+/// management session, while the protocol document (<c>/openapi/protocol.json</c>)
+/// and protocol UI (<c>/docs/</c>) remain public.
 ///
-/// The mixed scenario — management gated, protocol public, under a single
-/// restrictive allowlist — is the house-rule partial-failure test that proves
-/// the gate branches on document name / path rather than over-blocking.
+/// The mixed scenarios — management gated while protocol stays public under the
+/// same restrictive allowlist, and an allowlisted-but-unauthenticated caller
+/// still denied while an allowlisted-and-authenticated caller succeeds — are the
+/// house-rule partial-failure tests that prove the gate branches on document
+/// name / auth state rather than over- or under-blocking.
 /// </summary>
 [Trait("Category", "Integration")]
 public sealed class ManagementDocsGateTests : IAsyncLifetime
@@ -98,33 +106,72 @@ public sealed class ManagementDocsGateTests : IAsyncLifetime
         Assert.NotEqual(HttpStatusCode.Forbidden, resp.StatusCode);
     }
 
-    // ── Loopback (default allowlist): management accessible ──────────────────
-    // Regression guard: the default metrics allowlist permits loopback, so
-    // existing tests using DependablyFactory (which connects from loopback via
-    // TestServer) still reach management docs without any change.
+    // ── Loopback, no session: management still denied ────────────────────────
+    // The IP allowlist alone is not sufficient — a caller inside the allowlist
+    // with no authenticated management session must not be able to read the
+    // control-plane API contract. This is the regression pin for the finding:
+    // it fails against the IP-allowlist-only gate and passes once an
+    // authenticated session is required in addition to the allowlist.
 
     [Fact]
-    public async Task ManagementSpec_LoopbackIp_Returns200()
+    public async Task ManagementSpec_LoopbackIpNoSession_Returns401()
     {
         using var client = _loopbackFactory.CreateClient();
         var resp = await client.GetAsync("/openapi/management.json");
+        Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task ManagementDocsShell_LoopbackIpNoSession_Returns401()
+    {
+        using var client = _loopbackFactory.CreateClient();
+        var resp = await client.GetAsync("/api/v1/docs/");
+        Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task ManagementDocsAsset_LoopbackIpNoSession_Returns401()
+    {
+        using var client = _loopbackFactory.CreateClient();
+        var resp = await client.GetAsync("/api/v1/docs/swagger-ui-bundle.js");
+        Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
+    }
+
+    // ── Loopback (default allowlist) + authenticated session: management accessible ──
+    // Regression guard: an allowlisted caller who also holds a valid management
+    // session (the only path a real operator uses) still reaches management docs.
+
+    [Fact]
+    public async Task ManagementSpec_LoopbackIpWithSession_Returns200()
+    {
+        using var client = _loopbackFactory.CreateClient();
+        string jwt = await _loopbackFactory.CreateAdminJwtAsync();
+        var req = new HttpRequestMessage(HttpMethod.Get, "/openapi/management.json");
+        req.Headers.Add("Cookie", $"dependably_session={jwt}");
+        var resp = await client.SendAsync(req);
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
     }
 
     [Fact]
-    public async Task ManagementDocsShell_LoopbackIp_IsNotForbidden()
+    public async Task ManagementDocsShell_LoopbackIpWithSession_IsNotForbiddenOrUnauthorized()
     {
-        // From an allowlisted IP the gate must not fire. The shell handler
-        // returns 404 in the test environment (no swagger index.html) rather
-        // than 200 — the assertion is that the IP gate does not produce 403.
+        // From an allowlisted IP with a valid session the gate must not fire. The
+        // shell handler returns 404 in the test environment (no swagger index.html)
+        // rather than 200 — the assertion is that neither the IP gate nor the
+        // session gate produces 403/401.
         using var client = _loopbackFactory.CreateClient();
-        var resp = await client.GetAsync("/api/v1/docs/");
+        string jwt = await _loopbackFactory.CreateAdminJwtAsync();
+        var req = new HttpRequestMessage(HttpMethod.Get, "/api/v1/docs/");
+        req.Headers.Add("Cookie", $"dependably_session={jwt}");
+        var resp = await client.SendAsync(req);
         Assert.NotEqual(HttpStatusCode.Forbidden, resp.StatusCode);
+        Assert.NotEqual(HttpStatusCode.Unauthorized, resp.StatusCode);
     }
 
     [Fact]
     public async Task ProtocolSpec_LoopbackIp_Returns200()
     {
+        // Protocol document carries neither the IP nor the session gate.
         using var client = _loopbackFactory.CreateClient();
         var resp = await client.GetAsync("/openapi/protocol.json");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
@@ -164,6 +211,50 @@ public sealed class ManagementDocsGateTests : IAsyncLifetime
 
         public Task InitializeAsync() { _ = CreateClient(); return Task.CompletedTask; }
         public new async Task DisposeAsync() { await _metadataStore.DisposeAsync(); await base.DisposeAsync(); }
+
+        /// <summary>
+        /// Issues a tenant-scoped JWT for the seeded bootstrap owner, matching the
+        /// shape <c>HasAuthenticatedManagementSession</c> in <c>Program.cs</c> requires
+        /// (a validated JWT carrying <c>scope=tenant</c> or <c>scope=system</c>).
+        /// </summary>
+        public async Task<string> CreateAdminJwtAsync()
+        {
+            await using var conn = await _metadataStore.OpenAsync();
+
+            string orgId = await conn.ExecuteScalarAsync<string>(
+                "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1")
+                ?? throw new InvalidOperationException("Default org not found.");
+
+            string adminId = await conn.ExecuteScalarAsync<string>(
+                "SELECT id FROM users WHERE tenant_id = @orgId AND role = 'owner' LIMIT 1",
+                new { orgId })
+                ?? throw new InvalidOperationException("Bootstrap owner not found. Was first-boot run?");
+
+            string jwtSecret = await conn.ExecuteScalarAsync<string>(
+                "SELECT value FROM instance_settings WHERE key = 'jwt_secret' LIMIT 1")
+                ?? throw new InvalidOperationException("JWT secret not found.");
+
+            var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecret));
+            var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+            // now-ok: mints a JWT the host validates against its (default: real) clock.
+            var now = DateTime.UtcNow;
+
+            var token = new JwtSecurityToken(
+                claims: new[]
+                {
+                    new Claim(JwtRegisteredClaimNames.Sub, adminId),
+                    new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString("N")),
+                    new Claim("org_id", orgId),
+                    new Claim("tid", orgId),
+                    new Claim("role", "owner"),
+                    new Claim("scope", "tenant"),
+                },
+                notBefore: now,
+                expires: now.AddHours(8),
+                signingCredentials: creds);
+
+            return new JwtSecurityTokenHandler().WriteToken(token);
+        }
 
         private sealed class LoopbackRemoteIpFilter : IStartupFilter
         {

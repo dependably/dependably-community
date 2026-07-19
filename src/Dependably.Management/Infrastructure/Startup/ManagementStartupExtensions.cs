@@ -75,7 +75,8 @@ public static class ManagementStartupExtensions
         builder.Services.AddHostedService<SamlCertExpiryCheckService>();
 
         // JWT signing-key load. A hosted service registered after CoreStartupService so it runs
-        // once first-boot has written jwt_secret; it copies the secret into the JwtBearer options.
+        // once first-boot has written jwt_secret; it primes JwtSigningKeyProvider, which the
+        // JwtBearer scheme resolves per validation so a rotation takes effect without a restart.
         builder.Services.AddHostedService<StartupService>();
     }
 }

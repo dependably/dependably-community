@@ -100,6 +100,38 @@ public sealed class ServiceCollectionExtensionsTests
         Assert.True(HasSingleton<ExternalIdentityRepository>(services));
     }
 
+    // ── AddDependablyMail ─────────────────────────────────────────────────────
+
+    [Fact]
+    public void AddDependablyMail_RegistersSenderAndInstanceConfigAsSingletons()
+    {
+        var services = new ServiceCollection();
+
+        var result = services.AddDependablyMail(BuildConfig());
+
+        Assert.Same(services, result);
+        // Always registered (unlike the opt-in invite mailer) — an unconfigured instance
+        // resolves to Configured=false rather than the service being absent from DI.
+        Assert.True(HasSingleton<Dependably.Infrastructure.Mail.SmtpMailSender>(services));
+        Assert.True(HasSingleton<Dependably.Infrastructure.Mail.InstanceSmtpConfig>(services));
+    }
+
+    // ── AddDependablyInviteMailer ─────────────────────────────────────────────
+
+    [Fact]
+    public void AddDependablyInviteMailer_AlwaysRegistersSmtpInviteMailer()
+    {
+        // No SMTP_HOST env gate any more — availability is a DB-backed runtime signal
+        // (InstanceSmtpConfig), so the mailer is unconditionally registered.
+        var services = new ServiceCollection();
+
+        var result = services.AddDependablyInviteMailer();
+
+        Assert.Same(services, result);
+        Assert.True(HasSingleton<Dependably.Infrastructure.Mail.IInviteMailer,
+            Dependably.Infrastructure.Mail.SmtpInviteMailer>(services));
+    }
+
     // ── AddDependablySiemForwarding ──────────────────────────────────────────
 
     [Fact]

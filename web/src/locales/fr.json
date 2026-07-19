@@ -28,7 +28,8 @@
     "collapse": "Réduire la barre latérale",
     "expand": "Développer la barre latérale",
     "openMenu": "Ouvrir le menu",
-    "notifications": "Notifications"
+    "notifications": "Notifications",
+    "risk": "Risque"
   },
   "globalSearch": {
     "placeholder": "Rechercher des paquets",
@@ -344,6 +345,8 @@
     },
     "detail": {
       "purl": "PURL",
+      "upstreamSource": "Récupéré depuis",
+      "upstreamSourceLink": "Source",
       "files": "Fichiers",
       "checksum": "SHA-256",
       "published": "Publié le",
@@ -398,7 +401,15 @@
     },
     "system": "système",
     "anonymous": "anonyme",
-    "empty": "Aucune activité"
+    "empty": "Aucune activité",
+    "window": {
+      "label": "Période",
+      "all": "Depuis toujours",
+      "24h": "Dernières 24 heures",
+      "7d": "Les 7 derniers jours",
+      "30d": "Les 30 derniers jours",
+      "90d": "Les 90 derniers jours"
+    }
   },
   "audit": {
     "title": "Audit",
@@ -552,7 +563,7 @@
       "namespaces": "Espaces de noms",
       "licenses": "Licences",
       "serviceTokens": "Jetons de service",
-      "webhooks": "Webhooks",
+      "integrations": "Intégrations",
       "alerts": "Alertes",
       "banners": "Annonces",
       "instance": "Paramètres de l'instance",
@@ -608,19 +619,65 @@
     },
     "alerts": {
       "section": "Centre d'alertes",
-      "hint": "Les alertes se déclenchent sur un nouvel élément en quarantaine et sur une vulnérabilité atteignant le seuil de gravité ci-dessous. La livraison Slack est facultative et nécessite DEPENDABLY_MASTER_KEY pour stocker l'URL du webhook.",
+      "hint": "Les alertes se déclenchent sur un nouvel élément en quarantaine et sur une vulnérabilité atteignant le seuil de gravité ci-dessous.",
       "quarantineEnabled": "Alerter sur les nouveaux éléments en quarantaine",
       "vulnEnabled": "Alerter sur les vulnérabilités",
       "minSeverity": "Gravité minimale de vulnérabilité",
       "minSeverityHint": "Seules les avis atteignant ou dépassant cette gravité déclenchent une alerte. Les avis sans note ne déclenchent jamais d'alerte.",
-      "slackEnabled": "Envoyer les alertes à Slack",
-      "slackUrl": "URL du webhook Slack",
-      "slackUrlHint": "URL de webhook entrant de Slack. Nécessite DEPENDABLY_MASTER_KEY pour le stockage.",
-      "slackUrlRotateHint": "Saisissez une nouvelle valeur pour renouveler l'URL du webhook. Laissez vide pour conserver l'URL actuelle.",
-      "slackLastStatus": "Dernière livraison Slack : {status}",
-      "testSend": "Envoyer un message de test",
-      "testOk": "Message de test envoyé.",
-      "testFail": "Échec du message de test."
+      "emailEnabled": "Envoyer les alertes par courriel",
+      "emailRecipients": "Destinataires",
+      "emailRecipientsHint": "Adresses courriel séparées par des virgules. Vide signifie que rien n'est envoyé. Ces adresses reçoivent les alertes d'administration.",
+      "pointer": "Les transports de livraison (webhooks, Slack et le serveur SMTP du courriel) se configurent dans l'onglet Intégrations."
+    },
+    "integrations": {
+      "title": "Intégrations",
+      "hint": "Canaux de livraison des alertes d'administration (quarantaine + vulnérabilité). Le déclenchement se configure dans l'onglet Alertes.",
+      "masterKeyHint": "Nécessite que DEPENDABLY_MASTER_KEY soit configuré sur cette instance avant qu'un secret puisse être stocké.",
+      "tabs": {
+        "webhooks": "Webhooks",
+        "slack": "Slack",
+        "email": "Courriel"
+      },
+      "slack": {
+        "enabled": "Envoyer les alertes à Slack",
+        "url": "URL du webhook Slack",
+        "urlHint": "URL de webhook entrant de Slack. Nécessite DEPENDABLY_MASTER_KEY pour le stockage.",
+        "urlRotateHint": "Saisissez une nouvelle valeur pour renouveler l'URL du webhook. Laissez vide pour conserver l'URL actuelle.",
+        "lastStatus": "Dernière livraison Slack : {status}",
+        "consecutiveFailures": "({count} échecs consécutifs)",
+        "failingSince": "En échec depuis {since}",
+        "testSend": "Envoyer un message de test",
+        "testOk": "Message de test envoyé.",
+        "testFail": "Échec du message de test."
+      },
+      "email": {
+        "section": "Courriel",
+        "hint": "Transport SMTP des courriels d'alerte d'administration — celui de l'instance ou le vôtre. Activez les alertes courriel et choisissez les destinataires dans l'onglet Alertes.",
+        "inheritInstance": "Utiliser le transport SMTP de l'instance",
+        "inheritHint": "Décochez pour configurer votre propre serveur SMTP.",
+        "instanceConfigured": "SMTP de l'instance configuré",
+        "instanceNotConfigured": "SMTP de l'instance non configuré",
+        "host": "Hôte SMTP",
+        "port": "Port",
+        "security": "Sécurité",
+        "securityStarttls": "STARTTLS",
+        "securitySsl": "SSL/TLS",
+        "securityNone": "Aucune",
+        "username": "Nom d'utilisateur",
+        "password": "Mot de passe",
+        "passwordSetHint": "Mot de passe du compte SMTP. Nécessite DEPENDABLY_MASTER_KEY pour le stockage.",
+        "passwordRotateHint": "Saisissez une nouvelle valeur pour renouveler le mot de passe. Laissez vide pour conserver l'actuel.",
+        "from": "Adresse d'expédition",
+        "testSend": "Envoyer un courriel de test",
+        "testOk": "Courriel de test envoyé.",
+        "testFail": "Échec du courriel de test.",
+        "testHint": "Envoyé aux destinataires configurés dans l'onglet Alertes.",
+        "disabledPointer": "Les alertes courriel sont désactivées — activez-les dans l'onglet Alertes.",
+        "effectivelyDisabledRecipients": "Les alertes courriel sont activées mais aucun destinataire n'est configuré dans l'onglet Alertes — rien ne sera envoyé.",
+        "effectivelyDisabledInstance": "Les alertes courriel sont activées mais le transport SMTP de l'instance n'est pas configuré — rien ne sera envoyé.",
+        "effectivelyDisabledOwnTransport": "Les alertes courriel sont activées mais votre transport SMTP est incomplet — rien ne sera envoyé.",
+        "lastStatus": "Dernière livraison de courriel : {status}"
+      }
     },
     "banners": {
       "severity": "Niveau",
@@ -642,6 +699,28 @@
     },
     "metrics": {
       "intro": "Contrôle l'accès au point de terminaison Prometheus /metrics pour ce déploiement."
+    },
+    "instanceEmail": {
+      "title": "Courriel de l'instance (SMTP)",
+      "hint": "Relais SMTP utilisé pour livrer les courriels d'invitation d'organisation. Configurez-le une seule fois ici ; chaque invitation envoyée et le bouton de test ci-dessous l'utilisent.",
+      "enabled": "Activé",
+      "host": "Hôte SMTP",
+      "port": "Port",
+      "security": "Sécurité",
+      "securityStarttls": "STARTTLS",
+      "securitySsl": "TLS implicite (SSL)",
+      "securityNone": "Aucune",
+      "username": "Nom d'utilisateur",
+      "password": "Mot de passe",
+      "passwordSetHint": "Définissez un mot de passe pour activer le relais authentifié. Requis sauf si la sécurité est « Aucune ».",
+      "passwordRotateHint": "Un mot de passe est enregistré. Entrez une nouvelle valeur pour le remplacer, ou laissez vide pour conserver l'actuel.",
+      "from": "Adresse d'expédition",
+      "configured": "Configuré",
+      "notConfigured": "Non configuré",
+      "testSend": "Envoyer un courriel de test",
+      "testOk": "Courriel de test envoyé à l'adresse d'expédition.",
+      "testFail": "Échec du courriel de test.",
+      "masterKeyHint": "DEPENDABLY_MASTER_KEY doit être configuré avant de pouvoir enregistrer un mot de passe."
     },
     "auth": {
       "methodsTitle": "Méthodes de connexion",
@@ -920,6 +999,18 @@
           "urlHint": "URL de base du registre en amont (ex. https://pypi.org, https://registry.npmjs.org).",
           "name": "Libellé (facultatif)",
           "namePlaceholder": "ex. Miroir interne"
+        },
+        "auth": {
+          "authTypeLabel": "Authentification",
+          "authType": {
+            "anonymous": "Anonyme",
+            "bearer": "Jeton porteur (Bearer)",
+            "basic": "Basique (identifiant + mot de passe/jeton)"
+          },
+          "username": "Identifiant",
+          "secret": "Mot de passe / jeton",
+          "secretHint": "En écriture seule — non retourné par l'API après enregistrement.",
+          "credentialSet": "identifiants configurés"
         },
         "oci": {
           "host": "Hôte",
@@ -1297,7 +1388,9 @@
         "assistantLabel": "Choisir votre assistant IA",
         "installLabel": "Installer la compétence",
         "promptLabel": "Invite",
-        "fixedIn": "Corrigée dans"
+        "fixedIn": "Corrigée dans",
+        "copyBrief": "Copier le résumé de remédiation",
+        "copyBriefHelp": "Un résumé autonome à coller dans n'importe quel assistant IA ou système de suivi."
       }
     },
     "empty": "Aucun paquet vulnérable trouvé"
@@ -1353,9 +1446,10 @@
       "vulnerabilities": "Analyse de vulnérabilités"
     },
     "airGapped": "Isolé du réseau — les métadonnées en amont n'ont pas été vérifiées; les avis et la licence proviennent uniquement du miroir local.",
-    "errors": {
-      "notFound": "Ce paquet ou cette version est introuvable en amont.",
-      "unavailable": "Le registre en amont est temporairement indisponible. Réessayez sous peu."
+    "notFound": {
+      "title": "Aucun paquet de ce nom",
+      "hint": "{registry} n'a aucun paquet nommé {name}. Vérifiez l'orthographe.",
+      "versionHint": "{registry} n'a pas {name} en version {version}."
     },
     "empty": "Saisissez un paquet ci-dessus pour vérifier son statut de maliciel, de CVE et de licence avant de l'ajouter."
   },
@@ -1842,7 +1936,9 @@
       "subtitle": "Limites et planifications globales — appliquées à chaque locataire.",
       "tabs": {
         "instance": "Paramètres d'instance",
-        "metrics": "Accès aux métriques"
+        "metrics": "Accès aux métriques",
+        "email": "Courriel (SMTP)",
+        "slack": "Slack"
       },
       "labels": {
         "maxUploadBytes": "Taille max. d'envoi — global",
@@ -1901,6 +1997,19 @@
           "hoursAgo": "il y a {n}h",
           "daysAgo": "il y a {n}j"
         }
+      },
+      "slack": {
+        "title": "Slack opérateur",
+        "hint": "Événements de plan de contrôle uniquement : cycle de vie des locataires et comptes opérateurs. Ne reflète jamais une alerte de quarantaine ou de vulnérabilité par organisme.",
+        "enabled": "Activé",
+        "webhookUrl": "URL du webhook",
+        "webhookUrlHint": "URL de webhook entrant Slack. Stockée chiffrée ; jamais réaffichée après l'enregistrement.",
+        "webhookUrlRotateHint": "Une URL de webhook est configurée. Laissez vide pour la conserver, ou collez-en une nouvelle pour la remplacer.",
+        "masterKeyHint": "DEPENDABLY_MASTER_KEY n'est pas configurée — définissez-la pour activer la livraison Slack de l'opérateur.",
+        "lastStatus": "Dernière livraison : {status}",
+        "testSend": "Envoyer un message de test",
+        "testOk": "Message de test envoyé.",
+        "testFail": "Échec du test :"
       }
     },
     "banners": {
@@ -1961,6 +2070,50 @@
         "errorInvalidCode": "Code invalide.",
         "errorWrongPassword": "Le mot de passe actuel est incorrect."
       }
+    }
+  },
+  "risk": {
+    "title": "Risque",
+    "tabs": {
+      "operational": "Risque opérationnel",
+      "license": "Risque de licence"
+    },
+    "intro": {
+      "operational": "Versions qui accusent un retard d'au moins {threshold} versions stables sur l'amont. Ouvrez une ligne pour examiner le paquet et, au besoin, bloquer la version.",
+      "license": "Versions dont la licence figure sur votre liste de blocage, ou dont aucune licence n'a pu être extraite. Ouvrez une ligne pour examiner le paquet et, au besoin, bloquer la version."
+    },
+    "summary": {
+      "operational": "{packages} paquets · {versions} versions en retard d’au moins {threshold}",
+      "license": "{count} versions à risque de licence"
+    },
+    "filters": {
+      "ecosystem": "Écosystème",
+      "allEcosystems": "Tous les écosystèmes"
+    },
+    "columns": {
+      "package": "Paquet",
+      "version": "Version",
+      "versionsBehind": "Retard",
+      "latest": "Dernière en amont",
+      "licenses": "Licences",
+      "reason": "Motif",
+      "origin": "Origine",
+      "published": "Publiée"
+    },
+    "reason": {
+      "blocklisted": "Sur la liste de blocage",
+      "unknown": "Aucune licence"
+    },
+    "reasonFilter": {
+      "all": "Tous les motifs"
+    },
+    "origin": {
+      "uploaded": "Hébergée",
+      "proxy": "Mandataire"
+    },
+    "empty": {
+      "operational": "Aucune version n'accuse un tel retard sur l'amont.",
+      "license": "Aucune version à risque de licence."
     }
   }
 }

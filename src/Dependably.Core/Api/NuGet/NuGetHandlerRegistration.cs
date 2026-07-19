@@ -43,7 +43,8 @@ internal static class NuGetHandlerRegistration
                 stagingPath: stagingPath,
                 audit: sp.GetRequiredService<AuditRepository>(),
                 eventSink: sp.GetRequiredService<IPackageEventSink>(),
-                edgeGuard: sp.GetRequiredService<Dependably.Infrastructure.Edge.EdgePublishGuard>());
+                edgeGuard: sp.GetRequiredService<Dependably.Infrastructure.Edge.EdgePublishGuard>(),
+                uploadLimits: sp.GetRequiredService<IUploadLimitResolver>());
         });
         services.AddScoped<NuGetControllerServices>();
     }

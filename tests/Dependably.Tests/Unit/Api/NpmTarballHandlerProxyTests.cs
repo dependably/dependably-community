@@ -89,6 +89,30 @@ public sealed class NpmTarballHandlerProxyTests : IAsyncLifetime
             new { flag = enabled ? 1 : 0, org = _orgId });
     }
 
+    private async Task SetAllowlistModeAsync(bool enabled)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "UPDATE org_settings SET allowlist_mode = @flag WHERE org_id = @org",
+            new { flag = enabled ? 1 : 0, org = _orgId });
+    }
+
+    private async Task AddBlocklistPatternAsync(string pattern)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "INSERT INTO blocklist (id, org_id, pattern) VALUES (@id, @org, @pattern)",
+            new { id = Guid.NewGuid().ToString("N"), org = _orgId, pattern });
+    }
+
+    private async Task AddAllowlistPatternAsync(string purlPattern)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "INSERT INTO allowlist (id, org_id, purl_pattern) VALUES (@id, @org, @pattern)",
+            new { id = Guid.NewGuid().ToString("N"), org = _orgId, pattern = purlPattern });
+    }
+
     private void StubPackument(string fullName, string version, byte[] tarballBytes)
     {
         string sha1 = Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(tarballBytes)).ToLowerInvariant();
@@ -115,7 +139,7 @@ public sealed class NpmTarballHandlerProxyTests : IAsyncLifetime
     private long TarballGetCount(string file)
         => _server.LogEntries.Count(e => e.RequestMessage?.Path?.EndsWith("/-/" + file) == true);
 
-    private NpmTarballHandler BuildHandler()
+    private NpmTarballHandler BuildHandler(IBlobStore? serveStoreOverride = null)
     {
         var httpFactory = new StaticHttpClientFactory(new HttpClient(new WireMockHandler(_server)));
         var tiered = new TieredBlobStorage(_blobs, _blobs);
@@ -152,7 +176,7 @@ public sealed class NpmTarballHandlerProxyTests : IAsyncLifetime
             cacheArtifact, tenantAccess, NullLogger<CacheAccessRecorder>.Instance, TimeProvider.System);
         var proxyFetch = new ProxyFetchService(
             cacheRecorder, proxyVersions, cacheArtifact, tenantAccess, scanner, blockGate,
-            _packages, _audit, TimeProvider.System,
+            _audit, TimeProvider.System,
             new Dependably.Infrastructure.SourcePinRepository(_db, new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build()));
 
         var allowlist = new AllowlistService(_db, _audit);
@@ -165,9 +189,9 @@ public sealed class NpmTarballHandlerProxyTests : IAsyncLifetime
         var provenance = new NpmProvenanceVerifier(new NpmSignatureKeyStore(new StubPerOrgTrustAnchorStore()));
 
         return new NpmTarballHandler(
-            _orgs, _packages, cacheArtifact, tenantAccess, _tokens, _audit, tiered.Cache,
+            _orgs, _packages, cacheArtifact, tenantAccess, _tokens, _audit, serveStoreOverride ?? tiered.Cache,
             upstreamClient, allowlist, blocklist, blockGate, claimResolver, reserved,
-            proxyFetch, registries, provenance, TimeProvider.System);
+            proxyFetch, registries, provenance, TimeProvider.System, NullLogger<NpmTarballHandler>.Instance);
     }
 
     private static DefaultHttpContext BuildHttpContext(string orgId)
@@ -237,7 +261,182 @@ public sealed class NpmTarballHandlerProxyTests : IAsyncLifetime
         Assert.IsType<UnauthorizedResult>(second);
     }
 
+    [Fact]
+    public async Task ProxyMiss_ScopedPackage_OnBlocklist_Returns403_NotServed()
+    {
+        // A scoped package whose full name is on the blocklist must be blocked on the miss/fetch
+        // path. The gate builds a name-only PURL for the blocklist regex; when that PURL collapses
+        // to the bare "pkg:npm/" prefix for every scoped name, the entry never matches and a
+        // blocked scoped package is served anyway (dependency-confusion bypass).
+        const string scope = "evil";
+        const string pkg = "pkg";
+        const string version = "1.0.0";
+        string fullName = $"@{scope}/{pkg}";
+        string file = $"{pkg}-{version}.tgz";
+        byte[] bytes = Encoding.UTF8.GetBytes("blocked-scoped-npm-tarball");
+        StubPackument(fullName, version, bytes);
+        StubTarball(fullName, file, bytes);
+
+        // Blocklist regex matches the exact scoped name-only PURL.
+        await AddBlocklistPatternAsync("pkg:npm/@evil/pkg");
+
+        var handler = BuildHandler();
+        var http = BuildHttpContext(_orgId);
+        var result = await handler.GetScopedTarballAsync(http, _orgId, scope, pkg, file, CancellationToken.None);
+
+        var status = Assert.IsType<StatusCodeResult>(result);
+        Assert.Equal(StatusCodes.Status403Forbidden, status.StatusCode);
+    }
+
+    [Fact]
+    public async Task ProxyMiss_ScopedPackage_AllowlistMode_ScopedNameAllowlisted_Serves()
+    {
+        // Allowlist mode with an allowlist entry for the scoped name must let the fetch through.
+        // When the name-only PURL collapses to "pkg:npm/" for every scoped name, the allowlist
+        // entry never matches and every scoped package is locked out with a 403.
+        const string scope = "myco";
+        const string pkg = "widget";
+        const string version = "2.1.0";
+        string fullName = $"@{scope}/{pkg}";
+        string file = $"{pkg}-{version}.tgz";
+        byte[] bytes = Encoding.UTF8.GetBytes("allowlisted-scoped-npm-tarball");
+        StubPackument(fullName, version, bytes);
+        StubTarball(fullName, file, bytes);
+
+        await SetAllowlistModeAsync(true);
+        await AddAllowlistPatternAsync("pkg:npm/@myco/widget");
+
+        var handler = BuildHandler();
+        var http = BuildHttpContext(_orgId);
+        var result = await handler.GetScopedTarballAsync(http, _orgId, scope, pkg, file, CancellationToken.None);
+
+        var fileResult = Assert.IsType<FileStreamResult>(result);
+        fileResult.FileStream.Dispose();
+    }
+
+    [Fact]
+    public async Task ProxyFetch_DbProviderException_Propagates_NotMaskedAs404()
+    {
+        // A database-provider failure inside the fetch-and-cache try block must propagate so the
+        // middleware maps it to a 5xx — it must never be swallowed into a blanket 404. The guard
+        // must be provider-neutral (catch DbException), not tied to the SQLite exception type,
+        // or the guard is inert on the Postgres provider.
+        const string fullName = "flaky-pkg";
+        const string version = "3.0.0";
+        string file = $"{fullName}-{version}.tgz";
+        byte[] bytes = Encoding.UTF8.GetBytes("db-fault-npm-tarball");
+        StubPackument(fullName, version, bytes);
+        StubTarball(fullName, file, bytes);
+
+        // Serve-side blob reads throw a provider DbException that is NOT a SqliteException.
+        var throwingServeStore = new ThrowOnGetBlobStore();
+        var handler = BuildHandler(throwingServeStore);
+        var http = BuildHttpContext(_orgId);
+
+        await Assert.ThrowsAsync<FakeProviderDbException>(
+            () => handler.GetTarballAsync(http, _orgId, fullName, file, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task ProxyFetch_UnclassifiedException_MapsTo502_NotSilent404()
+    {
+        // An unclassified failure (e.g. an IOException from a misbehaving blob backend, or a bug
+        // in metadata/provenance resolution) must not be swallowed into a silent, non-retryable
+        // 404 — none of the carved-out exception types above matched, so it falls through to the
+        // trailing catch-all, which must log and answer a retryable 5xx instead of masking the
+        // failure as "package does not exist".
+        const string fullName = "unclassified-fault-pkg";
+        const string version = "3.0.0";
+        string file = $"{fullName}-{version}.tgz";
+        byte[] bytes = Encoding.UTF8.GetBytes("unclassified-fault-npm-tarball");
+        StubPackument(fullName, version, bytes);
+        StubTarball(fullName, file, bytes);
+
+        var handler = BuildHandler(new ThrowUnclassifiedExceptionBlobStore());
+        var http = BuildHttpContext(_orgId);
+
+        var result = await handler.GetTarballAsync(http, _orgId, fullName, file, CancellationToken.None);
+
+        var status = Assert.IsType<StatusCodeResult>(result);
+        Assert.Equal(StatusCodes.Status502BadGateway, status.StatusCode);
+    }
+
+    [Fact]
+    public async Task ProxyFetch_OperationCanceled_Propagates_NotMaskedAs404()
+    {
+        // A client disconnect or host shutdown inside the fetch-and-cache try block is control
+        // flow, not a missing artefact: it must propagate rather than be swallowed into a 404
+        // that would misreport the package as nonexistent.
+        const string fullName = "cancelled-pkg";
+        const string version = "3.0.0";
+        string file = $"{fullName}-{version}.tgz";
+        byte[] bytes = Encoding.UTF8.GetBytes("cancelled-npm-tarball");
+        StubPackument(fullName, version, bytes);
+        StubTarball(fullName, file, bytes);
+
+        var handler = BuildHandler(new ThrowOnGetBlobStore(cancel: true));
+        var http = BuildHttpContext(_orgId);
+
+        await Assert.ThrowsAsync<OperationCanceledException>(
+            () => handler.GetTarballAsync(http, _orgId, fullName, file, CancellationToken.None));
+    }
+
     // ── test doubles (mirror MavenControllerProxyTests) ─────────────────────────
+
+    // A non-SQLite DbException standing in for a Postgres provider fault (NpgsqlException).
+    private sealed class FakeProviderDbException : System.Data.Common.DbException
+    {
+        public FakeProviderDbException(string message) : base(message) { }
+    }
+
+    // Blob store whose GetAsync raises a provider DbException — models a DB-provider fault
+    // surfacing on the serve read path so the fetch-and-cache guard's rethrow can be pinned.
+    // With cancel: true it raises OperationCanceledException instead, modelling a client
+    // disconnect on the same read.
+    private sealed class ThrowOnGetBlobStore(bool cancel = false) : IBlobStore
+    {
+        private Exception Fault(string where) => cancel
+            ? new OperationCanceledException($"client disconnect on {where}")
+            : new FakeProviderDbException($"provider fault on {where}");
+
+        public Task<Stream?> GetAsync(string key, CancellationToken ct = default)
+            => throw Fault("blob read");
+        public Task PutAsync(string key, Stream data, CancellationToken ct = default) => Task.CompletedTask;
+        public Task<bool> ExistsAsync(string key, CancellationToken ct = default) => Task.FromResult(true);
+        public Task DeleteAsync(string key, CancellationToken ct = default) => Task.CompletedTask;
+        public Task<long> GetTotalSizeAsync(CancellationToken ct = default) => Task.FromResult(0L);
+        public Task<RangedStream?> GetRangeAsync(string key, long from, long to, CancellationToken ct = default)
+            => throw Fault("blob range read");
+        public async IAsyncEnumerable<BlobInfo> ListAsync(
+            string prefix, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+        {
+            await Task.CompletedTask;
+            yield break;
+        }
+    }
+
+
+    // Blob store whose GetAsync raises an exception type not carved out by any of the
+    // fetch-and-cache handler's specific catch clauses (not a DbException, not any of the
+    // proxy-specific exceptions, not OperationCanceledException) — models a bug or infra fault
+    // that falls through to the trailing catch-all.
+    private sealed class ThrowUnclassifiedExceptionBlobStore : IBlobStore
+    {
+        public Task<Stream?> GetAsync(string key, CancellationToken ct = default)
+            => throw new InvalidOperationException("unclassified blob read fault");
+        public Task PutAsync(string key, Stream data, CancellationToken ct = default) => Task.CompletedTask;
+        public Task<bool> ExistsAsync(string key, CancellationToken ct = default) => Task.FromResult(true);
+        public Task DeleteAsync(string key, CancellationToken ct = default) => Task.CompletedTask;
+        public Task<long> GetTotalSizeAsync(CancellationToken ct = default) => Task.FromResult(0L);
+        public Task<RangedStream?> GetRangeAsync(string key, long from, long to, CancellationToken ct = default)
+            => throw new InvalidOperationException("unclassified blob range-read fault");
+        public async IAsyncEnumerable<BlobInfo> ListAsync(
+            string prefix, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+        {
+            await Task.CompletedTask;
+            yield break;
+        }
+    }
 
     private sealed class StubAirGapMode : IAirGapMode
     {

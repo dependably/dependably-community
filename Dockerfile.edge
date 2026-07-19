@@ -80,7 +80,7 @@ RUN --mount=type=secret,id=registry_key \
 # backend SBOM (the script accepts one-or-more inputs). Pinned to the build
 # platform: it runs node over architecture-independent JSON, so emulation buys
 # nothing and risks SIGILL.
-FROM --platform=$BUILDPLATFORM node:22-alpine@sha256:968df39aedcea65eeb078fb336ed7191baf48f972b4479711397108be0966920 AS notices
+FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:e88a35be04478413b7c71c455cd9865de9b9360e1f43456be5951032d7ac1a66 AS notices
 WORKDIR /work
 COPY build/extract-notices.mjs ./
 COPY --from=build /sboms/sbom-edge.json ./

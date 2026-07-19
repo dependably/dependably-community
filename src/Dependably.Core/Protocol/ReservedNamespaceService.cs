@@ -1,7 +1,9 @@
+using System.Collections.Concurrent;
 using System.Text.RegularExpressions;
 using Dapper;
 using Dependably.Infrastructure;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Primitives;
 
 namespace Dependably.Protocol;
 
@@ -35,7 +37,9 @@ namespace Dependably.Protocol;
 ///
 /// Reads are served from a short-TTL per-org cache (same shape as
 /// <see cref="BlocklistRepository"/>) so the hot proxy paths cost one dictionary hit;
-/// mutations invalidate the org's entry.
+/// mutations invalidate the org's entry. A fill that raced a concurrent mutation is guarded by
+/// the same per-org generation token as <see cref="BlocklistRepository"/>, so a namespace just
+/// reserved can never be masked by a stale cached list for a full TTL.
 /// </summary>
 public sealed partial class ReservedNamespaceService
 {
@@ -46,6 +50,11 @@ public sealed partial class ReservedNamespaceService
     private readonly TimeProvider _time;
     private static readonly TimeSpan CacheTtl = TimeSpan.FromSeconds(60);
 
+    // Per-org generation token, bound to each cache entry as an expiration trigger so a fill
+    // that raced a concurrent Add/Delete cannot persist the stale list past the mutation.
+    private readonly ConcurrentDictionary<string, CancellationTokenSource> _fillGuards =
+        new(StringComparer.Ordinal);
+
     public ReservedNamespaceService(IMetadataStore db, IMemoryCache cache, TimeProvider time)
     {
         _db = db;
@@ -55,6 +64,24 @@ public sealed partial class ReservedNamespaceService
 
     private static string CacheKey(string orgId) => $"reserved-namespace:{orgId}";
 
+    private CancellationTokenSource GuardFor(string orgId) =>
+        _fillGuards.GetOrAdd(orgId, static _ => new CancellationTokenSource());
+
+    // Test seam (InternalsVisibleTo Dependably.Tests): the live generation-guard count, asserted
+    // to drain when a cached entry expires or is evicted so the map cannot grow unbounded.
+    internal int FillGuardCount => _fillGuards.Count;
+
+    // Evicts the cached list and cancels the current generation token so an in-flight fill that
+    // read the pre-mutation list cannot cache it.
+    private void InvalidateCache(string orgId)
+    {
+        _cache.Remove(CacheKey(orgId));
+        if (_fillGuards.TryRemove(orgId, out var retired))
+        {
+            retired.Cancel();
+        }
+    }
+
     public async Task<IReadOnlyList<ReservedNamespaceEntry>> ListAsync(
         string orgId, CancellationToken ct = default)
     {
@@ -62,6 +89,10 @@ public sealed partial class ReservedNamespaceService
         {
             return cached;
         }
+
+        // Snapshot the generation source BEFORE the read so a fill racing a concurrent mutation
+        // binds an already-cancelled expiration token and never persists the stale list.
+        var guardSource = GuardFor(orgId);
 
         await using var conn = await _db.OpenAsync(ct);
         var rows = await conn.QueryAsync<ReservedNamespaceEntry>(
@@ -73,11 +104,16 @@ public sealed partial class ReservedNamespaceService
             """,
             new { orgId });
         var list = (IReadOnlyList<ReservedNamespaceEntry>)rows.ToList();
-        _cache.Set(CacheKey(orgId), list, new MemoryCacheEntryOptions
+        var options = new MemoryCacheEntryOptions
         {
             AbsoluteExpirationRelativeToNow = CacheTtl,
             Size = 1,
-        });
+        };
+        options.AddExpirationToken(new CancellationChangeToken(guardSource.Token));
+        // Tie the generation's lifetime to this entry so an org whose cache entry expires without
+        // a mutation does not leave its guard in the map forever.
+        CacheFillGuard.TieToEntryLifetime(options, _fillGuards, orgId, guardSource);
+        _cache.Set(CacheKey(orgId), list, options);
         return list;
     }
 
@@ -93,7 +129,7 @@ public sealed partial class ReservedNamespaceService
             ON CONFLICT DO NOTHING
             """,
             new { id, orgId, ecosystem, pattern, createdBy });
-        _cache.Remove(CacheKey(orgId));
+        InvalidateCache(orgId);
         return new ReservedNamespaceEntry
         {
             Id = id,
@@ -118,7 +154,7 @@ public sealed partial class ReservedNamespaceService
             new { id = entryId, orgId });
         if (rows > 0)
         {
-            _cache.Remove(CacheKey(orgId));
+            InvalidateCache(orgId);
         }
 
         return rows;

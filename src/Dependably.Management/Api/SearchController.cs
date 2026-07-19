@@ -27,7 +27,11 @@ public sealed class SearchController : OrgScopedControllerBase
         _guard = guard;
     }
 
-    /// <summary>GET /api/v1/search?q=&amp;limit= — tenant-scoped quick search.</summary>
+    /// <summary>
+    /// GET /api/v1/search?q=&amp;limit= — tenant-scoped quick search.
+    /// <c>q</c> matches any substring of the package name, case-insensitively; terms shorter than
+    /// two characters return no results rather than scanning the tenant's catalogue.
+    /// </summary>
     // Read-only: accepts a PAT/service token carrying read:packages.
     [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [HttpGet("api/v1/search")]

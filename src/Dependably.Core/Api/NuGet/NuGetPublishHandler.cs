@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.IO.Compression;
 using Dapper;
 using Dependably.Infrastructure;
@@ -19,6 +20,10 @@ namespace Dependably.Api.NuGetProtocol;
 /// version unlist (DELETE /nuget/publish/{id}/{version}), and symbol download
 /// (GET /nuget/symbols/{id}/{version}/{file}).
 /// </summary>
+// Full NuGet publish/symbol/unlist surface; the real remedy for the coupling is per-concern
+// handler extraction, a separate architectural change.
+[SuppressMessage("Major Code Smell", "S1200:Classes should not be coupled to too many other classes",
+    Justification = "Full NuGet publish/symbol/unlist surface; coupling is inherent and the remedy is handler extraction, a separate change.")]
 public sealed class NuGetPublishHandler(
     OrgRepository orgs,
     PackageRepository packages,
@@ -36,8 +41,14 @@ public sealed class NuGetPublishHandler(
     string stagingPath,
     AuditRepository audit,
     IPackageEventSink eventSink,
-    EdgePublishGuard edgeGuard)
+    EdgePublishGuard edgeGuard,
+    IUploadLimitResolver uploadLimits)
 {
+    // Route-level hard ceiling for NuGet push requests (500 MiB); matches NuGetController's
+    // [RequestSizeLimit]. Used as the fallback effective cap when no org/instance NuGet limit
+    // is configured.
+    private const long NuGetUploadSizeLimitBytes = 500L * 1024 * 1024;
+
     public Task<IActionResult> PushAsync(HttpContext httpContext, string orgId, CancellationToken ct)
         => PushPackageAsync(httpContext, orgId, isSymbol: false, ct);
 
@@ -53,7 +64,13 @@ public sealed class NuGetPublishHandler(
             return authError;
         }
 
-        var (stagedPath, sizeBytes, readError) = await StageNupkgBodyAsync(httpContext, ct);
+        // Resolve the effective NuGet upload cap before reading any body bytes, falling back to
+        // the route's hard ceiling when no org/instance limit is configured. The resolved cap
+        // gates the staging write itself via LimitedReadStream below, so an oversize body is
+        // rejected mid-stream instead of after the full artifact is already on disk.
+        long effectiveCap = (await uploadLimits.ResolveAsync(orgId, "nuget", ct)) ?? NuGetUploadSizeLimitBytes;
+
+        var (stagedPath, sizeBytes, readError) = await StageNupkgBodyAsync(httpContext, effectiveCap, ct);
         if (readError is not null)
         {
             return readError;
@@ -124,6 +141,8 @@ public sealed class NuGetPublishHandler(
         // Stamp yanked_at so the unlist-age retention gate (purge_unlisted_after_days) can
         // measure time since this unlist rather than since the version was published.
         string yankedAt = time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        // xtenant: keyed by the version PK resolved above via GetByPurlNameAsync(orgId, …) →
+        // GetVersionAsync(pkg.Id, …); an unknown or cross-tenant coordinate already 404'd.
         await conn.ExecuteAsync(
             "UPDATE package_versions SET yanked = 1, yanked_at = @yankedAt WHERE id = @id",
             new { id = pkgVersion.Id, yankedAt });
@@ -341,9 +360,12 @@ public sealed class NuGetPublishHandler(
     /// per-org symbol index. Re-reads the staged archive from disk (symbol-push path only) so the
     /// PDBs are parsed without materialising them in managed memory on the hot push path.
     /// Non-Portable / unreadable PDBs are skipped by the extractor.
+    /// <paramref name="blobKey"/> is the key the publish service actually stored the
+    /// <c>.snupkg</c> under, carried through from <see cref="PublishResult.Accepted"/>: hosted
+    /// artifacts are content-addressed, so the key cannot be rebuilt from the coordinate alone.
     /// </summary>
     private async Task IndexSymbolPdbsAsync(
-        string orgId, string versionId, string purlName, string version, string filename,
+        string orgId, string versionId, string filename, string blobKey,
         string stagedPath, CancellationToken ct)
     {
         IReadOnlyList<PdbSymbol> symbols;
@@ -363,7 +385,6 @@ public sealed class NuGetPublishHandler(
             return;
         }
 
-        string blobKey = BlobKeys.Hosted(orgId, "nuget", purlName, version, filename);
         await symbolIndex.IndexAsync(orgId, versionId, blobKey, symbols, ct);
     }
 
@@ -395,12 +416,14 @@ public sealed class NuGetPublishHandler(
 
     /// <summary>
     /// Streams the multipart body's first file to a staging temp file under
-    /// PROXY_STAGING_PATH. Returns (stagingPath, sizeBytes, null) on success or
-    /// (null, 0, error) on shape mismatch. The caller is responsible for deleting
-    /// the staging file via <see cref="DeleteStagingFile"/>.
+    /// PROXY_STAGING_PATH via <see cref="FormFileStager"/>. The cap gates the copy itself, so an
+    /// oversize body is rejected with a 413 during the copy, before the full artifact is ever
+    /// fully written to disk. Returns (stagingPath, sizeBytes, null) on success or (null, 0,
+    /// error) on shape mismatch or cap breach. The caller is responsible for deleting the
+    /// staging file via <see cref="DeleteStagingFile"/>.
     /// </summary>
     private async Task<(string? stagingPath, long sizeBytes, IActionResult? error)> StageNupkgBodyAsync(
-        HttpContext httpContext, CancellationToken ct)
+        HttpContext httpContext, long cap, CancellationToken ct)
     {
         if (!httpContext.Request.HasFormContentType)
         {
@@ -415,21 +438,16 @@ public sealed class NuGetPublishHandler(
                 new ProblemDetails { Detail = "No file in request.", Status = StatusCodes.Status422UnprocessableEntity }));
         }
 
-        // staging file name is "publish-stage-{server-guid}" under the operator-configured staging root — no user input reaches the path.
-        string tempPath = System.IO.Path.Combine(stagingPath, $"publish-stage-{Guid.NewGuid():N}.tmp");
-        bool succeeded = false;
         try
         {
-            await using (var fileStream = new FileStream(
-                tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None,
-                bufferSize: 81920, useAsync: true))
-            await using (var src = file.OpenReadStream())
-            {
-                await src.CopyToAsync(fileStream, ct);
-            }
-            long sizeBytes = new FileInfo(tempPath).Length;
-            succeeded = true;
-            return (tempPath, sizeBytes, null);
+            var staged = await FormFileStager.StageAsync(file, stagingPath, cap, ct);
+            return (staged.Path, staged.Size, null);
+        }
+        catch (InvalidDataException)
+        {
+            return (null, 0, new ObjectResult(
+                new ProblemDetails { Detail = "Upload exceeds NuGet size limit.", Status = StatusCodes.Status413PayloadTooLarge })
+            { StatusCode = StatusCodes.Status413PayloadTooLarge });
         }
         catch (OperationCanceledException)
         {
@@ -441,13 +459,6 @@ public sealed class NuGetPublishHandler(
             return (null, 0, new ObjectResult(
                 new ProblemDetails { Detail = "Failed to stage upload.", Status = StatusCodes.Status500InternalServerError })
             { StatusCode = StatusCodes.Status500InternalServerError });
-        }
-        finally
-        {
-            if (!succeeded)
-            {
-                DeleteStagingFile(tempPath);
-            }
         }
     }
 
@@ -530,7 +541,8 @@ public sealed class NuGetPublishHandler(
                 { StatusCode = rej.HttpStatus };
         }
 
-        string versionId = ((PublishResult.Accepted)publishResult).VersionId;
+        var accepted = (PublishResult.Accepted)publishResult;
+        string versionId = accepted.VersionId;
         if (extracted.Spdx.Count > 0)
         {
             await licenses.SetLicensesAsync(versionId, extracted.Spdx, "upstream", ct);
@@ -546,7 +558,7 @@ public sealed class NuGetPublishHandler(
         {
             try
             {
-                await IndexSymbolPdbsAsync(ctx.OrgId, versionId, purlName, normalizedVersion, filename, stagedPath, ct);
+                await IndexSymbolPdbsAsync(ctx.OrgId, versionId, filename, accepted.BlobKey, stagedPath, ct);
             }
             catch (OperationCanceledException)
             {

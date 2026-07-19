@@ -145,8 +145,8 @@
       },
       "BouncyCastle.Cryptography": {
         "type": "Transitive",
-        "resolved": "2.5.1",
-        "contentHash": "zy8TMeTP+1FH2NrLaNZtdRbBdq7u5MI+NFZQOBSM69u5RFkciinwzV2eveY6Kjf5MzgsYvvl6kTStsj3JrXqkg=="
+        "resolved": "2.6.2",
+        "contentHash": "7oWOcvnntmMKNzDLsdxAYqApt+AjpRpP2CShjMfIa3umZ42UQMvH0tl1qAliYPNYO6vTdcGMqnRrCPmsfzTI1w=="
       },
       "Castle.Core": {
         "type": "Transitive",
@@ -819,6 +819,14 @@
           "Stef.Validation": "0.1.1"
         }
       },
+      "MailKit": {
+        "type": "Transitive",
+        "resolved": "4.17.0",
+        "contentHash": "1nUAVLxM9fhT/78we6/AGsCesnpn5dRNLLeRqOfr52Wnk87pzVwo5YMTMyqnmoXrYc7piGhmayiMA/OgDluIjg==",
+        "dependencies": {
+          "MimeKit": "4.17.0"
+        }
+      },
       "MetadataReferenceService.Abstractions": {
         "type": "Transitive",
         "resolved": "0.0.1",
@@ -1368,6 +1376,15 @@
           "Newtonsoft.Json": "13.0.1"
         }
       },
+      "MimeKit": {
+        "type": "Transitive",
+        "resolved": "4.17.0",
+        "contentHash": "h/KXsCreJf8RpR/PSAtlbvYtZFndp9N8Wn1Bs248AL7ITyhn+AiIY5bLTvt60tbN2mu6g8KadtBNWygTji2lqg==",
+        "dependencies": {
+          "BouncyCastle.Cryptography": "2.6.2",
+          "System.Security.Cryptography.Pkcs": "10.0.0"
+        }
+      },
       "Namotion.Reflection": {
         "type": "Transitive",
         "resolved": "2.1.2",
@@ -1910,8 +1927,8 @@
       "dependably": {
         "type": "Project",
         "dependencies": {
-          "Dependably.Core": "[0.2.2, )",
-          "Dependably.Management": "[0.2.2, )",
+          "Dependably.Core": "[0.3.1, )",
+          "Dependably.Management": "[0.3.1, )",
           "Serilog.AspNetCore": "[10.0.0, )"
         }
       },
@@ -1944,7 +1961,7 @@
       "dependably.edge": {
         "type": "Project",
         "dependencies": {
-          "Dependably.Core": "[0.2.2, )",
+          "Dependably.Core": "[0.3.1, )",
           "Serilog.AspNetCore": "[10.0.0, )"
         }
       },
@@ -1953,9 +1970,10 @@
         "dependencies": {
           "BCrypt.Net-Next": "[4.1.0, )",
           "Dapper": "[2.1.72, )",
-          "Dependably.Core": "[0.2.2, )",
+          "Dependably.Core": "[0.3.1, )",
           "IPAddressRange": "[6.3.0, )",
           "ITfoxtec.Identity.Saml2.MvcCore": "[4.17.0, )",
+          "MailKit": "[4.17.0, )",
           "Microsoft.AspNetCore.Authentication.JwtBearer": "[10.0.8, )",
           "Microsoft.AspNetCore.DataProtection.StackExchangeRedis": "[10.0.8, )",
           "Microsoft.AspNetCore.OpenApi": "[10.0.8, )",

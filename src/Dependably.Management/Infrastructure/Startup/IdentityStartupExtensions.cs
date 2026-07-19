@@ -39,7 +39,13 @@ internal static class IdentityStartupExtensions
             // Recovery-code hashing keys on the same per-instance MFA key as the authenticator
             // secret; resolving it here mirrors the IMfaSecretProtector registration above.
             byte[] key = keyProvider.GetKeyAsync().GetAwaiter().GetResult();
-            return new RecoveryCodeHasher(key);
+            // Legacy bare-SHA-256 recovery codes are rejected unless the operator opens a
+            // migration window; a new install has no legacy rows and needs no opt-in.
+            bool acceptLegacyCodes = builder.Configuration.GetValue("Mfa:AcceptLegacyRecoveryCodes", false);
+            return new RecoveryCodeHasher(
+                key,
+                acceptLegacyCodes,
+                sp.GetRequiredService<ILogger<RecoveryCodeHasher>>());
         });
 
         builder.Services.AddSingleton<MfaEncryptionKeyProvider>();

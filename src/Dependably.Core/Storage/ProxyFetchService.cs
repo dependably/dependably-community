@@ -36,17 +36,16 @@ public sealed class ProxyFetchService
     private readonly TenantArtifactAccessRepository _tenantAccess;
     private readonly VulnerabilityScanService _scanner;
     private readonly BlockGateService _blockGate;
-    private readonly PackageRepository _packages;
     private readonly AuditRepository _audit;
     private readonly TimeProvider _time;
     private readonly Infrastructure.SourcePinRepository _sourcePins;
 
-    // DI constructor: 10 dependencies are required by the post-fetch pipeline stages (access
+    // DI constructor: 9 dependencies are required by the post-fetch pipeline stages (access
     // recording, version recording, artifact repository, tenant access, scan, block gate,
-    // package CRUD, audit, time, and source-pin enforcement). No cleaner grouping exists — each
+    // audit, time, and source-pin enforcement). No cleaner grouping exists — each
     // dependency serves a distinct pipeline step and splitting the class would scatter the shared
     // sequencing logic.
-#pragma warning disable S107 // DI constructor — all 10 dependencies are distinct pipeline stages
+#pragma warning disable S107 // DI constructor — all 9 dependencies are distinct pipeline stages
     public ProxyFetchService(
         CacheAccessRecorder cacheRecorder,
         ProxyVersionRecorder proxyVersions,
@@ -54,7 +53,6 @@ public sealed class ProxyFetchService
         TenantArtifactAccessRepository tenantAccess,
         VulnerabilityScanService scanner,
         BlockGateService blockGate,
-        PackageRepository packages,
         AuditRepository audit,
         TimeProvider time,
         Infrastructure.SourcePinRepository sourcePins)
@@ -66,7 +64,6 @@ public sealed class ProxyFetchService
         _tenantAccess = tenantAccess;
         _scanner = scanner;
         _blockGate = blockGate;
-        _packages = packages;
         _audit = audit;
         _time = time;
         _sourcePins = sourcePins;
@@ -103,10 +100,20 @@ public sealed class ProxyFetchService
 
         string? cacheArtifactId = await RecordCacheAccessAsync(request, sha256, blobKey, sizeBytes, ct);
 
-        // When cacheArtifactId is non-null (proxy path), RecordAsync writes to the global plane
-        // only (no package_versions INSERT) and returns null. When null, RecordAsync inserts a
-        // package_versions row and returns its id for the per-version scan / block-gate path.
-        string? scanVersionId = await _proxyVersions.RecordAsync(
+        // No cache-plane row means the artefact cannot be scanned or gated: the OSV lookup and every
+        // gate below run against that row. So the fetch is refused rather than served ungated. The
+        // bytes are staged in the blob store and have not reached the client — refusing here costs a
+        // retry, and serving would cost the guarantee the registry exists to provide.
+        //
+        // Falling back to a package_versions row is not an option: package_versions is the hosted
+        // plane, and the vulnerability sweep and retention both read it as origin = 'uploaded'. An
+        // artefact standing in there is never scanned, never collected, and its blob never reclaimed,
+        // while the licence readers still see it — it looks catalogued and is not gateable.
+        string catalogueId = cacheArtifactId
+            ?? throw new ProxyCatalogueUnavailableException(
+                request.Ecosystem, request.PurlName, request.Version);
+
+        await _proxyVersions.RecordAsync(
             new ProxyVersionRequest(
                 OrgId: request.OrgId, Ecosystem: request.Ecosystem,
                 PackageName: request.PackageName, PurlName: request.PurlName,
@@ -118,24 +125,9 @@ public sealed class ProxyFetchService
                 UpstreamIntegrityValue: request.UpstreamIntegrityValue,
                 UpstreamIntegrityAlgorithm: request.UpstreamIntegrityAlgorithm,
                 Deprecated: request.Deprecated),
-            request.ExtractLicenses, request.ExtractManifest, cacheArtifactId, ct);
+            request.ExtractLicenses, request.ExtractManifest, catalogueId, ct);
 
-        // Proxy path: cacheArtifactId is set, RecordAsync returned null. Scan and gate via the
-        // global plane.
-        if (cacheArtifactId is not null && scanVersionId is null)
-        {
-            return await ScanAndGateGlobalPlaneAsync(request, sha256, blobKey, cacheArtifactId, ct);
-        }
-
-        if (scanVersionId is null)
-        {
-            // Race recovery in ProxyVersionRecorder returned null (no cacheArtifactId) — the parent
-            // package row was deleted between the unique-constraint catch and the lookup. Rare; treat
-            // as "served but unrecorded" so the bytes still flow to the client.
-            return new ProxyFetchResult(BlockDecision.Allowed, sha256, blobKey, VersionId: null);
-        }
-
-        return await ScanAndGateVersionAsync(request, sha256, blobKey, scanVersionId, cacheArtifactId, ct);
+        return await ScanAndGateGlobalPlaneAsync(request, sha256, blobKey, catalogueId, ct);
     }
 
     // Fail-fast verification against the upstream-supplied integrity hash (PyPI #sha256=,
@@ -205,7 +197,7 @@ public sealed class ProxyFetchService
             detail: $"{{\"name\":\"{request.PurlName}\",\"pinned_host\":\"{pinnedHost}\",\"serving_host\":\"{servingHost}\"}}",
             ct: ct);
 
-        return new ProxyFetchResult(BlockDecision.Blocked, sha256, blobKey, VersionId: null);
+        return new ProxyFetchResult(BlockDecision.Blocked, sha256, blobKey);
     }
 
     // Returns the scheme+authority (e.g. https://registry.npmjs.org) of an absolute URL, or null
@@ -238,7 +230,7 @@ public sealed class ProxyFetchService
                     BlockDeprecatedMode: request.BlockDeprecatedMode), ct);
             if (firstFetch == BlockDecision.Blocked)
             {
-                return new ProxyFetchResult(BlockDecision.Blocked, sha256, blobKey, VersionId: null);
+                return new ProxyFetchResult(BlockDecision.Blocked, sha256, blobKey);
             }
         }
 
@@ -256,7 +248,7 @@ public sealed class ProxyFetchService
                     ActorKind: request.ActorKind,
                     ProvenanceStatus: request.ProvenanceStatus,
                     VerifyProvenanceMode: request.VerifyProvenanceMode), ct);
-            return new ProxyFetchResult(BlockDecision.Blocked, sha256, blobKey, VersionId: null);
+            return new ProxyFetchResult(BlockDecision.Blocked, sha256, blobKey);
         }
 
         return null;
@@ -322,7 +314,7 @@ public sealed class ProxyFetchService
                 provenanceSigner: request.ProvenanceSigner,
                 upstreamIntegrityValue: null,
                 upstreamIntegrityAlgorithm: null,
-                ct);
+                ct: ct);
         }
 
         await _scanner.ScanCacheArtifactAsync(request.Purl, cacheArtifactId,
@@ -350,64 +342,7 @@ public sealed class ProxyFetchService
                 LicenseEnforcementMode: request.LicenseEnforcementMode,
                 CacheArtifactId: cacheArtifactId), ct);
 
-        return new ProxyFetchResult(caDecision, sha256, blobKey, VersionId: null);
-    }
-
-    // Uploaded-origin scan + block-gate path: scanVersionId is set. Persists provenance to
-    // the per-version row (and optionally the global plane), scans, then evaluates the gate.
-    private async Task<ProxyFetchResult> ScanAndGateVersionAsync(
-        ProxyFetchRequest request, string sha256, string blobKey,
-        string scanVersionId, string? cacheArtifactId, CancellationToken ct)
-    {
-        if (request.ProvenanceStatus is not null)
-        {
-            await _packages.UpdateProvenanceAsync(
-                scanVersionId, request.ProvenanceStatus, request.ProvenanceSigner, ct);
-
-            if (cacheArtifactId is not null)
-            {
-                await _cacheArtifacts.UpdateGlobalFactsAsync(
-                    cacheArtifactId,
-                    purl: null,
-                    checksumSha1: null,
-                    publishedAt: null,
-                    deprecated: null,
-                    hasInstallScript: false,
-                    installScriptKind: null,
-                    provenanceStatus: request.ProvenanceStatus,
-                    provenanceSigner: request.ProvenanceSigner,
-                    upstreamIntegrityValue: null,
-                    upstreamIntegrityAlgorithm: null,
-                    ct);
-            }
-        }
-
-        // Synchronous scan so the block gate can act on the very first fetch.
-        await _scanner.ScanVersionAsync(request.Purl, scanVersionId, request.Ecosystem,
-            request.PurlName, request.OrgId, request.UserId, ct);
-
-        var existing = await _packages.GetVersionByIdAsync(request.OrgId, scanVersionId, ct);
-        var decision = await _blockGate.EvaluateAsync(
-            new BlockGateRequest(request.OrgId, request.Ecosystem, request.Purl, scanVersionId,
-                existing?.ManualBlockState, _time.GetUtcNow(),
-                request.UserId, request.MaxOsvScoreTolerance, request.SourceIp,
-                MinReleaseAgeHours: request.MinReleaseAgeHours,
-                PublishedAt: request.PublishedAt,
-                ActorKind: request.ActorKind,
-                Deprecated: existing?.Deprecated,
-                BlockDeprecatedMode: request.BlockDeprecatedMode,
-                BlockMaliciousMode: request.BlockMaliciousMode,
-                BlockKevMode: request.BlockKevMode,
-                MaxEpssTolerance: request.MaxEpssTolerance,
-                Origin: existing?.Origin,
-                HasInstallScript: existing?.HasInstallScript ?? false,
-                InstallScriptKind: existing?.InstallScriptKind,
-                BlockInstallScriptsMode: request.BlockInstallScriptsMode,
-                ProvenanceStatus: existing?.ProvenanceStatus,
-                VerifyProvenanceMode: request.VerifyProvenanceMode,
-                LicenseEnforcementMode: request.LicenseEnforcementMode), ct);
-
-        return new ProxyFetchResult(decision, sha256, blobKey, scanVersionId);
+        return new ProxyFetchResult(caDecision, sha256, blobKey);
     }
 
     /// <summary>
@@ -601,5 +536,4 @@ public sealed record ProxyFetchRequest(
 public sealed record ProxyFetchResult(
     BlockDecision Decision,
     string Sha256,
-    string BlobKey,
-    string? VersionId);
+    string BlobKey);

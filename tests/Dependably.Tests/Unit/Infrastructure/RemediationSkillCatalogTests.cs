@@ -6,9 +6,9 @@ namespace Dependably.Tests.Unit.Infrastructure;
 public sealed class RemediationSkillCatalogTests
 {
     [Fact]
-    public void KnownSkillIds_HasSixEntries()
+    public void KnownSkillIds_HasNineEntries()
     {
-        Assert.Equal(6, RemediationSkillCatalog.KnownSkillIds.Count);
+        Assert.Equal(9, RemediationSkillCatalog.KnownSkillIds.Count);
     }
 
     [Theory]
@@ -18,6 +18,9 @@ public sealed class RemediationSkillCatalogTests
     [InlineData("fix-path-traversal")]
     [InlineData("fix-unsafe-deserialization")]
     [InlineData("fix-ssrf")]
+    [InlineData("fix-broken-access-control")]
+    [InlineData("fix-weak-cryptography")]
+    [InlineData("fix-authentication-failures")]
     public void TryGetSkillMarkdown_KnownId_ReturnsFrontmatterAndBody(string skillId)
     {
         string? markdown = RemediationSkillCatalog.TryGetSkillMarkdown(skillId);

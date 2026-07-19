@@ -186,7 +186,22 @@ public sealed class SamlController : ControllerBase
             testCid = await SetTestCookieAsync(tenant.TenantId!, ct);
         }
 
-        var saml2Config = BuildSaml2Configuration(cfg, requireIdp: true);
+        Saml2Configuration saml2Config;
+        try
+        {
+            saml2Config = BuildSaml2Configuration(cfg, requireIdp: true, allowExpiredCert: isTest);
+        }
+        catch (SamlIdpCertificateExpiredException)
+        {
+            // Non-test (production) login only reaches here with an expired pinned IdP cert; the
+            // Test SSO path passes allowExpiredCert and never throws. Refuse the round-trip instead
+            // of redirecting to the IdP against a stale trust anchor.
+            _logger.LogWarning("SAML rejected for tenant {TenantId}: state={SamlState}",
+                tenant.TenantId, "idp_cert_expired");
+            return Problem(statusCode: 503,
+                detail: "SAML SSO is unavailable: the IdP signing certificate has expired. Ask an administrator to rotate it in Settings → Authentication.");
+        }
+
         var authnRequest = new Saml2AuthnRequest(saml2Config)
         {
             // Always require fresh IdP auth on SP-initiated login. dependably is a security-
@@ -436,14 +451,17 @@ public sealed class SamlController : ControllerBase
 
     private (Saml2AuthnResponse? Response, IActionResult? Error) ParseSamlResponse(TenantSamlConfig cfg, string tenantId, bool isTest)
     {
-        var saml2Config = BuildSaml2Configuration(cfg, requireIdp: true);
-        var authnResponse = new Saml2AuthnResponse(saml2Config);
-        Saml2Binding binding = HttpMethods.IsPost(Request.Method)
-            ? new Saml2PostBinding()
-            : new Saml2RedirectBinding();
-
         try
         {
+            // BuildSaml2Configuration throws for a production (non-test) login when the pinned IdP
+            // signing cert has expired — caught below and surfaced as a closed validation failure,
+            // so an assertion signed by an expired/retired key can never mint a session.
+            var saml2Config = BuildSaml2Configuration(cfg, requireIdp: true, allowExpiredCert: isTest);
+            var authnResponse = new Saml2AuthnResponse(saml2Config);
+            Saml2Binding binding = HttpMethods.IsPost(Request.Method)
+                ? new Saml2PostBinding()
+                : new Saml2RedirectBinding();
+
             // ReadSamlResponse parses the envelope (Status and similar) without signature
             // validation, and Unbind below performs the cryptographic validation. The Status read
             // here only ever drives a reject-early decision — a non-Success status returns 401, and
@@ -549,7 +567,7 @@ public sealed class SamlController : ControllerBase
     private string AcsUri() => _urls.Absolute(HttpContext, "/saml/acs");
     private string SpEntityIdDefault() => _urls.Absolute(HttpContext, "/saml/metadata");
 
-    private Saml2Configuration BuildSaml2Configuration(TenantSamlConfig? cfg, bool requireIdp)
+    private Saml2Configuration BuildSaml2Configuration(TenantSamlConfig? cfg, bool requireIdp, bool allowExpiredCert = false)
     {
         string spEntityId = !string.IsNullOrWhiteSpace(cfg?.SpEntityId) ? cfg!.SpEntityId! : SpEntityIdDefault();
 
@@ -590,17 +608,24 @@ public sealed class SamlController : ControllerBase
             var idpCert = X509CertificateLoader.LoadCertificate(certBytes);
             saml2.SignatureValidationCertificates.Add(idpCert);
 
-            // Non-blocking expiry warning — emitted on every login when the cert is already
-            // expired so operators are alerted even if the daily sweep missed the window.
-            // Does NOT fail validation; a logins-ok outcome means the cert is still in place
-            // and the IdP still signs with it, so refusing would lock users out unnecessarily.
+            // Fail closed on production login when the pinned IdP signing cert has expired. An
+            // expired-and-retired signing key that has since leaked would otherwise keep minting
+            // sessions until an admin rotates the cert — a trust-freshness weakness. The admin
+            // Test SSO path (allowExpiredCert) stays warn-only so operators can diagnose and re-run
+            // a test against an expired anchor without being locked out of the diagnostic.
             if (idpCert.NotAfter.ToUniversalTime() < _time.GetUtcNow().UtcDateTime)
             {
                 _logger.LogWarning(
                     "SAML IdP signing cert for org {OrgId} expired: thumbprint={Thumbprint}, notAfter={NotAfter}. " +
-                    "Replace the cert in Settings → Authentication to restore full cert-expiry alerting.",
+                    "Replace the cert in Settings → Authentication to restore SAML login.",
                     cfg!.OrgId, idpCert.Thumbprint,
                     idpCert.NotAfter.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ"));
+
+                if (!allowExpiredCert)
+                {
+                    throw new SamlIdpCertificateExpiredException(
+                        "SAML IdP signing certificate has expired.");
+                }
             }
         }
 
@@ -699,6 +724,13 @@ public sealed class SamlController : ControllerBase
         // sent on that subsequent navigation. Lax is not required here.
         Response.Cookies.Append(SessionCookieName, token, _urls.SessionCookieOptions(HttpContext, SameSiteMode.Strict));
     }
+
+    // Raised by BuildSaml2Configuration when the pinned IdP signing cert has expired on a path
+    // that must fail closed (production login). Caught at the Login initiate and ACS boundaries and
+    // turned into a refusal, so an expired trust anchor never mints a session.
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Critical Code Smell", "S3871:Exception types should be \"public\"",
+        Justification = "Private, file-scoped control-flow signal caught only at this controller's own Login initiate and ACS boundaries; it never crosses this type's boundary, so callers have no need to catch it by type.")]
+    private sealed class SamlIdpCertificateExpiredException(string message) : Exception(message);
 }
 
 /// <summary>

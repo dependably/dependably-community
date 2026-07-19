@@ -90,6 +90,92 @@ public sealed class TenantArtifactAccessRepository
     }
 
     /// <summary>
+    /// Writes (or clears) the per-tenant manual block/allow override on an existing
+    /// <c>tenant_artifact_access</c> row. This is the proxy-plane analog of
+    /// <see cref="PackageRepository.SetManualBlockStateAsync"/>: the block gate's manual arm
+    /// (<see cref="Protocol.BlockGateService.Evaluate"/>) reads
+    /// <c>tenant_artifact_access.manual_block_state</c> for cache-hit facts built by
+    /// <see cref="Protocol.BlockGateRequest.ForProxyCacheFacts"/>, so this is the only runtime
+    /// writer for that column. <paramref name="state"/> is <c>"blocked"</c>, <c>"allowed"</c>,
+    /// or <see langword="null"/> to clear the override and restore the automatic gates.
+    /// Org-scoped by construction — callers resolve <paramref name="cacheArtifactId"/> through an
+    /// org-scoped lookup (e.g. <see cref="CacheArtifactRepository.ListServeFactsForNameAsync"/>),
+    /// so a cross-tenant id is never reachable here.
+    /// </summary>
+    public async Task SetManualBlockStateAsync(
+        string orgId, string cacheArtifactId, string? state, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        await conn.ExecuteAsync(
+            """
+            UPDATE tenant_artifact_access
+            SET manual_block_state = @state
+            WHERE org_id = @orgId AND cache_artifact_id = @cacheArtifactId
+            """,
+            new { orgId, cacheArtifactId, state });
+    }
+
+    /// <summary>
+    /// Removes <paramref name="orgId"/>'s per-tenant access row for the proxy-cached coordinate
+    /// <c>(ecosystem, name, version)</c>, without touching the shared <c>cache_artifact</c> row.
+    /// Used by the OCI manifest-delete path (<c>OciController.HandleManifestDeleteAsync</c>) so a
+    /// proxy-origin digest this org deleted stops appearing in its
+    /// <c>ArtifactInventoryRepository.ListServeableVersionsAsync</c> / <c>artifact_inventory</c> —
+    /// both read through an inner join on this table, so dropping the row alone closes the serve
+    /// path for this org. The shared row (and the manifest blob it references) is left alone: OCI
+    /// <c>cache_artifact</c> rows are excluded from reclamation everywhere else in the cache plane
+    /// (see <see cref="CacheArtifactRepository.EvictTenantProxyVersionsForNameAsync"/>) because
+    /// dropping one would strand the still-live <c>oci_blobs</c> row and layer blobs another org
+    /// (or this org's own re-pull) may still depend on. A no-op when no such row exists (e.g. the
+    /// digest was pushed, never proxied).
+    /// </summary>
+    public async Task RemoveAccessForCoordinateAsync(
+        string orgId, string ecosystem, string name, string version, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        await conn.ExecuteAsync(
+            """
+            DELETE FROM tenant_artifact_access
+            WHERE org_id = @orgId
+              AND cache_artifact_id IN (
+                  SELECT id FROM cache_artifact
+                  WHERE ecosystem = @ecosystem AND name = @name AND version = @version
+              )
+            """,
+            new { orgId, ecosystem, name, version });
+    }
+
+    /// <summary>
+    /// Deletes this org's per-tenant claim on a cache artifact. Used by the management-API
+    /// version delete so a removed proxy version no longer counts toward this org's storage
+    /// total or dashboard view. Does not touch the shared <c>cache_artifact</c> row or its
+    /// blob — see <see cref="CountRemainingAsync"/> for the cross-org refcount gate on those.
+    /// </summary>
+    public async Task DeleteAsync(string orgId, string cacheArtifactId, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        // (org_id, cache_artifact_id) PK — org-scoped, no opt-out needed.
+        await conn.ExecuteAsync(
+            "DELETE FROM tenant_artifact_access WHERE org_id = @orgId AND cache_artifact_id = @cacheArtifactId",
+            new { orgId, cacheArtifactId });
+    }
+
+    /// <summary>
+    /// Cross-org refcount on a cache artifact — how many orgs still hold a
+    /// <c>tenant_artifact_access</c> claim on it. <c>cache_artifact</c> is the shared global
+    /// cache index (no org column), so a version delete must not remove the row, or its
+    /// content-addressed blob, while any other org's claim survives.
+    /// </summary>
+    public async Task<int> CountRemainingAsync(string cacheArtifactId, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: deliberately cross-tenant — the whole point is counting every org's claim.
+        return await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM tenant_artifact_access WHERE cache_artifact_id = @cacheArtifactId",
+            new { cacheArtifactId });
+    }
+
+    /// <summary>
     /// Cross-tenant query for vulnerability response. Returns the orgs that have
     /// accessed any artifact matching the coordinate. Platform-admin scope only — callers
     /// must enforce.

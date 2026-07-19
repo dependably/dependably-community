@@ -1,6 +1,34 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <xliff version="2.0" xmlns="urn:oasis:names:tc:xliff:document:2.0" srcLang="en" trgLang="fr">
   <file id="backend" original="src/Dependably.Core/Resources/SharedResource.resx">
+    <unit id="email.alert.body">
+      <notes>
+        <note category="translator">Plain-text body of an alert-delivery email. {0} = the alert title, {1} = the alert detail (empty when the alert carries no additional detail). Keep the blank lines and the trailing newline.</note>
+      </notes>
+      <segment state="translated">
+        <source>{0}
+
+{1}
+
+View this alert in the Dependably Alerts settings.
+</source>
+        <target>{0}
+
+{1}
+
+Consultez cette alerte dans les paramètres Alertes de Dependably.
+</target>
+      </segment>
+    </unit>
+    <unit id="email.alert.subject">
+      <notes>
+        <note category="translator">Subject line of an alert-delivery email sent by the email delivery queue. {0} = the alert title, stripped of CR/LF by the caller before formatting.</note>
+      </notes>
+      <segment state="translated">
+        <source>Dependably alert: {0}</source>
+        <target>Alerte Dependably : {0}</target>
+      </segment>
+    </unit>
     <unit id="email.invite.body">
       <notes>
         <note category="translator">Plain-text invite email body. {0} = organization name, {1} = expiry timestamp, {2} = invite link. Keep the blank lines and the trailing newline.</note>
@@ -31,6 +59,35 @@ Si vous n&apos;attendiez pas cette invitation, vous pouvez ignorer ce courriel.
       <segment state="translated">
         <source>You&apos;ve been invited to {0} on Dependably</source>
         <target>Invitation à rejoindre {0} sur Dependably</target>
+      </segment>
+    </unit>
+    <unit id="email.test.body">
+      <notes>
+        <note category="translator">Plain-text body of the test email sent by the email-config test-send endpoints.</note>
+      </notes>
+      <segment state="translated">
+        <source>This is a test message from Dependably confirming your SMTP configuration is working.
+</source>
+        <target>Ceci est un message de test de Dependably confirmant que votre configuration SMTP fonctionne.
+</target>
+      </segment>
+    </unit>
+    <unit id="email.test.subject">
+      <notes>
+        <note category="translator">Subject line of the test email sent by the email-config test-send endpoints.</note>
+      </notes>
+      <segment state="translated">
+        <source>Dependably SMTP test</source>
+        <target>Test SMTP Dependably</target>
+      </segment>
+    </unit>
+    <unit id="error.activity.sinceInvalid">
+      <notes>
+        <note category="translator">422 detail for the activity feed&apos;s time-window filter. The quoted values are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be &apos;24h&apos;, &apos;7d&apos;, &apos;30d&apos;, or &apos;90d&apos;.</source>
+        <target>Doit être « 24h », « 7d », « 30d » ou « 90d ».</target>
       </segment>
     </unit>
     <unit id="error.admin.accountStatusInvalid">
@@ -139,6 +196,15 @@ Si vous n&apos;attendiez pas cette invitation, vous pouvez ignorer ce courriel.
       <segment state="translated">
         <source>Slack test message failed: {0}</source>
         <target>Échec du message de test Slack : {0}</target>
+      </segment>
+    </unit>
+    <unit id="error.alert.slackTestFailedGeneric">
+      <notes>
+        <note category="translator">422 detail for the org alert-settings/slack test send. Deliberately omits the underlying exception message, which can leak internal host/SSRF-guard details to the org admin driving the test send; the exception is logged server-side instead.</note>
+      </notes>
+      <segment state="translated">
+        <source>Slack test message failed. Check the server logs for details.</source>
+        <target>Échec du message de test Slack. Consultez les journaux du serveur pour plus de détails.</target>
       </segment>
     </unit>
     <unit id="error.alert.stateInvalid">
@@ -330,6 +396,96 @@ Si vous n&apos;attendiez pas cette invitation, vous pouvez ignorer ce courriel.
         <target>Conflit</target>
       </segment>
     </unit>
+    <unit id="error.email.hostBlocked">
+      <notes>
+        <note category="translator">422 detail for the emailSmtpHost field on the org alert-settings/email PUT when the host is an IP literal in a blocked SSRF range.</note>
+      </notes>
+      <segment state="translated">
+        <source>SMTP host resolves to a blocked IP range.</source>
+        <target>L&apos;hôte SMTP correspond à une plage d&apos;adresses IP bloquée.</target>
+      </segment>
+    </unit>
+    <unit id="error.email.invalidFrom">
+      <notes>
+        <note category="translator">422 detail for the fromAddress field on the email-config PUT.</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be a valid email address.</source>
+        <target>Doit être une adresse courriel valide.</target>
+      </segment>
+    </unit>
+    <unit id="error.email.invalidPort">
+      <notes>
+        <note category="translator">422 detail for the port field on the email-config PUT.</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be between 1 and 65535.</source>
+        <target>Doit être compris entre 1 et 65535.</target>
+      </segment>
+    </unit>
+    <unit id="error.email.invalidRecipient">
+      <notes>
+        <note category="translator">422 detail for the emailRecipients field on the org alert-settings/email PUT when any entry fails to parse.</note>
+      </notes>
+      <segment state="translated">
+        <source>All recipients must be valid email addresses.</source>
+        <target>Tous les destinataires doivent être des adresses courriel valides.</target>
+      </segment>
+    </unit>
+    <unit id="error.email.invalidSecurity">
+      <notes>
+        <note category="translator">422 detail for the security field on the email-config PUT. The quoted values are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be &apos;starttls&apos;, &apos;ssl&apos;, or &apos;none&apos;.</source>
+        <target>Doit être « starttls », « ssl » ou « none ».</target>
+      </segment>
+    </unit>
+    <unit id="error.email.masterKeyRequired">
+      <notes>
+        <note category="translator">422 detail returned when an email-config PUT supplies a password with no master key configured. DEPENDABLY_MASTER_KEY is an environment variable name - keep it verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>DEPENDABLY_MASTER_KEY must be configured to store an SMTP password at rest.</source>
+        <target>DEPENDABLY_MASTER_KEY doit être configurée pour stocker un mot de passe SMTP au repos.</target>
+      </segment>
+    </unit>
+    <unit id="error.email.notConfigured">
+      <notes>
+        <note category="translator">422 detail when testing email delivery with no complete SMTP transport configured.</note>
+      </notes>
+      <segment state="translated">
+        <source>Email delivery is not enabled or the SMTP transport is not fully configured.</source>
+        <target>La livraison de courriels n&apos;est pas activée ou le transport SMTP n&apos;est pas entièrement configuré.</target>
+      </segment>
+    </unit>
+    <unit id="error.email.testFailed">
+      <notes>
+        <note category="translator">422 detail. {0} = the underlying SMTP/network error message.</note>
+      </notes>
+      <segment state="translated">
+        <source>Test email failed: {0}</source>
+        <target>Échec du courriel de test : {0}</target>
+      </segment>
+    </unit>
+    <unit id="error.email.testFailedGeneric">
+      <notes>
+        <note category="translator">422 detail for the instance-level, system-level, and org-level email-config test-send endpoints. Deliberately omits the underlying exception message, which can leak internal hostnames/ports/TLS details to whoever is driving the test send; the exception is logged server-side instead.</note>
+      </notes>
+      <segment state="translated">
+        <source>Test email failed. Check the server logs for details.</source>
+        <target>Échec du courriel de test. Consultez les journaux du serveur pour plus de détails.</target>
+      </segment>
+    </unit>
+    <unit id="error.email.tooManyRecipients">
+      <notes>
+        <note category="translator">422 detail for the emailRecipients field on the org alert-settings/email PUT. 20 is the API-enforced cap.</note>
+      </notes>
+      <segment state="translated">
+        <source>At most 20 recipients are allowed.</source>
+        <target>20 destinataires maximum sont autorisés.</target>
+      </segment>
+    </unit>
     <unit id="error.forbidden.title">
       <notes>
         <note category="translator">Title of the HTTP 403 problem response (authenticated but not permitted).</note>
@@ -510,15 +666,6 @@ Si vous n&apos;attendiez pas cette invitation, vous pouvez ignorer ce courriel.
         <target>name est obligatoire.</target>
       </segment>
     </unit>
-    <unit id="error.lookup.packageNotFound">
-      <notes>
-        <note category="translator">404 detail for GET /api/v1/lookup when the upstream registry was reachable but does not know the requested package/version.</note>
-      </notes>
-      <segment state="translated">
-        <source>Package or version not found upstream.</source>
-        <target>Paquet ou version introuvable en amont.</target>
-      </segment>
-    </unit>
     <unit id="error.lookup.upstreamUnavailable">
       <notes>
         <note category="translator">503 detail for GET /api/v1/lookup when the upstream registry could not be reached (transient network failure) or has no upstream configured. {0} = the ecosystem name (API literal).</note>
@@ -661,6 +808,15 @@ Si vous n&apos;attendiez pas cette invitation, vous pouvez ignorer ce courriel.
       <segment state="translated">
         <source>Must be &apos;pending&apos;, &apos;approved&apos;, or &apos;denied&apos;.</source>
         <target>Doit être « pending », « approved » ou « denied ».</target>
+      </segment>
+    </unit>
+    <unit id="error.risk.reasonInvalid">
+      <notes>
+        <note category="translator">422 detail for the license-risk reason filter. The quoted values are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be &apos;blocklisted&apos; or &apos;unknown&apos;.</source>
+        <target>Doit être « blocklisted » ou « unknown ».</target>
       </segment>
     </unit>
     <unit id="error.saml.certificateInvalid">
@@ -832,6 +988,42 @@ Si vous n&apos;attendiez pas cette invitation, vous pouvez ignorer ce courriel.
       <segment state="translated">
         <source>Quota must be a positive number of bytes, or null to clear.</source>
         <target>Le quota doit être un nombre d&apos;octets positif, ou null pour effacer.</target>
+      </segment>
+    </unit>
+    <unit id="error.system.slackMasterKeyRequired">
+      <notes>
+        <note category="translator">422 detail. DEPENDABLY_MASTER_KEY is an environment variable name - keep it verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>DEPENDABLY_MASTER_KEY must be configured to store a Slack webhook URL at rest.</source>
+        <target>DEPENDABLY_MASTER_KEY doit être configurée pour stocker une URL de webhook Slack au repos.</target>
+      </segment>
+    </unit>
+    <unit id="error.system.slackNotConfigured">
+      <notes>
+        <note category="translator">422 detail when testing operator Slack delivery with no webhook configured.</note>
+      </notes>
+      <segment state="translated">
+        <source>Operator Slack delivery is not enabled or no webhook URL is configured for this instance.</source>
+        <target>La livraison Slack de l&apos;opérateur n&apos;est pas activée ou aucune URL de webhook n&apos;est configurée pour cette instance.</target>
+      </segment>
+    </unit>
+    <unit id="error.system.slackTestFailed">
+      <notes>
+        <note category="translator">422 detail. {0} = the underlying HTTP/network error message.</note>
+      </notes>
+      <segment state="translated">
+        <source>Slack test message failed: {0}</source>
+        <target>Échec du message de test Slack : {0}</target>
+      </segment>
+    </unit>
+    <unit id="error.system.slackTestFailedGeneric">
+      <notes>
+        <note category="translator">422 detail for the operator-realm slack-config test send. Deliberately omits the underlying exception message, which can leak internal host/SSRF-guard details to the system_admin driving the test send; the exception is logged server-side instead.</note>
+      </notes>
+      <segment state="translated">
+        <source>Slack test message failed. Check the server logs for details.</source>
+        <target>Échec du message de test Slack. Consultez les journaux du serveur pour plus de détails.</target>
       </segment>
     </unit>
     <unit id="error.system.tenantAlreadyActive">
@@ -1084,6 +1276,87 @@ Si vous n&apos;attendiez pas cette invitation, vous pouvez ignorer ce courriel.
       <segment state="translated">
         <source>url is required.</source>
         <target>url est obligatoire.</target>
+      </segment>
+    </unit>
+    <unit id="system.slack.actorUnknown">
+      <notes>
+        <note category="translator">Fallback actor phrase substituted into the operator-Slack message templates when the raising event carried no actor id.</note>
+      </notes>
+      <segment state="translated">
+        <source>an unknown operator</source>
+        <target>un opérateur inconnu</target>
+      </segment>
+    </unit>
+    <unit id="system.slack.adminCreated">
+      <notes>
+        <note category="translator">Operator-Slack message template for system_admin.admin_created. {0} = actor email.</note>
+      </notes>
+      <segment state="translated">
+        <source>Dependably [system]: operator account created by {0}</source>
+        <target>Dependably [système] : compte opérateur créé par {0}</target>
+      </segment>
+    </unit>
+    <unit id="system.slack.adminDeleted">
+      <notes>
+        <note category="translator">Operator-Slack message template for system_admin.admin_deleted. {0} = actor email.</note>
+      </notes>
+      <segment state="translated">
+        <source>Dependably [system]: operator account deleted by {0}</source>
+        <target>Dependably [système] : compte opérateur supprimé par {0}</target>
+      </segment>
+    </unit>
+    <unit id="system.slack.genericEvent">
+      <notes>
+        <note category="translator">Fallback operator-Slack message template for an action with no dedicated template. {0} = the raw audit-log action string.</note>
+      </notes>
+      <segment state="translated">
+        <source>Dependably [system]: {0}</source>
+        <target>Dependably [système] : {0}</target>
+      </segment>
+    </unit>
+    <unit id="system.slack.tenantCreated">
+      <notes>
+        <note category="translator">Operator-Slack message template for tenant.created. {0} = tenant slug, {1} = actor email.</note>
+      </notes>
+      <segment state="translated">
+        <source>Dependably [system]: tenant &apos;{0}&apos; created by {1}</source>
+        <target>Dependably [système] : locataire « {0} » créé par {1}</target>
+      </segment>
+    </unit>
+    <unit id="system.slack.tenantDeleted">
+      <notes>
+        <note category="translator">Operator-Slack message template for tenant.deleted. {0} = tenant slug, {1} = actor email.</note>
+      </notes>
+      <segment state="translated">
+        <source>Dependably [system]: tenant &apos;{0}&apos; deleted by {1}</source>
+        <target>Dependably [système] : locataire « {0} » supprimé par {1}</target>
+      </segment>
+    </unit>
+    <unit id="system.slack.tenantHardDeleted">
+      <notes>
+        <note category="translator">Operator-Slack message template for tenant.hard_deleted, raised by the retention sweep with no actor. {0} = tenant slug.</note>
+      </notes>
+      <segment state="translated">
+        <source>Dependably [system]: tenant &apos;{0}&apos; hard-deleted (retention grace period expired)</source>
+        <target>Dependably [système] : locataire « {0} » supprimé définitivement (délai de grâce de rétention expiré)</target>
+      </segment>
+    </unit>
+    <unit id="system.slack.tenantRestored">
+      <notes>
+        <note category="translator">Operator-Slack message template for tenant.restored. {0} = tenant slug, {1} = actor email.</note>
+      </notes>
+      <segment state="translated">
+        <source>Dependably [system]: tenant &apos;{0}&apos; restored by {1}</source>
+        <target>Dependably [système] : locataire « {0} » restauré par {1}</target>
+      </segment>
+    </unit>
+    <unit id="system.slack.tenantStatusChanged">
+      <notes>
+        <note category="translator">Operator-Slack message template for tenant.status_changed. {0} = tenant slug, {1} = actor email.</note>
+      </notes>
+      <segment state="translated">
+        <source>Dependably [system]: tenant &apos;{0}&apos; status changed by {1}</source>
+        <target>Dependably [système] : statut du locataire « {0} » modifié par {1}</target>
       </segment>
     </unit>
   </file>

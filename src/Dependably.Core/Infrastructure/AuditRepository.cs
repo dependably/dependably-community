@@ -287,6 +287,8 @@ public sealed class AuditRepository
     public async Task<IReadOnlyList<string>> ListDistinctSystemActionsAsync(CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+        // xtenant: system-scoped audit rows are operator-plane by definition (scope='system'
+        // rows carry no tenant); this feeds the operator audit page's filter dropdown.
         var rows = await conn.QueryAsync<string>(
             "SELECT DISTINCT action FROM audit_log WHERE scope = 'system' ORDER BY action ASC");
         return rows.ToList();
@@ -369,16 +371,23 @@ public sealed class AuditRepository
         return (rows, nextCursor);
     }
 
+    /// <summary>
+    /// Pages the activity feed. <paramref name="since"/> is an inclusive ISO-8601 UTC lower bound on
+    /// created_at, which is stored as ISO-8601-Z text on both providers, so a lexicographic compare
+    /// is a chronological one — the same form <see cref="ListAuditRangeAsync"/> uses. It is what
+    /// scopes the feed to the dashboard's 30-day blocked-pull window; the caller resolves the
+    /// instant from the injected clock.
+    /// </summary>
     public async Task<(IReadOnlyList<ActivityEntry> Items, int Total)> ListActivityAsync(
         string orgId, int limit, int offset, string? eventType = null, string? search = null,
-        CancellationToken ct = default)
+        string? since = null, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
         string? searchPattern = string.IsNullOrWhiteSpace(search) ? null : $"%{search.Trim().ToLowerInvariant()}%";
         // The 'blocked' token selects the whole block-gate family (blocked, blocked_release_age,
         // blocked_malicious, …) so the filter agrees with the dashboard's 'blocked%' tally; any
         // specific 'blocked_<gate>' value still matches exactly. The COUNT carries the same actor
-        // joins as the list so a search on actor email keeps the total in step (no paging drift).
+        // joins and the same since bound as the list so the total stays in step (no paging drift).
         int total = await conn.ExecuteScalarAsync<int>(
             """
             SELECT COUNT(*)
@@ -393,6 +402,7 @@ public sealed class AuditRepository
               AND (@eventType IS NULL
                    OR (@eventType = 'blocked' AND a.event_type LIKE 'blocked%')
                    OR (@eventType <> 'blocked' AND a.event_type = @eventType))
+              AND (@since IS NULL OR a.created_at >= @since)
               AND (@searchPattern IS NULL
                    OR lower(COALESCE(a.purl, '')) LIKE @searchPattern
                    OR lower(a.event_type) LIKE @searchPattern
@@ -401,7 +411,7 @@ public sealed class AuditRepository
                    OR lower(COALESCE(u.email, '')) LIKE @searchPattern
                    OR lower(COALESCE(st.name, '')) LIKE @searchPattern)
             """,
-            new { orgId, eventType, searchPattern });
+            new { orgId, eventType, searchPattern, since });
         // See ListAuditAsync for the actor_kind branching rationale.
         var rows = await conn.QueryAsync<ActivityEntry>(
             """
@@ -422,6 +432,7 @@ public sealed class AuditRepository
               AND (@eventType IS NULL
                    OR (@eventType = 'blocked' AND a.event_type LIKE 'blocked%')
                    OR (@eventType <> 'blocked' AND a.event_type = @eventType))
+              AND (@since IS NULL OR a.created_at >= @since)
               AND (@searchPattern IS NULL
                    OR lower(COALESCE(a.purl, '')) LIKE @searchPattern
                    OR lower(a.event_type) LIKE @searchPattern
@@ -432,7 +443,7 @@ public sealed class AuditRepository
             ORDER BY a.created_at DESC, a.id DESC
             LIMIT @limit OFFSET @offset
             """,
-            new { orgId, limit, offset, eventType, searchPattern });
+            new { orgId, limit, offset, eventType, searchPattern, since });
         return (rows.ToList(), total);
     }
 }

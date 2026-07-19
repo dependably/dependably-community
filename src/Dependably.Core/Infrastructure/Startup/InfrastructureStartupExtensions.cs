@@ -15,7 +15,7 @@ namespace Dependably.Infrastructure.Startup;
 /// staging disk monitoring, claim gate, publish pipeline, controller service aggregates,
 /// localization, and the CORS policy.
 /// </summary>
-internal static class InfrastructureStartupExtensions
+internal static partial class InfrastructureStartupExtensions
 {
     // Default fallback for BASE_URL; only used when running locally without configuration.
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S1075:URIs should not be hardcoded",
@@ -56,21 +56,30 @@ internal static class InfrastructureStartupExtensions
                 .GetValue("METADATA_REBUILD_CONCURRENCY", defaultValue: 8);
             return new MetadataConcurrencyGate(slots);
         });
+
+        // Org-level policy-invalidation epoch (see OrgCacheEpochStore) — shared across the four
+        // ecosystem caches whose rendered bytes reflect the org's proxy-settings gate, so a policy
+        // PUT can invalidate every cached document for that org in one call.
+        builder.Services.AddSingleton<OrgCacheEpochStore>();
+
         builder.Services.AddSingleton(sp =>
             new RenderedResponseCache<PyPiSimpleIndexKey>(
                 sp.GetRequiredService<Microsoft.Extensions.Caching.Memory.IMemoryCache>(),
                 MetadataCacheKeys.PyPiSimpleIndex,
-                sp.GetRequiredService<MetadataConcurrencyGate>().Semaphore));
+                sp.GetRequiredService<MetadataConcurrencyGate>().Semaphore,
+                sp.GetRequiredService<OrgCacheEpochStore>()));
         builder.Services.AddSingleton(sp =>
             new RenderedResponseCache<NpmPackumentKey>(
                 sp.GetRequiredService<Microsoft.Extensions.Caching.Memory.IMemoryCache>(),
                 MetadataCacheKeys.NpmPackument,
-                sp.GetRequiredService<MetadataConcurrencyGate>().Semaphore));
+                sp.GetRequiredService<MetadataConcurrencyGate>().Semaphore,
+                sp.GetRequiredService<OrgCacheEpochStore>()));
         builder.Services.AddSingleton(sp =>
             new RenderedResponseCache<NuGetRegistrationKey>(
                 sp.GetRequiredService<Microsoft.Extensions.Caching.Memory.IMemoryCache>(),
                 MetadataCacheKeys.NuGetRegistration,
-                sp.GetRequiredService<MetadataConcurrencyGate>().Semaphore));
+                sp.GetRequiredService<MetadataConcurrencyGate>().Semaphore,
+                sp.GetRequiredService<OrgCacheEpochStore>()));
         builder.Services.AddSingleton(sp =>
             new MetadataResponseCache<RpmMergedRepodataKey, MergedRepodataCache>(
                 sp.GetRequiredService<Microsoft.Extensions.Caching.Memory.IMemoryCache>(),
@@ -82,63 +91,8 @@ internal static class InfrastructureStartupExtensions
         builder.Services.AddSingleton(sp =>
             new RenderedResponseCache<MavenMetadataKey>(
                 sp.GetRequiredService<Microsoft.Extensions.Caching.Memory.IMemoryCache>(),
-                MetadataCacheKeys.MavenMetadata));
-    }
-
-    internal static void AddDependablyBackgroundServices(this WebApplicationBuilder builder)
-    {
-        // Core startup: schema migration + first-boot + instance-lock + edge reseed (must complete
-        // before other services). The JWT signing-key load is a separate management hosted service
-        // registered after this one so it runs once first-boot has written jwt_secret.
-        builder.Services.AddHostedService<CoreStartupService>();
-
-        // Shared-SQLite single-writer guard. CoreStartupService claims the lock before the server
-        // accepts traffic (fail-fast on a live peer); this hosted service keeps the heartbeat alive
-        // and releases the row on graceful shutdown. Self-skips for Postgres and in-memory stores.
-        builder.Services.AddSingleton<InstanceLock>();
-        builder.Services.AddHostedService<InstanceLockHeartbeatService>();
-
-        // Multi-replica (HA) job coordination is per-job, not centralized: each scheduled job that
-        // mutates shared state acquires its own distributed lock per tick (see
-        // ScheduledBackgroundService.RequiresLeaderLock and the management sweep locks). In
-        // standalone mode the in-process lock always grants, so every job runs on the single node.
-
-        // Health infrastructure
-        builder.Services.AddSingleton<ReadinessAggregator>();
-        builder.Services.AddSingleton<Dependably.Infrastructure.Health.HealthService>();
-        builder.Services.AddHostedService<HealthcheckPinger>();
-
-        builder.Services.AddSingleton<IAirGapMode, AirGapMode>();
-        builder.Services.AddSingleton<IEdgeMode, EdgeMode>();
-        // Passive master-reachability tracker fed at the UpstreamClient fetch boundary; read only
-        // by the edge-only /edge/status endpoint. Registered in all modes (near-free), exposed on edge.
-        builder.Services.AddSingleton<Dependably.Infrastructure.Observability.EdgeStatusTracker>();
-        builder.Services.AddHostedService<CacheEvictionService>();
-
-        // Hosted-tier orphan reconciliation: closes the SIGKILL window in PackagePublishService
-        // by sweeping the registry tier for blobs that no package_versions row references.
-        // Schedule + grace are configurable; defaults to daily at 04:00 UTC with a 30-minute
-        // grace window to skip in-flight publishes.
-        builder.Services.AddHostedService<OrphanBlobReconcilerService>();
-        builder.Services.AddHostedService<BlobStoreSizePoller>();
-        builder.Services.AddHostedService<TenantCountPoller>();
-        builder.Services.AddHostedService<AdvisoryInventoryPoller>();
-    }
-
-    internal static void AddDependablyStagingMonitor(this WebApplicationBuilder builder)
-    {
-        // Staging configuration resolved once: the proxy-fetch staging path and the
-        // disk-full floor. Shared by UpstreamClient (floor guard), DriveInfoStagingDiskInfo
-        // (disk probe), and StartupService (floor=0 opt-out warning) so the values can't diverge.
-        var stagingOptions = StagingOptions.Resolve(builder.Configuration);
-        builder.Services.AddSingleton(stagingOptions);
-
-        // Staging disk space monitoring. IStagingDiskInfo reads DriveInfo for the
-        // staging volume; StagingDiskMonitor samples it on a 60 s timer and emits
-        // OTel gauges + a Serilog warning when free space falls below the threshold.
-        builder.Services.AddSingleton<IStagingDiskInfo>(
-            new DriveInfoStagingDiskInfo(stagingOptions.Path));
-        builder.Services.AddHostedService<StagingDiskMonitor>();
+                MetadataCacheKeys.MavenMetadata,
+                sp.GetRequiredService<OrgCacheEpochStore>()));
     }
 
     internal static void AddDependablyMetrics(this WebApplicationBuilder builder)
@@ -153,101 +107,5 @@ internal static class InfrastructureStartupExtensions
         });
         builder.Services.AddSingleton<ScrapeDiagnostics>();
         builder.Services.AddSingleton<MetricsSnapshotProvider>();
-    }
-
-    internal static void AddDependablyPublishPipeline(this WebApplicationBuilder builder)
-    {
-        // Feature-flagged claim gate for publish/import paths. Default off; operators
-        // flip CLAIM_ENFORCEMENT=on once their initial claim set is in place.
-        builder.Services.AddSingleton<PublishGate>();
-
-        // Shared publish-flow tail (path safety, claim gate, dedup, blob put, version create,
-        // audit). Used by NpmController/PyPiController/NuGetController publish handlers and
-        // by ImportController bulk endpoints — replaces six near-identical inlined flows.
-        builder.Services.AddSingleton<Dependably.Infrastructure.Publish.PublishAuditor>();
-        // Fail-closed publish guard: refuses every publish/push/import on an edge node with a 405.
-        // No-op in every non-edge mode. Shared by PackagePublishService and OciController.
-        builder.Services.AddSingleton<Dependably.Infrastructure.Edge.EdgePublishGuard>();
-        builder.Services.AddSingleton<Dependably.Infrastructure.Publish.IPackagePublishService,
-                                      Dependably.Infrastructure.Publish.PackagePublishService>();
-    }
-
-    internal static void AddDependablyControllerAggregates(this WebApplicationBuilder builder)
-    {
-        // Protocol controller dependency aggregates — let DI assemble these from already-registered
-        // singletons. Each is a single ctor param on its respective controller, replacing
-        // 12-15 individual injections (S107). Bodies still reference the unpacked fields. The
-        // management-controller aggregates (org, vulnerability, import, claims) are registered by
-        // the management wiring in Dependably.Management.
-        builder.Services.AddNpmHandlers();
-        builder.Services.AddNuGetHandlers();
-        builder.Services.AddPyPiHandlers();
-        builder.Services.AddScoped<MavenControllerServices>();
-        builder.Services.AddSingleton<Dependably.Protocol.IRpmUpstreamProxy, Dependably.Protocol.RpmUpstreamProxy>();
-        builder.Services.AddScoped<RpmControllerServices>();
-        builder.Services.AddSingleton<Dependably.Storage.RpmRepodataService>();
-        builder.Services.AddScoped<OciControllerServices>();
-        builder.Services.AddSingleton<GoLatestFetchCoordinator>();
-        builder.Services.AddScoped<GoControllerServices>();
-        builder.Services.AddSingleton<ApkIndexFetchCoordinator>();
-        builder.Services.AddScoped(sp =>
-        {
-            var config = sp.GetRequiredService<IConfiguration>();
-            var negativeCacheTtl = TimeSpan.TryParse(config["Apk:NegativeCacheTtl"], out var n)
-                ? n
-                : TimeSpan.FromMinutes(5);
-            return new ApkControllerServices(
-                sp.GetRequiredService<OrgRepository>(),
-                sp.GetRequiredService<TokenRepository>(),
-                sp.GetRequiredService<AuditRepository>(),
-                sp.GetRequiredService<PackageRepository>(),
-                sp.GetRequiredService<IBlobStore>(),
-                sp.GetRequiredService<Dependably.Protocol.UpstreamClient>(),
-                sp.GetRequiredService<Dependably.Protocol.UpstreamRegistryResolver>(),
-                sp.GetRequiredService<IMetadataStore>(),
-                sp.GetRequiredService<CacheAccessRecorder>(),
-                sp.GetRequiredService<CacheArtifactRepository>(),
-                sp.GetRequiredService<TenantArtifactAccessRepository>(),
-                sp.GetRequiredService<TimeProvider>(),
-                sp.GetRequiredService<ILogger<ApkController>>(),
-                sp.GetRequiredService<Dependably.Protocol.ReservedNamespaceService>(),
-                sp.GetRequiredService<Dependably.Protocol.BlockGateService>(),
-                sp.GetRequiredService<ApkIndexFetchCoordinator>(),
-                negativeCacheTtl);
-        });
-    }
-
-    internal static void AddDependablyLocalization(this WebApplicationBuilder builder)
-    {
-        // i18n — request localization with en (default) and fr
-        builder.Services.AddLocalization(o => o.ResourcesPath = "Resources");
-        builder.Services.Configure<Microsoft.AspNetCore.Builder.RequestLocalizationOptions>(options =>
-        {
-            var supported = new[] { new System.Globalization.CultureInfo("en"), new System.Globalization.CultureInfo("fr") };
-            options.DefaultRequestCulture = new Microsoft.AspNetCore.Localization.RequestCulture("en");
-            options.SupportedCultures = supported;
-            options.SupportedUICultures = supported;
-            options.RequestCultureProviders = new List<Microsoft.AspNetCore.Localization.IRequestCultureProvider>
-            {
-                new Microsoft.AspNetCore.Localization.QueryStringRequestCultureProvider(),
-                new Microsoft.AspNetCore.Localization.CookieRequestCultureProvider(),
-                new Microsoft.AspNetCore.Localization.AcceptLanguageHeaderRequestCultureProvider()
-            };
-        });
-
-        // ProblemResults — scoped so IStringLocalizer resolves per-request culture
-        builder.Services.AddScoped<ProblemResults>();
-    }
-
-    internal static void AddDependablyCors(this WebApplicationBuilder builder)
-    {
-        // CORS — management API only allows BASE_URL origin. PublicBaseUrl() strips any
-        // trailing slash: a CORS origin with one never matches the browser-sent Origin header.
-        string baseUrl = builder.Configuration.PublicBaseUrl() ?? DefaultBaseUrl;
-        builder.Services.AddCors(o => o.AddPolicy("ManagementApi", policy =>
-            policy.WithOrigins(baseUrl)
-                  .AllowCredentials()
-                  .WithHeaders("Content-Type", "Authorization")
-                  .WithMethods("GET", "POST", "PUT", "DELETE")));
     }
 }

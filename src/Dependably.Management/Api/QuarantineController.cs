@@ -1,4 +1,5 @@
 using Dependably.Infrastructure;
+using Dependably.Protocol;
 using Dependably.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -11,8 +12,9 @@ namespace Dependably.Api;
 ///   GET  /api/v1/quarantine                — list entries, filterable by state/ecosystem
 ///   POST /api/v1/quarantine/{id}/decide    — approve or deny a pending entry
 /// Approval sets the version's manual allow override (the existing short-circuit unblocks
-/// every gate); denial sets the manual block. Version-less entries (first-fetch blocks)
-/// have no version row to flag — an approved row itself unblocks the next first fetch.
+/// every gate); denial sets the manual block. Version-less entries (proxy artifacts, which
+/// carry no package_versions row) instead flip the override on every tenant_artifact_access
+/// row for the purl's coordinate, since that is what the proxy cache-hit gate reads.
 /// The download-time blocked_* events were already written by the gate into activity;
 /// only the human decision lands in audit_log.
 /// </summary>
@@ -29,14 +31,22 @@ public sealed class QuarantineController : OrgScopedControllerBase
     private readonly OrgAccessGuard _guard;
     private readonly AuditRepository _audit;
     private readonly ProblemResults _problems;
+    private readonly CacheArtifactRepository _cacheArtifacts;
+    private readonly TenantArtifactAccessRepository _tenantAccess;
 
+    // Constructor injection of independently-registered DI services — each parameter is a
+    // distinct collaborator, not a candidate for further bundling.
+#pragma warning disable S107
     public QuarantineController(
         QuarantineRepository quarantine,
         PackageRepository packages,
         OrgRepository orgs,
         OrgAccessGuard guard,
         AuditRepository audit,
-        ProblemResults problems)
+        ProblemResults problems,
+        CacheArtifactRepository cacheArtifacts,
+        TenantArtifactAccessRepository tenantAccess)
+#pragma warning restore S107
     {
         _quarantine = quarantine;
         _packages = packages;
@@ -44,6 +54,8 @@ public sealed class QuarantineController : OrgScopedControllerBase
         _guard = guard;
         _audit = audit;
         _problems = problems;
+        _cacheArtifacts = cacheArtifacts;
+        _tenantAccess = tenantAccess;
     }
 
     /// <summary>GET /api/v1/quarantine?state=pending&amp;ecosystem=npm&amp;limit=50&amp;offset=0</summary>
@@ -123,44 +135,22 @@ public sealed class QuarantineController : OrgScopedControllerBase
         }
 
         string? userId = GetUserId();
-        if (entry.State == "pending")
+        var transitionResult = await ApplyDecisionTransitionAsync(orgId, id, entry, req, userId, ct);
+        if (transitionResult is not null)
         {
-            // Initial decision — only approve or deny; "pending" would be a no-op transition.
-            if (req.Decision == "pending")
-            {
-                return _problems.ValidationErrorActionKey("decision", "error.quarantine.alreadyPending");
-            }
-            if (!await _quarantine.DecideAsync(orgId, id, req.Decision, userId, req.Note, ct))
-            {
-                // Raced with another reviewer between the read and the guarded update.
-                return Conflict(new { detail = "Entry already decided." });
-            }
-        }
-        else if (entry.State != req.Decision)
-        {
-            // Re-decide or reset to pending — the admin "change my mind" path.
-            await _quarantine.ChangeStateAsync(orgId, id, req.Decision, userId, req.Note, ct);
-        }
-        else
-        {
-            // Target already matches the current state — nothing to change.
-            return Ok(new { id = entry.Id, state = entry.State });
+            return transitionResult;
         }
 
         // The version's manual override is what actually unblocks/blocks the gates; the
         // review row records why. approve ⇒ allow, deny ⇒ block, reset to pending ⇒ clear the
-        // override. Version-less entries (first-fetch blocks) skip this — the approved row
-        // itself is the first-fetch unblock signal.
-        if (entry.PackageVersionId is { } versionId)
+        // override.
+        string? manualState = req.Decision switch
         {
-            string? manualState = req.Decision switch
-            {
-                "approved" => "allowed",
-                "denied" => "blocked",
-                _ => null,
-            };
-            await _packages.SetManualBlockStateAsync(versionId, manualState, ct);
-        }
+            "approved" => "allowed",
+            "denied" => "blocked",
+            _ => null,
+        };
+        await ApplyManualBlockOverrideAsync(orgId, entry, manualState, ct);
 
         await _audit.LogAsync("quarantine_decision", orgId, userId,
             detail: System.Text.Json.JsonSerializer.Serialize(new
@@ -174,6 +164,71 @@ public sealed class QuarantineController : OrgScopedControllerBase
             }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
 
         return Ok(new { id = entry.Id, state = req.Decision });
+    }
+
+    // Applies the pending→decided transition, or an already-decided entry's re-decide/reset.
+    // Returns a short-circuit IActionResult (a validation error, a 409 race conflict, or the
+    // already-current-state 200) when the caller should return immediately without applying the
+    // manual override or logging the decision audit event; null once the transition is applied
+    // and the caller should proceed.
+    private async Task<IActionResult?> ApplyDecisionTransitionAsync(
+        string orgId, string id, QuarantineEntry entry, QuarantineDecisionRequest req, string? userId, CancellationToken ct)
+    {
+        if (entry.State == "pending")
+        {
+            // Initial decision — only approve or deny; "pending" would be a no-op transition.
+            if (req.Decision == "pending")
+            {
+                return _problems.ValidationErrorActionKey("decision", "error.quarantine.alreadyPending");
+            }
+            if (!await _quarantine.DecideAsync(orgId, id, req.Decision, userId, req.Note, ct))
+            {
+                // Raced with another reviewer between the read and the guarded update.
+                return Conflict(new { detail = "Entry already decided." });
+            }
+            return null;
+        }
+
+        if (entry.State != req.Decision)
+        {
+            // Re-decide or reset to pending — the admin "change my mind" path.
+            await _quarantine.ChangeStateAsync(orgId, id, req.Decision, userId, req.Note, ct);
+            return null;
+        }
+
+        // Target already matches the current state — nothing to change.
+        return Ok(new { id = entry.Id, state = entry.State });
+    }
+
+    // Flips the manual block-gate override to match the decision: on the version row when one
+    // exists, or (for a version-less proxy entry, which has no package_versions row) on every
+    // matching tenant_artifact_access row instead — the cache-hit serve gate reads its override
+    // from there via BlockGateRequest.ForProxyCacheFacts.
+    private async Task ApplyManualBlockOverrideAsync(
+        string orgId, QuarantineEntry entry, string? manualState, CancellationToken ct)
+    {
+        if (entry.PackageVersionId is { } versionId)
+        {
+            await _packages.SetManualBlockStateAsync(versionId, manualState, ct);
+            return;
+        }
+
+        // TryParseCacheCoordinate (not TryParse) is required: RPM/apk purls carry an ?arch=…
+        // qualifier and apk an alpine/ namespace, and Maven uses a group/artifact path separator —
+        // none of which appear in cache_artifact.name/version. A raw TryParse leaves those on and
+        // the coordinate never matches, silently no-opping the decision.
+        var parsed = PurlParser.TryParseCacheCoordinate(entry.Purl);
+        if (parsed is null)
+        {
+            return;
+        }
+
+        var proxyEntries = await _cacheArtifacts.ListServeFactsForNameAsync(orgId, entry.Ecosystem, parsed.Name, ct);
+        foreach (var proxyEntry in proxyEntries.Where(
+            e => string.Equals(e.Version, parsed.Version, StringComparison.OrdinalIgnoreCase)))
+        {
+            await _tenantAccess.SetManualBlockStateAsync(orgId, proxyEntry.Id, manualState, ct);
+        }
     }
 }
 

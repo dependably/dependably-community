@@ -93,6 +93,22 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
     /// </summary>
     public Serilog.Core.ILogEventSink? LogSink { get; init; }
 
+    /// <summary>
+    /// Optional replacement for the OSV advisory source. The host otherwise resolves
+    /// <see cref="Dependably.Protocol.IOsvSource"/> from <c>OSV_MODE</c>, which defaults to the
+    /// remote OSV.dev client — a stub keeps advisory-driven endpoints (npm bulk audit) hermetic
+    /// and lets a test pin the exact advisories a query answers with.
+    /// </summary>
+    public Dependably.Protocol.IOsvSource? OsvSource { get; init; }
+
+    /// <summary>
+    /// Optional <c>OSV_BASE_URL</c> override. Unlike <see cref="OsvSource"/> (which swaps the whole
+    /// source out for a stub), this keeps the real <c>OsvClient</c> and only redirects where it
+    /// points — letting a test drive the production client's actual outage behaviour against a
+    /// controllable endpoint.
+    /// </summary>
+    public string? OsvBaseUrl { get; init; }
+
     /// <summary>Default edge reader token used when <see cref="DeploymentMode"/> is edge and no
     /// explicit token is set. Edge integration tests match on this exact Bearer value.</summary>
     public const string DefaultEdgeToken = "edge-reader-tok-123";
@@ -103,6 +119,23 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
     /// <c>rpm_upstream_mode</c> override composing with a non-default instance env value.
     /// </summary>
     public string? RpmUpstreamMode { get; init; }
+
+    /// <summary>
+    /// <c>TRUSTED_PROXIES</c> value. Null (default) leaves forwarded-header processing off — the
+    /// test client's TestServer loopback peer is what the <c>/metrics</c>-style IP allowlist gate
+    /// sees. Set to declare that loopback peer a trusted proxy, so a test can simulate a real
+    /// external caller via <c>X-Forwarded-For</c> (mirrors the pattern in
+    /// <c>MetricsAllowlistForwardedIpTests</c>).
+    /// </summary>
+    public string? TrustedProxies { get; init; }
+
+    /// <summary>
+    /// Legacy <c>SMTP_*</c> environment variables to plant on the test host, so a test can drive
+    /// the present-but-ignored startup warning. Empty (default) leaves them absent, which is the
+    /// state of an install that never carried them.
+    /// </summary>
+    public IReadOnlyDictionary<string, string?> LegacySmtpVars { get; init; } =
+        new Dictionary<string, string?>();
 
     protected override IHost CreateHost(IHostBuilder _)
     {
@@ -116,7 +149,7 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         // service-registration time — setting it afterwards leaves the resolver bound to the wrong
         // mode even though first-boot reads the corrected value. Keeps the test host hermetic
         // regardless of the developer's shell.
-        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        var settings = new Dictionary<string, string?>
         {
             ["DEPLOYMENT_MODE"] = DeploymentMode,
             // Null entry is treated as absent by IConfiguration, so the protector stays
@@ -135,7 +168,18 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
             // token and disables anonymous pull. Only meaningful in edge mode.
             ["EDGE_ACCESS_TOKEN"] = DeploymentMode == "edge" ? EdgeAccessToken : null,
             ["Rpm:UpstreamMode"] = RpmUpstreamMode,
-        });
+            ["TRUSTED_PROXIES"] = TrustedProxies,
+            // Read by both composition roots when registering the OSV source; a null entry is
+            // absent, leaving the production default (api.osv.dev) in place.
+            ["OSV_BASE_URL"] = OsvBaseUrl,
+        };
+
+        foreach ((string key, string? value) in LegacySmtpVars)
+        {
+            settings[key] = value;
+        }
+
+        builder.Configuration.AddInMemoryCollection(settings);
 
         Program.ConfigureBuilder(builder);
 
@@ -153,6 +197,12 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         if (StagingPath is not null)
         {
             builder.WebHost.UseSetting("PROXY_STAGING_PATH", StagingPath);
+        }
+
+        if (OsvSource is not null)
+        {
+            builder.Services.RemoveAll<Dependably.Protocol.IOsvSource>();
+            builder.Services.AddSingleton(OsvSource);
         }
 
         // Test overrides: replace real stores with in-memory equivalents. Both the legacy

@@ -53,6 +53,20 @@ public sealed class LicenseBackfillServiceTests : IAsyncLifetime
         await blobs.PutAsync(goKey, GoModuleZip("example.com/with-lic", "v1.0.0", SpdxTextFixtures.Text("MIT")));
         string idGoWith = await SeedCacheArtifactAsync("golang", "example.com/with-lic", "v1.0.0", goKey, "v1.0.0.zip");
 
+        // 5. Maven .pom row whose <licenses> block maps to a known SPDX id → row written +
+        //    stamped, exercising maven alongside npm/golang in the same pass.
+        string pomKey = "proxy/" + new string('i', 64);
+        await blobs.PutAsync(pomKey, MavenPom("The Apache Software License, Version 2.0"));
+        string idMavenWith = await SeedCacheArtifactAsync(
+            "maven", "com.example:widget", "1.0.0", pomKey, "widget-1.0.0.pom");
+
+        // 6. Maven .jar row (same ecosystem, no license signal in the bytes) → never a candidate,
+        //    so it is left unstamped by this pass regardless of what the blob contains.
+        string jarKey = "proxy/" + new string('j', 64);
+        await blobs.PutAsync(jarKey, new MemoryStream(Encoding.UTF8.GetBytes("not-a-pom")));
+        string idMavenJar = await SeedCacheArtifactAsync(
+            "maven", "com.example:widget", "1.0.0", jarKey, "widget-1.0.0.jar");
+
         var service = BuildService(blobs);
         await service.RunBackfillPassAsync(CancellationToken.None);
 
@@ -63,13 +77,20 @@ public sealed class LicenseBackfillServiceTests : IAsyncLifetime
         Assert.Empty(await LicensesForAsync(idMissing));
         // 4: golang license extracted in the same pass as the npm rows above.
         Assert.Equal(new[] { "MIT" }, await LicensesForAsync(idGoWith));
+        // 5: maven .pom license extracted in the same pass.
+        Assert.Equal(new[] { "Apache-2.0" }, await LicensesForAsync(idMavenWith));
+        // 6: maven .jar row never became a candidate — no license row.
+        Assert.Empty(await LicensesForAsync(idMavenJar));
 
-        // All four stamped at the frozen instant, regardless of outcome.
+        // All five candidates stamped at the frozen instant, regardless of outcome.
         string expected = TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
         Assert.Equal(expected, await CheckedAtAsync(idWith));
         Assert.Equal(expected, await CheckedAtAsync(idNone));
         Assert.Equal(expected, await CheckedAtAsync(idMissing));
         Assert.Equal(expected, await CheckedAtAsync(idGoWith));
+        Assert.Equal(expected, await CheckedAtAsync(idMavenWith));
+        // The .jar row was never a backfill candidate, so it is not stamped by this pass.
+        Assert.Null(await CheckedAtAsync(idMavenJar));
     }
 
     [Fact]
@@ -119,6 +140,57 @@ public sealed class LicenseBackfillServiceTests : IAsyncLifetime
 
         Assert.Empty(await LicensesForAsync(id));
         Assert.Equal(TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"), await CheckedAtAsync(id));
+    }
+
+    [Fact]
+    public async Task BackfillPass_MavenPomCandidate_WithLicense_WritesRow_Stamped()
+    {
+        var blobs = new InMemoryBlobStore();
+        string key = "proxy/" + new string('k', 64);
+        await blobs.PutAsync(key, MavenPom("The Apache Software License, Version 2.0"));
+        string id = await SeedCacheArtifactAsync(
+            "maven", "com.example:widget", "1.0.0", key, "widget-1.0.0.pom");
+
+        var service = BuildService(blobs);
+        await service.RunBackfillPassAsync(CancellationToken.None);
+
+        Assert.Equal(new[] { "Apache-2.0" }, await LicensesForAsync(id));
+        Assert.Equal(TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"), await CheckedAtAsync(id));
+    }
+
+    [Fact]
+    public async Task BackfillPass_MavenPomCandidate_MissingBlob_StampedNoRow()
+    {
+        var blobs = new InMemoryBlobStore();
+        string key = "proxy/" + new string('l', 64);
+        string id = await SeedCacheArtifactAsync(
+            "maven", "com.example:gone", "1.0.0", key, "gone-1.0.0.pom");
+
+        var service = BuildService(blobs);
+        await service.RunBackfillPassAsync(CancellationToken.None);
+
+        Assert.Empty(await LicensesForAsync(id));
+        Assert.Equal(TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"), await CheckedAtAsync(id));
+    }
+
+    [Fact]
+    public async Task ListNeedingLicenseBackfillAsync_MavenJarRow_ExcludedFromCandidates()
+    {
+        // Seed a maven .pom row and a maven .jar row, both license_checked_at NULL — only the
+        // .pom row is a backfill candidate; the .jar row is filename-excluded entirely (Maven
+        // cache rows mix jars, poms, and sidecars under one ecosystem, and the license signal
+        // lives only in the .pom).
+        string pomId = await SeedCacheArtifactAsync(
+            "maven", "com.example:widget", "1.0.0", "proxy/" + new string('m', 64), "widget-1.0.0.pom");
+        await SeedCacheArtifactAsync(
+            "maven", "com.example:widget", "1.0.0", "proxy/" + new string('n', 64), "widget-1.0.0.jar");
+
+        var repo = new CacheArtifactRepository(_db);
+        var candidates = await repo.ListNeedingLicenseBackfillAsync(limit: 200);
+
+        Assert.Single(candidates);
+        Assert.Equal(pomId, candidates[0].Id);
+        Assert.Equal("widget-1.0.0.pom", candidates[0].Filename);
     }
 
     [Fact]
@@ -247,7 +319,7 @@ public sealed class LicenseBackfillServiceTests : IAsyncLifetime
     }
 
     // Builds a minimal npm tarball with package/package.json carrying the given license (or none).
-    private static Stream NpmTarball(string name, string version, string? license)
+    private static MemoryStream NpmTarball(string name, string version, string? license)
     {
         string pkgJson = license is null
             ? $$"""{"name":"{{name}}","version":"{{version}}"}"""
@@ -268,7 +340,7 @@ public sealed class LicenseBackfillServiceTests : IAsyncLifetime
 
     // Builds a minimal Go module zip whose root LICENSE entry carries the given text, using the
     // GOPROXY zip-entry naming convention ({module}@{version}/…).
-    private static Stream GoModuleZip(string module, string version, string licenseText)
+    private static MemoryStream GoModuleZip(string module, string version, string licenseText)
     {
         using var ms = new MemoryStream();
         using (var zip = new ZipArchive(ms, ZipArchiveMode.Create, leaveOpen: true))
@@ -279,6 +351,26 @@ public sealed class LicenseBackfillServiceTests : IAsyncLifetime
             w.Write(licenseText);
         }
         return new MemoryStream(ms.ToArray());
+    }
+
+    // Builds a minimal Maven POM whose single <licenses><license><name> declares the given text.
+    private static MemoryStream MavenPom(string licenseName)
+    {
+        string xml = $"""
+            <?xml version="1.0" encoding="UTF-8"?>
+            <project xmlns="http://maven.apache.org/POM/4.0.0">
+              <modelVersion>4.0.0</modelVersion>
+              <groupId>com.example</groupId>
+              <artifactId>widget</artifactId>
+              <version>1.0.0</version>
+              <licenses>
+                <license>
+                  <name>{licenseName}</name>
+                </license>
+              </licenses>
+            </project>
+            """;
+        return new MemoryStream(Encoding.UTF8.GetBytes(xml));
     }
 
     private sealed class StubAirGap : IAirGapMode

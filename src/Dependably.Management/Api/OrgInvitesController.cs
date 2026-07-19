@@ -127,7 +127,7 @@ public sealed class OrgInvitesController : OrgScopedControllerBase
         // route, so BASE_URL must not win here.
         string inviteLink = _urls.Absolute(HttpContext, $"/join?token={raw}");
 
-        if (_mailer is null)
+        if (_mailer is null || !await _mailer.IsAvailableAsync(ct))
         {
             // Invite id + tenant id are enough to correlate without exposing the recipient's
             // email or the invite token. The email lives in the audit_log entry above

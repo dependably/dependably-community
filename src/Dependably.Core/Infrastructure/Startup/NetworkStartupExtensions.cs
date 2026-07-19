@@ -79,9 +79,15 @@ public static class NetworkStartupExtensions
     // unknown Host headers before tenant resolution, preventing Host-header injection into SAML SP
     // URLs, absolute links, and CSRF Origin comparisons. Single mode permits the apex host and
     // localhost; multi mode additionally permits *.apex (all tenant subdomains). When BASE_URL is
-    // unset or contains a localhost host (dev/local mode), AllowedHosts stays "*" and a startup
-    // warning is logged via StartupService — the permissive fallback keeps the local dev loop working
-    // without requiring configuration. AllowEmptyHosts=false ensures requests with no Host header are
+    // unset or contains a localhost host (dev/local mode), no apex is derivable and filtering fails
+    // closed to the loopback hostnames only — never "*" — so a reverse-proxied deployment that never
+    // configures BASE_URL has every non-loopback Host header rejected rather than silently accepted.
+    // Multi mode additionally permits *.localhost so the local subdomain-per-tenant dev loop keeps
+    // working without a real BASE_URL. Any host configured via HOST_ROUTING is always permitted in
+    // addition to the apex/loopback set — those hostnames (e.g. registry.npmjs.org) are explicit,
+    // operator-configured transparent-intercept targets, not attacker input, and arrive as the raw
+    // Host header ahead of TransparentInterceptMiddleware's rewrite. StartupService logs a warning
+    // explaining how to set BASE_URL. AllowEmptyHosts=false ensures requests with no Host header are
     // always rejected rather than passed through silently.
     //
     // Implementation note: ASP.NET Core's GenericWebHostBuilder registers a PostConfigure that binds
@@ -97,8 +103,16 @@ public static class NetworkStartupExtensions
         List<string> allowed;
         if (string.IsNullOrEmpty(apex))
         {
-            // No usable apex — permissive fallback. StartupService logs a warning at startup.
-            allowed = ["*"];
+            // No usable apex — fail closed to the loopback hostnames only. StartupService logs a
+            // warning at startup pointing the operator at BASE_URL.
+            allowed = ["localhost", "127.0.0.1", "[::1]"];
+
+            if (deploymentMode == "multi")
+            {
+                // Local multi-tenant dev loop: subdomains of the loopback hostname route by tenant
+                // slug the same way *.apex does once BASE_URL names a real domain.
+                allowed.Add("*.localhost");
+            }
         }
         else
         {
@@ -111,6 +125,8 @@ public static class NetworkStartupExtensions
                 allowed.Add($"*.{apex}");
             }
         }
+
+        allowed.AddRange(ParseHostRoutingHosts(builder.Configuration["HOST_ROUTING"]));
 
         // Override the AllowedHosts configuration value so the framework's PostConfigure reads
         // the derived list, and explicitly configure AllowEmptyHosts=false.
@@ -130,5 +146,26 @@ public static class NetworkStartupExtensions
             and not "127.0.0.1"
             and not "[::1]"
             ? host : null;
+    }
+
+    // Extracts just the host keys out of HOST_ROUTING ("host=ecosystem" pairs) for the host-filter
+    // allowlist. Tolerant of malformed entries — HostEcosystemMap owns strict validation of the same
+    // config value; a best-effort host list here only widens what Kestrel accepts, it never narrows it.
+    private static IEnumerable<string> ParseHostRoutingHosts(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            yield break;
+        }
+
+        foreach (string pair in raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            int eq = pair.IndexOf('=');
+            string host = (eq > 0 ? pair[..eq] : pair).Trim();
+            if (host.Length > 0)
+            {
+                yield return host;
+            }
+        }
     }
 }

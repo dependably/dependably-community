@@ -14,6 +14,8 @@ public sealed class RemediationCatalogTests
     [InlineData(918, "A01:2025", "Broken Access Control")]  // SSRF.
     [InlineData(502, "A08:2025", "Software or Data Integrity Failures")]  // Unsafe deserialization.
     [InlineData(327, "A04:2025", "Cryptographic Failures")]
+    [InlineData(862, "A01:2025", "Broken Access Control")]   // Missing Authorization.
+    [InlineData(287, "A07:2025", "Authentication Failures")]  // Improper Authentication.
     public void CweToOwasp_KnownCwe_ResolvesExpectedCategory(int cwe, string owaspId, string owaspTitle)
     {
         Assert.True(RemediationCatalog.CweToOwasp.TryGetValue(cwe, out var category));
@@ -52,6 +54,14 @@ public sealed class RemediationCatalogTests
     [InlineData(441, "fix-ssrf")]
     [InlineData(502, "fix-unsafe-deserialization")]
     [InlineData(915, "fix-unsafe-deserialization")]
+    [InlineData(862, "fix-broken-access-control")]      // Missing Authorization.
+    [InlineData(863, "fix-broken-access-control")]      // Incorrect Authorization.
+    [InlineData(639, "fix-broken-access-control")]      // IDOR / Authorization Bypass Through User-Controlled Key.
+    [InlineData(327, "fix-weak-cryptography")]          // Broken/risky crypto algorithm.
+    [InlineData(347, "fix-weak-cryptography")]          // Improper verification of crypto signature.
+    [InlineData(287, "fix-authentication-failures")]    // Improper Authentication.
+    [InlineData(306, "fix-authentication-failures")]    // Missing Authentication for Critical Function.
+    [InlineData(798, "fix-authentication-failures")]    // Use of Hard-coded Credentials.
     public void CweToSkillId_CoveredCwe_ResolvesExpectedSkill(int cwe, string skillId)
     {
         Assert.True(RemediationCatalog.CweToSkillId.TryGetValue(cwe, out string? actual));
@@ -73,6 +83,20 @@ public sealed class RemediationCatalogTests
         // CWE-89 (SQL injection) is covered by fix-injection; a CWE with no curated skill
         // (e.g. CWE-1004, a cookie-flags misconfiguration) falls back to OWASP-link-only.
         Assert.False(RemediationCatalog.CweToSkillId.ContainsKey(1004));
+    }
+
+    [Fact]
+    public void CweToSkillId_UncoveredCwe_WithOwaspCategory_StillFallsBackToMitreUrl()
+    {
+        // CWE-352 (CSRF) and CWE-200 (information exposure) both resolve an OWASP A01:2025
+        // category — they just have no curated skill (CSRF/info-exposure need a different fix
+        // shape than fix-broken-access-control's ownership check) — so a caller falls back to
+        // the OWASP category link plus CweUrl, not a 404/empty skill lookup.
+        Assert.False(RemediationCatalog.CweToSkillId.ContainsKey(352));
+        Assert.False(RemediationCatalog.CweToSkillId.ContainsKey(200));
+        Assert.True(RemediationCatalog.CweToOwasp.ContainsKey(352));
+        Assert.True(RemediationCatalog.CweToOwasp.ContainsKey(200));
+        Assert.Equal("https://cwe.mitre.org/data/definitions/352.html", RemediationCatalog.CweUrl(352));
     }
 
     [Theory]

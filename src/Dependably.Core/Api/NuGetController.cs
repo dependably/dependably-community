@@ -150,7 +150,8 @@ public partial class NuGetController : ControllerBase
     [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [RequireCapability(Capabilities.PublishNuget)]
     [EnableRateLimiting("push")]
-    [RequestSizeLimit(NuGetUploadSizeLimitBytes)] // hard ceiling; UploadSizeLimitMiddleware enforces tighter per-tenant/ecosystem caps before any blob is written
+    [RequestSizeLimit(NuGetUploadSizeLimitBytes)] // hard ceiling; per-tenant limit enforced during staging
+    [RequestFormLimits(MultipartBodyLengthLimit = NuGetUploadSizeLimitBytes)] // match the route ceiling, not the 128 MiB framework default
     public Task<IActionResult> Push(CancellationToken ct)
         => _publishHandler.PushAsync(HttpContext, CurrentTenantId(), ct);
 
@@ -159,7 +160,8 @@ public partial class NuGetController : ControllerBase
     [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [RequireCapability(Capabilities.PublishNuget)]
     [EnableRateLimiting("push")]
-    [RequestSizeLimit(NuGetUploadSizeLimitBytes)] // hard ceiling; UploadSizeLimitMiddleware enforces tighter per-tenant/ecosystem caps before any blob is written
+    [RequestSizeLimit(NuGetUploadSizeLimitBytes)] // hard ceiling; per-tenant limit enforced during staging
+    [RequestFormLimits(MultipartBodyLengthLimit = NuGetUploadSizeLimitBytes)] // match the route ceiling, not the 128 MiB framework default
     public Task<IActionResult> PushSymbols(CancellationToken ct)
         => _publishHandler.PushSymbolsAsync(HttpContext, CurrentTenantId(), ct);
 

@@ -54,6 +54,7 @@ public sealed class AuditEmitterSiemTests : IAsyncLifetime
         var forwarder = new CapturingForwarder();
         var services = new ServiceCollection()
             .AddSingleton<ISiemForwarder>(forwarder)
+            .AddSingleton(TestTime.Frozen() as TimeProvider)
             .AddSingleton<SiemForwarderQueue>()
             .AddSingleton(EmptyConfig())
             .AddLogging()
@@ -140,6 +141,7 @@ public sealed class AuditEmitterSiemTests : IAsyncLifetime
         var forwarder = new CapturingForwarder();
         var services = new ServiceCollection()
             .AddSingleton<ISiemForwarder>(forwarder)
+            .AddSingleton(TestTime.Frozen() as TimeProvider)
             .AddSingleton<SiemForwarderQueue>()
             .AddSingleton(EmptyConfig())
             .AddLogging()

@@ -14,8 +14,7 @@ namespace Dependably.Api.NuGetProtocol;
 public sealed class NuGetSearchHandler(
     OrgRepository orgs,
     PackageRepository packages,
-    CacheArtifactRepository cacheArtifacts,
-    VulnerabilityRepository vulns,
+    ArtifactInventoryRepository inventory,
     TokenRepository tokens,
     IPublicUrlBuilder urls)
 {
@@ -26,8 +25,8 @@ public sealed class NuGetSearchHandler(
         HttpContext httpContext, string orgId,
         string? q, int skip, int take, CancellationToken ct)
     {
-        // Clamp paging: bound the per-result N+1 version lookups, and guard a negative skip
-        // (which would throw in Enumerable.Skip → 500). 100 covers any legitimate UI page.
+        // Clamp paging: bound the page's result payload, and guard a negative skip. 100 covers
+        // any legitimate UI page.
         skip = Math.Max(0, skip);
         take = Math.Clamp(take, 0, MaxSearchTake);
 
@@ -46,8 +45,21 @@ public sealed class NuGetSearchHandler(
             ? allPkgs
             : allPkgs.Where(p => p.Name.Contains(q, StringComparison.OrdinalIgnoreCase)).ToList();
 
-        var results = new List<object>();
+        // totalHits is the total number of matches disregarding skip/take (NuGet V3 Search
+        // Query Service contract) — clients rely on it to decide whether more pages exist. A
+        // "match" excludes name-matching packages with no listed version (same rule the page
+        // loop below applies). This is computed set-based, in one batched query over every
+        // filtered package's version facts, rather than by loading each package's full
+        // combined version list — an empty query matches an org's entire NuGet catalogue, and
+        // fanning the expensive per-package version lookup out across all of it (instead of
+        // just the page below) turns one request into an org-size-scaling DB round-trip storm.
+        var versionFacts = await inventory.ListVersionFactsForPackagesAsync(
+            orgId, "nuget", filtered.Select(p => p.Id).ToList(), ct);
+        int totalHits = filtered.Count(p => versionFacts[p.Id].Any(v => !v.IsYanked));
 
+        // The expensive per-package version fan-out (LoadCombinedVersionsAsync, 2-3 round trips
+        // each) stays bounded to the page actually returned.
+        var results = new List<object>();
         foreach (var pkg in filtered.Skip(skip).Take(take))
         {
             var versions = await LoadCombinedVersionsAsync(orgId, pkg.Id, pkg.Name.ToLowerInvariant(), ct);
@@ -66,7 +78,7 @@ public sealed class NuGetSearchHandler(
             });
         }
 
-        return new JsonResult(new { totalHits = results.Count, data = results });
+        return new JsonResult(new { totalHits, data = results });
     }
 
     public async Task<IActionResult> AutocompleteAsync(
@@ -100,6 +112,20 @@ public sealed class NuGetSearchHandler(
 
         // Return only packages that have at least one non-yanked version. prerelease=false
         // excludes packages whose only versions are pre-release, mirroring the spec's intent.
+        // totalHits is the total id-prefix match count disregarding skip/take (same contract
+        // as Search above). This is computed set-based, in one batched query over every
+        // filtered package's version facts, rather than by loading each package's full
+        // combined version list — an empty query matches an org's entire NuGet catalogue, and
+        // fanning the expensive per-package version lookup out across all of it (instead of
+        // just the page below) turns one request into an org-size-scaling DB round-trip storm.
+        var versionFacts = await inventory.ListVersionFactsForPackagesAsync(
+            orgId, "nuget", filtered.Select(p => p.Id).ToList(), ct);
+        bool MatchesFilter(Package pkg) => versionFacts[pkg.Id].Any(v =>
+            !v.IsYanked && (query.Prerelease || !IsPrerelease(v.Version)));
+        int totalHits = filtered.Count(MatchesFilter);
+
+        // The expensive per-package version fan-out (LoadCombinedVersionsAsync, 2-3 round trips
+        // each) stays bounded to the page actually returned.
         var ids = new List<string>();
         foreach (var pkg in filtered.Skip(skip).Take(take))
         {
@@ -112,7 +138,7 @@ public sealed class NuGetSearchHandler(
             }
         }
 
-        return new JsonResult(new { totalHits = ids.Count, data = ids });
+        return new JsonResult(new { totalHits, data = ids });
     }
 
     private async Task<IActionResult> AutocompleteVersionsAsync(
@@ -139,45 +165,14 @@ public sealed class NuGetSearchHandler(
 
     // Combines uploaded (package_versions) and global-plane proxy (cache_artifact) versions
     // for a NuGet package. NuGet may have multiple cache_artifact rows per version (.nupkg,
-    // .nuspec, .sha512); deduplication groups by version so each version string appears once.
-    // Proxy entries whose version already appears in uploaded versions are skipped.
+    // .nuspec, .sha512) — DedupeProxyVersionsByVersion collapses those to the .nupkg row so
+    // search and autocomplete list each version once. Proxy entries whose version already
+    // appears in uploaded versions are skipped upstream in ListServeableVersionsAsync.
     private async Task<IReadOnlyList<PackageVersion>> LoadCombinedVersionsAsync(
         string orgId, string packageId, string normalizedId, CancellationToken ct)
     {
-        var uploadedVersions = await packages.GetVersionsAsync(packageId, ct);
-        var proxyEntries = await cacheArtifacts.ListServeFactsForNameAsync(orgId, "nuget", normalizedId, ct);
-
-        if (proxyEntries.Count == 0)
-        {
-            return uploadedVersions;
-        }
-
-        var uploadedVersionSet = uploadedVersions
-            .Select(v => v.Version)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        var proxyIds = proxyEntries.Select(e => e.Id).ToList();
-        var proxySignals = proxyIds.Count > 0
-            ? await vulns.GetGateSignalsBatchForCacheArtifactsAsync(proxyIds, ct)
-            : new Dictionary<string, VulnGateSignals>();
-
-        // Each NuGet version may have multiple cache_artifact rows; take one representative
-        // entry per version string (first in first_cached_at DESC order from the query).
-        var synthetic = proxyEntries
-            .Where(e => !uploadedVersionSet.Contains(e.Version))
-            .GroupBy(e => e.Version, StringComparer.OrdinalIgnoreCase)
-            .Select(g => g.First().ToPackageVersionSynthetic(proxySignals))
-            .ToList();
-
-        if (synthetic.Count == 0)
-        {
-            return uploadedVersions;
-        }
-
-        var combined = new List<PackageVersion>(uploadedVersions.Count + synthetic.Count);
-        combined.AddRange(uploadedVersions);
-        combined.AddRange(synthetic);
-        return combined;
+        var versions = await inventory.ListServeableVersionsAsync(orgId, packageId, "nuget", normalizedId, ct);
+        return ArtifactInventoryRepository.DedupeProxyVersionsByVersion(versions);
     }
 }
 

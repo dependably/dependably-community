@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Security.Cryptography;
 using System.Text;
 using Dapper;
 using Dependably.Api;
@@ -61,6 +62,9 @@ public sealed class ImportControllerResourceControlTests
         SetForm(ctx, new FormCollection(new Dictionary<string, StringValues>(), files));
         ctx.Request.ContentType = "multipart/form-data; boundary=stub";
     }
+
+    private static string Sha256Hex(byte[] bytes)
+        => Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
 
     // ── Rate-limit policy attachment ────────────────────────────────────────
 
@@ -362,5 +366,130 @@ public sealed class ImportControllerResourceControlTests
 
         var problem = Assert.IsType<ObjectResult>(result);
         Assert.Equal(StatusCodes.Status413PayloadTooLarge, problem.StatusCode);
+    }
+
+    // ── "manifest" / "sha256sums" multipart part size cap ──────────────────
+    //
+    // Unlike artefact parts (streamed to disk under a per-tenant cap), the "manifest" and
+    // "sha256sums" parts are parsed as text and fully buffered into managed memory. They must
+    // carry their own small, fixed cap — enforced mid-stream via LimitedReadStream — so a
+    // garbage multipart part cannot force repeated large transient allocations regardless of
+    // the 1 GB whole-batch ceiling. Must track ImportController's private TextPartMaxBytes.
+
+    private const long TextPartCapBytesForTest = 8L * 1024 * 1024;
+
+    [Fact]
+    public async Task ImportManifest_ManifestPartOverCap_Returns413BeforeParsing()
+    {
+        // The part is garbage (not a valid manifest) — proof that the cap rejects it
+        // mid-stream, before ManifestParser.Detect ever runs against the buffered bytes.
+        const string prefix = "{\"padding\":\"";
+        const string suffix = "\"}";
+        int padLen = (int)(TextPartCapBytesForTest + 1 - prefix.Length - suffix.Length);
+        string oversizedManifest = prefix + new string('x', padLen) + suffix;
+        Assert.Equal(TextPartCapBytesForTest + 1, Encoding.UTF8.GetByteCount(oversizedManifest));
+
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var files = new FormFileCollection
+        {
+            BuildFile("package-lock.json", oversizedManifest, name: "manifest"),
+        };
+        Multipart(b.ImportController.HttpContext, files);
+
+        var result = await b.ImportController.ImportManifest(dryRun: false, CancellationToken.None);
+
+        var problem = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status413PayloadTooLarge, problem.StatusCode);
+    }
+
+    [Fact]
+    public async Task ImportManifest_ManifestPartAtCapBoundary_ParsesInsteadOfRejecting()
+    {
+        // Exactly at the cap (not over it) — LimitedReadStream only rejects once the read
+        // count strictly exceeds the limit, so a part of exactly this size must still parse
+        // and the batch must accept the matching artefact.
+        var (npmBytes, _, _) = NpmFixtures.BuildTarball("acme-cap-mfst-atcap", "1.0.0", tarballLicense: null);
+        const string prefix = "{\"name\":\"test\",\"version\":\"1.0.0\",\"lockfileVersion\":3,\"packages\":{\"\":" +
+            "{\"name\":\"test\",\"version\":\"1.0.0\"},\"node_modules/acme-cap-mfst-atcap\":" +
+            "{\"version\":\"1.0.0\"}},\"padding\":\"";
+        const string suffix = "\"}";
+        int padLen = (int)(TextPartCapBytesForTest - prefix.Length - suffix.Length);
+        string manifest = prefix + new string('x', padLen) + suffix;
+        Assert.Equal(TextPartCapBytesForTest, Encoding.UTF8.GetByteCount(manifest));
+
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var files = new FormFileCollection
+        {
+            BuildFile("package-lock.json", manifest, name: "manifest"),
+            BuildFile("acme-cap-mfst-atcap-1.0.0.tgz", npmBytes),
+        };
+        Multipart(b.ImportController.HttpContext, files);
+
+        var result = await b.ImportController.ImportManifest(dryRun: false, CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        Assert.Equal(1, (int)ok.Value!.GetType().GetProperty("accepted")!.GetValue(ok.Value)!);
+    }
+
+    [Fact]
+    public async Task Upload_Sha256SumsPartOverCap_Returns413BeforeParsing()
+    {
+        var (npmBytes, _, _) = NpmFixtures.BuildTarball("acme-cap-sums-over", "1.0.0", tarballLicense: null);
+        string entryLine = $"{Sha256Hex(npmBytes)}  acme-cap-sums-over-1.0.0.tgz\n";
+        // Padding lives inside a "#" comment line so it never has to be a well-formed entry —
+        // the cap must reject the part before Sha256SumsParser ever sees it.
+        const string commentPrefix = "#";
+        int padLen = (int)(TextPartCapBytesForTest + 1 - entryLine.Length - commentPrefix.Length);
+        string oversizedSidecar = entryLine + commentPrefix + new string('x', padLen);
+        Assert.Equal(TextPartCapBytesForTest + 1, Encoding.UTF8.GetByteCount(oversizedSidecar));
+
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var files = new FormFileCollection
+        {
+            BuildFile("acme-cap-sums-over-1.0.0.tgz", npmBytes),
+            BuildFile("sha256sums", oversizedSidecar, name: "sha256sums"),
+        };
+        Multipart(b.ImportController.HttpContext, files);
+
+        var result = await b.ImportController.Upload(dryRun: false, CancellationToken.None);
+
+        var problem = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status413PayloadTooLarge, problem.StatusCode);
+    }
+
+    [Fact]
+    public async Task Upload_Sha256SumsPartAtCapBoundary_ParsesInsteadOfRejecting()
+    {
+        var (npmBytes, _, _) = NpmFixtures.BuildTarball("acme-cap-sums-atcap", "1.0.0", tarballLicense: null);
+        string entryLine = $"{Sha256Hex(npmBytes)}  acme-cap-sums-atcap-1.0.0.tgz\n";
+        const string commentPrefix = "#";
+        int padLen = (int)(TextPartCapBytesForTest - entryLine.Length - commentPrefix.Length);
+        string sidecar = entryLine + commentPrefix + new string('x', padLen);
+        Assert.Equal(TextPartCapBytesForTest, Encoding.UTF8.GetByteCount(sidecar));
+
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var files = new FormFileCollection
+        {
+            BuildFile("acme-cap-sums-atcap-1.0.0.tgz", npmBytes),
+            BuildFile("sha256sums", sidecar, name: "sha256sums"),
+        };
+        Multipart(b.ImportController.HttpContext, files);
+
+        var result = await b.ImportController.Upload(dryRun: false, CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        Assert.Equal(1, (int)ok.Value!.GetType().GetProperty("accepted")!.GetValue(ok.Value)!);
     }
 }

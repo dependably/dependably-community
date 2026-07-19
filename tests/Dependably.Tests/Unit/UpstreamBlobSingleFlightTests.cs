@@ -31,17 +31,26 @@ public sealed class UpstreamBlobSingleFlightTests
         // GateHandler parks every request until Release() is called, giving us a
         // deterministic window where all concurrent callers are queued behind the gate.
         var gate = new GateHandler(HttpStatusCode.OK, RandomBytes(64));
-        var (client, blobs) = BuildClient(gate);
+        var (client, _) = BuildClient(gate);
 
         string blobKey = BlobKeys.Proxy(Sha256Hex(gate.ResponseBody));
         const string url = "http://upstream.invalid/pkg.whl";
         var spec = new ChecksumSpec(ChecksumAlgorithm.Sha256, Sha256Hex(gate.ResponseBody));
 
-        // Start 6 concurrent callers on the same key; all will hit the MISS path.
-        var tasks = Enumerable.Range(0, 6).Select(_ => Task.Run(() =>
-            client.GetOrFetchStreamAsync(blobKey, url, spec, "pypi", ct: default))).ToArray();
+        // Start 6 callers on the same key by invoking them directly (not via Task.Run), one after
+        // another, without awaiting in between. GetOrFetchStreamAsync's synchronous prologue —
+        // including the in-flight map registration — runs to completion on THIS thread before
+        // its first real suspension point (InMemoryBlobStore.GetAsync completes synchronously,
+        // so the await over it never yields), so by the time each call returns a pending Task,
+        // it has already registered. This is deterministic by construction: no thread pool
+        // scheduling, no signal, no margin — all 6 are guaranteed registered before the gate is
+        // released.
+        var tasks = new Task<(Stream Body, bool IsHit)>[6];
+        for (int i = 0; i < tasks.Length; i++)
+        {
+            tasks[i] = client.GetOrFetchStreamAsync(blobKey, url, spec, "pypi", ct: default);
+        }
 
-        await Task.Delay(80); // let all tasks enter GetOrFetchStreamAsync
         gate.Release();
         var results = await Task.WhenAll(tasks);
 
@@ -84,7 +93,8 @@ public sealed class UpstreamBlobSingleFlightTests
                 new ChecksumSpec(ChecksumAlgorithm.Sha256, Sha256Hex(blobsC)), "pypi", ct: default)),
         };
 
-        await Task.Delay(80);
+        // Distinct keys never collapse, so there is no registration race to wait out here —
+        // each gate simply unblocks its own caller whenever that caller reaches it.
         gateA.Release();
         gateB.Release();
         gateC.Release();
@@ -126,24 +136,27 @@ public sealed class UpstreamBlobSingleFlightTests
         string keyB = BlobKeys.Proxy(Sha256Hex(bodyB));
         string keyC = BlobKeys.Proxy(Sha256Hex(bodyC));
 
-        // Two callers for the shared key, one each for B and C — four total.
+        // Two callers for the shared key, one each for B and C — four total, invoked directly
+        // (not via Task.Run) one after another without awaiting in between. As in the same-key
+        // test above, GetOrFetchStreamAsync's registration is synchronous, so each call has
+        // already registered by the time it returns a pending Task — deterministic, no barrier
+        // or margin needed.
         var tasks = new[]
         {
-            Task.Run(() => client.GetOrFetchStreamAsync(
+            client.GetOrFetchStreamAsync(
                 sharedKey, "http://upstream.invalid/shared.whl",
-                new ChecksumSpec(ChecksumAlgorithm.Sha256, Sha256Hex(sharedBody)), "pypi", ct: default)),
-            Task.Run(() => client.GetOrFetchStreamAsync(
+                new ChecksumSpec(ChecksumAlgorithm.Sha256, Sha256Hex(sharedBody)), "pypi", ct: default),
+            client.GetOrFetchStreamAsync(
                 sharedKey, "http://upstream.invalid/shared.whl",
-                new ChecksumSpec(ChecksumAlgorithm.Sha256, Sha256Hex(sharedBody)), "pypi", ct: default)),
-            Task.Run(() => client.GetOrFetchStreamAsync(
+                new ChecksumSpec(ChecksumAlgorithm.Sha256, Sha256Hex(sharedBody)), "pypi", ct: default),
+            client.GetOrFetchStreamAsync(
                 keyB, "http://upstream.invalid/b.whl",
-                new ChecksumSpec(ChecksumAlgorithm.Sha256, Sha256Hex(bodyB)), "pypi", ct: default)),
-            Task.Run(() => client.GetOrFetchStreamAsync(
+                new ChecksumSpec(ChecksumAlgorithm.Sha256, Sha256Hex(bodyB)), "pypi", ct: default),
+            client.GetOrFetchStreamAsync(
                 keyC, "http://upstream.invalid/c.whl",
-                new ChecksumSpec(ChecksumAlgorithm.Sha256, Sha256Hex(bodyC)), "pypi", ct: default)),
+                new ChecksumSpec(ChecksumAlgorithm.Sha256, Sha256Hex(bodyC)), "pypi", ct: default),
         };
 
-        await Task.Delay(80);
         gateShared.Release();
         gateB.Release();
         gateC.Release();
@@ -180,17 +193,23 @@ public sealed class UpstreamBlobSingleFlightTests
         using var cts = new CancellationTokenSource();
         var firstTask = client.GetOrFetchStreamAsync(blobKey, url, spec, "pypi", ct: cts.Token);
 
-        // Let the first caller register in the in-flight map and start the shared upstream call
-        // (parked on the gate) before cancelling it.
-        await Task.Delay(80);
+        // Wait until the first caller has actually registered in the in-flight map and reached
+        // the gate (parked on the shared upstream call) before cancelling it — a deterministic
+        // replacement for guessing how long that takes with a fixed Task.Delay.
+        await gate.WaitForCallCountAsync(1);
         cts.Cancel();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => firstTask);
 
         // A second caller for the same key must join the still-running shared fetch, not start
-        // a fresh one.
-        var secondTask = Task.Run(() => client.GetOrFetchStreamAsync(blobKey, url, spec, "pypi", ct: default));
-        await Task.Delay(80);
+        // a fresh one. Calling it directly (not via Task.Run) is deterministic, not just
+        // best-effort: GetOrFetchStreamAsync's synchronous prologue — including the in-flight
+        // map registration — runs to completion on THIS thread before the method's first real
+        // suspension point, and that happens-before relationship holds regardless of scheduler
+        // contention (unlike a cross-thread "has it started yet" signal, which a sufficiently
+        // loaded box can still lose the race against). Only after that registration has
+        // definitely landed do we release the gate.
+        var secondTask = client.GetOrFetchStreamAsync(blobKey, url, spec, "pypi", ct: default);
         gate.Release();
         var (stream, _) = await secondTask;
         await stream.DisposeAsync();
@@ -245,18 +264,20 @@ public sealed class UpstreamBlobSingleFlightTests
         };
         using var httpClient = new HttpClient(throttle);
 
-        // First request occupies the single slot; release only after asserting concurrency.
+        // First request occupies the single slot; release only after it has actually parked
+        // on the gate — a deterministic replacement for guessing how long that takes.
         var first = httpClient.SendAsync(
             new HttpRequestMessage(HttpMethod.Get, "http://upstream.invalid/a"), default);
-        await Task.Delay(30); // let first enter the handler and park on the gate
+        await gate.WaitForCallCountAsync(1);
         gate.Release();
         using var r1 = await first;
 
-        // Gate resets for the second request.
+        // Gate resets for the second request — CallCount is cumulative across Reset(), so the
+        // second arrival is the 2nd call overall.
         gate.Reset(HttpStatusCode.OK, RandomBytes(8));
         var second = httpClient.SendAsync(
             new HttpRequestMessage(HttpMethod.Get, "http://upstream.invalid/b"), default);
-        await Task.Delay(30);
+        await gate.WaitForCallCountAsync(2);
         gate.Release();
         using var r2 = await second;
 
@@ -302,7 +323,10 @@ public sealed class UpstreamBlobSingleFlightTests
 
     private sealed class GateHandler : HttpMessageHandler
     {
+        private readonly object _arrivalLock = new();
         private TaskCompletionSource _gate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private TaskCompletionSource? _arrival;
+        private int _arrivalTarget;
         private HttpStatusCode _status;
         private int _callCount;
 
@@ -324,6 +348,26 @@ public sealed class UpstreamBlobSingleFlightTests
             _gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         }
 
+        /// <summary>
+        /// Completes once the gate has been hit by at least <paramref name="count"/> requests —
+        /// a deterministic replacement for guessing how long a caller takes to reach the HTTP
+        /// layer with a fixed <see cref="Task.Delay(int)"/>, which flakes under load.
+        /// </summary>
+        public Task WaitForCallCountAsync(int count, CancellationToken ct = default)
+        {
+            lock (_arrivalLock)
+            {
+                if (_callCount >= count)
+                {
+                    return Task.CompletedTask;
+                }
+
+                _arrivalTarget = count;
+                _arrival = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                return _arrival.Task.WaitAsync(ct);
+            }
+        }
+
         // Public forwarder so RoutingHandler can delegate to this gate without needing
         // to subclass it or cast to the protected SendAsync.
         public Task<HttpResponseMessage> ForwardAsync(
@@ -333,7 +377,15 @@ public sealed class UpstreamBlobSingleFlightTests
         protected override async Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request, CancellationToken cancellationToken)
         {
-            Interlocked.Increment(ref _callCount);
+            int count = Interlocked.Increment(ref _callCount);
+            lock (_arrivalLock)
+            {
+                if (_arrival is not null && count >= _arrivalTarget)
+                {
+                    _arrival.TrySetResult();
+                }
+            }
+
             await _gate.Task.WaitAsync(cancellationToken);
             return new HttpResponseMessage(_status)
             {

@@ -22,6 +22,9 @@
     <EmbeddedResource Include="../../skills/remediation/fix-path-traversal/SKILL.md" LogicalName="skills.remediation.fix-path-traversal.SKILL.md" />
     <EmbeddedResource Include="../../skills/remediation/fix-unsafe-deserialization/SKILL.md" LogicalName="skills.remediation.fix-unsafe-deserialization.SKILL.md" />
     <EmbeddedResource Include="../../skills/remediation/fix-ssrf/SKILL.md" LogicalName="skills.remediation.fix-ssrf.SKILL.md" />
+    <EmbeddedResource Include="../../skills/remediation/fix-broken-access-control/SKILL.md" LogicalName="skills.remediation.fix-broken-access-control.SKILL.md" />
+    <EmbeddedResource Include="../../skills/remediation/fix-weak-cryptography/SKILL.md" LogicalName="skills.remediation.fix-weak-cryptography.SKILL.md" />
+    <EmbeddedResource Include="../../skills/remediation/fix-authentication-failures/SKILL.md" LogicalName="skills.remediation.fix-authentication-failures.SKILL.md" />
   </ItemGroup>
 
   <ItemGroup>
@@ -53,6 +56,7 @@
     <PackageReference Include="Microsoft.AspNetCore.DataProtection.StackExchangeRedis" Version="10.0.8" />
     <PackageReference Include="Dapper" Version="2.1.72" />
     <PackageReference Include="IPAddressRange" Version="6.3.0" />
+    <PackageReference Include="MailKit" Version="4.17.0" />
     <PackageReference Include="SecurityCodeScan.VS2019" Version="5.6.7">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>

@@ -34,6 +34,13 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
     public const string SystemAdminEmail = "system@dependably.local";
     public const string SystemAdminPassword = "TestPassword12345!";
 
+    /// <summary>
+    /// When set (base64 32-byte key), configures <c>DEPENDABLY_MASTER_KEY</c> so instance secrets
+    /// (SMTP password, operator Slack webhook URL) are envelope-encrypted at rest. Null (default)
+    /// leaves the protector unconfigured — the standard keyless test host.
+    /// </summary>
+    public string? MasterKey { get; init; }
+
     private readonly TestMetadataStore _metadataStore = new();
 
     protected override IHost CreateHost(IHostBuilder _)
@@ -47,6 +54,9 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
         builder.Configuration["BASE_URL"] = $"http://{ApexHost}";
         builder.Configuration["FIRST_BOOT_SYSTEM_ADMIN_EMAIL"] = SystemAdminEmail;
         builder.Configuration["FIRST_BOOT_SYSTEM_ADMIN_PASSWORD"] = SystemAdminPassword;
+        // Null entry is treated as absent by IConfiguration, so the protector stays unconfigured
+        // unless a test opts in by setting MasterKey.
+        builder.Configuration["DEPENDABLY_MASTER_KEY"] = MasterKey;
 
         Program.ConfigureBuilder(builder);
 
@@ -95,6 +105,16 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
     }
 
     /// <summary>
+    /// Decrypts a stored <c>jwt_secret</c> value when <see cref="MasterKey"/> is configured (the
+    /// value is envelope-encrypted at rest once a master key is set); passes plaintext through
+    /// unchanged otherwise.
+    /// </summary>
+    private string DecryptJwtSecret(string stored) =>
+        MasterKey is null
+            ? stored
+            : TestEnvelope.Configured(Convert.FromBase64String(MasterKey)).Unprotect(stored);
+
+    /// <summary>
     /// Issues a system-scoped JWT for the seeded system_admin (apex login realm).
     /// </summary>
     public async Task<string> CreateSystemAdminJwt()
@@ -107,9 +127,10 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
         // PasswordRotationGuard doesn't 403 non-allowlisted /api/v1/system calls.
         await conn.ExecuteAsync(
             "UPDATE system_admins SET must_change_password = 0 WHERE id = @sysId", new { sysId });
-        string jwtSecret = await conn.ExecuteScalarAsync<string>(
+        string jwtSecretStored = await conn.ExecuteScalarAsync<string>(
             "SELECT value FROM instance_settings WHERE key = 'jwt_secret'")
             ?? throw new InvalidOperationException("jwt_secret missing");
+        string jwtSecret = DecryptJwtSecret(jwtSecretStored);
 
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecret));
         var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
@@ -136,9 +157,10 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
     public async Task<string> CreateSystemAdminJwtForUser(string adminId)
     {
         await using var conn = await _metadataStore.OpenAsync();
-        string jwtSecret = await conn.ExecuteScalarAsync<string>(
+        string jwtSecretStored = await conn.ExecuteScalarAsync<string>(
             "SELECT value FROM instance_settings WHERE key = 'jwt_secret'")
             ?? throw new InvalidOperationException("jwt_secret missing");
+        string jwtSecret = DecryptJwtSecret(jwtSecretStored);
         long tokenVersion = await conn.ExecuteScalarAsync<long>(
             "SELECT token_version FROM system_admins WHERE id = @adminId", new { adminId });
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecret));
@@ -166,9 +188,10 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
     public async Task<string> CreateTenantJwt(string userId, string tenantId, string role = "owner")
     {
         await using var conn = await _metadataStore.OpenAsync();
-        string jwtSecret = await conn.ExecuteScalarAsync<string>(
+        string jwtSecretStored = await conn.ExecuteScalarAsync<string>(
             "SELECT value FROM instance_settings WHERE key = 'jwt_secret'")
             ?? throw new InvalidOperationException("jwt_secret missing");
+        string jwtSecret = DecryptJwtSecret(jwtSecretStored);
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecret));
         var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
         // now-ok: mints a JWT the host validates against its real clock.

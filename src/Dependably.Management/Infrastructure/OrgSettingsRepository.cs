@@ -4,13 +4,9 @@ namespace Dependably.Infrastructure;
 
 /// <summary>
 /// Per-tenant configuration store. Separated from <see cref="OrgRepository"/> (which owns
-/// the org entity lifecycle: list / soft-delete / restore / membership) so the two concerns
-/// can evolve independently — settings change frequently, the entity rarely.
-///
-/// Also owns <c>instance_settings</c> listing: <c>jwt_secret</c> and <c>mfa_encryption_key</c>
-/// are intentionally excluded from <see cref="ListInstanceSettingsAsync"/> — reads and writes
-/// of those secrets go through <see cref="OrgRepository"/>, which routes them through
-/// <see cref="EnvelopeProtector"/> for at-rest encryption.
+/// the org entity lifecycle: list / soft-delete / restore / membership, and also owns
+/// <c>instance_settings</c> listing via <see cref="OrgRepository.ListInstanceSettingsAsync"/>)
+/// so the two concerns can evolve independently — settings change frequently, the entity rarely.
 /// </summary>
 public sealed class OrgSettingsRepository
 {
@@ -225,15 +221,6 @@ public sealed class OrgSettingsRepository
             new { orgId, mode });
         _orgs?.InvalidateSettingsCache(orgId);
     }
-
-    public async Task<IReadOnlyDictionary<string, string>> ListInstanceSettingsAsync(CancellationToken ct = default)
-    {
-        await using var conn = await _db.OpenAsync(ct);
-        var rows = await conn.QueryAsync<(string Key, string Value)>(
-            "SELECT key as Key, value as Value FROM instance_settings WHERE key NOT IN ('jwt_secret', 'mfa_encryption_key')");
-        return rows.ToDictionary(r => r.Key, r => r.Value);
-    }
-
 }
 
 /// <summary>

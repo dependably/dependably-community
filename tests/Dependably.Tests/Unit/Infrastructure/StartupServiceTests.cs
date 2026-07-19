@@ -2,11 +2,11 @@ using System.Security.Cryptography;
 using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Identity;
+using Dependably.Security;
 using Dependably.Tests.Infrastructure;
-using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
-using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 
 namespace Dependably.Tests.Unit.Infrastructure;
@@ -14,8 +14,8 @@ namespace Dependably.Tests.Unit.Infrastructure;
 /// <summary>
 /// Startup-time JWT key handling and envelope-encryption migration. The startup work is split
 /// across two hosted services registered in order: <see cref="CoreStartupService"/> runs schema +
-/// first-boot + envelope-encryption migration, then <see cref="StartupService"/> replaces the
-/// JwtBearer placeholder signing key from instance_settings. Both must fail closed — the JWT
+/// first-boot + envelope-encryption migration, then <see cref="StartupService"/> primes
+/// <see cref="JwtSigningKeyProvider"/> from instance_settings. Both must fail closed — the JWT
 /// service when the secret is missing on an already-bootstrapped instance, the Core service when
 /// secrets are envelope-encrypted but DEPENDABLY_MASTER_KEY is absent (lost-key scenario). The
 /// <see cref="StartupPair"/> helper starts both in registration order so these tests exercise the
@@ -25,7 +25,10 @@ namespace Dependably.Tests.Unit.Infrastructure;
 public sealed class StartupServiceTests : IAsyncLifetime
 {
     private readonly TestMetadataStore _db = new();
-    private readonly StubJwtOptionsMonitor _jwtOptions = new();
+
+    // The provider built by the most recent BuildService call — the one whose StartAsync last ran,
+    // and therefore the one holding the key the assertions are about.
+    private JwtSigningKeyProvider _signingKeys = null!;
 
     public Task InitializeAsync() => Task.CompletedTask;
 
@@ -41,11 +44,15 @@ public sealed class StartupServiceTests : IAsyncLifetime
                 { ["DEPENDABLY_MASTER_KEY"] = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)) })
                 .Build()));
 
-    private StartupPair BuildService(IConfiguration? config = null, EnvelopeProtector? envelope = null)
+    private StartupPair BuildService(
+        IConfiguration? config = null,
+        EnvelopeProtector? envelope = null,
+        ILogger<CoreStartupService>? logger = null)
     {
         config ??= new ConfigurationBuilder().Build();
         envelope ??= UnconfiguredEnvelope();
         var orgs = new OrgRepository(_db, envelope: envelope);
+        var metricsAccess = new MetricsAccessConfig(orgs.GetInstanceSettingAsync, config, TestTime.Frozen());
         var core = new CoreStartupService(
             new SchemaInitializer(_db),
             new FirstBootService(_db, config, NullLogger<FirstBootService>.Instance, envelope,
@@ -53,14 +60,22 @@ public sealed class StartupServiceTests : IAsyncLifetime
             orgs,
             config,
             StagingOptions.Resolve(config),
-            NullLogger<CoreStartupService>.Instance,
+            logger ?? NullLogger<CoreStartupService>.Instance,
             envelope,
             _db,
             new EdgeMode(config),
-            new InstanceLock(_db, config, TestTime.Frozen(), NullLogger<InstanceLock>.Instance));
-        var jwt = new StartupService(orgs, _jwtOptions, NullLogger<StartupService>.Instance);
+            new InstanceLock(_db, config, TestTime.Frozen(), NullLogger<InstanceLock>.Instance),
+            metricsAccess);
+        _signingKeys = new JwtSigningKeyProvider(
+            orgs, TestTime.Frozen(), config, NullLogger<JwtSigningKeyProvider>.Instance);
+        var jwt = new StartupService(_signingKeys, NullLogger<StartupService>.Instance);
         return new StartupPair(core, jwt);
     }
+
+    // The single signing key the provider currently trusts. Asserting Single() also pins the
+    // no-grace-window rule: the provider never trusts a superseded secret alongside the current one.
+    private byte[] LoadedSigningKeyBytes() =>
+        Assert.IsType<SymmetricSecurityKey>(Assert.Single(_signingKeys.CurrentKeys)).Key;
 
     // Runs the two startup hosted services in the same order the host registers them:
     // CoreStartupService (schema + first-boot + envelope migration) then StartupService (JWT key
@@ -94,14 +109,11 @@ public sealed class StartupServiceTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task StartAsync_FirstBoot_LoadsGeneratedJwtSecretIntoOptions()
+    public async Task StartAsync_FirstBoot_LoadsGeneratedJwtSecretIntoProvider()
     {
         await BuildService().StartAsync(CancellationToken.None);
 
-        var key = _jwtOptions.Get(JwtBearerDefaults.AuthenticationScheme)
-            .TokenValidationParameters.IssuerSigningKey;
-        var symmetric = Assert.IsType<SymmetricSecurityKey>(key);
-        Assert.NotEqual(new byte[32], symmetric.Key);
+        Assert.NotEqual(new byte[32], LoadedSigningKeyBytes());
     }
 
     [Fact]
@@ -154,11 +166,8 @@ public sealed class StartupServiceTests : IAsyncLifetime
         string? decryptedJwt = await repo.GetInstanceSettingAsync("jwt_secret");
         Assert.Equal(rawJwtBefore, decryptedJwt);
 
-        // The JWT signing key in options must be the decrypted plaintext bytes, not the ciphertext.
-        var signingKey = _jwtOptions.Get(JwtBearerDefaults.AuthenticationScheme)
-            .TokenValidationParameters.IssuerSigningKey;
-        var symmetric = Assert.IsType<SymmetricSecurityKey>(signingKey);
-        Assert.Equal(System.Text.Encoding.UTF8.GetBytes(rawJwtBefore!), symmetric.Key);
+        // The loaded signing key must be the decrypted plaintext bytes, not the ciphertext.
+        Assert.Equal(System.Text.Encoding.UTF8.GetBytes(rawJwtBefore!), LoadedSigningKeyBytes());
     }
 
     [Fact]
@@ -190,10 +199,7 @@ public sealed class StartupServiceTests : IAsyncLifetime
         // Normal first boot without a KEK: no migration, no exception, JWT key is loaded.
         await BuildService().StartAsync(CancellationToken.None);
 
-        var signingKey = _jwtOptions.Get(JwtBearerDefaults.AuthenticationScheme)
-            .TokenValidationParameters.IssuerSigningKey;
-        var symmetric = Assert.IsType<SymmetricSecurityKey>(signingKey);
-        Assert.NotEqual(new byte[32], symmetric.Key);
+        Assert.NotEqual(new byte[32], LoadedSigningKeyBytes());
     }
 
     [Fact]
@@ -353,19 +359,87 @@ public sealed class StartupServiceTests : IAsyncLifetime
         Assert.Contains("DEPENDABLY_MASTER_KEY", thrown.Message);
     }
 
-    private sealed class StubJwtOptionsMonitor : IOptionsMonitor<JwtBearerOptions>
+    // ── TRUSTED_PROXIES unset + default metrics allowlist: co-located-proxy warning ────────
+    //
+    // When TRUSTED_PROXIES is unset, X-Forwarded-For is discarded (fail-closed) and
+    // Connection.RemoteIpAddress reflects the raw socket peer. If the /metrics, /version, and
+    // management docs/OpenAPI IP allowlist is still the loopback default, a reverse proxy
+    // co-located on the same host/docker network makes every request it forwards arrive as
+    // 127.0.0.1 — the allowlist then fails OPEN instead of closed. The condition is deliberately
+    // narrow: it fires only when BOTH TRUSTED_PROXIES is unset AND the allowlist was never
+    // overridden via env or instance_settings.
+
+    private const string CoLocatedProxyWarningMarker = "silently defeats that allowlist";
+
+    // Minimal logger that captures only Warning-level (and above) messages, mirroring the
+    // AirGapModeTests capture pattern.
+    private sealed class CapturingLogger(List<string> sink) : ILogger<CoreStartupService>
     {
-        public JwtBearerOptions CurrentValue { get; } = new()
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel level) => level >= LogLevel.Warning;
+        public void Log<TState>(LogLevel level, EventId eventId, TState state, Exception? ex, Func<TState, Exception?, string> formatter)
         {
-            TokenValidationParameters = new TokenValidationParameters
+            if (level >= LogLevel.Warning)
             {
-                // Same all-zero placeholder Program.cs seeds before startup runs.
-                IssuerSigningKey = new SymmetricSecurityKey(new byte[32]),
-            },
-        };
+                sink.Add(formatter(state, ex));
+            }
+        }
+    }
 
-        public JwtBearerOptions Get(string? name) => CurrentValue;
+    private async Task<List<string>> StartAndCaptureWarningsAsync(IConfiguration config)
+    {
+        var warnings = new List<string>();
+        var pair = BuildService(config: config, logger: new CapturingLogger(warnings));
+        await pair.StartAsync(CancellationToken.None);
+        return warnings;
+    }
 
-        public IDisposable? OnChange(Action<JwtBearerOptions, string?> listener) => null;
+    [Fact]
+    public async Task StartAsync_TrustedProxiesUnset_AllowlistDefault_WarnsAboutCoLocatedProxy()
+    {
+        var config = new ConfigurationBuilder().Build();
+
+        var warnings = await StartAndCaptureWarningsAsync(config);
+
+        Assert.Contains(warnings, w => w.Contains(CoLocatedProxyWarningMarker, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task StartAsync_TrustedProxiesSet_AllowlistDefault_NoCoLocatedProxyWarning()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["TRUSTED_PROXIES"] = "10.0.0.5" })
+            .Build();
+
+        var warnings = await StartAndCaptureWarningsAsync(config);
+
+        Assert.DoesNotContain(warnings, w => w.Contains(CoLocatedProxyWarningMarker, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task StartAsync_TrustedProxiesUnset_AllowlistCustomizedViaEnv_NoCoLocatedProxyWarning()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["METRICS_ALLOWED_IPS"] = "10.0.0.0/8" })
+            .Build();
+
+        var warnings = await StartAndCaptureWarningsAsync(config);
+
+        Assert.DoesNotContain(warnings, w => w.Contains(CoLocatedProxyWarningMarker, StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(true, MetricsAccessConfig.Source.Default, true)]
+    [InlineData(false, MetricsAccessConfig.Source.Default, false)]
+    [InlineData(true, MetricsAccessConfig.Source.Env, false)]
+    [InlineData(true, MetricsAccessConfig.Source.Db, false)]
+    [InlineData(false, MetricsAccessConfig.Source.Env, false)]
+    [InlineData(false, MetricsAccessConfig.Source.Db, false)]
+    public void ShouldWarnCoLocatedProxyDefeatsMetricsAllowlist_MatchesExpected(
+        bool trustedProxiesUnset, MetricsAccessConfig.Source allowlistSource, bool expected)
+    {
+        Assert.Equal(
+            expected,
+            CoreStartupService.ShouldWarnCoLocatedProxyDefeatsMetricsAllowlist(trustedProxiesUnset, allowlistSource));
     }
 }

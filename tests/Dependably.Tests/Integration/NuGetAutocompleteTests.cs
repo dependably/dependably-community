@@ -102,6 +102,33 @@ public sealed class NuGetAutocompleteTests : IClassFixture<DependablyFactory>, I
     }
 
     [Fact]
+    public async Task Autocomplete_TotalHits_ReflectsFullMatchCountNotPageSize()
+    {
+        // Push three packages sharing a distinctive id-prefix, then request a page smaller
+        // than the match count. totalHits must report all three id-prefix matches
+        // (disregarding skip/take), not the single-id page that take=1 actually returns.
+        string prefix = $"AcTotalHits{Guid.NewGuid():N}"[..20];
+        await _factory.PushNuGetPackage($"{prefix}A", "1.0.0");
+        await _factory.PushNuGetPackage($"{prefix}B", "1.0.0");
+        await _factory.PushNuGetPackage($"{prefix}C", "1.0.0");
+
+        string token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(token);
+
+        var resp = await client.GetAsync($"/nuget/autocomplete?q={prefix}&take=1");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+
+        string body = await resp.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(body);
+
+        int totalHits = doc.RootElement.GetProperty("totalHits").GetInt32();
+        int dataCount = doc.RootElement.GetProperty("data").GetArrayLength();
+
+        Assert.Equal(1, dataCount);
+        Assert.Equal(3, totalHits);
+    }
+
+    [Fact]
     public async Task Autocomplete_EmptyQuery_ReturnsAllPackages()
     {
         // Push a recognisable package, then query with no q= — must appear in data.

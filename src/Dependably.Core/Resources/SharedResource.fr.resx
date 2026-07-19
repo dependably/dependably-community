@@ -219,6 +219,12 @@
   <data name="error.settings.offWarnBlock" xml:space="preserve">
     <value>Doit être « off », « warn » ou « block ».</value>
   </data>
+  <data name="error.risk.reasonInvalid" xml:space="preserve">
+    <value>Doit être « blocklisted » ou « unknown ».</value>
+  </data>
+  <data name="error.activity.sinceInvalid" xml:space="preserve">
+    <value>Doit être « 24h », « 7d », « 30d » ou « 90d ».</value>
+  </data>
   <data name="error.quarantine.stateInvalid" xml:space="preserve">
     <value>Doit être « pending », « approved » ou « denied ».</value>
   </data>
@@ -351,6 +357,9 @@
   <data name="error.alert.slackTestFailed" xml:space="preserve">
     <value>Échec du message de test Slack : {0}</value>
   </data>
+  <data name="error.alert.slackTestFailedGeneric" xml:space="preserve">
+    <value>Échec du message de test Slack. Consultez les journaux du serveur pour plus de détails.</value>
+  </data>
   <data name="error.lookup.nameRequired" xml:space="preserve">
     <value>name est obligatoire.</value>
   </data>
@@ -366,9 +375,6 @@
   <data name="error.lookup.versionRequired" xml:space="preserve">
     <value>version est obligatoire pour l'écosystème « {0} ».</value>
   </data>
-  <data name="error.lookup.packageNotFound" xml:space="preserve">
-    <value>Paquet ou version introuvable en amont.</value>
-  </data>
   <data name="error.lookup.upstreamUnavailable" xml:space="preserve">
     <value>La source amont pour « {0} » est temporairement indisponible. Réessayez sous peu.</value>
   </data>
@@ -383,6 +389,93 @@ Acceptez votre invitation à l'aide du lien ci-dessous. Le lien expire le {1} UT
 {2}
 
 Si vous n'attendiez pas cette invitation, vous pouvez ignorer ce courriel.
+</value>
+  </data>
+  <data name="error.email.masterKeyRequired" xml:space="preserve">
+    <value>DEPENDABLY_MASTER_KEY doit être configurée pour stocker un mot de passe SMTP au repos.</value>
+  </data>
+  <data name="error.email.invalidFrom" xml:space="preserve">
+    <value>Doit être une adresse courriel valide.</value>
+  </data>
+  <data name="error.email.invalidSecurity" xml:space="preserve">
+    <value>Doit être « starttls », « ssl » ou « none ».</value>
+  </data>
+  <data name="error.email.invalidPort" xml:space="preserve">
+    <value>Doit être compris entre 1 et 65535.</value>
+  </data>
+  <data name="error.email.notConfigured" xml:space="preserve">
+    <value>La livraison de courriels n'est pas activée ou le transport SMTP n'est pas entièrement configuré.</value>
+  </data>
+  <data name="error.email.testFailed" xml:space="preserve">
+    <value>Échec du courriel de test : {0}</value>
+  </data>
+  <data name="error.email.testFailedGeneric" xml:space="preserve">
+    <value>Échec du courriel de test. Consultez les journaux du serveur pour plus de détails.</value>
+  </data>
+  <data name="error.email.invalidRecipient" xml:space="preserve">
+    <value>Tous les destinataires doivent être des adresses courriel valides.</value>
+  </data>
+  <data name="error.email.tooManyRecipients" xml:space="preserve">
+    <value>20 destinataires maximum sont autorisés.</value>
+  </data>
+  <data name="error.email.hostBlocked" xml:space="preserve">
+    <value>L'hôte SMTP correspond à une plage d'adresses IP bloquée.</value>
+  </data>
+  <data name="email.test.subject" xml:space="preserve">
+    <value>Test SMTP Dependably</value>
+  </data>
+  <data name="email.test.body" xml:space="preserve">
+    <value>Ceci est un message de test de Dependably confirmant que votre configuration SMTP fonctionne.
+</value>
+  </data>
+  <data name="error.system.slackMasterKeyRequired" xml:space="preserve">
+    <value>DEPENDABLY_MASTER_KEY doit être configurée pour stocker une URL de webhook Slack au repos.</value>
+  </data>
+  <data name="error.system.slackNotConfigured" xml:space="preserve">
+    <value>La livraison Slack de l'opérateur n'est pas activée ou aucune URL de webhook n'est configurée pour cette instance.</value>
+  </data>
+  <data name="error.system.slackTestFailed" xml:space="preserve">
+    <value>Échec du message de test Slack : {0}</value>
+  </data>
+  <data name="error.system.slackTestFailedGeneric" xml:space="preserve">
+    <value>Échec du message de test Slack. Consultez les journaux du serveur pour plus de détails.</value>
+  </data>
+  <data name="system.slack.tenantCreated" xml:space="preserve">
+    <value>Dependably [système] : locataire « {0} » créé par {1}</value>
+  </data>
+  <data name="system.slack.tenantDeleted" xml:space="preserve">
+    <value>Dependably [système] : locataire « {0} » supprimé par {1}</value>
+  </data>
+  <data name="system.slack.tenantRestored" xml:space="preserve">
+    <value>Dependably [système] : locataire « {0} » restauré par {1}</value>
+  </data>
+  <data name="system.slack.tenantStatusChanged" xml:space="preserve">
+    <value>Dependably [système] : statut du locataire « {0} » modifié par {1}</value>
+  </data>
+  <data name="system.slack.tenantHardDeleted" xml:space="preserve">
+    <value>Dependably [système] : locataire « {0} » supprimé définitivement (délai de grâce de rétention expiré)</value>
+  </data>
+  <data name="system.slack.adminCreated" xml:space="preserve">
+    <value>Dependably [système] : compte opérateur créé par {0}</value>
+  </data>
+  <data name="system.slack.adminDeleted" xml:space="preserve">
+    <value>Dependably [système] : compte opérateur supprimé par {0}</value>
+  </data>
+  <data name="system.slack.genericEvent" xml:space="preserve">
+    <value>Dependably [système] : {0}</value>
+  </data>
+  <data name="system.slack.actorUnknown" xml:space="preserve">
+    <value>un opérateur inconnu</value>
+  </data>
+  <data name="email.alert.subject" xml:space="preserve">
+    <value>Alerte Dependably : {0}</value>
+  </data>
+  <data name="email.alert.body" xml:space="preserve">
+    <value>{0}
+
+{1}
+
+Consultez cette alerte dans les paramètres Alertes de Dependably.
 </value>
   </data>
 </root>

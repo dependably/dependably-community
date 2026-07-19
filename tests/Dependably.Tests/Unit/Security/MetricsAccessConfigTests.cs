@@ -1,4 +1,5 @@
 using Dependably.Security;
+using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Configuration;
 
 namespace Dependably.Tests.Unit.Security;
@@ -223,5 +224,54 @@ public sealed class MetricsAccessConfigTests
         sut.Invalidate();
         var refreshed = await sut.ResolveAsync();
         Assert.False(refreshed.Enabled);
+    }
+
+    [Fact]
+    public async Task InvalidateThatRacesAnInFlightFill_DoesNotRepublishThePreUpdateConfig()
+    {
+        // Fill-after-invalidate race: request A begins ResolveAsync on a cold cache and reads the
+        // pre-update, permissive allowlist; concurrently an operator tightens the policy via PUT,
+        // whose commit + Invalidate lands mid-fill. On the pre-guard code A republishes the stale
+        // permissive config over the invalidation, so /metrics stays wide-open for the 5s TTL.
+        //
+        // The reader fires the racing Invalidate exactly once, in the window after the generation
+        // snapshot and before the fill publishes. Time is frozen so the TTL cannot mask the bug:
+        // this fails on the old code (stale permissive config served) and passes on the guard.
+        var clock = TestTime.Frozen();
+        var backing = new Dictionary<string, string?>
+        {
+            ["metrics_enabled"] = "true",
+            ["metrics_allowed_ips"] = "[\"0.0.0.0/0\"]",
+        };
+
+        bool raced = false;
+        MetricsAccessConfig sut = null!;
+        Task<string?> Reader(string key, CancellationToken _)
+        {
+            if (key == "metrics_allowed_ips" && !raced)
+            {
+                raced = true;
+                sut.Invalidate(); // the racing PUT's invalidation, landing mid-fill
+            }
+
+            return Task.FromResult(backing.TryGetValue(key, out string? v) ? v : null);
+        }
+
+        sut = new MetricsAccessConfig(
+            Reader,
+            new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>()).Build(),
+            clock);
+
+        var first = await sut.ResolveAsync();
+        Assert.Contains("0.0.0.0/0", first.AllowedRaw); // A legitimately read the pre-update policy
+
+        // The operator's tightened policy is now the source of truth.
+        backing["metrics_allowed_ips"] = "[\"127.0.0.1/32\"]";
+
+        // Killer assertion: the next resolve must reflect the tightened policy, not a stale
+        // permissive config republished by A's post-invalidate write.
+        var second = await sut.ResolveAsync();
+        Assert.Contains("127.0.0.1/32", second.AllowedRaw);
+        Assert.DoesNotContain("0.0.0.0/0", second.AllowedRaw);
     }
 }

@@ -1,7 +1,9 @@
 <!--
-  Alert center settings — per-type toggles, the vulnerability severity floor, and the optional
-  Slack delivery channel. Modeled on SettingsWebhooks.svelte's write-only-secret pattern: the
-  Slack webhook URL is never echoed back, only a computed hasSlackWebhook boolean.
+  Alert center settings — what fires and who hears about it: per-type toggles, the vulnerability
+  severity floor, and the email delivery gate (send-by-email toggle + recipient list). The
+  delivery transports (Slack webhook, SMTP server) live on the Integrations tab; the base
+  alert-settings PUT never touches those columns, so a save here can't clobber an
+  Integrations-tab save.
 -->
 <script>
   import { onMount } from 'svelte'
@@ -14,60 +16,50 @@
 
   const SEVERITIES = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL']
 
-  let settings = null
   let loaded = false
   let error = ''
   let success = ''
   let saving = false
-  let testMsg = ''
-  let testing = false
 
   // Form-bound fields, seeded from the loaded settings.
   let quarantineAlertsEnabled = true
   let vulnAlertsEnabled = true
   let vulnMinSeverity = 'HIGH'
-  let slackEnabled = false
-  let slackWebhookUrl = '' // write-only — never pre-filled from the server
+  let emailEnabled = false
+  let emailRecipients = ''
 
   onMount(load)
 
   async function load() {
     try {
-      settings = await api.getAlertSettings()
+      const settings = await api.getAlertSettings()
       quarantineAlertsEnabled = settings.quarantineAlertsEnabled
       vulnAlertsEnabled = settings.vulnAlertsEnabled
       vulnMinSeverity = settings.vulnMinSeverity
-      slackEnabled = settings.slackEnabled
+      emailEnabled = settings.emailEnabled
+      emailRecipients = settings.emailRecipients || ''
       loaded = true
     } catch (e) { error = extractErrorMessage(e) }
   }
 
   async function save() {
     success = ''
-    testMsg = ''
     await submitForm(
-      () => api.updateAlertSettings(
-        quarantineAlertsEnabled, vulnAlertsEnabled, vulnMinSeverity, slackEnabled,
-        slackWebhookUrl || null),
+      () => api.updateAlertSettings({
+        quarantineAlertsEnabled,
+        vulnAlertsEnabled,
+        vulnMinSeverity,
+        emailEnabled,
+        emailRecipients: emailRecipients || null,
+      }),
       {
         setSaving: v => saving = v,
         setError: v => error = v,
         onSuccess: (updated) => {
-          settings = updated
-          slackWebhookUrl = ''
+          emailRecipients = updated.emailRecipients || ''
           success = $t('settings.saved')
         },
       })
-  }
-
-  async function testSlack() {
-    testMsg = ''; error = ''; testing = true
-    try {
-      await api.testAlertSlack()
-      testMsg = $t('settings.alerts.testOk')
-    } catch (e) {
-      testMsg = $t('settings.alerts.testFail') + ' ' + extractErrorMessage(e)
-    } finally { testing = false }
   }
 </script>
 
@@ -109,35 +101,24 @@
 
     <div class="form-row checkbox-row">
       <span class="checkbox-label">
-        <Toggle bind:checked={slackEnabled} ariaLabel={$t('settings.alerts.slackEnabled')} />
-        {$t('settings.alerts.slackEnabled')}
+        <Toggle bind:checked={emailEnabled} ariaLabel={$t('settings.alerts.emailEnabled')} />
+        {$t('settings.alerts.emailEnabled')}
       </span>
     </div>
 
     <div class="form-row">
-      <label for="alert-slack-url">{$t('settings.alerts.slackUrl')}</label>
-      <input id="alert-slack-url" type="password" bind:value={slackWebhookUrl} autocomplete="new-password" disabled={!slackEnabled} />
-      <div class="form-hint">
-        {settings.hasSlackWebhook ? $t('settings.alerts.slackUrlRotateHint') : $t('settings.alerts.slackUrlHint')}
-      </div>
-      {#if settings.slackLastStatus}
-        <div class="slack-status" class:slack-status-failed={settings.slackLastStatus === 'failed'}>
-          {$t('settings.alerts.slackLastStatus', { values: { status: settings.slackLastStatus } })}
-        </div>
-      {/if}
+      <label for="alert-email-recipients">{$t('settings.alerts.emailRecipients')}</label>
+      <input id="alert-email-recipients" type="text" bind:value={emailRecipients}
+             disabled={!emailEnabled} />
+      <div class="form-hint">{$t('settings.alerts.emailRecipientsHint')}</div>
     </div>
 
-    {#if testMsg}<p class="test-msg">{testMsg}</p>{/if}
+    <p class="pointer-line">{$t('settings.alerts.pointer')}</p>
 
     <div class="form-actions">
       <button class="primary" on:click={save} disabled={saving}>
         {saving ? $t('common.actions.saving') : $t('common.actions.save')}
       </button>
-      {#if settings.hasSlackWebhook}
-        <button class="btn-sm" on:click={testSlack} disabled={testing}>
-          {$t('settings.alerts.testSend')}
-        </button>
-      {/if}
     </div>
   </div>
 {/if}
@@ -154,12 +135,6 @@
     color: var(--text2);
     cursor: pointer;
   }
-  .slack-status {
-    font-size: 12px;
-    color: var(--text2);
-    margin-top: 4px;
-  }
-  .slack-status-failed { color: var(--danger); }
-  .test-msg { font-size: 13px; color: var(--text2); margin: 6px 0; }
+  .pointer-line { font-size: 12px; color: var(--text2); margin: 12px 0; }
   .form-actions { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
 </style>

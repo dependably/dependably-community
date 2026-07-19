@@ -5,6 +5,7 @@ using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Identity;
 using Dependably.Tests.Infrastructure;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Dependably.Tests.Unit.Identity;
 
@@ -18,7 +19,10 @@ public sealed class SystemAdminUserStoreTests : IAsyncLifetime
 {
     private readonly TestMetadataStore _db = new();
     private readonly MfaSecretProtector _protector = new(RandomNumberGenerator.GetBytes(32));
-    private readonly RecoveryCodeHasher _recoveryHasher = new(RandomNumberGenerator.GetBytes(32));
+    private readonly RecoveryCodeHasher _recoveryHasher = new(
+        RandomNumberGenerator.GetBytes(32),
+        acceptLegacyCodes: false,
+        NullLogger<RecoveryCodeHasher>.Instance);
 
     public async Task InitializeAsync()
     {
@@ -35,7 +39,8 @@ public sealed class SystemAdminUserStoreTests : IAsyncLifetime
         await _db.DisposeAsync();
     }
 
-    private SystemAdminUserStore Store() => new(_db, _protector, _recoveryHasher);
+    private SystemAdminUserStore Store(IRecoveryCodeHasher? recoveryHasher = null) =>
+        new(_db, _protector, recoveryHasher ?? _recoveryHasher);
 
     // ── FindByIdAsync ─────────────────────────────────────────────────────────
 
@@ -146,20 +151,43 @@ public sealed class SystemAdminUserStoreTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task RedeemCodeAsync_LegacyBareSha256Code_StillRedeems()
+    public async Task RedeemCodeAsync_LegacyBareSha256Code_RejectedWhenLegacyAcceptanceOff()
     {
         var store = Store();
         var user = new SystemAdminUser { Id = "sa1", Email = "admin@example.com" };
         const string legacyCode = "LEGACY-SA-CODE";
+        await SeedLegacyCodeAsync(store, user, legacyCode);
 
-        string legacyHash = Convert.ToHexString(
-            SHA256.HashData(Encoding.UTF8.GetBytes(legacyCode))).ToLowerInvariant();
-        user.RecoveryCodes = JsonSerializer.Serialize(new List<string> { legacyHash });
-        await store.UpdateAsync(user, CancellationToken.None);
+        Assert.False(await store.RedeemCodeAsync(user, legacyCode, CancellationToken.None));
+        Assert.Equal(1, await store.CountCodesAsync(user, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task RedeemCodeAsync_LegacyBareSha256Code_RedeemsWhenLegacyAcceptanceOn()
+    {
+        var store = Store(new RecoveryCodeHasher(
+            RandomNumberGenerator.GetBytes(32),
+            acceptLegacyCodes: true,
+            NullLogger<RecoveryCodeHasher>.Instance));
+        var user = new SystemAdminUser { Id = "sa1", Email = "admin@example.com" };
+        const string legacyCode = "LEGACY-SA-CODE";
+        await SeedLegacyCodeAsync(store, user, legacyCode);
 
         Assert.True(await store.RedeemCodeAsync(user, legacyCode, CancellationToken.None));
         Assert.Equal(0, await store.CountCodesAsync(user, CancellationToken.None));
         Assert.False(await store.RedeemCodeAsync(user, legacyCode, CancellationToken.None));
+    }
+
+    /// <summary>
+    /// Stores <paramref name="code"/> the way a pre-upgrade release did: unsalted bare
+    /// SHA-256 hex, written straight into the recovery-code column.
+    /// </summary>
+    private static async Task SeedLegacyCodeAsync(SystemAdminUserStore store, SystemAdminUser user, string code)
+    {
+        string legacyHash = Convert.ToHexString(
+            SHA256.HashData(Encoding.UTF8.GetBytes(code))).ToLowerInvariant();
+        user.RecoveryCodes = JsonSerializer.Serialize(new List<string> { legacyHash });
+        await store.UpdateAsync(user, CancellationToken.None);
     }
 
     [Fact]
@@ -228,5 +256,53 @@ public sealed class SystemAdminUserStoreTests : IAsyncLifetime
         Assert.True(await store.RedeemCodeAsync(user, "S1", CancellationToken.None));
         Assert.True(await store.RedeemCodeAsync(user, "S3", CancellationToken.None));
         Assert.Equal(0, await store.CountCodesAsync(user, CancellationToken.None));
+    }
+
+    // ── optimistic concurrency: no stale snapshot resurrects a consumed code ──────
+
+    [Fact]
+    public async Task RedeemCodeAsync_ConcurrentRedeemFromStaleSnapshot_DoesNotResurrectConsumedCode()
+    {
+        var store = Store();
+        await SeedPersistedCodesAsync(store, ["S1", "S2", "S3"]);
+
+        var requestA = await store.FindByIdAsync("sa1", CancellationToken.None);
+        var requestB = await store.FindByIdAsync("sa1", CancellationToken.None);
+
+        Assert.True(await store.RedeemCodeAsync(requestA!, "S1", CancellationToken.None));
+        Assert.False(await store.RedeemCodeAsync(requestB!, "S2", CancellationToken.None));
+
+        var fresh = await store.FindByIdAsync("sa1", CancellationToken.None);
+        Assert.Equal(2, await store.CountCodesAsync(fresh!, CancellationToken.None));
+        Assert.False(await store.RedeemCodeAsync(fresh!, "S1", CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task UpdateAsync_StaleSnapshotAfterConcurrentRedeem_FailsAndPreservesRedemption()
+    {
+        var store = Store();
+        await SeedPersistedCodesAsync(store, ["S1", "S2", "S3"]);
+
+        var login = await store.FindByIdAsync("sa1", CancellationToken.None);
+        var settings = await store.FindByIdAsync("sa1", CancellationToken.None);
+
+        Assert.True(await store.RedeemCodeAsync(login!, "S1", CancellationToken.None));
+
+        await store.SetTwoFactorEnabledAsync(settings!, false, CancellationToken.None);
+        var result = await store.UpdateAsync(settings!, CancellationToken.None);
+        Assert.False(result.Succeeded);
+
+        var fresh = await store.FindByIdAsync("sa1", CancellationToken.None);
+        Assert.True(fresh!.TwoFactorEnabled);
+        Assert.Equal(2, await store.CountCodesAsync(fresh, CancellationToken.None));
+        Assert.False(await store.RedeemCodeAsync(fresh, "S1", CancellationToken.None));
+    }
+
+    private static async Task SeedPersistedCodesAsync(SystemAdminUserStore store, string[] codes)
+    {
+        var seed = await store.FindByIdAsync("sa1", CancellationToken.None);
+        await store.ReplaceCodesAsync(seed!, codes, CancellationToken.None);
+        await store.SetTwoFactorEnabledAsync(seed!, true, CancellationToken.None);
+        Assert.True((await store.UpdateAsync(seed!, CancellationToken.None)).Succeeded);
     }
 }

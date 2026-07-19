@@ -11,13 +11,13 @@
 
   // Tab + filter state lives in the URL query string so it survives route changes,
   // reloads, and copied links. Lifecycle keys: type/q/page/limit; admin keys: action/aq/apage/alimit.
-  const DEFAULTS = { tab: 'lifecycle', type: '', q: '', page: 1, limit: 50, action: '', aq: '', apage: 1, alimit: 50 }
+  const DEFAULTS = { tab: 'lifecycle', type: '', q: '', since: '', page: 1, limit: 50, action: '', aq: '', apage: 1, alimit: 50 }
   const init = readQuery(DEFAULTS)
 
   function sync() {
     writeQuery({
       tab: activeTab,
-      type: lcFilterType, q: lcSearch, page: lcPage, limit: lcLimit,
+      type: lcFilterType, q: lcSearch, since: lcSince, page: lcPage, limit: lcLimit,
       action: adFilterAction, aq: adSearch, apage: adPage, alimit: adLimit,
     }, DEFAULTS)
   }
@@ -29,6 +29,9 @@
   let lcItems = [], lcLoading = true, lcError = ''
   let lcFilterType = init.type
   let lcSearch = init.q
+  // Time window (''|24h|7d|30d|90d). The dashboard's blocked-pull tiles deep-link here with
+  // since=30d so the feed shows exactly the events they counted.
+  let lcSince = init.since
   let lcPage = init.page, lcLimit = init.limit, lcTotal = 0
 
   $: lcColumns = [
@@ -46,6 +49,7 @@
       const p = { page: lcPage, limit: lcLimit }
       if (lcFilterType) p.event_type = lcFilterType
       if (lcSearch) p.search = lcSearch
+      if (lcSince) p.since = lcSince
       const data = await api.getActivity(p)
       lcItems = data.items
       lcTotal = data.total
@@ -63,6 +67,7 @@
       const p = {}
       if (lcFilterType) p.event_type = lcFilterType
       if (lcSearch) p.search = lcSearch
+      if (lcSince) p.since = lcSince
       await api.exportActivity(p)
     } catch (e) { lcError = e.message }
   }
@@ -211,6 +216,13 @@
         <option value="login.locked">{$t('activity.events.loginLocked')}</option>
         <option value="mfa.trusted_device_used">{$t('activity.events.mfaTrustedDeviceUsed')}</option>
         <option value="mfa.recovery_code_used">{$t('activity.events.mfaRecoveryCodeUsed')}</option>
+      </select>
+      <select bind:value={lcSince} on:change={lcOnFilterChange} class="event-select" aria-label={$t('activity.window.label')}>
+        <option value="">{$t('activity.window.all')}</option>
+        <option value="24h">{$t('activity.window.24h')}</option>
+        <option value="7d">{$t('activity.window.7d')}</option>
+        <option value="30d">{$t('activity.window.30d')}</option>
+        <option value="90d">{$t('activity.window.90d')}</option>
       </select>
       <button type="button" class="btn-sm" on:click={lcExport}>{$t('activity.export')}</button>
     </div>

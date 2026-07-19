@@ -329,6 +329,21 @@ public sealed partial class SchemaInitializer
         await conn.ExecuteAsync("ALTER TABLE package_versions DROP COLUMN sbom");
     }
 
+    // Drops `metadata_cache`. It was created for a planned upstream-metadata cache (npm packument,
+    // PyPI simple HTML, NuGet registration) with TTL revalidation via idx_metadata_cache_expires,
+    // but that caching is implemented in memory instead (single-flight + TTL per ecosystem, e.g.
+    // the npm packument cache) and no code reads or writes this table. Safe to drop outright —
+    // nothing references it.
+    private async Task DropMetadataCacheTableAsync(DbConnection conn)
+    {
+        if (!await TableExistsAsync(conn, "metadata_cache"))
+        {
+            return;
+        }
+
+        await conn.ExecuteAsync("DROP TABLE metadata_cache");
+    }
+
     // Collapses the retired per-tenant disable_vuln_scan / disable_deprecation_refresh flags into
     // the single air_gapped posture, then drops both columns. A tenant that had either job
     // disabled is treated as air-gapped (no outbound). Runs after the additive air_gapped add so
@@ -340,18 +355,24 @@ public sealed partial class SchemaInitializer
         bool hasVulnScan = await ColumnExistsAsync(conn, "org_settings", "disable_vuln_scan");
         bool hasDeprecation = await ColumnExistsAsync(conn, "org_settings", "disable_deprecation_refresh");
 
+        // Folds the retired per-org disable_* flags into air_gapped for every tenant that had
+        // either set. Scoping it to one org would leave the rest of the instance on a column
+        // that is about to be dropped.
         if (hasVulnScan && hasDeprecation)
         {
+            // xtenant: one-shot startup migration — instance-wide by design.
             await conn.ExecuteAsync(
                 "UPDATE org_settings SET air_gapped = 1 WHERE disable_vuln_scan = 1 OR disable_deprecation_refresh = 1");
         }
         else if (hasVulnScan)
         {
+            // xtenant: same migration, single-column variant.
             await conn.ExecuteAsync(
                 "UPDATE org_settings SET air_gapped = 1 WHERE disable_vuln_scan = 1");
         }
         else if (hasDeprecation)
         {
+            // xtenant: same migration, single-column variant.
             await conn.ExecuteAsync(
                 "UPDATE org_settings SET air_gapped = 1 WHERE disable_deprecation_refresh = 1");
         }
@@ -390,6 +411,7 @@ public sealed partial class SchemaInitializer
     // ('proxy'|'uploaded'). The split between user-published and operator-imported was
     // cosmetic — both are bytes a user pushed. The remaining distinction is upstream-cache
     // versus user-supplied, which is what gates dedup/claim/audit decisions.
+    // xtenant: one-shot startup migration — the enum collapse applies to every tenant's rows.
     private static Task CollapseOriginToUploadedAsync(DbConnection conn) =>
         conn.ExecuteAsync(
             "UPDATE package_versions SET origin = 'uploaded' WHERE origin IN ('imported','private')");
@@ -810,6 +832,31 @@ public sealed partial class SchemaInitializer
             "ALTER TABLE oci_blobs ADD COLUMN license_spdx TEXT",
             "ALTER TABLE oci_blobs ADD COLUMN license_checked_at TEXT",
             "CREATE INDEX IF NOT EXISTS idx_oci_blobs_org_config_digest ON oci_blobs(org_id, config_digest)",
+            // Per-org email delivery channel for admin alerts, structurally mirroring the
+            // slack_* columns above. email_inherit_instance selects between the instance-level
+            // SMTP transport and the org's own email_smtp_* columns; email_smtp_password is
+            // envelope-encrypted at rest (enc:v1: prefix) and write-only. SQLite's ADD COLUMN
+            // restriction is on PRIMARY KEY/UNIQUE and non-constant DEFAULT, not CHECK, so the
+            // CHECK ships here too (mirrors the rpm_upstream_mode migration above).
+            "ALTER TABLE alert_settings ADD COLUMN email_enabled INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE alert_settings ADD COLUMN email_inherit_instance INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE alert_settings ADD COLUMN email_recipients TEXT",
+            "ALTER TABLE alert_settings ADD COLUMN email_smtp_host TEXT",
+            "ALTER TABLE alert_settings ADD COLUMN email_smtp_port INTEGER",
+            "ALTER TABLE alert_settings ADD COLUMN email_smtp_security TEXT " +
+                "CHECK (email_smtp_security IS NULL OR email_smtp_security IN ('starttls','ssl','none'))",
+            "ALTER TABLE alert_settings ADD COLUMN email_smtp_username TEXT",
+            "ALTER TABLE alert_settings ADD COLUMN email_smtp_password TEXT",
+            "ALTER TABLE alert_settings ADD COLUMN email_smtp_from TEXT",
+            "ALTER TABLE alert_settings ADD COLUMN email_last_delivery_at TEXT",
+            "ALTER TABLE alert_settings ADD COLUMN email_last_status TEXT",
+            "ALTER TABLE alert_settings ADD COLUMN email_consecutive_failures INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE alert_settings ADD COLUMN email_failing_since TEXT",
+            "ALTER TABLE alert_settings ADD COLUMN email_last_error TEXT",
+            // Terminal outcome of the async email delivery attempt on the alert row, mirroring
+            // slack_status/slack_error.
+            "ALTER TABLE alert ADD COLUMN email_status TEXT",
+            "ALTER TABLE alert ADD COLUMN email_error TEXT",
     };
 
     private async Task RunAdditiveMigrationsAsync(DbConnection conn)

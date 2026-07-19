@@ -4,6 +4,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using Dapper;
 using Dependably.Infrastructure;
+using Dependably.Protocol;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Time.Testing;
@@ -282,6 +283,76 @@ public sealed class QuarantineWorkflowTests : IClassFixture<DependablyFactory>, 
         var doc = await JsonDocument.ParseAsync(await list.Content.ReadAsStreamAsync());
         Assert.Contains(doc.RootElement.GetProperty("items").EnumerateArray(),
             e => e.GetProperty("id").GetString() == id);
+    }
+
+    [Fact]
+    public async Task Approve_ProxyRpmEntry_FlipsOverrideOnMatchingCoordinateOnly()
+    {
+        // A version-less (proxy) quarantine entry carries a full purl with qualifiers, e.g.
+        // pkg:rpm/{name}@{ver}-{rel}?arch={arch}. Approving it must flip the manual override on
+        // the matching cache_artifact coordinate (name={name}, version={ver}-{rel}). Before the
+        // fix the controller re-parsed the purl with PurlParser.TryParse, whose version still
+        // carried "?arch=…", so no cached row matched and the decision silently no-opped — the
+        // gate kept 403ing the artifact forever. The second cached version (a different release)
+        // is the mixed-partial control: it must NOT be flipped.
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        var orgs = _factory.Services.GetRequiredService<OrgRepository>();
+        var cacheArtifacts = _factory.Services.GetRequiredService<CacheArtifactRepository>();
+        var tenantAccess = _factory.Services.GetRequiredService<TenantArtifactAccessRepository>();
+        var quarantine = _factory.Services.GetRequiredService<QuarantineRepository>();
+
+        string orgId = (await orgs.GetBySlugAsync("default"))!.Id;
+        string name = $"qrpm{Guid.NewGuid():N}"[..14].ToLowerInvariant();
+
+        // Two cached proxy versions of the same RPM: release 1 (quarantined) and release 2 (control).
+        string targetVersion = "5.1.8-1";
+        string otherVersion = "5.1.8-2";
+        string target = await SeedCachedRpmVersionAsync(cacheArtifacts, tenantAccess, orgId, name, targetVersion,
+            $"{name}-5.1.8-1.x86_64.rpm");
+        string other = await SeedCachedRpmVersionAsync(cacheArtifacts, tenantAccess, orgId, name, otherVersion,
+            $"{name}-5.1.8-2.x86_64.rpm");
+
+        // Version-less quarantine entry for release 1 — the purl carries the ?arch qualifier that
+        // TryParse never strips.
+        string purl = PurlNormalizer.Rpm(name, "5.1.8", "1", "x86_64");
+        var upserted = await quarantine.UpsertPendingAsync(orgId, "rpm", purl, "malicious", null, packageVersionId: null);
+
+        using var admin = await AdminClient();
+        var decide = await admin.PostAsJsonAsync($"/api/v1/quarantine/{upserted.RowId}/decide",
+            new { decision = "approved", note = "vetted" });
+        Assert.Equal(HttpStatusCode.OK, decide.StatusCode);
+
+        await using var conn = await store.OpenAsync();
+        string? targetState = await conn.ExecuteScalarAsync<string>(
+            "SELECT manual_block_state FROM tenant_artifact_access WHERE org_id = @orgId AND cache_artifact_id = @id",
+            new { orgId, id = target });
+        string? otherState = await conn.ExecuteScalarAsync<string>(
+            "SELECT manual_block_state FROM tenant_artifact_access WHERE org_id = @orgId AND cache_artifact_id = @id",
+            new { orgId, id = other });
+
+        Assert.Equal("allowed", targetState);   // matching coordinate flipped
+        Assert.Null(otherState);                 // other release untouched
+    }
+
+    private static async Task<string> SeedCachedRpmVersionAsync(
+        CacheArtifactRepository cacheArtifacts, TenantArtifactAccessRepository tenantAccess,
+        string orgId, string name, string version, string filename)
+    {
+        var artifact = await cacheArtifacts.InsertAsync(new CacheArtifact
+        {
+            Id = Guid.NewGuid().ToString("N"),
+            Ecosystem = "rpm",
+            Name = name,
+            Version = version,
+            Filename = filename,
+            BlobKey = $"proxy/sha256/{Guid.NewGuid():N}",
+            ContentHash = Guid.NewGuid().ToString("N"),
+            SizeBytes = 1024,
+            FirstCachedAt = TestTime.KnownNow,
+            LastAccessedAt = TestTime.KnownNow,
+        });
+        await tenantAccess.UpsertStateAsync(orgId, artifact.Id, TestTime.KnownNow);
+        return artifact.Id;
     }
 }
 

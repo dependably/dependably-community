@@ -94,6 +94,36 @@
         }
       }
     },
+    "/api/v1/alert-settings/email": {
+      "operations": {
+        "put": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/alert-settings/email/test": {
+      "operations": {
+        "post": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/alert-settings/slack": {
+      "operations": {
+        "put": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/api/v1/alert-settings/slack/test": {
       "operations": {
         "post": {
@@ -399,6 +429,32 @@
     "/api/v1/instance/background-jobs": {
       "operations": {
         "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/instance/email-config": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "put": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/instance/email-config/test": {
+      "operations": {
+        "post": {
           "requiredParams": [],
           "responseCodes": [
             "200"
@@ -842,6 +898,26 @@
         }
       }
     },
+    "/api/v1/risk/license": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/risk/operational": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/api/v1/rpm-upstream-mode": {
       "operations": {
         "put": {
@@ -1128,9 +1204,45 @@
         }
       }
     },
+    "/api/v1/system/email-config": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "put": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/system/email-config/test": {
+      "operations": {
+        "post": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/api/v1/system/health": {
       "operations": {
         "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/system/jwt-secret/rotate": {
+      "operations": {
+        "post": {
           "requiredParams": [],
           "responseCodes": [
             "200"
@@ -1256,6 +1368,32 @@
           "requiredParams": [],
           "responseCodes": [
             "204"
+          ]
+        }
+      }
+    },
+    "/api/v1/system/slack-config": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "put": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/system/slack-config/test": {
+      "operations": {
+        "post": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
           ]
         }
       }
@@ -1752,6 +1890,26 @@
         }
       }
     },
+    "/npm/-/npm/v1/security/advisories/bulk": {
+      "operations": {
+        "post": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/npm/-/npm/v1/security/audits/quick": {
+      "operations": {
+        "post": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/npm/-/package/@{scope}/{pkg}/dist-tags": {
       "operations": {
         "get": {
@@ -1899,9 +2057,34 @@
         }
       }
     },
+    "/npm/@{scope}/{pkg}/-/{file}/-rev/{rev}": {
+      "operations": {
+        "delete": {
+          "requiredParams": [
+            "file",
+            "pkg",
+            "rev",
+            "scope"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/npm/@{scope}/{pkg}/-rev/{rev}": {
       "operations": {
         "delete": {
+          "requiredParams": [
+            "pkg",
+            "rev",
+            "scope"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "put": {
           "requiredParams": [
             "pkg",
             "rev",
@@ -2014,9 +2197,32 @@
         }
       }
     },
+    "/npm/{pkg}/-/{file}/-rev/{rev}": {
+      "operations": {
+        "delete": {
+          "requiredParams": [
+            "file",
+            "pkg",
+            "rev"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/npm/{pkg}/-rev/{rev}": {
       "operations": {
         "delete": {
+          "requiredParams": [
+            "pkg",
+            "rev"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "put": {
           "requiredParams": [
             "pkg",
             "rev"

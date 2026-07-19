@@ -404,19 +404,6 @@ CREATE TABLE IF NOT EXISTS tenant_artifact_access (
 CREATE INDEX IF NOT EXISTS idx_tenant_artifact_access_artifact
     ON tenant_artifact_access (cache_artifact_id);
 
-CREATE TABLE IF NOT EXISTS metadata_cache (
-    id              TEXT PRIMARY KEY,
-    ecosystem       TEXT NOT NULL,
-    name            TEXT NOT NULL,
-    document        TEXT NOT NULL,
-    content_hash    TEXT NOT NULL,
-    upstream_etag   TEXT,
-    fetched_at      TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
-    expires_at      TEXT NOT NULL,
-    UNIQUE (ecosystem, name)
-);
-CREATE INDEX IF NOT EXISTS idx_metadata_cache_expires ON metadata_cache (expires_at);
-
 CREATE TABLE IF NOT EXISTS package_version_vulns (
     -- Surrogate PK so cache_artifact-owned rows can exist without a package_versions FK.
     id                  TEXT PRIMARY KEY,
@@ -539,6 +526,8 @@ CREATE TABLE IF NOT EXISTS alert (
     dismissed_at TEXT,
     slack_status TEXT,
     slack_error  TEXT,
+    email_status TEXT,
+    email_error  TEXT,
     created_at   TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
     updated_at   TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
     UNIQUE (org_id, type, source_ref)
@@ -546,7 +535,7 @@ CREATE TABLE IF NOT EXISTS alert (
 CREATE INDEX IF NOT EXISTS idx_alert_org_state ON alert(org_id, state, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_alert_dismissed_by ON alert(dismissed_by);
 
--- Per-org alert toggles, vuln severity floor, and optional Slack delivery channel.
+-- Per-org alert toggles, vuln severity floor, and optional Slack/email delivery channels.
 -- See Schema.sql for the full rationale.
 CREATE TABLE IF NOT EXISTS alert_settings (
     org_id                     TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
@@ -560,6 +549,20 @@ CREATE TABLE IF NOT EXISTS alert_settings (
     slack_consecutive_failures INTEGER NOT NULL DEFAULT 0,
     slack_failing_since        TEXT,
     slack_last_error           TEXT,
+    email_enabled              INTEGER NOT NULL DEFAULT 0,
+    email_inherit_instance     INTEGER NOT NULL DEFAULT 1,
+    email_recipients           TEXT,
+    email_smtp_host            TEXT,
+    email_smtp_port            INTEGER,
+    email_smtp_security        TEXT CHECK (email_smtp_security IS NULL OR email_smtp_security IN ('starttls', 'ssl', 'none')),
+    email_smtp_username        TEXT,
+    email_smtp_password        TEXT,
+    email_smtp_from            TEXT,
+    email_last_delivery_at     TEXT,
+    email_last_status          TEXT,
+    email_consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    email_failing_since        TEXT,
+    email_last_error           TEXT,
     created_at                 TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
     updated_at                 TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
 );

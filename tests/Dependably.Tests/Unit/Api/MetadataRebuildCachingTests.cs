@@ -453,6 +453,8 @@ public sealed class MetadataRebuildCachingTests : IAsyncLifetime
         var svc = new OrgControllerServices(
             Orgs: new OrgRepository(_db),
             Packages: new PackageRepository(_db),
+            Inventory: new ArtifactInventoryRepository(
+                _db, new PackageRepository(_db), new CacheArtifactRepository(_db), new VulnerabilityRepository(_db, TimeProvider.System)),
             VersionFiles: new PackageVersionFilesRepository(_db),
             PackageAnalytics: null!,
             StatsSnapshots: null!,
@@ -464,6 +466,7 @@ public sealed class MetadataRebuildCachingTests : IAsyncLifetime
             Guard: new OrgAccessGuard(_db),
             Blobs: _blobs,
             BlobStorage: null!,
+            OrphanBlobs: new OciOrphanBlobDeleter(_db, new TieredBlobStorage(_blobs, _blobs), new OciBlobKeyLock()),
             Config: null!,
             Logger: NullLogger<OrgController>.Instance,
             Problems: null!,

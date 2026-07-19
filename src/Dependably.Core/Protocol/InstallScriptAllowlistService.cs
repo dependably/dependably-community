@@ -1,6 +1,8 @@
+using System.Collections.Concurrent;
 using Dapper;
 using Dependably.Infrastructure;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Primitives;
 
 namespace Dependably.Protocol;
 
@@ -9,6 +11,9 @@ namespace Dependably.Protocol;
 /// (arm 9). A tenant may set <c>block_install_scripts = 'block'</c> globally while permitting
 /// known-good packages here. Reads are served from a short-TTL per-org cache matching the
 /// <see cref="ReservedNamespaceService"/> shape; mutations invalidate the org's cache entry.
+/// A fill that raced a concurrent mutation is guarded by the same per-org generation token as
+/// <see cref="BlocklistRepository"/>, so a just-added allowlist entry can never be masked by a
+/// stale cached list for a full TTL.
 ///
 /// Version matching:
 /// <list type="bullet">
@@ -31,6 +36,11 @@ public sealed class InstallScriptAllowlistService
     private readonly TimeProvider _time;
     private static readonly TimeSpan CacheTtl = TimeSpan.FromSeconds(60);
 
+    // Per-org generation token, bound to each cache entry as an expiration trigger so a fill
+    // that raced a concurrent Add/Delete cannot persist the stale list past the mutation.
+    private readonly ConcurrentDictionary<string, CancellationTokenSource> _fillGuards =
+        new(StringComparer.Ordinal);
+
     public InstallScriptAllowlistService(IMetadataStore db, IMemoryCache cache, TimeProvider time)
     {
         _db = db;
@@ -39,6 +49,24 @@ public sealed class InstallScriptAllowlistService
     }
 
     private static string CacheKey(string orgId) => $"install-script-allowlist:{orgId}";
+
+    private CancellationTokenSource GuardFor(string orgId) =>
+        _fillGuards.GetOrAdd(orgId, static _ => new CancellationTokenSource());
+
+    // Test seam (InternalsVisibleTo Dependably.Tests): the live generation-guard count, asserted
+    // to drain when a cached entry expires or is evicted so the map cannot grow unbounded.
+    internal int FillGuardCount => _fillGuards.Count;
+
+    // Evicts the cached list and cancels the current generation token so an in-flight fill that
+    // read the pre-mutation list cannot cache it.
+    private void InvalidateCache(string orgId)
+    {
+        _cache.Remove(CacheKey(orgId));
+        if (_fillGuards.TryRemove(orgId, out var retired))
+        {
+            retired.Cancel();
+        }
+    }
 
     /// <summary>Returns all allowlist entries for <paramref name="orgId"/>, served from cache.</summary>
     public async Task<IReadOnlyList<InstallScriptAllowlistEntry>> ListAsync(
@@ -50,6 +78,10 @@ public sealed class InstallScriptAllowlistService
             return cached;
         }
 
+        // Snapshot the generation source BEFORE the read so a fill racing a concurrent mutation
+        // binds an already-cancelled expiration token and never persists the stale list.
+        var guardSource = GuardFor(orgId);
+
         await using var conn = await _db.OpenAsync(ct);
         var rows = await conn.QueryAsync<InstallScriptAllowlistEntry>(
             """
@@ -60,11 +92,16 @@ public sealed class InstallScriptAllowlistService
             """,
             new { orgId });
         var list = (IReadOnlyList<InstallScriptAllowlistEntry>)rows.ToList();
-        _cache.Set(CacheKey(orgId), list, new MemoryCacheEntryOptions
+        var options = new MemoryCacheEntryOptions
         {
             AbsoluteExpirationRelativeToNow = CacheTtl,
             Size = 1,
-        });
+        };
+        options.AddExpirationToken(new CancellationChangeToken(guardSource.Token));
+        // Tie the generation's lifetime to this entry so an org whose cache entry expires without
+        // a mutation does not leave its guard in the map forever.
+        CacheFillGuard.TieToEntryLifetime(options, _fillGuards, orgId, guardSource);
+        _cache.Set(CacheKey(orgId), list, options);
         return list;
     }
 
@@ -86,7 +123,7 @@ public sealed class InstallScriptAllowlistService
             ON CONFLICT DO NOTHING
             """,
             new { id, orgId, ecosystem, name, versionPattern, createdBy });
-        _cache.Remove(CacheKey(orgId));
+        InvalidateCache(orgId);
         return new InstallScriptAllowlistEntry
         {
             Id = id,
@@ -112,7 +149,7 @@ public sealed class InstallScriptAllowlistService
             new { id = entryId, orgId });
         if (rows > 0)
         {
-            _cache.Remove(CacheKey(orgId));
+            InvalidateCache(orgId);
         }
 
         return rows;

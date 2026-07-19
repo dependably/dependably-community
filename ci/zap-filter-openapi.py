@@ -22,6 +22,7 @@ system-scoped twins (e.g. /api/v1/system/mfa/disable), which is harmless: a tena
 session cannot invoke them anyway.
 """
 import json
+import os
 import sys
 import urllib.request
 
@@ -41,7 +42,15 @@ def _load():
         url = sys.argv[1]
         if not url.startswith(("http://", "https://")):
             sys.exit("zap-filter-openapi: refusing non-http(s) source: " + url)
-        with urllib.request.urlopen(url, timeout=30) as resp:  # nosec B310 - http(s) only, job-local app
+        request = urllib.request.Request(url)
+        # The management OpenAPI document requires an authenticated management session, so the
+        # fetch carries the same session cookie the scan itself authenticates with. Without it
+        # the document answers 401 and the job dies before ZAP starts. ZAP_SESSION_COOKIE is
+        # exported by ci/zap-dast-auth.sh into zap-creds.env, which the job sources first.
+        cookie = os.environ.get("ZAP_SESSION_COOKIE")
+        if cookie:
+            request.add_header("Cookie", cookie)
+        with urllib.request.urlopen(request, timeout=30) as resp:  # nosec B310 - http(s) only, job-local app
             return json.load(resp)
     return json.load(sys.stdin)
 

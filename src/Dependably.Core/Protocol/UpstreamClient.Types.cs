@@ -210,6 +210,29 @@ public sealed class UpstreamFetchFailedException : Exception
         : base("Upstream blob fetch failed after retries were exhausted.") { }
 }
 
+/// <summary>
+/// The proxy fetch could not record the artefact on the cache plane, so the fetch is refused.
+///
+/// That row is not bookkeeping. It is what the fetch scans and gates against — the OSV lookup and
+/// the malicious-package, KEV, EPSS, CVSS-tolerance, release-age, install-script and licence gates
+/// all run against it — and it is what later makes the artefact vulnerability-scannable and
+/// evictable. An artefact with no cache-plane row is one the registry cannot vouch for, so it is not
+/// served: a registry whose job is to gate its supply chain does not serve what it could not gate.
+///
+/// The bytes are already staged in the blob store, so a client retry is cheap and the recording gets
+/// a fresh attempt. Callers map this to 503 — a retryable failure, never a 404, which would assert
+/// the artefact does not exist upstream.
+/// </summary>
+[System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S3925:\"ISerializable\" should be implemented correctly",
+    Justification = "Binary serialization ctor on Exception is obsolete in .NET 10 (SYSLIB0051); this exception is never serialized across an AppDomain or binary boundary.")]
+public sealed class ProxyCatalogueUnavailableException : Exception
+{
+    public ProxyCatalogueUnavailableException(string ecosystem, string purlName, string version)
+        : base($"Could not record {ecosystem}/{purlName}@{version} on the cache plane; the fetch is refused rather than served ungated.")
+    {
+    }
+}
+
 [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S3925:\"ISerializable\" should be implemented correctly",
     Justification = "Binary serialization ctor on Exception is obsolete in .NET 10 (SYSLIB0051); this exception is never serialized across an AppDomain or binary boundary.")]
 public sealed class ChecksumException : Exception
@@ -271,5 +294,30 @@ public sealed class StagingDiskFullException : Exception
     {
         AvailableBytes = availableBytes;
         FloorBytes = floorBytes;
+    }
+}
+
+/// <summary>
+/// Thrown by <see cref="UpstreamClient"/> when storing a freshly-fetched proxy artifact would
+/// exceed the tenant's storage quota. The fill is weighed against the tenant's live
+/// <c>org_storage_bytes</c> total, so it is bounded by the same per-org ceiling hosted publish
+/// (<c>PackagePublishService</c>) and OCI push (<c>OciUploadService</c>) enforce rather than
+/// growing the cache plane without limit. Caught by
+/// <c>TenantStorageQuotaExceededExceptionMiddleware</c> and translated to
+/// <c>413 Payload Too Large</c>, matching the status hosted publish already returns for
+/// <c>tenant_quota_exceeded</c>.
+/// </summary>
+[System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S3925:\"ISerializable\" should be implemented correctly",
+    Justification = "Binary serialization ctor on Exception is obsolete in .NET 10 (SYSLIB0051); this exception is never serialized across an AppDomain or binary boundary.")]
+public sealed class TenantStorageQuotaExceededException : Exception
+{
+    public string OrgId { get; }
+    public long QuotaBytes { get; }
+
+    public TenantStorageQuotaExceededException(string orgId, long quotaBytes)
+        : base($"Tenant storage quota ({quotaBytes} bytes) would be exceeded by this proxy cache fill.")
+    {
+        OrgId = orgId;
+        QuotaBytes = quotaBytes;
     }
 }

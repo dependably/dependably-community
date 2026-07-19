@@ -15,7 +15,11 @@ namespace Dependably.Tests.Unit;
 /// from the first-fetch path, which had no dedup map and let cold-start CI fan-out hit
 /// upstream N times for one coordinate.
 /// </summary>
+// BlockAllValidator drives the real IUpstreamUrlValidator.IsAllowedAsync extension, which emits
+// to the process-wide static dependably.security.upstream_url_blocks counter that
+// UpstreamUrlBlocksEmissionTests asserts exact counts against. See MeterSensitiveCollection.
 [Trait("Category", "Unit")]
+[Collection("MeterSensitive")]
 public sealed class UpstreamMetadataSingleFlightTests
 {
     [Fact]
@@ -29,13 +33,18 @@ public sealed class UpstreamMetadataSingleFlightTests
         var (client, _) = BuildClient(handler);
 
         const string url = "http://upstream.invalid/pkg/index.json";
-        var tasks = Enumerable.Range(0, 8)
-            .Select(_ => Task.Run(() => client.GetOrFetchMetadataAsync(url)))
-            .ToArray();
+        // Invoke all 8 callers directly (not via Task.Run), one after another, without awaiting
+        // in between. GetOrFetchMetadataAsync's synchronous prologue — including the in-flight
+        // map registration — runs to completion on THIS thread before its first real suspension
+        // point (no cache configured here, and the fake validator's CheckAsync completes
+        // synchronously), so each call has already registered by the time it returns a pending
+        // Task. Deterministic by construction: no thread pool scheduling, no signal, no margin.
+        var tasks = new Task<UpstreamMetadataResponse>[8];
+        for (int i = 0; i < tasks.Length; i++)
+        {
+            tasks[i] = client.GetOrFetchMetadataAsync(url);
+        }
 
-        // Give the scheduler a tick to let all callers reach GetOrFetchMetadataAsync and
-        // register in the in-flight map before we release the upstream response.
-        await Task.Delay(50);
         handler.Release();
         var results = await Task.WhenAll(tasks);
 
@@ -58,14 +67,14 @@ public sealed class UpstreamMetadataSingleFlightTests
 
         const string url = "http://upstream.invalid/pkg/index.json";
         var first = client.GetOrFetchMetadataAsync(url);
-        await Task.Delay(50);
+        await handler.WaitForCallCountAsync(1);
         handler.Release();
         _ = await first;
 
         // Swap the response — proves the second call genuinely re-hit upstream.
         handler.Reset(HttpStatusCode.OK, "second-body");
         var secondTask = client.GetOrFetchMetadataAsync(url);
-        await Task.Delay(50);
+        await handler.WaitForCallCountAsync(2);
         handler.Release();
         var second = await secondTask;
 
@@ -87,12 +96,18 @@ public sealed class UpstreamMetadataSingleFlightTests
         using var cts = new CancellationTokenSource();
         var firstTask = client.GetOrFetchMetadataAsync(url, authorizationHeader: null, ct: cts.Token);
 
-        await Task.Delay(80);
+        await handler.WaitForCallCountAsync(1);
         cts.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => firstTask);
 
-        var secondTask = Task.Run(() => client.GetOrFetchMetadataAsync(url));
-        await Task.Delay(80);
+        // Calling it directly (not via Task.Run) is deterministic, not just best-effort:
+        // GetOrFetchMetadataAsync's synchronous prologue — including the in-flight map
+        // registration — runs to completion on THIS thread before the method's first real
+        // suspension point, and that happens-before relationship holds regardless of scheduler
+        // contention (unlike a cross-thread "has it started yet" signal, which a sufficiently
+        // loaded box can still lose the race against). Only after that registration has
+        // definitely landed do we release the gate.
+        var secondTask = client.GetOrFetchMetadataAsync(url);
         handler.Release();
         var second = await secondTask;
 
@@ -114,7 +129,9 @@ public sealed class UpstreamMetadataSingleFlightTests
         var taskA = Task.Run(() => client.GetOrFetchMetadataAsync(url, authorizationHeader: "Bearer token-a"));
         var taskB = Task.Run(() => client.GetOrFetchMetadataAsync(url, authorizationHeader: "Bearer token-b"));
 
-        await Task.Delay(80);
+        // Different credentials never collapse, so both callers independently reach the gate —
+        // wait for both real arrivals rather than guessing at scheduling latency.
+        await handler.WaitForCallCountAsync(2);
         handler.Release();
         await Task.WhenAll(taskA, taskB);
 
@@ -135,7 +152,9 @@ public sealed class UpstreamMetadataSingleFlightTests
         var taskA = Task.Run(() => client.GetOrFetchMetadataAsync(url, UpstreamClient.MaxMetadataResponseBytes, null));
         var taskB = Task.Run(() => client.GetOrFetchMetadataAsync(url, UpstreamClient.MaxUpstreamResponseBytes, null));
 
-        await Task.Delay(80);
+        // Different caps never collapse, so both callers independently reach the gate — wait
+        // for both real arrivals rather than guessing at scheduling latency.
+        await handler.WaitForCallCountAsync(2);
         handler.Release();
         await Task.WhenAll(taskA, taskB);
 
@@ -192,7 +211,10 @@ public sealed class UpstreamMetadataSingleFlightTests
 
     private sealed class GateHandler : HttpMessageHandler
     {
+        private readonly object _arrivalLock = new();
         private TaskCompletionSource _gate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private TaskCompletionSource? _arrival;
+        private int _arrivalTarget;
         private HttpStatusCode _status;
         private string _body;
         public int CallCount;
@@ -212,10 +234,39 @@ public sealed class UpstreamMetadataSingleFlightTests
             _gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         }
 
+        /// <summary>
+        /// Completes once the gate has been hit by at least <paramref name="count"/> requests —
+        /// a deterministic replacement for guessing how long a caller takes to reach the HTTP
+        /// layer with a fixed <see cref="Task.Delay(int)"/>, which flakes under load. CallCount
+        /// is cumulative across <see cref="Reset"/>.
+        /// </summary>
+        public Task WaitForCallCountAsync(int count, CancellationToken ct = default)
+        {
+            lock (_arrivalLock)
+            {
+                if (CallCount >= count)
+                {
+                    return Task.CompletedTask;
+                }
+
+                _arrivalTarget = count;
+                _arrival = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                return _arrival.Task.WaitAsync(ct);
+            }
+        }
+
         protected override async Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request, CancellationToken cancellationToken)
         {
-            Interlocked.Increment(ref CallCount);
+            int count = Interlocked.Increment(ref CallCount);
+            lock (_arrivalLock)
+            {
+                if (_arrival is not null && count >= _arrivalTarget)
+                {
+                    _arrival.TrySetResult();
+                }
+            }
+
             await _gate.Task.WaitAsync(cancellationToken);
             return new HttpResponseMessage(_status)
             {

@@ -18,7 +18,7 @@ public sealed class InviteRepository
 
     /// <summary>
     /// Creates a new 24-hour invite. Returns (rawToken, record).
-    /// If SMTP_HOST is not configured, the caller is responsible for logging the link.
+    /// If instance SMTP delivery is not available, the caller is responsible for logging the link.
     /// </summary>
     public async Task<(string RawToken, InviteRecord Record)> CreateAsync(
         string orgId, string email, string createdByUserId, string role = "member", CancellationToken ct = default)
@@ -89,6 +89,40 @@ public sealed class InviteRepository
     }
 
     /// <summary>
+    /// Reads the invite identified by <paramref name="rawToken"/> only if it is still pending
+    /// (unaccepted, unexpired) — without consuming it. Lets a caller resolve email/tenant
+    /// context for a policy check (e.g. password strength) ahead of the one-shot
+    /// <see cref="AcceptAsync"/>, so a failed check never burns the invite's single use.
+    /// </summary>
+    public async Task<InviteRecord?> PeekPendingAsync(string rawToken, CancellationToken ct = default)
+    {
+        byte[] hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(rawToken));
+        string hash = Convert.ToHexString(hashBytes).ToLowerInvariant();
+        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+
+        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: keyed by the SHA-256 of the bearer's invite token, same rationale as AcceptAsync.
+        var (Id, OrgId, Email, Role, CreatedBy, CreatedAt, ExpiresAt, AcceptedAt) =
+            await conn.QuerySingleOrDefaultAsync<(string? Id, string OrgId, string Email, string Role, string CreatedBy, string CreatedAt, string ExpiresAt, string? AcceptedAt)>(
+            "SELECT id, org_id, email, role, created_by, created_at, expires_at, accepted_at FROM invites WHERE token_hash = @hash AND accepted_at IS NULL AND expires_at > @now",
+            new { hash, now });
+
+        return Id is null
+            ? null
+            : new InviteRecord
+            {
+                Id = Id,
+                OrgId = OrgId,
+                Email = Email,
+                Role = Role,
+                CreatedBy = CreatedBy,
+                CreatedAt = DateTimeOffset.Parse(CreatedAt),
+                ExpiresAt = DateTimeOffset.Parse(ExpiresAt),
+                AcceptedAt = AcceptedAt is not null ? DateTimeOffset.Parse(AcceptedAt) : null,
+            };
+    }
+
+    /// <summary>
     /// Atomically consumes an invite token. The UPDATE predicate guards both the
     /// not-yet-accepted and not-yet-expired conditions in one statement, so concurrent
     /// requests carrying the same token race on the DB write — exactly one wins
@@ -106,6 +140,8 @@ public sealed class InviteRepository
         // Single conditional UPDATE: wins the race only when the row is still pending
         // and unexpired. Concurrent requests with the same token both reach this statement
         // but at most one will match (SQLite serializes writes); the loser gets 0 rows.
+        // xtenant: keyed by the SHA-256 of the bearer's invite token. The row itself carries
+        // the org the invite grants; an org filter would need an org the acceptor does not yet have.
         int rowsAffected = await conn.ExecuteAsync(
             "UPDATE invites SET accepted_at = @now WHERE token_hash = @hash AND accepted_at IS NULL AND expires_at > @now",
             new { now, hash });

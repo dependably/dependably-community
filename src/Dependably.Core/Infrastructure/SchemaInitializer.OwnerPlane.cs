@@ -723,12 +723,215 @@ public sealed partial class SchemaInitializer
     // twins (package_version_id NULL) survive intact.
     // The NOT LIKE 'hosted/%' guard is a second discriminator: even if backfill_hosted_origin_by_blob_key
     // has not run (e.g. ledger reset), rows whose blob_key is 'hosted/…' are not deleted.
-    // Proxy artifacts may use any of the prefixes proxy/, cargo/, or go/ — all are genuine proxy
-    // rows and must be deleted. The only hosted prefix is hosted/; any row with that prefix is
-    // never a proxy artifact regardless of the origin column value.
+    // Proxy artifacts may use any of the prefixes proxy/, cargo/, go/, or oci/ — all are genuine
+    // proxy rows and must be deleted. The only hosted prefix is hosted/; any row with that prefix
+    // is never a proxy artifact regardless of the origin column value.
     // xtenant: cross-tenant DELETE; scoped to the proxy discriminator and has no tenant boundary.
     private static Task DeleteMigratedProxyPackageVersionsAsync(DbConnection conn) =>
         conn.ExecuteAsync("DELETE FROM package_versions WHERE origin = 'proxy' AND blob_key NOT LIKE 'hosted/%'");
+
+    // Backfills cache_artifact / tenant_artifact_access for OCI manifests that were never
+    // recorded onto the shared cache plane — OciUpstreamResolver.RecordCatalogVersionAsync wrote
+    // only a package_versions row (origin='proxy') until it was switched onto the global plane
+    // like every other proxy ecosystem.
+    //
+    // Sourced primarily FROM the package_versions rows delete_oci_proxy_package_versions is about
+    // to remove — that is exactly the inventory that must be preserved, and it is a coordinate no
+    // other table can reconstruct: a digest loses its oci_tags row the moment its tag is
+    // repointed to a newer digest (OciUpstreamResolver's tag-upsert ON CONFLICT DO UPDATE SET
+    // digest = excluded.digest), so a superseded digest that was catalogued under the old write
+    // path can have zero rows in oci_tags while its package_versions row (and the bytes it
+    // references) still exist. Sourcing from oci_blobs/oci_tags alone — as an earlier version of
+    // this migration did — would skip exactly those superseded-tag rows, delete their
+    // package_versions row right after, and silently lose them from inventory forever.
+    //
+    // A second pass over oci_blobs/oci_tags supplements any manifest that has a currently
+    // resolving tag but never got a package_versions row in the first place (the old write path's
+    // cataloguing was best-effort and swallowed transient DB faults) — a defensive net, not the
+    // primary source. Only rows whose media_type is a manifest/index type are ever candidates —
+    // layer and config blobs stay in oci_blobs as pure byte storage with no cache-plane row.
+    // xtenant: one-shot cross-tenant migration; cache_artifact is global, tenant_artifact_access
+    // is upserted per org_id from the source row.
+    private async Task BackfillOciCacheArtifactAsync(DbConnection conn)
+    {
+        // now-ok: one-shot migration timestamp; no TimeProvider injected into SchemaInitializer.
+        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        // Keyed on (OrgId, Repository, Digest) — not just (OrgId, Digest) — because the same
+        // digest can be tagged under two different repositories in one org with only one of
+        // them ever having earned a package_versions row; deduping on digest alone would wrongly
+        // skip the other repository's Pass 2 candidate.
+        var processed = new HashSet<(string OrgId, string Repository, string Digest)>();
+
+        // Pass 1 (primary, guarantees the delete-safety invariant): every OCI proxy
+        // package_versions row, regardless of whether its digest still has a resolving oci_tags
+        // entry. purl/blob_key/size/checksum are read verbatim from the row the old write path
+        // already wrote — no recomputation, no risk of drifting from what was actually served.
+        // xtenant: cross-tenant SELECT; org_id flows to the per-org upsert inside the loop below.
+        var pvRows = (await conn.QueryAsync<(
+            string OrgId, string Repository, string Digest, string Purl, string BlobKey,
+            long SizeBytes, string? ChecksumSha256)>(
+            """
+            SELECT p.org_id AS OrgId, p.purl_name AS Repository, pv.version AS Digest, pv.purl AS Purl,
+                   pv.blob_key AS BlobKey, pv.size_bytes AS SizeBytes, pv.checksum_sha256 AS ChecksumSha256
+            FROM package_versions pv
+            JOIN packages p ON p.id = pv.package_id
+            WHERE p.ecosystem = 'oci' AND pv.origin = 'proxy'
+            """)).ToList();
+
+        foreach (var (pvOrgId, repository, digest, purl, blobKey, sizeBytes, checksumSha256) in pvRows)
+        {
+            string contentHash = checksumSha256 ?? DigestHex(digest);
+            await UpsertOciCacheArtifactAsync(
+                conn, pvOrgId, new OciBackfillArtifact(repository, digest, purl, blobKey, contentHash, sizeBytes), now);
+            processed.Add((pvOrgId, repository, digest));
+        }
+
+        // Pass 2 (defensive supplement): manifests with a currently-resolving oci_tags entry that
+        // pass 1 did not already cover (no package_versions row was ever written for them).
+        var acceptedMediaTypes = OciManifestParser.AcceptedMediaTypes.ToList();
+        var mediaTypeParams = new DynamicParameters();
+        var mediaTypePlaceholders = new List<string>(acceptedMediaTypes.Count);
+        for (int i = 0; i < acceptedMediaTypes.Count; i++)
+        {
+            // Dapper's automatic `IN @list` parameter-list expansion is unreliable against
+            // Npgsql on this stack (a bound List<string>/array raises a Postgres syntax error
+            // at the expanded placeholder), so the placeholder list is built explicitly instead
+            // — one named parameter per media type, still fully parameterized, still reading the
+            // values from the single shared OciManifestParser.AcceptedMediaTypes constant rather
+            // than a re-declared list.
+            string name = "mediaType" + i.ToString(CultureInfo.InvariantCulture);
+            mediaTypeParams.Add(name, acceptedMediaTypes[i]);
+            mediaTypePlaceholders.Add("@" + name);
+        }
+
+        string mediaTypeInClause = string.Join(",", mediaTypePlaceholders);
+        // xtenant: one-shot cross-tenant migration; org_id flows to the per-org upsert below.
+        // rawsql: mediaTypeInClause interpolates only the @mediaTypeN placeholder names built above.
+        var blobRows = (await conn.QueryAsync<(
+            string Digest, string OrgId, long SizeBytes, string BlobKey, string? Repository, string? Tag)>(
+            $"""
+            SELECT b.digest AS Digest, b.org_id AS OrgId, b.size_bytes AS SizeBytes, b.blob_key AS BlobKey,
+                   t.repository AS Repository, MIN(t.tag) AS Tag
+            FROM oci_blobs b
+            LEFT JOIN oci_tags t ON t.digest = b.digest AND t.org_id = b.org_id
+            WHERE b.origin = 'proxy' AND b.media_type IN ({mediaTypeInClause})
+            GROUP BY b.digest, b.org_id, b.size_bytes, b.blob_key, t.repository
+            """,
+            mediaTypeParams)).ToList();
+
+        foreach (var (digest, orgId, sizeBytes, blobKey, repository, tag) in blobRows)
+        {
+            // No resolving tag (a by-digest-only sub-manifest fetch, or a manifest whose tag was
+            // later repointed elsewhere with no package_versions row of its own) — never
+            // catalogued before this migration under either write path; correctly skipped.
+            if (string.IsNullOrEmpty(repository) || processed.Contains((orgId, repository, digest)))
+            {
+                continue;
+            }
+
+            string contentHash = DigestHex(digest);
+            string purl = PurlNormalizer.Oci(repository, digest, tag);
+            await UpsertOciCacheArtifactAsync(
+                conn, orgId, new OciBackfillArtifact(repository, digest, purl, blobKey, contentHash, sizeBytes), now);
+        }
+    }
+
+    // Cohesive set of values identifying one OCI manifest coordinate and its cache-artifact
+    // payload, bundled to keep UpsertOciCacheArtifactAsync within the parameter-count threshold (S107).
+    private sealed record OciBackfillArtifact(
+        string Repository, string Digest, string Purl, string BlobKey, string ContentHash, long SizeBytes);
+
+    // Extracts the hex half of an OCI digest string ('sha256:{hex}' -> '{hex}'); falls back to
+    // the full digest string when the ':' separator is absent (defensive — every digest in this
+    // codebase is written in the colon-separated form).
+    private static string DigestHex(string digest)
+    {
+        string[] parts = digest.Split(':', 2);
+        return parts.Length == 2 ? parts[1] : digest;
+    }
+
+    // Resolves-or-inserts the cache_artifact row for one OCI manifest coordinate and upserts the
+    // org's tenant_artifact_access row against it. Shared by both backfill passes above.
+    private async Task UpsertOciCacheArtifactAsync(DbConnection conn, string orgId, OciBackfillArtifact a, string now)
+    {
+        string repository = a.Repository;
+        string digest = a.Digest;
+
+        // xtenant: cache_artifact is global; keyed by coordinate, not org.
+        string? caId = await conn.ExecuteScalarAsync<string?>(
+            """
+            SELECT id FROM cache_artifact
+            WHERE ecosystem = 'oci' AND name = @name AND version = @version AND filename = @filename
+            """,
+            new { name = repository, version = digest, filename = OciUpstreamResolver.ManifestCacheFilename });
+
+        if (caId is null)
+        {
+            caId = Guid.NewGuid().ToString("N");
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO cache_artifact
+                    (id, ecosystem, name, version, filename, blob_key, content_hash, size_bytes,
+                     first_cached_at, last_accessed_at, purl)
+                VALUES
+                    (@caId, 'oci', @name, @version, @filename, @blobKey, @contentHash, @sizeBytes,
+                     @now, @now, @purl)
+                ON CONFLICT (ecosystem, name, version, filename) DO NOTHING
+                """,
+                new
+                {
+                    caId,
+                    name = repository,
+                    version = digest,
+                    filename = OciUpstreamResolver.ManifestCacheFilename,
+                    blobKey = a.BlobKey,
+                    contentHash = a.ContentHash,
+                    sizeBytes = a.SizeBytes,
+                    now,
+                    purl = a.Purl,
+                });
+            // Re-read in case another replica raced this row to the same coordinate.
+            caId = await conn.ExecuteScalarAsync<string?>(
+                """
+                SELECT id FROM cache_artifact
+                WHERE ecosystem = 'oci' AND name = @name AND version = @version AND filename = @filename
+                """,
+                new { name = repository, version = digest, filename = OciUpstreamResolver.ManifestCacheFilename });
+            if (caId is null)
+            {
+                _logger.LogWarning(
+                    "backfill_oci_cache_artifact: failed to resolve cache_artifact for {Repository}@{Digest}.",
+                    repository, digest);
+                return;
+            }
+        }
+
+        // xtenant: per-org upsert keyed by (org_id, cache_artifact_id); org_id comes from the
+        // source row.
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO tenant_artifact_access
+                (org_id, cache_artifact_id, first_accessed_at, last_accessed_at, access_count)
+            VALUES (@orgId, @caId, @now, @now, 1)
+            ON CONFLICT (org_id, cache_artifact_id) DO NOTHING
+            """,
+            new { orgId, caId, now });
+    }
+
+    // Deletes the now-orphan OCI package_versions rows (origin='proxy') left behind once
+    // backfill_oci_cache_artifact has moved their data onto the global cache_artifact plane.
+    // Scoped to packages.ecosystem = 'oci' rather than reusing the blob_key-prefix discriminator
+    // DeleteMigratedProxyPackageVersionsAsync uses, since OCI's own blob_key prefix (oci/) is
+    // exact and unambiguous for this ecosystem.
+    // xtenant: cross-tenant DELETE; scoped to the ecosystem + origin discriminator, no tenant
+    // boundary to filter on.
+    private static Task DeleteOciProxyPackageVersionsAsync(DbConnection conn) =>
+        conn.ExecuteAsync(
+            """
+            DELETE FROM package_versions
+            WHERE origin = 'proxy'
+              AND package_id IN (SELECT id FROM packages WHERE ecosystem = 'oci')
+            """);
 
     private static async Task MigrateSqliteAsync(DbConnection conn, string ddl)
     {

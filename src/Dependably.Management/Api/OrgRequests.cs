@@ -1,6 +1,7 @@
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Audit;
 using Dependably.Infrastructure.Caching;
+using Dependably.Protocol;
 using Dependably.Security;
 using Dependably.Storage;
 using Microsoft.Extensions.Caching.Memory;
@@ -113,6 +114,7 @@ public sealed record PatchRoleRequest(string Role);
 public sealed record OrgControllerServices(
     OrgRepository Orgs,
     PackageRepository Packages,
+    ArtifactInventoryRepository Inventory,
     PackageVersionFilesRepository VersionFiles,
     PackageAnalyticsRepository PackageAnalytics,
     StatsSnapshotRepository StatsSnapshots,
@@ -124,6 +126,7 @@ public sealed record OrgControllerServices(
     OrgAccessGuard Guard,
     IBlobStore Blobs,
     TieredBlobStorage BlobStorage,
+    OciOrphanBlobDeleter OrphanBlobs,
     IConfiguration Config,
     ILogger<OrgController> Logger,
     ProblemResults Problems,

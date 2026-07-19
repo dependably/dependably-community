@@ -519,6 +519,7 @@ public sealed class SchemaInitializerTests : IAsyncLifetime
         // Drop the current table and recreate it in its pre-migration form.
         await using (var setup = await _db.OpenAsync())
         {
+            await TestSchemaViews.DropAsync(setup);
             await setup.ExecuteAsync("""
                 CREATE TABLE package_versions_old_shape (
                     id          TEXT PRIMARY KEY,

@@ -2,6 +2,7 @@ using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Primitives;
 
@@ -200,5 +201,70 @@ public class SubdomainTenantResolverTests : IAsyncLifetime
         var t = await r.ResolveAsync(WithHost("acme.example.com"));
 
         Assert.True(t.IsUninitialized);
+    }
+
+    [Fact]
+    public async Task InvalidateSlugThatRacesAnInFlightResolve_DoesNotServeThePreLifecycleContext()
+    {
+        // Fill-after-invalidate race: a resolve reads the pre-lifecycle-change orgs row (tenant
+        // active); concurrently system_admin soft-deletes the tenant, whose commit + InvalidateSlug
+        // lands mid-fill. On the pre-guard code the resolve caches the stale active context AFTER
+        // the eviction, so the subdomain keeps resolving for a full 5s TTL despite the delete. The
+        // hook fires the soft-delete + InvalidateSlug between the DB read and the cache write —
+        // fails on the old code, passes on the generation-token fix.
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        var hooked = new AfterDbReadHookStore(_db);
+        var r = new SubdomainTenantResolver(hooked, Cfg(("BASE_URL", "https://example.com")), cache);
+
+        hooked.AfterRead = async () =>
+        {
+            await using var conn = await _db.OpenAsync();
+            await conn.ExecuteAsync(
+                "UPDATE orgs SET deleted_at = @d WHERE slug = 'acme'",
+                new { d = "2026-02-01T00:00:00Z" });
+            r.InvalidateSlug("acme");
+        };
+
+        var first = await r.ResolveAsync(WithHost("acme.example.com"));
+        Assert.True(first.IsTenant); // legitimately read the pre-delete row
+
+        // Killer assertion: the next resolve must reflect the soft-delete (404), not a stale
+        // active tenant context cached by the racing resolve.
+        var second = await r.ResolveAsync(WithHost("acme.example.com"));
+        Assert.True(second.IsUninitialized);
+    }
+
+    [Fact]
+    public async Task NeverExistentSlug_DoesNotRetainItsFillGuard()
+    {
+        // Pre-auth reachability: any syntactically valid non-reserved subdomain that misses the
+        // cache mints a generation guard even when no tenant row exists (the fill caches
+        // Uninitialized). InvalidateSlug only runs on real tenant lifecycle, so unless the guard's
+        // lifetime is tied to the cache entry an unauthenticated client hitting <random>.apex
+        // accumulates one permanent CancellationTokenSource per distinct label — a
+        // memory-exhaustion amplifier.
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        var r = new SubdomainTenantResolver(_db, Cfg(("BASE_URL", "https://example.com")), cache);
+
+        var ctx = await r.ResolveAsync(WithHost("nobody.example.com"));
+        Assert.True(ctx.IsUninitialized); // no such tenant, but the negative result was still cached
+        Assert.Equal(1, r.FillGuardCount);
+
+        // Evict the negative entry the way a TTL expiry or capacity trim would. The entry's
+        // post-eviction callback must retire the guard the never-existent slug minted.
+        cache.Compact(1.0);
+
+        await WaitForFillGuardsToDrain(() => r.FillGuardCount);
+        Assert.Equal(0, r.FillGuardCount);
+    }
+
+    // MemoryCache fires post-eviction callbacks on a thread-pool task, so poll briefly for the
+    // asynchronous retire rather than assuming it has already run.
+    private static async Task WaitForFillGuardsToDrain(Func<int> count)
+    {
+        for (int i = 0; i < 200 && count() != 0; i++)
+        {
+            await Task.Delay(10);
+        }
     }
 }

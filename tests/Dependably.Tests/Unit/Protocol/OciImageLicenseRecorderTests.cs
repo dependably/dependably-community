@@ -29,7 +29,8 @@ public sealed class OciImageLicenseRecorderTests : IAsyncLifetime
     {
         await new SchemaInitializer(_db).InitializeAsync();
         var tiered = new TieredBlobStorage(_blobStore, _blobStore);
-        _sut = new OciImageLicenseRecorder(_db, tiered, _clock, NullLogger<OciImageLicenseRecorder>.Instance);
+        _sut = new OciImageLicenseRecorder(_db, tiered, _clock, NullLogger<OciImageLicenseRecorder>.Instance,
+                new LicenseRepository(_db, _clock, TestNormalizers.License(_db)));
     }
 
     public async Task DisposeAsync() => await _db.DisposeAsync();
@@ -243,6 +244,151 @@ public sealed class OciImageLicenseRecorderTests : IAsyncLifetime
 
     private static string Digest(byte[] bytes) =>
         "sha256:" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant();
+
+    // ── Projection onto the shared plane ─────────────────────────────────────────
+    // The license is captured on the oci_blobs manifest row before any catalogue row exists, so it
+    // is projected afterwards onto whichever row the image cast. Writing it to the shared
+    // package_version_licenses table is what lets every license reader — the package-detail page,
+    // the license-risk tile and its drill-down, the review queue — see an image's license through
+    // the same query it already uses for every other ecosystem.
+
+    [Fact]
+    public async Task ProjectLicenseToCatalog_PushedImage_WritesTheLicenseOntoItsPackageVersion()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"proj-push-{Guid.NewGuid():N}");
+        const string digest = "sha256:aaaa111111111111111111111111111111111111111111111111111111111111";
+
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "INSERT INTO oci_blobs (digest, org_id, blob_key, size_bytes, media_type, license_spdx) " +
+            "VALUES (@digest, @orgId, 'oci/sha256/aaaa', 10, 'application/vnd.oci.image.manifest.v1+json', 'MIT')",
+            new { digest, orgId });
+        await conn.ExecuteAsync(
+            "INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy) " +
+            "VALUES ('pp', @orgId, 'oci', 'library/nginx', 'library/nginx', 0)",
+            new { orgId });
+        await conn.ExecuteAsync(
+            "INSERT INTO package_versions (id, package_id, version, purl, blob_key, origin) " +
+            "VALUES ('vp', 'pp', @digest, 'pkg:oci/nginx@' || @digest, 'oci/sha256/aaaa', 'uploaded')",
+            new { digest });
+
+        await _sut.ProjectLicenseToCatalogAsync(orgId, digest, CancellationToken.None);
+
+        string? spdx = await conn.ExecuteScalarAsync<string?>(
+            "SELECT license_spdx FROM package_version_licenses WHERE package_version_id = 'vp'");
+        Assert.Equal("MIT", spdx);
+    }
+
+    [Fact]
+    public async Task ProjectLicenseToCatalog_ProxiedImage_WritesTheLicenseOntoItsCacheArtifact()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"proj-pull-{Guid.NewGuid():N}");
+        const string digest = "sha256:bbbb222222222222222222222222222222222222222222222222222222222222";
+
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "INSERT INTO oci_blobs (digest, org_id, blob_key, size_bytes, media_type, license_spdx) " +
+            "VALUES (@digest, @orgId, 'oci/sha256/bbbb', 10, 'application/vnd.oci.image.manifest.v1+json', 'Apache-2.0')",
+            new { digest, orgId });
+        await conn.ExecuteAsync(
+            "INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash) " +
+            "VALUES ('cap', 'oci', 'library/alpine', @digest, 'manifest', 'oci/sha256/bbbb', 'bbbb')",
+            new { digest });
+        await conn.ExecuteAsync(
+            "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES (@orgId, 'cap')",
+            new { orgId });
+
+        await _sut.ProjectLicenseToCatalogAsync(orgId, digest, CancellationToken.None);
+
+        string? spdx = await conn.ExecuteScalarAsync<string?>(
+            "SELECT license_spdx FROM package_version_licenses WHERE cache_artifact_id = 'cap'");
+        Assert.Equal("Apache-2.0", spdx);
+    }
+
+    [Fact]
+    public async Task ProjectLicenseToCatalog_IsIdempotent_AndNoOpsWithNoCapturedLicense()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"proj-idem-{Guid.NewGuid():N}");
+        const string licensed = "sha256:cccc333333333333333333333333333333333333333333333333333333333333";
+        const string unlicensed = "sha256:dddd444444444444444444444444444444444444444444444444444444444444";
+
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO oci_blobs (digest, org_id, blob_key, size_bytes, media_type, license_spdx) VALUES
+              (@licensed,   @orgId, 'oci/sha256/cccc', 10, 'application/vnd.oci.image.manifest.v1+json', 'MIT'),
+              (@unlicensed, @orgId, 'oci/sha256/dddd', 10, 'application/vnd.oci.image.manifest.v1+json', NULL)
+            """,
+            new { licensed, unlicensed, orgId });
+        await conn.ExecuteAsync(
+            "INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy) VALUES " +
+            "('pl', @orgId, 'oci', 'library/lic', 'library/lic', 0), " +
+            "('pu', @orgId, 'oci', 'library/unlic', 'library/unlic', 0)",
+            new { orgId });
+        await conn.ExecuteAsync(
+            "INSERT INTO package_versions (id, package_id, version, purl, blob_key, origin) VALUES " +
+            "('vl', 'pl', @licensed,   'pkg:oci/lic@x',   'oci/sha256/cccc', 'uploaded'), " +
+            "('vu', 'pu', @unlicensed, 'pkg:oci/unlic@y', 'oci/sha256/dddd', 'uploaded')",
+            new { licensed, unlicensed });
+
+        // A re-push or a tag-TTL revalidation runs the projection again; it must not duplicate.
+        await _sut.ProjectLicenseToCatalogAsync(orgId, licensed, CancellationToken.None);
+        await _sut.ProjectLicenseToCatalogAsync(orgId, licensed, CancellationToken.None);
+        await _sut.ProjectLicenseToCatalogAsync(orgId, unlicensed, CancellationToken.None);
+
+        Assert.Equal(1, await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM package_version_licenses WHERE package_version_id = 'vl'"));
+        // An image whose config carries no licenses label writes nothing at all — it stays honestly
+        // license-unknown rather than acquiring an empty row.
+        Assert.Equal(0, await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM package_version_licenses WHERE package_version_id = 'vu'"));
+    }
+
+    [Fact]
+    public async Task ProjectedLicense_IsVisibleThroughTheLookupsThePackageDetailPageUses()
+    {
+        // OrgController's per-version license projection reads GetSpdxForVersionsAsync for uploaded
+        // rows and GetSpdxForCacheArtifactsAsync for proxied ones — both keyed on
+        // package_version_licenses. Once an image's license is a row in that table, the detail page
+        // renders it with no OCI-specific code of its own, which is the whole point of projecting it.
+        string orgId = await OrgSeeder.InsertAsync(_db, $"proj-detail-{Guid.NewGuid():N}");
+        const string pushed = "sha256:eeee555555555555555555555555555555555555555555555555555555555555";
+        const string pulled = "sha256:ffff666666666666666666666666666666666666666666666666666666666666";
+
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO oci_blobs (digest, org_id, blob_key, size_bytes, media_type, license_spdx) VALUES
+              (@pushed, @orgId, 'oci/sha256/eeee', 10, 'application/vnd.oci.image.manifest.v1+json', 'MIT'),
+              (@pulled, @orgId, 'oci/sha256/ffff', 10, 'application/vnd.oci.image.manifest.v1+json', 'Apache-2.0')
+            """,
+            new { pushed, pulled, orgId });
+        await conn.ExecuteAsync(
+            "INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy) " +
+            "VALUES ('pd', @orgId, 'oci', 'library/nginx', 'library/nginx', 0)",
+            new { orgId });
+        await conn.ExecuteAsync(
+            "INSERT INTO package_versions (id, package_id, version, purl, blob_key, origin) " +
+            "VALUES ('vd', 'pd', @pushed, 'pkg:oci/nginx@x', 'oci/sha256/eeee', 'uploaded')",
+            new { pushed });
+        await conn.ExecuteAsync(
+            "INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash) " +
+            "VALUES ('cad', 'oci', 'library/alpine', @pulled, 'manifest', 'oci/sha256/ffff', 'ffff')",
+            new { pulled });
+        await conn.ExecuteAsync(
+            "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES (@orgId, 'cad')",
+            new { orgId });
+
+        await _sut.ProjectLicenseToCatalogAsync(orgId, pushed, CancellationToken.None);
+        await _sut.ProjectLicenseToCatalogAsync(orgId, pulled, CancellationToken.None);
+
+        var licenses = new LicenseRepository(_db, _clock, TestNormalizers.License(_db));
+        var uploaded = await licenses.GetSpdxForVersionsAsync(["vd"]);
+        var proxied = await licenses.GetSpdxForCacheArtifactsAsync(["cad"]);
+
+        Assert.Equal(["MIT"], uploaded["vd"]);
+        Assert.Equal(["Apache-2.0"], proxied["cad"]);
+    }
 
     private sealed record LicenseRow(string? ConfigDigest, string? LicenseSpdx, string? LicenseCheckedAt);
 }

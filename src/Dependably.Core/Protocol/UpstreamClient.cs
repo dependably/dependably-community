@@ -33,6 +33,7 @@ public sealed partial class UpstreamClient
     private readonly ILogger<UpstreamClient> _logger;
     private readonly MetadataResponseCache? _metadataCache;
     private readonly EdgeStatusTracker? _edgeStatus;
+    private readonly OrgRepository? _orgs;
     private readonly string _stagingPath;
     private readonly CancellationToken _hostStopping;
 
@@ -64,6 +65,15 @@ public sealed partial class UpstreamClient
     // ReleaseStagingBytes in the caller's finally once the fetch completes.
     private long _reservedInFlightBytes;
 
+    // Per-org ledger of proxy bytes this process has admitted through the tenant storage-quota
+    // gate but has not yet committed to the cache plane. The live org_storage_bytes SUM cannot
+    // see a fill until the controller records its rows after the fetch returns, so without this
+    // every concurrent fill of a distinct artefact reads the same pre-fill sum and admits itself.
+    // Charged by ReserveTenantCacheQuotaAsync before the blob write and released when the fill
+    // completes. Same purpose as _reservedInFlightBytes above, per tenant rather than per disk.
+    private readonly Dictionary<string, long> _inflightCacheFillBytes = [];
+    private readonly object _inflightCacheFillGate = new();
+
 #pragma warning disable S107 // Dependency-injection constructor: the parameter list is the declared dependency set; grouping it into an aggregate would hide dependencies without adding cohesion.
     public UpstreamClient(
         IHttpClientFactory httpClientFactory,
@@ -76,7 +86,8 @@ public sealed partial class UpstreamClient
         ILogger<UpstreamClient> logger,
         IHostApplicationLifetime? lifetime = null,
         MetadataResponseCache? metadataCache = null,
-        EdgeStatusTracker? edgeStatus = null)
+        EdgeStatusTracker? edgeStatus = null,
+        OrgRepository? orgs = null)
 #pragma warning restore S107
     {
         _httpClientFactory = httpClientFactory;
@@ -99,6 +110,11 @@ public sealed partial class UpstreamClient
         // fetch outcome is a cheap null-check. Injected (not read from a mode flag) so the single
         // seam works identically in every mode without branching here.
         _edgeStatus = edgeStatus;
+        // Gates the proxy cache-fill write against the tenant's storage quota — the same
+        // per-org ceiling PackagePublishService and OciUploadService enforce. Nullable so tests
+        // that don't exercise quota enforcement can omit it; EnsureTenantCacheQuotaAsync treats a
+        // null dependency the same as "no quota configured" (unlimited).
+        _orgs = orgs;
         _hostStopping = lifetime?.ApplicationStopping ?? CancellationToken.None;
 
         // Staging dir for hash-and-stage MISS path, plus the hard floor for available
@@ -799,6 +815,13 @@ public sealed partial class UpstreamClient
                 throw new ChecksumException($"Upstream checksum mismatch for {ctx.Url}");
             }
 
+            // Enforce the tenant's storage ceiling on the verified bytes before they land in the
+            // blob store — the same per-org quota hosted publish and OCI push enforce. Throws
+            // when the fill would exceed it, so the artefact is never cached. The reservation is
+            // held until the write completes, so a concurrent fill weighs these bytes even though
+            // nothing has recorded them on the cache plane yet.
+            using var quota = await ReserveTenantCacheQuotaAsync(ctx.OrgId, sizeBytes, fetchCt);
+
             // Upload the verified bytes to the blob store. PutAsync stages to a
             // same-directory temp file and renames atomically into place, so a
             // cancellation here leaves at most a sweepable temp file — never a truncated
@@ -829,6 +852,118 @@ public sealed partial class UpstreamClient
                     tempPath, ex.GetType().Name);
             }
         }
+    }
+
+    // Refuses a proxy cache-fill that would carry orgId past its storage ceiling, so an
+    // authenticated tenant cannot grow the shared cache plane without bound.
+    //
+    // Usage is derived from org_storage_bytes — the definition of an org's stored bytes that the
+    // admin tenant list and the publish gate also read — rather than reserved onto the
+    // storage_used_bytes counter. The cache plane is content-addressed and shared: one
+    // cache_artifact row is charged to every tenant holding tenant_artifact_access on it, so its
+    // bytes have no single owning tenant to charge on fill and uncharge on eviction. Deriving the
+    // number instead means eviction and retention need no paired decrement — deleting the row
+    // drops the bytes out of the sum — and a fill can never ratchet a tenant into a refusal it
+    // cannot recover from. Hosted publish keeps its atomic counter reservation, where an exact
+    // compare-and-swap is both affordable and required.
+    //
+    // The committed SUM alone is not a gate: a fill is invisible to it until the controller
+    // records the cache_artifact / tenant_artifact_access rows AFTER this fetch returns, and
+    // single-flight only collapses identical blob keys. Concurrent fills of DISTINCT artefacts
+    // would therefore all read the same pre-fill sum and all be admitted — bounded only by how
+    // many requests the tenant opens, each up to MaxUpstreamResponseBytes. _inflightCacheFillBytes
+    // closes that: bytes this process has admitted but that the SUM cannot see yet are charged
+    // against the ceiling too, so concurrent fills see each other. It mirrors the ledger
+    // ReserveStagingBytes keeps for the staging-disk floor, which exists for this same race.
+    //
+    // The ledger is per-process, so a multi-replica deployment bounds each replica independently
+    // and can overshoot by (replicas x in-flight bytes); community deployments are single-node.
+    // A narrow window also remains between releasing a reservation and the controller recording
+    // the rows. Both are bounded overshoots that the next fill's SUM read corrects, not the
+    // unbounded, attacker-paced growth an unaccounted gate allows.
+    //
+    // No-op when there is no org context, no OrgRepository dependency (test doubles that omit
+    // it), or no quota configured for the tenant (unlimited). Throws
+    // TenantStorageQuotaExceededException, mapped by TenantStorageQuotaExceededExceptionMiddleware
+    // to 413, when the fill would exceed the ceiling. The returned reservation must be disposed
+    // once the fill completes — the caller does so in a using, so a failed or cancelled fill
+    // releases too.
+    private async Task<CacheFillReservation> ReserveTenantCacheQuotaAsync(
+        string? orgId, long sizeBytes, CancellationToken ct)
+    {
+        if (_orgs is null || orgId is null)
+        {
+            return default;
+        }
+
+        long? quota = await _orgs.GetEffectiveStorageQuotaAsync(orgId, ct);
+        if (quota is null)
+        {
+            return default;
+        }
+
+        long usedBytes = await _orgs.GetLiveStorageBytesAsync(orgId, ct);
+
+        // Test-and-charge under one lock so two fills cannot both read the same in-flight total
+        // and both admit themselves. The DB read above stays outside it — no await ever holds the
+        // lock, and a sum that went stale by a just-recorded row only makes this admit one fill it
+        // could have refused, which the next fill's read corrects.
+        lock (_inflightCacheFillGate)
+        {
+            _inflightCacheFillBytes.TryGetValue(orgId, out long inFlight);
+            if (usedBytes + inFlight + sizeBytes > quota.Value)
+            {
+                throw new TenantStorageQuotaExceededException(orgId, quota.Value);
+            }
+
+            _inflightCacheFillBytes[orgId] = inFlight + sizeBytes;
+        }
+
+        return new CacheFillReservation(this, orgId, sizeBytes);
+    }
+
+    // Returns sizeBytes to orgId's in-flight ledger once the fill it covered has completed —
+    // successfully (the bytes are the committed SUM's job now) or not (they were never written).
+    // Drops the key at zero so an instance that has served many orgs holds no per-org residue.
+    private void ReleaseInFlightCacheFill(string orgId, long sizeBytes)
+    {
+        lock (_inflightCacheFillGate)
+        {
+            if (!_inflightCacheFillBytes.TryGetValue(orgId, out long inFlight))
+            {
+                return;
+            }
+
+            long remaining = inFlight - sizeBytes;
+            if (remaining > 0)
+            {
+                _inflightCacheFillBytes[orgId] = remaining;
+            }
+            else
+            {
+                _inflightCacheFillBytes.Remove(orgId);
+            }
+        }
+    }
+
+    /// <summary>
+    /// A tenant's claim on quota headroom for one in-flight cache fill. <c>default</c> is the
+    /// no-op reservation returned when no quota applies, so callers dispose unconditionally.
+    /// </summary>
+    private readonly struct CacheFillReservation : IDisposable
+    {
+        private readonly UpstreamClient? _client;
+        private readonly string? _orgId;
+        private readonly long _sizeBytes;
+
+        internal CacheFillReservation(UpstreamClient client, string orgId, long sizeBytes)
+        {
+            _client = client;
+            _orgId = orgId;
+            _sizeBytes = sizeBytes;
+        }
+
+        public void Dispose() => _client?.ReleaseInFlightCacheFill(_orgId!, _sizeBytes);
     }
 
     /// <summary>

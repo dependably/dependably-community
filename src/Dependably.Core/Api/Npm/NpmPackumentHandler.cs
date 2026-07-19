@@ -19,9 +19,9 @@ namespace Dependably.Api.NpmProtocol;
 public sealed class NpmPackumentHandler(
     OrgRepository orgs,
     PackageRepository packages,
-    CacheArtifactRepository cacheArtifacts,
     TokenRepository tokens,
     VulnerabilityRepository vulns,
+    ArtifactInventoryRepository inventory,
     IPublicUrlBuilder urls,
     ClaimResolver claimResolver,
     ReservedNamespaceService reserved,
@@ -127,6 +127,14 @@ public sealed class NpmPackumentHandler(
             return ServePackumentBytes(httpContext, cachedBytes, "private, max-age=60");
         }
 
+        // Resolve the tarball base URL from the initiating request BEFORE entering the
+        // single-flight rebuild. The shared rebuild runs under CancellationToken.None and
+        // outlives any one caller's request: if the initiating client detaches, Kestrel can
+        // recycle/pool its HttpContext, so a rebuild that read Request.Host at that point could
+        // bake the wrong host into the cached tarball URLs. Capturing the resolved string here
+        // and closing over it (never the HttpContext) keeps the rebuild request-lifetime-safe.
+        string tarballBase = NpmTarballBase(httpContext);
+
         // Single-flight rebuild: concurrent rebuilds for the same key collapse onto one shared
         // task. The rebuild returns serialized bytes (never a response decision), so one
         // caller's If-None-Match can never prevent the bytes from being cached — the ETag/304
@@ -136,7 +144,7 @@ public sealed class NpmPackumentHandler(
             var passthroughTags = pkg is not null
                 ? await distTags.GetTagsAsync(orgId, pkg.Id, rebuildCt)
                 : null;
-            return await BuildProxyPackumentBytesAsync(httpContext, orgId, fullName, pkg,
+            return await BuildProxyPackumentBytesAsync(tarballBase, orgId, fullName, pkg,
                 passthroughTags?.Count > 0 ? passthroughTags : null, settings, rebuildCt);
         }, ct);
 
@@ -165,18 +173,30 @@ public sealed class NpmPackumentHandler(
         }
 
         var cacheKey = new NpmPackumentKey(orgId, fullName);
+
+        // Capture the invalidation generation AND the org policy epoch token before reading any
+        // state. A publish/unpublish/deprecate that commits its DB write and evicts this key
+        // between the read below and the Set must not be lost: the Set is discarded when its
+        // snapshot predates that eviction, and the next read rebuilds from the mutated state
+        // instead of serving it stale until the TTL elapses. Same discipline for a concurrent
+        // proxy-settings PUT that invalidates the org's epoch mid-read — mirroring
+        // RenderedResponseCache.GetOrRebuildAsync — so the Set binds to the (already-retired)
+        // token captured here rather than whichever epoch happens to be live once it runs.
+        long generation = cache.GetGeneration(cacheKey);
+        var epochToken = cache.CaptureEpochToken(cacheKey);
         if (cache.TryGet(cacheKey, out byte[]? localCached) && localCached is not null)
         {
             return ServePackumentBytes(httpContext, localCached, "private, max-age=300");
         }
 
+        string tarballBase = NpmTarballBase(httpContext);
         var versions = await LoadCombinedVersionsAsync(orgId, pkg.Id, fullName, ct);
         var signals = await LoadVulnSignalsAsync(versions, ct);
         var tags = await distTags.GetTagsAsync(orgId, pkg.Id, ct);
-        var metadata = BuildNpmMetadata(httpContext, pkg, versions,
+        var metadata = BuildNpmMetadata(tarballBase, pkg, versions,
             tags.Count > 0 ? tags : null, settings, signals, time.GetUtcNow());
         byte[] localBytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(metadata);
-        cache.Set(cacheKey, localBytes, PackumentLocalTtl);
+        cache.SetIfGenerationUnchanged(cacheKey, localBytes, PackumentLocalTtl, generation, epochToken);
         return ServePackumentBytes(httpContext, localBytes, "private, max-age=300");
     }
 
@@ -203,7 +223,7 @@ public sealed class NpmPackumentHandler(
     // cache decision stays independent of any one caller's conditional-request headers.
     [SuppressMessage("Major Code Smell", "S125:Sections of code should not be commented out", Justification = "Descriptive documentation comment, not commented-out code.")]
     private async Task<byte[]?> BuildProxyPackumentBytesAsync(
-        HttpContext httpContext, string orgId, string fullName, Package? localPkg,
+        string tarballBase, string orgId, string fullName, Package? localPkg,
         Dictionary<string, string>? persistedTags, OrgSettings settings, CancellationToken ct)
     {
         var localVersions = localPkg is null
@@ -215,7 +235,7 @@ public sealed class NpmPackumentHandler(
         // paths so block-gate filtering is consistent across both without extra I/O.
         var localSignals = await LoadVulnSignalsAsync(localVersions, ct);
 
-        var metadata = await FetchUpstreamPackumentAsync(httpContext, orgId, fullName, ct);
+        var metadata = await FetchUpstreamPackumentAsync(tarballBase, orgId, fullName, ct);
 
         var now = time.GetUtcNow();
 
@@ -226,7 +246,7 @@ public sealed class NpmPackumentHandler(
                 return null;
             }
 
-            var fallbackMeta = BuildNpmMetadata(httpContext, localPkg, localVersions,
+            var fallbackMeta = BuildNpmMetadata(tarballBase, localPkg, localVersions,
                 persistedTags, settings, localSignals, now);
             return System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(fallbackMeta);
         }
@@ -245,7 +265,7 @@ public sealed class NpmPackumentHandler(
         // upstream projection above cannot see them).
         if (localPkg is not null && localVersions.Count > 0)
         {
-            var blockedUpstream = MergeLocalVersionsIntoPackument(httpContext, metadata, localPkg,
+            var blockedUpstream = MergeLocalVersionsIntoPackument(tarballBase, metadata, localPkg,
                 localVersions, settings, localSignals, now);
             if (blockedUpstream.Count > 0)
             {
@@ -259,6 +279,13 @@ public sealed class NpmPackumentHandler(
         // filtering, so a dist-tag never points at a version absent from the packument.
         ApplyLocalDistTags(metadata, persistedTags);
 
+        // Override any upstream _rev with our synthetic one: the unpublish flow reflects this
+        // value back to /-rev/{_rev}, and only a rev we compute from the served version set is
+        // one this registry can interpret and prune against.
+        var mergedVersionKeys = metadata["versions"]?.AsObject()?.Select(kv => kv.Key)
+            ?? Enumerable.Empty<string>();
+        metadata["_rev"] = NpmSharedHelpers.ComputeSyntheticRev(mergedVersionKeys);
+
         return Encoding.UTF8.GetBytes(metadata.ToJsonString());
     }
 
@@ -266,7 +293,7 @@ public sealed class NpmPackumentHandler(
     // No configured upstream ⇒ proxying is disabled for this ecosystem — returns null so
     // the caller serves local-only metadata.
     private async Task<JsonNode?> FetchUpstreamPackumentAsync(
-        HttpContext httpContext, string orgId, string fullName, CancellationToken ct)
+        string tarballBase, string orgId, string fullName, CancellationToken ct)
     {
         var bases = await registries.ResolveAsync(orgId, "npm", ct);
         foreach (var source in bases)
@@ -289,7 +316,7 @@ public sealed class NpmPackumentHandler(
                 var metadata = JsonNode.Parse(response.BodyAsString());
                 if (metadata is not null)
                 {
-                    RewriteTarballUrls(metadata, fullName, NpmTarballBase(httpContext));
+                    RewriteTarballUrls(metadata, fullName, tarballBase);
                 }
 
                 return metadata;
@@ -504,8 +531,8 @@ public sealed class NpmPackumentHandler(
     // behaviour sees them. Yanked local versions are not spliced (they are hidden from the
     // local packument too) but do not remove a colliding upstream entry — yank withdraws
     // the local advertisement, not upstream's.
-    private HashSet<string> MergeLocalVersionsIntoPackument(
-        HttpContext httpContext, JsonNode packument, Package localPkg,
+    private static HashSet<string> MergeLocalVersionsIntoPackument(
+        string tarballBase, JsonNode packument, Package localPkg,
         IReadOnlyList<PackageVersion> localVersions,
         OrgSettings settings, IReadOnlyDictionary<string, VulnGateSignals> signals, DateTimeOffset now)
     {
@@ -517,7 +544,6 @@ public sealed class NpmPackumentHandler(
         }
 
         var removed = new HashSet<string>(StringComparer.Ordinal);
-        string tarballBase = NpmTarballBase(httpContext);
         foreach (var v in localVersions)
         {
             bool blocked = BlockGateService.IsHardBlockedByStoredState(
@@ -740,37 +766,7 @@ public sealed class NpmPackumentHandler(
     private async Task<IReadOnlyList<PackageVersion>> LoadCombinedVersionsAsync(
         string orgId, string packageId, string fullName, CancellationToken ct)
     {
-        var uploadedVersions = await packages.GetVersionsAsync(packageId, ct);
-        var proxyEntries = await cacheArtifacts.ListServeFactsForNameAsync(orgId, "npm", fullName, ct);
-
-        if (proxyEntries.Count == 0)
-        {
-            return uploadedVersions;
-        }
-
-        var uploadedVersionSet = uploadedVersions
-            .Select(v => v.Version)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        var proxyIds = proxyEntries.Select(e => e.Id).ToList();
-        var proxySignals = proxyIds.Count > 0
-            ? await vulns.GetGateSignalsBatchForCacheArtifactsAsync(proxyIds, ct)
-            : new Dictionary<string, VulnGateSignals>();
-
-        var synthetic = proxyEntries
-            .Where(e => !uploadedVersionSet.Contains(e.Version))
-            .Select(e => e.ToPackageVersionSynthetic(proxySignals))
-            .ToList();
-
-        if (synthetic.Count == 0)
-        {
-            return uploadedVersions;
-        }
-
-        var combined = new List<PackageVersion>(uploadedVersions.Count + synthetic.Count);
-        combined.AddRange(uploadedVersions);
-        combined.AddRange(synthetic);
-        return combined;
+        return await inventory.ListServeableVersionsAsync(orgId, packageId, "npm", fullName, ct);
     }
 
     /// <summary>
@@ -779,12 +775,11 @@ public sealed class NpmPackumentHandler(
     /// </summary>
     private string NpmTarballBase(HttpContext httpContext) => urls.Absolute(httpContext, "/npm/tarballs");
 
-    internal JsonObject BuildNpmMetadata(
-        HttpContext httpContext, Package pkg, IReadOnlyList<PackageVersion> versions,
+    internal static JsonObject BuildNpmMetadata(
+        string tarballBase, Package pkg, IReadOnlyList<PackageVersion> versions,
         Dictionary<string, string>? persistedTags,
         OrgSettings settings, IReadOnlyDictionary<string, VulnGateSignals> signals, DateTimeOffset now)
     {
-        string tarballBase = NpmTarballBase(httpContext);
         var versionsObj = new JsonObject();
         // Publish-timestamp map for the versions this packument advertises. Sourced from the
         // stored publish timestamp (upstream first-publish for proxy rows, row creation for
@@ -833,6 +828,10 @@ public sealed class NpmPackumentHandler(
         return new JsonObject
         {
             ["_id"] = pkg.Name,
+            // Synthetic _rev so the npm unpublish flow (GET _rev → PUT /-rev/{_rev} → DELETE
+            // tarball) resolves a real revision instead of "undefined": without it the CLI
+            // reports success while the version stays listed.
+            ["_rev"] = NpmSharedHelpers.ComputeSyntheticRev(versionsObj.Select(kv => kv.Key)),
             ["name"] = pkg.Name,
             ["dist-tags"] = distTagsObj,
             ["versions"] = versionsObj,

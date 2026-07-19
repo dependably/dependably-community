@@ -50,6 +50,8 @@ public sealed class LicenseController : ControllerBase
     // ── Policy summary ────────────────────────────────────────────────────────
 
     /// <summary>GET /api/v1/orgs/{org}/license-policy</summary>
+    // Read-only: accepts a PAT/service token carrying read:packages.
+    [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [HttpGet("api/v1/license-policy")]
     public async Task<IActionResult> GetPolicy(CancellationToken ct)
     {
@@ -123,6 +125,8 @@ public sealed class LicenseController : ControllerBase
     // ── Allowlist ─────────────────────────────────────────────────────────────
 
     /// <summary>GET /api/v1/orgs/{org}/license-policy/allowlist</summary>
+    // Read-only: accepts a PAT/service token carrying read:packages.
+    [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [HttpGet("api/v1/license-policy/allowlist")]
     public async Task<IActionResult> GetAllowlist(CancellationToken ct)
     {
@@ -196,6 +200,8 @@ public sealed class LicenseController : ControllerBase
     // ── Blocklist ─────────────────────────────────────────────────────────────
 
     /// <summary>GET /api/v1/orgs/{org}/license-policy/blocklist</summary>
+    // Read-only: accepts a PAT/service token carrying read:packages.
+    [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [HttpGet("api/v1/license-policy/blocklist")]
     public async Task<IActionResult> GetBlocklist(CancellationToken ct)
     {

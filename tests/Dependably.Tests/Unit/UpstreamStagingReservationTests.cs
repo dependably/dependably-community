@@ -39,8 +39,9 @@ public sealed class UpstreamStagingReservationTests
         string shaA = Convert.ToHexString(SHA256.HashData(payloadA)).ToLowerInvariant();
 
         var bodyGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var bodyReadStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var routing = new RoutingHandler();
-        routing.AddRoute("http://upstream.invalid/a.whl", new BodyGatedHandler(payloadA, bodyGate.Task));
+        routing.AddRoute("http://upstream.invalid/a.whl", new BodyGatedHandler(payloadA, bodyGate.Task, bodyReadStarted));
         routing.AddRoute("http://upstream.invalid/b.whl", new CountingHandler(HttpStatusCode.OK, []));
 
         var diskInfo = new FakeDiskInfo(available);
@@ -50,10 +51,12 @@ public sealed class UpstreamStagingReservationTests
             "blobs/reserve-a", "http://upstream.invalid/a.whl",
             new ChecksumSpec(ChecksumAlgorithm.Sha256, shaA), "pypi"));
 
-        // Give A time to: pass phase 1, receive headers (Content-Length known instantly since the
-        // fake handler returns synchronously), pass phase 2, and reserve its declared bytes —
-        // all synchronous, no I/O — before it blocks reading the (gated) body.
-        await Task.Delay(150);
+        // Deterministically wait until A's response body read has actually started — production
+        // code (UpstreamClient.GetOrFetchStreamAsync) reserves the declared bytes strictly before
+        // it begins reading the response body, so this signal only fires after phase 1, headers,
+        // phase 2, and the reservation have all already happened. A fixed delay only guesses at
+        // how long that synchronous prefix takes and flakes under load.
+        await bodyReadStarted.Task;
 
         // B must fail Phase 1 because A's reservation is still outstanding.
         var ex = await Assert.ThrowsAsync<StagingDiskFullException>(() =>
@@ -116,18 +119,20 @@ public sealed class UpstreamStagingReservationTests
     {
         private readonly byte[] _body;
         private readonly Task _bodyReady;
+        private readonly TaskCompletionSource? _bodyReadStarted;
         public int CallCount { get; private set; }
 
-        public BodyGatedHandler(byte[] body, Task bodyReady)
+        public BodyGatedHandler(byte[] body, Task bodyReady, TaskCompletionSource? bodyReadStarted = null)
         {
             _body = body;
             _bodyReady = bodyReady;
+            _bodyReadStarted = bodyReadStarted;
         }
 
         public Task<HttpResponseMessage> InvokeAsync(HttpRequestMessage request, CancellationToken ct)
         {
             CallCount++;
-            var content = new BodyGatedContent(_body, _bodyReady);
+            var content = new BodyGatedContent(_body, _bodyReady, _bodyReadStarted);
             var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = content };
             return Task.FromResult(response);
         }
@@ -137,16 +142,22 @@ public sealed class UpstreamStagingReservationTests
     {
         private readonly byte[] _body;
         private readonly Task _bodyReady;
+        private readonly TaskCompletionSource? _bodyReadStarted;
 
-        public BodyGatedContent(byte[] body, Task bodyReady)
+        public BodyGatedContent(byte[] body, Task bodyReady, TaskCompletionSource? bodyReadStarted = null)
         {
             _body = body;
             _bodyReady = bodyReady;
+            _bodyReadStarted = bodyReadStarted;
             Headers.ContentLength = body.Length;
         }
 
         protected override async Task SerializeToStreamAsync(Stream stream, TransportContext? context)
         {
+            // Signals that the caller has reached the body-read step — production code reserves
+            // the declared bytes strictly before this point, so this is a valid, deterministic
+            // proxy for "the reservation has already happened."
+            _bodyReadStarted?.TrySetResult();
             await _bodyReady;
             await stream.WriteAsync(_body);
         }

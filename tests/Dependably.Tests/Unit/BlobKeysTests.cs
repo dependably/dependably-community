@@ -82,6 +82,51 @@ public class BlobKeysTests
         Assert.Equal("hosted/////", key);
     }
 
+    // ---- HostedArtifact ----
+
+    [Fact]
+    public void HostedArtifact_Golden_PutsDigestBeforeFilename()
+    {
+        string sha = new('a', 64);
+        string key = BlobKeys.HostedArtifact("acme", "npm", "lodash", "4.17.21", sha, "lodash-4.17.21.tgz");
+        Assert.Equal($"hosted/acme/npm/lodash/4.17.21/{sha}/lodash-4.17.21.tgz", key);
+    }
+
+    [Fact]
+    public void HostedArtifact_DifferentBytesOnSameCoordinate_AddressDisjointKeys()
+    {
+        // The whole point: two publishes of one coordinate whose bytes differ can never
+        // address the same blob, so neither can overwrite the artifact the other's committed
+        // row names. Identical bytes collapse to one key, whose content is the same either way.
+        string a = BlobKeys.HostedArtifact("o", "npm", "p", "1.0.0", new string('a', 64), "p-1.0.0.tgz");
+        string b = BlobKeys.HostedArtifact("o", "npm", "p", "1.0.0", new string('b', 64), "p-1.0.0.tgz");
+        string aAgain = BlobKeys.HostedArtifact("o", "npm", "p", "1.0.0", new string('a', 64), "p-1.0.0.tgz");
+
+        Assert.NotEqual(a, b);
+        Assert.Equal(a, aAgain);
+    }
+
+    [Fact]
+    public void HostedArtifact_FilenameStaysTheKeyTail()
+    {
+        // PackageRepository.DeriveFilename and the PyPI index fall back to the key's last
+        // segment for the display filename.
+        string key = BlobKeys.HostedArtifact("o", "pypi", "req", "2.0", new string('f', 64), "req-2.0.tar.gz");
+        Assert.Equal("req-2.0.tar.gz", key[(key.LastIndexOf('/') + 1)..]);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("not-hex")]
+    [InlineData("ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789")]
+    [InlineData("../../../etc/passwd")]
+    public void HostedArtifact_NonHexDigest_Throws(string sha256)
+    {
+        // Same path-traversal defence as Proxy: the digest segment must be 64 lowercase hex.
+        Assert.Throws<ArgumentException>(() =>
+            BlobKeys.HostedArtifact("o", "npm", "p", "1.0.0", sha256, "p-1.0.0.tgz"));
+    }
+
     // ---- StoreKey ----
     // Covers both branches of the compound condition: parts.Length == 3 && parts[0] == "proxy"
 

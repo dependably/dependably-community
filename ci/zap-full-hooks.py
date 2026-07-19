@@ -17,16 +17,18 @@ Two exclusions keep that division clean:
 
 2. The whole /api/v1 management surface is excluded from the active scanner (but not the
    spider — the SPA still exercises those routes over XHR during the crawl, giving passive
-   coverage). Active-scanning it here is redundant with zap-api-management and is the sole
-   source of ZAP's boolean-based SQL Injection [40018] false positive on the list endpoints'
-   filter/sort parameters: the scanner appends "value AND 1=1 --" and reads the app's row-
-   count heuristic as a confirmed injection, even though no user input reaches SQL (values
-   are Dapper-bound parameters matched against a column, or sort fields mapped through a
-   bounded whitelist — and NoInterpolatedSqlComplianceTests makes an interpolated query a
-   build failure). That alert is rate-limiter-gated: ZAP only confirms it when enough probes
-   slip past the app's 429s, so it lands on a different parameter run to run — unfixable by
-   per-parameter accept-listing. Scoping the active scan away from the API removes the whole
-   flaky class at its source while leaving 40018 armed on every other surface.
+   coverage). Active-scanning it here is redundant with zap-api-management, which owns that
+   surface deterministically. It was also historically the source of ZAP's boolean-based SQL
+   Injection [40018] false positive on the list endpoints' filter/sort parameters: the scanner
+   appends "value AND 1=1 --" and reads the app's row-count heuristic as a confirmed injection,
+   even though no user input reaches SQL (values are Dapper-bound parameters matched against a
+   column, or sort fields mapped through a bounded whitelist — and NoInterpolatedSqlComplianceTests
+   makes an interpolated query a build failure). That FP is rate-limiter-gated: it confirms only
+   when the app's 429s flip a rule's true/false probe pair, landing on a different parameter run
+   to run. The DAST app boot (.app_boot) now raises every request-rate limiter far above the
+   scan's request volume, so no 429 boundary exists and 40018 no longer flakes on either scan;
+   excluding /api/v1 here remains correct purely for redundancy with zap-api-management, which
+   scans it with 40018 armed.
 
 zap-full-scan.py calls `zap_started(zap, target)` after the daemon is up and before the
 spider/ajax/active-scan phases.

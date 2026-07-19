@@ -79,8 +79,7 @@ public sealed class SpdxLicenseRepository
         }
 
         await using var conn = await _db.OpenAsync(ct);
-        var rows = await conn.QueryAsync<SpdxLicense>(
-            """
+        const string sql = """
             SELECT identifier      AS Identifier,
                    name            AS Name,
                    is_osi_approved AS IsOsiApproved,
@@ -90,8 +89,11 @@ public sealed class SpdxLicenseRepository
                    copyleft        AS Copyleft
             FROM spdx_license
             WHERE identifier IN @ids
-            """,
-            new { ids });
+            """;
+        // See DapperInClause: Dapper's own IN @ids auto-expansion binds the whole list as one
+        // Postgres array parameter instead of expanding the SQL text, which IN never accepts.
+        var (idsClause, idsParams) = DapperInClause.Expand("id", ids);
+        var rows = await conn.QueryAsync<SpdxLicense>(sql.Replace("@ids", idsClause), idsParams);
 
         return rows.ToDictionary(r => r.Identifier, StringComparer.Ordinal);
     }

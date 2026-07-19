@@ -5,7 +5,7 @@
   import { currentOrg } from '../lib/store.js'
   import { formatDate } from '../lib/format.js'
   import { copyToClipboard } from '../lib/clipboard.js'
-  import { ASSISTANTS, remediationSkillIds, resolvedFixedVersion, skillInstallCommand, skillPrompt } from '../lib/remediation.js'
+  import { ASSISTANTS, remediationBrief, remediationSkillIds, resolvedFixedVersion, skillInstallCommand, skillPrompt } from '../lib/remediation.js'
   import { aliasUrl } from '../lib/advisories.js'
   import Pagination from '../lib/Pagination.svelte'
   import ErrorBanner from '../lib/ErrorBanner.svelte'
@@ -264,10 +264,29 @@
               <div class="detail-status detail-error">{$t('vulnerabilities.detail.error')}</div>
             {:else if d.detail}
               {@const v = d.detail}
+              {@const fixedVersion = resolvedFixedVersion(v.remediation, v.affected)}
+              {@const briefKey = `${r.purl}::${r.osvId}::brief`}
 
               {#if v.withdrawn}
                 <div class="withdrawn-notice">{$t('vulnerabilities.detail.withdrawnNotice')}</div>
               {/if}
+
+              <div class="brief-actions">
+                <button
+                  class="brief-copy-btn"
+                  on:click|stopPropagation={() => copyRemediation(briefKey, remediationBrief({
+                    osvId: r.osvId,
+                    summary: v.summary ?? r.summary,
+                    purl: r.purl,
+                    installedVersion: r.version,
+                    fixedVersion,
+                    remediation: v.remediation,
+                  }))}
+                  title={$t('vulnerabilities.detail.remediation.copyBriefHelp')}
+                >
+                  {remediationCopyState[briefKey] === 'copied' ? $t('common.actions.copied') : remediationCopyState[briefKey] === 'failed' ? $t('common.actions.copyFailed') : $t('vulnerabilities.detail.remediation.copyBrief')}
+                </button>
+              </div>
 
               <div class="detail-meta">
                 <div class="meta-item">
@@ -338,7 +357,6 @@
 
               {@const skillIds = remediationSkillIds(v.remediation)}
               {#if v.remediation?.entries?.length || skillIds.length}
-                {@const fixedVersion = resolvedFixedVersion(v.remediation, v.affected)}
                 <div class="detail-section col remediation-section">
                   <span class="detail-label">{$t('vulnerabilities.detail.remediation.title')}</span>
 
@@ -491,6 +509,13 @@
   }
   .detail-status { color: var(--text2); font-style: italic; }
   .detail-error { color: var(--badge-red-text); font-style: normal; }
+
+  .brief-actions { display: flex; justify-content: flex-end; }
+  .brief-copy-btn {
+    min-height: 0; /* the global button min-height would balloon this compact action */
+    padding: 4px 10px;
+    font-size: 12px;
+  }
 
   .withdrawn-notice {
     background: var(--badge-warning-bg);

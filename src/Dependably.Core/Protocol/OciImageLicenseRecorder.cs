@@ -38,18 +38,97 @@ public sealed class OciImageLicenseRecorder
     private readonly TieredBlobStorage _blobs;
     private readonly TimeProvider _time;
     private readonly ILogger<OciImageLicenseRecorder> _logger;
+    private readonly LicenseRepository _licenses;
 
     public OciImageLicenseRecorder(
         IMetadataStore db,
         TieredBlobStorage blobs,
         TimeProvider time,
-        ILogger<OciImageLicenseRecorder> logger)
+        ILogger<OciImageLicenseRecorder> logger,
+        LicenseRepository licenses)
     {
         _db = db;
         _blobs = blobs;
         _time = time;
         _logger = logger;
+        _licenses = licenses;
     }
+
+    /// <summary>
+    /// Projects the SPDX expression captured on the manifest's <c>oci_blobs</c> row onto whichever
+    /// catalogue row the image cast, as an ordinary <c>package_version_licenses</c> fact.
+    ///
+    /// An image reaches the catalogue through either plane — a tag push writes a
+    /// <c>package_versions</c> row, a proxy pull writes a <c>cache_artifact</c> row — and in both
+    /// cases the row's version column holds the manifest digest. Writing the license to the shared
+    /// table means every license reader (the package-detail page, the license-risk tile and its
+    /// drill-down, the review queue) sees an image's license through the same query it already uses
+    /// for every other ecosystem, instead of each one having to know that OCI keeps its license
+    /// somewhere else.
+    ///
+    /// Runs after cataloguing: the capture points above stamp <c>oci_blobs</c> before the catalogue
+    /// row exists, so there is nothing to attach the fact to at that moment. Idempotent — both
+    /// writes are ON CONFLICT DO NOTHING. Best-effort, like the capture itself: a failure here never
+    /// faults the push or pull that triggered it.
+    /// </summary>
+    public async Task ProjectLicenseToCatalogAsync(
+        string orgId, string manifestDigest, CancellationToken ct)
+    {
+        try
+        {
+            await using var conn = await _db.OpenAsync(ct);
+
+            // xtenant: (digest, org_id) is the oci_blobs PK — each org holds its own manifest row.
+            string? spdx = await conn.ExecuteScalarAsync<string?>(
+                "SELECT license_spdx FROM oci_blobs WHERE digest = @manifestDigest AND org_id = @orgId",
+                new { manifestDigest, orgId });
+
+            if (string.IsNullOrWhiteSpace(spdx))
+            {
+                return;
+            }
+
+            string? versionId = await conn.ExecuteScalarAsync<string?>(
+                // plane-ok: projects the licence onto the PV-plane row; the proxy-plane cache_artifact row is handled by the sibling SELECT in this method.
+                """
+                SELECT pv.id
+                FROM package_versions pv
+                JOIN packages p ON p.id = pv.package_id
+                WHERE p.org_id = @orgId AND p.ecosystem = 'oci'
+                  AND pv.version = @manifestDigest AND pv.origin = 'uploaded'
+                """,
+                new { orgId, manifestDigest });
+
+            if (versionId is not null)
+            {
+                await _licenses.SetLicensesAsync(versionId, [spdx], OciLabelSource, ct);
+            }
+
+            string? cacheArtifactId = await conn.ExecuteScalarAsync<string?>(
+                """
+                SELECT ca.id
+                FROM cache_artifact ca
+                JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id
+                WHERE taa.org_id = @orgId AND ca.ecosystem = 'oci' AND ca.version = @manifestDigest
+                """,
+                new { orgId, manifestDigest });
+
+            if (cacheArtifactId is not null)
+            {
+                await _licenses.SetLicensesForCacheArtifactAsync(cacheArtifactId, [spdx], OciLabelSource, ct);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(
+                "{ExceptionType} projecting the OCI image license onto the catalogue for {Digest}; the pull or push is unaffected. TraceId={TraceId}",
+                ex.GetType().Name, manifestDigest,
+                System.Diagnostics.Activity.Current?.TraceId.ToString());
+        }
+    }
+
+    /// <summary>Provenance recorded on a license row derived from an image's config label.</summary>
+    internal const string OciLabelSource = "oci-label";
 
     /// <summary>
     /// Records the config digest from a freshly written image manifest and, when the config blob
@@ -127,13 +206,16 @@ public sealed class OciImageLicenseRecorder
         {
             await using var conn = await _db.OpenAsync(ct);
 
-            int awaiting = await conn.ExecuteScalarAsync<int>(
+            // The digests this config is about to stamp. Read before the UPDATE, because the
+            // license_checked_at IS NULL predicate that selects them is what the UPDATE clears —
+            // and each one's catalogue row needs the license projected onto it afterwards.
+            var awaiting = (await conn.QueryAsync<string>(
                 """
-                SELECT COUNT(*) FROM oci_blobs
+                SELECT digest FROM oci_blobs
                 WHERE org_id = @orgId AND config_digest = @configDigest AND license_checked_at IS NULL
                 """,
-                new { orgId, configDigest });
-            if (awaiting == 0)
+                new { orgId, configDigest })).ToList();
+            if (awaiting.Count == 0)
             {
                 return;
             }
@@ -152,6 +234,18 @@ public sealed class OciImageLicenseRecorder
                 WHERE org_id = @orgId AND config_digest = @configDigest AND license_checked_at IS NULL
                 """,
                 new { spdx, checkedAt, orgId, configDigest });
+
+            if (spdx is null)
+            {
+                return;
+            }
+
+            // This is the path that closes the self-healing race: the manifest was catalogued before
+            // its config arrived, so the license is only knowable now.
+            foreach (string manifestDigest in awaiting)
+            {
+                await ProjectLicenseToCatalogAsync(orgId, manifestDigest, ct);
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

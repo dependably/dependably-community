@@ -73,24 +73,38 @@ public sealed class PyPiProxyFetcher(
                 httpContext.Response.Headers["X-Dependably-PURL"] = HeaderSanitizer.Sanitize(pkgVersions.Value.Version.Purl);
             }
 
-            // Record into cache_artifact + tenant_artifact_access on every fetch path
-            // (hit and miss). Best-effort — recorder swallows failures. The returned id is
-            // threaded into RecordAndScanFirstFetchAsync so the first-fetch pipeline routes
-            // to the global plane (no package_versions INSERT) matching all other ecosystems.
+            // The cache-access record for this fetch into cache_artifact + tenant_artifact_access.
+            // The name is normalized to the canonical PURL name inside the shared pipeline; the blob
+            // fields come from what we just staged.
             string purlName = pkgVersions?.Package.PurlName ?? parsed.PurlName;
             string version = pkgVersions?.Version.Version ?? parsed.Version;
-            string? cacheArtifactId = await cacheRecorder.RecordAccessAsync(new CacheAccess(
+            var cacheAccess = new CacheAccess(
                 gate.OrgId, "pypi", purlName, version, file,
-                fetched.Blob.Sha256Hex, fetched.Blob.SizeBytes, fetched.Blob.BlobKey, upstreamUrl), ct);
+                fetched.Blob.Sha256Hex, fetched.Blob.SizeBytes, fetched.Blob.BlobKey, upstreamUrl);
 
-            if (!fetched.IsHit && pkgVersions is null)
+            if (pkgVersions is null)
             {
-                var firstFetchArgs = new FirstFetchArgs(file, parsed, upstreamSha256, cacheArtifactId, upstreamUrl);
+                // This org's first fetch of the coordinate: reaching here means it holds neither an
+                // uploaded version nor a proxy cache row (the caller's per-org GetServeFactsByCoordinate
+                // hit-check already returned null). Hand the record to the shared pipeline so the
+                // artefact is adopted only AFTER its first-fetch gates pass — a version blocked by
+                // deprecation/provenance must leave no cache_artifact / tenant_artifact_access row,
+                // matching npm/NuGet/Maven. This must NOT key on fetched.IsHit: that is the GLOBAL
+                // content-addressed blob-store hit, so an org first-fetching bytes another tenant
+                // already cached would otherwise adopt with no gate at all.
+                var firstFetchArgs = new FirstFetchArgs(file, parsed, upstreamSha256, cacheAccess, upstreamUrl);
                 var firstFetchBlock = await RecordAndScanFirstFetchAsync(firstFetchArgs, fetched.Blob, gate, ct);
                 if (firstFetchBlock is not null)
                 {
                     return firstFetchBlock;
                 }
+            }
+            else
+            {
+                // The coordinate already has an uploaded version for this org (a mixed hosted/proxied
+                // name whose uploaded serve fell through to a proxied file): record access up front, a
+                // last_accessed_at / download-count touch — the org already holds the name.
+                await cacheRecorder.RecordAccessAsync(cacheAccess, ct);
             }
 
             // The blob is already cached (either pre-existing for HIT, or freshly written
@@ -109,15 +123,54 @@ public sealed class PyPiProxyFetcher(
             // hostile upstream, refused rather than served.
             return new StatusCodeResult(StatusCodes.Status502BadGateway);
         }
+        catch (ProxyCatalogueUnavailableException)
+        {
+            // The artefact could not be recorded on the cache plane, so it could not be scanned or
+            // gated — and an artefact the registry cannot vouch for is not served. 503, never 404:
+            // the artefact exists upstream, we just could not admit it. The bytes are staged, so the
+            // client's retry is cheap.
+            return new StatusCodeResult(StatusCodes.Status503ServiceUnavailable);
+        }
         catch (UpstreamFetchFailedException)
         {
             // Transient upstream exhausted retries — propagate so the middleware maps it to a
             // retryable 503/502 instead of a hard 403/404 that aborts the install.
             throw;
         }
-        catch
+        catch (System.Data.Common.DbException)
         {
+            // A metadata-store failure (DB locked, disk full, corrupt) during first-fetch recording
+            // is infrastructure, not a missing artefact. RecordAndScanAsync's global-plane writes
+            // (proxy version row, first_fetch activity) are direct DB writes not wrapped by
+            // CacheAccessRecorder's swallow-to-null, so a raw provider exception reaches here.
+            // Rethrow so the middleware maps it to a 5xx — never the blanket 404 below, which would
+            // make pip report a real package as nonexistent. Matches npm/NuGet.
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            // Client disconnect / shutdown — propagate cancellation rather than masking it as a 404.
+            throw;
+        }
+        catch (HttpRequestException)
+        {
+            // A genuine upstream not-found: UpstreamClient surfaces non-transient upstream
+            // statuses (404/410) as HttpRequestException. The artefact truly does not exist
+            // upstream, so the client sees 404 — distinct from the unclassified 502 below.
             return new NotFoundResult();
+        }
+        catch (Exception ex)
+        {
+            // An unclassified failure (blob-store I/O error, a bug in first-fetch metadata or
+            // provenance resolution, malformed upstream data, etc.) — none of the carved-out
+            // cases above matched. Log it so the operator has a diagnostic trail, and answer
+            // 502 rather than the blanket 404 that would make pip report a real package as
+            // nonexistent and fail the install outright, since a 404 is not retried.
+            logger.LogWarning(ex,
+                "Unclassified failure during PyPI proxy fetch/cache for {PurlName}/{File}: {ExceptionType} trace={TraceId}",
+                parsed.PurlName, file, ex.GetType().Name,
+                System.Diagnostics.Activity.Current?.TraceId.ToString());
+            return new StatusCodeResult(StatusCodes.Status502BadGateway);
         }
     }
 
@@ -151,14 +204,21 @@ public sealed class PyPiProxyFetcher(
         }
 
         // Walk upstreams in priority order; the first whose simple index resolves the file wins.
-        // The matched upstream's auth header rides along so the artefact fetch authenticates to
-        // the same host the simple index resolved the (possibly relative) href against.
+        // The matched upstream's auth header rides along, but ONLY when the resolved href stayed
+        // on the upstream's own host. A PEP 503 simple index may name an absolute href to any
+        // host (see ResolvePyPiHref's doc comment) — a hostile or merely mirror-like upstream
+        // (Artifactory-style proxies commonly link straight to files.pythonhosted.org) can name a
+        // third-party host in its own response. Attaching this upstream's stored credential there
+        // would leak it to a host the org never configured, mirroring the CDN-shortcut guard above.
         foreach (var source in bases)
         {
             var resolved = await ResolveUpstreamPyPiUrlAsync(source, parsed.PurlName, file, ct);
             if (resolved is not null)
             {
-                return (resolved.Value.Url, resolved.Value.Sha256Hex, source.AuthorizationHeader);
+                string? authorizationHeader = UpstreamHostPin.IsSameHost(source.Url, resolved.Value.Url)
+                    ? source.AuthorizationHeader
+                    : null;
+                return (resolved.Value.Url, resolved.Value.Sha256Hex, authorizationHeader);
             }
         }
         return null;
@@ -231,10 +291,10 @@ public sealed class PyPiProxyFetcher(
     }
 
     // Groups the first-fetch bookkeeping (filename, parsed identity, upstream-supplied
-    // checksum/URL, and the already-recorded cache_artifact id) that RecordAndScanFirstFetchAsync
-    // threads through to the shared proxy pipeline.
+    // checksum/URL, and the not-yet-recorded cache-access record) that RecordAndScanFirstFetchAsync
+    // threads through to the shared proxy pipeline, which adopts it only after its gates pass.
     private sealed record FirstFetchArgs(
-        string File, PyPiFilename Parsed, string? UpstreamSha256, string? CacheArtifactId, string UpstreamUrl);
+        string File, PyPiFilename Parsed, string? UpstreamSha256, CacheAccess CacheAccess, string UpstreamUrl);
 
     // bytes are cached under BlobKeys.Proxy(sha) which validates
     // 64-char lowercase hex; Serilog uses RenderedCompactJsonFormatter (CRLF-safe).
@@ -273,11 +333,12 @@ public sealed class PyPiProxyFetcher(
             SourceIp: gate.SourceIp,
             MaxOsvScoreTolerance: gate.Settings.MaxOsvScoreTolerance,
             MinReleaseAgeHours: gate.Settings.MinReleaseAgeHours,
-            // PyPI records cache-access once in FetchAndCacheUpstreamAsync (covering both hit
-            // and miss paths). Pass the already-obtained id so the pipeline routes to the global
-            // plane without a second cache_artifact write.
-            CacheAccess: null,
-            PreRecordedCacheArtifactId: args.CacheArtifactId,
+            // Hand the cache-access record to the shared pipeline so it adopts the artefact only
+            // after its first-fetch gates pass (RecordCacheAccessAsync runs after
+            // EvaluateFirstFetchGatesAsync). A blocked version therefore leaves no cache_artifact /
+            // tenant_artifact_access row, and the record still routes to the global plane.
+            CacheAccess: args.CacheAccess,
+            PreRecordedCacheArtifactId: null,
             PublishedAt: jsonMeta.PublishedAt,
             UpstreamIntegrityValue: integrityValue,
             UpstreamIntegrityAlgorithm: integrityAlgo,

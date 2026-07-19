@@ -25,6 +25,8 @@ public sealed class InstanceController : ControllerBase
     private readonly OrgAccessGuard _guard;
     private readonly IAirGapMode _airGap;
     private readonly BackgroundJobRunRepository _jobRuns;
+    private readonly ILogger<InstanceController> _logger;
+    private readonly IConfiguration _config;
     private readonly bool _isMultiMode;
 
     public InstanceController(
@@ -33,6 +35,7 @@ public sealed class InstanceController : ControllerBase
         OrgAccessGuard guard,
         IAirGapMode airGap,
         BackgroundJobRunRepository jobRuns,
+        ILogger<InstanceController> logger,
         IConfiguration config)
     {
         _orgs = orgs;
@@ -40,6 +43,8 @@ public sealed class InstanceController : ControllerBase
         _guard = guard;
         _airGap = airGap;
         _jobRuns = jobRuns;
+        _logger = logger;
+        _config = config;
         string mode = (config["DEPLOYMENT_MODE"] ?? "single").Trim().ToLowerInvariant();
         _isMultiMode = mode is "multi" or "header";
     }
@@ -215,6 +220,166 @@ public sealed class InstanceController : ControllerBase
             ct: ct);
 
         return Ok(new { warnings });
+    }
+
+    // ── Email config ──────────────────────────────────────────────────────────
+    //
+    // Single-mode counterpart of the system-realm /api/v1/system/email-config. Validation and
+    // response shaping are shared with SystemController.EmailConfig via EmailConfigEditing so the
+    // two surfaces cannot drift.
+
+    /// <summary>GET /api/v1/instance/email-config — the resolved instance SMTP transport.</summary>
+    [HttpGet("api/v1/instance/email-config")]
+    public async Task<IActionResult> GetEmailConfig(
+        [FromServices] Dependably.Infrastructure.Mail.InstanceSmtpConfig smtp,
+        [FromServices] Dependably.Infrastructure.Identity.EnvelopeProtector envelope,
+        CancellationToken ct)
+    {
+        if (_isMultiMode)
+        {
+            return NotFound();
+        }
+
+        var deny = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantAdmin, ct);
+        if (deny is not null)
+        {
+            return deny;
+        }
+
+        var resolved = await smtp.ResolveAsync(ct);
+        return Ok(Dependably.Infrastructure.Mail.EmailConfigEditing.BuildView(resolved, envelope.IsConfigured));
+    }
+
+    /// <summary>
+    /// PUT /api/v1/instance/email-config — updates the instance SMTP transport. A non-empty
+    /// <c>password</c> requires <c>EnvelopeProtector.IsConfigured</c>, otherwise 400
+    /// (<c>error.email.masterKeyRequired</c>) — <c>SetInstanceSettingAsync</c> would otherwise
+    /// silently store it in plaintext. An IP-literal <c>host</c> in a blocked SSRF range is
+    /// rejected unless <c>WEBHOOK_ALLOW_PRIVATE=true</c> (via <see cref="HostSsrfValidator"/>) —
+    /// the authoritative, DNS-rebinding-aware gate is the connect-time guard
+    /// <c>SmtpMailSender</c> runs on every send. Audits the non-secret fields only.
+    /// </summary>
+    [HttpPut("api/v1/instance/email-config")]
+    public async Task<IActionResult> UpdateEmailConfig(
+        [FromBody] Dependably.Infrastructure.Mail.EmailConfigRequest req,
+        [FromServices] Dependably.Infrastructure.Mail.InstanceSmtpConfig smtp,
+        [FromServices] Dependably.Infrastructure.Identity.EnvelopeProtector envelope,
+        [FromServices] ProblemResults problems,
+        CancellationToken ct)
+    {
+        if (_isMultiMode)
+        {
+            return NotFound();
+        }
+
+        var deny = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantAdmin, ct);
+        if (deny is not null)
+        {
+            return deny;
+        }
+
+        if (req is null)
+        {
+            return problems.ValidationErrorActionKey("body", "error.common.requestBodyRequired");
+        }
+
+        var (field, resourceKey) = Dependably.Infrastructure.Mail.EmailConfigEditing.Validate(req);
+        if (field is not null)
+        {
+            return problems.ValidationErrorActionKey(field, resourceKey!);
+        }
+
+        if (!string.IsNullOrEmpty(req.Password) && !envelope.IsConfigured)
+        {
+            return problems.ValidationErrorActionKey("password", "error.email.masterKeyRequired");
+        }
+
+        bool allowPrivate = string.Equals(
+            _config["WEBHOOK_ALLOW_PRIVATE"], "true", StringComparison.OrdinalIgnoreCase);
+        Func<System.Net.IPAddress, bool> isBlocked = allowPrivate
+            ? SsrfGuard.IsBlockedIpExcludingPrivate
+            : SsrfGuard.IsBlockedIp;
+        if (HostSsrfValidator.IsHostBlocked(req.Host, isBlocked))
+        {
+            return problems.ValidationErrorActionKey("host", "error.email.hostBlocked");
+        }
+
+        await Dependably.Infrastructure.Mail.EmailConfigEditing.ApplyAsync(_orgs, req, ct);
+        smtp.Invalidate();
+
+        string? actor = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
+            ?? User.FindFirst("sub")?.Value;
+        await _audit.LogSystemAsync(
+            action: "instance_email_config_updated",
+            actorId: actor,
+            detail: System.Text.Json.JsonSerializer.Serialize(new
+            {
+                enabled = req.Enabled,
+                host = req.Host,
+                port = req.Port,
+                security = req.Security,
+                username = req.Username,
+                fromAddress = req.FromAddress,
+                passwordRotated = !string.IsNullOrEmpty(req.Password),
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            ct: ct);
+
+        var resolved = await smtp.ResolveAsync(ct);
+        return Ok(Dependably.Infrastructure.Mail.EmailConfigEditing.BuildView(resolved, envelope.IsConfigured));
+    }
+
+    /// <summary>
+    /// POST /api/v1/instance/email-config/test — synchronous test send to the configured
+    /// from-address (never a caller-supplied target).
+    /// </summary>
+    [HttpPost("api/v1/instance/email-config/test")]
+    [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("invite")]
+    public async Task<IActionResult> TestEmailConfig(
+        [FromServices] Dependably.Infrastructure.Mail.InstanceSmtpConfig smtp,
+        [FromServices] Dependably.Infrastructure.Mail.SmtpMailSender sender,
+        [FromServices] Microsoft.Extensions.Localization.IStringLocalizer<SharedResource> localizer,
+        [FromServices] ProblemResults problems,
+        CancellationToken ct)
+    {
+        if (_isMultiMode)
+        {
+            return NotFound();
+        }
+
+        var deny = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantAdmin, ct);
+        if (deny is not null)
+        {
+            return deny;
+        }
+
+        var resolved = await smtp.ResolveAsync(ct);
+        if (!resolved.Configured || string.IsNullOrWhiteSpace(resolved.Transport.FromAddress))
+        {
+            return problems.ValidationErrorActionKey("email", "error.email.notConfigured");
+        }
+
+        try
+        {
+            await sender.SendAsync(
+                resolved.Transport,
+                [resolved.Transport.FromAddress],
+                localizer["email.test.subject"],
+                localizer["email.test.body"],
+                ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(
+                ex,
+                "Instance email test send failed: {ExceptionType} host={Host} port={Port} trace={TraceId}",
+                ex.GetType().Name,
+                resolved.Transport.Host,
+                resolved.Transport.Port,
+                System.Diagnostics.Activity.Current?.TraceId.ToString());
+            return problems.ValidationErrorActionKey("email", "error.email.testFailedGeneric");
+        }
+
+        return NoContent();
     }
 
     // ── Background Jobs ──────────────────────────────────────────────────────────

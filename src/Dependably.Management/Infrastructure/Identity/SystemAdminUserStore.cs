@@ -50,10 +50,28 @@ internal sealed class SystemAdminUserStore :
         });
     }
 
+    /// <summary>
+    /// Records the MFA-column values as they were just read from the database so
+    /// <see cref="UpdateAsync"/> and <see cref="RedeemCodeAsync"/> can detect a concurrent
+    /// mutation instead of blindly overwriting it.
+    /// </summary>
+    private static SystemAdminUser? StampPersistedSnapshot(SystemAdminUser? user)
+    {
+        if (user is not null)
+        {
+            user.PersistedTwoFactorEnabled = user.TwoFactorEnabled;
+            user.PersistedAuthenticatorKey = user.AuthenticatorKey;
+            user.PersistedRecoveryCodes = user.RecoveryCodes;
+            user.PersistedSecurityStamp = user.SecurityStamp;
+        }
+
+        return user;
+    }
+
     public async Task<SystemAdminUser?> FindByIdAsync(string userId, CancellationToken cancellationToken)
     {
         await using var conn = await _db.OpenAsync(cancellationToken);
-        return await conn.QuerySingleOrDefaultAsync<SystemAdminUser?>(
+        return StampPersistedSnapshot(await conn.QuerySingleOrDefaultAsync<SystemAdminUser?>(
             """
             SELECT id AS Id, email AS Email,
                    password_hash AS PasswordHash, mfa_enabled AS TwoFactorEnabled,
@@ -63,14 +81,14 @@ internal sealed class SystemAdminUserStore :
                    token_version AS TokenVersion
             FROM system_admins WHERE id = @id
             """,
-            new { id = userId });
+            new { id = userId }));
     }
 
     public async Task<SystemAdminUser?> FindByNameAsync(string normalizedUserName, CancellationToken cancellationToken)
     {
         // UserName == Email; email is globally unique across system_admins.
         await using var conn = await _db.OpenAsync(cancellationToken);
-        return await conn.QuerySingleOrDefaultAsync<SystemAdminUser?>(
+        return StampPersistedSnapshot(await conn.QuerySingleOrDefaultAsync<SystemAdminUser?>(
             """
             SELECT id AS Id, email AS Email,
                    password_hash AS PasswordHash, mfa_enabled AS TwoFactorEnabled,
@@ -82,7 +100,7 @@ internal sealed class SystemAdminUserStore :
             WHERE lower(email) = lower(@email)
             LIMIT 1
             """,
-            new { email = normalizedUserName });
+            new { email = normalizedUserName }));
     }
 
     public Task<string?> GetNormalizedUserNameAsync(SystemAdminUser user, CancellationToken cancellationToken) =>
@@ -110,7 +128,11 @@ internal sealed class SystemAdminUserStore :
     public async Task<IdentityResult> UpdateAsync(SystemAdminUser user, CancellationToken cancellationToken)
     {
         await using var conn = await _db.OpenAsync(cancellationToken);
-        await conn.ExecuteAsync(
+        // Optimistic concurrency: guard on the MFA columns as they were last read (the persisted
+        // snapshot) so a stale in-memory copy cannot overwrite a value a concurrent MFA operation
+        // already committed. COALESCE to '' gives a provider-portable null-safe comparison
+        // (no real key/codes/stamp value is the empty string) on both SQLite and Postgres.
+        int affected = await conn.ExecuteAsync(
             """
             UPDATE system_admins
             SET mfa_enabled         = @e,
@@ -118,6 +140,10 @@ internal sealed class SystemAdminUserStore :
                 mfa_recovery_codes  = @r,
                 security_stamp      = @s
             WHERE id = @id
+              AND mfa_enabled = @pe
+              AND COALESCE(mfa_authenticator_key, '') = COALESCE(@pk, '')
+              AND COALESCE(mfa_recovery_codes, '')  = COALESCE(@pr, '')
+              AND COALESCE(security_stamp, '')      = COALESCE(@ps, '')
             """,
             new
             {
@@ -125,8 +151,19 @@ internal sealed class SystemAdminUserStore :
                 k = user.AuthenticatorKey,
                 r = user.RecoveryCodes,
                 s = user.SecurityStamp,
+                pe = user.PersistedTwoFactorEnabled ? 1 : 0,
+                pk = user.PersistedAuthenticatorKey,
+                pr = user.PersistedRecoveryCodes,
+                ps = user.PersistedSecurityStamp,
                 id = user.Id,
             });
+
+        if (affected == 0)
+        {
+            return IdentityResult.Failed(new IdentityErrorDescriber().ConcurrencyFailure());
+        }
+
+        StampPersistedSnapshot(user);
         return IdentityResult.Success;
     }
 
@@ -149,7 +186,7 @@ internal sealed class SystemAdminUserStore :
     public async Task<SystemAdminUser?> FindByEmailAsync(string normalizedEmail, CancellationToken cancellationToken)
     {
         await using var conn = await _db.OpenAsync(cancellationToken);
-        return await conn.QuerySingleOrDefaultAsync<SystemAdminUser?>(
+        return StampPersistedSnapshot(await conn.QuerySingleOrDefaultAsync<SystemAdminUser?>(
             """
             SELECT id AS Id, email AS Email,
                    password_hash AS PasswordHash, mfa_enabled AS TwoFactorEnabled,
@@ -161,7 +198,7 @@ internal sealed class SystemAdminUserStore :
             WHERE lower(email) = lower(@email)
             LIMIT 1
             """,
-            new { email = normalizedEmail });
+            new { email = normalizedEmail }));
     }
 
     public Task<string?> GetEmailAsync(SystemAdminUser user, CancellationToken cancellationToken) =>
@@ -284,8 +321,31 @@ internal sealed class SystemAdminUserStore :
         }
 
         hashes.RemoveAt(matchIndex);
-        user.RecoveryCodes = JsonSerializer.Serialize(hashes);
-        await UpdateAsync(user, cancellationToken);
+        string? previous = user.PersistedRecoveryCodes;
+        string trimmed = JsonSerializer.Serialize(hashes);
+
+        // Column-scoped write guarded on the recovery-code list as last read: only the
+        // mfa_recovery_codes column is touched, so a concurrent operation's changes to the
+        // other MFA columns are not clobbered, and a mismatch (another operation already
+        // rewrote the list) means this redemption loses the race and consumes nothing —
+        // the previously-redeemed code is never resurrected.
+        await using var conn = await _db.OpenAsync(cancellationToken);
+        int affected = await conn.ExecuteAsync(
+            """
+            UPDATE system_admins
+            SET mfa_recovery_codes = @trimmed
+            WHERE id = @id
+              AND COALESCE(mfa_recovery_codes, '') = COALESCE(@previous, '')
+            """,
+            new { trimmed, previous, id = user.Id });
+
+        if (affected == 0)
+        {
+            return false;
+        }
+
+        user.RecoveryCodes = trimmed;
+        user.PersistedRecoveryCodes = trimmed;
         return true;
     }
 

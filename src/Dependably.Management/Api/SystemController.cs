@@ -55,15 +55,17 @@ public sealed partial class SystemController : ControllerBase
     private readonly ITenantSlugCacheInvalidator? _tenantCache;
     private readonly IRequireMfaMode? _requireMfa;
     private readonly Dependably.Infrastructure.Identity.EnvelopeProtector _envelope;
+    private readonly Dependably.Infrastructure.SystemEvents.ISystemEventNotifier? _systemEvents;
+    private readonly ILogger<SystemController> _logger;
 
     // Static vocabulary surfaced on the background-jobs facets endpoint. Mirrors the
     // <c>dependably.background_job.duration</c> histogram outcome label values.
     private static readonly string[] BackgroundJobOutcomes = ["success", "server_error", "cancelled"];
 
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
-        Justification = "Controller aggregates 10 independent DI-resolved services (3 repos, metadata store, problem-results helper, " +
-            "configuration, password policy, clock, secret protector, optional cache invalidator). Bundling into a wrapper record would " +
-            "obscure the DI graph and force every test setup to materialise the wrapper for unrelated callers.")]
+        Justification = "Controller aggregates 11 independent DI-resolved services (3 repos, metadata store, problem-results helper, " +
+            "configuration, password policy, clock, secret protector, logger, optional cache invalidator). Bundling into a wrapper record " +
+            "would obscure the DI graph and force every test setup to materialise the wrapper for unrelated callers.")]
     public SystemController(
         OrgRepository orgs,
         SystemAdminRepository systemAdmins,
@@ -73,8 +75,10 @@ public sealed partial class SystemController : ControllerBase
         IConfiguration config,
         TimeProvider time,
         Dependably.Infrastructure.Identity.EnvelopeProtector envelope,
+        ILogger<SystemController> logger,
         ITenantSlugCacheInvalidator? tenantCache = null,
-        IRequireMfaMode? requireMfa = null)
+        IRequireMfaMode? requireMfa = null,
+        Dependably.Infrastructure.SystemEvents.ISystemEventNotifier? systemEvents = null)
     {
         _orgs = orgs;
         _systemAdmins = systemAdmins;
@@ -84,8 +88,10 @@ public sealed partial class SystemController : ControllerBase
         _config = config;
         _time = time;
         _envelope = envelope;
+        _logger = logger;
         _tenantCache = tenantCache;
         _requireMfa = requireMfa;
+        _systemEvents = systemEvents;
     }
 
     /// <summary>GET /api/v1/system/tenants — list all tenants.</summary>
@@ -94,8 +100,7 @@ public sealed partial class SystemController : ControllerBase
         [FromQuery] int limit = 50, [FromQuery] int page = 1, CancellationToken ct = default)
     {
         limit = Math.Clamp(limit, 1, MaxSystemAdminPageSize);
-        page = Math.Max(page, 1);
-        int offset = (page - 1) * limit;
+        int offset = PaginationHelper.ComputeOffset(page, limit);
         var (items, total) = await _orgs.ListOrgsAsync(limit, offset, ct: ct);
 
         // Control-plane-only projection. memberCount/storageBytes are computed inline in
@@ -215,6 +220,8 @@ public sealed partial class SystemController : ControllerBase
             orgId: orgId,
             detail: System.Text.Json.JsonSerializer.Serialize(new { slug, ownerEmail = req.OwnerEmail }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             ct: ct);
+        _systemEvents?.Notify(new Dependably.Infrastructure.SystemEvents.SystemEventRecord(
+            "tenant.created", slug, null, actor));
 
         return Ok(new
         {
@@ -250,6 +257,8 @@ public sealed partial class SystemController : ControllerBase
             orgId: org.Id,
             detail: System.Text.Json.JsonSerializer.Serialize(new { slug }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             ct: ct);
+        _systemEvents?.Notify(new Dependably.Infrastructure.SystemEvents.SystemEventRecord(
+            "tenant.deleted", slug, null, actor));
 
         return NoContent();
     }
@@ -349,6 +358,8 @@ public sealed partial class SystemController : ControllerBase
             orgId: org.Id,
             detail: System.Text.Json.JsonSerializer.Serialize(new { slug, status = req.Status, priorStatus }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             ct: ct);
+        _systemEvents?.Notify(new Dependably.Infrastructure.SystemEvents.SystemEventRecord(
+            "tenant.status_changed", slug, null, actor));
 
         return NoContent();
     }
@@ -388,6 +399,8 @@ public sealed partial class SystemController : ControllerBase
             orgId: org.Id,
             detail: System.Text.Json.JsonSerializer.Serialize(new { slug }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             ct: ct);
+        _systemEvents?.Notify(new Dependably.Infrastructure.SystemEvents.SystemEventRecord(
+            "tenant.restored", slug, null, actor));
 
         return NoContent();
     }
@@ -431,8 +444,7 @@ public sealed partial class SystemController : ControllerBase
         CancellationToken ct = default)
     {
         limit = Math.Clamp(limit, 1, MaxSystemAdminPageSize);
-        page = Math.Max(page, 1);
-        int offset = (page - 1) * limit;
+        int offset = PaginationHelper.ComputeOffset(page, limit);
         var (items, total) = await _audit.ListSystemAuditAsync(
             limit, offset, search, action, sortBy, sortDir, ct);
         return Ok(new { items, total, limit, offset });
@@ -463,8 +475,7 @@ public sealed partial class SystemController : ControllerBase
         CancellationToken ct = default)
     {
         int limit = Math.Clamp(query.Limit, 1, 200);
-        int page = Math.Max(query.Page, 1);
-        int offset = (page - 1) * limit;
+        int offset = PaginationHelper.ComputeOffset(query.Page, limit);
         var (items, total) = await repo.ListAsync(
             new BackgroundJobRunQuery(
                 Search: query.Search,

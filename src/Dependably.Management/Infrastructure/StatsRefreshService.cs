@@ -68,7 +68,29 @@ public sealed class StatsRefreshService : BackgroundService
         catch (OperationCanceledException) { /* normal shutdown */ }
     }
 
+    // The pass entry point ExecuteAsync calls at startup and on every tick. It mirrors
+    // ScheduledBackgroundService.ContinueOnTickError: a transient failure in one pass — an
+    // unguarded query like ListActiveOrgIdsAsync throwing SQLITE_BUSY while a large import holds
+    // the single writer — is logged and swallowed so the loop continues to the next tick, rather
+    // than escaping ExecuteAsync and, under BackgroundService's default StopHost behavior, taking
+    // the whole replica down. Genuine shutdown cancellation still propagates for a clean stop.
     internal async Task RunRefreshPassAsync(CancellationToken ct)
+    {
+        try
+        {
+            await RunRefreshPassScopedAsync(ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Stats refresh pass failed; skipping this pass.");
+        }
+    }
+
+    private async Task RunRefreshPassScopedAsync(CancellationToken ct)
     {
         using var scope = Observability.BackgroundJobScope.Begin("stats-refresh", "stats.refresh", _time);
         try

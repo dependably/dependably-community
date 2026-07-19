@@ -220,7 +220,7 @@ public sealed class MavenSnapshotProxyTests : IAsyncLifetime
             cacheArtifact, tenantAccess,
             NullLogger<CacheAccessRecorder>.Instance, TimeProvider.System);
         var proxyFetch = new ProxyFetchService(
-            cacheRecorder, proxyVersions, cacheArtifact, tenantAccess, scanner, blockGate, _packages, _audit, TimeProvider.System,
+            cacheRecorder, proxyVersions, cacheArtifact, tenantAccess, scanner, blockGate, _audit, TimeProvider.System,
             new Dependably.Infrastructure.SourcePinRepository(_db, new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build()));
 
         var svc = new MavenControllerServices(
@@ -314,7 +314,7 @@ public sealed class MavenSnapshotProxyTests : IAsyncLifetime
         long artifactCallsAfterMiss = _server.LogEntries.Count(
             e => e.RequestMessage?.Path?.EndsWith(timestampedFilename) == true);
 
-        // Second GET → local cache hit (maven_version_files row written by first GET).
+        // Second GET → local cache hit (cache_artifact row written by first GET).
         var ctl2 = BuildController(CleanOsv());
         var second = await ctl2.Download($"{groupPath}/{artifactId}/{version}/{timestampedFilename}", CancellationToken.None);
 
@@ -705,10 +705,9 @@ public sealed class MavenSnapshotProxyTests : IAsyncLifetime
     // regardless of what upstream serves at the same coordinate. The freshness block
     // is gated on origin='proxy'; origin='uploaded' skips it entirely and goes straight
     // to the cache-hit path where the uploaded-origin auth gate (token + ReadArtifact)
-    // enforces access control. The DO-UPDATE alias SQL in RecordMavenFileAsync is only
-    // reachable from ProxyFetchAndCacheAsync, which is only reached when the freshness
-    // block determines a proxy miss — so an uploaded row can never be overwritten by
-    // that path.
+    // enforces access control. A proxy miss caches onto the cache_artifact plane and never
+    // touches an origin='uploaded' maven_version_files row, so an uploaded row can never be
+    // overwritten by that path.
 
     private static string BasicAuthHeader(string rawToken)
     {

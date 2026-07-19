@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text;
 using System.Text.Json;
 using Dapper;
 using Dependably.Infrastructure;
@@ -213,6 +214,24 @@ public sealed class NpmPingWhoamiTests : IClassFixture<DependablyFactory>, IAsyn
 
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
         Assert.Contains("Bearer", resp.Headers.WwwAuthenticate.ToString());
+    }
+
+    // ── /-/npm/v1/security/... (npm audit) ──────────────────────────────────
+
+    /// <summary>
+    /// The npm 6-era quick-audit shape is a deliberate 501 refusal, not a bare 404 — npm 7 and
+    /// newer audit exclusively through the bulk-advisories endpoint, which
+    /// <see cref="NpmAuditBulkAdvisoriesTests"/> covers.
+    /// </summary>
+    [Fact]
+    public async Task AuditQuick_Returns501NotImplemented()
+    {
+        using var client = _factory.CreateClient();
+        using var content = new StringContent("{}", Encoding.UTF8, "application/json");
+
+        var resp = await client.PostAsync("/npm/-/npm/v1/security/audits/quick", content);
+
+        Assert.Equal(HttpStatusCode.NotImplemented, resp.StatusCode);
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────

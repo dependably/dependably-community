@@ -32,6 +32,12 @@ public sealed class MetricsAccessConfig
     private ResolvedConfig? _cached;
     private DateTimeOffset _expiry;
 
+    // Generation counter guarding against a fill that raced an Invalidate. A fill snapshots this
+    // before reading the sources; Invalidate increments it. A fill whose snapshot no longer
+    // matches when it goes to publish drops its (potentially stale) result instead of
+    // overwriting the invalidation — mirroring UserTokenVersionStore's generation-token guard.
+    private long _generation;
+
     /// <summary>
     /// Constructs the resolver against an instance-setting reader (the
     /// production wiring passes <c>OrgRepository.GetInstanceSettingAsync</c>;
@@ -73,9 +79,24 @@ public sealed class MetricsAccessConfig
                 return _cached;
             }
 
+            // Snapshot the generation BEFORE reading sources. A concurrent Invalidate (which does
+            // not take _lock) increments it, so a fill that read pre-update values cannot publish
+            // them over the invalidation the operator just issued.
+            long generation = Interlocked.Read(ref _generation);
             var resolved = await ResolveFromSourcesAsync(ct);
-            _cached = resolved;
-            _expiry = _time.GetUtcNow().AddSeconds(CacheTtlSeconds);
+
+            // Publish only if no Invalidate fired during the read; the second check closes the
+            // narrow window where an Invalidate lands between the publish and this return.
+            if (Interlocked.Read(ref _generation) == generation)
+            {
+                _cached = resolved;
+                _expiry = _time.GetUtcNow().AddSeconds(CacheTtlSeconds);
+                if (Interlocked.Read(ref _generation) != generation)
+                {
+                    _cached = null;
+                }
+            }
+
             return resolved;
         }
         finally
@@ -88,10 +109,12 @@ public sealed class MetricsAccessConfig
     /// Invalidates the cache so the next <see cref="ResolveAsync"/>
     /// re-reads from sources. Called by <c>SystemController</c> after a
     /// successful settings update so UI edits take effect immediately
-    /// instead of waiting for the 5s TTL.
+    /// instead of waiting for the 5s TTL. Bumps the generation so a fill
+    /// racing this call cannot republish the pre-update config.
     /// </summary>
     public void Invalidate()
     {
+        Interlocked.Increment(ref _generation);
         _cached = null;
     }
 

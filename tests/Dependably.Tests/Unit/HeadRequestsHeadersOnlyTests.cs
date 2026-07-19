@@ -429,11 +429,16 @@ public sealed class HeadRequestsHeadersOnlyTests : IAsyncLifetime
                 new UnlimitedDisk(),
                 new StagingOptions(Path.GetTempPath(), FloorBytes: 0),
                 new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
-                new OciImageLicenseRecorder(_db, uploadTiered, TimeProvider.System, NullLogger<OciImageLicenseRecorder>.Instance),
+                new OciImageLicenseRecorder(_db, uploadTiered, TimeProvider.System, NullLogger<OciImageLicenseRecorder>.Instance,
+                new LicenseRepository(_db, TimeProvider.System, TestNormalizers.License(_db))),
+                new OciBlobKeyLock(),
                 NullLogger<OciUploadService>.Instance,
                 TimeProvider.System)),
+            OrphanBlobs: new OciOrphanBlobDeleter(_db, uploadTiered, new OciBlobKeyLock()),
             BlockGate: BuildBlockGate(),
-            EdgeGuard: Dependably.Tests.Infrastructure.TestEdgeMode.DisabledPublishGuard());
+            EdgeGuard: Dependably.Tests.Infrastructure.TestEdgeMode.DisabledPublishGuard(),
+            Packages: new PackageRepository(_db),
+            TenantArtifactAccess: new TenantArtifactAccessRepository(_db));
 
         return new OciController(svc, NullLogger<OciController>.Instance)
         {
@@ -452,10 +457,16 @@ public sealed class HeadRequestsHeadersOnlyTests : IAsyncLifetime
             http, options, new DisabledAirGap(),
             NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
         var blobs = new TieredBlobStorage(_cacheBlobs, _registryBlobs);
-        var recorder = new OciImageLicenseRecorder(_db, blobs, TimeProvider.System, NullLogger<OciImageLicenseRecorder>.Instance);
+        var recorder = new OciImageLicenseRecorder(_db, blobs, TimeProvider.System, NullLogger<OciImageLicenseRecorder>.Instance,
+                new LicenseRepository(_db, TimeProvider.System, TestNormalizers.License(_db)));
+        var cacheArtifacts = new CacheArtifactRepository(_db);
+        var tenantAccess = new TenantArtifactAccessRepository(_db);
+        var cacheRecorder = new CacheAccessRecorder(cacheArtifacts, tenantAccess,
+            NullLogger<CacheAccessRecorder>.Instance, TimeProvider.System);
         return new OciUpstreamResolver(
             http, authSvc, options, blobs, _db,
-            new DisabledAirGap(), recorder, NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            new DisabledAirGap(), recorder, cacheRecorder, cacheArtifacts,
+            NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
     }
 
     // ── Test stubs ────────────────────────────────────────────────────────────

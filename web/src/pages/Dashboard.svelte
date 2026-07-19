@@ -78,8 +78,10 @@
     .map(g => `${$t('dashboard.gates.' + g.gate)}: ${g.count}`)
     .join(' · ')
   $: quarantinePending = stats?.quarantinePending ?? 0
-  // Quarantine is an admin/owner-only surface (see Sidebar). Non-admins see the count
-  // as a read-only stat, but the card is not a link into the review queue.
+  // Quarantine and Audit are admin/owner-only surfaces (see Sidebar, ADMIN_ONLY_PAGES). Non-admins
+  // see those counts as read-only stats — the cards are not links, because the page behind them
+  // would bounce them straight back here. The two risk tiles have no such gate: their drill-down
+  // needs only read:packages, so they link for every role.
   $: isAdmin = $user?.role === 'admin' || $user?.role === 'owner'
   $: hostedPackages = stats?.hostedPackages ?? 0
   $: proxiedPackages = stats?.proxiedPackages ?? 0
@@ -243,25 +245,60 @@
         <div class="eyebrow">{$t('dashboard.totalDownloads')}</div>
         <div class="stat-value">{(stats.totalDownloads30d ?? 0).toLocaleString()}</div>
       </div>
-      <div class="stat-card" title={blockedBreakdown}>
-        <div class="eyebrow">{$t('dashboard.blockedPulls')}</div>
-        <div class="stat-value" class:warn={stats.blockedPulls30d > 0}>{(stats.blockedPulls30d ?? 0).toLocaleString()}</div>
-      </div>
-      <div class="stat-card">
-        <div class="eyebrow">{$t('dashboard.blockedMalicious')}</div>
-        <div class="stat-value" class:danger={maliciousBlocked > 0}>{maliciousBlocked.toLocaleString()}</div>
-      </div>
-      <div class="stat-card">
+      <!-- The two blocked tiles drill into the Audit page's lifecycle feed, scoped to the same
+           30-day window they count. That page is admin-only (ADMIN_ONLY_PAGES), so only an
+           admin/owner gets the link — everyone else keeps the count as a read-only stat. -->
+      {#if isAdmin}
+        <button
+          class="stat-card stat-link"
+          title={blockedBreakdown}
+          on:click={() => navigate('audit', { tab: 'lifecycle', type: 'blocked', since: '30d' })}
+          aria-label={$t('dashboard.blockedPulls')}
+        >
+          <div class="eyebrow">{$t('dashboard.blockedPulls')}</div>
+          <div class="stat-value" class:warn={stats.blockedPulls30d > 0}>{(stats.blockedPulls30d ?? 0).toLocaleString()}</div>
+        </button>
+      {:else}
+        <div class="stat-card" title={blockedBreakdown}>
+          <div class="eyebrow">{$t('dashboard.blockedPulls')}</div>
+          <div class="stat-value" class:warn={stats.blockedPulls30d > 0}>{(stats.blockedPulls30d ?? 0).toLocaleString()}</div>
+        </div>
+      {/if}
+      {#if isAdmin}
+        <button
+          class="stat-card stat-link"
+          on:click={() => navigate('audit', { tab: 'lifecycle', type: 'blocked_malicious', since: '30d' })}
+          aria-label={$t('dashboard.blockedMalicious')}
+        >
+          <div class="eyebrow">{$t('dashboard.blockedMalicious')}</div>
+          <div class="stat-value" class:danger={maliciousBlocked > 0}>{maliciousBlocked.toLocaleString()}</div>
+        </button>
+      {:else}
+        <div class="stat-card">
+          <div class="eyebrow">{$t('dashboard.blockedMalicious')}</div>
+          <div class="stat-value" class:danger={maliciousBlocked > 0}>{maliciousBlocked.toLocaleString()}</div>
+        </div>
+      {/if}
+      <!-- Risk is not admin-gated: read:packages serves both the tile and the drill-down. -->
+      <button
+        class="stat-card stat-link"
+        on:click={() => navigate('risk', { tab: 'operational' })}
+        aria-label={$t('dashboard.operationalRisk')}
+      >
         <div class="eyebrow">{$t('dashboard.operationalRisk')}</div>
         <div class="stat-value" class:warn={operationalRiskPackageCount > 0}>{operationalRiskPackageCount.toLocaleString()}</div>
         {#if versionsBehindThreshold > 0}
           <div class="stat-sub">{$t('dashboard.operationalRiskSub', { values: { threshold: versionsBehindThreshold } })}</div>
         {/if}
-      </div>
-      <div class="stat-card">
+      </button>
+      <button
+        class="stat-card stat-link"
+        on:click={() => navigate('risk', { tab: 'license' })}
+        aria-label={$t('dashboard.licenseRisk')}
+      >
         <div class="eyebrow">{$t('dashboard.licenseRisk')}</div>
         <div class="stat-value" class:warn={licenseRiskVersionCount > 0}>{licenseRiskVersionCount.toLocaleString()}</div>
-      </div>
+      </button>
       {#if isAdmin}
         <button
           class="stat-card stat-link"

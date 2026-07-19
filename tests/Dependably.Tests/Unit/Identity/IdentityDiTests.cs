@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
 
 namespace Dependably.Tests.Unit.Identity;
@@ -43,7 +44,8 @@ public sealed class IdentityDiTests : IAsyncLifetime
 
         // ── Identity registrations (mirrors AddDependablyIdentity output) ─────
         services.AddSingleton<IMfaSecretProtector>(protector);
-        services.AddSingleton<IRecoveryCodeHasher>(new RecoveryCodeHasher(key));
+        services.AddSingleton<IRecoveryCodeHasher>(
+            new RecoveryCodeHasher(key, acceptLegacyCodes: false, NullLogger<RecoveryCodeHasher>.Instance));
         services.AddSingleton<MfaEncryptionKeyProvider>();
         services.AddSingleton<SystemAdminTokenVersionStore>();
 

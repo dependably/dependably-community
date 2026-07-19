@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
+using System.Xml.Linq;
 using Dapper;
 using Dependably.Api;
 using Dependably.Infrastructure;
@@ -149,6 +150,16 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
         };
     }
 
+    private async Task<List<string>> HostedKeysAsync()
+    {
+        var keys = new List<string>();
+        await foreach (var blob in _blobs.ListAsync("hosted/"))
+        {
+            keys.Add(blob.Key);
+        }
+        return keys;
+    }
+
     private async Task<string> IssueTokenAsync(string orgId, string userId)
     {
         // Capabilities aren't enforced inside the controller body — the [RequireCapability]
@@ -236,16 +247,149 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
         return (pkgId, verId, blobKey);
     }
 
+    // Seeds one hosted maven_version_files row under a shared SNAPSHOT package_versions row —
+    // reuses the version row across calls so a test can seed several timestamped build files
+    // (jar + pom, or multiple builds) under one SNAPSHOT version, the way a real `mvn deploy`
+    // publishes a multi-file build.
+    private async Task<string> SeedMavenSnapshotFileAsync(
+        string groupId, string artifactId, string version, string filename, string extension, string? classifier)
+    {
+        string purlName = $"{groupId}:{artifactId}";
+        byte[] bytes = Encoding.UTF8.GetBytes(filename);
+        string blobKey = BlobKeys.Hosted(_orgId, "maven", groupId.Replace('.', '/') + "/" + artifactId, version, filename);
+        await _blobs.PutAsync(blobKey, new MemoryStream(bytes), CancellationToken.None);
+
+        string sha256 = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        string sha1 = Convert.ToHexString(SHA1.HashData(bytes)).ToLowerInvariant();
+        string md5 = Convert.ToHexString(MD5.HashData(bytes)).ToLowerInvariant();
+
+        await using var conn = await _db.OpenAsync();
+        string? existingPkgId = await conn.ExecuteScalarAsync<string?>(
+            "SELECT id FROM packages WHERE org_id = @org AND ecosystem = 'maven' AND purl_name = @purl",
+            new { org = _orgId, purl = purlName });
+        string pkgId = existingPkgId ?? Guid.NewGuid().ToString("N");
+        if (existingPkgId is null)
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy) VALUES (@id, @org, 'maven', @name, @purl, 0)",
+                new { id = pkgId, org = _orgId, name = purlName, purl = purlName });
+        }
+
+        string? existingVerId = await conn.ExecuteScalarAsync<string?>(
+            "SELECT id FROM package_versions WHERE package_id = @pkg AND version = @ver",
+            new { pkg = pkgId, ver = version });
+        string verId = existingVerId ?? Guid.NewGuid().ToString("N");
+        if (existingVerId is null)
+        {
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO package_versions (id, package_id, version, purl, blob_key, filename, size_bytes, checksum_sha256, origin)
+                VALUES (@id, @pkg, @ver, @purl, @blobKey, @filename, @size, @sha256, 'uploaded')
+                """,
+                new
+                {
+                    id = verId,
+                    pkg = pkgId,
+                    ver = version,
+                    purl = $"pkg:maven/{groupId}/{artifactId}@{version}",
+                    blobKey,
+                    filename,
+                    size = (long)bytes.Length,
+                    sha256,
+                });
+        }
+
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO maven_version_files
+                (id, package_version_id, filename, classifier, extension, blob_key, size_bytes,
+                 checksum_sha256, checksum_sha1, checksum_md5, origin)
+            VALUES (@id, @pv, @filename, @classifier, @extension, @blobKey, @size, @sha256, @sha1, @md5, 'uploaded')
+            """,
+            new
+            {
+                id = Guid.NewGuid().ToString("N"),
+                pv = verId,
+                filename,
+                classifier,
+                extension,
+                blobKey,
+                size = (long)bytes.Length,
+                sha256,
+                sha1,
+                md5,
+            });
+
+        return verId;
+    }
+
+    // Seeds one proxied Maven version onto the shared cache plane (cache_artifact +
+    // tenant_artifact_access) with no package_versions row — where every current Maven proxy
+    // fetch lands, and where the package_versions -> cache_artifact backfill leaves an upgraded
+    // deployment's proxied versions. CacheAccessRecorder stamps first_cached_at from the
+    // injected clock, so seeding several versions without advancing the frozen clock reproduces
+    // the backfill's single shared timestamp across every row exactly.
+    private async Task SeedMavenCachePlaneVersionAsync(string groupId, string artifactId, string version)
+    {
+        string purlName = $"{groupId}:{artifactId}";
+        string filename = $"{artifactId}-{version}.jar";
+        byte[] bytes = Encoding.UTF8.GetBytes(filename);
+        string sha256 = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        string blobKey = BlobKeys.Proxy(sha256);
+        await _blobs.PutAsync(BlobKeys.StoreKey(blobKey), new MemoryStream(bytes), CancellationToken.None);
+
+        var recorder = new CacheAccessRecorder(
+            new CacheArtifactRepository(_db),
+            new TenantArtifactAccessRepository(_db),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<CacheAccessRecorder>.Instance,
+            _clock);
+        string? id = await recorder.RecordAccessAsync(new CacheAccess(
+            _orgId, "maven", purlName, version, filename,
+            Sha256: sha256, SizeBytes: bytes.Length,
+            BlobKey: $"{blobKey}/{filename}",
+            UpstreamUrl: $"https://repo.example/{filename}"));
+        Assert.NotNull(id);
+
+        await _packages.GetOrCreateAsync(_orgId, "maven", purlName, purlName, isProxy: true, CancellationToken.None);
+    }
+
+    // Asserts the seeded cache-plane rows really do share one first_cached_at — the premise the
+    // tie-order tests rest on. Without this the tests could pass for the wrong reason (distinct
+    // timestamps ordering the versions correctly on their own).
+    private async Task AssertCachePlaneTimestampsTiedAsync(string purlName, int expectedVersions)
+    {
+        await using var conn = await _db.OpenAsync();
+        var stamps = (await conn.QueryAsync<string>(
+            "SELECT first_cached_at FROM cache_artifact WHERE ecosystem = 'maven' AND name = @purlName",
+            new { purlName })).ToList();
+
+        Assert.Equal(expectedVersions, stamps.Count);
+        Assert.Single(stamps.Distinct(StringComparer.Ordinal));
+    }
+
+    // Reads the <versioning> element of a served artifact-level maven-metadata.xml.
+    private static async Task<XElement> ServedVersioningAsync(MavenController ctl, string path)
+    {
+        var content = Assert.IsType<ContentResult>(await ctl.Download(path, CancellationToken.None));
+        return XDocument.Parse(content.Content!).Root!.Element("versioning")!;
+    }
+
     // Seeds a proxy-cached Maven artifact (origin='proxy'). Use this for tests that exercise
     // behavior other than origin-based auth (checksums, block gate, metadata, HEAD) so they
     // remain servable under AnonymousPull without a token — uploaded artifacts require a token
     // even when AnonymousPull is enabled.
-    private async Task<(string pkgId, string verId, string blobKey)> SeedMavenProxyArtifactAsync(
+    private Task<(string pkgId, string verId, string blobKey)> SeedMavenProxyArtifactAsync(
         string groupId, string artifactId, string version, byte[] bytes)
+        => SeedMavenProxyArtifactForOrgAsync(_orgId, groupId, artifactId, version, bytes);
+
+    // Same seed, against an arbitrary org — lets a test place the identical coordinate in two
+    // tenants and assert the serve path never crosses between them.
+    private async Task<(string pkgId, string verId, string blobKey)> SeedMavenProxyArtifactForOrgAsync(
+        string orgId, string groupId, string artifactId, string version, byte[] bytes)
     {
         string purlName = $"{groupId}:{artifactId}";
         string filename = $"{artifactId}-{version}.jar";
-        string blobKey = BlobKeys.Hosted(_orgId, "maven", groupId.Replace('.', '/') + "/" + artifactId, version, filename);
+        string blobKey = BlobKeys.Hosted(orgId, "maven", groupId.Replace('.', '/') + "/" + artifactId, version, filename);
 
         await _blobs.PutAsync(blobKey, new MemoryStream(bytes), CancellationToken.None);
 
@@ -259,13 +403,13 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
         await using var conn = await _db.OpenAsync();
         string? existingPkgId = await conn.ExecuteScalarAsync<string?>(
             "SELECT id FROM packages WHERE org_id = @org AND ecosystem = 'maven' AND purl_name = @purl",
-            new { org = _orgId, purl = purlName });
+            new { org = orgId, purl = purlName });
         string pkgId = existingPkgId ?? Guid.NewGuid().ToString("N");
         if (existingPkgId is null)
         {
             await conn.ExecuteAsync(
                 "INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy) VALUES (@id, @org, 'maven', @name, @purl, 1)",
-                new { id = pkgId, org = _orgId, name = purlName, purl = purlName });
+                new { id = pkgId, org = orgId, name = purlName, purl = purlName });
         }
         await conn.ExecuteAsync(
             """
@@ -463,6 +607,43 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Download_ArtifactOwnedByAnotherOrg_IsNotServed()
+    {
+        // maven_version_files has no org_id column of its own: a row is bound to a tenant only
+        // through package_versions → packages.org_id, and the serve query's `p.org_id = @orgId`
+        // predicate is the entire tenancy boundary. Seed the coordinate under the OTHER org only;
+        // acme requests the exact same GAV + filename. Dropping that predicate would serve the
+        // other tenant's bytes, so this pins it.
+        await SetAnonymousPullAsync(true);
+        byte[] otherBytes = Encoding.UTF8.GetBytes("other-tenant-jar");
+        await SeedMavenProxyArtifactForOrgAsync(_otherOrgId, "com.example", "tenantsplit", "1.0", otherBytes);
+
+        var ctl = BuildController();
+        var result = await ctl.Download("com/example/tenantsplit/1.0/tenantsplit-1.0.jar", CancellationToken.None);
+
+        // No local row for acme and no upstream configured ⇒ 404. Never the other org's file.
+        Assert.IsType<NotFoundResult>(result);
+    }
+
+    [Fact]
+    public async Task Download_SameCoordinateInTwoOrgs_ServesTheCallersOwnBytes()
+    {
+        // Both tenants hold the identical GAV + filename. The caller must get its OWN blob —
+        // a missing org predicate would let whichever row the LIMIT 1 happened to pick win.
+        await SetAnonymousPullAsync(true);
+        await SeedMavenProxyArtifactForOrgAsync(
+            _otherOrgId, "com.example", "shared", "2.0", Encoding.UTF8.GetBytes("other-tenant-bytes"));
+        await SeedMavenProxyArtifactAsync("com.example", "shared", "2.0", Encoding.UTF8.GetBytes("acme-bytes"));
+
+        var ctl = BuildController();
+        var result = await ctl.Download("com/example/shared/2.0/shared-2.0.jar", CancellationToken.None);
+
+        var file = Assert.IsType<FileStreamResult>(result);
+        using var reader = new StreamReader(file.FileStream);
+        Assert.Equal("acme-bytes", await reader.ReadToEndAsync(CancellationToken.None));
+    }
+
+    [Fact]
     public async Task Download_StoredChecksumSidecar_ReturnsHex()
     {
         await SetAnonymousPullAsync(true);
@@ -560,6 +741,206 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
         string expected = Convert.ToHexString(
             SHA1.HashData(Encoding.UTF8.GetBytes(body.Content!))).ToLowerInvariant();
         Assert.Equal(expected, sidecar.Content);
+    }
+
+    // ── Artifact-level metadata ordering over the shared cache plane ────────────
+
+    // Every version set below is chosen so that the lexically-greatest version is NOT the
+    // semantically-newest (1.9 sorts above 1.10 as text). That matters for what these tests
+    // prove: MAX(created_at) cannot separate rows that share the backfill's one timestamp, so
+    // the engine is free to return them in any order — and the order SQLite's plan happens to
+    // produce for this GROUP BY is the version text. A set whose text-max coincides with its
+    // version-max would therefore resolve <latest> correctly by accident and pin nothing.
+
+    [Fact]
+    public async Task Download_MetadataXml_CachePlaneVersionsTiedOnFirstCachedAt_LatestIsSemanticallyNewest()
+    {
+        // The upgraded-deployment shape: every proxied version of a coordinate carries the one
+        // shared timestamp the cache-plane backfill wrote. <latest>/<release> must resolve from
+        // the version set itself, and <versions> must come back in Maven's order — 1.10 is newer
+        // than 1.9, which is exactly what the tie order left behind gets backwards.
+        await SetAnonymousPullAsync(true);
+        foreach (string version in new[] { "1.10", "1.9", "1.0" })
+        {
+            await SeedMavenCachePlaneVersionAsync("com.example", "lib", version);
+        }
+        await AssertCachePlaneTimestampsTiedAsync("com.example:lib", 3);
+
+        var versioning = await ServedVersioningAsync(
+            BuildController(), "com/example/lib/maven-metadata.xml");
+
+        Assert.Equal("1.10", versioning.Element("latest")!.Value);
+        Assert.Equal("1.10", versioning.Element("release")!.Value);
+        Assert.Equal(
+            new[] { "1.0", "1.9", "1.10" },
+            versioning.Element("versions")!.Elements("version").Select(e => e.Value));
+    }
+
+    [Fact]
+    public async Task Download_MetadataXml_TiedFirstCachedAt_ResolvesFromTheVersionSetNotRowArrivalOrder()
+    {
+        // The byte-stability the ETag and the .sha1/.md5 sidecars rest on: the document must be a
+        // function of the version SET alone. Two coordinates get the same versions seeded in
+        // opposite orders; with one shared first_cached_at across every row, arrival order is the
+        // only thing separating them, and on a tie an engine is free to hand it straight back.
+        //
+        // The <versioning> equality is the weaker half of this test — SQLite's plan for this
+        // GROUP BY sorts by version text, so arrival order is already invisible to it and that
+        // assertion holds either way. The value it resolves to is the half that bites: a text
+        // order makes 1.9 the last row and therefore the reported <latest>.
+        await SetAnonymousPullAsync(true);
+        string[] versions = ["1.0", "1.9", "1.10"];
+        foreach (string version in versions)
+        {
+            await SeedMavenCachePlaneVersionAsync("com.example", "asc", version);
+        }
+        foreach (string version in versions.Reverse())
+        {
+            await SeedMavenCachePlaneVersionAsync("com.example", "desc", version);
+        }
+        await AssertCachePlaneTimestampsTiedAsync("com.example:asc", 3);
+        await AssertCachePlaneTimestampsTiedAsync("com.example:desc", 3);
+
+        // A fresh controller per request gets a fresh rendered-response cache, so each of these
+        // is a genuine rebuild off the rows rather than a cache hit.
+        var ascending = await ServedVersioningAsync(
+            BuildController(), "com/example/asc/maven-metadata.xml");
+        var descending = await ServedVersioningAsync(
+            BuildController(), "com/example/desc/maven-metadata.xml");
+
+        Assert.Equal(ascending.ToString(), descending.ToString());
+        Assert.Equal("1.10", ascending.Element("latest")!.Value);
+        Assert.Equal(versions, ascending.Element("versions")!.Elements("version").Select(e => e.Value));
+    }
+
+    [Fact]
+    public async Task Download_MetadataXml_SnapshotAndReleaseOnCachePlane_LatestTakesSnapshot_ReleaseSkipsIt()
+    {
+        // The <latest>/<release> distinction, over rows that all share one first_cached_at:
+        // <latest> takes the newest version outright (the in-flight 1.11-SNAPSHOT), <release>
+        // the newest non-SNAPSHOT (1.10). Under the leftover text order both land on 1.9.
+        await SetAnonymousPullAsync(true);
+        foreach (string version in new[] { "1.2", "1.9", "1.10", "1.11-SNAPSHOT" })
+        {
+            await SeedMavenCachePlaneVersionAsync("com.example", "lib", version);
+        }
+        await AssertCachePlaneTimestampsTiedAsync("com.example:lib", 4);
+
+        var versioning = await ServedVersioningAsync(
+            BuildController(), "com/example/lib/maven-metadata.xml");
+
+        Assert.Equal("1.11-SNAPSHOT", versioning.Element("latest")!.Value);
+        Assert.Equal("1.10", versioning.Element("release")!.Value);
+    }
+
+    [Fact]
+    public async Task Download_MetadataXml_MixedHostedAndTiedCachePlaneVersions_LatestSpansBothPlanes()
+    {
+        // Mixed shape, the one an upgraded deployment actually carries: part of the coordinate is
+        // published locally (package_versions, a real per-publish created_at) and part was proxied
+        // onto the cache plane by the backfill (every row on one shared timestamp). The two planes'
+        // timestamps are unrelated, so <latest> must come from the newest version across the union
+        // — never from whichever plane's rows happen to sort last, which is what hands back the
+        // hosted 1.5 here.
+        await SetAnonymousPullAsync(true);
+        await SeedMavenArtifactAsync("com.example", "lib", "1.5", Encoding.UTF8.GetBytes("hosted"));
+        foreach (string version in new[] { "1.10", "1.9", "1.0" })
+        {
+            await SeedMavenCachePlaneVersionAsync("com.example", "lib", version);
+        }
+        await AssertCachePlaneTimestampsTiedAsync("com.example:lib", 3);
+
+        var versioning = await ServedVersioningAsync(
+            BuildController(), "com/example/lib/maven-metadata.xml");
+
+        Assert.Equal("1.10", versioning.Element("latest")!.Value);
+        Assert.Equal("1.10", versioning.Element("release")!.Value);
+        // Both planes contribute; the union is deduplicated by version, not by plane. Compared as
+        // a set — the two planes' created_at values are unrelated, so which one leads the list is
+        // not a property this test should pin.
+        Assert.Equal(
+            new[] { "1.0", "1.5", "1.9", "1.10" },
+            versioning.Element("versions")!.Elements("version").Select(e => e.Value).Order(MavenVersionComparer.Instance));
+    }
+
+    // ── Version-level SNAPSHOT metadata (g/a/{version}/maven-metadata.xml) ──────
+
+    [Fact]
+    public async Task Download_SnapshotVersionMetadataXml_EmitsSnapshotAndSnapshotVersions()
+    {
+        // Pins the gap: a hosted SNAPSHOT publish with multiple timestamped builds must
+        // resolve g/a/1.0-SNAPSHOT/maven-metadata.xml to a document carrying the <snapshot>
+        // (newest build) and <snapshotVersions> (every timestamped file) blocks — not the
+        // artifact-level version list the old code returned at this path regardless of the
+        // requested version segment.
+        await SetAnonymousPullAsync(true);
+        await SeedMavenSnapshotFileAsync(
+            "com.example", "lib", "1.0-SNAPSHOT", "lib-1.0-20240101.120000-1.jar", "jar", null);
+        await SeedMavenSnapshotFileAsync(
+            "com.example", "lib", "1.0-SNAPSHOT", "lib-1.0-20240102.130000-2.jar", "jar", null);
+        await SeedMavenSnapshotFileAsync(
+            "com.example", "lib", "1.0-SNAPSHOT", "lib-1.0-20240102.130000-2.pom", "pom", null);
+
+        var ctl = BuildController();
+        var result = await ctl.Download("com/example/lib/1.0-SNAPSHOT/maven-metadata.xml", CancellationToken.None);
+
+        var content = Assert.IsType<ContentResult>(result);
+        Assert.StartsWith("application/xml", content.ContentType);
+        var doc = System.Xml.Linq.XDocument.Parse(content.Content!);
+        Assert.Equal("1.0-SNAPSHOT", doc.Root!.Element("version")!.Value);
+
+        var versioning = doc.Root.Element("versioning")!;
+        var snapshot = versioning.Element("snapshot")!;
+        Assert.Equal("20240102.130000", snapshot.Element("timestamp")!.Value);
+        Assert.Equal("2", snapshot.Element("buildNumber")!.Value);
+
+        // All three files carry a resolvable deploy timestamp, so all three are listed — the
+        // older build-1 jar stays resolvable by its own timestamped filename even though it's
+        // no longer the newest build the top-level <snapshot> element points at.
+        var snapshotVersions = versioning.Element("snapshotVersions")!.Elements("snapshotVersion").ToList();
+        Assert.Equal(3, snapshotVersions.Count);
+        Assert.Contains(snapshotVersions, sv => sv.Element("value")!.Value == "1.0-20240101.120000-1");
+        Assert.Contains(snapshotVersions, sv =>
+            sv.Element("value")!.Value == "1.0-20240102.130000-2" && sv.Element("extension")!.Value == "jar");
+        Assert.Contains(snapshotVersions, sv =>
+            sv.Element("value")!.Value == "1.0-20240102.130000-2" && sv.Element("extension")!.Value == "pom");
+    }
+
+    [Fact]
+    public async Task Download_SnapshotVersionMetadataXml_NoHostedFiles_Returns404()
+    {
+        await SetAnonymousPullAsync(true);
+        var ctl = BuildController();
+        var result = await ctl.Download("com/example/ghost/1.0-SNAPSHOT/maven-metadata.xml", CancellationToken.None);
+        Assert.IsType<NotFoundResult>(result);
+    }
+
+    [Fact]
+    public async Task Download_SnapshotVersionMetadataXml_IsIndependentOfArtifactLevelMetadata()
+    {
+        // The two "maven-metadata.xml" requests at different path depths must not collide in
+        // the rendered-response cache: the artifact-level document (all versions) and the
+        // version-level SNAPSHOT document (build list) are different content for the same
+        // groupId/artifactId. Fetching one first must not poison the other.
+        await SetAnonymousPullAsync(true);
+        await SeedMavenSnapshotFileAsync(
+            "com.example", "lib", "1.0-SNAPSHOT", "lib-1.0-20240101.120000-1.jar", "jar", null);
+
+        var ctl = BuildController();
+        var artifactLevel = Assert.IsType<ContentResult>(
+            await ctl.Download("com/example/lib/maven-metadata.xml", CancellationToken.None));
+        var versionLevel = Assert.IsType<ContentResult>(
+            await ctl.Download("com/example/lib/1.0-SNAPSHOT/maven-metadata.xml", CancellationToken.None));
+
+        var artifactDoc = System.Xml.Linq.XDocument.Parse(artifactLevel.Content!);
+        var versionDoc = System.Xml.Linq.XDocument.Parse(versionLevel.Content!);
+
+        // Artifact-level lists versions and has no <version>/<snapshot> element; version-level
+        // carries <version> and <snapshot> and no <versions> list.
+        Assert.NotNull(artifactDoc.Root!.Element("versioning")!.Element("versions"));
+        Assert.Null(artifactDoc.Root.Element("version"));
+        Assert.NotNull(versionDoc.Root!.Element("version"));
+        Assert.NotNull(versionDoc.Root.Element("versioning")!.Element("snapshot"));
     }
 
     // ── Block gate (vuln/manual gate on download) ───────────────────────
@@ -775,11 +1156,14 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
             new { org = _orgId });
         Assert.Equal(1, count);
 
-        // And the blob was written under the hosted key. The controller uses
+        // And the blob was written under the content-addressed hosted key. The controller uses
         // coords.PackageName.Replace(':','/') = "com.example/newlib" — the dotted group is
-        // kept intact (only the g:a separator becomes '/'). The blob layout differs from the
-        // request path layout (which uses g/a/v/file form) by design.
-        string blobKey = BlobKeys.Hosted(_orgId, "maven", "com.example/newlib", "1.0", "newlib-1.0.jar");
+        // kept intact (only the g:a separator becomes '/') — plus the artefact's SHA-256 as the
+        // penultimate segment, so bytes under a key always hash to the digest the key names.
+        // The blob layout differs from the request path layout (which uses g/a/v/file form) by design.
+        string sha256 = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        string blobKey = BlobKeys.HostedArtifact(
+            _orgId, "maven", "com.example/newlib", "1.0", sha256, "newlib-1.0.jar");
         Assert.True(await _blobs.ExistsAsync(blobKey, CancellationToken.None));
     }
 
@@ -866,8 +1250,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
         var status = Assert.IsType<ObjectResult>(result);
         Assert.Equal(413, status.StatusCode);
 
-        string blobKey = BlobKeys.Hosted(_orgId, "maven", "com.example/toobig", "1.0", "toobig-1.0.jar");
-        Assert.False(await _blobs.ExistsAsync(blobKey, CancellationToken.None));
+        Assert.DoesNotContain(await HostedKeysAsync(), k => k.EndsWith("/toobig-1.0.jar", StringComparison.Ordinal));
     }
 
     [Fact]

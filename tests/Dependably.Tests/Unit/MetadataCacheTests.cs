@@ -59,10 +59,19 @@ public sealed class MetadataCacheTests
         clock.Advance(TimeSpan.FromSeconds(61));
         handler.Enqueue(Reply.Ok("v2").Gated());
 
-        var tasks = Enumerable.Range(0, 6)
-            .Select(_ => Task.Run(() => client.GetOrFetchMetadataAsync(Url)))
-            .ToArray();
-        await Task.Delay(50);
+        // Invoke all 6 callers directly (not via Task.Run), one after another, without awaiting
+        // in between. GetOrFetchMetadataAsync's synchronous prologue — the stale-cache check, the
+        // (synchronously-completing fake) validator check, and the in-flight map registration
+        // inside SingleFlightMetadataAsync — runs to completion on THIS thread before its first
+        // real suspension point, so each call has already registered by the time it returns a
+        // pending Task. Deterministic by construction: no thread pool scheduling, no signal, no
+        // margin.
+        var tasks = new Task<UpstreamMetadataResponse>[6];
+        for (int i = 0; i < tasks.Length; i++)
+        {
+            tasks[i] = client.GetOrFetchMetadataAsync(Url);
+        }
+
         handler.ReleaseGate();
         var results = await Task.WhenAll(tasks);
 
@@ -233,6 +242,35 @@ public sealed class MetadataCacheTests
 
         Assert.Equal("a-v2", a.BodyAsString());   // refreshed
         Assert.Equal("b-v1", b.BodyAsString());   // served stale
+    }
+
+    [Fact]
+    public async Task DifferentAuthHeaders_SameUrl_DoNotShareCachedBody()
+    {
+        var handler = new ScriptedHandler();
+        var clock = TestTime.Frozen();
+        var (client, _) = Build(handler, clock, ttlSeconds: 3600);
+
+        // Two orgs configure a Settings->Proxy upstream at the same private-registry URL. Org A
+        // holds valid credentials; org B has none (or different creds). Org A's authenticated body
+        // must never satisfy org B's request off the shared-singleton TTL cache.
+        handler.Enqueue(Reply.Ok("org-a-private"));
+        var a = await client.GetOrFetchMetadataAsync(Url, authorizationHeader: "Bearer org-a-token");
+        Assert.Equal("org-a-private", a.BodyAsString());
+        Assert.Equal(1, handler.CallCount);
+
+        // Well within the 3600s TTL: a URL-only cache key would serve org A's cached body here
+        // with no upstream call. Keying on the credential hash forces a fresh fetch for org B.
+        handler.Enqueue(Reply.Ok("org-b-public"));
+        var b = await client.GetOrFetchMetadataAsync(Url, authorizationHeader: null);
+        Assert.Equal("org-b-public", b.BodyAsString());
+        Assert.Equal(2, handler.CallCount);
+
+        // A third caller reusing org A's exact credentials still shares A's cached entry — the
+        // isolation is per-credential, not per-request.
+        var aWarm = await client.GetOrFetchMetadataAsync(Url, authorizationHeader: "Bearer org-a-token");
+        Assert.Equal("org-a-private", aWarm.BodyAsString());
+        Assert.Equal(2, handler.CallCount);
     }
 
     // ── Edge master-reachability recording ──────────────────────────────────────

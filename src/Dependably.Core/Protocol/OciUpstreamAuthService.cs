@@ -275,10 +275,16 @@ public sealed class OciUpstreamAuthService : IDisposable
             }
 
             // Community edition: ECR GetAuthorizationToken integration is not yet implemented.
-            // Configure AuthType=Basic with a GetAuthorizationToken-derived password in the meantime.
+            // The API layer already rejects aws_ecr at configuration time, so this path is only
+            // reachable for a row created out of band (e.g. seeded by enterprise tooling or a
+            // future migration). Refuse rather than fall back to an anonymous request: an
+            // anonymous pull against a private ECR repository would either 401 in a way that
+            // masks the real unsupported-auth-type cause, or silently succeed against a
+            // repository whose access policy is broader than the operator expects.
             _logger.LogWarning(
                 "ECR auth requires AWS SDK integration. Configure AuthType=Basic with a GetAuthorizationToken-derived password as a workaround.");
-            return null;
+            throw new OciUnauthorizedException(
+                $"AWS ECR auth is not implemented for upstream {upstream.Host}; refusing rather than falling back to anonymous.");
         }
         finally
         {

@@ -23,6 +23,7 @@
   import Upload from './pages/Upload.svelte'
   import Vulnerabilities from './pages/Vulnerabilities.svelte'
   import Quarantine from './pages/Quarantine.svelte'
+  import Risk from './pages/Risk.svelte'
   import LicensePolicy from './pages/LicensePolicy.svelte'
   import Lookup from './pages/Lookup.svelte'
   import Dashboard from './pages/Dashboard.svelte'
@@ -225,6 +226,8 @@
         <Vulnerabilities />
       {:else if $route.page === 'quarantine'}
         <Quarantine />
+      {:else if $route.page === 'risk'}
+        <Risk />
       {:else if $route.page === 'license-policy'}
         <LicensePolicy />
       {:else if $route.page === 'lookup'}

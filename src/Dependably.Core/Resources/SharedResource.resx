@@ -289,6 +289,14 @@
     <value>Must be 'pending', 'approved', or 'denied'.</value>
     <comment>422 detail for the quarantine state filter. The quoted values are API literals.</comment>
   </data>
+  <data name="error.risk.reasonInvalid" xml:space="preserve">
+    <value>Must be 'blocklisted' or 'unknown'.</value>
+    <comment>422 detail for the license-risk reason filter. The quoted values are API literals.</comment>
+  </data>
+  <data name="error.activity.sinceInvalid" xml:space="preserve">
+    <value>Must be '24h', '7d', '30d', or '90d'.</value>
+    <comment>422 detail for the activity feed's time-window filter. The quoted values are API literals.</comment>
+  </data>
   <data name="error.quarantine.decisionInvalid" xml:space="preserve">
     <value>Must be 'approved', 'denied', or 'pending'.</value>
     <comment>422 detail for a quarantine decision. The quoted values are API literals.</comment>
@@ -461,6 +469,124 @@
     <value>Slack test message failed: {0}</value>
     <comment>422 detail. {0} = the underlying HTTP/network error message.</comment>
   </data>
+  <data name="error.alert.slackTestFailedGeneric" xml:space="preserve">
+    <value>Slack test message failed. Check the server logs for details.</value>
+    <comment>422 detail for the org alert-settings/slack test send. Deliberately omits the underlying exception message, which can leak internal host/SSRF-guard details to the org admin driving the test send; the exception is logged server-side instead.</comment>
+  </data>
+  <data name="error.email.masterKeyRequired" xml:space="preserve">
+    <value>DEPENDABLY_MASTER_KEY must be configured to store an SMTP password at rest.</value>
+    <comment>422 detail returned when an email-config PUT supplies a password with no master key configured. DEPENDABLY_MASTER_KEY is an environment variable name - keep it verbatim.</comment>
+  </data>
+  <data name="error.email.invalidFrom" xml:space="preserve">
+    <value>Must be a valid email address.</value>
+    <comment>422 detail for the fromAddress field on the email-config PUT.</comment>
+  </data>
+  <data name="error.email.invalidSecurity" xml:space="preserve">
+    <value>Must be 'starttls', 'ssl', or 'none'.</value>
+    <comment>422 detail for the security field on the email-config PUT. The quoted values are API literals.</comment>
+  </data>
+  <data name="error.email.invalidPort" xml:space="preserve">
+    <value>Must be between 1 and 65535.</value>
+    <comment>422 detail for the port field on the email-config PUT.</comment>
+  </data>
+  <data name="error.email.notConfigured" xml:space="preserve">
+    <value>Email delivery is not enabled or the SMTP transport is not fully configured.</value>
+    <comment>422 detail when testing email delivery with no complete SMTP transport configured.</comment>
+  </data>
+  <data name="error.email.testFailed" xml:space="preserve">
+    <value>Test email failed: {0}</value>
+    <comment>422 detail. {0} = the underlying SMTP/network error message.</comment>
+  </data>
+  <data name="error.email.testFailedGeneric" xml:space="preserve">
+    <value>Test email failed. Check the server logs for details.</value>
+    <comment>422 detail for the instance-level, system-level, and org-level email-config test-send endpoints. Deliberately omits the underlying exception message, which can leak internal hostnames/ports/TLS details to whoever is driving the test send; the exception is logged server-side instead.</comment>
+  </data>
+  <data name="error.email.invalidRecipient" xml:space="preserve">
+    <value>All recipients must be valid email addresses.</value>
+    <comment>422 detail for the emailRecipients field on the org alert-settings/email PUT when any entry fails to parse.</comment>
+  </data>
+  <data name="error.email.tooManyRecipients" xml:space="preserve">
+    <value>At most 20 recipients are allowed.</value>
+    <comment>422 detail for the emailRecipients field on the org alert-settings/email PUT. 20 is the API-enforced cap.</comment>
+  </data>
+  <data name="error.email.hostBlocked" xml:space="preserve">
+    <value>SMTP host resolves to a blocked IP range.</value>
+    <comment>422 detail for the emailSmtpHost field on the org alert-settings/email PUT when the host is an IP literal in a blocked SSRF range.</comment>
+  </data>
+  <data name="email.test.subject" xml:space="preserve">
+    <value>Dependably SMTP test</value>
+    <comment>Subject line of the test email sent by the email-config test-send endpoints.</comment>
+  </data>
+  <data name="email.test.body" xml:space="preserve">
+    <value>This is a test message from Dependably confirming your SMTP configuration is working.
+</value>
+    <comment>Plain-text body of the test email sent by the email-config test-send endpoints.</comment>
+  </data>
+  <data name="error.system.slackMasterKeyRequired" xml:space="preserve">
+    <value>DEPENDABLY_MASTER_KEY must be configured to store a Slack webhook URL at rest.</value>
+    <comment>422 detail. DEPENDABLY_MASTER_KEY is an environment variable name - keep it verbatim.</comment>
+  </data>
+  <data name="error.system.slackNotConfigured" xml:space="preserve">
+    <value>Operator Slack delivery is not enabled or no webhook URL is configured for this instance.</value>
+    <comment>422 detail when testing operator Slack delivery with no webhook configured.</comment>
+  </data>
+  <data name="error.system.slackTestFailed" xml:space="preserve">
+    <value>Slack test message failed: {0}</value>
+    <comment>422 detail. {0} = the underlying HTTP/network error message.</comment>
+  </data>
+  <data name="error.system.slackTestFailedGeneric" xml:space="preserve">
+    <value>Slack test message failed. Check the server logs for details.</value>
+    <comment>422 detail for the operator-realm slack-config test send. Deliberately omits the underlying exception message, which can leak internal host/SSRF-guard details to the system_admin driving the test send; the exception is logged server-side instead.</comment>
+  </data>
+  <data name="system.slack.tenantCreated" xml:space="preserve">
+    <value>Dependably [system]: tenant '{0}' created by {1}</value>
+    <comment>Operator-Slack message template for tenant.created. {0} = tenant slug, {1} = actor email.</comment>
+  </data>
+  <data name="system.slack.tenantDeleted" xml:space="preserve">
+    <value>Dependably [system]: tenant '{0}' deleted by {1}</value>
+    <comment>Operator-Slack message template for tenant.deleted. {0} = tenant slug, {1} = actor email.</comment>
+  </data>
+  <data name="system.slack.tenantRestored" xml:space="preserve">
+    <value>Dependably [system]: tenant '{0}' restored by {1}</value>
+    <comment>Operator-Slack message template for tenant.restored. {0} = tenant slug, {1} = actor email.</comment>
+  </data>
+  <data name="system.slack.tenantStatusChanged" xml:space="preserve">
+    <value>Dependably [system]: tenant '{0}' status changed by {1}</value>
+    <comment>Operator-Slack message template for tenant.status_changed. {0} = tenant slug, {1} = actor email.</comment>
+  </data>
+  <data name="system.slack.tenantHardDeleted" xml:space="preserve">
+    <value>Dependably [system]: tenant '{0}' hard-deleted (retention grace period expired)</value>
+    <comment>Operator-Slack message template for tenant.hard_deleted, raised by the retention sweep with no actor. {0} = tenant slug.</comment>
+  </data>
+  <data name="system.slack.adminCreated" xml:space="preserve">
+    <value>Dependably [system]: operator account created by {0}</value>
+    <comment>Operator-Slack message template for system_admin.admin_created. {0} = actor email.</comment>
+  </data>
+  <data name="system.slack.adminDeleted" xml:space="preserve">
+    <value>Dependably [system]: operator account deleted by {0}</value>
+    <comment>Operator-Slack message template for system_admin.admin_deleted. {0} = actor email.</comment>
+  </data>
+  <data name="system.slack.genericEvent" xml:space="preserve">
+    <value>Dependably [system]: {0}</value>
+    <comment>Fallback operator-Slack message template for an action with no dedicated template. {0} = the raw audit-log action string.</comment>
+  </data>
+  <data name="system.slack.actorUnknown" xml:space="preserve">
+    <value>an unknown operator</value>
+    <comment>Fallback actor phrase substituted into the operator-Slack message templates when the raising event carried no actor id.</comment>
+  </data>
+  <data name="email.alert.subject" xml:space="preserve">
+    <value>Dependably alert: {0}</value>
+    <comment>Subject line of an alert-delivery email sent by the email delivery queue. {0} = the alert title, stripped of CR/LF by the caller before formatting.</comment>
+  </data>
+  <data name="email.alert.body" xml:space="preserve">
+    <value>{0}
+
+{1}
+
+View this alert in the Dependably Alerts settings.
+</value>
+    <comment>Plain-text body of an alert-delivery email. {0} = the alert title, {1} = the alert detail (empty when the alert carries no additional detail). Keep the blank lines and the trailing newline.</comment>
+  </data>
   <data name="error.lookup.nameRequired" xml:space="preserve">
     <value>name is required.</value>
     <comment>422 detail for GET /api/v1/lookup when the name query parameter is missing. 'name' is the API literal query-parameter name.</comment>
@@ -480,10 +606,6 @@
   <data name="error.lookup.versionRequired" xml:space="preserve">
     <value>version is required for ecosystem '{0}'.</value>
     <comment>422 detail for GET /api/v1/lookup when no version was given and the ecosystem has no "latest" to resolve against (Go, Cargo, or an air-gapped org/instance). {0} = the ecosystem name (API literal).</comment>
-  </data>
-  <data name="error.lookup.packageNotFound" xml:space="preserve">
-    <value>Package or version not found upstream.</value>
-    <comment>404 detail for GET /api/v1/lookup when the upstream registry was reachable but does not know the requested package/version.</comment>
   </data>
   <data name="error.lookup.upstreamUnavailable" xml:space="preserve">
     <value>The upstream registry for '{0}' is temporarily unavailable. Try again shortly.</value>

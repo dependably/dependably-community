@@ -12,7 +12,15 @@ namespace Dependably.Tests.Unit;
 /// must enqueue into the writer's channel and return without touching the DB; the
 /// hosted-service drainer must batch the rows into a single INSERT pass.
 /// </summary>
+// Attaches a MeterListener filtered only by DependablyMeter.MeterName + instrument name and
+// asserts exact counts — must run alone against the process-wide static meter. Also races
+// Integration.ActivityWriterPostgresTests, which deliberately overflows the same writer and
+// increments the same dropped counter — that class stays in [Collection("LivePostgres")] for
+// its shared-Postgres-schema concern, so LivePostgresCollection carries
+// DisableParallelization = true too, which keeps the two collections mutually exclusive.
+// See MeterSensitiveCollection.
 [Trait("Category", "Unit")]
+[Collection("MeterSensitive")]
 public sealed class ActivityWriterTests : IAsyncLifetime
 {
     private readonly TestMetadataStore _db = new();

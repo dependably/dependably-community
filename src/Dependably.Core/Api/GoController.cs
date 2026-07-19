@@ -3,6 +3,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.Text;
 using System.Text.Json;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Caching;
 using Dependably.Protocol;
 using Dependably.Security;
 using Dependably.Storage;
@@ -301,16 +302,14 @@ public sealed class GoController : OrgScopedControllerBase
         string orgId, string module, string version, string ext,
         OrgSettings? settings, TokenRecord? token, CancellationToken ct)
     {
-        var invalidModule = ValidateModulePath(module);
-        if (invalidModule is not null)
+        if (ValidateModulePath(module) is { } moduleError)
         {
-            return invalidModule;
+            return BadRequest($"Invalid module path: {moduleError}");
         }
 
-        var versionResult = PathSafeValidator.Validate(version, "version");
-        if (!versionResult.IsValid)
+        if (UpstreamSegmentError(version) is { } versionError)
         {
-            return BadRequest($"Invalid version: {versionResult.Message}");
+            return BadRequest($"Invalid version: {versionError}");
         }
 
         string blobKey = BlobKeys.Go(orgId, module, version, ext);
@@ -373,74 +372,11 @@ public sealed class GoController : OrgScopedControllerBase
 
         foreach (var source in upstreamBases)
         {
-            string upstreamUrl = $"{source.Url}/{upstreamPath}";
-            try
+            var result = await TryFetchFromSourceAsync(
+                orgId, module, version, ext, token, blobKey, upstreamPath, source, ct);
+            if (result is not null)
             {
-                var (stream, isHit) = await _svc.Upstream.GetOrFetchStreamAsync(
-                    blobKey,
-                    upstreamUrl,
-                    checksumSpec: null,
-                    ecosystem: "golang",
-                    orgId: orgId,
-                    purl: PurlNormalizer.Golang(module, version),
-                    ct: ct,
-                    authorizationHeader: source.AuthorizationHeader);
-
-                _ = isHit; // cache-hit is already handled above; this is always a miss path
-
-                if (ext == "zip")
-                {
-                    // Record the version in the catalogue for the .zip (primary artifact).
-                    await RecordVersionAsync(orgId, module, ct);
-                    // Record the proxy fetch into the shared cache index so the eviction
-                    // pipeline and vulnerability-response query can see it.
-                    string? cacheArtifactId = await RecordZipCacheAccessAsync(orgId, module, version, blobKey, upstreamUrl, ct);
-                    if (cacheArtifactId is not null)
-                    {
-                        // Go modules carry no license metadata in .info/.mod, so the module's own
-                        // LICENSE-file text is the only proxy-side signal. Best-effort: extraction
-                        // never fails or delays the response streamed below.
-                        await TryExtractAndStoreGoLicenseAsync(cacheArtifactId, blobKey, orgId, module, version, ct);
-                    }
-                }
-
-                await _svc.Audit.LogActivityAsync(
-                    orgId, "golang", PurlNormalizer.Golang(module, version),
-                    ext == "zip" ? "first_fetch" : "download",
-                    token?.UserId,
-                    sourceIp: HttpContext.GetNormalizedRemoteIp(),
-                    ct: ct);
-
-                Response.Headers["X-Cache"] = "MISS";
-                return File(stream, ContentTypeFor(ext));
-            }
-            catch (ChecksumException)
-            {
-                _svc.Logger.LogWarning(
-                    "Checksum mismatch fetching golang {Module}@{Version}.{Ext} from {UpstreamBase}",
-                    module, version, ext, source.Url);
-                return StatusCode(StatusCodes.Status502BadGateway, "Upstream checksum verification failed.");
-            }
-            catch (UpstreamResponseTooLargeException)
-            {
-                _svc.Logger.LogWarning(
-                    "Upstream response too large fetching golang {Module}@{Version}.{Ext} from {UpstreamBase}",
-                    module, version, ext, source.Url);
-                return StatusCode(StatusCodes.Status502BadGateway, "Upstream response exceeded size limit.");
-            }
-            catch (HttpRequestException ex)
-            {
-                // 404 from upstream means not found at this registry; try the next one.
-                if (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
-                {
-                    continue;
-                }
-
-                _svc.Logger.LogWarning(
-                    ex,
-                    "HTTP error fetching golang {Module}@{Version}.{Ext} from {UpstreamBase}: {ExceptionType}",
-                    module, version, ext, source.Url, ex.GetType().Name);
-                return StatusCode(StatusCodes.Status502BadGateway, "Upstream fetch failed.");
+                return result;
             }
         }
 
@@ -448,19 +384,125 @@ public sealed class GoController : OrgScopedControllerBase
     }
 
     /// <summary>
+    /// Attempts the fetch against a single upstream source. Returns the response to serve to the
+    /// client (success or a mapped failure status), or <c>null</c> when this source 404'd and the
+    /// caller should fall through to the next one.
+    /// </summary>
+    private async Task<IActionResult?> TryFetchFromSourceAsync(
+        string orgId, string module, string version, string ext, TokenRecord? token,
+        string blobKey, string upstreamPath, UpstreamSource source, CancellationToken ct)
+    {
+        string upstreamUrl = $"{source.Url}/{upstreamPath}";
+        try
+        {
+            var (stream, isHit) = await _svc.Upstream.GetOrFetchStreamAsync(
+                blobKey,
+                upstreamUrl,
+                checksumSpec: null,
+                ecosystem: "golang",
+                orgId: orgId,
+                purl: PurlNormalizer.Golang(module, version),
+                ct: ct,
+                authorizationHeader: source.AuthorizationHeader);
+
+            _ = isHit; // cache-hit is already handled above; this is always a miss path
+
+            if (ext == "zip")
+            {
+                // Record the version in the catalogue for the .zip (primary artifact).
+                await RecordVersionAsync(orgId, module, ct);
+                // Record the proxy fetch into the shared cache index so the eviction pipeline
+                // and vulnerability-response query can see it. Throws
+                // ProxyCatalogueUnavailableException when the cache plane cannot take the row —
+                // caught below and answered 503 rather than serving an ungateable .zip.
+                string cacheArtifactId = await RecordZipFirstFetchOrRefuseAsync(
+                    orgId, module, version, blobKey, upstreamUrl, stream, ct);
+
+                // Go modules carry no license metadata in .info/.mod, so the module's own
+                // LICENSE-file text is the only proxy-side signal. Best-effort: extraction
+                // never fails or delays the response streamed below.
+                await TryExtractAndStoreGoLicenseAsync(cacheArtifactId, blobKey, orgId, module, version, ct);
+            }
+
+            await _svc.Audit.LogActivityAsync(
+                orgId, "golang", PurlNormalizer.Golang(module, version),
+                ext == "zip" ? "first_fetch" : "download",
+                token?.UserId,
+                sourceIp: HttpContext.GetNormalizedRemoteIp(),
+                ct: ct);
+
+            Response.Headers["X-Cache"] = "MISS";
+            return File(stream, ContentTypeFor(ext));
+        }
+        catch (ChecksumException)
+        {
+            _svc.Logger.LogWarning(
+                "Checksum mismatch fetching golang {Module}@{Version}.{Ext} from {UpstreamBase}",
+                module, version, ext, source.Url);
+            return StatusCode(StatusCodes.Status502BadGateway, "Upstream checksum verification failed.");
+        }
+        catch (UpstreamResponseTooLargeException)
+        {
+            _svc.Logger.LogWarning(
+                "Upstream response too large fetching golang {Module}@{Version}.{Ext} from {UpstreamBase}",
+                module, version, ext, source.Url);
+            return StatusCode(StatusCodes.Status502BadGateway, "Upstream response exceeded size limit.");
+        }
+        catch (ProxyCatalogueUnavailableException)
+        {
+            // The .zip could not be recorded on the cache plane, so it could not be gated — and
+            // an artefact the registry cannot vouch for is not served. 503, never 404: the
+            // module exists upstream, we just could not admit it. Not a per-upstream failure,
+            // so the walk stops here instead of retrying the next source.
+            _svc.Logger.LogWarning(
+                "Cache plane unavailable recording golang {Module}@{Version}.zip for org {OrgId}; refusing the fetch.",
+                module, version, orgId);
+            return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                "Module could not be recorded on the cache plane; retry.");
+        }
+        catch (HttpRequestException ex)
+        {
+            // 404 from upstream means not found at this registry; try the next one.
+            if (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                return null;
+            }
+
+            _svc.Logger.LogWarning(
+                ex,
+                "HTTP error fetching golang {Module}@{Version}.{Ext} from {UpstreamBase}: {ExceptionType}",
+                module, version, ext, source.Url, ex.GetType().Name);
+            return StatusCode(StatusCodes.Status502BadGateway, "Upstream fetch failed.");
+        }
+    }
+
+    /// <summary>
+    /// One path segment safe to bang-encode into the upstream proxy URL. Uses the '%'-banning
+    /// ValidateUpstreamSegment (not Validate): the module/version are composed into the upstream
+    /// URL via EncodeBangEncoding, which passes '%' through untouched, and the {**path} catch-all
+    /// leaves %2F/%2E undecoded — so a percent-encoded traversal would otherwise reach the
+    /// upstream and be decoded to '../' there, invisible to the host-only SSRF guard. Returns the
+    /// failing rule's message, or null when the segment is safe.
+    /// </summary>
+    internal static string? UpstreamSegmentError(string value)
+    {
+        var r = PathSafeValidator.ValidateUpstreamSegment(value, "segment");
+        return r.IsValid ? null : r.Message;
+    }
+
+    /// <summary>
     /// Validates each segment of a Go module path. Go module paths contain '/' so each
     /// segment is validated individually (split on '/'), the same way Maven validates its
-    /// multi-part coordinates. Returns a 400 result on the first invalid segment, null when
-    /// the whole path is valid.
+    /// multi-part coordinates. Returns the first invalid segment's message, null when the
+    /// whole path is valid.
     /// </summary>
-    private BadRequestObjectResult? ValidateModulePath(string module)
+    internal static string? ValidateModulePath(string module)
     {
         foreach (string seg in module.Split('/'))
         {
-            var r = PathSafeValidator.Validate(seg, "module");
-            if (!r.IsValid)
+            if (UpstreamSegmentError(seg) is { } error)
             {
-                return BadRequest($"Invalid module path: {r.Message}");
+                return error;
             }
         }
         return null;
@@ -474,10 +516,9 @@ public sealed class GoController : OrgScopedControllerBase
     /// </summary>
     private async Task<IActionResult> ServeVersionListAsync(string orgId, string module, CancellationToken ct)
     {
-        var invalidModule = ValidateModulePath(module);
-        if (invalidModule is not null)
+        if (ValidateModulePath(module) is { } moduleError)
         {
-            return invalidModule;
+            return BadRequest($"Invalid module path: {moduleError}");
         }
 
         var versions = await _svc.Packages.ListVersionsForGoModuleAsync(orgId, module, ct);
@@ -495,10 +536,9 @@ public sealed class GoController : OrgScopedControllerBase
     private async Task<IActionResult> ServeLatestAsync(
         string orgId, string module, OrgSettings? settings, CancellationToken ct)
     {
-        var invalidModule = ValidateModulePath(module);
-        if (invalidModule is not null)
+        if (ValidateModulePath(module) is { } moduleError)
         {
-            return invalidModule;
+            return BadRequest($"Invalid module path: {moduleError}");
         }
 
         // Return the latest locally-cached version if we have one.
@@ -555,14 +595,14 @@ public sealed class GoController : OrgScopedControllerBase
                 inflightKey,
                 _ => new Lazy<Task<string?>>(
                     () => FetchLatestJsonAsync(upstreamUrl, _svc.HttpClientFactory, _svc.Logger, module, upstreamBase, authorizationHeader, CancellationToken.None)));
-            try
-            {
-                return await lazy.Value.WaitAsync(ct);
-            }
-            finally
-            {
-                _svc.LatestCoordinator.InFlight.TryRemove(inflightKey, out _);
-            }
+
+            // Removes exactly this (key, lazy) pair once the shared fetch genuinely completes —
+            // success or failure — never when this caller's WaitAsync(ct) below merely detaches
+            // early. Attaching per-caller (instead of once at registration) is safe: TryRemove is
+            // idempotent, so joiners' redundant continuations are no-ops.
+            InFlightCoordination.ScheduleRemoval(_svc.LatestCoordinator.InFlight, inflightKey, lazy);
+
+            return await lazy.Value.WaitAsync(ct);
         }
         catch (HttpRequestException ex)
         {
@@ -645,10 +685,13 @@ public sealed class GoController : OrgScopedControllerBase
     /// proxy artefact and is always recorded. The checksum and size come from the
     /// <c>package_versions</c> row (org-scoped via the join on <c>packages</c>), matching the
     /// Cargo lookup shape. A missing row records empty/zero bytes-metadata — the coordinate
-    /// and blob key are what the eviction pipeline keys on. Best-effort: the recorder swallows
-    /// its own failures and the lookup failure is caught so serving is never broken. Returns the
-    /// recorded <c>cache_artifact</c> id (null when the recorder declined) so the miss path can
-    /// key a subsequent license-extraction pass to the same row.
+    /// and blob key are what the eviction pipeline keys on. Returns the recorded
+    /// <c>cache_artifact</c> id, or null when the recorder declined after its retry.
+    ///
+    /// A null return means different things to the two callers. On a cache HIT it is best-effort:
+    /// the row the serve path already gated against exists, and only this access tick is lost, so
+    /// the bytes still serve. On a first fetch it means the artefact was never admitted to the
+    /// cache plane at all — <see cref="RecordZipFirstFetchOrRefuseAsync"/> turns that into a 503.
     /// </summary>
     private async Task<string?> RecordZipCacheAccessAsync(
         string orgId, string module, string version, string blobKey, string? upstreamUrl, CancellationToken ct)
@@ -683,7 +726,7 @@ public sealed class GoController : OrgScopedControllerBase
                     provenanceSigner: null,
                     upstreamIntegrityValue: contentHash.Length > 0 ? contentHash : null,
                     upstreamIntegrityAlgorithm: contentHash.Length > 0 ? "sha256" : null,
-                    ct);
+                    ct: ct);
             }
             else
             {
@@ -692,6 +735,37 @@ public sealed class GoController : OrgScopedControllerBase
         }
 
         return cacheArtifactId;
+    }
+
+    /// <summary>
+    /// First-fetch wrapper around <see cref="RecordZipCacheAccessAsync"/> that enforces the
+    /// fail-closed cache-plane contract: a .zip the cache plane could not take a row for is one the
+    /// registry cannot scan, gate, or reclaim, so it is refused rather than served ungated.
+    ///
+    /// The staged blob is discarded along with the refusal. The content-addressed ecosystems
+    /// (npm/PyPI/NuGet/Maven) get this for free — their cache-hit lookup is row-driven, so no row
+    /// means the next request re-enters the fetch path and re-refuses. A Go .zip is keyed by its
+    /// module coordinate and found by probing the blob store, so a staged-but-unrecorded blob would
+    /// answer every later request from cache with no row to gate against — a permanent bypass, not
+    /// a deferred one. Dropping it restores the same "no row ⇒ miss ⇒ re-fetch ⇒ re-record"
+    /// invariant, at the cost of re-downloading once the plane is back.
+    /// </summary>
+    /// <exception cref="ProxyCatalogueUnavailableException">The recorder returned no row.</exception>
+    private async Task<string> RecordZipFirstFetchOrRefuseAsync(
+        string orgId, string module, string version, string blobKey, string upstreamUrl,
+        Stream staged, CancellationToken ct)
+    {
+        string? cacheArtifactId = await RecordZipCacheAccessAsync(orgId, module, version, blobKey, upstreamUrl, ct);
+        if (cacheArtifactId is not null)
+        {
+            return cacheArtifactId;
+        }
+
+        // Release the caller's handle on the staged blob before deleting it — the response is
+        // never written, and an open handle blocks the delete on stores that lock by handle.
+        await staged.DisposeAsync();
+        await _svc.Blobs.DeleteAsync(BlobKeys.StoreKey(blobKey), ct);
+        throw new ProxyCatalogueUnavailableException("golang", module, version);
     }
 
     /// <summary>
@@ -738,6 +812,7 @@ public sealed class GoController : OrgScopedControllerBase
         {
             await using var conn = await _svc.Db.OpenAsync(ct);
             var row = await Dapper.SqlMapper.QuerySingleOrDefaultAsync<GoVersionBytesRow>(conn,
+                // plane-ok: PV-plane .zip metadata first; global-plane proxy .zips resolve via the sibling cache_artifact SELECT below.
                 """
                 SELECT pv.checksum_sha256 AS ChecksumSha256,
                        pv.size_bytes AS SizeBytes
@@ -827,7 +902,8 @@ public sealed class GoLatestFetchCoordinator
 {
     /// <summary>
     /// In-flight @latest fetch tasks keyed by <c>{orgId}:{module}:{upstreamBase}</c>.
-    /// Entries are removed by the caller's finally block once the task resolves.
+    /// Entries are removed via <see cref="InFlightCoordination.ScheduleRemoval{TResult}"/> once
+    /// the registering entry's shared task completes — not by an individual caller detaching.
     /// </summary>
     public ConcurrentDictionary<string, Lazy<Task<string?>>> InFlight { get; } = new();
 }

@@ -110,20 +110,52 @@ public static class ManagementServiceCollectionExtensions
     }
 
     /// <summary>
-    /// Registers <see cref="SmtpInviteMailer"/> as <see cref="IInviteMailer"/> when
-    /// <c>SMTP_HOST</c> is configured. Returns without registering anything when SMTP is
-    /// absent — the controller checks whether the service is available via
-    /// <see cref="IServiceProvider"/> resolution and falls back to the link-in-response path.
+    /// Registers <see cref="SmtpInviteMailer"/> as <see cref="IInviteMailer"/> — always, since
+    /// delivery availability is now a DB-backed runtime signal (<see cref="InstanceSmtpConfig"/>)
+    /// rather than a startup-time env var. The controller calls
+    /// <see cref="IInviteMailer.IsAvailableAsync"/> per request and falls back to the
+    /// link-in-response path when the instance SMTP config is disabled or unconfigured.
     /// </summary>
-    public static IServiceCollection AddDependablyInviteMailer(
-        this IServiceCollection services, IConfiguration config)
+    public static IServiceCollection AddDependablyInviteMailer(this IServiceCollection services)
     {
-        if (string.IsNullOrWhiteSpace(config["SMTP_HOST"]))
-        {
-            return services;
-        }
-
         services.AddSingleton<IInviteMailer, SmtpInviteMailer>();
+        return services;
+    }
+
+    /// <summary>
+    /// Registers the instance-level SMTP config resolver and the MailKit-backed sender that is
+    /// the single choke point for every outbound email. Always registered (unlike
+    /// <see cref="AddDependablyInviteMailer"/>): the config resolves to <c>Configured = false</c>
+    /// when <c>instance_settings</c> has no <c>smtp_*</c> rows, so callers (test-send endpoints,
+    /// future alert-email delivery) treat an unconfigured instance as a no-op/400 rather than a
+    /// missing service.
+    ///
+    /// <see cref="SmtpMailSender"/> gets its own <see cref="SsrfConnectCallback"/> instance (not
+    /// shared with the webhook/Slack/SIEM HTTP clients — MailKit has no
+    /// <c>SocketsHttpHandler</c> to hang a shared callback off) so it can resolve and vet the SMTP
+    /// host itself before dialing. Reuses <c>WEBHOOK_ALLOW_PRIVATE</c> — an SMTP relay host is a
+    /// caller-supplied value with the same SSRF risk profile as a generic outbound webhook.
+    /// </summary>
+    public static IServiceCollection AddDependablyMail(this IServiceCollection services, IConfiguration config)
+    {
+        bool allowPrivate = string.Equals(
+            config["WEBHOOK_ALLOW_PRIVATE"], "true", StringComparison.OrdinalIgnoreCase);
+        Func<System.Net.IPAddress, bool> ssrfPredicate = allowPrivate
+            ? SsrfGuard.IsBlockedIpExcludingPrivate
+            : SsrfGuard.IsBlockedIp;
+        var smtpConnectGuard = new SsrfConnectCallback(ssrfPredicate);
+
+        services.AddSingleton(_ => new SmtpMailSender(smtpConnectGuard));
+        services.AddSingleton(sp =>
+        {
+            var orgs = sp.GetRequiredService<OrgRepository>();
+            var time = sp.GetRequiredService<TimeProvider>();
+            return new InstanceSmtpConfig(orgs.GetInstanceSettingAsync, time);
+        });
+
+        // Resolves an org's effective alert-email transport (own SMTP or instance inheritance);
+        // depends on both the per-org settings repository and the instance resolver above.
+        services.AddSingleton<EffectiveEmailConfigResolver>();
         return services;
     }
 
@@ -190,10 +222,14 @@ public static class ManagementServiceCollectionExtensions
     }
 
     /// <summary>
-    /// Registers the per-org alert Slack delivery channel: <see cref="SlackWebhookClient"/> (typed
+    /// Registers the per-org alert delivery channels: <see cref="SlackWebhookClient"/> (typed
     /// HTTP client with SSRF connect-time guard, same posture as
-    /// <see cref="WebhookDeliveryClient"/>), <see cref="AlertSlackQueue"/> as both the
-    /// <see cref="IAlertNotifier"/> singleton and a hosted background service.
+    /// <see cref="WebhookDeliveryClient"/>) backing <see cref="AlertSlackQueue"/>, and
+    /// <see cref="AlertEmailQueue"/> (over the <see cref="AddDependablyMail"/> registrations).
+    /// Both queues are registered as singletons and hosted background services in their own
+    /// right; <see cref="CompositeAlertNotifier"/> fans out to both and is the only
+    /// <see cref="IAlertNotifier"/> the container exposes, so <c>AlertService</c> (Core) never
+    /// depends on either concrete queue.
     ///
     /// Reuses <c>WEBHOOK_ALLOW_PRIVATE</c> (default <c>false</c>) — a Slack webhook URL is a
     /// tenant-user-supplied value with the same SSRF risk profile as a generic outbound webhook.
@@ -217,8 +253,34 @@ public static class ManagementServiceCollectionExtensions
             });
 
         services.AddSingleton<AlertSlackQueue>();
-        services.AddSingleton<IAlertNotifier>(sp => sp.GetRequiredService<AlertSlackQueue>());
         services.AddHostedService(sp => sp.GetRequiredService<AlertSlackQueue>());
+
+        services.AddSingleton<AlertEmailQueue>();
+        services.AddHostedService(sp => sp.GetRequiredService<AlertEmailQueue>());
+
+        services.AddSingleton<IAlertNotifier>(sp => new CompositeAlertNotifier(
+            [sp.GetRequiredService<AlertSlackQueue>(), sp.GetRequiredService<AlertEmailQueue>()],
+            sp.GetRequiredService<ILogger<CompositeAlertNotifier>>()));
+        return services;
+    }
+
+    /// <summary>
+    /// Registers the operator-realm (system-scope) Slack event notifier:
+    /// <see cref="Dependably.Infrastructure.SystemEvents.SystemSlackQueue"/> as both the
+    /// <see cref="Dependably.Infrastructure.SystemEvents.ISystemEventNotifier"/> singleton and a
+    /// hosted service. Reuses the <see cref="SlackWebhookClient"/> typed-client registration from
+    /// <see cref="AddDependablyAlertNotifier"/> (same SSRF posture) rather than registering a
+    /// second one — the two queues share the delivery client but never share a DI seam beyond it
+    /// (see the type's isolation doc comment). Always registered, including in single mode: the
+    /// producers are apex-gated system endpoints, so the queue is simply inert there.
+    /// </summary>
+    public static IServiceCollection AddDependablySystemEventNotifier(this IServiceCollection services)
+    {
+        services.AddSingleton<Dependably.Infrastructure.SystemEvents.SystemSlackQueue>();
+        services.AddSingleton<Dependably.Infrastructure.SystemEvents.ISystemEventNotifier>(
+            sp => sp.GetRequiredService<Dependably.Infrastructure.SystemEvents.SystemSlackQueue>());
+        services.AddHostedService(
+            sp => sp.GetRequiredService<Dependably.Infrastructure.SystemEvents.SystemSlackQueue>());
         return services;
     }
 }

@@ -33,8 +33,10 @@ dotnet build
 # Run all unit/compliance/security tests
 dotnet test --filter "Category!=Integration"
 
-# Run a single test class
-dotnet test --filter "ClassName=PurlNormalizerTests"
+# Run a single test class. `ClassName=` matches nothing under this repo's test setup and still
+# exits 0 ("No test matches the given testcase filter"), so a typo or a stale name reads as green
+# — always confirm a non-zero test count in the output, never exit code alone.
+dotnet test --filter "FullyQualifiedName~PurlNormalizerTests"
 
 # Run all tests including integration (self-contained — uses in-memory blob + SQLite stores)
 dotnet test

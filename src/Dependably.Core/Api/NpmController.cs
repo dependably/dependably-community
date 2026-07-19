@@ -19,6 +19,7 @@ public class NpmController : ControllerBase
     private readonly NpmTarballHandler _tarball;
     private readonly NpmPublishHandler _publish;
     private readonly NpmDistTagsHandler _distTags;
+    private readonly NpmAuditHandler _audit;
 
     public NpmController(NpmControllerHandlers svc)
     {
@@ -26,6 +27,7 @@ public class NpmController : ControllerBase
         _tarball = svc.Tarball;
         _publish = svc.Publish;
         _distTags = svc.DistTags;
+        _audit = svc.Audit;
     }
 
     // ── npm client probes ────────────────────────────────────────────────────
@@ -167,6 +169,7 @@ public class NpmController : ControllerBase
     [HttpPut("/npm/-/package/{pkg}/dist-tags/{tag}")]
     [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [RequireCapability(Capabilities.PublishNpm)]
+    [EnableRateLimiting("push")]
     public Task<IActionResult> PutDistTag(string pkg, string tag, CancellationToken ct)
         => _distTags.PutDistTagAsync(HttpContext, CurrentTenantId(), pkg, tag, ct);
 
@@ -174,6 +177,7 @@ public class NpmController : ControllerBase
     [HttpPut("/npm/-/package/@{scope}/{pkg}/dist-tags/{tag}")]
     [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [RequireCapability(Capabilities.PublishNpm)]
+    [EnableRateLimiting("push")]
     public Task<IActionResult> PutScopedDistTag(string scope, string pkg, string tag, CancellationToken ct)
         => _distTags.PutScopedDistTagAsync(HttpContext, CurrentTenantId(), scope, pkg, tag, ct);
 
@@ -181,6 +185,7 @@ public class NpmController : ControllerBase
     [HttpDelete("/npm/-/package/{pkg}/dist-tags/{tag}")]
     [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [RequireCapability(Capabilities.PublishNpm)]
+    [EnableRateLimiting("push")]
     public Task<IActionResult> DeleteDistTag(string pkg, string tag, CancellationToken ct)
         => _distTags.DeleteDistTagAsync(HttpContext, CurrentTenantId(), pkg, tag, ct);
 
@@ -188,6 +193,7 @@ public class NpmController : ControllerBase
     [HttpDelete("/npm/-/package/@{scope}/{pkg}/dist-tags/{tag}")]
     [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [RequireCapability(Capabilities.PublishNpm)]
+    [EnableRateLimiting("push")]
     public Task<IActionResult> DeleteScopedDistTag(string scope, string pkg, string tag, CancellationToken ct)
         => _distTags.DeleteScopedDistTagAsync(HttpContext, CurrentTenantId(), scope, pkg, tag, ct);
 
@@ -204,6 +210,7 @@ public class NpmController : ControllerBase
     [HttpDelete("/npm/{pkg}/-rev/{rev}")]
     [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [RequireCapability(Capabilities.YankNpm)]
+    [EnableRateLimiting("push")]
     public Task<IActionResult> Unpublish(string pkg, string rev, CancellationToken ct)
         => _publish.UnpublishAsync(HttpContext, CurrentTenantId(), pkg, rev, ct);
 
@@ -211,8 +218,50 @@ public class NpmController : ControllerBase
     [HttpDelete("/npm/@{scope}/{pkg}/-rev/{rev}")]
     [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [RequireCapability(Capabilities.YankNpm)]
+    [EnableRateLimiting("push")]
     public Task<IActionResult> UnpublishScoped(string scope, string pkg, string rev, CancellationToken ct)
         => _publish.UnpublishScopedAsync(HttpContext, CurrentTenantId(), scope, pkg, rev, ct);
+
+    /// <summary>
+    /// PUT /npm/{pkg}/-rev/{rev} — per-version unpublish prune (<c>npm unpublish pkg@version</c>).
+    /// Modern npm reads the packument's <c>_rev</c>, then PUTs the pruned packument here; the body's
+    /// <c>versions</c> map is the set to keep, so any stored uploaded version absent from it is
+    /// unpublished. The tarball DELETE-with-rev below is the flow's final step.
+    /// </summary>
+    [HttpPut("/npm/{pkg}/-rev/{rev}")]
+    [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
+    [RequireCapability(Capabilities.YankNpm)]
+    [EnableRateLimiting("push")]
+    public Task<IActionResult> UnpublishRevPut(string pkg, string rev, CancellationToken ct)
+        => _publish.UnpublishRevPutAsync(HttpContext, CurrentTenantId(), pkg, rev, ct);
+
+    /// <summary>PUT /npm/@{scope}/{pkg}/-rev/{rev} — scoped per-version unpublish prune.</summary>
+    [HttpPut("/npm/@{scope}/{pkg}/-rev/{rev}")]
+    [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
+    [RequireCapability(Capabilities.YankNpm)]
+    [EnableRateLimiting("push")]
+    public Task<IActionResult> UnpublishRevPutScoped(string scope, string pkg, string rev, CancellationToken ct)
+        => _publish.UnpublishRevPutScopedAsync(HttpContext, CurrentTenantId(), scope, pkg, rev, ct);
+
+    /// <summary>
+    /// DELETE /npm/{pkg}/-/{file}/-rev/{rev} — final step of per-version unpublish. The rev-PUT
+    /// prune already removed the version, so this is normally an idempotent confirmation; it still
+    /// removes the version defensively when a client skips the PUT step.
+    /// </summary>
+    [HttpDelete("/npm/{pkg}/-/{file}/-rev/{rev}")]
+    [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
+    [RequireCapability(Capabilities.YankNpm)]
+    [EnableRateLimiting("push")]
+    public Task<IActionResult> DeleteTarballWithRev(string pkg, string file, string rev, CancellationToken ct)
+        => _publish.DeleteTarballWithRevAsync(HttpContext, CurrentTenantId(), pkg, file, rev, ct);
+
+    /// <summary>DELETE /npm/@{scope}/{pkg}/-/{file}/-rev/{rev} — scoped tarball unpublish step.</summary>
+    [HttpDelete("/npm/@{scope}/{pkg}/-/{file}/-rev/{rev}")]
+    [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
+    [RequireCapability(Capabilities.YankNpm)]
+    [EnableRateLimiting("push")]
+    public Task<IActionResult> DeleteTarballWithRevScoped(string scope, string pkg, string file, string rev, CancellationToken ct)
+        => _publish.DeleteTarballWithRevScopedAsync(HttpContext, CurrentTenantId(), scope, pkg, file, rev, ct);
 
     // ── Search endpoint ──────────────────────────────────────────────────────
 
@@ -230,6 +279,32 @@ public class NpmController : ControllerBase
         CancellationToken ct = default)
         => _distTags.SearchAsync(HttpContext, CurrentTenantId(), text, size, from, ct);
 
+    // ── Audit endpoints ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// POST /npm/-/npm/v1/security/advisories/bulk — bulk advisory lookup sent by
+    /// <c>npm install</c>/<c>npm audit</c>. This is the only audit request npm 7 and newer make.
+    /// The request names the caller's own dependency tree and the response projects this
+    /// registry's OSV-backed advisory data into npm's advisory wire format; packages with no
+    /// advisories are omitted from the response entirely.
+    /// </summary>
+    [HttpPost("/npm/-/npm/v1/security/advisories/bulk")]
+    [EnableRateLimiting("metadata")]
+    public Task<IActionResult> AuditAdvisoriesBulk(CancellationToken ct)
+        => _audit.BulkAdvisoriesAsync(HttpContext, CurrentTenantId(), ct);
+
+    /// <summary>
+    /// POST /npm/-/npm/v1/security/audits/quick — the npm 6-era quick-audit shape. Deliberate
+    /// 501: every supported npm version audits through the bulk-advisories endpoint above and
+    /// never calls this one. The route stays so an npm 6 client gets an explicit refusal it can
+    /// degrade to a warning on, rather than an unexplained 404.
+    /// </summary>
+    [HttpPost("/npm/-/npm/v1/security/audits/quick")]
+    [EnableRateLimiting("metadata")]
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822:Mark members as static",
+        Justification = "MVC route action: ASP.NET Core does not invoke static action methods.")]
+    public IActionResult AuditQuick() => NpmAuditHandler.QuickAuditNotImplemented();
+
     // ── Shared utilities ─────────────────────────────────────────────────────
 
     private string CurrentTenantId() =>
@@ -242,4 +317,5 @@ public sealed record NpmControllerHandlers(
     NpmProtocol.NpmPackumentHandler Packument,
     NpmProtocol.NpmTarballHandler Tarball,
     NpmProtocol.NpmPublishHandler Publish,
-    NpmProtocol.NpmDistTagsHandler DistTags);
+    NpmProtocol.NpmDistTagsHandler DistTags,
+    NpmProtocol.NpmAuditHandler Audit);

@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Text;
 using Dependably.Infrastructure;
 using Dependably.Protocol;
 using Dependably.Security;
@@ -22,14 +23,25 @@ internal static class NpmSharedHelpers
     }
 
     /// <summary>
-    /// True when a decoded npm name ("name" or "@scope/name") is safe to embed in an
-    /// upstream proxy URL: at most two path segments, each passing
-    /// <see cref="PathSafeValidator.ValidateUpstreamSegment"/>.
+    /// True when a decoded npm name is both well-shaped and safe to embed in an upstream proxy
+    /// URL. npm admits exactly two shapes: unscoped ("name", no separator at all) and scoped
+    /// ("@scope/name", exactly one separator with a non-empty scope after the '@'). Every
+    /// segment must additionally pass <see cref="PathSafeValidator.ValidateUpstreamSegment"/>.
+    ///
+    /// The shape check is not cosmetic: a bare "@scope" with no name part is unresolvable, but
+    /// registry.npmjs.org answers it with 405, not 404. Forwarding it upstream would therefore
+    /// surface a caller's typo as an unhealthy-source signal (a lookup reports it as
+    /// upstream-unavailable rather than a bad name), so a malformed name is rejected here
+    /// before any upstream request is composed.
     /// </summary>
     internal static bool IsUpstreamSafeNpmName(string fullName)
     {
         string[] segments = fullName.Split('/');
-        return segments.Length <= 2 &&
+        bool shapeValid = fullName.StartsWith('@')
+            ? segments.Length == 2 && segments[0].Length > 1
+            : segments.Length == 1;
+
+        return shapeValid &&
             Array.TrueForAll(segments, s => PathSafeValidator.ValidateUpstreamSegment(s, "package").IsValid);
     }
 
@@ -73,4 +85,23 @@ internal static class NpmSharedHelpers
     }
 
     internal static string DecodeNpmName(string name) => NpmRouteHelper.DecodeRouteName(name);
+
+    /// <summary>
+    /// Computes a synthetic CouchDB-style packument revision (<c>_rev</c>) for a version set.
+    /// The npm unpublish flow reads the packument's <c>_rev</c>, then PUTs the pruned packument
+    /// to <c>/-rev/{_rev}</c> and DELETEs the tarball at <c>/-/{tarball}/-rev/{_rev}</c>. A
+    /// packument with no <c>_rev</c> makes the CLI resolve <c>undefined</c> and PUT to
+    /// <c>/-rev/undefined</c>, which never prunes the version, so the client reports success
+    /// while the version still lists. The value is <c>{count}-{digest}</c> — the number of
+    /// versions and a stable 12-hex-char SHA-256 digest of the sorted version keys — so it
+    /// changes whenever the advertised version set changes and matches the <c>N-hex</c> shape
+    /// real clients expect without persisting a revision counter.
+    /// </summary>
+    internal static string ComputeSyntheticRev(IEnumerable<string> versionKeys)
+    {
+        var sorted = versionKeys.OrderBy(v => v, StringComparer.Ordinal).ToList();
+        byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(string.Join('\n', sorted)));
+        string digest = Convert.ToHexString(hash)[..12].ToLowerInvariant();
+        return $"{sorted.Count}-{digest}";
+    }
 }

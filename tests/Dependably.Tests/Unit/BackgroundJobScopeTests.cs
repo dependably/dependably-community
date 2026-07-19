@@ -90,7 +90,12 @@ public sealed class BackgroundJobScopeTests : IAsyncLifetime
     {
         BackgroundJobScope.Services = new ServiceCollection().BuildServiceProvider();
         // The fire-and-forget write resolves the repo to null and returns — the repo-null
-        // branch must complete without throwing. Give the background write a beat to run.
+        // branch must complete without throwing. Its own try/catch swallows every exception
+        // (logging a warning instead), so no exception ever reaches this Record.ExceptionAsync
+        // regardless of timing — Assert.Null(ex) below does not depend on the delay below for
+        // correctness. The wait only widens the window for the fire-and-forget task to actually
+        // run so the repo-null branch gets exercised for coverage; it is deliberately generous
+        // rather than tuned tight, since there is no assertion racing it.
         var ex = await Record.ExceptionAsync(async () =>
         {
             using (var scope = BackgroundJobScope.Begin("orphan", "op", TimeProvider.System))
@@ -98,7 +103,7 @@ public sealed class BackgroundJobScopeTests : IAsyncLifetime
                 scope.Complete();
             }
 
-            await Task.Delay(150);
+            await Task.Delay(500);
         });
         Assert.Null(ex);
     }

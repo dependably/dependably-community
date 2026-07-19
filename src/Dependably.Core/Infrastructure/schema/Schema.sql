@@ -460,8 +460,9 @@ CREATE INDEX IF NOT EXISTS idx_quarantine_org_state ON quarantine(org_id, state,
 -- source_ref is type-specific: the quarantine row id for 'quarantine_new', or
 -- "vulnId:ecosystem:packageName" for 'vuln_severity' (one alert per advisory-per-package, not
 -- per version). state is a single shared active/dismissed flag — all admins in an org see and
--- dismiss the same list. slack_status/slack_error record the terminal outcome of the async Slack
--- delivery attempt; they never gate whether the alert itself is visible in the panel.
+-- dismiss the same list. slack_status/slack_error and email_status/email_error record the
+-- terminal outcome of the async Slack/email delivery attempts; they never gate whether the alert
+-- itself is visible in the panel.
 CREATE TABLE IF NOT EXISTS alert (
     id           TEXT PRIMARY KEY,
     org_id       TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -477,6 +478,8 @@ CREATE TABLE IF NOT EXISTS alert (
     dismissed_at TEXT,
     slack_status TEXT,           -- 'sent' | 'failed' | NULL (Slack off, or delivery not yet attempted)
     slack_error  TEXT,
+    email_status TEXT,           -- 'sent' | 'failed' | NULL (email off, or delivery not yet attempted)
+    email_error  TEXT,
     created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     UNIQUE (org_id, type, source_ref)
@@ -485,13 +488,16 @@ CREATE INDEX IF NOT EXISTS idx_alert_org_state ON alert(org_id, state, created_a
 CREATE INDEX IF NOT EXISTS idx_alert_dismissed_by ON alert(dismissed_by);
 
 -- One row per org holding the alert-raising toggles, the vulnerability severity floor, and the
--- optional Slack delivery channel. An absent row means the all-on/Slack-off defaults below —
--- there is no backfill migration; every org reads through the same default path via
--- AlertSettingsRepository. slack_webhook_url is envelope-encrypted at rest (enc:v1: prefix) and
--- requires DEPENDABLY_MASTER_KEY to be configured before it can be stored. The
--- slack_consecutive_failures/slack_failing_since/slack_last_error/slack_last_status columns
--- mirror webhook_subscription's failure-health model so AlertSlackQueue can reuse the same
--- auto-disable arithmetic (20 consecutive failures or 48h of sustained failure).
+-- optional Slack/email delivery channels. An absent row means the all-on/Slack-off/email-off
+-- defaults below — there is no backfill migration; every org reads through the same default path
+-- via AlertSettingsRepository. slack_webhook_url and email_smtp_password are envelope-encrypted at
+-- rest (enc:v1: prefix) and require DEPENDABLY_MASTER_KEY to be configured before they can be
+-- stored. The slack_consecutive_failures/slack_failing_since/slack_last_error/slack_last_status
+-- columns (and their email_ counterparts) mirror webhook_subscription's failure-health model so
+-- AlertSlackQueue/AlertEmailQueue can reuse the same auto-disable arithmetic (20 consecutive
+-- failures or 48h of sustained failure). email_inherit_instance selects between the instance-level
+-- SMTP transport (InstanceSmtpConfig) and the org's own email_smtp_* columns; when neither
+-- resolves, the channel is silently disabled rather than falling back to some other transport.
 CREATE TABLE IF NOT EXISTS alert_settings (
     org_id                     TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
     quarantine_alerts_enabled INTEGER NOT NULL DEFAULT 1,
@@ -504,6 +510,20 @@ CREATE TABLE IF NOT EXISTS alert_settings (
     slack_consecutive_failures INTEGER NOT NULL DEFAULT 0,
     slack_failing_since        TEXT,
     slack_last_error           TEXT,
+    email_enabled              INTEGER NOT NULL DEFAULT 0,
+    email_inherit_instance     INTEGER NOT NULL DEFAULT 1,
+    email_recipients           TEXT,   -- comma-separated; NULL/empty = nothing sends
+    email_smtp_host            TEXT,
+    email_smtp_port            INTEGER,
+    email_smtp_security        TEXT CHECK (email_smtp_security IS NULL OR email_smtp_security IN ('starttls', 'ssl', 'none')),
+    email_smtp_username        TEXT,
+    email_smtp_password        TEXT,   -- enc:v1: envelope-encrypted; write-only, NULL when unset
+    email_smtp_from            TEXT,
+    email_last_delivery_at     TEXT,
+    email_last_status          TEXT,   -- 'ok' | 'failed' | NULL (never delivered)
+    email_consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    email_failing_since        TEXT,
+    email_last_error           TEXT,
     created_at                 TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     updated_at                 TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
@@ -1253,22 +1273,6 @@ CREATE TABLE IF NOT EXISTS tenant_artifact_access (
 );
 CREATE INDEX IF NOT EXISTS idx_tenant_artifact_access_artifact
     ON tenant_artifact_access (cache_artifact_id);
-
--- Cached upstream metadata documents (npm package JSON, PyPI simple HTML, NuGet registration).
--- Global; freshness via TTL revalidation. Per-tenant access is not tracked (low privacy value;
--- metadata changes too often for the tracking to be useful).
-CREATE TABLE IF NOT EXISTS metadata_cache (
-    id              TEXT PRIMARY KEY,
-    ecosystem       TEXT NOT NULL,
-    name            TEXT NOT NULL,
-    document        TEXT NOT NULL,             -- JSON or HTML, ecosystem-dependent
-    content_hash    TEXT NOT NULL,
-    upstream_etag   TEXT,
-    fetched_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-    expires_at      TEXT NOT NULL,
-    UNIQUE (ecosystem, name)
-);
-CREATE INDEX IF NOT EXISTS idx_metadata_cache_expires ON metadata_cache (expires_at);
 
 -- Typed audit events. Replaces the freeform audit_log gradually; both tables coexist.
 -- Envelope columns are required; payload is JSON. event_id is UUIDv7.

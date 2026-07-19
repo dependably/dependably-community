@@ -211,6 +211,42 @@
         <target>Activité</target>
       </segment>
     </unit>
+    <unit id="activity.window.24h">
+      <segment state="translated">
+        <source>Last 24 hours</source>
+        <target>Dernières 24 heures</target>
+      </segment>
+    </unit>
+    <unit id="activity.window.30d">
+      <segment state="translated">
+        <source>Last 30 days</source>
+        <target>Les 30 derniers jours</target>
+      </segment>
+    </unit>
+    <unit id="activity.window.7d">
+      <segment state="translated">
+        <source>Last 7 days</source>
+        <target>Les 7 derniers jours</target>
+      </segment>
+    </unit>
+    <unit id="activity.window.90d">
+      <segment state="translated">
+        <source>Last 90 days</source>
+        <target>Les 90 derniers jours</target>
+      </segment>
+    </unit>
+    <unit id="activity.window.all">
+      <segment state="translated">
+        <source>All time</source>
+        <target>Depuis toujours</target>
+      </segment>
+    </unit>
+    <unit id="activity.window.label">
+      <segment state="translated">
+        <source>Time window</source>
+        <target>Période</target>
+      </segment>
+    </unit>
     <unit id="admin.orgs.columns.created">
       <segment state="translated">
         <source>Created</source>
@@ -1963,18 +1999,6 @@
         <target>Saisissez un paquet ci-dessus pour vérifier son statut de maliciel, de CVE et de licence avant de l&apos;ajouter.</target>
       </segment>
     </unit>
-    <unit id="lookup.errors.notFound">
-      <segment state="translated">
-        <source>That package or version was not found upstream.</source>
-        <target>Ce paquet ou cette version est introuvable en amont.</target>
-      </segment>
-    </unit>
-    <unit id="lookup.errors.unavailable">
-      <segment state="translated">
-        <source>The upstream registry is temporarily unavailable. Try again shortly.</source>
-        <target>Le registre en amont est temporairement indisponible. Réessayez sous peu.</target>
-      </segment>
-    </unit>
     <unit id="lookup.form.ecosystem">
       <segment state="translated">
         <source>Ecosystem</source>
@@ -2081,6 +2105,24 @@
       <segment state="translated">
         <source>Malware</source>
         <target>Maliciel</target>
+      </segment>
+    </unit>
+    <unit id="lookup.notFound.hint">
+      <segment state="translated">
+        <source>{registry} has no package named {name}. Check the spelling.</source>
+        <target>{registry} n&apos;a aucun paquet nommé {name}. Vérifiez l&apos;orthographe.</target>
+      </segment>
+    </unit>
+    <unit id="lookup.notFound.title">
+      <segment state="translated">
+        <source>No such package</source>
+        <target>Aucun paquet de ce nom</target>
+      </segment>
+    </unit>
+    <unit id="lookup.notFound.versionHint">
+      <segment state="translated">
+        <source>{registry} has no {name} at version {version}.</source>
+        <target>{registry} n&apos;a pas {name} en version {version}.</target>
       </segment>
     </unit>
     <unit id="lookup.title">
@@ -2303,6 +2345,12 @@
       <segment state="translated">
         <source>Quarantine</source>
         <target>Quarantaine</target>
+      </segment>
+    </unit>
+    <unit id="nav.risk">
+      <segment state="translated">
+        <source>Risk</source>
+        <target>Risque</target>
       </segment>
     </unit>
     <unit id="nav.settings">
@@ -3115,6 +3163,150 @@
         <target>Supprimer cet espace de noms réservé? Les noms correspondants redeviennent récupérables depuis l&apos;amont.</target>
       </segment>
     </unit>
+    <unit id="risk.columns.latest">
+      <segment state="translated">
+        <source>Latest upstream</source>
+        <target>Dernière en amont</target>
+      </segment>
+    </unit>
+    <unit id="risk.columns.licenses">
+      <segment state="translated">
+        <source>Licenses</source>
+        <target>Licences</target>
+      </segment>
+    </unit>
+    <unit id="risk.columns.origin">
+      <segment state="translated">
+        <source>Origin</source>
+        <target>Origine</target>
+      </segment>
+    </unit>
+    <unit id="risk.columns.package">
+      <segment state="translated">
+        <source>Package</source>
+        <target>Paquet</target>
+      </segment>
+    </unit>
+    <unit id="risk.columns.published">
+      <segment state="translated">
+        <source>Published</source>
+        <target>Publiée</target>
+      </segment>
+    </unit>
+    <unit id="risk.columns.reason">
+      <segment state="translated">
+        <source>Reason</source>
+        <target>Motif</target>
+      </segment>
+    </unit>
+    <unit id="risk.columns.version">
+      <segment state="translated">
+        <source>Version</source>
+        <target>Version</target>
+      </segment>
+    </unit>
+    <unit id="risk.columns.versionsBehind">
+      <segment state="translated">
+        <source>Behind</source>
+        <target>Retard</target>
+      </segment>
+    </unit>
+    <unit id="risk.empty.license">
+      <segment state="translated">
+        <source>No versions are at license risk.</source>
+        <target>Aucune version à risque de licence.</target>
+      </segment>
+    </unit>
+    <unit id="risk.empty.operational">
+      <segment state="translated">
+        <source>No versions are behind upstream by that margin.</source>
+        <target>Aucune version n&apos;accuse un tel retard sur l&apos;amont.</target>
+      </segment>
+    </unit>
+    <unit id="risk.filters.allEcosystems">
+      <segment state="translated">
+        <source>All ecosystems</source>
+        <target>Tous les écosystèmes</target>
+      </segment>
+    </unit>
+    <unit id="risk.filters.ecosystem">
+      <segment state="translated">
+        <source>Ecosystem</source>
+        <target>Écosystème</target>
+      </segment>
+    </unit>
+    <unit id="risk.intro.license">
+      <segment state="translated">
+        <source>Versions carrying a license on your blocklist, or with no license we could extract at all. Open a row to review the package and, if needed, block the version.</source>
+        <target>Versions dont la licence figure sur votre liste de blocage, ou dont aucune licence n&apos;a pu être extraite. Ouvrez une ligne pour examiner le paquet et, au besoin, bloquer la version.</target>
+      </segment>
+    </unit>
+    <unit id="risk.intro.operational">
+      <segment state="translated">
+        <source>Versions that have fallen at least {threshold} stable releases behind upstream. Open a row to review the package and, if needed, block the version.</source>
+        <target>Versions qui accusent un retard d&apos;au moins {threshold} versions stables sur l&apos;amont. Ouvrez une ligne pour examiner le paquet et, au besoin, bloquer la version.</target>
+      </segment>
+    </unit>
+    <unit id="risk.origin.proxy">
+      <segment state="translated">
+        <source>Proxied</source>
+        <target>Mandataire</target>
+      </segment>
+    </unit>
+    <unit id="risk.origin.uploaded">
+      <segment state="translated">
+        <source>Hosted</source>
+        <target>Hébergée</target>
+      </segment>
+    </unit>
+    <unit id="risk.reason.blocklisted">
+      <segment state="translated">
+        <source>Blocklisted</source>
+        <target>Sur la liste de blocage</target>
+      </segment>
+    </unit>
+    <unit id="risk.reason.unknown">
+      <segment state="translated">
+        <source>No license</source>
+        <target>Aucune licence</target>
+      </segment>
+    </unit>
+    <unit id="risk.reasonFilter.all">
+      <segment state="translated">
+        <source>All reasons</source>
+        <target>Tous les motifs</target>
+      </segment>
+    </unit>
+    <unit id="risk.summary.license">
+      <segment state="translated">
+        <source>{count} versions at license risk</source>
+        <target>{count} versions à risque de licence</target>
+      </segment>
+    </unit>
+    <unit id="risk.summary.operational">
+      <segment state="translated">
+        <source>{packages} packages · {versions} versions at least {threshold} behind</source>
+        <target>{packages} paquets · {versions} versions en retard d’au moins {threshold}</target>
+      </segment>
+    </unit>
+    <unit id="risk.tabs.license">
+      <segment state="translated">
+        <source>License risk</source>
+        <target>Risque de licence</target>
+      </segment>
+    </unit>
+    <unit id="risk.tabs.operational">
+      <segment state="translated">
+        <source>Operational risk</source>
+        <target>Risque opérationnel</target>
+      </segment>
+    </unit>
+    <unit id="risk.title">
+      <segment state="translated">
+        <source>Risk</source>
+        <target>Risque</target>
+      </segment>
+    </unit>
     <unit id="serviceTokens.columns.created">
       <segment state="translated">
         <source>Created</source>
@@ -3241,10 +3433,28 @@
         <target>Jeton créé — copiez-le maintenant, il ne sera plus affiché.</target>
       </segment>
     </unit>
+    <unit id="settings.alerts.emailEnabled">
+      <segment state="translated">
+        <source>Send alerts by email</source>
+        <target>Envoyer les alertes par courriel</target>
+      </segment>
+    </unit>
+    <unit id="settings.alerts.emailRecipients">
+      <segment state="translated">
+        <source>Recipients</source>
+        <target>Destinataires</target>
+      </segment>
+    </unit>
+    <unit id="settings.alerts.emailRecipientsHint">
+      <segment state="translated">
+        <source>Comma-separated email addresses. Empty means nothing sends. These addresses receive admin alert emails.</source>
+        <target>Adresses courriel séparées par des virgules. Vide signifie que rien n&apos;est envoyé. Ces adresses reçoivent les alertes d&apos;administration.</target>
+      </segment>
+    </unit>
     <unit id="settings.alerts.hint">
       <segment state="translated">
-        <source>Alerts fire on a new quarantine review item and on a vulnerability meeting the severity floor below. Slack delivery is optional and requires DEPENDABLY_MASTER_KEY to store the webhook URL.</source>
-        <target>Les alertes se déclenchent sur un nouvel élément en quarantaine et sur une vulnérabilité atteignant le seuil de gravité ci-dessous. La livraison Slack est facultative et nécessite DEPENDABLY_MASTER_KEY pour stocker l&apos;URL du webhook.</target>
+        <source>Alerts fire on a new quarantine review item and on a vulnerability meeting the severity floor below.</source>
+        <target>Les alertes se déclenchent sur un nouvel élément en quarantaine et sur une vulnérabilité atteignant le seuil de gravité ci-dessous.</target>
       </segment>
     </unit>
     <unit id="settings.alerts.minSeverity">
@@ -3259,6 +3469,12 @@
         <target>Seules les avis atteignant ou dépassant cette gravité déclenchent une alerte. Les avis sans note ne déclenchent jamais d&apos;alerte.</target>
       </segment>
     </unit>
+    <unit id="settings.alerts.pointer">
+      <segment state="translated">
+        <source>Delivery transports (webhooks, Slack, and the email SMTP server) are configured on the Integrations tab.</source>
+        <target>Les transports de livraison (webhooks, Slack et le serveur SMTP du courriel) se configurent dans l&apos;onglet Intégrations.</target>
+      </segment>
+    </unit>
     <unit id="settings.alerts.quarantineEnabled">
       <segment state="translated">
         <source>Alert on new quarantine items</source>
@@ -3269,54 +3485,6 @@
       <segment state="translated">
         <source>Alert center</source>
         <target>Centre d&apos;alertes</target>
-      </segment>
-    </unit>
-    <unit id="settings.alerts.slackEnabled">
-      <segment state="translated">
-        <source>Send alerts to Slack</source>
-        <target>Envoyer les alertes à Slack</target>
-      </segment>
-    </unit>
-    <unit id="settings.alerts.slackLastStatus">
-      <segment state="translated">
-        <source>Last Slack delivery: {status}</source>
-        <target>Dernière livraison Slack : {status}</target>
-      </segment>
-    </unit>
-    <unit id="settings.alerts.slackUrl">
-      <segment state="translated">
-        <source>Slack webhook URL</source>
-        <target>URL du webhook Slack</target>
-      </segment>
-    </unit>
-    <unit id="settings.alerts.slackUrlHint">
-      <segment state="translated">
-        <source>Incoming webhook URL from Slack. Requires DEPENDABLY_MASTER_KEY to store.</source>
-        <target>URL de webhook entrant de Slack. Nécessite DEPENDABLY_MASTER_KEY pour le stockage.</target>
-      </segment>
-    </unit>
-    <unit id="settings.alerts.slackUrlRotateHint">
-      <segment state="translated">
-        <source>Enter a new value to rotate the webhook URL. Leave blank to keep the current one.</source>
-        <target>Saisissez une nouvelle valeur pour renouveler l&apos;URL du webhook. Laissez vide pour conserver l&apos;URL actuelle.</target>
-      </segment>
-    </unit>
-    <unit id="settings.alerts.testFail">
-      <segment state="translated">
-        <source>Test message failed.</source>
-        <target>Échec du message de test.</target>
-      </segment>
-    </unit>
-    <unit id="settings.alerts.testOk">
-      <segment state="translated">
-        <source>Test message sent.</source>
-        <target>Message de test envoyé.</target>
-      </segment>
-    </unit>
-    <unit id="settings.alerts.testSend">
-      <segment state="translated">
-        <source>Send test message</source>
-        <target>Envoyer un message de test</target>
       </segment>
     </unit>
     <unit id="settings.alerts.vulnEnabled">
@@ -4187,6 +4355,378 @@
         <target>Limites et planifications à l&apos;échelle de l&apos;instance pour ce déploiement. En mode mono-locataire, le propriétaire est aussi l&apos;opérateur, donc elles sont gérées ici.</target>
       </segment>
     </unit>
+    <unit id="settings.instanceEmail.configured">
+      <segment state="translated">
+        <source>Configured</source>
+        <target>Configuré</target>
+      </segment>
+    </unit>
+    <unit id="settings.instanceEmail.enabled">
+      <segment state="translated">
+        <source>Enabled</source>
+        <target>Activé</target>
+      </segment>
+    </unit>
+    <unit id="settings.instanceEmail.from">
+      <segment state="translated">
+        <source>From address</source>
+        <target>Adresse d&apos;expédition</target>
+      </segment>
+    </unit>
+    <unit id="settings.instanceEmail.hint">
+      <segment state="translated">
+        <source>SMTP relay used to deliver org invite emails. Configure it once here; every invite send and the test button below use it.</source>
+        <target>Relais SMTP utilisé pour livrer les courriels d&apos;invitation d&apos;organisation. Configurez-le une seule fois ici ; chaque invitation envoyée et le bouton de test ci-dessous l&apos;utilisent.</target>
+      </segment>
+    </unit>
+    <unit id="settings.instanceEmail.host">
+      <segment state="translated">
+        <source>SMTP host</source>
+        <target>Hôte SMTP</target>
+      </segment>
+    </unit>
+    <unit id="settings.instanceEmail.masterKeyHint">
+      <segment state="translated">
+        <source>DEPENDABLY_MASTER_KEY must be configured before a password can be stored.</source>
+        <target>DEPENDABLY_MASTER_KEY doit être configuré avant de pouvoir enregistrer un mot de passe.</target>
+      </segment>
+    </unit>
+    <unit id="settings.instanceEmail.notConfigured">
+      <segment state="translated">
+        <source>Not configured</source>
+        <target>Non configuré</target>
+      </segment>
+    </unit>
+    <unit id="settings.instanceEmail.password">
+      <segment state="translated">
+        <source>Password</source>
+        <target>Mot de passe</target>
+      </segment>
+    </unit>
+    <unit id="settings.instanceEmail.passwordRotateHint">
+      <segment state="translated">
+        <source>A password is stored. Enter a new value to rotate it, or leave blank to keep the current one.</source>
+        <target>Un mot de passe est enregistré. Entrez une nouvelle valeur pour le remplacer, ou laissez vide pour conserver l&apos;actuel.</target>
+      </segment>
+    </unit>
+    <unit id="settings.instanceEmail.passwordSetHint">
+      <segment state="translated">
+        <source>Set a password to enable authenticated relay. Required unless security is None.</source>
+        <target>Définissez un mot de passe pour activer le relais authentifié. Requis sauf si la sécurité est « Aucune ».</target>
+      </segment>
+    </unit>
+    <unit id="settings.instanceEmail.port">
+      <segment state="translated">
+        <source>Port</source>
+        <target>Port</target>
+      </segment>
+    </unit>
+    <unit id="settings.instanceEmail.security">
+      <segment state="translated">
+        <source>Security</source>
+        <target>Sécurité</target>
+      </segment>
+    </unit>
+    <unit id="settings.instanceEmail.securityNone">
+      <segment state="translated">
+        <source>None</source>
+        <target>Aucune</target>
+      </segment>
+    </unit>
+    <unit id="settings.instanceEmail.securitySsl">
+      <segment state="translated">
+        <source>Implicit TLS (SSL)</source>
+        <target>TLS implicite (SSL)</target>
+      </segment>
+    </unit>
+    <unit id="settings.instanceEmail.securityStarttls">
+      <segment state="translated">
+        <source>STARTTLS</source>
+        <target>STARTTLS</target>
+      </segment>
+    </unit>
+    <unit id="settings.instanceEmail.testFail">
+      <segment state="translated">
+        <source>Test email failed.</source>
+        <target>Échec du courriel de test.</target>
+      </segment>
+    </unit>
+    <unit id="settings.instanceEmail.testOk">
+      <segment state="translated">
+        <source>Test email sent to the from address.</source>
+        <target>Courriel de test envoyé à l&apos;adresse d&apos;expédition.</target>
+      </segment>
+    </unit>
+    <unit id="settings.instanceEmail.testSend">
+      <segment state="translated">
+        <source>Send test email</source>
+        <target>Envoyer un courriel de test</target>
+      </segment>
+    </unit>
+    <unit id="settings.instanceEmail.title">
+      <segment state="translated">
+        <source>Instance email (SMTP)</source>
+        <target>Courriel de l&apos;instance (SMTP)</target>
+      </segment>
+    </unit>
+    <unit id="settings.instanceEmail.username">
+      <segment state="translated">
+        <source>Username</source>
+        <target>Nom d&apos;utilisateur</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.email.disabledPointer">
+      <segment state="translated">
+        <source>Email alerts are turned off — enable them on the Alerts tab.</source>
+        <target>Les alertes courriel sont désactivées — activez-les dans l&apos;onglet Alertes.</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.email.effectivelyDisabledInstance">
+      <segment state="translated">
+        <source>Email alerts are on but the instance SMTP transport isn&apos;t configured — nothing will send.</source>
+        <target>Les alertes courriel sont activées mais le transport SMTP de l&apos;instance n&apos;est pas configuré — rien ne sera envoyé.</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.email.effectivelyDisabledOwnTransport">
+      <segment state="translated">
+        <source>Email alerts are on but your own SMTP transport is incomplete — nothing will send.</source>
+        <target>Les alertes courriel sont activées mais votre transport SMTP est incomplet — rien ne sera envoyé.</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.email.effectivelyDisabledRecipients">
+      <segment state="translated">
+        <source>Email alerts are on but no recipients are configured on the Alerts tab — nothing will send.</source>
+        <target>Les alertes courriel sont activées mais aucun destinataire n&apos;est configuré dans l&apos;onglet Alertes — rien ne sera envoyé.</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.email.from">
+      <segment state="translated">
+        <source>From address</source>
+        <target>Adresse d&apos;expédition</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.email.hint">
+      <segment state="translated">
+        <source>SMTP transport for admin alert emails — the instance&apos;s or your own. Turn email alerts on and choose recipients on the Alerts tab.</source>
+        <target>Transport SMTP des courriels d&apos;alerte d&apos;administration — celui de l&apos;instance ou le vôtre. Activez les alertes courriel et choisissez les destinataires dans l&apos;onglet Alertes.</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.email.host">
+      <segment state="translated">
+        <source>SMTP host</source>
+        <target>Hôte SMTP</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.email.inheritHint">
+      <segment state="translated">
+        <source>Uncheck to configure your own SMTP server instead.</source>
+        <target>Décochez pour configurer votre propre serveur SMTP.</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.email.inheritInstance">
+      <segment state="translated">
+        <source>Use the instance&apos;s SMTP transport</source>
+        <target>Utiliser le transport SMTP de l&apos;instance</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.email.instanceConfigured">
+      <segment state="translated">
+        <source>Instance SMTP configured</source>
+        <target>SMTP de l&apos;instance configuré</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.email.instanceNotConfigured">
+      <segment state="translated">
+        <source>Instance SMTP not configured</source>
+        <target>SMTP de l&apos;instance non configuré</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.email.lastStatus">
+      <segment state="translated">
+        <source>Last email delivery: {status}</source>
+        <target>Dernière livraison de courriel : {status}</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.email.password">
+      <segment state="translated">
+        <source>Password</source>
+        <target>Mot de passe</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.email.passwordRotateHint">
+      <segment state="translated">
+        <source>Enter a new value to rotate the password. Leave blank to keep the current one.</source>
+        <target>Saisissez une nouvelle valeur pour renouveler le mot de passe. Laissez vide pour conserver l&apos;actuel.</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.email.passwordSetHint">
+      <segment state="translated">
+        <source>SMTP account password. Requires DEPENDABLY_MASTER_KEY to store.</source>
+        <target>Mot de passe du compte SMTP. Nécessite DEPENDABLY_MASTER_KEY pour le stockage.</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.email.port">
+      <segment state="translated">
+        <source>Port</source>
+        <target>Port</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.email.section">
+      <segment state="translated">
+        <source>Email</source>
+        <target>Courriel</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.email.security">
+      <segment state="translated">
+        <source>Security</source>
+        <target>Sécurité</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.email.securityNone">
+      <segment state="translated">
+        <source>None</source>
+        <target>Aucune</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.email.securitySsl">
+      <segment state="translated">
+        <source>SSL/TLS</source>
+        <target>SSL/TLS</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.email.securityStarttls">
+      <segment state="translated">
+        <source>STARTTLS</source>
+        <target>STARTTLS</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.email.testFail">
+      <segment state="translated">
+        <source>Test email failed.</source>
+        <target>Échec du courriel de test.</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.email.testHint">
+      <segment state="translated">
+        <source>Sends to the recipients configured on the Alerts tab.</source>
+        <target>Envoyé aux destinataires configurés dans l&apos;onglet Alertes.</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.email.testOk">
+      <segment state="translated">
+        <source>Test email sent.</source>
+        <target>Courriel de test envoyé.</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.email.testSend">
+      <segment state="translated">
+        <source>Send test email</source>
+        <target>Envoyer un courriel de test</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.email.username">
+      <segment state="translated">
+        <source>Username</source>
+        <target>Nom d&apos;utilisateur</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.hint">
+      <segment state="translated">
+        <source>Delivery channels for admin alerts (quarantine + vulnerability). Configure what fires on the Alerts tab.</source>
+        <target>Canaux de livraison des alertes d&apos;administration (quarantaine + vulnérabilité). Le déclenchement se configure dans l&apos;onglet Alertes.</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.masterKeyHint">
+      <segment state="translated">
+        <source>Requires DEPENDABLY_MASTER_KEY to be configured on this instance before a secret can be stored.</source>
+        <target>Nécessite que DEPENDABLY_MASTER_KEY soit configuré sur cette instance avant qu&apos;un secret puisse être stocké.</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.slack.consecutiveFailures">
+      <segment state="translated">
+        <source>({count} consecutive failures)</source>
+        <target>({count} échecs consécutifs)</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.slack.enabled">
+      <segment state="translated">
+        <source>Send alerts to Slack</source>
+        <target>Envoyer les alertes à Slack</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.slack.failingSince">
+      <segment state="translated">
+        <source>Failing since {since}</source>
+        <target>En échec depuis {since}</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.slack.lastStatus">
+      <segment state="translated">
+        <source>Last Slack delivery: {status}</source>
+        <target>Dernière livraison Slack : {status}</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.slack.testFail">
+      <segment state="translated">
+        <source>Test message failed.</source>
+        <target>Échec du message de test.</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.slack.testOk">
+      <segment state="translated">
+        <source>Test message sent.</source>
+        <target>Message de test envoyé.</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.slack.testSend">
+      <segment state="translated">
+        <source>Send test message</source>
+        <target>Envoyer un message de test</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.slack.url">
+      <segment state="translated">
+        <source>Slack webhook URL</source>
+        <target>URL du webhook Slack</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.slack.urlHint">
+      <segment state="translated">
+        <source>Incoming webhook URL from Slack. Requires DEPENDABLY_MASTER_KEY to store.</source>
+        <target>URL de webhook entrant de Slack. Nécessite DEPENDABLY_MASTER_KEY pour le stockage.</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.slack.urlRotateHint">
+      <segment state="translated">
+        <source>Enter a new value to rotate the webhook URL. Leave blank to keep the current one.</source>
+        <target>Saisissez une nouvelle valeur pour renouveler l&apos;URL du webhook. Laissez vide pour conserver l&apos;URL actuelle.</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.tabs.email">
+      <segment state="translated">
+        <source>Email</source>
+        <target>Courriel</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.tabs.slack">
+      <segment state="translated">
+        <source>Slack</source>
+        <target>Slack</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.tabs.webhooks">
+      <segment state="translated">
+        <source>Webhooks</source>
+        <target>Webhooks</target>
+      </segment>
+    </unit>
+    <unit id="settings.integrations.title">
+      <segment state="translated">
+        <source>Integrations</source>
+        <target>Intégrations</target>
+      </segment>
+    </unit>
     <unit id="settings.licenses.allow.addEntry">
       <segment state="translated">
         <source>Add license</source>
@@ -4683,6 +5223,54 @@
       <segment state="translated">
         <source>Add registry</source>
         <target>Ajouter un registre</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.upstreamRegistries.auth.authType.anonymous">
+      <segment state="translated">
+        <source>Anonymous</source>
+        <target>Anonyme</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.upstreamRegistries.auth.authType.basic">
+      <segment state="translated">
+        <source>Basic (username + password/token)</source>
+        <target>Basique (identifiant + mot de passe/jeton)</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.upstreamRegistries.auth.authType.bearer">
+      <segment state="translated">
+        <source>Bearer (token)</source>
+        <target>Jeton porteur (Bearer)</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.upstreamRegistries.auth.authTypeLabel">
+      <segment state="translated">
+        <source>Authentication</source>
+        <target>Authentification</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.upstreamRegistries.auth.credentialSet">
+      <segment state="translated">
+        <source>credential set</source>
+        <target>identifiants configurés</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.upstreamRegistries.auth.secret">
+      <segment state="translated">
+        <source>Password / token</source>
+        <target>Mot de passe / jeton</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.upstreamRegistries.auth.secretHint">
+      <segment state="translated">
+        <source>Write-only — not returned by the API after saving.</source>
+        <target>En écriture seule — non retourné par l&apos;API après enregistrement.</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.upstreamRegistries.auth.username">
+      <segment state="translated">
+        <source>Username</source>
+        <target>Identifiant</target>
       </segment>
     </unit>
     <unit id="settings.proxy.upstreamRegistries.dragHint">
@@ -5205,8 +5793,8 @@ dotnet/</target>
     </unit>
     <unit id="settings.security.trustAnchors.modal.materialHint">
       <segment state="translated">
-        <source>Public key material only — no private keys are accepted. For example: an ASCII-armored PGP public key block for RPM/Maven, a base64-encoded SPKI DER for npm, a PEM certificate for NuGet, or Sigstore root JSON for PyPI.</source>
-        <target>Matériel de clé publique uniquement — aucune clé privée n&apos;est acceptée.</target>
+        <source>Public key material only — no private keys are accepted. For example: an ASCII-armored PGP public key block for RPM/Maven, a base64-encoded SPKI DER for npm, a PEM certificate for NuGet, Sigstore root JSON for PyPI, or a PEM RSA public key for apk.</source>
+        <target>Matériel de clé publique uniquement — aucune clé privée n&apos;est acceptée. Par exemple, pour apk : une clé publique RSA au format PEM.</target>
       </segment>
     </unit>
     <unit id="settings.security.trustAnchors.modal.materialPlaceholder">
@@ -5347,6 +5935,12 @@ dotnet/</target>
         <target>Paramètres de l&apos;instance</target>
       </segment>
     </unit>
+    <unit id="settings.tabs.integrations">
+      <segment state="translated">
+        <source>Integrations</source>
+        <target>Intégrations</target>
+      </segment>
+    </unit>
     <unit id="settings.tabs.licenses">
       <segment state="translated">
         <source>Licenses</source>
@@ -5387,12 +5981,6 @@ dotnet/</target>
       <segment state="translated">
         <source>Storage</source>
         <target>Stockage</target>
-      </segment>
-    </unit>
-    <unit id="settings.tabs.webhooks">
-      <segment state="translated">
-        <source>Webhooks</source>
-        <target>Webhooks</target>
       </segment>
     </unit>
     <unit id="settings.title">
@@ -7297,10 +7885,82 @@ dotnet/</target>
         <target>Enregistrement…</target>
       </segment>
     </unit>
+    <unit id="system.settings.slack.enabled">
+      <segment state="translated">
+        <source>Enabled</source>
+        <target>Activé</target>
+      </segment>
+    </unit>
+    <unit id="system.settings.slack.hint">
+      <segment state="translated">
+        <source>Control-plane events only: tenant lifecycle and operator accounts. Never mirrors a per-org quarantine or vulnerability alert.</source>
+        <target>Événements de plan de contrôle uniquement : cycle de vie des locataires et comptes opérateurs. Ne reflète jamais une alerte de quarantaine ou de vulnérabilité par organisme.</target>
+      </segment>
+    </unit>
+    <unit id="system.settings.slack.lastStatus">
+      <segment state="translated">
+        <source>Last delivery: {status}</source>
+        <target>Dernière livraison : {status}</target>
+      </segment>
+    </unit>
+    <unit id="system.settings.slack.masterKeyHint">
+      <segment state="translated">
+        <source>DEPENDABLY_MASTER_KEY is not configured — set it to enable operator Slack delivery.</source>
+        <target>DEPENDABLY_MASTER_KEY n&apos;est pas configurée — définissez-la pour activer la livraison Slack de l&apos;opérateur.</target>
+      </segment>
+    </unit>
+    <unit id="system.settings.slack.testFail">
+      <segment state="translated">
+        <source>Test failed:</source>
+        <target>Échec du test :</target>
+      </segment>
+    </unit>
+    <unit id="system.settings.slack.testOk">
+      <segment state="translated">
+        <source>Test message sent.</source>
+        <target>Message de test envoyé.</target>
+      </segment>
+    </unit>
+    <unit id="system.settings.slack.testSend">
+      <segment state="translated">
+        <source>Send test message</source>
+        <target>Envoyer un message de test</target>
+      </segment>
+    </unit>
+    <unit id="system.settings.slack.title">
+      <segment state="translated">
+        <source>Operator Slack</source>
+        <target>Slack opérateur</target>
+      </segment>
+    </unit>
+    <unit id="system.settings.slack.webhookUrl">
+      <segment state="translated">
+        <source>Webhook URL</source>
+        <target>URL du webhook</target>
+      </segment>
+    </unit>
+    <unit id="system.settings.slack.webhookUrlHint">
+      <segment state="translated">
+        <source>Slack incoming-webhook URL. Stored encrypted; never shown again after saving.</source>
+        <target>URL de webhook entrant Slack. Stockée chiffrée ; jamais réaffichée après l&apos;enregistrement.</target>
+      </segment>
+    </unit>
+    <unit id="system.settings.slack.webhookUrlRotateHint">
+      <segment state="translated">
+        <source>A webhook URL is configured. Leave blank to keep it, or paste a new one to rotate it.</source>
+        <target>Une URL de webhook est configurée. Laissez vide pour la conserver, ou collez-en une nouvelle pour la remplacer.</target>
+      </segment>
+    </unit>
     <unit id="system.settings.subtitle">
       <segment state="translated">
         <source>Global limits and schedules — applied across every tenant.</source>
         <target>Limites et planifications globales — appliquées à chaque locataire.</target>
+      </segment>
+    </unit>
+    <unit id="system.settings.tabs.email">
+      <segment state="translated">
+        <source>Email (SMTP)</source>
+        <target>Courriel (SMTP)</target>
       </segment>
     </unit>
     <unit id="system.settings.tabs.instance">
@@ -7313,6 +7973,12 @@ dotnet/</target>
       <segment state="translated">
         <source>Metrics access</source>
         <target>Accès aux métriques</target>
+      </segment>
+    </unit>
+    <unit id="system.settings.tabs.slack">
+      <segment state="translated">
+        <source>Slack</source>
+        <target>Slack</target>
       </segment>
     </unit>
     <unit id="system.settings.title">
@@ -8779,6 +9445,18 @@ dotnet/</target>
         <target>SHA-1 amont (shasum)</target>
       </segment>
     </unit>
+    <unit id="versionDetail.detail.upstreamSource">
+      <segment state="translated">
+        <source>Fetched from</source>
+        <target>Récupéré depuis</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.detail.upstreamSourceLink">
+      <segment state="translated">
+        <source>Source</source>
+        <target>Source</target>
+      </segment>
+    </unit>
     <unit id="versionDetail.detail.vulns">
       <segment state="translated">
         <source>Vulnerabilities</source>
@@ -9113,6 +9791,18 @@ dotnet/</target>
       <segment state="translated">
         <source>Choose your AI assistant</source>
         <target>Choisir votre assistant IA</target>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.detail.remediation.copyBrief">
+      <segment state="translated">
+        <source>Copy remediation brief</source>
+        <target>Copier le résumé de remédiation</target>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.detail.remediation.copyBriefHelp">
+      <segment state="translated">
+        <source>A self-contained summary you can paste into any AI assistant or a ticket.</source>
+        <target>Un résumé autonome à coller dans n&apos;importe quel assistant IA ou système de suivi.</target>
       </segment>
     </unit>
     <unit id="vulnerabilities.detail.remediation.fixedIn">

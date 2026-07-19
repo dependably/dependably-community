@@ -1,15 +1,20 @@
 using System.Text.Json;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Observability;
+using Dependably.Security;
 
 namespace Dependably.Api;
 
 /// <summary>
-/// Read-only, anonymous status surface for a headless edge node: <c>GET /edge/status</c>. Mapped
-/// ONLY when <see cref="IEdgeMode.IsEdge"/> — in every other deployment mode the route is never
-/// registered (a request 404s), which also keeps it out of the non-edge OpenAPI documents and the
-/// ApiContract gate. Follows the <c>/health</c> convention: anonymous, so the payload carries
-/// nothing sensitive — no token material, no org data, no full upstream URL that could embed
+/// Read-only status surface for a headless edge node: <c>GET /edge/status</c>. Mapped ONLY when
+/// <see cref="IEdgeMode.IsEdge"/> — in every other deployment mode the route is never registered
+/// (a request 404s), which also keeps it out of the non-edge OpenAPI documents and the
+/// ApiContract gate. Same class as <c>/metrics</c> and <c>/version</c> — operator/ops surfaces
+/// deliberately excluded from the OpenAPI inventory and documented in <c>docs/edge-node.md</c>
+/// instead — so it takes no bearer/basic credential but sits behind the same
+/// <see cref="MetricsAccessConfig"/> IP allowlist those two endpoints use: an anonymous internet
+/// caller cannot fingerprint the deployed version or cache topology. The payload itself is also
+/// deliberately scrubbed — no token material, no org data, no full upstream URL that could embed
 /// credentials (host + scheme only), and disk figures rather than filesystem paths.
 ///
 /// <para>Every field is derived from state the process already holds:
@@ -40,12 +45,25 @@ public static class EdgeStatusEndpoint
         var time = app.Services.GetRequiredService<TimeProvider>();
         var startedAt = time.GetUtcNow();
 
-        app.MapGet("/edge/status", (
+        app.MapGet("/edge/status", async (
+            HttpContext ctx,
             EdgeStatusTracker tracker,
             IStagingDiskInfo disk,
             IEdgeMode edgeMode,
-            TimeProvider clock) =>
+            TimeProvider clock,
+            MetricsAccessConfig metricsAccess,
+            ScrapeDiagnostics scrapeDiag) =>
         {
+            // Same IP allowlist as /metrics and /version — see the class doc comment.
+            var resolved = await metricsAccess.ResolveAsync(ctx.RequestAborted);
+            var remote = ctx.Connection.RemoteIpAddress;
+            if (remote is null || !MetricsAccessMiddleware.IsIpAllowed(remote, resolved.Allowed))
+            {
+                scrapeDiag.Record(remote, ScrapeDiagnostics.Outcome.DeniedIp);
+                await MetricsAccessMiddleware.WriteScrapeDeniedAuditAsync(ctx, remote, "/edge/status", scrapeDiag);
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            }
+
             var payload = Build(tracker, disk, edgeMode, clock, version, startedAt);
             return Results.Json(payload, JsonOptions);
         })

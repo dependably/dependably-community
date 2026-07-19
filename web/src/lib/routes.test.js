@@ -1,8 +1,25 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { useRouter, pathFor, searchFor, routeFor, routesEqual } from './routes.js'
+import { useRouter, pathFor, searchFor, routeFor, routesEqual, ADMIN_ONLY_PAGES } from './routes.js'
 
 describe('routes — tenant table', () => {
   beforeEach(() => useRouter('tenant'))
+
+  it('round-trips the risk page, which the dashboard risk tiles link into', () => {
+    expect(pathFor('risk')).toBe('/risk')
+    expect(routeFor('/risk')).toEqual({ page: 'risk', params: {} })
+  })
+
+  it('risk is not admin-only — every role can open the rows behind a tile it can see', () => {
+    // The drill-down endpoints gate on read:packages, the same capability that serves the
+    // dashboard tiles. Adding 'risk' here would bounce members off their own risk data.
+    expect(ADMIN_ONLY_PAGES.has('risk')).toBe(false)
+  })
+
+  it('deep-links the risk tabs and the blocked-pull audit window the dashboard tiles use', () => {
+    expect(searchFor('risk', { tab: 'license' })).toBe('?tab=license')
+    expect(searchFor('audit', { tab: 'lifecycle', type: 'blocked', since: '30d' }))
+      .toBe('?tab=lifecycle&type=blocked&since=30d')
+  })
 
   it('pathFor returns the canonical path for a tenant page', () => {
     expect(pathFor('dashboard')).toBe('/')

@@ -182,4 +182,67 @@ public class UpstreamUrlValidatorTests
         string? error = UpstreamUrlValidator.ValidateUrl(url);
         Assert.Null(error);
     }
+
+    // Reserved / special-use ranges beyond the basic RFC 1918 set — all must be blocked
+    // at save time when supplied as IP literals so that a tenant cannot register an upstream
+    // pointing at a documentation test-net, Class E, or broadcast address.
+    [Theory]
+    [InlineData("http://0.0.0.1/packages")]             // 0/8 "this host" — kernel routes to loopback
+    [InlineData("http://0.255.255.255/packages")]        // 0/8 upper bound
+    [InlineData("http://192.0.0.1/packages")]            // 192.0.0.0/24 IETF protocol assignments
+    [InlineData("http://192.0.2.100/packages")]          // 192.0.2.0/24 TEST-NET-1 (documentation)
+    [InlineData("http://198.18.0.1/packages")]           // 198.18.0.0/15 benchmarking
+    [InlineData("http://198.51.100.1/packages")]         // 198.51.100.0/24 TEST-NET-2 (documentation)
+    [InlineData("http://203.0.113.1/packages")]          // 203.0.113.0/24 TEST-NET-3 (documentation)
+    [InlineData("http://240.0.0.1/packages")]            // 240.0.0.0/4 reserved / Class E
+    [InlineData("http://255.255.255.255/packages")]      // limited broadcast
+    public void ValidateUrl_ReservedRange_ReturnsBlockedError(string url)
+    {
+        string? error = UpstreamUrlValidator.ValidateUrl(url);
+        Assert.NotNull(error);
+        Assert.StartsWith("Upstream URL resolves to a blocked IP range", error);
+    }
+
+    // IPv4-mapped IPv6 forms must not bypass the block — ::ffff:a.b.c.d collapses to the
+    // underlying IPv4 address before the range check, so a mapped loopback or RFC 1918
+    // address is indistinguishable from its plain IPv4 form.
+    [Theory]
+    [InlineData("http://[::ffff:127.0.0.1]/packages")]      // IPv4-mapped loopback
+    [InlineData("http://[::ffff:169.254.169.254]/packages")] // IPv4-mapped cloud metadata
+    [InlineData("http://[::ffff:10.0.0.1]/packages")]        // IPv4-mapped RFC 1918
+    [InlineData("http://[::ffff:192.168.1.1]/packages")]     // IPv4-mapped RFC 1918
+    [InlineData("http://[::ffff:0.0.0.1]/packages")]         // IPv4-mapped "this host" range
+    public void ValidateUrl_Ipv4MappedBlockedIpv6_ReturnsBlockedError(string url)
+    {
+        string? error = UpstreamUrlValidator.ValidateUrl(url);
+        Assert.NotNull(error);
+        Assert.StartsWith("Upstream URL resolves to a blocked IP range", error);
+    }
+
+    // Mixed partial-failure scenario: a batch of upstream URL candidates where some are
+    // valid and some are blocked — each is validated independently and the outcome for one
+    // must not affect the outcome for another.
+    [Fact]
+    public void ValidateUrl_MixedBatch_BlockedAndAllowedUrlsBehaveCorrectly()
+    {
+        var cases = new (string Url, bool ShouldBlock)[]
+        {
+            ("https://pypi.org",                                false),
+            ("http://10.0.0.1/packages",                        true),
+            ("https://registry.npmjs.org",                      false),
+            ("http://169.254.169.254/metadata",                 true),
+            ("http://[::ffff:127.0.0.1]/packages",              true),
+            ("https://api.nuget.org/v3",                        false),
+            ("http://240.0.0.1/packages",                       true),
+            ("http://[2606:4700:4700::1111]/packages",          false),
+        };
+
+        var failures = cases
+            .Select(c => (c.Url, c.ShouldBlock, Error: UpstreamUrlValidator.ValidateUrl(c.Url)))
+            .Where(r => r.ShouldBlock != (r.Error is not null))
+            .Select(r => $"{r.Url}: expected blocked={r.ShouldBlock}, got error={(r.Error ?? "null")}")
+            .ToList();
+
+        Assert.Empty(failures);
+    }
 }

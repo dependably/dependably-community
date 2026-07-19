@@ -93,10 +93,16 @@ public sealed partial class UpstreamClient
             throw new AirGappedException(url);
         }
 
-        // The TTL-cache key carries the Accept variant: the same URL can name two different
-        // documents under content negotiation, and a cached full body must never satisfy an
-        // abbreviated request (or vice versa).
-        string cacheKey = accept is null ? url : url + "\naccept:" + accept;
+        // The TTL-cache key carries the per-upstream credential hash and the Accept variant. The
+        // cache is a shared singleton across every org, so keying on URL alone would let one
+        // tenant's authenticated private-registry body satisfy another tenant's request for the
+        // same URL under different (or no) credentials — a cross-tenant disclosure. Hashing the
+        // Authorization header the same way the single-flight key does gives anonymous public
+        // registries one shared entry while isolating authenticated upstreams per credential. The
+        // Accept variant is folded in for the same reason as the in-flight key: a cached full body
+        // must never satisfy an abbreviated request (or vice versa) under content negotiation.
+        string cacheKey = url + "\nauth:" + AuthHeaderHash(authorizationHeader)
+            + (accept is null ? "" : "\naccept:" + accept);
 
         // A fresh cached entry short-circuits before any SSRF pre-check or upstream call — the
         // whole point of the cache. Stale entries fall through to a single-flight refresh below

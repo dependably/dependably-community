@@ -1,4 +1,6 @@
 using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
 using Dapper;
 using Dependably.Api;
@@ -159,7 +161,8 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
         string? spEntityId = null,
         string? nameIdFormat = null,
         string? lastTestAt = null,
-        string? emailAttribute = null)
+        string? emailAttribute = null,
+        string? idpSigningCert = null)
     {
         await using var conn = await _fixture.Store.OpenAsync();
         await conn.ExecuteAsync("DELETE FROM tenant_saml_config WHERE org_id = @o", new { o = orgId });
@@ -181,7 +184,7 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
                 forms = formsLoginEnabled ? 1 : 0,
                 entity = withMetadata ? "https://idp.example.com/entity" : null,
                 sso = withMetadata ? "https://idp.example.com/sso" : null,
-                cert = withMetadata ? SampleIdpCertBase64 : null,
+                cert = withMetadata ? (idpSigningCert ?? SampleIdpCertBase64) : null,
                 sp = spEntityId,
                 nameFmt = nameIdFormat ?? "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
                 emailAttr = emailAttribute,
@@ -825,4 +828,67 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
         string setCookies = sut.ControllerContext.HttpContext.Response.Headers.SetCookie.ToString();
         Assert.DoesNotContain("SameSite=Lax", setCookies, StringComparison.OrdinalIgnoreCase);
     }
+
+    // ── Expired IdP signing cert: fail closed on production, warn-only on Test SSO ────
+
+    // A self-signed cert whose validity window (2020-2021) is entirely before the frozen test
+    // clock (2026-06-15), so BuildSaml2Configuration sees NotAfter in the past. Fixed dates keep
+    // the fixture deterministic and avoid any wall-clock read.
+    private static string GenerateExpiredIdpCertBase64()
+    {
+        using var rsa = RSA.Create(2048);
+        var req = new CertificateRequest("CN=expired-idp", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        using var cert = req.CreateSelfSigned(
+            new DateTimeOffset(2020, 1, 1, 0, 0, 0, TimeSpan.Zero),
+            new DateTimeOffset(2021, 1, 1, 0, 0, 0, TimeSpan.Zero));
+        return Convert.ToBase64String(cert.Export(X509ContentType.Cert));
+    }
+
+    /// <summary>
+    /// Regression: a production (non-test) SP-initiated login whose pinned IdP signing cert has
+    /// expired must fail closed rather than redirect the browser into an SSO round-trip anchored on
+    /// a stale trust anchor. The prior behaviour logged a warning and still returned a 302 redirect;
+    /// the fix returns a 503 Problem.
+    /// </summary>
+    [Fact]
+    public async Task Login_NonTest_ExpiredIdpSigningCert_FailsClosed()
+    {
+        string orgId = await SeedTenantAsync("acme");
+        await SeedSamlConfigAsync(orgId, enabled: true, idpSigningCert: GenerateExpiredIdpCertBase64());
+        var sut = NewControllerForTenant(orgId, "acme");
+
+        var result = await sut.Login(test: null, ct: CancellationToken.None);
+
+        Assert.IsNotType<RedirectResult>(result);
+        var problem = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(503, problem.StatusCode);
+    }
+
+    /// <summary>
+    /// The admin Test SSO path keeps the warn-only behaviour when the pinned IdP signing cert has
+    /// expired: an owner running a test is redirected to the IdP so they can diagnose and re-run the
+    /// test against an expired anchor. This proves the fix scopes the hard failure to production login.
+    /// </summary>
+    [Fact]
+    public async Task Login_TestMode_ExpiredIdpSigningCert_StillRedirects()
+    {
+        string orgId = await SeedTenantAsync("acme");
+        await SeedSamlConfigAsync(orgId, enabled: false, withMetadata: true,
+            idpSigningCert: GenerateExpiredIdpCertBase64());
+        string userId = await UserSeeder.InsertAsync(_fixture.Store, orgId,
+            $"owner-{Guid.NewGuid():N}@x.test", role: "owner");
+        var sut = NewControllerForTenant(orgId, "acme",
+            user: BuildPrincipal(userId, orgId, role: "owner"));
+
+        var result = await sut.Login(test: "1", ct: CancellationToken.None);
+
+        var redirect = Assert.IsType<RedirectResult>(result);
+        Assert.Contains("idp.example.com/sso", redirect.Url);
+    }
+
+    // The production ACS path — the boundary that actually stops an expired-and-retired signing
+    // key from minting a session — is pinned end-to-end by SamlExpiredIdpCertTests, which posts a
+    // fully valid assertion signed by an expired cert. It cannot be pinned here: a unit test can
+    // only post a garbage SAMLResponse, which fails inside ITfoxtec's Unbind with a 401 whether or
+    // not the expiry gate exists, so such a test would pass against the unfixed code and pin nothing.
 }

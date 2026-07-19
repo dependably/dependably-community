@@ -22,6 +22,9 @@ public static class RemediationSkillCatalog
         "fix-path-traversal",
         "fix-unsafe-deserialization",
         "fix-ssrf",
+        "fix-broken-access-control",
+        "fix-weak-cryptography",
+        "fix-authentication-failures",
     ];
 
     private static readonly Lazy<IReadOnlyList<RemediationSkillSummary>> IndexLazy = new(BuildIndex);

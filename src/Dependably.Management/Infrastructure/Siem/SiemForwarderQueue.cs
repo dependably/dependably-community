@@ -15,6 +15,16 @@ namespace Dependably.Infrastructure.Siem;
 public sealed class SiemForwarderQueue : BackgroundService
 {
     private const int DefaultCapacity = 1024;
+
+    /// <summary>
+    /// Upper bound on how long the shutdown drain (see <see cref="ExecuteAsync"/>) spends
+    /// forwarding events still buffered in the channel once the host's stopping token has
+    /// already fired. Bounded independently of the host's own shutdown timeout so one slow,
+    /// retrying event cannot consume the entire grace period at the expense of every other
+    /// compliance-relevant event waiting behind it in the channel.
+    /// </summary>
+    private static readonly TimeSpan DrainTimeout = TimeSpan.FromSeconds(25);
+
     private static readonly TimeSpan[] BackoffSchedule =
     [
         TimeSpan.FromSeconds(1),
@@ -24,14 +34,17 @@ public sealed class SiemForwarderQueue : BackgroundService
 
     private readonly Channel<SiemEvent> _channel;
     private readonly ISiemForwarder _forwarder;
+    private readonly TimeProvider _time;
     private readonly ILogger<SiemForwarderQueue> _logger;
     private long _droppedCount;
     private long _deliveredCount;
     private long _failedCount;
 
-    public SiemForwarderQueue(ISiemForwarder forwarder, IConfiguration config, ILogger<SiemForwarderQueue> logger)
+    public SiemForwarderQueue(
+        ISiemForwarder forwarder, TimeProvider time, IConfiguration config, ILogger<SiemForwarderQueue> logger)
     {
         _forwarder = forwarder;
+        _time = time;
         _logger = logger;
         int capacity = int.TryParse(config["SIEM_QUEUE_CAPACITY"], out int c) && c > 0 ? c : DefaultCapacity;
         // Default FullMode (Wait) lets TryWrite return false when the channel is at capacity,
@@ -63,14 +76,77 @@ public sealed class SiemForwarderQueue : BackgroundService
     public long DeliveredCount => Interlocked.Read(ref _deliveredCount);
     public long FailedCount => Interlocked.Read(ref _failedCount);
 
+    /// <summary>
+    /// Test-only direct invocation of <see cref="ExecuteAsync"/>. <see cref="BackgroundService.StartAsync"/>
+    /// short-circuits and never invokes <c>ExecuteAsync</c> at all when handed an already-cancelled
+    /// token, so it cannot exercise the shutdown-drain race this method covers (a stopping token
+    /// cancelled while the read loop is genuinely running, with events still buffered).
+    /// </summary>
+    internal Task ExecuteAsyncForTests(CancellationToken stoppingToken) => ExecuteAsync(stoppingToken);
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation(
             "SIEM forwarder queue starting (transport={Transport}).", _forwarder.Name);
 
-        await foreach (var ev in _channel.Reader.ReadAllAsync(stoppingToken))
+        try
         {
-            await DeliverWithRetryAsync(ev, stoppingToken);
+            await foreach (var ev in _channel.Reader.ReadAllAsync(stoppingToken))
+            {
+                await DeliverWithRetryAsync(ev, stoppingToken);
+            }
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            // ReadAllAsync's WaitToReadAsync checks the stopping token before it checks whether
+            // the channel has buffered items, so cancellation can fire here with events still
+            // sitting in the channel — fall through to drain them instead of dropping them. SIEM
+            // is a compliance sink, so events accepted into the queue before shutdown must still
+            // reach the forwarder.
+        }
+
+        await DrainOnShutdownAsync();
+    }
+
+    /// <summary>
+    /// Runs whatever is still buffered in the channel through the normal delivery path when
+    /// shutdown cancels the main read loop above. The host's own stopping token is already
+    /// cancelled by this point, so drained deliveries run on a fresh, time-bounded token
+    /// (<see cref="DrainTimeout"/>) instead — otherwise every delivery attempt would see
+    /// cancellation immediately and skip straight to "failed" without ever trying.
+    /// </summary>
+    private async Task DrainOnShutdownAsync()
+    {
+        using var drainCts = new CancellationTokenSource(DrainTimeout);
+        int drained = 0;
+        int abandoned = 0;
+
+        while (_channel.Reader.TryRead(out var ev))
+        {
+            if (drainCts.IsCancellationRequested)
+            {
+                // Drain window exhausted — stop attempting deliveries but keep draining the
+                // channel itself so the abandoned count is accurate.
+                abandoned++;
+                continue;
+            }
+
+            await DeliverWithRetryAsync(ev, drainCts.Token);
+            drained++;
+        }
+
+        if (abandoned > 0)
+        {
+            _logger.LogWarning(
+                "SIEM forwarder queue shutdown drain timed out after {Timeout}s; " +
+                "{Count} event(s) still buffered were not attempted.",
+                DrainTimeout.TotalSeconds, abandoned);
+        }
+
+        if (drained > 0)
+        {
+            _logger.LogInformation(
+                "SIEM forwarder queue drained {Count} event(s) still buffered at shutdown.", drained);
         }
     }
 
@@ -103,7 +179,7 @@ public sealed class SiemForwarderQueue : BackgroundService
                 _logger.LogDebug(ex,
                     "SIEM forward attempt {Attempt} failed; retrying in {Backoff}.",
                     attempt + 1, BackoffSchedule[attempt]);
-                try { await Task.Delay(BackoffSchedule[attempt], ct); }
+                try { await Task.Delay(BackoffSchedule[attempt], _time, ct); }
                 catch (OperationCanceledException) { return; }
             }
         }

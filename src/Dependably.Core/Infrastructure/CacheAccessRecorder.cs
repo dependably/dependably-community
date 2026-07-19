@@ -12,8 +12,11 @@ namespace Dependably.Infrastructure;
 /// per-tenant row tracking access count + first/last seen for that tenant. The latter is
 /// what drives the vulnerability-response query.
 ///
-/// Designed to be idempotent and side-effect-light — failures here log and continue rather
-/// than break the request, because the originating fetch already succeeded.
+/// Idempotent, and consequential: the row it returns is the artefact's identity on the cache
+/// plane, and the proxy fetch path gates against that row before any byte reaches the client. A
+/// failure here is therefore not cosmetic — <see cref="RecordAccessAsync"/> retries once and
+/// returns null only when the plane is genuinely unavailable, which the proxy fetch path treats as
+/// grounds to refuse the fetch.
 /// </summary>
 public sealed class CacheAccessRecorder
 {
@@ -39,11 +42,23 @@ public sealed class CacheAccessRecorder
     /// Creates the <c>cache_artifact</c> row if absent (using <c>ON CONFLICT DO NOTHING</c> +
     /// re-read so a concurrent first-fetch race always resolves to the single winner row),
     /// otherwise touches its <c>last_accessed_at</c>. Always upserts the per-tenant access row.
-    /// Returns the <c>cache_artifact.id</c> on success, or <c>null</c> when recording fails
-    /// (failures are swallowed and logged; the originating fetch already succeeded).
+    /// Returns the <c>cache_artifact.id</c> on success, or <c>null</c> when recording fails.
+    ///
+    /// The write is attempted twice. The dominant failure is contention on the metadata store — the
+    /// concurrent first-fetch race that <see cref="CacheArtifactRepository.InsertAsync"/> resolves by
+    /// re-reading the winner row — and a second attempt turns most of those into an ordinary success.
+    ///
+    /// The retry is worth having because the cost of returning null is high. A cache-plane row is
+    /// what makes a proxied artefact scannable and evictable, and it is the row the proxy fetch gates
+    /// against: an artefact with no row is one the registry cannot vouch for.
     /// </summary>
-    public Task<string?> RecordAccessAsync(CacheAccess access, CancellationToken ct = default)
-        => RecordAccessImplAsync(access, ct);
+    public async Task<string?> RecordAccessAsync(CacheAccess access, CancellationToken ct = default)
+    {
+        string? id = await RecordAccessImplAsync(access, ct);
+        return id is not null || ct.IsCancellationRequested
+            ? id
+            : await RecordAccessImplAsync(access, ct);
+    }
 
     private async Task<string?> RecordAccessImplAsync(CacheAccess access, CancellationToken ct)
     {
@@ -104,9 +119,9 @@ public sealed class CacheAccessRecorder
         }
         catch (Exception ex)
         {
-            // The proxy fetch already returned bytes to the client; this recording is
-            // best-effort. Log loud enough that ops notice if it starts failing systemically
-            // (the vulnerability-response query depends on it) without breaking serving.
+            // Logged per attempt so a systemic failure is visible before it becomes a serving
+            // problem: RecordAccessAsync retries once, and the caller decides what a second failure
+            // means for the fetch.
             _logger.LogWarning(ex,
                 "CacheAccessRecorder failed for {Ecosystem}/{Name}@{Version} {Filename} (org {OrgId}).",
                 ecosystem, name, version, filename, orgId);

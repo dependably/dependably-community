@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Caching;
@@ -11,16 +12,20 @@ namespace Dependably.Api.PyPiProtocol;
 
 /// <summary>
 /// Handles GET /simple/ (package listing) and GET /simple/{package}/ (per-package version
-/// listing) per PEP 503/592. Serves local-only or proxy-merged simple indices with
-/// in-process caching, ETag-based conditional responses, and block-gate filtering.
+/// listing) per PEP 503/592, with PEP 691 JSON Simple API content negotiation. Serves
+/// local-only or proxy-merged simple indices with in-process caching, ETag-based conditional
+/// responses, and block-gate filtering. Both representations share the byte cache: the
+/// negotiated representation is part of the <see cref="PyPiSimpleIndexKey"/>, so JSON and HTML
+/// occupy distinct entries for one URL and each is served from cache rather than re-fetched
+/// upstream per request.
 /// </summary>
 public sealed class PyPiSimpleIndexHandler(
     OrgRepository orgs,
     PackageRepository packages,
     PackageVersionFilesRepository versionFiles,
-    CacheArtifactRepository cacheArtifacts,
     TokenRepository tokens,
     VulnerabilityRepository vulns,
+    ArtifactInventoryRepository inventory,
     UpstreamClient upstream,
     UpstreamRegistryResolver registries,
     ClaimResolver claimResolver,
@@ -32,6 +37,7 @@ public sealed class PyPiSimpleIndexHandler(
     public async Task<IActionResult> SimpleIndexAsync(
         HttpContext httpContext, string orgId, CancellationToken ct)
     {
+        SetVaryOnAccept(httpContext);
         var settings = await orgs.GetSettingsAsync(orgId, ct);
         var token = await httpContext.Request.ResolveTokenAsync(tokens, orgId, ct);
 
@@ -42,6 +48,12 @@ public sealed class PyPiSimpleIndexHandler(
         }
 
         var pkgs = await packages.ListAsync(orgId, "pypi", ct);
+
+        if (PrefersJson(httpContext))
+        {
+            string projectListJson = PyPiSimpleIndexHelper.RenderProjectListJson(pkgs.Select(pkg => pkg.PurlName));
+            return new ContentResult { Content = projectListJson, ContentType = PyPiSimpleIndexHelper.JsonContentType, StatusCode = StatusCodes.Status200OK };
+        }
 
         var sb = new StringBuilder();
         sb.AppendLine("<!DOCTYPE html>");
@@ -54,12 +66,13 @@ public sealed class PyPiSimpleIndexHandler(
         }
         sb.AppendLine("</body></html>");
 
-        return new ContentResult { Content = sb.ToString(), ContentType = "text/html; charset=utf-8", StatusCode = StatusCodes.Status200OK };
+        return new ContentResult { Content = sb.ToString(), ContentType = HtmlContentType, StatusCode = StatusCodes.Status200OK };
     }
 
     public async Task<IActionResult> PackageIndexAsync(
         HttpContext httpContext, string orgId, string package, CancellationToken ct)
     {
+        SetVaryOnAccept(httpContext);
         var settings = await orgs.GetSettingsAsync(orgId, ct);
         var token = await httpContext.Request.ResolveTokenAsync(tokens, orgId, ct);
 
@@ -82,6 +95,8 @@ public sealed class PyPiSimpleIndexHandler(
             return new UnauthorizedResult();
         }
 
+        bool wantsJson = PrefersJson(httpContext);
+
         // Always merge upstream + local versions when passthrough + claims allow. Routing must
         // not gate on packages.is_proxy — a name with privately uploaded versions is still a
         // namespace that holds proxy-fetched versions; clients need to discover both.
@@ -91,30 +106,39 @@ public sealed class PyPiSimpleIndexHandler(
 
         if (passthroughAllowed)
         {
-            return await ServeProxySimpleIndexAsync(httpContext, orgId, purlName, pkg, settings, token, ct);
+            return await ServeProxySimpleIndexAsync(
+                new SimpleIndexRequest(httpContext, orgId, purlName, pkg, settings!, token, wantsJson), ct);
         }
 
         // Passthrough disabled or name is claim-local — return only local versions.
         return pkg is null
             ? new NotFoundResult()
-            : await ServeLocalSimpleIndexAsync(httpContext, orgId, purlName, pkg, settings!, ct);
+            : await ServeLocalSimpleIndexAsync(httpContext, orgId, purlName, pkg, settings!, wantsJson, ct);
     }
 
-    private async Task<IActionResult> ServeProxySimpleIndexAsync(
-        HttpContext httpContext, string orgId, string purlName, Package? pkg,
-        OrgSettings settings, TokenRecord? token, CancellationToken ct)
+    // Bundles the per-request context threaded through the proxy simple-index path — the
+    // pieces past the .NET 7-recommended parameter count are all facets of one logical request,
+    // never independently varying, so they travel together rather than as separate parameters.
+    private sealed record SimpleIndexRequest(
+        HttpContext HttpContext, string OrgId, string PurlName, Package? Pkg,
+        OrgSettings Settings, TokenRecord? Token, bool WantsJson);
+
+    private async Task<IActionResult> ServeProxySimpleIndexAsync(SimpleIndexRequest req, CancellationToken ct)
     {
-        var cacheKey = new PyPiSimpleIndexKey(orgId, purlName);
+        // The negotiated representation is part of the key, so the JSON form is cached
+        // alongside the HTML form instead of re-fetching upstream on every request.
+        var cacheKey = new PyPiSimpleIndexKey(req.OrgId, req.PurlName) { WantsJson = req.WantsJson };
+        string contentType = ContentTypeFor(req.WantsJson);
         if (cache.TryGet(cacheKey, out byte[]? proxyHit) && proxyHit is not null)
         {
-            return ServeNotModifiedOrSetCacheHeaders(httpContext, proxyHit, "private, max-age=60")
-                ?? (IActionResult)new FileContentResult(proxyHit, "text/html; charset=utf-8");
+            return ServeNotModifiedOrSetCacheHeaders(req.HttpContext, proxyHit, "private, max-age=60")
+                ?? (IActionResult)new FileContentResult(proxyHit, contentType);
         }
 
         // Single-flight: collapse concurrent rebuilds for the same proxy simple index.
         byte[]? proxyBytes = await cache.GetOrRebuildAsync(cacheKey, cacheOptions.ProxyTtl, async rebuildCt =>
         {
-            var result = await ProxyUpstreamSimpleIndexAsync(httpContext, orgId, purlName, pkg, settings, token, rebuildCt);
+            var result = await ProxyUpstreamSimpleIndexAsync(req, rebuildCt);
             return result is ContentResult cr && cr.Content is not null
                 ? Encoding.UTF8.GetBytes(cr.Content)
                 : null;
@@ -122,22 +146,34 @@ public sealed class PyPiSimpleIndexHandler(
 
         if (proxyBytes is not null)
         {
-            return new FileContentResult(proxyBytes, "text/html; charset=utf-8");
+            return new FileContentResult(proxyBytes, contentType);
         }
 
         // Non-ContentResult result (e.g. Unauthorized or NotFound) — return as-is.
-        return await ProxyUpstreamSimpleIndexAsync(httpContext, orgId, purlName, pkg, settings, token, ct);
+        return await ProxyUpstreamSimpleIndexAsync(req, ct);
     }
 
     private async Task<IActionResult> ServeLocalSimpleIndexAsync(
         HttpContext httpContext, string orgId, string purlName, Package pkg,
-        OrgSettings settings, CancellationToken ct)
+        OrgSettings settings, bool wantsJson, CancellationToken ct)
     {
-        var localCacheKey = new PyPiSimpleIndexKey(orgId, purlName);
+        // The negotiated representation is part of the key, so both forms are cached without
+        // one ever being served under the other's content type.
+        var localCacheKey = new PyPiSimpleIndexKey(orgId, purlName) { WantsJson = wantsJson };
+        string contentType = ContentTypeFor(wantsJson);
+
+        // Capture the invalidation generation AND the org policy epoch token before reading any
+        // policy-dependent state below — mirroring RenderedResponseCache.GetOrRebuildAsync. A
+        // proxy-settings PUT that commits its DB write and invalidates the org's epoch between
+        // this read and the Set below must not be lost: binding the Set to the token captured
+        // here means it is already expired the instant it lands, instead of picking up whichever
+        // epoch happens to be live once the write actually runs.
+        long generation = cache.GetGeneration(localCacheKey);
+        var epochToken = cache.CaptureEpochToken(localCacheKey);
         if (cache.TryGet(localCacheKey, out byte[]? localHit) && localHit is not null)
         {
             return ServeNotModifiedOrSetCacheHeaders(httpContext, localHit, "private, max-age=300")
-                ?? (IActionResult)new FileContentResult(localHit, "text/html; charset=utf-8");
+                ?? (IActionResult)new FileContentResult(localHit, contentType);
         }
 
         var allVersions = await LoadCombinedVersionsAsync(orgId, pkg.Id, "pypi", purlName, ct);
@@ -145,17 +181,20 @@ public sealed class PyPiSimpleIndexHandler(
         // Per-file records exist only for hosted (uploaded) versions; synthetic proxy
         // projections miss the lookup and render their single version-row artifact.
         var hostedFiles = await versionFiles.GetByPackageAsync(pkg.Id, ct);
-        string localHtml = PyPiSimpleIndexHelper.RenderLocalSimpleIndex(pkg.PurlName, allVersions, hostedFiles, settings, signals, time.GetUtcNow());
-        byte[] localBytes = Encoding.UTF8.GetBytes(localHtml);
-        cache.Set(localCacheKey, localBytes, cacheOptions.LocalTtl);
+        var now = time.GetUtcNow();
+        string localBody = wantsJson
+            ? PyPiSimpleIndexHelper.RenderLocalSimpleIndexJson(pkg.PurlName, allVersions, hostedFiles, settings, signals, now)
+            : PyPiSimpleIndexHelper.RenderLocalSimpleIndex(pkg.PurlName, allVersions, hostedFiles, settings, signals, now);
+        byte[] localBytes = Encoding.UTF8.GetBytes(localBody);
+        cache.SetIfGenerationUnchanged(localCacheKey, localBytes, cacheOptions.LocalTtl, generation, epochToken);
         return ServeNotModifiedOrSetCacheHeaders(httpContext, localBytes, "private, max-age=300")
-            ?? (IActionResult)new ContentResult { Content = localHtml, ContentType = "text/html; charset=utf-8", StatusCode = StatusCodes.Status200OK };
+            ?? (IActionResult)new ContentResult { Content = localBody, ContentType = contentType, StatusCode = StatusCodes.Status200OK };
     }
 
-    private async Task<IActionResult> ProxyUpstreamSimpleIndexAsync(
-        HttpContext httpContext, string orgId, string purlName,
-        Package? localPkg, OrgSettings settings, TokenRecord? token, CancellationToken ct)
+    private async Task<IActionResult> ProxyUpstreamSimpleIndexAsync(SimpleIndexRequest req, CancellationToken ct)
     {
+        var (httpContext, orgId, purlName, localPkg, settings, token, wantsJson) = req;
+
         if (!settings.AnonymousPull && token is null)
         {
             httpContext.Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
@@ -218,20 +257,110 @@ public sealed class PyPiSimpleIndexHandler(
                 return new NotFoundResult();
             }
 
-            string fallbackHtml = PyPiSimpleIndexHelper.RenderLocalSimpleIndex(purlName, localVersions, hostedFiles, settings, signals, now);
-            byte[] fallbackBytes = Encoding.UTF8.GetBytes(fallbackHtml);
+            string fallbackBody = wantsJson
+                ? PyPiSimpleIndexHelper.RenderLocalSimpleIndexJson(purlName, localVersions, hostedFiles, settings, signals, now)
+                : PyPiSimpleIndexHelper.RenderLocalSimpleIndex(purlName, localVersions, hostedFiles, settings, signals, now);
+            byte[] fallbackBytes = Encoding.UTF8.GetBytes(fallbackBody);
             return ServeNotModifiedOrSetCacheHeaders(httpContext, fallbackBytes, "private, max-age=300")
-                ?? (IActionResult)new ContentResult { Content = fallbackHtml, ContentType = "text/html; charset=utf-8", StatusCode = StatusCodes.Status200OK };
+                ?? (IActionResult)new ContentResult { Content = fallbackBody, ContentType = ContentTypeFor(wantsJson), StatusCode = StatusCodes.Status200OK };
         }
 
         // Render the merged index entirely from parsed upstream entries + local versions —
         // mixed-origin namespaces expose private versions alongside upstream, with filenames
         // already present upstream skipped to avoid duplicates.
-        string merged = PyPiSimpleIndexHelper.RenderMergedSimpleIndex(purlName, upstreamEntries, localVersions, hostedFiles, settings, signals, now);
+        string merged = wantsJson
+            ? PyPiSimpleIndexHelper.RenderMergedSimpleIndexJson(purlName, upstreamEntries, localVersions, hostedFiles, settings, signals, now)
+            : PyPiSimpleIndexHelper.RenderMergedSimpleIndex(purlName, upstreamEntries, localVersions, hostedFiles, settings, signals, now);
         byte[] mergedBytes = Encoding.UTF8.GetBytes(merged);
         return ServeNotModifiedOrSetCacheHeaders(httpContext, mergedBytes, "private, max-age=60")
-            ?? (IActionResult)new ContentResult { Content = merged, ContentType = "text/html; charset=utf-8", StatusCode = StatusCodes.Status200OK };
+            ?? (IActionResult)new ContentResult { Content = merged, ContentType = ContentTypeFor(wantsJson), StatusCode = StatusCodes.Status200OK };
     }
+
+    private const string HtmlContentType = "text/html; charset=utf-8";
+
+    // Resolves the content type from the same flag that selects the body renderer, so a serve
+    // site cannot declare one representation while emitting the other.
+    private static string ContentTypeFor(bool wantsJson) =>
+        wantsJson ? PyPiSimpleIndexHelper.JsonContentType : HtmlContentType;
+
+    // These routes serve two representations of one URL, chosen by the Accept header, with an
+    // ETag and Cache-Control on each. Vary: Accept tells per-URL HTTP caches (pip's own cache,
+    // an intermediary proxy, a CDN) to key on Accept as well, so a JSON client is never handed
+    // a cached HTML body or vice versa. Set on every response from the negotiated routes —
+    // including 304s and the single-flight path that returns already-rendered bytes.
+    private static void SetVaryOnAccept(HttpContext httpContext) =>
+        httpContext.Response.Headers.Vary = "Accept";
+
+    // Negotiates PEP 691 JSON vs. PEP 503 HTML from the request's Accept header: the media type
+    // (exact match, or a wildcard covering it) with the higher quality value wins, and JSON must
+    // win outright — a tie keeps the HTML default. A bare "*/*" from a generic client counts
+    // toward HTML alone, and no Accept header at all keeps HTML too, so only a client that
+    // explicitly asks for JSON receives it.
+    private static bool PrefersJson(HttpContext httpContext)
+    {
+        var acceptValues = httpContext.Request.Headers.Accept;
+        if (acceptValues.Count == 0)
+        {
+            return false;
+        }
+
+        double jsonQuality = -1;
+        double htmlQuality = -1;
+        foreach (string? header in acceptValues)
+        {
+            if (string.IsNullOrEmpty(header))
+            {
+                continue;
+            }
+
+            foreach (string rawEntry in header.Split(','))
+            {
+                string entry = rawEntry.Trim();
+                if (entry.Length == 0)
+                {
+                    continue;
+                }
+
+                string[] parts = entry.Split(';');
+                string mediaType = parts[0].Trim().ToLowerInvariant();
+                double quality = ParseQuality(parts);
+
+                if (IsJsonMediaType(mediaType))
+                {
+                    jsonQuality = Math.Max(jsonQuality, quality);
+                }
+                else if (IsHtmlOrWildcardMediaType(mediaType))
+                {
+                    htmlQuality = Math.Max(htmlQuality, quality);
+                }
+            }
+        }
+
+        return jsonQuality >= 0 && jsonQuality > htmlQuality;
+    }
+
+    private static double ParseQuality(string[] mediaTypeParts)
+    {
+        for (int i = 1; i < mediaTypeParts.Length; i++)
+        {
+            string param = mediaTypeParts[i].Trim();
+            if (param.StartsWith("q=", StringComparison.OrdinalIgnoreCase)
+                && double.TryParse(param.AsSpan(2), NumberStyles.Float, CultureInfo.InvariantCulture, out double q))
+            {
+                return q;
+            }
+        }
+        return 1.0;
+    }
+
+    // A bare "*/*" is deliberately absent here and present in IsHtmlOrWildcardMediaType: a
+    // client that expresses no preference between the two representations gets the PEP 503
+    // HTML one, which is what generic scrapers and older pip releases parse.
+    private static bool IsJsonMediaType(string mediaType) =>
+        mediaType is "application/vnd.pypi.simple.v1+json" or "application/json" or "application/*";
+
+    private static bool IsHtmlOrWildcardMediaType(string mediaType) =>
+        mediaType is "text/html" or "application/vnd.pypi.simple.v1+html" or "text/*" or "*/*";
 
     // Stamps the ETag for a simple-index body and answers 304 when the client's
     // If-None-Match matches; otherwise sets Cache-Control and returns null so the
@@ -298,39 +427,6 @@ public sealed class PyPiSimpleIndexHandler(
     private async Task<IReadOnlyList<PackageVersion>> LoadCombinedVersionsAsync(
         string orgId, string packageId, string ecosystem, string purlName, CancellationToken ct)
     {
-        var uploadedVersions = await packages.GetVersionsAsync(packageId, ct);
-        var proxyEntries = await cacheArtifacts.ListServeFactsForNameAsync(orgId, ecosystem, purlName, ct);
-
-        if (proxyEntries.Count == 0)
-        {
-            return uploadedVersions;
-        }
-
-        // Deduplicate: skip proxy entries whose version already appears in uploaded versions
-        // so a name that was cached before upload does not double-list that version.
-        var uploadedVersionSet = uploadedVersions
-            .Select(v => v.Version)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        // Load proxy signals once to populate IsMalicious on the synthetic PackageVersion.
-        var proxyIds = proxyEntries.Select(e => e.Id).ToList();
-        var proxySignals = proxyIds.Count > 0
-            ? await vulns.GetGateSignalsBatchForCacheArtifactsAsync(proxyIds, ct)
-            : new Dictionary<string, VulnGateSignals>();
-
-        var synthetic = proxyEntries
-            .Where(e => !uploadedVersionSet.Contains(e.Version))
-            .Select(e => e.ToPackageVersionSynthetic(proxySignals))
-            .ToList();
-
-        if (synthetic.Count == 0)
-        {
-            return uploadedVersions;
-        }
-
-        var combined = new List<PackageVersion>(uploadedVersions.Count + synthetic.Count);
-        combined.AddRange(uploadedVersions);
-        combined.AddRange(synthetic);
-        return combined;
+        return await inventory.ListServeableVersionsAsync(orgId, packageId, ecosystem, purlName, ct);
     }
 }

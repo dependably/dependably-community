@@ -114,7 +114,19 @@ public sealed class OsvClient : IOsvSource
     /// by <see cref="HydrationConcurrency"/>. IDs that fail hydration fall back to
     /// the stripped record (IsHydrated=false), which the scan service skips.
     /// </summary>
-    public async Task<List<List<OsvAdvisory>>> QueryBatchAsync(IReadOnlyList<string> purls, CancellationToken ct = default)
+    public async Task<List<List<OsvAdvisory>>> QueryBatchAsync(
+        IReadOnlyList<string> purls, CancellationToken ct = default) =>
+        (await TryQueryBatchAsync(purls, ct)).Results;
+
+    /// <summary>
+    /// Same batch query as <see cref="QueryBatchAsync"/>, but reports whether OSV was actually
+    /// reached (<see cref="OsvBatchQueryResult.Reached"/> false on a network failure, or any
+    /// non-2xx — including the synthetic 429 returned after retry exhaustion). Those are exactly
+    /// the failure modes <see cref="QueryBatchAsync"/> swallows into a full-length list of empty
+    /// results, which is otherwise indistinguishable from a genuinely clean batch.
+    /// </summary>
+    public async Task<OsvBatchQueryResult> TryQueryBatchAsync(
+        IReadOnlyList<string> purls, CancellationToken ct = default)
     {
         var queries = purls.Select(p => new { package = new { purl = p } }).ToList();
         string requestBody = JsonSerializer.Serialize(new { queries }, JsonOpts);
@@ -127,7 +139,7 @@ public sealed class OsvClient : IOsvSource
         catch (HttpRequestException ex)
         {
             _logger.LogWarning(ex, "OSV querybatch fetch failed: {ExceptionType}", ex.GetType().Name);
-            return purls.Select(_ => new List<OsvAdvisory>()).ToList();
+            return Unreached(purls);
         }
 
         using (response)
@@ -135,7 +147,7 @@ public sealed class OsvClient : IOsvSource
             if (!response.IsSuccessStatusCode)
             {
                 _logger.LogWarning("OSV querybatch returned {Status}", response.StatusCode);
-                return purls.Select(_ => new List<OsvAdvisory>()).ToList();
+                return Unreached(purls);
             }
 
             string json = await response.Content.ReadAsStringAsync(ct);
@@ -186,13 +198,20 @@ public sealed class OsvClient : IOsvSource
 
             // Build per-PURL advisory lists. Use hydrated where available; fall back to
             // stripped (IsHydrated=false) so the scan service can skip non-hydrated records.
-            return perPurlRaw.Select(list => list
+            var results = perPurlRaw.Select(list => list
                 .Select(raw => hydrated.TryGetValue(raw.Id ?? "", out var h)
                     ? h
                     : ParseAdvisory(raw, isHydrated: false))
                 .ToList()).ToList();
+
+            return new OsvBatchQueryResult(results, Reached: true);
         } // using (response)
     }
+
+    // The full-length all-empty result every swallowed failure mode produces, tagged unreached so
+    // callers can tell it apart from a genuinely clean batch.
+    private static OsvBatchQueryResult Unreached(IReadOnlyList<string> purls) =>
+        new(purls.Select(_ => new List<OsvAdvisory>()).ToList(), Reached: false);
 
     /// <summary>Fetch a single advisory's full details via GET /vulns/{id}. Returns null on any failure.</summary>
     private async Task<OsvAdvisory?> FetchAdvisoryAsync(string id, CancellationToken ct)

@@ -29,6 +29,14 @@ public static class ConfigurationExtensions
     /// containing <c>/</c> are networks; the rest are single addresses. A malformed entry throws
     /// at startup (fail fast) rather than silently degrading the trust boundary. Returns empty
     /// lists when the value is null/blank.
+    ///
+    /// <para>A network with prefix length 0 (<c>0.0.0.0/0</c> or <c>::/0</c>) also throws: it
+    /// trusts every possible peer address as a forwarding proxy, so any client — not just the
+    /// declared reverse proxy — can inject <c>X-Forwarded-For</c>/<c>-Proto</c>/<c>-Host</c> and
+    /// spoof the caller IP that the <c>/metrics</c>, <c>/version</c>, and management-docs
+    /// allowlists (and the tenant subdomain resolver) authorize against. Narrower ranges (a
+    /// specific proxy fleet's subnet, a VPC CIDR) are the operator's call and are not rejected
+    /// here.</para>
     /// </summary>
     public static (List<System.Net.IPNetwork> Networks, List<System.Net.IPAddress> Proxies) ParseTrustedProxies(string? value)
     {
@@ -43,7 +51,17 @@ public static class ConfigurationExtensions
         {
             if (entry.Contains('/'))
             {
-                networks.Add(System.Net.IPNetwork.Parse(entry));
+                var network = System.Net.IPNetwork.Parse(entry);
+                if (network.PrefixLength == 0)
+                {
+                    throw new InvalidOperationException(
+                        $"TRUSTED_PROXIES entry '{entry}' trusts every possible address as a forwarding " +
+                        "proxy (prefix length 0). Any client could then spoof X-Forwarded-For/-Proto/-Host " +
+                        "and bypass the /metrics, /version, and management-docs IP allowlists. Scope " +
+                        "TRUSTED_PROXIES to the actual reverse-proxy address(es) or subnet instead of the " +
+                        "whole address space.");
+                }
+                networks.Add(network);
             }
             else
             {

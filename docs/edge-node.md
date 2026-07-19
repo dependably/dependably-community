@@ -135,11 +135,13 @@ set to clear it:
   see (including that org's private packages). Set **`EDGE_ACCESS_TOKEN`** whenever the edge is
   reachable beyond a trusted LAN or the master token can see private/hosted content (see *Inbound
   client auth* above).
-- **`BASE_URL is not set` → permissive host filtering.** With no `BASE_URL`, `AllowedHosts` is `*`
-  and any `Host` header is accepted, which allows Host-header injection into absolute links. (The
+- **`BASE_URL is not set` → host filtering falls back to loopback hosts only.** With no `BASE_URL`,
+  `AllowedHosts` is restricted to `localhost`/`127.0.0.1`/`[::1]`, so any request that reaches the
+  edge through a reverse proxy under a real domain is rejected (400) instead of accepted. (The
   edge issues no session cookies and runs no login, so the cookie half of this warning does not
   apply to an edge and is not emitted.) Set **`BASE_URL`** to the URL clients use to reach the edge
-  (e.g. `https://edge.internal.example.com`) so unknown `Host` values are rejected.
+  (e.g. `https://edge.internal.example.com`) so that domain's `Host` header is accepted and unknown
+  ones are still rejected.
 - **`TRUSTED_PROXIES is not set` → forwarded headers ignored (fail-closed).** `X-Forwarded-For` /
   `-Proto` / `-Host` are discarded, so the edge sees the reverse proxy's socket address as the
   client, not the real caller. Set **`TRUSTED_PROXIES`** to your reverse proxy's IP(s)/CIDR(s) when
@@ -194,10 +196,15 @@ RAM-backed tmpfs, which defeats the memory bounding for large artifacts — alwa
 
 ## Status endpoint
 
-An edge node exposes a read-only, anonymous status surface at **`GET /edge/status`**. It is mapped
-**only in edge mode** — on a standard (non-edge) instance the route does not exist (404). Like
-`/health`, it takes no auth; the payload is deliberately non-sensitive (no token, no org data, no
-full upstream URL, no filesystem paths — only the master's scheme+host and disk numbers).
+An edge node exposes a read-only status surface at **`GET /edge/status`**. It is mapped **only in
+edge mode** — on a standard (non-edge) instance the route does not exist (404). It takes no
+bearer/basic credential, but — like `/metrics` and `/version` — it sits behind the same
+`METRICS_ALLOWED_IPS` allowlist (default `127.0.0.1`, `::1`; configurable in Settings → Observability
+or via `METRICS_ENABLED`/`METRICS_ALLOWED_IPS`), so a caller outside that allowlist gets a plain
+403. The payload itself is also deliberately non-sensitive (no token, no org data, no full upstream
+URL, no filesystem paths — only the master's scheme+host and disk numbers), and — like `/metrics`
+and `/version` — it is intentionally excluded from both OpenAPI documents; this section is its
+inventory record.
 
 Everything it reports is derived passively from state the process already holds. In particular,
 master reachability is inferred from the outcome of upstream fetches the edge was already making —

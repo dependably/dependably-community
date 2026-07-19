@@ -18,7 +18,11 @@ namespace Dependably.Tests.Unit;
 // GetOrFetchStreamAsync directly and consume the returned stream — the legacy byte[]
 // assertions ("Equal(data, bytes)") become "drain stream, then compare".
 
+// BlockAllValidator drives the real IUpstreamUrlValidator.IsAllowedAsync extension, which emits
+// to the process-wide static dependably.security.upstream_url_blocks counter that
+// UpstreamUrlBlocksEmissionTests asserts exact counts against. See MeterSensitiveCollection.
 [Trait("Category", "Unit")]
+[Collection("MeterSensitive")]
 public class UpstreamClientTests : IAsyncLifetime
 {
     private readonly TestMetadataStore _db = new();
@@ -39,7 +43,8 @@ public class UpstreamClientTests : IAsyncLifetime
         IUpstreamUrlValidator validator,
         IBlobStore? blobs = null,
         bool airGapped = false,
-        ILogger<UpstreamClient>? logger = null)
+        ILogger<UpstreamClient>? logger = null,
+        OrgRepository? orgs = null)
     {
         var handler = new FakeHttpHandler();
         var factory = new FakeHttpClientFactory(handler);
@@ -56,8 +61,34 @@ public class UpstreamClientTests : IAsyncLifetime
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?> { ["PROXY_STAGING_PATH"] = stagingDir })
             .Build();
-        var client = new UpstreamClient(factory, tiered, audit, validator, airGap, new Dependably.Infrastructure.DriveInfoStagingDiskInfo(stagingDir), Dependably.Infrastructure.StagingOptions.Resolve(config), log);
+        var client = new UpstreamClient(
+            factory, tiered, audit, validator, airGap,
+            new Dependably.Infrastructure.DriveInfoStagingDiskInfo(stagingDir),
+            Dependably.Infrastructure.StagingOptions.Resolve(config), log,
+            orgs: orgs);
         return (client, handler);
+    }
+
+    /// <summary>
+    /// Builds a client over a caller-supplied handler and blob store. The in-flight quota ledger
+    /// lives on the <see cref="UpstreamClient"/> instance (a DI singleton in production), so tests
+    /// that exercise it must drive every fetch through ONE client — which in turn needs a handler
+    /// that can serve more than one distinct body.
+    /// </summary>
+    private static UpstreamClient BuildClientWithHandler(
+        HttpMessageHandler handler, IBlobStore blobs, OrgRepository orgs)
+    {
+        var tiered = new TieredBlobStorage(blobs, blobs);
+        string stagingDir = Path.Combine(Path.GetTempPath(), $"dependably-test-{Guid.NewGuid():N}");
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["PROXY_STAGING_PATH"] = stagingDir })
+            .Build();
+        return new UpstreamClient(
+            new FakeHttpClientFactory(handler), tiered, new AuditRepository(new NullMetadataStore()),
+            new AllowAllValidator(), new StubAirGapMode(false),
+            new Dependably.Infrastructure.DriveInfoStagingDiskInfo(stagingDir),
+            Dependably.Infrastructure.StagingOptions.Resolve(config),
+            NullLogger<UpstreamClient>.Instance, orgs: orgs);
     }
 
     private sealed class StubAirGapMode : Dependably.Infrastructure.IAirGapMode
@@ -357,6 +388,580 @@ public class UpstreamClientTests : IAsyncLifetime
         Assert.DoesNotContain("available_bytes", body);
         Assert.DoesNotContain("floor_bytes", body);
         Assert.Contains("Insufficient storage", body);
+    }
+
+    // ── Tenant storage quota gate on the proxy cache-fill (MISS) path ─────────
+    //
+    // Regression coverage for the proxy MISS write path (StreamVerifyAndStoreAsync and its
+    // content-key sibling StreamHashAndStoreByContentKeyAsync) never bounding the tenant's
+    // storage quota, so an authenticated tenant could grow the cache plane without bound.
+    // The gate weighs each fill against the tenant's live org_storage_bytes total — the same
+    // per-org ceiling hosted publish and OCI push enforce — rather than reserving onto the
+    // storage_used_bytes counter, which the shared cache plane has no way to pay back on
+    // eviction.
+
+    private async Task<string> CreateOrgAsync(string slug = "acme")
+    {
+        await using var conn = await _db.OpenAsync();
+        string orgId = Guid.NewGuid().ToString("N");
+        await conn.ExecuteAsync(
+            "INSERT INTO orgs (id, slug) VALUES (@id, @slug)",
+            new { id = orgId, slug });
+        return orgId;
+    }
+
+    private async Task<long> ReadStorageUsedBytesAsync(string orgId)
+    {
+        await using var conn = await _db.OpenAsync();
+        return await conn.ExecuteScalarAsync<long>(
+            "SELECT COALESCE(storage_used_bytes, 0) FROM org_settings WHERE org_id = @orgId",
+            new { orgId });
+    }
+
+    /// <summary>
+    /// Records a proxy artefact on the cache plane exactly the way a completed proxy fetch does:
+    /// the blob, a shared <c>cache_artifact</c> row, and the tenant's
+    /// <c>tenant_artifact_access</c> grant. That trio is what puts the bytes into the org's
+    /// <c>org_storage_bytes</c> total, so this is how a tenant legitimately arrives near its
+    /// ceiling. Returns the cache_artifact id so a test can evict it.
+    /// </summary>
+    private async Task<string> SeedCachedArtifactAsync(
+        string orgId, long sizeBytes, string version = "1.0.0", InMemoryBlobStore? blobs = null)
+    {
+        string blobKey = BlobKeys.Proxy(Sha256Hex(System.Text.Encoding.UTF8.GetBytes(version)));
+        if (blobs is not null)
+        {
+            await blobs.PutAsync(blobKey, new MemoryStream(new byte[sizeBytes]));
+        }
+
+        var artifact = await new CacheArtifactRepository(_db).InsertAsync(new CacheArtifact
+        {
+            Id = Guid.NewGuid().ToString("D"),
+            Ecosystem = "npm",
+            Name = "lodash",
+            Version = version,
+            Filename = $"lodash-{version}.tgz",
+            BlobKey = blobKey,
+            ContentHash = "sha256:x",
+            SizeBytes = sizeBytes,
+            FirstCachedAt = TestTime.Frozen().GetUtcNow(),
+            LastAccessedAt = TestTime.Frozen().GetUtcNow().AddDays(-30)
+        });
+        await new TenantArtifactAccessRepository(_db).UpsertAsync(
+            orgId, artifact.Id, TestTime.Frozen().GetUtcNow());
+        return artifact.Id;
+    }
+
+    private async Task EvictCachedArtifactAsync(string cacheArtifactId) =>
+        await new CacheArtifactRepository(_db).DeleteAsync(cacheArtifactId);
+
+    [Fact]
+    public async Task GetOrFetchStreamAsync_ProxyMissExceedsQuota_ThrowsTenantStorageQuotaExceededException_AndBlobNotWritten()
+    {
+        string orgId = await CreateOrgAsync();
+        var orgs = new OrgRepository(_db);
+        await orgs.SetStorageQuotaBytesAsync(orgId, 100); // tiny cap
+
+        byte[] data = RandomBytes(512); // 512 > 100
+        var spec = new ChecksumSpec(ChecksumAlgorithm.Sha256, Sha256Hex(data));
+        var store = new InMemoryBlobStore();
+        var (client, handler) = BuildClient(new AllowAllValidator(), store, orgs: orgs);
+        handler.NextResponse = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(data)
+        };
+
+        var ex = await Assert.ThrowsAsync<TenantStorageQuotaExceededException>(() =>
+            client.GetOrFetchStreamAsync(
+                "blobs/quota-key", "http://upstream.test/pkg", spec, "rpm", orgId: orgId));
+
+        Assert.Equal(orgId, ex.OrgId);
+        Assert.Equal(100, ex.QuotaBytes);
+
+        // The verified bytes were fetched (the upstream call happened) but must never have
+        // reached the blob store — a rejected reservation must not leave the artefact cached.
+        Assert.Equal(1, handler.CallCount);
+        Assert.Null(await store.GetAsync("blobs/quota-key"));
+
+        // Rejection must not have inflated the counter.
+        Assert.Equal(0, await ReadStorageUsedBytesAsync(orgId));
+    }
+
+    [Fact]
+    public async Task GetOrFetchStreamAsync_ProxyMissUnderQuota_Succeeds_AndDoesNotRatchetTheCounter()
+    {
+        string orgId = await CreateOrgAsync();
+        var orgs = new OrgRepository(_db);
+        await orgs.SetStorageQuotaBytesAsync(orgId, 10_000);
+
+        byte[] data = RandomBytes(256);
+        var spec = new ChecksumSpec(ChecksumAlgorithm.Sha256, Sha256Hex(data));
+        var store = new InMemoryBlobStore();
+        var (client, handler) = BuildClient(new AllowAllValidator(), store, orgs: orgs);
+        handler.NextResponse = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(data)
+        };
+
+        var (stream, isHit) = await client.GetOrFetchStreamAsync(
+            "blobs/quota-ok-key", "http://upstream.test/pkg", spec, "rpm", orgId: orgId);
+
+        Assert.False(isHit);
+        Assert.Equal(data, await DrainAsync(stream));
+
+        // A proxy fill must leave storage_used_bytes alone. Charging it here would be an
+        // increment nothing pays back: eviction and retention delete the cache_artifact row the
+        // fill produced, and neither can decrement a counter for bytes a content-addressed,
+        // tenant-shared plane never attributed to one tenant. The fill's bytes are counted by
+        // org_storage_bytes via the cache_artifact + tenant_artifact_access rows instead.
+        Assert.Equal(0, await ReadStorageUsedBytesAsync(orgId));
+    }
+
+    [Fact]
+    public async Task GetOrFetchStreamAsync_RefetchAfterEviction_IsAdmittedAgain()
+    {
+        // The lifetime-ratchet regression. A tenant at 900/1000 bytes is refused a 200-byte
+        // fill; eviction then frees those 900 bytes. The next fill must be admitted — the tenant
+        // is holding nothing. A quota charged onto a counter that only ever counts up refuses
+        // this fill forever, locking the tenant out of its own empty cache with no recovery.
+        string orgId = await CreateOrgAsync();
+        var orgs = new OrgRepository(_db);
+        await orgs.SetStorageQuotaBytesAsync(orgId, 1000);
+        string cachedId = await SeedCachedArtifactAsync(orgId, sizeBytes: 900);
+
+        byte[] data = RandomBytes(200);
+        var spec = new ChecksumSpec(ChecksumAlgorithm.Sha256, Sha256Hex(data));
+        var store = new InMemoryBlobStore();
+
+        // 900 held + 200 incoming = 1100 > 1000 → refused.
+        var (client1, handler1) = BuildClient(new AllowAllValidator(), store, orgs: orgs);
+        handler1.NextResponse = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(data)
+        };
+        await Assert.ThrowsAsync<TenantStorageQuotaExceededException>(() =>
+            client1.GetOrFetchStreamAsync(
+                "blobs/ratchet-key", "http://upstream.test/pkg", spec, "rpm", orgId: orgId));
+
+        // Eviction frees the 900 bytes.
+        await EvictCachedArtifactAsync(cachedId);
+
+        // Nothing held + 200 incoming = 200 <= 1000 → admitted.
+        var (client2, handler2) = BuildClient(new AllowAllValidator(), store, orgs: orgs);
+        handler2.NextResponse = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(data)
+        };
+        var (stream, isHit) = await client2.GetOrFetchStreamAsync(
+            "blobs/ratchet-key", "http://upstream.test/pkg", spec, "rpm", orgId: orgId);
+
+        Assert.False(isHit);
+        Assert.Equal(data, await DrainAsync(stream));
+    }
+
+    [Fact]
+    public async Task GetOrFetchStreamAsync_ProxyMissNoQuotaConfigured_AlwaysSucceeds()
+    {
+        // No quota set on the org → unlimited; a large proxy fetch must still pass, and the
+        // gate must be a true no-op (no reservation attempted) when unlimited.
+        string orgId = await CreateOrgAsync();
+        var orgs = new OrgRepository(_db);
+
+        byte[] data = RandomBytes(1024 * 64);
+        var spec = new ChecksumSpec(ChecksumAlgorithm.Sha256, Sha256Hex(data));
+        var store = new InMemoryBlobStore();
+        var (client, handler) = BuildClient(new AllowAllValidator(), store, orgs: orgs);
+        handler.NextResponse = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(data)
+        };
+
+        var (stream, isHit) = await client.GetOrFetchStreamAsync(
+            "blobs/quota-unlimited-key", "http://upstream.test/pkg", spec, "rpm", orgId: orgId);
+
+        Assert.False(isHit);
+        Assert.Equal(data, await DrainAsync(stream));
+    }
+
+    // ── Mixed partial-failure (house rule): first proxy fetch fits, second is rejected ─
+
+    [Fact]
+    public async Task GetOrFetchStreamAsync_MixedScenario_FirstFitsSecondRejected_QuotaTracksThePlane()
+    {
+        // Cap: 800 bytes. First fetch = 500 bytes (fits, and its controller records it onto the
+        // cache plane the way a real fetch does). Second fetch of a different coordinate = 400
+        // bytes — together 900 > 800, so it must be rejected and its blob never written.
+        string orgId = await CreateOrgAsync();
+        var orgs = new OrgRepository(_db);
+        await orgs.SetStorageQuotaBytesAsync(orgId, 800);
+
+        byte[] data1 = RandomBytes(500);
+        var spec1 = new ChecksumSpec(ChecksumAlgorithm.Sha256, Sha256Hex(data1));
+        var store = new InMemoryBlobStore();
+
+        var (client1, handler1) = BuildClient(new AllowAllValidator(), store, orgs: orgs);
+        handler1.NextResponse = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(data1)
+        };
+        var (stream1, isHit1) = await client1.GetOrFetchStreamAsync(
+            "blobs/mixed-first-key", "http://upstream.test/pkg-1", spec1, "rpm", orgId: orgId);
+        Assert.False(isHit1);
+        Assert.Equal(data1, await DrainAsync(stream1));
+        await SeedCachedArtifactAsync(orgId, sizeBytes: 500, version: "mixed-first");
+
+        byte[] data2 = RandomBytes(400);
+        var spec2 = new ChecksumSpec(ChecksumAlgorithm.Sha256, Sha256Hex(data2));
+        var (client2, handler2) = BuildClient(new AllowAllValidator(), store, orgs: orgs);
+        handler2.NextResponse = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(data2)
+        };
+
+        await Assert.ThrowsAsync<TenantStorageQuotaExceededException>(() =>
+            client2.GetOrFetchStreamAsync(
+                "blobs/mixed-second-key", "http://upstream.test/pkg-2", spec2, "rpm", orgId: orgId));
+
+        // The admitted fill is on the plane, the refused one left nothing behind.
+        Assert.NotNull(await store.GetAsync("blobs/mixed-first-key"));
+        Assert.Null(await store.GetAsync("blobs/mixed-second-key"));
+        Assert.Equal(500, await orgs.GetLiveStorageBytesAsync(orgId));
+    }
+
+    [Fact]
+    public async Task ConcurrentFills_SecondExceedingQuotaWhileFirstIsInFlight_IsRefused()
+    {
+        // Two concurrent fills of DISTINCT artefacts for one org, together over the ceiling.
+        // Neither is visible to org_storage_bytes yet — the controller records cache_artifact
+        // only after the fetch returns — so a gate that reads only the committed SUM admits both.
+        // Nothing tenant-scoped bounds how many of these a tenant runs at once, and upstreams are
+        // tenant-admin-configured, so "both" generalises to "as many as the attacker opens".
+        // The in-flight ledger is what makes the first fill visible to the second.
+        string orgId = await CreateOrgAsync();
+        var orgs = new OrgRepository(_db);
+        await orgs.SetStorageQuotaBytesAsync(orgId, 350);
+
+        // Blocks inside the first PutAsync so the first fill is provably still in flight —
+        // holding its reservation, committed to the plane by nothing — while the second runs its
+        // quota gate. Deterministic: no sleeps, no timing assumptions.
+        var store = new BlockingPutBlobStore(new InMemoryBlobStore());
+        var handler = new MultiResponseHttpHandler();
+        var client = BuildClientWithHandler(handler, store, orgs);
+
+        byte[] first = RandomBytes(300);
+        byte[] second = RandomBytes(200); // 300 + 200 = 500 > 350
+        handler.Map("http://upstream.test/first", first);
+        handler.Map("http://upstream.test/second", second);
+
+        var firstFill = Task.Run(() => client.GetOrFetchStreamAsync(
+            "blobs/inflight-first", "http://upstream.test/first",
+            new ChecksumSpec(ChecksumAlgorithm.Sha256, Sha256Hex(first)), "rpm", orgId: orgId));
+
+        await store.PutEntered.Task; // the first fill now holds its reservation
+
+        // 0 committed + 300 in flight + 200 incoming = 500 > 350 → must be refused.
+        var ex = await Assert.ThrowsAsync<TenantStorageQuotaExceededException>(() =>
+            client.GetOrFetchStreamAsync(
+                "blobs/inflight-second", "http://upstream.test/second",
+                new ChecksumSpec(ChecksumAlgorithm.Sha256, Sha256Hex(second)), "rpm", orgId: orgId));
+        Assert.Equal(orgId, ex.OrgId);
+        Assert.Equal(350, ex.QuotaBytes);
+
+        store.ReleasePut.SetResult();
+        var (stream, _) = await firstFill;
+        Assert.Equal(first, await DrainAsync(stream));
+
+        // The refused fill cached nothing; the admitted one did.
+        Assert.Null(await store.GetAsync("blobs/inflight-second"));
+        Assert.NotNull(await store.GetAsync("blobs/inflight-first"));
+    }
+
+    [Fact]
+    public async Task ConcurrentFills_ReservationIsReleasedWhenTheFillCompletes()
+    {
+        // The ledger must not leak: once a fill completes its bytes are the committed SUM's job,
+        // and a reservation left charged would refuse the tenant's next fill forever — the same
+        // permanent-refusal failure the counter ratchet caused.
+        string orgId = await CreateOrgAsync();
+        var orgs = new OrgRepository(_db);
+        await orgs.SetStorageQuotaBytesAsync(orgId, 350);
+
+        var store = new InMemoryBlobStore();
+        var handler = new MultiResponseHttpHandler();
+        var client = BuildClientWithHandler(handler, store, orgs);
+
+        // Three sequential 300-byte fills through ONE client. Nothing records them on the plane,
+        // so each must be admitted: 300 in flight is released the moment its fill returns.
+        for (int i = 0; i < 3; i++)
+        {
+            byte[] body = RandomBytes(300);
+            string url = $"http://upstream.test/seq-{i}";
+            handler.Map(url, body);
+            var (stream, _) = await client.GetOrFetchStreamAsync(
+                $"blobs/seq-{i}", url,
+                new ChecksumSpec(ChecksumAlgorithm.Sha256, Sha256Hex(body)), "rpm", orgId: orgId);
+            Assert.Equal(body, await DrainAsync(stream));
+        }
+    }
+
+    [Fact]
+    public async Task ConcurrentFills_ReservationIsReleasedWhenTheFillFails()
+    {
+        // A reservation charged before a write that then fails must come back. Otherwise a flaky
+        // blob backend silently walks the tenant's headroom to zero.
+        string orgId = await CreateOrgAsync();
+        var orgs = new OrgRepository(_db);
+        await orgs.SetStorageQuotaBytesAsync(orgId, 350);
+
+        var handler = new MultiResponseHttpHandler();
+        byte[] doomed = RandomBytes(300);
+        handler.Map("http://upstream.test/doomed", doomed);
+
+        var failingStore = new FailingPutBlobStore(new InMemoryBlobStore());
+        var failingClient = BuildClientWithHandler(handler, failingStore, orgs);
+        await Assert.ThrowsAsync<IOException>(() => failingClient.GetOrFetchStreamAsync(
+            "blobs/doomed", "http://upstream.test/doomed",
+            new ChecksumSpec(ChecksumAlgorithm.Sha256, Sha256Hex(doomed)), "rpm", orgId: orgId));
+
+        // The failed fill's 300 bytes must not still be charged: a fresh 300-byte fill fits.
+        byte[] good = RandomBytes(300);
+        handler.Map("http://upstream.test/good", good);
+        var (stream, _) = await failingClient.GetOrFetchStreamAsync(
+            "blobs/good", "http://upstream.test/good",
+            new ChecksumSpec(ChecksumAlgorithm.Sha256, Sha256Hex(good)), "rpm", orgId: orgId);
+        Assert.Equal(good, await DrainAsync(stream));
+    }
+
+    /// <summary>
+    /// Serves a distinct body per URL. The in-flight tests drive two fetches of different
+    /// artefacts through ONE <see cref="UpstreamClient"/> — the ledger lives on the instance, and
+    /// single-flight only collapses identical keys, so distinct bodies are the whole point.
+    /// </summary>
+    private sealed class MultiResponseHttpHandler : HttpMessageHandler
+    {
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte[]> _bodies =
+            new(StringComparer.Ordinal);
+
+        public void Map(string url, byte[] body) => _bodies[url] = body;
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Task.FromResult(_bodies.TryGetValue(request.RequestUri!.ToString(), out byte[]? body)
+                ? new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(body) }
+                : new HttpResponseMessage(HttpStatusCode.NotFound));
+    }
+
+    /// <summary>Blocks inside the first <see cref="PutAsync"/> until released, pinning one fill
+    /// in flight so a concurrent fill's quota gate runs against it.</summary>
+    private sealed class BlockingPutBlobStore : IBlobStore
+    {
+        private readonly IBlobStore _inner;
+        private int _blocked;
+
+        public TaskCompletionSource PutEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleasePut { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public BlockingPutBlobStore(IBlobStore inner) => _inner = inner;
+
+        public async Task PutAsync(string key, Stream data, CancellationToken ct = default)
+        {
+            if (Interlocked.Exchange(ref _blocked, 1) == 0)
+            {
+                PutEntered.SetResult();
+                await ReleasePut.Task;
+            }
+            await _inner.PutAsync(key, data, ct);
+        }
+
+        public Task DeleteAsync(string key, CancellationToken ct = default) => _inner.DeleteAsync(key, ct);
+        public Task<Stream?> GetAsync(string key, CancellationToken ct = default) => _inner.GetAsync(key, ct);
+        public Task<bool> ExistsAsync(string key, CancellationToken ct = default) => _inner.ExistsAsync(key, ct);
+        public Task<long> GetTotalSizeAsync(CancellationToken ct = default) => _inner.GetTotalSizeAsync(ct);
+        public Task<RangedStream?> GetRangeAsync(string key, long from, long to, CancellationToken ct = default) =>
+            _inner.GetRangeAsync(key, from, to, ct);
+        public IAsyncEnumerable<BlobInfo> ListAsync(string prefix, CancellationToken ct = default) =>
+            _inner.ListAsync(prefix, ct);
+    }
+
+    /// <summary>Fails the first <see cref="PutAsync"/> and serves the rest — a flaky blob backend.</summary>
+    private sealed class FailingPutBlobStore : IBlobStore
+    {
+        private readonly IBlobStore _inner;
+        private int _failed;
+
+        public FailingPutBlobStore(IBlobStore inner) => _inner = inner;
+
+        public Task PutAsync(string key, Stream data, CancellationToken ct = default) =>
+            Interlocked.Exchange(ref _failed, 1) == 0
+                ? throw new IOException("blob backend write failed")
+                : _inner.PutAsync(key, data, ct);
+
+        public Task DeleteAsync(string key, CancellationToken ct = default) => _inner.DeleteAsync(key, ct);
+        public Task<Stream?> GetAsync(string key, CancellationToken ct = default) => _inner.GetAsync(key, ct);
+        public Task<bool> ExistsAsync(string key, CancellationToken ct = default) => _inner.ExistsAsync(key, ct);
+        public Task<long> GetTotalSizeAsync(CancellationToken ct = default) => _inner.GetTotalSizeAsync(ct);
+        public Task<RangedStream?> GetRangeAsync(string key, long from, long to, CancellationToken ct = default) =>
+            _inner.GetRangeAsync(key, from, to, ct);
+        public IAsyncEnumerable<BlobInfo> ListAsync(string prefix, CancellationToken ct = default) =>
+            _inner.ListAsync(prefix, ct);
+    }
+
+    [Fact]
+    public async Task MixedEviction_SomeArtefactsFreedSomeFail_RefillIsAdmittedForTheFreedBytes()
+    {
+        // Mixed partial failure inside ONE eviction pass, and what the quota gate does after it.
+        // The tenant holds three 100-byte proxy artefacts under a 350-byte ceiling. One pass
+        // evicts two of them cleanly while the third's blob is unreachable, so its row stays.
+        // The tenant is now holding 100 bytes and must be able to fill the 250 it has room for.
+        // A ceiling charged onto a counter nothing pays back still believes the freed 200 bytes
+        // are held and refuses — permanently, for a tenant that is under its real quota.
+        string orgId = await CreateOrgAsync();
+        var orgs = new OrgRepository(_db);
+        await orgs.SetStorageQuotaBytesAsync(orgId, 350);
+
+        var store = new InMemoryBlobStore();
+        await SeedCachedArtifactAsync(orgId, 100, version: "v1", blobs: store);
+        string keptId = await SeedCachedArtifactAsync(orgId, 100, version: "v2", blobs: store);
+        await SeedCachedArtifactAsync(orgId, 100, version: "v3", blobs: store);
+
+        // A small fill first, so the tenant has actually exercised the gate before eviction runs
+        // (300 held + 40 = 340 <= 350 → admitted).
+        byte[] small = RandomBytes(40);
+        var smallSpec = new ChecksumSpec(ChecksumAlgorithm.Sha256, Sha256Hex(small));
+        var (client1, handler1) = BuildClient(new AllowAllValidator(), store, orgs: orgs);
+        handler1.NextResponse = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(small)
+        };
+        var (stream1, _) = await client1.GetOrFetchStreamAsync(
+            "blobs/mixed-evict-small", "http://upstream.test/small", smallSpec, "rpm", orgId: orgId);
+        Assert.Equal(small, await DrainAsync(stream1));
+
+        // The eviction pass: v2's blob delete throws, v1's and v3's succeed.
+        string keptBlobKey = BlobKeys.Proxy(Sha256Hex(System.Text.Encoding.UTF8.GetBytes("v2")));
+        var clock = TestTime.Frozen();
+        var evictionStore = new SelectiveFailingDeleteBlobStore(store, failKey: keptBlobKey);
+        var evictionCacheArtifacts = new CacheArtifactRepository(_db);
+        var eviction = new CacheEvictionService(
+            evictionCacheArtifacts,
+            new TieredBlobStorage(evictionStore, store),
+            new Dependably.Infrastructure.CacheOrphanBlobDeleter(
+                evictionCacheArtifacts, new Dependably.Infrastructure.CacheBlobKeyLock()),
+            new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?> { ["CACHE_MAX_AGE_DAYS"] = "7" })
+                .Build(),
+            NullLogger<CacheEvictionService>.Instance,
+            clock,
+            new Dependably.Infrastructure.Redis.InProcessDistributedLock(clock));
+
+        var summary = await eviction.RunOnceAsync();
+
+        // Two evicted, one left behind for a later pass — the mixed outcome.
+        Assert.Equal(2, summary.ArtifactsEvicted);
+        Assert.Equal(200, summary.BytesFreed);
+        Assert.NotNull(await new CacheArtifactRepository(_db).GetByCoordinateAsync(
+            "npm", "lodash", "v2", "lodash-v2.tgz"));
+        Assert.Equal(keptId, (await new CacheArtifactRepository(_db).GetByCoordinateAsync(
+            "npm", "lodash", "v2", "lodash-v2.tgz"))!.Id);
+
+        // 100 still held + 200 incoming = 300 <= 350 → must be admitted.
+        byte[] refill = RandomBytes(200);
+        var refillSpec = new ChecksumSpec(ChecksumAlgorithm.Sha256, Sha256Hex(refill));
+        var (client2, handler2) = BuildClient(new AllowAllValidator(), store, orgs: orgs);
+        handler2.NextResponse = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(refill)
+        };
+
+        var (stream2, isHit2) = await client2.GetOrFetchStreamAsync(
+            "blobs/mixed-evict-refill", "http://upstream.test/refill", refillSpec, "rpm", orgId: orgId);
+
+        Assert.False(isHit2);
+        Assert.Equal(refill, await DrainAsync(stream2));
+        Assert.Equal(100, await orgs.GetLiveStorageBytesAsync(orgId));
+    }
+
+    /// <summary>
+    /// Cache-tier <see cref="IBlobStore"/> whose <see cref="DeleteAsync"/> throws for exactly one
+    /// key and succeeds for the rest — one unreachable object among healthy ones, the mixed case
+    /// a store-wide outage double cannot express.
+    /// </summary>
+    private sealed class SelectiveFailingDeleteBlobStore : IBlobStore
+    {
+        private readonly IBlobStore _inner;
+        private readonly string _failKey;
+
+        public SelectiveFailingDeleteBlobStore(IBlobStore inner, string failKey)
+        {
+            _inner = inner;
+            _failKey = failKey;
+        }
+
+        public Task DeleteAsync(string key, CancellationToken ct = default) =>
+            key == _failKey
+                ? throw new IOException($"blob {key} unreachable")
+                : _inner.DeleteAsync(key, ct);
+
+        public Task PutAsync(string key, Stream data, CancellationToken ct = default) => _inner.PutAsync(key, data, ct);
+        public Task<Stream?> GetAsync(string key, CancellationToken ct = default) => _inner.GetAsync(key, ct);
+        public Task<bool> ExistsAsync(string key, CancellationToken ct = default) => _inner.ExistsAsync(key, ct);
+        public Task<long> GetTotalSizeAsync(CancellationToken ct = default) => _inner.GetTotalSizeAsync(ct);
+        public Task<RangedStream?> GetRangeAsync(string key, long from, long to, CancellationToken ct = default) =>
+            _inner.GetRangeAsync(key, from, to, ct);
+        public IAsyncEnumerable<BlobInfo> ListAsync(string prefix, CancellationToken ct = default) =>
+            _inner.ListAsync(prefix, ct);
+    }
+
+    [Fact]
+    public async Task FetchAndCacheByUrlAsync_ProxyMissExceedsQuota_ThrowsTenantStorageQuotaExceededException_AndBlobNotWritten()
+    {
+        // The no-pre-known-SHA path (npm tarballs, NuGet flatcontainer) is gated the same way.
+        string orgId = await CreateOrgAsync();
+        var orgs = new OrgRepository(_db);
+        await orgs.SetStorageQuotaBytesAsync(orgId, 100);
+
+        byte[] data = RandomBytes(512);
+        var store = new InMemoryBlobStore();
+        var (client, handler) = BuildClient(new AllowAllValidator(), store, orgs: orgs);
+        handler.NextResponse = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(data)
+        };
+
+        var ex = await Assert.ThrowsAsync<TenantStorageQuotaExceededException>(() =>
+            client.FetchAndCacheByUrlAsync("http://upstream.test/pkg.tgz", null, "npm", orgId));
+
+        Assert.Equal(orgId, ex.OrgId);
+        string blobKey = BlobKeys.Proxy(Sha256Hex(data));
+        Assert.Null(await store.GetAsync(blobKey));
+        Assert.Equal(0, await ReadStorageUsedBytesAsync(orgId));
+    }
+
+    [Fact]
+    public async Task TenantStorageQuotaExceededExceptionMiddleware_TranslatesExceptionTo413()
+    {
+        var logger = new Microsoft.Extensions.Logging.Abstractions.NullLogger<TenantStorageQuotaExceededExceptionMiddleware>();
+        bool nextCalled = false;
+        var middleware = new TenantStorageQuotaExceededExceptionMiddleware(
+            _ =>
+            {
+                nextCalled = true;
+                throw new TenantStorageQuotaExceededException("org-1", 1_000_000);
+            },
+            logger);
+
+        var httpContext = new DefaultHttpContext();
+        httpContext.Response.Body = new MemoryStream();
+
+        await middleware.InvokeAsync(httpContext);
+
+        Assert.True(nextCalled);
+        Assert.Equal(413, httpContext.Response.StatusCode);
+        Assert.Equal("application/problem+json", httpContext.Response.ContentType);
+
+        httpContext.Response.Body.Seek(0, SeekOrigin.Begin);
+        string body = new System.IO.StreamReader(httpContext.Response.Body).ReadToEnd();
+        Assert.Contains("quota", body, StringComparison.OrdinalIgnoreCase);
     }
 
     // ── Transient upstream failure logs a structured Warning ──────────────────

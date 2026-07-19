@@ -80,17 +80,11 @@ public sealed class FirstBootService
 
             _logger.LogInformation("First boot detected — initializing instance.");
 
-            // JWT secret is needed in both modes — generate once per install.
-            // When a master key is configured, store the envelope-encrypted form so the
-            // raw secret is never at rest in plaintext on a fresh install.
-            string jwtSecret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
-            string jwtStored = _envelope.IsConfigured ? _envelope.Protect(jwtSecret) : jwtSecret;
-            await conn.ExecuteAsync(
-                """
-                INSERT INTO instance_settings (key, value) VALUES ('jwt_secret', @value)
-                ON CONFLICT(key) DO UPDATE SET value = excluded.value
-                """,
-                new { value = jwtStored });
+            // JWT secret is needed in both modes — generate once per install. The same
+            // generate/envelope/persist steps back the operator-triggered rotation path
+            // (RotateJwtSecretAsync below), so there is exactly one implementation of "how
+            // jwt_secret gets written".
+            await StoreJwtSecretAsync(conn);
 
             // MFA encryption key seeds alongside the JWT secret so both are present from
             // first boot. MfaEncryptionKeyProvider handles the generate-if-missing path for
@@ -129,6 +123,73 @@ public sealed class FirstBootService
             await conn.ExecuteAsync("ROLLBACK");
             throw;
         }
+    }
+
+    /// <summary>
+    /// Regenerates <c>jwt_secret</c> for an already-bootstrapped instance and persists it under
+    /// the same envelope policy as first boot. Guarded to the already-bootstrapped case: a
+    /// missing <c>jwt_secret</c> row means first boot has not run yet, and rotating before an
+    /// initial secret exists would race <see cref="RunAsync"/> rather than replace anything.
+    ///
+    /// This is the persist half of rotation only, and committing it changes behaviour
+    /// immediately: the login path reads <c>jwt_secret</c> live on every login, so the next token
+    /// minted anywhere is signed with the new secret. The validation half belongs to the
+    /// management host — its JwtBearer scheme resolves the signing key per validation from
+    /// <c>JwtSigningKeyProvider</c>, which re-reads this row. Callers in that process must reload
+    /// the provider after this returns so the change is effective before they report success;
+    /// other replicas converge on the provider's own refresh interval. Callers that skip the
+    /// reload leave their replica validating against the superseded secret while minting under
+    /// the new one — every session on it breaks until the refresh lands.
+    ///
+    /// There is no old-key grace period by design; see <c>JwtSigningKeyProvider</c> for the
+    /// reasoning. Every session signed under the previous secret stops validating.
+    ///
+    /// This method lives in the shared Core closure (no reference to JwtBearerOptions, which is
+    /// management-only) because it owns the single implementation of "how jwt_secret gets
+    /// written". The operator-facing trigger is
+    /// <c>POST /api/v1/system/jwt-secret/rotate</c> (<c>SystemController.JwtSecret.cs</c>).
+    /// </summary>
+    public async Task RotateJwtSecretAsync(CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        await conn.BeginSerializedAsync(_db.Provider, ct);
+        try
+        {
+            // xtenant: jwt_secret is an instance-wide secret, not scoped to any single tenant.
+            _ = await conn.ExecuteScalarAsync<string?>(
+                "SELECT value FROM instance_settings WHERE key = 'jwt_secret'")
+                ?? throw new InvalidOperationException(
+                    "Cannot rotate jwt_secret: no jwt_secret row exists yet. First boot has not "
+                    + "completed on this instance — rotation only applies after an initial secret "
+                    + "has been generated.");
+
+            await StoreJwtSecretAsync(conn);
+            await conn.ExecuteAsync("COMMIT");
+        }
+        catch
+        {
+            await conn.ExecuteAsync("ROLLBACK");
+            throw;
+        }
+
+        _logger.LogWarning(
+            "jwt_secret rotated — every session token signed under the previous secret stops " +
+            "validating as each replica picks up the new value. Logins mint under it immediately.");
+    }
+
+    // Generates a fresh 32-byte jwt_secret and persists it (envelope-protected when a master key
+    // is configured, plaintext otherwise). Shared by first boot and operator-triggered rotation
+    // so there is exactly one implementation of "how jwt_secret gets written".
+    private async Task StoreJwtSecretAsync(DbConnection conn)
+    {
+        string jwtSecret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+        string jwtStored = _envelope.IsConfigured ? _envelope.Protect(jwtSecret) : jwtSecret;
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO instance_settings (key, value) VALUES ('jwt_secret', @value)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            new { value = jwtStored });
     }
 
     // The single/multi branches create a BCrypt-hashed admin account, which only a management

@@ -119,9 +119,11 @@ public sealed class PublishDiskStagingTests : IAsyncLifetime
     /// Mixed partial-failure: three sequential PyPI calls — good, oversized (413),
     /// bad checksum (422). Each call must leave 0 staging files.
     ///
-    /// The 413 case specifically pins the "stage first, size-check second, clean up"
-    /// path in PyPiController.Upload: staging happens before CheckPyPiUploadSizeAsync,
-    /// so the cleanup in the finally block is the only guard against leaking the file.
+    /// The 413 case pins the effective-cap-before-staging path in PyPiPublishHandler: the org
+    /// limit is resolved and threaded into FormFileStager before the copy starts, so the write
+    /// itself aborts mid-stream via LimitedReadStream (rather than staging the full artifact and
+    /// only checking its size afterward) — the cleanup in the finally block still guards the
+    /// (now much smaller) partial file against leaking.
     /// </summary>
     [Fact]
     public async Task PyPi_MixedPartialFailure_AllCallsCleanUpStagingFiles()
@@ -143,7 +145,8 @@ public sealed class PublishDiskStagingTests : IAsyncLifetime
 
         Assert.Equal(0, StagingFileCount());
 
-        // Call 2 — oversized: 1-byte org limit fires after staging.
+        // Call 2 — oversized: the 1-byte org limit is resolved before staging, so
+        // LimitedReadStream aborts the copy mid-stream rather than a post-hoc size check.
         await _factory.SetOrgLimit("default", "pypi", 1L);
         try
         {
@@ -198,8 +201,11 @@ public sealed class PublishDiskStagingTests : IAsyncLifetime
     }
 
     /// <summary>
-    /// Mixed partial-failure: valid push, then oversized (413), then corrupt nupkg (422/400).
-    /// The staging file for both failures must be cleaned up by the finally block in PushPackage.
+    /// Mixed partial-failure: valid push, then oversized (413), then corrupt nupkg (422/400). The
+    /// oversized case pins the effective-cap-before-staging path in NuGetPublishHandler: the org
+    /// limit is resolved and threaded into FormFileStager before the copy starts, so the write
+    /// itself aborts mid-stream. The staging file for both failures must be cleaned up by the
+    /// finally block in PushPackage.
     /// </summary>
     [Fact]
     public async Task NuGet_MixedPartialFailure_AllCallsCleanUpStagingFiles()
@@ -222,7 +228,8 @@ public sealed class PublishDiskStagingTests : IAsyncLifetime
 
         Assert.Equal(0, StagingFileCount());
 
-        // Call 2 — oversized: 1-byte limit fires after staging.
+        // Call 2 — oversized: the 1-byte limit is resolved before staging, so LimitedReadStream
+        // aborts the copy mid-stream rather than a post-hoc size check.
         await _factory.SetOrgLimit("default", "nuget", 1L);
         try
         {

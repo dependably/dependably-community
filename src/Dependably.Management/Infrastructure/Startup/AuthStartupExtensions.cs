@@ -20,11 +20,12 @@ namespace Dependably.Infrastructure.Startup;
 /// </summary>
 public static class AuthStartupExtensions
 {
-    // Placeholder JWT key length (bytes) used before the real secret is loaded from the DB.
-    private const int JwtKeyPlaceholderLength = 32;
-
     public static void AddDependablyJwt(this WebApplicationBuilder builder)
     {
+        // Owns the live signing key. Singleton: the cache (and its refresh window) is per-process,
+        // not per-request.
+        builder.Services.AddSingleton<JwtSigningKeyProvider>();
+
         // Core registers the ApiToken scheme (npm/pypi/nuget clients), authorization, and the
         // capability policy provider/handler — everything a protocol-only host needs. Calling it
         // makes ApiToken the default scheme; the AddAuthentication call below re-asserts JwtBearer
@@ -39,19 +40,16 @@ public static class AuthStartupExtensions
             {
                 options.Events = new JwtBearerEvents
                 {
-                    // Read JWT from cookie for UI sessions
-                    OnMessageReceived = ctx =>
-                    {
-                        ctx.Token = ctx.Request.Cookies["dependably_session"];
-                        return Task.CompletedTask;
-                    },
+                    // Read JWT from cookie for UI sessions. An empty token here falls through to
+                    // the Authorization header in the handler, which is how API clients present a
+                    // session JWT.
+                    OnMessageReceived = OnJwtMessageReceivedAsync,
                     // Reject revoked tokens (logged-out sessions) and tenant sessions whose
                     // token_version is stale (invalidated by a password change).
                     OnTokenValidated = OnJwtTokenValidatedAsync,
                 };
                 // Keep JWT claim names as-is (role, sub, org_id) without mapping to ClaimTypes URIs
                 options.MapInboundClaims = false;
-                // Validation parameters are configured after first-boot below
                 options.TokenValidationParameters = new TokenValidationParameters
                 {
                     ValidateIssuer = false,
@@ -61,14 +59,22 @@ public static class AuthStartupExtensions
                     ValidateIssuerSigningKey = true,
                     // Explicit algorithm allow-list so only HS256 tokens are accepted, matching issuance in LoginService
                     ValidAlgorithms = [SecurityAlgorithms.HmacSha256],
-                    // Placeholder — replaced after first-boot with actual secret
-                    IssuerSigningKey = new SymmetricSecurityKey(new byte[JwtKeyPlaceholderLength])
                 };
             });
 
-        // The bearer handler reads its clock from the same DI TimeProvider that LoginService
-        // issues tokens with, so a substituted clock can never split issue and validation time.
         builder.Services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
+            // Resolve the signing key per validation from JwtSigningKeyProvider instead of copying
+            // a fixed key into TokenValidationParameters at startup. Two consequences, both
+            // wanted: an operator-rotated jwt_secret is honoured by the running process without a
+            // restart (a key captured once at startup would reject every session the login path
+            // minted under the new secret, since minting reads the row live); and there is no
+            // placeholder key, so a host that has not loaded the secret yet fails validation
+            // closed rather than trusting known bytes.
+            .Configure<JwtSigningKeyProvider>((options, keys) =>
+                options.TokenValidationParameters.IssuerSigningKeyResolver =
+                    (_, _, _, _) => keys.CurrentKeys)
+            // The bearer handler reads its clock from the same DI TimeProvider that LoginService
+            // issues tokens with, so a substituted clock can never split issue and validation time.
             .Configure<TimeProvider>((options, time) => options.TimeProvider = time);
 
         // Global RouteScopeFilter rejects any /api/v1/ request whose JWT lacks a
@@ -79,6 +85,26 @@ public static class AuthStartupExtensions
         builder.Services.AddScoped<PasswordRotationGuard>();
         // Forces a user to complete MFA enrollment when the policy requires it.
         builder.Services.AddScoped<MfaEnrollmentGuard>();
+    }
+
+    // Sources the session JWT from the UI cookie, then gives the signing-key provider its chance
+    // to pick up a secret rotated on another replica before the signature is checked. The refresh
+    // is TTL-gated inside the provider, so this costs one DB read per refresh interval per
+    // process, not one per request. Skipped when no token is presented: anonymous traffic that
+    // trips the handler must not drive DB reads.
+    private static async Task OnJwtMessageReceivedAsync(MessageReceivedContext ctx)
+    {
+        ctx.Token = ctx.Request.Cookies["dependably_session"];
+
+        bool hasToken = !string.IsNullOrEmpty(ctx.Token)
+            || !string.IsNullOrEmpty(ctx.Request.Headers.Authorization.ToString());
+        if (!hasToken)
+        {
+            return;
+        }
+
+        var keys = ctx.HttpContext.RequestServices.GetRequiredService<JwtSigningKeyProvider>();
+        await keys.RefreshIfStaleAsync(ctx.HttpContext.RequestAborted);
     }
 
     // Validates a JWT after signature verification: checks the jti against the revocation

@@ -16,10 +16,11 @@
   import SettingsProxyRouting from '../lib/settings/SettingsProxyRouting.svelte'
   import SettingsNamespaceOwnership from '../lib/settings/SettingsNamespaceOwnership.svelte'
   import SettingsServiceTokens from '../lib/settings/SettingsServiceTokens.svelte'
-  import SettingsWebhooks from '../lib/settings/SettingsWebhooks.svelte'
+  import SettingsIntegrations from '../lib/settings/SettingsIntegrations.svelte'
   import SettingsAlerts from '../lib/settings/SettingsAlerts.svelte'
   import SettingsInstance from '../lib/settings/SettingsInstance.svelte'
   import SettingsMetrics from '../lib/settings/SettingsMetrics.svelte'
+  import SettingsInstanceEmail from '../lib/settings/SettingsInstanceEmail.svelte'
   import Toggle from '../lib/Toggle.svelte'
 
   let tab = 'general'
@@ -410,7 +411,7 @@
     { key: 'licenses',       label: 'settings.tabs.licenses' },
     ...(viewerIsAdmin ? [
       { key: 'service-tokens', label: 'settings.tabs.serviceTokens' },
-      { key: 'webhooks',       label: 'settings.tabs.webhooks' },
+      { key: 'integrations',   label: 'settings.tabs.integrations' },
       { key: 'alerts',         label: 'settings.tabs.alerts' },
       { key: 'banners',        label: 'settings.tabs.banners' },
     ] : []),
@@ -795,8 +796,8 @@
     {:else if tab === 'service-tokens' && viewerIsAdmin}
       <SettingsServiceTokens />
 
-    {:else if tab === 'webhooks' && viewerIsAdmin}
-      <SettingsWebhooks />
+    {:else if tab === 'integrations' && viewerIsAdmin}
+      <SettingsIntegrations />
 
     {:else if tab === 'alerts' && viewerIsAdmin}
       <SettingsAlerts />
@@ -804,6 +805,11 @@
     {:else if tab === 'instance' && showInstanceTabs}
       <p class="tab-intro">{$t('settings.instance.intro')}</p>
       <SettingsInstance getSettings={api.getInstanceSettings} updateSettings={api.updateInstanceSettings} />
+      <SettingsInstanceEmail
+        getConfig={api.getInstanceEmailConfig}
+        updateConfig={api.updateInstanceEmailConfig}
+        testSend={api.testInstanceEmail}
+      />
 
     {:else if tab === 'metrics' && showInstanceTabs}
       <p class="tab-intro">{$t('settings.metrics.intro')}</p>

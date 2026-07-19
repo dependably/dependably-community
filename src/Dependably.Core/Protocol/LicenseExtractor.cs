@@ -543,10 +543,9 @@ public static class LicenseExtractor
                 continue;
             }
 
-            if (line.StartsWith('['))
+            if (TryParseTomlSectionHeader(line, out string? section))
             {
-                int end = line.IndexOf(']');
-                currentSection = end > 0 ? line[1..end].Trim() : null;
+                currentSection = section;
                 continue;
             }
 
@@ -555,22 +554,52 @@ public static class LicenseExtractor
                 continue;
             }
 
-            int eq = line.IndexOf('=');
-            if (eq <= 0)
+            if (TryParseTomlLicenseAssignment(line, out string? license))
             {
-                continue;
+                return license;
             }
-
-            string key = line[..eq].Trim();
-            if (!key.Equals("license", StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            string? unquoted = UnquoteTomlBasicString(line[(eq + 1)..].Trim());
-            return unquoted is not null && IsPlausibleSpdx(unquoted) ? unquoted.Trim() : null;
         }
         return null;
+    }
+
+    // Matches a TOML "[section]" header line, extracting the section name. Returns false (and
+    // section = null) for any other line shape, so the caller keeps scanning.
+    private static bool TryParseTomlSectionHeader(string line, out string? section)
+    {
+        if (!line.StartsWith('['))
+        {
+            section = null;
+            return false;
+        }
+
+        int end = line.IndexOf(']');
+        section = end > 0 ? line[1..end].Trim() : null;
+        return true;
+    }
+
+    // Matches a `license = "..."` assignment line within the [package] section. Returns true
+    // (with the parsed — possibly null when implausible — SPDX value) once the key is found, so
+    // the caller returns immediately rather than continuing to scan past the one license line a
+    // well-formed Cargo.toml carries.
+    private static bool TryParseTomlLicenseAssignment(string line, out string? license)
+    {
+        int eq = line.IndexOf('=');
+        if (eq <= 0)
+        {
+            license = null;
+            return false;
+        }
+
+        string key = line[..eq].Trim();
+        if (!key.Equals("license", StringComparison.Ordinal))
+        {
+            license = null;
+            return false;
+        }
+
+        string? unquoted = UnquoteTomlBasicString(line[(eq + 1)..].Trim());
+        license = unquoted is not null && IsPlausibleSpdx(unquoted) ? unquoted.Trim() : null;
+        return true;
     }
 
     // Extracts the value of a TOML basic (double-quoted) string, ignoring any trailing inline

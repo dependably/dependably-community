@@ -128,6 +128,16 @@ public sealed class PyPiDownloadHandler(
             return new NotFoundResult();
         }
 
+        // Re-check the claim on every cache-hit serve, not just on the miss/upstream-fetch
+        // path. A surviving cache_artifact row (an in-flight fetch that raced a local_only
+        // transition's purge, or air-gap mode's implicit local_only, which never purges) must
+        // not be served just because the row still exists — same silent 404 as the miss path
+        // so probing can't distinguish "never cached" from "cached but now local_only".
+        if (!await claimResolver.IsProxyFetchAllowedAsync(orgId, "pypi", parsedPurlName, ct))
+        {
+            return new NotFoundResult();
+        }
+
         string? sourceIpHead = httpContext.GetNormalizedRemoteIp();
         if (await blockGate.EvaluateAsync(
                 BlockGateRequest.ForProxyCacheFacts(orgId, "pypi", caFacts, token, settings, sourceIpHead), ct)
@@ -242,8 +252,8 @@ public sealed class PyPiDownloadHandler(
     }
 
     // Checks the global-plane proxy cache for a PyPI artifact. Returns an IActionResult
-    // (including a block-gate denial or a file stream) when a cache_artifact row exists and
-    // the blob is in the store, or null when absent (falls through to upstream).
+    // (including a claim/block-gate denial or a file stream) when a cache_artifact row exists
+    // and the blob is in the store, or null when absent (falls through to upstream).
     // Cohesive proxy-cache serve helper; sourceIp is separate from HttpContext for testability.
 #pragma warning disable S107
     private async Task<IActionResult?> TryServeProxyCacheHitAsync(
@@ -264,6 +274,16 @@ public sealed class PyPiDownloadHandler(
         if (caFacts is null)
         {
             return null;
+        }
+
+        // Re-check the claim on every cache-hit serve, not just on the miss/upstream-fetch
+        // path in FetchFromUpstreamAsync below. A surviving cache_artifact row (an in-flight
+        // fetch that raced a local_only transition's purge, or air-gap mode's implicit
+        // local_only, which never purges) must not be served just because the row still
+        // exists — same silent 404 the miss path returns for a local_only/reserved name.
+        if (!await claimResolver.IsProxyFetchAllowedAsync(orgId, "pypi", parsedPurlName, ct))
+        {
+            return new NotFoundResult();
         }
 
         // Ternary form satisfies IDE0046: last guard before a single return expression.

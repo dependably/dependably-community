@@ -47,6 +47,10 @@ namespace Dependably.Api;
 ///   ecosystem limit → org global limit → instance default). Files exceeding the cap are
 ///   rejected individually (upload path) or abort the whole batch (manifest path) without
 ///   leaving orphaned disk state.</item>
+///   <item>The <c>manifest</c> and <c>sha256sums</c> multipart parts are fully buffered into
+///   managed memory (they are parsed as text, not streamed to disk), so each is capped at a
+///   small, fixed size via <c>LimitedReadStream</c>; an oversized part is rejected mid-stream
+///   with a 413 before it is ever fully buffered.</item>
 /// </list>
 /// </summary>
 [ApiController]
@@ -71,6 +75,13 @@ public sealed class ImportController : ControllerBase
     // upload-limit chain; this constant bounds the whole multipart envelope before
     // any bytes are read so a single oversized request never buffers unbounded data.
     private const long BatchSizeLimitBytes = 1L * 1024 * 1024 * 1024;
+
+    // The "manifest" and "sha256sums" multipart parts are text documents (a lockfile or a
+    // checksum listing) that are fully buffered into managed memory for parsing, unlike the
+    // artefact parts which stream to disk under a per-file cap. Both part kinds are
+    // inherently small, so this cap sits far below the whole-batch ceiling; LimitedReadStream
+    // rejects an oversized part mid-stream, before it is ever fully buffered.
+    private const long TextPartMaxBytes = 8L * 1024 * 1024;
 
     public ImportController(ImportControllerServices svc)
     {
@@ -229,7 +240,19 @@ public sealed class ImportController : ControllerBase
         string sidecarText;
         using (var ms = new MemoryStream())
         {
-            await sidecar.CopyToAsync(ms, ct);
+            try
+            {
+                await using var limited = new LimitedReadStream(
+                    sidecar.OpenReadStream(), TextPartMaxBytes, "sha256sums sidecar part");
+                await limited.CopyToAsync(ms, ct);
+            }
+            catch (InvalidDataException)
+            {
+                return Problem(
+                    statusCode: StatusCodes.Status413PayloadTooLarge,
+                    title: "Payload Too Large",
+                    detail: $"The sha256sums sidecar exceeds the {TextPartMaxBytes}-byte limit.");
+            }
             sidecarText = System.Text.Encoding.UTF8.GetString(ms.ToArray());
         }
 
@@ -411,7 +434,19 @@ public sealed class ImportController : ControllerBase
         byte[] manifestBytes;
         using (var ms = new MemoryStream())
         {
-            await manifestFile.CopyToAsync(ms, ct);
+            try
+            {
+                await using var limited = new LimitedReadStream(
+                    manifestFile.OpenReadStream(), TextPartMaxBytes, "manifest part");
+                await limited.CopyToAsync(ms, ct);
+            }
+            catch (InvalidDataException)
+            {
+                return (null, Problem(
+                    statusCode: StatusCodes.Status413PayloadTooLarge,
+                    title: "Payload Too Large",
+                    detail: $"The manifest part exceeds the {TextPartMaxBytes}-byte limit."));
+            }
             manifestBytes = ms.ToArray();
         }
         string manifestText = System.Text.Encoding.UTF8.GetString(manifestBytes);

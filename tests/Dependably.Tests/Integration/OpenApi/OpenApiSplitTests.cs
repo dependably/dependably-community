@@ -26,7 +26,10 @@ public sealed class OpenApiSplitTests : IClassFixture<DependablyFactory>, IAsync
     [Fact]
     public async Task ManagementDocument_OnlyContainsManagementPaths()
     {
-        using var client = _factory.CreateClient();
+        // Reading the management document requires an authenticated management session in
+        // addition to the metrics IP allowlist (loopback, which TestServer satisfies).
+        string token = await _factory.CreateAdminJwt();
+        using var client = _factory.CreateClientWithBearer(token);
         var resp = await client.GetAsync("/openapi/management.json");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
@@ -63,7 +66,10 @@ public sealed class OpenApiSplitTests : IClassFixture<DependablyFactory>, IAsync
     [Fact]
     public async Task ManagementAndProtocol_AreSetDisjoint()
     {
-        using var client = _factory.CreateClient();
+        // Reading the management document requires an authenticated management session in
+        // addition to the metrics IP allowlist (loopback, which TestServer satisfies).
+        string token = await _factory.CreateAdminJwt();
+        using var client = _factory.CreateClientWithBearer(token);
 
         var managementResp = await client.GetAsync("/openapi/management.json");
         Assert.Equal(HttpStatusCode.OK, managementResp.StatusCode);

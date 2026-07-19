@@ -38,9 +38,6 @@ public sealed class OciUpstreamResolver
     private const int UpstreamMaxAttempts = 2;
     private const int UpstreamFirstAttempt = 0;
 
-    // SQLite SQLITE_CONSTRAINT error code (unique constraint violation on insert).
-    private const int SqliteConstraintErrorCode = 19;
-
     // All four manifest media types accepted by current Docker and OCI clients.
     private static readonly string[] ManifestAcceptTypes =
     [
@@ -49,6 +46,13 @@ public sealed class OciUpstreamResolver
         "application/vnd.docker.distribution.manifest.v2+json",
         "application/vnd.docker.distribution.manifest.list.v2+json",
     ];
+
+    // Constant filename recorded on an OCI manifest's cache_artifact row. version is the
+    // content-addressed digest, so a fixed filename is safe and collision-free within the
+    // (ecosystem, name, version, filename) UNIQUE coordinate — this row always represents the
+    // pullable manifest, never a layer or config blob (those stay in oci_blobs only, with no
+    // cache_artifact row). Internal so SchemaInitializer's backfill migration can reuse it.
+    internal const string ManifestCacheFilename = "manifest";
 
     private readonly IHttpClientFactory _http;
     private readonly OciUpstreamAuthService _auth;
@@ -59,6 +63,8 @@ public sealed class OciUpstreamResolver
     private readonly UpstreamRegistryRepository _upstreamRepo;
     private readonly IAirGapMode _airGap;
     private readonly OciImageLicenseRecorder _licenseRecorder;
+    private readonly CacheAccessRecorder _cacheRecorder;
+    private readonly CacheArtifactRepository _cacheArtifacts;
     private readonly ILogger<OciUpstreamResolver> _logger;
     private readonly TimeProvider _time;
 
@@ -72,11 +78,26 @@ public sealed class OciUpstreamResolver
     // Lazy and cancelling all other waiters — the blob write is idempotent.
     private readonly ConcurrentDictionary<string, Lazy<Task<OciBlobFetchMetadata?>>> _blobInflight = new();
 
+    // Test-only observation seam (InternalsVisibleTo Dependably.Tests): counts callers that have
+    // reached the _blobInflight registration point for a given blob key, so a concurrency test
+    // can deterministically wait for "all N callers have registered as winner/joiner" instead of
+    // guessing at that moment with a timeout. Never read on any production path.
+    private readonly ConcurrentDictionary<string, int> _blobInflightArrivals = new();
+
+    /// <summary>
+    /// Number of <see cref="FetchBlobAsync"/> callers that have registered against the shared
+    /// in-flight entry for <paramref name="blobKey"/> (winner + joiners), for deterministic
+    /// concurrency-test synchronization only.
+    /// </summary>
+    internal int BlobInflightArrivalCount(string blobKey) =>
+        _blobInflightArrivals.TryGetValue(blobKey, out int count) ? count : 0;
+
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
         Justification =
-            "Resolver aggregates 10 independent DI-resolved services (HTTP client factory, auth service, " +
-            "options, tiered blob storage, metadata store, air-gap mode, license recorder, logger, clock, " +
-            "secret protector). Bundling into a wrapper record would obscure the DI graph.")]
+            "Resolver aggregates 12 independent DI-resolved services (HTTP client factory, auth service, " +
+            "options, tiered blob storage, metadata store, air-gap mode, license recorder, cache-plane " +
+            "recorder + repository, logger, clock, secret protector). Bundling into a wrapper record " +
+            "would obscure the DI graph.")]
     public OciUpstreamResolver(
         IHttpClientFactory http,
         OciUpstreamAuthService auth,
@@ -85,6 +106,8 @@ public sealed class OciUpstreamResolver
         IMetadataStore db,
         IAirGapMode airGap,
         OciImageLicenseRecorder licenseRecorder,
+        CacheAccessRecorder cacheRecorder,
+        CacheArtifactRepository cacheArtifacts,
         ILogger<OciUpstreamResolver> logger,
         TimeProvider time,
         Dependably.Infrastructure.Identity.EnvelopeProtector envelope)
@@ -100,6 +123,11 @@ public sealed class OciUpstreamResolver
         _upstreamRepo = new UpstreamRegistryRepository(db, time, envelope);
         _airGap = airGap;
         _licenseRecorder = licenseRecorder;
+        // CacheAccessRecorder and CacheArtifactRepository are registered as singletons (stateless
+        // Dapper helpers over the shared IMetadataStore), so — unlike the scoped services this
+        // resolver avoids capturing — they are safe to inject directly here.
+        _cacheRecorder = cacheRecorder;
+        _cacheArtifacts = cacheArtifacts;
         _logger = logger;
         _time = time;
     }
@@ -321,14 +349,16 @@ public sealed class OciUpstreamResolver
             return null;
         }
 
-        string algo = parts[0];
-        string hex = parts[1];
-        string blobKey = BlobKeys.OciBlob(algo, hex);
-
-        // Blob may already be in cache from a prior request — just confirm existence.
-        if (await _blobs.Cache.ExistsAsync(blobKey, ct))
+        // Answer a cache-hit HEAD only from an oci_blobs row scoped to THIS org. A bare
+        // content-key existence probe against the shared, content-addressed cache store would
+        // report 200/404 based on whether the digest exists for ANY tenant — a cross-tenant
+        // existence oracle over org-agnostic storage. Scoping to (digest, org_id) confines the
+        // answer to blobs the caller's own org has actually fetched; anything else falls through
+        // to a real, org-scoped upstream HEAD.
+        var cached = await TryGetCachedBlobMetadataByDigestAsync(orgId, digest, ct);
+        if (cached is not null)
         {
-            return new OciBlobMetadata("application/octet-stream");
+            return cached;
         }
 
         var upstream = await MatchUpstreamAsync(orgId, repository, ct);
@@ -350,6 +380,31 @@ public sealed class OciUpstreamResolver
 
         string mediaType = resp.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
         return new OciBlobMetadata(mediaType);
+    }
+
+    // Returns blob HEAD metadata only when the org owns an oci_blobs row for the digest AND the
+    // backing bytes are still present in the store. A dangling row (blob evicted) returns null so
+    // the caller falls through to upstream rather than reporting a false 200. The (digest, org_id)
+    // scope is what keeps a blob HEAD from becoming a cross-tenant existence oracle over the shared
+    // content-addressed cache store.
+    private async Task<OciBlobMetadata?> TryGetCachedBlobMetadataByDigestAsync(
+        string orgId, string digest, CancellationToken ct)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: (digest, org_id) PK is tenant-scoped.
+        var (MediaType, BlobKey) = await conn.QuerySingleOrDefaultAsync<(string? MediaType, string? BlobKey)>(
+            "SELECT media_type AS MediaType, blob_key AS BlobKey " +
+            "FROM oci_blobs WHERE digest = @digest AND org_id = @orgId",
+            new { digest, orgId });
+
+        if (BlobKey is null)
+        {
+            return null;
+        }
+
+        bool exists = await _blobs.Cache.ExistsAsync(BlobKey, ct)
+            || await _blobs.Registry.ExistsAsync(BlobKey, ct);
+        return exists ? new OciBlobMetadata(MediaType ?? "application/octet-stream") : null;
     }
 
     /// <summary>
@@ -386,18 +441,28 @@ public sealed class OciUpstreamResolver
         string hex = parts[1];
         string blobKey = BlobKeys.OciBlob(algo, hex);
 
-        // Blob may already be in cache from a prior org or prior request.
+        // Blob may already be in the shared content-addressed store from a prior org or request.
+        // A bare store hit is NOT authorization: the key (oci/{algo}/{hex}) has no org segment, so
+        // in the default single-store deployment (cache == registry) another tenant's PRIVATE
+        // uploaded bytes live under the identical key. Serve the hit only when the caller is
+        // entitled to it; otherwise dispose the unused stream and fall through to a real upstream
+        // fetch scoped to this org (which re-verifies the digest before caching).
         var existing = await _blobs.Cache.GetAsync(blobKey, ct);
         if (existing is not null)
         {
-            // Ensure a DB row exists for this org (another org may have primed the key).
-            bool inserted = await EnsureBlobDbRowAsync(orgId, digest, "application/octet-stream", 0, blobKey, ct);
-            if (inserted)
+            if (await CanServeSharedBlobAsync(orgId, repository, blobKey, ct))
             {
-                // First time this org sees the blob: it may be a config awaited by a manifest row.
-                await _licenseRecorder.RecordConfigBlobArrivalAsync(orgId, digest, blobKey, ct);
+                // Ensure a DB row exists for this org (another org may have primed the key).
+                bool inserted = await EnsureBlobDbRowAsync(orgId, digest, "application/octet-stream", 0, blobKey, ct);
+                if (inserted)
+                {
+                    // First time this org sees the blob: it may be a config awaited by a manifest row.
+                    await _licenseRecorder.RecordConfigBlobArrivalAsync(orgId, digest, blobKey, ct);
+                }
+                return new OciBlobResult(existing, "application/octet-stream");
             }
-            return new OciBlobResult(existing, "application/octet-stream");
+
+            await existing.DisposeAsync();
         }
 
         var upstream = await MatchUpstreamAsync(orgId, repository, ct);
@@ -415,6 +480,7 @@ public sealed class OciUpstreamResolver
         var lazy = _blobInflight.GetOrAdd(blobKey, _ => new Lazy<Task<OciBlobFetchMetadata?>>(
             () => FetchAndCacheBlobAsync(orgId, upstream, repository, digest, blobKey, CancellationToken.None),
             LazyThreadSafetyMode.ExecutionAndPublication));
+        _blobInflightArrivals.AddOrUpdate(blobKey, 1, (_, count) => count + 1);
 
         // Removes exactly this (blobKey, lazy) pair once the shared fetch genuinely completes —
         // success or failure — never when an individual caller's WaitAsync(ct) below merely
@@ -424,7 +490,13 @@ public sealed class OciUpstreamResolver
         // concurrent caller attaches its own continuation to the same Task; TryRemove is
         // idempotent — only the first continuation to run has any effect.
         _ = lazy.Value.ContinueWith(
-            _ => _blobInflight.TryRemove(new KeyValuePair<string, Lazy<Task<OciBlobFetchMetadata?>>>(blobKey, lazy)),
+            completedTask =>
+            {
+                _blobInflight.TryRemove(new KeyValuePair<string, Lazy<Task<OciBlobFetchMetadata?>>>(blobKey, lazy));
+                // Bounds _blobInflightArrivals to the same lifecycle as _blobInflight — otherwise
+                // every distinct digest ever fetched would leak an entry for the life of the process.
+                _blobInflightArrivals.TryRemove(blobKey, out int _);
+            },
             CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
@@ -435,6 +507,18 @@ public sealed class OciUpstreamResolver
         if (meta is null)
         {
             return null;
+        }
+
+        // The shared work item wrote the oci_blobs row only for the org captured in the Lazy
+        // (the single-flight winner). A joiner from a DIFFERENT org shares the content-addressed
+        // cache bytes but still needs its own per-org row — and, on first insert, the config-blob
+        // arrival hook that lets an awaiting manifest pick up this config's license. Mirror the
+        // cache-hit branch for this caller's org; EnsureBlobDbRowAsync is idempotent per
+        // (digest, org_id), so the winner re-running it here is a harmless no-op.
+        bool rowInserted = await EnsureBlobDbRowAsync(orgId, digest, meta.MediaType, meta.SizeBytes, blobKey, ct);
+        if (rowInserted)
+        {
+            await _licenseRecorder.RecordConfigBlobArrivalAsync(orgId, digest, blobKey, ct);
         }
 
         // Each waiter opens an INDEPENDENT stream from the cache store — never shared.
@@ -755,9 +839,10 @@ public sealed class OciUpstreamResolver
             // Packages page read from. OCI otherwise lives only in oci_blobs/oci_tags and
             // counts as zero everywhere. Only tag pulls are catalogued (the user-facing
             // unit); by-digest sub-manifest fetches the daemon issues afterwards are not.
+            string manifestUrl = $"https://{upstream.Host}/v2/{repository}/manifests/{reference}";
             await RecordCatalogVersionAsync(
                 orgId,
-                new OciCatalogEntry(repository, reference, m.Digest, m.Sha256Hex, (long)m.Bytes.Length, blobKey),
+                new OciCatalogEntry(repository, reference, m.Digest, m.Sha256Hex, (long)m.Bytes.Length, blobKey, manifestUrl),
                 ct);
         }
 
@@ -771,19 +856,28 @@ public sealed class OciUpstreamResolver
     private sealed record FetchedManifest(byte[] Bytes, string MediaType, string Digest, string Sha256Hex);
 
     private readonly record struct OciCatalogEntry(
-        string Repository, string Tag, string Digest, string Sha256Hex, long SizeBytes, string BlobKey);
+        string Repository, string Tag, string Digest, string Sha256Hex, long SizeBytes, string BlobKey,
+        string? UpstreamUrl);
 
     /// <summary>
-    /// Records the pulled image in the shared package catalogue (<c>packages</c> /
-    /// <c>package_versions</c>) so the overview counts, Packages page, and disk chart see OCI
-    /// like every other ecosystem — it otherwise lives only in <c>oci_blobs</c>/<c>oci_tags</c>
-    /// and renders as zero. The manifest digest is the content-addressed version identity; the
-    /// resolving tag is captured in the PURL qualifier.
+    /// Records the pulled image in the shared package catalogue: a <c>packages</c> row (so the
+    /// Packages page and its detail route resolve the repository name) plus a global-plane
+    /// <c>cache_artifact</c> / <c>tenant_artifact_access</c> row pair — the same shared cache
+    /// plane every other proxy ecosystem uses — rather than a <c>package_versions</c> row. The
+    /// manifest digest is the content-addressed version identity; the resolving tag is captured
+    /// in the PURL qualifier. Only manifest pulls land a row here — one per pullable image,
+    /// matching a <c>docker pull</c> 1:1; layers and config blobs stay in <c>oci_blobs</c> as
+    /// pure byte storage with no cache-plane entry.
     ///
-    /// Best-effort and idempotent: a unique-constraint hit (SQLite error 19) is the expected
-    /// re-pull / many-tags-to-one-digest / cross-org-same-image case and is swallowed silently;
-    /// any other failure is logged at Warning but never propagated — the manifest has already
-    /// streamed to the client, so cataloguing must not fail the pull.
+    /// Best-effort: the caller (<see cref="CacheAndReturnManifestAsync"/>) awaits this before
+    /// returning the manifest to the client, so an unhandled exception here would 500 a pull
+    /// whose bytes are already durably cached (blob store + <c>oci_blobs</c> row, both written
+    /// before this call). <see cref="CacheAccessRecorder.RecordAccessAsync"/> already swallows
+    /// its own failures and <see cref="PackageRepository.GetOrCreateAsync"/> resolves races via
+    /// <c>ON CONFLICT DO NOTHING</c> + re-read, but <see cref="CacheArtifactRepository.UpdateGlobalFactsAsync"/>
+    /// and the <c>GetOrCreateAsync</c> call itself are plain Dapper calls that still throw on a
+    /// transient fault (SQLITE_BUSY, a dropped connection) — caught here so cataloguing can never
+    /// fail the pull.
     /// </summary>
     private async Task RecordCatalogVersionAsync(string orgId, OciCatalogEntry entry, CancellationToken ct)
     {
@@ -791,21 +885,46 @@ public sealed class OciUpstreamResolver
         {
             // purl_name == repository so the Packages-page detail route (/packages/oci/{name})
             // resolves; isProxy=true marks the package as upstream-backed.
-            var pkg = await _packages.GetOrCreateAsync(orgId, "oci", entry.Repository, entry.Repository, isProxy: true, ct);
+            await _packages.GetOrCreateAsync(orgId, "oci", entry.Repository, entry.Repository, isProxy: true, ct);
             string purl = PurlNormalizer.Oci(entry.Repository, entry.Digest, entry.Tag);
-            await _packages.CreateVersionAsync(
-                new NewPackageVersion(pkg.Id, entry.Digest, purl, entry.BlobKey, entry.SizeBytes, entry.Sha256Hex, FirstFetch: true, Origin: "proxy"),
+
+            // Name is entry.Repository, matching the purl_name GetOrCreateAsync just wrote onto
+            // the packages row above — the cross-plane version-count join in PackageRepository
+            // keys on ca.name = p.purl_name. BlobKey is left as the oci/{algo}/{hex} store key
+            // rather than routed through BlobKeys.Proxy, which throws on a non-64-hex key.
+            string? cacheArtifactId = await _cacheRecorder.RecordAccessAsync(
+                new CacheAccess(
+                    orgId, "oci", entry.Repository, entry.Digest, ManifestCacheFilename,
+                    entry.Sha256Hex, entry.SizeBytes, entry.BlobKey, entry.UpstreamUrl),
                 ct);
+
+            if (cacheArtifactId is not null)
+            {
+                await _cacheArtifacts.UpdateGlobalFactsAsync(
+                    cacheArtifactId,
+                    purl: purl,
+                    checksumSha1: null,
+                    publishedAt: null,
+                    deprecated: null,
+                    hasInstallScript: false,
+                    installScriptKind: null,
+                    provenanceStatus: null,
+                    provenanceSigner: null,
+                    upstreamIntegrityValue: null,
+                    upstreamIntegrityAlgorithm: null,
+                    ct: ct);
+            }
+
+            // The manifest's license was stamped onto oci_blobs before this row existed; project it
+            // onto the row now so every license reader sees it through the shared table.
+            await _licenseRecorder.ProjectLicenseToCatalogAsync(orgId, entry.Digest, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            if (ex is not Microsoft.Data.Sqlite.SqliteException { SqliteErrorCode: SqliteConstraintErrorCode })
-            {
-                _logger.LogWarning(
-                    "{ExceptionType} cataloguing OCI version {Repository}@{Digest}; pull unaffected. BlobKey={BlobKey} TraceId={TraceId}",
-                    ex.GetType().Name, entry.Repository, entry.Digest, entry.BlobKey,
-                    System.Diagnostics.Activity.Current?.TraceId.ToString());
-            }
+            _logger.LogWarning(
+                "{ExceptionType} cataloguing OCI version {Repository}@{Digest}; pull unaffected. BlobKey={BlobKey} TraceId={TraceId}",
+                ex.GetType().Name, entry.Repository, entry.Digest, entry.BlobKey,
+                System.Diagnostics.Activity.Current?.TraceId.ToString());
         }
     }
 
@@ -887,7 +1006,51 @@ public sealed class OciUpstreamResolver
 
         // Return only metadata — each waiter opens its own stream independently in
         // FetchBlobAsync, so the single shared result never carries a shared stream.
-        return new OciBlobFetchMetadata(blobKey, mediaType);
+        return new OciBlobFetchMetadata(blobKey, mediaType, bytesWritten);
+    }
+
+    // Decides whether a bare hit on the shared content-addressed blob store (blobKey) may be
+    // served to orgId. The store is content-addressed with no org segment, so in the default
+    // single-store deployment (cache == registry) one tenant's PRIVATE uploaded bytes resolve
+    // under the same key as anyone else's — a raw store hit is never proof of authorization.
+    // Entitlement holds only when:
+    //   * the caller's own org already has an oci_blobs row for the key (its own upload/cache), or
+    //   * the bytes are proxy-derived (some org holds a proxy-origin row, proving upstream
+    //     provenance) AND the caller has a matching configured upstream for the repository.
+    // An 'uploaded' row owned solely by another org confers no entitlement and is never
+    // cross-served — mirroring the org-scoped oci_blobs gate the manifest serve path enforces.
+    private async Task<bool> CanServeSharedBlobAsync(
+        string orgId, string repository, string blobKey, CancellationToken ct)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: content-addressed dedup gate — deliberately inspects rows across orgs to decide
+        // whether shared bytes may be served, then enforces the org boundary in the code below.
+        var rows = await conn.QueryAsync<(string OrgId, string Origin)>(
+            "SELECT org_id AS OrgId, origin AS Origin FROM oci_blobs WHERE blob_key = @blobKey",
+            new { blobKey });
+
+        bool ownsRow = false;
+        bool anyProxy = false;
+        foreach (var (RowOrgId, Origin) in rows)
+        {
+            if (string.Equals(RowOrgId, orgId, StringComparison.Ordinal))
+            {
+                ownsRow = true;
+            }
+            if (string.Equals(Origin, "proxy", StringComparison.Ordinal))
+            {
+                anyProxy = true;
+            }
+        }
+
+        if (ownsRow)
+        {
+            return true;
+        }
+
+        // Cross-org serve is permitted only for proxy-derived bytes to an org that has a matching
+        // upstream configured for the repository — never for another tenant's private upload.
+        return anyProxy && await MatchUpstreamAsync(orgId, repository, ct) is not null;
     }
 
     // Returns true when a NEW row was inserted (ON CONFLICT DO NOTHING → 0 rows on an existing
@@ -939,7 +1102,7 @@ public sealed record OciBlobMetadata(string MediaType);
 /// Each concurrent waiter opens its own stream from the cache store after the Lazy resolves,
 /// preventing use-after-dispose when multiple callers race on the same digest.
 /// </summary>
-internal sealed record OciBlobFetchMetadata(string BlobKey, string MediaType);
+internal sealed record OciBlobFetchMetadata(string BlobKey, string MediaType, long SizeBytes);
 
 // ── Digest-verifying pass-through stream ─────────────────────────────────────
 

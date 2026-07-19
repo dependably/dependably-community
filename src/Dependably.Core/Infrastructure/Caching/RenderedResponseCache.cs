@@ -16,7 +16,7 @@ namespace Dependably.Infrastructure.Caching;
 /// guarantee holds only while one instance is shared across requests — i.e. the helper is a
 /// DI singleton and the controllers that use it are transient.
 /// </remarks>
-public sealed class RenderedResponseCache<TKey> : MetadataResponseCache<TKey, byte[]>
+public class RenderedResponseCache<TKey> : MetadataResponseCache<TKey, byte[]>
     where TKey : notnull
 {
     // Single-flight map: concurrent rebuilds for the same formatted key collapse onto one
@@ -29,18 +29,20 @@ public sealed class RenderedResponseCache<TKey> : MetadataResponseCache<TKey, by
     // Cache HITs bypass this gate entirely — they read already-allocated bytes.
     private readonly SemaphoreSlim? _gate;
 
-    public RenderedResponseCache(IMemoryCache cache, Func<TKey, string> keyFormatter)
-        : base(cache, keyFormatter)
+    public RenderedResponseCache(IMemoryCache cache, Func<TKey, string> keyFormatter, OrgCacheEpochStore? epochStore = null)
+        : base(cache, keyFormatter, epochStore)
     {
     }
 
     /// <summary>
     /// Constructs a cache with a concurrency gate applied to cache-MISS rebuilds only.
     /// <paramref name="gate"/> limits the number of rebuild lambdas executing concurrently
-    /// across all cache keys on this instance.
+    /// across all cache keys on this instance. <paramref name="epochStore"/> is passed through to
+    /// <see cref="MetadataResponseCache{TKey,TValue}"/> — see that constructor overload.
     /// </summary>
-    public RenderedResponseCache(IMemoryCache cache, Func<TKey, string> keyFormatter, SemaphoreSlim gate)
-        : base(cache, keyFormatter)
+    public RenderedResponseCache(
+        IMemoryCache cache, Func<TKey, string> keyFormatter, SemaphoreSlim gate, OrgCacheEpochStore? epochStore = null)
+        : base(cache, keyFormatter, epochStore)
     {
         _gate = gate;
     }
@@ -50,6 +52,17 @@ public sealed class RenderedResponseCache<TKey> : MetadataResponseCache<TKey, by
     /// rendered responses where the byte count is the cache weight.
     /// </summary>
     public void Set(TKey key, byte[] bytes, TimeSpan ttl) => Set(key, bytes, ttl, bytes.Length);
+
+    /// <summary>
+    /// Size-inferring counterpart to <see cref="MetadataResponseCache{TKey,TValue}.SetIfGenerationUnchanged"/>:
+    /// stores <paramref name="bytes"/> only when the key's invalidation generation still equals
+    /// <paramref name="expectedGeneration"/>. Returns true when the write is kept.
+    /// <paramref name="epochToken"/> is forwarded to the base method — see its documentation for
+    /// why a rebuild path must capture it before its read rather than let the write bind fresh.
+    /// </summary>
+    public bool SetIfGenerationUnchanged(
+        TKey key, byte[] bytes, TimeSpan ttl, long expectedGeneration, Microsoft.Extensions.Primitives.IChangeToken? epochToken = null) =>
+        SetIfGenerationUnchanged(key, bytes, ttl, bytes.Length, expectedGeneration, epochToken);
 
     /// <summary>
     /// Returns the cached bytes for <paramref name="key"/> on a hit; on a miss, runs
@@ -79,12 +92,27 @@ public sealed class RenderedResponseCache<TKey> : MetadataResponseCache<TKey, by
         var lazy = _inFlight.GetOrAdd(formatted,
             _ => new Lazy<Task<byte[]?>>(async () =>
             {
+                // Capture the invalidation generation before the rebuild reads any state (or, on
+                // the proxy path, holds open a multi-second upstream fetch). A concurrent
+                // publish/unpublish that commits its DB write and calls Evict mid-rebuild bumps
+                // this key's generation; SetIfGenerationUnchanged below then discards the Set
+                // instead of resurrecting the pre-mutation snapshot this rebuild read, so the
+                // invalidation is never lost — the next miss rebuilds against current state.
+                long generation = GetGeneration(key);
+
+                // Same capture-before-read discipline for the org policy epoch: a concurrent
+                // proxy-settings PUT that lands mid-rebuild must not have its Invalidate lost
+                // just because the eventual Set happens to run after a fresh epoch is already
+                // live. Binding to the token captured here means that write's entry is already
+                // expired the instant it lands.
+                var epochToken = CaptureEpochToken(key);
+
                 // CancellationToken.None: the shared task must not be cancelled by any one
                 // caller's disconnection — individual callers detach via WaitAsync(ct).
                 byte[]? bytes = await RebuildWithGateAsync(rebuild, CancellationToken.None);
                 if (bytes is not null)
                 {
-                    Set(key, bytes, ttl);
+                    SetIfGenerationUnchanged(key, bytes, ttl, generation, epochToken);
                 }
                 return bytes;
             }));

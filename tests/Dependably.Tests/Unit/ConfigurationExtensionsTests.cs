@@ -68,4 +68,28 @@ public sealed class ConfigurationExtensionsTests
     [InlineData("10.0.0.0/999")]
     public void ParseTrustedProxies_Malformed_ThrowsAtStartup(string value)
         => Assert.ThrowsAny<FormatException>(() => Dependably.Infrastructure.ConfigurationExtensions.ParseTrustedProxies(value));
+
+    [Theory]
+    [InlineData("0.0.0.0/0")]
+    [InlineData("::/0")]
+    [InlineData("10.0.0.0/8,0.0.0.0/0")]
+    public void ParseTrustedProxies_CatchAllRange_ThrowsAtStartup(string value)
+    {
+        // A /0 network trusts every possible peer as a forwarding proxy, so any client can
+        // spoof X-Forwarded-For and forge the caller IP the /metrics, /version, and
+        // management-docs allowlists authorize against. This must fail fast at startup rather
+        // than silently accepting a config that trusts the entire internet.
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => Dependably.Infrastructure.ConfigurationExtensions.ParseTrustedProxies(value));
+        Assert.Contains("TRUSTED_PROXIES", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ParseTrustedProxies_NarrowRanges_AreNotRejected()
+    {
+        // A specific proxy subnet or VPC CIDR is a legitimate operator choice — only the
+        // literal whole-address-space case (/0) is rejected.
+        var (networks, _) = Dependably.Infrastructure.ConfigurationExtensions.ParseTrustedProxies("10.0.0.0/8,172.16.0.0/12");
+        Assert.Equal(2, networks.Count);
+    }
 }

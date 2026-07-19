@@ -638,6 +638,146 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
         Assert.True(cacheHeader is "MISS" or "HIT", $"unexpected X-Cache: {cacheHeader}");
     }
 
+    [Fact]
+    public async Task DownloadPackage_FirstFetch_DeprecatedBlocked_AdoptsNothingOnEitherPlane()
+    {
+        // #391: the first-fetch gate must run BEFORE the artefact is adopted. A proxied version the
+        // gate 403s (here: block_new deprecation) must leave no cache_artifact / tenant_artifact_access
+        // row — otherwise it lands in the tenant's catalogue (inventory, storage total) despite never
+        // being served. npm/NuGet/Maven already gate before adopting; this pins PyPI to the same order.
+        string name = $"depblock{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string underscored = name.Replace('-', '_');
+        string filename = $"{underscored}-1.0.0-py3-none-any.whl";
+        var (wheelBytes, _) = PyPiFixtures.BuildWheel(name, "1.0.0");
+        string mockBase = _factory.MockUpstream.Urls[0];
+
+        _factory.MockUpstream
+            .Given(Request.Create().WithPath($"/simple/{name}/").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                .WithHeader("Content-Type", "text/html")
+                .WithBody($"<html><body><a href=\"{mockBase}/files/{filename}\">{filename}</a></body></html>"));
+        _factory.MockUpstream
+            .Given(Request.Create().WithPath($"/files/{filename}").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                .WithHeader("Content-Type", "application/octet-stream").WithBody(wheelBytes));
+        // The JSON metadata marks the file yanked → deprecated, which block_new refuses on first fetch.
+        _factory.MockUpstream
+            .Given(Request.Create().WithPath($"/pypi/{name}/1.0.0/json").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                .WithHeader("Content-Type", "application/json")
+                .WithBody($"{{\"urls\":[{{\"filename\":\"{filename}\",\"yanked\":true}}]}}"));
+
+        string orgId = (await _factory.Services.GetRequiredService<OrgRepository>().GetBySlugAsync("default"))!.Id;
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using (var conn = await store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "UPDATE org_settings SET block_deprecated = 'block_new' WHERE org_id = @orgId", new { orgId });
+        }
+        _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
+
+        try
+        {
+            string token = await _factory.CreateToken("pull");
+            using var client = _factory.CreateClientWithBasic(token);
+            var resp = await client.GetAsync($"/packages/{filename}");
+            Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
+
+            await using var verify = await store.OpenAsync();
+            // Nothing adopted on either plane for this artefact (scoped by the unique name since the
+            // factory is shared across the class).
+            Assert.Equal(0, await verify.ExecuteScalarAsync<long>(
+                "SELECT COUNT(*) FROM cache_artifact WHERE ecosystem = 'pypi' AND name = @name", new { name }));
+            Assert.Equal(0, await verify.ExecuteScalarAsync<long>(
+                """
+                SELECT COUNT(*) FROM tenant_artifact_access taa
+                JOIN cache_artifact ca ON ca.id = taa.cache_artifact_id
+                WHERE taa.org_id = @orgId AND ca.name = @name
+                """, new { orgId, name }));
+            Assert.Equal(0, await verify.ExecuteScalarAsync<long>(
+                """
+                SELECT COUNT(*) FROM package_versions pv
+                JOIN packages p ON p.id = pv.package_id
+                WHERE p.ecosystem = 'pypi' AND p.purl_name = @name
+                """, new { name }));
+            // (The blocked_deprecated activity row is emitted too, but through the async activity
+            // writer — a synchronous read here would race the background flush, so it isn't asserted.
+            // The zero-adoption facts above are the #391 regression: on the pre-fix code the artefact
+            // was recorded up front, so cache_artifact / tenant_artifact_access held a row here.)
+        }
+        finally
+        {
+            await using var conn = await store.OpenAsync();
+            await conn.ExecuteAsync(
+                "UPDATE org_settings SET block_deprecated = 'off' WHERE org_id = @orgId", new { orgId });
+            _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
+        }
+    }
+
+    [Fact]
+    public async Task DownloadPackage_FirstFetch_BlobAlreadyCachedByAnotherTenant_StillGatesBeforeAdopting()
+    {
+        // #391 blob-hit gap: `IsHit` is the GLOBAL content-addressed blob-store hit, so an org's
+        // FIRST fetch of bytes another tenant already cached must still run the first-fetch gate —
+        // otherwise the cross-tenant blob hit adopts with no policy evaluation. Pre-seeding the
+        // proxy blob forces IsHit=true while this org holds no cache_artifact/taa row.
+        string name = $"hitgate{Guid.NewGuid():N}"[..16].ToLowerInvariant();
+        string underscored = name.Replace('-', '_');
+        string filename = $"{underscored}-1.0.0-py3-none-any.whl";
+        var (wheelBytes, sha) = PyPiFixtures.BuildWheel(name, "1.0.0");
+        string mockBase = _factory.MockUpstream.Urls[0];
+
+        // The content-addressed proxy blob is already present → this org's fetch is a store HIT.
+        await _factory.BlobStore.PutAsync($"proxy/{sha}", new MemoryStream(wheelBytes));
+
+        // The simple-index href carries #sha256 so the known-sha (hit-detecting) download path runs.
+        _factory.MockUpstream
+            .Given(Request.Create().WithPath($"/simple/{name}/").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                .WithHeader("Content-Type", "text/html")
+                .WithBody($"<html><body><a href=\"{mockBase}/files/{filename}#sha256={sha}\">{filename}</a></body></html>"));
+        // Yanked JSON so block_new refuses this first fetch.
+        _factory.MockUpstream
+            .Given(Request.Create().WithPath($"/pypi/{name}/1.0.0/json").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                .WithHeader("Content-Type", "application/json")
+                .WithBody($"{{\"urls\":[{{\"filename\":\"{filename}\",\"yanked\":true}}]}}"));
+
+        string orgId = (await _factory.Services.GetRequiredService<OrgRepository>().GetBySlugAsync("default"))!.Id;
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using (var conn = await store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "UPDATE org_settings SET block_deprecated = 'block_new' WHERE org_id = @orgId", new { orgId });
+        }
+        _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
+
+        try
+        {
+            string token = await _factory.CreateToken("pull");
+            using var client = _factory.CreateClientWithBasic(token);
+            var resp = await client.GetAsync($"/packages/{filename}");
+            Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
+
+            await using var verify = await store.OpenAsync();
+            Assert.Equal(0, await verify.ExecuteScalarAsync<long>(
+                "SELECT COUNT(*) FROM cache_artifact WHERE ecosystem = 'pypi' AND name = @name", new { name }));
+            Assert.Equal(0, await verify.ExecuteScalarAsync<long>(
+                """
+                SELECT COUNT(*) FROM tenant_artifact_access taa
+                JOIN cache_artifact ca ON ca.id = taa.cache_artifact_id
+                WHERE taa.org_id = @orgId AND ca.name = @name
+                """, new { orgId, name }));
+        }
+        finally
+        {
+            await using var conn = await store.OpenAsync();
+            await conn.ExecuteAsync(
+                "UPDATE org_settings SET block_deprecated = 'off' WHERE org_id = @orgId", new { orgId });
+            _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
+        }
+    }
+
     // ── SimpleIndex block-gate consistency ────────────────────────────────────
 
     /// <summary>

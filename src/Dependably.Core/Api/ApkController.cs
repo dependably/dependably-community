@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Dapper;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Caching;
 using Dependably.Infrastructure.Observability;
 using Dependably.Protocol;
 using Dependably.Protocol.Provenance;
@@ -360,7 +361,7 @@ public sealed class ApkController : OrgScopedControllerBase
                 provenanceSigner: null,
                 upstreamIntegrityValue: fetchResult.Sha256Hex,
                 upstreamIntegrityAlgorithm: "sha256",
-                ct);
+                ct: ct);
         }
     }
 
@@ -480,6 +481,8 @@ public sealed record ApkIndexResult(Stream Body, string ContentType, string? ETa
 /// around the index fetch maps this — like any other upstream failure — to a 502,
 /// refusing to cache or serve upstream metadata that failed to verify.
 /// </summary>
+[System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S3925:\"ISerializable\" should be implemented correctly",
+    Justification = "Binary serialization ctor on Exception is obsolete in .NET 10 (SYSLIB0051); this exception is never serialized across an AppDomain or binary boundary.")]
 public sealed class ApkIndexSignatureVerificationFailedException : Exception
 {
     public ApkIndexSignatureVerificationFailedException(string upstreamBase)
@@ -582,15 +585,13 @@ public sealed class ApkIndexFetchCoordinator
             _ => new Lazy<Task<CachedIndexFile?>>(
                 () => FetchFromUpstreamAsync(upstreamBase, release, repo, arch, filename, authorizationHeader, orgId, CancellationToken.None)));
 
-        CachedIndexFile? result;
-        try
-        {
-            result = await lazy.Value.WaitAsync(ct);
-        }
-        finally
-        {
-            _inflight.TryRemove(cacheKey, out _);
-        }
+        // Removes exactly this (key, lazy) pair once the shared fetch genuinely completes —
+        // success or failure — never when this caller's WaitAsync(ct) below merely detaches
+        // early. Attaching per-caller (instead of once at registration) is safe: TryRemove is
+        // idempotent, so joiners' redundant continuations are no-ops.
+        InFlightCoordination.ScheduleRemoval(_inflight, cacheKey, lazy);
+
+        var result = await lazy.Value.WaitAsync(ct);
 
         if (result is null)
         {

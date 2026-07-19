@@ -439,7 +439,12 @@ public sealed class AuthController : ControllerBase
             return BadRequest(new { detail = "Invite token is required." });
         }
 
-        var verdict = PasswordPolicy.Evaluate(req.Password, new PasswordContext());
+        // Peek (without consuming) so a failed policy check never burns the invite's single
+        // use. The invite's email and tenant slug feed the context-dictionary check and the
+        // zxcvbn user-inputs list — an empty context only ever blocks the literal product name.
+        var pending = await invites.PeekPendingAsync(req.Token, ct);
+        var pendingOrg = pending is not null ? await _orgs.GetByIdAsync(pending.OrgId, ct) : null;
+        var verdict = PasswordPolicy.Evaluate(req.Password, new PasswordContext(pending?.Email, pendingOrg?.Slug));
         if (!verdict.IsOk)
         {
             return BadRequest(new { detail = verdict.ToReason(), field = "password" });
@@ -488,17 +493,27 @@ public sealed class AuthController : ControllerBase
             return BadRequest(new { detail = "Current password is required." });
         }
 
-        var verdict = PasswordPolicy.Evaluate(req.NewPassword, new PasswordContext());
-        if (!verdict.IsOk)
-        {
-            return BadRequest(new { detail = verdict.ToReason(), field = "newPassword" });
-        }
-
         string? sub = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
             ?? User.FindFirst("sub")?.Value;
         if (sub is null)
         {
             return Unauthorized();
+        }
+
+        // The session JWT carries no email claim, so it's resolved live from the user's own
+        // row; the tenant slug comes from the org the caller's own claims already name. Both
+        // feed the context-dictionary check and the zxcvbn user-inputs list — an empty context
+        // only ever blocks the literal product name, not the caller's own email or tenant.
+        string? tenantIdForPolicy = User.FindFirst("tid")?.Value ?? User.FindFirst("org_id")?.Value;
+        string? emailForPolicy = await _users.GetEmailAsync(sub, ct);
+        string? tenantSlugForPolicy = tenantIdForPolicy is not null
+            ? (await _orgs.GetByIdAsync(tenantIdForPolicy, ct))?.Slug
+            : null;
+
+        var verdict = PasswordPolicy.Evaluate(req.NewPassword, new PasswordContext(emailForPolicy, tenantSlugForPolicy));
+        if (!verdict.IsOk)
+        {
+            return BadRequest(new { detail = verdict.ToReason(), field = "newPassword" });
         }
 
         var result = await _users.ChangePasswordAsync(sub, req.CurrentPassword, req.NewPassword, ct);
@@ -515,7 +530,7 @@ public sealed class AuthController : ControllerBase
         // The token_version bump just staled every outstanding session JWT (and the user's API
         // tokens were revoked). Re-issue the changing session's own cookie at the new version
         // so the user who rotated the password stays logged in.
-        string? tenantId = User.FindFirst("tid")?.Value ?? User.FindFirst("org_id")?.Value;
+        string? tenantId = tenantIdForPolicy;
         string role = User.FindFirst("role")?.Value ?? "member";
         if (!string.IsNullOrEmpty(tenantId) && result.NewTokenVersion is long newVersion)
         {
@@ -548,25 +563,36 @@ public sealed class AuthController : ControllerBase
         return Ok(new { message = "Logged out." });
     }
 
-    // Parses and revokes the session JWT embedded in the cookie. Ignores malformed tokens
-    // so a corrupt or stale cookie never blocks the logout flow.
+    // Parses and revokes the session JWT embedded in the cookie. Only the parse step is
+    // guarded — a corrupt or stale cookie never blocks the logout flow — so a revocation-store
+    // failure (DB locked/unavailable) is never mistaken for "nothing to revoke" and swallowed.
+    // It propagates out of Logout instead, so the caller cannot report success while the
+    // session JWT remains valid and unrevoked.
     private async Task TryRevokeSessionCookieAsync(string sessionCookie, CancellationToken ct)
     {
+        var handler = new JwtSecurityTokenHandler();
+        string jti;
+        DateTime validTo;
         try
         {
-            var handler = new JwtSecurityTokenHandler();
             if (!handler.CanReadToken(sessionCookie))
             {
                 return;
             }
             var jwt = handler.ReadJwtToken(sessionCookie);
-            string jti = jwt.Id;
-            if (!string.IsNullOrEmpty(jti))
-            {
-                await _revocations.RevokeAsync(jti, jwt.ValidTo, ct);
-            }
+            jti = jwt.Id;
+            validTo = jwt.ValidTo;
         }
-        catch { /* malformed token — still delete the cookie */ }
+        catch (ArgumentException)
+        {
+            // Malformed token — nothing to revoke; the cookie is still deleted by the caller.
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(jti))
+        {
+            await _revocations.RevokeAsync(jti, validTo, ct);
+        }
     }
 
     /// <summary>

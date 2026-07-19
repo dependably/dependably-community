@@ -17,7 +17,11 @@ namespace Dependably.Tests.Integration;
 /// <c>dependably.security.upstream_url_blocks</c> measurement, and that the
 /// redirect-block path emits exactly one measurement (double-count fix).
 /// </summary>
+// Attaches a MeterListener filtered only by DependablyMeter.MeterName + instrument name and
+// asserts exact counts — must run alone against the process-wide static meter.
+// See MeterSensitiveCollection.
 [Trait("Category", "Integration")]
+[Collection("MeterSensitive")]
 public sealed class UpstreamUrlBlocksEmissionTests : IAsyncLifetime
 {
     private readonly TestMetadataStore _db = new();

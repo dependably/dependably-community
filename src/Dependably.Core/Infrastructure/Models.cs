@@ -455,6 +455,14 @@ public class PackageVersion
     /// version is never labelled clean. Derived in SQL; not a stored column.
     /// </summary>
     public bool HasAdvisory { get; set; }
+    /// <summary>
+    /// Full URL the artifact bytes were fetched from, for proxy cache-plane versions — the
+    /// resolved per-org upstream (a private registry when one is configured), projected from
+    /// <c>cache_artifact.upstream_url</c> by
+    /// <see cref="CacheArtifactIndexFacts.ToPackageVersionSynthetic"/>. NULL for uploaded
+    /// versions (no upstream) and for proxy rows cached before the column was populated.
+    /// </summary>
+    public string? UpstreamUrl { get; set; }
 }
 
 public class User

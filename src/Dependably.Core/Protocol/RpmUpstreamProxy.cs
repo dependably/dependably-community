@@ -5,6 +5,7 @@ using System.Text;
 using System.Xml.Linq;
 using Dapper;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Caching;
 using Dependably.Infrastructure.Observability;
 using Dependably.Protocol.Provenance;
 using Dependably.Security;
@@ -562,30 +563,28 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
             _ => new Lazy<Task<(byte[], string?, string?)>>(
                 () => FetchRepomdFromUpstreamAsync(upstreamBase, filename, ifNoneMatch, ifModifiedSince, CancellationToken.None)));
 
-        (byte[] body, string? etag, string? lastModified) result;
-        try
-        {
-            result = await lazy.Value.WaitAsync(ct);
-        }
-        finally
-        {
-            _repomdInflight.TryRemove(cacheKey, out _);
-        }
+        // Removes exactly this (key, lazy) pair once the shared fetch genuinely completes —
+        // success or failure — never when this caller's WaitAsync(ct) below merely detaches
+        // early. Attaching per-caller (instead of once at registration) is safe: TryRemove is
+        // idempotent, so joiners' redundant continuations are no-ops.
+        InFlightCoordination.ScheduleRemoval(_repomdInflight, cacheKey, lazy);
 
-        if (result.body.Length == 0)
+        var (body, etag, lastModified) = await lazy.Value.WaitAsync(ct);
+
+        if (body.Length == 0)
         {
             // Upstream returned 304 (or 404). Don't cache.
-            return result.etag is null
+            return etag is null
                 ? null  // 404
-                : new RepodataResult(Stream.Null, ContentTypeFor(filename), result.etag, result.lastModified, NotModified: true);
+                : new RepodataResult(Stream.Null, ContentTypeFor(filename), etag, lastModified, NotModified: true);
         }
 
-        _memCache.Set(cacheKey, new CachedRepomd(result.body, result.etag, result.lastModified), new MemoryCacheEntryOptions
+        _memCache.Set(cacheKey, new CachedRepomd(body, etag, lastModified), new MemoryCacheEntryOptions
         {
             AbsoluteExpirationRelativeToNow = _repomdTtl,
-            Size = result.body.Length,
+            Size = body.Length,
         });
-        return new RepodataResult(new MemoryStream(result.body), ContentTypeFor(filename), result.etag, result.lastModified, NotModified: false);
+        return new RepodataResult(new MemoryStream(body), ContentTypeFor(filename), etag, lastModified, NotModified: false);
     }
 
     private async Task<(byte[] Body, string? ETag, string? LastModified)> FetchRepomdFromUpstreamAsync(

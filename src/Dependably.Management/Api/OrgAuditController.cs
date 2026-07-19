@@ -24,15 +24,31 @@ public sealed class OrgAuditController : OrgScopedControllerBase
     // Maximum page size for paged audit/activity list responses.
     private const int MaxAuditPageSize = 200;
 
+    /// <summary>
+    /// The time windows the activity feed can be scoped to. A closed vocabulary rather than a
+    /// free-form date: it is what the dashboard's drill-downs need (the blocked-pull tiles count a
+    /// 30-day window), it validates cleanly, and it keeps the CSV export off an unbounded range scan.
+    /// </summary>
+    private static readonly Dictionary<string, TimeSpan> ActivityWindows =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["24h"] = TimeSpan.FromHours(24),
+            ["7d"] = TimeSpan.FromDays(7),
+            ["30d"] = TimeSpan.FromDays(30),
+            ["90d"] = TimeSpan.FromDays(90),
+        };
+
     private readonly AuditRepository _audit;
     private readonly OrgAccessGuard _guard;
     private readonly TimeProvider _time;
+    private readonly ProblemResults _problems;
 
-    public OrgAuditController(AuditRepository audit, OrgAccessGuard guard, TimeProvider time)
+    public OrgAuditController(AuditRepository audit, OrgAccessGuard guard, TimeProvider time, ProblemResults problems)
     {
         _audit = audit;
         _guard = guard;
         _time = time;
+        _problems = problems;
     }
 
     /// <summary>GET /api/v1/orgs/{org}/activity</summary>
@@ -45,6 +61,7 @@ public sealed class OrgAuditController : OrgScopedControllerBase
         [FromQuery] int page = 1,
         [FromQuery(Name = "event_type")] string? eventType = null,
         [FromQuery] string? search = null,
+        [FromQuery] string? since = null,
         [FromQuery] string? format = null,
         CancellationToken ct = default)
     {
@@ -60,9 +77,21 @@ public sealed class OrgAuditController : OrgScopedControllerBase
             eventType = null;
         }
 
+        string? sinceIso = null;
+        if (!string.IsNullOrEmpty(since))
+        {
+            if (!ActivityWindows.TryGetValue(since, out var window))
+            {
+                return _problems.ValidationErrorActionKey("since", "error.activity.sinceInvalid");
+            }
+
+            sinceIso = _time.GetUtcNow().Subtract(window).UtcDateTime.ToString(
+                "yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture);
+        }
+
         if (string.Equals(format, "csv", StringComparison.OrdinalIgnoreCase))
         {
-            var (csvItems, _) = await _audit.ListActivityAsync(orgId, CsvExportRowCap, 0, eventType, search, ct);
+            var (csvItems, _) = await _audit.ListActivityAsync(orgId, CsvExportRowCap, 0, eventType, search, sinceIso, ct);
             var sb = new System.Text.StringBuilder();
             CsvWriter.WriteRow(sb, "created_at", "event_type", "ecosystem", "purl", "actor_email", "source_ip", "detail");
             foreach (var item in csvItems)
@@ -78,9 +107,8 @@ public sealed class OrgAuditController : OrgScopedControllerBase
         }
 
         limit = Math.Clamp(limit, 1, MaxAuditPageSize);
-        page = Math.Max(page, 1);
-        int offset = (page - 1) * limit;
-        var (items, total) = await _audit.ListActivityAsync(orgId, limit, offset, eventType, search, ct);
+        int offset = PaginationHelper.ComputeOffset(page, limit);
+        var (items, total) = await _audit.ListActivityAsync(orgId, limit, offset, eventType, search, sinceIso, ct);
         return Ok(new { items, total, limit, offset });
     }
 
@@ -125,8 +153,7 @@ public sealed class OrgAuditController : OrgScopedControllerBase
         }
 
         limit = Math.Clamp(limit, 1, MaxAuditPageSize);
-        page = Math.Max(page, 1);
-        int offset = (page - 1) * limit;
+        int offset = PaginationHelper.ComputeOffset(page, limit);
         var (items, total) = await _audit.ListAuditAsync(orgId, limit, offset, action, search, ct);
         return Ok(new { items, total, limit, offset });
     }

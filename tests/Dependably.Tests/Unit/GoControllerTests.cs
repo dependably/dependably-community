@@ -81,4 +81,50 @@ public class GoControllerTests
         Assert.Equal(module, parsed.Name);
         Assert.Equal(version, parsed.Version);
     }
+
+    // ── Upstream-path-segment safety (percent-encoded traversal defence) ───────
+
+    // The module/version are composed into the upstream proxy URL via EncodeBangEncoding, which
+    // passes '%' through untouched, and the /go/{**path} catch-all leaves %2F/%2E undecoded — so
+    // a percent-encoded traversal would otherwise reach the upstream and be decoded to '../'
+    // there. ValidateModulePath must reject any segment carrying '%' (or a raw traversal /
+    // control char) before the URL is composed.
+    [Theory]
+    [InlineData("example.com/%2e%2e%2f%2e%2e/etc")]  // '%' in an interior segment
+    [InlineData("example.com%2f..%2f..%2fetc")]      // single-segment %2f traversal
+    [InlineData("github.com/a%2fb/mod")]             // '%' anywhere in the path
+    [InlineData("github.com/../../etc")]             // raw traversal segment
+    [InlineData("github.com/foo\u0000bar/mod")]      // null byte
+    public void ValidateModulePath_RejectsUnsafeSegment(string module)
+    {
+        Assert.NotNull(GoController.ValidateModulePath(module));
+    }
+
+    [Theory]
+    [InlineData("golang.org/x/net")]
+    [InlineData("github.com/stretchr/testify")]
+    [InlineData("github.com/foo/bar")]
+    [InlineData("example.com/simple")]
+    public void ValidateModulePath_AcceptsWellFormedModule(string module)
+    {
+        Assert.Null(GoController.ValidateModulePath(module));
+    }
+
+    [Theory]
+    [InlineData("v1.0.0%2f%2e%2e")]  // '%' traversal smuggled into the version
+    [InlineData("v1.0.0/../etc")]    // raw separator + traversal
+    [InlineData("v1.0\u0000")]       // null byte
+    public void UpstreamSegmentError_RejectsUnsafeVersion(string version)
+    {
+        Assert.NotNull(GoController.UpstreamSegmentError(version));
+    }
+
+    [Theory]
+    [InlineData("v0.10.0")]
+    [InlineData("v0.0.0-20231201123456-abcdef123456")]  // pseudo-version
+    [InlineData("v2.0.0+incompatible")]
+    public void UpstreamSegmentError_AcceptsWellFormedVersion(string version)
+    {
+        Assert.Null(GoController.UpstreamSegmentError(version));
+    }
 }

@@ -19,9 +19,9 @@ namespace Dependably.Api.NuGetProtocol;
 public sealed class NuGetRegistrationHandler(
     OrgRepository orgs,
     PackageRepository packages,
-    CacheArtifactRepository cacheArtifacts,
     TokenRepository tokens,
     VulnerabilityRepository vulns,
+    ArtifactInventoryRepository inventory,
     UpstreamClient upstream,
     UpstreamRegistryResolver registries,
     ClaimResolver claimResolver,
@@ -223,7 +223,7 @@ public sealed class NuGetRegistrationHandler(
     }
 
     // Upstream-merged registration with an IMemoryCache front: cache hit serves the stored
-    // bytes; a miss rebuilds via single-flighted ProxyMergedRegistrationAsync.
+    // bytes; a miss rebuilds via single-flighted BuildProxyMergedRegistrationBytesAsync.
     // Uses IsProxy:true so the proxy-merged entry occupies a distinct cache slot from the
     // local-only entry written by ServeLocalRegistrationAsync. Without the distinction,
     // a local-only entry cached before an operator adds a mixed claim would be served
@@ -237,26 +237,32 @@ public sealed class NuGetRegistrationHandler(
             return RegistrationBytesResult(httpContext, proxyHit, "private, max-age=60");
         }
 
-        // Single-flight: collapse concurrent registration rebuilds for the same key.
+        // Resolve the tenant base URL on the request thread, before entering single-flight.
+        // The rebuild below runs under CancellationToken.None and is shared across concurrent
+        // callers for the same key, so it must never touch the initiating caller's HttpContext:
+        // that context may have completed (its response object recycled) by the time the shared
+        // task runs, and the registration/flatcontainer URLs baked into the cached JSON are
+        // served org-wide for the whole TTL — they cannot depend on whichever caller happened
+        // to win the race.
+        string baseUrl = urls.Absolute(httpContext, "/nuget");
+
+        // Single-flight: collapse concurrent registration rebuilds for the same key. The
+        // rebuild yields pure bytes (no HttpContext reads, no response-header writes); the
+        // ETag / If-None-Match decision is made below against the returned bytes, so one
+        // caller's conditional-request header can never suppress caching for the others.
+        // An upstream-unreachable local fallback carries the longer local-only max-age hint;
+        // the merged/rewritten upstream response uses the shorter proxy max-age.
+        string cacheControl = "private, max-age=60";
         byte[]? proxyBytes = await cache.GetOrRebuildAsync(proxyCacheKey, RegistrationProxyTtl, async rebuildCt =>
         {
-            var result = await ProxyMergedRegistrationAsync(httpContext, orgId, id, pkg, semVer2, rebuildCt);
-            string? json = result switch
-            {
-                ContentResult cr => cr.Content,
-                JsonResult jr => System.Text.Json.JsonSerializer.Serialize(jr.Value, NuGetRegistrationHelpers.RelaxedJsonOptions),
-                _ => null,
-            };
-            return json is null ? null : System.Text.Encoding.UTF8.GetBytes(json);
+            var (bytes, upstreamReached) = await BuildProxyMergedRegistrationBytesAsync(orgId, id, pkg, semVer2, baseUrl, rebuildCt);
+            cacheControl = upstreamReached ? "private, max-age=60" : "private, max-age=300";
+            return bytes;
         }, ct);
 
-        if (proxyBytes is not null)
-        {
-            return new FileContentResult(proxyBytes, "application/json");
-        }
-
-        // Non-cacheable result (e.g. NotFound) — fall through to direct return.
-        return await ProxyMergedRegistrationAsync(httpContext, orgId, id, pkg, semVer2, ct);
+        return proxyBytes is null
+            ? new NotFoundResult()
+            : RegistrationBytesResult(httpContext, proxyBytes, cacheControl);
     }
 
     // Local-only registration with an IMemoryCache front: a cache hit serves the stored
@@ -266,6 +272,15 @@ public sealed class NuGetRegistrationHandler(
         HttpContext httpContext, string orgId, string id, string normalizedId, Package pkg, bool semVer2, CancellationToken ct)
     {
         var localCacheKey = new NuGetRegistrationKey(orgId, normalizedId, semVer2);
+
+        // Capture the invalidation generation AND the org policy epoch token before reading any
+        // policy-dependent state below — mirroring RenderedResponseCache.GetOrRebuildAsync. A
+        // proxy-settings PUT that commits its DB write and invalidates the org's epoch between
+        // this read and the Set below must not be lost: binding the Set to the token captured
+        // here means it is already expired the instant it lands, instead of picking up whichever
+        // epoch happens to be live once the write actually runs.
+        long generation = cache.GetGeneration(localCacheKey);
+        var epochToken = cache.CaptureEpochToken(localCacheKey);
         if (cache.TryGet(localCacheKey, out byte[]? localHit) && localHit is not null)
         {
             return RegistrationBytesResult(httpContext, localHit, "private, max-age=300");
@@ -274,10 +289,11 @@ public sealed class NuGetRegistrationHandler(
         var settings = await orgs.GetSettingsAsync(orgId, ct);
         var versions = await LoadCombinedVersionsAsync(orgId, pkg.Id, normalizedId, ct);
         var signals = await LoadCombinedVulnSignalsAsync(versions, ct);
-        object localResult = BuildLocalRegistration(httpContext, id, pkg, versions, settings!, signals, time.GetUtcNow());
+        string baseUrl = urls.Absolute(httpContext, "/nuget");
+        object localResult = BuildLocalRegistration(baseUrl, id, pkg, versions, settings!, signals, time.GetUtcNow());
         string localJson = System.Text.Json.JsonSerializer.Serialize(localResult, NuGetRegistrationHelpers.RelaxedJsonOptions);
         byte[] localBytes = System.Text.Encoding.UTF8.GetBytes(localJson);
-        cache.Set(localCacheKey, localBytes, RegistrationLocalTtl);
+        cache.SetIfGenerationUnchanged(localCacheKey, localBytes, RegistrationLocalTtl, generation, epochToken);
         return RegistrationBytesResult(httpContext, localBytes, "private, max-age=300");
     }
 
@@ -324,52 +340,23 @@ public sealed class NuGetRegistrationHandler(
     // Returns the combined list of uploaded package_versions and synthetic PackageVersion
     // objects projected from global-plane proxy cache entries. NuGet registration lists all
     // cached versions for a package id; proxy entries whose version already appears in uploaded
-    // versions are deduplicated. Each NuGet version may produce multiple cache_artifact rows
-    // (.nupkg, .nuspec, .sha512); version deduplication ensures one entry per version string.
+    // versions are dropped. The registration document is version-level, but each proxied NuGet
+    // version casts up to three cache_artifact rows (.nupkg, .nuspec, .sha512) sharing one
+    // version string — DedupeProxyVersionsByVersion collapses those down to the .nupkg row so
+    // the version is listed exactly once.
     private async Task<IReadOnlyList<PackageVersion>> LoadCombinedVersionsAsync(
         string orgId, string packageId, string normalizedId, CancellationToken ct)
     {
-        var uploadedVersions = await packages.GetVersionsAsync(packageId, ct);
-        var proxyEntries = await cacheArtifacts.ListServeFactsForNameAsync(orgId, "nuget", normalizedId, ct);
-
-        if (proxyEntries.Count == 0)
-        {
-            return uploadedVersions;
-        }
-
-        var uploadedVersionSet = uploadedVersions
-            .Select(v => v.Version)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        var proxyIds = proxyEntries.Select(e => e.Id).ToList();
-        var proxySignals = proxyIds.Count > 0
-            ? await vulns.GetGateSignalsBatchForCacheArtifactsAsync(proxyIds, ct)
-            : new Dictionary<string, VulnGateSignals>();
-
-        var synthetic = proxyEntries
-            .Where(e => !uploadedVersionSet.Contains(e.Version))
-            .GroupBy(e => e.Version, StringComparer.OrdinalIgnoreCase)
-            .Select(g => g.First().ToPackageVersionSynthetic(proxySignals))
-            .ToList();
-
-        if (synthetic.Count == 0)
-        {
-            return uploadedVersions;
-        }
-
-        var combined = new List<PackageVersion>(uploadedVersions.Count + synthetic.Count);
-        combined.AddRange(uploadedVersions);
-        combined.AddRange(synthetic);
-        return combined;
+        var versions = await inventory.ListServeableVersionsAsync(orgId, packageId, "nuget", normalizedId, ct);
+        return ArtifactInventoryRepository.DedupeProxyVersionsByVersion(versions);
     }
 
-    private Dictionary<string, object?> BuildLocalRegistration(
-        HttpContext httpContext,
+    private static Dictionary<string, object?> BuildLocalRegistration(
+        string baseUrl,
         string id, Package pkg, IReadOnlyList<PackageVersion> versions,
         OrgSettings settings, IReadOnlyDictionary<string, VulnGateSignals> signals, DateTimeOffset now)
     {
         string normalizedId = id.ToLowerInvariant();
-        string baseUrl = urls.Absolute(httpContext, "/nuget");
         string registration = $"{baseUrl}/registration/{normalizedId}/index.json";
 
         // Exclude yanked versions and versions the block gate will hard-block on the download
@@ -409,8 +396,17 @@ public sealed class NuGetRegistrationHandler(
         };
     }
 
-    private async Task<IActionResult> ProxyMergedRegistrationAsync(
-        HttpContext httpContext, string orgId, string id, Package? pkg, bool semVer2, CancellationToken ct)
+    // Builds the serialized proxy-merged registration document: the upstream index rewritten
+    // to tenant URLs, with servable local versions merged in, or a local-only fallback when
+    // upstream is unreachable. Bytes are null when neither upstream nor local has anything to
+    // serve (the caller maps that to 404); UpstreamReached is false on the local-only fallback
+    // so the caller can pick the longer local max-age hint. Takes a precomputed baseUrl and
+    // returns pure bytes — never reading the initiating caller's HttpContext nor writing
+    // response headers — so the single-flight cache decision stays independent of any one
+    // caller's conditional-request headers and the shared task cannot touch a completed or
+    // recycled response.
+    private async Task<(byte[]? Bytes, bool UpstreamReached)> BuildProxyMergedRegistrationBytesAsync(
+        string orgId, string id, Package? pkg, bool semVer2, string baseUrl, CancellationToken ct)
     {
         string normalizedId = id.ToLowerInvariant();
         // semver1 excludes SemVer-2 build metadata (+suffix); semver2 is the superset. Pick the
@@ -429,28 +425,18 @@ public sealed class NuGetRegistrationHandler(
         var settings = await orgs.GetSettingsAsync(orgId, ct);
         var signals = await LoadCombinedVulnSignalsAsync(localVersions, ct);
         var now = time.GetUtcNow();
-        string baseUrl = urls.Absolute(httpContext, "/nuget");
 
         if (upstreamJson is null)
         {
             if (pkg is null || localVersions.Count == 0)
             {
-                return new NotFoundResult();
+                return (null, false);
             }
 
-            object localFallback = BuildLocalRegistration(httpContext, id, pkg, localVersions, settings!, signals, now);
+            object localFallback = BuildLocalRegistration(baseUrl, id, pkg, localVersions, settings!, signals, now);
             byte[] localFallbackBytes = System.Text.Encoding.UTF8.GetBytes(
                 System.Text.Json.JsonSerializer.Serialize(localFallback, NuGetRegistrationHelpers.RelaxedJsonOptions));
-            if (IsClientCopyCurrent(httpContext, localFallbackBytes))
-            {
-                return new StatusCodeResult(StatusCodes.Status304NotModified);
-            }
-            httpContext.Response.Headers.CacheControl = "private, max-age=300";
-            return new ContentResult
-            {
-                Content = System.Text.Json.JsonSerializer.Serialize(localFallback, NuGetRegistrationHelpers.RelaxedJsonOptions),
-                ContentType = "application/json"
-            };
+            return (localFallbackBytes, false);
         }
 
         // Filter local-only versions through the block gate before merging them into the
@@ -464,13 +450,7 @@ public sealed class NuGetRegistrationHandler(
             ? NuGetRegistrationHelpers.RewriteRegistrationIndexUrls(upstreamJson, normalizedId, baseUrl)
             : NuGetRegistrationHelpers.MergeLocalIntoUpstreamRegistration(upstreamJson, servableLocalVersions, pkg, id, baseUrl);
 
-        byte[] regBytes = System.Text.Encoding.UTF8.GetBytes(responseJson);
-        if (IsClientCopyCurrent(httpContext, regBytes))
-        {
-            return new StatusCodeResult(StatusCodes.Status304NotModified);
-        }
-        httpContext.Response.Headers.CacheControl = "private, max-age=60";
-        return new ContentResult { Content = responseJson, ContentType = "application/json" };
+        return (System.Text.Encoding.UTF8.GetBytes(responseJson), true);
     }
 
     // Walks the org's configured upstreams in priority order and returns the first

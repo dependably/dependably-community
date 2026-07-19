@@ -23,6 +23,7 @@ const TENANT_STATIC = [
   ['upload',            '/upload'],
   ['vulnerabilities',   '/vulnerabilities'],
   ['quarantine',        '/quarantine'],
+  ['risk',              '/risk'],
   ['license-policy',    '/license-policy'],
   ['lookup',            '/lookup'],
   ['profile',           '/profile'],

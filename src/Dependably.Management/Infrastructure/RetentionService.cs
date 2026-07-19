@@ -188,16 +188,25 @@ public sealed class RetentionService : ScheduledBackgroundService
         }
     }
 
-    private async Task EnforceVersionLimitAsync(
+    // internal (not private) so RetentionServiceCacheExclusionTests can drive it directly without
+    // the full cron/config scheduling machinery — mirrors PurgeUnlistedAsync below.
+    internal async Task EnforceVersionLimitAsync(
         System.Data.Common.DbConnection conn, string orgId, int keepVersions, CancellationToken ct)
     {
         // Uploaded versions: keep the most recent N per package; delete older ones from package_versions.
+        // OCI is excluded here for the same reason it is excluded from the proxy eviction below: a
+        // tag push catalogues the image as a package_versions row whose blob_key is the manifest,
+        // so deleting it destroys the manifest while the oci_blobs row, the tags, and every layer
+        // blob survive — a broken serve path and orphaned layers. An image reaches the catalogue
+        // through either plane, so both arms carry the guard.
         var uploadedToDelete = await conn.QueryAsync<(string VersionId, string BlobKey)>(
+            // plane-ok: uploaded-plane version-limit driver; the proxy plane is evicted by the sibling cache_artifact/tenant_artifact_access query below in this method (OCI excluded on both arms).
             """
             SELECT pv.id as VersionId, pv.blob_key as BlobKey
             FROM package_versions pv
             JOIN packages p ON p.id = pv.package_id
             WHERE p.org_id = @orgId AND pv.origin = 'uploaded'
+              AND p.ecosystem != 'oci'
               AND pv.id NOT IN (
                   SELECT id FROM package_versions pv2
                   WHERE pv2.package_id = pv.package_id
@@ -211,65 +220,107 @@ public sealed class RetentionService : ScheduledBackgroundService
         foreach (var (VersionId, BlobKey) in uploadedToDelete)
         {
             if (ct.IsCancellationRequested) { break; }
+            // xtenant: keyed by a version PK from the p.org_id = @orgId SELECT above.
             await _blobs.DeleteAsync(BlobKeys.StoreKey(BlobKey), ct);
             await conn.ExecuteAsync("DELETE FROM package_versions WHERE id = @id", new { id = VersionId });
             _logger.LogDebug("GC: deleted uploaded version {Id} (blob {Key})", VersionId, BlobKey);
         }
 
-        // Proxy versions: evict this org's least-recently-accessed cache_artifact rows per name,
-        // beyond the keep limit. Removes the tenant_artifact_access row; cascade-deletes the
-        // cache_artifact and its blob when no other tenant retains access.
+        // Proxy versions: keep this org's @keepVersions least-recently-accessed VERSIONS per name
+        // and evict every row of every version below that cut. Removes the tenant_artifact_access
+        // row; cascade-deletes the cache_artifact and its blob when no other tenant retains access.
+        //
+        // The keep-set ranks versions, not rows, because cache_artifact is keyed
+        // UNIQUE (ecosystem, name, version, filename): one version owns one row per file, so a
+        // Maven version spans jar+pom+sources+javadoc. Ranking rows would make keep_versions=5
+        // retain about one real Maven version, and — because the cut could fall between two files
+        // of the same version — could evict a version's .pom while keeping its .jar, leaving a
+        // partial version that resolves broken. A version's recency is its most recently accessed
+        // file (MAX), and the NOT IN predicate matches on ca.version, so a version is always
+        // wholly kept or wholly evicted. Versions are ordered by recency then by version as a
+        // tiebreak, so two versions cached within the same second cut deterministically rather
+        // than by plan order.
+        // OCI is excluded: evicting an OCI cache_artifact row would delete the manifest blob
+        // while its oci_blobs row and layer blobs survive, leaving a broken serve path and
+        // orphaned layers. Correct OCI eviction needs layer refcounting, which is out of scope —
+        // OCI stays never-evicted from the cache plane, matching its pre-existing behavior.
         // xtenant: cache_artifact is global; org_id filter is in tenant_artifact_access.
-        var proxyToEvict = await conn.QueryAsync<(string CacheArtifactId, string Name, string BlobKey)>(
+        var proxyToEvict = await conn.QueryAsync<(string CacheArtifactId, string Ecosystem, string Name, string Version, string BlobKey)>(
             """
-            SELECT ca.id AS CacheArtifactId, ca.name AS Name, ca.blob_key AS BlobKey
+            SELECT ca.id AS CacheArtifactId, ca.ecosystem AS Ecosystem, ca.name AS Name,
+                   ca.version AS Version, ca.blob_key AS BlobKey
             FROM tenant_artifact_access taa
             JOIN cache_artifact ca ON ca.id = taa.cache_artifact_id
             WHERE taa.org_id = @orgId
-              AND taa.cache_artifact_id NOT IN (
-                  SELECT taa2.cache_artifact_id
+              AND ca.ecosystem != 'oci'
+              AND ca.version NOT IN (
+                  SELECT ca2.version
                   FROM tenant_artifact_access taa2
                   JOIN cache_artifact ca2 ON ca2.id = taa2.cache_artifact_id
                   WHERE taa2.org_id = @orgId AND ca2.name = ca.name AND ca2.ecosystem = ca.ecosystem
-                  ORDER BY taa2.last_accessed_at DESC
+                  GROUP BY ca2.version
+                  ORDER BY MAX(taa2.last_accessed_at) DESC, ca2.version DESC
                   LIMIT @keepVersions
               )
             """,
             new { orgId, keepVersions });
 
-        foreach (var (CacheArtifactId, Name, BlobKey) in proxyToEvict)
+        // Grouped by full version identity — (ecosystem, name, version), since two names or two
+        // ecosystems can share a version string — so the cancellation checkpoint falls on a version
+        // boundary. Checking it per row would let a shutdown land mid-version and leave exactly the
+        // partial version the keep-set is shaped to prevent; a version whose eviction has started
+        // runs to completion.
+        foreach (var versionGroup in proxyToEvict.GroupBy(r => (r.Ecosystem, r.Name, r.Version)))
         {
             if (ct.IsCancellationRequested) { break; }
 
-            await conn.ExecuteAsync(
-                "DELETE FROM tenant_artifact_access WHERE org_id = @orgId AND cache_artifact_id = @id",
-                new { orgId, id = CacheArtifactId });
-
-            // Delete the global cache_artifact and its blob when no tenant retains access.
-            long remaining = await conn.ExecuteScalarAsync<long>(
-                "SELECT COUNT(*) FROM tenant_artifact_access WHERE cache_artifact_id = @id",
-                new { id = CacheArtifactId });
-            if (remaining == 0)
+            foreach (var (CacheArtifactId, _, Name, Version, BlobKey) in versionGroup)
             {
-                await _blobs.DeleteAsync(BlobKeys.StoreKey(BlobKey), ct);
-                await conn.ExecuteAsync("DELETE FROM cache_artifact WHERE id = @id", new { id = CacheArtifactId });
+                await conn.ExecuteAsync(
+                    "DELETE FROM tenant_artifact_access WHERE org_id = @orgId AND cache_artifact_id = @id",
+                    new { orgId, id = CacheArtifactId });
+
+                // Delete the global cache_artifact and its blob when no tenant retains access.
+                // xtenant: deliberately cross-tenant — this counts whether ANY OTHER tenant still
+                // retains access to the shared cache_artifact before its blob is deleted. Filtering
+                // by org_id here would always return 0 and delete a blob other tenants still use.
+                long remaining = await conn.ExecuteScalarAsync<long>(
+                    "SELECT COUNT(*) FROM tenant_artifact_access WHERE cache_artifact_id = @id",
+                    new { id = CacheArtifactId });
+                if (remaining == 0)
+                {
+                    // CancellationToken.None, unlike every other blob delete in this service: the
+                    // version boundary above is the checkpoint, and honouring ct here would let a
+                    // shutdown abort between two files of one version — dropping a version's .jar
+                    // while its .pom survives. The extra work a cancelled pass takes on is bounded
+                    // by one version's file count.
+                    await _blobs.DeleteAsync(BlobKeys.StoreKey(BlobKey), CancellationToken.None);
+                    await conn.ExecuteAsync("DELETE FROM cache_artifact WHERE id = @id", new { id = CacheArtifactId });
+                }
+                _logger.LogDebug("GC: evicted proxy artifact {Id} name={Name} version={Version} (blob {Key})",
+                    CacheArtifactId, Name, Version, BlobKey);
             }
-            _logger.LogDebug("GC: evicted proxy version {Id} name={Name} (blob {Key})", CacheArtifactId, Name, BlobKey);
         }
     }
 
-    private async Task EvictStaleBlobsAsync(
+    // internal (not private) so RetentionServiceCacheExclusionTests can drive it directly — see
+    // EnforceVersionLimitAsync above.
+    internal async Task EvictStaleBlobsAsync(
         System.Data.Common.DbConnection conn, string orgId, int keepDays, CancellationToken ct)
     {
         string cutoff = _time.GetUtcNow().AddDays(-keepDays).ToString("yyyy-MM-ddTHH:mm:ssZ");
 
-        // Uploaded versions: evict by last_used timestamp on package_versions.
+        // Uploaded versions: evict by last_used timestamp on package_versions. OCI is excluded on
+        // both planes — deleting a pushed image's catalogue row destroys its manifest blob and
+        // orphans every layer (see EnforceVersionLimitAsync).
         var uploadedStale = await conn.QueryAsync<(string VersionId, string BlobKey)>(
+            // plane-ok: uploaded-plane stale-blob driver; the proxy plane is evicted by the sibling cache_artifact/tenant_artifact_access query below in this method (OCI excluded on both arms).
             """
             SELECT pv.id as VersionId, pv.blob_key as BlobKey
             FROM package_versions pv
             JOIN packages p ON p.id = pv.package_id
             WHERE p.org_id = @orgId AND pv.origin = 'uploaded'
+              AND p.ecosystem != 'oci'
               AND pv.last_used IS NOT NULL AND pv.last_used < @cutoff
             """,
             new { orgId, cutoff });
@@ -277,6 +328,7 @@ public sealed class RetentionService : ScheduledBackgroundService
         foreach (var (VersionId, BlobKey) in uploadedStale)
         {
             if (ct.IsCancellationRequested) { break; }
+            // xtenant: keyed by a version PK from the p.org_id = @orgId SELECT above.
             await _blobs.DeleteAsync(BlobKeys.StoreKey(BlobKey), ct);
             await conn.ExecuteAsync("DELETE FROM package_versions WHERE id = @id", new { id = VersionId });
         }
@@ -284,6 +336,8 @@ public sealed class RetentionService : ScheduledBackgroundService
         // Proxy versions: evict this org's tenant_artifact_access rows where the tenant's
         // last_used is older than the cutoff. Removes the per-tenant row; cascade-deletes the
         // global cache_artifact and its blob when no other tenant retains access.
+        // OCI is excluded — see the age-based eviction comment in EnforceVersionLimitAsync above;
+        // the same broken-serve / orphaned-layer risk applies here.
         // xtenant: cache_artifact is global; org_id filter is in tenant_artifact_access.
         var proxyStale = await conn.QueryAsync<(string CacheArtifactId, string BlobKey)>(
             """
@@ -291,6 +345,7 @@ public sealed class RetentionService : ScheduledBackgroundService
             FROM tenant_artifact_access taa
             JOIN cache_artifact ca ON ca.id = taa.cache_artifact_id
             WHERE taa.org_id = @orgId
+              AND ca.ecosystem != 'oci'
               AND taa.last_used IS NOT NULL AND taa.last_used < @cutoff
             """,
             new { orgId, cutoff });
@@ -303,6 +358,9 @@ public sealed class RetentionService : ScheduledBackgroundService
                 "DELETE FROM tenant_artifact_access WHERE org_id = @orgId AND cache_artifact_id = @id",
                 new { orgId, id = CacheArtifactId });
 
+            // xtenant: deliberately cross-tenant — this counts whether ANY OTHER tenant still
+            // retains access to the shared cache_artifact before its blob is deleted. Filtering
+            // by org_id here would always return 0 and delete a blob other tenants still use.
             long remaining = await conn.ExecuteScalarAsync<long>(
                 "SELECT COUNT(*) FROM tenant_artifact_access WHERE cache_artifact_id = @id",
                 new { id = CacheArtifactId });
@@ -327,12 +385,16 @@ public sealed class RetentionService : ScheduledBackgroundService
     {
         string cutoff = _time.GetUtcNow().AddDays(-afterDays).ToString("yyyy-MM-ddTHH:mm:ssZ");
 
+        // OCI is excluded on both planes — deleting a pushed image's catalogue row destroys its
+        // manifest blob and orphans every layer (see EnforceVersionLimitAsync).
         var toPurge = await conn.QueryAsync<(string VersionId, string BlobKey)>(
+            // plane-ok: uploaded-plane unlisted purge; proxy rows are excluded by the origin discriminator and cache-tier eviction is owned by CacheEvictionService.
             """
             SELECT pv.id as VersionId, pv.blob_key as BlobKey
             FROM package_versions pv
             JOIN packages p ON p.id = pv.package_id
             WHERE p.org_id = @orgId AND pv.origin = 'uploaded'
+              AND p.ecosystem != 'oci'
               AND pv.yanked = 1
               AND pv.yanked_at IS NOT NULL AND pv.yanked_at < @cutoff
             """,
@@ -341,6 +403,7 @@ public sealed class RetentionService : ScheduledBackgroundService
         foreach (var (VersionId, BlobKey) in toPurge)
         {
             if (ct.IsCancellationRequested) { break; }
+            // xtenant: keyed by a version PK from the p.org_id = @orgId SELECT above.
             await _blobs.DeleteAsync(BlobKeys.StoreKey(BlobKey), ct);
             await conn.ExecuteAsync("DELETE FROM package_versions WHERE id = @id", new { id = VersionId });
             _logger.LogDebug("GC: purged unlisted version {Id} (blob {Key})", VersionId, BlobKey);

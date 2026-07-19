@@ -261,7 +261,9 @@ public sealed class ControllerScenario : IAsyncDisposable
 
     // ── Build ────────────────────────────────────────────────────────────────
 
-    public async Task<ControllerScenarioResult> BuildAsync(IInviteMailer? mailer = null)
+    public async Task<ControllerScenarioResult> BuildAsync(
+        IInviteMailer? mailer = null,
+        Dependably.Infrastructure.SystemEvents.ISystemEventNotifier? systemEvents = null)
     {
         EnsureNotBuilt();
 
@@ -354,17 +356,26 @@ public sealed class ControllerScenario : IAsyncDisposable
         var license = new LicenseController(licenses, orgs, guard, problems, audit) { ControllerContext = ctx };
         var jobRuns = new BackgroundJobRunRepository(db);
         var instance = new InstanceController(orgs, audit, guard, noAirGap, jobRuns,
-            new ConfigurationBuilder().Build())
+            NullLogger<InstanceController>.Instance, new ConfigurationBuilder().Build())
         { ControllerContext = ctx };
+        var cacheArtifacts = new CacheArtifactRepository(db);
+        var tenantAccess = new TenantArtifactAccessRepository(db);
+        var quarantineRepo = new QuarantineRepository(db, Clock);
         var vuln = new VulnerabilityController(new VulnerabilityControllerDependencies(
             vulns, packages, scanner, audit,
-            new QuarantineRepository(db, Clock), guard,
-            NullLogger<VulnerabilityController>.Instance, Clock))
+            quarantineRepo, guard,
+            NullLogger<VulnerabilityController>.Instance, Clock,
+            cacheArtifacts, tenantAccess))
+        { ControllerContext = ctx };
+        var quarantine = new QuarantineController(
+            quarantineRepo, packages, orgs, guard, audit, problems,
+            cacheArtifacts, tenantAccess)
         { ControllerContext = ctx };
         var envelope = _masterKeyConfigured ? TestEnvelope.Configured() : TestEnvelope.Unconfigured();
         var system = new SystemController(orgs, systemAdmins, db, audit, problems,
             new ConfigurationBuilder().Build(),
-            Clock, envelope)
+            Clock, envelope, NullLogger<SystemController>.Instance,
+            tenantCache: null, requireMfa: null, systemEvents: systemEvents)
         { ControllerContext = ctx };
         var upstreamRegistries = new UpstreamRegistryController(
             new UpstreamRegistryRepository(db, Clock, envelope), guard, audit, problems, envelope)
@@ -374,11 +385,15 @@ public sealed class ControllerScenario : IAsyncDisposable
         var statsSnapshots = new StatsSnapshotRepository(db);
         var scenarioCache = new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions());
         var orgSvc = new OrgControllerServices(
-            Orgs: orgs, Packages: packages, VersionFiles: new PackageVersionFilesRepository(db, Clock), PackageAnalytics: packageAnalytics,
+            Orgs: orgs, Packages: packages,
+            Inventory: new ArtifactInventoryRepository(db, packages, new CacheArtifactRepository(db), vulns),
+            VersionFiles: new PackageVersionFilesRepository(db, Clock), PackageAnalytics: packageAnalytics,
             StatsSnapshots: statsSnapshots,
             Tokens: tokens, Invites: invites,
             Allowlist: allowlist, Blocklist: blocklist, Audit: audit, Guard: guard,
             Blobs: blobs, BlobStorage: new Dependably.Storage.TieredBlobStorage(blobs, blobs),
+            OrphanBlobs: new Dependably.Protocol.OciOrphanBlobDeleter(
+                db, new Dependably.Storage.TieredBlobStorage(blobs, blobs), new Dependably.Protocol.OciBlobKeyLock()),
             Config: new ConfigurationBuilder().Build(),
             Logger: NullLogger<OrgController>.Instance, Problems: problems,
             Licenses: licenses, Vulns: vulns, Urls: publicUrl,
@@ -413,7 +428,8 @@ public sealed class ControllerScenario : IAsyncDisposable
                 Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.RpmProvenanceVerifier>.Instance),
             new Dependably.Protocol.Provenance.MavenProvenanceVerifier(
                 scenarioTrustStore,
-                Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.MavenProvenanceVerifier>.Instance))
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.MavenProvenanceVerifier>.Instance),
+            new Dependably.Infrastructure.Caching.OrgCacheEpochStore())
         { ControllerContext = ctx };
         var orgTokens = new OrgTokensController(
             tokens, orgs, guard, audit, orgAuditEmitter, problems)
@@ -429,18 +445,24 @@ public sealed class ControllerScenario : IAsyncDisposable
         var orgLists = new OrgListsController(
             allowlist, blocklist, reservedNamespaces, installScriptAllowlist, guard, audit, problems)
         { ControllerContext = ctx };
-        var orgAudit = new OrgAuditController(audit, guard, Clock) { ControllerContext = ctx };
+        var orgAudit = new OrgAuditController(audit, guard, Clock, problems) { ControllerContext = ctx };
         var orgAuthConfig = new OrgAuthConfigController(
             guard, samlConfig, audit, publicUrl, problems, Clock)
         { ControllerContext = ctx };
+        var risk = new RiskController(packageAnalytics, licenses, guard, problems) { ControllerContext = ctx };
 
         var claimRepo = new ClaimRepository(db);
         var airGap = Substitute.For<IAirGapMode>();
         airGap.IsEnabled.Returns(false);
         var claimResolver = new ClaimResolver(claimRepo, airGap);
+        var claimCacheArtifacts = new Dependably.Infrastructure.CacheArtifactRepository(db);
         var claimSvc = new ClaimsControllerServices(
             Guard: guard, Claims: claimRepo, Resolver: claimResolver, Audit: audit,
-            AuditEmitter: orgAuditEmitter, Packages: packages, Blobs: blobs,
+            AuditEmitter: orgAuditEmitter, Packages: packages,
+            Cache: claimCacheArtifacts,
+            CacheOrphanBlobs: new Dependably.Infrastructure.CacheOrphanBlobDeleter(
+                claimCacheArtifacts, new Dependably.Infrastructure.CacheBlobKeyLock()),
+            Blobs: blobs,
             Logger: NullLogger<ClaimsController>.Instance, Time: Clock);
         var claims = new ClaimsController(claimSvc) { ControllerContext = ctx };
 
@@ -455,10 +477,11 @@ public sealed class ControllerScenario : IAsyncDisposable
             .Returns(call => new Dependably.Infrastructure.Publish.PublishResult.Accepted(
                 "ver-" + Guid.NewGuid().ToString("N"),
                 call.Arg<Dependably.Infrastructure.Publish.PublishRequest>().Purl,
-                "sha-stub"));
+                "sha-stub",
+                "hosted/stub"));
         PublishService.ValidateAsync(Arg.Any<Dependably.Infrastructure.Publish.PublishRequest>(), Arg.Any<CancellationToken>())
             .Returns(call => new Dependably.Infrastructure.Publish.PublishResult.Accepted(
-                "", call.Arg<Dependably.Infrastructure.Publish.PublishRequest>().Purl, "sha-stub"));
+                "", call.Arg<Dependably.Infrastructure.Publish.PublishRequest>().Purl, "sha-stub", ""));
         var publishGate = new Dependably.Security.PublishGate(new ConfigurationBuilder().Build(), claimResolver);
         var uploadLimitResolver = new Dependably.Protocol.UploadLimitResolver(orgs, new ConfigurationBuilder().Build());
         var importSvc = new ImportControllerServices(
@@ -491,7 +514,12 @@ public sealed class ControllerScenario : IAsyncDisposable
             siem,
             import,
             upstreamRegistries,
-            search);
+            search,
+            risk,
+            quarantine,
+            cacheArtifacts,
+            tenantAccess,
+            blobs);
     }
 
     /// <summary>NSubstitute mock for the publish pipeline. Override return values on a test to exercise rejection paths.</summary>
@@ -534,7 +562,15 @@ public sealed record ControllerScenarioResult(
     SiemController SiemController,
     ImportController ImportController,
     UpstreamRegistryController UpstreamRegistryController,
-    SearchController SearchController) : IAsyncDisposable
+    SearchController SearchController,
+    RiskController RiskController,
+    QuarantineController QuarantineController,
+    CacheArtifactRepository CacheArtifacts,
+    TenantArtifactAccessRepository TenantAccess,
+    // Backing store for OrgControllerServices' Blobs/BlobStorage (both tiers point at this same
+    // instance unless a test constructs its own tiering — see BuildAsync). Exposed so tests can
+    // assert directly on physical blob presence/absence rather than only DB-row state.
+    Dependably.Storage.InMemoryBlobStore Blobs) : IAsyncDisposable
 {
     public IMetadataStore Db => Fixture.Store;
 

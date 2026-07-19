@@ -82,7 +82,8 @@ public class PyPiController : ControllerBase
     [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [RequireCapability(Capabilities.PublishPypi)]
     [EnableRateLimiting("push")]
-    [RequestSizeLimit(PyPiUploadSizeLimitBytes)] // hard ceiling; per-tenant limit checked below
+    [RequestSizeLimit(PyPiUploadSizeLimitBytes)] // hard ceiling; per-tenant limit enforced during staging
+    [RequestFormLimits(MultipartBodyLengthLimit = PyPiUploadSizeLimitBytes)] // match the route ceiling, not the 128 MiB framework default
     public Task<IActionResult> Upload(CancellationToken ct)
         => _publish.UploadAsync(HttpContext, CurrentTenantId(), ct);
 

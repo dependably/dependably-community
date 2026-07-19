@@ -108,6 +108,92 @@ public class ClaimRepositoryTests : IAsyncLifetime
         Assert.Equal(2, historyCount);
     }
 
+    /// <summary>
+    /// Pins the revive-on-insert fix: a claim released (soft-deleted) via
+    /// <c>ApplyTransitionAsync</c> can be created again for the same
+    /// <c>(org, ecosystem, name)</c> without colliding with its tombstone on the unique
+    /// index. On old code this blind-INSERTs and throws a raw
+    /// <see cref="Microsoft.Data.Sqlite.SqliteException"/> (UNIQUE constraint); the revive
+    /// keeps the tombstoned row's original id so claim_history's FK stays consistent
+    /// across the whole create → release → re-create lifecycle.
+    /// </summary>
+    [Fact]
+    public async Task ApplyTransition_Create_AfterRelease_RevivesTombstonedRow()
+    {
+        var repo = new ClaimRepository(_db);
+        var create = Create("o1", "npm", "left-pad", ClaimStateMachine.LocalOnly, "init");
+        await repo.ApplyTransitionAsync(create);
+
+        await repo.ApplyTransitionAsync(new ClaimTransition
+        {
+            ClaimId = create.ClaimId,
+            HistoryId = Guid.NewGuid().ToString("D"),
+            OrgId = "o1",
+            Ecosystem = "npm",
+            Name = "left-pad",
+            PriorState = ClaimStateMachine.LocalOnly,
+            NewState = null,
+            Reason = "release",
+            OccurredAt = TestTime.KnownNow
+        });
+        Assert.Null(await repo.GetAsync("o1", "npm", "left-pad"));
+
+        // Re-create: the controller mints a FRESH ClaimId for this transition, exactly as
+        // ClaimsController.Create does — the old blind INSERT would collide on it.
+        var recreate = Create("o1", "npm", "left-pad", ClaimStateMachine.Mixed, "re-claimed");
+        Assert.NotEqual(create.ClaimId, recreate.ClaimId);
+        await repo.ApplyTransitionAsync(recreate);
+
+        var revived = await repo.GetAsync("o1", "npm", "left-pad");
+        Assert.NotNull(revived);
+        Assert.Equal(ClaimStateMachine.Mixed, revived!.State);
+        // The revived row keeps the ORIGINAL id — claim_history rows from before the release
+        // still reference it via FK, so the id cannot change out from under them.
+        Assert.Equal(create.ClaimId, revived.Id);
+
+        await using var conn = await _db.OpenAsync();
+        long historyCount = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM claim_history WHERE claim_id = @id",
+            new { id = create.ClaimId });
+        Assert.Equal(3, historyCount);
+
+        // The re-create's history row was written under the REVIVED (original) claim id, not
+        // the fresh id the caller minted for the transition.
+        long historyUnderFreshId = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM claim_history WHERE claim_id = @id",
+            new { id = recreate.ClaimId });
+        Assert.Equal(0, historyUnderFreshId);
+    }
+
+    /// <summary>
+    /// A creation transition racing a still-LIVE claim of the same
+    /// (org, ecosystem, name) — reachable only via two concurrent creates, since
+    /// ClaimsController checks for a live claim before building the transition — must
+    /// surface as <see cref="ClaimConflictException"/>, never an unhandled DB exception.
+    /// The losing transition's history row must not be persisted (transaction rolled back).
+    /// </summary>
+    [Fact]
+    public async Task ApplyTransition_Create_RacesLiveClaim_ThrowsClaimConflictException()
+    {
+        var repo = new ClaimRepository(_db);
+        var create = Create("o1", "npm", "is-odd", ClaimStateMachine.LocalOnly, "init");
+        await repo.ApplyTransitionAsync(create);
+
+        var racer = Create("o1", "npm", "is-odd", ClaimStateMachine.Mixed, "racing create");
+        await Assert.ThrowsAsync<ClaimConflictException>(() => repo.ApplyTransitionAsync(racer));
+
+        // The original claim is untouched by the losing racer.
+        var c = await repo.GetAsync("o1", "npm", "is-odd");
+        Assert.NotNull(c);
+        Assert.Equal(ClaimStateMachine.LocalOnly, c!.State);
+
+        await using var conn = await _db.OpenAsync();
+        long racerHistoryCount = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM claim_history WHERE claim_id = @id",
+            new { id = racer.ClaimId });
+        Assert.Equal(0, racerHistoryCount);
+    }
+
     [Fact]
     public async Task List_FiltersByEcosystemAndState()
     {

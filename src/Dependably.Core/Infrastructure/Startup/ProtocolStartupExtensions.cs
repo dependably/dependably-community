@@ -99,6 +99,12 @@ internal static class ProtocolStartupExtensions
         builder.Services.AddSingleton<OciUpstreamAuthService>();
         builder.Services.AddSingleton<OciImageLicenseRecorder>();
         builder.Services.AddSingleton<OciUpstreamResolver>();
+        // Serialises finalize/delete of a content-addressed OCI blob key within the process; shared
+        // by the upload service (push) and the deleter (yank) so both agree on one physical blob.
+        builder.Services.AddSingleton<OciBlobKeyLock>();
+        // The only physical OCI blob delete — both the Distribution-Spec digest delete and the
+        // management-API version yank route through it for the locked refcount guard.
+        builder.Services.AddSingleton<OciOrphanBlobDeleter>();
         builder.Services.AddSingleton<OciUploadService.Dependencies>();
         builder.Services.AddSingleton<OciUploadService>();
         builder.Services.AddHostedService<OciStagingJanitorService>();

@@ -256,4 +256,38 @@ public class CacheArtifactRepositoryTests : IAsyncLifetime
         Assert.Equal(3, fact.VersionsBehind);
         Assert.Equal(3, fact.ToPackageVersionSynthetic(new Dictionary<string, VulnGateSignals>()).VersionsBehind);
     }
+
+    [Fact]
+    public async Task UpstreamUrl_RoundTripsThroughListServeFactsAndSyntheticProjection()
+    {
+        var repo = new CacheArtifactRepository(_db);
+        // A private/internal upstream — the whole point is that the origin is whatever the org
+        // proxied from, not a reconstructed public-registry URL.
+        const string upstreamUrl = "https://nexus.internal.example.com/repository/npm/lodash/-/lodash-1.0.0.tgz";
+        var a = new CacheArtifact
+        {
+            Id = Guid.NewGuid().ToString("D"),
+            Ecosystem = "npm",
+            Name = "lodash",
+            Version = "1.0.0",
+            Filename = "lodash-1.0.0.tgz",
+            BlobKey = "proxy/abc/1.0.0",
+            ContentHash = "sha256:abc",
+            SizeBytes = 100,
+            UpstreamUrl = upstreamUrl,
+            FirstCachedAt = TestTime.KnownNow,
+            LastAccessedAt = TestTime.KnownNow
+        };
+        await repo.InsertAsync(a);
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES ('o1', @id)", new { id = a.Id });
+        }
+
+        var fact = Assert.Single(await repo.ListServeFactsForNameAsync("o1", "npm", "lodash"));
+        Assert.Equal(upstreamUrl, fact.UpstreamUrl);
+        Assert.Equal(upstreamUrl,
+            fact.ToPackageVersionSynthetic(new Dictionary<string, VulnGateSignals>()).UpstreamUrl);
+    }
 }

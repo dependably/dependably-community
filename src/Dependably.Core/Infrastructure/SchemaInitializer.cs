@@ -51,6 +51,11 @@ public sealed partial class SchemaInitializer
         // schema would create empty sibling tables under the new names alongside the original
         // data. _applied_migrations is ensured up front so RunOnceAsync can record the ledger.
         await EnsureMigrationsTableAsync(conn);
+
+        // Views are dropped before anything reshapes a table they depend on, and recreated at the
+        // very end (see SchemaInitializer.Views.cs). They hold no state, so this costs nothing.
+        await DropViewsAsync(conn);
+
         await RunOnceAsync(conn, "rename_tokens_to_user_tokens", RenameTokensTableAsync);
         await RunOnceAsync(conn, "rename_cicd_tokens_to_service_tokens", RenameCicdTokensTableAsync);
 
@@ -234,6 +239,90 @@ public sealed partial class SchemaInitializer
         // rather than boot time. The simple index and download path read exclusively from
         // package_version_files for PyPI after this.
         await RunOnceAsync(conn, "backfill_package_version_files_pypi", BackfillPackageVersionFilesPypiAsync);
+
+        // OCI proxy manifests join the shared cache_artifact / tenant_artifact_access plane like
+        // every other proxy ecosystem instead of writing package_versions rows. Backfill existing
+        // oci_blobs manifest rows onto the plane, then drop the now-orphan package_versions rows
+        // the old write path left behind.
+        await RunOnceAsync(conn, "backfill_oci_cache_artifact", BackfillOciCacheArtifactAsync);
+        await RunOnceAsync(conn, "delete_oci_proxy_package_versions", DeleteOciProxyPackageVersionsAsync);
+
+        // An image's license is an ordinary package_version_licenses fact, projected onto whichever
+        // plane catalogued it. Images ingested before that projection existed carry the license only
+        // on their oci_blobs manifest row, so every license reader reported them as having none.
+        await RunOnceAsync(conn, "backfill_oci_licenses_to_shared_plane", BackfillOciLicensesToSharedPlaneAsync);
+
+        // Second sweep of the proxy plane. A ledger entry runs once and never revisits rows that
+        // appear after it: the first migrate/delete pass cannot see an origin='proxy' package_versions
+        // row written to the same DB after that pass recorded itself as applied. The proxy fetch path
+        // catalogues exclusively on the cache plane and refuses a fetch it cannot record there, so no
+        // such row is produced any more — but a database that ran the first pass while the old path
+        // was still live carries the ones it minted in between. They are invisible to the vulnerability
+        // sweep and to retention (both read package_versions as origin='uploaded'), so they are unscanned
+        // and unreclaimable. This fresh ledger entry re-runs the identical, idempotent backfill+delete
+        // once more to catalogue them onto the cache plane and drop the package_versions rows; on a DB
+        // with none it is a no-op.
+        // xtenant: cross-tenant one-shot; cache_artifact is global and the delete keys on the proxy discriminator.
+        await RunOnceAsync(conn, "migrate_proxy_versions_to_cache_plane_2", MigrateProxyVersionsToCachePlaneAsync, transactional: false);
+        await RunOnceAsync(conn, "delete_migrated_proxy_package_versions_2", DeleteMigratedProxyPackageVersionsAsync);
+
+        // metadata_cache was never wired to a reader or writer (upstream-metadata caching lives
+        // in memory instead); drop it so the schema doesn't advertise a TTL sweep that doesn't exist.
+        await RunOnceAsync(conn, "drop_metadata_cache_table", DropMetadataCacheTableAsync);
+
+        // Last, after every migration: the view bodies can only be created once every table and
+        // column they reference is guaranteed to exist.
+        await CreateViewsAsync(conn);
+    }
+
+    // Projects oci_blobs.license_spdx onto whichever catalogue row the image cast — the
+    // package_versions row for a tag push, the cache_artifact row for a proxy pull. Both arms key on
+    // the manifest digest, which is what the version column holds for OCI on either plane.
+    //
+    // The id is derived by concatenation rather than generated: there is no RNG portable across both
+    // providers (randomblob is SQLite-only, gen_random_uuid() is Postgres-only), and an owner carries
+    // at most one label-derived license row, so 'ocilic-' || <owner id> is unique by construction.
+    private static async Task BackfillOciLicensesToSharedPlaneAsync(DbConnection conn)
+    {
+        // xtenant: one-shot backfill across every tenant on the instance; each arm still joins the
+        // image's own org through packages.org_id / tenant_artifact_access.org_id.
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO package_version_licenses (id, package_version_id, owner_kind, license_spdx, source)
+            SELECT 'ocilic-' || pv.id, pv.id, 'package_version', ob.license_spdx, 'oci-label'
+            FROM oci_blobs ob
+            JOIN packages p ON p.org_id = ob.org_id AND p.ecosystem = 'oci'
+            JOIN package_versions pv
+              ON pv.package_id = p.id AND pv.version = ob.digest AND pv.origin = 'uploaded'
+            WHERE ob.license_spdx IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM package_version_licenses x
+                  WHERE x.package_version_id = pv.id AND x.license_spdx = ob.license_spdx)
+            ON CONFLICT DO NOTHING
+            """);
+
+        // xtenant: see above — the proxy arm scopes to the holder through tenant_artifact_access.
+        // cache_artifact is GLOBAL (one row per digest) while oci_blobs is per-org, so two orgs that
+        // both proxied the same licensed image make the SELECT emit two rows with the same derived id
+        // ('ocilic-' || ca.id). The NOT EXISTS guard only sees pre-statement state, not intra-statement
+        // duplicates, so ON CONFLICT DO NOTHING is what keeps this from a PK/unique violation that
+        // would roll the (transactional) migration back and crash-loop the boot on a multi-tenant
+        // upgrade. One license row per cache_artifact is correct — the licence is a property of the
+        // image bytes, shared across every tenant holding the digest.
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO package_version_licenses (id, cache_artifact_id, owner_kind, license_spdx, source)
+            SELECT 'ocilic-' || ca.id, ca.id, 'cache_artifact', ob.license_spdx, 'oci-label'
+            FROM oci_blobs ob
+            JOIN cache_artifact ca ON ca.ecosystem = 'oci' AND ca.version = ob.digest
+            JOIN tenant_artifact_access taa
+              ON taa.cache_artifact_id = ca.id AND taa.org_id = ob.org_id
+            WHERE ob.license_spdx IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM package_version_licenses x
+                  WHERE x.cache_artifact_id = ca.id AND x.license_spdx = ob.license_spdx)
+            ON CONFLICT DO NOTHING
+            """);
     }
 
     // One file row per hosted PyPI version, projected from the version row's own
@@ -373,6 +462,8 @@ public sealed partial class SchemaInitializer
         {
             int lastSlash = BlobKey.LastIndexOf('/');
             string filename = lastSlash >= 0 ? BlobKey[(lastSlash + 1)..] : BlobKey;
+            // xtenant: one-shot startup migration; backfills every tenant's rows by design, keyed
+            // by the PKs the instance-wide SELECT above returned.
             await conn.ExecuteAsync(
                 "UPDATE package_versions SET filename = @filename WHERE id = @id",
                 new { id = Id, filename });
@@ -647,6 +738,7 @@ public sealed partial class SchemaInitializer
     // (%2F, %40) instead of their decoded equivalents (old GetTarball passed raw route values).
     private static async Task FixNpmPurlEncodingAsync(DbConnection conn)
     {
+        // xtenant: one-shot startup migration — it repairs every tenant's mis-encoded npm rows.
         var npmRows = (await conn.QueryAsync(
             "SELECT id, name, purl_name FROM packages WHERE ecosystem = 'npm'")).ToList();
         foreach (var row in npmRows)
@@ -667,10 +759,13 @@ public sealed partial class SchemaInitializer
             string fixedPurlName = fixedName.StartsWith('@')
                 ? "%40" + fixedName[1..]
                 : purlName.Replace("%2F", "/", StringComparison.OrdinalIgnoreCase);
+            // xtenant: migration write keyed by a PK from the instance-wide SELECT above.
             await conn.ExecuteAsync(
                 "UPDATE packages SET name = @n, purl_name = @p WHERE id = @id",
                 new { n = fixedName, p = fixedPurlName, id = (string)row.id });
         }
+
+        // xtenant: same one-shot migration, version arm — every tenant's npm PURLs are repaired.
         var versionRows = (await conn.QueryAsync(
             "SELECT pv.id, pv.purl FROM package_versions pv " +
             "JOIN packages p ON p.id = pv.package_id WHERE p.ecosystem = 'npm'")).ToList();
@@ -682,6 +777,7 @@ public sealed partial class SchemaInitializer
                 continue;
             }
 
+            // xtenant: migration write keyed by a PK from the instance-wide SELECT above.
             await conn.ExecuteAsync(
                 "UPDATE package_versions SET purl = @p WHERE id = @id",
                 new { p = purl.Replace("%2F", "/", StringComparison.OrdinalIgnoreCase), id = (string)row.id });
@@ -690,12 +786,14 @@ public sealed partial class SchemaInitializer
 
     // purl_name for npm scoped packages should be the plain name (@scope/pkg), not the
     // PURL-encoded form (%40scope/pkg). The prior migration over-encoded it.
+    // xtenant: one-shot startup migration — repairs the encoding for every tenant's npm rows.
     private static Task FixNpmPurlNameUnencodedAsync(DbConnection conn) =>
         conn.ExecuteAsync(
             "UPDATE packages SET purl_name = '@' || substr(purl_name, 4) " +
             "WHERE ecosystem = 'npm' AND substr(purl_name, 1, 3) = '%40'");
 
     // Fix stored npm PURLs that used %40 for @ in scoped package names.
+    // xtenant: one-shot startup migration — instance-wide by design.
     private static Task FixNpmVersionPurlAtEncodingAsync(DbConnection conn) =>
         conn.ExecuteAsync(
             "UPDATE package_versions SET purl = replace(purl, 'pkg:npm/%40', 'pkg:npm/@') " +
@@ -704,14 +802,18 @@ public sealed partial class SchemaInitializer
     // Fix any npm PURLs still containing %2F (encoded /) in the package name.
     private static async Task FixNpmVersionPurlSlashEncodingAsync(DbConnection conn)
     {
+        // xtenant: one-shot startup migration — instance-wide by design.
         await conn.ExecuteAsync(
             "UPDATE package_versions SET purl = replace(replace(purl, '%2F', '/'), '%2f', '/') " +
             "WHERE purl LIKE 'pkg:npm/%' AND (purl LIKE '%2F%' OR purl LIKE '%2f%')");
+        // xtenant: same migration — drops the placeholder 'unknown' version rows the broken
+        // encoding produced, in every tenant.
         await conn.ExecuteAsync(
             "DELETE FROM package_versions WHERE version = 'unknown'");
     }
 
     // Fix npm PURLs in activity log that were stored with %40/%2F encoding.
+    // xtenant: one-shot startup migration — instance-wide by design.
     private static Task FixNpmActivityPurlEncodingAsync(DbConnection conn) =>
         conn.ExecuteAsync(
             "UPDATE activity SET purl = replace(replace(replace(purl, '%40', '@'), '%2F', '/'), '%2f', '/') " +
@@ -742,6 +844,7 @@ public sealed partial class SchemaInitializer
                 GROUP BY org_id, name
               )");
         // Step 3: rename the surviving broken rows.
+        // xtenant: one-shot startup migration — instance-wide by design.
         await conn.ExecuteAsync(
             "UPDATE packages SET purl_name = name WHERE ecosystem = 'nuget' AND is_proxy = 1 AND purl_name LIKE 'pkg:%'");
     }

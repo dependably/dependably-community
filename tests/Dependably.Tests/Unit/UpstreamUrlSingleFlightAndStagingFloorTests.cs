@@ -40,12 +40,19 @@ public sealed class UpstreamUrlSingleFlightAndStagingFloorTests
         using var cts = new CancellationTokenSource();
         var firstTask = client.FetchAndCacheByUrlAsync(url, null, "npm", ct: cts.Token);
 
-        await Task.Delay(80);
+        await gate.WaitForCallCountAsync(1);
         cts.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => firstTask);
 
-        var secondTask = Task.Run(() => client.FetchAndCacheByUrlAsync(url, null, "npm"));
-        await Task.Delay(80);
+        // Calling it directly (not via Task.Run) is deterministic, not just best-effort:
+        // FetchAndCacheByUrlAsync's synchronous prologue — including the in-flight map
+        // registration — runs to completion on THIS thread before the method's first real
+        // suspension point, and that happens-before relationship holds regardless of scheduler
+        // contention (unlike a cross-thread "has it started yet" signal, which a sufficiently
+        // loaded box can still lose the race against — this exact test flaked that way under a
+        // 3x-concurrent-suite load test). Only after that registration has definitely landed do
+        // we release the gate.
+        var secondTask = client.FetchAndCacheByUrlAsync(url, null, "npm");
         gate.Release();
         var result = await secondTask;
 
@@ -65,7 +72,9 @@ public sealed class UpstreamUrlSingleFlightAndStagingFloorTests
         var taskA = Task.Run(() => client.FetchAndCacheByUrlAsync(url, null, "npm", authorizationHeader: "Bearer token-a"));
         var taskB = Task.Run(() => client.FetchAndCacheByUrlAsync(url, null, "npm", authorizationHeader: "Bearer token-b"));
 
-        await Task.Delay(80);
+        // Different credentials never collapse, so both callers independently reach the gate —
+        // wait for both real arrivals rather than guessing at scheduling latency.
+        await gate.WaitForCallCountAsync(2);
         gate.Release();
         await Task.WhenAll(taskA, taskB);
 
@@ -177,8 +186,11 @@ public sealed class UpstreamUrlSingleFlightAndStagingFloorTests
 
     private sealed class GateHandler : HttpMessageHandler
     {
+        private readonly object _arrivalLock = new();
         private readonly TaskCompletionSource _gate = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly HttpStatusCode _status;
+        private TaskCompletionSource? _arrival;
+        private int _arrivalTarget;
         private int _callCount;
 
         public GateHandler(HttpStatusCode status, byte[] body)
@@ -192,10 +204,38 @@ public sealed class UpstreamUrlSingleFlightAndStagingFloorTests
 
         public void Release() => _gate.TrySetResult();
 
+        /// <summary>
+        /// Completes once the gate has been hit by at least <paramref name="count"/> requests —
+        /// a deterministic replacement for guessing how long a caller takes to reach the HTTP
+        /// layer with a fixed <see cref="Task.Delay(int)"/>, which flakes under load.
+        /// </summary>
+        public Task WaitForCallCountAsync(int count, CancellationToken ct = default)
+        {
+            lock (_arrivalLock)
+            {
+                if (_callCount >= count)
+                {
+                    return Task.CompletedTask;
+                }
+
+                _arrivalTarget = count;
+                _arrival = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                return _arrival.Task.WaitAsync(ct);
+            }
+        }
+
         protected override async Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request, CancellationToken cancellationToken)
         {
-            Interlocked.Increment(ref _callCount);
+            int count = Interlocked.Increment(ref _callCount);
+            lock (_arrivalLock)
+            {
+                if (_arrival is not null && count >= _arrivalTarget)
+                {
+                    _arrival.TrySetResult();
+                }
+            }
+
             await _gate.Task.WaitAsync(cancellationToken);
             return new HttpResponseMessage(_status)
             {

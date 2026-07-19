@@ -66,20 +66,26 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
     }
 
     private static async Task EnableSlackAsync(AlertSettingsRepository settings, string orgId, string webhookUrl) =>
-        await settings.UpdateAsync(orgId, new UpdateAlertSettings(
-            QuarantineAlertsEnabled: true, VulnAlertsEnabled: true, VulnMinSeverity: "HIGH",
-            SlackEnabled: true, SlackWebhookUrl: webhookUrl));
+        await settings.UpdateSlackAsync(orgId, new UpdateAlertSlack(SlackEnabled: true, SlackWebhookUrl: webhookUrl));
 
-    private static async Task WaitAsync(Func<bool> condition, TimeSpan? timeout = null)
+    /// <summary>
+    /// Polls the DURABLE end state (the persisted alert/settings row) rather than the queue's
+    /// in-memory counters. <see cref="AlertSlackQueue"/> increments <c>DeliveredCount</c>/
+    /// <c>FailedCount</c> BEFORE its two DB writes complete — waiting on the counter and then
+    /// immediately cancelling the token races those writes and can leave the row's
+    /// <c>SlackStatus</c>/<c>SlackLastStatus</c> unset even though the counter says "delivered".
+    /// Waiting on the row itself only returns once the write has actually landed.
+    /// </summary>
+    private static async Task WaitAsync(Func<Task<bool>> condition, TimeSpan? timeout = null)
     {
-        // now-ok: polling deadline awaiting real async completion of the queue's consumer loop
-        var deadline = DateTimeOffset.UtcNow + (timeout ?? TimeSpan.FromSeconds(3));
-        while (!condition() && DateTimeOffset.UtcNow < deadline)
+        // now-ok: polling deadline awaiting real async completion of the durable write path
+        var deadline = DateTimeOffset.UtcNow + (timeout ?? TimeSpan.FromSeconds(10));
+        while (!await condition() && DateTimeOffset.UtcNow < deadline)
         {
             await Task.Delay(20);
         }
 
-        if (!condition())
+        if (!await condition())
         {
             throw new TimeoutException("Condition never satisfied.");
         }
@@ -88,30 +94,38 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
     /// <summary>
     /// Drives a queue's retry backoff deterministically: advances <paramref name="clock"/> by
     /// <paramref name="step"/> and yields briefly so the background delivery loop observes each
-    /// fired timer, repeating until <paramref name="condition"/> is met. The tiny real-time yield
-    /// only gives the scheduler a turn — it does not wait out the backoff itself, which is driven
-    /// entirely by the advancing fake clock.
+    /// fired timer, repeating until <paramref name="condition"/> is met — pumping until a
+    /// DURABLE end state (a persisted row) lands, rather than the queue's in-memory counters
+    /// (see <see cref="WaitAsync(Func{Task{bool}}, TimeSpan?)"/> for why that distinction
+    /// matters). The real-time yield per iteration only gives the scheduler a turn to let the
+    /// background delivery loop observe the fired timer — it does not wait out the backoff
+    /// itself, which is driven entirely by the advancing fake clock. Both the per-iteration
+    /// yield and the iteration cap are generous (not tuned tight) so a loaded box has real
+    /// margin to actually run that turn before the next clock advance.
     /// </summary>
     private static async Task PumpUntilAsync(
-        FakeTimeProvider clock, Func<bool> condition, TimeSpan step, int maxIterations = 200)
+        FakeTimeProvider clock, Func<Task<bool>> condition, TimeSpan step, int maxIterations = 1000)
     {
-        for (int i = 0; i < maxIterations && !condition(); i++)
+        for (int i = 0; i < maxIterations && !await condition(); i++)
         {
             clock.Advance(step);
-            await Task.Delay(5);
+            await Task.Delay(20);
         }
 
-        if (!condition())
+        if (!await condition())
         {
             throw new TimeoutException("Condition never satisfied while pumping the fake clock.");
         }
     }
 
-    /// <summary>Routes by URL substring: "good" → 200, "bad" → 502. Captures the last request body.</summary>
+    /// <summary>Routes by URL substring: "good" → 200, "bad" → 502. Captures the last request body,
+    /// and every (url, body) pair — the latter lets cross-tenant tests assert exactly which
+    /// destination(s) were called, not just an aggregate count.</summary>
     private sealed class RoutingHandler : DelegatingHandler
     {
         public string? LastBody { get; private set; }
         public int Calls { get; private set; }
+        public List<(string Url, string Body)> Requests { get; } = [];
 
         public RoutingHandler() : base(new HttpClientHandler()) { }
 
@@ -121,6 +135,7 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
             Calls++;
             LastBody = request.Content is null ? null : await request.Content.ReadAsStringAsync(cancellationToken);
             string url = request.RequestUri?.ToString() ?? "";
+            Requests.Add((url, LastBody ?? ""));
             return url.Contains("good")
                 ? new HttpResponseMessage(HttpStatusCode.OK)
                 : new HttpResponseMessage(HttpStatusCode.BadGateway);
@@ -128,6 +143,9 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
     }
 
     private static SlackWebhookClient BuildClient(RoutingHandler handler) =>
+        new(new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(5) });
+
+    private static SlackWebhookClient BuildClient(HttpMessageHandler handler) =>
         new(new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(5) });
 
     // ── Success path ─────────────────────────────────────────────────────────
@@ -149,9 +167,14 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         _ = queue.StartAsync(cts.Token);
 
         queue.Notify(alert);
-        await WaitAsync(() => queue.DeliveredCount == 1);
+        // Waits on the DURABLE end state (the persisted alert row), not the queue's in-memory
+        // DeliveredCount — the queue increments that counter BEFORE its DB writes complete, so
+        // waiting on the counter and then cancelling races the write.
+        await WaitAsync(async () => (await alerts.GetByIdAsync("org1", alert.Id))?.SlackStatus is not null);
 
-        await cts.CancelAsync();
+        // Graceful drain — StopAsync signals ExecuteAsync's stopping token itself, but by the
+        // time we get here the durable write has already landed, so there is nothing in-flight
+        // left for a cancellation to interrupt.
         try { await queue.StopAsync(CancellationToken.None); } catch { }
 
         var reread = await alerts.GetByIdAsync("org1", alert.Id);
@@ -181,9 +204,14 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         _ = queue.StartAsync(cts.Token);
 
         queue.Notify(alert);
-        await WaitAsync(() => queue.DeliveredCount == 1);
+        // Waits on the DURABLE end state (the persisted alert row), not the queue's in-memory
+        // DeliveredCount — the queue increments that counter BEFORE its DB writes complete, so
+        // waiting on the counter and then cancelling races the write.
+        await WaitAsync(async () => (await alerts.GetByIdAsync("org1", alert.Id))?.SlackStatus is not null);
 
-        await cts.CancelAsync();
+        // Graceful drain — StopAsync signals ExecuteAsync's stopping token itself, but by the
+        // time we get here the durable write has already landed, so there is nothing in-flight
+        // left for a cancellation to interrupt.
         try { await queue.StopAsync(CancellationToken.None); } catch { }
 
         Assert.NotNull(handler.LastBody);
@@ -193,6 +221,194 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         Assert.Contains(alert.Title, text);
         // Exactly one top-level property — the bare {"text": ...} contract, not the HMAC envelope.
         Assert.Single(doc.RootElement.EnumerateObject());
+    }
+
+    // ── Shutdown mid-bookkeeping (host-stopping token cancelled after send succeeds) ──
+
+    /// <summary>
+    /// Simulates host shutdown landing in the window between the Slack POST succeeding and the
+    /// durable outcome write: the fake handler cancels the stopping token synchronously, before
+    /// returning the 200 response, so <see cref="AlertSlackQueue.DeliverAsync"/> resumes with an
+    /// already-cancelled token. The delivery must still be recorded as durable state (not lost
+    /// to a swallowed <see cref="OperationCanceledException"/>), and
+    /// <see cref="AlertSlackQueue.DeliveredCount"/> must only report 1 once that write has
+    /// actually landed.
+    /// </summary>
+    [Fact]
+    public async Task DeliverAsync_ShutdownCancelsTokenRightAfterSendSucceeds_OutcomeStillRecorded()
+    {
+        using var ep = MakeProtector();
+        var settings = new AlertSettingsRepository(_db, ep, Clock);
+        var alerts = new AlertRepository(_db, Clock);
+
+        await EnableSlackAsync(settings, "org1", "https://good.example.com/hook");
+        var alert = await SeedActiveAlertAsync(alerts, "org1", Guid.NewGuid().ToString("N"));
+
+        using var cts = new CancellationTokenSource();
+        var handler = new CancelOnSendHandler(cts);
+        var client = BuildClient(handler);
+        var queue = new AlertSlackQueue(settings, alerts, client, Clock, BuildCfg(), NullLogger<AlertSlackQueue>.Instance);
+
+        // Drives the delivery path directly (no queue/BackgroundService loop needed) with a
+        // token that gets cancelled synchronously the instant the POST "lands" — the exact
+        // window the shutdown bug races.
+        await queue.DeliverAsync(alert, cts.Token);
+
+        Assert.True(cts.IsCancellationRequested);
+        Assert.Equal(1, queue.DeliveredCount);
+
+        var reread = await alerts.GetByIdAsync("org1", alert.Id);
+        Assert.Equal("sent", reread!.SlackStatus);
+        Assert.Null(reread.SlackError);
+
+        var orgSettings = await settings.GetAsync("org1");
+        Assert.Equal("ok", orgSettings.SlackLastStatus);
+    }
+
+    /// <summary>
+    /// Same shutdown-window scenario on the terminal-failure path: once retries are exhausted,
+    /// the failure bookkeeping (which drives auto-disable) must also survive a stopping token
+    /// cancelled the instant the last attempt finishes. A dedicated <see cref="FakeTimeProvider"/>
+    /// drives the retry backoff so the test doesn't wait out the real 1s/5s/30s schedule.
+    /// </summary>
+    [Fact]
+    public async Task DeliverAsync_ShutdownCancelsTokenRightAfterFinalAttemptFails_FailureStillRecorded()
+    {
+        using var ep = MakeProtector();
+        var settings = new AlertSettingsRepository(_db, ep, Clock);
+        var alerts = new AlertRepository(_db, Clock);
+        var slackClock = new FakeTimeProvider(Clock.GetUtcNow());
+
+        await EnableSlackAsync(settings, "org1", "https://bad.example.com/hook");
+        // One failure short of the auto-disable threshold, so this delivery's failure crosses
+        // it — proving the auto-disable-driving count itself survived the cancelled token.
+        for (int i = 0; i < AlertSlackQueue.AutoDisableAfterFailures - 1; i++)
+        {
+            await settings.RecordSlackFailureAsync(
+                "org1", "seed", AlertSlackQueue.AutoDisableAfterFailures, AlertSlackQueue.AutoDisableAfterDuration);
+        }
+
+        var alert = await SeedActiveAlertAsync(alerts, "org1", Guid.NewGuid().ToString("N"));
+
+        using var cts = new CancellationTokenSource();
+        var handler = new CancelOnFinalFailureHandler(cts);
+        var client = BuildClient(handler);
+        var queue = new AlertSlackQueue(settings, alerts, client, slackClock, BuildCfg(), NullLogger<AlertSlackQueue>.Instance);
+
+        var deliverTask = queue.DeliverAsync(alert, cts.Token);
+        await PumpUntilAsync(slackClock, () => Task.FromResult(cts.IsCancellationRequested), TimeSpan.FromSeconds(1));
+        await deliverTask;
+
+        Assert.Equal(1, queue.FailedCount);
+
+        var reread = await alerts.GetByIdAsync("org1", alert.Id);
+        Assert.Equal("failed", reread!.SlackStatus);
+
+        var orgSettings = await settings.GetAsync("org1");
+        Assert.False(orgSettings.SlackEnabled, "Auto-disable must still fire from the durably-recorded failure count.");
+    }
+
+    /// <summary>Cancels the given token synchronously right before returning a 200 response.</summary>
+    private sealed class CancelOnSendHandler : DelegatingHandler
+    {
+        private readonly CancellationTokenSource _cancelOnSend;
+        public CancelOnSendHandler(CancellationTokenSource cancelOnSend) : base(new HttpClientHandler())
+        {
+            _cancelOnSend = cancelOnSend;
+        }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            _cancelOnSend.Cancel();
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK));
+        }
+    }
+
+    /// <summary>
+    /// Fails every attempt with 502; on the last attempt of the retry budget (1 initial + 3
+    /// retries = 4 total), cancels the given token synchronously right before returning —
+    /// simulating shutdown landing exactly as the retry budget is exhausted.
+    /// </summary>
+    private sealed class CancelOnFinalFailureHandler : DelegatingHandler
+    {
+        private readonly CancellationTokenSource _cancelOnFinal;
+        private int _attempts;
+
+        public CancelOnFinalFailureHandler(CancellationTokenSource cancelOnFinal)
+            : base(new HttpClientHandler())
+        {
+            _cancelOnFinal = cancelOnFinal;
+        }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            int attempt = Interlocked.Increment(ref _attempts);
+            if (attempt >= 4)
+            {
+                _cancelOnFinal.Cancel();
+            }
+
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.BadGateway));
+        }
+    }
+
+    // ── Shutdown drain (channel still buffered when the stopping token is cancelled) ──
+
+    /// <summary>
+    /// Reproduces the shutdown-drop defect deterministically by invoking <c>ExecuteAsync</c>
+    /// directly (via the <see cref="AlertSlackQueue.ExecuteAsyncForTests"/> test hook) with an
+    /// already-cancelled token — <see cref="BackgroundService.StartAsync"/> itself short-circuits
+    /// and never calls <c>ExecuteAsync</c> at all in that case, so it cannot exercise the real
+    /// race being tested (a stopping token cancelled while the read loop is genuinely running,
+    /// mid-shutdown, with an alert still buffered). Two alerts are buffered before the drain runs,
+    /// one routed to a reachable webhook and one to an unreachable one — the drain must deliver
+    /// the first and durably record the second's failure, independently.
+    /// </summary>
+    [Fact]
+    public async Task ExecuteAsync_CancelledMidRun_DrainsMixedSuccessAndFailure()
+    {
+        using var ep = MakeProtector();
+        var settings = new AlertSettingsRepository(_db, ep, Clock);
+        var alerts = new AlertRepository(_db, Clock);
+        var handler = new RoutingHandler();
+        var client = BuildClient(handler);
+        var slackClock = new FakeTimeProvider(Clock.GetUtcNow());
+
+        await EnableSlackAsync(settings, "org1", "https://good.example.com/hook");
+        await EnableSlackAsync(settings, "org2", "https://bad.example.com/hook");
+        var goodAlert = await SeedActiveAlertAsync(alerts, "org1", Guid.NewGuid().ToString("N"));
+        var badAlert = await SeedActiveAlertAsync(alerts, "org2", Guid.NewGuid().ToString("N"));
+
+        var queue = new AlertSlackQueue(settings, alerts, client, slackClock, BuildCfg(), NullLogger<AlertSlackQueue>.Instance);
+
+        // Buffer both alerts before the worker ever starts reading.
+        queue.Notify(goodAlert);
+        queue.Notify(badAlert);
+
+        // Drives ExecuteAsync directly with an already-cancelled token — the exact state the
+        // stopping token is in by the time BackgroundService.StopAsync signals cancellation.
+        var executeTask = queue.ExecuteAsyncForTests(new CancellationToken(canceled: true));
+
+        // The failing alert burns through the 1s/5s/30s backoff inside the drain itself; pump
+        // the fake clock so that finishes in virtual time instead of real time.
+        await PumpUntilAsync(slackClock, async () =>
+        {
+            var good = await alerts.GetByIdAsync("org1", goodAlert.Id);
+            var bad = await alerts.GetByIdAsync("org2", badAlert.Id);
+            return good?.SlackStatus is not null && bad?.SlackStatus is not null;
+        }, TimeSpan.FromSeconds(1));
+
+        await executeTask;
+
+        Assert.Equal(1, queue.DeliveredCount);
+        Assert.Equal(1, queue.FailedCount);
+
+        var goodReread = await alerts.GetByIdAsync("org1", goodAlert.Id);
+        var badReread = await alerts.GetByIdAsync("org2", badAlert.Id);
+        Assert.Equal("sent", goodReread!.SlackStatus);
+        Assert.Equal("failed", badReread!.SlackStatus);
     }
 
     // ── Disabled / unconfigured: silent no-op ───────────────────────────────────
@@ -261,9 +477,20 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         // Advance the fake clock through the 1s + 5s + 30s backoff schedule; each iteration only
         // yields a few real milliseconds so the background delivery loop can observe the fired
         // timer, keeping the test fast and deterministic instead of waiting out real backoff.
-        await PumpUntilAsync(slackClock, () => queue.DeliveredCount + queue.FailedCount >= 2, TimeSpan.FromSeconds(1));
+        // Pumps until the DURABLE end state (both persisted rows) lands, not the queue's
+        // in-memory DeliveredCount/FailedCount — the queue increments those counters BEFORE its
+        // DB writes complete, so pumping only until the counter changes and then cancelling
+        // races the write.
+        await PumpUntilAsync(slackClock, async () =>
+        {
+            var good = await alerts.GetByIdAsync("org1", goodAlert.Id);
+            var bad = await alerts.GetByIdAsync("org2", badAlert.Id);
+            return good?.SlackStatus is not null && bad?.SlackStatus is not null;
+        }, TimeSpan.FromSeconds(1));
 
-        await cts.CancelAsync();
+        // Graceful drain — StopAsync signals ExecuteAsync's stopping token itself, but by the
+        // time we get here both durable writes have already landed, so there is nothing
+        // in-flight left for a cancellation to interrupt.
         try { await queue.StopAsync(CancellationToken.None); } catch { }
 
         Assert.Equal(1, queue.DeliveredCount);
@@ -281,6 +508,70 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         Assert.Equal(1, badSettings.SlackConsecutiveFailures);
         // A single failure does not yet auto-disable (threshold is 20).
         Assert.True(badSettings.SlackEnabled);
+    }
+
+    // ── Cross-tenant non-delivery ────────────────────────────────────────────
+
+    /// <summary>
+    /// Both orgs configure and enable Slack, each with its own webhook URL. Notifying an alert
+    /// whose <c>OrgId</c> is org1 must never reach org2's webhook — <see cref="Notify_MixedOrgs_OneSucceedsOneFails_IndependentOutcomes"/>
+    /// proves independent per-org *outcomes* but never asserts that the wrong tenant's webhook
+    /// received zero requests. This is the "must-NOT" twin: org2's URL gets no POST at all, and
+    /// the one delivered text carries only org1's alert content.
+    /// </summary>
+    [Fact]
+    public async Task Notify_AlertForOrg1_NeverDeliveredToOrg2Webhook()
+    {
+        using var ep = MakeProtector();
+        var settings = new AlertSettingsRepository(_db, ep, Clock);
+        var alerts = new AlertRepository(_db, Clock);
+        var handler = new RoutingHandler();
+        var client = BuildClient(handler);
+
+        await EnableSlackAsync(settings, "org1", "https://good.example.com/org1-hook");
+        await EnableSlackAsync(settings, "org2", "https://good.example.com/org2-hook");
+
+        var org1Alert = await alerts.TryInsertAsync(new NewAlert(
+            "org1", AlertTypes.QuarantineNew, Severity: null, SourceRef: Guid.NewGuid().ToString("N"),
+            Ecosystem: "npm", Purl: "pkg:npm/org1-secret@1.0.0",
+            Title: "ORG1-ONLY quarantine item", Detail: "org1 detail payload"));
+
+        var org2Alert = await alerts.TryInsertAsync(new NewAlert(
+            "org2", AlertTypes.QuarantineNew, Severity: null, SourceRef: Guid.NewGuid().ToString("N"),
+            Ecosystem: "npm", Purl: "pkg:npm/org2-secret@1.0.0",
+            Title: "ORG2-ONLY quarantine item", Detail: "org2 detail payload"));
+
+        var queue = new AlertSlackQueue(settings, alerts, client, Clock, BuildCfg(), NullLogger<AlertSlackQueue>.Instance);
+        using var cts = new CancellationTokenSource();
+        _ = queue.StartAsync(cts.Token);
+
+        queue.Notify(org1Alert!);
+        // Waits on the DURABLE end state (the persisted alert row), not the queue's in-memory
+        // DeliveredCount — the queue increments that counter BEFORE its DB writes complete, so
+        // waiting on the counter and then cancelling races the write.
+        await WaitAsync(async () => (await alerts.GetByIdAsync("org1", org1Alert!.Id))?.SlackStatus is not null);
+
+        // Graceful drain — StopAsync signals ExecuteAsync's stopping token itself, but by the
+        // time we get here the durable write has already landed, so there is nothing in-flight
+        // left for a cancellation to interrupt.
+        try { await queue.StopAsync(CancellationToken.None); } catch { }
+
+        // Exactly one POST was ever sent, and it went to org1's webhook — org2's webhook
+        // received nothing at all.
+        Assert.Single(handler.Requests);
+        var (url, body) = handler.Requests[0];
+        Assert.Equal("https://good.example.com/org1-hook", url);
+        Assert.DoesNotContain(handler.Requests, r => r.Url == "https://good.example.com/org2-hook");
+
+        // The delivered text carries org1's alert content and no trace of org2's.
+        Assert.Contains("ORG1-ONLY", body);
+        Assert.DoesNotContain("ORG2-ONLY", body);
+
+        // org2's alert was never touched: no Slack delivery attempted, no outcome recorded.
+        var org2Reread = await alerts.GetByIdAsync("org2", org2Alert!.Id);
+        Assert.NotNull(org2Reread);
+        Assert.Null(org2Reread!.SlackStatus);
+        Assert.Null(org2Reread.SlackError);
     }
 
     // ── Auto-disable (exercised directly against the repository, same as the webhook suite) ────

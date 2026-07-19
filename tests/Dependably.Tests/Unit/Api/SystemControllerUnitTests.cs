@@ -1055,4 +1055,151 @@ public sealed class SystemControllerUnitTests
         var obj = Assert.IsType<ObjectResult>(result);
         Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
     }
+
+    // ── Operator Slack event producers ─────────────────────────────────────
+    // Exercises the exact production wiring (controller → real repos → notifier) end to end,
+    // asserting each system-realm action enqueues exactly one SystemEventRecord carrying only
+    // the fields the operator dashboard legitimately shows — never a package name, vuln detail,
+    // or tenant member email, per the operator-Slack isolation invariant.
+
+    private sealed class RecordingSystemEventNotifier : Dependably.Infrastructure.SystemEvents.ISystemEventNotifier
+    {
+        public List<Dependably.Infrastructure.SystemEvents.SystemEventRecord> Records { get; } = [];
+        public void Notify(Dependably.Infrastructure.SystemEvents.SystemEventRecord record) => Records.Add(record);
+    }
+
+    [Fact]
+    public async Task CreateTenant_EnqueuesExactlyOneSystemEventRecord_SlugAndActorOnly()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        var notifier = new RecordingSystemEventNotifier();
+        var b = await s.BuildAsync(systemEvents: notifier);
+        SetSystemActor(b, "ops-actor-id");
+
+        string slug = $"produced-{Guid.NewGuid():N}"[..18];
+        var result = await b.SystemController.CreateTenant(
+            new CreateTenantRequest(slug, "owner@example.test"), CancellationToken.None);
+        Assert.IsType<OkObjectResult>(result);
+
+        var record = Assert.Single(notifier.Records);
+        Assert.Equal("tenant.created", record.Action);
+        Assert.Equal(slug, record.TenantSlug);
+        Assert.Equal("ops-actor-id", record.Actor);
+        Assert.Null(record.TenantName);
+    }
+
+    [Fact]
+    public async Task SoftDeleteTenant_EnqueuesExactlyOneSystemEventRecord()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        string targetSlug = $"target-{Guid.NewGuid():N}"[..18];
+        await OrgSeeder.InsertAsync(s.Store, targetSlug);
+        var notifier = new RecordingSystemEventNotifier();
+        var b = await s.BuildAsync(systemEvents: notifier);
+        SetSystemActor(b, "ops-actor-id");
+
+        var result = await b.SystemController.SoftDeleteTenant(targetSlug, CancellationToken.None);
+        Assert.IsType<NoContentResult>(result);
+
+        var record = Assert.Single(notifier.Records);
+        Assert.Equal("tenant.deleted", record.Action);
+        Assert.Equal(targetSlug, record.TenantSlug);
+        Assert.Equal("ops-actor-id", record.Actor);
+    }
+
+    [Fact]
+    public async Task RestoreTenant_EnqueuesExactlyOneSystemEventRecord()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        string slug = $"restore-{Guid.NewGuid():N}"[..18];
+        string orgId = await OrgSeeder.InsertAsync(s.Store, slug);
+        await using (var conn = await s.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "UPDATE orgs SET deleted_at = @now WHERE id = @id",
+                new { id = orgId, now = s.Clock.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ") });
+        }
+        var notifier = new RecordingSystemEventNotifier();
+        var b = await s.BuildAsync(systemEvents: notifier);
+        SetSystemActor(b, "ops-actor-id");
+
+        var result = await b.SystemController.RestoreTenant(slug, CancellationToken.None);
+        Assert.IsType<NoContentResult>(result);
+
+        var record = Assert.Single(notifier.Records);
+        Assert.Equal("tenant.restored", record.Action);
+        Assert.Equal(slug, record.TenantSlug);
+    }
+
+    [Fact]
+    public async Task SetTenantStatus_EnqueuesExactlyOneSystemEventRecord()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        string slug = $"status-{Guid.NewGuid():N}"[..18];
+        await OrgSeeder.InsertAsync(s.Store, slug);
+        var notifier = new RecordingSystemEventNotifier();
+        var b = await s.BuildAsync(systemEvents: notifier);
+        SetSystemActor(b, "ops-actor-id");
+
+        var result = await b.SystemController.SetTenantStatus(
+            slug, new SetTenantStatusRequest("suspended"), CancellationToken.None);
+        Assert.IsType<NoContentResult>(result);
+
+        var record = Assert.Single(notifier.Records);
+        Assert.Equal("tenant.status_changed", record.Action);
+        Assert.Equal(slug, record.TenantSlug);
+    }
+
+    [Fact]
+    public async Task CreateAdmin_EnqueuesExactlyOneSystemEventRecord_NoTenant()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        var notifier = new RecordingSystemEventNotifier();
+        var b = await s.BuildAsync(systemEvents: notifier);
+        SetSystemActor(b, "ops-actor-id");
+
+        var result = await b.SystemController.CreateAdmin(
+            new CreateAdminRequest("new-ops@example.test"), CancellationToken.None);
+        Assert.IsType<CreatedAtActionResult>(result);
+
+        var record = Assert.Single(notifier.Records);
+        Assert.Equal("system_admin.admin_created", record.Action);
+        Assert.Null(record.TenantSlug);
+        Assert.Null(record.TenantName);
+        Assert.Equal("ops-actor-id", record.Actor);
+    }
+
+    [Fact]
+    public async Task DeleteAdmin_EnqueuesExactlyOneSystemEventRecord_NoTenant()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        string targetId = await SystemAdminSeeder.InsertAsync(s.Store, "delete-producer@example.test");
+        await using (var conn = await s.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "UPDATE system_admins SET account_status = 'disabled' WHERE id = @id", new { id = targetId });
+        }
+        var notifier = new RecordingSystemEventNotifier();
+        var b = await s.BuildAsync(systemEvents: notifier);
+        SetSystemActor(b, "ops-actor-id");
+
+        var result = await b.SystemController.DeleteAdmin(targetId, CancellationToken.None);
+        Assert.IsType<NoContentResult>(result);
+
+        var record = Assert.Single(notifier.Records);
+        Assert.Equal("system_admin.admin_deleted", record.Action);
+        Assert.Null(record.TenantSlug);
+    }
 }

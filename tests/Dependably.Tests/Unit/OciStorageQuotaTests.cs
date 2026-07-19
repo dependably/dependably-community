@@ -55,10 +55,11 @@ public sealed class OciStorageQuotaTests : IAsyncLifetime
         var cfg = new ConfigurationBuilder().Build();
         // Unlimited disk (floor = 0 opt-out) so quota tests focus on storage accounting.
         var stagingOptions = new StagingOptions(Path.GetTempPath(), FloorBytes: 0);
-        var recorder = new OciImageLicenseRecorder(
-            _db, tiered, TimeProvider.System, NullLogger<OciImageLicenseRecorder>.Instance);
+        var recorder = new OciImageLicenseRecorder(_db, tiered, TimeProvider.System, NullLogger<OciImageLicenseRecorder>.Instance,
+                new LicenseRepository(_db, TimeProvider.System, TestNormalizers.License(_db)));
         return new OciUploadService(new OciUploadService.Dependencies(
             _db, tiered, _orgs, new UnlimitedDisk(), stagingOptions, cfg, recorder,
+            new OciBlobKeyLock(),
             NullLogger<OciUploadService>.Instance,
             TimeProvider.System));
     }
@@ -178,9 +179,11 @@ public sealed class OciStorageQuotaTests : IAsyncLifetime
         Assert.Equal(OciFinalizeStatus.Ok, configResult.Status);
         Assert.Equal(OciFinalizeStatus.Ok, layerResult.Status);
 
-        // Set quota just below the current usage + manifest size.
-        long usedSoFar = await ReadStorageUsedBytes();
-        await _orgs.SetStorageQuotaBytesAsync(_orgId, usedSoFar); // no room for the manifest
+        // The config and layer blobs are already stored, so the org really is holding their bytes —
+        // the zero-baseline backfill inside the reserve discovers them from oci_blobs. Pin the quota
+        // to exactly that, leaving no room for the manifest.
+        long storedBytes = configBytes.Length + layerBytes.Length;
+        await _orgs.SetStorageQuotaBytesAsync(_orgId, storedBytes); // no room for the manifest
 
         byte[] manifest = BuildManifest(configResult.Digest!, configBytes.Length, layerResult.Digest!, layerBytes.Length);
         var storeResult = await svc.StoreManifestAsync(
@@ -188,9 +191,10 @@ public sealed class OciStorageQuotaTests : IAsyncLifetime
             "application/vnd.oci.image.manifest.v1+json", default);
 
         Assert.Equal(OciManifestStatus.QuotaExceeded, storeResult.Status);
-        // Counter must not have increased beyond usedSoFar.
+        // The rejected manifest reserves nothing: the counter settles on the bytes already stored,
+        // never those bytes plus the manifest's.
         long counterAfter = await ReadStorageUsedBytes();
-        Assert.Equal(usedSoFar, counterAfter);
+        Assert.Equal(storedBytes, counterAfter);
     }
 
     [Fact]

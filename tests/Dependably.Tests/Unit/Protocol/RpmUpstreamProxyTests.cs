@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Xml.Linq;
@@ -6,6 +7,7 @@ using Dependably.Infrastructure;
 using Dependably.Protocol;
 using Dependably.Security;
 using Dependably.Storage;
+using Dependably.Tests.Compliance;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
@@ -94,6 +96,42 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
 
         // Only one upstream request should have been made.
         Assert.Equal(1, _server.LogEntries.Count(e => e.RequestMessage?.Path?.EndsWith("repomd.xml") == true));
+    }
+
+    [Fact]
+    public async Task GetRepodataAsync_RepomdXml_CallerCancelsWhileFetchStillRunning_DoesNotStartDuplicateUpstreamFetch()
+    {
+        // ABA regression: caller A's own wait detaches (client disconnect/timeout) while the
+        // shared upstream fetch it registered is still running. Caller B then joins the same
+        // coordinate before the shared fetch resolves. The single-flight in-flight entry must
+        // survive A's early detach so B joins the live fetch instead of starting a duplicate one.
+        var handler = new GatedHandler();
+        var proxy = BuildProxy(handler: handler);
+
+        using var ctsA = new CancellationTokenSource();
+        var taskA = proxy.GetRepodataAsync(_upstream, "repomd.xml", null, null, ctsA.Token);
+
+        await handler.FirstCallStarted;
+
+        ctsA.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => taskA);
+
+        // Caller B joins for the identical coordinate while the shared fetch is still blocked on
+        // the gate. On the buggy unconditional-TryRemove finally, A's cancellation already evicted
+        // the in-flight entry, so B would start a second (un-gated, immediately-completing) fetch
+        // here instead of joining the still-running one.
+        var taskB = proxy.GetRepodataAsync(_upstream, "repomd.xml", null, null, default);
+
+        var winner = await Task.WhenAny(taskB, Task.Delay(TimeSpan.FromMilliseconds(300)));
+        Assert.NotSame(taskB, winner); // B must still be waiting on the shared (gated) fetch
+        Assert.Equal(1, handler.CallCount);
+
+        handler.ReleaseFirstCall();
+        var resultB = await taskB;
+
+        Assert.NotNull(resultB);
+        Assert.False(resultB!.NotModified);
+        Assert.Equal(1, handler.CallCount); // still exactly one upstream round-trip
     }
 
     [Fact]
@@ -689,6 +727,54 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
         Assert.False(RpmUpstreamProxy.VerifyRepomdSignature(repomd, asc, otherRing));
     }
 
+    [Fact]
+    public void RpmPrimaryMapCache_ConfiguredSizeLimit_HonorsOperatorValue()
+    {
+        const long configured = 64L * 1024 * 1024;
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Rpm:PrimaryMapCacheSizeLimitBytes"] = configured.ToString(),
+            })
+            .Build();
+
+        using var cache = new RpmPrimaryMapCache(config);
+
+        Assert.NotEqual(RpmPrimaryMapCache.DefaultSizeLimitBytes, configured);
+        cache.Cache.Set("probe", "value", new MemoryCacheEntryOptions { Size = configured });
+        Assert.True(cache.Cache.TryGetValue("probe", out _));
+    }
+
+    [Fact]
+    public void RpmPrimaryMapCache_NoConfig_FallsBackToDefaultSizeLimit()
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>()).Build();
+
+        using var cache = new RpmPrimaryMapCache(config);
+
+        // The default bound (300 MiB) admits an entry that size but rejects one over it —
+        // proves the constructor fell through to RpmPrimaryMapCache.DefaultSizeLimitBytes
+        // rather than an unbounded or zero cache.
+        cache.Cache.Set("within-default", "value", new MemoryCacheEntryOptions { Size = RpmPrimaryMapCache.DefaultSizeLimitBytes });
+        Assert.True(cache.Cache.TryGetValue("within-default", out _));
+
+        cache.Cache.Set("over-default", "value", new MemoryCacheEntryOptions { Size = RpmPrimaryMapCache.DefaultSizeLimitBytes + 1 });
+        Assert.False(cache.Cache.TryGetValue("over-default", out _));
+    }
+
+    [Fact]
+    public void ContributingMd_DocumentsPrimaryMapCacheSizeLimitEnvVar()
+    {
+        // Rpm:PrimaryMapCacheSizeLimitBytes (RpmUpstreamProxy.cs) tunes the RPM primary.xml
+        // map cache bound; every other Section:Key read in code (Maven:NegativeCacheTtl,
+        // Go:SumDb, Apk:*) is documented in CONTRIBUTING.md's environment-variable reference —
+        // this key must be too, or operators of large RPM mirrors have no way to discover it.
+        string contributingPath = Path.Combine(SourceRoots.RepoRoot(), "CONTRIBUTING.md");
+        string contents = File.ReadAllText(contributingPath);
+
+        Assert.Contains("Rpm__PrimaryMapCacheSizeLimitBytes", contents);
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private static (byte[] Repomd, string PrimaryFilename, byte[] PrimaryGz) BuildSignedRepoFixture(string packageName)
@@ -768,7 +854,8 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
     private RpmUpstreamProxy BuildProxy(
         IBlobStore? blobs = null, bool airGapped = false,
         string? gpgKey = null, string? verifyFlag = null,
-        long? sharedCacheSizeLimitBytes = null, long? primaryMapCacheSizeLimitBytes = null)
+        long? sharedCacheSizeLimitBytes = null, long? primaryMapCacheSizeLimitBytes = null,
+        HttpMessageHandler? handler = null)
     {
         blobs ??= new InMemoryBlobStore();
         var settings = new Dictionary<string, string?>
@@ -787,7 +874,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
 
         var config = new ConfigurationBuilder().AddInMemoryCollection(settings).Build();
 
-        var httpFactory = new StaticHttpClientFactory(new HttpClient(new WireMockHandler(_server)));
+        var httpFactory = new StaticHttpClientFactory(new HttpClient(handler ?? new WireMockHandler(_server)));
         // sharedCacheSizeLimitBytes is unset (unbounded) by default, matching most tests' focus on
         // functional behavior rather than eviction; individual tests that need to reproduce a
         // size-bounded shared cache (mirroring the production 50 MB metadata cache) pass it explicitly.
@@ -965,6 +1052,37 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
 
             var inner = new HttpClient();
             return await inner.SendAsync(innerRequest, ct);
+        }
+    }
+
+    /// <summary>
+    /// Blocks the first request on a gate the test controls explicitly, so the single-flight
+    /// in-flight entry is deterministically still "running" when a second caller joins. Every
+    /// subsequent request completes immediately, so a duplicate (un-gated) fetch is observable
+    /// as an immediate second completion rather than needing a wall-clock race.
+    /// </summary>
+    private sealed class GatedHandler : HttpMessageHandler
+    {
+        private int _callCount;
+        private readonly TaskCompletionSource _firstCallStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _releaseFirstCall = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public int CallCount => _callCount;
+        public Task FirstCallStarted => _firstCallStarted.Task;
+        public void ReleaseFirstCall() => _releaseFirstCall.TrySetResult();
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            if (Interlocked.Increment(ref _callCount) == 1)
+            {
+                _firstCallStarted.SetResult();
+                await _releaseFirstCall.Task;
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(Encoding.UTF8.GetBytes(MinimalRepomd())),
+            };
         }
     }
 }

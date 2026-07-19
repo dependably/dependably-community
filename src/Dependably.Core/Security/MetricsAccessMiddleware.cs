@@ -30,7 +30,17 @@ namespace Dependably.Security;
 /// evaluated instead — an undeclared co-located proxy is indistinguishable
 /// from a genuine local caller in that configuration; declaring the proxy
 /// in <c>TRUSTED_PROXIES</c> is the fix. See
-/// <c>dependably-enterprise/docs/reverse-proxy.md</c>.</para>
+/// <c>dependably-enterprise/docs/reverse-proxy.md</c>. Scoping
+/// <c>TRUSTED_PROXIES</c> too broadly (a shared load-balancer CIDR, a whole
+/// VPC, or worse) reopens exactly the spoofing risk this allowlist exists
+/// to close — any peer inside that range can then forge
+/// <c>X-Forwarded-For</c> and impersonate an allowlisted caller.
+/// <see cref="Dependably.Infrastructure.ConfigurationExtensions.ParseTrustedProxies"/>
+/// fails startup outright on the unambiguous worst case (a <c>/0</c> network
+/// that trusts every address on the internet, which would also let any
+/// caller impersonate an allowlisted address against <c>/version</c> and the
+/// management OpenAPI/Swagger IP gates); narrower-but-still-broad ranges are
+/// an operator judgment call this code cannot safely make for them.</para>
 ///
 /// <para><see cref="AuditRepository"/> is resolved per-request via
 /// <c>ctx.RequestServices</c> because this middleware is a singleton and

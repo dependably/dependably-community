@@ -31,22 +31,14 @@ public sealed class FirstBootServicePostgresBootTests
             "TEST_POSTGRES_CONNECTION must be set to run Category=SchemaPostgres tests. " +
             "CI sets it from the postgres service; locally start a docker postgres and export it.");
 
-    private static async Task<NpgsqlMetadataStore> FreshPostgresAsync()
-    {
-        var store = new NpgsqlMetadataStore(ConnectionString);
-        await using var conn = await store.OpenAsync();
-        // Pristine slate: drop everything from a prior run so the apply starts from zero.
-        await conn.ExecuteAsync("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-        return store;
-    }
-
     private static EnvelopeProtector UnconfiguredEnvelope() =>
         new(new EnvFileMasterKeyProvider(new ConfigurationBuilder().Build()));
 
     [Fact]
     public async Task RunAsync_LivePostgres_SingleMode_CompletesWithoutSyntaxError()
     {
-        var store = await FreshPostgresAsync();
+        await using var pg = await LivePostgresReset.FreshAsync(ConnectionString);
+        var store = pg.Store;
         await new SchemaInitializer(store).InitializeAsync();
 
         var config = new ConfigurationBuilder()
@@ -80,7 +72,8 @@ public sealed class FirstBootServicePostgresBootTests
     [Fact]
     public async Task RunAsync_LivePostgres_SecondCall_IsNoOpAndDoesNotThrow()
     {
-        var store = await FreshPostgresAsync();
+        await using var pg = await LivePostgresReset.FreshAsync(ConnectionString);
+        var store = pg.Store;
         await new SchemaInitializer(store).InitializeAsync();
 
         var config = new ConfigurationBuilder()
@@ -113,7 +106,8 @@ public sealed class FirstBootServicePostgresBootTests
         // (FirstBootService, StartupService's two secret-migration paths, SystemController's
         // tenant-create): on Postgres it must open a plain transaction plus an advisory lock,
         // never the SQLite-only BEGIN IMMEDIATE syntax.
-        var store = await FreshPostgresAsync();
+        await using var pg = await LivePostgresReset.FreshAsync(ConnectionString);
+        var store = pg.Store;
         await new SchemaInitializer(store).InitializeAsync();
 
         await using var conn = await store.OpenAsync();

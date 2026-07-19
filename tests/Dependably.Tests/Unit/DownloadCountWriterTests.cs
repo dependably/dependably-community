@@ -16,7 +16,11 @@ namespace Dependably.Tests.Unit;
 /// The by-purl path increments <c>tenant_artifact_access.download_count</c> scoped to the
 /// caller's org_id (proxy download counts live in the global plane, not in package_versions).
 /// </summary>
+// Attaches a MeterListener filtered only by DependablyMeter.MeterName + instrument name and
+// asserts exact counts — must run alone against the process-wide static meter.
+// See MeterSensitiveCollection.
 [Trait("Category", "Unit")]
+[Collection("MeterSensitive")]
 public sealed class DownloadCountWriterTests : IAsyncLifetime
 {
     private readonly TestMetadataStore _db = new();

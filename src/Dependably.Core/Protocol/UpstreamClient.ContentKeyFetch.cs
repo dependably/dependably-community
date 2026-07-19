@@ -241,10 +241,21 @@ public sealed partial class UpstreamClient
             }
 
             // Store under the content-addressed key derived from the computed SHA-256.
-            // Idempotent: concurrent callers that hashed the same content skip the write.
+            // Idempotent: concurrent callers that hashed the same content skip the write, and
+            // that dedup is also why the quota gate guards only a genuinely new blob — bytes
+            // already resident under this key grow the cache plane by nothing. The tenant is
+            // still charged for them once it records access, because org_storage_bytes counts a
+            // cache_artifact against every tenant holding tenant_artifact_access on it, so the
+            // next fill this tenant attempts weighs them.
             string blobKey = BlobKeys.Proxy(sha256Hex);
-            if (!await _blobs.ExistsAsync(blobKey, ct))
+            bool newBlob = !await _blobs.ExistsAsync(blobKey, ct);
+            if (newBlob)
             {
+                // Enforce the tenant's storage ceiling before the new bytes land in the blob
+                // store — the same per-org quota hosted publish and OCI push enforce. Held until
+                // the write completes so concurrent fills weigh these not-yet-recorded bytes.
+                using var quota = await ReserveTenantCacheQuotaAsync(orgId, sizeBytes, ct);
+
                 await using var verified = new FileStream(
                     tempPath, FileMode.Open, FileAccess.Read, FileShare.Read,
                     bufferSize: 81920, useAsync: true);

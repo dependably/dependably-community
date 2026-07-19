@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using Dapper;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Caching;
 using Dependably.Protocol;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
@@ -243,6 +244,60 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
             .ToHashSet();
         Assert.Contains("1.0.0", versions);
         Assert.Contains("9.9.9", versions);
+    }
+
+    // ── Registration: single-flight rebuild is HttpContext-independent ────────
+
+    // Regression: the single-flight proxy-merged rebuild must return pure bytes and defer the
+    // ETag / If-None-Match decision to the serve layer. When the request that triggers the
+    // rebuild carries a matching If-None-Match, the pre-fix rebuild ran the whole registration
+    // build inside the shared task against the initiating caller's HttpContext — it read the
+    // caller's If-None-Match, short-circuited to a 304 result, and so cached nothing (and would
+    // have written response headers onto a possibly-completed response served org-wide). The fix
+    // caches the rebuilt bytes regardless of the initiating caller's conditional-request header,
+    // then makes the 304 decision outside the shared task. This pins that the conditional MISS
+    // still populates the proxy cache.
+    [Fact]
+    public async Task RegistrationIndex_ConditionalMiss_FromInitiatingCaller_StillCachesBytes()
+    {
+        string id = $"regcond{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string upstreamJson = "{\"count\":1,\"items\":[{\"count\":1,\"items\":["
+            + "{\"@id\":\"x\",\"catalogEntry\":{\"id\":\"X\",\"version\":\"3.1.4\",\"listed\":true}}]}]}";
+        _factory.MockUpstream.Given(
+                Request.Create()
+                    .WithPath($"/registration5-semver1/{id}/index.json")
+                    .UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                .WithHeader("Content-Type", "application/json").WithBody(upstreamJson));
+
+        string token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(token);
+
+        // Warm the proxy cache once to learn the ETag.
+        var warm = await client.GetAsync($"/nuget/registration/{id}/index.json");
+        Assert.Equal(HttpStatusCode.OK, warm.StatusCode);
+        string etag = warm.Headers.ETag!.Tag;
+
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        string orgId = (await conn.ExecuteScalarAsync<string>(
+            "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1"))!;
+
+        // Evict so the next request is a genuine cache MISS that must rebuild.
+        var cache = _factory.Services.GetRequiredService<RenderedResponseCache<NuGetRegistrationKey>>();
+        var proxyKey = new NuGetRegistrationKey(orgId, id, SemVer2: false) { IsProxy = true };
+        cache.Evict(proxyKey);
+        Assert.False(cache.TryGet(proxyKey, out byte[]? _));
+
+        // The request that triggers the rebuild carries a matching If-None-Match. It correctly
+        // gets 304, but the rebuild must still cache the freshly-built bytes.
+        var req = new HttpRequestMessage(HttpMethod.Get, $"/nuget/registration/{id}/index.json");
+        req.Headers.TryAddWithoutValidation("If-None-Match", etag);
+        var conditional = await client.SendAsync(req);
+        Assert.Equal(HttpStatusCode.NotModified, conditional.StatusCode);
+
+        // Pre-fix: the shared rebuild returned 304 from the caller's context, cached nothing.
+        Assert.True(cache.TryGet(proxyKey, out byte[]? cached) && cached is not null);
     }
 
     // ── Registration leaf: {id}/{version}.json ───────────────────────────────

@@ -28,6 +28,14 @@ namespace Dependably.Infrastructure;
 /// <c>cache_artifact</c> row for the group each pass, and mirrored onto any hosted
 /// (<c>origin='uploaded'</c>) <c>package_versions</c> rows sharing the same package. NULL means
 /// unknown (never 0) — an unreachable/unresolvable upstream this pass, not "up to date".
+///
+/// The pass enumerates the stale <c>cache_artifact</c> groups first, then a second set of
+/// HOSTED-ONLY groups: packages that were once proxied — hence carry a seeded
+/// <c>upstream_latest_checked_at</c> — but whose proxy rows were later evicted, leaving only
+/// hosted versions. They have no <c>cache_artifact</c> row for the cache enumeration to find, so
+/// without this second pass their <c>upstream_latest_version</c> and hosted <c>versions_behind</c>
+/// would freeze at eviction time. A purely-internal name that was never proxied has a NULL
+/// <c>upstream_latest_checked_at</c> and is deliberately never fetched.
 /// </summary>
 public sealed class DeprecationRefreshService : ScheduledBackgroundService
 {
@@ -110,6 +118,32 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
         var sw = System.Diagnostics.Stopwatch.StartNew();
 
         var groups = await _cacheArtifacts.ListGroupsNeedingDeprecationRefreshAsync(ageHours, batchSize, _time, ct);
+        var (cacheChecked, cacheUpdated) = await ProcessGroupsAsync(groups, batchDelayMs, ct);
+
+        // Hosted-only groups: packages that were once proxied (so they carry a seeded
+        // upstream_latest_checked_at) but no longer have a cache_artifact row — their proxy
+        // versions were evicted, leaving only origin='uploaded' rows. The cache-plane enumeration
+        // above cannot see them, so without this pass their upstream_latest_version and hosted
+        // versions_behind would freeze at eviction time. Same per-name upstream fetch, same
+        // processing — the cache-version list is just empty.
+        var hostedGroups = await _packages.ListHostedGroupsNeedingUpstreamRefreshAsync(ageHours, batchSize, _time, ct);
+        var (hostedChecked, hostedUpdated) = await ProcessGroupsAsync(hostedGroups, batchDelayMs, ct);
+
+        int totalChecked = cacheChecked + hostedChecked;
+        int totalUpdated = cacheUpdated + hostedUpdated;
+
+        sw.Stop();
+        _logger.LogInformation(
+            "Deprecation refresh pass complete. Checked {Checked} versions across {Groups} packages, {Updated} updated, took {ElapsedMs}ms.",
+            totalChecked, groups.Count, totalUpdated, sw.ElapsedMilliseconds);
+    }
+
+    // Runs ProcessGroupAsync over each group in order, stopping early on cancellation, with an
+    // optional delay between groups to spread upstream fetch load. Shared by the cache-plane and
+    // hosted-only refresh passes in RunRefreshPassInnerAsync above.
+    private async Task<(int Checked, int Updated)> ProcessGroupsAsync(
+        IReadOnlyList<(string Ecosystem, string Name, string OrgId)> groups, int batchDelayMs, CancellationToken ct)
+    {
         int totalChecked = 0;
         int totalUpdated = 0;
 
@@ -120,7 +154,7 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
                 break;
             }
 
-            var (checked_, updated) = await ProcessCacheGroupAsync(group, ct);
+            var (checked_, updated) = await ProcessGroupAsync(group, ct);
             totalChecked += checked_;
             totalUpdated += updated;
 
@@ -131,18 +165,18 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
             }
         }
 
-        sw.Stop();
-        _logger.LogInformation(
-            "Deprecation refresh pass complete. Checked {Checked} versions across {Groups} packages, {Updated} updated, took {ElapsedMs}ms.",
-            totalChecked, groups.Count, totalUpdated, sw.ElapsedMilliseconds);
+        return (totalChecked, totalUpdated);
     }
 
     /// <summary>
-    /// Processes one (ecosystem, name, orgId) group: fetches upstream metadata and writes
-    /// <c>deprecated</c>/<c>deprecation_checked_at</c> to each <c>cache_artifact</c> row for
-    /// that package name. One upstream fetch covers all version rows for the name.
+    /// Processes one (ecosystem, name, orgId) group: fetches upstream metadata once, records the
+    /// upstream-latest on the packages row, writes <c>deprecated</c>/<c>deprecation_checked_at</c>
+    /// to each <c>cache_artifact</c> row for the name, and mirrors <c>versions_behind</c> onto the
+    /// hosted rows. Serves both the cache-plane groups and the hosted-only groups (a package with
+    /// no <c>cache_artifact</c> row) — for the latter the cache-version list is simply empty, so
+    /// only the packages row and hosted versions are updated.
     /// </summary>
-    private async Task<(int Checked, int Updated)> ProcessCacheGroupAsync(
+    private async Task<(int Checked, int Updated)> ProcessGroupAsync(
         (string Ecosystem, string Name, string OrgId) group,
         CancellationToken ct)
     {

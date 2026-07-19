@@ -1,6 +1,7 @@
 using System.Reflection;
 using Dapper;
 using Dependably.Infrastructure.Identity;
+using Dependably.Security;
 
 namespace Dependably.Infrastructure;
 
@@ -14,7 +15,7 @@ namespace Dependably.Infrastructure;
 /// 4. Envelope-encrypt instance secrets that are still stored as plaintext (idempotent migration)
 /// 5. Re-seed edge upstream + access-token rows on every boot (no-op outside edge mode)
 ///
-/// The JWT signing-key load — copying <c>jwt_secret</c> into the JwtBearer options and the
+/// The JWT signing-key load — priming <c>JwtSigningKeyProvider</c> from <c>jwt_secret</c> and the
 /// fail-closed guard when it is missing — is a separate management hosted service registered
 /// immediately after this one, so it runs once first-boot has written the secret. Both are
 /// <see cref="IHostedService"/>s; hosted services start in registration order.
@@ -31,6 +32,7 @@ public sealed class CoreStartupService : IHostedService
     private readonly IMetadataStore _db;
     private readonly IEdgeMode _edge;
     private readonly InstanceLock _instanceLock;
+    private readonly MetricsAccessConfig _metricsAccess;
 
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
         Justification = "Dependency-injection constructor: the parameter list is the declared dependency set; grouping it into an aggregate would hide dependencies without adding cohesion.")]
@@ -44,7 +46,8 @@ public sealed class CoreStartupService : IHostedService
         EnvelopeProtector envelope,
         IMetadataStore db,
         IEdgeMode edge,
-        InstanceLock instanceLock)
+        InstanceLock instanceLock,
+        MetricsAccessConfig metricsAccess)
     {
         _schema = schema;
         _firstBoot = firstBoot;
@@ -56,6 +59,7 @@ public sealed class CoreStartupService : IHostedService
         _db = db;
         _edge = edge;
         _instanceLock = instanceLock;
+        _metricsAccess = metricsAccess;
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -83,7 +87,7 @@ public sealed class CoreStartupService : IHostedService
         await ReseedEdgeUpstreamsAsync(cancellationToken);
         await ReseedEdgeAccessTokenAsync(cancellationToken);
 
-        LogEnvironmentWarnings();
+        await LogEnvironmentWarningsAsync(cancellationToken);
 
         var (_, tenantCount) = await _orgs.ListOrgsAsync(1, 0, includeDeleted: false, cancellationToken);
 
@@ -376,14 +380,53 @@ public sealed class CoreStartupService : IHostedService
     // Logs operator-facing warnings for missing or misconfigured environment variables.
     // None of these abort startup — they surface as LogWarning so the operator can act
     // without a restart. Called once per startup after schema init and first-boot.
-    private void LogEnvironmentWarnings()
+    private async Task LogEnvironmentWarningsAsync(CancellationToken ct)
     {
         LogBaseUrlCookieWarning();
-        LogTrustedProxiesWarning();
+        await LogTrustedProxiesWarningAsync(ct);
         LogApexHostWarning();
         LogReplicaAffinityWarning();
         LogHaLocalStorageWarning();
         LogStagingFloorWarning();
+        LogLegacySmtpWarning();
+    }
+
+    // The SMTP_* environment variables that once configured invite email delivery. Email
+    // configuration is DB-backed; nothing reads these, and there is no env-to-DB seed, so an
+    // upgraded deployment that still sets them would otherwise lose invite email silently.
+    private static readonly string[] LegacySmtpVariables =
+    [
+        "SMTP_HOST", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM", "SMTP_STARTTLS",
+    ];
+
+    private void LogLegacySmtpWarning()
+    {
+        // The edge host carries no management plane: it has neither an invite mailer nor the
+        // Settings UI this warning points at, so naming that path there would be impossible advice.
+        if (_edge.IsEdge)
+        {
+            return;
+        }
+
+        string[] present = LegacySmtpVariables
+            .Where(name => !string.IsNullOrWhiteSpace(_config[name]))
+            .ToArray();
+
+        if (present.Length == 0)
+        {
+            return;
+        }
+
+        // Names only — never the values; SMTP_PASSWORD is among them.
+        _logger.LogWarning(
+            "Legacy SMTP environment variables are set but ignored: {LegacySmtpVariables}. Email " +
+            "configuration is database-backed and there is no environment-to-database seed, so " +
+            "these values have no effect. Invite emails send only once the relay is configured at " +
+            "Settings -> Instance settings -> Instance email (SMTP); until then an invite returns " +
+            "its link in the API response instead of emailing it. Alert email delivery is " +
+            "configured separately at Settings -> Integrations -> Email. Remove these variables " +
+            "once the transport is configured.",
+            string.Join(", ", present));
     }
 
     private void LogBaseUrlCookieWarning()
@@ -445,19 +488,53 @@ public sealed class CoreStartupService : IHostedService
         }
     }
 
-    private void LogTrustedProxiesWarning()
+    private async Task LogTrustedProxiesWarningAsync(CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(_config["TRUSTED_PROXIES"]))
+        bool trustedProxiesUnset = string.IsNullOrWhiteSpace(_config["TRUSTED_PROXIES"]);
+        if (!trustedProxiesUnset)
+        {
+            return;
+        }
+
+        _logger.LogWarning(
+            "TRUSTED_PROXIES is not set. X-Forwarded-For, X-Forwarded-Proto, and " +
+            "X-Forwarded-Host are ignored (fail-closed). Connection.RemoteIpAddress, " +
+            "Request.Host, and Request.Scheme reflect the real socket peer. " +
+            "If a TLS-terminating reverse proxy is in front, set TRUSTED_PROXIES to the " +
+            "proxy's IP(s)/CIDR(s) so forwarded headers from that proxy are trusted and the " +
+            "client-facing scheme and source IP are visible to the application.");
+
+        // Layered on top of the base warning above: when the metrics/version/management-docs IP
+        // allowlist is still the hard-coded loopback default (never overridden via env or DB), an
+        // unset TRUSTED_PROXIES has a second, sharper consequence beyond ignored forwarded headers.
+        // A reverse proxy co-located on this host or docker network (a sidecar scraper, an nginx
+        // container on the same compose network) makes every request it forwards arrive with
+        // Connection.RemoteIpAddress == 127.0.0.1 — indistinguishable from a genuine loopback
+        // caller. The allowlist then treats every client that proxy forwards as an allowlisted
+        // operator: it fails OPEN, not closed.
+        var resolved = await _metricsAccess.ResolveAsync(ct);
+        if (ShouldWarnCoLocatedProxyDefeatsMetricsAllowlist(trustedProxiesUnset, resolved.AllowlistSource))
         {
             _logger.LogWarning(
-                "TRUSTED_PROXIES is not set. X-Forwarded-For, X-Forwarded-Proto, and " +
-                "X-Forwarded-Host are ignored (fail-closed). Connection.RemoteIpAddress, " +
-                "Request.Host, and Request.Scheme reflect the real socket peer. " +
-                "If a TLS-terminating reverse proxy is in front, set TRUSTED_PROXIES to the " +
-                "proxy's IP(s)/CIDR(s) so forwarded headers from that proxy are trusted and the " +
-                "client-facing scheme and source IP are visible to the application.");
+                "TRUSTED_PROXIES is unset and the /metrics, /version, and management docs/OpenAPI " +
+                "IP allowlist is still the default (127.0.0.1, ::1). A reverse proxy co-located on " +
+                "this host or docker network silently defeats that allowlist: every request it " +
+                "forwards arrives as Connection.RemoteIpAddress=127.0.0.1, so any client the proxy " +
+                "forwards is treated as an allowlisted operator instead of being denied. Set " +
+                "TRUSTED_PROXIES to the proxy's IP(s)/CIDR(s) so the allowlist evaluates the real " +
+                "client IP instead of the proxy's loopback peer address.");
         }
     }
+
+    /// <summary>
+    /// True exactly when TRUSTED_PROXIES is unset AND the metrics/version/management-docs
+    /// allowlist has never been overridden via env var or <c>instance_settings</c> — i.e. it is
+    /// still the hard-coded loopback default that a co-located reverse proxy defeats. Exposed
+    /// internally so the warning condition is unit-testable without a full DB-backed startup.
+    /// </summary>
+    internal static bool ShouldWarnCoLocatedProxyDefeatsMetricsAllowlist(
+        bool trustedProxiesUnset, MetricsAccessConfig.Source allowlistSource) =>
+        trustedProxiesUnset && allowlistSource == MetricsAccessConfig.Source.Default;
 
     private void LogApexHostWarning()
     {
@@ -465,11 +542,11 @@ public sealed class CoreStartupService : IHostedService
         {
             _logger.LogWarning(
                 "BASE_URL is not set or contains a localhost host. Host header " +
-                "filtering is permissive (AllowedHosts=*): any Host value is accepted. This " +
-                "allows Host header injection into SAML SP entity IDs / ACS URLs, absolute links, " +
-                "and CSRF Origin comparisons. In production, set BASE_URL to your public domain " +
-                "(e.g. https://repo.example.com) so unknown Host headers are rejected before " +
-                "reaching tenant resolution.");
+                "filtering falls back to loopback hostnames only (localhost/127.0.0.1/[::1]); any " +
+                "request arriving through a reverse proxy under a real domain is rejected (400) " +
+                "until BASE_URL is configured. Set BASE_URL to your public domain " +
+                "(e.g. https://repo.example.com) so that domain's Host headers are accepted and " +
+                "unknown ones are still rejected before reaching tenant resolution.");
         }
     }
 

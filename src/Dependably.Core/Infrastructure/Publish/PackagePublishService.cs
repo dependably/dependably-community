@@ -143,7 +143,6 @@ public sealed class PackagePublishService : IPackagePublishService
 
         // Dedup vs overwrite. Resolution is policy-driven (org tri-state + per-package override).
         // ResolveOverwriteAllowed returns true only when the effective combination permits it.
-        string blobKey = BlobKeys.Hosted(request.OrgId, request.Ecosystem, request.PurlName, request.Version, request.Filename);
         var pkg = await _packages.GetOrCreateAsync(request.OrgId, request.Ecosystem, request.Name, request.PurlName, isProxy: false, ct);
         var existing = await _packages.GetVersionAsync(pkg.Id, request.Version, ct);
         var settings = await _orgs.GetSettingsAsync(request.OrgId, ct);
@@ -208,7 +207,7 @@ public sealed class PackagePublishService : IPackagePublishService
 
         return await HashAndStoreBlobAsync(
             request,
-            new PublishStorageContext(pkg, existing, existingFile, blobKey, artifactLength, delta, reserved),
+            new PublishStorageContext(pkg, existing, existingFile, artifactLength, delta, reserved),
             ct);
     }
 
@@ -229,14 +228,16 @@ public sealed class PackagePublishService : IPackagePublishService
     }
 
     // Resolved storage context for the write tail, bundled to keep HashAndStoreBlobAsync
-    // within the parameter-count threshold (S107).
+    // within the parameter-count threshold (S107). The blob key is NOT resolved here: it is
+    // content-addressed and therefore not knowable until the artifact has been hashed.
     private sealed record PublishStorageContext(
-        Package Pkg, PackageVersion? Existing, PackageVersionFile? ExistingFile, string BlobKey,
+        Package Pkg, PackageVersion? Existing, PackageVersionFile? ExistingFile,
         long ArtifactSizeBytes, long Delta, bool Reserved);
 
-    // Resolves the artifact's SHA-256 (and npm SHA-1), opens the artifact stream, puts the blob,
-    // commits the metadata and OSV scan, emits the audit record, and releases the quota
-    // reservation on any failure to keep the storage counter accurate.
+    // Resolves the artifact's SHA-256 (and npm SHA-1), derives the content-addressed blob key
+    // from that digest, opens the artifact stream, puts the blob, commits the metadata and OSV
+    // scan, emits the audit record, and releases the quota reservation on any failure to keep
+    // the storage counter accurate.
     private async Task<PublishResult> HashAndStoreBlobAsync(
         PublishRequest request, PublishStorageContext ctx, CancellationToken ct)
     {
@@ -280,18 +281,27 @@ public sealed class PackagePublishService : IPackagePublishService
         // clients that sent none (and the in-repo import path, which has no publish body).
         string? integritySri = request.DeclaredIntegritySri ?? sha512Sri;
 
+        // Content-addressed key: the artifact's own digest is a key segment, so the bytes at
+        // this key can only ever be the bytes that hash to sha256. Concurrent publishes of the
+        // same coordinate with different bytes land on disjoint keys — neither can overwrite
+        // the other's artifact, and the (blob_key, checksum_sha256) pair each one commits below
+        // stays true of the stored bytes for the life of the row. A coordinate-addressed key
+        // would instead make the last put win over every committed row naming that key.
+        string blobKey = BlobKeys.HostedArtifact(
+            request.OrgId, request.Ecosystem, request.PurlName, request.Version, sha256, request.Filename);
+
         var registry = await _storage.GetRegistryAsync(request.OrgId, ct);
         try
         {
-            await registry.PutAsync(ctx.BlobKey, artifactStream, ct);
+            await registry.PutAsync(blobKey, artifactStream, ct);
 
             var newVersion = await CommitMetadataAsync(request, ctx,
-                new PersistedArtifact(ctx.BlobKey, sha256, sha1, integritySri, ctx.ArtifactSizeBytes), registry, ct);
-            await DetectInstallScriptQuietlyAsync(request, newVersion, ctx.BlobKey, registry, ct);
+                new PersistedArtifact(blobKey, sha256, sha1, integritySri, ctx.ArtifactSizeBytes), registry, ct);
+            await DetectInstallScriptQuietlyAsync(request, newVersion, blobKey, registry, ct);
             await ScanQuietlyAsync(request, newVersion, ct);
             await _auditor.RecordAsync(request, sha256, ctx.Existing, ctx.ArtifactSizeBytes, ct);
 
-            return new PublishResult.Accepted(newVersion.Id, request.Purl, sha256);
+            return new PublishResult.Accepted(newVersion.Id, request.Purl, sha256, blobKey);
         }
         catch
         {
@@ -365,7 +375,8 @@ public sealed class PackagePublishService : IPackagePublishService
         string sha256 = request.ArtifactStagingPath is { } stagePath
             ? (await ComputeHashesFromFileAsync(stagePath, request.Ecosystem, ct)).Sha256
             : Convert.ToHexString(SHA256.HashData(request.ArtifactBytes!)).ToLowerInvariant();
-        return new PublishResult.Accepted(VersionId: "", request.Purl, sha256);
+        // Dry run: nothing was stored, so there is no blob key to report.
+        return new PublishResult.Accepted(VersionId: "", request.Purl, sha256, BlobKey: "");
     }
 
     // Dry-run dedup projection: mirrors StoreAndRecordInnerAsync's version-exists and
@@ -564,23 +575,21 @@ public sealed class PackagePublishService : IPackagePublishService
     }
 
     // Metadata commit, with compensating blob delete on failure.
-    // Blob and DB live in different stores (no shared transaction), so an exception
-    // out of the version-row write would otherwise leave an orphan hosted blob. For
-    // paths that wrote a FRESH blob key (new version, or a new PyPI file of an existing
-    // version) we can safely delete the just-put blob to compensate — nothing else
-    // references it yet. For the OVERWRITE paths the put was destructive (same
-    // blob_key as the prior artifact, old bytes already replaced); a compensating
-    // delete here would erase the new bytes too, leaving the existing row pointing
-    // at a now-missing key. We log loudly instead so an operator can re-publish.
-    // A background orphan-blob reconciler is the follow-up that closes the SIGKILL
-    // window; the try/catch here closes the application-exception window.
+    // Blob and DB live in different stores (no shared transaction), so an exception out of the
+    // version-row write would otherwise leave an orphan hosted blob. On the INSERT paths (new
+    // version, or a new PyPI file of an existing version) no committed row can name this key
+    // yet, so the just-put blob is deletable to compensate. On the OVERWRITE paths the row
+    // still names the PRIOR artifact's key — the put was non-destructive, so the prior bytes
+    // and the row remain mutually consistent and there is nothing to repair; the newly written
+    // blob is simply unreferenced and left for the orphan reconciler.
+    // A background orphan-blob reconciler closes the SIGKILL window; the try/catch here closes
+    // the application-exception window.
     private async Task<PackageVersion> CommitMetadataAsync(PublishRequest request, PublishStorageContext ctx,
         PersistedArtifact artifact, IBlobStore registry, CancellationToken ct)
     {
         var existing = ctx.Existing;
-        // A fresh blob key means nothing referenced it before this publish, so the blob
-        // is deletable on a failed metadata write. Both overwrite shapes reuse the prior
-        // artifact's key and are NOT compensable.
+        // The INSERT shapes: no pre-existing row references this artifact, so a failed metadata
+        // write leaves a blob that only the compensating delete can reclaim.
         bool freshBlob = existing is null || (request.Ecosystem == "pypi" && ctx.ExistingFile is null);
         try
         {
@@ -605,17 +614,19 @@ public sealed class PackagePublishService : IPackagePublishService
         catch (Exception ex) when (freshBlob)
         {
             // A uniqueness violation means a CONCURRENT publish of the same coordinate won
-            // the insert race — and both publishes PutAsync the SAME hosted blob key, so the
-            // "fresh" blob is now referenced by the winner's committed row. Deleting it here
-            // would 404 the winner's artifact; skip the compensation and let the loser's
-            // failure propagate (a retry resolves against the now-existing row/file).
-            bool blobSharedWithRaceWinner = IsUniqueViolation(ex);
+            // the insert race. When that winner uploaded byte-for-byte identical content it
+            // content-addressed to THIS key too, so its committed row references the blob we
+            // would compensate — deleting it would 404 the winner's artifact. Skip the
+            // compensation whenever the row write lost a race and let the loser's failure
+            // propagate (a retry resolves against the now-existing row/file); at worst a
+            // distinct-bytes loser leaves a blob for the orphan reconciler.
+            bool blobMayBeSharedWithRaceWinner = IsUniqueViolation(ex);
             _logger.LogWarning(ex,
                 "Metadata write failed after blob put on INSERT path for {BlobKey}; " +
                 "compensating delete {Action}",
                 artifact.BlobKey,
-                blobSharedWithRaceWinner ? "skipped (blob shared with concurrent-publish winner)" : "attempted");
-            if (!blobSharedWithRaceWinner)
+                blobMayBeSharedWithRaceWinner ? "skipped (blob may be shared with concurrent-publish winner)" : "attempted");
+            if (!blobMayBeSharedWithRaceWinner)
             {
                 try { await registry.DeleteAsync(artifact.BlobKey, CancellationToken.None); }
                 catch (Exception delEx)
@@ -629,11 +640,14 @@ public sealed class PackagePublishService : IPackagePublishService
         }
         catch (Exception ex)
         {
-            // OVERWRITE failure: cannot compensate without erasing the new bytes the put
-            // already committed. The row still points at the prior sha256 but the bytes
-            // are now the new ones — integrity divergence until the publisher retries.
+            // OVERWRITE failure. The put wrote a content-addressed key of its own, so the row
+            // and the artifact it still references are untouched and mutually consistent — the
+            // version simply keeps its prior bytes. The blob just written is unreferenced, and
+            // is NOT deleted here: a concurrent publish of the identical bytes addresses the
+            // same key and may already have committed a row against it. The orphan reconciler
+            // reclaims it once no row references it.
             _logger.LogError(ex,
-                "Metadata write failed after blob put on OVERWRITE path; row {VersionId} now diverges from blob {BlobKey}. Retry the publish to converge.",
+                "Metadata write failed after blob put on OVERWRITE path; version {VersionId} keeps its prior artifact and blob {BlobKey} is unreferenced pending reconciliation. Retry the publish.",
                 existing!.Id, artifact.BlobKey);
             throw;
         }
@@ -682,9 +696,14 @@ public sealed class PackagePublishService : IPackagePublishService
             return (await _packages.GetVersionAsync(ctx.Pkg.Id, request.Version, ct))!;
         }
 
-        // Overwrite path: keep the same id so dependent rows (vulns, licenses) follow.
+        // Overwrite path: keep the same id so dependent rows (vulns, licenses) follow. The row
+        // is REPOINTED at the new artifact's content-addressed key; blob_key and
+        // checksum_sha256 are written together in one UPDATE, so the row always names bytes
+        // that hash to the checksum beside it, whichever of two concurrent overwrites lands
+        // last. The superseded artifact is left in place (an in-flight download may still be
+        // streaming it) and is reclaimed by the orphan reconciler once no row references it.
         // vuln_checked_at is reset by the repository so the next scan re-checks the new
-        // bytes — the prior scan applied to a hash that's no longer in the blob store.
+        // bytes — the prior scan applied to the artifact the row no longer points at.
         // checksum_sha1, the integrity SRI, and the stored manifest all follow the new
         // bytes (npm) — otherwise the packument would emit stale metadata next request.
         // For PyPI the version row's artifact columns follow only when the overwritten

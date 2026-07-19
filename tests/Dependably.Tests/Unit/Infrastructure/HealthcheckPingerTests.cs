@@ -52,6 +52,21 @@ public sealed class HealthcheckPingerTests : IAsyncLifetime
             NullLogger<HealthcheckPinger>.Instance,
             TimeProvider.System);
 
+    /// <summary>
+    /// Deterministically awaits the pinger's background loop having made its HTTP call, bounded
+    /// by a generous safety timeout — replaces a fixed <see cref="Task.Delay(int)"/> guess with
+    /// a real completion signal from the handler (<see cref="CapturingHttpHandler.RequestReceived"/>,
+    /// passed by its base <see cref="Task"/> since the concrete handler type is file-local),
+    /// since the loop involves genuine async work (a readiness check plus the send itself) that
+    /// a short fixed wait can miss under load.
+    /// </summary>
+    private static async Task WaitForPingAsync(Task requestReceived)
+    {
+        var finished = await Task.WhenAny(requestReceived, Task.Delay(TimeSpan.FromSeconds(10)));
+        Assert.True(finished == requestReceived,
+            "HealthcheckPinger did not send a ping within the safety timeout.");
+    }
+
     // ── Tests ─────────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -89,9 +104,9 @@ public sealed class HealthcheckPingerTests : IAsyncLifetime
         var pinger = BuildPinger(config, factory);
 
         using var cts = new CancellationTokenSource();
-        // Start pinger in background; cancel after short delay to allow one iteration.
+        // Start pinger in background; wait for its real ping to land, then cancel.
         var task = pinger.StartAsync(cts.Token);
-        await Task.Delay(200);
+        await WaitForPingAsync(handler.RequestReceived);
         cts.Cancel();
         await pinger.StopAsync(default);
         try { await task; } catch (OperationCanceledException) { }
@@ -117,7 +132,7 @@ public sealed class HealthcheckPingerTests : IAsyncLifetime
 
         using var cts = new CancellationTokenSource();
         var task = pinger.StartAsync(cts.Token);
-        await Task.Delay(200);
+        await WaitForPingAsync(handler.RequestReceived);
         cts.Cancel();
         await pinger.StopAsync(default);
         try { await task; } catch (OperationCanceledException) { }
@@ -145,7 +160,7 @@ public sealed class HealthcheckPingerTests : IAsyncLifetime
 
         using var cts = new CancellationTokenSource();
         var task = pinger.StartAsync(cts.Token);
-        await Task.Delay(200);
+        await WaitForPingAsync(handler.RequestReceived);
         cts.Cancel();
         await pinger.StopAsync(default);
         try { await task; } catch (OperationCanceledException) { }
@@ -175,7 +190,7 @@ public sealed class HealthcheckPingerTests : IAsyncLifetime
 
         using var cts = new CancellationTokenSource();
         var task = pinger.StartAsync(cts.Token);
-        await Task.Delay(200);
+        await WaitForPingAsync(handler.RequestReceived);
         cts.Cancel();
         await pinger.StopAsync(default);
 
@@ -254,21 +269,31 @@ file sealed class TrackingHttpClientFactory : IHttpClientFactory
 }
 
 /// <summary>
-/// Captures the most recent outgoing request and returns a configurable response.
+/// Captures the most recent outgoing request and returns a configurable response. Signals
+/// <see cref="RequestReceived"/> the moment a request lands, so tests can await the pinger's
+/// background loop having actually made its call instead of guessing at how long that takes
+/// with a fixed <see cref="Task.Delay(int)"/> — the loop involves real async work (a readiness
+/// check plus the HTTP send itself), so a short fixed wait flakes under load.
 /// </summary>
 file sealed class CapturingHttpHandler : HttpMessageHandler
 {
     private readonly HttpStatusCode _statusCode;
+    private readonly TaskCompletionSource<HttpRequestMessage> _received =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public CapturingHttpHandler(HttpStatusCode statusCode = HttpStatusCode.OK)
         => _statusCode = statusCode;
 
     public HttpRequestMessage? LastRequest { get; private set; }
 
+    /// <summary>Completes with the first captured request once the handler has been invoked.</summary>
+    public Task<HttpRequestMessage> RequestReceived => _received.Task;
+
     protected override Task<HttpResponseMessage> SendAsync(
         HttpRequestMessage request, CancellationToken cancellationToken)
     {
         LastRequest = request;
+        _received.TrySetResult(request);
         return Task.FromResult(new HttpResponseMessage(_statusCode));
     }
 }

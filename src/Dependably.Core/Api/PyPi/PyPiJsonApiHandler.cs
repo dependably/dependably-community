@@ -17,8 +17,7 @@ namespace Dependably.Api.PyPiProtocol;
 public sealed class PyPiJsonApiHandler(
     OrgRepository orgs,
     PackageRepository packages,
-    CacheArtifactRepository cacheArtifacts,
-    VulnerabilityRepository vulns,
+    ArtifactInventoryRepository inventory,
     TokenRepository tokens,
     UpstreamClient upstream,
     ClaimResolver claimResolver,
@@ -207,37 +206,7 @@ public sealed class PyPiJsonApiHandler(
     private async Task<IReadOnlyList<PackageVersion>> LoadCombinedVersionsAsync(
         string orgId, string packageId, string purlName, CancellationToken ct)
     {
-        var uploadedVersions = await packages.GetVersionsAsync(packageId, ct);
-        var proxyEntries = await cacheArtifacts.ListServeFactsForNameAsync(orgId, "pypi", purlName, ct);
-
-        if (proxyEntries.Count == 0)
-        {
-            return uploadedVersions;
-        }
-
-        var uploadedVersionSet = uploadedVersions
-            .Select(v => v.Version)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        var proxyIds = proxyEntries.Select(e => e.Id).ToList();
-        var proxySignals = proxyIds.Count > 0
-            ? await vulns.GetGateSignalsBatchForCacheArtifactsAsync(proxyIds, ct)
-            : new Dictionary<string, VulnGateSignals>();
-
-        var synthetic = proxyEntries
-            .Where(e => !uploadedVersionSet.Contains(e.Version))
-            .Select(e => e.ToPackageVersionSynthetic(proxySignals))
-            .ToList();
-
-        if (synthetic.Count == 0)
-        {
-            return uploadedVersions;
-        }
-
-        var combined = new List<PackageVersion>(uploadedVersions.Count + synthetic.Count);
-        combined.AddRange(uploadedVersions);
-        combined.AddRange(synthetic);
-        return combined;
+        return await inventory.ListServeableVersionsAsync(orgId, packageId, "pypi", purlName, ct);
     }
 
     /// <summary>

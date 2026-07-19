@@ -131,6 +131,19 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
     }
 
     /// <summary>
+    /// Same batch query as <see cref="QueryBatchAsync"/>, but reports whether the local dump
+    /// directory was actually consulted — mirroring <see cref="TryQueryAsync"/>. Reached is false
+    /// only when <c>OSV_LOCAL_PATH</c> itself is missing (unavailable or misconfigured), which
+    /// otherwise answers every purl empty and is indistinguishable from a clean batch.
+    /// </summary>
+    public async Task<OsvBatchQueryResult> TryQueryBatchAsync(
+        IReadOnlyList<string> purls, CancellationToken ct = default)
+    {
+        var results = await QueryBatchAsync(purls, ct);
+        return new OsvBatchQueryResult(results, Reached: _sourceReachable);
+    }
+
+    /// <summary>
     /// Re-reads the dump directory and rebuilds the index. Public so operators can trigger a
     /// reload via an admin endpoint (e.g. after sideloading new dumps without restarting).
     /// </summary>
@@ -288,6 +301,24 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
             && name.StartsWith("alpine/", StringComparison.OrdinalIgnoreCase))
         {
             name = name["alpine/".Length..];
+        }
+
+        // Maven purls carry the coordinate as pkg:maven/{groupId}/{artifactId}@{version}, but OSV's
+        // affected[].package.name field mandates "groupId:artifactId" — convert the separator so the
+        // extracted name matches what TryIndexFileAsync indexed from the OSV dump. The final path
+        // segment is always the artifactId (everything before it is the namespace/groupId), so the
+        // last '/' is the boundary to replace. A name already in colon form, or one carrying no
+        // separator at all, is left untouched and simply finds no match.
+        if (string.Equals(ecosystem, "maven", StringComparison.OrdinalIgnoreCase))
+        {
+            int groupArtifactBoundary = name.LastIndexOf('/');
+            if (groupArtifactBoundary >= 0)
+            {
+                name = string.Concat(
+                    name[..groupArtifactBoundary],
+                    ":",
+                    name[(groupArtifactBoundary + 1)..]);
+            }
         }
 
         return (NormalizeEcosystem(ecosystem), name.ToLowerInvariant(), version);

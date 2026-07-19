@@ -35,8 +35,10 @@ public sealed class ProxyVersionRecorderTests : IAsyncLifetime
         resolver.ResolveAsync("npm", orgId, "left-pad", Arg.Any<CancellationToken>())
             .Returns(Task.FromResult(new UpstreamLatestVersion("9.9.9", null)));
         var recorder = BuildRecorder(resolver);
+        string caId = await SeedCacheArtifactAsync(orgId, "left-pad", "1.0.0");
 
-        await recorder.RecordAsync(await BuildRequestAsync(orgId, "left-pad", "1.0.0"), extractLicenses: null);
+        await recorder.RecordAsync(await BuildRequestAsync(orgId, "left-pad", "1.0.0"),
+            extractLicenses: null, extractManifest: null, cacheArtifactId: caId);
 
         Assert.Equal("9.9.9", await ReadUpstreamLatestAsync(orgId, "left-pad"));
         await resolver.Received(1).ResolveAsync("npm", orgId, "left-pad", Arg.Any<CancellationToken>());
@@ -51,8 +53,10 @@ public sealed class ProxyVersionRecorderTests : IAsyncLifetime
         resolver.ResolveAsync("npm", orgId, "left-pad", Arg.Any<CancellationToken>())
             .Returns(Task.FromResult(new UpstreamLatestVersion("9.9.9", publishedAt)));
         var recorder = BuildRecorder(resolver);
+        string caId = await SeedCacheArtifactAsync(orgId, "left-pad", "1.0.0");
 
-        await recorder.RecordAsync(await BuildRequestAsync(orgId, "left-pad", "1.0.0"), extractLicenses: null);
+        await recorder.RecordAsync(await BuildRequestAsync(orgId, "left-pad", "1.0.0"),
+            extractLicenses: null, extractManifest: null, cacheArtifactId: caId);
 
         var packages = new PackageRepository(_db);
         var pkg = await packages.GetByPurlNameAsync(orgId, "npm", "left-pad");
@@ -69,8 +73,10 @@ public sealed class ProxyVersionRecorderTests : IAsyncLifetime
         resolver.ResolveAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(Task.FromResult(new UpstreamLatestVersion("9.9.9", null)));
         var recorder = BuildRecorder(resolver);
+        string caId = await SeedCacheArtifactAsync(orgId, "left-pad", "1.1.0");
 
-        await recorder.RecordAsync(await BuildRequestAsync(orgId, "left-pad", "1.1.0"), extractLicenses: null);
+        await recorder.RecordAsync(await BuildRequestAsync(orgId, "left-pad", "1.1.0"),
+            extractLicenses: null, extractManifest: null, cacheArtifactId: caId);
 
         Assert.Equal("5.0.0", await ReadUpstreamLatestAsync(orgId, "left-pad"));
         await resolver.DidNotReceive().ResolveAsync(
@@ -89,30 +95,13 @@ public sealed class ProxyVersionRecorderTests : IAsyncLifetime
         var recorder = BuildRecorder(resolver);
 
         await recorder.RecordAsync(
-            await BuildRequestAsync(orgId, "left-pad", "1.0.0"), extractLicenses: null, cacheArtifactId: caId);
+            await BuildRequestAsync(orgId, "left-pad", "1.0.0"),
+            extractLicenses: null, extractManifest: null, cacheArtifactId: caId);
 
         await using var conn = await _db.OpenAsync();
         int? behind = await conn.QuerySingleAsync<int?>(
             "SELECT versions_behind FROM cache_artifact WHERE id = @id", new { id = caId });
         Assert.Equal(2, behind); // 2.0.0 and 3.0.0 are newer than the held 1.0.0
-    }
-
-    [Fact]
-    public async Task RecordAsync_FirstFetch_SkipsCacheArtifactSeedWhenNotProxyPath()
-    {
-        // cacheArtifactId is null on the uploaded path — TrySeedUpstreamLatestAsync must not
-        // attempt a cache_artifact write it has no row id for.
-        string orgId = await SeedOrgAsync();
-        var resolver = Substitute.For<IUpstreamLatestVersionResolver>();
-        resolver.ResolveAsync("npm", orgId, "left-pad", Arg.Any<CancellationToken>())
-            .Returns(Task.FromResult(new UpstreamLatestVersion("9.9.9", null,
-                StableVersionsDescending: new[] { "9.9.9" })));
-        var recorder = BuildRecorder(resolver);
-
-        // Should not throw despite no cache_artifact row existing for this coordinate.
-        await recorder.RecordAsync(await BuildRequestAsync(orgId, "left-pad", "1.0.0"), extractLicenses: null);
-
-        Assert.Equal("9.9.9", await ReadUpstreamLatestAsync(orgId, "left-pad"));
     }
 
     /// <summary>

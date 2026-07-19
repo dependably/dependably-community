@@ -228,7 +228,7 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
             cacheArtifact, tenantAccess,
             NullLogger<CacheAccessRecorder>.Instance, TimeProvider.System);
         var proxyFetch = new ProxyFetchService(
-            cacheRecorder, proxyVersions, cacheArtifact, tenantAccess, scanner, blockGate, _packages, _audit, TimeProvider.System,
+            cacheRecorder, proxyVersions, cacheArtifact, tenantAccess, scanner, blockGate, _audit, TimeProvider.System,
             new Dependably.Infrastructure.SourcePinRepository(_db, new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build()));
 
         var svc = new MavenControllerServices(
@@ -277,8 +277,8 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
 
         Assert.Equal(403, Assert.IsType<StatusCodeResult>(result).StatusCode);
 
-        // Refused on the very first fetch: the shared pipeline recorded the package_versions
-        // row (scan target) but the controller left no maven_version_files serve-row, so a
+        // Refused on the very first fetch: the block gate fired after the scan, so the artefact
+        // is never written to maven_version_files (which holds only locally-published files) and a
         // later attempt re-fetches and re-gates rather than serving from cache.
         await using var conn = await _db.OpenAsync();
         long fileRows = await conn.ExecuteScalarAsync<long>(
@@ -290,6 +290,24 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
             """,
             new { org = _orgId });
         Assert.Equal(0, fileRows);
+    }
+
+    // A percent-encoded traversal survives the {**path} catch-all undecoded (ASP.NET does not
+    // decode %2F/%2E in route values), so without the segment guard it would ride into the
+    // composed upstream URL and be decoded to '../' by the upstream — a same-host path escape
+    // the host-only SSRF guard cannot see. The download path must reject it before any fetch.
+    [Theory]
+    [InlineData("com%2f..%2f..%2fsecret/lib/1.0/lib-1.0.jar")]  // '%' in the group segment
+    [InlineData("com/example/%2e%2e%2f%2e%2e/1.0/lib-1.0.jar")] // '%' in an interior segment
+    [InlineData("com/example/lib/1.0/lib-1.0.jar%2f..%2fx")]    // '%' in the filename segment
+    public async Task ProxyDownload_PercentEncodedTraversal_Returns400_AndNeverContactsUpstream(string path)
+    {
+        var ctl = BuildController(CleanOsv());
+
+        var result = await ctl.Download(path, CancellationToken.None);
+
+        Assert.IsType<BadRequestObjectResult>(result);
+        Assert.Empty(_server.LogEntries);
     }
 
     [Fact]
@@ -324,8 +342,8 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
 
         long artifactCallsAfterMiss = ArtifactGetCount("clean-1.0.jar");
 
-        // Second request resolves the recorded maven_version_files row → served from the blob
-        // store as a cache HIT, with no further upstream artifact fetch.
+        // Second request resolves the cache_artifact row the first fetch wrote → served from the
+        // blob store as a cache HIT, with no further upstream artifact fetch.
         var ctl2 = BuildController(CleanOsv());
         var second = await ctl2.Download(path, CancellationToken.None);
         Assert.IsType<FileStreamResult>(second).FileStream.Dispose();
@@ -381,6 +399,55 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
         var second = await ctl2.Download("com/example/evict/maven-metadata.xml", CancellationToken.None);
         var content2 = Assert.IsType<ContentResult>(second);
         Assert.Contains("2.0", content2.Content);
+    }
+
+    // Seeds a proxied Maven version on the shared cache plane (cache_artifact +
+    // tenant_artifact_access) — where every current Maven proxy fetch lands — without any
+    // package_versions row, the way a real proxy fetch leaves it.
+    private async Task SeedProxiedMavenCacheVersionAsync(string groupId, string artifactId, string version)
+    {
+        string purlName = $"{groupId}:{artifactId}";
+        string caId = Guid.NewGuid().ToString("N");
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash, size_bytes)
+            VALUES (@id, 'maven', @name, @version, @filename, @blobKey, 'cafeba', 1)
+            """,
+            new { id = caId, name = purlName, version, filename = $"{artifactId}-{version}.jar", blobKey = $"proxy/sha256/{caId}" });
+        await conn.ExecuteAsync(
+            "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES (@org, @id)",
+            new { org = _orgId, id = caId });
+    }
+
+    [Fact]
+    public async Task Metadata_ListsCachedProxyVersion_WhenUpstreamReturnsNothing()
+    {
+        // A version proxied earlier lives only on the cache plane. No upstream stub for this
+        // coordinate, so the upstream merge returns nothing and only the local (both-plane) set
+        // drives the document. Reading package_versions alone would 404 this coordinate.
+        await SeedProxiedMavenCacheVersionAsync("com.example", "cached", "3.1.4");
+
+        var ctl = BuildController(CleanOsv());
+        var result = await ctl.Download("com/example/cached/maven-metadata.xml", CancellationToken.None);
+        var content = Assert.IsType<ContentResult>(result);
+        Assert.Contains("3.1.4", content.Content);
+    }
+
+    [Fact]
+    public async Task Metadata_UnionsCachedProxyVersionWithHostedVersion()
+    {
+        // com.example:mix has one hosted publish and one proxied (cache-plane) version. Both must
+        // appear — reading package_versions alone would drop the cached one when the upstream merge
+        // returns nothing (here: no upstream stub for this coordinate).
+        await PublishLocalVersionAsync("com.example", "mix", "1.0");
+        await SeedProxiedMavenCacheVersionAsync("com.example", "mix", "2.0");
+
+        var ctl = BuildController(CleanOsv());
+        var result = await ctl.Download("com/example/mix/maven-metadata.xml", CancellationToken.None);
+        var content = Assert.IsType<ContentResult>(result);
+        Assert.Contains("1.0", content.Content);
+        Assert.Contains("2.0", content.Content);
     }
 
     [Fact]

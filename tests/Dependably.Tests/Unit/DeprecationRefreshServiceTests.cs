@@ -129,6 +129,60 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task HostedOnlyPackage_OnceProxiedNowStale_RefreshesUpstreamLatestAndVersionsBehind()
+    {
+        // A package that was proxied (so upstream_latest_checked_at was seeded) then had its proxy
+        // rows evicted, leaving only a hosted (origin='uploaded') version and no cache_artifact row.
+        // The cache-plane enumeration can't see it; the hosted-only pass must still refresh it.
+        var (_, packageId, versionId, _) = await SeedVersionAsync(
+            ecosystem: "npm", name: "hosted-shadow", version: "1.0.0", origin: "uploaded", deprecated: null);
+        await using (var seed = await _db.OpenAsync())
+        {
+            await seed.ExecuteAsync(
+                "UPDATE packages SET upstream_latest_checked_at = '2000-01-01T00:00:00Z' WHERE id = @id",
+                new { id = packageId });
+        }
+
+        // Upstream now has 1.0.0 / 2.0.0 / 3.0.0 with latest 3.0.0, so the hosted 1.0.0 is two behind.
+        var service = BuildService(NpmPackument("hosted-shadow", new Dictionary<string, string?>
+        {
+            ["1.0.0"] = null,
+            ["2.0.0"] = null,
+            ["3.0.0"] = null
+        }, latest: "3.0.0"));
+        await service.RunRefreshPassAsync(CancellationToken.None);
+
+        await using var conn = await _db.OpenAsync();
+        Assert.Equal("3.0.0", await conn.QuerySingleAsync<string?>(
+            "SELECT upstream_latest_version FROM packages WHERE id = @id", new { id = packageId }));
+        Assert.Equal(2, await conn.QuerySingleAsync<int?>(
+            "SELECT versions_behind FROM package_versions WHERE id = @id", new { id = versionId }));
+    }
+
+    [Fact]
+    public async Task HostedOnlyPackage_NeverProxied_IsNotFetched()
+    {
+        // No upstream_latest_checked_at (never proxied) → we don't know it tracks an upstream, so
+        // the hosted-only pass must not fetch it or invent a versions_behind for it. Guards against
+        // labelling a coincidentally-named private package as "behind" some unrelated public one.
+        var (_, packageId, versionId, _) = await SeedVersionAsync(
+            ecosystem: "npm", name: "internal-lib", version: "1.0.0", origin: "uploaded", deprecated: null);
+
+        var service = BuildService(NpmPackument("internal-lib", new Dictionary<string, string?>
+        {
+            ["1.0.0"] = null,
+            ["9.9.9"] = null
+        }, latest: "9.9.9"));
+        await service.RunRefreshPassAsync(CancellationToken.None);
+
+        await using var conn = await _db.OpenAsync();
+        Assert.Null(await conn.QuerySingleAsync<string?>(
+            "SELECT upstream_latest_version FROM packages WHERE id = @id", new { id = packageId }));
+        Assert.Null(await conn.QuerySingleAsync<int?>(
+            "SELECT versions_behind FROM package_versions WHERE id = @id", new { id = versionId }));
+    }
+
+    [Fact]
     public async Task NpmPackage_RefreshPass_RecordsUpstreamLatestVersion()
     {
         // The service looks up the packages row (if any) to record upstream's declared latest

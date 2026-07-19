@@ -162,6 +162,7 @@ public sealed class InstanceControllerModePredicateTests : IAsyncLifetime
             new OrgAccessGuard(_db.Store),
             airGap,
             new BackgroundJobRunRepository(_db.Store),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<InstanceController>.Instance,
             Cfg(mode))
         {
             ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() },

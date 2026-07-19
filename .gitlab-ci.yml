@@ -430,7 +430,7 @@ build-web:
   stage: build
   # Not in .release-required: gated transitively via `build`'s `needs:`.
   extends: [.private-registry-setup, .runs-on-ci]
-  image: ${DEP_IMAGE_REGISTRY}/library/node:22-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7d2934522b752
+  image: ${DEP_IMAGE_REGISTRY}/library/node:26-slim@sha256:ffc78385a788964bb3cbab5e434ff79a10bdc25b8ae6db03fe5fe6cb14053c09
   script:
     - cd web && npm ci && npm run build
   artifacts:
@@ -462,10 +462,15 @@ build:
 # JRE the SonarScanner engine needs, plus Node for its JS analysis sensors).
 # Runs automatically whenever a Dockerfile under ci/docker/ changes, on both
 # MR and main pipelines, so the pushed tag always reflects the checked-in
-# source; also always available as a manual run (rebuilding after nothing
-# else changed, e.g. to pick up a base-image digest bump). Modeled on
-# publish-image's dind/login mechanics. Hard-fails on an empty
-# DEP_IMAGE_REGISTRY rather than silently building without a push target.
+# source. Modeled on publish-image's dind/login mechanics. Hard-fails on an
+# empty DEP_IMAGE_REGISTRY rather than silently building without a push
+# target. Deliberately has NO manual fallback rule: sonarqube-check's `needs:
+# [{job: build-ci-tools, optional: true}]` only skips waiting on this job when
+# it is genuinely absent from the pipeline — a present-but-unplayed manual job
+# still blocks a needs edge, which left sonarqube-check permanently "skipped"
+# on every push that didn't touch ci/docker/**. Manual rebuilds (e.g. to pick
+# up a base-image digest bump with no source change) use the separate
+# build-ci-tools-manual job below, which no needs edge references.
 build-ci-tools:
   stage: build
   image: ${DEP_IMAGE_REGISTRY}/library/docker:27-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c
@@ -480,8 +485,6 @@ build-ci-tools:
     - if: $CI_COMMIT_BRANCH == "main"
       changes:
         - ci/docker/**
-    - when: manual
-      allow_failure: true
   variables:
     DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: "" # glsec:ignore GL031 -- TLS on 2376 needs the runner to share dind's /certs/client volume into the job, which these self-hosted runners do not; the docker executor isolates the dind daemon on this job's per-build service network, so 2375 is not reachable by other jobs
@@ -500,12 +503,22 @@ build-ci-tools:
     - docker build -f ci/docker/ci-tools.Dockerfile --build-arg DEP_IMAGE_REGISTRY="$DEP_IMAGE_REGISTRY" -t "$DEP_IMAGE_REGISTRY/ci/ci-tools:latest" .
     - docker push "$DEP_IMAGE_REGISTRY/ci/ci-tools:latest"
 
+# Manual-only convenience rebuild of the same image with no ci/docker/** change
+# (e.g. a base-image digest bump). Not referenced by any `needs:` edge, so it
+# can sit unplayed indefinitely without blocking a downstream DAG job the way
+# build-ci-tools' old manual fallback blocked sonarqube-check.
+build-ci-tools-manual:
+  extends: build-ci-tools
+  rules:
+    - when: manual
+      allow_failure: true
+
 # === test ===
 
 lint:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
-  image: ${DEP_IMAGE_REGISTRY}/library/node:22-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7d2934522b752
+  image: ${DEP_IMAGE_REGISTRY}/library/node:26-slim@sha256:ffc78385a788964bb3cbab5e434ff79a10bdc25b8ae6db03fe5fe6cb14053c09
   script:
     - cd web && npm ci && npm run lint && npm run lint:css && npm run check
 
@@ -554,7 +567,7 @@ chrome-emoji-guard:
 i18n-validate:
   stage: test
   extends: [.runs-on-ci, .release-required]
-  image: ${DEP_IMAGE_REGISTRY}/library/node:22-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7d2934522b752
+  image: ${DEP_IMAGE_REGISTRY}/library/node:26-slim@sha256:ffc78385a788964bb3cbab5e434ff79a10bdc25b8ae6db03fe5fe6cb14053c09
   script:
     - node i18n/scripts/i18n-validate.js
 
@@ -656,7 +669,7 @@ schema-integrity:
 frontend-tests:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
-  image: ${DEP_IMAGE_REGISTRY}/library/node:22-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7d2934522b752
+  image: ${DEP_IMAGE_REGISTRY}/library/node:26-slim@sha256:ffc78385a788964bb3cbab5e434ff79a10bdc25b8ae6db03fe5fe6cb14053c09
   script:
     - cd web
     - npm ci
@@ -719,7 +732,7 @@ sca-backend:
 sca-frontend:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
-  image: ${DEP_IMAGE_REGISTRY}/library/node:22-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7d2934522b752
+  image: ${DEP_IMAGE_REGISTRY}/library/node:26-slim@sha256:ffc78385a788964bb3cbab5e434ff79a10bdc25b8ae6db03fe5fe6cb14053c09
   script:
     - cd web
     - npm audit --omit=dev --audit-level=high --registry=https://registry.npmjs.org
@@ -753,7 +766,14 @@ edge-closure-guard:
   image: ${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
   script:
     - dotnet tool restore
-    - dotnet CycloneDX src/Dependably.Edge/Dependably.Edge.csproj -o . -fn sbom-edge.json -F json -spv 1.6 --exclude-dev
+    # CycloneDX's own internal restore carries a fixed 5-minute cap and
+    # re-resolves the whole graph from scratch, which intermittently times out
+    # against the private mirror. Restore explicitly first (no internal cap)
+    # and pass --disable-package-restore so CycloneDX reads the
+    # project.assets.json this restore already produced instead of re-running
+    # its own restore.
+    - dotnet restore src/Dependably.Edge/Dependably.Edge.csproj
+    - dotnet CycloneDX src/Dependably.Edge/Dependably.Edge.csproj -o . -fn sbom-edge.json -F json -spv 1.6 --exclude-dev --disable-package-restore
     - ci/edge-closure-guard.sh sbom-edge.json
   artifacts:
     paths:
@@ -958,7 +978,14 @@ sbom-backend:
   image: ${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
   script:
     - dotnet tool restore
-    - dotnet CycloneDX src/Dependably/Dependably.csproj -o . -fn sbom-backend.json -F json -spv 1.6 --exclude-dev
+    # CycloneDX's own internal restore carries a fixed 5-minute cap and
+    # re-resolves the whole graph from scratch, which intermittently times out
+    # against the private mirror. Restore explicitly first (no internal cap)
+    # and pass --disable-package-restore so CycloneDX reads the
+    # project.assets.json this restore already produced instead of re-running
+    # its own restore.
+    - dotnet restore src/Dependably/Dependably.csproj
+    - dotnet CycloneDX src/Dependably/Dependably.csproj -o . -fn sbom-backend.json -F json -spv 1.6 --exclude-dev --disable-package-restore
   artifacts:
     paths:
       - sbom-backend.json
@@ -967,7 +994,7 @@ sbom-backend:
 sbom-frontend:
   stage: sbom
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
-  image: ${DEP_IMAGE_REGISTRY}/library/node:22-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7d2934522b752
+  image: ${DEP_IMAGE_REGISTRY}/library/node:26-slim@sha256:ffc78385a788964bb3cbab5e434ff79a10bdc25b8ae6db03fe5fe6cb14053c09
   script:
     - cd web && npm ci && npm run sbom
   artifacts:
@@ -1123,8 +1150,24 @@ ai-review-docs:
   export STORAGE_BACKEND=local
   export ASPNETCORE_URLS=http://+:8080
   export FIRST_BOOT_ADMIN_PASSWORD="$DAST_ADMIN_PASSWORD"
+  # DAST determinism: raise every request-rate limiter far above the scan's request
+  # volume so ZAP never crosses a 429 boundary. A 429 mid-scan is both a lost probe
+  # (coverage gap) and the root cause of ZAP's rate-limiter-gated boolean-SQL [40018]
+  # and path-traversal [6] false positives: the limiter flips from allow to block
+  # between a rule's true/false probe pair, and ZAP reads that response variance as a
+  # confirmed injection on a different parameter each run. With no 429 boundary those
+  # rules fire only on genuine differences. The invite limiter needs its own knob
+  # (INVITE_RATE_LIMIT_PERMITS) — several management writes (invites, email/Slack
+  # config, alert settings) share it and were among the endpoints flaking.
   export LOGIN_RATE_LIMIT_PERMITS=100000
   export TOKEN_CREATE_RATE_LIMIT_PERMITS=100000
+  export INVITE_RATE_LIMIT_PERMITS=100000
+  export IMPORT_RATE_LIMIT_PERMITS=100000
+  export MANAGEMENT_RATE_LIMIT_PERMITS=100000
+  export METADATA_RATE_LIMIT_PERMITS=100000
+  export ANON_RATE_LIMIT_PERMITS=100000
+  export PUSH_RATE_LIMIT_PERMITS=100000
+  export DOWNLOAD_RATE_LIMIT_PERMITS=100000
   export DISABLE_BACKGROUND_JOBS=vuln-scan,vuln-rescan,deprecation-refresh,threat-feed
   cp -r src/Dependably/bin/Release/net10.0/linux-x64/publish /tmp/dast/app
   chmod +x /tmp/dast/app/Dependably
@@ -1198,13 +1241,17 @@ zap-full:
 # generated OpenAPI document so ZAP exercises every documented route instead of
 # relying on a spider that can't crawl an API. ci/zap-dast-auth.sh logs in,
 # clears the first-boot password-rotation flag, and emits a session cookie that
-# ZAP's replacer add-on injects on every request. -I is dropped: accepted noise
-# is enumerated in .zap/api-management.conf, so the scan goes green when clean
-# and red when a new, unaccepted finding appears. Gates every MR and the release
-# (.release-required): a new authenticated-API finding blocks the merge so it
-# gets fixed in-context. interruptible so a re-push cancels it rather than
-# queueing on the single amd64 runner. Management routes accept only the session
-# JWT, not a dpd_ token.
+# ZAP's replacer add-on injects on every request. The scan runs with -I so a
+# warning never fails it on its own; ci/zap-api-gate.py decides pass/fail and
+# fails only on findings ZAP rates risk>=Medium AND confidence>=Medium. That bar
+# keeps the gate deterministic — active-scanning a JSON API otherwise surfaces a
+# rotating cast of low-confidence false positives (boolean-SQL row-count variance,
+# path-like values echoed in JSON, reflected input in application/json) that land
+# on a different rule/parameter each run — while a real injection still reds it.
+# Gates every MR and the release (.release-required): a genuine authenticated-API
+# finding blocks the merge so it gets fixed in-context. interruptible so a re-push
+# cancels it rather than queueing on the single amd64 runner. Management routes
+# accept only the session JWT, not a dpd_ token.
 #
 # The management and protocol surfaces scan in separate jobs, not one job running
 # two scans: zap-api-scan.py boots a ZAP daemon and is built to own its container
@@ -1231,13 +1278,21 @@ zap-api-management:
     # session mid-scan — the rest of the management surface then scans unauthenticated
     # (a flood of "Token has been revoked" 401s). Strip the session-destroying
     # operations from the spec first so the session survives. See ci/zap-filter-openapi.py.
-    - python3 ci/zap-filter-openapi.py http://localhost:8080/openapi/management.json > /zap/wrk/management-scan.json
+    # The cookie is passed inline because zap-creds.env assigns without exporting, so sourcing
+    # it makes ZAP_SESSION_COOKIE a shell variable the sibling jobs expand inline — but not an
+    # environment variable a child process inherits. The management spec requires an
+    # authenticated session, so an unauthenticated fetch answers 401 and the job dies here.
+    - ZAP_SESSION_COOKIE="$ZAP_SESSION_COOKIE" python3 ci/zap-filter-openapi.py http://localhost:8080/openapi/management.json > /zap/wrk/management-scan.json
+    # -I so a warning-level alert never fails the scan on its own — ci/zap-api-gate.py
+    # is the pass/fail authority (fails only on risk>=Medium AND confidence>=Medium).
+    # A genuine scan/import error still exits non-zero here and fails the job.
     - >
       ZAP_AUTH_HEADER=Cookie ZAP_AUTH_HEADER_VALUE="$ZAP_SESSION_COOKIE"
       zap-api-scan.py -t /zap/wrk/management-scan.json
-      -f openapi -O http://localhost:8080
+      -f openapi -O http://localhost:8080 -I
       -c .zap/api-management.conf
       -J zap-api-management.json -r zap-api-management.html
+    - python3 ci/zap-api-gate.py zap-api-management.json .zap/api-management.conf
   after_script:
     - echo "=== dependably app log ==="; cat app.log || true
   artifacts:
@@ -1251,8 +1306,9 @@ zap-api-management:
 # Authenticated API scan of the protocol surfaces (npm/PyPI/NuGet/…). Same
 # OpenAPI import; auth is the dpd_ token as a Bearer header — TokenAuthentication
 # accepts Bearer for every ecosystem, so one token covers all protocol routes
-# (NuGet push via X-NuGet-ApiKey is the one documented gap). -I dropped, gates
-# every MR and the release, interruptible — same rationale as zap-api-management.
+# (NuGet push via X-NuGet-ApiKey is the one documented gap). Runs with -I +
+# ci/zap-api-gate.py, gates every MR and the release, interruptible — same
+# rationale as zap-api-management.
 zap-api-protocol:
   stage: dast
   extends: [.runs-on-ci, .release-required]
@@ -1267,12 +1323,16 @@ zap-api-protocol:
     - sh ci/zap-dast-auth.sh
     - . ./zap-creds.env
     - ln -sfn "$PWD" /zap/wrk
+    # -I so a warning-level alert never fails the scan on its own — ci/zap-api-gate.py
+    # is the pass/fail authority (fails only on risk>=Medium AND confidence>=Medium).
+    # A genuine scan/import error still exits non-zero here and fails the job.
     - >
       ZAP_AUTH_HEADER_VALUE="Bearer $ZAP_API_TOKEN"
       zap-api-scan.py -t http://localhost:8080/openapi/protocol.json
-      -f openapi -O http://localhost:8080
+      -f openapi -O http://localhost:8080 -I
       -c .zap/api-protocol.conf
       -J zap-api-protocol.json -r zap-api-protocol.html
+    - python3 ci/zap-api-gate.py zap-api-protocol.json .zap/api-protocol.conf
   after_script:
     - echo "=== dependably app log ==="; cat app.log || true
   artifacts:
@@ -1359,24 +1419,22 @@ release-to-github:
 #                   for `docker login` below.
 #   DOCKER_AUTH_CONFIG — base-image pull creds (already required pipeline-wide).
 # Two-image publish. `parallel: matrix` fans this one definition into
-# publish-image (community) and publish-image (edge): the community image builds
+# publish-image: [community] and publish-image: [edge]: the community image builds
 # from Dockerfile into dependably/community; the edge image builds from
 # Dockerfile.edge into dependably/edge (the slim, management-plane-free root).
 # Both are multi-arch (amd64+arm64) and share the identical tag logic. IMAGE_FLAVOR
-# selects the Dockerfile, the target repo, and a per-flavor resource_group so the
-# two registry pushes serialize independently rather than blocking each other.
+# is the sole matrix axis (GitLab names each parallel job after its matrix variable
+# values, so a lone flavor keyword keeps the job names short); IMAGE_REPO and
+# DOCKERFILE are derived from it in the script below, along with a per-flavor
+# resource_group so the two registry pushes serialize independently rather than
+# blocking each other.
 publish-image:
   stage: release
   extends: .runs-on-ci-main
   image: ${DEP_IMAGE_REGISTRY}/library/docker:27-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c
   parallel:
     matrix:
-      - IMAGE_FLAVOR: community
-        IMAGE_REPO: ${DEP_IMAGE_REGISTRY}/dependably/community
-        DOCKERFILE: Dockerfile
-      - IMAGE_FLAVOR: edge
-        IMAGE_REPO: ${DEP_IMAGE_REGISTRY}/dependably/edge
-        DOCKERFILE: Dockerfile.edge
+      - IMAGE_FLAVOR: [community, edge]
   services:
     - name: ${DEP_IMAGE_REGISTRY}/library/docker:27-dind@sha256:aa3df78ecf320f5fafdce71c659f1629e96e9de0968305fe1de670e0ca9176ce   # glsec:ignore GL054 -- buildx needs BuildKit (Dockerfiles use RUN --mount=type=secret); privileged/BuildKit runner is the documented, chosen prerequisite
       alias: docker
@@ -1395,6 +1453,12 @@ publish-image:
   # Auth + build-time dep routing reuse the existing REGISTRY_URL / REGISTRY_KEY
   # CI vars (same as the build job); REGISTRY_KEY must carry publish:oci to push.
   script:
+    - |
+      case "$IMAGE_FLAVOR" in
+        community) IMAGE_REPO="${DEP_IMAGE_REGISTRY}/dependably/community"; DOCKERFILE="Dockerfile" ;;
+        edge) IMAGE_REPO="${DEP_IMAGE_REGISTRY}/dependably/edge"; DOCKERFILE="Dockerfile.edge" ;;
+        *) echo "unknown IMAGE_FLAVOR: $IMAGE_FLAVOR" >&2; exit 1 ;;
+      esac
     - echo "Publishing $IMAGE_FLAVOR image from $DOCKERFILE to $IMAGE_REPO"
     - echo "$REGISTRY_KEY" | docker login "$DEP_IMAGE_REGISTRY" -u api --password-stdin
     # The dind service daemon comes up a few seconds after the job container, so the

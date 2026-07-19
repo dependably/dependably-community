@@ -16,8 +16,10 @@ public sealed class OrgRepository
 
     // Keys whose values are encrypted at rest when a master key is configured. Only
     // these keys are wrapped on write; quota integers and other settings pass through.
+    // smtp_password and system_slack_webhook_url are written only via their dedicated
+    // email/Slack-config endpoints, never the generic instance-settings PUT.
     internal static readonly HashSet<string> SecretKeys =
-        ["jwt_secret", "mfa_encryption_key"];
+        ["jwt_secret", "mfa_encryption_key", "smtp_password", "system_slack_webhook_url"];
 
     private readonly IMetadataStore _db;
     private readonly IMemoryCache? _cache;
@@ -169,7 +171,7 @@ public sealed class OrgRepository
                    o.storage_quota_bytes AS StorageQuotaBytes,
                    o.created_at        AS CreatedAt,
                    COALESCE(u.member_count, 0)  AS MemberCount,
-                   COALESCE(s.storage_bytes, 0) AS StorageBytes,
+                   COALESCE(s.total_bytes, 0) AS StorageBytes,
                    sn.stats_json       AS StatsJson,
                    sn.computed_at      AS StatsComputedAt
             FROM orgs o
@@ -178,24 +180,7 @@ public sealed class OrgRepository
                 FROM users
                 GROUP BY tenant_id
             ) u ON u.tenant_id = o.id
-            LEFT JOIN (
-                SELECT org_id, SUM(bytes) AS storage_bytes
-                FROM (
-                    SELECT p.org_id AS org_id, pv.size_bytes AS bytes
-                    FROM package_versions pv
-                    JOIN packages p ON p.id = pv.package_id
-                    WHERE p.ecosystem != 'oci' AND pv.origin = 'uploaded'
-                    UNION ALL
-                    SELECT taa.org_id AS org_id, ca.size_bytes AS bytes
-                    FROM cache_artifact ca
-                    JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id
-                    WHERE ca.ecosystem != 'oci'
-                    UNION ALL
-                    SELECT org_id AS org_id, size_bytes AS bytes
-                    FROM oci_blobs
-                )
-                GROUP BY org_id
-            ) s ON s.org_id = o.id
+            LEFT JOIN org_storage_bytes s ON s.org_id = o.id
             LEFT JOIN org_stats_snapshot sn ON sn.org_id = o.id
             WHERE (@includeDeleted = 1 OR o.deleted_at IS NULL)
             ORDER BY o.created_at ASC, o.id ASC
@@ -387,11 +372,23 @@ public sealed class OrgRepository
         return raw is not null && long.TryParse(raw, out long parsed) ? parsed : long.MaxValue;
     }
 
+    /// <summary>
+    /// Lists every <c>instance_settings</c> row except the ones in <see cref="SecretKeys"/>.
+    /// The exclusion is bound to the same set the encrypt-on-write path consults (rather than a
+    /// second hardcoded literal list) so the two can never drift — a key added to
+    /// <see cref="SecretKeys"/> is automatically hidden from this generic listing without a
+    /// second edit.
+    /// </summary>
     public async Task<IReadOnlyDictionary<string, string>> ListInstanceSettingsAsync(CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+        const string sql = "SELECT key as Key, value as Value FROM instance_settings WHERE key NOT IN @secretKeys";
+        // See DapperInClause: Dapper's own IN/NOT IN @secretKeys auto-expansion binds the whole
+        // set as one Postgres array parameter instead of expanding the SQL text, which NOT IN
+        // never accepts.
+        var (secretKeysClause, secretKeysParams) = DapperInClause.Expand("secretKey", SecretKeys.ToList());
         var rows = await conn.QueryAsync<(string Key, string Value)>(
-            "SELECT key as Key, value as Value FROM instance_settings WHERE key NOT IN ('jwt_secret', 'mfa_encryption_key')");
+            sql.Replace("@secretKeys", secretKeysClause), secretKeysParams);
         return rows.ToDictionary(r => r.Key, r => r.Value);
     }
 
@@ -590,6 +587,31 @@ public sealed class OrgRepository
     }
 
     /// <summary>
+    /// The authoritative definition of an org's stored bytes: <c>org_storage_bytes</c> spans every
+    /// plane — hosted versions, the shared cache plane (<c>cache_artifact</c> reachable through
+    /// <c>tenant_artifact_access</c>), and OCI blobs. One constant so the quota gate and the
+    /// counter baseline below can never disagree about what "bytes this org holds" means.
+    /// </summary>
+    private const string LiveStorageBytesSql =
+        "SELECT COALESCE(SUM(total_bytes), 0) FROM org_storage_bytes WHERE org_id = @orgId";
+
+    /// <summary>
+    /// Bytes the tenant currently holds, read live from <c>org_storage_bytes</c>.
+    ///
+    /// Derived, never accumulated: a row leaving any plane (a version deleted, a
+    /// <c>cache_artifact</c> evicted or aged out by retention) leaves this sum by itself, so it
+    /// cannot drift away from the bytes actually stored and needs nothing released back into it.
+    /// The proxy cache-fill gate enforces against this rather than <c>storage_used_bytes</c>: the
+    /// cache plane is content-addressed and shared, so its bytes have no single owning tenant to
+    /// charge and uncharge symmetrically.
+    /// </summary>
+    public async Task<long> GetLiveStorageBytesAsync(string orgId, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        return await conn.ExecuteScalarAsync<long>(LiveStorageBytesSql, new { orgId });
+    }
+
+    /// <summary>
     /// Atomically reserves <paramref name="delta"/> bytes against the tenant's quota counter.
     /// Issues a single UPDATE that increments <c>storage_used_bytes</c> only when the result
     /// would not exceed <paramref name="quota"/> (NULL = unlimited). Returns true when the
@@ -615,18 +637,23 @@ public sealed class OrgRepository
         // live aggregate. WHERE storage_used_bytes = 0 makes this a no-op on rows that were
         // already incremented by a prior publish, so concurrent callers racing the backfill
         // can only inflate the counter, never set it to a stale-low value.
+        //
+        // The aggregate spans every plane — the same definition the admin tenant list reports.
+        // Summing package_versions alone omits every proxied byte the org holds, and sizes an OCI
+        // image by its manifest rather than its layers, so an org well over its quota could be
+        // baselined at almost nothing and keep publishing.
+        long liveBytes = await conn.ExecuteScalarAsync<long>(LiveStorageBytesSql, new { orgId });
+
+        // Reading the aggregate and writing it are two statements, but the guard is unchanged: the
+        // UPDATE still only fires while the counter is 0, so a publish that incremented it in the
+        // meantime turns this into a no-op rather than resetting it to a stale value.
         await conn.ExecuteAsync(
             """
             UPDATE org_settings
-            SET storage_used_bytes = (
-                SELECT COALESCE(SUM(pv.size_bytes), 0)
-                FROM package_versions pv
-                JOIN packages p ON p.id = pv.package_id
-                WHERE p.org_id = @orgId
-            )
+            SET storage_used_bytes = @liveBytes
             WHERE org_id = @orgId AND storage_used_bytes = 0
             """,
-            new { orgId });
+            new { liveBytes, orgId });
 
         // Atomic reserve: increment the counter only when the new value fits inside the quota.
         // 0 rows affected means quota would be exceeded; caller treats that as 413.

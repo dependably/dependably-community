@@ -86,6 +86,61 @@ public sealed class OciPushTests : IClassFixture<DependablyFactory>, IAsyncLifet
         Assert.Contains("1.0.0", list);
     }
 
+    // ── Cross-repository blob mount ───────────────────────────────────────────────
+
+    [Fact]
+    public async Task UploadInit_MountExistingBlob_Returns201WithoutReupload()
+    {
+        string token = await _factory.CreateToken("push");
+        using var client = _factory.CreateClientWithBearer(token);
+
+        // Push a layer into the default repo first — the "source" repository a second image
+        // build shares a base layer with.
+        byte[] layerBytes = RandomBytes(2048);
+        string layerDigest = Digest(layerBytes);
+        await PushBlobMonolithicAsync(client, layerBytes, layerDigest);
+
+        string orgId = await OrgIdAsync();
+        int blobCountBeforeMount = await CountOciBlobAsync(orgId, layerDigest);
+
+        // A second, unrelated repository mounts the same blob instead of re-uploading it.
+        const string otherRepo = "team/other-app";
+        using var mount = await client.PostAsync(
+            $"/v2/{otherRepo}/blobs/uploads/?mount={layerDigest}&from={Repo}", new ByteArrayContent([]));
+
+        Assert.Equal(HttpStatusCode.Created, mount.StatusCode);
+        Assert.Equal(layerDigest, Assert.Single(mount.Headers.GetValues("Docker-Content-Digest")));
+        Assert.Equal($"/v2/{otherRepo}/blobs/{layerDigest}", Assert.Single(mount.Headers.GetValues("Location")));
+
+        // No new blob row — the org-scoped store already had this digest; nothing was re-transferred.
+        Assert.Equal(blobCountBeforeMount, await CountOciBlobAsync(orgId, layerDigest));
+
+        // The mounted blob is immediately servable through the second repository's path.
+        using var get = await client.GetAsync($"/v2/{otherRepo}/blobs/{layerDigest}");
+        Assert.Equal(HttpStatusCode.OK, get.StatusCode);
+        Assert.Equal(layerBytes, await get.Content.ReadAsByteArrayAsync());
+    }
+
+    [Fact]
+    public async Task UploadInit_MountUnknownDigest_FallsBackToNormalUploadSession()
+    {
+        // A mount request for a digest this org has never seen must not error — the client
+        // falls back to a normal chunked/monolithic upload, exactly as if mount had not been
+        // specified. Exercised alongside the successful-mount case above to pin both branches
+        // (found vs. not-found) of the same code path.
+        string token = await _factory.CreateToken("push");
+        using var client = _factory.CreateClientWithBearer(token);
+
+        string unknownDigest = Digest(RandomBytes(64));
+        const string otherRepo = "team/never-pushed";
+        using var resp = await client.PostAsync(
+            $"/v2/{otherRepo}/blobs/uploads/?mount={unknownDigest}&from={Repo}", new ByteArrayContent([]));
+
+        Assert.Equal(HttpStatusCode.Accepted, resp.StatusCode);
+        Assert.Single(resp.Headers.GetValues("Location"));
+        Assert.Single(resp.Headers.GetValues("Docker-Upload-UUID"));
+    }
+
     // ── Auth gate ──────────────────────────────────────────────────────────────────
 
     [Fact]

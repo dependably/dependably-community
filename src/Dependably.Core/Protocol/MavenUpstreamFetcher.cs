@@ -163,20 +163,23 @@ public sealed class MavenUpstreamFetcher
             Dependably.Infrastructure.Observability.DependablyMeter.MavenSidecarMissing.Add(1,
                 new KeyValuePair<string, object?>(
                     "reason", VerifyWithUpstreamSha256 ? "no_sha256_sidecar" : "verify_disabled"));
-            return await FetchThenHashAsync(upstreamBase, upstreamPath, upstreamUrl, authorizationHeader, ct);
+            return await FetchThenHashAsync(upstreamBase, upstreamPath, upstreamUrl, orgId, authorizationHeader, ct);
         }
 
         string blobKey = BlobKeys.Proxy(expectedSha256);
 
         try
         {
+            // The caller's org context rides both fetch paths: it is what binds the fill to the
+            // tenant's storage quota and per-org upstream URL policy, and what scopes the audit
+            // trail this fetch writes.
             var (body, isHit) = await _upstream.GetOrFetchStreamAsync(
                 blobKey,
                 upstreamUrl,
                 new ChecksumSpec(ChecksumAlgorithm.Sha256, expectedSha256),
                 ecosystem: "maven",
-                orgId: null,
-                purl: null,
+                orgId: orgId,
+                purl: purl,
                 ct: ct,
                 authorizationHeader: authorizationHeader);
 
@@ -213,6 +216,12 @@ public sealed class MavenUpstreamFetcher
             // rather than the caller silently returning 404.
             throw;
         }
+        catch (TenantStorageQuotaExceededException)
+        {
+            // The tenant is at its storage ceiling — propagate so middleware answers 413. The
+            // artefact exists upstream; reporting it absent would be a lie the client caches.
+            throw;
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             // Transient upstream failure (network / 5xx / SSRF block / response-too-large).
@@ -236,7 +245,8 @@ public sealed class MavenUpstreamFetcher
     /// a <c>.sha1</c> mismatch and <see cref="AirGappedException"/> in air-gap mode.
     /// </summary>
     private async Task<MavenArtifactFetchResult?> FetchThenHashAsync(
-        string upstreamBase, string upstreamPath, string upstreamUrl, string? authorizationHeader, CancellationToken ct)
+        string upstreamBase, string upstreamPath, string upstreamUrl, string? orgId,
+        string? authorizationHeader, CancellationToken ct)
     {
         // Route through the shared hash-and-stage disk pipeline: FetchAndCacheByUrlAsync streams
         // the body to a staging temp file (SHA-256 computed inline), stores it under
@@ -248,7 +258,7 @@ public sealed class MavenUpstreamFetcher
         {
             fetched = await _upstream.FetchAndCacheByUrlAsync(
                 upstreamUrl, checksumSpec: null, ecosystem: "maven",
-                orgId: null, authorizationHeader: authorizationHeader, ct);
+                orgId: orgId, authorizationHeader: authorizationHeader, ct);
         }
         catch (AirGappedException)
         {
@@ -257,6 +267,10 @@ public sealed class MavenUpstreamFetcher
         catch (UpstreamFetchFailedException)
         {
             throw; // middleware maps transient exhaustion to 503/502
+        }
+        catch (TenantStorageQuotaExceededException)
+        {
+            throw; // middleware answers 413 — the tenant is at its ceiling, not the artefact absent
         }
         catch (HttpRequestException ex) when (ex.StatusCode is not null)
         {

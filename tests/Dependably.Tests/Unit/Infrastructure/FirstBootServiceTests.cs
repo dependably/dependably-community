@@ -278,6 +278,70 @@ public sealed class FirstBootServiceTests
     }
 
     [Fact]
+    public async Task RotateJwtSecretAsync_AlreadyBootstrapped_ReplacesStoredSecretWithANewValue()
+    {
+        await using var fx = await NewFixtureAsync();
+        var sut = NewSut(fx, Cfg());
+        await sut.RunAsync();
+
+        string? original = await GetJwtSecretRawAsync(fx);
+        Assert.False(string.IsNullOrEmpty(original));
+
+        await sut.RotateJwtSecretAsync();
+
+        string? rotated = await GetJwtSecretRawAsync(fx);
+        Assert.False(string.IsNullOrEmpty(rotated));
+        Assert.NotEqual(original, rotated);
+    }
+
+    [Fact]
+    public async Task RotateJwtSecretAsync_EnvelopeConfigured_StoresNewSecretUnderTheEnvelope()
+    {
+        // Rotation must reuse the same envelope policy as first boot rather than ever falling
+        // back to plaintext once a master key is configured.
+        await using var fx = await NewFixtureAsync();
+        var envelope = TestEnvelope.Configured();
+        var sut = NewSut(fx, Cfg(), envelope);
+        await sut.RunAsync();
+
+        string? originalStored = await GetJwtSecretRawAsync(fx);
+        Assert.True(EnvelopeProtector.IsEncrypted(originalStored!));
+        string originalPlaintext = envelope.Unprotect(originalStored!);
+
+        await sut.RotateJwtSecretAsync();
+
+        string? rotatedStored = await GetJwtSecretRawAsync(fx);
+        Assert.True(EnvelopeProtector.IsEncrypted(rotatedStored!));
+        string rotatedPlaintext = envelope.Unprotect(rotatedStored!);
+
+        Assert.NotEqual(originalStored, rotatedStored);
+        Assert.NotEqual(originalPlaintext, rotatedPlaintext);
+    }
+
+    [Fact]
+    public async Task RotateJwtSecretAsync_BeforeFirstBoot_ThrowsAndLeavesNoJwtSecretRow()
+    {
+        // Pins the regression: before this method existed there was no supported way to rotate
+        // jwt_secret at all (only a manual DB edit); the fix adds RotateJwtSecretAsync but it
+        // must refuse — rather than silently seed a secret — on an instance that has not
+        // completed first boot, since RunAsync owns that path.
+        await using var fx = await NewFixtureAsync();
+        var sut = NewSut(fx, Cfg());
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => sut.RotateJwtSecretAsync());
+
+        string? jwt = await GetJwtSecretRawAsync(fx);
+        Assert.Null(jwt);
+    }
+
+    private static async Task<string?> GetJwtSecretRawAsync(InMemoryDbFixture fx)
+    {
+        await using var conn = await fx.Store.OpenAsync();
+        return await conn.ExecuteScalarAsync<string?>(
+            "SELECT value FROM instance_settings WHERE key = 'jwt_secret'");
+    }
+
+    [Fact]
     public async Task RunAsync_EmptyDb_HeaderMode_CreatesSystemAdminOnly_NoOrgNoUser()
     {
         // header mode is a multi-tenant mode (HeaderTenantResolver); first boot must create

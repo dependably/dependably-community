@@ -9,9 +9,9 @@ namespace Dependably.Tests.Integration;
 
 /// <summary>
 /// End-to-end coverage of <c>GET /api/v1/lookup</c>: auth (a ReadPackages-capable member can run
-/// a lookup, anonymous is rejected), camelCase response shape, RFC 7807 problem details for
-/// unknown ecosystem / package-not-found upstream, and that the endpoint is read-only (a lookup
-/// never creates a package/version row nor caches an artifact).
+/// a lookup, anonymous is rejected), camelCase response shape, the 200 found/not-found verdict
+/// split, RFC 7807 problem details for a malformed name or unknown ecosystem, and that the
+/// endpoint is read-only (a lookup never creates a package/version row nor caches an artifact).
 /// </summary>
 [Trait("Category", "Integration")]
 public sealed class PackageLookupControllerTests : IClassFixture<DependablyFactory>, IAsyncLifetime
@@ -108,8 +108,11 @@ public sealed class PackageLookupControllerTests : IClassFixture<DependablyFacto
         Assert.False(string.IsNullOrWhiteSpace(doc.RootElement.GetProperty("detail").GetString()));
     }
 
+    // A lookup is a query about a candidate, so "upstream has no such package" is an answer to
+    // it — served 200 with found=false, echoing the coordinate that was resolved. Mistyping a
+    // name is the ordinary way to reach this and must not be reported as a failed request.
     [Fact]
-    public async Task PackageNotFoundUpstream_Returns404ProblemDetail()
+    public async Task PackageNotFoundUpstream_Returns200WithFoundFalse()
     {
         string name = $"lookup-missing-{Guid.NewGuid():N}"[..24];
         _factory.MockUpstream.Given(Request.Create().WithPath($"/{name}").UsingGet())
@@ -118,9 +121,71 @@ public sealed class PackageLookupControllerTests : IClassFixture<DependablyFacto
 
         var resp = await client.GetAsync($"/api/v1/lookup?ecosystem=npm&name={name}&version=1.0.0");
 
-        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
-        Assert.Equal(404, doc.RootElement.GetProperty("status").GetInt32());
+        Assert.False(doc.RootElement.GetProperty("found").GetBoolean());
+        Assert.Equal("npm", doc.RootElement.GetProperty("ecosystem").GetString());
+        Assert.Equal(name, doc.RootElement.GetProperty("name").GetString());
+        Assert.Equal("1.0.0", doc.RootElement.GetProperty("version").GetString());
+        // The not-found body carries no verdict — a client must not read one out of it.
+        Assert.False(doc.RootElement.TryGetProperty("verdict", out _));
+    }
+
+    // The found shape carries the same discriminator set to true, so a client branches on
+    // `found` rather than on the status code (both are 200).
+    [Fact]
+    public async Task PackageFoundUpstream_Returns200WithFoundTrue()
+    {
+        string name = $"lookup-present-{Guid.NewGuid():N}"[..24];
+        StubNpmPackument(name, "1.0.0");
+        using var client = await MemberClient();
+
+        var resp = await client.GetAsync($"/api/v1/lookup?ecosystem=npm&name={name}&version=1.0.0");
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        Assert.True(doc.RootElement.GetProperty("found").GetBoolean());
+        Assert.False(string.IsNullOrWhiteSpace(doc.RootElement.GetProperty("verdict").GetString()));
+    }
+
+    // A bare "@scope" with no name part is a malformed npm name, not an absent package.
+    // registry.npmjs.org answers it with 405 (not 404), so forwarding it upstream would report a
+    // caller's typo as an unhealthy upstream (503). It is rejected as invalid input instead, and
+    // no upstream request is made at all.
+    [Fact]
+    public async Task BareNpmScope_Returns422_AndNeverReachesUpstream()
+    {
+        using var client = await MemberClient();
+
+        var resp = await client.GetAsync("/api/v1/lookup?ecosystem=npm&name=%40dependably");
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        Assert.Equal(422, doc.RootElement.GetProperty("status").GetInt32());
+        Assert.DoesNotContain(
+            _factory.MockUpstream.LogEntries,
+            e => e.RequestMessage?.Path?.Contains("dependably", StringComparison.Ordinal) == true);
+    }
+
+    // End-to-end proof of the double-encoding traversal defence: the wire bytes are
+    // "%252e%252e%252fadmin", which ASP.NET decodes ONCE to the literal string "%2e%2e%2fadmin"
+    // — no literal ".." or "/", so it clears the base path-safety rules and would be decoded to
+    // "../admin" by the upstream. The '%'-ban in ValidateUpstreamSegment rejects it as 422 and
+    // no upstream request is composed. Single-encoding ("%2e%2e%2f") is already caught because
+    // ASP.NET decodes it to a literal "../" that the base rules reject.
+    [Fact]
+    public async Task DoubleEncodedTraversalName_Returns422_AndNeverReachesUpstream()
+    {
+        using var client = await MemberClient();
+
+        var resp = await client.GetAsync("/api/v1/lookup?ecosystem=pypi&name=%252e%252e%252fadmin&version=1.0");
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        Assert.Equal(422, doc.RootElement.GetProperty("status").GetInt32());
+        Assert.DoesNotContain(
+            _factory.MockUpstream.LogEntries,
+            e => e.RequestMessage?.Path?.Contains("admin", StringComparison.Ordinal) == true);
     }
 
     [Fact]

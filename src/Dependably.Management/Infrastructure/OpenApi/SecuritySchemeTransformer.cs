@@ -1,3 +1,4 @@
+using System.Reflection;
 using Dependably.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc.Controllers;
@@ -20,6 +21,7 @@ internal sealed class DocumentMetadataTransformer : IOpenApiDocumentTransformer
         CancellationToken cancellationToken)
     {
         document.Info ??= new OpenApiInfo();
+        document.Info.Version = AssemblyVersion;
         switch (context.DocumentName)
         {
             case "management":
@@ -30,11 +32,18 @@ internal sealed class DocumentMetadataTransformer : IOpenApiDocumentTransformer
             case "protocol":
                 document.Info.Title = "Dependably Registry Protocols";
                 document.Info.Description =
-                    "Package-registry protocol surfaces: OCI Distribution Spec v2 (/v2/), PyPI (/simple/), npm (/npm/), NuGet (/nuget/v3/), Maven, RPM.";
+                    "Package-registry protocol surfaces: OCI Distribution Spec v2 (/v2/), PyPI (/simple/), npm (/npm/), " +
+                    "NuGet (/nuget/v3/), Maven, RPM, Go (/go/), Cargo (/cargo/), APK (/apk/).";
                 break;
         }
         return Task.CompletedTask;
     }
+
+    private static string AssemblyVersion { get; } =
+        typeof(DocumentMetadataTransformer).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+        ?? typeof(DocumentMetadataTransformer).Assembly.GetName().Version?.ToString()
+        ?? "unknown";
 }
 
 /// <summary>

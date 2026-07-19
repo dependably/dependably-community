@@ -20,6 +20,7 @@ namespace Dependably.Tests.Unit.Protocol;
 ///  - DockerHub cache: second call within expiry does not re-exchange
 ///  - InvalidateToken: evicts cached token so next call re-exchanges
 ///  - Air-gap: throws AirGappedException
+///  - AWS ECR: refuses with OciUnauthorizedException rather than degrading to anonymous
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class OciUpstreamAuthServiceTests : IDisposable
@@ -330,6 +331,30 @@ public sealed class OciUpstreamAuthServiceTests : IDisposable
 
         await Assert.ThrowsAsync<AirGappedException>(() =>
             svc.GetAuthorizationAsync("test-org", upstream, "library/ubuntu", "pull", default));
+    }
+
+    // ── AWS ECR ────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Regression: the API layer rejects <c>aws_ecr</c> at configuration time, but a row could
+    /// still exist out of band (seeded by enterprise tooling or a future migration). Reaching
+    /// this auth type at runtime must refuse the request with <see cref="OciUnauthorizedException"/>
+    /// rather than silently returning null and letting the caller retry anonymously — an
+    /// anonymous fallback would either mask the real cause behind a generic upstream 401, or
+    /// silently succeed against a repository whose access policy is broader than the operator
+    /// expects. No HTTP call is made: the refusal happens before any network request.
+    /// </summary>
+    [Fact]
+    public async Task GetAuthorizationAsync_AwsEcr_RefusesRatherThanFallingBackToAnonymous()
+    {
+        using var svc = Build();
+        var upstream = MakeUpstream(OciAuthType.AwsEcr, host: "123456789012.dkr.ecr.us-east-1.amazonaws.com");
+
+        await Assert.ThrowsAsync<OciUnauthorizedException>(() =>
+            svc.GetAuthorizationAsync("test-org", upstream, "my-repo", "pull", default));
+
+        // No HTTP call was made — refusal is unconditional, not upstream-response-driven.
+        Assert.Equal(0, _factory.RemainingCount);
     }
 
     // ── Test doubles ──────────────────────────────────────────────────────────

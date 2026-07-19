@@ -80,6 +80,50 @@ public sealed class ClaimsControllerTests : IClassFixture<DependablyFactory>, IA
         Assert.Equal(HttpStatusCode.Conflict, second.StatusCode);
     }
 
+    /// <summary>
+    /// Pins the full create → release → re-create lifecycle over HTTP: on old code the
+    /// second POST blind-INSERTs against the tombstoned row left by DELETE and hits the
+    /// (org_id, ecosystem, name) unique index, producing an unhandled 500 with an empty
+    /// body; PATCH also 404s because the name reads as implicit/unclaimed. The revive-on-
+    /// insert fix makes the second POST succeed (201) and the claim immediately usable.
+    /// </summary>
+    [Fact]
+    public async Task Create_AfterRelease_CanBeRecreatedAndPatched()
+    {
+        using var c = await AdminClient();
+        var create = await c.PostAsJsonAsync("/api/v1/admin/claims", new
+        {
+            ecosystem = "npm",
+            name = "acme-claim-recreate",
+            state = "local_only",
+            reason = "init"
+        });
+        create.EnsureSuccessStatusCode();
+
+        var release = await c.DeleteAsync("/api/v1/admin/claims/npm/acme-claim-recreate?reason=cleanup");
+        Assert.Equal(HttpStatusCode.NoContent, release.StatusCode);
+
+        // Before the fix this 500s with an empty body instead of ever reaching this assertion.
+        var recreate = await c.PostAsJsonAsync("/api/v1/admin/claims", new
+        {
+            ecosystem = "npm",
+            name = "acme-claim-recreate",
+            state = "mixed",
+            reason = "re-claimed after release"
+        });
+        Assert.Equal(HttpStatusCode.Created, recreate.StatusCode);
+        var recreateDoc = JsonDocument.Parse(await recreate.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal("mixed", recreateDoc.GetProperty("claim").GetProperty("state").GetString());
+
+        // PATCH previously 404'd against the implicit-unclaimed read; now the revived claim
+        // transitions normally.
+        var patch = await c.PatchAsJsonAsync("/api/v1/admin/claims/npm/acme-claim-recreate",
+            new { state = "local_only", reason = "lock down again" });
+        Assert.Equal(HttpStatusCode.OK, patch.StatusCode);
+        var patchDoc = JsonDocument.Parse(await patch.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal("local_only", patchDoc.GetProperty("claim").GetProperty("state").GetString());
+    }
+
     [Fact]
     public async Task Create_InvalidState_400()
     {
@@ -287,6 +331,225 @@ public sealed class ClaimsControllerTests : IClassFixture<DependablyFactory>, IA
         Assert.False(await _factory.BlobStore.ExistsAsync("proxy/sha256/aaa"));
         Assert.False(await _factory.BlobStore.ExistsAsync("proxy/sha256/bbb"));
         Assert.True(await _factory.BlobStore.ExistsAsync("hosted/private/ccc"));
+    }
+
+    // Every current proxy fetch lands on the shared cache plane (cache_artifact +
+    // tenant_artifact_access), not package_versions. This asserts local_only actually evicts
+    // that plane — dropping this org's access so the cached copy stops serving — while a shared
+    // blob another tenant still proxies survives.
+    [Fact]
+    public async Task CreateLocalOnly_EvictsCachePlaneVersions_ButSpareSharedBlobHeldByAnotherTenant()
+    {
+        using var c = await AdminClient();
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+
+        string orgId;
+        await using (var conn = await store.OpenAsync())
+        {
+            orgId = (await conn.ExecuteScalarAsync<string>(
+                "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1"))!;
+
+            // A second tenant that also proxies one of the target versions.
+            await conn.ExecuteAsync(
+                "INSERT INTO orgs (id, slug) VALUES ('org-cache-2', 'tenant-two')");
+
+            // Two cached versions of the target name: ca-solo (this org only) and ca-shared
+            // (this org + org-cache-2). Plus a bystander under a different name.
+            await conn.ExecuteAsync("""
+                INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash) VALUES
+                  ('ca-solo',    'npm', 'acme-cache-target',    '1.0.0', 'acme-cache-target-1.0.0.tgz',    'proxy/sha256/casolo',    'casolo'),
+                  ('ca-shared',  'npm', 'acme-cache-target',    '2.0.0', 'acme-cache-target-2.0.0.tgz',    'proxy/sha256/cashared',  'cashared'),
+                  ('ca-bystand', 'npm', 'acme-cache-bystander', '1.0.0', 'acme-cache-bystander-1.0.0.tgz', 'proxy/sha256/cabystand', 'cabystand');
+                INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES
+                  (@orgId, 'ca-solo'),
+                  (@orgId, 'ca-shared'),
+                  ('org-cache-2', 'ca-shared'),
+                  (@orgId, 'ca-bystand');
+                """, new { orgId });
+        }
+
+        await _factory.BlobStore.PutAsync("proxy/sha256/casolo", new MemoryStream([1, 2, 3]));
+        await _factory.BlobStore.PutAsync("proxy/sha256/cashared", new MemoryStream([4, 5, 6]));
+        await _factory.BlobStore.PutAsync("proxy/sha256/cabystand", new MemoryStream([7, 8, 9]));
+
+        var resp = await c.PostAsJsonAsync("/api/v1/admin/claims", new
+        {
+            ecosystem = "npm",
+            name = "acme-cache-target",
+            state = "local_only",
+            reason = "cache purge test"
+        });
+        resp.EnsureSuccessStatusCode();
+        var body = JsonDocument.Parse(await resp.Content.ReadAsStringAsync()).RootElement;
+        // Both target versions were evicted for this org (solo + shared).
+        Assert.Equal(2, body.GetProperty("purgedCount").GetInt32());
+
+        await using (var verify = await store.OpenAsync())
+        {
+            // This org no longer reaches either target version — the serve path joins on this row,
+            // so removing it is what stops the cached copy serving.
+            long myTargetAccess = await verify.ExecuteScalarAsync<long>(
+                """
+                SELECT COUNT(*) FROM tenant_artifact_access taa
+                JOIN cache_artifact ca ON ca.id = taa.cache_artifact_id
+                WHERE taa.org_id = @orgId AND ca.name = 'acme-cache-target'
+                """, new { orgId });
+            Assert.Equal(0, myTargetAccess);
+
+            // ca-solo had no other tenant → shared row and blob reclaimed.
+            Assert.Equal(0, await verify.ExecuteScalarAsync<long>(
+                "SELECT COUNT(*) FROM cache_artifact WHERE id = 'ca-solo'"));
+
+            // ca-shared is still held by org-cache-2 → row survives, its access survives.
+            Assert.Equal(1, await verify.ExecuteScalarAsync<long>(
+                "SELECT COUNT(*) FROM cache_artifact WHERE id = 'ca-shared'"));
+            Assert.Equal(1, await verify.ExecuteScalarAsync<long>(
+                "SELECT COUNT(*) FROM tenant_artifact_access WHERE cache_artifact_id = 'ca-shared' AND org_id = 'org-cache-2'"));
+
+            // The bystander name is untouched on both the row and the access.
+            Assert.Equal(1, await verify.ExecuteScalarAsync<long>(
+                "SELECT COUNT(*) FROM tenant_artifact_access WHERE cache_artifact_id = 'ca-bystand' AND org_id = @orgId",
+                new { orgId }));
+
+            long historyPurged = await verify.ExecuteScalarAsync<long>(
+                "SELECT purged_count FROM claim_history WHERE name = 'acme-cache-target' ORDER BY occurred_at DESC LIMIT 1");
+            Assert.Equal(2, historyPurged);
+        }
+
+        // Solo blob dereferenced; shared blob retained (org-cache-2 still proxies it); bystander kept.
+        Assert.False(await _factory.BlobStore.ExistsAsync("proxy/sha256/casolo"));
+        Assert.True(await _factory.BlobStore.ExistsAsync("proxy/sha256/cashared"));
+        Assert.True(await _factory.BlobStore.ExistsAsync("proxy/sha256/cabystand"));
+    }
+
+    // ── Content-addressed blob_key sharing ACROSS DISTINCT COORDINATES ────────
+    // The prior test covers one cache_artifact row shared by two tenants via
+    // tenant_artifact_access. This block covers the ticketed bug: TWO DIFFERENT
+    // cache_artifact rows (distinct ecosystem/name/version/filename coordinates) whose
+    // upstream bytes happen to be byte-identical share one blob_key. Evicting one coordinate
+    // must never physically delete a blob a sibling coordinate's own row still references.
+
+    [Fact]
+    public async Task CreateLocalOnly_SharedBlobKeyAcrossDistinctCoordinates_SurvivesUntilLastSharerEvicted()
+    {
+        using var c = await AdminClient();
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+
+        string orgId;
+        await using (var conn = await store.OpenAsync())
+        {
+            orgId = (await conn.ExecuteScalarAsync<string>(
+                "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1"))!;
+
+            // Two unrelated package names whose upstream bytes are byte-identical (e.g. an empty
+            // file, a shared vendored asset) — content-addressing gives them the SAME blob_key
+            // even though the rows are otherwise unconnected.
+            await conn.ExecuteAsync("""
+                INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash) VALUES
+                  ('ca-content-target',  'npm', 'acme-content-target',  '1.0.0', 'acme-content-target-1.0.0.tgz',  'proxy/sha256/shared-bytes', 'shared'),
+                  ('ca-content-sibling', 'npm', 'acme-content-sibling', '1.0.0', 'acme-content-sibling-1.0.0.tgz', 'proxy/sha256/shared-bytes', 'shared');
+                INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES
+                  (@orgId, 'ca-content-target'),
+                  (@orgId, 'ca-content-sibling');
+                """, new { orgId });
+        }
+
+        await _factory.BlobStore.PutAsync("proxy/sha256/shared-bytes", new MemoryStream([9, 9, 9]));
+
+        // Purge only acme-content-target to local_only.
+        var resp = await c.PostAsJsonAsync("/api/v1/admin/claims", new
+        {
+            ecosystem = "npm",
+            name = "acme-content-target",
+            state = "local_only",
+            reason = "shared blob key regression"
+        });
+        resp.EnsureSuccessStatusCode();
+
+        // The target row is gone (no other tenant held it) but the shared blob must survive —
+        // the sibling coordinate's own row still references the same content-addressed key.
+        await using (var verify = await store.OpenAsync())
+        {
+            Assert.Equal(0, await verify.ExecuteScalarAsync<long>(
+                "SELECT COUNT(*) FROM cache_artifact WHERE id = 'ca-content-target'"));
+            Assert.Equal(1, await verify.ExecuteScalarAsync<long>(
+                "SELECT COUNT(*) FROM cache_artifact WHERE id = 'ca-content-sibling'"));
+        }
+        Assert.True(await _factory.BlobStore.ExistsAsync("proxy/sha256/shared-bytes"),
+            "the sibling coordinate's blob must survive eviction of a byte-identical sibling row");
+
+        // Purge the sibling too — the last reference is gone, so the blob is finally reclaimed.
+        var resp2 = await c.PostAsJsonAsync("/api/v1/admin/claims", new
+        {
+            ecosystem = "npm",
+            name = "acme-content-sibling",
+            state = "local_only",
+            reason = "shared blob key regression - last sharer"
+        });
+        resp2.EnsureSuccessStatusCode();
+
+        Assert.False(await _factory.BlobStore.ExistsAsync("proxy/sha256/shared-bytes"),
+            "the blob must be reclaimed once no coordinate references it");
+    }
+
+    // Mixed batch, ONE purge pass: acme-content-mixed has two versions. v1.0.0's blob is shared
+    // with an untouched sibling name (must survive); v2.0.0's blob is referenced by no one else
+    // (must be deleted). Both versions are evicted in the SAME PurgeProxyArtefactsAsync call.
+    [Fact]
+    public async Task CreateLocalOnly_MixedSharedAndSoloBlobKeysInOnePass_OnlySoloBlobDeleted()
+    {
+        using var c = await AdminClient();
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+
+        string orgId;
+        await using (var conn = await store.OpenAsync())
+        {
+            orgId = (await conn.ExecuteScalarAsync<string>(
+                "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1"))!;
+
+            await conn.ExecuteAsync("""
+                INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash) VALUES
+                  ('ca-mixed-shared',      'npm', 'acme-content-mixed',    '1.0.0', 'acme-content-mixed-1.0.0.tgz',   'proxy/sha256/mixed-shared', 'shared'),
+                  ('ca-mixed-solo',        'npm', 'acme-content-mixed',    '2.0.0', 'acme-content-mixed-2.0.0.tgz',   'proxy/sha256/mixed-solo',   'solo'),
+                  ('ca-mixed-untouched',   'npm', 'acme-content-untouched', '1.0.0', 'acme-content-untouched-1.0.0.tgz', 'proxy/sha256/mixed-shared', 'shared');
+                INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES
+                  (@orgId, 'ca-mixed-shared'),
+                  (@orgId, 'ca-mixed-solo'),
+                  (@orgId, 'ca-mixed-untouched');
+                """, new { orgId });
+        }
+
+        await _factory.BlobStore.PutAsync("proxy/sha256/mixed-shared", new MemoryStream([1, 1, 1]));
+        await _factory.BlobStore.PutAsync("proxy/sha256/mixed-solo", new MemoryStream([2, 2, 2]));
+
+        // One purge call evicts BOTH versions of acme-content-mixed in a single pass.
+        var resp = await c.PostAsJsonAsync("/api/v1/admin/claims", new
+        {
+            ecosystem = "npm",
+            name = "acme-content-mixed",
+            state = "local_only",
+            reason = "mixed shared/solo blob keys in one pass"
+        });
+        resp.EnsureSuccessStatusCode();
+        var body = JsonDocument.Parse(await resp.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal(2, body.GetProperty("purgedCount").GetInt32());
+
+        await using (var verify = await store.OpenAsync())
+        {
+            Assert.Equal(0, await verify.ExecuteScalarAsync<long>(
+                "SELECT COUNT(*) FROM cache_artifact WHERE id IN ('ca-mixed-shared', 'ca-mixed-solo')"));
+            // The untouched sibling's own row is unaffected — a different name, never part of
+            // this purge.
+            Assert.Equal(1, await verify.ExecuteScalarAsync<long>(
+                "SELECT COUNT(*) FROM cache_artifact WHERE id = 'ca-mixed-untouched'"));
+        }
+
+        // The shared key survives (ca-mixed-untouched still references it); the solo key,
+        // referenced by no other row, is reclaimed.
+        Assert.True(await _factory.BlobStore.ExistsAsync("proxy/sha256/mixed-shared"),
+            "a blob key still referenced by an untouched sibling row must survive");
+        Assert.False(await _factory.BlobStore.ExistsAsync("proxy/sha256/mixed-solo"),
+            "a blob key referenced by no remaining row must be reclaimed");
     }
 
     [Fact]

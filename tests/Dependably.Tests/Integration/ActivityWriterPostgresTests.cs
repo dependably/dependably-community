@@ -25,14 +25,6 @@ public sealed class ActivityWriterPostgresTests
             "TEST_POSTGRES_CONNECTION must be set to run Category=SchemaPostgres tests. " +
             "CI sets it from the postgres service; locally start a docker postgres and export it.");
 
-    private static async Task<NpgsqlMetadataStore> FreshPostgresAsync()
-    {
-        var store = new NpgsqlMetadataStore(ConnectionString);
-        await using var conn = await store.OpenAsync();
-        await conn.ExecuteAsync("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-        return store;
-    }
-
     /// <summary>
     /// Enqueues 250 activity rows (exceeding MaxBatch=200, which forces two DbBatch flushes)
     /// and confirms all 250 land in the <c>activity</c> table after DrainPendingAsync.
@@ -41,7 +33,8 @@ public sealed class ActivityWriterPostgresTests
     [Fact]
     public async Task DbBatch_FlushesToLivePostgres_AllRowsPersisted()
     {
-        var store = await FreshPostgresAsync();
+        await using var pg = await LivePostgresReset.FreshAsync(ConnectionString);
+        var store = pg.Store;
         await new SchemaInitializer(store).InitializeAsync();
 
         await using var conn = await store.OpenAsync();
@@ -71,7 +64,8 @@ public sealed class ActivityWriterPostgresTests
     [Fact]
     public async Task DbBatch_OnLivePostgres_PartialBurst_OnlySuccessfulRowsPersisted()
     {
-        var store = await FreshPostgresAsync();
+        await using var pg = await LivePostgresReset.FreshAsync(ConnectionString);
+        var store = pg.Store;
         await new SchemaInitializer(store).InitializeAsync();
 
         await using var conn = await store.OpenAsync();

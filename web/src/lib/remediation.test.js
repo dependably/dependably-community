@@ -1,6 +1,14 @@
 import { describe, it, expect } from 'vitest'
 import vulnerabilitiesSource from '../pages/Vulnerabilities.svelte?raw'
-import { remediationSkillIds, firstFixedVersion, resolvedFixedVersion, skillInstallCommand, skillPrompt } from './remediation.js'
+import {
+  remediationSkillIds,
+  firstFixedVersion,
+  resolvedFixedVersion,
+  skillInstallCommand,
+  skillPrompt,
+  remediationBrief,
+  remediationTaskStatement,
+} from './remediation.js'
 
 describe('remediationSkillIds', () => {
   it('returns an empty array for null/undefined remediation', () => {
@@ -202,5 +210,139 @@ describe('skillPrompt', () => {
     expect(skillPrompt('fix-xss', 'GHSA-x', 'pkg:npm/p@1', '1', '2')).toContain('the fix-xss skill')
     expect(skillPrompt('fix-xss', 'GHSA-x', 'pkg:npm/p@1', '1', '2', 'codex')).toContain('the /fix-xss prompt')
     expect(skillPrompt('fix-xss', 'GHSA-x', 'pkg:npm/p@1', '1', '2', 'copilot')).toContain('the /fix-xss prompt')
+  })
+})
+
+describe('remediationTaskStatement', () => {
+  it('names the highest-priority skill when one is mapped', () => {
+    const s = remediationTaskStatement('GHSA-x', 'pkg:npm/p@1', '1.0.0', '1.2.4', ['fix-vulnerable-dependency', 'fix-xss'])
+    expect(s).toContain('fixed in 1.2.4')
+    expect(s).toContain('Use the fix-vulnerable-dependency skill if it is available.')
+  })
+
+  it('omits the skill sentence entirely when no skill is mapped', () => {
+    const s = remediationTaskStatement('GHSA-x', 'pkg:npm/p@1', '1.0.0', '1.2.4', [])
+    expect(s).not.toContain('skill')
+  })
+
+  it('states the fixed version is unknown rather than omitting it', () => {
+    const s = remediationTaskStatement('GHSA-x', 'pkg:npm/p@1', '1.0.0', null, [])
+    expect(s).toContain('fixed version unknown')
+    expect(s).not.toContain('fixed in')
+  })
+})
+
+describe('remediationBrief', () => {
+  const baseRemediation = {
+    cweIds: ['CWE-79'],
+    entries: [{
+      cweId: 'CWE-79',
+      cweUrl: 'https://cwe.mitre.org/data/definitions/79.html',
+      owaspId: 'A05:2025',
+      owaspTitle: 'Injection',
+      owaspUrl: 'https://owasp.org/Top10/2025/A05_2025-Injection/',
+      skillId: 'fix-xss',
+    }],
+    upgradeSkillId: 'fix-vulnerable-dependency',
+    fixedVersion: '1.2.4',
+  }
+
+  it('renders the advisory id, summary, affected purl/versions, CWE+OWASP links, skill reference, and a task statement when a skill is mapped', () => {
+    const brief = remediationBrief({
+      osvId: 'GHSA-xxxx',
+      summary: 'Reflected XSS in the template renderer.',
+      purl: 'pkg:npm/vuln-pkg@1.0.0',
+      installedVersion: '1.0.0',
+      fixedVersion: '1.2.4',
+      remediation: baseRemediation,
+    })
+
+    expect(brief).toContain('# Remediation brief: GHSA-xxxx')
+    expect(brief).toContain('Reflected XSS in the template renderer.')
+    expect(brief).toContain('pkg:npm/vuln-pkg@1.0.0')
+    expect(brief).toContain('Installed version: `1.0.0`')
+    expect(brief).toContain('Fixed version: `1.2.4`')
+    expect(brief).toContain('[CWE-79](https://cwe.mitre.org/data/definitions/79.html)')
+    expect(brief).toContain('[A05:2025 Injection](https://owasp.org/Top10/2025/A05_2025-Injection/)')
+    expect(brief).toContain('## Curated skill')
+    expect(brief).toContain('fix-vulnerable-dependency')
+    expect(brief).toContain('## Task')
+    expect(brief).toContain('Use the fix-vulnerable-dependency skill if it is available.')
+  })
+
+  it('omits the Curated skill section gracefully when no skill is mapped', () => {
+    const remediation = {
+      cweIds: ['CWE-1'],
+      entries: [{ cweId: 'CWE-1', cweUrl: 'https://cwe.mitre.org/data/definitions/1.html', owaspId: null, owaspTitle: null, owaspUrl: null, skillId: null }],
+      upgradeSkillId: null, // no fixed version, so the flagship upgrade skill does not apply either
+      fixedVersion: null,
+    }
+    const brief = remediationBrief({
+      osvId: 'GHSA-yyyy',
+      summary: 'Some advisory with an unmapped CWE.',
+      purl: 'pkg:pypi/vuln-pkg@2.0.0',
+      installedVersion: '2.0.0',
+      fixedVersion: null,
+      remediation,
+    })
+
+    expect(brief).not.toContain('## Curated skill')
+    expect(brief).not.toContain('skill if it is available')
+    // The unmapped CWE itself still renders — only the skill/OWASP mapping is missing.
+    expect(brief).toContain('CWE-1')
+  })
+
+  it('states the fixed version is unknown explicitly rather than omitting the line', () => {
+    const brief = remediationBrief({
+      osvId: 'GHSA-zzzz',
+      summary: 'An advisory with no resolvable fix.',
+      purl: 'pkg:maven/org.example/vuln-lib@3.0.0',
+      installedVersion: '3.0.0',
+      fixedVersion: null,
+      remediation: { cweIds: [], entries: [], upgradeSkillId: null, fixedVersion: null },
+    })
+
+    expect(brief).toContain('Fixed version: **unknown**')
+    expect(brief).not.toContain('Fixed version: `')
+  })
+
+  it('states no CWE/OWASP classification is available rather than rendering an empty section', () => {
+    const brief = remediationBrief({
+      osvId: 'GHSA-wwww',
+      summary: 'An advisory whose OSV entry carries no cwe_ids.',
+      purl: 'pkg:npm/vuln-pkg@4.0.0',
+      installedVersion: '4.0.0',
+      fixedVersion: '4.0.1',
+      remediation: { cweIds: [], entries: [], upgradeSkillId: 'fix-vulnerable-dependency', fixedVersion: '4.0.1' },
+    })
+
+    expect(brief).toContain('## Weakness classification')
+    expect(brief).toContain('_No CWE/OWASP classification available for this advisory._')
+    // The flagship upgrade skill still applies (a fixed version exists) even with zero CWEs.
+    expect(brief).toContain('## Curated skill')
+    expect(brief).toContain('fix-vulnerable-dependency')
+  })
+
+  it('degrades gracefully when remediation, summary, purl, and versions are all missing', () => {
+    const brief = remediationBrief({ osvId: null, summary: null, purl: null, installedVersion: null, fixedVersion: null, remediation: null })
+
+    expect(brief).toContain('# Remediation brief: Unknown advisory')
+    expect(brief).toContain('_No summary available for this advisory._')
+    expect(brief).toContain('unknown package')
+    expect(brief).toContain('Fixed version: **unknown**')
+    expect(brief).toContain('_No CWE/OWASP classification available for this advisory._')
+    expect(brief).not.toContain('## Curated skill')
+  })
+})
+
+describe('Vulnerabilities.svelte "Copy remediation brief" action', () => {
+  // Pins the call site so the button always builds the brief from the resolved fixedVersion
+  // (shared with the per-skill prompt above it) rather than recomputing or dropping it, and
+  // copies under a distinct per-row/per-advisory state key so its "Copied!" flash never lands on
+  // the wrong button.
+  it('renders a copy-brief button wired to remediationBrief and a distinct copy-state key', () => {
+    expect(vulnerabilitiesSource).toMatch(/briefKey\s*=\s*`\$\{r\.purl\}::\$\{r\.osvId\}::brief`/)
+    expect(vulnerabilitiesSource).toMatch(/copyRemediation\(briefKey,\s*remediationBrief\(\{/)
+    expect(vulnerabilitiesSource).toContain("vulnerabilities.detail.remediation.copyBrief")
   })
 })

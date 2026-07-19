@@ -1,7 +1,9 @@
+using System.Data.Common;
 using Dapper;
 using Dependably.Background;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Redis;
+using Dependably.Infrastructure.SystemEvents;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
 using Microsoft.Extensions.Configuration;
@@ -61,7 +63,8 @@ public sealed class TenantHardDeleteServiceResilienceTests : IClassFixture<InMem
             _inner.AcquireAsync(name, ttl, wait, retryInterval, ct);
     }
 
-    private static TenantHardDeleteService BuildService(IMetadataStore db, IDistributedLock locks, TimeProvider clock)
+    private static TenantHardDeleteService BuildService(
+        IMetadataStore db, IDistributedLock locks, TimeProvider clock, ISystemEventNotifier? systemEvents = null)
     {
         var orgs = new OrgRepository(db, null, clock);
         var audit = new AuditRepository(db, null, clock);
@@ -77,7 +80,58 @@ public sealed class TenantHardDeleteServiceResilienceTests : IClassFixture<InMem
             new AirGapMode(config),
             locks,
             NullLogger<TenantHardDeleteService>.Instance,
-            clock);
+            clock,
+            systemEvents);
+    }
+
+    // Throws on the first Notify call (models a transient failure in the per-tenant delete work),
+    // then succeeds. Notify runs after the org row is already deleted, so this exercises the
+    // per-iteration guard: the throw must be caught and the batch must continue to the next org.
+    private sealed class ThrowOnFirstNotify : ISystemEventNotifier
+    {
+        private int _calls;
+        public void Notify(SystemEventRecord record)
+        {
+            _calls++;
+            if (_calls == 1)
+            {
+                throw new InvalidOperationException("simulated transient failure in per-tenant delete work");
+            }
+        }
+    }
+
+    // Delegates every open to the inner store, but on the Nth open it first clears the target org's
+    // deleted_at — modelling a system_admin restore that lands between the expired-list snapshot
+    // (open #1, inside ListExpiredSoftDeletedOrgIdsAsync) and the loop's guarded DELETE (which uses
+    // the shared connection opened at open #2). Restoring on open #2 reproduces exactly that race.
+    private sealed class RestoreOnNthOpenStore : IMetadataStore
+    {
+        private readonly IMetadataStore _inner;
+        private readonly string _orgId;
+        private readonly int _restoreOnOpen;
+        private int _opens;
+
+        public RestoreOnNthOpenStore(IMetadataStore inner, string orgId, int restoreOnOpen)
+        {
+            _inner = inner;
+            _orgId = orgId;
+            _restoreOnOpen = restoreOnOpen;
+        }
+
+        public DbProvider Provider => _inner.Provider;
+
+        public async Task<DbConnection> OpenAsync(CancellationToken ct = default)
+        {
+            _opens++;
+            if (_opens == _restoreOnOpen)
+            {
+                await using var restoreConn = await _inner.OpenAsync(ct);
+                await restoreConn.ExecuteAsync(
+                    "UPDATE orgs SET deleted_at = NULL WHERE id = @id AND deleted_at IS NOT NULL",
+                    new { id = _orgId });
+            }
+            return await _inner.OpenAsync(ct);
+        }
     }
 
     [Fact]
@@ -133,6 +187,80 @@ public sealed class TenantHardDeleteServiceResilienceTests : IClassFixture<InMem
             int deletedCount = await conn.ExecuteScalarAsync<int>(
                 "SELECT COUNT(*) FROM orgs WHERE id = @id", new { id = orgId });
             Assert.Equal(0, deletedCount);
+        }
+    }
+
+    [Fact]
+    public async Task RunPassAsync_PerTenantWorkThrows_DoesNotPropagateAndBatchContinues()
+    {
+        // Two expired tenants; the per-tenant notify throws on the first one processed. Pre-fix the
+        // loop body had no per-iteration catch, so the throw escaped RunPassAsync — leaving the
+        // second tenant undeleted and, in production, faulting the hosted BackgroundService (whole
+        // replica down). Post-fix the throw is caught and the batch finishes: both tenants deleted,
+        // no exception.
+        var clock = TestTime.Frozen(KnownNow);
+        string orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"batch-a-{Guid.NewGuid():N}");
+        string orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"batch-b-{Guid.NewGuid():N}");
+
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "UPDATE orgs SET deleted_at = @dt WHERE id IN (@a, @b)",
+                new { dt = KnownNow.AddDays(-60).ToString("yyyy-MM-ddTHH:mm:ssZ"), a = orgA, b = orgB });
+        }
+
+        var svc = BuildService(_fixture.Store, new InProcessDistributedLock(clock), clock, new ThrowOnFirstNotify());
+
+        var ex = await Record.ExceptionAsync(() => svc.RunPassAsync(CancellationToken.None));
+        Assert.Null(ex);
+
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            int survivors = await conn.ExecuteScalarAsync<int>(
+                "SELECT COUNT(*) FROM orgs WHERE id IN (@a, @b)", new { a = orgA, b = orgB });
+            Assert.Equal(0, survivors);
+        }
+    }
+
+    [Fact]
+    public async Task RunPassAsync_ConcurrentRestoreBetweenListAndDelete_DoesNotHardDeleteRestoredTenant()
+    {
+        // A system_admin restores the tenant (clears deleted_at) after the sweep has listed it as
+        // expired but before the loop's DELETE fires. Pre-fix the DELETE was an unconditional
+        // `DELETE FROM orgs WHERE id = @id`, so the just-restored tenant was permanently hard-
+        // deleted. Post-fix the DELETE re-asserts `deleted_at IS NOT NULL AND deleted_at < @cutoff`,
+        // matches no row, and the tenant is left intact with no hard-delete audit row.
+        var clock = TestTime.Frozen(KnownNow);
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"restore-race-{Guid.NewGuid():N}");
+
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "UPDATE orgs SET deleted_at = @dt WHERE id = @id",
+                new { dt = KnownNow.AddDays(-60).ToString("yyyy-MM-ddTHH:mm:ssZ"), id = orgId });
+        }
+
+        // Restore lands on the second open — after the expired-list snapshot, before the DELETE.
+        var racingStore = new RestoreOnNthOpenStore(_fixture.Store, orgId, restoreOnOpen: 2);
+        var svc = BuildService(racingStore, new InProcessDistributedLock(clock), clock);
+
+        var ex = await Record.ExceptionAsync(() => svc.RunPassAsync(CancellationToken.None));
+        Assert.Null(ex);
+
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            int survivingCount = await conn.ExecuteScalarAsync<int>(
+                "SELECT COUNT(*) FROM orgs WHERE id = @id", new { id = orgId });
+            Assert.Equal(1, survivingCount);
+
+            string? deletedAt = await conn.ExecuteScalarAsync<string?>(
+                "SELECT deleted_at FROM orgs WHERE id = @id", new { id = orgId });
+            Assert.Null(deletedAt);
+
+            int auditRows = await conn.ExecuteScalarAsync<int>(
+                "SELECT COUNT(*) FROM audit_log WHERE org_id = @id AND action = 'tenant.hard_deleted'",
+                new { id = orgId });
+            Assert.Equal(0, auditRows);
         }
     }
 }

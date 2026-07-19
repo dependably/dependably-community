@@ -1,12 +1,20 @@
 namespace Dependably.Infrastructure.Mail;
 
 /// <summary>
-/// Sends org invite emails when SMTP is configured. Implementations are injected into
-/// <c>OrgInvitesController</c>; the null-object path (SMTP_HOST absent) is handled by
-/// the caller, not by a separate NullInviteMailer.
+/// Sends org invite emails through the instance-level SMTP transport. Implementations are
+/// injected into <c>OrgInvitesController</c>; the link-in-response fallback path is handled by
+/// the caller (gated on <see cref="IsAvailableAsync"/>), not by a separate NullInviteMailer.
 /// </summary>
 public interface IInviteMailer
 {
+    /// <summary>
+    /// Resolves whether the instance SMTP transport is currently enabled and configured
+    /// (host/from/credentials present). Called per request rather than cached at startup so a
+    /// config change in Settings → Instance (or the operator apex System Settings in multi mode)
+    /// takes effect immediately.
+    /// </summary>
+    Task<bool> IsAvailableAsync(CancellationToken ct = default);
+
     /// <summary>
     /// Sends an invitation email to <paramref name="toAddress"/>. Throws on delivery
     /// failure so the caller can fall back to returning the link in the response body.

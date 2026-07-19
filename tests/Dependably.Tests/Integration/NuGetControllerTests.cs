@@ -69,6 +69,36 @@ public sealed class NuGetControllerTests : IClassFixture<DependablyFactory>, IAs
         }
     }
 
+    // ── Search: totalHits reports the true match count, not the page size ────
+
+    [Fact]
+    public async Task Search_TotalHits_ReflectsFullMatchCountNotPageSize()
+    {
+        // Push three packages sharing a distinctive prefix, then request a page smaller
+        // than the match count. totalHits must report all three matches (disregarding
+        // skip/take per the NuGet V3 Search Query Service contract), not the single
+        // result the take=1 page actually returns.
+        string prefix = $"TotalHitsPkg{Guid.NewGuid():N}"[..20];
+        await _factory.PushNuGetPackage($"{prefix}A", "1.0.0");
+        await _factory.PushNuGetPackage($"{prefix}B", "1.0.0");
+        await _factory.PushNuGetPackage($"{prefix}C", "1.0.0");
+
+        string token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(token);
+
+        var resp = await client.GetAsync($"/nuget/query?q={prefix}&take=1");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+
+        string json = await resp.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(json);
+
+        int totalHits = doc.RootElement.GetProperty("totalHits").GetInt32();
+        int dataCount = doc.RootElement.GetProperty("data").GetArrayLength();
+
+        Assert.Equal(1, dataCount);
+        Assert.Equal(3, totalHits);
+    }
+
     [Fact]
     public async Task Search_OversizedTakeAndNegativeSkip_AreClampedNot500()
     {

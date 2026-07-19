@@ -117,14 +117,26 @@ public sealed class RpmHeaderParserExtendedTests
     [Fact]
     public void Parse_TruncatedBeforeMainHeader_Throws()
     {
-        // Build lead + sig header that claims a huge sig hsize so mainHeaderStart
-        // lands past the end of the buffer.
+        // Sig header intro fits exactly at EOF (nindex=0, hsize=0), but there are no
+        // trailing bytes left for the main header intro that should follow it.
         byte[] lead = MakeLead();
-        byte[] sig = HeaderIntro(nindex: 0, hsize: 10_000);
-        // No further bytes — mainHeaderStart should land past EOF.
+        byte[] sig = HeaderIntro(nindex: 0, hsize: 0);
         byte[] bytes = Concat(lead, sig);
         var ex = Assert.Throws<RpmParseException>(() => RpmHeaderParser.Parse(bytes));
         Assert.Contains("truncated", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Parse_SignatureHeaderExtendsPastEof_Throws()
+    {
+        // Sig header claims a huge hsize that pushes its own end past the buffer —
+        // caught directly at the signature-header bound check rather than surfacing
+        // downstream as a misleading "truncated before main header".
+        byte[] lead = MakeLead();
+        byte[] sig = HeaderIntro(nindex: 0, hsize: 10_000);
+        byte[] bytes = Concat(lead, sig);
+        var ex = Assert.Throws<RpmParseException>(() => RpmHeaderParser.Parse(bytes));
+        Assert.Contains("extends past eof", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -687,6 +699,130 @@ public sealed class RpmHeaderParserExtendedTests
         Assert.True(
             ex.Message.Contains("exceeds", StringComparison.OrdinalIgnoreCase),
             $"Expected 'exceeds' in message but got: {ex.Message}");
+    }
+
+    /// <summary>
+    /// A crafted string-array tag whose Count field is negative (e.g. an attacker-set
+    /// 0xFFFFFFFF, which reads back as -1). Because a negative count is never ">" the
+    /// positive maxPossibleStrings bound, the oversized-count guard alone lets it through
+    /// to `new string[count]`, which throws an unhandled OverflowException instead of the
+    /// intended validated RpmParseException.
+    /// </summary>
+    [Fact]
+    public void ReadStringArray_NegativeCount_ThrowsRpmParseException()
+    {
+        var tags = MandatoryTags();
+        tags.Add(new TagWrite(1049, Type: 8, Count: -1, Bytes: NullTerm("glibc")));
+
+        byte[] bytes = BuildRpmWithMainHeader(tags);
+        var ex = Assert.Throws<RpmParseException>(() => RpmHeaderParser.Parse(bytes));
+        Assert.Contains("negative", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Mixed partial-failure scenario mirroring <see cref="Parse_PartiallyMalformed_MixedValidAndOversizedArrays_Throws"/>:
+    /// one dependency array (requires) is entirely well-formed while the sibling array
+    /// (conflicts) carries a negative Count. The parser must reject the whole file rather
+    /// than silently accepting the valid array and crashing (or worse, succeeding) on the
+    /// malformed one.
+    /// </summary>
+    [Fact]
+    public void Parse_PartiallyMalformed_MixedValidAndNegativeCountArrays_Throws()
+    {
+        var tags = MandatoryTags();
+        // Requires: 1 valid name + 1 valid flag + 1 valid version — all well-formed.
+        tags.Add(new TagWrite(1049, Type: 8, Count: 1, Bytes: NullTerm("glibc")));
+        tags.Add(new TagWrite(1048, Type: 4, Count: 1, Bytes: BeInt32(0x08)));
+        tags.Add(new TagWrite(1050, Type: 8, Count: 1, Bytes: NullTerm("2.34")));
+        // Conflicts: negative Count.
+        tags.Add(new TagWrite(1054, Type: 8, Count: -1, Bytes: NullTerm("bad-pkg")));
+
+        byte[] bytes = BuildRpmWithMainHeader(tags);
+        var ex = Assert.Throws<RpmParseException>(() => RpmHeaderParser.Parse(bytes));
+        Assert.Contains("negative", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    // ── Overflow / offset-bounds regression tests ─────────────────────────────
+
+    /// <summary>
+    /// A crafted signature header intro whose Nindex is large enough that
+    /// Nindex * IndexEntrySize overflows int32 (wraps negative), which previously drove
+    /// sigEnd/mainHeaderStart negative and slipped past the "past EOF" guard. The parser
+    /// must reject this as malformed input instead of crashing with an unhandled
+    /// IndexOutOfRangeException while indexing the wrapped-negative offset.
+    /// </summary>
+    [Fact]
+    public void Parse_SignatureNindexOverflowsInt32Multiplication_ThrowsRpmParseException()
+    {
+        byte[] lead = MakeLead();
+        // 200,000,000 * 16 (IndexEntrySize) = 3,200,000,000, which overflows int32.
+        byte[] sig = HeaderIntro(nindex: 200_000_000, hsize: 0);
+        byte[] bytes = Concat(lead, sig);
+
+        var ex = Record.Exception(() => RpmHeaderParser.Parse(bytes));
+        Assert.IsType<RpmParseException>(ex);
+    }
+
+    /// <summary>
+    /// Same overflow shape but exercised via DetectScriptlets, which duplicates the
+    /// signature-header-skip arithmetic.
+    /// </summary>
+    [Fact]
+    public void DetectScriptlets_SignatureNindexOverflowsInt32Multiplication_ThrowsRpmParseException()
+    {
+        byte[] lead = MakeLead();
+        byte[] sig = HeaderIntro(nindex: 200_000_000, hsize: 0);
+        byte[] bytes = Concat(lead, sig);
+
+        var ex = Record.Exception(() => RpmHeaderParser.DetectScriptlets(bytes));
+        Assert.IsType<RpmParseException>(ex);
+    }
+
+    /// <summary>
+    /// A string array tag whose Count claims one more element than the store actually
+    /// holds NUL-terminated strings for: the last real string has no trailing NUL, so the
+    /// walk consumes through EOF and the next iteration starts past the buffer. Previously
+    /// this reached <c>Encoding.UTF8.GetString</c> with a start index past <c>data.Length</c>
+    /// and threw an unhandled <see cref="ArgumentOutOfRangeException"/>; it must now surface
+    /// as <see cref="RpmParseException"/>.
+    /// </summary>
+    [Fact]
+    public void ReadStringArray_MissingTerminatorOnLastRealString_ThrowsRpmParseException()
+    {
+        var tags = MandatoryTags();
+        // Two real strings ("first", "second") but only "second" is missing its NUL, and
+        // Count claims 3 entries — the third read starts past the end of the buffer.
+        byte[] noTrailingNul = Concat(NullTerm("first"), Encoding.UTF8.GetBytes("second"));
+        tags.Add(new TagWrite(1049, Type: 8, Count: 3, Bytes: noTrailingNul)); // RPMTAG_REQUIRENAME
+
+        byte[] bytes = BuildRpmWithMainHeader(tags);
+        var ex = Record.Exception(() => RpmHeaderParser.Parse(bytes));
+        Assert.IsType<RpmParseException>(ex);
+    }
+
+    /// <summary>
+    /// A mandatory STRING tag (RPMTAG_NAME) whose index entry Offset is corrupted to point
+    /// far past the end of the data store. Previously <c>ReadNullTerminated</c> dereferenced
+    /// <c>storeStart + entry.Offset</c> unchecked, which reached
+    /// <c>Encoding.UTF8.GetString</c> with an out-of-range start index. The parser must now
+    /// reject it as malformed input.
+    /// </summary>
+    [Fact]
+    public void Parse_TagOffsetPointsPastEof_ThrowsRpmParseException()
+    {
+        var tags = MandatoryTags();
+        byte[] bytes = BuildRpmWithMainHeader(tags);
+
+        // MandatoryTags()[0] is RPMTAG_NAME (1000) — the first index entry written by
+        // BuildMainHeader. Lead(96) + empty sig intro(16, no padding needed since 112 is
+        // already 8-byte aligned) + main intro(16) = index start at byte 128; the Offset
+        // field sits 8 bytes into each 16-byte index entry.
+        const int IndexStart = 96 + 16 + 16;
+        const int OffsetFieldPos = IndexStart + 8;
+        BinaryPrimitives.WriteInt32BigEndian(bytes.AsSpan(OffsetFieldPos, 4), int.MaxValue);
+
+        var ex = Record.Exception(() => RpmHeaderParser.Parse(bytes));
+        Assert.IsType<RpmParseException>(ex);
     }
 
     // ── Builder helpers ────────────────────────────────────────────────────────

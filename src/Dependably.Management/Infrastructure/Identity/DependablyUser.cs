@@ -24,4 +24,15 @@ internal sealed class DependablyUser
     public string? SecurityStamp { get; set; }
     /// <summary>Monotonic session-invalidation counter embedded as the <c>tver</c> JWT claim.</summary>
     public long TokenVersion { get; set; } = 1;
+
+    /// <summary>
+    /// Snapshot of the MFA columns as last read from (or written to) the database. The store
+    /// stamps these on load and refreshes them after a successful write; UpdateAsync uses them
+    /// as an optimistic-concurrency guard so a stale in-memory snapshot cannot clobber a value
+    /// another concurrent MFA operation already committed.
+    /// </summary>
+    public bool PersistedTwoFactorEnabled { get; set; }
+    public string? PersistedAuthenticatorKey { get; set; }
+    public string? PersistedRecoveryCodes { get; set; }
+    public string? PersistedSecurityStamp { get; set; }
 }

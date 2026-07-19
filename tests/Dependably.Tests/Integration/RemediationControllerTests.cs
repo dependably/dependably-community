@@ -13,14 +13,14 @@ public sealed class RemediationControllerTests : IClassFixture<DependablyFactory
     public Task DisposeAsync() => Task.CompletedTask;
 
     [Fact]
-    public async Task Index_Anonymous_Returns200_WithSixSkills()
+    public async Task Index_Anonymous_Returns200_WithNineSkills()
     {
         using var c = _factory.CreateClient();
         var resp = await c.GetAsync("/api/v1/remediation/skills");
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var doc = await JsonDocument.ParseAsync(await resp.Content.ReadAsStreamAsync());
-        Assert.Equal(6, doc.RootElement.GetArrayLength());
+        Assert.Equal(9, doc.RootElement.GetArrayLength());
         var ids = doc.RootElement.EnumerateArray()
             .Select(e => e.GetProperty("id").GetString())
             .ToHashSet();
@@ -30,6 +30,9 @@ public sealed class RemediationControllerTests : IClassFixture<DependablyFactory
         Assert.Contains("fix-path-traversal", ids);
         Assert.Contains("fix-unsafe-deserialization", ids);
         Assert.Contains("fix-ssrf", ids);
+        Assert.Contains("fix-broken-access-control", ids);
+        Assert.Contains("fix-weak-cryptography", ids);
+        Assert.Contains("fix-authentication-failures", ids);
     }
 
     [Fact]

@@ -67,6 +67,7 @@ public sealed class UserService
         string userId, string currentPassword, string newPassword, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+        // xtenant: keyed by users PK; userId is the authenticated session's own subject claim.
         string? hash = await conn.ExecuteScalarAsync<string?>(
             "SELECT password_hash FROM users WHERE id = @id",
             new { id = userId });
@@ -90,15 +91,18 @@ public sealed class UserService
         // consistent with the credential change; token_version remains the canonical per-request
         // session-invalidation signal.
         string stamp = Guid.NewGuid().ToString();
+        // xtenant: self-service credential change keyed by the session subject's users PK.
         await conn.ExecuteAsync(
             "UPDATE users SET password_hash = @hash, must_change_password = 0, token_version = token_version + 1, security_stamp = @stamp WHERE id = @id",
             new { hash = newHash, stamp, id = userId });
+        // xtenant: reads back the same session-subject users PK just written.
         long newVersion = await conn.ExecuteScalarAsync<long>(
             "SELECT token_version FROM users WHERE id = @id", new { id = userId });
 
         // Revoke (delete) the user's API tokens — a rotated credential must cut off
         // everything minted under the old one. user_id is FK-bound to users.id, which is
         // already tenant-scoped.
+        // xtenant: user_tokens.user_id is FK-bound to the session subject's users row.
         int revokedApiTokens = await conn.ExecuteAsync(
             "DELETE FROM user_tokens WHERE user_id = @id", new { id = userId });
 
@@ -120,6 +124,7 @@ public sealed class UserService
     public async Task<bool> IsPasswordChangeRequiredAsync(string userId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+        // xtenant: keyed by users PK from the request principal's subject claim.
         long? flag = await conn.ExecuteScalarAsync<long?>(
             "SELECT must_change_password FROM users WHERE id = @id", new { id = userId });
         return flag == 1;
@@ -133,9 +138,23 @@ public sealed class UserService
     public async Task<bool> IsMfaEnabledAsync(string userId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+        // xtenant: keyed by users PK from the request principal's subject claim.
         long? flag = await conn.ExecuteScalarAsync<long?>(
             "SELECT mfa_enabled FROM users WHERE id = @id", new { id = userId });
         return flag == 1;
+    }
+
+    /// <summary>
+    /// Resolves the authenticated user's own email so a self-service password change can
+    /// feed it into <see cref="Dependably.Security.PasswordPolicy"/>'s context-dictionary
+    /// check. Missing row → null (caller evaluates the policy with no email context).
+    /// </summary>
+    public async Task<string?> GetEmailAsync(string userId, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: keyed by users PK from the request principal's subject claim.
+        return await conn.ExecuteScalarAsync<string?>(
+            "SELECT email FROM users WHERE id = @id", new { id = userId });
     }
 
     /// <summary>
@@ -145,6 +164,7 @@ public sealed class UserService
     public async Task<UserContext?> GetUserContextAsync(string userId, string? orgId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+        // xtenant: "me" projection keyed by the session subject's own users PK.
         var row = await conn.QuerySingleOrDefaultAsync<UserRow>(
             "SELECT must_change_password AS MustChangePassword, language AS Language, mfa_enabled AS MfaEnabled FROM users WHERE id = @id",
             new { id = userId });
@@ -173,6 +193,7 @@ public sealed class UserService
     public async Task UpdateLanguageAsync(string userId, string language, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+        // xtenant: self-service preference write keyed by the session subject's users PK.
         await conn.ExecuteAsync(
             "UPDATE users SET language = @lang WHERE id = @id",
             new { lang = language, id = userId });
@@ -192,12 +213,15 @@ public sealed class UserService
         // consistent with the credential change; token_version remains the canonical per-request
         // session-invalidation signal.
         string stamp = Guid.NewGuid().ToString();
+        // xtenant: session-invalidation bump keyed by the session subject's own users PK.
         await conn.ExecuteAsync(
             "UPDATE users SET token_version = token_version + 1, security_stamp = @stamp WHERE id = @id",
             new { stamp, id = userId });
+        // xtenant: reads back the same session-subject users PK just written.
         long newVersion = await conn.ExecuteScalarAsync<long>(
             "SELECT token_version FROM users WHERE id = @id", new { id = userId });
 
+        // xtenant: user_tokens.user_id is FK-bound to the session subject's users row.
         // user_id is FK-bound to users.id, which is already tenant-scoped.
         await conn.ExecuteAsync(
             "DELETE FROM user_tokens WHERE user_id = @id", new { id = userId });

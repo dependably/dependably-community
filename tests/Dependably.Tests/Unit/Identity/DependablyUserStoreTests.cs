@@ -6,6 +6,7 @@ using Dependably.Infrastructure;
 using Dependably.Infrastructure.Identity;
 using Dependably.Tests.Infrastructure;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
 
 namespace Dependably.Tests.Unit.Identity;
@@ -21,7 +22,10 @@ public sealed class DependablyUserStoreTests : IAsyncLifetime
 {
     private readonly TestMetadataStore _db = new();
     private readonly MfaSecretProtector _protector = new(RandomNumberGenerator.GetBytes(32));
-    private readonly RecoveryCodeHasher _recoveryHasher = new(RandomNumberGenerator.GetBytes(32));
+    private readonly RecoveryCodeHasher _recoveryHasher = new(
+        RandomNumberGenerator.GetBytes(32),
+        acceptLegacyCodes: false,
+        NullLogger<RecoveryCodeHasher>.Instance);
 
     public async Task InitializeAsync()
     {
@@ -45,7 +49,7 @@ public sealed class DependablyUserStoreTests : IAsyncLifetime
         await _db.DisposeAsync();
     }
 
-    private DependablyUserStore StoreForTenant(string tenantId)
+    private DependablyUserStore StoreForTenant(string tenantId, IRecoveryCodeHasher? recoveryHasher = null)
     {
         var httpContext = new DefaultHttpContext();
         httpContext.Items[TenantContext.HttpItemsKey] =
@@ -54,7 +58,7 @@ public sealed class DependablyUserStoreTests : IAsyncLifetime
         var accessor = Substitute.For<IHttpContextAccessor>();
         accessor.HttpContext.Returns(httpContext);
 
-        return new DependablyUserStore(_db, accessor, _protector, _recoveryHasher);
+        return new DependablyUserStore(_db, accessor, _protector, recoveryHasher ?? _recoveryHasher);
     }
 
     // ── BOLA isolation ────────────────────────────────────────────────────────
@@ -197,25 +201,51 @@ public sealed class DependablyUserStoreTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task RedeemCodeAsync_LegacyBareSha256Code_StillRedeems()
+    public async Task RedeemCodeAsync_LegacyBareSha256Code_RejectedWhenLegacyAcceptanceOff()
     {
         var store = StoreForTenant("tenantA");
         var user = new DependablyUser { Id = "uA", TenantId = "tenantA", Email = "alice@example.com" };
         const string legacyCode = "LEGACY-CODE-99";
+        await SeedLegacyCodeAsync(store, user, legacyCode);
 
-        // Simulate a pre-upgrade stored code: unsalted bare SHA-256 hex written directly.
-        string legacyHash = Convert.ToHexString(
-            SHA256.HashData(Encoding.UTF8.GetBytes(legacyCode))).ToLowerInvariant();
-        user.RecoveryCodes = JsonSerializer.Serialize(new List<string> { legacyHash });
-        await store.UpdateAsync(user, CancellationToken.None);
+        // The weak stored form is not a valid second factor on a default instance.
+        Assert.False(await store.RedeemCodeAsync(user, legacyCode, CancellationToken.None));
 
-        // The transition-aware verifier accepts the legacy format and consumes it.
+        // The rejected code is left in place rather than silently consumed, so it still
+        // redeems if the operator opens a migration window.
+        Assert.Equal(1, await store.CountCodesAsync(user, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task RedeemCodeAsync_LegacyBareSha256Code_RedeemsWhenLegacyAcceptanceOn()
+    {
+        var legacyHasher = new RecoveryCodeHasher(
+            RandomNumberGenerator.GetBytes(32),
+            acceptLegacyCodes: true,
+            NullLogger<RecoveryCodeHasher>.Instance);
+        var store = StoreForTenant("tenantA", legacyHasher);
+        var user = new DependablyUser { Id = "uA", TenantId = "tenantA", Email = "alice@example.com" };
+        const string legacyCode = "LEGACY-CODE-99";
+        await SeedLegacyCodeAsync(store, user, legacyCode);
+
         bool redeemed = await store.RedeemCodeAsync(user, legacyCode, CancellationToken.None);
         Assert.True(redeemed);
         Assert.Equal(0, await store.CountCodesAsync(user, CancellationToken.None));
 
         // One-time use: a second attempt fails.
         Assert.False(await store.RedeemCodeAsync(user, legacyCode, CancellationToken.None));
+    }
+
+    /// <summary>
+    /// Stores <paramref name="code"/> the way a pre-upgrade release did: unsalted bare
+    /// SHA-256 hex, written straight into the recovery-code column.
+    /// </summary>
+    private static async Task SeedLegacyCodeAsync(DependablyUserStore store, DependablyUser user, string code)
+    {
+        string legacyHash = Convert.ToHexString(
+            SHA256.HashData(Encoding.UTF8.GetBytes(code))).ToLowerInvariant();
+        user.RecoveryCodes = JsonSerializer.Serialize(new List<string> { legacyHash });
+        await store.UpdateAsync(user, CancellationToken.None);
     }
 
     [Fact]
@@ -306,5 +336,71 @@ public sealed class DependablyUserStoreTests : IAsyncLifetime
         Assert.True(await store.RedeemCodeAsync(user, "CODE1", CancellationToken.None));
         Assert.True(await store.RedeemCodeAsync(user, "CODE3", CancellationToken.None));
         Assert.Equal(0, await store.CountCodesAsync(user, CancellationToken.None));
+    }
+
+    // ── optimistic concurrency: no stale snapshot resurrects a consumed code ──────
+
+    /// <summary>
+    /// Persists three recovery codes, then loads two independent snapshots of the same row.
+    /// One redeems, the other tries to redeem a different code from its now-stale snapshot.
+    /// The column-scoped guard must reject the stale write so the already-consumed code is
+    /// never restored to the list.
+    /// </summary>
+    [Fact]
+    public async Task RedeemCodeAsync_ConcurrentRedeemFromStaleSnapshot_DoesNotResurrectConsumedCode()
+    {
+        var store = StoreForTenant("tenantA");
+        await SeedPersistedCodesAsync(store, ["AAA", "BBB", "CCC"]);
+
+        var requestA = await store.FindByIdAsync("uA", CancellationToken.None);
+        var requestB = await store.FindByIdAsync("uA", CancellationToken.None);
+
+        // Request A redeems AAA first and commits [BBB, CCC].
+        Assert.True(await store.RedeemCodeAsync(requestA!, "AAA", CancellationToken.None));
+
+        // Request B, holding the pre-redemption snapshot, redeems a different code. Its
+        // whole-list write would resurrect AAA; the guard must make it lose the race.
+        Assert.False(await store.RedeemCodeAsync(requestB!, "BBB", CancellationToken.None));
+
+        var fresh = await store.FindByIdAsync("uA", CancellationToken.None);
+        Assert.Equal(2, await store.CountCodesAsync(fresh!, CancellationToken.None));
+        Assert.False(await store.RedeemCodeAsync(fresh!, "AAA", CancellationToken.None));
+    }
+
+    /// <summary>
+    /// The finding's exact scenario: request A logs in via a recovery code (redeems and commits),
+    /// while a concurrent authenticated Settings session (request B) disables MFA from a snapshot
+    /// taken before A's write. B's whole-row UPDATE must be rejected by optimistic concurrency
+    /// rather than writing its stale recovery-code list — which would resurrect the consumed code
+    /// and clobber A's state.
+    /// </summary>
+    [Fact]
+    public async Task UpdateAsync_StaleSnapshotAfterConcurrentRedeem_FailsAndPreservesRedemption()
+    {
+        var store = StoreForTenant("tenantA");
+        await SeedPersistedCodesAsync(store, ["AAA", "BBB", "CCC"]);
+
+        var login = await store.FindByIdAsync("uA", CancellationToken.None);
+        var settings = await store.FindByIdAsync("uA", CancellationToken.None);
+
+        Assert.True(await store.RedeemCodeAsync(login!, "AAA", CancellationToken.None));
+
+        await store.SetTwoFactorEnabledAsync(settings!, false, CancellationToken.None);
+        var result = await store.UpdateAsync(settings!, CancellationToken.None);
+        Assert.False(result.Succeeded);
+
+        var fresh = await store.FindByIdAsync("uA", CancellationToken.None);
+        Assert.True(fresh!.TwoFactorEnabled);
+        Assert.Equal(2, await store.CountCodesAsync(fresh, CancellationToken.None));
+        Assert.False(await store.RedeemCodeAsync(fresh, "AAA", CancellationToken.None));
+    }
+
+    /// <summary>Persists a hashed recovery-code list and enables MFA on the seeded uA row.</summary>
+    private static async Task SeedPersistedCodesAsync(DependablyUserStore store, string[] codes)
+    {
+        var seed = await store.FindByIdAsync("uA", CancellationToken.None);
+        await store.ReplaceCodesAsync(seed!, codes, CancellationToken.None);
+        await store.SetTwoFactorEnabledAsync(seed!, true, CancellationToken.None);
+        Assert.True((await store.UpdateAsync(seed!, CancellationToken.None)).Succeeded);
     }
 }

@@ -8,9 +8,9 @@ namespace Dependably.Tests.Unit.Infrastructure;
 /// <summary>
 /// Extends <see cref="PackageRepositoryTests"/> with branches the original file did not reach:
 /// FindVersionByBlobKeySuffix (hit/miss + VulnCheckedAt non-null), GetVersionAsync (hit/miss),
-/// TouchLastUsedAsync, StreamAllBlobKeysAsync (yield + cancellation), GetTotalSizeBytesAsync
-/// (zero-row COALESCE fallback + populated), DeleteVersionAsync, SetManualBlockStateAsync, and
-/// DeleteProxyVersionsForNameAsync's empty branch (no proxy rows → no DELETE issued).
+/// TouchLastUsedAsync, StreamAllBlobKeysAsync (yield + cancellation), DeleteVersionAsync,
+/// SetManualBlockStateAsync, and DeleteProxyVersionsForNameAsync's empty branch (no proxy rows
+/// → no DELETE issued).
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class PackageRepositoryExtendedTests : IClassFixture<InMemoryDbFixture>
@@ -223,34 +223,6 @@ public sealed class PackageRepositoryExtendedTests : IClassFixture<InMemoryDbFix
         Assert.Null((await _repo.GetVersionByIdAsync(orgId, verId))!.ManualBlockState);
     }
 
-    // ── GetTotalSizeBytesAsync ───────────────────────────────────────────────
-
-    [Fact]
-    public async Task GetTotalSizeBytesAsync_NoRows_ReturnsZero()
-    {
-        // Org with zero packages exercises the COALESCE/?? 0L fallback.
-        string emptyOrg = await OrgSeeder.InsertAsync(_fixture.Store, $"empty-{Guid.NewGuid():N}");
-        Assert.Equal(0L, await _repo.GetTotalSizeBytesAsync(emptyOrg));
-    }
-
-    [Fact]
-    public async Task GetTotalSizeBytesAsync_SumsAcrossOrgVersionsOnly()
-    {
-        string orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"orgA-{Guid.NewGuid():N}");
-        string orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"orgB-{Guid.NewGuid():N}");
-        string pkgA = await PackageSeeder.InsertAsync(_fixture.Store, orgA, "npm", "acme");
-        string pkgB = await PackageSeeder.InsertAsync(_fixture.Store, orgB, "npm", "acme");
-        await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgA, "1.0.0", Purl("1.0.0"),
-            blobKey: $"a1-{Guid.NewGuid():N}", sizeBytes: 100);
-        await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgA, "2.0.0", Purl("2.0.0"),
-            blobKey: $"a2-{Guid.NewGuid():N}", sizeBytes: 250);
-        // Other-org bytes must not be summed.
-        await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgB, "1.0.0", Purl("1.0.0"),
-            blobKey: $"b1-{Guid.NewGuid():N}", sizeBytes: 9999);
-
-        Assert.Equal(350L, await _repo.GetTotalSizeBytesAsync(orgA));
-    }
-
     // ── StreamAllBlobKeysAsync ───────────────────────────────────────────────
 
     [Fact]
@@ -271,6 +243,61 @@ public sealed class PackageRepositoryExtendedTests : IClassFixture<InMemoryDbFix
 
         Assert.Contains(k1, collected);
         Assert.Contains(k2, collected);
+    }
+
+    [Fact]
+    public async Task StreamAllBlobKeysAsync_UnionsEverySecondaryFileTable()
+    {
+        // The orphan reconciler deletes every hosted blob NOT in this stream, so each table that
+        // can hold a blob key has to be an arm of the union. A key reachable only from
+        // maven_version_files / package_version_files / nuget_symbol_index — the Maven .pom, the
+        // PyPI sdist beside a wheel, the .snupkg — must still come back.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "maven", "acme");
+        string primaryKey = $"union-{Guid.NewGuid():N}/primary";
+        string versionId = await PackageSeeder.InsertVersionAsync(
+            _fixture.Store, pkgId, "3.0.0", Purl("3.0.0"), blobKey: primaryKey);
+
+        string mavenKey = $"union-{Guid.NewGuid():N}/widget.pom";
+        string pypiKey = $"union-{Guid.NewGuid():N}/widget.tar.gz";
+        string snupkgKey = $"union-{Guid.NewGuid():N}/widget.snupkg";
+
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO maven_version_files " +
+                "(id, package_version_id, filename, extension, blob_key, size_bytes, owner_kind) " +
+                "VALUES (@id, @pvId, 'widget.pom', 'pom', @k, 2, 'package_version')",
+                new { id = Guid.NewGuid().ToString("N"), pvId = versionId, k = mavenKey });
+            await conn.ExecuteAsync(
+                "INSERT INTO package_version_files " +
+                "(id, package_version_id, org_id, filename, blob_key, size_bytes) " +
+                "VALUES (@id, @pvId, @orgId, 'widget.tar.gz', @k, 3)",
+                new { id = Guid.NewGuid().ToString("N"), pvId = versionId, orgId, k = pypiKey });
+            await conn.ExecuteAsync(
+                "INSERT INTO nuget_symbol_index " +
+                "(id, org_id, package_version_id, pdb_filename, ssqp_key, snupkg_blob_key, entry_path) " +
+                "VALUES (@id, @orgId, @pvId, 'widget.pdb', @ssqp, @k, 'lib/widget.pdb')",
+                new
+                {
+                    id = Guid.NewGuid().ToString("N"),
+                    orgId,
+                    pvId = versionId,
+                    ssqp = Guid.NewGuid().ToString("N") + "ffffffff",
+                    k = snupkgKey,
+                });
+        }
+
+        var collected = new List<string>();
+        await foreach (string key in _repo.StreamAllBlobKeysAsync())
+        {
+            collected.Add(key);
+        }
+
+        Assert.Contains(primaryKey, collected);
+        Assert.Contains(mavenKey, collected);
+        Assert.Contains(pypiKey, collected);
+        Assert.Contains(snupkgKey, collected);
     }
 
     [Fact]

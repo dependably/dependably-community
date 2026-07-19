@@ -35,6 +35,8 @@ public sealed class LookupController : OrgScopedControllerBase
     }
 
     /// <summary>GET /api/v1/lookup?ecosystem=&amp;name=&amp;version= — tenant-scoped, read-only package verdict.</summary>
+    // Read-only: accepts a PAT/service token carrying read:packages.
+    [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [HttpGet("api/v1/lookup")]
     public async Task<IActionResult> Get(
         [FromQuery] string? ecosystem,
@@ -60,7 +62,11 @@ public sealed class LookupController : OrgScopedControllerBase
                 outcome.Field ?? "name", InvalidInputResourceKey(outcome.Reason)),
             PackageLookupStatus.VersionRequired => _problems.ValidationErrorActionKey(
                 "version", "error.lookup.versionRequired", outcome.Reason ?? ""),
-            PackageLookupStatus.UpstreamNotFound => _problems.NotFoundActionKey("error.lookup.packageNotFound"),
+            // A definitively-absent package is an ANSWER to the lookup query, not a failed
+            // request — a mistyped name is the common path here. Served 200 with found=false so
+            // the caller renders a "no such package" verdict rather than an error, and so the
+            // browser does not log every typo as a failed request in its console.
+            PackageLookupStatus.UpstreamNotFound => Ok(outcome.NotFound),
             PackageLookupStatus.UpstreamUnavailable => _problems.ServiceUnavailableActionKey(
                 "error.lookup.upstreamUnavailable", outcome.Reason ?? ""),
             _ => _problems.ServiceUnavailableActionKey("error.lookup.upstreamUnavailable", outcome.Reason ?? ""),

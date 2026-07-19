@@ -203,6 +203,12 @@ describe('endpoint contract', () => {
     ['blockVersion', () => api.blockVersion('npm', 'pkg', '1.0.0'), 'POST', '/api/v1/packages/npm/pkg/1.0.0/block'],
     ['unblockVersion', () => api.unblockVersion('npm', 'pkg', '1.0.0'), 'POST', '/api/v1/packages/npm/pkg/1.0.0/unblock'],
     ['getStats', () => api.getStats(), 'GET', '/api/v1/stats'],
+    ['getInstanceEmailConfig', () => api.getInstanceEmailConfig(), 'GET', '/api/v1/instance/email-config'],
+    ['updateInstanceEmailConfig', () => api.updateInstanceEmailConfig({}), 'PUT', '/api/v1/instance/email-config'],
+    ['testInstanceEmail', () => api.testInstanceEmail(), 'POST', '/api/v1/instance/email-config/test'],
+    ['updateAlertSettings', () => api.updateAlertSettings({ emailEnabled: true }), 'PUT', '/api/v1/alert-settings'],
+    ['updateAlertEmail', () => api.updateAlertEmail({ emailInheritInstance: true }), 'PUT', '/api/v1/alert-settings/email'],
+    ['testAlertEmail', () => api.testAlertEmail(), 'POST', '/api/v1/alert-settings/email/test'],
   ]
 
   it.each(cases)('%s — %s %s', async (_label, invoke, expectedMethod, expectedPathFragment) => {
@@ -234,6 +240,9 @@ describe('systemApi contract', () => {
     ['issuePasswordReset', (s) => s.issuePasswordReset('a@b', 'acme'), 'POST', '/api/v1/system/users/a%40b/password-reset'],
     ['changePassword', (s) => s.changePassword('a', 'b'), 'POST', '/api/v1/system/me/password'],
     ['updateLanguage', (s) => s.updateLanguage('fr'), 'POST', '/api/v1/system/me/language'],
+    ['getEmailConfig', (s) => s.getEmailConfig(), 'GET', '/api/v1/system/email-config'],
+    ['updateEmailConfig', (s) => s.updateEmailConfig({}), 'PUT', '/api/v1/system/email-config'],
+    ['testEmailConfig', (s) => s.testEmailConfig(), 'POST', '/api/v1/system/email-config/test'],
   ]
 
   it.each(systemCases)('%s — %s %s', async (_label, invoke, expectedMethod, expectedPathFragment) => {

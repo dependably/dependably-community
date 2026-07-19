@@ -13,7 +13,11 @@ namespace Dependably.Tests.Unit;
 /// blocked target. The inner call count proves the handler intercepts before the second
 /// TCP hop.
 /// </summary>
+// Drives the real SsrfAwareRedirectHandler, which emits to the process-wide static
+// dependably.security.upstream_url_blocks counter that UpstreamUrlBlocksEmissionTests asserts
+// exact counts against. See MeterSensitiveCollection.
 [Trait("Category", "Security")]
+[Collection("MeterSensitive")]
 public class SsrfAwareRedirectHandlerTests
 {
     // ── blocking redirect to cloud metadata ──────────────────────────────────────
@@ -173,6 +177,104 @@ public class SsrfAwareRedirectHandlerTests
         // Second (redirect) call must not carry the Authorization header
         var secondRequest = inner.Requests[1];
         Assert.False(secondRequest.Headers.Contains("Authorization"));
+    }
+
+    /// <summary>
+    /// OCI upstreams configured with Basic auth (username:password) produce an
+    /// <c>Authorization: Basic …</c> header. Verifies that the Basic-format credential
+    /// is not forwarded to the redirect target, preventing registry credentials from
+    /// reaching an attacker-controlled host when the upstream returns a 302.
+    /// </summary>
+    [Fact]
+    public async Task SendAsync_RedirectWithBasicAuth_DoesNotForwardAuthorizationHeader()
+    {
+        var validator = new StubValidator();
+        var inner = new StubInnerHandler();
+        var client = new HttpClient(new SsrfAwareRedirectHandler(validator) { InnerHandler = inner });
+
+        inner.Responses.Enqueue(new HttpResponseMessage(HttpStatusCode.Found)
+        {
+            Headers = { Location = new Uri("https://cdn.example.com/oci-blob") }
+        });
+        inner.Responses.Enqueue(new HttpResponseMessage(HttpStatusCode.OK));
+
+        // OCI Basic auth format: "Basic base64(username:password)"
+        string basicCred = "Basic " + Convert.ToBase64String(
+            System.Text.Encoding.UTF8.GetBytes("registry-user:registry-password"));
+
+        var request = new HttpRequestMessage(HttpMethod.Get, "http://registry.upstream.test/v2/repo/blobs/sha256:abc");
+        request.Headers.TryAddWithoutValidation("Authorization", basicCred);
+        await client.SendAsync(request);
+
+        // The redirect hop must not carry the registry credential.
+        var redirectRequest = inner.Requests[1];
+        Assert.False(redirectRequest.Headers.Contains("Authorization"));
+    }
+
+    /// <summary>
+    /// Authorization header stripping is case-insensitive. Verifies that a header
+    /// added with the lowercase spelling is also excluded from the redirect hop,
+    /// matching the OrdinalIgnoreCase comparison in BuildRedirectRequest.
+    /// </summary>
+    [Fact]
+    public async Task SendAsync_RedirectWithLowercaseAuthorizationHeader_DoesNotForwardIt()
+    {
+        var validator = new StubValidator();
+        var inner = new StubInnerHandler();
+        var client = new HttpClient(new SsrfAwareRedirectHandler(validator) { InnerHandler = inner });
+
+        inner.Responses.Enqueue(new HttpResponseMessage(HttpStatusCode.Found)
+        {
+            Headers = { Location = new Uri("https://cdn.example.com/pkg") }
+        });
+        inner.Responses.Enqueue(new HttpResponseMessage(HttpStatusCode.OK));
+
+        var request = new HttpRequestMessage(HttpMethod.Get, "http://upstream.test/pkg");
+        // Use lowercase spelling to exercise the case-insensitive exclusion path.
+        request.Headers.TryAddWithoutValidation("authorization", "Bearer lowercase-token");
+        await client.SendAsync(request);
+
+        var redirectRequest = inner.Requests[1];
+        // .NET normalises header names, so check both casings.
+        Assert.False(
+            redirectRequest.Headers.Contains("Authorization") ||
+            redirectRequest.Headers.Contains("authorization"));
+    }
+
+    /// <summary>
+    /// Multi-hop redirect: Authorization is absent on every hop, not just the first.
+    /// Verifies that the stripping applies per-hop so a chain of redirects never
+    /// re-acquires the credential from a prior iteration's request object.
+    /// </summary>
+    [Fact]
+    public async Task SendAsync_MultiHopRedirect_AuthorizationAbsentOnEveryHop()
+    {
+        var validator = new StubValidator();
+        var inner = new StubInnerHandler();
+        var client = new HttpClient(new SsrfAwareRedirectHandler(validator) { InnerHandler = inner });
+
+        // Two redirect hops then a final 200.
+        inner.Responses.Enqueue(new HttpResponseMessage(HttpStatusCode.Found)
+        {
+            Headers = { Location = new Uri("https://cdn1.example.com/hop1") }
+        });
+        inner.Responses.Enqueue(new HttpResponseMessage(HttpStatusCode.Found)
+        {
+            Headers = { Location = new Uri("https://cdn2.example.com/hop2") }
+        });
+        inner.Responses.Enqueue(new HttpResponseMessage(HttpStatusCode.OK));
+
+        var request = new HttpRequestMessage(HttpMethod.Get, "http://upstream.test/start");
+        request.Headers.TryAddWithoutValidation("Authorization", "Bearer multi-hop-secret");
+        await client.SendAsync(request);
+
+        Assert.Equal(3, inner.CallCount);
+
+        // Hop 1 and hop 2 must both omit the Authorization header.
+        Assert.False(inner.Requests[1].Headers.Contains("Authorization"),
+            "First redirect hop must not carry Authorization");
+        Assert.False(inner.Requests[2].Headers.Contains("Authorization"),
+            "Second redirect hop must not carry Authorization");
     }
 
     // ── org context propagation ───────────────────────────────────────────────────

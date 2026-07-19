@@ -65,6 +65,17 @@ public static class SpdxTextClassifier
             return null;
         }
 
+        var (bestId, bestScore) = FindBestFuzzyMatch(tokens, total, corpus);
+        return bestScore >= DiceThreshold ? bestId : null;
+    }
+
+    // Linear scan over the corpus for the highest-Dice-score entry. The cheap
+    // maximum-possible-Dice bound (computed from the totals alone) skips entries whose length
+    // differs too much from the input (roughly outside a ~10.5% band around it) before paying for
+    // the O(tokens) intersection pass. Ties break on the lexicographically earlier SPDX id.
+    private static (string? BestId, double BestScore) FindBestFuzzyMatch(
+        Dictionary<string, int> tokens, int total, Corpus corpus)
+    {
         string? bestId = null;
         double bestScore = 0;
         foreach (var entry in corpus.Entries)
@@ -74,10 +85,6 @@ public static class SpdxTextClassifier
                 continue;
             }
 
-            // The maximum Dice score two multisets of these sizes could possibly achieve — cheap
-            // to compute from the totals alone, so entries whose length differs too much from the
-            // input (roughly outside a ~10.5% band around it) are skipped before the O(tokens)
-            // intersection pass below.
             double maxPossibleDice = 2.0 * Math.Min(total, entry.TotalTokens) / (total + entry.TotalTokens);
             if (maxPossibleDice < DiceThreshold)
             {
@@ -103,7 +110,7 @@ public static class SpdxTextClassifier
             }
         }
 
-        return bestScore >= DiceThreshold ? bestId : null;
+        return (bestId, bestScore);
     }
 
     // ── Normalization ────────────────────────────────────────────────────────
@@ -122,7 +129,7 @@ public static class SpdxTextClassifier
             string trimmedLine = rawLine.Trim();
             if (trimmedLine.StartsWith("copyright", StringComparison.Ordinal)
                 || trimmedLine.StartsWith("(c)", StringComparison.Ordinal)
-                || trimmedLine.StartsWith("©", StringComparison.Ordinal))
+                || trimmedLine.StartsWith('©'))
             {
                 continue;
             }

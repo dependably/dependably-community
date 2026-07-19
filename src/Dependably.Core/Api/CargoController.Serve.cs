@@ -228,11 +228,18 @@ public sealed partial class CargoController
         // Cache hit path.
         if (await _blobs.ExistsAsync(storeKey, ct))
         {
-            // Block gate runs before the cached bytes are served, so an operator block (or OSV
-            // finding) on a crate takes effect on every subsequent download, not only on a
-            // never-before-fetched version. Proxy crates carry their policy state on the global
-            // plane (cache_artifact); hosted crates on their package_versions row.
-            if (await IsCrateBlockedAsync(orgId, name, version, token, settings, ct))
+            // Claim recheck + block gate both run before the cached bytes are served, so a
+            // local_only transition or an operator block (or OSV finding) on a crate takes
+            // effect on every subsequent download, not only on a never-before-fetched version.
+            // Proxy crates carry their policy state on the global plane (cache_artifact);
+            // hosted crates on their package_versions row — only proxy-origin crates are
+            // claim-gated, since local_only must still serve the org's own published crates.
+            var gateDecision = await EvaluateCrateCacheHitGateAsync(orgId, name, version, token, settings, ct);
+            if (gateDecision == CrateCacheHitGateDecision.ClaimRefused)
+            {
+                return NotFound();
+            }
+            if (gateDecision == CrateCacheHitGateDecision.Blocked)
             {
                 return StatusCode(StatusCodes.Status403Forbidden);
             }
@@ -265,9 +272,30 @@ public sealed partial class CargoController
         }
 
         var upstreamSources = await _registries.ResolveAsync(orgId, "cargo", ct);
-        return upstreamSources.Count == 0
-            ? NotFound()
-            : await ProxyCrateFromUpstreamAsync(orgId, name, version, blobKey, upstreamSources, ct);
+        if (upstreamSources.Count == 0)
+        {
+            return NotFound();
+        }
+
+        try
+        {
+            return await ProxyCrateFromUpstreamAsync(orgId, name, version, blobKey, upstreamSources, ct);
+        }
+        catch (ProxyCatalogueUnavailableException)
+        {
+            // The crate could not be recorded on the cache plane, so it could not be gated — and an
+            // artefact the registry cannot vouch for is not served. 503, never 404: the crate exists
+            // upstream, we just could not admit it.
+            // name and version pass PathSafeValidator; Serilog structured rendering prevents log injection.
+            _logger.LogWarning(
+                "Cache plane unavailable recording cargo {Name} {Version} for org {OrgId}; refusing the fetch.",
+                name, version, orgId);
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new ProblemDetails
+            {
+                Detail = "Crate could not be recorded on the cache plane; retry.",
+                Status = StatusCodes.Status503ServiceUnavailable,
+            });
+        }
     }
 
     // Walks the configured upstream URLs in priority order, fetching the crate from the first
@@ -284,6 +312,14 @@ public sealed partial class CargoController
             string downloadUrl = BuildCrateDownloadUrl(upstreamBase, name, version);
             var checksumSpec = await ResolveUpstreamChecksumSpecAsync(upstreamBase, name, version, ct, authorizationHeader);
 
+            // The download base can resolve to a different host than the configured upstream (the
+            // index.crates.io special-case below rewrites to static.crates.io); the configured
+            // upstream's credential rides along to the actual download fetch only when that fetch
+            // stays on the configured upstream's own host, mirroring the PyPI proxy's host-pin
+            // invariant so a credential never leaks to a host the operator never configured.
+            string? downloadAuthorizationHeader =
+                ResolveDownloadAuthorizationHeader(upstreamBase, downloadUrl, authorizationHeader);
+
             UpstreamFetchResult fetchResult;
             try
             {
@@ -297,7 +333,7 @@ public sealed partial class CargoController
                 // name and version are validated by PathSafeValidator.ValidateUpstreamSegment above;
                 // blobKey comes from BlobKeys.Cargo (no traversal possible); Serilog uses structured rendering.
                 fetchResult = await _upstream.GetOrFetchToBlobKeyAsync(
-                    blobKey, downloadUrl, checksumSpec, "cargo", orgId, ct: ct, authorizationHeader: authorizationHeader);
+                    blobKey, downloadUrl, checksumSpec, "cargo", orgId, ct: ct, authorizationHeader: downloadAuthorizationHeader);
             }
             catch (ChecksumException)
             {
@@ -338,39 +374,37 @@ public sealed partial class CargoController
 
             await RecordProxiedVersionAsync(orgId, name, ct);
 
-            // Record the proxy first-fetch into the shared cache index so the eviction
-            // pipeline and vulnerability-response query can see it. Best-effort — the
-            // recorder swallows its own failures.
-            string? cacheArtifactId = await _cacheRecorder.RecordAccessAsync(
-                new CacheAccess(orgId, "cargo", name, version, $"{name}-{version}.crate",
-                    sha256Hex, sizeBytes, blobKey, downloadUrl), ct);
-            if (cacheArtifactId is not null)
-            {
-                // Dual-write per-tenant download state and global supply-chain facts.
-                await _tenantAccess.UpsertStateAsync(orgId, cacheArtifactId, _time.GetUtcNow(), ct);
-                await _cacheArtifacts.UpdateGlobalFactsAsync(
-                    cacheArtifactId,
-                    purl: PurlNormalizer.Cargo(name, version),
-                    checksumSha1: null,
-                    publishedAt: null,
-                    deprecated: null,
-                    hasInstallScript: false,
-                    installScriptKind: null,
-                    provenanceStatus: null,
-                    provenanceSigner: null,
-                    upstreamIntegrityValue: sha256Hex,
-                    upstreamIntegrityAlgorithm: "sha256",
-                    ct);
+            // Record the proxy first-fetch into the shared cache index so the eviction pipeline and
+            // vulnerability-response query can see it. Throws ProxyCatalogueUnavailableException
+            // when the cache plane cannot take the row — GetCrateAsync answers 503 rather than
+            // serving an ungateable crate.
+            string cacheArtifactId = await RecordCrateFirstFetchOrRefuseAsync(
+                orgId, name, version, blobKey, sha256Hex, sizeBytes, downloadUrl, ct);
 
-                // Write the sparse-index line against the global cache_artifact row so the
-                // index renderer serves it without a package_versions row.
-                await _cargoMeta.UpsertIndexLineForCacheArtifactAsync(cacheArtifactId, indexLine, ct);
+            // Dual-write per-tenant download state and global supply-chain facts.
+            await _tenantAccess.UpsertStateAsync(orgId, cacheArtifactId, _time.GetUtcNow(), ct);
+            await _cacheArtifacts.UpdateGlobalFactsAsync(
+                cacheArtifactId,
+                purl: PurlNormalizer.Cargo(name, version),
+                checksumSha1: null,
+                publishedAt: null,
+                deprecated: null,
+                hasInstallScript: false,
+                installScriptKind: null,
+                provenanceStatus: null,
+                provenanceSigner: null,
+                upstreamIntegrityValue: sha256Hex,
+                upstreamIntegrityAlgorithm: "sha256",
+                ct: ct);
 
-                // The sparse-index line carries no license field, so the only proxy-side
-                // license signal is the crate's own Cargo.toml. Best-effort: extraction never
-                // fails or delays the serve path below.
-                await TryExtractAndStoreCargoLicenseAsync(cacheArtifactId, blobKey, orgId, name, version, ct);
-            }
+            // Write the sparse-index line against the global cache_artifact row so the
+            // index renderer serves it without a package_versions row.
+            await _cargoMeta.UpsertIndexLineForCacheArtifactAsync(cacheArtifactId, indexLine, ct);
+
+            // The sparse-index line carries no license field, so the only proxy-side
+            // license signal is the crate's own Cargo.toml. Best-effort: extraction never
+            // fails or delays the serve path below.
+            await TryExtractAndStoreCargoLicenseAsync(cacheArtifactId, blobKey, orgId, name, version, ct);
 
             // name and version pass PathSafeValidator; sha256Hex is a hex digest from the upstream fetch result; Serilog structured rendering prevents log injection.
             _logger.LogInformation(
@@ -386,6 +420,39 @@ public sealed partial class CargoController
         }
 
         return NotFound();
+    }
+
+    /// <summary>
+    /// Records a crate first-fetch on the cache plane, enforcing the fail-closed contract: a crate
+    /// the plane could not take a row for is one the registry cannot scan, gate, or reclaim, so it
+    /// is refused rather than served ungated.
+    ///
+    /// The staged blob is discarded along with the refusal. The content-addressed ecosystems
+    /// (npm/PyPI/NuGet/Maven) get this for free — their cache-hit lookup is row-driven, so no row
+    /// means the next request re-enters the fetch path and re-refuses. A crate is keyed by its
+    /// org-scoped coordinate and found by probing the blob store, and
+    /// <see cref="EvaluateCrateCacheHitGateAsync"/> allows a hit it has no row for, so a
+    /// staged-but-unrecorded blob would answer every later request from cache with nothing to gate
+    /// against — a permanent bypass, not a deferred one. Dropping it restores the same "no row ⇒
+    /// miss ⇒ re-fetch ⇒ re-record" invariant, at the cost of re-downloading once the plane is back.
+    /// </summary>
+    /// <exception cref="ProxyCatalogueUnavailableException">The recorder returned no row.</exception>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
+        Justification = "Each argument is a distinct cache-plane coordinate or bytes-metadata input for the single record call.")]
+    private async Task<string> RecordCrateFirstFetchOrRefuseAsync(
+        string orgId, string name, string version, string blobKey,
+        string sha256Hex, long sizeBytes, string downloadUrl, CancellationToken ct)
+    {
+        string? cacheArtifactId = await _cacheRecorder.RecordAccessAsync(
+            new CacheAccess(orgId, "cargo", name, version, $"{name}-{version}.crate",
+                sha256Hex, sizeBytes, blobKey, downloadUrl), ct);
+        if (cacheArtifactId is not null)
+        {
+            return cacheArtifactId;
+        }
+
+        await _blobs.DeleteAsync(BlobKeys.StoreKey(blobKey), ct);
+        throw new ProxyCatalogueUnavailableException("cargo", name, version);
     }
 
     /// <summary>
@@ -435,6 +502,7 @@ public sealed partial class CargoController
         await using var conn = await _db.OpenAsync(ct);
         // Tenant gate: packages.org_id = @orgId confines the lookup to the requesting org.
         string? pvKey = await conn.ExecuteScalarAsync<string?>(
+            // plane-ok: hosted/legacy-proxy PV crate lookup; global-plane proxy crates resolve via the sibling _cacheArtifacts.GetServeFactsByCoordinateAsync fallback below.
             """
             SELECT pv.blob_key
             FROM package_versions pv
@@ -537,13 +605,24 @@ public sealed partial class CargoController
     /// (<c>index.crates.io</c>), the download base is <c>static.crates.io/crates</c>.
     /// For other sparse registries, <c>/api/v1/crates</c> is appended to the upstream base.
     /// </summary>
-    private static string BuildCrateDownloadUrl(string upstreamBase, string name, string version)
+    internal static string BuildCrateDownloadUrl(string upstreamBase, string name, string version)
     {
         string downloadBase = upstreamBase.Contains("index.crates.io", StringComparison.OrdinalIgnoreCase)
             ? "https://static.crates.io/crates"
             : $"{upstreamBase}/api/v1/crates";
         return $"{downloadBase}/{name}/{version}/download";
     }
+
+    /// <summary>
+    /// Chooses the Authorization header to attach to the crate-download fetch. The configured
+    /// upstream's credential rides along only when <paramref name="downloadUrl"/> stays on
+    /// <paramref name="upstreamBase"/>'s own host — never to a host <see cref="BuildCrateDownloadUrl"/>
+    /// switched to (the index.crates.io → static.crates.io rewrite), mirroring the PyPI proxy's
+    /// host-pin invariant so a credential never leaks to a host the operator never configured.
+    /// </summary>
+    internal static string? ResolveDownloadAuthorizationHeader(
+        string upstreamBase, string downloadUrl, string? authorizationHeader) =>
+        UpstreamHostPin.IsSameHost(upstreamBase, downloadUrl) ? authorizationHeader : null;
 
     /// <summary>
     /// Records a proxied Cargo version in the global cache plane. Ensures the per-tenant
@@ -576,6 +655,7 @@ public sealed partial class CargoController
         {
             await using var conn = await _db.OpenAsync(ct);
             row = await conn.QuerySingleOrDefaultAsync<ProxiedVersionRow>(
+                // plane-ok: PV-plane cache-hit probe; global-plane proxy rows resolve via cache_artifact in the sibling fallback branch of this method.
                 """
                 SELECT pv.origin AS Origin,
                        pv.checksum_sha256 AS ChecksumSha256,
@@ -643,11 +723,20 @@ public sealed partial class CargoController
         }
     }
 
-    // Evaluates the block gate for a cache-hit crate download. A proxy crate carries its policy
-    // signals on the global plane (cache_artifact + tenant_artifact_access); a hosted crate on
-    // its package_versions row. When neither exists (nothing to attribute), the download is
-    // allowed — there is no block state to enforce.
-    private async Task<bool> IsCrateBlockedAsync(
+    // Outcome of the cache-hit gate for a crate download: Allowed serves the cached blob,
+    // ClaimRefused mirrors the miss path's silent 404 (a surviving proxy row must not outlive
+    // a local_only claim), Blocked is the existing operator/OSV block-gate 403.
+    private enum CrateCacheHitGateDecision { Allowed, ClaimRefused, Blocked }
+
+    // Evaluates the claim recheck + block gate for a cache-hit crate download. A proxy crate
+    // carries its policy signals on the global plane (cache_artifact + tenant_artifact_access)
+    // and is claim-gated on every hit — a cache_artifact row surviving a local_only transition's
+    // purge (race) or air-gap mode's implicit local_only (which never purges) must not be served
+    // just because the row still exists. A hosted crate carries its signals on its
+    // package_versions row and is never claim-gated — local_only must still serve the org's own
+    // published crates. When neither exists (nothing to attribute), the download is allowed —
+    // there is no policy state to enforce.
+    private async Task<CrateCacheHitGateDecision> EvaluateCrateCacheHitGateAsync(
         string orgId, string name, string version, TokenRecord? token, OrgSettings? settings, CancellationToken ct)
     {
         string? sourceIp = HttpContext.GetNormalizedRemoteIp();
@@ -656,21 +745,30 @@ public sealed partial class CargoController
             orgId, "cargo", name, version, $"{name}-{version}.crate", ct);
         if (caFacts is not null)
         {
-            return await _blockGate.EvaluateAsync(
-                BlockGateRequest.ForProxyCacheFacts(orgId, "cargo", caFacts, token, settings, sourceIp), ct)
-                == BlockDecision.Blocked;
+            // Ternary form satisfies IDE0046: last guard before a single return expression.
+            return !await _claimResolver.IsProxyFetchAllowedAsync(orgId, "cargo", name, ct)
+                ? CrateCacheHitGateDecision.ClaimRefused
+                : await _blockGate.EvaluateAsync(
+                    BlockGateRequest.ForProxyCacheFacts(orgId, "cargo", caFacts, token, settings, sourceIp), ct)
+                    == BlockDecision.Blocked
+                    ? CrateCacheHitGateDecision.Blocked
+                    : CrateCacheHitGateDecision.Allowed;
         }
 
         var pkg = await _packages.GetByPurlNameAsync(orgId, "cargo", name, ct);
         if (pkg is null)
         {
-            return false;
+            return CrateCacheHitGateDecision.Allowed;
         }
         var hostedVersion = await _packages.GetVersionAsync(pkg.Id, version, ct);
-        return hostedVersion is not null
-            && await _blockGate.EvaluateAsync(
+        // Ternary form satisfies IDE0046: last guard before a single return expression.
+        return hostedVersion is null
+            ? CrateCacheHitGateDecision.Allowed
+            : await _blockGate.EvaluateAsync(
                 BlockGateRequest.For(orgId, "cargo", hostedVersion, token, settings, sourceIp), ct)
-                == BlockDecision.Blocked;
+                == BlockDecision.Blocked
+                ? CrateCacheHitGateDecision.Blocked
+                : CrateCacheHitGateDecision.Allowed;
     }
 
     private sealed record ProxiedVersionRow(string Origin, string? ChecksumSha256, long SizeBytes);

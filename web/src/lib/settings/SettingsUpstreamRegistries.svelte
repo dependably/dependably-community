@@ -45,6 +45,11 @@
   let ociTokenEndpoint = ''
   let ociPrefixesRaw = '' // comma/newline-separated input
 
+  // Non-OCI auth modal fields (not shown for rpm — public distro mirrors are anonymous-only)
+  let nonOciAuthType = 'anonymous'
+  let nonOciUsername = ''
+  let nonOciSecret = ''
+
   // Drag state
   let dragEco = null, dragFrom = -1
 
@@ -94,6 +99,9 @@
     ociSecret = ''
     ociTokenEndpoint = ''
     ociPrefixesRaw = ''
+    nonOciAuthType = 'anonymous'
+    nonOciUsername = ''
+    nonOciSecret = ''
     error = ''
     showAdd = true
   }
@@ -133,7 +141,10 @@
           prefixes,
         })
       } else {
-        entry = await api.addUpstreamRegistry(addEco, newUrl.trim(), newName.trim() || null)
+        const authType = (addEco !== 'rpm' && nonOciAuthType !== 'anonymous') ? nonOciAuthType : undefined
+        const username = (addEco !== 'rpm' && nonOciAuthType === 'basic' && nonOciUsername.trim()) ? nonOciUsername.trim() : undefined
+        const secret = (addEco !== 'rpm' && nonOciAuthType !== 'anonymous' && nonOciSecret) ? nonOciSecret : undefined
+        entry = await api.addUpstreamRegistry(addEco, newUrl.trim(), newName.trim() || null, authType, username, secret)
       }
       byEco[addEco] = [...byEco[addEco], entry]
       byEco = byEco
@@ -276,7 +287,15 @@
                 {/if}
               {:else}
                 <span class="reg-url">{entry.url}</span>
-                {#if entry.name}<span class="reg-name">{entry.name}</span>{/if}
+                <span class="reg-meta">
+                  {#if entry.name}<span class="reg-name">{entry.name}</span>{/if}
+                  {#if entry.authType && entry.authType !== 'anonymous'}
+                    <span class="auth-badge auth-badge--{entry.authType}">{$t('settings.proxy.upstreamRegistries.auth.authType.' + entry.authType)}</span>
+                  {/if}
+                  {#if entry.hasSecret}
+                    <span class="cred-badge">{$t('settings.proxy.upstreamRegistries.auth.credentialSet')}</span>
+                  {/if}
+                </span>
               {/if}
             </span>
             <div class="row-actions">
@@ -361,9 +380,32 @@
           <label for="ur-name">{$t('settings.proxy.upstreamRegistries.modal.name')}</label>
           <input id="ur-name" bind:value={newName} placeholder={$t('settings.proxy.upstreamRegistries.modal.namePlaceholder')} />
         </div>
+        {#if addEco !== 'rpm'}
+          <div class="form-row">
+            <label for="ur-auth">{$t('settings.proxy.upstreamRegistries.auth.authTypeLabel')}</label>
+            <select id="ur-auth" bind:value={nonOciAuthType}>
+              <option value="anonymous">{$t('settings.proxy.upstreamRegistries.auth.authType.anonymous')}</option>
+              <option value="bearer">{$t('settings.proxy.upstreamRegistries.auth.authType.bearer')}</option>
+              <option value="basic">{$t('settings.proxy.upstreamRegistries.auth.authType.basic')}</option>
+            </select>
+          </div>
+          {#if nonOciAuthType === 'basic'}
+            <div class="form-row">
+              <label for="ur-username">{$t('settings.proxy.upstreamRegistries.auth.username')}</label>
+              <input id="ur-username" bind:value={nonOciUsername} autocomplete="off" />
+            </div>
+          {/if}
+          {#if nonOciAuthType === 'bearer' || nonOciAuthType === 'basic'}
+            <div class="form-row">
+              <label for="ur-secret">{$t('settings.proxy.upstreamRegistries.auth.secret')}</label>
+              <input id="ur-secret" type="password" bind:value={nonOciSecret} autocomplete="new-password" />
+              <div class="form-hint">{$t('settings.proxy.upstreamRegistries.auth.secretHint')}</div>
+            </div>
+          {/if}
+        {/if}
         <div class="modal-actions">
-          <button on:click={() => showAdd = false}>{$t('common.actions.cancel')}</button>
-          <button class="primary" on:click={add} disabled={adding || !newUrl.trim()}>
+          <button on:click={() => { showAdd = false; nonOciAuthType = 'anonymous'; nonOciUsername = ''; nonOciSecret = '' }}>{$t('common.actions.cancel')}</button>
+          <button class="primary" on:click={add} disabled={adding || !newUrl.trim() || (addEco !== 'rpm' && nonOciAuthType === 'basic' && (!nonOciUsername.trim() || !nonOciSecret)) || (addEco !== 'rpm' && nonOciAuthType === 'bearer' && !nonOciSecret)}>
             {adding ? $t('common.actions.saving') : $t('common.actions.add')}
           </button>
         </div>
@@ -399,6 +441,7 @@
     background: var(--surface2); color: var(--text2);
   }
   .auth-badge--basic { background: var(--badge-nuget-bg); color: var(--badge-nuget-text); }
+  .auth-badge--bearer { background: var(--badge-purple-bg); color: var(--badge-purple-text); }
   .auth-badge--dockerhub_token_exchange { background: var(--badge-oci-bg); color: var(--badge-oci-text); }
   .cred-badge {
     font-size: 11px; padding: 1px 6px; border-radius: 3px;

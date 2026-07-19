@@ -24,6 +24,7 @@ public sealed class PyPiPublishHandler(
     LicenseRepository licenses,
     RenderedResponseCache<PyPiSimpleIndexKey> cache,
     ILogger<PyPiPublishHandler> logger,
+    IUploadLimitResolver uploadLimits,
     string stagingPath)
 {
     // PEP 508 name regex
@@ -72,9 +73,15 @@ public sealed class PyPiPublishHandler(
             return claimReject;
         }
 
+        // Resolve the effective PyPI upload cap before reading any file bytes, falling back to
+        // the route's hard ceiling when no org/instance limit is configured. The resolved cap
+        // gates the staging write itself via LimitedReadStream below, so an oversize file is
+        // rejected mid-stream instead of after the full artifact is already on disk.
+        long effectiveCap = (await uploadLimits.ResolveAsync(orgId, "pypi", ct)) ?? PyPiConstants.UploadSizeLimitBytes;
+
         // Stage to disk: stream multipart file through HashingFileStream so SHA-256 is
         // computed inline, never materializing the full artifact as a byte[].
-        var (stagedPath, sizeBytes, stageError) = await StagePyPiFileAsync(file!, ct);
+        var (stagedPath, sizeBytes, stageError) = await StagePyPiFileAsync(file!, effectiveCap, ct);
         if (stageError is not null)
         {
             return stageError;
@@ -222,28 +229,23 @@ public sealed class PyPiPublishHandler(
 
     /// <summary>
     /// Streams the multipart file to a staging temp file under PROXY_STAGING_PATH via
-    /// <see cref="HashingFileStream"/>, computing SHA-256 inline. Returns the staging
-    /// path, byte count, and null on success; (null, 0, error) on failure.
+    /// <see cref="FormFileStager"/>, computing SHA-256 inline. The cap gates the copy itself, so
+    /// an oversize file is rejected with a 413 during the copy, before the full artifact is ever
+    /// fully written to disk. Returns the staging path, byte count, and null on success;
+    /// (null, 0, error) on failure.
     /// </summary>
     private async Task<(string? Path, long Size, IActionResult? Error)> StagePyPiFileAsync(
-        IFormFile file, CancellationToken ct)
+        IFormFile file, long cap, CancellationToken ct)
     {
-        // staging file name is "publish-stage-{server-guid}" under the operator-configured staging root — no user input reaches the path.
-        string tempPath = System.IO.Path.Combine(stagingPath, $"publish-stage-{Guid.NewGuid():N}.tmp");
-        bool succeeded = false;
         try
         {
-            var fileStream = new FileStream(
-                tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None,
-                bufferSize: 81920, useAsync: true);
-            await using (var staging = new HashingFileStream(fileStream, long.MaxValue))
-            await using (var src = file.OpenReadStream())
-            {
-                await src.CopyToAsync(staging, ct);
-            }
-            long sizeBytes = new FileInfo(tempPath).Length;
-            succeeded = true;
-            return (tempPath, sizeBytes, null);
+            var staged = await FormFileStager.StageAsync(file, stagingPath, cap, ct);
+            return (staged.Path, staged.Size, null);
+        }
+        catch (InvalidDataException)
+        {
+            return (null, 0, new ObjectResult(new ProblemDetails { Detail = "Upload exceeds size limit.", Status = StatusCodes.Status413PayloadTooLarge })
+            { StatusCode = StatusCodes.Status413PayloadTooLarge });
         }
         catch (OperationCanceledException)
         {
@@ -254,13 +256,6 @@ public sealed class PyPiPublishHandler(
             logger.LogWarning(ex, "Failed to stage PyPI push body: {ExceptionType}", ex.GetType().Name);
             return (null, 0, new ObjectResult(new ProblemDetails { Detail = "Failed to stage upload.", Status = StatusCodes.Status500InternalServerError })
             { StatusCode = StatusCodes.Status500InternalServerError });
-        }
-        finally
-        {
-            if (!succeeded)
-            {
-                DeleteStagingFile(tempPath);
-            }
         }
     }
 
@@ -366,8 +361,11 @@ public sealed class PyPiPublishHandler(
         }
 
         // Evict the cached simple index so the newly-published version appears immediately.
-        // The formatter normalizes the name (PEP 503), so the raw upload name is passed.
+        // The formatter normalizes the name (PEP 503), so the raw upload name is passed. Both
+        // negotiated representations are evicted — a client on either would otherwise keep
+        // receiving a pre-publish index until its TTL expired.
         cache.Evict(new PyPiSimpleIndexKey(tenant.OrgId, upload.Name));
+        cache.Evict(new PyPiSimpleIndexKey(tenant.OrgId, upload.Name) { WantsJson = true });
 
         return new OkResult();
     }

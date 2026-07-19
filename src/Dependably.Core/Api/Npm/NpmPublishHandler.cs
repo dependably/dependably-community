@@ -13,9 +13,12 @@ using Microsoft.AspNetCore.Mvc;
 namespace Dependably.Api.NpmProtocol;
 
 /// <summary>
-/// Handles npm publish (PUT /npm/{pkg}), unpublish (DELETE /npm/{pkg}/-rev/{rev}),
-/// and deprecate (PUT without _attachments). Each action routes by the shape of the
-/// PUT body: _attachments present = publish, absent = deprecate.
+/// Handles npm publish (PUT /npm/{pkg}), deprecate (PUT without _attachments), and the
+/// unpublish surface. Modern per-version unpublish is a three-step wire sequence — GET the
+/// packument (reads its synthetic _rev), PUT the pruned packument to /npm/{pkg}/-rev/{rev}, then
+/// DELETE /npm/{pkg}/-/{tarball}/-rev/{rev} — alongside the bare DELETE /npm/{pkg}/-rev/{rev}
+/// version/whole-package path. Publish and deprecate route by the shape of the PUT body:
+/// _attachments present = publish, absent = deprecate.
 /// </summary>
 public sealed class NpmPublishHandler(
     OrgRepository orgs,
@@ -35,6 +38,11 @@ public sealed class NpmPublishHandler(
     // Route-level hard ceiling for npm publish requests (500 MiB); per-tenant limits are
     // enforced by UploadSizeLimitMiddleware before any blob is written.
     private const long NpmPublishSizeLimitBytes = 500L * 1024 * 1024;
+
+    // Ceiling for the pruned-packument body the unpublish rev-PUT accepts. Metadata-only (no
+    // attachments) but grows with the version list, so it is bounded well above a large packument
+    // and well below the publish ceiling.
+    private const long PrunePackumentMaxBytes = 32L * 1024 * 1024;
 
     public Task<IActionResult> PublishAsync(
         HttpContext httpContext, string orgId, string package, CancellationToken ct)
@@ -68,6 +76,22 @@ public sealed class NpmPublishHandler(
     public Task<IActionResult> UnpublishScopedAsync(
         HttpContext httpContext, string orgId, string scope, string pkg, string rev, CancellationToken ct)
         => UnpublishImplAsync(httpContext, orgId, "@" + scope + "/" + pkg, rev, ct);
+
+    public Task<IActionResult> UnpublishRevPutAsync(
+        HttpContext httpContext, string orgId, string pkg, string rev, CancellationToken ct)
+        => UnpublishRevPutImplAsync(httpContext, orgId, NpmSharedHelpers.DecodeNpmName(pkg), rev, ct);
+
+    public Task<IActionResult> UnpublishRevPutScopedAsync(
+        HttpContext httpContext, string orgId, string scope, string pkg, string rev, CancellationToken ct)
+        => UnpublishRevPutImplAsync(httpContext, orgId, "@" + scope + "/" + pkg, rev, ct);
+
+    public Task<IActionResult> DeleteTarballWithRevAsync(
+        HttpContext httpContext, string orgId, string pkg, string file, string rev, CancellationToken ct)
+        => DeleteTarballWithRevImplAsync(httpContext, orgId, NpmSharedHelpers.DecodeNpmName(pkg), file, rev, ct);
+
+    public Task<IActionResult> DeleteTarballWithRevScopedAsync(
+        HttpContext httpContext, string orgId, string scope, string pkg, string file, string rev, CancellationToken ct)
+        => DeleteTarballWithRevImplAsync(httpContext, orgId, "@" + scope + "/" + pkg, file, rev, ct);
 
     private async Task<IActionResult> PublishPackageAsync(
         HttpContext httpContext, string orgId, string package, string? scope, CancellationToken ct)
@@ -530,22 +554,167 @@ public sealed class NpmPublishHandler(
 
         if (ver.Origin != "uploaded")
         {
-            return new ObjectResult(new ProblemDetails
-            {
-                Detail = "Only user-published versions can be unpublished via this endpoint.",
-                Status = StatusCodes.Status403Forbidden
-            })
-            { StatusCode = StatusCodes.Status403Forbidden };
+            return OnlyUploadedVersionsForbidden();
         }
 
-        await blobs.DeleteAsync(BlobKeys.StoreKey(ver.BlobKey), ct);
-        await packages.DeleteVersionAsync(ver.Id, ct);
+        await ApplyVersionRemovalsAsync(httpContext, orgId, pkg, fullName, new[] { ver }, token, ct);
+        return new OkResult();
+    }
 
-        // Remove any dist-tags that pointed at the deleted version, then re-anchor
-        // 'latest' when it was among the removed tags and the package still has other
-        // versions. The package row is deleted last so the version list query above is
-        // still valid at this point.
-        var removedTags = await distTags.DeleteTagsForVersionAsync(orgId, pkg.Id, ver.Version, ct);
+    // Modern npm per-version unpublish PUTs the pruned packument back to /npm/{pkg}/-rev/{rev}
+    // (the rev read from the packument's synthetic _rev). The body's "versions" map is the set
+    // the client wants to KEEP; any stored uploaded version absent from it is the one being
+    // unpublished, so this diffs stored-uploaded against the keep-set and removes the difference.
+    private async Task<IActionResult> UnpublishRevPutImplAsync(
+        HttpContext httpContext, string orgId, string fullName, string rev, CancellationToken ct)
+    {
+        if (edgeGuard.UploadRejection() is { } edgeReject)
+        {
+            return edgeReject;
+        }
+
+        var token = await httpContext.Request.ResolveTokenAsync(tokens, ct);
+        if (token is null || token.OrgId != orgId)
+        {
+            return UnauthorizedBearer(httpContext);
+        }
+
+        // Fail loud on an unresolvable revision. A packument that advertises no _rev makes the
+        // CLI PUT to /-rev/undefined; refuse it so the failure is visible instead of the version
+        // appearing removed while it still lists.
+        if (IsUnresolvableRev(rev))
+        {
+            return UnresolvableRevConflict(rev);
+        }
+
+        JsonObject? keepVersions;
+        try
+        {
+            keepVersions = await ReadPackumentKeepVersionsAsync(httpContext.Request, ct);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return new UnprocessableEntityObjectResult(new ProblemDetails
+            {
+                Detail = "Malformed packument body.",
+                Status = StatusCodes.Status422UnprocessableEntity
+            });
+        }
+
+        if (keepVersions is null || keepVersions.Count == 0)
+        {
+            // A prune that keeps zero versions is a whole-package unpublish, which npm sends as a
+            // bare DELETE /-rev/{rev}. Refuse the empty-keep-set PUT rather than mass-delete on a
+            // truncated or malformed body.
+            return new UnprocessableEntityObjectResult(new ProblemDetails
+            {
+                Detail = "Packument body must list the versions to keep. " +
+                         "Whole-package unpublish uses DELETE, not PUT.",
+                Status = StatusCodes.Status422UnprocessableEntity
+            });
+        }
+
+        var pkg = await packages.GetByPurlNameAsync(orgId, "npm", fullName, ct);
+        if (pkg is null)
+        {
+            return new NotFoundResult();
+        }
+
+        // Only user-published (uploaded) versions can be unpublished; proxy-cached versions are
+        // never advertised as removable, so a version absent from the keep-set that is not
+        // uploaded is left untouched.
+        var stored = await packages.GetVersionsAsync(pkg.Id, ct);
+        var toPrune = stored
+            .Where(v => v.Origin == "uploaded" && !keepVersions.ContainsKey(v.Version))
+            .ToList();
+
+        if (toPrune.Count > 0)
+        {
+            await ApplyVersionRemovalsAsync(httpContext, orgId, pkg, fullName, toPrune, token, ct);
+        }
+
+        // CouchDB-style ok envelope so the CLI treats the prune as applied.
+        return new OkObjectResult(new JsonObject { ["ok"] = true, ["id"] = fullName, ["rev"] = rev });
+    }
+
+    // Final step of the modern unpublish flow: DELETE /npm/{pkg}/-/{file}/-rev/{rev}. The rev-PUT
+    // above already pruned the version, so this is normally an idempotent confirmation — it still
+    // removes the version defensively when a client skips the PUT step.
+    private async Task<IActionResult> DeleteTarballWithRevImplAsync(
+        HttpContext httpContext, string orgId, string fullName, string file, string rev, CancellationToken ct)
+    {
+        if (edgeGuard.UploadRejection() is { } edgeReject)
+        {
+            return edgeReject;
+        }
+
+        var token = await httpContext.Request.ResolveTokenAsync(tokens, ct);
+        if (token is null || token.OrgId != orgId)
+        {
+            return UnauthorizedBearer(httpContext);
+        }
+
+        if (IsUnresolvableRev(rev))
+        {
+            return UnresolvableRevConflict(rev);
+        }
+
+        var pkg = await packages.GetByPurlNameAsync(orgId, "npm", fullName, ct);
+        if (pkg is null)
+        {
+            // The rev-PUT prune already removed the version and its now-empty package — nothing
+            // left for this final idempotent step.
+            return new OkResult();
+        }
+
+        string plainName = fullName.Contains('/') ? fullName.Split('/').Last() : fullName;
+        string? version = NpmSharedHelpers.ExtractVersionFromTarballFilename(plainName, file);
+        if (version is null)
+        {
+            return new NotFoundResult();
+        }
+
+        var ver = await packages.GetVersionAsync(pkg.Id, version, ct);
+        if (ver is null)
+        {
+            // Already pruned by the rev-PUT step — idempotent success.
+            return new OkResult();
+        }
+
+        if (ver.Origin != "uploaded")
+        {
+            return OnlyUploadedVersionsForbidden();
+        }
+
+        await ApplyVersionRemovalsAsync(httpContext, orgId, pkg, fullName, new[] { ver }, token, ct);
+        return new OkResult();
+    }
+
+    // Physically removes a set of uploaded versions: deletes each blob + version row and records
+    // an audit row, then prunes dist-tags pointing at a removed version, re-anchoring 'latest' to
+    // the highest remaining stable version when it was among the pruned tags, and dropping the
+    // package row when no versions remain. Shared by the bare version-unpublish DELETE, the modern
+    // rev-PUT prune, and the tarball DELETE-with-rev so all three leave identical residual state.
+    private async Task ApplyVersionRemovalsAsync(
+        HttpContext httpContext, string orgId, Package pkg, string fullName,
+        IReadOnlyList<PackageVersion> toRemove, TokenRecord token, CancellationToken ct)
+    {
+        var removedTags = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var ver in toRemove)
+        {
+            await blobs.DeleteAsync(BlobKeys.StoreKey(ver.BlobKey), ct);
+            await packages.DeleteVersionAsync(ver.Id, ct);
+            foreach (string tag in await distTags.DeleteTagsForVersionAsync(orgId, pkg.Id, ver.Version, ct))
+            {
+                removedTags.Add(tag);
+            }
+
+            await audit.LogActivityAsync(orgId, "npm", ver.Purl, "delete", token.UserId,
+                actorKind: token.ActorKind, sourceIp: httpContext.GetNormalizedRemoteIp(), ct: ct);
+        }
+
+        // Re-anchor 'latest' when it was among the removed tags and the package still has other
+        // versions. The package row is deleted last so the remaining-version query stays valid.
         bool packageStillExists = !(await packages.DeletePackageIfEmptyAsync(pkg.Id, ct));
         if (packageStillExists && removedTags.Contains("latest"))
         {
@@ -558,13 +727,44 @@ public sealed class NpmPublishHandler(
             }
         }
 
-        await audit.LogActivityAsync(orgId, "npm", ver.Purl, "delete", token.UserId,
-            actorKind: token.ActorKind, sourceIp: httpContext.GetNormalizedRemoteIp(), ct: ct);
-
-        // Evict the cached packument so the deleted version disappears immediately.
+        // Evict the cached packument so the removed versions disappear immediately.
         cache.Evict(new NpmPackumentKey(orgId, fullName));
         cache.Evict(new NpmPackumentKey(orgId, fullName) { IsProxy = true });
+    }
 
-        return new OkResult();
+    // Reads the pruned packument PUT body and returns its "versions" map (the versions to keep),
+    // bounded so a hostile body cannot exhaust memory. Returns null when the body carries no
+    // versions object.
+    private static async Task<JsonObject?> ReadPackumentKeepVersionsAsync(HttpRequest request, CancellationToken ct)
+    {
+        await using var limited = new LimitedReadStream(request.Body, PrunePackumentMaxBytes, "npm unpublish packument body");
+        var node = await System.Text.Json.JsonSerializer.DeserializeAsync<JsonNode>(limited, cancellationToken: ct);
+        return node?["versions"]?.AsObject();
+    }
+
+    // True when the packument revision the client echoed cannot be resolved — the degenerate
+    // "undefined"/"null" the npm CLI sends when a packument advertised no _rev.
+    private static bool IsUnresolvableRev(string rev) =>
+        string.IsNullOrWhiteSpace(rev) || rev is "undefined" or "null";
+
+    private static ObjectResult UnresolvableRevConflict(string rev) => new(new ProblemDetails
+    {
+        Detail = $"Packument revision could not be resolved (received '{rev}'). " +
+                 "Retry the unpublish with an npm client that reads the packument _rev.",
+        Status = StatusCodes.Status409Conflict
+    })
+    { StatusCode = StatusCodes.Status409Conflict };
+
+    private static ObjectResult OnlyUploadedVersionsForbidden() => new(new ProblemDetails
+    {
+        Detail = "Only user-published versions can be unpublished via this endpoint.",
+        Status = StatusCodes.Status403Forbidden
+    })
+    { StatusCode = StatusCodes.Status403Forbidden };
+
+    private static UnauthorizedResult UnauthorizedBearer(HttpContext httpContext)
+    {
+        httpContext.Response.Headers.WWWAuthenticate = "Bearer realm=\"dependably\"";
+        return new UnauthorizedResult();
     }
 }

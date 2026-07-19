@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
 using Dapper;
 using Dependably.Infrastructure;
@@ -198,6 +199,8 @@ public sealed class LicenseNormalizer
     // A plain settable-property POCO (not a positional record) so Dapper maps rows via property
     // assignment — which coerces the SQLite INTEGER 0/1 storage class to bool — rather than
     // trying to match a constructor parameter list by exact type.
+    [SuppressMessage("Minor Code Smell", "S3459:Unassigned members should be removed", Justification = "Dapper sets this prop by reflection; not statically visible as assigned.")]
+    [SuppressMessage("Major Code Smell", "S1144:Unused private types or members should be removed", Justification = "Dapper sets this prop's setter by reflection; not statically visible as used.")]
     private sealed class LicenseRow
     {
         public string Identifier { get; set; } = string.Empty;

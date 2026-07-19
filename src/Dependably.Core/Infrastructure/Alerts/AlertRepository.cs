@@ -61,6 +61,7 @@ public sealed class AlertRepository
                 id, alert.OrgId, alert.Type, alert.Severity, alert.SourceRef, alert.Ecosystem,
                 alert.Purl, alert.Title, alert.Detail, "active",
                 DismissedBy: null, DismissedAt: null, SlackStatus: null, SlackError: null,
+                EmailStatus: null, EmailError: null,
                 CreatedAt: nowOffset, UpdatedAt: nowOffset);
     }
 
@@ -75,6 +76,7 @@ public sealed class AlertRepository
                    ecosystem AS Ecosystem, purl AS Purl, title AS Title, detail AS Detail, state AS State,
                    dismissed_by AS DismissedBy, dismissed_at AS DismissedAt,
                    slack_status AS SlackStatus, slack_error AS SlackError,
+                   email_status AS EmailStatus, email_error AS EmailError,
                    created_at AS CreatedAt, updated_at AS UpdatedAt
             FROM alert
             WHERE org_id = @orgId
@@ -108,6 +110,7 @@ public sealed class AlertRepository
                    ecosystem AS Ecosystem, purl AS Purl, title AS Title, detail AS Detail, state AS State,
                    dismissed_by AS DismissedBy, dismissed_at AS DismissedAt,
                    slack_status AS SlackStatus, slack_error AS SlackError,
+                   email_status AS EmailStatus, email_error AS EmailError,
                    created_at AS CreatedAt, updated_at AS UpdatedAt
             FROM alert WHERE id = @id AND org_id = @orgId
             """,
@@ -144,6 +147,22 @@ public sealed class AlertRepository
         await conn.ExecuteAsync(
             """
             UPDATE alert SET slack_status = @status, slack_error = @error, updated_at = @now
+            WHERE id = @id AND org_id = @orgId
+            """,
+            new { orgId, id, status, error, now = NowIso() });
+    }
+
+    /// <summary>
+    /// Records the terminal outcome of an async email delivery attempt on the alert row. Called by
+    /// the management-plane email delivery queue after a success or exhausted-retry failure.
+    /// </summary>
+    public async Task RecordEmailOutcomeAsync(
+        string orgId, string id, string status, string? error, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        await conn.ExecuteAsync(
+            """
+            UPDATE alert SET email_status = @status, email_error = @error, updated_at = @now
             WHERE id = @id AND org_id = @orgId
             """,
             new { orgId, id, status, error, now = NowIso() });
@@ -207,6 +226,8 @@ public sealed record AlertRecord(
     DateTimeOffset? DismissedAt,
     string? SlackStatus,
     string? SlackError,
+    string? EmailStatus,
+    string? EmailError,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt);
 

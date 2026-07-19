@@ -57,7 +57,7 @@ public sealed class PackageVersionsFilenameIndexTests : IAsyncLifetime
 
         string blobKey = BlobKeys.Hosted("o1", "pypi", "demo", "1.0", "demo-1.0.tar.gz");
         var v = await repo.CreateVersionAsync(new NewPackageVersion(
-            pkg.Id, "1.0", "pkg:pypi/demo@1.0", blobKey, 100, "deadbeef"));
+            pkg.Id, "1.0", "pkg:pypi/demo@1.0", blobKey, 100, "deadbeef", Origin: "uploaded"));
 
         await using var conn2 = await _db.OpenAsync();
         string? filename = await conn2.ExecuteScalarAsync<string?>(
@@ -97,7 +97,7 @@ public sealed class PackageVersionsFilenameIndexTests : IAsyncLifetime
         }
         var pkg = await repo.GetOrCreateAsync("o1", "pypi", "legacy", "legacy", isProxy: true);
         _ = await repo.CreateVersionAsync(new NewPackageVersion(
-            pkg.Id, "0.1", "pkg:pypi/legacy@0.1", "proxy/abc123/legacy-0.1.tar.gz", 50, "dead"));
+            pkg.Id, "0.1", "pkg:pypi/legacy@0.1", "proxy/abc123/legacy-0.1.tar.gz", 50, "dead", Origin: "uploaded"));
 
         await using (var conn = await _db.OpenAsync())
         {

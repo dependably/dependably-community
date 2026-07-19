@@ -254,7 +254,8 @@ internal static class AuthStartupExtensions
         int loginLimit = int.TryParse(cfg["LOGIN_RATE_LIMIT_PERMITS"], out int p) ? p : 10;
         AddPerIpFixedWindowLimiter(o, "login", loginLimit, TimeSpan.FromMinutes(1));
 
-        AddPerIpFixedWindowLimiter(o, "invite", InviteRateLimitPermitsDefault, TimeSpan.FromHours(1));
+        int inviteLimit = int.TryParse(cfg["INVITE_RATE_LIMIT_PERMITS"], out int inv) ? inv : InviteRateLimitPermitsDefault;
+        AddPerIpFixedWindowLimiter(o, "invite", inviteLimit, TimeSpan.FromHours(1));
 
         int tokenCreateLimit = int.TryParse(cfg["TOKEN_CREATE_RATE_LIMIT_PERMITS"], out int t) ? t : 60;
         AddPerIpFixedWindowLimiter(o, "token-create", tokenCreateLimit, TimeSpan.FromHours(1));

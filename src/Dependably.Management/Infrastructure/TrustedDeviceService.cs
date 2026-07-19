@@ -76,6 +76,8 @@ public sealed class TrustedDeviceService
             return false;
         }
 
+        // xtenant: keyed by the device PK the (token_hash, user_id, realm, tenant_id) SELECT
+        // above returned — that lookup already pins realm and tenant.
         await conn.ExecuteAsync(
             "UPDATE mfa_trusted_devices SET last_seen_at = @now WHERE id = @id",
             new { id, now });

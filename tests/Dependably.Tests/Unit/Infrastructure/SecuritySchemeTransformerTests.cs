@@ -65,6 +65,33 @@ public sealed class SecuritySchemeTransformerTests
     }
 
     [Fact]
+    public async Task MetadataTransformer_ProtocolDocument_DescriptionListsGoCargoApk()
+    {
+        // The protocol document actually routes /go/{path}, /cargo/*, and /apk/{path}
+        // (see tests/Contracts/openapi.contract.json) — the description must not
+        // under-count the live registry surface.
+        var doc = new OpenApiDocument();
+        var transformer = new DocumentMetadataTransformer();
+
+        await transformer.TransformAsync(doc, BuildDocumentContext("protocol"), CancellationToken.None);
+
+        Assert.Contains("/go/", doc.Info!.Description);
+        Assert.Contains("/cargo/", doc.Info.Description);
+        Assert.Contains("/apk/", doc.Info.Description);
+    }
+
+    [Fact]
+    public async Task MetadataTransformer_SetsDocumentVersion()
+    {
+        var doc = new OpenApiDocument();
+        var transformer = new DocumentMetadataTransformer();
+
+        await transformer.TransformAsync(doc, BuildDocumentContext("protocol"), CancellationToken.None);
+
+        Assert.False(string.IsNullOrWhiteSpace(doc.Info!.Version));
+    }
+
+    [Fact]
     public async Task MetadataTransformer_UnknownDocument_LeavesTitleUnset()
     {
         var doc = new OpenApiDocument();

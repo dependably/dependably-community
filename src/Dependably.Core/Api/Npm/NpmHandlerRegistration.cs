@@ -20,6 +20,7 @@ internal static class NpmHandlerRegistration
         services.AddScoped<NpmPackumentHandler>();
         services.AddScoped<NpmTarballHandler>();
         services.AddScoped<NpmDistTagsHandler>();
+        services.AddScoped<NpmAuditHandler>();
         services.AddScoped<NpmPublishHandler>(sp =>
         {
             string path = sp.GetRequiredService<StagingOptions>().Path;

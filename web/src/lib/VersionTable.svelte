@@ -116,6 +116,8 @@
       checksumSha1: single ? rep.checksumSha1 : null,
       upstreamIntegrityValue: single ? rep.upstreamIntegrityValue : null,
       upstreamIntegrityAlgorithm: single ? rep.upstreamIntegrityAlgorithm : null,
+      // The origin URL belongs to one file; multi-file groups surface it per-file in the panel.
+      upstreamUrl: single ? rep.upstreamUrl : null,
       origin: rep.origin,
       licenses: [...new Set(files.flatMap(f => f.licenses ?? []))],
       // Operational-risk signal (Deliverable 1): all files under one version share the same
@@ -417,6 +419,7 @@
                         <th>{$t('versionDetail.columns.checksum')}</th>
                         <th>{$t('versionDetail.columns.size')}</th>
                         <th class="num-col">{$t('versionDetail.columns.downloads')}</th>
+                        <th>{$t('versionDetail.detail.upstreamSource')}</th>
                         <th></th>
                       </tr>
                     </thead>
@@ -437,6 +440,16 @@
                           </td>
                           <td class="nowrap">{$formatBytes(f.sizeBytes)}</td>
                           <td class="nowrap num-col">{$formatNumber(f.downloadCount)}</td>
+                          <td>
+                            {#if f.upstreamUrl}
+                              <a class="upstream-link" href={f.upstreamUrl} target="_blank" rel="noopener noreferrer" title={f.upstreamUrl}>
+                                <svg width="12" height="12" aria-hidden="true"><use href="/icons.svg#icon-external"/></svg>
+                                {$t('versionDetail.detail.upstreamSourceLink')}
+                              </a>
+                            {:else}
+                              <span class="text-muted">—</span>
+                            {/if}
+                          </td>
                           <td class="text-right">
                             <button class="file-dl-btn" on:click|stopPropagation={() => fire('download', { version: g.version, file: f.filename })}>{$t('versionDetail.actionsMenu.download')}</button>
                           </td>
@@ -452,6 +465,16 @@
                 <code class="detail-value mono">{g.purl}</code>
                 <button class="copy-btn" on:click={() => copy(g.purl)}>{$t('versionDetail.detail.copy')}</button>
               </div>
+
+              {#if g.single && g.upstreamUrl}
+                <div class="detail-section">
+                  <span class="detail-label">{$t('versionDetail.detail.upstreamSource')}</span>
+                  <a class="detail-value upstream-link" href={g.upstreamUrl} target="_blank" rel="noopener noreferrer">
+                    {g.upstreamUrl}
+                    <svg width="12" height="12" aria-hidden="true"><use href="/icons.svg#icon-external"/></svg>
+                  </a>
+                </div>
+              {/if}
 
               {#if g.single && g.checksumSha256}
                 <div class="detail-section">
@@ -612,6 +635,9 @@
 
   .detail-row td { padding: 0; border-top: none; }
   .copy-btn { padding: 1px 6px; font-size: 11px; flex-shrink: 0; }
+  .upstream-link { display: inline-flex; align-items: center; gap: 4px; color: var(--accent); text-decoration: none; overflow-wrap: anywhere; }
+  .upstream-link:hover { text-decoration: underline; }
+  .upstream-link svg { flex-shrink: 0; }
   .vuln-list { display: flex; flex-direction: column; gap: 4px; flex: 1; }
 
   /* Per-file breakdown for multi-file versions (Maven jar/pom/sidecars, PyPI wheel/sdist). */

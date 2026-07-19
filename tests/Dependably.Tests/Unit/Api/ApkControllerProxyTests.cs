@@ -26,7 +26,11 @@ namespace Dependably.Tests.Unit.Api;
 /// that resolves to a blocked address — no HTTP call is ever made (the SSRF check runs before
 /// any request), so the HTTP factory here fails loudly if it's ever invoked.
 /// </summary>
+// BlockingValidator drives the real IUpstreamUrlValidator.IsAllowedAsync extension, which emits
+// to the process-wide static dependably.security.upstream_url_blocks counter that
+// UpstreamUrlBlocksEmissionTests asserts exact counts against. See MeterSensitiveCollection.
 [Trait("Category", "Unit")]
+[Collection("MeterSensitive")]
 public sealed class ApkControllerProxyTests : IAsyncLifetime
 {
     private const string UpstreamBaseUrl = "https://blocked-upstream.example.test";

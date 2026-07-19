@@ -148,7 +148,15 @@ public sealed record PublishRequest
 /// <summary>Outcome of a <see cref="IPackagePublishService.StoreAndRecordAsync"/> call.</summary>
 public abstract record PublishResult
 {
-    public sealed record Accepted(string VersionId, string Purl, string Sha256) : PublishResult;
+    /// <summary>
+    /// <paramref name="BlobKey"/> is the content-addressed registry key the artifact was
+    /// stored under and is exactly the key persisted on the version / file row — callers that
+    /// need to reference the stored bytes (e.g. the NuGet symbol index) must use it rather
+    /// than rebuild a key from the publish coordinate, because the digest segment makes the
+    /// key unknowable from the coordinate alone. Empty on the
+    /// <see cref="IPackagePublishService.ValidateAsync"/> dry-run path, which stores nothing.
+    /// </summary>
+    public sealed record Accepted(string VersionId, string Purl, string Sha256, string BlobKey) : PublishResult;
 
     /// <summary>
     /// <paramref name="HttpStatus"/> is the recommended HTTP status for protocol callers

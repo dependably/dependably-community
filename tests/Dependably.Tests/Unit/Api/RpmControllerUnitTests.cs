@@ -276,8 +276,12 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
 
         // Cap-before-write: the 413 is raised while streaming the body (LimitedReadStream at the
         // resolved 50-byte cap), so no blob is ever written for the oversize upload.
-        string blobKey = BlobKeys.Hosted(_orgId, "rpm", "foo", "1.0-1", "foo-1.0-1.x86_64.rpm");
-        Assert.False(await _blobs.ExistsAsync(BlobKeys.StoreKey(blobKey), CancellationToken.None));
+        var hosted = new List<string>();
+        await foreach (var blob in _blobs.ListAsync("hosted/"))
+        {
+            hosted.Add(blob.Key);
+        }
+        Assert.DoesNotContain(hosted, k => k.EndsWith("/foo-1.0-1.x86_64.rpm", StringComparison.Ordinal));
     }
 
     [Fact]

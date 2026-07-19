@@ -39,7 +39,9 @@ public static class NpmPackumentFetcher
         catch (UpstreamResponseTooLargeException ex)
         {
             logger?.LogWarning(
-                "{ExceptionType}: full npm packument for {Url} exceeds the metadata byte cap; retrying with the abbreviated install-v1 document (no time map or per-version license). TraceId {TraceId}",
+                "{ExceptionType}: full npm packument for {Url} exceeds the metadata byte cap; " +
+                "retrying with the abbreviated install-v1 document (no time map or per-version " +
+                "license). TraceId {TraceId}",
                 ex.GetType().Name, url, Activity.Current?.TraceId.ToString());
             return await upstream.GetOrFetchMetadataAsync(
                 url, UpstreamClient.MaxMetadataResponseBytes, authorizationHeader, AbbreviatedAccept, ct);

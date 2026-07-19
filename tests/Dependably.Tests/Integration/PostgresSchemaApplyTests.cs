@@ -31,19 +31,11 @@ public sealed class PostgresSchemaApplyTests
             "TEST_POSTGRES_CONNECTION must be set to run Category=SchemaPostgres tests. " +
             "CI sets it from the postgres service; locally start a docker postgres and export it.");
 
-    private static async Task<NpgsqlMetadataStore> FreshPostgresAsync()
-    {
-        var store = new NpgsqlMetadataStore(ConnectionString);
-        await using var conn = await store.OpenAsync();
-        // Pristine slate: drop everything from a prior run so the apply starts from zero.
-        await conn.ExecuteAsync("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-        return store;
-    }
-
     [Fact]
     public async Task Schema_AppliesAgainstLivePostgres_AndIsIdempotent()
     {
-        var store = await FreshPostgresAsync();
+        await using var pg = await LivePostgresReset.FreshAsync(ConnectionString);
+        var store = pg.Store;
         var initializer = new SchemaInitializer(store);
 
         // First apply must succeed (this is the path that aborted on a fresh PG before the
@@ -60,7 +52,8 @@ public sealed class PostgresSchemaApplyTests
     [Fact]
     public async Task LivePostgresShape_MatchesFreshSqlite()
     {
-        var pgStore = await FreshPostgresAsync();
+        await using var pg = await LivePostgresReset.FreshAsync(ConnectionString);
+        var pgStore = pg.Store;
         await new SchemaInitializer(pgStore).InitializeAsync();
 
         await using var sqliteStore = new TestMetadataStore();
@@ -104,11 +97,11 @@ public sealed class PostgresSchemaApplyTests
     // UPDATE ... WHERE consumed_at IS NULL one-shot are proven on the engine enterprise deploys on,
     // not just SQLite. Kept in this class so they share the serialized live-Postgres lifecycle.
 
-    private static async Task<NpgsqlMetadataStore> InitializedPostgresAsync()
+    private static async Task<LivePostgresHandle> InitializedPostgresAsync()
     {
-        var store = await FreshPostgresAsync();
-        await new SchemaInitializer(store).InitializeAsync();
-        return store;
+        var pg = await LivePostgresReset.FreshAsync(ConnectionString);
+        await new SchemaInitializer(pg.Store).InitializeAsync();
+        return pg;
     }
 
     private static async Task<string> SeedOrgAsync(NpgsqlMetadataStore store)
@@ -126,7 +119,8 @@ public sealed class PostgresSchemaApplyTests
         // Frozen clock + fixed expiry: the repository prunes/compares expiry against its
         // injected TimeProvider, so KnownNow-relative instants stay on the right side of
         // the window regardless of when the CI job runs.
-        var store = await InitializedPostgresAsync();
+        await using var pg = await InitializedPostgresAsync();
+        var store = pg.Store;
         var repo = new SamlConfigRepository(store, TestTime.Frozen());
         string org = await SeedOrgAsync(store);
         string assertionId = "_" + Guid.NewGuid().ToString("N");
@@ -140,7 +134,8 @@ public sealed class PostgresSchemaApplyTests
     [Fact]
     public async Task AssertionReplayGuard_OnLivePostgres_SameIdDistinctTenants_Independent()
     {
-        var store = await InitializedPostgresAsync();
+        await using var pg = await InitializedPostgresAsync();
+        var store = pg.Store;
         // Frozen clock + fixed expiry — same determinism rationale as the replay test above.
         var repo = new SamlConfigRepository(store, TestTime.Frozen());
         string orgA = await SeedOrgAsync(store);
@@ -156,7 +151,8 @@ public sealed class PostgresSchemaApplyTests
     [Fact]
     public async Task PendingRequest_OnLivePostgres_ConsumedExactlyOnce()
     {
-        var store = await InitializedPostgresAsync();
+        await using var pg = await InitializedPostgresAsync();
+        var store = pg.Store;
         // Frozen clock + fixed expiry — same determinism rationale as the replay test above.
         var repo = new SamlConfigRepository(store, TestTime.Frozen());
         string org = await SeedOrgAsync(store);
@@ -179,7 +175,8 @@ public sealed class PostgresSchemaApplyTests
     [Fact]
     public async Task MakePvvPackageVersionIdNullable_OnLivePostgres_AllRowsSurviveReshape()
     {
-        var store = await FreshPostgresAsync();
+        await using var pg = await LivePostgresReset.FreshAsync(ConnectionString);
+        var store = pg.Store;
         var initializer = new SchemaInitializer(store);
         await initializer.InitializeAsync();
 
@@ -245,14 +242,84 @@ public sealed class PostgresSchemaApplyTests
         Assert.Equal(1, danglingCount);
     }
 
-    private static async Task<Dictionary<string, HashSet<string>>> PostgresShapeAsync(NpgsqlMetadataStore store)
+    /// <summary>
+    /// The read-model views are defined once and executed verbatim against both engines, so there is
+    /// no SQLite/Postgres pair to drift — but there is still one body that has to compile and expose
+    /// the same columns on each. That is what this asserts. It is the only gate on the views: the
+    /// static schema-parity tests regex CREATE TABLE / CREATE INDEX and never see a CREATE VIEW.
+    /// </summary>
+    [Fact]
+    [Trait("Category", "SchemaPostgres")]
+    public async Task LivePostgresViews_HaveTheSameColumnsAsSqlite()
+    {
+        await using var pg = await LivePostgresReset.FreshAsync(ConnectionString);
+        await new SchemaInitializer(pg.Store).InitializeAsync();
+
+        await using var sqliteStore = new TestMetadataStore();
+        await new SchemaInitializer(sqliteStore).InitializeAsync();
+
+        var pgViews = await PostgresViewShapeAsync(pg.Store);
+        var sqliteViews = await SqliteViewShapeAsync(sqliteStore);
+
+        Assert.NotEmpty(pgViews);
+        Assert.Equal(
+            sqliteViews.Keys.OrderBy(k => k, StringComparer.Ordinal),
+            pgViews.Keys.OrderBy(k => k, StringComparer.Ordinal));
+
+        foreach (string view in pgViews.Keys)
+        {
+            Assert.Equal(
+                sqliteViews[view].OrderBy(c => c, StringComparer.OrdinalIgnoreCase),
+                pgViews[view].OrderBy(c => c, StringComparer.OrdinalIgnoreCase));
+        }
+    }
+
+    private static async Task<Dictionary<string, HashSet<string>>> PostgresViewShapeAsync(NpgsqlMetadataStore store)
     {
         await using var conn = await store.OpenAsync();
         var rows = await conn.QueryAsync<(string Table, string Column)>(
             """
-            SELECT table_name AS Table, column_name AS Column
-            FROM information_schema.columns
-            WHERE table_schema = 'public'
+            SELECT c.table_name AS Table, c.column_name AS Column
+            FROM information_schema.columns c
+            JOIN information_schema.tables t
+              ON t.table_schema = c.table_schema AND t.table_name = c.table_name
+            WHERE c.table_schema = 'public' AND t.table_type = 'VIEW'
+            """);
+        return Group(rows);
+    }
+
+    private static async Task<Dictionary<string, HashSet<string>>> SqliteViewShapeAsync(TestMetadataStore store)
+    {
+        await using var conn = await store.OpenAsync();
+        var views = (await conn.QueryAsync<string>(
+            "SELECT name FROM sqlite_master WHERE type='view'")).ToList();
+        var rows = new List<(string Table, string Column)>();
+        foreach (string view in views)
+        {
+            foreach (string col in await conn.QueryAsync<string>(
+                "SELECT name FROM pragma_table_info(@view)", new { view }))
+            {
+                rows.Add((view, col));
+            }
+        }
+
+        return Group(rows);
+    }
+
+    private static async Task<Dictionary<string, HashSet<string>>> PostgresShapeAsync(NpgsqlMetadataStore store)
+    {
+        await using var conn = await store.OpenAsync();
+        // information_schema.columns includes VIEW columns; sqlite_master WHERE type='table' does
+        // not. Restrict to base tables so this stays a comparison of table shape — view parity is
+        // asserted separately below, where a typo in a view body reports as a view failure rather
+        // than a phantom missing table.
+        var rows = await conn.QueryAsync<(string Table, string Column)>(
+            """
+            SELECT c.table_name AS Table, c.column_name AS Column
+            FROM information_schema.columns c
+            JOIN information_schema.tables t
+              ON t.table_schema = c.table_schema AND t.table_name = c.table_name
+            WHERE c.table_schema = 'public' AND t.table_type = 'BASE TABLE'
             """);
         return Group(rows);
     }

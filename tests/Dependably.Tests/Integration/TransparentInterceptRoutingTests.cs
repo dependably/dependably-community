@@ -11,11 +11,15 @@ namespace Dependably.Tests.Integration;
 /// parser, or the rewrite logic would silently break stock-client compatibility.
 ///
 /// Strategy: target <c>GET /health</c>. It's an unauthenticated endpoint that always
-/// returns 200 when reached. With HOST_ROUTING active and the impersonated host, the
-/// path becomes <c>/npm/health</c> — which has no matching route and 404s. Three cases:
-///   - mapped host + HOST_ROUTING set   → 404 (rewrite happened)
-///   - unmapped host + HOST_ROUTING set → 200 (no rewrite for this host)
-///   - mapped host + HOST_ROUTING unset → 200 (middleware is no-op when map is empty)
+/// returns 200 when reached. With HOST_ROUTING active and a mapped host, the path
+/// becomes <c>/npm/health</c> — which has no matching route and 404s. Three cases:
+///   - mapped host + HOST_ROUTING set    → 404 (rewrite happened)
+///   - localhost (unmapped) + HOST_ROUTING set → 200 (no rewrite for this host)
+///   - localhost + HOST_ROUTING unset    → 200 (middleware is no-op when map is empty)
+/// Every mapped host is also always accepted by host filtering (regardless of BASE_URL) —
+/// those hostnames are the entire point of transparent intercept; localhost stands in for
+/// "any host the filter would accept but the map doesn't recognise" without also having to
+/// stand up a real BASE_URL/apex for these tests.
 /// </summary>
 [Trait("Category", "Integration")]
 [Collection("HostRoutingEnv")]   // serialised — env var mutation is process-wide
@@ -48,8 +52,8 @@ public sealed class TransparentInterceptRoutingTests
     private static async Task<HttpResponseMessage> GetHealthAsync(DependablyFactory factory, string host)
     {
         // TestServer takes Host from the request URI's authority, not from the Host
-        // header — encoding the impersonated host into the URL is the only way to make
-        // context.Request.Host.Host == "registry.npmjs.org" inside the pipeline.
+        // header — encoding the target host into the URL is the only way to make
+        // context.Request.Host.Host reflect it inside the pipeline.
         var client = factory.CreateClient();
         var req = new HttpRequestMessage(HttpMethod.Get, $"http://{host}/health");
         return await client.SendAsync(req);
@@ -90,7 +94,10 @@ public sealed class TransparentInterceptRoutingTests
             "registry.npmjs.org=npm,pypi.org=pypi,api.nuget.org=nuget",
             async factory =>
             {
-                var resp = await GetHealthAsync(factory, host: "dependably.example.com");
+                // localhost is never a HOST_ROUTING entry, and (unlike an arbitrary hostname)
+                // always clears host filtering regardless of BASE_URL — isolating the assertion
+                // to the middleware's own host-scoping rather than the filter allowlist.
+                var resp = await GetHealthAsync(factory, host: "localhost");
 
                 // Unmapped host stays /health → 200. Proves the rewrite is host-scoped.
                 Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
@@ -98,14 +105,15 @@ public sealed class TransparentInterceptRoutingTests
     }
 
     [Fact]
-    public async Task EmptyHostRouting_MiddlewareIsNoOp_EvenWithMappedHost()
+    public async Task EmptyHostRouting_MiddlewareIsNoOp_HealthReturns200()
     {
         // HOST_ROUTING unset (the default deployment). The middleware is registered but
-        // _map.IsEmpty short-circuits the rewrite. Even an impersonated host gets the
-        // path through unmodified.
+        // _map.IsEmpty short-circuits the rewrite. localhost always clears host filtering
+        // (even with no apex configured), so the request reaches the middleware and proves
+        // it leaves the path through unmodified when there is nothing to map.
         await WithHostRoutingAsync(null, async factory =>
         {
-            var resp = await GetHealthAsync(factory, host: "registry.npmjs.org");
+            var resp = await GetHealthAsync(factory, host: "localhost");
 
             Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         });

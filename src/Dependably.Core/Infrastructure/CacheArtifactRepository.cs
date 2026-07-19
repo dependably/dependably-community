@@ -72,7 +72,11 @@ public sealed class CacheArtifactRepository
 
     /// <summary>
     /// Returns artifacts eligible for LRU eviction in oldest-access-first order. The caller
-    /// decides how many to evict per pass based on size/count caps.
+    /// decides how many to evict per pass based on size/count caps. Excludes OCI: evicting an
+    /// OCI cache_artifact row would delete the manifest blob while its oci_blobs row and layer
+    /// blobs survive, leaving a broken serve path and orphaned layers. Correct OCI eviction
+    /// needs layer refcounting, which is out of scope — OCI stays never-evicted from the cache
+    /// plane, the same behavior as before it joined the plane at all.
     /// </summary>
     public async Task<IReadOnlyList<CacheArtifact>> ListLruCandidatesAsync(
         DateTimeOffset olderThan, int limit, CancellationToken ct = default)
@@ -86,23 +90,134 @@ public sealed class CacheArtifactRepository
                    last_accessed_at AS LastAccessedAt
             FROM cache_artifact
             WHERE last_accessed_at < @olderThan
+              AND ecosystem != 'oci'
             ORDER BY last_accessed_at ASC
             LIMIT @limit
             """, new { olderThan, limit });
         return rows.AsList();
     }
 
+    /// <summary>
+    /// Total bytes on the evictable cache plane, used by <c>CacheEvictionService</c>'s size cap.
+    /// Excludes OCI — see <see cref="ListLruCandidatesAsync"/> — so the size cap is measured
+    /// against the bytes that eviction can actually reclaim; including never-evicted OCI bytes
+    /// here would make the cap unreachable once OCI images accumulate.
+    /// </summary>
     public async Task<long> GetTotalSizeBytesAsync(CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
         return await conn.ExecuteScalarAsync<long>(
-            "SELECT COALESCE(SUM(size_bytes), 0) FROM cache_artifact");
+            "SELECT COALESCE(SUM(size_bytes), 0) FROM cache_artifact WHERE ecosystem != 'oci'");
+    }
+
+    /// <summary>
+    /// Total row count on the evictable cache plane, used by <c>CacheEvictionService</c>'s
+    /// artifact-count cap. Excludes OCI — see <see cref="ListLruCandidatesAsync"/> — so the count
+    /// cap is measured against the rows that eviction can actually reclaim; including
+    /// never-evicted OCI rows here would make the cap unreachable once OCI images accumulate.
+    /// </summary>
+    public async Task<long> GetTotalCountAsync(CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        return await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM cache_artifact WHERE ecosystem != 'oci'");
     }
 
     public async Task DeleteAsync(string id, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync("DELETE FROM cache_artifact WHERE id = @id", new { id });
+    }
+
+    /// <summary>
+    /// True when at least one <c>cache_artifact</c> row other than <paramref name="excludingId"/>
+    /// still references <paramref name="blobKey"/>. Content-addressed proxy blobs
+    /// (<see cref="Storage.BlobKeys.Proxy"/>) are shared across every coordinate — any org, any
+    /// ecosystem/name/version/filename — that happens to hash to the same upstream bytes, so
+    /// evicting one coordinate must never physically delete a blob a sibling coordinate still
+    /// needs. Used by <see cref="CacheOrphanBlobDeleter"/> as the shared-key refcount guard ahead
+    /// of the physical delete on both cache-tier eviction paths.
+    /// </summary>
+    // xtenant: cache_artifact is a global, content-addressed table; whether a blob is still needed
+    // anywhere is deliberately checked across every org's rows, not scoped to one tenant.
+    public async Task<bool> BlobKeyReferencedElsewhereAsync(
+        string blobKey, string excludingId, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        long count = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM cache_artifact WHERE blob_key = @blobKey AND id <> @excludingId",
+            new { blobKey, excludingId });
+        return count > 0;
+    }
+
+    /// <summary>
+    /// Evicts <paramref name="orgId"/>'s access to every cached proxy version of
+    /// <c>(ecosystem, name)</c> and returns how many versions were evicted plus the blob keys that
+    /// were dereferenced (whose <c>cache_artifact</c> row had no other tenant retaining access and
+    /// was deleted, so the caller can delete the blob).
+    ///
+    /// Removing the <c>tenant_artifact_access</c> row is what stops this org serving the cached
+    /// copy — every proxy serve path joins on it — so this alone closes a stale-serve on the cache
+    /// plane. The shared <c>cache_artifact</c> row and its blob are deleted only when no tenant
+    /// retains access, so a version another tenant still proxies is never dereferenced. OCI is
+    /// excluded from the shared-row delete: dropping an OCI <c>cache_artifact</c> destroys the
+    /// manifest blob while its <c>oci_blobs</c> row and layer blobs survive — the same
+    /// broken-serve / orphaned-layer hazard the retention and LRU paths guard against. The OCI
+    /// tenant access row is still removed, so this org stops serving it either way.
+    /// </summary>
+    // xtenant: cache_artifact is global; this org's access is scoped through tenant_artifact_access,
+    // and the shared-row reclamation is a single guarded DELETE across every tenant's access.
+    public async Task<TenantProxyEviction> EvictTenantProxyVersionsForNameAsync(
+        string orgId, string ecosystem, string name, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+
+        var accessed = (await conn.QueryAsync<(string Id, string BlobKey, string Ecosystem)>(
+            new CommandDefinition(
+                """
+                SELECT ca.id AS Id, ca.blob_key AS BlobKey, ca.ecosystem AS Ecosystem
+                FROM cache_artifact ca
+                JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id
+                WHERE taa.org_id = @orgId AND ca.ecosystem = @ecosystem AND ca.name = @name
+                """,
+                new { orgId, ecosystem, name }, cancellationToken: ct))).ToList();
+
+        var dereferenced = new List<string>();
+        foreach (var (id, blobKey, eco) in accessed)
+        {
+            if (ct.IsCancellationRequested) { break; }
+
+            // Drop this org's access first — the serve path joins on it, so the cached copy stops
+            // being served for this org even when the shared row survives for other tenants.
+            await conn.ExecuteAsync(new CommandDefinition(
+                "DELETE FROM tenant_artifact_access WHERE org_id = @orgId AND cache_artifact_id = @id",
+                new { orgId, id }, cancellationToken: ct));
+
+            if (string.Equals(eco, "oci", StringComparison.Ordinal))
+            {
+                // Never delete an OCI cache_artifact / manifest blob here — see the summary.
+                continue;
+            }
+
+            // Reclaim the shared row only when no tenant retains access. The NOT EXISTS guard runs
+            // inside the DELETE, so a concurrent fetch that (re)acquires access between a check and
+            // the delete can't lose its row to a stale count — the row is dropped iff it is genuinely
+            // unreferenced, and its blob is dereferenced only when that DELETE actually removed it.
+            // xtenant: deliberately cross-tenant reclamation of the global cache_artifact row.
+            int deleted = await conn.ExecuteAsync(new CommandDefinition(
+                """
+                DELETE FROM cache_artifact
+                WHERE id = @id
+                  AND NOT EXISTS (SELECT 1 FROM tenant_artifact_access WHERE cache_artifact_id = @id)
+                """,
+                new { id }, cancellationToken: ct));
+            if (deleted == 1)
+            {
+                dereferenced.Add(blobKey);
+            }
+        }
+
+        return new TenantProxyEviction(accessed.Count, dereferenced);
     }
 
     /// <summary>
@@ -169,17 +284,19 @@ public sealed class CacheArtifactRepository
     /// <summary>
     /// Returns proxy <c>cache_artifact</c> rows that have never had a license-extraction pass
     /// (<c>license_checked_at IS NULL</c>) for the ecosystems whose bytes carry an extractable
-    /// license manifest (npm/PyPI/NuGet) or LICENSE-file text (Go). Keyset-paginated on
-    /// <c>(first_cached_at, id)</c> — a total order, since <c>first_cached_at</c> alone is not
+    /// license manifest (npm/PyPI/NuGet), LICENSE-file text (Go), or a POM (Maven). Keyset-paginated
+    /// on <c>(first_cached_at, id)</c> — a total order, since <c>first_cached_at</c> alone is not
     /// unique — via <paramref name="afterFirstCachedAt"/> / <paramref name="afterId"/> (both null
     /// for the first page of a pass). LIMIT-batched so the backfill pass bounds its per-tick work.
     /// The caller advances the cursor from the last row of every batch regardless of per-row
     /// outcome, so a row that fails to process (and so is never stamped) cannot re-enter a later
     /// page of the SAME pass and starve newer rows behind it — it is simply retried on the next
     /// scheduled pass, when the cursor resets. Returns the coordinate plus the blob key the caller
-    /// needs to open the artifact bytes. The ecosystem list is deliberately narrow — Maven joins
-    /// once the backfill can dispatch <c>.pom</c> files to the existing POM extractor (Maven cache
-    /// rows mix jars and poms under one ecosystem, so filename-based dispatch is required).
+    /// needs to open the artifact bytes. Maven cache rows mix jars, poms, and checksum sidecars
+    /// under one ecosystem, and the extractable license signal lives only in the <c>.pom</c> —
+    /// so Maven candidates are restricted to rows whose filename ends in <c>.pom</c>; jar and
+    /// sidecar rows never become candidates and keep <c>license_checked_at</c> permanently NULL,
+    /// which is harmless since this query excludes them regardless.
     /// </summary>
     // xtenant: cache_artifact is a global table (no org_id); the license-backfill pass enumerates
     // the whole shared cache plane oldest-first and processes each row independently.
@@ -196,7 +313,10 @@ public sealed class CacheArtifactRepository
                    filename AS Filename, blob_key AS BlobKey, first_cached_at AS FirstCachedAt
             FROM cache_artifact
             WHERE license_checked_at IS NULL
-              AND ecosystem IN ('npm', 'pypi', 'nuget', 'golang')
+              AND (
+                    ecosystem IN ('npm', 'pypi', 'nuget', 'golang')
+                    OR (ecosystem = 'maven' AND LOWER(filename) LIKE '%.pom')
+                  )
               AND (
                     @afterFirstCachedAt IS NULL
                     OR first_cached_at > @afterFirstCachedAt
@@ -395,6 +515,7 @@ public sealed class CacheArtifactRepository
                 ca.provenance_signer    AS ProvenanceSigner,
                 ca.upstream_integrity_value     AS UpstreamIntegrityValue,
                 ca.upstream_integrity_algorithm AS UpstreamIntegrityAlgorithm,
+                ca.upstream_url         AS UpstreamUrl,
                 ca.manifest_json        AS ManifestJson,
                 taa.manual_block_state  AS ManualBlockState,
                 taa.yanked              AS Yanked,
@@ -432,13 +553,13 @@ public sealed class CacheArtifactRepository
         string? provenanceSigner,
         string? upstreamIntegrityValue,
         string? upstreamIntegrityAlgorithm,
-        CancellationToken ct = default,
         // JSON install-manifest subset (dependencies/optionalDependencies/bin/engines) extracted
         // from the npm tarball's package.json at first-fetch. NULL for every non-npm ecosystem and
         // left unchanged (COALESCE keep-existing) when extraction fails, so a pre-migration row
         // backfills the next time this artifact is re-fetched rather than being overwritten back
         // to NULL.
-        string? manifestJson = null)
+        string? manifestJson = null,
+        CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync("""
@@ -491,6 +612,15 @@ public sealed record LicenseBackfillCandidate(
     string Filename,
     string BlobKey,
     DateTimeOffset FirstCachedAt);
+
+/// <summary>
+/// Result of <see cref="CacheArtifactRepository.EvictTenantProxyVersionsForNameAsync"/>:
+/// <see cref="VersionsEvicted"/> is how many cached proxy versions this org lost access to;
+/// <see cref="DereferencedBlobKeys"/> is the subset whose shared row had no remaining tenant and
+/// was deleted, so the caller deletes those blobs. The two differ when a version stays proxied by
+/// another tenant (evicted for this org, blob retained) or is OCI (access dropped, manifest kept).
+/// </summary>
+public sealed record TenantProxyEviction(int VersionsEvicted, IReadOnlyList<string> DereferencedBlobKeys);
 
 public sealed class CacheArtifact
 {
@@ -585,6 +715,12 @@ public sealed class CacheArtifactIndexFacts
     /// <summary>Algorithm tag ('sha256' | 'sha512-sri' | 'sha512-b64') for <see cref="UpstreamIntegrityValue"/>.</summary>
     public string? UpstreamIntegrityAlgorithm { get; init; }
     /// <summary>
+    /// Full URL the artifact bytes were fetched from, sourced from <c>cache_artifact.upstream_url</c>.
+    /// This is the resolved per-org upstream (a private registry when one is configured), recorded at
+    /// first-fetch. NULL for rows created before the column existed.
+    /// </summary>
+    public string? UpstreamUrl { get; init; }
+    /// <summary>
     /// JSON install-manifest subset (dependencies/optionalDependencies/bin/engines/…) from
     /// <c>cache_artifact.manifest_json</c>, in the same shape as
     /// <c>package_versions.manifest_json</c>. NULL for artifacts cached before ingest-time
@@ -631,6 +767,7 @@ public sealed class CacheArtifactIndexFacts
             ProvenanceSigner = ProvenanceSigner,
             UpstreamIntegrityValue = UpstreamIntegrityValue,
             UpstreamIntegrityAlgorithm = UpstreamIntegrityAlgorithm,
+            UpstreamUrl = UpstreamUrl,
             ManifestJson = ManifestJson,
             DownloadCount = DownloadCount,
             Origin = "proxy",

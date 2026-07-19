@@ -70,12 +70,30 @@ internal sealed class DependablyUserStore :
         });
     }
 
+    /// <summary>
+    /// Records the MFA-column values as they were just read from the database so
+    /// <see cref="UpdateAsync"/> and <see cref="RedeemCodeAsync"/> can detect a concurrent
+    /// mutation instead of blindly overwriting it.
+    /// </summary>
+    private static DependablyUser? StampPersistedSnapshot(DependablyUser? user)
+    {
+        if (user is not null)
+        {
+            user.PersistedTwoFactorEnabled = user.TwoFactorEnabled;
+            user.PersistedAuthenticatorKey = user.AuthenticatorKey;
+            user.PersistedRecoveryCodes = user.RecoveryCodes;
+            user.PersistedSecurityStamp = user.SecurityStamp;
+        }
+
+        return user;
+    }
+
     public async Task<DependablyUser?> FindByIdAsync(string userId, CancellationToken cancellationToken)
     {
         await using var conn = await _db.OpenAsync(cancellationToken);
         // xtenant: PK lookup; users.id is globally unique. Tenant binding is enforced at
         // JWT issuance and by RouteScopeFilter; this read does not cross tenant data planes.
-        return await conn.QuerySingleOrDefaultAsync<DependablyUser?>(
+        return StampPersistedSnapshot(await conn.QuerySingleOrDefaultAsync<DependablyUser?>(
             """
             SELECT id AS Id, tenant_id AS TenantId, email AS Email,
                    password_hash AS PasswordHash, mfa_enabled AS TwoFactorEnabled,
@@ -85,7 +103,7 @@ internal sealed class DependablyUserStore :
                    token_version AS TokenVersion
             FROM users WHERE id = @id
             """,
-            new { id = userId });
+            new { id = userId }));
     }
 
     public async Task<DependablyUser?> FindByNameAsync(string normalizedUserName, CancellationToken cancellationToken)
@@ -93,7 +111,7 @@ internal sealed class DependablyUserStore :
         // UserName == Email for this provider; normalizedUserName is lowercased by UserManager.
         string tenantId = RequireTenantId();
         await using var conn = await _db.OpenAsync(cancellationToken);
-        return await conn.QuerySingleOrDefaultAsync<DependablyUser?>(
+        return StampPersistedSnapshot(await conn.QuerySingleOrDefaultAsync<DependablyUser?>(
             """
             SELECT id AS Id, tenant_id AS TenantId, email AS Email,
                    password_hash AS PasswordHash, mfa_enabled AS TwoFactorEnabled,
@@ -105,7 +123,7 @@ internal sealed class DependablyUserStore :
             WHERE lower(email) = lower(@email) AND tenant_id = @tenantId
             LIMIT 1
             """,
-            new { email = normalizedUserName, tenantId });
+            new { email = normalizedUserName, tenantId }));
     }
 
     public Task<string?> GetNormalizedUserNameAsync(DependablyUser user, CancellationToken cancellationToken) =>
@@ -134,7 +152,11 @@ internal sealed class DependablyUserStore :
     {
         string tenantId = RequireTenantId();
         await using var conn = await _db.OpenAsync(cancellationToken);
-        await conn.ExecuteAsync(
+        // Optimistic concurrency: guard on the MFA columns as they were last read (the persisted
+        // snapshot) so a stale in-memory copy cannot overwrite a value a concurrent MFA operation
+        // already committed. COALESCE to '' gives a provider-portable null-safe comparison
+        // (no real key/codes/stamp value is the empty string) on both SQLite and Postgres.
+        int affected = await conn.ExecuteAsync(
             """
             UPDATE users
             SET mfa_enabled         = @e,
@@ -142,6 +164,10 @@ internal sealed class DependablyUserStore :
                 mfa_recovery_codes  = @r,
                 security_stamp      = @s
             WHERE id = @id AND tenant_id = @tenantId
+              AND mfa_enabled = @pe
+              AND COALESCE(mfa_authenticator_key, '') = COALESCE(@pk, '')
+              AND COALESCE(mfa_recovery_codes, '')  = COALESCE(@pr, '')
+              AND COALESCE(security_stamp, '')      = COALESCE(@ps, '')
             """,
             new
             {
@@ -149,9 +175,20 @@ internal sealed class DependablyUserStore :
                 k = user.AuthenticatorKey,
                 r = user.RecoveryCodes,
                 s = user.SecurityStamp,
+                pe = user.PersistedTwoFactorEnabled ? 1 : 0,
+                pk = user.PersistedAuthenticatorKey,
+                pr = user.PersistedRecoveryCodes,
+                ps = user.PersistedSecurityStamp,
                 id = user.Id,
                 tenantId,
             });
+
+        if (affected == 0)
+        {
+            return IdentityResult.Failed(new IdentityErrorDescriber().ConcurrencyFailure());
+        }
+
+        StampPersistedSnapshot(user);
         return IdentityResult.Success;
     }
 
@@ -175,7 +212,7 @@ internal sealed class DependablyUserStore :
     {
         string tenantId = RequireTenantId();
         await using var conn = await _db.OpenAsync(cancellationToken);
-        return await conn.QuerySingleOrDefaultAsync<DependablyUser?>(
+        return StampPersistedSnapshot(await conn.QuerySingleOrDefaultAsync<DependablyUser?>(
             """
             SELECT id AS Id, tenant_id AS TenantId, email AS Email,
                    password_hash AS PasswordHash, mfa_enabled AS TwoFactorEnabled,
@@ -187,7 +224,7 @@ internal sealed class DependablyUserStore :
             WHERE lower(email) = lower(@email) AND tenant_id = @tenantId
             LIMIT 1
             """,
-            new { email = normalizedEmail, tenantId });
+            new { email = normalizedEmail, tenantId }));
     }
 
     public Task<string?> GetEmailAsync(DependablyUser user, CancellationToken cancellationToken) =>
@@ -320,8 +357,32 @@ internal sealed class DependablyUserStore :
         }
 
         hashes.RemoveAt(matchIndex);
-        user.RecoveryCodes = JsonSerializer.Serialize(hashes);
-        await UpdateAsync(user, cancellationToken);
+        string? previous = user.PersistedRecoveryCodes;
+        string trimmed = JsonSerializer.Serialize(hashes);
+
+        // Column-scoped write guarded on the recovery-code list as last read: only the
+        // mfa_recovery_codes column is touched, so a concurrent operation's changes to the
+        // other MFA columns are not clobbered, and a mismatch (another operation already
+        // rewrote the list) means this redemption loses the race and consumes nothing —
+        // the previously-redeemed code is never resurrected.
+        string tenantId = RequireTenantId();
+        await using var conn = await _db.OpenAsync(cancellationToken);
+        int affected = await conn.ExecuteAsync(
+            """
+            UPDATE users
+            SET mfa_recovery_codes = @trimmed
+            WHERE id = @id AND tenant_id = @tenantId
+              AND COALESCE(mfa_recovery_codes, '') = COALESCE(@previous, '')
+            """,
+            new { trimmed, previous, id = user.Id, tenantId });
+
+        if (affected == 0)
+        {
+            return false;
+        }
+
+        user.RecoveryCodes = trimmed;
+        user.PersistedRecoveryCodes = trimmed;
         return true;
     }
 

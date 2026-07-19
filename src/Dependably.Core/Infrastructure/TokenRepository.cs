@@ -341,8 +341,11 @@ public class TokenRepository
         // Two full SQL constants, dispatched by enum — no string composition, no caller input
         // anywhere near the query text. Keeps the parameterized-SQL rule and removes the
         // dynamic-SQL hotspot that interpolation would trigger.
+        // xtenant: both keyed by the token PK that ResolveAsync returned for the presented
+        // secret's SHA-256 hash — the row is the caller's own token, never a supplied id.
         const string updateUser =
             "UPDATE user_tokens SET last_used_at = @now WHERE id = @id AND (last_used_at IS NULL OR last_used_at < @threshold)";
+        // xtenant: service-token arm of the same hash-resolved PK touch.
         const string updateService =
             "UPDATE service_tokens SET last_used_at = @now WHERE id = @id AND (last_used_at IS NULL OR last_used_at < @threshold)";
 

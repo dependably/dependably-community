@@ -8,9 +8,10 @@ namespace Dependably.Tests.Unit.Infrastructure;
 /// <summary>
 /// Covers <see cref="OrgSettingsRepository"/> — the settings write path used by
 /// <c>OrgSettingsController</c>. Tests all Upsert branches: Clamp(null,*) /
-/// Clamp(*,null), DefaultLanguage whitespace handling, every Upsert's
-/// insert + update path, instance settings get/list/set including the
-/// jwt_secret filter and conflict overwrite.
+/// Clamp(*,null), DefaultLanguage whitespace handling, and every Upsert's
+/// insert + update path. <c>instance_settings</c> listing (including the secret-key
+/// exclusion) lives on <see cref="OrgRepository"/>, not this repository — see
+/// <c>OrgRepositoryTests</c> for that coverage.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class OrgSettingsRepositoryTests : IClassFixture<InMemoryDbFixture>
@@ -306,31 +307,5 @@ public sealed class OrgSettingsRepositoryTests : IClassFixture<InMemoryDbFixture
         Assert.Equal("warn", (await _repo.GetSettingsAsync(orgId))!.LicenseEnforcementMode);
         await _repo.UpsertLicensePolicyModeAsync(orgId, "block");
         Assert.Equal("block", (await _repo.GetSettingsAsync(orgId))!.LicenseEnforcementMode);
-    }
-
-    // ── Instance settings — ListInstanceSettingsAsync ─────────────────────────
-
-    [Fact]
-    public async Task ListInstanceSettingsAsync_ExcludesJwtSecretAndMfaKey()
-    {
-        // Seed rows directly via Dapper to avoid the deleted Set path.
-        await using var conn = await _fixture.Store.OpenAsync();
-        string unique = Guid.NewGuid().ToString("N");
-        string userKey = $"k-{unique}";
-        await conn.ExecuteAsync(
-            "INSERT INTO instance_settings (key, value) VALUES (@key, @value) ON CONFLICT(key) DO UPDATE SET value = @value",
-            new { key = userKey, value = "v1" });
-        await conn.ExecuteAsync(
-            "INSERT INTO instance_settings (key, value) VALUES (@key, @value) ON CONFLICT(key) DO UPDATE SET value = @value",
-            new { key = "jwt_secret", value = "TOPSECRET" });
-        await conn.ExecuteAsync(
-            "INSERT INTO instance_settings (key, value) VALUES (@key, @value) ON CONFLICT(key) DO UPDATE SET value = @value",
-            new { key = "mfa_encryption_key", value = "MFASECRET" });
-
-        var listed = await _repo.ListInstanceSettingsAsync();
-
-        Assert.False(listed.ContainsKey("jwt_secret"), "jwt_secret must be excluded from listing");
-        Assert.False(listed.ContainsKey("mfa_encryption_key"), "mfa_encryption_key must be excluded from listing");
-        Assert.Equal("v1", listed[userKey]);
     }
 }

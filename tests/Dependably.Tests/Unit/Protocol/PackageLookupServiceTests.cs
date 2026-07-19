@@ -396,6 +396,112 @@ public sealed class PackageLookupServiceTests : IAsyncLifetime
         Assert.Equal("maven.coordinateInvalid", outcome.Reason);
     }
 
+    // A malformed npm name must be rejected as input, never forwarded upstream. The bare-scope
+    // case is the one that bites: registry.npmjs.org answers GET /@scope with 405 (not 404), so a
+    // forwarded typo comes back as "this source is unhealthy" and the lookup would report an
+    // upstream outage (503) instead of a bad name. Unscoped names cannot contain a separator at
+    // all, so "a/b" is equally malformed.
+    [Theory]
+    [InlineData("@dependably")]      // scope with no name part
+    [InlineData("@")]                // scope sigil alone
+    [InlineData("@/name")]           // empty scope
+    [InlineData("@scope/")]          // empty name
+    [InlineData("plain/slashed")]    // unscoped names admit no separator
+    [InlineData("@scope/name/extra")]
+    public async Task MalformedNpmName_ReturnsInvalidInput_WithoutContactingUpstream(string name)
+    {
+        string orgId = await SeedOrgWithNpmUpstreamAsync();
+        var service = BuildService(new FakeOsvSource(_ => []));
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "npm", name, "1.0.0"));
+
+        Assert.Equal(PackageLookupStatus.InvalidInput, outcome.Status);
+        Assert.Equal("name.invalid", outcome.Reason);
+        Assert.Equal("name", outcome.Field);
+    }
+
+    [Theory]
+    [InlineData("left-pad")]
+    [InlineData("@scope/name")]
+    public void WellShapedNpmNames_AreAccepted(string name)
+    {
+        Assert.True(Dependably.Api.NpmProtocol.NpmSharedHelpers.IsUpstreamSafeNpmName(name));
+    }
+
+    // The name is composed into an authenticated upstream URL. ASP.NET decodes the query value
+    // once, so a double-encoded "%252e%252e%252f" arrives here as the literal string
+    // "%2e%2e%2f" — no literal ".." or "/", so it clears the base rules — and would be decoded
+    // to "../" by the upstream. ValidateUpstreamSegment's '%' ban rejects it before any fetch.
+    [Theory]
+    [InlineData("pypi", "%2e%2e%2fadmin")]
+    [InlineData("pypi", "req%2fuests")]
+    [InlineData("nuget", "%2e%2e%2f%2e%2e%2fpackages")]
+    [InlineData("cargo", "ser%2fde")]
+    [InlineData("golang", "example.com/%2e%2e%2fmod")]
+    [InlineData("golang", "example.com/a%2fb")]
+    public async Task PercentEncodedName_ReturnsInvalidInput_WithoutContactingUpstream(string ecosystem, string name)
+    {
+        string orgId = await SeedOrgWithNpmUpstreamAsync();
+        var service = BuildService(new FakeOsvSource(_ => []));
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, ecosystem, name, "1.0.0"));
+
+        Assert.Equal(PackageLookupStatus.InvalidInput, outcome.Status);
+        Assert.Equal("name.invalid", outcome.Reason);
+        Assert.Equal("name", outcome.Field);
+    }
+
+    // The groupId becomes a URL path via Replace('.', '/'), so a '%' in any groupId sub-segment
+    // or in the artifactId is a traversal vector; a literal '/' smuggled into the groupId and the
+    // pre-existing artifact-'/' rule are also rejected as malformed coordinates.
+    [Theory]
+    [InlineData("com.example:art%2e%2e%2fifact")]  // '%' in artifactId
+    [InlineData("com.%2e%2e.example:artifact")]    // '%' in a groupId sub-segment
+    [InlineData("com/evil:artifact")]              // '/' smuggled into the groupId
+    [InlineData("com.example:art/ifact")]          // regression guard: artifact '/' still rejected
+    [InlineData("com.exam\u0000ple:artifact")] // null byte in a groupId sub-segment
+    public async Task MalformedMavenCoordinate_ReturnsInvalidInput(string coordinate)
+    {
+        string orgId = await SeedOrgWithNpmUpstreamAsync();
+        var service = BuildService(new FakeOsvSource(_ => []));
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "maven", coordinate, "1.0"));
+
+        Assert.Equal(PackageLookupStatus.InvalidInput, outcome.Status);
+        Assert.Equal("maven.coordinateInvalid", outcome.Reason);
+    }
+
+    [Fact]
+    public async Task PercentEncodedVersion_ReturnsInvalidInput()
+    {
+        string orgId = await SeedOrgWithNpmUpstreamAsync();
+        var service = BuildService(new FakeOsvSource(_ => []));
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "npm", "left-pad", "1.0.0%2f%2e%2e"));
+
+        Assert.Equal(PackageLookupStatus.InvalidInput, outcome.Status);
+        Assert.Equal("version.invalid", outcome.Reason);
+    }
+
+    // The '%' ban must not reject any legitimate name in these ecosystems — none of their name
+    // grammars admit '%'. These pass validation and proceed (the outcome past validation depends
+    // on upstream config, so the invariant asserted is only "not rejected as invalid input").
+    [Theory]
+    [InlineData("pypi", "typing_extensions")]
+    [InlineData("nuget", "Newtonsoft.Json")]
+    [InlineData("maven", "com.google.guava:guava")]
+    [InlineData("golang", "github.com/foo/bar")]
+    [InlineData("cargo", "serde_json")]
+    public async Task WellShapedNames_AreNotRejectedAsInvalidInput(string ecosystem, string name)
+    {
+        string orgId = await SeedOrgWithNpmUpstreamAsync();
+        var service = BuildService(new FakeOsvSource(_ => []));
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, ecosystem, name, "1.0.0"));
+
+        Assert.NotEqual(PackageLookupStatus.InvalidInput, outcome.Status);
+    }
+
     // ── Test doubles / helpers ───────────────────────────────────────────────────
 
     private static OsvAdvisory MalwareAdvisory(string id) => new(

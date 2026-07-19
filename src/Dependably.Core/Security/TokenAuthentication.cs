@@ -141,6 +141,8 @@ public sealed class TokenAuthenticationHandler : AuthenticationHandler<TokenAuth
         }
 
         await using var conn = await _db.OpenAsync(ct);
+        // xtenant: keyed by users PK taken from the token record the presented secret's SHA-256
+        // hash resolved — it names the token's own owner, not a caller-supplied user.
         string? role = await conn.QuerySingleOrDefaultAsync<string>(
             "SELECT role FROM users WHERE id = @id", new { id = token.UserId });
         return role ?? "member";

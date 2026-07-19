@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Xml.Linq;
@@ -99,7 +100,9 @@ public sealed class PackageLookupService
         string? requestedVersion = string.IsNullOrWhiteSpace(request.Version) ? null : request.Version.Trim();
         if (requestedVersion is not null)
         {
-            var vr = PathSafeValidator.Validate(requestedVersion, "version");
+            // ValidateUpstreamSegment (not Validate): the version is composed into an upstream
+            // URL (the NuGet nuspec fetch), and no ecosystem's version grammar admits '%'.
+            var vr = PathSafeValidator.ValidateUpstreamSegment(requestedVersion, "version");
             if (!vr.IsValid)
             {
                 return PackageLookupOutcome.InvalidInput("version", "version.invalid");
@@ -185,7 +188,8 @@ public sealed class PackageLookupService
 
         return fetchOutcome?.Status switch
         {
-            MetadataFetchStatus.NotFound => VersionResolution.Exit(PackageLookupOutcome.UpstreamNotFound()),
+            MetadataFetchStatus.NotFound => VersionResolution.Exit(
+                PackageLookupOutcome.UpstreamNotFound(new PackageLookupNotFound(ecosystem, name, requestedVersion))),
             MetadataFetchStatus.Ok => ResolveFromFetchedFacts(fetchOutcome, requestedVersion),
             _ => ResolveWithoutMetadata(fetchOutcome, requestedVersion, ecosystem),
         };
@@ -372,9 +376,13 @@ public sealed class PackageLookupService
         return PurlNormalizer.Maven(coordinate[..sep], coordinate[(sep + 1)..], version);
     }
 
-    // Field-shape validation. Reuses PathSafeValidator for the common (slash-free) case;
-    // npm scoped names and Maven's groupId:artifactId coordinate need their own shape checks
-    // since both legitimately contain a separator PathSafeValidator rejects.
+    // Field-shape validation. Every accepted name is composed into an authenticated upstream
+    // registry URL, so each path segment goes through PathSafeValidator.ValidateUpstreamSegment
+    // (the base rules plus a '%' ban) — not the '%'-permissive Validate. The '%' ban matters
+    // because the query value is decoded once by ASP.NET, so a double-encoded '%252e%252e%252f'
+    // arrives as the literal string '%2e%2e%2f', clears the '..'/'/' rules, and would otherwise
+    // be decoded to '../' by the upstream. npm and Maven layer their own shape checks on top
+    // since both legitimately contain a segment separator ValidateUpstreamSegment rejects.
     private static (string Field, string Code)? ValidateName(string ecosystem, string name)
     {
         if (string.IsNullOrWhiteSpace(name))
@@ -391,25 +399,43 @@ public sealed class PackageLookupService
 
         if (ecosystem == "maven")
         {
-            int sep = name.IndexOf(':');
-            bool coordinateInvalid = sep <= 0 || sep == name.Length - 1
-                || name.Contains("..", StringComparison.Ordinal) || name[(sep + 1)..].Contains('/');
-            return coordinateInvalid ? ("name", "maven.coordinateInvalid") : null;
+            return ValidateMavenCoordinate(name);
         }
 
         if (ecosystem == "golang")
         {
             // Go module paths are domain/path-shaped (e.g. "example.com/mod",
             // "github.com/foo/bar") — validate each '/'-separated segment individually rather
-            // than the whole string, since PathSafeValidator itself rejects any path separator.
+            // than the whole string, since ValidateUpstreamSegment itself rejects any separator.
             string[] segments = name.Split('/');
             bool allSegmentsSafe = Array.TrueForAll(
-                segments, s => PathSafeValidator.Validate(s, "name").IsValid);
+                segments, s => PathSafeValidator.ValidateUpstreamSegment(s, "name").IsValid);
             return allSegmentsSafe ? null : ("name", "name.invalid");
         }
 
-        var vr = PathSafeValidator.Validate(name, "name");
+        var vr = PathSafeValidator.ValidateUpstreamSegment(name, "name");
         return vr.IsValid ? null : ("name", "name.invalid");
+    }
+
+    // groupId:artifactId shape plus per-upstream-path-segment safety. The groupId becomes a URL
+    // path via Replace('.', '/') in FetchMavenAsync, so every '.'-separated groupId sub-segment
+    // is a distinct segment of the composed authenticated upstream URL and must clear the same
+    // ValidateUpstreamSegment gate (its '%' ban stops double-encoded traversal). The artifactId
+    // is validated unsplit — artifactIds legitimately contain dots (e.g.
+    // "org.apache.felix.framework") and form a single upstream path segment.
+    private static (string Field, string Code)? ValidateMavenCoordinate(string name)
+    {
+        int sep = name.IndexOf(':');
+        if (sep <= 0 || sep == name.Length - 1)
+        {
+            return ("name", "maven.coordinateInvalid");
+        }
+
+        bool groupSafe = Array.TrueForAll(
+            name[..sep].Split('.'),
+            s => PathSafeValidator.ValidateUpstreamSegment(s, "name").IsValid);
+        bool artifactSafe = PathSafeValidator.ValidateUpstreamSegment(name[(sep + 1)..], "name").IsValid;
+        return groupSafe && artifactSafe ? null : ("name", "maven.coordinateInvalid");
     }
 
     // A thrown failure is transient/unreachable — not a definitive "this package/version does
@@ -953,15 +979,17 @@ public sealed record PackageLookupRequest(string OrgId, string? Ecosystem, strin
 public enum PackageLookupStatus { Ok, UnsupportedEcosystem, InvalidInput, VersionRequired, UpstreamNotFound, UpstreamUnavailable }
 
 /// <summary>
-/// Outcome of a lookup: either a computed <see cref="Result"/> (Status == Ok) or a reason the
-/// controller maps to the matching RFC 7807 problem (422 for input problems, 404 for a
-/// definitively-absent upstream package/version, 502/503 for a transient/unreachable upstream).
+/// Outcome of a lookup: a computed <see cref="Result"/> (Status == Ok), a definitive
+/// <see cref="NotFound"/> answer the controller returns as a 200 verdict-shaped body, or a reason
+/// the controller maps to the matching RFC 7807 problem (422 for input problems, 502/503 for a
+/// transient/unreachable upstream).
 /// </summary>
 public sealed record PackageLookupOutcome(
     PackageLookupStatus Status,
     PackageLookupResult? Result = null,
     string? Field = null,
-    string? Reason = null)
+    string? Reason = null,
+    PackageLookupNotFound? NotFound = null)
 {
     public static PackageLookupOutcome Ok(PackageLookupResult result) => new(PackageLookupStatus.Ok, result);
     public static PackageLookupOutcome UnsupportedEcosystem(string ecosystem) =>
@@ -970,9 +998,28 @@ public sealed record PackageLookupOutcome(
         new(PackageLookupStatus.InvalidInput, Field: field, Reason: code);
     public static PackageLookupOutcome VersionRequired(string ecosystem) =>
         new(PackageLookupStatus.VersionRequired, Reason: ecosystem);
-    public static PackageLookupOutcome UpstreamNotFound() => new(PackageLookupStatus.UpstreamNotFound);
+    public static PackageLookupOutcome UpstreamNotFound(PackageLookupNotFound notFound) =>
+        new(PackageLookupStatus.UpstreamNotFound, NotFound: notFound);
     public static PackageLookupOutcome UpstreamUnavailable(string ecosystem) =>
         new(PackageLookupStatus.UpstreamUnavailable, Reason: ecosystem);
+}
+
+/// <summary>
+/// The body served (200) when the upstream definitively has no such package or version. A lookup
+/// is a query about a candidate, so "no such package" is an answer to it, not a failure of the
+/// request — a mistyped name is the single most common way to reach this and does not warrant an
+/// error status. <see cref="Found"/> is the discriminator against <see cref="PackageLookupResult"/>,
+/// which carries the same flag set to true.
+/// </summary>
+public sealed record PackageLookupNotFound(string Ecosystem, string Name, string? Version)
+{
+    // Deliberately an instance property, not static: System.Text.Json only serializes instance
+    // members, and LookupController's Ok(outcome.NotFound) response depends on "found" appearing
+    // in the JSON body as the client-facing discriminator against PackageLookupResult. Marking it
+    // static would silently drop the field from the wire response instead of failing to compile.
+    [SuppressMessage("Minor Code Smell", "S2325:Methods and properties that don't access instance data should be static",
+        Justification = "Instance property is required for System.Text.Json to serialize it into the JSON response; a static member would silently vanish from the wire contract.")]
+    public bool Found => false;
 }
 
 public sealed record PackageLookupResult(
@@ -990,7 +1037,14 @@ public sealed record PackageLookupResult(
     VulnerabilityLookupCheck Vulnerabilities,
     LicenseLookupCheck License,
     bool AirGapped,
-    IReadOnlyList<string> UnavailableChecks);
+    IReadOnlyList<string> UnavailableChecks)
+{
+    /// <summary>Discriminates this shape from <see cref="PackageLookupNotFound"/> — both are
+    /// served as 200, so the client branches on this flag rather than on the status code.</summary>
+    [SuppressMessage("Minor Code Smell", "S2325:Methods and properties that don't access instance data should be static",
+        Justification = "Instance property is required for System.Text.Json to serialize it into the JSON response; a static member would silently vanish from the wire contract.")]
+    public bool Found => true;
+}
 
 public sealed record MalwareLookupCheck(bool Detected, IReadOnlyList<string> AdvisoryIds);
 

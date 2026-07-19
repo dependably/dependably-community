@@ -194,4 +194,29 @@ public sealed class InstallScriptAllowlistServiceTests : IClassFixture<InMemoryD
         Assert.Equal("z-pkg", list[1].Name);
         Assert.Equal("pypi", list[2].Ecosystem);
     }
+
+    // ── fill-after-invalidate race ────────────────────────────────────────────
+
+    [Fact]
+    public async Task AddThatRacesAnInFlightListFill_DoesNotServeThePreAddListForATtl()
+    {
+        // Fill-after-invalidate race: IsAllowlistedAsync reads the DB (no entry yet); concurrently
+        // an operator adds an exemption, whose INSERT + cache-eviction lands mid-fill. On the
+        // pre-guard code the fill caches the pre-add list AFTER the eviction, so the exemption
+        // stays invisible for a full 60s TTL. The hook fires the racing AddAsync between the list
+        // read and its cache write — fails on the old code, passes on the generation-token fix.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"isa-race-{Guid.NewGuid():N}");
+        var hooked = new AfterDbReadHookStore(_fixture.Store);
+        var sut = new InstallScriptAllowlistService(
+            hooked, new MemoryCache(new MemoryCacheOptions()), _clock);
+
+        hooked.AfterRead = async () => await sut.AddAsync(orgId, "npm", "esbuild", null, null);
+
+        // The fill reads the empty list, then the hook adds the exemption + evicts, then it caches.
+        Assert.False(await sut.IsAllowlistedAsync(orgId, "npm", "esbuild", "1.0.0")); // pre-add read
+
+        // Killer assertion: the next check must honour the newly-added exemption, not a stale
+        // pre-add list cached by the racing fill.
+        Assert.True(await sut.IsAllowlistedAsync(orgId, "npm", "esbuild", "1.0.0"));
+    }
 }

@@ -160,6 +160,120 @@ public sealed class FullHostStartupWarningTests
     }
 }
 
+/// <summary>
+/// Isolated (non-parallel) coverage for the legacy <c>SMTP_*</c> present-but-ignored startup
+/// warning. Email configuration is DB-backed with no environment-to-database seed, so a
+/// deployment carrying the old variables loses invite email silently — this warning is the only
+/// signal the operator gets. Shares the serialized log-capture collection because Serilog's
+/// static <c>Log.Logger</c> is process-global.
+/// </summary>
+[Trait("Category", "Integration")]
+[Collection("EdgeLogCapture")]
+public sealed class LegacySmtpEnvWarningTests
+{
+    private const string WarningPrefix = "Legacy SMTP environment variables are set but ignored";
+
+    [Fact]
+    public async Task FullHost_LegacySmtpHostPresent_LogsIgnoredWarningNamingTheVariable()
+    {
+        var sink = new CapturingLogSink();
+        await using var f = new DependablyFactory
+        {
+            LegacySmtpVars = new Dictionary<string, string?>
+            {
+                ["SMTP_HOST"] = "smtp.example.com",
+            },
+            LogSink = sink,
+        };
+        using var boot = f.CreateClient();
+        await boot.GetAsync("/health");
+
+        Assert.True(
+            sink.Contains(WarningPrefix, Serilog.Events.LogEventLevel.Warning),
+            "a present-but-ignored SMTP_* variable must warn at Warning level");
+        Assert.True(
+            sink.Contains("SMTP_HOST", Serilog.Events.LogEventLevel.Warning),
+            "the warning must name the variable that is being ignored");
+        Assert.True(
+            sink.Contains("Settings -> Instance settings -> Instance email (SMTP)",
+                Serilog.Events.LogEventLevel.Warning),
+            "the warning must point at where invite SMTP is now configured");
+    }
+
+    // Mixed state: some legacy variables set, others absent. The warning must enumerate exactly
+    // the ones present — naming an unset variable would send the operator hunting for config
+    // they never had.
+    [Fact]
+    public async Task FullHost_SubsetOfLegacySmtpVarsPresent_NamesOnlyThePresentOnes()
+    {
+        var sink = new CapturingLogSink();
+        await using var f = new DependablyFactory
+        {
+            LegacySmtpVars = new Dictionary<string, string?>
+            {
+                ["SMTP_HOST"] = "smtp.example.com",
+                ["SMTP_FROM"] = "invites@example.com",
+                // SMTP_PORT / SMTP_USERNAME / SMTP_STARTTLS deliberately absent.
+                ["SMTP_PASSWORD"] = "  ",
+            },
+            LogSink = sink,
+        };
+        using var boot = f.CreateClient();
+        await boot.GetAsync("/health");
+
+        Assert.True(
+            sink.Contains("SMTP_HOST, SMTP_FROM", Serilog.Events.LogEventLevel.Warning),
+            "the warning must enumerate the present variables in declaration order");
+        Assert.False(
+            sink.Contains("SMTP_PORT", Serilog.Events.LogEventLevel.Warning),
+            "an absent variable must not be named");
+        // A whitespace-only value is not a configured relay; treating it as present would warn
+        // an operator who has nothing to migrate.
+        Assert.False(
+            sink.Contains("SMTP_PASSWORD", Serilog.Events.LogEventLevel.Warning),
+            "a whitespace-only value must count as absent");
+    }
+
+    [Fact]
+    public async Task FullHost_NoLegacySmtpVars_StaysSilent()
+    {
+        var sink = new CapturingLogSink();
+        await using var f = new DependablyFactory
+        {
+            LogSink = sink,
+        };
+        using var boot = f.CreateClient();
+        await boot.GetAsync("/health");
+
+        Assert.False(
+            sink.Contains(WarningPrefix, Serilog.Events.LogEventLevel.Warning),
+            "a host with no legacy SMTP_* variables must not warn");
+    }
+
+    // The edge host has no management plane, so it has no invite mailer and no Settings UI to
+    // point at — the warning's advice would be impossible there.
+    [Fact]
+    public async Task Edge_LegacySmtpHostPresent_DoesNotWarn()
+    {
+        var sink = new CapturingLogSink();
+        await using var f = new DependablyFactory
+        {
+            DeploymentMode = "edge",
+            LegacySmtpVars = new Dictionary<string, string?>
+            {
+                ["SMTP_HOST"] = "smtp.example.com",
+            },
+            LogSink = sink,
+        };
+        using var boot = f.CreateClient();
+        await boot.GetAsync("/health");
+
+        Assert.False(
+            sink.Contains(WarningPrefix, Serilog.Events.LogEventLevel.Warning),
+            "edge carries no invite mailer, so the legacy SMTP warning must not fire");
+    }
+}
+
 /// <summary>Serializes the log-capture edge tests — Serilog's static logger is process-global.</summary>
 [CollectionDefinition("EdgeLogCapture", DisableParallelization = true)]
 public sealed class EdgeLogCaptureCollection

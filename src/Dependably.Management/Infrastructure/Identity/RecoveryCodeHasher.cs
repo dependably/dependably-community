@@ -21,14 +21,16 @@ internal interface IRecoveryCodeHasher
 
     /// <summary>
     /// Constant-time verification of <paramref name="code"/> against a value produced by
-    /// <see cref="Hash"/>. Also accepts the legacy bare lowercase-hex SHA-256 format so codes
-    /// issued before the keyed scheme keep redeeming during the transition.
+    /// <see cref="Hash"/>. Legacy bare lowercase-hex SHA-256 values verify only when the
+    /// instance opts in via <c>Mfa:AcceptLegacyRecoveryCodes</c>; otherwise they are rejected.
     /// </summary>
     bool Verify(string code, string storedHash);
 
     /// <summary>
     /// True when <paramref name="storedHash"/> is a legacy bare SHA-256 hex value rather than
-    /// the current keyed format, letting callers rewrite on the next successful use.
+    /// the current keyed format. A legacy value cannot be upgraded in place — the stored form
+    /// is a one-way digest and the code's plaintext is known only while it is being redeemed,
+    /// at which point it is consumed — so callers use this to prompt regeneration instead.
     /// </summary>
     bool IsLegacyFormat(string storedHash);
 }
@@ -36,17 +38,28 @@ internal interface IRecoveryCodeHasher
 /// <summary>
 /// HMAC-SHA256 + per-code-salt implementation of <see cref="IRecoveryCodeHasher"/>, keyed with
 /// the per-instance MFA encryption key resolved by <see cref="MfaEncryptionKeyProvider"/>.
+///
+/// Legacy bare-SHA-256 acceptance is off unless <c>Mfa:AcceptLegacyRecoveryCodes</c> is set.
+/// Because a legacy digest can never be rewritten into the keyed form without its plaintext,
+/// an always-on fallback would keep the weak, offline-brute-forceable stored form valid for
+/// the lifetime of any code its owner never redeems. Defaulting the fallback off bounds that
+/// exposure to instances whose operator has explicitly opened a migration window.
 /// </summary>
 internal sealed class RecoveryCodeHasher : IRecoveryCodeHasher
 {
     private const string Prefix = "hmac:v1:";
     private const int SaltSize = 16;
     private readonly byte[] _key;
+    private readonly bool _acceptLegacyCodes;
+    private readonly ILogger<RecoveryCodeHasher> _logger;
+    private int _legacyRejectionLogged;
 
-    public RecoveryCodeHasher(byte[] key)
+    public RecoveryCodeHasher(byte[] key, bool acceptLegacyCodes, ILogger<RecoveryCodeHasher> logger)
     {
         // Defensive copy so external mutation of the caller's array cannot alter the key.
         _key = (byte[])key.Clone();
+        _acceptLegacyCodes = acceptLegacyCodes;
+        _logger = logger;
     }
 
     public string Hash(string code)
@@ -88,12 +101,40 @@ internal sealed class RecoveryCodeHasher : IRecoveryCodeHasher
             return CryptographicOperations.FixedTimeEquals(actualMac, expectedMac);
         }
 
-        // Legacy bare SHA-256 hex, retained so pre-upgrade codes still redeem.
+        // Legacy bare SHA-256 hex. Accepted only while the operator holds a migration window
+        // open, because the digest is unkeyed and unsalted over a ~47-bit code space and so is
+        // brute-forceable offline from a database dump.
+        if (!_acceptLegacyCodes)
+        {
+            WarnOnceOnLegacyRejection();
+            return false;
+        }
+
         byte[] legacy = SHA256.HashData(Encoding.UTF8.GetBytes(code));
         string legacyHex = Convert.ToHexString(legacy).ToLowerInvariant();
         return CryptographicOperations.FixedTimeEquals(
             Encoding.UTF8.GetBytes(legacyHex),
             Encoding.UTF8.GetBytes(storedHash));
+    }
+
+    /// <summary>
+    /// Logs the first legacy rejection per process. Redemption verifies the presented code
+    /// against every stored hash, so an unconditional log would emit one line per stored code
+    /// per attempt; one warning is enough to tell an operator why a recovery code stopped
+    /// working. No code, digest, or user identifier is logged.
+    /// </summary>
+    private void WarnOnceOnLegacyRejection()
+    {
+        if (Interlocked.Exchange(ref _legacyRejectionLogged, 1) != 0)
+        {
+            return;
+        }
+
+        _logger.LogWarning(
+            "Rejected a recovery code stored in the legacy unsalted SHA-256 format. Legacy " +
+            "recovery codes are disabled because the format is brute-forceable from a database " +
+            "dump. Affected users should regenerate their recovery codes; set " +
+            "Mfa:AcceptLegacyRecoveryCodes=true to accept them during a migration window.");
     }
 
     public bool IsLegacyFormat(string storedHash) =>

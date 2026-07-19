@@ -187,6 +187,29 @@ public sealed class QuarantineRepository
     }
 
     /// <summary>
+    /// Resolves any pending row for a purl when an operator uses the manual block/unblock
+    /// endpoints against a proxy artifact (no <c>package_version_id</c> to key off — the
+    /// quarantine row for a proxy block carries <c>package_version_id = NULL</c> and is unique
+    /// per <c>(org_id, purl)</c> instead). Mirrors <see cref="ResolveForVersionAsync"/> so the
+    /// hosted and proxy planes keep the review queue in sync the same way.
+    /// </summary>
+    public async Task ResolveForPurlAsync(
+        string orgId, string purl, string manualState, string? decidedBy,
+        CancellationToken ct = default)
+    {
+        string state = manualState == "allowed" ? "approved" : "denied";
+        await using var conn = await _db.OpenAsync(ct);
+        await conn.ExecuteAsync(
+            """
+            UPDATE quarantine
+            SET state = @state, decided_by = @decidedBy, decided_at = @now,
+                note = 'resolved via manual ' || @manualState, updated_at = @now
+            WHERE org_id = @orgId AND purl = @purl AND state = 'pending'
+            """,
+            new { orgId, purl, state, manualState, decidedBy, now = NowIso() });
+    }
+
+    /// <summary>
     /// Deletes pending <c>release_age</c> quarantine rows whose version has now aged past the
     /// hold threshold, making them phantom entries in the review queue. The release-age gate is
     /// re-evaluated on every serve and index render against the current clock, so a held version
@@ -196,22 +219,45 @@ public sealed class QuarantineRepository
     /// purl. Only <c>release_age</c>+<c>pending</c> rows are touched — human decisions
     /// (<c>approved</c>/<c>denied</c>) and other gate types are never affected.
     /// </summary>
+    /// <summary>
+    /// Each pending release-age hold and the publish date it must be judged against.
+    ///
+    /// The gate blocks on either plane: a tag push queues the hold against a <c>package_versions</c>
+    /// row, and a proxy fetch queues it with <c>package_version_id = NULL</c> — the artifact it
+    /// blocked lives on the cache plane, and its publish date with it. Reading only
+    /// <c>package_versions</c> therefore yields NULL for every proxied hold, which
+    /// <see cref="IsReleaseHoldStale"/> reads as "publish date unknown, so the hold no longer
+    /// applies" — and the hold the gate had just raised is purged before an admin ever sees it.
+    ///
+    /// <c>artifact_inventory</c> spans both catalogues, so the date is resolved from whichever plane
+    /// owns the artifact. A hold whose artifact is not in the catalogue at all still yields NULL,
+    /// which is the honest answer: there is no publish date to hold against.
+    ///
+    /// Shared by the queue's purge-on-load and the dashboard's pending count so the number can never
+    /// disagree with the queue it describes.
+    /// </summary>
+    internal const string PendingReleaseHoldsSql =
+        """
+        SELECT q.id AS Id,
+               COALESCE(
+                   pv.published_at,
+                   (SELECT MAX(ai.published_at)
+                    FROM artifact_inventory ai
+                    WHERE ai.org_id = q.org_id AND ai.purl = q.purl)
+               ) AS PublishedAt
+        FROM quarantine q
+        LEFT JOIN package_versions pv ON pv.id = q.package_version_id
+        WHERE q.org_id = @orgId
+          AND q.gate = 'release_age'
+          AND q.state = 'pending'
+        """;
+
     public async Task<int> PurgeAgedReleaseHoldsAsync(
         string orgId, int? minReleaseAgeHours, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
 
-        // xtenant: package_versions joined by FK id already bound to the org-scoped quarantine row
-        var candidates = await conn.QueryAsync<ReleaseHoldRow>(
-            """
-            SELECT q.id AS Id, pv.published_at AS PublishedAt
-            FROM quarantine q
-            LEFT JOIN package_versions pv ON pv.id = q.package_version_id
-            WHERE q.org_id = @orgId
-              AND q.gate = 'release_age'
-              AND q.state = 'pending'
-            """,
-            new { orgId });
+        var candidates = await conn.QueryAsync<ReleaseHoldRow>(PendingReleaseHoldsSql, new { orgId });
 
         var now = _time.GetUtcNow();
         var ids = candidates
@@ -219,11 +265,19 @@ public sealed class QuarantineRepository
             .Select(row => row.Id)
             .ToList();
 
-        return ids.Count == 0
-            ? 0
-            : await conn.ExecuteAsync(
-                "DELETE FROM quarantine WHERE org_id = @orgId AND id IN @ids",
-                new { orgId, ids });
+        if (ids.Count == 0)
+        {
+            return 0;
+        }
+
+        // IN (...) is built and parameterized in C#, not via Dapper's IN @ids auto-expansion —
+        // see DapperInClause for why: Dapper special-cases Npgsql connections and binds the whole
+        // list as one array parameter instead of expanding the SQL text, which IN never accepts.
+        var (idsClause, idsParams) = DapperInClause.Expand("id", ids);
+        idsParams.Add("orgId", orgId);
+        return await conn.ExecuteAsync(
+            "DELETE FROM quarantine WHERE org_id = @orgId AND id IN " + idsClause,
+            idsParams);
     }
 
     /// <summary>
@@ -247,7 +301,7 @@ public sealed class QuarantineRepository
         return (now - p).TotalHours >= m;
     }
 
-    private sealed record ReleaseHoldRow(string Id, DateTimeOffset? PublishedAt);
+    internal sealed record ReleaseHoldRow(string Id, DateTimeOffset? PublishedAt);
 
     /// <summary>
     /// True when the purl has an approved review — the first-fetch analog of the manual allow

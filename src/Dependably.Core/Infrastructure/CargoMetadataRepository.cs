@@ -28,6 +28,7 @@ public sealed class CargoMetadataRepository
         await using var conn = await _db.OpenAsync(ct);
         // Tenant gate: packages.org_id = @orgId ensures no cross-tenant leakage.
         var rows = await conn.QueryAsync<string>(
+            // plane-ok: PV-plane index lines; global-plane lines are UNIONed via the sibling cache_artifact SELECT in this method.
             """
             SELECT cm.index_line
             FROM cargo_metadata cm
@@ -164,6 +165,7 @@ public sealed class CargoMetadataRepository
         await using var conn = await _db.OpenAsync(ct);
         // Tenant gate: packages.org_id = @orgId ensures no cross-tenant leakage.
         return await conn.ExecuteScalarAsync<string?>(
+            // plane-ok: single index-line lookup keyed to the PV-plane version the yank path resolved; proxy lines are keyed by cache_artifact_id.
             """
             SELECT cm.index_line
             FROM cargo_metadata cm

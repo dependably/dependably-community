@@ -42,6 +42,23 @@ public sealed class SystemAdminTokenVersionStoreTests : IAsyncLifetime
         Assert.Null(version);
     }
 
+    [Fact]
+    public async Task GetCurrentVersionAsync_MissingId_DoesNotRetainItsFillGuard()
+    {
+        // Not-cached terminal branch: a cache MISS mints a per-admin generation guard before the DB
+        // read, but a missing system_admin row (version == null) is intentionally never cached, so
+        // the guard is never tied to a cache entry. This lookup runs on every JWT request, so a
+        // removed admin's id would otherwise leak one CancellationTokenSource forever — the terminal
+        // branch must retire the just-minted guard.
+        var store = Store();
+
+        Assert.Null(await store.GetCurrentVersionAsync("no-such-id"));
+
+        // Synchronous retire on the terminal branch — no cache entry, so no eviction callback to
+        // await. On the pre-fix code the guard leaks and this reads 1.
+        Assert.Equal(0, store.FillGuardCount);
+    }
+
     // ── returns stored version ────────────────────────────────────────────────
 
     [Fact]
@@ -132,5 +149,36 @@ public sealed class SystemAdminTokenVersionStoreTests : IAsyncLifetime
 
         Assert.Equal(100L, v1After); // re-read
         Assert.Equal(3L, v2After);   // still cached
+    }
+
+    // ── fill-after-invalidate race ────────────────────────────────────────────
+
+    [Fact]
+    public async Task InvalidateThatRacesAnInFlightFill_DoesNotCacheThePreBumpVersion()
+    {
+        // Invalidate-then-fill race for the highest-privilege principal: a JwtBearer validation
+        // reads the pre-bump token_version from the DB, then a concurrent password rotation commits
+        // the bump and calls Invalidate (evicting the key). The validation then completes its fill.
+        // On the pre-guard code it caches the stale pre-bump version AFTER the eviction, so a
+        // system_admin session the password change was meant to kill immediately stays valid for a
+        // full 60s TTL. The hook fires the bump+Invalidate exactly between the DB read and the
+        // cache write — fails on the old code, passes on the guard-token fix.
+        var hooked = new AfterDbReadHookStore(_db);
+        var store = new SystemAdminTokenVersionStore(hooked, _cache);
+
+        hooked.AfterRead = async () =>
+        {
+            await using var conn = await _db.OpenAsync();
+            await conn.ExecuteAsync(
+                "UPDATE system_admins SET token_version = 8 WHERE id = 'sa1'");
+            store.Invalidate("sa1");
+        };
+
+        long? racedRead = await store.GetCurrentVersionAsync("sa1");
+        Assert.Equal(7L, racedRead); // legitimately read the pre-bump version
+
+        // Killer assertion: the next lookup must observe the bumped version, not a stale cached
+        // pre-bump value left behind by the post-eviction write.
+        Assert.Equal(8L, await store.GetCurrentVersionAsync("sa1"));
     }
 }

@@ -8,7 +8,7 @@
 # and SBOM are architecture-independent, so this stage runs node/esbuild natively
 # on the builder instead of under QEMU emulation for the non-native target arch
 # (esbuild's native binary aborts with SIGILL under QEMU).
-FROM --platform=$BUILDPLATFORM node:22-alpine@sha256:968df39aedcea65eeb078fb336ed7191baf48f972b4479711397108be0966920 AS frontend
+FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:e88a35be04478413b7c71c455cd9865de9b9360e1f43456be5951032d7ac1a66 AS frontend
 WORKDIR /web
 COPY web/package*.json ./
 ARG REGISTRY_URL=
@@ -38,7 +38,6 @@ COPY Directory.Build.props .
 COPY src/Dependably/Dependably.csproj src/Dependably/
 COPY src/Dependably.Core/Dependably.Core.csproj src/Dependably.Core/
 COPY src/Dependably.Management/Dependably.Management.csproj src/Dependably.Management/
-COPY src/Dependably.Edge/Dependably.Edge.csproj src/Dependably.Edge/
 ARG TARGETARCH
 ARG VERSION=0.1.0
 ARG REGISTRY_URL=
@@ -80,7 +79,6 @@ RUN --mount=type=secret,id=registry_key \
 COPY src/Dependably/ src/Dependably/
 COPY src/Dependably.Core/ src/Dependably.Core/
 COPY src/Dependably.Management/ src/Dependably.Management/
-COPY src/Dependably.Edge/ src/Dependably.Edge/
 COPY skills/ skills/
 COPY --from=frontend /src/Dependably.Management/wwwroot/ src/Dependably.Management/wwwroot/
 RUN --mount=type=secret,id=registry_key \
@@ -99,7 +97,7 @@ RUN --mount=type=secret,id=registry_key \
 # Notices stage — combines both CycloneDX SBOMs into a curated attribution file.
 # Pinned to the build platform for the same reason as the frontend stage: it runs
 # node over architecture-independent JSON, so emulation buys nothing and risks SIGILL.
-FROM --platform=$BUILDPLATFORM node:22-alpine@sha256:968df39aedcea65eeb078fb336ed7191baf48f972b4479711397108be0966920 AS notices
+FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:e88a35be04478413b7c71c455cd9865de9b9360e1f43456be5951032d7ac1a66 AS notices
 WORKDIR /work
 COPY build/extract-notices.mjs ./
 COPY --from=frontend /web/sbom-frontend-prod.json ./

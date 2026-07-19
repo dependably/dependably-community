@@ -27,6 +27,7 @@ public sealed class CacheEvictionService : ScheduledBackgroundService
 {
     private readonly CacheArtifactRepository _cache;
     private readonly IBlobStore _blobs;   // TieredBlobStorage.Cache — only ever deletes from the cache tier
+    private readonly CacheOrphanBlobDeleter _orphanBlobs;
     private readonly IConfiguration _config;
     private readonly ILogger<CacheEvictionService> _logger;
     private readonly TimeProvider _time;
@@ -42,6 +43,7 @@ public sealed class CacheEvictionService : ScheduledBackgroundService
     public CacheEvictionService(
         CacheArtifactRepository cache,
         TieredBlobStorage blobs,
+        CacheOrphanBlobDeleter orphanBlobs,
         IConfiguration config,
         ILogger<CacheEvictionService> logger,
         TimeProvider time,
@@ -53,6 +55,7 @@ public sealed class CacheEvictionService : ScheduledBackgroundService
         // and never evicted — even though cache_artifact rows refer to keys we own, we
         // must never call delete on the registry store from this background job.
         _blobs = blobs.Cache;
+        _orphanBlobs = orphanBlobs;
         _config = config;
         _logger = logger;
         _time = time;
@@ -95,7 +98,7 @@ public sealed class CacheEvictionService : ScheduledBackgroundService
 
         if (maxSizeBytes is not null || maxArtifacts is not null)
         {
-            (evicted, bytesFreed) = await EvictBySizeAsync(maxSizeBytes, evicted, bytesFreed, ct);
+            (evicted, bytesFreed) = await EvictBySizeAsync(maxSizeBytes, maxArtifacts, evicted, bytesFreed, ct);
         }
 
         _logger.LogInformation("Cache eviction done (evicted={Evicted}, bytesFreed={BytesFreed}).",
@@ -129,11 +132,25 @@ public sealed class CacheEvictionService : ScheduledBackgroundService
                 break;
             }
 
+            bool progress = false;
             foreach (var row in rows)
             {
-                await EvictAsync(row, ct);
-                evicted++;
-                bytesFreed += row.SizeBytes;
+                if (ct.IsCancellationRequested) { break; }
+                if (await EvictAsync(row, ct))
+                {
+                    evicted++;
+                    bytesFreed += row.SizeBytes;
+                    progress = true;
+                }
+            }
+
+            // A row whose blob delete fails is left in place, and the next LRU query (ORDER BY
+            // last_accessed_at, no offset) re-lists it at the same position. If a whole batch
+            // fails — e.g. the cache blob backend is unreachable — re-listing would spin on the
+            // same rows forever, so stop the pass once a batch makes no forward progress.
+            if (!progress)
+            {
+                break;
             }
         }
         return (evicted, bytesFreed);
@@ -141,17 +158,22 @@ public sealed class CacheEvictionService : ScheduledBackgroundService
 
     /// <summary>
     /// Drops oldest-accessed rows until the total cache size is at or below
-    /// <paramref name="maxSizeBytes"/>. Per-row size is decremented from a running total
+    /// <paramref name="maxSizeBytes"/> AND the total row count is at or below
+    /// <paramref name="maxArtifacts"/> — an unset cap is treated as unbounded (<see
+    /// cref="long.MaxValue"/>), so a caller that passes only one of the two caps still evicts
+    /// correctly against the other. Per-row size and count are decremented from running totals
     /// to avoid an extra DB round-trip after every delete.
     /// </summary>
     private async Task<(long evicted, long bytesFreed)> EvictBySizeAsync(
-        long? maxSizeBytes, long evicted, long bytesFreed, CancellationToken ct)
+        long? maxSizeBytes, int? maxArtifacts, long evicted, long bytesFreed, CancellationToken ct)
     {
-        long cap = maxSizeBytes ?? long.MaxValue;
+        long sizeCap = maxSizeBytes ?? long.MaxValue;
+        long countCap = maxArtifacts ?? long.MaxValue;
         while (!ct.IsCancellationRequested)
         {
             long total = await _cache.GetTotalSizeBytesAsync(ct);
-            if (total <= cap)
+            long count = await _cache.GetTotalCountAsync(ct);
+            if (total <= sizeCap && count <= countCap)
             {
                 break;
             }
@@ -162,34 +184,78 @@ public sealed class CacheEvictionService : ScheduledBackgroundService
                 break;
             }
 
-            foreach (var row in rows)
+            var batch = await EvictBatchUntilCapAsync(rows, sizeCap, countCap, total, count, ct);
+            evicted += batch.Evicted;
+            bytesFreed += batch.BytesFreed;
+
+            // If no row in the batch could be evicted (e.g. the cache blob backend is
+            // unreachable), the running totals never drop below the caps and the next LRU query
+            // re-lists the same rows — a livelock. Stop the pass once a batch makes no progress.
+            if (!batch.Progress)
             {
-                await EvictAsync(row, ct);
-                evicted++;
-                bytesFreed += row.SizeBytes;
-                total -= row.SizeBytes;
-                if (total <= cap)
-                {
-                    break;
-                }
+                break;
             }
         }
         return (evicted, bytesFreed);
     }
 
-    private async Task EvictAsync(CacheArtifact a, CancellationToken ct)
+    // Evicts rows from one LRU batch until the size/count caps are satisfied or the batch is
+    // exhausted. Returns whether any row in the batch was actually evicted, so the caller can
+    // detect a livelocked batch (every row's blob delete failed) and stop the outer pass.
+    private async Task<(long Evicted, long BytesFreed, bool Progress)> EvictBatchUntilCapAsync(
+        IReadOnlyList<CacheArtifact> rows, long sizeCap, long countCap, long total, long count, CancellationToken ct)
     {
-        // Delete blob first so a crash between blob and row leaves a recoverable state
+        long evicted = 0;
+        long bytesFreed = 0;
+        bool progress = false;
+        foreach (var row in rows)
+        {
+            if (ct.IsCancellationRequested) { break; }
+            if (!await EvictAsync(row, ct))
+            {
+                continue;
+            }
+            evicted++;
+            bytesFreed += row.SizeBytes;
+            total -= row.SizeBytes;
+            count--;
+            progress = true;
+            if (total <= sizeCap && count <= countCap)
+            {
+                break;
+            }
+        }
+        return (evicted, bytesFreed, progress);
+    }
+
+    /// <summary>
+    /// Evicts a single cache row: deletes its blob (unless a sibling coordinate with
+    /// byte-identical content still shares the key — see <see cref="CacheOrphanBlobDeleter"/>),
+    /// then its <c>cache_artifact</c> row. Returns <c>true</c> when the row was removed,
+    /// <c>false</c> when the blob delete failed and the row was left in place for a later pass —
+    /// callers must not count a <c>false</c> result toward evicted totals, and must treat a batch
+    /// of all-<c>false</c> results as no forward progress so the re-list loop terminates instead of
+    /// spinning on the same failing rows.
+    /// </summary>
+    private async Task<bool> EvictAsync(CacheArtifact a, CancellationToken ct)
+    {
+        // Delete blob first (guarded: skipped when a sibling row still shares this
+        // content-addressed key) so a crash between blob and row leaves a recoverable state
         // (orphaned row, recreated on next fetch). The reverse — orphaned blob — is a leak.
-        try { await _blobs.DeleteAsync(BlobKeys.StoreKey(a.BlobKey), ct); }
+        try
+        {
+            await _orphanBlobs.DeleteIfUnreferencedAsync(
+                a.BlobKey, a.Id, BlobKeys.StoreKey(a.BlobKey), _blobs, ct);
+        }
         catch (Exception ex)
         {
             _logger.LogWarning(ex,
                 "Cache eviction: blob delete failed for {Id} ({Key}); row left in place to retry next pass.",
                 a.Id, a.BlobKey);
-            return;
+            return false;
         }
         await _cache.DeleteAsync(a.Id, ct);
+        return true;
     }
 
     // reads numeric tuning knobs (limits, ages) from

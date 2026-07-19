@@ -1,5 +1,6 @@
 using Dapper;
 using Dependably.Infrastructure.Identity;
+using Dependably.Infrastructure.Mail;
 
 namespace Dependably.Infrastructure.Alerts;
 
@@ -9,7 +10,7 @@ namespace Dependably.Infrastructure.Alerts;
 /// subset that must not depend on <see cref="EnvelopeProtector"/>). The Slack webhook URL is
 /// envelope-encrypted at rest (<c>enc:v1:</c> prefix) and fails closed when no
 /// <c>DEPENDABLY_MASTER_KEY</c> is configured — the API layer must check
-/// <see cref="EnvelopeProtector.IsConfigured"/> before calling <see cref="UpdateAsync"/> with a
+/// <see cref="EnvelopeProtector.IsConfigured"/> before calling <see cref="UpdateSlackAsync"/> with a
 /// non-empty <c>SlackWebhookUrl</c>. An absent row (no org has ever saved settings) is projected
 /// as the documented defaults by <see cref="GetAsync"/>; there is no backfill migration.
 /// </summary>
@@ -28,7 +29,8 @@ public sealed class AlertSettingsRepository
 
     private string NowIso() => _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
 
-    /// <summary>API-facing read: never returns the raw Slack webhook URL, only <c>HasSlackWebhook</c>.</summary>
+    /// <summary>API-facing read: never returns the raw Slack webhook URL or SMTP password, only
+    /// <c>HasSlackWebhook</c>/<c>HasEmailSmtpPassword</c>.</summary>
     public async Task<AlertSettings> GetAsync(string orgId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
@@ -43,7 +45,21 @@ public sealed class AlertSettingsRepository
                    slack_last_status AS SlackLastStatus,
                    slack_consecutive_failures AS SlackConsecutiveFailures,
                    slack_failing_since AS SlackFailingSince,
-                   slack_last_error AS SlackLastError
+                   slack_last_error AS SlackLastError,
+                   email_enabled AS EmailEnabled,
+                   email_inherit_instance AS EmailInheritInstance,
+                   email_recipients AS EmailRecipients,
+                   email_smtp_host AS EmailSmtpHost,
+                   email_smtp_port AS EmailSmtpPort,
+                   email_smtp_security AS EmailSmtpSecurity,
+                   email_smtp_username AS EmailSmtpUsername,
+                   email_smtp_password AS EmailSmtpPasswordStored,
+                   email_smtp_from AS EmailSmtpFrom,
+                   email_last_delivery_at AS EmailLastDeliveryAt,
+                   email_last_status AS EmailLastStatus,
+                   email_consecutive_failures AS EmailConsecutiveFailures,
+                   email_failing_since AS EmailFailingSince,
+                   email_last_error AS EmailLastError
             FROM alert_settings WHERE org_id = @orgId
             """,
             new { orgId });
@@ -61,7 +77,21 @@ public sealed class AlertSettingsRepository
                 row.SlackLastStatus,
                 (int)row.SlackConsecutiveFailures,
                 row.SlackFailingSince,
-                row.SlackLastError);
+                row.SlackLastError,
+                row.EmailEnabled != 0,
+                row.EmailInheritInstance != 0,
+                row.EmailRecipients,
+                row.EmailSmtpHost,
+                (int?)row.EmailSmtpPort,
+                row.EmailSmtpSecurity,
+                row.EmailSmtpUsername,
+                HasEmailSmtpPassword: row.EmailSmtpPasswordStored is not null,
+                row.EmailSmtpFrom,
+                row.EmailLastDeliveryAt,
+                row.EmailLastStatus,
+                (int)row.EmailConsecutiveFailures,
+                row.EmailFailingSince,
+                row.EmailLastError);
     }
 
     /// <summary>
@@ -80,30 +110,74 @@ public sealed class AlertSettingsRepository
     }
 
     /// <summary>
-    /// Upserts the settings row. <paramref name="req"/>.SlackWebhookUrl is write-only: a non-empty
-    /// value rotates the encrypted URL (requires <see cref="EnvelopeProtector.IsConfigured"/> —
-    /// the caller must check this before calling), null/empty leaves the stored value unchanged.
+    /// Decrypted email delivery config for an org: the inherit flag, the parsed recipient list,
+    /// and the org's own SMTP transport (decrypted password) for when it isn't inheriting. Null
+    /// when the channel is disabled or has no recipients — called only by
+    /// <see cref="EffectiveEmailConfigResolver"/> (delivery queue + test endpoint), never by a
+    /// response-serializing path.
     /// </summary>
-    public async Task<AlertSettings> UpdateAsync(string orgId, UpdateAlertSettings req, CancellationToken ct = default)
+    public async Task<EmailDeliveryConfig?> GetDecryptedEmailDeliveryConfigAsync(string orgId, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        var row = await conn.QuerySingleOrDefaultAsync<RawEmailDeliveryRow>(
+            """
+            SELECT email_enabled AS EmailEnabled, email_inherit_instance AS EmailInheritInstance,
+                   email_recipients AS EmailRecipients, email_smtp_host AS EmailSmtpHost,
+                   email_smtp_port AS EmailSmtpPort, email_smtp_security AS EmailSmtpSecurity,
+                   email_smtp_username AS EmailSmtpUsername, email_smtp_password AS EmailSmtpPasswordStored,
+                   email_smtp_from AS EmailSmtpFrom
+            FROM alert_settings WHERE org_id = @orgId
+            """,
+            new { orgId });
+
+        if (row is null || row.EmailEnabled == 0)
+        {
+            return null;
+        }
+
+        string[] recipients = EmailRecipients.Split(row.EmailRecipients);
+        if (recipients.Length == 0)
+        {
+            return null;
+        }
+
+        var ownTransport = new SmtpTransportSettings(
+            Host: row.EmailSmtpHost,
+            Port: (int)(row.EmailSmtpPort ?? SmtpTransportSettings.DefaultPort),
+            Security: string.IsNullOrWhiteSpace(row.EmailSmtpSecurity) ? SmtpTransportSettings.DefaultSecurity : row.EmailSmtpSecurity,
+            Username: row.EmailSmtpUsername,
+            Password: row.EmailSmtpPasswordStored is null ? null : _envelope.Unprotect(row.EmailSmtpPasswordStored),
+            FromAddress: row.EmailSmtpFrom);
+
+        return new EmailDeliveryConfig(row.EmailInheritInstance != 0, recipients, ownTransport);
+    }
+
+    /// <summary>
+    /// Upserts only the Alerts-tab columns: the gates (quarantine/vuln toggles + severity floor)
+    /// plus the email delivery gate (<c>email_enabled</c>) and its recipient list. Never touches
+    /// the Slack or SMTP-transport columns, so a gates save can't clobber a
+    /// concurrently-configured Slack channel or email transport — an insert triggered by this
+    /// call takes the schema defaults for those columns.
+    /// </summary>
+    public async Task<AlertSettings> UpdateGatesAsync(string orgId, UpdateAlertGates req, CancellationToken ct = default)
     {
         string now = NowIso();
-        string? encryptedUrl = string.IsNullOrEmpty(req.SlackWebhookUrl) ? null : _envelope.Protect(req.SlackWebhookUrl);
 
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             """
             INSERT INTO alert_settings
                 (org_id, quarantine_alerts_enabled, vuln_alerts_enabled, vuln_min_severity,
-                 slack_enabled, slack_webhook_url, created_at, updated_at)
+                 email_enabled, email_recipients, created_at, updated_at)
             VALUES
                 (@orgId, @quarantineAlertsEnabled, @vulnAlertsEnabled, @vulnMinSeverity,
-                 @slackEnabled, @encryptedUrl, @now, @now)
+                 @emailEnabled, @emailRecipients, @now, @now)
             ON CONFLICT (org_id) DO UPDATE SET
                 quarantine_alerts_enabled = excluded.quarantine_alerts_enabled,
                 vuln_alerts_enabled = excluded.vuln_alerts_enabled,
                 vuln_min_severity = excluded.vuln_min_severity,
-                slack_enabled = excluded.slack_enabled,
-                slack_webhook_url = COALESCE(excluded.slack_webhook_url, alert_settings.slack_webhook_url),
+                email_enabled = excluded.email_enabled,
+                email_recipients = excluded.email_recipients,
                 updated_at = excluded.updated_at
             """,
             new
@@ -112,6 +186,41 @@ public sealed class AlertSettingsRepository
                 quarantineAlertsEnabled = req.QuarantineAlertsEnabled ? 1 : 0,
                 vulnAlertsEnabled = req.VulnAlertsEnabled ? 1 : 0,
                 vulnMinSeverity = req.VulnMinSeverity,
+                emailEnabled = req.EmailEnabled ? 1 : 0,
+                emailRecipients = req.EmailRecipients,
+                now
+            });
+
+        return await GetAsync(orgId, ct);
+    }
+
+    /// <summary>
+    /// Upserts only the Slack columns. <paramref name="req"/>.SlackWebhookUrl is write-only: a
+    /// non-empty value rotates the encrypted URL (requires <see cref="EnvelopeProtector.IsConfigured"/>
+    /// — the caller must check this before calling), null/empty leaves the stored value unchanged.
+    /// Never touches the gate columns, so a Slack save can't clobber a concurrently-configured
+    /// gate — an insert triggered by this call takes the schema defaults for the gate columns.
+    /// </summary>
+    public async Task<AlertSettings> UpdateSlackAsync(string orgId, UpdateAlertSlack req, CancellationToken ct = default)
+    {
+        string now = NowIso();
+        string? encryptedUrl = string.IsNullOrEmpty(req.SlackWebhookUrl) ? null : _envelope.Protect(req.SlackWebhookUrl);
+
+        await using var conn = await _db.OpenAsync(ct);
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO alert_settings
+                (org_id, slack_enabled, slack_webhook_url, created_at, updated_at)
+            VALUES
+                (@orgId, @slackEnabled, @encryptedUrl, @now, @now)
+            ON CONFLICT (org_id) DO UPDATE SET
+                slack_enabled = excluded.slack_enabled,
+                slack_webhook_url = COALESCE(excluded.slack_webhook_url, alert_settings.slack_webhook_url),
+                updated_at = excluded.updated_at
+            """,
+            new
+            {
+                orgId,
                 slackEnabled = req.SlackEnabled ? 1 : 0,
                 encryptedUrl,
                 now
@@ -190,16 +299,156 @@ public sealed class AlertSettingsRepository
         return autoDisable;
     }
 
+    /// <summary>
+    /// Upserts only the email SMTP-transport columns (inherit flag + own-transport fields).
+    /// <paramref name="req"/>.EmailSmtpPassword is write-only: a non-empty value rotates the
+    /// encrypted password (requires <see cref="EnvelopeProtector.IsConfigured"/> — the caller
+    /// must check this before calling), null/empty leaves the stored value unchanged. Never
+    /// touches the gate, Slack, or email delivery-gate columns (<c>email_enabled</c> and
+    /// <c>email_recipients</c> belong to <see cref="UpdateGatesAsync"/>), so a transport save
+    /// can't clobber a concurrently-saved Alerts tab or Slack channel — an insert triggered by
+    /// this call takes the schema defaults for those columns.
+    /// </summary>
+    public async Task<AlertSettings> UpdateEmailAsync(string orgId, UpdateAlertEmail req, CancellationToken ct = default)
+    {
+        string now = NowIso();
+        string? encryptedPassword = string.IsNullOrEmpty(req.EmailSmtpPassword)
+            ? null
+            : _envelope.Protect(req.EmailSmtpPassword);
+
+        await using var conn = await _db.OpenAsync(ct);
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO alert_settings
+                (org_id, email_inherit_instance,
+                 email_smtp_host, email_smtp_port, email_smtp_security, email_smtp_username,
+                 email_smtp_password, email_smtp_from, created_at, updated_at)
+            VALUES
+                (@orgId, @emailInheritInstance,
+                 @emailSmtpHost, @emailSmtpPort, @emailSmtpSecurity, @emailSmtpUsername,
+                 @encryptedPassword, @emailSmtpFrom, @now, @now)
+            ON CONFLICT (org_id) DO UPDATE SET
+                email_inherit_instance = excluded.email_inherit_instance,
+                email_smtp_host = excluded.email_smtp_host,
+                email_smtp_port = excluded.email_smtp_port,
+                email_smtp_security = excluded.email_smtp_security,
+                email_smtp_username = excluded.email_smtp_username,
+                email_smtp_password = COALESCE(excluded.email_smtp_password, alert_settings.email_smtp_password),
+                email_smtp_from = excluded.email_smtp_from,
+                updated_at = excluded.updated_at
+            """,
+            new
+            {
+                orgId,
+                emailInheritInstance = req.EmailInheritInstance ? 1 : 0,
+                emailSmtpHost = req.EmailSmtpHost,
+                emailSmtpPort = req.EmailSmtpPort,
+                emailSmtpSecurity = req.EmailSmtpSecurity,
+                emailSmtpUsername = req.EmailSmtpUsername,
+                encryptedPassword,
+                emailSmtpFrom = req.EmailSmtpFrom,
+                now
+            });
+
+        return await GetAsync(orgId, ct);
+    }
+
+    /// <summary>
+    /// Records a successful email delivery: resets the failure-health columns. Called by the
+    /// management-plane email delivery queue after a confirmed send.
+    /// </summary>
+    public async Task RecordEmailSuccessAsync(string orgId, CancellationToken ct = default)
+    {
+        string now = NowIso();
+        await using var conn = await _db.OpenAsync(ct);
+        await conn.ExecuteAsync(
+            """
+            UPDATE alert_settings
+            SET email_last_delivery_at = @now, email_last_status = 'ok',
+                email_consecutive_failures = 0, email_failing_since = NULL, email_last_error = NULL,
+                updated_at = @now
+            WHERE org_id = @orgId
+            """,
+            new { orgId, now });
+    }
+
+    /// <summary>
+    /// Records a terminal email delivery failure and conditionally auto-disables the email
+    /// channel (<c>email_enabled = 0</c>) once <c>email_consecutive_failures</c> reaches
+    /// <paramref name="autoDisableAfterFailures"/> or the <c>email_failing_since</c> window has
+    /// exceeded <paramref name="autoDisableAfterDuration"/>, whichever comes first. Returns true
+    /// when this call auto-disabled email delivery so the caller can log it.
+    /// </summary>
+    public async Task<bool> RecordEmailFailureAsync(
+        string orgId, string error,
+        int autoDisableAfterFailures, TimeSpan autoDisableAfterDuration,
+        CancellationToken ct = default)
+    {
+        string now = NowIso();
+        await using var conn = await _db.OpenAsync(ct);
+
+        var (currentFailures, currentFailingSince) = await conn.QuerySingleOrDefaultAsync<(long Failures, string? FailingSince)>(
+            "SELECT email_consecutive_failures AS Failures, email_failing_since AS FailingSince FROM alert_settings WHERE org_id = @orgId",
+            new { orgId });
+
+        int newFailures = (int)currentFailures + 1;
+        string? failingSince = currentFailingSince ?? now;
+
+        bool autoDisable = newFailures >= autoDisableAfterFailures
+            || (DateTimeOffset.TryParse(failingSince, out var since)
+                && _time.GetUtcNow() - since >= autoDisableAfterDuration);
+
+        string truncatedError = error.Length > 500 ? error[..500] : error;
+
+        await conn.ExecuteAsync(
+            """
+            UPDATE alert_settings
+            SET email_last_delivery_at = @now, email_last_status = 'failed',
+                email_consecutive_failures = @newFailures, email_failing_since = @failingSince,
+                email_last_error = @truncatedError,
+                email_enabled = CASE WHEN @autoDisable = 1 THEN 0 ELSE email_enabled END,
+                updated_at = @now
+            WHERE org_id = @orgId
+            """,
+            new
+            {
+                orgId,
+                now,
+                newFailures,
+                failingSince,
+                truncatedError,
+                autoDisable = autoDisable ? 1 : 0
+            });
+
+        return autoDisable;
+    }
+
     // SQLite returns INTEGER columns as Int64; use long here to avoid Dapper constructor-matching
     // errors, then convert to bool/int in the mapping call sites.
     private sealed record RawRow(
         long QuarantineAlertsEnabled, long VulnAlertsEnabled, string VulnMinSeverity,
         long SlackEnabled, string? SlackWebhookUrlStored,
         string? SlackLastDeliveryAt, string? SlackLastStatus,
-        long SlackConsecutiveFailures, string? SlackFailingSince, string? SlackLastError);
+        long SlackConsecutiveFailures, string? SlackFailingSince, string? SlackLastError,
+        long EmailEnabled, long EmailInheritInstance, string? EmailRecipients,
+        string? EmailSmtpHost, long? EmailSmtpPort, string? EmailSmtpSecurity, string? EmailSmtpUsername,
+        string? EmailSmtpPasswordStored, string? EmailSmtpFrom,
+        string? EmailLastDeliveryAt, string? EmailLastStatus,
+        long EmailConsecutiveFailures, string? EmailFailingSince, string? EmailLastError);
+
+    // Raw projection for GetDecryptedEmailDeliveryConfigAsync — a narrower column set than
+    // RawRow, read separately so the delivery path never touches the health/audit columns.
+    private sealed record RawEmailDeliveryRow(
+        long EmailEnabled, long EmailInheritInstance, string? EmailRecipients,
+        string? EmailSmtpHost, long? EmailSmtpPort, string? EmailSmtpSecurity, string? EmailSmtpUsername,
+        string? EmailSmtpPasswordStored, string? EmailSmtpFrom);
 }
 
-/// <summary>API-facing projection of <c>alert_settings</c>. Never carries the raw webhook URL.</summary>
+/// <summary>API-facing projection of <c>alert_settings</c>. Never carries the raw webhook URL or
+/// SMTP password. <see cref="SecretsAvailable"/> and <see cref="InstanceEmailConfigured"/> are not
+/// stored on the row — the controller stamps them on from <see cref="EnvelopeProtector.IsConfigured"/>
+/// and <see cref="Mail.InstanceSmtpConfig"/> respectively, so the UI can grey the secret inputs and
+/// show the inherit-instance badge without ever seeing the instance's own SMTP details.</summary>
 public sealed record AlertSettings(
     string OrgId,
     bool QuarantineAlertsEnabled,
@@ -211,21 +460,69 @@ public sealed record AlertSettings(
     string? SlackLastStatus,
     int SlackConsecutiveFailures,
     string? SlackFailingSince,
-    string? SlackLastError)
+    string? SlackLastError,
+    bool EmailEnabled,
+    bool EmailInheritInstance,
+    string? EmailRecipients,
+    string? EmailSmtpHost,
+    int? EmailSmtpPort,
+    string? EmailSmtpSecurity,
+    string? EmailSmtpUsername,
+    bool HasEmailSmtpPassword,
+    string? EmailSmtpFrom,
+    string? EmailLastDeliveryAt,
+    string? EmailLastStatus,
+    int EmailConsecutiveFailures,
+    string? EmailFailingSince,
+    string? EmailLastError,
+    bool SecretsAvailable = false,
+    bool InstanceEmailConfigured = false)
 {
     /// <summary>The documented defaults for an org with no settings row: both alert types on, HIGH
-    /// severity floor, Slack off.</summary>
+    /// severity floor, Slack off, email off inheriting the instance transport.</summary>
     public static AlertSettings Defaults(string orgId) =>
         new(orgId, QuarantineAlertsEnabled: true, VulnAlertsEnabled: true, VulnMinSeverity: "HIGH",
             SlackEnabled: false, HasSlackWebhook: false,
             SlackLastDeliveryAt: null, SlackLastStatus: null,
-            SlackConsecutiveFailures: 0, SlackFailingSince: null, SlackLastError: null);
+            SlackConsecutiveFailures: 0, SlackFailingSince: null, SlackLastError: null,
+            EmailEnabled: false, EmailInheritInstance: true, EmailRecipients: null,
+            EmailSmtpHost: null, EmailSmtpPort: null, EmailSmtpSecurity: null, EmailSmtpUsername: null,
+            HasEmailSmtpPassword: false, EmailSmtpFrom: null,
+            EmailLastDeliveryAt: null, EmailLastStatus: null, EmailConsecutiveFailures: 0,
+            EmailFailingSince: null, EmailLastError: null);
 }
 
-/// <summary>Fields accepted by <see cref="AlertSettingsRepository.UpdateAsync"/>.</summary>
-public sealed record UpdateAlertSettings(
+/// <summary>Fields accepted by <see cref="AlertSettingsRepository.UpdateGatesAsync"/>.</summary>
+public sealed record UpdateAlertGates(
     bool QuarantineAlertsEnabled,
     bool VulnAlertsEnabled,
     string VulnMinSeverity,
+    bool EmailEnabled,
+    string? EmailRecipients);
+
+/// <summary>Fields accepted by <see cref="AlertSettingsRepository.UpdateSlackAsync"/>.</summary>
+public sealed record UpdateAlertSlack(
     bool SlackEnabled,
     string? SlackWebhookUrl);
+
+/// <summary>Fields accepted by <see cref="AlertSettingsRepository.UpdateEmailAsync"/>. Mirrors
+/// <see cref="UpdateAlertSlack"/>'s write-only-secret convention: <see cref="EmailSmtpPassword"/>
+/// is write-only, null/empty on update means "leave the stored password unchanged".</summary>
+public sealed record UpdateAlertEmail(
+    bool EmailInheritInstance,
+    string? EmailSmtpHost,
+    int? EmailSmtpPort,
+    string? EmailSmtpSecurity,
+    string? EmailSmtpUsername,
+    string? EmailSmtpPassword,
+    string? EmailSmtpFrom);
+
+/// <summary>
+/// Decrypted delivery-only view of an org's email channel, returned by
+/// <see cref="AlertSettingsRepository.GetDecryptedEmailDeliveryConfigAsync"/>. Never serialized to
+/// a client — <see cref="OwnTransport"/> carries the decrypted SMTP password.
+/// </summary>
+public sealed record EmailDeliveryConfig(
+    bool InheritInstance,
+    string[] Recipients,
+    Mail.SmtpTransportSettings OwnTransport);

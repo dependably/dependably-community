@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Threading.Channels;
 
 namespace Dependably.Infrastructure.Webhooks;
@@ -25,6 +26,15 @@ public sealed class WebhookDispatchQueue : BackgroundService, IPackageEventSink
 {
     private const int DefaultCapacity = 1024;
 
+    /// <summary>
+    /// Upper bound on how long the shutdown drain (see <see cref="ExecuteAsync"/>) spends
+    /// delivering envelopes still buffered in the channel once the host's stopping token has
+    /// already fired. Bounded independently of the host's own shutdown timeout so one slow,
+    /// retrying subscription cannot consume the entire grace period at the expense of every
+    /// other envelope waiting behind it in the channel.
+    /// </summary>
+    private static readonly TimeSpan DrainTimeout = TimeSpan.FromSeconds(25);
+
     /// <summary>Auto-disable a subscription after this many consecutive terminal failures.</summary>
     internal const int AutoDisableAfterFailures = 20;
 
@@ -41,6 +51,7 @@ public sealed class WebhookDispatchQueue : BackgroundService, IPackageEventSink
     private readonly Channel<PackageEventEnvelope> _channel;
     private readonly WebhookSubscriptionRepository _subscriptions;
     private readonly WebhookDeliveryClient _client;
+    private readonly TimeProvider _time;
     private readonly ILogger<WebhookDispatchQueue> _logger;
     private long _droppedCount;
     private long _deliveredCount;
@@ -49,11 +60,13 @@ public sealed class WebhookDispatchQueue : BackgroundService, IPackageEventSink
     public WebhookDispatchQueue(
         WebhookSubscriptionRepository subscriptions,
         WebhookDeliveryClient client,
+        TimeProvider time,
         IConfiguration config,
         ILogger<WebhookDispatchQueue> logger)
     {
         _subscriptions = subscriptions;
         _client = client;
+        _time = time;
         _logger = logger;
 
         int capacity = int.TryParse(config["WEBHOOK_QUEUE_CAPACITY"], out int c) && c > 0
@@ -89,13 +102,74 @@ public sealed class WebhookDispatchQueue : BackgroundService, IPackageEventSink
     public long DeliveredCount => Interlocked.Read(ref _deliveredCount);
     public long FailedCount => Interlocked.Read(ref _failedCount);
 
+    /// <summary>
+    /// Test-only direct invocation of <see cref="ExecuteAsync"/>. <see cref="BackgroundService.StartAsync"/>
+    /// short-circuits and never invokes <c>ExecuteAsync</c> at all when handed an already-cancelled
+    /// token, so it cannot exercise the shutdown-drain race this method covers (a stopping token
+    /// cancelled while the read loop is genuinely running, with envelopes still buffered).
+    /// </summary>
+    internal Task ExecuteAsyncForTests(CancellationToken stoppingToken) => ExecuteAsync(stoppingToken);
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("Webhook dispatch queue starting.");
 
-        await foreach (var envelope in _channel.Reader.ReadAllAsync(stoppingToken))
+        try
         {
-            await FanOutAsync(envelope, stoppingToken);
+            await foreach (var envelope in _channel.Reader.ReadAllAsync(stoppingToken))
+            {
+                await FanOutAsync(envelope, stoppingToken);
+            }
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            // ReadAllAsync's WaitToReadAsync checks the stopping token before it checks whether
+            // the channel has buffered items, so cancellation can fire here with envelopes still
+            // sitting in the channel — fall through to drain them instead of dropping them.
+        }
+
+        await DrainOnShutdownAsync();
+    }
+
+    /// <summary>
+    /// Runs whatever is still buffered in the channel through the normal fan-out path when
+    /// shutdown cancels the main read loop above. The host's own stopping token is already
+    /// cancelled by this point, so drained deliveries run on a fresh, time-bounded token
+    /// (<see cref="DrainTimeout"/>) instead — otherwise every delivery attempt would see
+    /// cancellation immediately and skip straight to "failed" without ever trying.
+    /// </summary>
+    private async Task DrainOnShutdownAsync()
+    {
+        using var drainCts = new CancellationTokenSource(DrainTimeout);
+        int drained = 0;
+        int abandoned = 0;
+
+        while (_channel.Reader.TryRead(out var envelope))
+        {
+            if (drainCts.IsCancellationRequested)
+            {
+                // Drain window exhausted — stop attempting deliveries but keep draining the
+                // channel itself so the abandoned count is accurate.
+                abandoned++;
+                continue;
+            }
+
+            await FanOutAsync(envelope, drainCts.Token);
+            drained++;
+        }
+
+        if (abandoned > 0)
+        {
+            _logger.LogWarning(
+                "Webhook dispatch queue shutdown drain timed out after {Timeout}s; " +
+                "{Count} envelope(s) still buffered were not attempted.",
+                DrainTimeout.TotalSeconds, abandoned);
+        }
+
+        if (drained > 0)
+        {
+            _logger.LogInformation(
+                "Webhook dispatch queue drained {Count} envelope(s) still buffered at shutdown.", drained);
         }
     }
 
@@ -126,7 +200,7 @@ public sealed class WebhookDispatchQueue : BackgroundService, IPackageEventSink
         }
     }
 
-    private async Task DeliverToSubscriptionAsync(
+    internal async Task DeliverToSubscriptionAsync(
         PackageEventEnvelope envelope,
         WebhookSubscriptionDelivery sub,
         CancellationToken ct)
@@ -145,8 +219,14 @@ public sealed class WebhookDispatchQueue : BackgroundService, IPackageEventSink
             {
                 await _client.SendAsync(sub.Url, sub.Secret, envelope, deliveryId, ct);
 
+                // The POST already landed at the subscriber — this is an irreversible external
+                // side effect. If host shutdown cancels `ct` in the window between the send
+                // returning and the bookkeeping write, the write must still happen: run it on
+                // an independent token so it survives the stopping token being cancelled.
+                // DeliveredCount is bumped only after the durable write succeeds, so the
+                // observable completion signal implies durable state.
+                await RecordSuccessAsync(sub, CancellationToken.None);
                 Interlocked.Increment(ref _deliveredCount);
-                await RecordSuccessAsync(sub, ct);
                 return;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -166,7 +246,7 @@ public sealed class WebhookDispatchQueue : BackgroundService, IPackageEventSink
                     attempt + 1, sub.Id, BackoffSchedule[attempt]);
                 try
                 {
-                    await Task.Delay(BackoffSchedule[attempt], ct);
+                    await Task.Delay(BackoffSchedule[attempt], _time, ct);
                 }
                 catch (OperationCanceledException)
                 {
@@ -175,17 +255,18 @@ public sealed class WebhookDispatchQueue : BackgroundService, IPackageEventSink
             }
         }
 
-        // All attempts exhausted.
-        Interlocked.Increment(ref _failedCount);
+        // All attempts exhausted — also a terminal, durable outcome (it drives auto-disable),
+        // so it gets the same independent-token treatment as success.
         string errorMsg = lastEx?.Message ?? "Unknown error";
         _logger.LogWarning(lastEx,
             "Webhook delivery failed after {Attempts} attempts for subscription {SubId} ({Url}); recording failure.",
             BackoffSchedule.Length + 1, sub.Id, sub.Url);
 
-        await RecordFailureAsync(sub, errorMsg, ct);
+        await RecordFailureAsync(sub, errorMsg, CancellationToken.None);
+        Interlocked.Increment(ref _failedCount);
     }
 
-    private async Task RecordSuccessAsync(WebhookSubscriptionDelivery sub, CancellationToken ct)
+    internal async Task RecordSuccessAsync(WebhookSubscriptionDelivery sub, CancellationToken ct)
     {
         try
         {
@@ -193,11 +274,18 @@ public sealed class WebhookDispatchQueue : BackgroundService, IPackageEventSink
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to record webhook delivery success for subscription {SubId}.", sub.Id);
+            // Callers pass CancellationToken.None here once the delivery has succeeded, so an
+            // OperationCanceledException reaching this catch means the durable write itself was
+            // lost, not routine shutdown noise — it needs to stand out from the transient
+            // per-attempt failures logged at Debug above.
+            _logger.LogWarning(ex,
+                "{ExceptionType} recording webhook delivery success for subscription {SubId}; " +
+                "delivery happened but was not durably recorded. TraceId={TraceId}",
+                ex.GetType().Name, sub.Id, Activity.Current?.TraceId.ToString());
         }
     }
 
-    private async Task RecordFailureAsync(
+    internal async Task RecordFailureAsync(
         WebhookSubscriptionDelivery sub, string errorMsg, CancellationToken ct)
     {
         try
@@ -216,7 +304,10 @@ public sealed class WebhookDispatchQueue : BackgroundService, IPackageEventSink
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to record webhook delivery failure for subscription {SubId}.", sub.Id);
+            _logger.LogWarning(ex,
+                "{ExceptionType} recording webhook delivery failure for subscription {SubId}; " +
+                "failure count for auto-disable was not durably recorded. TraceId={TraceId}",
+                ex.GetType().Name, sub.Id, Activity.Current?.TraceId.ToString());
         }
     }
 }

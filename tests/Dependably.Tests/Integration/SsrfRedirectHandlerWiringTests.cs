@@ -25,7 +25,11 @@ namespace Dependably.Tests.Integration;
 /// a blocking validator and confirming that a redirect to a disallowed URL raises
 /// <see cref="SsrfBlockedException"/> through the actual client pipeline.
 /// </summary>
+// Drives the real SsrfAwareRedirectHandler through the actual DI-wired client pipeline, which
+// emits to the process-wide static dependably.security.upstream_url_blocks counter that
+// UpstreamUrlBlocksEmissionTests asserts exact counts against. See MeterSensitiveCollection.
 [Trait("Category", "Integration")]
+[Collection("MeterSensitive")]
 public sealed class SsrfRedirectHandlerWiringTests : IAsyncLifetime
 {
     private BlockingFactory? _factory;

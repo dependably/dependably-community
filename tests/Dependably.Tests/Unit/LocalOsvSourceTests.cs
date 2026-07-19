@@ -249,4 +249,33 @@ public sealed class LocalOsvSourceTests : IDisposable
         var hits = await src.QueryAsync("pkg:apk/alpine/curl@8.9.0-r0?arch=x86_64");
         Assert.Empty(hits);
     }
+
+    // ── Maven ────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task Query_Maven_ColonSeparatedOsvName_MatchesSlashSeparatedPurl()
+    {
+        // OSV mandates Maven names as "groupId:artifactId"; PurlNormalizer emits
+        // pkg:maven/{groupId}/{artifactId}@{version}. The slash-to-colon conversion in ParsePurl
+        // is what lets the slash-form purl hit the colon-keyed index.
+        WriteAdvisory("GHSA-Maven-1", "Maven", "com.fasterxml.jackson.core:jackson-databind",
+            ["2.9.9"]);
+        var src = Build();
+
+        var hits = await src.QueryAsync(
+            "pkg:maven/com.fasterxml.jackson.core/jackson-databind@2.9.9");
+        Assert.Single(hits);
+        Assert.Equal("GHSA-Maven-1", hits[0].Id);
+    }
+
+    [Fact]
+    public async Task Query_Maven_VersionMiss_ReturnsEmpty()
+    {
+        WriteAdvisory("GHSA-Maven-2", "Maven", "org.apache.logging.log4j:log4j-core", ["2.14.0"]);
+        var src = Build();
+
+        var hits = await src.QueryAsync(
+            "pkg:maven/org.apache.logging.log4j/log4j-core@2.17.1");
+        Assert.Empty(hits);
+    }
 }

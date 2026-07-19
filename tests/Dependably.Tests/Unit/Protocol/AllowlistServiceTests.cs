@@ -6,7 +6,11 @@ using Dependably.Tests.Infrastructure.Seeding;
 
 namespace Dependably.Tests.Unit.Protocol;
 
+// Drives the real AllowlistService.IsAllowedAsync, which emits to the process-wide static
+// dependably.security.allowlist_blocks counter that UpstreamUrlBlocksEmissionTests asserts
+// exact counts against. See MeterSensitiveCollection.
 [Trait("Category", "Unit")]
+[Collection("MeterSensitive")]
 public sealed class AllowlistServiceTests : IClassFixture<InMemoryDbFixture>
 {
     private readonly InMemoryDbFixture _fixture;

@@ -108,36 +108,57 @@ public static class ApkIndexSignatureVerifier
 
         foreach (var sig in parsed.Signatures)
         {
-            HashAlgorithmName? hashAlgorithm = sig.Algorithm switch
+            if (VerifiesAgainstAnyAnchor(parsed.SignedPayload, sig, anchors))
             {
-                ApkSignatureAlgorithm.Sha1 => HashAlgorithmName.SHA1,
-                ApkSignatureAlgorithm.Sha256 => HashAlgorithmName.SHA256,
-                ApkSignatureAlgorithm.Sha512 => HashAlgorithmName.SHA512,
-                _ => null,
-            };
-            if (hashAlgorithm is null)
-            {
-                continue;
-            }
-
-            foreach (var key in anchors)
-            {
-                try
-                {
-                    if (key.VerifyData(parsed.SignedPayload, sig.SignatureBytes, hashAlgorithm.Value, RSASignaturePadding.Pkcs1))
-                    {
-                        return (true, "");
-                    }
-                }
-                catch (CryptographicException)
-                {
-                    // Signature bytes are not a valid PKCS#1v1.5 encoding for this key —
-                    // try the next anchor/signature pair rather than failing the whole check.
-                }
+                return (true, "");
             }
         }
 
         return (false, "bad_signature");
+    }
+
+    // Tries every trust anchor against one signature entry, returning true on the first that
+    // verifies. An unsupported algorithm (never assigned by ParseSignatureEntries today, but
+    // defensive) fails this signature entry without consuming any anchor.
+    private static bool VerifiesAgainstAnyAnchor(
+        byte[] signedPayload, ApkIndexSignature sig, IReadOnlyList<RSA> anchors)
+    {
+        HashAlgorithmName? hashAlgorithm = sig.Algorithm switch
+        {
+            ApkSignatureAlgorithm.Sha1 => HashAlgorithmName.SHA1,
+            ApkSignatureAlgorithm.Sha256 => HashAlgorithmName.SHA256,
+            ApkSignatureAlgorithm.Sha512 => HashAlgorithmName.SHA512,
+            _ => null,
+        };
+        if (hashAlgorithm is null)
+        {
+            return false;
+        }
+
+        foreach (var key in anchors)
+        {
+            if (VerifiesWithKey(signedPayload, sig.SignatureBytes, hashAlgorithm.Value, key))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // Signature bytes that are not a valid PKCS#1v1.5 encoding for this key fail closed (false)
+    // rather than throwing, so the caller tries the next anchor/signature pair.
+    private static bool VerifiesWithKey(
+        byte[] signedPayload, byte[] signatureBytes, HashAlgorithmName hashAlgorithm, RSA key)
+    {
+        try
+        {
+            return key.VerifyData(signedPayload, signatureBytes, hashAlgorithm, RSASignaturePadding.Pkcs1);
+        }
+        catch (CryptographicException)
+        {
+            return false;
+        }
     }
 
     /// <summary>

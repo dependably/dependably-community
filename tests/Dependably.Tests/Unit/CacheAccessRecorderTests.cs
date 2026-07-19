@@ -1,3 +1,4 @@
+using System.Data.Common;
 using System.Diagnostics.Metrics;
 using Dapper;
 using Dependably.Infrastructure;
@@ -9,7 +10,11 @@ using NSubstitute;
 
 namespace Dependably.Tests.Unit;
 
+// Attaches a MeterListener filtered only by DependablyMeter.MeterName + instrument name and
+// asserts exact counts — must run alone against the process-wide static meter.
+// See MeterSensitiveCollection.
 [Trait("Category", "Unit")]
+[Collection("MeterSensitive")]
 public sealed class CacheAccessRecorderTests : IAsyncLifetime
 {
     private readonly TestMetadataStore _db = new();
@@ -110,7 +115,7 @@ public sealed class CacheAccessRecorderTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task RecordAccessAsync_DbMissing_SwallowsExceptionAndLogs()
+    public async Task RecordAccessAsync_DbMissing_DoesNotThrow_AndLogsEveryAttempt()
     {
         // Drop the cache_artifact table so any query against it will throw.
         await using (var conn = await _db.OpenAsync())
@@ -122,17 +127,64 @@ public sealed class CacheAccessRecorderTests : IAsyncLifetime
         var logger = Substitute.For<ILogger<CacheAccessRecorder>>();
         var recorder = BuildRecorder(logger);
 
-        // Must NOT throw — failures are best-effort and logged as warnings.
-        var ex = await Record.ExceptionAsync(() => recorder.RecordAccessAsync(SampleAccess()));
+        // Must NOT throw. The recorder reports failure by returning null; what the caller does about
+        // it is the caller's decision, not this class's.
+        string? id = null;
+        var ex = await Record.ExceptionAsync(async () => id = await recorder.RecordAccessAsync(SampleAccess()));
         Assert.Null(ex);
+        Assert.Null(id);
 
-        // A warning must have been logged for the failure.
-        logger.Received(1).Log(
+        // Two attempts, two warnings. The count is asserted deliberately: it is the retry, and a
+        // silent drop back to a single attempt would take the recovery below with it.
+        logger.Received(2).Log(
             LogLevel.Warning,
             Arg.Any<EventId>(),
             Arg.Any<object>(),
             Arg.Any<Exception>(),
             Arg.Any<Func<object, Exception?, string>>());
+    }
+
+    /// <summary>
+    /// The reason the retry exists. The dominant failure here is contention on the metadata store,
+    /// and a second attempt turns it into an ordinary success — which matters because a proxied
+    /// artefact with no cache-plane row is one the registry can neither scan nor evict, and the fetch
+    /// that produced it cannot be gated against anything.
+    /// </summary>
+    [Fact]
+    public async Task RecordAccessAsync_FirstAttemptFails_SecondSucceeds()
+    {
+        var logger = Substitute.For<ILogger<CacheAccessRecorder>>();
+        var flaky = new FailsOnceStore(_db);
+        var recorder = new CacheAccessRecorder(
+            new CacheArtifactRepository(flaky),
+            new TenantArtifactAccessRepository(flaky),
+            logger,
+            TimeProvider.System);
+
+        string? id = await recorder.RecordAccessAsync(SampleAccess());
+
+        // The first attempt threw and was swallowed; the second recorded the artefact.
+        Assert.NotNull(id);
+        Assert.Equal(1, flaky.Failures);
+
+        await using var check = await _db.OpenAsync();
+        Assert.Equal(1, await check.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM cache_artifact"));
+    }
+
+    // Throws on its first connection and behaves normally thereafter — a transient store failure
+    // that clears on its own, which is the failure the retry is for.
+    private sealed class FailsOnceStore(IMetadataStore inner) : IMetadataStore
+    {
+        private int _thrown;
+
+        public int Failures => _thrown;
+
+        public DbProvider Provider => inner.Provider;
+
+        public Task<DbConnection> OpenAsync(CancellationToken ct = default)
+            => Interlocked.CompareExchange(ref _thrown, 1, 0) == 0
+                ? throw new InvalidOperationException("transient metadata-store failure")
+                : inner.OpenAsync(ct);
     }
 
     /// <summary>

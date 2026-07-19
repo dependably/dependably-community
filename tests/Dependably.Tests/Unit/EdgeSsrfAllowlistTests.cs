@@ -10,7 +10,10 @@ namespace Dependably.Tests.Unit;
 /// host (so an internal/private master over a LAN link is dialable) while every other
 /// private/internal host stays blocked. Non-edge behaviour (no allowed host) is unchanged.
 /// </summary>
+// Exercises the SSRF connect-time gate that feeds the same dns_rebind/blocked_range emission
+// paths UpstreamUrlBlocksEmissionTests asserts exact counts against. See MeterSensitiveCollection.
 [Trait("Category", "Security")]
+[Collection("MeterSensitive")]
 public sealed class EdgeSsrfAllowlistTests
 {
     [Fact]

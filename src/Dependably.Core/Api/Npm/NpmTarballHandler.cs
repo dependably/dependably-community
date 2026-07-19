@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Dependably.Infrastructure;
 using Dependably.Protocol;
 using Dependably.Protocol.Provenance;
@@ -32,7 +33,8 @@ public sealed class NpmTarballHandler(
     ProxyFetchService proxyFetch,
     UpstreamRegistryResolver registries,
     NpmProvenanceVerifier provenance,
-    TimeProvider time)
+    TimeProvider time,
+    ILogger<NpmTarballHandler> logger)
 {
     public Task<IActionResult> GetTarballAsync(
         HttpContext httpContext, string orgId, string pkg, string file, CancellationToken ct)
@@ -176,6 +178,16 @@ public sealed class NpmTarballHandler(
             return new NotFoundResult();
         }
 
+        // Re-check the claim on every cache-hit serve, not just on the miss/upstream-fetch
+        // path. A surviving cache_artifact row (an in-flight fetch that raced a local_only
+        // transition's purge, or air-gap mode's implicit local_only, which never purges) must
+        // not be served just because the row still exists — same silent 404 as the miss path
+        // so probing can't distinguish "never cached" from "cached but now local_only".
+        if (!await claimResolver.IsProxyFetchAllowedAsync(orgId, "npm", fullName, ct))
+        {
+            return new NotFoundResult();
+        }
+
         string? sourceIp = httpContext.GetNormalizedRemoteIp();
         if (await blockGate.EvaluateAsync(
                 BlockGateRequest.ForProxyCacheFacts(orgId, "npm", caFacts, token, settings, sourceIp), ct)
@@ -234,8 +246,9 @@ public sealed class NpmTarballHandler(
         // before the proxy-fetch gates. The AnonymousPull gate applies here — anonymous clients
         // must authenticate to access proxy cache hits when the org requires it, exactly as for
         // a cache miss. The Proxy-tab passthrough settings govern whether anonymous clients may
-        // trigger an upstream fetch on a miss (see CheckProxyGatesAsync below). The per-version
-        // policy block-gate is still re-evaluated on every hit.
+        // trigger an upstream fetch on a miss (see CheckProxyGatesAsync below). The claim state
+        // and per-version policy block-gate are both re-evaluated on every hit — a surviving
+        // cache row does not bypass the local_only dependency-confusion guard.
         var cacheHitResult = await TryServeCacheHitTarballAsync(
             httpContext, new NpmTarballKey(orgId, fullName, shortName, file), token, settings!, ct);
         if (cacheHitResult is not null)
@@ -260,9 +273,9 @@ public sealed class NpmTarballHandler(
     }
 
     // Serves an already-cached proxy artifact from the global plane, applying the AnonymousPull
-    // and per-version block gates on every hit. Returns null when there is no cache hit for this
-    // coordinate (or the blob has since been evicted), signalling the caller to fall through to
-    // the upstream proxy-fetch path.
+    // gate, the claim recheck, and the per-version block gate on every hit. Returns null when
+    // there is no cache hit for this coordinate (or the blob has since been evicted), signalling
+    // the caller to fall through to the upstream proxy-fetch path.
     private async Task<IActionResult?> TryServeCacheHitTarballAsync(
         HttpContext httpContext, NpmTarballKey key,
         TokenRecord? token, OrgSettings settings, CancellationToken ct)
@@ -284,6 +297,17 @@ public sealed class NpmTarballHandler(
         {
             httpContext.Response.Headers.WWWAuthenticate = "Bearer realm=\"dependably\"";
             return new UnauthorizedResult();
+        }
+
+        // Re-check the claim on every cache-hit serve, not just on the miss/upstream-fetch
+        // path below. A surviving cache_artifact row (an in-flight fetch that raced a
+        // local_only transition's purge, or air-gap mode's implicit local_only, which never
+        // purges) must not be served just because the row still exists — same silent 404 the
+        // miss path returns for a local_only/reserved name, so probing can't distinguish
+        // "never cached" from "cached but now local_only".
+        if (!await claimResolver.IsProxyFetchAllowedAsync(key.OrgId, "npm", key.FullName, ct))
+        {
+            return new NotFoundResult();
         }
 
         string? sourceIpProxy = httpContext.GetNormalizedRemoteIp();
@@ -371,7 +395,7 @@ public sealed class NpmTarballHandler(
             return new UnauthorizedResult();
         }
 
-        string purlCheck = PurlNormalizer.Npm(fullName, "0.0.0").Split('@')[0]; // name-only PURL
+        string purlCheck = PurlNormalizer.NameOnly("npm", fullName);
         if (settings.AllowlistMode && !await allowlist.IsAllowedAsync(orgId, purlCheck, ct))
         {
             return new StatusCodeResult(StatusCodes.Status403Forbidden);
@@ -516,7 +540,7 @@ public sealed class NpmTarballHandler(
                 ? new NotFoundResult()
                 : new FileStreamResult(blobStream, "application/octet-stream") { FileDownloadName = key.File };
         }
-        catch (Microsoft.Data.Sqlite.SqliteException) { throw; }
+        catch (System.Data.Common.DbException) { throw; }
         catch (ChecksumException)
         {
             // Upstream bytes didn't match upstream-supplied integrity — refuse the response
@@ -528,15 +552,43 @@ public sealed class NpmTarballHandler(
             // Upstream body crossed the streaming cap — a malformed or hostile upstream.
             return new StatusCodeResult(StatusCodes.Status502BadGateway);
         }
+        catch (ProxyCatalogueUnavailableException)
+        {
+            // The artefact could not be recorded on the cache plane, so it could not be scanned or
+            // gated — and an artefact the registry cannot vouch for is not served. 503, never 404:
+            // the artefact exists upstream, we just could not admit it. The bytes are staged, so the
+            // client's retry is cheap.
+            return new StatusCodeResult(StatusCodes.Status503ServiceUnavailable);
+        }
         catch (UpstreamFetchFailedException)
         {
             // Transient upstream exhausted retries — propagate so the middleware maps it to a
             // retryable 503/502 instead of a hard 403/404 that aborts the install.
             throw;
         }
-        catch
+        catch (OperationCanceledException)
         {
+            // Client disconnect / shutdown — propagate cancellation rather than masking it as a 404.
+            throw;
+        }
+        catch (HttpRequestException)
+        {
+            // A genuine upstream not-found: UpstreamClient surfaces non-transient upstream
+            // statuses (404/410) as HttpRequestException. The tarball truly does not exist
+            // upstream, so the client sees 404 — distinct from the unclassified 502 below.
             return new NotFoundResult();
+        }
+        catch (Exception ex)
+        {
+            // An unclassified failure (blob-store I/O error, a bug in first-fetch metadata
+            // or provenance resolution, malformed upstream JSON, etc.) — none of the carved-out
+            // cases above matched. Log it so the operator has a diagnostic trail, and answer
+            // 502 rather than the blanket 404 that would make npm report a real package as
+            // nonexistent and fail the install outright, since a 404 is not retried.
+            logger.LogWarning(ex,
+                "Unclassified failure during npm proxy fetch/cache for {FullName}/{File}: {ExceptionType} trace={TraceId}",
+                key.FullName, key.File, ex.GetType().Name, Activity.Current?.TraceId.ToString());
+            return new StatusCodeResult(StatusCodes.Status502BadGateway);
         }
     }
 

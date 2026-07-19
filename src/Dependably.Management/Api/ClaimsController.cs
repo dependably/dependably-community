@@ -25,10 +25,17 @@ namespace Dependably.Api;
 ///   <item>POST   /api/v1/admin/claims/bulk                    — claim a list of names at once</item>
 /// </list>
 /// Cache purging on transitions to <c>local_only</c> runs synchronously through
-/// <see cref="PurgeProxyArtefactsAsync"/>: every <c>origin = 'proxy'</c> version row for
-/// the name is dropped and its blob best-effort deleted before the claim row is persisted.
-/// The count lands in <c>claim_history.purged_count</c> and the response body so the UI
-/// can report what changed. Imported / private artefacts are never touched.
+/// <see cref="PurgeProxyArtefactsAsync"/>: every cached proxy version for the name is dropped
+/// across both catalogues — legacy <c>origin = 'proxy'</c> rows on the uploaded plane and the
+/// org's <c>tenant_artifact_access</c> rows on the shared cache plane — and each dereferenced
+/// blob best-effort deleted <em>after</em> the claim transition is persisted. Persisting first
+/// closes the window (present when purge ran first) where a proxy fetch landing between the
+/// purge and the persist could read the still-old claim state, re-fetch, and repopulate the
+/// cache with a row no later purge would ever remove — an in-flight fetch that re-checks the
+/// claim after this point observes <c>local_only</c> immediately. The purged count is folded
+/// into <c>claim_history.purged_count</c> (via a follow-up update once the purge completes) and
+/// the response body so the UI can report what changed. Imported / private artefacts are never
+/// touched.
 /// </summary>
 [ApiController]
 [Authorize]
@@ -40,6 +47,8 @@ public sealed class ClaimsController : ControllerBase
     private readonly AuditRepository _audit;
     private readonly Dependably.Infrastructure.Audit.IAuditEmitter _auditEmitter;
     private readonly PackageRepository _packages;
+    private readonly CacheArtifactRepository _cache;
+    private readonly Dependably.Infrastructure.CacheOrphanBlobDeleter _cacheOrphanBlobs;
     private readonly Dependably.Storage.IBlobStore _blobs;
     private readonly ILogger<ClaimsController> _logger;
     private readonly TimeProvider _time;
@@ -52,6 +61,8 @@ public sealed class ClaimsController : ControllerBase
         _audit = svc.Audit;
         _auditEmitter = svc.AuditEmitter;
         _packages = svc.Packages;
+        _cache = svc.Cache;
+        _cacheOrphanBlobs = svc.CacheOrphanBlobs;
         _blobs = svc.Blobs;
         _logger = svc.Logger;
         _time = svc.Time;
@@ -61,15 +72,27 @@ public sealed class ClaimsController : ControllerBase
     /// When a transition flips the claim into <c>local_only</c>, every cached proxy
     /// version for that name must be evicted — both the metadata row and the underlying
     /// blob — so subsequent installs are forced through the local-only artefact set rather
-    /// than serving a stale proxy copy. Returns the count for the audit/history record.
+    /// than serving a stale proxy copy. A proxied artefact reaches the org through either
+    /// catalogue, so both are purged: legacy <c>origin='proxy'</c> rows on the uploaded plane
+    /// and the org's <c>tenant_artifact_access</c> rows on the shared cache plane (where every
+    /// current proxy fetch lands). Purging only the uploaded plane would leave the cached copy
+    /// still advertised and served for every ecosystem whose proxy artefacts live on the cache
+    /// plane. Returns the total versions evicted across both planes for the audit/history record.
     /// Blob deletes are best-effort: a failed delete logs a warning but does not fail the
     /// transition (the row is already gone, so the storage entry is dereferenced garbage).
+    /// The cache-plane blob keys are content-addressed and shared across every coordinate with
+    /// byte-identical upstream bytes, so each goes through
+    /// <see cref="Dependably.Infrastructure.CacheOrphanBlobDeleter"/>'s locked refcount guard
+    /// rather than an unconditional delete — a sibling coordinate that still shares the same key
+    /// keeps its blob.
     /// </summary>
     private async Task<int> PurgeProxyArtefactsAsync(
         string orgId, string ecosystem, string name, CancellationToken ct)
     {
-        var blobKeys = await _packages.DeleteProxyVersionsForNameAsync(orgId, ecosystem, name, ct);
-        foreach (string key in blobKeys)
+        var uploadedBlobKeys = await _packages.DeleteProxyVersionsForNameAsync(orgId, ecosystem, name, ct);
+        var cacheEviction = await _cache.EvictTenantProxyVersionsForNameAsync(orgId, ecosystem, name, ct);
+
+        foreach (string key in uploadedBlobKeys)
         {
             try { await _blobs.DeleteAsync(key, ct); }
             catch (Exception ex)
@@ -81,7 +104,28 @@ public sealed class ClaimsController : ControllerBase
                     key, orgId, ecosystem, name);
             }
         }
-        return blobKeys.Count;
+
+        foreach (string key in cacheEviction.DereferencedBlobKeys)
+        {
+            try
+            {
+                // The cache_artifact row that referenced this key is already gone — deleted
+                // inside EvictTenantProxyVersionsForNameAsync's own transaction — so there is no
+                // row left to exclude from the shared-key count; string.Empty can never match a
+                // real (GUID) id and so excludes nothing. The store key is the DB key verbatim,
+                // matching this path's delete target before this guard existed.
+                await _cacheOrphanBlobs.DeleteIfUnreferencedAsync(key, string.Empty, key, _blobs, ct);
+            }
+            catch (Exception ex)
+            {
+                // Serilog RenderedCompactJsonFormatter JSON-encodes property
+                // values, so CRLF in tenant-route inputs (org/ecosystem/name) cannot break the log envelope.
+                _logger.LogWarning(ex,
+                    "Failed to delete proxy blob {BlobKey} during local_only purge for {Org}/{Ecosystem}/{Name}.",
+                    key, orgId, ecosystem, name);
+            }
+        }
+        return uploadedBlobKeys.Count + cacheEviction.VersionsEvicted;
     }
 
     /// <summary>GET /api/v1/admin/claims</summary>
@@ -150,54 +194,11 @@ public sealed class ClaimsController : ControllerBase
             return Error;
         }
 
-        if (req is null)
+        var (validationError, ecosystem, name, validation) = await ValidateCreateRequestAsync(req, OrgId!, ct);
+        if (validationError is not null)
         {
-            return BadRequest("Body required.");
+            return validationError;
         }
-
-        if (string.IsNullOrWhiteSpace(req.Reason))
-        {
-            return BadRequest("reason is required.");
-        }
-
-        string ecosystem = req.Ecosystem?.ToLowerInvariant() ?? "";
-        if (!ClaimEcosystems.Enforced.Contains(ecosystem))
-        {
-            return BadRequest(ClaimEcosystems.IsClaimAware(ecosystem)
-                ? $"claims are not enforced for the '{ecosystem}' ecosystem — no data path consults them, so a claim would be a silent no-op. Accepted: {ClaimEcosystems.AcceptedList}."
-                : $"ecosystem must be one of: {ClaimEcosystems.AcceptedList}.");
-        }
-
-        string name = PurlNormalizer.CanonicalName(ecosystem, req.Name ?? "");
-        if (string.IsNullOrEmpty(name))
-        {
-            return BadRequest("name is required.");
-        }
-
-        var existing = await _claims.GetAsync(OrgId!, ecosystem, name, ct);
-        if (existing is not null)
-        {
-            return Conflict(new ProblemDetails
-            {
-                Status = StatusCodes.Status409Conflict,
-                Detail = $"Claim already exists for {ecosystem}/{name} (state: {existing.State}). " +
-                         "Use PATCH to transition.",
-            });
-        }
-
-        var validation = ClaimStateMachine.ValidateCreate(req.State ?? "");
-        if (!validation.Allowed)
-        {
-            return BadRequest(new ProblemDetails { Status = StatusCodes.Status400BadRequest, Detail = validation.RejectionReason });
-        }
-
-        // Purge: when the claim transition demands it (creating with state=local_only),
-        // evict cached proxy versions BEFORE persisting the transition. Doing it before
-        // means a concurrent install racing the create can't repopulate the cache between
-        // purge and claim-row creation.
-        int purgedCount = validation.PurgesProxy
-            ? await PurgeProxyArtefactsAsync(OrgId!, ecosystem, name, ct)
-            : 0;
 
         var tx = new ClaimTransition
         {
@@ -211,9 +212,34 @@ public sealed class ClaimsController : ControllerBase
             Reason = req.Reason!,
             ActorId = ActorId,
             OccurredAt = _time.GetUtcNow(),
-            PurgedCount = purgedCount,
+            PurgedCount = 0,
         };
-        await _claims.ApplyTransitionAsync(tx, ct);
+        // Persist the claim transition BEFORE purging cached proxy artefacts (see the class
+        // doc comment for the race this ordering closes). purged_count starts at 0 in this
+        // insert and is patched to the real count once the purge below completes. A tombstoned
+        // (soft-deleted) row for this name is revived in place by ApplyTransitionAsync; only a
+        // race against a still-live claim (the check above already ruled out the common case)
+        // reaches ClaimConflictException here.
+        try
+        {
+            await _claims.ApplyTransitionAsync(tx, ct);
+        }
+        catch (ClaimConflictException)
+        {
+            return Conflict(new ProblemDetails
+            {
+                Status = StatusCodes.Status409Conflict,
+                Detail = $"Claim already exists for {ecosystem}/{name}. Use PATCH to transition.",
+            });
+        }
+
+        int purgedCount = validation.PurgesProxy
+            ? await PurgeProxyArtefactsAsync(OrgId!, ecosystem, name, ct)
+            : 0;
+        if (purgedCount > 0)
+        {
+            await _claims.UpdateHistoryPurgedCountAsync(tx.HistoryId, purgedCount, ct);
+        }
         string createDetail = $"{{\"state\":\"{req.State}\"," +
             $"\"reason\":{System.Text.Json.JsonSerializer.Serialize(req.Reason, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail)}," +
             $"\"purged\":{purgedCount}}}";
@@ -235,6 +261,57 @@ public sealed class ClaimsController : ControllerBase
             purgesProxy = validation.PurgesProxy,
             purgedCount,
         });
+    }
+
+    // Validates the create request body, the ecosystem/name, that no live claim already exists
+    // for the coordinate, and the requested target state against the claim state machine. Returns
+    // the first failing IActionResult, or null with the resolved ecosystem/name/validation result
+    // once every check passes.
+    private async Task<(IActionResult? Error, string Ecosystem, string Name, ClaimTransitionResult Validation)>
+        ValidateCreateRequestAsync(CreateClaimRequest req, string orgId, CancellationToken ct)
+    {
+        if (req is null)
+        {
+            return (BadRequest("Body required."), "", "", default);
+        }
+
+        if (string.IsNullOrWhiteSpace(req.Reason))
+        {
+            return (BadRequest("reason is required."), "", "", default);
+        }
+
+        string ecosystem = req.Ecosystem?.ToLowerInvariant() ?? "";
+        if (!ClaimEcosystems.Enforced.Contains(ecosystem))
+        {
+            return (BadRequest(ClaimEcosystems.IsClaimAware(ecosystem)
+                ? $"claims are not enforced for the '{ecosystem}' ecosystem — no data path consults them, so a claim would be a silent no-op. Accepted: {ClaimEcosystems.AcceptedList}."
+                : $"ecosystem must be one of: {ClaimEcosystems.AcceptedList}."), "", "", default);
+        }
+
+        string name = PurlNormalizer.CanonicalName(ecosystem, req.Name ?? "");
+        if (string.IsNullOrEmpty(name))
+        {
+            return (BadRequest("name is required."), "", "", default);
+        }
+
+        var existing = await _claims.GetAsync(orgId, ecosystem, name, ct);
+        if (existing is not null)
+        {
+            return (Conflict(new ProblemDetails
+            {
+                Status = StatusCodes.Status409Conflict,
+                Detail = $"Claim already exists for {ecosystem}/{name} (state: {existing.State}). " +
+                         "Use PATCH to transition.",
+            }), "", "", default);
+        }
+
+        var validation = ClaimStateMachine.ValidateCreate(req.State ?? "");
+        if (!validation.Allowed)
+        {
+            return (BadRequest(new ProblemDetails { Status = StatusCodes.Status400BadRequest, Detail = validation.RejectionReason }), "", "", default);
+        }
+
+        return (null, ecosystem, name, validation);
     }
 
     /// <summary>PATCH /api/v1/admin/claims/{ecosystem}/{name} — transition state.</summary>
@@ -270,11 +347,6 @@ public sealed class ClaimsController : ControllerBase
             return BadRequest(new ProblemDetails { Status = StatusCodes.Status400BadRequest, Detail = validation.RejectionReason });
         }
 
-        // Purge on mixed → local_only. See Create for the purge-before-persist rationale.
-        int purgedCount = validation.PurgesProxy
-            ? await PurgeProxyArtefactsAsync(OrgId!, ecosystem, name, ct)
-            : 0;
-
         var tx = new ClaimTransition
         {
             ClaimId = existing.Id,
@@ -287,9 +359,19 @@ public sealed class ClaimsController : ControllerBase
             Reason = req.Reason!,
             ActorId = ActorId,
             OccurredAt = _time.GetUtcNow(),
-            PurgedCount = purgedCount,
+            PurgedCount = 0,
         };
+        // Persist on mixed → local_only BEFORE purging. See Create / the class doc comment
+        // for the purge-after-persist rationale.
         await _claims.ApplyTransitionAsync(tx, ct);
+
+        int purgedCount = validation.PurgesProxy
+            ? await PurgeProxyArtefactsAsync(OrgId!, ecosystem, name, ct)
+            : 0;
+        if (purgedCount > 0)
+        {
+            await _claims.UpdateHistoryPurgedCountAsync(tx.HistoryId, purgedCount, ct);
+        }
         await _audit.LogAsync("claim.transition", OrgId, ActorId, ecosystem,
             PurlNormalizer.NameOnly(ecosystem, name),
             detail: $"{{\"from\":\"{existing.State}\",\"to\":\"{req.State}\",\"purged\":{purgedCount}}}",
@@ -406,6 +488,8 @@ public sealed record ClaimsControllerServices(
     AuditRepository Audit,
     Dependably.Infrastructure.Audit.IAuditEmitter AuditEmitter,
     PackageRepository Packages,
+    CacheArtifactRepository Cache,
+    Dependably.Infrastructure.CacheOrphanBlobDeleter CacheOrphanBlobs,
     Dependably.Storage.IBlobStore Blobs,
     ILogger<ClaimsController> Logger,
     TimeProvider Time);

@@ -16,11 +16,16 @@ namespace Dependably.Tests.Integration;
 ///      <c>state=degraded</c> with <c>lastFailedPullAt</c>.
 ///   4. Cache hit/miss counters move across a miss-then-hit sequence.
 ///   5. The payload leaks no token material — the seeded master token is absent from the body.
+///   6. The endpoint is gated behind the same <c>/metrics</c>/<c>/version</c> IP allowlist: a
+///      caller outside it gets 403, and the default allowlist (loopback) still gets 200.
 /// </summary>
 [Trait("Category", "Integration")]
 public sealed class EdgeStatusEndpointTests
 {
     private const string EdgeToken = DependablyFactory.DefaultEdgeToken;
+
+    // Not in the default metrics/version/edge-status allowlist (127.0.0.1, ::1).
+    private const string ExternalCallerIp = "203.0.113.77";
 
     private static DependablyFactory NewEdgeFactory() => new() { DeploymentMode = "edge" };
 
@@ -34,10 +39,14 @@ public sealed class EdgeStatusEndpointTests
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
 
         // The endpoint must not appear in either OpenAPI document, so the ApiContract gate stays
-        // green untouched. Verify the path is absent from both specs.
+        // green untouched. Verify the path is absent from both specs. Reading the management
+        // document requires an authenticated management session in addition to the metrics IP
+        // allowlist (loopback, which TestServer satisfies).
+        string token = await f.CreateAdminJwt();
+        using var authedClient = f.CreateClientWithBearer(token);
         foreach (string spec in new[] { "/openapi/management.json", "/openapi/protocol.json" })
         {
-            var specResp = await client.GetAsync(spec);
+            var specResp = await (spec == "/openapi/management.json" ? authedClient : client).GetAsync(spec);
             specResp.EnsureSuccessStatusCode();
             using var doc = JsonDocument.Parse(await specResp.Content.ReadAsStringAsync());
             if (doc.RootElement.TryGetProperty("paths", out var paths))
@@ -87,6 +96,31 @@ public sealed class EdgeStatusEndpointTests
         // masterHost is scheme+host only (no port, no path, no userinfo) — never a token.
         var masterUri = new Uri(f.MockUpstream.Urls[0]);
         Assert.Equal($"{masterUri.Scheme}://{masterUri.Host}", node.GetProperty("masterHost").GetString());
+    }
+
+    /// <summary>
+    /// Pins the API9-inventory-management fix: <c>/edge/status</c> exposes deployed-version and
+    /// cache-topology fingerprinting anonymously and must sit behind the same IP allowlist as
+    /// <c>/metrics</c> and <c>/version</c>, not be reachable by any caller. Trusts the TestServer's
+    /// own loopback peer as a proxy (mirrors <c>MetricsAllowlistForwardedIpTests</c>) so a
+    /// forwarded external IP outside the default allowlist is denied with 403 — never the payload.
+    /// </summary>
+    [Fact]
+    public async Task Edge_Status_DeniedForNonAllowlistedCaller_ButAllowedForLoopback()
+    {
+        await using var f = new DependablyFactory { DeploymentMode = "edge", TrustedProxies = "127.0.0.1" };
+        using var client = f.CreateClient();
+
+        var deniedReq = new HttpRequestMessage(HttpMethod.Get, "/edge/status");
+        deniedReq.Headers.Add("X-Forwarded-For", ExternalCallerIp);
+        var deniedResp = await client.SendAsync(deniedReq);
+        Assert.Equal(HttpStatusCode.Forbidden, deniedResp.StatusCode);
+
+        // The default allowlist (127.0.0.1, ::1) still passes for the forwarded loopback caller.
+        var allowedReq = new HttpRequestMessage(HttpMethod.Get, "/edge/status");
+        allowedReq.Headers.Add("X-Forwarded-For", "127.0.0.1");
+        var allowedResp = await client.SendAsync(allowedReq);
+        Assert.Equal(HttpStatusCode.OK, allowedResp.StatusCode);
     }
 
     [Fact]

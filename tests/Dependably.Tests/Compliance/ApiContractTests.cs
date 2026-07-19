@@ -27,7 +27,10 @@ public sealed class ApiContractTests : IClassFixture<DependablyFactory>, IAsyncL
     [Fact]
     public async Task OpenApi_Loads()
     {
-        using var client = _factory.CreateClient();
+        // The management document requires an authenticated management session in addition to
+        // the metrics IP allowlist (loopback, which the in-memory TestServer satisfies).
+        string token = await _factory.CreateAdminJwt();
+        using var client = _factory.CreateClientWithBearer(token);
 
         var managementResp = await client.GetAsync("/openapi/management.json");
         Assert.Equal(HttpStatusCode.OK, managementResp.StatusCode);
@@ -47,7 +50,10 @@ public sealed class ApiContractTests : IClassFixture<DependablyFactory>, IAsyncL
     [Fact]
     public async Task OpenApi_MatchesContract()
     {
-        using var client = _factory.CreateClient();
+        // The management document requires an authenticated management session in addition to
+        // the metrics IP allowlist (loopback, which the in-memory TestServer satisfies).
+        string token = await _factory.CreateAdminJwt();
+        using var client = _factory.CreateClientWithBearer(token);
 
         var managementResp = await client.GetAsync("/openapi/management.json");
         managementResp.EnsureSuccessStatusCode();

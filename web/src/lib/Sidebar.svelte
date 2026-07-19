@@ -7,6 +7,9 @@
     { page: 'packages', icon: 'icon-package', label: 'nav.packages' },
     { page: 'lookup', icon: 'icon-search', label: 'nav.lookup' },
     { page: 'vulnerabilities', icon: 'icon-bug', label: 'nav.vulnerabilities' },
+    // Risk is deliberately not in adminItems: its endpoints gate on read:packages (the same
+    // capability that serves the dashboard tiles), so every role can open it.
+    { page: 'risk', icon: 'icon-shield', label: 'nav.risk' },
     { page: 'license-policy', icon: 'icon-license', label: 'nav.licensePolicy' },
     { page: 'tokens', icon: 'icon-key', label: 'nav.tokens' },
   ]

@@ -294,7 +294,9 @@ public partial class Program
         // Storage/upstream exception → problem-JSON translators.
         app.UseMiddleware<AirGappedExceptionMiddleware>();
         app.UseMiddleware<StagingDiskFullExceptionMiddleware>();
+        app.UseMiddleware<TenantStorageQuotaExceededExceptionMiddleware>();
         app.UseMiddleware<UpstreamFetchFailedExceptionMiddleware>();
+        app.UseMiddleware<SsrfBlockedExceptionMiddleware>();
         app.UseMiddleware<TenantNotReadyExceptionMiddleware>();
 
         app.UseResponseCompression();

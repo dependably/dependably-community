@@ -17,8 +17,33 @@ public interface IOsvSource
     /// Batch query, parallel results to inputs. The remote implementation deduplicates
     /// hydration across the batch; the local implementation answers each purl from its
     /// in-memory index.
+    ///
+    /// Same swallow-and-return-empty contract as <see cref="QueryAsync"/>: every failure mode
+    /// yields a full-length list of empty results, indistinguishable from a genuine all-clean
+    /// answer. Callers that must not read an outage as "no advisories" use
+    /// <see cref="TryQueryBatchAsync"/> instead.
     /// </summary>
     Task<List<List<OsvAdvisory>>> QueryBatchAsync(IReadOnlyList<string> purls, CancellationToken ct = default);
+
+    /// <summary>
+    /// Batch counterpart to <see cref="TryQueryAsync"/>: the same query as
+    /// <see cref="QueryBatchAsync"/>, plus whether the source was actually reached this call.
+    /// <see cref="OsvBatchQueryResult.Reached"/> false means <see cref="OsvBatchQueryResult.Results"/>
+    /// must not be treated as authoritative — it is the empty list every failure mode produces,
+    /// not an all-clean answer.
+    ///
+    /// The default implementation assumes the source was reached whenever
+    /// <see cref="QueryBatchAsync"/> does not throw — correct for any <see cref="IOsvSource"/>
+    /// whose batch contract is "throw on failure, return data on success". <see cref="OsvClient"/>
+    /// and <c>LocalOsvSource</c> override it with their own reachability signal because both
+    /// swallow their respective failure modes inside <see cref="QueryBatchAsync"/> itself.
+    /// </summary>
+    async Task<OsvBatchQueryResult> TryQueryBatchAsync(
+        IReadOnlyList<string> purls, CancellationToken ct = default)
+    {
+        var results = await QueryBatchAsync(purls, ct);
+        return new OsvBatchQueryResult(results, Reached: true);
+    }
 
     /// <summary>
     /// Same single-PURL query as <see cref="QueryAsync"/>, but also reports whether the source
@@ -48,3 +73,11 @@ public interface IOsvSource
 /// <see cref="Advisories"/> as authoritative.
 /// </summary>
 public sealed record OsvQueryResult(List<OsvAdvisory> Advisories, bool Reached);
+
+/// <summary>
+/// Result of <see cref="IOsvSource.TryQueryBatchAsync"/>: the per-purl advisory lists (parallel to
+/// the input purls) plus <see cref="Reached"/>. On an unreached source <see cref="Results"/> is the
+/// full-length all-empty list every failure mode produces — <see cref="Reached"/> is the only thing
+/// distinguishing that from a genuinely clean batch.
+/// </summary>
+public sealed record OsvBatchQueryResult(List<List<OsvAdvisory>> Results, bool Reached);

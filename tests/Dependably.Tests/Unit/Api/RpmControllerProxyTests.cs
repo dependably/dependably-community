@@ -189,6 +189,87 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Download_LocalMiss_NonSeekableCacheStream_RecordsExactSizeNotZero()
+    {
+        // S3BlobStore/AzureBlobStore return a non-seekable network stream from GetAsync, so
+        // body.CanSeek is false for essentially every RPM proxy fetch on those backends. The
+        // recorded size_bytes must still equal the real blob length, not silently fall back
+        // to 0 (which corrupts org storage totals and quota accounting).
+        await EnableAnonPullAsync();
+        await SeedRpmRegistryAsync();
+        byte[] bytes = RandomBytes(4096);
+        string sha256 = Sha256Hex(bytes);
+        string filename = "tree-2.1.1-1.fc40.x86_64.rpm";
+        var resolution = new PackageResolution(
+            PackageUrl: $"https://mirror.example.com/Packages/t/{filename}",
+            Sha256: sha256,
+            Name: "tree",
+            Epoch: 0,
+            Version: "2.1.1",
+            Release: "1.fc40",
+            Arch: "x86_64",
+            Summary: "A recursive directory listing command",
+            Description: "tree is a recursive...",
+            License: "GPLv2+");
+
+        await _blobs.PutAsync(BlobKeys.Proxy(sha256), new MemoryStream(bytes), default);
+
+        var stubProxy = new StubProxy(resolution: resolution);
+        var ctl = BuildController(proxy: stubProxy, cacheOverride: new NonSeekableBlobStore(_blobs));
+
+        var result = await ctl.Download(filename, default);
+        Assert.IsType<FileStreamResult>(result);
+
+        await using var conn = await _db.OpenAsync();
+        long? sizeBytes = await conn.ExecuteScalarAsync<long?>(
+            """
+            SELECT ca.size_bytes FROM cache_artifact ca
+            WHERE ca.ecosystem = 'rpm' AND ca.name = 'tree'
+            LIMIT 1
+            """);
+        Assert.Equal(bytes.Length, sizeBytes);
+    }
+
+    [Fact]
+    public async Task Download_LocalMiss_OversizedSeekableStream_RecordsExactSizeWithoutInt32Wrap()
+    {
+        // A seekable stream whose Length exceeds int.MaxValue (a plausible size for large
+        // driver/firmware/CUDA RPMs) must record the true long size_bytes rather than
+        // silently wrapping to a negative 32-bit value via a narrowing (int) cast.
+        await EnableAnonPullAsync();
+        await SeedRpmRegistryAsync();
+        const long hugeLength = 2_500_000_000L; // > int.MaxValue (2,147,483,647)
+        string sha256 = Sha256Hex(RandomBytes(32));
+        string filename = "cuda-toolkit-12.4-1.x86_64.rpm";
+        var resolution = new PackageResolution(
+            PackageUrl: $"https://mirror.example.com/Packages/c/{filename}",
+            Sha256: sha256,
+            Name: "cuda-toolkit",
+            Epoch: 0,
+            Version: "12.4",
+            Release: "1",
+            Arch: "x86_64",
+            Summary: "A large driver package",
+            Description: "cuda-toolkit sample",
+            License: "Proprietary");
+
+        var stubProxy = new StubProxy(resolution: resolution);
+        var ctl = BuildController(proxy: stubProxy, cacheOverride: new FixedLengthSeekableBlobStore(hugeLength));
+
+        var result = await ctl.Download(filename, default);
+        Assert.IsType<FileStreamResult>(result);
+
+        await using var conn = await _db.OpenAsync();
+        long? sizeBytes = await conn.ExecuteScalarAsync<long?>(
+            """
+            SELECT ca.size_bytes FROM cache_artifact ca
+            WHERE ca.ecosystem = 'rpm' AND ca.name = 'cuda-toolkit'
+            LIMIT 1
+            """);
+        Assert.Equal(hugeLength, sizeBytes);
+    }
+
+    [Fact]
     public async Task Download_LocalMiss_UnmappedLicenseTag_MirrorsVerbatimToCacheArtifact()
     {
         // Mixed partial-failure coverage alongside the mapped-tag case above: a compound
@@ -1085,7 +1166,7 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
 
     // ── Controller builder ────────────────────────────────────────────────────
 
-    private RpmController BuildController(IRpmUpstreamProxy? proxy = null)
+    private RpmController BuildController(IRpmUpstreamProxy? proxy = null, IBlobStore? cacheOverride = null)
     {
         var http = new DefaultHttpContext();
         http.Request.Scheme = "https";
@@ -1106,9 +1187,11 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
         services.AddLogging();
         http.RequestServices = services.BuildServiceProvider();
 
-        // Build a real UpstreamClient that reads from _blobs (cache tier).
-        // Tests that need the proxy path pre-stage the blob so GetOrFetchAsync returns a HIT.
-        var upstreamClient = BuildRealUpstreamClient();
+        // Build a real UpstreamClient that reads from _blobs (cache tier), or from
+        // cacheOverride when a test needs to control the exact Stream shape (e.g.
+        // non-seekable) returned from the cache-tier lookup.
+        var cacheStore = cacheOverride ?? _blobs;
+        var upstreamClient = BuildRealUpstreamClient(cacheStore);
 
         var cacheArtifacts = new CacheArtifactRepository(_db);
         var tenantAccess = new TenantArtifactAccessRepository(_db);
@@ -1119,7 +1202,7 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
             Tokens: _tokens,
             Audit: _audit,
             Orgs: _orgs,
-            BlobStore: new TieredBlobStorage(_blobs, _blobs),
+            BlobStore: new TieredBlobStorage(cacheStore, _blobs),
             Db: _db,
             Repodata: new RpmRepodataService(_db, NullLogger<RpmRepodataService>.Instance, TimeProvider.System),
             Registries: new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured())),
@@ -1148,13 +1231,13 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
         };
     }
 
-    private UpstreamClient BuildRealUpstreamClient()
+    private UpstreamClient BuildRealUpstreamClient(IBlobStore? cacheOverride = null)
     {
         // UpstreamClient with no-op HttpClient (should not be called — blobs are pre-staged).
         var httpFactory = new NullHttpClientFactory();
         return new UpstreamClient(
             httpFactory,
-            new TieredBlobStorage(_blobs, _blobs),
+            new TieredBlobStorage(cacheOverride ?? _blobs, _blobs),
             _audit,
             new AllowAllValidator(),
             new DisabledAirGap(),
@@ -1303,5 +1386,127 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
     {
         public Task<UpstreamUrlBlock> CheckAsync(string url, string? orgId, CancellationToken ct = default)
             => Task.FromResult(UpstreamUrlBlock.None);
+    }
+
+    /// <summary>
+    /// Wraps a real <see cref="IBlobStore"/> but returns a non-seekable stream from
+    /// <see cref="GetAsync"/>, mirroring S3BlobStore/AzureBlobStore's network response
+    /// streams. <see cref="GetRangeAsync"/> still delegates to the inner store, matching
+    /// the real object-store backends where a range/metadata lookup is a distinct,
+    /// seekable-independent operation.
+    /// </summary>
+    private sealed class NonSeekableBlobStore(IBlobStore inner) : IBlobStore
+    {
+        public Task PutAsync(string key, Stream data, CancellationToken ct = default) => inner.PutAsync(key, data, ct);
+
+        public async Task<Stream?> GetAsync(string key, CancellationToken ct = default)
+        {
+            var stream = await inner.GetAsync(key, ct);
+            return stream is null ? null : new NonSeekableStreamWrapper(stream);
+        }
+
+        public Task<bool> ExistsAsync(string key, CancellationToken ct = default) => inner.ExistsAsync(key, ct);
+
+        public Task DeleteAsync(string key, CancellationToken ct = default) => inner.DeleteAsync(key, ct);
+
+        public Task<long> GetTotalSizeAsync(CancellationToken ct = default) => inner.GetTotalSizeAsync(ct);
+
+        public Task<RangedStream?> GetRangeAsync(string key, long from, long to, CancellationToken ct = default)
+            => inner.GetRangeAsync(key, from, to, ct);
+
+        public IAsyncEnumerable<BlobInfo> ListAsync(string prefix, CancellationToken ct = default) => inner.ListAsync(prefix, ct);
+    }
+
+    /// <summary>Forces <see cref="CanSeek"/>/<see cref="Length"/> to behave like a non-seekable
+    /// network stream (AWS SDK / Azure SDK download streams) while still delegating reads.</summary>
+    private sealed class NonSeekableStreamWrapper(Stream inner) : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) => inner.Read(buffer, offset, count);
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken ct)
+            => inner.ReadAsync(buffer, offset, count, ct);
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default)
+            => inner.ReadAsync(buffer, ct);
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                inner.Dispose();
+            }
+
+            base.Dispose(disposing);
+        }
+
+        public override ValueTask DisposeAsync() => inner.DisposeAsync();
+    }
+
+    /// <summary>
+    /// Returns a seekable stream that reports a fixed <see cref="Stream.Length"/> above
+    /// <see cref="int.MaxValue"/> without allocating real backing bytes, so a >2 GiB RPM
+    /// can be simulated cheaply. <see cref="GetRangeAsync"/> reports the same length so the
+    /// non-seekable fallback path (not exercised for a seekable stream) would also agree.
+    /// Reads are never exercised by these tests — the controller only inspects
+    /// <see cref="Stream.CanSeek"/>/<see cref="Stream.Length"/> before handing the stream to
+    /// <c>File(...)</c> without copying it.
+    /// </summary>
+    private sealed class FixedLengthSeekableBlobStore(long length) : IBlobStore
+    {
+        public Task PutAsync(string key, Stream data, CancellationToken ct = default) => Task.CompletedTask;
+
+        public Task<Stream?> GetAsync(string key, CancellationToken ct = default)
+            => Task.FromResult<Stream?>(new FixedLengthSeekableStream(length));
+
+        public Task<bool> ExistsAsync(string key, CancellationToken ct = default) => Task.FromResult(true);
+
+        public Task DeleteAsync(string key, CancellationToken ct = default) => Task.CompletedTask;
+
+        public Task<long> GetTotalSizeAsync(CancellationToken ct = default) => Task.FromResult(length);
+
+        public Task<RangedStream?> GetRangeAsync(string key, long from, long to, CancellationToken ct = default)
+            => Task.FromResult<RangedStream?>(new RangedStream(Stream.Null, from, to, length));
+
+        public IAsyncEnumerable<BlobInfo> ListAsync(string prefix, CancellationToken ct = default) => Empty();
+
+        private static async IAsyncEnumerable<BlobInfo> Empty()
+        {
+            await Task.Yield();
+            yield break;
+        }
+
+        private sealed class FixedLengthSeekableStream(long length) : Stream
+        {
+            private long _position;
+
+            public override bool CanRead => true;
+            public override bool CanSeek => true;
+            public override bool CanWrite => false;
+            public override long Length { get; } = length;
+            public override long Position
+            {
+                get => _position;
+                set => _position = value;
+            }
+
+            public override int Read(byte[] buffer, int offset, int count)
+                => throw new InvalidOperationException("Bytes are never read from a size-only fake stream.");
+            public override void Flush() { }
+            public override long Seek(long offset, SeekOrigin origin) => _position = offset;
+            public override void SetLength(long value) => throw new NotSupportedException();
+            public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        }
     }
 }

@@ -17,8 +17,7 @@ namespace Dependably.Api.NpmProtocol;
 public sealed class NpmDistTagsHandler(
     OrgRepository orgs,
     PackageRepository packages,
-    CacheArtifactRepository cacheArtifacts,
-    VulnerabilityRepository vulns,
+    ArtifactInventoryRepository inventory,
     TokenRepository tokens,
     AuditRepository audit,
     NpmDistTagRepository distTags,
@@ -291,36 +290,6 @@ public sealed class NpmDistTagsHandler(
     private async Task<IReadOnlyList<PackageVersion>> LoadCombinedVersionsAsync(
         string orgId, string packageId, string fullName, CancellationToken ct)
     {
-        var uploadedVersions = await packages.GetVersionsAsync(packageId, ct);
-        var proxyEntries = await cacheArtifacts.ListServeFactsForNameAsync(orgId, "npm", fullName, ct);
-
-        if (proxyEntries.Count == 0)
-        {
-            return uploadedVersions;
-        }
-
-        var uploadedVersionSet = uploadedVersions
-            .Select(v => v.Version)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        var proxyIds = proxyEntries.Select(e => e.Id).ToList();
-        var proxySignals = proxyIds.Count > 0
-            ? await vulns.GetGateSignalsBatchForCacheArtifactsAsync(proxyIds, ct)
-            : new Dictionary<string, VulnGateSignals>();
-
-        var synthetic = proxyEntries
-            .Where(e => !uploadedVersionSet.Contains(e.Version))
-            .Select(e => e.ToPackageVersionSynthetic(proxySignals))
-            .ToList();
-
-        if (synthetic.Count == 0)
-        {
-            return uploadedVersions;
-        }
-
-        var combined = new List<PackageVersion>(uploadedVersions.Count + synthetic.Count);
-        combined.AddRange(uploadedVersions);
-        combined.AddRange(synthetic);
-        return combined;
+        return await inventory.ListServeableVersionsAsync(orgId, packageId, "npm", fullName, ct);
     }
 }

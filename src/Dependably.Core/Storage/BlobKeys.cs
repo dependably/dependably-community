@@ -30,12 +30,35 @@ public static partial class BlobKeys
         => $"hosted/{orgId}/{ecosystem}/{purlName}/{version}/{filename}";
 
     /// <summary>
-    /// Org-scoped key for generated RPM repodata files. repomd.xml and the
-    /// compressed primary/filelists/other XML documents live under a per-arch path so
-    /// <c>dnf</c> clients reading <c>/rpm/repodata/{arch}/{file}</c> resolve directly.
+    /// Org-scoped, content-addressed key for a hosted artefact published through
+    /// <c>IPackagePublishService</c>. The artefact's SHA-256 is a key segment, so the bytes
+    /// stored under a key always hash to the digest that key names.
     /// </summary>
-    public static string Repodata(string orgId, string arch, string filename)
-        => $"hosted/{orgId}/rpm/repodata/{arch}/{filename}";
+    /// <remarks>
+    /// That property is what keeps a committed <c>package_versions</c> /
+    /// <c>package_version_files</c> row's <c>(blob_key, checksum_sha256)</c> pair
+    /// self-consistent under concurrency, with no lock and no ordering constraint between the
+    /// blob write and the metadata write: two publishes of the same coordinate carrying
+    /// DIFFERENT bytes address DISJOINT keys and so cannot overwrite one another, and two
+    /// publishes carrying IDENTICAL bytes address one key whose content is the same either
+    /// way. It is the same property that makes <see cref="Proxy"/> divergence-proof.
+    ///
+    /// The filename stays the last segment, so <c>PackageRepository.DeriveFilename</c> and
+    /// every reader that derives a display filename from the key tail keep working. Readers
+    /// resolve hosted blobs from the row's stored <c>blob_key</c> rather than by rebuilding
+    /// the coordinate, so rows written under the coordinate-only <see cref="Hosted"/> shape
+    /// keep resolving unchanged.
+    ///
+    /// <paramref name="sha256"/> is validated as 64 lowercase hex characters at this
+    /// boundary — the same path-traversal defence <see cref="Proxy"/> applies.
+    /// </remarks>
+    public static string HostedArtifact(
+        string orgId, string ecosystem, string purlName, string version, string sha256, string filename)
+    {
+        return !Sha256HexRegex().IsMatch(sha256)
+            ? throw new ArgumentException("sha256 must be 64 lowercase hex characters", nameof(sha256))
+            : $"hosted/{orgId}/{ecosystem}/{purlName}/{version}/{sha256}/{filename}";
+    }
 
     /// <summary>
     /// Content-addressed key for RPM repodata proxy files. Hash-prefixed metadata

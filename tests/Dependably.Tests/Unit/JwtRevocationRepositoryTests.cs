@@ -103,4 +103,84 @@ public sealed class JwtRevocationRepositoryTests : IAsyncLifetime
         await repo.RevokeAsync("jti-4", TestTime.KnownNow.AddHours(1));
         Assert.True(await repo.IsRevokedAsync("jti-4"));
     }
+
+    [Fact]
+    public async Task RevokeThatRacesAnInFlightNegativeFill_DoesNotCacheTheStaleNotRevokedAnswer()
+    {
+        // Fill-after-invalidate race: request B checks IsRevokedAsync and its DB read returns
+        // count=0 (not yet revoked); concurrently request A logs out, committing the revocation
+        // INSERT and evicting the cache key. B then completes its fill. On the pre-guard code B
+        // caches revoked=false AFTER A's eviction, so the logged-out token authenticates for a
+        // full 60s TTL. The hook fires the racing RevokeAsync in the window between B's scalar
+        // read and its cache write — this fails on the old code and passes on the guard-token fix.
+        var hooked = new AfterDbReadHookStore(_db);
+        var repo = new JwtRevocationRepository(hooked, _cache, TestTime.Frozen());
+
+        hooked.AfterRead = async () =>
+            await repo.RevokeAsync("jti-race", TestTime.KnownNow.AddHours(1));
+
+        // B's fill: reads count=0, then the hook revokes+evicts, then B writes the negative entry.
+        Assert.False(await repo.IsRevokedAsync("jti-race")); // B legitimately read the pre-revoke state
+
+        // Killer assertion: a subsequent check must observe the revocation, not a stale cached
+        // "not revoked" left behind by B's post-eviction write.
+        Assert.True(await repo.IsRevokedAsync("jti-race"));
+    }
+
+    [Fact]
+    public async Task NaturallyExpiringToken_DoesNotRetainItsFillGuard()
+    {
+        // A cache MISS mints a per-jti generation guard so a racing RevokeAsync can cancel an
+        // in-flight fill. Naturally-expiring JWTs never call RevokeAsync, so unless the guard's
+        // lifetime is tied to the cache entry its generation lives for the whole process — one
+        // CancellationTokenSource per distinct token ever seen, an unbounded leak on a long-lived
+        // node.
+        var repo = new JwtRevocationRepository(_db, _cache, TestTime.Frozen());
+
+        Assert.False(await repo.IsRevokedAsync("jti-leak"));
+        Assert.Equal(1, repo.FillGuardCount);
+
+        // Evict the negative entry the way a TTL expiry or capacity trim would — not RevokeAsync,
+        // which retires the guard directly. The entry's post-eviction callback must retire it.
+        _cache.Compact(1.0);
+
+        await WaitForFillGuardsToDrain(() => repo.FillGuardCount);
+        Assert.Equal(0, repo.FillGuardCount);
+    }
+
+    [Fact]
+    public async Task RevokedJtiLookup_DoesNotRetainItsFillGuard()
+    {
+        // Not-cached terminal branch: a cache MISS mints a per-jti generation guard before the DB
+        // read, but a revoked (positive) result is intentionally never cached, so the guard is
+        // never tied to a cache entry. IsRevokedAsync runs on EVERY JWT request, so a repeatedly
+        // presented logged-out token would leak one CancellationTokenSource per distinct revoked
+        // jti — monotonic over the process lifetime. The terminal branch must retire the guard.
+        var repo = new JwtRevocationRepository(_db, _cache, TestTime.Frozen());
+
+        // Insert the revocation directly so the guard we observe is the one IsRevokedAsync mints,
+        // not the one RevokeAsync retires on its own path.
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO jwt_revocations (jti, expires_at) VALUES (@jti, @exp)",
+                new { jti = "jti-revoked-leak", exp = TestTime.KnownNow.AddHours(1).ToString("yyyy-MM-ddTHH:mm:ssZ") });
+        }
+
+        Assert.True(await repo.IsRevokedAsync("jti-revoked-leak"));
+
+        // The retire is synchronous on the terminal branch (no cache entry, so no post-eviction
+        // callback to await). On the pre-fix code the guard leaks and this reads 1.
+        Assert.Equal(0, repo.FillGuardCount);
+    }
+
+    // MemoryCache fires post-eviction callbacks on a thread-pool task, so poll briefly for the
+    // asynchronous retire rather than assuming it has already run.
+    private static async Task WaitForFillGuardsToDrain(Func<int> count)
+    {
+        for (int i = 0; i < 200 && count() != 0; i++)
+        {
+            await Task.Delay(10);
+        }
+    }
 }

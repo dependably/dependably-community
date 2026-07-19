@@ -26,13 +26,16 @@ public class LicenseReviewQueueTests : IAsyncLifetime
               ('p2', 'org1', 'pypi', 'b', 'b'),
               ('p3', 'org2', 'pypi', 'c', 'c')
             """);
+        // origin='uploaded': these represent hosted pushes (the SeenAsync helper attaches a
+        // hosted-plane license fact to them). The proxy plane is exercised separately, through
+        // ProxiedAsync's cache_artifact rows.
         await conn.ExecuteAsync(
             """
-            INSERT INTO package_versions (id, package_id, version, purl, blob_key) VALUES
-              ('pv1', 'p1', '1.0', 'pkg:pypi/a@1.0', 'blob1'),
-              ('pv2', 'p1', '2.0', 'pkg:pypi/a@2.0', 'blob2'),
-              ('pv3', 'p2', '1.0', 'pkg:pypi/b@1.0', 'blob3'),
-              ('pv4', 'p3', '1.0', 'pkg:pypi/c@1.0', 'blob4')
+            INSERT INTO package_versions (id, package_id, version, purl, blob_key, origin) VALUES
+              ('pv1', 'p1', '1.0', 'pkg:pypi/a@1.0', 'blob1', 'uploaded'),
+              ('pv2', 'p1', '2.0', 'pkg:pypi/a@2.0', 'blob2', 'uploaded'),
+              ('pv3', 'p2', '1.0', 'pkg:pypi/b@1.0', 'blob3', 'uploaded'),
+              ('pv4', 'p3', '1.0', 'pkg:pypi/c@1.0', 'blob4', 'uploaded')
             """);
     }
 

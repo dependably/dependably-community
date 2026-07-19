@@ -267,6 +267,8 @@ public sealed class LoginService
 
         // Stamp last_login_at on the user row so the system_admin lookup endpoint can surface
         // it without a separate auth audit query.
+        // xtenant: keyed by the users PK the just-completed first-factor login resolved for
+        // this (realm, tenant, email) — not a caller-supplied id.
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             "UPDATE users SET last_login_at = @now WHERE id = @id",
@@ -788,6 +790,8 @@ public sealed class LoginService
     private async Task<SamlLoginResult> LoginViaExternalIdentityAsync(
         System.Data.Common.DbConnection conn, ExternalIdentity existing, SamlLoginContext ctx, CancellationToken ct)
     {
+        // xtenant: keyed by the users PK on the external_identities row that the (idpEntityId,
+        // nameId) pair resolved to — the SAML link, not a request-supplied user id.
         var (Id, Role, AccountStatus, Email, TokenVersion) = await conn.QuerySingleOrDefaultAsync<(string Id, string Role, string AccountStatus, string Email, long TokenVersion)>(
             "SELECT id AS Id, role AS Role, account_status AS AccountStatus, email AS Email, token_version AS TokenVersion FROM users WHERE id = @id",
             new { id = existing.UserId });
@@ -1023,12 +1027,14 @@ public sealed class LoginService
             && !string.Equals(assertionEmail, currentEmail, StringComparison.OrdinalIgnoreCase);
         if (emailChanged)
         {
+            // xtenant: keyed by the users PK of the SAML-linked account resolved above.
             await conn.ExecuteAsync(
                 "UPDATE users SET last_login_at = @now, email = @email WHERE id = @id",
                 new { id = userId, now = nowStr, email = assertionEmail });
         }
         else
         {
+            // xtenant: keyed by the users PK of the SAML-linked account resolved above.
             await conn.ExecuteAsync(
                 "UPDATE users SET last_login_at = @now WHERE id = @id",
                 new { id = userId, now = nowStr });

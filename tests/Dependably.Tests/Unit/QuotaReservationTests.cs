@@ -212,8 +212,8 @@ public sealed class QuotaReservationTests : IAsyncLifetime
                 "INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy) " +
                 "VALUES ('p1', 'o1', 'npm', 'legacy', 'legacy', 0)");
             await conn.ExecuteAsync(
-                "INSERT INTO package_versions (id, package_id, version, purl, blob_key, size_bytes) " +
-                "VALUES ('v1', 'p1', '1.0.0', 'pkg:npm/legacy@1.0.0', 'k', 800)");
+                "INSERT INTO package_versions (id, package_id, version, purl, blob_key, size_bytes, origin) " +
+                "VALUES ('v1', 'p1', '1.0.0', 'pkg:npm/legacy@1.0.0', 'k', 800, 'uploaded')");
         }
 
         // counter is still 0 at this point. A 300-byte publish should backfill to 800 then
@@ -241,8 +241,8 @@ public sealed class QuotaReservationTests : IAsyncLifetime
                 "INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy) " +
                 "VALUES ('p1', 'o1', 'npm', 'legacy', 'legacy', 0)");
             await conn.ExecuteAsync(
-                "INSERT INTO package_versions (id, package_id, version, purl, blob_key, size_bytes) " +
-                "VALUES ('v1', 'p1', '1.0.0', 'pkg:npm/legacy@1.0.0', 'k', 800)");
+                "INSERT INTO package_versions (id, package_id, version, purl, blob_key, size_bytes, origin) " +
+                "VALUES ('v1', 'p1', '1.0.0', 'pkg:npm/legacy@1.0.0', 'k', 800, 'uploaded')");
         }
 
         // A 300-byte publish would put usage at 1100 > 1000 cap → must reject.

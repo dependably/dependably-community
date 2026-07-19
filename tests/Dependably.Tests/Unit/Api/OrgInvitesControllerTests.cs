@@ -73,12 +73,43 @@ public sealed class OrgInvitesControllerTests
         Assert.Contains("\"delivered_via\":\"link\"", json);
     }
 
+    // ── Mailer registered but instance SMTP unconfigured ────────────────────
+
+    [Fact]
+    public async Task CreateInvite_MailerRegisteredButUnavailable_ReturnsLinkInResponse()
+    {
+        // SmtpInviteMailer is always registered (no more SMTP_HOST env gate), but the DB-backed
+        // instance SMTP config can still be disabled/unconfigured — IsAvailableAsync surfaces
+        // that at request time and the controller must fall back to the link, exactly like the
+        // no-mailer-registered case.
+        var mailer = Substitute.For<IInviteMailer>();
+        mailer.IsAvailableAsync(Arg.Any<CancellationToken>()).Returns(false);
+
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync(mailer: mailer);
+
+        var result = await b.OrgInvitesController.CreateInvite(
+            new CreateInviteRequest("invitee@example.test", "member"),
+            CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        string json = System.Text.Json.JsonSerializer.Serialize(ok.Value, WebJsonOptions);
+        Assert.Contains("\"invite_link\"", json);
+        Assert.DoesNotContain("\"invite_link\":null", json);
+        Assert.Contains("\"delivered_via\":\"link\"", json);
+
+        await mailer.DidNotReceive().SendInviteAsync(
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<DateTimeOffset>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
+    }
+
     // ── SMTP present, delivery succeeds ─────────────────────────────────────
 
     [Fact]
     public async Task CreateInvite_SmtpPresent_SendSucceeds_ReturnsNullLink()
     {
         var mailer = Substitute.For<IInviteMailer>();
+        mailer.IsAvailableAsync(Arg.Any<CancellationToken>()).Returns(true);
         mailer.SendInviteAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<DateTimeOffset>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(Task.CompletedTask);
 
@@ -112,6 +143,7 @@ public sealed class OrgInvitesControllerTests
     public async Task CreateInvite_SmtpPresent_SendThrows_FallsBackToLink()
     {
         var mailer = Substitute.For<IInviteMailer>();
+        mailer.IsAvailableAsync(Arg.Any<CancellationToken>()).Returns(true);
         mailer.SendInviteAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<DateTimeOffset>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
             .ThrowsAsync(new InvalidOperationException("SMTP relay rejected connection"));
 

@@ -277,6 +277,28 @@ public sealed class OrgRepositoryTests : IClassFixture<InMemoryDbFixture>
     }
 
     [Fact]
+    public async Task InstanceSettings_ListAsync_ExclusionIsBoundToSecretKeys_NotAHardcodedLiteralList()
+    {
+        // Every key in OrgRepository.SecretKeys must be excluded from the generic listing —
+        // the NOT IN clause binds to the same set the encrypt-on-write path consults, so a key
+        // added to SecretKeys is automatically hidden here without a second hardcoded literal.
+        await _repo.SetInstanceSettingAsync("mfa_encryption_key", "DO-NOT-LEAK-1");
+        await _repo.SetInstanceSettingAsync("smtp_password", "DO-NOT-LEAK-2");
+        await _repo.SetInstanceSettingAsync("system_slack_webhook_url", "DO-NOT-LEAK-3");
+        await _repo.SetInstanceSettingAsync("smtp_host", "smtp.example.com");
+
+        var listed = await _repo.ListInstanceSettingsAsync();
+        Assert.False(listed.ContainsKey("mfa_encryption_key"));
+        Assert.False(listed.ContainsKey("smtp_password"));
+        Assert.False(listed.ContainsKey("system_slack_webhook_url"));
+        Assert.Equal("smtp.example.com", listed["smtp_host"]);
+
+        // ScalarGet still returns the secrets — used internally by the dedicated email-config
+        // endpoints (never the generic instance-settings GET/PUT).
+        Assert.Equal("DO-NOT-LEAK-2", await _repo.GetInstanceSettingAsync("smtp_password"));
+    }
+
+    [Fact]
     public async Task SetInstanceSettingAsync_OnConflict_Overwrites()
     {
         await _repo.SetInstanceSettingAsync($"k-{Guid.NewGuid():N}", "v1");

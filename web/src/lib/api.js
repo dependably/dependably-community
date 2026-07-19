@@ -184,6 +184,12 @@ export const api = {
   getMetricsAccess: () => req('GET', '/instance/metrics-access'),
   updateMetricsAccess: (body) => req('PUT', '/instance/metrics-access', body),
 
+  // Instance SMTP config (single mode; 404 in multi mode — operators use systemApi.* instead).
+  // GET/PUT responses return hasPassword (bool), never the raw value; test sends to fromAddress.
+  getInstanceEmailConfig: () => req('GET', '/instance/email-config'),
+  updateInstanceEmailConfig: (cfg) => req('PUT', '/instance/email-config', cfg),
+  testInstanceEmail: () => req('POST', '/instance/email-config/test'),
+
   // Tenant settings (per-org config)
   getOrgSettings: () => req('GET', '/settings'),
   updateOrgSettings: (s) => req('PUT', '/settings', {
@@ -217,6 +223,10 @@ export const api = {
   // Pre-adoption package lookup: read-only malware/CVE/license verdict for a candidate
   // package that has never been requested through the registry. Nothing is ingested —
   // `version` omitted evaluates the upstream latest stable release.
+  //
+  // "Upstream has no such package/version" is an ANSWER here, not a failure: it resolves 200
+  // with { found: false, ecosystem, name, version }. Branch on `found` — a rejected promise
+  // means a bad request (422) or an unreachable upstream (503), never a mistyped name.
   lookupPackage: (ecosystem, name, version) =>
     req('GET', `/lookup?${qs({ ecosystem, name, version })}`),
 
@@ -314,8 +324,17 @@ export const api = {
 
   // Upstream proxy registries — per ecosystem, priority-ordered (top = tried first).
   getUpstreamRegistries: () => req('GET', '/upstream-registries'),
-  // Non-OCI: supply ecosystem, url, name. OCI: omit this overload and use addOciUpstreamRegistry.
-  addUpstreamRegistry: (ecosystem, url, name) => req('POST', '/upstream-registries', { ecosystem, url, name }),
+  // Non-OCI: supply ecosystem, url, name and optional auth fields (authType, username, secret).
+  // authType ∈ { 'anonymous' (default), 'bearer', 'basic' }; omit auth fields for rpm.
+  // Only non-null/non-anonymous values are sent so the body stays minimal.
+  addUpstreamRegistry: (ecosystem, url, name, authType, username, secret) => {
+    /** @type {Record<string, any>} */
+    const body = { ecosystem, url, name }
+    if (authType && authType !== 'anonymous') body.authType = authType
+    if (username) body.username = username
+    if (secret) body.secret = secret
+    return req('POST', '/upstream-registries', body)
+  },
   // OCI-specific add: carries host (in url), authType, prefixes, optional username/secret/tokenEndpoint.
   addOciUpstreamRegistry: ({ name, url, authType, username, secret, tokenEndpoint, prefixes }) =>
     req('POST', '/upstream-registries', { ecosystem: 'oci', url, name: name || null, authType, username: username || null, secret: secret || null, tokenEndpoint: tokenEndpoint || null, prefixes }),
@@ -351,16 +370,26 @@ export const api = {
   deleteWebhook: (id) => req('DELETE', `/webhooks/${id}`),
   testWebhook: (id) => req('POST', `/webhooks/${id}/test`),
 
-  // Per-tenant alert center (topbar bell, admin/owner only). Slack webhook URL is write-only:
-  // GET/PUT responses return hasSlackWebhook (bool), never the raw value.
+  // Per-tenant alert center (topbar bell, admin/owner only). The Slack webhook URL is write-only:
+  // GET/PUT responses return hasSlackWebhook (bool), never the raw value. The gates PUT and the
+  // Slack PUT are separate calls so an Alerts-tab save and an Integrations-tab save can't
+  // clobber each other's settings columns.
   listAlerts: (state, limit = 50, offset = 0) =>
     req('GET', `/alerts?${qs({ state, limit, offset })}`),
   getAlertsSummary: () => req('GET', '/alerts/summary'),
   dismissAlert: (id) => req('POST', `/alerts/${id}/dismiss`),
   getAlertSettings: () => req('GET', '/alert-settings'),
-  updateAlertSettings: (quarantineAlertsEnabled, vulnAlertsEnabled, vulnMinSeverity, slackEnabled, slackWebhookUrl) =>
-    req('PUT', '/alert-settings', { quarantineAlertsEnabled, vulnAlertsEnabled, vulnMinSeverity, slackEnabled, slackWebhookUrl }),
+  // Alerts-tab columns: the gates plus the email delivery toggle and recipient list — payload
+  // carries the exact camelCase fields AlertSettingsRequest accepts.
+  updateAlertSettings: (payload) => req('PUT', '/alert-settings', payload),
+  updateAlertSlack: (slackEnabled, slackWebhookUrl) =>
+    req('PUT', '/alert-settings/slack', { slackEnabled, slackWebhookUrl }),
   testAlertSlack: () => req('POST', '/alert-settings/slack/test'),
+  // Email SMTP transport only (the delivery toggle + recipients live on the base PUT):
+  // emailSmtpPassword is write-only — payload carries the exact camelCase fields
+  // AlertEmailSettingsRequest accepts, so callers assemble the whole object themselves.
+  updateAlertEmail: (payload) => req('PUT', '/alert-settings/email', payload),
+  testAlertEmail: () => req('POST', '/alert-settings/email/test'),
 
   // Invites
   listInvites: () => req('GET', '/invites'),
@@ -403,8 +432,10 @@ export const api = {
   // Lazy advisory detail for the expandable row — tenant-scoped server-side (BOLA).
   // `version` (optional) is the installed version; the server uses it to resolve the
   // fixed version of the affected range containing it (remediation.fixedVersion).
-  getVulnDetail: (osvId, version) =>
-    req('GET', `/vulnerabilities/${encodeURIComponent(osvId)}${version ? `?version=${encodeURIComponent(version)}` : ''}`),
+  getVulnDetail: (osvId, version) => {
+    const versionQuery = version ? `?version=${encodeURIComponent(version)}` : ''
+    return req('GET', `/vulnerabilities/${encodeURIComponent(osvId)}${versionQuery}`)
+  },
   rescanVersion: (eco, name, version) =>
     req('POST', `/packages/${eco}/${name.replaceAll('/', '%2F')}/${version}/rescan`),
   blockVersion: (eco, name, version) =>
@@ -418,6 +449,14 @@ export const api = {
   // Raw SKILL.md content is fetched by the user's own agent via the copyable curl one-liner,
   // not by this frontend.
   getRemediationSkills: () => req('GET', '/remediation/skills'),
+
+  // Risk drill-downs — the rows behind the dashboard's operational- and license-risk tiles.
+  // Read-only, gated on read:packages (not admin-only). Both totals reproduce the tile they
+  // came from; the operational response also carries the tile's own packageCount + threshold.
+  getOperationalRisk: (params = {}) =>
+    req('GET', `/risk/operational?${qs({ limit: 50, page: 1, ...params })}`),
+  getLicenseRisk: (params = {}) =>
+    req('GET', `/risk/license?${qs({ limit: 50, page: 1, ...params })}`),
 
   // Stats
   getStats: () => req('GET', '/stats'),
@@ -495,6 +534,12 @@ export const systemApi = {
   getMetricsAccess: () => req('GET', '/system/metrics-access'),
   updateMetricsAccess: (body) => req('PUT', '/system/metrics-access', body),
 
+  // Instance SMTP config (apex-only, scope=system). GET/PUT responses return hasPassword
+  // (bool), never the raw value; test sends to fromAddress.
+  getEmailConfig: () => req('GET', '/system/email-config'),
+  updateEmailConfig: (cfg) => req('PUT', '/system/email-config', cfg),
+  testEmailConfig: () => req('POST', '/system/email-config/test'),
+
   // Support flows: lock/unlock account + force password reset.
   setAccountStatus: (email, tenantSlug, accountStatus) =>
     req('PATCH', `/system/users/${encodeURIComponent(email)}/account-status`, { tenantSlug, accountStatus }),
@@ -540,4 +585,10 @@ export const systemApi = {
   createSystemBanner: (b) => req('POST', '/system/banners', b),
   updateSystemBanner: (id, b) => req('PUT', `/system/banners/${id}`, b),
   deleteSystemBanner: (id) => req('DELETE', `/system/banners/${id}`),
+
+  // Operator Slack config — control-plane events only (tenant lifecycle + operator accounts),
+  // never a per-org alert. webhookUrl is write-only: empty/omitted preserves the stored URL.
+  getSlackConfig: () => req('GET', '/system/slack-config'),
+  updateSlackConfig: (body) => req('PUT', '/system/slack-config', body),
+  testSlackConfig: () => req('POST', '/system/slack-config/test'),
 }

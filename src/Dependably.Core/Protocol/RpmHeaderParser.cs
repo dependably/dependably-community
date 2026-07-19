@@ -171,7 +171,7 @@ public static class RpmHeaderParser
         // ── Signature header (skip; just need its end to align main header) ───
         int sigStart = LeadSize;
         var (sigNindex, sigHsize) = ReadHeaderIntro(data, sigStart);
-        int sigEnd = sigStart + HeaderIntroSize + sigNindex * IndexEntrySize + sigHsize;
+        int sigEnd = ComputeHeaderEnd(data, sigStart, sigNindex, sigHsize, "RPM signature header extends past EOF.");
         // Signature is 8-byte aligned; main header starts at the next 8-byte boundary.
         int mainHeaderStart = (sigEnd + 7) & ~7;
         if (mainHeaderStart + HeaderIntroSize > data.Length)
@@ -182,13 +182,8 @@ public static class RpmHeaderParser
         // ── Main header ─────────────────────────────────────────────────────────
         var (nindex, hsize) = ReadHeaderIntro(data, mainHeaderStart);
         int indexStart = mainHeaderStart + HeaderIntroSize;
-        int indexEnd = indexStart + nindex * IndexEntrySize;
-        int storeStart = indexEnd;
-        int storeEnd = storeStart + hsize;
-        if (storeEnd > data.Length)
-        {
-            throw new RpmParseException("RPM main header data store extends past EOF.");
-        }
+        int storeEnd = ComputeHeaderEnd(data, mainHeaderStart, nindex, hsize, "RPM main header data store extends past EOF.");
+        int storeStart = indexStart + nindex * IndexEntrySize;
 
         // Collect raw values keyed by tag — most are scalars or short string arrays we
         // pull out in one pass and then assemble into the strongly-typed record below.
@@ -200,10 +195,10 @@ public static class RpmHeaderParser
         }
 
         // Mandatory tags first so we fail fast.
-        string name = RequireString(data, storeStart, raw, TagName, "RPMTAG_NAME");
-        string version = RequireString(data, storeStart, raw, TagVersion, "RPMTAG_VERSION");
-        string release = RequireString(data, storeStart, raw, TagRelease, "RPMTAG_RELEASE");
-        string arch = RequireString(data, storeStart, raw, TagArch, "RPMTAG_ARCH");
+        string name = RequireString(data, storeStart, storeEnd, raw, TagName, "RPMTAG_NAME");
+        string version = RequireString(data, storeStart, storeEnd, raw, TagVersion, "RPMTAG_VERSION");
+        string release = RequireString(data, storeStart, storeEnd, raw, TagRelease, "RPMTAG_RELEASE");
+        string arch = RequireString(data, storeStart, storeEnd, raw, TagArch, "RPMTAG_ARCH");
 
         // Files reconstructed from basenames + dirnames + dirindexes triples.
         var files = ExtractFiles(data, storeStart, raw);
@@ -219,22 +214,22 @@ public static class RpmHeaderParser
         return new RpmHeaderInfo
         {
             Name = name,
-            Epoch = ReadOptionalInt32(data, storeStart, raw, TagEpoch),
+            Epoch = ReadOptionalInt32(data, storeStart, storeEnd, raw, TagEpoch),
             Version = version,
             Release = release,
             Arch = arch,
-            Summary = ReadOptionalString(data, storeStart, raw, TagSummary),
-            Description = ReadOptionalString(data, storeStart, raw, TagDescription),
-            License = ReadOptionalString(data, storeStart, raw, TagLicense),
-            Url = ReadOptionalString(data, storeStart, raw, TagUrl),
-            Vendor = ReadOptionalString(data, storeStart, raw, TagVendor),
-            Packager = ReadOptionalString(data, storeStart, raw, TagPackager),
-            Group = ReadOptionalString(data, storeStart, raw, TagGroup),
-            SourceRpm = ReadOptionalString(data, storeStart, raw, TagSourceRpm),
-            BuildHost = ReadOptionalString(data, storeStart, raw, TagBuildHost),
-            BuildTime = ReadOptionalInt32(data, storeStart, raw, TagBuildTime),
-            InstalledSize = ReadOptionalInt32(data, storeStart, raw, TagInstalledSize) ?? 0,
-            ArchiveSize = ReadOptionalInt32(data, storeStart, raw, TagArchiveSize) ?? 0,
+            Summary = ReadOptionalString(data, storeStart, storeEnd, raw, TagSummary),
+            Description = ReadOptionalString(data, storeStart, storeEnd, raw, TagDescription),
+            License = ReadOptionalString(data, storeStart, storeEnd, raw, TagLicense),
+            Url = ReadOptionalString(data, storeStart, storeEnd, raw, TagUrl),
+            Vendor = ReadOptionalString(data, storeStart, storeEnd, raw, TagVendor),
+            Packager = ReadOptionalString(data, storeStart, storeEnd, raw, TagPackager),
+            Group = ReadOptionalString(data, storeStart, storeEnd, raw, TagGroup),
+            SourceRpm = ReadOptionalString(data, storeStart, storeEnd, raw, TagSourceRpm),
+            BuildHost = ReadOptionalString(data, storeStart, storeEnd, raw, TagBuildHost),
+            BuildTime = ReadOptionalInt32(data, storeStart, storeEnd, raw, TagBuildTime),
+            InstalledSize = ReadOptionalInt32(data, storeStart, storeEnd, raw, TagInstalledSize) ?? 0,
+            ArchiveSize = ReadOptionalInt32(data, storeStart, storeEnd, raw, TagArchiveSize) ?? 0,
             HeaderStart = mainHeaderStart,
             HeaderEnd = storeEnd,
             Requires = requires,
@@ -271,7 +266,7 @@ public static class RpmHeaderParser
         // Skip over the signature header to reach the main header.
         int sigStart = LeadSize;
         var (sigNindex, sigHsize) = ReadHeaderIntro(data, sigStart);
-        int sigEnd = sigStart + HeaderIntroSize + sigNindex * IndexEntrySize + sigHsize;
+        int sigEnd = ComputeHeaderEnd(data, sigStart, sigNindex, sigHsize, "RPM signature header extends past EOF.");
         int mainHeaderStart = (sigEnd + 7) & ~7;
         if (mainHeaderStart + HeaderIntroSize > data.Length)
         {
@@ -280,13 +275,8 @@ public static class RpmHeaderParser
 
         var (nindex, hsize) = ReadHeaderIntro(data, mainHeaderStart);
         int indexStart = mainHeaderStart + HeaderIntroSize;
-        int indexEnd = indexStart + nindex * IndexEntrySize;
-        int storeStart = indexEnd;
-        int storeEnd = storeStart + hsize;
-        if (storeEnd > data.Length)
-        {
-            throw new RpmParseException("RPM main header data store extends past EOF.");
-        }
+        int storeEnd = ComputeHeaderEnd(data, mainHeaderStart, nindex, hsize, "RPM main header data store extends past EOF.");
+        int storeStart = indexStart + nindex * IndexEntrySize;
 
         var raw = new Dictionary<int, IndexEntry>();
         for (int i = 0; i < nindex; i++)
@@ -298,20 +288,20 @@ public static class RpmHeaderParser
         // Check each scriptlet tag; a tag is present and non-trivial when it resolves to a
         // non-empty, non-whitespace-only string via the same bounded read helper Parse uses.
         var phases = new List<string>(4);
-        CheckScriptletTag(data, storeStart, raw, TagPreIn, "%pre", phases);
-        CheckScriptletTag(data, storeStart, raw, TagPostIn, "%post", phases);
-        CheckScriptletTag(data, storeStart, raw, TagPreUn, "%preun", phases);
-        CheckScriptletTag(data, storeStart, raw, TagPostUn, "%postun", phases);
-        CheckScriptletTag(data, storeStart, raw, TagPreTrans, "%pretrans", phases);
-        CheckScriptletTag(data, storeStart, raw, TagPostTrans, "%posttrans", phases);
+        CheckScriptletTag(data, storeStart, storeEnd, raw, TagPreIn, "%pre", phases);
+        CheckScriptletTag(data, storeStart, storeEnd, raw, TagPostIn, "%post", phases);
+        CheckScriptletTag(data, storeStart, storeEnd, raw, TagPreUn, "%preun", phases);
+        CheckScriptletTag(data, storeStart, storeEnd, raw, TagPostUn, "%postun", phases);
+        CheckScriptletTag(data, storeStart, storeEnd, raw, TagPreTrans, "%pretrans", phases);
+        CheckScriptletTag(data, storeStart, storeEnd, raw, TagPostTrans, "%posttrans", phases);
         return phases;
     }
 
     private static void CheckScriptletTag(
-        byte[] data, int storeStart, Dictionary<int, IndexEntry> raw,
+        byte[] data, int storeStart, int storeEnd, Dictionary<int, IndexEntry> raw,
         int tag, string phaseName, List<string> found)
     {
-        string? value = ReadOptionalString(data, storeStart, raw, tag);
+        string? value = ReadOptionalString(data, storeStart, storeEnd, raw, tag);
         if (!string.IsNullOrWhiteSpace(value))
         {
             found.Add(phaseName);
@@ -348,30 +338,54 @@ public static class RpmHeaderParser
 
     private readonly record struct IndexEntry(int Tag, int Type, int Offset, int Count);
 
-    private static string RequireString(byte[] data, int storeStart, Dictionary<int, IndexEntry> raw, int tag, string label)
+    // Computes headerStart + HeaderIntroSize + nindex*IndexEntrySize + hsize using long
+    // arithmetic so an attacker-controlled nindex/hsize (already validated non-negative in
+    // ReadHeaderIntro, but otherwise unbounded) can't overflow int32 and wrap the result
+    // negative — which previously slipped past the "extends past EOF" guard entirely.
+    private static int ComputeHeaderEnd(byte[] data, int headerStart, int nindex, int hsize, string truncatedMessage)
+    {
+        long end = (long)headerStart + HeaderIntroSize + (long)nindex * IndexEntrySize + hsize;
+        return end > data.Length ? throw new RpmParseException(truncatedMessage) : (int)end;
+    }
+
+    // Resolves storeStart + entryOffset using long arithmetic and validates that at least
+    // minBytes bytes remain before storeEnd. A crafted Offset (arbitrarily large, or
+    // negative) can otherwise land outside the header's data store — or outside the
+    // buffer entirely — and reach an unchecked array/span access.
+    private static int ResolveStoreOffset(int storeStart, int storeEnd, int entryOffset, int minBytes, string tagLabel)
+    {
+        long offset = (long)storeStart + entryOffset;
+        return offset < storeStart || offset + minBytes > storeEnd
+            ? throw new RpmParseException($"RPM {tagLabel} offset {entryOffset} is outside the header data store.")
+            : (int)offset;
+    }
+
+    private static string RequireString(byte[] data, int storeStart, int storeEnd, Dictionary<int, IndexEntry> raw, int tag, string label)
     {
         return !raw.TryGetValue(tag, out var entry) || (entry.Type != TypeString && entry.Type != TypeI18nString)
             ? throw new RpmParseException($"Missing required RPM tag: {label}")
-            : ReadNullTerminated(data, storeStart + entry.Offset);
+            : ReadNullTerminated(data, ResolveStoreOffset(storeStart, storeEnd, entry.Offset, minBytes: 1, label));
     }
 
-    private static string? ReadOptionalString(byte[] data, int storeStart, Dictionary<int, IndexEntry> raw, int tag)
+    private static string? ReadOptionalString(byte[] data, int storeStart, int storeEnd, Dictionary<int, IndexEntry> raw, int tag)
     {
         return !raw.TryGetValue(tag, out var entry)
             ? null
             : entry.Type switch
             {
-                TypeString or TypeI18nString => ReadNullTerminated(data, storeStart + entry.Offset),
+                TypeString or TypeI18nString => ReadNullTerminated(data, ResolveStoreOffset(storeStart, storeEnd, entry.Offset, minBytes: 1, $"tag {tag}")),
                 TypeStringArray => entry.Count > 0 ? ReadStringArray(data, storeStart + entry.Offset, 1)[0] : null,
                 _ => null,
             };
     }
 
-    private static int? ReadOptionalInt32(byte[] data, int storeStart, Dictionary<int, IndexEntry> raw, int tag)
+    private static int? ReadOptionalInt32(byte[] data, int storeStart, int storeEnd, Dictionary<int, IndexEntry> raw, int tag)
     {
         return !raw.TryGetValue(tag, out var entry)
             ? null
-            : entry.Type != TypeInt32 ? null : BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(storeStart + entry.Offset, Int32Size));
+            : entry.Type != TypeInt32
+                ? null
+                : BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(ResolveStoreOffset(storeStart, storeEnd, entry.Offset, Int32Size, $"tag {tag}"), Int32Size));
     }
 
     private static int[] ReadInt32Array(byte[] data, int storeStart, IndexEntry entry)
@@ -411,6 +425,15 @@ public static class RpmHeaderParser
                 $"String array offset {offset} is outside the data store.");
         }
 
+        // A negative Count (e.g. an attacker-set 0xFFFFFFFF in the index entry) is never ">"
+        // a positive maxPossibleStrings below, so it must be rejected explicitly — otherwise
+        // `new string[count]` throws an unhandled OverflowException instead of the intended
+        // validated RpmParseException.
+        if (count < 0)
+        {
+            throw new RpmParseException($"String array count {count} is negative.");
+        }
+
         int maxPossibleStrings = data.Length - offset;
         if (count > maxPossibleStrings)
         {
@@ -422,6 +445,18 @@ public static class RpmHeaderParser
         int pos = offset;
         for (int i = 0; i < count; i++)
         {
+            // The bytes-available check above only guarantees the claimed count could fit
+            // if every string were minimally NUL-terminated; it doesn't guarantee that many
+            // NUL terminators actually exist. A preceding entry with no terminator makes
+            // ReadNullTerminated consume through EOF, advancing pos past data.Length — catch
+            // that here instead of letting the next iteration read out of bounds.
+            if (pos >= data.Length)
+            {
+                throw new RpmParseException(
+                    $"String array element {i} of {count} starts past the end of the data store " +
+                    "(a preceding entry is missing its NUL terminator).");
+            }
+
             result[i] = ReadNullTerminated(data, pos);
             pos += result[i].Length + 1; // skip past the NUL terminator
         }
@@ -430,6 +465,11 @@ public static class RpmHeaderParser
 
     private static string ReadNullTerminated(byte[] data, int offset)
     {
+        if (offset < 0 || offset > data.Length)
+        {
+            throw new RpmParseException($"RPM string offset {offset} is outside the data store.");
+        }
+
         int end = offset;
         while (end < data.Length && data[end] != 0)
         {

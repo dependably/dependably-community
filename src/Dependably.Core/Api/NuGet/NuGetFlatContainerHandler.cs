@@ -29,6 +29,7 @@ public sealed class NuGetFlatContainerHandler(
     BlocklistRepository blocklist,
     BlockGateService blockGate,
     VulnerabilityRepository vulns,
+    ArtifactInventoryRepository inventory,
     ClaimResolver claimResolver,
     ReservedNamespaceService reserved,
     ProxyFetchService proxyFetch,
@@ -203,7 +204,7 @@ public sealed class NuGetFlatContainerHandler(
     }
 
     // Attempts to serve an already-cached proxy artifact from the global plane. Returns
-    // the IActionResult to send (including block-gate denials) when a cache_artifact row
+    // the IActionResult to send (including claim/block-gate denials) when a cache_artifact row
     // exists, or null when the artifact is not cached and the caller should fall through
     // to the upstream fetch path.
     // Cohesive proxy-cache serve helper; all params are required for coordinate lookup, block-gate, and serve.
@@ -225,6 +226,16 @@ public sealed class NuGetFlatContainerHandler(
         {
             httpContext.Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
             return new UnauthorizedResult();
+        }
+
+        // Re-check the claim on every cache-hit serve, not just on the miss/upstream-fetch
+        // path in FetchFromUpstreamAsync below. A surviving cache_artifact row (an in-flight
+        // fetch that raced a local_only transition's purge, or air-gap mode's implicit
+        // local_only, which never purges) must not be served just because the row still
+        // exists — same silent 404 the miss path returns for a local_only/reserved name.
+        if (!await claimResolver.IsProxyFetchAllowedAsync(orgId, "nuget", normalizedId, ct))
+        {
+            return new NotFoundResult();
         }
 
         string? sourceIpCa = httpContext.GetNormalizedRemoteIp();
@@ -364,6 +375,16 @@ public sealed class NuGetFlatContainerHandler(
         var caFacts = await cacheArtifacts.GetServeFactsByCoordinateAsync(
             orgId, "nuget", normalizedId, normalizedVersion, file, ct);
         if (caFacts is null)
+        {
+            return new NotFoundResult();
+        }
+
+        // Re-check the claim on every cache-hit serve, not just on the miss/upstream-fetch
+        // path. A surviving cache_artifact row (an in-flight fetch that raced a local_only
+        // transition's purge, or air-gap mode's implicit local_only, which never purges) must
+        // not be served just because the row still exists — same silent 404 as the miss path
+        // so probing can't distinguish "never cached" from "cached but now local_only".
+        if (!await claimResolver.IsProxyFetchAllowedAsync(orgId, "nuget", normalizedId, ct))
         {
             return new NotFoundResult();
         }
@@ -562,11 +583,51 @@ public sealed class NuGetFlatContainerHandler(
                 ? new NotFoundResult()
                 : new FileStreamResult(blobStream, "application/octet-stream") { FileDownloadName = file };
         }
-        catch (Microsoft.Data.Sqlite.SqliteException) { throw; }
+        catch (System.Data.Common.DbException)
+        {
+            // A metadata-store failure (pool exhaustion, failover, DB locked, disk full) during
+            // first-fetch recording is infrastructure, not a missing artefact. RecordAndScanAsync's
+            // global-plane writes are direct DB writes not wrapped by CacheAccessRecorder's
+            // swallow-to-null, so a raw provider exception reaches here. The predicate is
+            // provider-neutral: DbException covers SqliteException and NpgsqlException alike, so the
+            // guard stays live under DB_PROVIDER=postgres. Rethrow so the middleware maps it to a
+            // 5xx — never the blanket 404 below, which would make NuGet report a real package as
+            // nonexistent (NU1102) and fail the restore outright, since a 404 is not retried.
+            throw;
+        }
+        catch (ProxyCatalogueUnavailableException)
+        {
+            // Not recorded on the cache plane, so not scanned and not gated — refused rather than
+            // served. 503, never the blanket 404 below: the artefact exists upstream.
+            return new StatusCodeResult(StatusCodes.Status503ServiceUnavailable);
+        }
         catch (ChecksumException) { return new StatusCodeResult(StatusCodes.Status502BadGateway); }
         catch (UpstreamResponseTooLargeException) { return new StatusCodeResult(StatusCodes.Status502BadGateway); }
         catch (UpstreamFetchFailedException) { throw; }
-        catch { return new NotFoundResult(); }
+        catch (OperationCanceledException)
+        {
+            // Client disconnect / shutdown — propagate cancellation rather than masking it as a 404.
+            throw;
+        }
+        catch (HttpRequestException)
+        {
+            // A genuine upstream not-found: UpstreamClient surfaces non-transient upstream
+            // statuses (404/410) as HttpRequestException. The package truly does not exist
+            // upstream, so the client sees 404 — distinct from the unclassified 502 below.
+            return new NotFoundResult();
+        }
+        catch (Exception ex)
+        {
+            // An unclassified failure (blob-store I/O error, a bug in first-fetch metadata or
+            // provenance resolution, malformed upstream data, etc.) — none of the carved-out
+            // cases above matched. Log it so the operator has a diagnostic trail, and answer
+            // 502 rather than the blanket 404 that would make NuGet report a real package as
+            // nonexistent (NU1102) and fail the restore outright, since a 404 is not retried.
+            logger.LogWarning(ex,
+                "Unclassified failure during NuGet proxy fetch/cache for {Id}/{Version}: {ExceptionType} trace={TraceId}",
+                id, version, ex.GetType().Name, System.Diagnostics.Activity.Current?.TraceId.ToString());
+            return new StatusCodeResult(StatusCodes.Status502BadGateway);
+        }
     }
 
     // Caps the in-memory buffer the signature verifier allocates to seek the .nupkg ZIP central
@@ -664,45 +725,15 @@ public sealed class NuGetFlatContainerHandler(
     // Returns the combined list of uploaded package_versions and synthetic PackageVersion
     // objects projected from global-plane proxy cache entries. NuGet flatcontainer lists all
     // cached versions for a package id; proxy entries whose version already appears in uploaded
-    // versions are deduplicated.
+    // versions are dropped upstream in ListServeableVersionsAsync, and DedupeProxyVersionsByVersion
+    // collapses the (.nupkg, .nuspec, .sha512) rows a single proxied version can cast down to the
+    // .nupkg row, so CollectLocalVersions evaluates the block gate once per version rather than
+    // once per cached file.
     private async Task<IReadOnlyList<PackageVersion>> LoadCombinedVersionsAsync(
         string orgId, string packageId, string normalizedId, CancellationToken ct)
     {
-        var uploadedVersions = await packages.GetVersionsAsync(packageId, ct);
-        var proxyEntries = await cacheArtifacts.ListServeFactsForNameAsync(orgId, "nuget", normalizedId, ct);
-
-        if (proxyEntries.Count == 0)
-        {
-            return uploadedVersions;
-        }
-
-        var uploadedVersionSet = uploadedVersions
-            .Select(v => v.Version)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        var proxyIds = proxyEntries.Select(e => e.Id).ToList();
-        var proxySignals = proxyIds.Count > 0
-            ? await vulns.GetGateSignalsBatchForCacheArtifactsAsync(proxyIds, ct)
-            : new Dictionary<string, VulnGateSignals>();
-
-        // Each .nupkg, .nuspec, and .sha512 file for a version produces a separate
-        // cache_artifact row. Deduplicate by version (case-insensitive) so the version
-        // list only carries one entry per version string.
-        var synthetic = proxyEntries
-            .Where(e => !uploadedVersionSet.Contains(e.Version))
-            .GroupBy(e => e.Version, StringComparer.OrdinalIgnoreCase)
-            .Select(g => g.First().ToPackageVersionSynthetic(proxySignals))
-            .ToList();
-
-        if (synthetic.Count == 0)
-        {
-            return uploadedVersions;
-        }
-
-        var combined = new List<PackageVersion>(uploadedVersions.Count + synthetic.Count);
-        combined.AddRange(uploadedVersions);
-        combined.AddRange(synthetic);
-        return combined;
+        var versions = await inventory.ListServeableVersionsAsync(orgId, packageId, "nuget", normalizedId, ct);
+        return ArtifactInventoryRepository.DedupeProxyVersionsByVersion(versions);
     }
 
     // Returns (settings, token) when the caller is authorized to read NuGet packages from this org,

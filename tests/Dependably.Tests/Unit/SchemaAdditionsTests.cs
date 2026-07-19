@@ -18,7 +18,6 @@ public class SchemaAdditionsTests : IAsyncLifetime
     [InlineData("claim_history")]
     [InlineData("cache_artifact")]
     [InlineData("tenant_artifact_access")]
-    [InlineData("metadata_cache")]
     [InlineData("audit_event")]
     [InlineData("tenant_storage")]
     [InlineData("tenant_provisioning_jobs")]
@@ -224,6 +223,53 @@ public class SchemaAdditionsTests : IAsyncLifetime
             "SELECT name, \"notnull\" FROM pragma_table_info('spdx_license') WHERE name = 'license_text'");
         Assert.Equal("license_text", name);
         Assert.Equal(0, notnull);
+    }
+
+    [Fact]
+    public async Task MetadataCache_TableDoesNotExist_AfterInit()
+    {
+        // metadata_cache was schema-only dead weight — created on every install, indexed,
+        // and never read or written by any C# code. The base schema no longer creates it.
+        await using var conn = await _db.OpenAsync();
+        string? name = await conn.QuerySingleOrDefaultAsync<string>(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='metadata_cache'");
+        Assert.Null(name);
+    }
+
+    [Fact]
+    public async Task MetadataCache_PreExistingTable_DroppedByMigration()
+    {
+        // Simulates upgrading a database created before the fix, which still carries the
+        // orphaned metadata_cache table. The drop_metadata_cache_table one-time migration
+        // must remove it even though its ledger entry has never run on this DB before.
+        await using var db = new TestMetadataStore();
+        await using (var conn = await db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                """
+                CREATE TABLE metadata_cache (
+                    id            TEXT PRIMARY KEY,
+                    ecosystem     TEXT NOT NULL,
+                    name          TEXT NOT NULL,
+                    document      TEXT NOT NULL,
+                    content_hash  TEXT NOT NULL,
+                    upstream_etag TEXT,
+                    fetched_at    TEXT NOT NULL,
+                    expires_at    TEXT NOT NULL,
+                    UNIQUE (ecosystem, name)
+                )
+                """);
+            await conn.ExecuteAsync(
+                "INSERT INTO metadata_cache (id, ecosystem, name, document, content_hash, fetched_at, expires_at) " +
+                "VALUES ('m1','npm','left-pad','{}','h','2024-01-01T00:00:00Z','2024-01-02T00:00:00Z')");
+        }
+
+        await new SchemaInitializer(db).InitializeAsync();
+
+        await using var conn2 = await db.OpenAsync();
+        string? name = await conn2.QuerySingleOrDefaultAsync<string>(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='metadata_cache'");
+        Assert.Null(name);
     }
 
     [Fact]

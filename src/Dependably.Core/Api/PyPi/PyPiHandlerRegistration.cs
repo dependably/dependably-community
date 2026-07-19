@@ -33,6 +33,7 @@ internal static class PyPiHandlerRegistration
                 licenses: sp.GetRequiredService<LicenseRepository>(),
                 cache: sp.GetRequiredService<RenderedResponseCache<PyPiSimpleIndexKey>>(),
                 logger: sp.GetRequiredService<ILogger<PyPiPublishHandler>>(),
+                uploadLimits: sp.GetRequiredService<IUploadLimitResolver>(),
                 stagingPath: stagingPath);
         });
         services.AddScoped<PyPiControllerServices>();

@@ -58,9 +58,14 @@ public abstract class SpdxLicenseExpression
     internal abstract bool HasAndOr();
 
     /// <summary>A single SPDX identifier (may carry a trailing <c>+</c> or-later suffix).</summary>
-    public sealed class Leaf(string id) : SpdxLicenseExpression
+    public sealed class Leaf : SpdxLicenseExpression
     {
-        public string Id { get; } = id;
+        public string Id { get; }
+
+        public Leaf(string id)
+        {
+            Id = id;
+        }
 
         public override bool Evaluate(Func<string, bool> leafSatisfied) => leafSatisfied(Id);
 
@@ -79,10 +84,16 @@ public abstract class SpdxLicenseExpression
     /// <c>"&lt;baseId&gt; WITH &lt;exceptionId&gt;"</c> — treated as a single atomic leaf, since
     /// an exception only ever applies to its exact base license, not the base id alone.
     /// </summary>
-    public sealed class WithException(string baseId, string exceptionId) : SpdxLicenseExpression
+    public sealed class WithException : SpdxLicenseExpression
     {
-        public string BaseId { get; } = baseId;
-        public string ExceptionId { get; } = exceptionId;
+        public string BaseId { get; }
+        public string ExceptionId { get; }
+
+        public WithException(string baseId, string exceptionId)
+        {
+            BaseId = baseId;
+            ExceptionId = exceptionId;
+        }
 
         /// <summary>The single atomic leaf string this node contributes: <c>"BaseId WITH ExceptionId"</c>.</summary>
         public string LeafString => $"{BaseId} WITH {ExceptionId}";
@@ -100,10 +111,16 @@ public abstract class SpdxLicenseExpression
         internal override bool HasAndOr() => false;
     }
 
-    public sealed class And(SpdxLicenseExpression left, SpdxLicenseExpression right) : SpdxLicenseExpression
+    public sealed class And : SpdxLicenseExpression
     {
-        public SpdxLicenseExpression Left { get; } = left;
-        public SpdxLicenseExpression Right { get; } = right;
+        public SpdxLicenseExpression Left { get; }
+        public SpdxLicenseExpression Right { get; }
+
+        public And(SpdxLicenseExpression left, SpdxLicenseExpression right)
+        {
+            Left = left;
+            Right = right;
+        }
 
         public override bool Evaluate(Func<string, bool> leafSatisfied)
             => Left.Evaluate(leafSatisfied) && Right.Evaluate(leafSatisfied);
@@ -117,10 +134,16 @@ public abstract class SpdxLicenseExpression
         internal override bool HasAndOr() => true;
     }
 
-    public sealed class Or(SpdxLicenseExpression left, SpdxLicenseExpression right) : SpdxLicenseExpression
+    public sealed class Or : SpdxLicenseExpression
     {
-        public SpdxLicenseExpression Left { get; } = left;
-        public SpdxLicenseExpression Right { get; } = right;
+        public SpdxLicenseExpression Left { get; }
+        public SpdxLicenseExpression Right { get; }
+
+        public Or(SpdxLicenseExpression left, SpdxLicenseExpression right)
+        {
+            Left = left;
+            Right = right;
+        }
 
         public override bool Evaluate(Func<string, bool> leafSatisfied)
             => Left.Evaluate(leafSatisfied) || Right.Evaluate(leafSatisfied);
@@ -136,6 +159,8 @@ public abstract class SpdxLicenseExpression
 
     // Internal-only: signals "give up, fall back to a single opaque leaf" to Parse. Never
     // escapes this file.
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Critical Code Smell", "S3871:Exception types should be \"public\"",
+        Justification = "Private, file-scoped control-flow signal used only within SpdxLicenseExpression's own parser to trigger the opaque-leaf fallback in Parse; it never crosses this type's boundary, so callers have no need to catch it by type.")]
     private sealed class SpdxParseException : Exception
     {
         public SpdxParseException(string message) : base(message)
@@ -153,49 +178,56 @@ public abstract class SpdxLicenseExpression
         {
             var tokens = new List<Token>();
             int i = 0;
-            int n = raw.Length;
-            while (i < n)
+            while (i < raw.Length)
             {
-                char c = raw[i];
-                if (char.IsWhiteSpace(c))
-                {
-                    i++;
-                    continue;
-                }
-                if (c == '(')
-                {
-                    tokens.Add(new Token(TokenKind.LParen, "("));
-                    i++;
-                    continue;
-                }
-                if (c == ')')
-                {
-                    tokens.Add(new Token(TokenKind.RParen, ")"));
-                    i++;
-                    continue;
-                }
-                if (IsIdentChar(c))
-                {
-                    int start = i;
-                    while (i < n && IsIdentChar(raw[i]))
-                    {
-                        i++;
-                    }
-                    // Trailing '+' (or-later) is part of the idstring, not a separate token.
-                    if (i < n && raw[i] == '+')
-                    {
-                        i++;
-                    }
-                    string word = raw[start..i];
-                    tokens.Add(new Token(ClassifyWord(word), word));
-                    continue;
-                }
-                // Unrecognized character (e.g. a stray operator symbol) — bail out to the
-                // whole-string fallback rather than guessing.
-                throw new SpdxParseException($"Unexpected character '{c}' at position {i}.");
+                i = ConsumeToken(raw, i, tokens);
             }
             tokens.Add(new Token(TokenKind.End, string.Empty));
             return tokens;
+        }
+
+        private static int ConsumeToken(string raw, int i, List<Token> tokens)
+        {
+            char c = raw[i];
+            if (char.IsWhiteSpace(c))
+            {
+                return i + 1;
+            }
+            if (c == '(')
+            {
+                tokens.Add(new Token(TokenKind.LParen, "("));
+                return i + 1;
+            }
+            if (c == ')')
+            {
+                tokens.Add(new Token(TokenKind.RParen, ")"));
+                return i + 1;
+            }
+            if (IsIdentChar(c))
+            {
+                return ConsumeIdent(raw, i, tokens);
+            }
+            // Unrecognized character (e.g. a stray operator symbol) — bail out to the
+            // whole-string fallback rather than guessing.
+            throw new SpdxParseException($"Unexpected character '{c}' at position {i}.");
+        }
+
+        private static int ConsumeIdent(string raw, int i, List<Token> tokens)
+        {
+            int n = raw.Length;
+            int start = i;
+            while (i < n && IsIdentChar(raw[i]))
+            {
+                i++;
+            }
+            // Trailing '+' (or-later) is part of the idstring, not a separate token.
+            if (i < n && raw[i] == '+')
+            {
+                i++;
+            }
+            string word = raw[start..i];
+            tokens.Add(new Token(ClassifyWord(word), word));
+            return i;
         }
 
         private static bool IsIdentChar(char c)

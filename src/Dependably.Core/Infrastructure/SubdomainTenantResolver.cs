@@ -1,5 +1,7 @@
+using System.Collections.Concurrent;
 using Dapper;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Primitives;
 
 namespace Dependably.Infrastructure;
 
@@ -37,6 +39,12 @@ public sealed class SubdomainTenantResolver : ITenantResolver, ITenantSlugCacheI
     private readonly IReadOnlySet<string> _extraReserved;
     private readonly IMemoryCache? _cache;
 
+    // Per-slug generation token. A fill captures the token before its DB read and binds the
+    // cache entry to it; InvalidateSlug cancels-and-replaces the token so an in-flight fill that
+    // read the pre-lifecycle-change row cannot persist it past the eviction.
+    private readonly ConcurrentDictionary<string, CancellationTokenSource> _fillGuards =
+        new(StringComparer.Ordinal);
+
     public SubdomainTenantResolver(IMetadataStore db, IConfiguration config, IMemoryCache? cache = null)
     {
         _db = db;
@@ -53,13 +61,33 @@ public sealed class SubdomainTenantResolver : ITenantResolver, ITenantSlugCacheI
 
     private static string CacheKey(string slug) => "tenant-resolve:" + slug;
 
+    private CancellationTokenSource GuardFor(string slug) =>
+        _fillGuards.GetOrAdd(slug, static _ => new CancellationTokenSource());
+
+    // Test seam (InternalsVisibleTo Dependably.Tests): the live generation-guard count, asserted
+    // to drain when a cached entry expires or is evicted so the map cannot grow unbounded.
+    internal int FillGuardCount => _fillGuards.Count;
+
     /// <summary>
-    /// Evicts the cached resolution for <paramref name="slug"/>. Called by tenant-lifecycle
-    /// endpoints (soft-delete, restore, status flip, hard-delete) so the subdomain reflects
-    /// the new state immediately instead of waiting up to <see cref="TenantCacheTtl"/>.
+    /// Evicts the cached resolution for <paramref name="slug"/> and cancels the current
+    /// generation token so an in-flight fill that read the pre-lifecycle-change row cannot cache
+    /// it. Called by tenant-lifecycle endpoints (soft-delete, restore, status flip, hard-delete)
+    /// so the subdomain reflects the new state immediately instead of waiting up to
+    /// <see cref="TenantCacheTtl"/>.
     /// </summary>
     public void InvalidateSlug(string slug)
-        => _cache?.Remove(CacheKey(slug));
+    {
+        if (_cache is null)
+        {
+            return;
+        }
+
+        _cache.Remove(CacheKey(slug));
+        if (_fillGuards.TryRemove(slug, out var retired))
+        {
+            retired.Cancel();
+        }
+    }
 
     public async Task<TenantContext> ResolveAsync(HttpContext context, CancellationToken ct = default)
     {
@@ -122,6 +150,11 @@ public sealed class SubdomainTenantResolver : ITenantResolver, ITenantSlugCacheI
             return cached;
         }
 
+        // Snapshot the generation source BEFORE the read. A concurrent InvalidateSlug cancels this
+        // source (and installs a fresh one), so a fill that raced a lifecycle change binds an
+        // already-cancelled expiration token and never persists the stale context.
+        var guardSource = _cache is null ? null : GuardFor(slug);
+
         await using var conn = await _db.OpenAsync(ct);
         // Soft-deleted tenants are immediately inaccessible — the subdomain returns 404 until
         // system_admin restores within the grace window.
@@ -133,14 +166,25 @@ public sealed class SubdomainTenantResolver : ITenantResolver, ITenantSlugCacheI
             ? TenantContext.Uninitialized
             : TenantContext.ForTenant(Id, Slug);
 
-        _cache?.Set(cacheKey, result, new MemoryCacheEntryOptions
+        if (_cache is not null)
         {
-            SlidingExpiration = TenantCacheTtl,
-            // Absolute cap so a long-running hot subdomain still pays the DB lookup
-            // periodically and picks up out-of-band changes (e.g. lifecycle status flips).
-            AbsoluteExpirationRelativeToNow = TenantCacheTtl,
-            Size = 1,
-        });
+            var options = new MemoryCacheEntryOptions
+            {
+                SlidingExpiration = TenantCacheTtl,
+                // Absolute cap so a long-running hot subdomain still pays the DB lookup
+                // periodically and picks up out-of-band changes (e.g. lifecycle status flips).
+                AbsoluteExpirationRelativeToNow = TenantCacheTtl,
+                Size = 1,
+            };
+            // If the guard was cancelled by a concurrent InvalidateSlug the entry is expired on
+            // insert; if cancellation lands after the insert the callback evicts it.
+            options.AddExpirationToken(new CancellationChangeToken(guardSource!.Token));
+            // Tie the generation's lifetime to this entry. This path is reachable pre-auth: a
+            // never-existent slug caches Uninitialized and mints a guard InvalidateSlug never
+            // clears, so without this an unauthenticated client could grow the map without bound.
+            CacheFillGuard.TieToEntryLifetime(options, _fillGuards, slug, guardSource!);
+            _cache.Set(cacheKey, result, options);
+        }
 
         return result;
     }

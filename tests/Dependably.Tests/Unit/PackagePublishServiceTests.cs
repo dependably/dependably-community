@@ -99,8 +99,13 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
         Assert.False(string.IsNullOrEmpty(accepted.VersionId));
         Assert.False(string.IsNullOrEmpty(accepted.Sha256));
 
-        // Blob actually written.
-        Assert.True(await _blobs.ExistsAsync(BlobKeys.Hosted("o1", "npm", "lodash", "1.0.0", "lodash-1.0.0.tgz")));
+        // Blob actually written, under the artifact's content-addressed hosted key — the key
+        // the accepted result reports and the key the version row persists.
+        Assert.Equal(
+            BlobKeys.HostedArtifact("o1", "npm", "lodash", "1.0.0", accepted.Sha256, "lodash-1.0.0.tgz"),
+            accepted.BlobKey);
+        Assert.True(await _blobs.ExistsAsync(accepted.BlobKey));
+        await AssertVersionRowMatchesStoredBytesAsync("npm", "lodash", "1.0.0");
     }
 
     [Fact]
@@ -281,16 +286,16 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
             Ecosystem = "pypi",
             Filename = "acme_pkg-1.2.1-py3-none-any.whl",
         };
-        Assert.IsType<PublishResult.Accepted>(await svc.StoreAndRecordAsync(wheel));
+        var wheelAccepted = Assert.IsType<PublishResult.Accepted>(await svc.StoreAndRecordAsync(wheel));
 
         var sdist = wheel with { Filename = "acme_pkg-1.2.1.tar.gz", AllowOverwrite = true };
-        Assert.IsType<PublishResult.Accepted>(await svc.StoreAndRecordAsync(sdist));
+        var sdistAccepted = Assert.IsType<PublishResult.Accepted>(await svc.StoreAndRecordAsync(sdist));
 
         // Both blobs exist under their own keys; the version row still points at the wheel.
         Assert.True(await _blobs.ExistsAsync(
-            BlobKeys.Hosted("o1", "pypi", "acme-pkg", "1.2.1", "acme_pkg-1.2.1-py3-none-any.whl")));
+            BlobKeys.HostedArtifact("o1", "pypi", "acme-pkg", "1.2.1", wheelAccepted.Sha256, "acme_pkg-1.2.1-py3-none-any.whl")));
         Assert.True(await _blobs.ExistsAsync(
-            BlobKeys.Hosted("o1", "pypi", "acme-pkg", "1.2.1", "acme_pkg-1.2.1.tar.gz")));
+            BlobKeys.HostedArtifact("o1", "pypi", "acme-pkg", "1.2.1", sdistAccepted.Sha256, "acme_pkg-1.2.1.tar.gz")));
         var packages = new PackageRepository(_db);
         var pkg = await packages.GetByPurlNameAsync("o1", "pypi", "acme-pkg");
         var version = await packages.GetVersionAsync(pkg!.Id, "1.2.1");
@@ -317,8 +322,7 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
         Assert.Equal(409, rej.HttpStatus);
         Assert.Equal("artifact_mismatch", rej.Code);
 
-        Assert.False(await _blobs.ExistsAsync(
-            BlobKeys.Hosted("o1", "npm", "acme-npm-guard", "1.2.1", "acme-npm-guard-1.2.1-alt.tgz")));
+        Assert.DoesNotContain(await HostedKeysAsync(), k => k.EndsWith("/acme-npm-guard-1.2.1-alt.tgz", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -451,7 +455,7 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
         Assert.Equal("pkg:npm/lodash@1.0.0", accepted.Purl);
 
         // No blob must have been stored.
-        Assert.False(await _blobs.ExistsAsync(BlobKeys.Hosted("o1", "npm", "lodash", "1.0.0", "lodash-1.0.0.tgz")));
+        Assert.Empty(await HostedKeysAsync());
 
         // No version row must have been written.
         await using var conn = await _db.OpenAsync();
@@ -533,7 +537,7 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
         Assert.Equal("tenant_quota_exceeded", rej.Code);
         // The reject must happen BEFORE the blob put — orphan bytes from rejected publishes
         // would defeat the whole point of the quota.
-        Assert.False(await _blobs.ExistsAsync(BlobKeys.Hosted("o1", "npm", "b", "1.0.0", "b-1.0.0.tgz")));
+        Assert.DoesNotContain(await HostedKeysAsync(), k => k.EndsWith("/b-1.0.0.tgz", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -718,11 +722,12 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
     [Fact]
     public async Task OverwriteFails_MetadataUpdateThrows_NoCompensatingDelete()
     {
-        // OVERWRITE-path failure (lines 219-227 in the SUT): the put already replaced
-        // bytes in place, so the compensating delete is *intentionally* suppressed —
-        // a delete here would erase the new bytes too, leaving the row pointing at a
-        // missing key. Verify both halves: the exception propagates AND DeleteAsync is
-        // never called.
+        // OVERWRITE-path failure: the compensating delete is *intentionally* suppressed. The
+        // put landed on the new artifact's own content-addressed key, so the version row and
+        // the artifact it still names stay consistent; the unreferenced new blob is left for
+        // the orphan reconciler rather than deleted inline, because a concurrent publish of
+        // identical bytes addresses that same key and may already have committed against it.
+        // Verify both halves: the exception propagates AND DeleteAsync is never called.
         //
         // Force the update to fail by side-loading a DROP TABLE inside the registry's
         // PutAsync. Sequence inside the SUT: GetVersionAsync (table still there) →
@@ -761,7 +766,6 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
         // orphan-blob scenario the compensating-delete catch is there to handle.
         var droppingRegistry = new DropTableOnPutBlobStore(_blobs, _db, "package_versions");
         var svc = BuildWithRegistry(droppingRegistry);
-        string blobKey = BlobKeys.Hosted("o1", "npm", "lodash", "1.0.0", "lodash-1.0.0.tgz");
 
         await Assert.ThrowsAnyAsync<Exception>(() => svc.StoreAndRecordAsync(Sample()));
 
@@ -769,8 +773,7 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
         // no row pointing at it — the very scenario the catch guards against.
         Assert.True(droppingRegistry.DeleteAttempted,
             "INSERT failure must trigger a compensating blob delete; orphan would otherwise persist.");
-        Assert.False(await _blobs.ExistsAsync(blobKey),
-            "INSERT failure must trigger a compensating blob delete; orphan would otherwise persist.");
+        Assert.Empty(await HostedKeysAsync());
     }
 
     // Same wiring as Build(), parameterised on the registry-tier blob store so tests can
@@ -928,9 +931,12 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
         Assert.Contains(files, f => f.Filename == "mfpkg-1.0.0.tar.gz" && f.SizeBytes == 40);
         // The version row carries the SUM of its files so quota release on delete is symmetric.
         Assert.Equal(140, version.SizeBytes);
-        // Both blobs stored under distinct hosted keys.
-        Assert.True(await _blobs.ExistsAsync(BlobKeys.Hosted("o1", "pypi", "mfpkg", "1.0.0", "mfpkg-1.0.0-py3-none-any.whl")));
-        Assert.True(await _blobs.ExistsAsync(BlobKeys.Hosted("o1", "pypi", "mfpkg", "1.0.0", "mfpkg-1.0.0.tar.gz")));
+        // Both blobs stored under distinct hosted keys, each holding the bytes its file row's
+        // checksum names.
+        foreach (var file in files)
+        {
+            await AssertStoredBytesHashToAsync(file.BlobKey, file.ChecksumSha256!);
+        }
     }
 
     [Fact]
@@ -1053,9 +1059,10 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
     [Fact]
     public async Task Pypi_ConcurrentSameNewFilename_LoserDoesNotDeleteWinnersBlob()
     {
-        // Two concurrent publishes of the SAME new filename to one version share a hosted
-        // blob key. The loser's UNIQUE(version, filename) failure must NOT trigger the
-        // fresh-blob compensating delete — that would 404 the winner's committed artifact.
+        // Two concurrent publishes of the SAME new filename with byte-for-byte identical
+        // content content-address to the SAME hosted key, so the loser's blob IS the winner's
+        // blob. Its UNIQUE(version, filename) failure must NOT trigger the fresh-blob
+        // compensating delete — that would 404 the winner's committed artifact.
         var svc = Build();
         var wheel = PypiSample("mfrace", "1.0.0", "mfrace-1.0.0-py3-none-any.whl");
         Assert.IsType<PublishResult.Accepted>(await svc.StoreAndRecordAsync(wheel));
@@ -1071,8 +1078,9 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
             loser.StoreAndRecordAsync(PypiSample("mfrace", "1.0.0", "mfrace-1.0.0.tar.gz", size: 40)));
 
         // The shared blob survives — the winner's committed file record still resolves.
-        Assert.True(await _blobs.ExistsAsync(
-            BlobKeys.Hosted("o1", "pypi", "mfrace", "1.0.0", "mfrace-1.0.0.tar.gz")),
+        var winnerFile = (await new PackageVersionFilesRepository(_db).GetByVersionAsync(version.Id))
+            .Single(f => f.Filename == "mfrace-1.0.0.tar.gz");
+        Assert.True(await _blobs.ExistsAsync(winnerFile.BlobKey),
             "the loser's compensation must not delete the blob the race winner's row references");
     }
 
@@ -1116,5 +1124,149 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
         public Task<long> GetTotalSizeAsync(CancellationToken ct = default) => _inner.GetTotalSizeAsync(ct);
         public IAsyncEnumerable<BlobInfo> ListAsync(string prefix, CancellationToken ct = default)
             => _inner.ListAsync(prefix, ct);
+    }
+
+    // ── Concurrent publish of one coordinate: bytes vs committed checksum ────────
+    //
+    // The supply-chain invariant these three pin: for every committed row, the bytes stored
+    // under the row's blob_key hash to the row's checksum_sha256 — the ingest-time digest is
+    // the only integrity check this registry performs (nothing re-verifies at download), so a
+    // row that outlives its bytes silently serves an artifact nobody vouched for.
+    //
+    // Each test forces a real interleaving with a gate (no sleeps): one publisher is parked
+    // inside PutAsync until the other has committed, so the loser's bytes and the winner's row
+    // land in the order that a coordinate-addressed blob key turns into permanent divergence.
+
+    [Fact]
+    public async Task ConcurrentInsert_SameVersion_DifferentBytes_RowChecksumMatchesStoredBytes()
+    {
+        // INSERT race. A's blob write is parked BEFORE it touches the store, so A's bytes land
+        // AFTER B has already committed its version row. With one shared coordinate key that
+        // leaves B's row advertising sha(B) over a blob holding A's bytes, forever.
+        var gate = new GatedPutBlobStore(_blobs, writeBeforePark: false);
+        var slow = BuildWithRegistry(gate);
+        var fast = Build();
+
+        var slowPublish = Task.Run(() => slow.StoreAndRecordAsync(Sample() with { ArtifactBytes = Bytes(0xAA, 128) }));
+        await gate.Reached;
+
+        var winner = Assert.IsType<PublishResult.Accepted>(
+            await fast.StoreAndRecordAsync(Sample() with { ArtifactBytes = Bytes(0xBB, 200) }));
+
+        gate.Release();
+        // The loser's INSERT hits UNIQUE(package_id, version); its bytes are already stored.
+        await Assert.ThrowsAnyAsync<Exception>(() => slowPublish);
+
+        var row = await AssertVersionRowMatchesStoredBytesAsync("npm", "lodash", "1.0.0");
+        Assert.Equal(winner.Sha256, row.ChecksumSha256);
+    }
+
+    [Fact]
+    public async Task ConcurrentOverwrite_SameVersion_DifferentBytes_RowChecksumMatchesStoredBytes()
+    {
+        // OVERWRITE race. Both publishes replace an existing version. A is parked AFTER writing
+        // its bytes and before its row UPDATE, so the puts land A-then-B while the updates land
+        // B-then-A. With one shared coordinate key the blob ends up holding B's bytes while the
+        // row (updated last by A) advertises sha(A) — the checksum and the artifact swap.
+        await using (var setup = await _db.OpenAsync())
+        {
+            await setup.ExecuteAsync(
+                "INSERT INTO org_settings (org_id, version_overwrite_policy, allow_version_overwrite) VALUES ('o1', 'allow', 1)");
+        }
+        Assert.IsType<PublishResult.Accepted>(
+            await Build().StoreAndRecordAsync(Sample() with { ArtifactBytes = Bytes(0x11, 64) }));
+
+        var gate = new GatedPutBlobStore(_blobs, writeBeforePark: true);
+        var slow = BuildWithRegistry(gate);
+        var fast = Build();
+
+        var slowPublish = Task.Run(() => slow.StoreAndRecordAsync(Sample() with { ArtifactBytes = Bytes(0xAA, 128) }));
+        await gate.Reached;
+
+        Assert.IsType<PublishResult.Accepted>(
+            await fast.StoreAndRecordAsync(Sample() with { ArtifactBytes = Bytes(0xBB, 200) }));
+
+        gate.Release();
+        var late = Assert.IsType<PublishResult.Accepted>(await slowPublish);
+
+        // Whichever UPDATE lands last owns the row — and the row must name that publish's bytes.
+        var row = await AssertVersionRowMatchesStoredBytesAsync("npm", "lodash", "1.0.0");
+        Assert.Equal(late.Sha256, row.ChecksumSha256);
+    }
+
+    [Fact]
+    public async Task Pypi_ConcurrentNewFile_SameFilename_DifferentBytes_FileChecksumMatchesStoredBytes()
+    {
+        // PyPI multi-file NEW-FILE race: both publishes probe the file slot as empty, so both
+        // take the add path for the same filename. A is parked before its write, so its bytes
+        // land after B's file record commits — under one shared coordinate key that leaves the
+        // committed package_version_files row's checksum describing bytes that are no longer
+        // there.
+        Assert.IsType<PublishResult.Accepted>(
+            await Build().StoreAndRecordAsync(PypiSample("mfbytes", "1.0.0", "mfbytes-1.0.0-py3-none-any.whl")));
+
+        var gate = new GatedPutBlobStore(_blobs, writeBeforePark: false);
+        var slow = BuildWithRegistry(gate);
+        var fast = Build();
+
+        var sdist = PypiSample("mfbytes", "1.0.0", "mfbytes-1.0.0.tar.gz");
+        var slowPublish = Task.Run(() => slow.StoreAndRecordAsync(sdist with { ArtifactBytes = Bytes(0xAA, 128) }));
+        await gate.Reached;
+
+        var winner = Assert.IsType<PublishResult.Accepted>(
+            await fast.StoreAndRecordAsync(sdist with { ArtifactBytes = Bytes(0xBB, 200) }));
+
+        gate.Release();
+        // The loser's file-record INSERT hits UNIQUE(package_version_id, filename).
+        await Assert.ThrowsAnyAsync<Exception>(() => slowPublish);
+
+        var packages = new PackageRepository(_db);
+        var pkg = await packages.GetByPurlNameAsync("o1", "pypi", "mfbytes");
+        var version = await packages.GetVersionAsync(pkg!.Id, "1.0.0");
+        var file = (await new PackageVersionFilesRepository(_db).GetByVersionAsync(version!.Id))
+            .Single(f => f.Filename == "mfbytes-1.0.0.tar.gz");
+
+        Assert.Equal(winner.Sha256, file.ChecksumSha256);
+        await AssertStoredBytesHashToAsync(file.BlobKey, file.ChecksumSha256!);
+    }
+
+    private static byte[] Bytes(byte fill, int length)
+    {
+        byte[] bytes = new byte[length];
+        Array.Fill(bytes, fill);
+        return bytes;
+    }
+
+    // The committed version row must name bytes that hash to the checksum stored beside them.
+    private async Task<PackageVersion> AssertVersionRowMatchesStoredBytesAsync(
+        string ecosystem, string purlName, string version)
+    {
+        var packages = new PackageRepository(_db);
+        var pkg = await packages.GetByPurlNameAsync("o1", ecosystem, purlName);
+        var row = await packages.GetVersionAsync(pkg!.Id, version);
+        Assert.NotNull(row);
+        await AssertStoredBytesHashToAsync(row!.BlobKey, row.ChecksumSha256!);
+        return row;
+    }
+
+    private async Task AssertStoredBytesHashToAsync(string blobKey, string expectedSha256)
+    {
+        await using var stored = await _blobs.GetAsync(BlobKeys.StoreKey(blobKey));
+        Assert.NotNull(stored);
+        using var buffer = new MemoryStream();
+        await stored!.CopyToAsync(buffer);
+        string actual = Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(buffer.ToArray())).ToLowerInvariant();
+        Assert.Equal(expectedSha256, actual);
+    }
+
+    private async Task<List<string>> HostedKeysAsync()
+    {
+        var keys = new List<string>();
+        await foreach (var blob in _blobs.ListAsync("hosted/"))
+        {
+            keys.Add(blob.Key);
+        }
+        return keys;
     }
 }

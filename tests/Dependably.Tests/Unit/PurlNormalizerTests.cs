@@ -172,4 +172,70 @@ public class PurlParserTests
         Assert.Equal("@angular/core", parsed.Name);
         Assert.Equal("15.0.0", parsed.Version);
     }
+
+    // TryParseCacheCoordinate must yield the (name, version) exactly as the proxy producers
+    // store them on cache_artifact — otherwise a version-less quarantine decision on an RPM/apk/
+    // Maven proxy artifact silently no-ops (the coordinate never matches any cached row).
+    // Each round-trip goes through the real PurlNormalizer producer so the assertion pins the
+    // producer↔parser contract, not a hand-written purl.
+
+    [Fact]
+    public void CacheCoordinate_Rpm_StripsArchQualifier()
+    {
+        // Producer: pkg:rpm/bash@5.1.8-1?arch=x86_64 ; cache_artifact stores name=bash,
+        // version=5.1.8-1 (no ?arch qualifier). Raw TryParse leaves "?arch=x86_64" on the version.
+        string purl = PurlNormalizer.Rpm("bash", "5.1.8", "1", "x86_64");
+        var parsed = PurlParser.TryParseCacheCoordinate(purl);
+        Assert.NotNull(parsed);
+        Assert.Equal("rpm", parsed.Ecosystem);
+        Assert.Equal("bash", parsed.Name);
+        Assert.Equal("5.1.8-1", parsed.Version);
+        // The old code path (raw TryParse) carries the qualifier and would never match.
+        Assert.Equal("5.1.8-1?arch=x86_64", PurlParser.TryParse(purl)!.Version);
+    }
+
+    [Fact]
+    public void CacheCoordinate_Apk_StripsAlpineNamespaceAndArchQualifier()
+    {
+        // Producer: pkg:apk/alpine/musl@1.2.4-r2?arch=x86_64 ; cache_artifact stores name=musl,
+        // version=1.2.4-r2. Raw TryParse keeps the "alpine/" prefix and the "?arch" qualifier.
+        string purl = PurlNormalizer.Apk("musl", "1.2.4", "2", "x86_64");
+        var parsed = PurlParser.TryParseCacheCoordinate(purl);
+        Assert.NotNull(parsed);
+        Assert.Equal("apk", parsed.Ecosystem);
+        Assert.Equal("musl", parsed.Name);
+        Assert.Equal("1.2.4-r2", parsed.Version);
+        Assert.Equal("alpine/musl", PurlParser.TryParse(purl)!.Name);
+    }
+
+    [Fact]
+    public void CacheCoordinate_Maven_MapsPathSeparatorToColon()
+    {
+        // Producer: pkg:maven/org.apache.commons/commons-lang3@3.12.0 ; cache_artifact stores
+        // name=org.apache.commons:commons-lang3 (MavenCoordinates.PackageName form). Raw TryParse
+        // keeps the '/' separator and would never match the stored ':' form.
+        string purl = PurlNormalizer.Maven("org.apache.commons", "commons-lang3", "3.12.0");
+        var parsed = PurlParser.TryParseCacheCoordinate(purl);
+        Assert.NotNull(parsed);
+        Assert.Equal("maven", parsed.Ecosystem);
+        Assert.Equal("org.apache.commons:commons-lang3", parsed.Name);
+        Assert.Equal("3.12.0", parsed.Version);
+        Assert.Equal("org.apache.commons/commons-lang3", PurlParser.TryParse(purl)!.Name);
+    }
+
+    [Fact]
+    public void CacheCoordinate_Npm_Scoped_PassesThroughUnchanged()
+    {
+        // Ecosystems with no qualifier or namespace quirk resolve identically to TryParse.
+        string purl = PurlNormalizer.Npm("@angular/core", "15.0.0");
+        var parsed = PurlParser.TryParseCacheCoordinate(purl);
+        Assert.NotNull(parsed);
+        Assert.Equal("npm", parsed.Ecosystem);
+        Assert.Equal("@angular/core", parsed.Name);
+        Assert.Equal("15.0.0", parsed.Version);
+    }
+
+    [Fact]
+    public void CacheCoordinate_InvalidPurl_ReturnsNull()
+        => Assert.Null(PurlParser.TryParseCacheCoordinate("not-a-purl"));
 }

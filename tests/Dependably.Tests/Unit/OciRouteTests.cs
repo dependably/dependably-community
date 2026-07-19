@@ -88,4 +88,27 @@ public sealed class OciRouteTests
     [InlineData("repo/unsupported/path")]
     public void Parse_Garbage_ReturnsNull(string path)
         => Assert.Null(OciRoute.Parse(path));
+
+    /// <summary>
+    /// The catch-all <c>/v2/{**path}</c> route makes each Distribution-Spec sub-operation
+    /// opaque to the API-contract gate, which sees one path per HTTP verb rather than one
+    /// operation per kind. This enumeration is the committed inventory that stands in for
+    /// contract coverage: adding a new <see cref="OciRouteKind"/> (and its dispatch arm in
+    /// <c>OciController</c>) must update this list, so a new sub-operation cannot land
+    /// invisibly.
+    /// </summary>
+    [Fact]
+    public void OciRouteKind_MatchesCommittedInventory()
+    {
+        string[] expected =
+        [
+            nameof(OciRouteKind.Manifest),
+            nameof(OciRouteKind.Blob),
+            nameof(OciRouteKind.TagsList),
+            nameof(OciRouteKind.BlobUploadInit),
+            nameof(OciRouteKind.BlobUploadSession),
+            nameof(OciRouteKind.Referrers),
+        ];
+        Assert.Equal(expected, Enum.GetNames<OciRouteKind>());
+    }
 }

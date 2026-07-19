@@ -122,6 +122,23 @@ public sealed class OrgControllerExtendedTests
         Assert.Equal(2, offset); // (3-1)*1
     }
 
+    [Fact]
+    public async Task ListPackages_HugePage_OffsetGuardedAgainstOverflow()
+    {
+        // page * limit overflows a 32-bit int well before this page number; the guarded
+        // offset must stay a non-negative, bounded value instead of wrapping around.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var ok = Assert.IsType<OkObjectResult>(
+            await b.OrgController.ListPackages(limit: 200, page: 99_999_999));
+
+        object value = ok.Value!;
+        int offset = (int)value.GetType().GetProperty("offset")!.GetValue(value)!;
+        Assert.InRange(offset, 0, 10_000_000);
+    }
+
     // ── GetPackage: anonymous + version-status branches ──────────────────────
 
     [Fact]
@@ -456,6 +473,459 @@ public sealed class OrgControllerExtendedTests
 
         var result = await b.OrgController.DeleteVersion("npm", "anything", "1.0.0", CancellationToken.None);
         Assert.False(result is NoContentResult);
+    }
+
+    // ── DeleteVersion: cache-plane fallback (proxy versions with no package_versions row) ────
+    //
+    // Proxy/cache-plane versions never get a package_versions row (they live on cache_artifact +
+    // tenant_artifact_access, plus — for OCI — oci_blobs/oci_tags), so GetVersionAsync 404s for
+    // them and DeleteVersion falls back to DeleteCachePlaneVersionAsync. OCI needs extra care:
+    // oci_blobs.blob_key is content-addressed with NO org segment and is the SAME namespace a
+    // hosted docker push writes to (oci_blobs' PK is (digest, org_id) — one row per digest per
+    // org, shared by both write paths' ON CONFLICT upserts, NEITHER of which rewrites `origin`).
+    // The seeding helpers below drive the real upsert SQL each write path uses so a "pull then
+    // push" scenario lands in the state production code actually leaves behind, rather than
+    // hand-setting `origin` to make a scenario pass for the wrong reason.
+
+    // Seeds one cache_artifact row plus a tenant_artifact_access row for each of orgs. For
+    // ecosystem 'oci' also drives the real proxy-pull oci_blobs upsert (origin='proxy') and any
+    // oci_tags rows DeleteVersion's cache-plane fallback must clean up. Returns the
+    // cache_artifact id.
+    private static async Task<string> SeedProxyCacheArtifactAsync(
+        Dependably.Infrastructure.IMetadataStore db, string ecosystem, string name, string version,
+        string blobKey, string purl, IReadOnlyList<(string OrgId, string[] Tags)> orgs)
+    {
+        await using var conn = await db.OpenAsync();
+        string caId = Guid.NewGuid().ToString("N");
+        await conn.ExecuteAsync(
+            "INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash, size_bytes, purl) " +
+            "VALUES (@id, @ecosystem, @name, @version, 'manifest', @blobKey, @hash, 100, @purl)",
+            new { id = caId, ecosystem, name, version, blobKey, hash = version.Replace("sha256:", ""), purl });
+
+        foreach (var (orgId, tags) in orgs)
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES (@orgId, @caId)",
+                new { orgId, caId });
+
+            if (ecosystem == "oci")
+            {
+                // Mirrors OciUpstreamResolver.CacheAndReturnManifestAsync's literal upsert: a
+                // proxy pull is always this helper's first writer for a given (digest, org_id),
+                // so origin lands 'proxy' exactly as a real pull leaves it.
+                await conn.ExecuteAsync(
+                    "INSERT INTO oci_blobs (digest, org_id, media_type, size_bytes, blob_key, origin, cached_at) " +
+                    "VALUES (@digest, @orgId, 'application/vnd.oci.image.manifest.v1+json', 100, @blobKey, 'proxy', '2026-01-01T00:00:00Z') " +
+                    "ON CONFLICT(digest, org_id) DO UPDATE SET upstream_checked_at = '2026-01-01T00:00:00Z'",
+                    new { digest = version, orgId, blobKey });
+                foreach (string tag in tags)
+                {
+                    await conn.ExecuteAsync(
+                        "INSERT INTO oci_tags (org_id, repository, tag, digest) VALUES (@orgId, @repo, @tag, @digest)",
+                        new { orgId, repo = name, tag, digest = version });
+                }
+            }
+        }
+
+        return caId;
+    }
+
+    // Applies OciUploadService.UpsertBlobRowAsync's literal hosted-push upsert (the
+    // updateMediaType: true branch a manifest push always takes) against oci_blobs. Used to seed
+    // the genuine pull-then-push trap: call SeedProxyCacheArtifactAsync first (proxy pull —
+    // origin lands 'proxy'), then this (hosted push of the SAME digest/org) — the real
+    // ON CONFLICT(digest, org_id) branch never rewrites origin, so it stays 'proxy' through the
+    // ACTUAL upsert semantics, not a hand-set UPDATE.
+    private static async Task SeedHostedPushUpsertAsync(
+        Dependably.Infrastructure.IMetadataStore db, string orgId, string digest, string blobKey)
+    {
+        await using var conn = await db.OpenAsync();
+        await conn.ExecuteAsync(
+            "INSERT INTO oci_blobs (digest, org_id, media_type, size_bytes, blob_key, origin, cached_at) " +
+            "VALUES (@digest, @orgId, 'application/vnd.oci.image.manifest.v1+json', 100, @blobKey, 'uploaded', '2026-01-01T00:00:00Z') " +
+            "ON CONFLICT(digest, org_id) DO UPDATE SET media_type = excluded.media_type, size_bytes = excluded.size_bytes",
+            new { digest, orgId, blobKey });
+    }
+
+    [Fact]
+    public async Task DeleteVersion_OciProxyVersion_SoleClaim_RemovesRowsButRetainsCacheTierBlob()
+    {
+        // Genuinely sole claim: no tags survive elsewhere, no hosted package_versions row
+        // anywhere in the org, no other org shares the digest. The cache-plane rows
+        // (cache_artifact/tenant_artifact_access) and this org's oci_tags/oci_blobs rows are all
+        // removed, and the packages row is GC'd. Physical bytes are intentionally retained: this
+        // org's oci_blobs row's own origin is 'proxy' (the only write path here), and physical
+        // deletion mirrors OciController.HandleManifestDeleteAsync's protocol-level digest
+        // delete, which only ever reclaims Registry-tier (origin='uploaded') bytes — Cache-tier
+        // proxy manifest bytes are left alone, consistent with cache_artifact excluding OCI from
+        // LRU eviction entirely (layer refcounting is out of scope for both paths).
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        await s.WithPackageAsync("library/ubuntu", ecosystem: "oci", isProxy: true);
+        var b = await s.BuildAsync();
+
+        string digest = "sha256:" + new string('1', 64);
+        string blobKey = "oci/sha256/" + new string('1', 64);
+        string purl = $"pkg:oci/ubuntu@{digest.Replace(":", "%3A")}?repository_url=library/ubuntu&tag=22.04";
+        string caId = await SeedProxyCacheArtifactAsync(
+            b.Db, "oci", "library/ubuntu", digest, blobKey, purl,
+            [(b.PrimaryOrgId, new[] { "22.04" })]);
+        await b.Blobs.PutAsync(blobKey, new MemoryStream([1, 2, 3]));
+
+        var result = await b.OrgController.DeleteVersion("oci", "library/ubuntu", digest, CancellationToken.None);
+        Assert.IsType<NoContentResult>(result);
+
+        await using var conn = await b.Db.OpenAsync();
+
+        Assert.Equal(0, await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM tenant_artifact_access WHERE cache_artifact_id = @id", new { id = caId }));
+        Assert.Equal(0, await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM cache_artifact WHERE id = @id", new { id = caId }));
+        Assert.Equal(0, await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM oci_blobs WHERE digest = @digest AND org_id = @orgId",
+            new { digest, orgId = b.PrimaryOrgId }));
+        Assert.Equal(0, await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM oci_tags WHERE org_id = @orgId AND repository = 'library/ubuntu' AND digest = @digest",
+            new { digest, orgId = b.PrimaryOrgId }));
+
+        Assert.True(await b.Blobs.ExistsAsync(blobKey));
+
+        Assert.Equal(0, await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM packages WHERE org_id = @orgId AND ecosystem = 'oci' AND purl_name = 'library/ubuntu'",
+            new { orgId = b.PrimaryOrgId }));
+
+        Assert.Equal(1, await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM activity WHERE event_type = 'delete' AND ecosystem = 'oci' AND org_id = @org",
+            new { org = b.PrimaryOrgId }));
+    }
+
+    [Fact]
+    public async Task DeleteVersion_OciHostedVersion_GenuineSoleClaim_DeletesPhysicalBlobAndGcsPackage()
+    {
+        // The "control" case proving the fix is not over-conservative: a hosted image with no
+        // other claim anywhere (no tags, no other repository or org referencing the digest) is
+        // fully reclaimed — the oci_blobs row, the Registry-tier bytes, AND the packages row all
+        // go. This exercises the EARLY DeleteVersion branch (found via package_versions), not
+        // the cache-plane fallback — OCI blob deletion must be safe from both entry points.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        string digest = "sha256:" + new string('8', 64);
+        string blobKey = "oci/sha256/" + new string('8', 64);
+        string purl = $"pkg:oci/solo@{digest.Replace(":", "%3A")}?repository_url=myorg/solo";
+
+        string pkgId = await PackageSeeder.InsertAsync(b.Db, b.PrimaryOrgId, "oci", "myorg/solo", purlName: "myorg/solo");
+        await PackageSeeder.InsertVersionAsync(b.Db, pkgId, digest, purl, origin: "uploaded", blobKey: blobKey);
+        await SeedHostedPushUpsertAsync(b.Db, b.PrimaryOrgId, digest, blobKey);
+        await b.Blobs.PutAsync(blobKey, new MemoryStream([1, 2, 3]));
+
+        var result = await b.OrgController.DeleteVersion("oci", "myorg/solo", digest, CancellationToken.None);
+        Assert.IsType<NoContentResult>(result);
+
+        await using var conn = await b.Db.OpenAsync();
+        Assert.Equal(0, await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM package_versions WHERE package_id = @pkgId", new { pkgId }));
+        Assert.Equal(0, await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM oci_blobs WHERE digest = @digest AND org_id = @orgId",
+            new { digest, orgId = b.PrimaryOrgId }));
+        Assert.False(await b.Blobs.ExistsAsync(blobKey));
+        Assert.Equal(0, await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM packages WHERE id = @id", new { id = pkgId }));
+    }
+
+    [Fact]
+    public async Task DeleteVersion_OciProxyVersion_HostedClaimSameOrgDifferentRepo_BlobAndOciBlobsRowSurvive()
+    {
+        // Regression for the pull-then-push trap: this org proxy-pulled digest D under
+        // 'library/nginx' (first writer — origin='proxy'), then separately hosts a pushed image
+        // at the SAME digest D under 'myorg/nginx' (the real hosted-push upsert never rewrites
+        // origin, so it stays 'proxy'). No oci_tags row exists for 'myorg/nginx' — the only
+        // surviving claim is the hosted package_versions row, which is what must block the
+        // delete. Deleting the *proxy* version under 'library/nginx' must never touch the shared
+        // oci_blobs row or its bytes.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        await s.WithPackageAsync("library/nginx", ecosystem: "oci", isProxy: true);
+        var b = await s.BuildAsync();
+
+        string digest = "sha256:" + new string('4', 64);
+        string blobKey = "oci/sha256/" + new string('4', 64);
+        string proxyPurl = $"pkg:oci/nginx@{digest.Replace(":", "%3A")}?repository_url=library/nginx&tag=stable";
+        string hostedPurl = $"pkg:oci/nginx@{digest.Replace(":", "%3A")}?repository_url=myorg/nginx&tag=stable";
+
+        string caId = await SeedProxyCacheArtifactAsync(
+            b.Db, "oci", "library/nginx", digest, blobKey, proxyPurl, [(b.PrimaryOrgId, new[] { "stable" })]);
+
+        string hostedPkgId = await PackageSeeder.InsertAsync(b.Db, b.PrimaryOrgId, "oci", "myorg/nginx", purlName: "myorg/nginx");
+        await PackageSeeder.InsertVersionAsync(b.Db, hostedPkgId, digest, hostedPurl, origin: "uploaded", blobKey: blobKey);
+        await SeedHostedPushUpsertAsync(b.Db, b.PrimaryOrgId, digest, blobKey);
+        await b.Blobs.PutAsync(blobKey, new MemoryStream([1, 2, 3]));
+
+        var result = await b.OrgController.DeleteVersion("oci", "library/nginx", digest, CancellationToken.None);
+        Assert.IsType<NoContentResult>(result);
+
+        await using var verify = await b.Db.OpenAsync();
+
+        Assert.Equal(0, await verify.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM cache_artifact WHERE id = @id", new { id = caId }));
+        Assert.Equal(0, await verify.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM oci_tags WHERE org_id = @orgId AND repository = 'library/nginx' AND digest = @digest",
+            new { digest, orgId = b.PrimaryOrgId }));
+
+        string? origin = await verify.ExecuteScalarAsync<string?>(
+            "SELECT origin FROM oci_blobs WHERE digest = @digest AND org_id = @orgId",
+            new { digest, orgId = b.PrimaryOrgId });
+        Assert.Equal("proxy", origin);
+        Assert.True(await b.Blobs.ExistsAsync(blobKey));
+
+        Assert.Equal(1, await verify.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM package_versions WHERE package_id = @pkgId AND version = @digest",
+            new { pkgId = hostedPkgId, digest }));
+    }
+
+    [Fact]
+    public async Task DeleteVersion_OciHostedVersion_ProxyClaimSameOrgDifferentRepo_BlobAndOciBlobsRowSurvive()
+    {
+        // Symmetric to the proxy-first trap above: deleting the HOSTED version (found via
+        // package_versions, the early DeleteVersion branch) must apply the SAME claims check — a
+        // surviving proxy tag under a different repository in this org is still a live claim on
+        // the shared oci_blobs row.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        await s.WithPackageAsync("library/nginx", ecosystem: "oci", isProxy: true);
+        var b = await s.BuildAsync();
+
+        string digest = "sha256:" + new string('4', 64);
+        string blobKey = "oci/sha256/" + new string('4', 64);
+        string proxyPurl = $"pkg:oci/nginx@{digest.Replace(":", "%3A")}?repository_url=library/nginx&tag=stable";
+        string hostedPurl = $"pkg:oci/nginx@{digest.Replace(":", "%3A")}?repository_url=myorg/nginx&tag=stable";
+
+        await SeedProxyCacheArtifactAsync(
+            b.Db, "oci", "library/nginx", digest, blobKey, proxyPurl, [(b.PrimaryOrgId, new[] { "stable" })]);
+
+        string hostedPkgId = await PackageSeeder.InsertAsync(b.Db, b.PrimaryOrgId, "oci", "myorg/nginx", purlName: "myorg/nginx");
+        await PackageSeeder.InsertVersionAsync(b.Db, hostedPkgId, digest, hostedPurl, origin: "uploaded", blobKey: blobKey);
+        await SeedHostedPushUpsertAsync(b.Db, b.PrimaryOrgId, digest, blobKey);
+        await b.Blobs.PutAsync(blobKey, new MemoryStream([1, 2, 3]));
+
+        var result = await b.OrgController.DeleteVersion("oci", "myorg/nginx", digest, CancellationToken.None);
+        Assert.IsType<NoContentResult>(result);
+
+        await using var verify = await b.Db.OpenAsync();
+        Assert.Equal(0, await verify.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM package_versions WHERE package_id = @pkgId", new { pkgId = hostedPkgId }));
+
+        Assert.Equal(1, await verify.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM oci_blobs WHERE digest = @digest AND org_id = @orgId",
+            new { digest, orgId = b.PrimaryOrgId }));
+        Assert.Equal(1, await verify.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM oci_tags WHERE org_id = @orgId AND repository = 'library/nginx' AND digest = @digest",
+            new { digest, orgId = b.PrimaryOrgId }));
+        Assert.True(await b.Blobs.ExistsAsync(blobKey));
+    }
+
+    [Fact]
+    public async Task DeleteVersion_OciHostedVersion_OtherOrgSharesBlobKey_CrossOrgRefcountProtectsBytes()
+    {
+        // Cross-org refcount: this org pushed (hosted, sole claim) digest D; a different org
+        // independently proxy-pulled the identical digest under its own repository — a separate
+        // oci_blobs row (PK is (digest, org_id)) but the SAME content-addressed blob_key.
+        // Deleting this org's hosted version removes this org's own oci_blobs row (origin=
+        // 'uploaded', no other claim in this org), but the physical bytes must survive because
+        // the other org's row still references the shared key.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        string otherOrgId = await OrgSeeder.InsertAsync(b.Db, "shared-blob-org");
+
+        string digest = "sha256:" + new string('7', 64);
+        string blobKey = "oci/sha256/" + new string('7', 64);
+        string hostedPurl = $"pkg:oci/redis@{digest.Replace(":", "%3A")}?repository_url=myorg/redis";
+
+        string pkgId = await PackageSeeder.InsertAsync(b.Db, b.PrimaryOrgId, "oci", "myorg/redis", purlName: "myorg/redis");
+        await PackageSeeder.InsertVersionAsync(b.Db, pkgId, digest, hostedPurl, origin: "uploaded", blobKey: blobKey);
+        await SeedHostedPushUpsertAsync(b.Db, b.PrimaryOrgId, digest, blobKey);
+
+        await SeedProxyCacheArtifactAsync(
+            b.Db, "oci", "mirror/redis", digest, blobKey,
+            $"pkg:oci/redis@{digest.Replace(":", "%3A")}?repository_url=mirror/redis", [(otherOrgId, [])]);
+
+        await b.Blobs.PutAsync(blobKey, new MemoryStream([1, 2, 3]));
+
+        var result = await b.OrgController.DeleteVersion("oci", "myorg/redis", digest, CancellationToken.None);
+        Assert.IsType<NoContentResult>(result);
+
+        await using var verify = await b.Db.OpenAsync();
+
+        Assert.Equal(0, await verify.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM oci_blobs WHERE digest = @digest AND org_id = @orgId",
+            new { digest, orgId = b.PrimaryOrgId }));
+        Assert.Equal(1, await verify.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM oci_blobs WHERE digest = @digest AND org_id = @orgId",
+            new { digest, orgId = otherOrgId }));
+        Assert.True(await b.Blobs.ExistsAsync(blobKey));
+    }
+
+    [Fact]
+    public async Task DeleteVersion_OciProxyVersion_TwoProxyReposSameDigestSameOrg_DeletingOneLeavesOtherIntact()
+    {
+        // Two DIFFERENT repository names in the SAME org both proxy-pulled the identical digest
+        // — two separate cache_artifact rows (distinct (ecosystem, name, version) coordinates)
+        // and two separate oci_tags rows, but ONE shared org-scoped oci_blobs row. Deleting the
+        // version under one repository must not strip the oci_blobs row (or its bytes) out from
+        // under the other repository's still-live tag.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        await s.WithPackageAsync("library/redis", ecosystem: "oci", isProxy: true);
+        await s.WithPackageAsync("mirror/redis", ecosystem: "oci", isProxy: true);
+        var b = await s.BuildAsync();
+
+        string digest = "sha256:" + new string('5', 64);
+        string blobKey = "oci/sha256/" + new string('5', 64);
+
+        string caIdA = await SeedProxyCacheArtifactAsync(
+            b.Db, "oci", "library/redis", digest, blobKey,
+            $"pkg:oci/redis@{digest.Replace(":", "%3A")}?repository_url=library/redis&tag=latest",
+            [(b.PrimaryOrgId, new[] { "latest" })]);
+        string caIdB = await SeedProxyCacheArtifactAsync(
+            b.Db, "oci", "mirror/redis", digest, blobKey,
+            $"pkg:oci/redis@{digest.Replace(":", "%3A")}?repository_url=mirror/redis&tag=latest",
+            [(b.PrimaryOrgId, new[] { "latest" })]);
+
+        await b.Blobs.PutAsync(blobKey, new MemoryStream([1, 2, 3]));
+
+        var result = await b.OrgController.DeleteVersion("oci", "library/redis", digest, CancellationToken.None);
+        Assert.IsType<NoContentResult>(result);
+
+        await using var verify = await b.Db.OpenAsync();
+
+        Assert.Equal(0, await verify.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM cache_artifact WHERE id = @id", new { id = caIdA }));
+        Assert.Equal(0, await verify.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM oci_tags WHERE org_id = @orgId AND repository = 'library/redis' AND digest = @digest",
+            new { digest, orgId = b.PrimaryOrgId }));
+
+        Assert.Equal(1, await verify.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM cache_artifact WHERE id = @id", new { id = caIdB }));
+        Assert.Equal(1, await verify.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM oci_tags WHERE org_id = @orgId AND repository = 'mirror/redis' AND digest = @digest",
+            new { digest, orgId = b.PrimaryOrgId }));
+        Assert.Equal(1, await verify.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM oci_blobs WHERE digest = @digest AND org_id = @orgId",
+            new { digest, orgId = b.PrimaryOrgId }));
+        Assert.True(await b.Blobs.ExistsAsync(blobKey));
+    }
+
+    [Fact]
+    public async Task DeleteVersion_OciProxyVersion_NoMatchingCacheArtifact_Returns404()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        await s.WithPackageAsync("library/redis", ecosystem: "oci", isProxy: true);
+        // No cache_artifact seeded — neither package_versions nor the cache plane has this version.
+        var b = await s.BuildAsync();
+
+        var result = await b.OrgController.DeleteVersion(
+            "oci", "library/redis", "sha256:" + new string('9', 64), CancellationToken.None);
+        int? status = (result as IStatusCodeActionResult)?.StatusCode;
+        Assert.Equal(StatusCodes.Status404NotFound, status);
+    }
+
+    [Fact]
+    public async Task DeleteVersion_NpmProxyVersion_SoleTenant_DeletesCacheArtifactBlobAndPackage()
+    {
+        // Non-OCI proxy ecosystems have shared this global-plane gap since the cache-plane
+        // migration; the fallback is ecosystem-agnostic (only OCI needs the extra oci_tags/
+        // oci_blobs claims check — BlobKeys.Proxy's proxy/{sha256} namespace never collides with
+        // a hosted key, so the generic tenant_artifact_access refcount alone is sufficient here).
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        await s.WithPackageAsync("left-pad", ecosystem: "npm", isProxy: true);
+        var b = await s.BuildAsync();
+
+        string blobKey = "proxy/" + new string('3', 64);
+        string caId = await SeedProxyCacheArtifactAsync(
+            b.Db, "npm", "left-pad", "1.3.0", blobKey, "pkg:npm/left-pad@1.3.0", [(b.PrimaryOrgId, Array.Empty<string>())]);
+        await b.Blobs.PutAsync(blobKey, new MemoryStream([1, 2, 3]));
+
+        var result = await b.OrgController.DeleteVersion("npm", "left-pad", "1.3.0", CancellationToken.None);
+        Assert.IsType<NoContentResult>(result);
+
+        await using var conn = await b.Db.OpenAsync();
+        Assert.Equal(0, await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM cache_artifact WHERE id = @id", new { id = caId }));
+        Assert.False(await b.Blobs.ExistsAsync(blobKey));
+        Assert.Equal(0, await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM packages WHERE org_id = @orgId AND ecosystem = 'npm' AND purl_name = 'left-pad'",
+            new { orgId = b.PrimaryOrgId }));
+        Assert.Equal(1, await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM activity WHERE event_type = 'delete' AND ecosystem = 'npm' AND org_id = @org",
+            new { org = b.PrimaryOrgId }));
+    }
+
+    [Fact]
+    public async Task DeleteVersion_NpmProxyVersion_OtherOrgStillReferences_CacheArtifactAndBlobSurvive()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        await s.WithPackageAsync("left-pad", ecosystem: "npm", isProxy: true);
+        var b = await s.BuildAsync();
+
+        string otherOrgId = await OrgSeeder.InsertAsync(b.Db, "other-npm-org");
+        string blobKey = "proxy/" + new string('6', 64);
+        string caId = await SeedProxyCacheArtifactAsync(
+            b.Db, "npm", "left-pad", "1.3.0", blobKey, "pkg:npm/left-pad@1.3.0",
+            [(b.PrimaryOrgId, Array.Empty<string>()), (otherOrgId, Array.Empty<string>())]);
+        await b.Blobs.PutAsync(blobKey, new MemoryStream([1, 2, 3]));
+
+        var result = await b.OrgController.DeleteVersion("npm", "left-pad", "1.3.0", CancellationToken.None);
+        Assert.IsType<NoContentResult>(result);
+
+        await using var conn = await b.Db.OpenAsync();
+        Assert.Equal(0, await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM tenant_artifact_access WHERE org_id = @orgId AND cache_artifact_id = @id",
+            new { orgId = b.PrimaryOrgId, id = caId }));
+        Assert.Equal(1, await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM tenant_artifact_access WHERE org_id = @orgId AND cache_artifact_id = @id",
+            new { orgId = otherOrgId, id = caId }));
+        Assert.Equal(1, await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM cache_artifact WHERE id = @id", new { id = caId }));
+        Assert.True(await b.Blobs.ExistsAsync(blobKey));
+    }
+
+    [Fact]
+    public async Task DeleteVersion_CachePlaneVersion_ScopedToCallersOwnOrg_CannotReachOtherOrgsClaim()
+    {
+        // BOLA guard: the caller's own org never pulled this package (no tenant_artifact_access
+        // row for THIS org), even though a DIFFERENT org shares the same (ecosystem, name)
+        // coordinate on the global cache_artifact row. ListServeFactsForNameAsync is joined on
+        // this org's own claim, so this 404s instead of resolving — and even if it had resolved,
+        // DeleteAsync/CountRemainingAsync are always this-org-scoped, so another org's claim or
+        // bytes could never be reached this way.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync("acme"); await s.WithUserAsync(role: "owner");
+        await s.WithPackageAsync("left-pad", ecosystem: "npm", isProxy: true);
+        var b = await s.BuildAsync();
+
+        string otherOrgId = await OrgSeeder.InsertAsync(b.Db, "other-org-bola");
+        string blobKey = "proxy/" + new string('2', 64);
+        string caId = await SeedProxyCacheArtifactAsync(
+            b.Db, "npm", "left-pad", "1.3.0", blobKey, "pkg:npm/left-pad@1.3.0", [(otherOrgId, Array.Empty<string>())]);
+        await b.Blobs.PutAsync(blobKey, new MemoryStream([1, 2, 3]));
+
+        var result = await b.OrgController.DeleteVersion("npm", "left-pad", "1.3.0", CancellationToken.None);
+        int? status = (result as IStatusCodeActionResult)?.StatusCode;
+        Assert.Equal(StatusCodes.Status404NotFound, status);
+
+        await using var conn = await b.Db.OpenAsync();
+        Assert.Equal(1, await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM tenant_artifact_access WHERE org_id = @orgId AND cache_artifact_id = @id",
+            new { orgId = otherOrgId, id = caId }));
+        Assert.Equal(1, await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM cache_artifact WHERE id = @id", new { id = caId }));
+        Assert.True(await b.Blobs.ExistsAsync(blobKey));
     }
 
     // ── GetStats / GetSetup auth and config branches ─────────────────────────

@@ -278,6 +278,8 @@ public sealed partial class SchemaInitializer
         // SchemaSyncComplianceTests regex does not pick up NOT NULL from a later statement.
         await conn.ExecuteAsync(
             "ALTER TABLE package_version_vulns ADD COLUMN id TEXT");
+        // xtenant: one-shot startup reshape — mints the new surrogate PK for every existing row
+        // on the instance; a tenant filter would leave the rest of the table with a NULL PK.
         await conn.ExecuteAsync(
             "UPDATE package_version_vulns SET id = lower(left(md5(random()::text || '-' || package_version_id || '-' || vuln_id), 32)) WHERE id IS NULL");
         await conn.ExecuteAsync(

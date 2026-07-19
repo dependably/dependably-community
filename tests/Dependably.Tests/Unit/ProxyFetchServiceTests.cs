@@ -69,7 +69,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
         var blockGate = Dependably.Tests.Infrastructure.TestBlockGate.Create(_db, TimeProvider.System);
         var cacheRecorder = new CacheAccessRecorder(cacheArtifact, tenantAccess,
             NullLogger<CacheAccessRecorder>.Instance, TimeProvider.System);
-        return new ProxyFetchService(cacheRecorder, proxyVersions, cacheArtifact, tenantAccess, scanner, blockGate, packages, audit, TimeProvider.System,
+        return new ProxyFetchService(cacheRecorder, proxyVersions, cacheArtifact, tenantAccess, scanner, blockGate, audit, TimeProvider.System,
             new Dependably.Infrastructure.SourcePinRepository(_db, new Microsoft.Extensions.Configuration.ConfigurationBuilder()
                 .AddInMemoryCollection(new Dictionary<string, string?> { ["PROXY_SOURCE_PINNING"] = sourcePinningEnabled ? "true" : "false" })
                 .Build()));
@@ -100,11 +100,25 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             ExtractLicenses: null,
             UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
             MaxOsvScoreTolerance: 10.0,
-            CacheAccess: null));
+            CacheAccess: new CacheAccess("o1", "npm", "left-pad", "1.0.0", "left-pad-1.0.0.tgz",
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact")));
 
         Assert.Equal(BlockDecision.Allowed, result.Decision);
-        Assert.NotNull(result.VersionId);
         Assert.True(await _blobs.ExistsAsync(result.BlobKey));
+
+        // Catalogued on the cache plane, and scanned there. Asserting vuln_checked_at is what stops
+        // this passing on a fetch that skipped the scan entirely.
+        await using var conn = await _db.OpenAsync();
+        var (cacheArtifactId, vulnCheckedAt) = await conn.QuerySingleAsync<(string Id, string? VulnCheckedAt)>(
+            "SELECT id AS Id, vuln_checked_at AS VulnCheckedAt FROM cache_artifact " +
+            "WHERE ecosystem = 'npm' AND name = 'left-pad' AND version = '1.0.0'");
+        Assert.NotNull(vulnCheckedAt);
+        Assert.Equal(1, await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM tenant_artifact_access WHERE org_id = 'o1' AND cache_artifact_id = @id",
+            new { id = cacheArtifactId }));
+
+        // And nowhere else: package_versions is the hosted plane.
+        Assert.Equal(0, await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM package_versions"));
     }
 
     [Fact]
@@ -125,7 +139,8 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             ExtractLicenses: null,
             UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
             MaxOsvScoreTolerance: 10.0,
-            CacheAccess: null,
+            CacheAccess: new CacheAccess("o1", "npm", "left-pad", "1.0.0", "left-pad-1.0.0.tgz",
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact"),
             UpstreamUrl: "https://private.registry.example/left-pad/-/left-pad-1.0.0.tgz"));
         Assert.Equal(BlockDecision.Allowed, first.Decision);
 
@@ -140,10 +155,17 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             ExtractLicenses: null,
             UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
             MaxOsvScoreTolerance: 10.0,
-            CacheAccess: null,
+            CacheAccess: new CacheAccess("o1", "npm", "left-pad", "1.0.1", "left-pad-1.0.1.tgz",
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact"),
             UpstreamUrl: "https://registry.npmjs.org/left-pad/-/left-pad-1.0.1.tgz"));
         Assert.Equal(BlockDecision.Blocked, second.Decision);
-        Assert.Null(second.VersionId);
+        // The source-pin gate refuses before the artefact is catalogued, so the diverging version
+        // was never adopted onto the cache plane.
+        await using (var conn = await _db.OpenAsync())
+        {
+            Assert.Equal(0, await conn.ExecuteScalarAsync<long>(
+                "SELECT COUNT(*) FROM cache_artifact WHERE ecosystem = 'npm' AND name = 'left-pad' AND version = '1.0.1'"));
+        }
 
         // Same name from the ORIGINAL upstream still serves.
         byte[] bytesC = "left-pad-from-private-2"u8.ToArray();
@@ -156,7 +178,8 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             ExtractLicenses: null,
             UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
             MaxOsvScoreTolerance: 10.0,
-            CacheAccess: null,
+            CacheAccess: new CacheAccess("o1", "npm", "left-pad", "1.0.2", "left-pad-1.0.2.tgz",
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact"),
             UpstreamUrl: "https://private.registry.example/left-pad/-/left-pad-1.0.2.tgz"));
         Assert.Equal(BlockDecision.Allowed, third.Decision);
     }
@@ -187,7 +210,8 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             ExtractLicenses: null,
             UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
             MaxOsvScoreTolerance: 4.0,
-            CacheAccess: null));
+            CacheAccess: new CacheAccess("o1", "maven", "com.example:lib", "1.0.0", "lib-1.0.0.jar",
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact")));
 
         Assert.Equal(BlockDecision.Blocked, result.Decision);
     }
@@ -212,16 +236,17 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             ExtractLicenses: null,
             UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
             MaxOsvScoreTolerance: 10.0,
-            CacheAccess: null,
+            CacheAccess: new CacheAccess("o1", "npm", "abandoned", "1.0.0", "abandoned-1.0.0.tgz",
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact"),
             Deprecated: "use successor@2 instead",
             BlockDeprecatedMode: mode));
 
         Assert.Equal(BlockDecision.Blocked, result.Decision);
-        Assert.Null(result.VersionId);
 
         await using var conn = await _db.OpenAsync();
-        long rowCount = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM package_versions");
-        Assert.Equal(0, rowCount);
+        // Nothing catalogued on either plane: the gate runs before the artefact is adopted.
+        Assert.Equal(0, await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM package_versions"));
+        Assert.Equal(0, await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM cache_artifact"));
         long blockCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM activity WHERE event_type = 'blocked_deprecated'");
         Assert.Equal(1, blockCount);
@@ -244,12 +269,16 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             ExtractLicenses: null,
             UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
             MaxOsvScoreTolerance: 10.0,
-            CacheAccess: null,
+            CacheAccess: new CacheAccess("o1", "npm", "warned", "1.0.0", "warned-1.0.0.tgz",
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact"),
             Deprecated: "deprecated upstream",
             BlockDeprecatedMode: "warn"));
 
         Assert.Equal(BlockDecision.Allowed, result.Decision);
-        Assert.NotNull(result.VersionId);
+
+        await using var conn = await _db.OpenAsync();
+        Assert.Equal(1, await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM cache_artifact WHERE ecosystem = 'npm' AND name = 'warned' AND version = '1.0.0'"));
     }
 
     [Fact]
@@ -342,35 +371,47 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
                 ExtractLicenses: s => Extract(coord.PackageName, s),
                 UserId: null, ActorKind: null, SourceIp: null,
                 MaxOsvScoreTolerance: 10.0,
-                CacheAccess: null);
+                CacheAccess: new CacheAccess("o1", "npm", coord.PackageName, coord.Version,
+                    $"{coord.PackageName}-{coord.Version}.tgz",
+                    Sha256: "", SizeBytes: 0, BlobKey: "",
+                    UpstreamUrl: $"https://registry.npmjs.org/{coord.PackageName}"));
             results[idx] = await svc.RecordAndScanAsync(req, ct);
         });
 
-        // All five first-fetch rows persisted, no exception bubbled.
-        Assert.All(results, r => Assert.NotNull(r.VersionId));
+        // Every fetch was allowed and none threw: a failing extractor must not fail the fetch.
+        Assert.All(results, r => Assert.Equal(BlockDecision.Allowed, r.Decision));
 
         await using var conn = await _db.OpenAsync();
-        long rowCount = await conn.ExecuteScalarAsync<long>(
-            "SELECT COUNT(*) FROM package_versions");
-        Assert.Equal(total, rowCount);
 
-        // First three succeeded — licence rows should be present.
+        // All five catalogued on the cache plane, and none on the hosted plane.
+        Assert.Equal(total, await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM cache_artifact"));
+        Assert.Equal(total, await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM tenant_artifact_access WHERE org_id = 'o1'"));
+        Assert.Equal(0, await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM package_versions"));
+
+        // First three succeeded — licence rows present, owned by the cache artefact.
         for (int i = 0; i < failFrom; i++)
         {
-            string versionId = results[i].VersionId!;
             long licCount = await conn.ExecuteScalarAsync<long>(
-                "SELECT COUNT(*) FROM package_version_licenses WHERE package_version_id = @v",
-                new { v = versionId });
+                """
+                SELECT COUNT(*) FROM package_version_licenses pvl
+                JOIN cache_artifact ca ON ca.id = pvl.cache_artifact_id
+                WHERE pvl.owner_kind = 'cache_artifact' AND ca.name = @name
+                """,
+                new { name = routedCoords[i].PackageName });
             Assert.Equal(1, licCount);
         }
 
         // Last two failed on stream-open — extractor never ran, no licence rows.
         for (int i = failFrom; i < total; i++)
         {
-            string versionId = results[i].VersionId!;
             long licCount = await conn.ExecuteScalarAsync<long>(
-                "SELECT COUNT(*) FROM package_version_licenses WHERE package_version_id = @v",
-                new { v = versionId });
+                """
+                SELECT COUNT(*) FROM package_version_licenses pvl
+                JOIN cache_artifact ca ON ca.id = pvl.cache_artifact_id
+                WHERE pvl.owner_kind = 'cache_artifact' AND ca.name = @name
+                """,
+                new { name = routedCoords[i].PackageName });
             Assert.Equal(0, licCount);
         }
 
@@ -400,16 +441,17 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             ExtractLicenses: null,
             UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
             MaxOsvScoreTolerance: 10.0,
-            CacheAccess: null,
+            CacheAccess: new CacheAccess("o1", "npm", "spoofed", "1.0.0", "spoofed-1.0.0.tgz",
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact"),
             ProvenanceStatus: status,
             VerifyProvenanceMode: "block"));
 
         Assert.Equal(BlockDecision.Blocked, result.Decision);
-        Assert.Null(result.VersionId);
 
         await using var conn = await _db.OpenAsync();
-        long rowCount = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM package_versions");
-        Assert.Equal(0, rowCount);
+        // Nothing catalogued on either plane: an unverified artefact is never adopted.
+        Assert.Equal(0, await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM package_versions"));
+        Assert.Equal(0, await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM cache_artifact"));
         long blockCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM activity WHERE event_type = 'blocked_provenance'");
         Assert.Equal(1, blockCount);
@@ -434,18 +476,20 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             ExtractLicenses: null,
             UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
             MaxOsvScoreTolerance: 10.0,
-            CacheAccess: null,
+            CacheAccess: new CacheAccess("o1", "npm", "trusted", "1.0.0", "trusted-1.0.0.tgz",
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact"),
             ProvenanceStatus: "verified",
             ProvenanceSigner: "SHA256:anchor",
             VerifyProvenanceMode: "block"));
 
         Assert.Equal(BlockDecision.Allowed, result.Decision);
-        Assert.NotNull(result.VersionId);
 
-        var packages = new PackageRepository(_db);
-        var version = await packages.GetVersionByIdAsync("o1", result.VersionId!);
-        Assert.Equal("verified", version!.ProvenanceStatus);
-        Assert.Equal("SHA256:anchor", version.ProvenanceSigner);
+        await using var conn = await _db.OpenAsync();
+        var prov = await conn.QuerySingleAsync<ProvenanceRow>(
+            "SELECT provenance_status AS Status, provenance_signer AS Signer FROM cache_artifact " +
+            "WHERE ecosystem = 'npm' AND name = 'trusted' AND version = '1.0.0'");
+        Assert.Equal("verified", prov.Status);
+        Assert.Equal("SHA256:anchor", prov.Signer);
     }
 
     [Fact]
@@ -465,16 +509,18 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             ExtractLicenses: null,
             UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
             MaxOsvScoreTolerance: 10.0,
-            CacheAccess: null,
+            CacheAccess: new CacheAccess("o1", "npm", "warned-prov", "1.0.0", "warned-prov-1.0.0.tgz",
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact"),
             ProvenanceStatus: "failed",
             VerifyProvenanceMode: "warn"));
 
         Assert.Equal(BlockDecision.Allowed, result.Decision);
-        Assert.NotNull(result.VersionId);
 
-        var packages = new PackageRepository(_db);
-        var version = await packages.GetVersionByIdAsync("o1", result.VersionId!);
-        Assert.Equal("failed", version!.ProvenanceStatus);
+        await using var conn = await _db.OpenAsync();
+        var prov = await conn.QuerySingleAsync<ProvenanceRow>(
+            "SELECT provenance_status AS Status, provenance_signer AS Signer FROM cache_artifact " +
+            "WHERE ecosystem = 'npm' AND name = 'warned-prov' AND version = '1.0.0'");
+        Assert.Equal("failed", prov.Status);
     }
 
     /// <summary>
@@ -509,7 +555,9 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
                 ExtractLicenses: null,
                 UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
                 MaxOsvScoreTolerance: 10.0,
-                CacheAccess: null,
+                CacheAccess: new CacheAccess("o1", "npm", c.Name, "1.0.0", $"{c.Name}-1.0.0.tgz",
+                    Sha256: "", SizeBytes: 0, BlobKey: "",
+                    UpstreamUrl: $"https://registry.npmjs.org/{c.Name}"),
                 ProvenanceStatus: c.Status,
                 ProvenanceSigner: c.Signer,
                 VerifyProvenanceMode: "block"), ct);
@@ -518,20 +566,18 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
 
         // Verified versions allowed + recorded; failed/unsigned blocked + not recorded.
         Assert.Equal(BlockDecision.Allowed, results["good-a"].Decision);
-        Assert.NotNull(results["good-a"].VersionId);
         Assert.Equal(BlockDecision.Allowed, results["good-c"].Decision);
         Assert.Equal(BlockDecision.Blocked, results["bad-b"].Decision);
-        Assert.Null(results["bad-b"].VersionId);
         Assert.Equal(BlockDecision.Blocked, results["old-d"].Decision);
-        Assert.Null(results["old-d"].VersionId);
 
         await using var conn = await _db.OpenAsync();
-        // Exactly the two verified versions made it into the catalogue.
-        long rowCount = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM package_versions");
-        Assert.Equal(2, rowCount);
-        long verifiedCount = await conn.ExecuteScalarAsync<long>(
-            "SELECT COUNT(*) FROM package_versions WHERE provenance_status = 'verified'");
-        Assert.Equal(2, verifiedCount);
+        // Exactly the two verified versions made it into the catalogue — and the blocked
+        // coordinates are absent, not merely unflagged.
+        Assert.Equal(0, await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM package_versions"));
+        var cached = (await conn.QueryAsync<string>(
+            "SELECT name FROM cache_artifact WHERE provenance_status = 'verified' ORDER BY name")).ToList();
+        Assert.Equal(new[] { "good-a", "good-c" }, cached);
+        Assert.Equal(2, await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM cache_artifact"));
         // Two block events (one per refused version).
         long blockCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM activity WHERE event_type = 'blocked_provenance'");
@@ -600,6 +646,57 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
     /// faults. <see cref="ExistsAsync"/> stays truthful so ProxyFetchService doesn't
     /// re-cache.
     /// </summary>
+    /// <summary>
+    /// The cache plane is where a proxied artefact is gated: the OSV scan, the malicious/KEV/EPSS
+    /// gates, the licence gates and the release-age hold all key off its <c>cache_artifact</c> row.
+    /// If the recorder cannot produce that row — after its retry — there is nothing to gate against,
+    /// so the fetch is refused rather than served ungated. Nothing is written on either plane and no
+    /// decision is returned at all: the caller sees the exception and maps it to 503.
+    /// </summary>
+    [Fact]
+    public async Task RecordAndScanAsync_throws_when_cache_plane_unavailable_and_serves_nothing()
+    {
+        var svc = Build();
+
+        // Take the cache plane away. Both recorder attempts now fail, so no catalogue row exists.
+        await using (var setup = await _db.OpenAsync())
+        {
+            await TestSchemaViews.DropAsync(setup);
+            await setup.ExecuteAsync("DROP TABLE tenant_artifact_access");
+            await setup.ExecuteAsync("DROP TABLE cache_artifact");
+        }
+
+        byte[] bytes = "ungatable-tarball"u8.ToArray();
+        var blob = await SeedBlobAsync(_blobs, bytes);
+
+        await Assert.ThrowsAsync<ProxyCatalogueUnavailableException>(() =>
+            svc.RecordAndScanAsync(new ProxyFetchRequest(
+                OrgId: "o1", Ecosystem: "npm",
+                PackageName: "ungatable", PurlName: "ungatable",
+                Version: "1.0.0", Purl: "pkg:npm/ungatable@1.0.0",
+                File: "ungatable-1.0.0.tgz", Blob: blob,
+                ExtractLicenses: null,
+                UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
+                MaxOsvScoreTolerance: 10.0,
+                CacheAccess: new CacheAccess("o1", "npm", "ungatable", "1.0.0", "ungatable-1.0.0.tgz",
+                    Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact"))));
+
+        // The refused fetch left no trace on the hosted plane either — no zombie stand-in row.
+        await using var conn = await _db.OpenAsync();
+        Assert.Equal(0, await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM package_versions"));
+    }
+
+    /// <summary>
+    /// A class with settable properties, not a positional record: in a compound query Dapper
+    /// validates ctor parameter types against the provider's reported column types, and a nullable
+    /// TEXT column with no declared type comes back as byte[].
+    /// </summary>
+    private sealed class ProvenanceRow
+    {
+        public string? Status { get; set; }
+        public string? Signer { get; set; }
+    }
+
     private sealed class FlakyBlobStore : IBlobStore
     {
         private readonly IBlobStore _inner;

@@ -12,8 +12,9 @@ namespace Dependably.Tests.Integration;
 /// <summary>
 /// Covers the API-token (PAT) read-only management surface: read GETs across
 /// OrgController, VulnerabilityController, SearchController, OrgAuditController,
-/// OrgSettingsController, QuarantineController, and AuthController.Me now accept the
-/// ApiToken scheme in addition to a JWT session, gated by the matching read:* capability.
+/// OrgSettingsController, QuarantineController, LicenseController, LookupController, and
+/// AuthController.Me now accept the ApiToken scheme in addition to a JWT session, gated by
+/// the matching read:* capability.
 /// Also covers the three blockers that made the surface a dead letter for automation before
 /// this change: service/CI tokens 404ing on every capability-gated route (no users-table
 /// row), require_mfa orgs 403ing token principals, and read:* not being mintable.
@@ -101,6 +102,84 @@ public sealed class PatReadSurfaceTests : IClassFixture<DependablyFactory>
         using var client = BearerClient(pat);
         var resp = await client.GetAsync("/api/v1/vuln-report");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+    }
+
+    // ── read:packages (LicenseController policy reads, LookupController) ──────────────────
+
+    [Fact]
+    public async Task LicensePolicy_UserPatWithReadPackages_Returns200()
+    {
+        string pat = await _factory.CreateAdminUserToken("""["read:packages"]""");
+        using var client = BearerClient(pat);
+        var resp = await client.GetAsync("/api/v1/license-policy");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task LicensePolicy_UserPatWithoutReadPackages_Returns403()
+    {
+        // Carries a different read leaf only — proves the capability gate, not just the scheme.
+        string pat = await _factory.CreateAdminUserToken("""["read:audit"]""");
+        using var client = BearerClient(pat);
+        var resp = await client.GetAsync("/api/v1/license-policy");
+        Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task LicensePolicy_ServiceTokenWithReadPackages_Returns200()
+    {
+        string svc = await CreateServiceToken("""["read:packages"]""");
+        using var client = BearerClient(svc);
+        var resp = await client.GetAsync("/api/v1/license-policy");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task LicensePolicyAllowlist_UserPatWithReadPackages_Returns200()
+    {
+        string pat = await _factory.CreateAdminUserToken("""["read:packages"]""");
+        using var client = BearerClient(pat);
+        var resp = await client.GetAsync("/api/v1/license-policy/allowlist");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task LicensePolicyBlocklist_UserPatWithReadPackages_Returns200()
+    {
+        string pat = await _factory.CreateAdminUserToken("""["read:packages"]""");
+        using var client = BearerClient(pat);
+        var resp = await client.GetAsync("/api/v1/license-policy/blocklist");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task Lookup_UserPatWithReadPackages_AuthPasses()
+    {
+        // No query params: the capability guard runs before request validation, so a 422
+        // validation problem (not 401/403) proves the ApiToken scheme and read:packages gate
+        // both admitted the call without needing an upstream packument stub.
+        string pat = await _factory.CreateAdminUserToken("""["read:packages"]""");
+        using var client = BearerClient(pat);
+        var resp = await client.GetAsync("/api/v1/lookup");
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task Lookup_UserPatWithoutReadPackages_Returns403()
+    {
+        string pat = await _factory.CreateAdminUserToken("""["read:audit"]""");
+        using var client = BearerClient(pat);
+        var resp = await client.GetAsync("/api/v1/lookup");
+        Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task Lookup_ServiceTokenWithReadPackages_AuthPasses()
+    {
+        string svc = await CreateServiceToken("""["read:packages"]""");
+        using var client = BearerClient(svc);
+        var resp = await client.GetAsync("/api/v1/lookup");
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
     }
 
     // ── read:audit (OrgAuditController) ───────────────────────────────────────────────────
@@ -254,6 +333,15 @@ public sealed class PatReadSurfaceTests : IClassFixture<DependablyFactory>
         Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
     }
 
+    [Fact]
+    public async Task LicensePolicy_ServiceTokenWithNullCapabilities_Returns403()
+    {
+        string svc = await CreateServiceTokenWithRawCapabilities(capabilitiesColumn: null);
+        using var client = BearerClient(svc);
+        var resp = await client.GetAsync("/api/v1/license-policy");
+        Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
+    }
+
     // ── Service token yank (fix 1 also unblocks DeleteVersion for CI tokens) ─────────────
 
     [Fact]
@@ -294,6 +382,26 @@ public sealed class PatReadSurfaceTests : IClassFixture<DependablyFactory>
         {
             decision = "approve",
         });
+        Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task LicensePolicySetMode_UserPat_Returns401()
+    {
+        // The license-policy writes are not opted into the ApiToken scheme — even a PAT
+        // carrying tenant:configure fails the default JWT scheme on the PUT.
+        string pat = await _factory.CreateAdminUserToken("""["tenant:configure","read:packages"]""");
+        using var client = BearerClient(pat);
+        var resp = await client.PutAsJsonAsync("/api/v1/license-policy/mode", new { mode = "warn" });
+        Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task LicensePolicyAllowlistAdd_UserPat_Returns401()
+    {
+        string pat = await _factory.CreateAdminUserToken("""["tenant:configure","read:packages"]""");
+        using var client = BearerClient(pat);
+        var resp = await client.PostAsJsonAsync("/api/v1/license-policy/allowlist", new { licenseSpdx = "MIT" });
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
     }
 

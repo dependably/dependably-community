@@ -207,6 +207,91 @@ public sealed class MetadataResponseCacheTests
         Assert.Equal([5, 6], second);
     }
 
+    // ── Lost-invalidation guard ─────────────────────────────────────────────────
+
+    [Fact]
+    public async Task GetOrRebuildAsync_EvictDuringRebuild_DoesNotResurrectStaleData()
+    {
+        // A concurrent publish/unpublish evicts the key while a cache-MISS rebuild is still
+        // reading its now-stale snapshot (the proxy path can hold this window open for a
+        // multi-second upstream fetch). The rebuild's completion must not overwrite that
+        // invalidation with the stale bytes it already captured.
+        var cache = new RenderedResponseCache<NpmPackumentKey>(
+            NewCache(), MetadataCacheKeys.NpmPackument);
+        var key = new NpmPackumentKey("org1", "racy-pkg");
+
+        var rebuildStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseRebuild = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        async Task<byte[]?> Rebuild(CancellationToken _)
+        {
+            rebuildStarted.SetResult();
+            await releaseRebuild.Task;
+            return [1, 2, 3]; // the pre-mutation snapshot read before the concurrent publish
+        }
+
+        var rebuildTask = cache.GetOrRebuildAsync(key, TimeSpan.FromMinutes(5), Rebuild, CancellationToken.None);
+
+        // Wait until the rebuild has started reading its (soon-to-be-stale) snapshot.
+        await rebuildStarted.Task;
+
+        // The concurrent publish commits its DB write and evicts mid-rebuild.
+        cache.Evict(key);
+
+        // Let the rebuild complete with the pre-mutation bytes it already captured.
+        releaseRebuild.SetResult();
+        byte[]? result = await rebuildTask;
+
+        Assert.Equal(new byte[] { 1, 2, 3 }, result); // this caller still gets its answer
+        Assert.False(cache.TryGet(key, out _)); // but the cache must not resurrect stale data
+    }
+
+    [Fact]
+    public async Task GetOrRebuildAsync_EvictDuringRebuild_MixedKeys_OnlyEvictedKeyIsDropped()
+    {
+        // Mixed scenario: two independent rebuilds are in flight concurrently; only one key
+        // receives a concurrent Evict. The unaffected key must still populate normally — the
+        // guard is scoped per formatted key, not a blanket skip-caching switch.
+        var cache = new RenderedResponseCache<NpmPackumentKey>(
+            NewCache(), MetadataCacheKeys.NpmPackument);
+        var evictedKey = new NpmPackumentKey("org1", "evicted-mid-rebuild");
+        var untouchedKey = new NpmPackumentKey("org1", "untouched");
+
+        var evictedStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var untouchedStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseAll = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        async Task<byte[]?> RebuildEvicted(CancellationToken _)
+        {
+            evictedStarted.SetResult();
+            await releaseAll.Task;
+            return [9];
+        }
+
+        async Task<byte[]?> RebuildUntouched(CancellationToken _)
+        {
+            untouchedStarted.SetResult();
+            await releaseAll.Task;
+            return [7];
+        }
+
+        var evictedTask = cache.GetOrRebuildAsync(
+            evictedKey, TimeSpan.FromMinutes(5), RebuildEvicted, CancellationToken.None);
+        var untouchedTask = cache.GetOrRebuildAsync(
+            untouchedKey, TimeSpan.FromMinutes(5), RebuildUntouched, CancellationToken.None);
+
+        await Task.WhenAll(evictedStarted.Task, untouchedStarted.Task);
+
+        cache.Evict(evictedKey);
+
+        releaseAll.SetResult();
+        await Task.WhenAll(evictedTask, untouchedTask);
+
+        Assert.False(cache.TryGet(evictedKey, out _));
+        Assert.True(cache.TryGet(untouchedKey, out byte[]? untouchedBytes));
+        Assert.Equal(new byte[] { 7 }, untouchedBytes);
+    }
+
     // ── Singleton-lifetime contract ─────────────────────────────────────────────
 
     [Fact]
@@ -267,6 +352,106 @@ public sealed class MetadataResponseCacheTests
 
         Assert.True(cache.TryGet(key, out byte[]? bytes));
         Assert.Equal(4, bytes!.Length);
+    }
+
+    // ── Org policy-epoch binding (proxy-settings PUT invalidation) ──────────────
+
+    [Fact]
+    public void OrgPolicyEpoch_Invalidate_ExpiresEveryKeyForThatOrg_AcrossEcosystems()
+    {
+        // A proxy-settings PUT can flip advertised gate state for every version an org has
+        // published or proxied, across every ecosystem's rendered cache — there is no
+        // enumerable list of affected formatted keys the way a publish/unpublish handler has.
+        // With the epoch store wired in, Invalidate for the org must expire every entry bound
+        // to it in one call, regardless of ecosystem or package name.
+        var epochStore = new OrgCacheEpochStore();
+        var pypiCache = new RenderedResponseCache<PyPiSimpleIndexKey>(
+            NewCache(), MetadataCacheKeys.PyPiSimpleIndex, epochStore);
+        var npmCache = new RenderedResponseCache<NpmPackumentKey>(
+            NewCache(), MetadataCacheKeys.NpmPackument, epochStore);
+
+        pypiCache.Set(new PyPiSimpleIndexKey("org1", "pkg-a"), [1], TimeSpan.FromMinutes(10));
+        npmCache.Set(new NpmPackumentKey("org1", "left-pad"), [2], TimeSpan.FromMinutes(10));
+
+        epochStore.Invalidate("org1");
+
+        Assert.False(pypiCache.TryGet(new PyPiSimpleIndexKey("org1", "pkg-a"), out _));
+        Assert.False(npmCache.TryGet(new NpmPackumentKey("org1", "left-pad"), out _));
+    }
+
+    [Fact]
+    public void OrgPolicyEpoch_Invalidate_DoesNotEvictAnotherOrgsEntries()
+    {
+        var epochStore = new OrgCacheEpochStore();
+        var cache = new RenderedResponseCache<NpmPackumentKey>(
+            NewCache(), MetadataCacheKeys.NpmPackument, epochStore);
+
+        cache.Set(new NpmPackumentKey("org-a", "left-pad"), [1], TimeSpan.FromMinutes(10));
+        cache.Set(new NpmPackumentKey("org-b", "left-pad"), [2], TimeSpan.FromMinutes(10));
+
+        epochStore.Invalidate("org-a");
+
+        Assert.False(cache.TryGet(new NpmPackumentKey("org-a", "left-pad"), out _));
+        // Tenant isolation: a policy change for one org must never invalidate another org's
+        // rendered cache.
+        Assert.True(cache.TryGet(new NpmPackumentKey("org-b", "left-pad"), out _));
+    }
+
+    [Fact]
+    public async Task OrgPolicyEpoch_InvalidateRacingAnInFlightRebuild_DoesNotResurrectPreFlipState()
+    {
+        // Mixed/partial scenario: two concurrent GetOrRebuildAsync calls for different keys under
+        // the same org are in flight when a proxy-settings PUT lands mid-rebuild for BOTH. Every
+        // rebuild that captured the pre-flip epoch token must have its Set effectively dropped
+        // (the entry expires immediately on insert); a rebuild that starts AFTER the flip must
+        // cache normally.
+        var epochStore = new OrgCacheEpochStore();
+        var cache = new RenderedResponseCache<NpmPackumentKey>(
+            NewCache(), MetadataCacheKeys.NpmPackument, epochStore);
+        var keyA = new NpmPackumentKey("org1", "racy-a");
+        var keyB = new NpmPackumentKey("org1", "racy-b");
+
+        var aStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var bStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseBoth = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        async Task<byte[]?> RebuildA(CancellationToken _)
+        {
+            aStarted.SetResult();
+            await releaseBoth.Task;
+            return [1]; // pre-flip snapshot
+        }
+
+        async Task<byte[]?> RebuildB(CancellationToken _)
+        {
+            bStarted.SetResult();
+            await releaseBoth.Task;
+            return [2]; // pre-flip snapshot
+        }
+
+        var taskA = cache.GetOrRebuildAsync(keyA, TimeSpan.FromMinutes(10), RebuildA, CancellationToken.None);
+        var taskB = cache.GetOrRebuildAsync(keyB, TimeSpan.FromMinutes(10), RebuildB, CancellationToken.None);
+        await Task.WhenAll(aStarted.Task, bStarted.Task);
+
+        // The proxy-settings PUT lands while both rebuilds are still holding their pre-flip reads.
+        epochStore.Invalidate("org1");
+
+        releaseBoth.SetResult();
+        await Task.WhenAll(taskA, taskB);
+
+        // Both callers still get their (in-flight) answer for this one request...
+        Assert.Equal(new byte[] { 1 }, await taskA);
+        Assert.Equal(new byte[] { 2 }, await taskB);
+        // ...but neither pre-flip snapshot is left behind in the cache for the next request.
+        Assert.False(cache.TryGet(keyA, out _));
+        Assert.False(cache.TryGet(keyB, out _));
+
+        // A rebuild started fresh after the flip binds to the new epoch and caches normally.
+        byte[]? postFlip = await cache.GetOrRebuildAsync(
+            keyA, TimeSpan.FromMinutes(10), _ => Task.FromResult<byte[]?>([9]), CancellationToken.None);
+        Assert.Equal(new byte[] { 9 }, postFlip);
+        Assert.True(cache.TryGet(keyA, out byte[]? cached));
+        Assert.Equal(new byte[] { 9 }, cached);
     }
 
     // ── MetadataConcurrencyGate integration ──────────────────────────────────────

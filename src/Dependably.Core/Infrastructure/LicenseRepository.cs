@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using Dapper;
 using Dependably.Protocol;
 
@@ -105,14 +106,18 @@ public sealed class LicenseRepository
 
         await using var conn = await _db.OpenAsync(ct);
         // xtenant: keyed by an IN list of package_version_ids (each caller-org-scoped).
-        var rows = await conn.QueryAsync<VersionLicenseRow>(
-            """
+        const string sql = """
             SELECT package_version_id as VersionId, license_spdx as Spdx
             FROM package_version_licenses
             WHERE package_version_id IN @ids
             ORDER BY license_spdx
-            """,
-            new { ids });
+            """;
+        // The @ids token is swapped for a literal (@id0, @id1, ...) list before the query ever
+        // reaches Dapper — see DapperInClause for why Dapper's own IN @ids auto-expansion cannot
+        // be trusted here (it silently binds the whole list as one Postgres array parameter
+        // instead, which IN never accepts).
+        var (idsClause, idsParams) = DapperInClause.Expand("id", ids);
+        var rows = await conn.QueryAsync<VersionLicenseRow>(sql.Replace("@ids", idsClause), idsParams);
         return rows.ToLookup(r => r.VersionId, r => r.Spdx);
     }
 
@@ -136,15 +141,17 @@ public sealed class LicenseRepository
         // xtenant: cache_artifact is a global table; rows are keyed by cache_artifact_id
         // (content-addressed, no org column). Callers supply IDs from their own tenant's
         // artifact access records so no arbitrary cross-tenant row is reachable.
-        var rows = await conn.QueryAsync<CacheArtifactLicenseRow>(
-            """
+        const string sql = """
             SELECT cache_artifact_id as ArtifactId, license_spdx as Spdx
             FROM package_version_licenses
             WHERE cache_artifact_id IN @ids
               AND owner_kind = 'cache_artifact'
             ORDER BY license_spdx
-            """,
-            new { ids });
+            """;
+        // See DapperInClause: Dapper's own IN @ids auto-expansion binds the whole list as one
+        // Postgres array parameter instead of expanding the SQL text, which IN never accepts.
+        var (idsClause, idsParams) = DapperInClause.Expand("id", ids);
+        var rows = await conn.QueryAsync<CacheArtifactLicenseRow>(sql.Replace("@ids", idsClause), idsParams);
         return rows.ToLookup(r => r.ArtifactId, r => r.Spdx);
     }
 
@@ -263,10 +270,12 @@ public sealed class LicenseRepository
     /// that are on neither the allow- nor block-list. Includes a per-leaf package count and
     /// first-seen timestamp so the admin UI can prioritise high-impact licenses.
     ///
-    /// Licenses are merged across three planes: hosted/published artifacts (per-tenant
-    /// <c>package_versions</c>), proxied artifacts (the global <c>cache_artifact</c> plane,
-    /// org-scoped via <c>tenant_artifact_access</c>), and OCI images (per-tenant <c>oci_blobs</c>,
-    /// which carries the captured SPDX expression on its manifest row).
+    /// Reads the canonical <c>artifact_license</c> / <c>artifact_inventory</c> read model (see
+    /// <c>SchemaInitializer.Views.cs</c>) rather than hand-rolling the hosted/proxied union:
+    /// <c>artifact_license</c> already spans both artifact planes — hosted/published artifacts
+    /// (per-tenant <c>package_versions</c>) and proxied artifacts (the global <c>cache_artifact</c>
+    /// plane, org-scoped via <c>tenant_artifact_access</c>) — and an OCI image's license is
+    /// projected onto whichever plane catalogued it, so it needs no arm of its own.
     ///
     /// Compound expressions (PyPI PEP 639 emits "MIT OR Apache-2.0" verbatim) are split into
     /// their individual leaves — each leaf is reviewed and approved independently — and name
@@ -292,36 +301,19 @@ public sealed class LicenseRepository
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         await using var conn = await _db.OpenAsync(ct);
-        // All three UNION arms filter on @orgId (hosted via packages.org_id, proxied via
-        // tenant_artifact_access.org_id, OCI via oci_blobs.org_id), so no cross-tenant row is
-        // reachable.
+        // artifact_license is already org-scoped (org_id spans both its hosted and proxied
+        // arms), so filtering it alone keeps every row within the caller's tenant; the join to
+        // artifact_inventory is keyed by the same (org_id, owner_kind, owner_id) pair and adds
+        // no additional tenant it could leak across.
         var rawRows = await conn.QueryAsync<ReviewRawRow>(
             """
-            SELECT pvl.license_spdx                     AS RawLicenseSpdx,
-                   p.ecosystem || ':' || p.purl_name    AS PackageKey,
-                   pvl.created_at                        AS CreatedAt
-            FROM package_version_licenses pvl
-            JOIN package_versions pv ON pv.id = pvl.package_version_id
-            JOIN packages         p  ON p.id  = pv.package_id
-            WHERE p.org_id = @orgId
-            UNION ALL
-            SELECT pvl.license_spdx                     AS RawLicenseSpdx,
-                   ca.ecosystem || ':' || ca.name       AS PackageKey,
-                   pvl.created_at                        AS CreatedAt
-            FROM package_version_licenses pvl
-            JOIN cache_artifact ca
-              ON ca.id = pvl.cache_artifact_id
-            JOIN tenant_artifact_access taa
-              ON taa.cache_artifact_id = pvl.cache_artifact_id
-             AND taa.org_id = @orgId
-            WHERE pvl.owner_kind = 'cache_artifact'
-            UNION ALL
-            SELECT ob.license_spdx                              AS RawLicenseSpdx,
-                   'oci:' || COALESCE(ot.repository, ob.digest) AS PackageKey,
-                   ob.cached_at                                 AS CreatedAt
-            FROM oci_blobs ob
-            LEFT JOIN oci_tags ot ON ot.org_id = ob.org_id AND ot.digest = ob.digest
-            WHERE ob.org_id = @orgId AND ob.license_spdx IS NOT NULL
+            SELECT al.license_spdx           AS RawLicenseSpdx,
+                   ai.ecosystem || ':' || ai.name AS PackageKey,
+                   al.created_at             AS CreatedAt
+            FROM artifact_license al
+            JOIN artifact_inventory ai
+              ON ai.org_id = al.org_id AND ai.owner_kind = al.owner_kind AND ai.owner_id = al.owner_id
+            WHERE al.org_id = @orgId
             """,
             new { orgId });
 
@@ -357,15 +349,17 @@ public sealed class LicenseRepository
         // Hydrate name/copyleft/is_deprecated per distinct canonical leaf id in one round-trip.
         var ids = accum.Keys.ToList();
         // xtenant: spdx_license is a global reference table, no org scoping.
-        var meta = (await conn.QueryAsync<SpdxMetaRow>(
-            """
+        const string metaSql = """
             SELECT identifier AS Identifier, name AS Name,
                    COALESCE(copyleft, 'unclassified') AS Copyleft,
                    is_deprecated AS IsDeprecated
             FROM spdx_license
             WHERE identifier IN @ids
-            """,
-            new { ids }))
+            """;
+        // See DapperInClause: Dapper's own IN @ids auto-expansion binds the whole list as one
+        // Postgres array parameter instead of expanding the SQL text, which IN never accepts.
+        var (idsClause, idsParams) = DapperInClause.Expand("id", ids);
+        var meta = (await conn.QueryAsync<SpdxMetaRow>(metaSql.Replace("@ids", idsClause), idsParams))
             .ToDictionary(m => m.Identifier, StringComparer.OrdinalIgnoreCase);
 
         var entries = new List<LicenseReviewEntry>(accum.Count);
@@ -390,6 +384,9 @@ public sealed class LicenseRepository
             .ToList();
     }
 
+    // Internal DTO for raw DB rows. Dapper sets props by reflection.
+    [SuppressMessage("Minor Code Smell", "S3459:Unassigned members should be removed", Justification = "Dapper sets these props by reflection; not statically visible as assigned.")]
+    [SuppressMessage("Major Code Smell", "S1144:Unused private types or members should be removed", Justification = "Dapper sets these props by reflection; not statically visible as used.")]
     private sealed class ReviewRawRow
     {
         public string RawLicenseSpdx { get; set; } = "";
@@ -397,6 +394,9 @@ public sealed class LicenseRepository
         public DateTimeOffset CreatedAt { get; set; }
     }
 
+    // Internal DTO for raw DB rows. Dapper sets props by reflection.
+    [SuppressMessage("Minor Code Smell", "S3459:Unassigned members should be removed", Justification = "Dapper sets these props by reflection; not statically visible as assigned.")]
+    [SuppressMessage("Major Code Smell", "S1144:Unused private types or members should be removed", Justification = "Dapper sets these props by reflection; not statically visible as used.")]
     private sealed class SpdxMetaRow
     {
         public string Identifier { get; set; } = "";

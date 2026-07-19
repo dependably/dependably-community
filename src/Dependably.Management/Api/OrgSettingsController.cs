@@ -1,5 +1,6 @@
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Audit;
+using Dependably.Infrastructure.Caching;
 using Dependably.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
@@ -34,6 +35,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
     private readonly Dependably.Protocol.Provenance.PyPiProvenanceVerifier _pypiProvenance;
     private readonly Dependably.Protocol.Provenance.RpmProvenanceVerifier _rpmProvenance;
     private readonly Dependably.Protocol.Provenance.MavenProvenanceVerifier _mavenProvenance;
+    private readonly OrgCacheEpochStore _cacheEpoch;
 
     // Dependency-injection constructor; the parameter list is the controller's declared
     // dependency set and grouping it into an aggregate would hide dependencies without
@@ -52,7 +54,8 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         Dependably.Protocol.Provenance.NuGetProvenanceVerifier nugetProvenance,
         Dependably.Protocol.Provenance.PyPiProvenanceVerifier pypiProvenance,
         Dependably.Protocol.Provenance.RpmProvenanceVerifier rpmProvenance,
-        Dependably.Protocol.Provenance.MavenProvenanceVerifier mavenProvenance)
+        Dependably.Protocol.Provenance.MavenProvenanceVerifier mavenProvenance,
+        OrgCacheEpochStore cacheEpoch)
 #pragma warning restore S107
     {
         _settings = settings;
@@ -68,6 +71,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         _pypiProvenance = pypiProvenance;
         _rpmProvenance = rpmProvenance;
         _mavenProvenance = mavenProvenance;
+        _cacheEpoch = cacheEpoch;
     }
 
     /// <summary>GET /api/v1/orgs/{org}/settings</summary>
@@ -366,6 +370,14 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                 sigVerify.VerifyNpmSignatures, sigVerify.VerifyNuGetSignatures, sigVerify.VerifyPyPiAttestations,
                 sigVerify.VerifyRpmSignatures, sigVerify.VerifyMavenSignatures, blockRevoked),
             ct);
+
+        // The block/verify gates and thresholds just persisted can flip the advertised state of
+        // every version across every package this org has published or proxied. There is no
+        // enumerable list of affected cache keys to Evict one at a time (the way publish/unpublish
+        // do), so instead bump the org's rendered-cache policy epoch: every npm packument, NuGet
+        // registration, PyPI simple index, and Maven metadata document cached for this org expires
+        // immediately rather than serving the pre-flip gate state until its TTL.
+        _cacheEpoch.Invalidate(orgId);
 
         await _audit.LogAsync("proxy_settings_updated", orgId, GetUserId(),
             detail: System.Text.Json.JsonSerializer.Serialize(new

@@ -147,7 +147,7 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
             pkgId, "1.0.0", Purl(), "blob/key", 100, "sha256hex",
             FirstFetch: true,
             UpstreamIntegrityValue: "sha512-aGVsbG8=",
-            UpstreamIntegrityAlgorithm: "sha512-sri"));
+            UpstreamIntegrityAlgorithm: "sha512-sri", Origin: "uploaded"));
 
         Assert.Equal("sha512-aGVsbG8=", created.UpstreamIntegrityValue);
         Assert.Equal("sha512-sri", created.UpstreamIntegrityAlgorithm);
@@ -166,7 +166,7 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
 
         var created = await _repo.CreateVersionAsync(new NewPackageVersion(
             pkgId, "1.0.0", Purl(), "blob/key", 100, "sha256hex",
-            FirstFetch: true, ChecksumSha1: "abc123def456"));
+            FirstFetch: true, ChecksumSha1: "abc123def456", Origin: "uploaded"));
 
         Assert.Equal("abc123def456", created.ChecksumSha1);
         var fetched = await _repo.GetVersionByIdAsync(orgId, created.Id);
@@ -184,7 +184,7 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
 
         var created = await _repo.CreateVersionAsync(new NewPackageVersion(
             pkgId, "1.0.0", Purl(), "blob/key", 100, "sha256hex",
-            FirstFetch: true, PublishedAt: publishedAt));
+            FirstFetch: true, PublishedAt: publishedAt, Origin: "uploaded"));
 
         Assert.Equal(publishedAt, created.PublishedAt);
 
@@ -204,7 +204,7 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
         string purl = Purl();
 
         var created = await _repo.CreateVersionAsync(new NewPackageVersion(
-            pkgId, "1.0.0", purl, "blob/key", 100, "sha256hex", FirstFetch: false));
+            pkgId, "1.0.0", purl, "blob/key", 100, "sha256hex", FirstFetch: false, Origin: "uploaded"));
         Assert.Null(created.VersionsBehind); // unwritten default — unknown, not 0
 
         await _repo.UpdateVersionsBehindAsync(created.Id, 4);
@@ -391,7 +391,9 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task ListPaginatedAsync_Search_EscapesWildcards_AndOnlyMatchesLiteral()
     {
-        // "ev_il" should be treated as the literal substring, not the SQL wildcard pattern.
+        // "ev_il" is matched as a literal substring: the '_' is escaped, so it must not act as
+        // the SQL single-character wildcard and pull in "evxil". LOWER()-folding the pattern must
+        // not disturb the ESCAPE '\' handling either.
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
         await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "ev_il");
         await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "evxil");
@@ -402,6 +404,78 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
         Assert.Equal(1, total);
         Assert.Single(items);
         Assert.Equal("ev_il", items[0].Name);
+    }
+
+    /// <summary>
+    /// Search matches a substring of the name, not just its prefix. Package names carry an
+    /// ecosystem-specific prefix the user does not type — npm scopes and Maven
+    /// groupId:artifactId coordinates — so a prefix-anchored pattern would make the npm search
+    /// protocol, the Cargo search protocol, and the management typeahead all return nothing for
+    /// the term a user actually types. The leading wildcard is a product requirement; this pins
+    /// it against being "optimized" away in pursuit of an index that cannot exist.
+    /// </summary>
+    [Theory]
+    [InlineData("core", "@babel/core")]              // npm scope: user types the bare package name
+    [InlineData("jackson-databind", "com.fasterxml.jackson.core:jackson-databind")] // maven artifactId
+    [InlineData("databind", "com.fasterxml.jackson.core:jackson-databind")]         // maven, mid-artifact
+    public async Task ListPaginatedAsync_Search_MatchesMidName_NotOnlyPrefix(string term, string packageName)
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", packageName);
+        await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "unrelated-package");
+
+        var (items, total) = await _repo.ListPaginatedAsync(new PackageListQuery(
+            OrgId: orgId, Limit: 50, Offset: 0, Ecosystem: "npm", Search: term));
+
+        Assert.Equal(1, total);
+        Assert.Equal(packageName, Assert.Single(items).Name);
+    }
+
+    /// <summary>
+    /// Search folds case, and does so identically on both providers. SQLite's LIKE folds ASCII
+    /// case on its own but Postgres's does not, so the predicate LOWER()s both sides; without
+    /// that, the same search returns different rows depending on DB_PROVIDER. This test pins the
+    /// behaviour on SQLite — <c>PostgresQuerySmokeTests</c> runs the same predicate live on PG.
+    /// </summary>
+    [Theory]
+    [InlineData("REQUESTS")]
+    [InlineData("Requests")]
+    [InlineData("requests")]
+    public async Task ListPaginatedAsync_Search_IsCaseInsensitive(string term)
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "Python-Requests");
+
+        var (items, total) = await _repo.ListPaginatedAsync(new PackageListQuery(
+            OrgId: orgId, Limit: 50, Offset: 0, Ecosystem: "npm", Search: term));
+
+        Assert.Equal(1, total);
+        Assert.Equal("Python-Requests", Assert.Single(items).Name);
+    }
+
+    /// <summary>
+    /// The search COUNT must stay bounded to the tenant's own rows via idx_packages_org_ecosystem.
+    /// A substring LIKE is not sargable — no B-tree can range-bound a leading wildcard on either
+    /// provider — so the org bound is the only thing standing between a search request and a scan
+    /// of every package on the instance. This plans the exact production CountSql string and fails
+    /// if the org bound is ever lost (e.g. a predicate rewrite that wraps org_id in a function, or
+    /// a dropped index), which is the resource-consumption invariant a semantics test cannot pin.
+    /// </summary>
+    [Fact]
+    public async Task CountSql_SearchPlan_StaysBoundedByTheOrgIndex()
+    {
+        await using var conn = await _fixture.Store.OpenAsync();
+        var rows = await conn.QueryAsync(
+            "EXPLAIN QUERY PLAN " + PackageRepository.CountSql,
+            new { orgId = "org-plan-probe", ecosystem = (string?)null, searchPattern = "%core%" });
+
+        string plan = string.Join("\n", rows.Select(r => (string)r.detail));
+
+        // Bounded by org through the index: "SEARCH p USING INDEX idx_packages_org_ecosystem
+        // (org_id=?)". A plan that reads "SCAN p" would mean every package on the instance is
+        // examined for one tenant's search.
+        Assert.Contains("idx_packages_org_ecosystem", plan, StringComparison.Ordinal);
+        Assert.Contains("org_id=?", plan, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -877,6 +951,234 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
 
         Assert.True(await _repo.DeletePackageIfEmptyAsync(pkgId));
         Assert.Null(await _repo.GetByPurlNameAsync(orgId, "npm", "acme"));
+    }
+
+    /// <summary>
+    /// Regression: a proxy-only package (is_proxy) never has package_versions rows, so the
+    /// emptiness check must also consult the cache plane (tenant_artifact_access joined to
+    /// cache_artifact by ecosystem+purl_name) — otherwise the packages row is GC'd the moment its
+    /// last package_versions row is gone even while this org still has other cache-plane versions
+    /// of the same package, silently re-creating the "0 versions" symptom this method guards
+    /// against.
+    /// </summary>
+    [Fact]
+    public async Task DeletePackageIfEmptyAsync_CachePlaneVersionPresent_DoesNotDelete()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(
+            _fixture.Store, orgId, "oci", "library/ubuntu", isProxy: true, purlName: "library/ubuntu");
+
+        string caId = Guid.NewGuid().ToString("N");
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash, size_bytes) " +
+                "VALUES (@id, 'oci', 'library/ubuntu', 'sha256:aa', 'manifest', 'oci/sha256/aa', 'aa', 100)",
+                new { id = caId });
+            await conn.ExecuteAsync(
+                "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES (@orgId, @caId)",
+                new { orgId, caId });
+        }
+
+        // No package_versions rows at all — a proxy-only package — but the cache plane still has
+        // a live version, so the row must survive.
+        Assert.False(await _repo.DeletePackageIfEmptyAsync(pkgId));
+        Assert.NotNull(await _repo.GetByPurlNameAsync(orgId, "oci", "library/ubuntu"));
+
+        // Once the cache-plane version is also gone, the package is GC-eligible.
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "DELETE FROM tenant_artifact_access WHERE org_id = @orgId AND cache_artifact_id = @caId",
+                new { orgId, caId });
+        }
+        Assert.True(await _repo.DeletePackageIfEmptyAsync(pkgId));
+        Assert.Null(await _repo.GetByPurlNameAsync(orgId, "oci", "library/ubuntu"));
+    }
+
+    /// <summary>
+    /// A cache-plane version under a DIFFERENT package (different purl_name, or a different org
+    /// entirely) must never block this package's GC — the cache-plane NOT EXISTS check is scoped
+    /// to this row's own (org_id, ecosystem, purl_name), not a blanket "cache_artifact has any
+    /// row for this ecosystem" check.
+    /// </summary>
+    [Fact]
+    public async Task DeletePackageIfEmptyAsync_CachePlaneVersionUnderDifferentPackage_StillDeletes()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(
+            _fixture.Store, orgId, "oci", "library/redis", isProxy: true, purlName: "library/redis");
+        await PackageSeeder.InsertAsync(
+            _fixture.Store, orgId, "oci", "library/postgres", isProxy: true, purlName: "library/postgres");
+
+        // A cache-plane version for a DIFFERENT purl_name in the SAME org — irrelevant to pkgId.
+        string otherCaId = Guid.NewGuid().ToString("N");
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash, size_bytes) " +
+                "VALUES (@id, 'oci', 'library/postgres', 'sha256:bb', 'manifest', 'oci/sha256/bb', 'bb', 100)",
+                new { id = otherCaId });
+            await conn.ExecuteAsync(
+                "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES (@orgId, @caId)",
+                new { orgId, caId = otherCaId });
+        }
+
+        Assert.True(await _repo.DeletePackageIfEmptyAsync(pkgId));
+        Assert.Null(await _repo.GetByPurlNameAsync(orgId, "oci", "library/redis"));
+        // The unrelated package's cache-plane version is untouched.
+        Assert.NotNull(await _repo.GetByPurlNameAsync(orgId, "oci", "library/postgres"));
+    }
+
+    // ── ReleaseOciDigestClaimAsync ──────────────────────────────────────────
+
+    [Fact]
+    public async Task ReleaseOciDigestClaimAsync_NoOtherClaim_ProxyOrigin_DeletesRow_ResolvesNoUploadedCandidate()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string digest = "sha256:" + new string('1', 64);
+        string blobKey = "oci/sha256/" + new string('1', 64);
+
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO oci_blobs (digest, org_id, media_type, size_bytes, blob_key, origin) " +
+                "VALUES (@digest, @orgId, 'application/vnd.oci.image.manifest.v1+json', 100, @blobKey, 'proxy')",
+                new { digest, orgId, blobKey });
+        }
+
+        // No surviving oci_tags row, no package_versions claim — this org's row is removed, but
+        // its own origin is 'proxy', so no Registry-tier physical-delete candidate is resolved
+        // (proxy-tier bytes are reclaimed by cache GC; the deleter is never handed a blob).
+        string? candidate = await _repo.ReleaseOciDigestClaimAsync(orgId, "library/redis", digest);
+        Assert.Null(candidate);
+
+        await using var conn2 = await _fixture.Store.OpenAsync();
+        Assert.Equal(0, await conn2.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM oci_blobs WHERE digest = @digest AND org_id = @orgId", new { digest, orgId }));
+    }
+
+    [Fact]
+    public async Task ReleaseOciDigestClaimAsync_UploadedOriginSoleClaim_ResolvesUploadedBlobCandidate()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string digest = "sha256:" + new string('2', 64);
+        string blobKey = "oci/sha256/" + new string('2', 64);
+
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO oci_blobs (digest, org_id, media_type, size_bytes, blob_key, origin) " +
+                "VALUES (@digest, @orgId, 'application/vnd.oci.image.manifest.v1+json', 100, @blobKey, 'uploaded')",
+                new { digest, orgId, blobKey });
+        }
+
+        // Uploaded origin, no surviving claim — the row comes off and the blob_key is returned as
+        // a Registry-tier candidate. The cross-org refcount + physical delete is the shared
+        // OciOrphanBlobDeleter's job (see OciManifestDeleteRefcountTests), not this method's.
+        string? candidate = await _repo.ReleaseOciDigestClaimAsync(orgId, "myorg/solo", digest);
+        Assert.Equal(blobKey, candidate);
+
+        await using var conn2 = await _fixture.Store.OpenAsync();
+        Assert.Equal(0, await conn2.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM oci_blobs WHERE digest = @digest AND org_id = @orgId", new { digest, orgId }));
+    }
+
+    [Fact]
+    public async Task ReleaseOciDigestClaimAsync_UploadedOrigin_RemovesOnlyThisOrgsRow_LeavesOtherOrgUntouched()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string otherOrgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string digest = "sha256:" + new string('3', 64);
+        string blobKey = "oci/sha256/" + new string('3', 64);
+
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO oci_blobs (digest, org_id, media_type, size_bytes, blob_key, origin) " +
+                "VALUES (@digest, @orgId, 'application/vnd.oci.image.manifest.v1+json', 100, @blobKey, 'uploaded')",
+                new { digest, orgId, blobKey });
+            // Another org's row references the SAME content-addressed blob_key — the cross-org
+            // sharing axis the shared deleter's refcount protects. This method is org-scoped and
+            // must never touch that row; it only resolves this org's uploaded candidate.
+            await conn.ExecuteAsync(
+                "INSERT INTO oci_blobs (digest, org_id, media_type, size_bytes, blob_key, origin) " +
+                "VALUES (@digest, @otherOrgId, 'application/vnd.oci.image.manifest.v1+json', 100, @blobKey, 'proxy')",
+                new { digest, otherOrgId, blobKey });
+        }
+
+        string? candidate = await _repo.ReleaseOciDigestClaimAsync(orgId, "myorg/solo", digest);
+        Assert.Equal(blobKey, candidate);
+
+        await using var conn2 = await _fixture.Store.OpenAsync();
+        Assert.Equal(0, await conn2.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM oci_blobs WHERE digest = @digest AND org_id = @orgId", new { digest, orgId }));
+        Assert.Equal(1, await conn2.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM oci_blobs WHERE digest = @digest AND org_id = @otherOrgId",
+            new { digest, otherOrgId }));
+    }
+
+    [Fact]
+    public async Task ReleaseOciDigestClaimAsync_SurvivingTagInDifferentRepository_DoesNotDeleteRow()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string digest = "sha256:" + new string('4', 64);
+        string blobKey = "oci/sha256/" + new string('4', 64);
+
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO oci_blobs (digest, org_id, media_type, size_bytes, blob_key, origin) " +
+                "VALUES (@digest, @orgId, 'application/vnd.oci.image.manifest.v1+json', 100, @blobKey, 'proxy')",
+                new { digest, orgId, blobKey });
+            await conn.ExecuteAsync(
+                "INSERT INTO oci_tags (org_id, repository, tag, digest) VALUES (@orgId, 'mirror/redis', 'latest', @digest)",
+                new { orgId, digest });
+        }
+
+        // Deleting the version under a DIFFERENT repository removes only that repository's tag;
+        // the surviving tag under mirror/redis blocks the oci_blobs row from being removed and
+        // resolves no physical-delete candidate.
+        string? candidate = await _repo.ReleaseOciDigestClaimAsync(orgId, "library/redis", digest);
+        Assert.Null(candidate);
+
+        await using var conn2 = await _fixture.Store.OpenAsync();
+        Assert.Equal(1, await conn2.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM oci_blobs WHERE digest = @digest AND org_id = @orgId", new { digest, orgId }));
+        Assert.Equal(1, await conn2.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM oci_tags WHERE org_id = @orgId AND repository = 'mirror/redis' AND digest = @digest",
+            new { digest, orgId }));
+    }
+
+    [Fact]
+    public async Task ReleaseOciDigestClaimAsync_SurvivingUploadedPackageVersionInDifferentRepository_DoesNotDeleteRow()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string digest = "sha256:" + new string('5', 64);
+        string blobKey = "oci/sha256/" + new string('5', 64);
+
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO oci_blobs (digest, org_id, media_type, size_bytes, blob_key, origin) " +
+                "VALUES (@digest, @orgId, 'application/vnd.oci.image.manifest.v1+json', 100, @blobKey, 'proxy')",
+                new { digest, orgId, blobKey });
+        }
+
+        string hostedPkgId = await PackageSeeder.InsertAsync(
+            _fixture.Store, orgId, "oci", "myorg/nginx", purlName: "myorg/nginx");
+        await PackageSeeder.InsertVersionAsync(
+            _fixture.Store, hostedPkgId, digest, Purl(digest, "nginx"), origin: "uploaded", blobKey: blobKey);
+
+        // The hosted package_versions row under a DIFFERENT repository is a live claim even
+        // though this org's oci_blobs row's own origin is 'proxy' (first-writer-wins) — the
+        // claim check never inspects that column.
+        string? candidate = await _repo.ReleaseOciDigestClaimAsync(orgId, "library/nginx", digest);
+        Assert.Null(candidate);
+
+        await using var conn2 = await _fixture.Store.OpenAsync();
+        Assert.Equal(1, await conn2.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM oci_blobs WHERE digest = @digest AND org_id = @orgId", new { digest, orgId }));
     }
 
     [Fact]

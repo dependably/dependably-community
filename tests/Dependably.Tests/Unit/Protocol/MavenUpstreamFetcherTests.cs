@@ -46,6 +46,9 @@ namespace Dependably.Tests.Unit.Protocol;
 ///  - FetchUpstreamVersionsAsync_Upstream5xx_ReturnsNull: error → null (caller serves
 ///    local-only).
 ///  - FetchUpstreamVersionsAsync_AirGap_ReturnsNull: air-gap → null, no throw.
+///  - TenantStorageQuota_*: both fetch paths carry the caller's org context onto the shared
+///    cache-fill write, so Maven proxy pulls are bounded by the tenant's storage quota like
+///    every other ecosystem, and a refusal surfaces as 413 rather than a silent 404.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
@@ -72,7 +75,8 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
     private MavenUpstreamFetcher BuildFetcher(
         InMemoryBlobStore? blobs = null,
         bool airGapped = false,
-        bool verifyWithSha256 = true)
+        bool verifyWithSha256 = true,
+        OrgRepository? orgs = null)
     {
         blobs ??= new InMemoryBlobStore();
         var tiered = new TieredBlobStorage(blobs, blobs);
@@ -95,7 +99,7 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
             httpFactory, tiered, audit, urlValidator, airGap,
             new Dependably.Infrastructure.DriveInfoStagingDiskInfo(Path.GetTempPath()),
             Dependably.Infrastructure.StagingOptions.Resolve(config),
-            NullLogger<UpstreamClient>.Instance);
+            NullLogger<UpstreamClient>.Instance, orgs: orgs);
 
         return new MavenUpstreamFetcher(
             upstreamClient, tiered, _db, config,
@@ -635,6 +639,87 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
         private readonly HttpClient _client;
         public StaticHttpClientFactory(HttpClient client) => _client = client;
         public HttpClient CreateClient(string name) => _client;
+    }
+
+    // ── Tenant storage quota ──────────────────────────────────────────────────
+    //
+    // Maven reaches the shared proxy cache-fill through this fetcher on two paths — the
+    // .sha256-sidecar path (GetOrFetchStreamAsync) and the sidecar-less fetch-then-hash fallback
+    // (FetchAndCacheByUrlAsync) that most of Maven Central takes. Both have to carry the caller's
+    // org context, or the quota gate reads "no org context", waves the fill through, and Maven is
+    // the one ecosystem an authenticated tenant can grow the cache plane through without bound.
+
+    private async Task<string> CreateQuotaOrgAsync(long quotaBytes)
+    {
+        string orgId = Guid.NewGuid().ToString("N");
+        await using (var conn = await _db.OpenAsync())
+        {
+            await Dapper.SqlMapper.ExecuteAsync(conn,
+                "INSERT INTO orgs (id, slug) VALUES (@id, @slug)", new { id = orgId, slug = "acme" });
+        }
+        await new OrgRepository(_db).SetStorageQuotaBytesAsync(orgId, quotaBytes);
+        return orgId;
+    }
+
+    [Fact]
+    public async Task TenantStorageQuota_Sha256SidecarPath_OverQuota_RefusesAndDoesNotCache()
+    {
+        byte[] jar = RandomNumberGenerator.GetBytes(512);
+        string path = "com/example/widget/1.0.0/widget-1.0.0.jar";
+        StubArtifact(path, jar);
+        StubSidecar(path, Sha256Hex(jar));
+
+        string orgId = await CreateQuotaOrgAsync(quotaBytes: 100); // 512 > 100
+        var blobs = new InMemoryBlobStore();
+        var fetcher = BuildFetcher(blobs, orgs: new OrgRepository(_db));
+
+        var ex = await Assert.ThrowsAsync<TenantStorageQuotaExceededException>(() =>
+            fetcher.FetchArtifactAsync(_upstream, path, default, orgId: orgId));
+
+        Assert.Equal(orgId, ex.OrgId);
+        Assert.Equal(100, ex.QuotaBytes);
+        Assert.Null(await blobs.GetAsync(BlobKeys.Proxy(Sha256Hex(jar)), default));
+    }
+
+    [Fact]
+    public async Task TenantStorageQuota_FetchThenHashPath_OverQuota_RefusesAndDoesNotCache()
+    {
+        // No .sha256 sidecar stubbed → the fetcher falls back to fetch-then-hash, the path most
+        // real Maven Central artefacts take.
+        byte[] jar = RandomNumberGenerator.GetBytes(512);
+        string path = "com/example/widget/2.0.0/widget-2.0.0.jar";
+        StubArtifact(path, jar);
+        StubSha1Sidecar(path, Sha1Hex(jar));
+
+        string orgId = await CreateQuotaOrgAsync(quotaBytes: 100);
+        var blobs = new InMemoryBlobStore();
+        var fetcher = BuildFetcher(blobs, orgs: new OrgRepository(_db));
+
+        var ex = await Assert.ThrowsAsync<TenantStorageQuotaExceededException>(() =>
+            fetcher.FetchArtifactAsync(_upstream, path, default, orgId: orgId));
+
+        Assert.Equal(orgId, ex.OrgId);
+        Assert.Null(await blobs.GetAsync(BlobKeys.Proxy(Sha256Hex(jar)), default));
+    }
+
+    [Fact]
+    public async Task TenantStorageQuota_UnderQuota_Caches()
+    {
+        // The gate must admit a fill that fits — a quota that refuses everything is not a fix.
+        byte[] jar = RandomNumberGenerator.GetBytes(512);
+        string path = "com/example/widget/3.0.0/widget-3.0.0.jar";
+        StubArtifact(path, jar);
+        StubSidecar(path, Sha256Hex(jar));
+
+        string orgId = await CreateQuotaOrgAsync(quotaBytes: 10_000);
+        var blobs = new InMemoryBlobStore();
+        var fetcher = BuildFetcher(blobs, orgs: new OrgRepository(_db));
+
+        var result = await fetcher.FetchArtifactAsync(_upstream, path, default, orgId: orgId);
+
+        Assert.NotNull(result);
+        Assert.Equal(Sha256Hex(jar), result!.Sha256);
+        Assert.Equal(jar, await ReadBlobAsync(blobs, BlobKeys.Proxy(Sha256Hex(jar))));
     }
 
     /// <summary>Routes HttpClient requests through the WireMock server, preserving the path.</summary>

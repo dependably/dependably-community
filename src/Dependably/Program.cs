@@ -70,9 +70,6 @@ public partial class Program
         builder.AddDependablyMetadataStore();
         builder.AddDependablyBlobStore();
 
-        // ── Management wiring: HA Redis + Data Protection key ring ───────────────
-        builder.AddDependablyRedisAndDataProtection();
-
         builder.ConfigureDependablyKestrel();
         builder.ConfigureDependablyForwardedHeaders();
         builder.ConfigureDependablyHostFiltering();
@@ -88,12 +85,25 @@ public partial class Program
 
         builder.AddDependablyCaching();
         builder.AddDependablyBackgroundServices();
+
+        // ── Management wiring: HA Redis + Data Protection key ring ───────────────
+        // Registered after AddDependablyBackgroundServices (which registers CoreStartupService,
+        // the schema-migration hosted service) rather than before it: IHost starts hosted services
+        // in registration order, and the framework's DataProtectionHostedService eagerly loads the
+        // key ring from data_protection_keys at startup. Registering it here guarantees
+        // CoreStartupService's schema migration creates that table before the key ring is first read.
+        builder.AddDependablyRedisAndDataProtection();
+
         builder.AddDependablyStagingMonitor();
         builder.AddDependablyMetrics();
 
         builder.Services.AddHttpContextAccessor();
         builder.Services.AddDependablyRepositories(builder.Configuration);
         builder.Services.AddDependablyManagementRepositories();
+
+        // Mail foundation: instance-level SMTP config resolver + the MailKit sender every
+        // outbound email (invites, alert delivery, email-config test-send) funnels through.
+        builder.Services.AddDependablyMail(builder.Configuration);
 
         builder.AddDependablyPublishPipeline();
 
@@ -110,9 +120,15 @@ public partial class Program
         // with Slack enabled + a webhook URL configured). Same WEBHOOK_ALLOW_PRIVATE SSRF gate.
         builder.Services.AddDependablyAlertNotifier(builder.Configuration);
 
-        // Invite email delivery (opt-in via SMTP_HOST). No-op when SMTP_HOST is absent —
-        // the controller falls back to returning the invite link in the response body.
-        builder.Services.AddDependablyInviteMailer(builder.Configuration);
+        // Operator-realm Slack notifications for tenant-lifecycle and operator-account events
+        // (always registered; inert in single mode since its producers are apex-gated system
+        // endpoints). Deliberately a separate seam from the per-org alert notifier above.
+        builder.Services.AddDependablySystemEventNotifier();
+
+        // Invite email delivery, always registered — availability is a DB-backed runtime
+        // signal (instance SMTP config), not a startup-time env var. The controller falls
+        // back to returning the invite link in the response body when unconfigured.
+        builder.Services.AddDependablyInviteMailer();
 
         builder.AddDependablyProtocolServices();
         builder.AddDependablyUpstreamQueue();
@@ -358,10 +374,20 @@ public partial class Program
         // live together in the pipeline.
         app.UseMiddleware<Dependably.Infrastructure.StagingDiskFullExceptionMiddleware>();
 
+        // Translate TenantStorageQuotaExceededException (proxy cache fill would exceed the
+        // tenant's storage quota) into 413 problem-JSON. Sits adjacent to the other
+        // storage-layer exception mappings.
+        app.UseMiddleware<Dependably.Infrastructure.TenantStorageQuotaExceededExceptionMiddleware>();
+
         // Translate UpstreamFetchFailedException (transient upstream 403/429/5xx exhausted) into
         // 503/502 problem-JSON so package managers retry rather than treat the response as a
         // fatal policy block (403) or absence (404).
         app.UseMiddleware<Dependably.Infrastructure.UpstreamFetchFailedExceptionMiddleware>();
+
+        // Translate a SsrfBlockedException that escapes an ecosystem download path (no local
+        // catch) into 502 problem-JSON. Sits adjacent to UpstreamFetchFailedExceptionMiddleware
+        // so all upstream-fetch exception mappings live together in the pipeline.
+        app.UseMiddleware<Dependably.Infrastructure.SsrfBlockedExceptionMiddleware>();
 
         // Translate TenantNotReadyException raised by ITenantStorageResolver.GetRegistryAsync
         // into 404 / 423 / 503 problem-JSON responses instead of letting it bubble to a 500.
@@ -520,9 +546,13 @@ public partial class Program
     }
 
     // Gates the management Swagger UI static-asset subtree (/api/v1/docs/*) behind the metrics
-    // IP allowlist. The protocol Swagger UI (/docs/) is intentionally public — package-manager
-    // clients discover it by spec. Runs before UseStaticFiles so assets under /api/v1/docs are
-    // never served to callers outside the allowlist.
+    // IP allowlist AND an authenticated management session. The protocol Swagger UI (/docs/) is
+    // intentionally public — package-manager clients discover it by spec. Runs before
+    // UseStaticFiles so assets under /api/v1/docs are never served to callers outside the
+    // allowlist or without a session. The IP allowlist alone only bounds *where* a caller can be;
+    // requiring a session too means the control-plane API contract (every admin/system route,
+    // its parameters, and its schemas) can't be read by an unauthenticated caller who merely
+    // shares a subnet with an operator workstation.
     private static async Task ManagementDocsAllowlistMiddleware(HttpContext ctx, RequestDelegate next)
     {
         if (ctx.Request.Path.StartsWithSegments("/api/v1/docs"))
@@ -536,12 +566,20 @@ public partial class Program
                 await ctx.Response.WriteAsync("Forbidden");
                 return;
             }
+            if (!HasAuthenticatedManagementSession(ctx))
+            {
+                ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                await ctx.Response.WriteAsync("Unauthorized");
+                return;
+            }
         }
         await next(ctx);
     }
 
-    // Endpoint filter that gates the management OpenAPI spec behind the metrics IP allowlist.
-    // The protocol spec (/openapi/protocol.json) is left public.
+    // Endpoint filter that gates the management OpenAPI spec behind the metrics IP allowlist AND
+    // an authenticated management session (tenant or system_admin JWT) — a caller inside the
+    // allowlist with no session can no longer enumerate the entire control-plane API surface for
+    // reconnaissance. The protocol spec (/openapi/protocol.json) is left public.
     private static async ValueTask<object?> ManagementOpenApiAllowlistFilter(
         EndpointFilterInvocationContext invocationContext, EndpointFilterDelegate next)
     {
@@ -556,8 +594,28 @@ public partial class Program
             {
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             }
+            if (!HasAuthenticatedManagementSession(ctx))
+            {
+                return Results.StatusCode(StatusCodes.Status401Unauthorized);
+            }
         }
         return await next(invocationContext);
+    }
+
+    // True when the request carries a validated JWT (cookie session or Bearer) with a
+    // recognized management scope — <c>tenant</c> (an org member) or <c>system</c>
+    // (a system_admin, multi mode only). UseAuthentication runs earlier in the pipeline, so
+    // HttpContext.User already reflects the authentication result by the time this is checked.
+    private static bool HasAuthenticatedManagementSession(HttpContext ctx)
+    {
+        var user = ctx.User;
+        if (user.Identity?.IsAuthenticated != true)
+        {
+            return false;
+        }
+
+        string? scope = user.FindFirst("scope")?.Value;
+        return scope is "tenant" or "system";
     }
 
     // Serves the Swagger shell index.html for a given file provider. UseDefaultFiles relies on

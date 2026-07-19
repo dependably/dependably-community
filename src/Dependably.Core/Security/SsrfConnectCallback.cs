@@ -20,6 +20,7 @@ public sealed class SsrfConnectCallback
 {
     private readonly Func<IPAddress, bool> _isBlocked;
     private readonly string? _allowedHost;
+    private readonly Func<string, CancellationToken, Task<IPAddress[]>> _resolve;
 
     /// <param name="isBlocked">
     /// Per-IP block predicate — <see cref="SsrfGuard.IsBlockedIp"/> in production. Injected so
@@ -32,9 +33,22 @@ public sealed class SsrfConnectCallback
     /// host is exempted; every other private/internal host stays blocked.
     /// </param>
     public SsrfConnectCallback(Func<IPAddress, bool> isBlocked, string? allowedHost = null)
+        : this(isBlocked, allowedHost, (host, ct) => Dns.GetHostAddressesAsync(host, ct)) { }
+
+    /// <param name="isBlocked">Per-IP block predicate.</param>
+    /// <param name="allowedHost">Exact edge-master host exempt from the block predicate, or null.</param>
+    /// <param name="resolve">
+    /// DNS resolver — injected so tests can control the candidate set without network I/O.
+    /// Production callers use the overload that omits this parameter.
+    /// </param>
+    internal SsrfConnectCallback(
+        Func<IPAddress, bool> isBlocked,
+        string? allowedHost,
+        Func<string, CancellationToken, Task<IPAddress[]>> resolve)
     {
         _isBlocked = isBlocked;
         _allowedHost = string.IsNullOrEmpty(allowedHost) ? null : allowedHost;
+        _resolve = resolve;
     }
 
     public ValueTask<Stream> ConnectAsync(
@@ -46,6 +60,22 @@ public sealed class SsrfConnectCallback
     // be unit-tested directly.
     internal async ValueTask<Stream> ConnectAsync(string host, int port, CancellationToken ct)
     {
+        var socket = await ConnectSocketAsync(host, port, ct).ConfigureAwait(false);
+        return new NetworkStream(socket, ownsSocket: true);
+    }
+
+    /// <summary>
+    /// Resolves <paramref name="host"/> once, validates every candidate address against the
+    /// injected block predicate, and dials an already-connected <see cref="Socket"/> to one of
+    /// the vetted candidates — the same resolve-once/dial-what-was-checked guarantee as
+    /// <see cref="ConnectAsync(string,int,CancellationToken)"/>, exposed as a raw socket for
+    /// transports with no <c>SocketsHttpHandler.ConnectCallback</c> hook to plug into (MailKit's
+    /// SMTP client, which instead accepts a pre-connected <see cref="Socket"/> plus the original
+    /// hostname for TLS SNI/certificate-name validation, so no second DNS lookup happens inside
+    /// the client).
+    /// </summary>
+    public async Task<Socket> ConnectSocketAsync(string host, int port, CancellationToken ct)
+    {
         // Edge allowlist: the exact master host bypasses the IP block predicate so an internal
         // master is dialable; all other hosts run the full block check unchanged.
         bool hostAllowed = _allowedHost is not null
@@ -55,7 +85,7 @@ public sealed class SsrfConnectCallback
         // same result set, leaving no second resolution for a rebinding attacker to flip.
         var candidates = IPAddress.TryParse(host, out var literal)
             ? [literal]
-            : await Dns.GetHostAddressesAsync(host, ct).ConfigureAwait(false);
+            : await _resolve(host, ct).ConfigureAwait(false);
 
         if (candidates.Length == 0)
         {
@@ -78,7 +108,7 @@ public sealed class SsrfConnectCallback
         try
         {
             await socket.ConnectAsync(candidates, port, ct).ConfigureAwait(false);
-            return new NetworkStream(socket, ownsSocket: true);
+            return socket;
         }
         catch
         {

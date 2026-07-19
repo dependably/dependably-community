@@ -52,6 +52,15 @@
   function unscoredSummary(v) {
     return v.unscored?.length ? `${v.unscored.length}` : '0'
   }
+
+  // The not-found body echoes the coordinate the server actually resolved, so the hint names
+  // the package the user asked for even after they have edited the form fields.
+  function notFoundHint(r) {
+    const registry = ECO_LABEL[r.ecosystem] ?? r.ecosystem
+    return r.version
+      ? $t('lookup.notFound.versionHint', { values: { registry, name: r.name, version: r.version } })
+      : $t('lookup.notFound.hint', { values: { registry, name: r.name } })
+  }
 </script>
 
 <div class="page">
@@ -98,6 +107,19 @@
 
   {#if loading}
     <p class="text-muted">{$t('common.loading')}</p>
+  {:else if result && !result.found}
+    <!--
+      A package the upstream has never heard of is an answer, not an error — the endpoint
+      returns it as a 200 with found=false, so it renders as a neutral state rather than the
+      red ErrorBanner. Mistyping a name is the ordinary way to land here.
+    -->
+    <div class="notfound-panel">
+      <svg width="16" height="16" aria-hidden="true"><use href="/icons.svg#icon-search" /></svg>
+      <div>
+        <p class="notfound-title">{$t('lookup.notFound.title')}</p>
+        <p class="text-muted t-sm">{notFoundHint(result)}</p>
+      </div>
+    </div>
   {:else if result}
     <div class="verdict-panel">
       <div class="verdict-header">
@@ -233,6 +255,19 @@
     border-radius: var(--radius);
     padding: 16px;
   }
+
+  .notfound-panel {
+    display: flex;
+    align-items: start;
+    gap: 10px;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+    color: var(--text2);
+  }
+  .notfound-title { margin: 0 0 2px; font-weight: 600; color: var(--text); }
+  .notfound-panel p { margin: 0; }
   .verdict-header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .verdict-purl { color: var(--text2); font-size: 13px; }
   .hint-row { display: flex; align-items: center; gap: 6px; }

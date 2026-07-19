@@ -49,6 +49,7 @@ public sealed class OciUploadService
     private readonly long _stagingDiskFloorBytes;
     private readonly string _stagingPath;
     private readonly OciImageLicenseRecorder _licenseRecorder;
+    private readonly OciBlobKeyLock _blobKeyLock;
     private readonly ILogger<OciUploadService> _logger;
 
     /// <summary>
@@ -63,6 +64,7 @@ public sealed class OciUploadService
         StagingOptions StagingOptions,
         IConfiguration Configuration,
         OciImageLicenseRecorder LicenseRecorder,
+        OciBlobKeyLock BlobKeyLock,
         ILogger<OciUploadService> Logger,
         TimeProvider Time);
 
@@ -77,6 +79,7 @@ public sealed class OciUploadService
         // here (not injected) so this Singleton doesn't capture a Scoped repository.
         _packages = new PackageRepository(deps.Db, time: deps.Time);
         _licenseRecorder = deps.LicenseRecorder;
+        _blobKeyLock = deps.BlobKeyLock;
         _logger = deps.Logger;
 
         string? configured = deps.Configuration["PROXY_STAGING_PATH"];
@@ -265,59 +268,70 @@ public sealed class OciUploadService
         long sizeBytes = new FileInfo(session.StagingPath).Length;
         string blobKey = BlobKeys.OciBlob("sha256", computedHex);
 
-        // Quota reservation: blobs that already exist in the Registry tier do not consume
-        // additional tenant quota (content-addressed storage — same bytes already counted).
-        // Only reserve for new blobs to avoid double-counting when two tenants push identical
-        // layers. Reserve before any write so the counter stays accurate on failure.
-        bool newBlob = !await _blobs.Registry.ExistsAsync(blobKey, ct);
-        long? quota = newBlob ? await _orgs.GetEffectiveStorageQuotaAsync(orgId, ct) : null;
-        bool reserved = false;
-        if (newBlob && quota is not null)
+        // Serialise the exists-check → reserve → put → row-insert for this content-addressed key
+        // against every other finalize and refcount-guarded delete of the same key. OCI blob keys
+        // have no org segment, so two concurrent pushes of the same new blob would otherwise both
+        // observe "does not exist" and each reserve the tenant's quota (double-counting one stored
+        // blob), and a skip-the-write dedup push could race a physical delete into a dangling row.
+        await using (await _blobKeyLock.AcquireAsync(blobKey, ct))
         {
-            if (!await _orgs.TryReserveStorageAsync(orgId, sizeBytes, quota, ct))
+            // Quota reservation: blobs that already exist in the Registry tier do not consume
+            // additional tenant quota (content-addressed storage — same bytes already counted).
+            // Only reserve for new blobs to avoid double-counting when two tenants push identical
+            // layers. Reserve before any write so the counter stays accurate on failure. The
+            // existence probe runs inside the lock so a blob deleted by a concurrent yank is
+            // re-detected here and re-put rather than left dangling.
+            bool newBlob = !await _blobs.Registry.ExistsAsync(blobKey, ct);
+            long? quota = newBlob ? await _orgs.GetEffectiveStorageQuotaAsync(orgId, ct) : null;
+            bool reserved = false;
+            if (newBlob && quota is not null)
             {
-                await CleanupSessionAsync(orgId, session, ct);
-                return OciBlobFinalizeResult.QuotaExceeded;
-            }
-            reserved = true;
-        }
-
-        try
-        {
-            if (newBlob)
-            {
-                // StagingPath is the server-generated "oci-upload-{GUID}" path; not user-controlled.
-                await using var src = new FileStream(session.StagingPath, FileMode.Open, FileAccess.Read);
-                await _blobs.Registry.PutAsync(blobKey, src, ct);
-            }
-
-            await UpsertBlobRowAsync(orgId, $"sha256:{computedHex}", "application/octet-stream", sizeBytes, blobKey, ct);
-            await CleanupSessionAsync(orgId, session, ct);
-
-            _logger.LogInformation(
-                "OCI blob push {Repository}/sha256:{Digest} ({Bytes} B)", session.Repository, computedHex, sizeBytes);
-            return OciBlobFinalizeResult.Ok($"sha256:{computedHex}", sizeBytes);
-        }
-        catch
-        {
-            // Release the reservation so the quota counter stays accurate when the blob put
-            // or metadata upsert fails. Fire-and-forget: a release failure leaves the counter
-            // high (conservative — more likely to 413 on retry), which is safer than low.
-            if (reserved)
-            {
-                try { await _orgs.ReleaseStorageAsync(orgId, sizeBytes, CancellationToken.None); }
-                catch (Exception releaseEx)
+                if (!await _orgs.TryReserveStorageAsync(orgId, sizeBytes, quota, ct))
                 {
-                    _logger.LogError(releaseEx,
-                        "Quota counter release failed for org {OrgId} after OCI blob finalize failure; " +
-                        "counter may be high until next publish. BlobKey={BlobKey} TraceId={TraceId}",
-                        orgId, blobKey,
-                        System.Diagnostics.Activity.Current?.TraceId.ToString());
+                    await CleanupSessionAsync(orgId, session, ct);
+                    return OciBlobFinalizeResult.QuotaExceeded;
                 }
+                reserved = true;
             }
-            await CleanupSessionAsync(orgId, session, CancellationToken.None);
-            throw;
+
+            try
+            {
+                if (newBlob)
+                {
+                    // StagingPath is the server-generated "oci-upload-{GUID}" path; not user-controlled.
+                    await using var src = new FileStream(session.StagingPath, FileMode.Open, FileAccess.Read);
+                    await _blobs.Registry.PutAsync(blobKey, src, ct);
+                }
+
+                await UpsertBlobRowAsync(orgId, $"sha256:{computedHex}", "application/octet-stream", sizeBytes, blobKey, ct);
+            }
+            catch
+            {
+                // Release the reservation so the quota counter stays accurate when the blob put
+                // or metadata upsert fails. Fire-and-forget: a release failure leaves the counter
+                // high (conservative — more likely to 413 on retry), which is safer than low.
+                if (reserved)
+                {
+                    try { await _orgs.ReleaseStorageAsync(orgId, sizeBytes, CancellationToken.None); }
+                    catch (Exception releaseEx)
+                    {
+                        _logger.LogError(releaseEx,
+                            "Quota counter release failed for org {OrgId} after OCI blob finalize failure; " +
+                            "counter may be high until next publish. BlobKey={BlobKey} TraceId={TraceId}",
+                            orgId, blobKey,
+                            System.Diagnostics.Activity.Current?.TraceId.ToString());
+                    }
+                }
+                await CleanupSessionAsync(orgId, session, CancellationToken.None);
+                throw;
+            }
         }
+
+        await CleanupSessionAsync(orgId, session, ct);
+
+        _logger.LogInformation(
+            "OCI blob push {Repository}/sha256:{Digest} ({Bytes} B)", session.Repository, computedHex, sizeBytes);
+        return OciBlobFinalizeResult.Ok($"sha256:{computedHex}", sizeBytes);
     }
 
     /// <summary>Deletes a session's DB row and staging file. Safe to call more than once.</summary>
@@ -381,67 +395,74 @@ public sealed class OciUploadService
     private async Task<OciManifestStoreResult> ReserveAndPutManifestAsync(
         OciManifestPutArgs a, CancellationToken ct)
     {
-        // Quota reservation: manifest blobs that already exist in the Registry tier do not
-        // consume additional tenant quota (same content-addressed logic as layer blobs).
-        bool newBlob = !await _blobs.Registry.ExistsAsync(a.BlobKey, ct);
-        long? quota = newBlob ? await _orgs.GetEffectiveStorageQuotaAsync(a.OrgId, ct) : null;
-        bool reserved = false;
-        if (newBlob && quota is not null)
+        // Serialise exists-check → reserve → put → row-insert for this content-addressed manifest
+        // key against every other finalize and refcount-guarded delete of the same key, exactly as
+        // the layer-blob finalize path does — closing the same quota double-count and dangling-row
+        // races for manifest blobs, which share the org-segment-free key space.
+        await using (await _blobKeyLock.AcquireAsync(a.BlobKey, ct))
         {
-            if (!await _orgs.TryReserveStorageAsync(a.OrgId, a.Bytes.LongLength, quota, ct))
+            // Quota reservation: manifest blobs that already exist in the Registry tier do not
+            // consume additional tenant quota (same content-addressed logic as layer blobs).
+            bool newBlob = !await _blobs.Registry.ExistsAsync(a.BlobKey, ct);
+            long? quota = newBlob ? await _orgs.GetEffectiveStorageQuotaAsync(a.OrgId, ct) : null;
+            bool reserved = false;
+            if (newBlob && quota is not null)
             {
-                return OciManifestStoreResult.QuotaExceeded;
-            }
-            reserved = true;
-        }
-
-        try
-        {
-            if (newBlob)
-            {
-                await _blobs.Registry.PutAsync(a.BlobKey, new MemoryStream(a.Bytes), ct);
-            }
-
-            await UpsertBlobRowAsync(a.OrgId, a.Digest, a.MediaType, a.Bytes.Length, a.BlobKey, ct, updateMediaType: true);
-
-            // Capture the image license from the config label onto the manifest row. On push the
-            // config blob is guaranteed present (refs validated above), so this stamps synchronously.
-            await _licenseRecorder.RecordManifestAsync(a.OrgId, a.Digest, a.Bytes, ct);
-
-            // Repoint the tag and surface the image in the shared catalogue (only tag pushes are
-            // catalogued — by-digest manifest pushes, e.g. an index's children, are not the
-            // user-facing unit). Mirrors the proxy path's cataloguing with origin='uploaded'.
-            bool isTag = !OciCoordinatesParser.IsValidDigest(a.Reference) && OciCoordinatesParser.IsValidTag(a.Reference);
-            if (isTag)
-            {
-                await UpsertTagAsync(a.OrgId, a.Repository, a.Reference, a.Digest, ct);
-                await RecordCatalogVersionAsync(
-                    new OciCatalogEntry(a.OrgId, a.Repository, a.Reference, a.Digest, a.Hex, a.Bytes.Length, a.BlobKey), ct);
-            }
-
-            _logger.LogInformation(
-                "OCI manifest push {Repository}/{Reference} → {Digest} ({Bytes} B)",
-                a.Repository, a.Reference, a.Digest, a.Bytes.Length);
-            return OciManifestStoreResult.Ok(a.Digest);
-        }
-        catch
-        {
-            // Release the reservation so the quota counter stays accurate when the blob put
-            // or metadata upsert fails. Fire-and-forget: a release failure leaves the counter
-            // high (conservative), which is safer than low.
-            if (reserved)
-            {
-                try { await _orgs.ReleaseStorageAsync(a.OrgId, a.Bytes.LongLength, CancellationToken.None); }
-                catch (Exception releaseEx)
+                if (!await _orgs.TryReserveStorageAsync(a.OrgId, a.Bytes.LongLength, quota, ct))
                 {
-                    _logger.LogError(releaseEx,
-                        "Quota counter release failed for org {OrgId} after OCI manifest store failure; " +
-                        "counter may be high until next publish. BlobKey={BlobKey} TraceId={TraceId}",
-                        a.OrgId, a.BlobKey,
-                        System.Diagnostics.Activity.Current?.TraceId.ToString());
+                    return OciManifestStoreResult.QuotaExceeded;
                 }
+                reserved = true;
             }
-            throw;
+
+            try
+            {
+                if (newBlob)
+                {
+                    await _blobs.Registry.PutAsync(a.BlobKey, new MemoryStream(a.Bytes), ct);
+                }
+
+                await UpsertBlobRowAsync(a.OrgId, a.Digest, a.MediaType, a.Bytes.Length, a.BlobKey, ct, updateMediaType: true);
+
+                // Capture the image license from the config label onto the manifest row. On push the
+                // config blob is guaranteed present (refs validated above), so this stamps synchronously.
+                await _licenseRecorder.RecordManifestAsync(a.OrgId, a.Digest, a.Bytes, ct);
+
+                // Repoint the tag and surface the image in the shared catalogue (only tag pushes are
+                // catalogued — by-digest manifest pushes, e.g. an index's children, are not the
+                // user-facing unit). Mirrors the proxy path's cataloguing with origin='uploaded'.
+                bool isTag = !OciCoordinatesParser.IsValidDigest(a.Reference) && OciCoordinatesParser.IsValidTag(a.Reference);
+                if (isTag)
+                {
+                    await UpsertTagAsync(a.OrgId, a.Repository, a.Reference, a.Digest, ct);
+                    await RecordCatalogVersionAsync(
+                        new OciCatalogEntry(a.OrgId, a.Repository, a.Reference, a.Digest, a.Hex, a.Bytes.Length, a.BlobKey), ct);
+                }
+
+                _logger.LogInformation(
+                    "OCI manifest push {Repository}/{Reference} → {Digest} ({Bytes} B)",
+                    a.Repository, a.Reference, a.Digest, a.Bytes.Length);
+                return OciManifestStoreResult.Ok(a.Digest);
+            }
+            catch
+            {
+                // Release the reservation so the quota counter stays accurate when the blob put
+                // or metadata upsert fails. Fire-and-forget: a release failure leaves the counter
+                // high (conservative), which is safer than low.
+                if (reserved)
+                {
+                    try { await _orgs.ReleaseStorageAsync(a.OrgId, a.Bytes.LongLength, CancellationToken.None); }
+                    catch (Exception releaseEx)
+                    {
+                        _logger.LogError(releaseEx,
+                            "Quota counter release failed for org {OrgId} after OCI manifest store failure; " +
+                            "counter may be high until next publish. BlobKey={BlobKey} TraceId={TraceId}",
+                            a.OrgId, a.BlobKey,
+                            System.Diagnostics.Activity.Current?.TraceId.ToString());
+                    }
+                }
+                throw;
+            }
         }
     }
 
@@ -511,6 +532,10 @@ public sealed class OciUploadService
                 new NewPackageVersion(pkg.Id, entry.Digest, purl, entry.BlobKey, entry.SizeBytes,
                     entry.Sha256Hex, FirstFetch: false, Origin: "uploaded"),
                 ct);
+
+            // The manifest's license was stamped onto oci_blobs before this row existed; project it
+            // onto the row now so every license reader sees it through the shared table.
+            await _licenseRecorder.ProjectLicenseToCatalogAsync(entry.OrgId, entry.Digest, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

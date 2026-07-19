@@ -77,18 +77,47 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
         return new EnvelopeProtector(new EnvFileMasterKeyProvider(config));
     }
 
-    private static async Task WaitAsync(Func<bool> condition, TimeSpan? timeout = null)
+    /// <summary>
+    /// Polls the DURABLE end state (the persisted subscription row) rather than the queue's in-memory
+    /// counters. The counters are incremented only after the outcome write lands, so they do imply
+    /// durable state — but asserting on the row keeps the test independent of that internal
+    /// ordering, so a future reordering of the queue's bookkeeping cannot silently reintroduce a
+    /// race between the counter and the write.
+    /// </summary>
+    private static async Task WaitAsync(Func<Task<bool>> condition, TimeSpan? timeout = null)
     {
-        // now-ok: polling deadline awaiting real async completion of the queue consumer
-        var deadline = DateTimeOffset.UtcNow + (timeout ?? TimeSpan.FromSeconds(3));
-        while (!condition() && DateTimeOffset.UtcNow < deadline)
+        // now-ok: polling deadline awaiting real async completion of the durable write path
+        var deadline = DateTimeOffset.UtcNow + (timeout ?? TimeSpan.FromSeconds(10));
+        while (!await condition() && DateTimeOffset.UtcNow < deadline)
         {
             await Task.Delay(20);
         }
 
-        if (!condition())
+        if (!await condition())
         {
             throw new TimeoutException("Condition never satisfied.");
+        }
+    }
+
+    /// <summary>
+    /// Drives a queue's retry backoff deterministically: advances <paramref name="clock"/> by
+    /// <paramref name="step"/> and yields briefly so the background delivery loop observes each
+    /// fired timer, repeating until <paramref name="condition"/> is met. The tiny real-time yield
+    /// only gives the scheduler a turn — it does not wait out the backoff itself, which is driven
+    /// entirely by the advancing fake clock.
+    /// </summary>
+    private static async Task PumpUntilAsync(
+        FakeTimeProvider clock, Func<Task<bool>> condition, TimeSpan step, int maxIterations = 200)
+    {
+        for (int i = 0; i < maxIterations && !await condition(); i++)
+        {
+            clock.Advance(step);
+            await Task.Delay(5);
+        }
+
+        if (!await condition())
+        {
+            throw new TimeoutException("Condition never satisfied while pumping the fake clock.");
         }
     }
 
@@ -505,20 +534,23 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
     /// to two subscriptions where the HTTP endpoint is up for one ("good") and returns 502 for
     /// the other ("bad") results in exactly one delivered and eventually one failed count.
     /// Because the queue retries on failure, the "bad" subscription goes through the full
-    /// backoff schedule before being counted as failed. The test waits for the outcome.
+    /// backoff schedule before being counted as failed. A dedicated <see cref="FakeTimeProvider"/>
+    /// drives the queue's retry backoff so the test advances virtual time instead of waiting out
+    /// the real 36-second (1s + 5s + 30s) schedule.
     /// </summary>
-    [Fact(Timeout = 90_000)]
+    [Fact]
     public async Task FanOut_QueueEndToEnd_OneSucceeds_OneFails_IndependentCounters()
     {
         using var ep = MakeProtector();
         var repo = new WebhookSubscriptionRepository(_db, ep, Clock);
+        var webhookClock = new FakeTimeProvider(Clock.GetUtcNow());
 
-        await repo.AddAsync("org1", new NewWebhookSubscription(
+        var subGood = await repo.AddAsync("org1", new NewWebhookSubscription(
             "https://good.example.com/hook2",
             ["package.publish"],
             Secret: null, Description: null));
 
-        await repo.AddAsync("org1", new NewWebhookSubscription(
+        var subBad = await repo.AddAsync("org1", new NewWebhookSubscription(
             "https://bad.example.com/hook2",
             ["package.publish"],
             Secret: null, Description: null));
@@ -526,21 +558,355 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
         var mockClient = BuildPartialFailureClient();
 
         var queue = new WebhookDispatchQueue(
-            repo, mockClient, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance);
+            repo, mockClient, webhookClock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance);
         using var cts = new CancellationTokenSource();
         _ = queue.StartAsync(cts.Token);
 
         queue.Dispatch(SampleEnvelope(eventType: "package.publish", orgId: "org1"));
 
-        // now-ok: polling real async queue until both subscriptions have a terminal outcome.
-        // "bad" sub goes through 1s + 5s + 30s retries before failing, so allow 60s.
-        await WaitAsync(() => queue.DeliveredCount + queue.FailedCount >= 2, TimeSpan.FromSeconds(60));
+        // Advance the fake clock through the 1s + 5s + 30s backoff schedule so the "bad" sub's
+        // retries cost virtual time, not real time — and wait on the DURABLE end state (the
+        // persisted subscription rows) rather than the in-memory counters, so the assertion does
+        // not depend on the queue's internal increment ordering.
+        await PumpUntilAsync(webhookClock, async () =>
+        {
+            var good = await repo.GetAsync("org1", subGood.Id);
+            var bad = await repo.GetAsync("org1", subBad.Id);
+            return good?.LastStatus is not null && bad?.LastStatus is not null;
+        }, TimeSpan.FromSeconds(1));
 
-        await cts.CancelAsync();
+        // Graceful drain — StopAsync signals ExecuteAsync's stopping token itself, but by the
+        // time we get here both durable writes have already landed, so there is nothing
+        // in-flight left for a cancellation to interrupt.
         try { await queue.StopAsync(CancellationToken.None); } catch { }
 
         Assert.Equal(1, queue.DeliveredCount);
         Assert.Equal(1, queue.FailedCount);
+    }
+
+    // ── Cross-tenant non-delivery ────────────────────────────────────────────
+
+    /// <summary>
+    /// Two orgs each register an enabled subscription for the same event type. Dispatching a
+    /// <see cref="PackageEventEnvelope"/> for org1 only must never reach org2's endpoint — the
+    /// existing multi-org tests (<see cref="FanOut_QueueEndToEnd_OneSucceeds_OneFails_IndependentCounters"/>)
+    /// prove independent per-org *outcomes* but never assert that the wrong tenant's URL received
+    /// zero requests. This is the "must-NOT" twin: org2's URL gets no POST at all, and the one
+    /// delivered body carries only org1's slug/data.
+    /// </summary>
+    [Fact]
+    public async Task Dispatch_EventForOrg1_NeverDeliveredToOrg2Endpoint()
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('org2', 'beta')");
+
+        using var ep = MakeProtector();
+        var repo = new WebhookSubscriptionRepository(_db, ep, Clock);
+        var webhookClock = new FakeTimeProvider(Clock.GetUtcNow());
+
+        var subOrg1 = await repo.AddAsync("org1", new NewWebhookSubscription(
+            "https://org1-endpoint.example.com/hook",
+            ["package.publish"],
+            Secret: null, Description: null));
+
+        var subOrg2 = await repo.AddAsync("org2", new NewWebhookSubscription(
+            "https://org2-endpoint.example.com/hook",
+            ["package.publish"],
+            Secret: null, Description: null));
+
+        var handler = new RecordingDelegatingHandler();
+        var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(5) };
+        var client = new WebhookDeliveryClient(http);
+
+        var queue = new WebhookDispatchQueue(
+            repo, client, webhookClock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance);
+        using var cts = new CancellationTokenSource();
+        _ = queue.StartAsync(cts.Token);
+
+        queue.Dispatch(SampleEnvelope(eventType: "package.publish", orgId: "org1", orgSlug: "acme"));
+
+        await WaitAsync(async () => (await repo.GetAsync("org1", subOrg1.Id))?.LastStatus is not null);
+
+        // Graceful drain — StopAsync signals ExecuteAsync's stopping token itself, but by the
+        // time we get here the durable write has already landed, so there is nothing in-flight
+        // left for a cancellation to interrupt.
+        try { await queue.StopAsync(CancellationToken.None); } catch { }
+
+        // Exactly one POST was ever sent, and it went to org1's endpoint — org2's endpoint
+        // received nothing at all.
+        Assert.Single(handler.Requests);
+        var (url, body) = handler.Requests[0];
+        Assert.Equal("https://org1-endpoint.example.com/hook", url);
+        Assert.DoesNotContain(handler.Requests, r => r.Url == "https://org2-endpoint.example.com/hook");
+
+        // The delivered body carries org1's slug and no trace of org2's.
+        Assert.Contains("\"acme\"", body);
+        Assert.DoesNotContain("beta", body);
+
+        // org2's subscription was never touched: no delivery attempted, no failure recorded.
+        var org2Sub = await repo.GetAsync("org2", subOrg2.Id);
+        Assert.NotNull(org2Sub);
+        Assert.Null(org2Sub!.LastStatus);
+        Assert.Equal(0, org2Sub.ConsecutiveFailures);
+    }
+
+    /// <summary>Records every request as an (url, body) pair and always returns 200 OK. Used by
+    /// cross-tenant non-delivery tests, which need to know exactly which URL(s) were called —
+    /// not just an aggregate count or the last body, unlike <see cref="PartialFailureDelegatingHandler"/>.</summary>
+    private sealed class RecordingDelegatingHandler : DelegatingHandler
+    {
+        public List<(string Url, string Body)> Requests { get; } = [];
+
+        public RecordingDelegatingHandler() : base(new HttpClientHandler()) { }
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            string url = request.RequestUri?.ToString() ?? "";
+            string body = request.Content is null
+                ? ""
+                : await request.Content.ReadAsStringAsync(cancellationToken);
+            Requests.Add((url, body));
+            return new HttpResponseMessage(HttpStatusCode.OK);
+        }
+    }
+
+    // ── Shutdown mid-bookkeeping (host-stopping token cancelled after send succeeds) ──
+
+    /// <summary>
+    /// Simulates host shutdown landing in the window between the webhook POST succeeding and
+    /// the durable outcome write: the fake handler cancels the stopping token synchronously,
+    /// before returning the 200 response, so <see cref="WebhookDispatchQueue.DeliverToSubscriptionAsync"/>
+    /// resumes with an already-cancelled token. The delivery must still be recorded as durable
+    /// state (not lost to a swallowed <see cref="OperationCanceledException"/>), and
+    /// <see cref="WebhookDispatchQueue.DeliveredCount"/> must only report 1 once that write has
+    /// actually landed.
+    /// </summary>
+    [Fact]
+    public async Task DeliverToSubscriptionAsync_ShutdownCancelsTokenRightAfterSendSucceeds_OutcomeStillRecorded()
+    {
+        using var ep = MakeProtector();
+        var repo = new WebhookSubscriptionRepository(_db, ep, Clock);
+
+        var sub = await repo.AddAsync("org1", new NewWebhookSubscription(
+            "https://good.example.com/hook",
+            ["package.publish"],
+            Secret: null, Description: null));
+
+        using var cts = new CancellationTokenSource();
+        var handler = new CancelOnSendHandler(cts);
+        var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(5) };
+        var client = new WebhookDeliveryClient(http);
+
+        var queue = new WebhookDispatchQueue(
+            repo, client, Clock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance);
+        var delivery = new WebhookSubscriptionDelivery(
+            sub.Id, "org1", sub.Url, Secret: null, sub.EventTypes, sub.ConsecutiveFailures, sub.FailingSince);
+
+        // Drives the delivery path directly (no queue/BackgroundService loop needed) with a
+        // token that gets cancelled synchronously the instant the POST "lands" — the exact
+        // window the shutdown bug races.
+        await queue.DeliverToSubscriptionAsync(SampleEnvelope(), delivery, cts.Token);
+
+        Assert.True(cts.IsCancellationRequested);
+        Assert.Equal(1, queue.DeliveredCount);
+
+        var reread = await repo.GetAsync("org1", sub.Id);
+        Assert.Equal("ok", reread!.LastStatus);
+        Assert.Equal(0, reread.ConsecutiveFailures);
+    }
+
+    /// <summary>
+    /// Same shutdown-window scenario on the terminal-failure path: once retries are exhausted,
+    /// the failure bookkeeping (which drives auto-disable) must also survive a stopping token
+    /// cancelled at the moment the last attempt finishes. A dedicated <see cref="FakeTimeProvider"/>
+    /// drives the retry backoff so the test doesn't wait out the real 1s/5s/30s schedule.
+    /// </summary>
+    [Fact]
+    public async Task DeliverToSubscriptionAsync_ShutdownCancelsTokenRightAfterFinalAttemptFails_FailureStillRecorded()
+    {
+        using var ep = MakeProtector();
+        var repo = new WebhookSubscriptionRepository(_db, ep, Clock);
+        var webhookClock = new FakeTimeProvider(Clock.GetUtcNow());
+
+        var sub = await repo.AddAsync("org1", new NewWebhookSubscription(
+            "https://bad.example.com/hook",
+            ["package.publish"],
+            Secret: null, Description: null));
+
+        using var cts = new CancellationTokenSource();
+        var handler = new CancelOnFinalFailureHandler(cts);
+        var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(5) };
+        var client = new WebhookDeliveryClient(http);
+
+        // Seed the subscription one failure short of the auto-disable threshold so this
+        // delivery's failure crosses it — proving the auto-disable-driving count itself
+        // survived the cancelled token, not just a generic status string.
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "UPDATE webhook_subscription SET consecutive_failures = @n WHERE id = @id",
+                new { n = WebhookDispatchQueue.AutoDisableAfterFailures - 1, id = sub.Id });
+        }
+
+        var queue = new WebhookDispatchQueue(
+            repo, client, webhookClock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance);
+        var delivery = new WebhookSubscriptionDelivery(
+            sub.Id, "org1", sub.Url, Secret: null, sub.EventTypes,
+            ConsecutiveFailures: WebhookDispatchQueue.AutoDisableAfterFailures - 1, FailingSince: null);
+
+        var deliverTask = queue.DeliverToSubscriptionAsync(SampleEnvelope(), delivery, cts.Token);
+        await PumpUntilAsync(webhookClock, () => Task.FromResult(cts.IsCancellationRequested), TimeSpan.FromSeconds(1));
+        await deliverTask;
+
+        Assert.True(cts.IsCancellationRequested);
+        Assert.Equal(1, queue.FailedCount);
+
+        var reread = await repo.GetAsync("org1", sub.Id);
+        Assert.Equal("failed", reread!.LastStatus);
+        Assert.False(reread.Enabled, "Auto-disable must still fire from the durably-recorded failure count.");
+    }
+
+    /// <summary>Cancels the given token synchronously right before returning a 200 response.</summary>
+    private sealed class CancelOnSendHandler : DelegatingHandler
+    {
+        private readonly CancellationTokenSource _cancelOnSend;
+        public CancelOnSendHandler(CancellationTokenSource cancelOnSend) : base(new HttpClientHandler())
+        {
+            _cancelOnSend = cancelOnSend;
+        }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            _cancelOnSend.Cancel();
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK));
+        }
+    }
+
+    /// <summary>
+    /// Fails every attempt with 502; on the last attempt of the retry budget (1 initial + 3
+    /// retries = 4 total), cancels the given token synchronously right before returning —
+    /// simulating shutdown landing exactly as the retry budget is exhausted.
+    /// </summary>
+    private sealed class CancelOnFinalFailureHandler : DelegatingHandler
+    {
+        private readonly CancellationTokenSource _cancelOnFinal;
+        private int _attempts;
+
+        public CancelOnFinalFailureHandler(CancellationTokenSource cancelOnFinal)
+            : base(new HttpClientHandler())
+        {
+            _cancelOnFinal = cancelOnFinal;
+        }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            int attempt = Interlocked.Increment(ref _attempts);
+            if (attempt >= 4)
+            {
+                _cancelOnFinal.Cancel();
+            }
+
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.BadGateway));
+        }
+    }
+
+    // ── Shutdown drain (channel still buffered when the stopping token is cancelled) ──
+
+    /// <summary>
+    /// Reproduces the shutdown-drop defect deterministically by invoking <c>ExecuteAsync</c>
+    /// directly (via the <see cref="WebhookDispatchQueue.ExecuteAsyncForTests"/> test hook) with
+    /// an already-cancelled token — <see cref="BackgroundService.StartAsync"/> itself
+    /// short-circuits and never calls <c>ExecuteAsync</c> at all in that case, so it cannot
+    /// exercise the real race being tested (a stopping token cancelled while the read loop is
+    /// genuinely running, mid-shutdown, with an envelope still buffered). The main
+    /// <c>ReadAllAsync</c> loop observes cancellation on its very first <c>WaitToReadAsync</c>
+    /// call — before it ever gets a chance to dequeue — exactly like <c>ApplicationStopping</c>
+    /// firing in that window. On the old code this drops the envelope silently; the shutdown
+    /// drain must still deliver it.
+    /// </summary>
+    [Fact]
+    public async Task ExecuteAsync_CancelledMidRun_StillDrainsBufferedEnvelope()
+    {
+        using var ep = MakeProtector();
+        var repo = new WebhookSubscriptionRepository(_db, ep, Clock);
+
+        var sub = await repo.AddAsync("org1", new NewWebhookSubscription(
+            "https://good.example.com/hook",
+            ["package.publish"],
+            Secret: null, Description: null));
+
+        var mockClient = BuildPartialFailureClient();
+        var queue = new WebhookDispatchQueue(
+            repo, mockClient, Clock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance);
+
+        // Buffer the envelope before the worker ever starts reading.
+        queue.Dispatch(SampleEnvelope(eventType: "package.publish", orgId: "org1"));
+
+        // Drives ExecuteAsync directly with an already-cancelled token — the exact state the
+        // stopping token is in by the time BackgroundService.StopAsync signals cancellation.
+        await queue.ExecuteAsyncForTests(new CancellationToken(canceled: true));
+
+        Assert.Equal(1, queue.DeliveredCount);
+        var reread = await repo.GetAsync("org1", sub.Id);
+        Assert.Equal("ok", reread!.LastStatus);
+    }
+
+    /// <summary>
+    /// Mixed partial-failure variant of the same shutdown-drain scenario: two envelopes are
+    /// buffered before <c>ExecuteAsync</c> runs with an already-cancelled token, one routed to a
+    /// reachable endpoint and one to an unreachable one. The drain must deliver the first and
+    /// durably record the second's failure, independently, mirroring
+    /// <see cref="FanOut_QueueEndToEnd_OneSucceeds_OneFails_IndependentCounters"/> but through the
+    /// shutdown-drain path instead of the normal read loop.
+    /// </summary>
+    [Fact]
+    public async Task ExecuteAsync_CancelledMidRun_DrainsMixedSuccessAndFailure()
+    {
+        using var ep = MakeProtector();
+        var repo = new WebhookSubscriptionRepository(_db, ep, Clock);
+        var webhookClock = new FakeTimeProvider(Clock.GetUtcNow());
+
+        var subGood = await repo.AddAsync("org1", new NewWebhookSubscription(
+            "https://good.example.com/drain",
+            ["package.publish"],
+            Secret: null, Description: null));
+
+        var subBad = await repo.AddAsync("org1", new NewWebhookSubscription(
+            "https://bad.example.com/drain",
+            ["package.publish"],
+            Secret: null, Description: null));
+
+        var mockClient = BuildPartialFailureClient();
+        var queue = new WebhookDispatchQueue(
+            repo, mockClient, webhookClock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance);
+
+        // Both subscriptions match the same event type, so one Dispatch fans out to both — one
+        // succeeds, one exhausts its retry budget — before the worker ever starts reading.
+        queue.Dispatch(SampleEnvelope(eventType: "package.publish", orgId: "org1"));
+
+        var executeTask = queue.ExecuteAsyncForTests(new CancellationToken(canceled: true));
+
+        // The failing subscription burns through the 1s/5s/30s backoff inside the drain itself;
+        // pump the fake clock so that finishes in virtual time instead of real time.
+        await PumpUntilAsync(webhookClock, async () =>
+        {
+            var good = await repo.GetAsync("org1", subGood.Id);
+            var bad = await repo.GetAsync("org1", subBad.Id);
+            return good?.LastStatus is not null && bad?.LastStatus is not null;
+        }, TimeSpan.FromSeconds(1));
+
+        await executeTask;
+
+        Assert.Equal(1, queue.DeliveredCount);
+        Assert.Equal(1, queue.FailedCount);
+
+        var goodReread = await repo.GetAsync("org1", subGood.Id);
+        var badReread = await repo.GetAsync("org1", subBad.Id);
+        Assert.Equal("ok", goodReread!.LastStatus);
+        Assert.Equal("failed", badReread!.LastStatus);
     }
 
     // ── Overflow / drop path ──────────────────────────────────────────────────
@@ -558,7 +924,7 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
             .AddInMemoryCollection(new Dictionary<string, string?> { ["WEBHOOK_QUEUE_CAPACITY"] = "1" })
             .Build();
 
-        var queue = new WebhookDispatchQueue(repo, client, cfg,
+        var queue = new WebhookDispatchQueue(repo, client, Clock, cfg,
             NullLogger<WebhookDispatchQueue>.Instance);
 
         // Enqueue 5 without starting the consumer (channel capacity = 1)

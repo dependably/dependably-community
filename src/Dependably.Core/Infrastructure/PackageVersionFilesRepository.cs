@@ -94,6 +94,7 @@ public sealed class PackageVersionFilesRepository
         await using var conn = await _db.OpenAsync(ct);
         // xtenant: keyed by package PK (org-scoped via the caller's package lookup).
         var rows = await conn.QueryAsync<PackageVersionFile>(
+            // plane-ok: package_version_files rows exist only for hosted multi-file releases; proxy versions carry no file rows.
             """
             SELECT f.id, f.package_version_id as PackageVersionId, f.org_id as OrgId, f.filename,
                    f.blob_key as BlobKey, f.size_bytes as SizeBytes,
@@ -153,6 +154,7 @@ public sealed class PackageVersionFilesRepository
             string VerOrigin, string? VerPublishedAt, bool VerHasInstallScript,
             string FileId, string FileName, string FileBlobKey, long FileSizeBytes,
             string? FileChecksumSha256, string FileCreatedAt)>(
+            // plane-ok: point lookup by (org, filename) for the hosted multi-file serve (origin='uploaded'); proxy is served from cache_artifact.
             """
             SELECT p.id, p.org_id, p.ecosystem, p.name, p.purl_name, p.is_proxy, p.created_at,
                    pv.id, pv.package_id, pv.version, pv.purl, pv.blob_key, pv.size_bytes,

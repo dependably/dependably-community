@@ -72,6 +72,14 @@ public sealed partial class MavenController : OrgScopedControllerBase
             return NotFound();
         }
 
+        // The path is composed into the upstream proxy URL (ServeArtifactAsync /
+        // ServeMetadataAsync), so every segment must clear the %-banning gate before it is even
+        // parsed or fetched.
+        if (FirstUnsafePathSegmentMessage(path) is { } unsafeSegment)
+        {
+            return BadRequest(unsafeSegment);
+        }
+
         var coords = MavenPathParser.Parse(path);
         if (coords is null)
         {
@@ -153,16 +161,11 @@ public sealed partial class MavenController : OrgScopedControllerBase
             return Unauthorized();
         }
 
-        // Path-traversal / control-character defence: reject anything PathSafeValidator
-        // wouldn't let into a blob key. Maven's slashed group form lands as path
-        // segments so we validate each one separately.
-        foreach (string seg in path.Split('/'))
+        // Path-traversal / control-character defence: reject anything that couldn't safely
+        // land in a blob key or a composed upstream URL. Shares the download path's gate.
+        if (FirstUnsafePathSegmentMessage(path) is { } unsafeSegment)
         {
-            var r = PathSafeValidator.Validate(seg, "path");
-            if (!r.IsValid)
-            {
-                return BadRequest(r.Message);
-            }
+            return BadRequest(unsafeSegment);
         }
 
         // Per-tenant Maven cap → instance Maven cap → instance global cap. Resolve BEFORE
@@ -204,6 +207,26 @@ public sealed partial class MavenController : OrgScopedControllerBase
 
     // ── Helpers ────────────────────────────────────────────────────────────────
 
+    // Every '/'-separated segment of a Maven path becomes either a blob-key component (publish)
+    // or a segment of the composed upstream proxy URL (download/metadata). Both demand the
+    // %-banning ValidateUpstreamSegment: ASP.NET leaves %2F/%2E undecoded in the {**path}
+    // catch-all, so a percent-encoded traversal would otherwise survive into the upstream request
+    // and be decoded to '../' there — invisible to the host-only SSRF guard. Returns the first
+    // failing segment's message, or null when every segment is safe.
+    private static string? FirstUnsafePathSegmentMessage(string path)
+    {
+        foreach (string seg in path.Split('/'))
+        {
+            var r = PathSafeValidator.ValidateUpstreamSegment(seg, "path");
+            if (!r.IsValid)
+            {
+                return r.Message;
+            }
+        }
+
+        return null;
+    }
+
     private async Task<IActionResult> ServeArtifactAsync(
         string orgId, MavenCoordinates coords, OrgSettings? settings, TokenRecord? token, CancellationToken ct)
     {
@@ -226,6 +249,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
 
         await using var conn = await _svc.Db.OpenAsync(ct);
         var row = await conn.QuerySingleOrDefaultAsync<MavenFileRow>(
+            // plane-ok: maven_version_files hosted serve; global-plane proxy served via the sibling CacheArtifacts.GetServeFactsByCoordinateAsync in this method.
             """
             SELECT mvf.id AS Id, mvf.package_version_id AS PackageVersionId,
                    mvf.filename AS Filename,
@@ -322,6 +346,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
         // first in maven_version_files (legacy / uploaded rows), then in cache_artifact
         // (global-plane proxy rows written by the P3b path).
         bool timestampedIsCached = await conn.ExecuteScalarAsync<int>(
+            // plane-ok: maven_version_files freshness probe; global-plane checked via the sibling CacheArtifacts.GetServeFactsByCoordinateAsync in this method.
             """
             SELECT COUNT(1) FROM maven_version_files mvf
             JOIN package_versions pv ON pv.id = mvf.package_version_id
@@ -688,8 +713,18 @@ public sealed partial class MavenController : OrgScopedControllerBase
         (string? mavenProvenanceStatus, string? mavenProvenanceSigner) =
             await VerifyMavenSignatureAsync(orgId, mavenVerifyMode, bases, upstreamPath, result, ct);
 
-        return await RecordScanAndServeAsync(orgId, resolvedCoords, result, settings, token,
-            snapshotLiteralFilename, mavenProvenanceStatus, mavenProvenanceSigner, mavenVerifyMode, ct);
+        try
+        {
+            return await RecordScanAndServeAsync(orgId, resolvedCoords, result, settings, token,
+                snapshotLiteralFilename, mavenProvenanceStatus, mavenProvenanceSigner, mavenVerifyMode, ct);
+        }
+        catch (ProxyCatalogueUnavailableException)
+        {
+            // The artefact could not be recorded on the cache plane, so it could not be scanned or
+            // gated — and an artefact the registry cannot vouch for is not served. 503, not 404: it
+            // exists upstream, we could not admit it. The bytes are staged, so a retry is cheap.
+            return StatusCode(StatusCodes.Status503ServiceUnavailable);
+        }
     }
 
     // Verifies the detached OpenPGP (.asc) signature for a freshly-fetched Maven artifact when the
@@ -804,20 +839,16 @@ public sealed partial class MavenController : OrgScopedControllerBase
             return StatusCode(StatusCodes.Status403Forbidden);
         }
 
-        // RecordMavenFileAsync survives for legacy rows (VersionId non-null from pre-P3b rows
-        // still in package_versions). New proxy artifacts take the global-plane path (VersionId
-        // null) and skip the maven_version_files write — the cache_artifact row is authoritative.
-        if (fetch.VersionId is not null)
-        {
-            await RecordMavenFileAsync(fetch.VersionId, resolvedCoords, result, ct);
-        }
+        // A proxied artefact is catalogued on the cache plane (the cache_artifact row the fetch
+        // wrote); the serve path resolves its file rows from there, so nothing is written to
+        // maven_version_files, which holds only locally-published (origin='uploaded') files.
 
         // SNAPSHOT literal alias: when the caller requested a literal -SNAPSHOT.jar but the
         // artifact resolved to a timestamped build (e.g. lib-1.0-20240101.120000-3.jar), write
         // a cache_artifact alias row under the literal filename so a second literal request
         // finds the global plane and gets a HIT instead of another upstream round-trip. The
         // alias shares the same blob_key and content_hash as the primary timestamped row.
-        if (snapshotLiteralFilename is not null && fetch.VersionId is null)
+        if (snapshotLiteralFilename is not null)
         {
             _ = await _svc.CacheRecorder.RecordAccessAsync(new CacheAccess(
                 orgId, "maven", resolvedCoords.PackageName,
@@ -863,6 +894,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
         // the stored checksum columns. The row was written by the recursive call above.
         await using var sidecarConn = await _svc.Db.OpenAsync(ct);
         var row = await sidecarConn.QuerySingleOrDefaultAsync<MavenFileRow>(
+            // plane-ok: PV-plane sidecar re-query; global-plane primary served via the sibling CacheArtifacts.GetServeFactsByCoordinateAsync in this method.
             """
             SELECT mvf.id AS Id, mvf.package_version_id AS PackageVersionId,
                    mvf.filename AS Filename,
@@ -906,91 +938,6 @@ public sealed partial class MavenController : OrgScopedControllerBase
             : await ServeGlobalPlaneArtifactAsync(orgId, coords, settings, token, caFacts, ct);
     }
 
-    /// <summary>
-    /// Records the <c>maven_version_files</c> row for a proxied artifact against the
-    /// <c>package_versions</c> id the shared proxy pipeline already created. Idempotent on
-    /// (package_version_id, filename) so a second file of the same coordinate — or a
-    /// concurrent first-fetch — doesn't collide.
-    ///
-    /// For SNAPSHOT artifacts resolved to a timestamped filename, an alias row under the
-    /// literal <c>-SNAPSHOT</c> filename is also written so clients requesting either
-    /// the timestamped or the literal form both hit the cache on a subsequent request.
-    /// </summary>
-    private async Task RecordMavenFileAsync(
-        string versionId, MavenCoordinates coords, MavenArtifactFetchResult result, CancellationToken ct)
-    {
-        await using var conn = await _svc.Db.OpenAsync(ct);
-
-        // xtenant: maven_version_files FK chain: package_version_id → package_versions → packages.org_id.
-        // versionId came from ProxyFetchService's GetOrCreate(orgId,...) chain, so it is tenant-scoped.
-        await conn.ExecuteAsync(
-            """
-            INSERT INTO maven_version_files
-                (id, package_version_id, filename, classifier, extension, blob_key, size_bytes,
-                 checksum_sha256, checksum_sha1, checksum_md5, origin, owner_kind)
-            VALUES (@id, @pvId, @filename, @classifier, @extension, @blobKey, @sizeBytes,
-                    @sha256, @sha1, @md5, 'proxy', 'package_version')
-            ON CONFLICT(package_version_id, filename) WHERE owner_kind = 'package_version' DO NOTHING
-            """,
-            new
-            {
-                id = Guid.NewGuid().ToString("N"),
-                pvId = versionId,
-                filename = coords.Filename,
-                classifier = coords.Classifier,
-                extension = coords.Extension ?? "",
-                blobKey = result.BlobKey,
-                sizeBytes = result.SizeBytes,
-                sha256 = result.Sha256,
-                sha1 = result.Sha1,
-                md5 = result.Md5,
-            });
-
-        // For SNAPSHOT artifacts where the filename was resolved to a timestamped form
-        // (e.g. lib-1.0-20240101.120000-3.jar), also write an alias row under the
-        // literal -SNAPSHOT filename (e.g. lib-1.0-SNAPSHOT.jar). The alias uses
-        // DO UPDATE so that when upstream publishes a newer build the alias is refreshed
-        // to point at the new blob_key and checksums. The freshness re-check in
-        // ServeArtifactAsync guarantees literal SNAPSHOT requests always re-resolve the
-        // current timestamped build before accepting a cache hit, so the alias is kept
-        // current and the literal path never serves a stale build.
-        if (coords.IsSnapshot && coords.Extension is not null)
-        {
-            string classifierPart = coords.Classifier is not null ? $"-{coords.Classifier}" : "";
-            string literalFilename = $"{coords.ArtifactId}-{coords.Version}{classifierPart}.{coords.Extension}";
-            if (!string.Equals(literalFilename, coords.Filename, StringComparison.Ordinal))
-            {
-                // xtenant: same FK chain as the primary insert above; same versionId.
-                await conn.ExecuteAsync(
-                    """
-                    INSERT INTO maven_version_files
-                        (id, package_version_id, filename, classifier, extension, blob_key, size_bytes,
-                         checksum_sha256, checksum_sha1, checksum_md5, origin, owner_kind)
-                    VALUES (@id, @pvId, @filename, @classifier, @extension, @blobKey, @sizeBytes,
-                            @sha256, @sha1, @md5, 'proxy', 'package_version')
-                    ON CONFLICT(package_version_id, filename) WHERE owner_kind = 'package_version' DO UPDATE SET
-                        blob_key         = excluded.blob_key,
-                        size_bytes       = excluded.size_bytes,
-                        checksum_sha256  = excluded.checksum_sha256,
-                        checksum_sha1    = excluded.checksum_sha1,
-                        checksum_md5     = excluded.checksum_md5
-                    """,
-                    new
-                    {
-                        id = Guid.NewGuid().ToString("N"),
-                        pvId = versionId,
-                        filename = literalFilename,
-                        classifier = coords.Classifier,
-                        extension = coords.Extension,
-                        blobKey = result.BlobKey,
-                        sizeBytes = result.SizeBytes,
-                        sha256 = result.Sha256,
-                        sha1 = result.Sha1,
-                        md5 = result.Md5,
-                    });
-            }
-        }
-    }
 
 
     // The staged file path is a server-generated GUID under the operator-configured staging root;
@@ -1033,10 +980,22 @@ public sealed partial class MavenController : OrgScopedControllerBase
         string sha1Hex = staged.Sha1!;
         string md5Hex = staged.Md5!;
 
-        string blobKey = BlobKeys.Hosted(
+        // Content-addressed hosted key: the artefact's SHA-256 (computed inline while the body
+        // streamed to the staging file) is a key segment, so the bytes under a key always hash
+        // to the digest the key names. Two concurrent publishes of one file coordinate carrying
+        // different bytes therefore address disjoint keys and cannot overwrite one another —
+        // the (blob_key, checksum_sha256) pair each of package_versions and maven_version_files
+        // commits stays true of the stored bytes with no lock and no ordering constraint between
+        // the blob write and the metadata write. A republish with different bytes repoints the
+        // maven_version_files row at the new key and leaves the superseded blob unreferenced for
+        // the orphan reconciler, rather than overwriting bytes a committed row still names.
+        // Readers resolve hosted blobs from the stored blob_key (never by rebuilding the
+        // coordinate), so rows written under the older coordinate-only key shape keep resolving.
+        string blobKey = BlobKeys.HostedArtifact(
             orgId, "maven",
             coords.PackageName.Replace(':', '/'),  // groupId/artifactId in the blob path
             coords.Version!,
+            sha256Hex,
             coords.Filename);
 
         // PackageRepository.GetOrCreateAsync + manual package_versions / maven_version_files
@@ -1059,11 +1018,34 @@ public sealed partial class MavenController : OrgScopedControllerBase
         string versionId = await GetOrCreateVersionRowAsync(
             conn, pkg.Id, coords, purl, blobKey, sha256Hex, sha1Hex, staged.Size);
 
-        // xtenant: maven_version_files FKs into package_versions(id), which FKs into
-        // packages(id) — the org_id is reachable transitively. The package_version_id
-        // we're inserting against came from a tenant-scoped GetOrCreateAsync chain above.
-        // Insert / replace maven_version_files row. ON CONFLICT(package_version_id, filename)
-        // WHERE owner_kind='package_version' overwrites so a republished file gets the new hash.
+        await UpsertMavenVersionFileAsync(conn, versionId, coords, blobKey, staged.Size, sha256Hex, sha1Hex, md5Hex);
+
+        // Licenses live only in the POM. On a .pom publish, parse the staged bytes and attach
+        // the resolved SPDX identifiers to the shared package_versions row so hosted Maven
+        // artifacts feed license governance the same way proxied ones do. Extraction failures
+        // never fail the publish — the artifact is already stored and the row already written.
+        if (string.Equals(coords.Extension, "pom", StringComparison.OrdinalIgnoreCase))
+        {
+            await ExtractAndAttachPomLicensesAsync(staged.Path, versionId, purl, ct);
+        }
+
+        await _svc.Audit.LogActivityAsync(orgId, "maven", purl, "push",
+            actorId: token.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+
+        EvictMavenMetadataCacheAfterPublish(orgId, coords);
+
+        Response.Headers["X-Dependably-PURL"] = purl;
+        return StatusCode(StatusCodes.Status201Created);
+    }
+
+    // Insert / replace the maven_version_files row. ON CONFLICT(package_version_id, filename)
+    // WHERE owner_kind='package_version' overwrites so a republished file gets the new hash.
+    private static async Task UpsertMavenVersionFileAsync(
+        System.Data.Common.DbConnection conn, string versionId, MavenCoordinates coords, string blobKey,
+        long sizeBytes, string sha256Hex, string sha1Hex, string md5Hex)
+    {
+        // xtenant: keyed by versionId from GetOrCreateVersionRowAsync(pkg.Id, …), and pkg came from
+        // GetOrCreateAsync(orgId, …) — the FK chain package_versions → packages carries the org_id.
         await conn.ExecuteAsync(
             """
             INSERT INTO maven_version_files
@@ -1086,47 +1068,46 @@ public sealed partial class MavenController : OrgScopedControllerBase
                 classifier = coords.Classifier,
                 extension = coords.Extension ?? "",
                 blobKey,
-                sizeBytes = staged.Size,
+                sizeBytes,
                 sha256 = sha256Hex,
                 sha1 = sha1Hex,
                 md5 = md5Hex,
             });
+    }
 
-        // Licenses live only in the POM. On a .pom publish, parse the staged bytes and attach
-        // the resolved SPDX identifiers to the shared package_versions row so hosted Maven
-        // artifacts feed license governance the same way proxied ones do. Extraction failures
-        // never fail the publish — the artifact is already stored and the row already written.
-        if (string.Equals(coords.Extension, "pom", StringComparison.OrdinalIgnoreCase))
+    // staged.Path is under the operator-configured staging root — no user input reaches the path.
+    // FromPomXml takes ownership of and disposes the stream (class stream-ownership contract).
+    private async Task ExtractAndAttachPomLicensesAsync(string stagedPath, string versionId, string purl, CancellationToken ct)
+    {
+        try
         {
-            try
+            var pomStream = new FileStream(
+                stagedPath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 81920, useAsync: true);
+            var licenses = LicenseExtractor.FromPomXml(pomStream);
+            if (licenses.Spdx.Count > 0)
             {
-                // staged.Path is under the operator-configured staging root — no user input reaches the path.
-                var pomStream = new FileStream(
-                    staged.Path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 81920, useAsync: true);
-                // FromPomXml takes ownership of and disposes the stream (class stream-ownership contract).
-                var licenses = LicenseExtractor.FromPomXml(pomStream);
-                if (licenses.Spdx.Count > 0)
-                {
-                    await _svc.Licenses.SetLicensesAsync(versionId, licenses.Spdx, "upstream", ct);
-                }
-            }
-            catch (Exception ex)
-            {
-                _svc.Log.LogWarning(ex, "Maven POM license extraction failed for {Purl}; publish unaffected.", purl);
+                await _svc.Licenses.SetLicensesAsync(versionId, licenses.Spdx, "upstream", ct);
             }
         }
+        catch (Exception ex)
+        {
+            _svc.Log.LogWarning(ex, "Maven POM license extraction failed for {Purl}; publish unaffected.", purl);
+        }
+    }
 
-        await _svc.Audit.LogActivityAsync(orgId, "maven", purl, "push",
-            actorId: token.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
-
-        // A real-artifact publish changed this coordinate's version set; evict the rendered
-        // maven-metadata.xml so a publish-then-resolve sees the new version immediately instead
-        // of waiting out the TTL. (The metadata-acknowledge path changes no versions and is
-        // handled before StoreFileAsync, so it never reaches here.)
+    // A real-artifact publish changed this coordinate's version set; evict the rendered
+    // maven-metadata.xml so a publish-then-resolve sees the new version immediately instead
+    // of waiting out the TTL. (The metadata-acknowledge path changes no versions and is
+    // handled before StoreFileAsync, so it never reaches here.) A SNAPSHOT publish also
+    // evicts its version-level document — the new file changes the <snapshot>/
+    // <snapshotVersions> build list that document reports.
+    private void EvictMavenMetadataCacheAfterPublish(string orgId, MavenCoordinates coords)
+    {
         _svc.MetadataCache.Evict(new MavenMetadataKey(orgId, coords.GroupId, coords.ArtifactId));
-
-        Response.Headers["X-Dependably-PURL"] = purl;
-        return StatusCode(StatusCodes.Status201Created);
+        if (coords.IsSnapshot)
+        {
+            _svc.MetadataCache.Evict(new MavenMetadataKey(orgId, coords.GroupId, coords.ArtifactId, coords.Version));
+        }
     }
 
     /// <summary>
@@ -1229,6 +1210,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
         string primaryFilename = MavenPathParser.PrimaryFilename(coords.Filename);
         await using var conn = await _svc.Db.OpenAsync(ct);
         var (Sha256, Sha1, Md5) = await conn.QuerySingleOrDefaultAsync<(string Sha256, string? Sha1, string? Md5)>(
+            // plane-ok: sidecar checksum validation on the hosted PUT/publish path; sidecars exist only for hosted maven_version_files rows.
             """
             SELECT mvf.checksum_sha256 AS Sha256, mvf.checksum_sha1 AS Sha1, mvf.checksum_md5 AS Md5
             FROM maven_version_files mvf

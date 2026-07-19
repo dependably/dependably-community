@@ -109,71 +109,89 @@ public sealed class RpmController : OrgScopedControllerBase
 
         try
         {
-            if (staged.Size < RpmArtifactValidator.MinimumValidSize)
-            {
-                return BadRequest("RPM upload too small.");
-            }
-
-            // RpmArtifactValidator and scriptlet detection parse the RPM header (at the file
-            // start) from a byte[]. Read the staged file — bounded by the tenant cap enforced
-            // above — rather than holding the body in two live buffers.
-            // staged.Path is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
-            byte[] bytes = await System.IO.File.ReadAllBytesAsync(staged.Path, ct);
-
-            RpmHeaderInfo header;
-            try
-            {
-                header = RpmArtifactValidator.Validate(bytes);
-            }
-            catch (RpmParseException ex)
-            {
-                return BadRequest(ex.Message);
-            }
-
-            // NEVRA filename convention; dnf clients expect this exact shape.
-            string filename = $"{header.Name}-{header.Version}-{header.Release}.{header.Arch}.rpm";
-            string purlName = header.Name.ToLowerInvariant();
-            string version = $"{header.Version}-{header.Release}";
-            string purl = PurlNormalizer.Rpm(header.Name, header.Version, header.Release, header.Arch, header.Epoch ?? 0);
-            string blobKey = BlobKeys.Hosted(orgId, "rpm", purlName, version, filename);
-
-            // Install/lifecycle-script detection on the staged bytes. Best-effort: the artifact
-            // already passed validation, so a parse failure here must not fail the upload.
-            var scriptResult = ScriptDetectionService.Detect("rpm", filename, bytes);
-
-            // License hard-block. RPM publishes write the registry tier and version row
-            // directly (outside IPackagePublishService's shared pipeline), so the gate is
-            // applied here at the choke point, before any blob or metadata write — mirroring
-            // the "no version row on block" invariant the shared pipeline gives every other
-            // hosted-push ecosystem. Strictly guarded by 'block': under 'warn'/'off' this reads
-            // nothing extra.
-            if (await EvaluateRpmLicenseGateAsync(orgId, settings, header.License, ct) is { } licenseReject)
-            {
-                return licenseReject;
-            }
-
-            // Store the verified artifact by streaming the staged file into the blob store.
-            // staged.Path is under the operator-configured staging root — no user input reaches the path.
-            await using (var artifactStream = new FileStream(
-                staged.Path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 81920, useAsync: true))
-            {
-                await _svc.BlobStore.Registry.PutAsync(blobKey, artifactStream, ct);
-            }
-
-            var pkg = await _svc.Packages.GetOrCreateAsync(orgId, "rpm", header.Name, purlName, isProxy: false, ct);
-            await PersistRpmVersionAsync(new RpmVersionArgs(orgId, pkg, version, purl, blobKey, filename, bytes.Length, staged.Sha256, header,
-                HasInstallScript: scriptResult.HasScript, InstallScriptKind: scriptResult.Kind), ct);
-
-            await _svc.Audit.LogActivityAsync(orgId, "rpm", purl, "push",
-                actorId: token.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
-
-            Response.Headers["X-Dependably-PURL"] = purl;
-            return StatusCode(StatusCodes.Status201Created);
+            return await ValidateAndPublishStagedRpmAsync(orgId, settings, token, staged, ct);
         }
         finally
         {
             RequestBodyStager.TryDelete(staged.Path);
         }
+    }
+
+    // Validates the staged RPM, then stores the blob and persists the version/repodata rows.
+    // Split out of Upload to keep the dispatcher method within the line-count threshold (S138).
+    private async Task<IActionResult> ValidateAndPublishStagedRpmAsync(
+        string orgId, OrgSettings? settings, TokenRecord token, RequestBodyStager.StagedBody staged, CancellationToken ct)
+    {
+        if (staged.Size < RpmArtifactValidator.MinimumValidSize)
+        {
+            return BadRequest("RPM upload too small.");
+        }
+
+        // RpmArtifactValidator and scriptlet detection parse the RPM header (at the file
+        // start) from a byte[]. Read the staged file — bounded by the tenant cap enforced
+        // above — rather than holding the body in two live buffers.
+        // staged.Path is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+        byte[] bytes = await System.IO.File.ReadAllBytesAsync(staged.Path, ct);
+
+        RpmHeaderInfo header;
+        try
+        {
+            header = RpmArtifactValidator.Validate(bytes);
+        }
+        catch (RpmParseException ex)
+        {
+            return BadRequest(ex.Message);
+        }
+
+        // NEVRA filename convention; dnf clients expect this exact shape.
+        string filename = $"{header.Name}-{header.Version}-{header.Release}.{header.Arch}.rpm";
+        string purlName = header.Name.ToLowerInvariant();
+        string version = $"{header.Version}-{header.Release}";
+        string purl = PurlNormalizer.Rpm(header.Name, header.Version, header.Release, header.Arch, header.Epoch ?? 0);
+
+        // Content-addressed hosted key: the artefact's SHA-256 (computed inline while the
+        // body streamed to the staging file) is a key segment, so the bytes under a key
+        // always hash to the digest the key names. Two concurrent uploads of one NEVRA
+        // carrying different bytes therefore address disjoint keys and cannot overwrite
+        // one another — the committed package_versions row's (blob_key, checksum_sha256)
+        // pair stays true of the stored bytes with no lock and no ordering constraint
+        // between the blob write and the metadata write. Readers resolve the key from the
+        // stored blob_key (never by rebuilding the coordinate), so rows written under the
+        // older coordinate-only key shape keep resolving unchanged.
+        string blobKey = BlobKeys.HostedArtifact(orgId, "rpm", purlName, version, staged.Sha256, filename);
+
+        // Install/lifecycle-script detection on the staged bytes. Best-effort: the artifact
+        // already passed validation, so a parse failure here must not fail the upload.
+        var scriptResult = ScriptDetectionService.Detect("rpm", filename, bytes);
+
+        // License hard-block. RPM publishes write the registry tier and version row
+        // directly (outside IPackagePublishService's shared pipeline), so the gate is
+        // applied here at the choke point, before any blob or metadata write — mirroring
+        // the "no version row on block" invariant the shared pipeline gives every other
+        // hosted-push ecosystem. Strictly guarded by 'block': under 'warn'/'off' this reads
+        // nothing extra.
+        if (await EvaluateRpmLicenseGateAsync(orgId, settings, header.License, ct) is { } licenseReject)
+        {
+            return licenseReject;
+        }
+
+        // Store the verified artifact by streaming the staged file into the blob store.
+        // staged.Path is under the operator-configured staging root — no user input reaches the path.
+        await using (var artifactStream = new FileStream(
+            staged.Path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 81920, useAsync: true))
+        {
+            await _svc.BlobStore.Registry.PutAsync(blobKey, artifactStream, ct);
+        }
+
+        var pkg = await _svc.Packages.GetOrCreateAsync(orgId, "rpm", header.Name, purlName, isProxy: false, ct);
+        await PersistRpmVersionAsync(new RpmVersionArgs(orgId, pkg, version, purl, blobKey, filename, bytes.Length, staged.Sha256, header,
+            HasInstallScript: scriptResult.HasScript, InstallScriptKind: scriptResult.Kind), ct);
+
+        await _svc.Audit.LogActivityAsync(orgId, "rpm", purl, "push",
+            actorId: token.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+
+        Response.Headers["X-Dependably-PURL"] = purl;
+        return StatusCode(StatusCodes.Status201Created);
     }
 
     // Cohesive set of values for a newly published RPM version, bundled to keep
@@ -185,6 +203,14 @@ public sealed class RpmController : OrgScopedControllerBase
 
     // Upserts the package_versions and rpm_metadata rows for a newly published RPM, marks
     // the per-arch repodata dirty, and evicts both the merged and local repodata caches.
+    //
+    // The package_versions row is written once per (package, version) and its artefact columns
+    // are never repointed: an upload of a NEVRA the tenant already holds keeps the committed
+    // row — and therefore the bytes the repodata's sealed checksum names and the download path
+    // serves — intact. Because the hosted key is content-addressed, the re-uploaded bytes land
+    // on their own key rather than over the committed row's, so the row can never end up
+    // advertising a digest the blob beneath it no longer has; the unreferenced bytes are
+    // reclaimed by the orphan reconciler.
     private async Task PersistRpmVersionAsync(RpmVersionArgs a, CancellationToken ct)
     {
         // xtenant: a.Pkg.Id came from GetOrCreateAsync(a.OrgId, ...); inserts against it
@@ -595,6 +621,16 @@ public sealed class RpmController : OrgScopedControllerBase
         string blobStoreKey = BlobKeys.Proxy(resolution.Sha256);
 
         // 4. Fetch from upstream via UpstreamClient (checksum-verified, cached on Cache tier)
+        // RPM resolves no per-org upstream credential today — every repodata/package fetch is
+        // anonymous. The host-pin still gates the attach point: a <primary.xml> <location href>
+        // may be absolute to any host, so if a future per-org RPM credential is threaded in here,
+        // it can only ever ride to a fetch whose host matches the configured upstream — never to
+        // whatever third-party host the upstream's own repodata named.
+        string? rpmUpstreamCredential = null;
+        string? authorizationHeader = UpstreamHostPin.IsSameHost(upstreamBase, resolution.PackageUrl)
+            ? rpmUpstreamCredential
+            : null;
+
         Stream body;
         bool isHit;
         try
@@ -602,7 +638,7 @@ public sealed class RpmController : OrgScopedControllerBase
             (body, isHit) = await _svc.UpstreamClient!.GetOrFetchStreamAsync(
                 blobStoreKey, resolution.PackageUrl,
                 new ChecksumSpec(ChecksumAlgorithm.Sha256, resolution.Sha256),
-                "rpm", orgId, purl, ct: ct);
+                "rpm", orgId, purl, ct: ct, authorizationHeader: authorizationHeader);
         }
         catch (ChecksumException)
         {
@@ -638,8 +674,22 @@ public sealed class RpmController : OrgScopedControllerBase
 
         // 6. Persist DB row (cache_artifact + rpm_metadata) on first fetch
         string dbBlobKey = $"proxy/{resolution.Sha256}/{file}"; // StoreKey strips the filename suffix
-        // Use Content-Length if the stream knows it; otherwise fall back to 0 (updated async).
-        int contentLength = body.CanSeek ? (int)body.Length : 0;
+        // body.Length is only usable when the stream is seekable (S3/Azure network streams
+        // are not). GetRangeAsync issues a cheap metadata-only lookup against the same cache
+        // key and returns the true blob length without buffering, so size_bytes is exact
+        // regardless of backend or artifact size (kept as long — a >2 GiB RPM is plausible
+        // for driver/firmware/CUDA packages and must not narrow-wrap).
+        long contentLength;
+        if (body.CanSeek)
+        {
+            contentLength = body.Length;
+        }
+        else
+        {
+            await using var sizeProbe = await _svc.BlobStore.Cache.GetRangeAsync(blobStoreKey, 0, 0, ct);
+            contentLength = sizeProbe?.TotalLength ?? 0;
+        }
+
         await CacheProxyPackageAsync(
             new ProxyCachePackage(orgId, file, resolution, nevra.Value, ver, purl, dbBlobKey, contentLength,
                 provResult),
@@ -1155,8 +1205,13 @@ public sealed class RpmController : OrgScopedControllerBase
 
         string stem = filename[..^4];
 
+        // Each separator must sit strictly inside its substring — never at position 0 or at
+        // the last index — so the dash/dot split alone can never resolve to an empty Name,
+        // Version, Release, or Arch (mirrors ApkController.ParseApkFilename's verDash guard).
+        // Version can still end up empty after the epoch-colon strip below, so that step
+        // carries its own guard.
         int archDot = stem.LastIndexOf('.');
-        if (archDot < 0)
+        if (archDot <= 0 || archDot == stem.Length - 1)
         {
             return null;
         }
@@ -1165,7 +1220,7 @@ public sealed class RpmController : OrgScopedControllerBase
         string nameVerRel = stem[..archDot];
 
         int relDash = nameVerRel.LastIndexOf('-');
-        if (relDash < 0)
+        if (relDash <= 0 || relDash == nameVerRel.Length - 1)
         {
             return null;
         }
@@ -1174,7 +1229,7 @@ public sealed class RpmController : OrgScopedControllerBase
         string nameVer = nameVerRel[..relDash];
 
         int verDash = nameVer.LastIndexOf('-');
-        if (verDash < 0)
+        if (verDash <= 0 || verDash == nameVer.Length - 1)
         {
             return null;
         }
@@ -1188,6 +1243,14 @@ public sealed class RpmController : OrgScopedControllerBase
         {
             epoch = e;
             version = version[(colon + 1)..];
+
+            // The epoch strip can itself empty the remaining Version (e.g. "pkg-1:-1.x86_64.rpm"
+            // has verDash sitting inside "pkg-1:", so the boundary guard above never sees it).
+            // Reject rather than let an empty Version reach the PURL and cache_artifact.
+            if (version.Length == 0)
+            {
+                return null;
+            }
         }
 
         return (name, epoch, version, release, arch);
@@ -1263,7 +1326,7 @@ public sealed class RpmController : OrgScopedControllerBase
                 provenanceSigner: p.ProvenanceResult.Signer,
                 upstreamIntegrityValue: p.Resolution.Sha256,
                 upstreamIntegrityAlgorithm: "sha256",
-                ct);
+                ct: ct);
 
             // Write rpm_metadata against the global cache_artifact row so repodata renderers
             // have structured NEVRA/summary/description available without a package_versions row.

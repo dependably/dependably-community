@@ -9,8 +9,9 @@ namespace Dependably.Infrastructure;
 /// ingest-time license capture existed. Those <c>cache_artifact</c> rows carry no
 /// <c>package_version_licenses</c> rows and no query rescans them, so a large slice of the cache
 /// plane has no license facts. This pass reads the cached bytes for each un-checked
-/// npm/PyPI/NuGet/Go artifact, runs the same stream-based <see cref="LicenseExtractor"/> entry
-/// points the first-fetch recorder uses, writes any SPDX identifiers to the global plane
+/// npm/PyPI/NuGet/Go artifact — and each un-checked Maven <c>.pom</c> row — runs the same
+/// stream-based <see cref="LicenseExtractor"/> entry points the first-fetch recorder uses, writes
+/// any SPDX identifiers to the global plane
 /// (<c>LicenseRepository.SetLicensesForCacheArtifactAsync</c>, source <c>"upstream"</c>), and — in
 /// every case (license found, none present, or blob missing) — stamps
 /// <c>cache_artifact.license_checked_at</c> so the row is scanned exactly once.
@@ -105,28 +106,12 @@ public sealed class LicenseBackfillService : ScheduledBackgroundService
                 break;
             }
 
-            foreach (var candidate in batch)
-            {
-                if (ct.IsCancellationRequested)
-                {
-                    break;
-                }
-
-                var outcome = await ProcessArtifactAsync(candidate, ct);
-                scanned++;
-                if (outcome is ArtifactOutcome.LicenseFound)
-                {
-                    found++;
-                }
-                if (outcome is not ArtifactOutcome.Failed)
-                {
-                    stamped++;
-                }
-            }
-
-            var lastRow = batch[^1];
-            afterFirstCachedAt = lastRow.FirstCachedAt;
-            afterId = lastRow.Id;
+            var (batchScanned, batchFound, batchStamped, lastFirstCachedAt, lastId) = await ProcessBatchAsync(batch, ct);
+            scanned += batchScanned;
+            found += batchFound;
+            stamped += batchStamped;
+            afterFirstCachedAt = lastFirstCachedAt;
+            afterId = lastId;
 
             // A short read means the queue is drained for this pass — stop rather than issue
             // another round-trip that would return nothing.
@@ -141,6 +126,39 @@ public sealed class LicenseBackfillService : ScheduledBackgroundService
             "License backfill pass complete. Scanned {Scanned} artifact(s), {Found} with a license, " +
             "{Stamped} stamped, took {ElapsedMs}ms.",
             scanned, found, stamped, sw.ElapsedMilliseconds);
+    }
+
+    // Processes one page of candidates, returning the per-batch counts and the keyset-cursor
+    // position of the last row — advanced regardless of per-row outcome, per the cursor
+    // invariant documented on RunBackfillPassAsync above.
+    private async Task<(int Scanned, int Found, int Stamped, DateTimeOffset LastFirstCachedAt, string LastId)> ProcessBatchAsync(
+        IReadOnlyList<LicenseBackfillCandidate> batch, CancellationToken ct)
+    {
+        int scanned = 0;
+        int found = 0;
+        int stamped = 0;
+
+        foreach (var candidate in batch)
+        {
+            if (ct.IsCancellationRequested)
+            {
+                break;
+            }
+
+            var outcome = await ProcessArtifactAsync(candidate, ct);
+            scanned++;
+            if (outcome is ArtifactOutcome.LicenseFound)
+            {
+                found++;
+            }
+            if (outcome is not ArtifactOutcome.Failed)
+            {
+                stamped++;
+            }
+        }
+
+        var lastRow = batch[^1];
+        return (scanned, found, stamped, lastRow.FirstCachedAt, lastRow.Id);
     }
 
     // Extracts and persists any license for one artifact, then stamps license_checked_at. The
@@ -194,6 +212,8 @@ public sealed class LicenseBackfillService : ScheduledBackgroundService
                 return LicenseExtractor.FromNuspec(blob);
             case "golang":
                 return LicenseExtractor.FromGoModuleZip(blob, candidate.Name, candidate.Version);
+            case "maven":
+                return LicenseExtractor.FromPomXml(blob);
             default:
                 // Unreachable — the repository query filters to the ecosystems above — but
                 // dispose defensively so an unexpected row never leaks the opened stream.

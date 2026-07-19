@@ -84,6 +84,8 @@ public sealed partial class SystemController
             actorId: actor,
             detail: System.Text.Json.JsonSerializer.Serialize(new { id, email = req.Email }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             ct: ct);
+        _systemEvents?.Notify(new Dependably.Infrastructure.SystemEvents.SystemEventRecord(
+            "system_admin.admin_created", null, null, actor));
 
         return CreatedAtAction(nameof(GetAdmin), new { id }, new
         {
@@ -149,7 +151,10 @@ public sealed partial class SystemController
     /// <summary>
     /// POST /api/v1/system/admins/{id}/password-reset — issues a temporary password for another
     /// admin. Self-reset is rejected; the operator must use POST /me/password for their own
-    /// password. The temp password is returned once and never persisted in plaintext.
+    /// password. The temp password is returned once and never persisted in plaintext. The reset
+    /// (in <see cref="SystemAdminRepository.ResetPasswordAsync"/>) bumps the target admin's
+    /// token_version, evicts the cached version, and drops trusted devices, so the target's
+    /// existing sessions and remembered devices are severed immediately.
     /// </summary>
     [HttpPost("admins/{id}/password-reset")]
     public async Task<IActionResult> ResetAdminPassword(string id, CancellationToken ct)
@@ -231,6 +236,8 @@ public sealed partial class SystemController
             actorId: actor,
             detail: System.Text.Json.JsonSerializer.Serialize(new { id, email = target.Email }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             ct: ct);
+        _systemEvents?.Notify(new Dependably.Infrastructure.SystemEvents.SystemEventRecord(
+            "system_admin.admin_deleted", null, null, actor));
 
         return NoContent();
     }

@@ -17,7 +17,7 @@ namespace Dependably.Tests.Integration;
 /// </list>
 /// The AUTHENTICATED-upstream contract — a deterministic 401/403 refusal, never retried,
 /// surfaced as a single-attempt 502 — is pinned end-to-end in EdgeUpstreamRefusalTests (the
-/// edge→master fetch always authenticates). Covers PyPI and npm (each has its own
+/// edge→master fetch always authenticates). Covers PyPI, npm, and NuGet (each has its own
 /// MISS-handler catch ladder). Pairs with the unit-level retry tests in UpstreamClientTests.cs.
 /// </summary>
 [Trait("Category", "Integration")]
@@ -208,6 +208,28 @@ public sealed class ProxyTransientRetryTests : IClassFixture<DependablyFactory>,
         string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
         var resp = await client.GetAsync($"/npm/tarballs/{name}/{filename}");
+
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+    }
+
+    // ── NuGet ─────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task NuGet_Genuine404_ClientSees404_Unchanged()
+    {
+        // Genuine absent .nupkg stays 404 — absence must not be promoted to 502. The MISS-handler
+        // catch ladder maps a genuine upstream not-found (HttpRequestException) to 404, distinct
+        // from an unclassified failure (502) or a transient/exhausted upstream (503).
+        string id = $"nuget404{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string version = "1.0.0";
+
+        _factory.MockUpstream
+            .Given(Request.Create().WithPath($"/flatcontainer/{id}/{version}/{id}.{version}.nupkg").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.NotFound));
+
+        string token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(token);
+        var resp = await client.GetAsync($"/nuget/flatcontainer/{id}/{version}/{id}.{version}.nupkg");
 
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
     }

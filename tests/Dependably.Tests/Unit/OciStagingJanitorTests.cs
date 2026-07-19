@@ -101,7 +101,9 @@ public sealed class OciStagingJanitorTests : IAsyncLifetime
             disk ?? new UnlimitedDisk(),
             stagingOpts,
             config,
-            new OciImageLicenseRecorder(_db, tiered, _clock, NullLogger<OciImageLicenseRecorder>.Instance),
+            new OciImageLicenseRecorder(_db, tiered, _clock, NullLogger<OciImageLicenseRecorder>.Instance,
+                new LicenseRepository(_db, _clock, TestNormalizers.License(_db))),
+            new OciBlobKeyLock(),
             NullLogger<OciUploadService>.Instance,
             _clock));
     }

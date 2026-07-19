@@ -34,8 +34,10 @@ public sealed class OrgController : OrgScopedControllerBase
     private readonly OrgAccessGuard _guard;
     private readonly IBlobStore _blobs;
     private readonly TieredBlobStorage _blobStorage;
+    private readonly OciOrphanBlobDeleter _orphanBlobs;
     private readonly LicenseRepository _licenses;
     private readonly VulnerabilityRepository _vulns;
+    private readonly ArtifactInventoryRepository _inventory;
     private readonly IPublicUrlBuilder _urls;
     private readonly ILogger<OrgController> _logger;
     private readonly IMemoryCache _cache;
@@ -56,8 +58,10 @@ public sealed class OrgController : OrgScopedControllerBase
         _guard = svc.Guard;
         _blobs = svc.Blobs;
         _blobStorage = svc.BlobStorage;
+        _orphanBlobs = svc.OrphanBlobs;
         _licenses = svc.Licenses;
         _vulns = svc.Vulns;
+        _inventory = svc.Inventory;
         _urls = svc.Urls;
         _logger = svc.Logger;
         _cache = svc.Cache;
@@ -73,7 +77,13 @@ public sealed class OrgController : OrgScopedControllerBase
 
     // ── Packages ──────────────────────────────────────────────────────────────
 
-    /// <summary>GET /api/v1/orgs/{org}/packages</summary>
+    /// <summary>
+    /// GET /api/v1/orgs/{org}/packages.
+    /// The <c>search</c> term matches any substring of the package name, case-insensitively:
+    /// names that carry a prefix the user does not type — npm scopes, Maven groupId:artifactId
+    /// coordinates, OCI repository paths — are found by the part they do ('core' matches
+    /// '@babel/core'). '%' and '_' in the term are matched literally, not as wildcards.
+    /// </summary>
     // Read-only: accepts a PAT/service token carrying read:packages in addition to the
     // class-level JWT session, mirroring the yank override below.
     [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
@@ -95,8 +105,7 @@ public sealed class OrgController : OrgScopedControllerBase
 
         string orgId = CurrentTenantId();
         limit = Math.Clamp(limit, 1, MaxPackagePageSize);
-        page = Math.Max(page, 1);
-        int offset = (page - 1) * limit;
+        int offset = PaginationHelper.ComputeOffset(page, limit);
 
         var (items, total) = await _packages.ListPaginatedAsync(
             new PackageListQuery(orgId, limit, offset, ecosystem, search, sortBy, sortDir), ct);
@@ -208,6 +217,7 @@ public sealed class OrgController : OrgScopedControllerBase
             v.RevokedAt,
             v.VersionsBehind,
             v.Origin,
+            v.UpstreamUrl,
             v.UpstreamIntegrityValue,
             v.UpstreamIntegrityAlgorithm,
             v.IsMalicious,
@@ -229,41 +239,19 @@ public sealed class OrgController : OrgScopedControllerBase
     // deduplicated so a name that was cached before upload does not double-list a version.
     // The synthesized proxy PackageVersion rows carry per-tenant download_count from
     // tenant_artifact_access via CacheArtifactIndexFacts.DownloadCount.
+    //
+    // This page is version-level. NuGet's sidecar rows (.nuspec, .sha512) are metadata noise —
+    // detached hash/manifest files with no independent size or content of their own — that a
+    // version-level view must collapse to the one row (.nupkg) that actually represents the
+    // artifact. Maven (jar/pom/sources/javadoc) and multi-file PyPI (sdist + each wheel) also
+    // cast multiple cache_artifact rows per proxied version, but those rows are distinct real
+    // files with their own meaningful filename/size/hash, so they are deliberately left per-row
+    // here rather than collapsed.
     private async Task<IReadOnlyList<PackageVersion>> LoadCombinedVersionsForOrgAsync(
         string orgId, string packageId, string ecosystem, string purlName, CancellationToken ct)
     {
-        var uploadedVersions = await _packages.GetVersionsAsync(packageId, ct);
-        var proxyEntries = await _cacheArtifacts.ListServeFactsForNameAsync(orgId, ecosystem, purlName, ct);
-
-        if (proxyEntries.Count == 0)
-        {
-            return uploadedVersions;
-        }
-
-        var uploadedVersionSet = uploadedVersions
-            .Select(v => v.Version)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        // Load proxy signals once to populate IsMalicious on the synthetic PackageVersion.
-        var proxySignalIds = proxyEntries.Select(e => e.Id).ToList();
-        var proxySignals = proxySignalIds.Count > 0
-            ? await _vulns.GetGateSignalsBatchForCacheArtifactsAsync(proxySignalIds, ct)
-            : new Dictionary<string, VulnGateSignals>();
-
-        var synthetic = proxyEntries
-            .Where(e => !uploadedVersionSet.Contains(e.Version))
-            .Select(e => e.ToPackageVersionSynthetic(proxySignals))
-            .ToList();
-
-        if (synthetic.Count == 0)
-        {
-            return uploadedVersions;
-        }
-
-        var combined = new List<PackageVersion>(uploadedVersions.Count + synthetic.Count);
-        combined.AddRange(uploadedVersions);
-        combined.AddRange(synthetic);
-        return combined;
+        var versions = await _inventory.ListServeableVersionsAsync(orgId, packageId, ecosystem, purlName, ct);
+        return ecosystem == "nuget" ? ArtifactInventoryRepository.DedupeProxyVersionsByVersion(versions) : versions;
     }
 
     private static string ComputeVersionStatus(PackageVersion v, double? maxScore, double tolerance, string blockDeprecatedMode = "off")
@@ -341,28 +329,160 @@ public sealed class OrgController : OrgScopedControllerBase
         var ver = await _packages.GetVersionAsync(pkg.Id, version, ct);
         if (ver is null)
         {
-            return NotFound();
+            // Proxy/cache-plane versions have no package_versions row — see DownloadVersion's
+            // identical fallback further down.
+            return await DeleteCachePlaneVersionAsync(orgId, ecosystem, pkg, version, ct);
         }
 
-        // A PyPI version may hold several distribution files (wheel + sdist), each its own
-        // blob; delete them all, deduped against the version row's primary key so single-file
-        // versions and non-PyPI ecosystems delete exactly once.
-        var blobKeys = new HashSet<string>(StringComparer.Ordinal) { ver.BlobKey };
-        foreach (string fileBlobKey in await _versionFiles.GetBlobKeysForVersionAsync(ver.Id, ct))
+        if (ecosystem == "oci")
         {
-            blobKeys.Add(fileBlobKey);
+            // OCI manifests are content-addressed with no org segment — one oci_blobs row per
+            // (digest, org) is shared by every repository and both write paths, and a manifest
+            // casts oci_blobs / oci_tags sidecars the generic delete below never cleans. Delete the
+            // version row FIRST so it cannot count as its own surviving claim, then release this
+            // org's claim: the oci_blobs row (and its bytes) come off only when NO other claim on
+            // the digest survives anywhere in this org — a live oci_tags row under another
+            // repository, or a hosted package_versions row on the same digest, keeps them. The
+            // resolved uploaded blob is handed to the shared deleter, which removes the file only
+            // under the per-key lock a concurrent push holds and only when this org held the last
+            // cross-org reference. The naive generic path (delete ver.BlobKey directly) would 404
+            // every other repository's image and strand the sidecars.
+            await _packages.DeleteVersionAsync(ver.Id, ct);
+            string? uploadedManifestBlob = await _packages.ReleaseOciDigestClaimAsync(
+                orgId, pkg.PurlName, version, ct);
+            if (uploadedManifestBlob is not null)
+            {
+                await _orphanBlobs.DeleteIfUnreferencedAsync(uploadedManifestBlob, ct);
+            }
         }
-        foreach (string key in blobKeys)
+        else
         {
-            await _blobs.DeleteAsync(BlobKeys.StoreKey(key), ct);
+            // A PyPI version may hold several distribution files (wheel + sdist), each its own
+            // blob; delete them all, deduped against the version row's primary key so single-file
+            // versions and non-PyPI ecosystems delete exactly once.
+            var blobKeys = new HashSet<string>(StringComparer.Ordinal) { ver.BlobKey };
+            foreach (string fileBlobKey in await _versionFiles.GetBlobKeysForVersionAsync(ver.Id, ct))
+            {
+                blobKeys.Add(fileBlobKey);
+            }
+            foreach (string key in blobKeys)
+            {
+                await _blobs.DeleteAsync(BlobKeys.StoreKey(key), ct);
+            }
+            await _packages.DeleteVersionAsync(ver.Id, ct);
         }
-        await _packages.DeleteVersionAsync(ver.Id, ct);
+
         // GC the parent row when this was the last version. Orphan packages rows otherwise
         // accumulate across delete/republish cycles and cause "empty package" UI cards.
         // Atomic NOT EXISTS guard handles the race against a concurrent publish.
         await _packages.DeletePackageIfEmptyAsync(pkg.Id, ct);
 
-        // Evict any cached metadata so the deleted version is not served from cache.
+        EvictProtocolMetadataCache(orgId, ecosystem, pkg);
+
+        // Activity is the right sink for a per-version operator action — audit_log is for
+        // tenant-level config/security events. Never dual-write the same event to both.
+        await _audit.LogActivityAsync(orgId, ecosystem, ver.Purl, "delete", GetUserId(),
+            actorKind: ActorKinds.User, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+
+        return NoContent();
+    }
+
+    /// <summary>
+    /// Deletes a proxy version that lives only on the global cache plane (no
+    /// <c>package_versions</c> row — see <see cref="LoadCombinedVersionsForOrgAsync"/>). Removes
+    /// this org's <c>tenant_artifact_access</c> claim; the (global, cross-tenant)
+    /// <c>cache_artifact</c> row and its Cache-tier blob are removed only once no other org
+    /// retains access — <c>cache_artifact</c> is shared across every org that has pulled the
+    /// same coordinate, so an unconditional delete here would remove the artifact out from under
+    /// other tenants.
+    ///
+    /// OCI additionally releases this org's claim on the digest (repository-scoped
+    /// <c>oci_tags</c>, and the org's <c>oci_blobs</c> row once no claim anywhere in the org
+    /// survives) via <see cref="PackageRepository.ReleaseOciDigestClaimAsync"/> — the SAME
+    /// claims-based, cross-org-refcounted check the hosted branch above uses, because OCI's
+    /// content-addressed <c>oci_blobs.blob_key</c> is shared with hosted pushes and is NOT
+    /// protected by the generic <c>tenant_artifact_access</c> refcount below (that refcount only
+    /// sees this org's OWN cache-plane catalog row, not a same-org hosted claim or another
+    /// repository's claim on the identical digest). OCI's physical bytes are therefore governed
+    /// exclusively by <see cref="PackageRepository.ReleaseOciDigestClaimAsync"/>'s own gate; the
+    /// generic <c>cache_artifact</c> cross-org refcount below still removes OCI's cache-plane
+    /// catalog ROW when it hits zero (dashboard hygiene) but never deletes Cache-tier bytes for
+    /// OCI — those are addressed by the same content-addressed key an unrelated repository or
+    /// org may still depend on.
+    ///
+    /// Every other proxy ecosystem's blob key IS safely covered by the generic
+    /// <c>tenant_artifact_access</c> refcount: <c>BlobKeys.Proxy</c> (<c>proxy/{sha256}</c>) and
+    /// the hosted <c>BlobKeys.Hosted</c>/<c>HostedArtifact</c> (<c>hosted/{orgId}/…</c>)
+    /// namespaces are disjoint, and Go/Cargo/Apk proxy keys carry their own <c>{orgId}</c>
+    /// segment — none of them can collide with a hosted claim the way OCI's can.
+    ///
+    /// Deliberately does not call <see cref="PackageRepository.DeletePackageIfEmptyAsync"/>
+    /// itself — the caller does, after this returns, exactly as it does for the hosted branch.
+    /// </summary>
+    private async Task<IActionResult> DeleteCachePlaneVersionAsync(
+        string orgId, string ecosystem, Package pkg, string version, CancellationToken ct)
+    {
+        var proxyEntries = await _cacheArtifacts.ListServeFactsForNameAsync(orgId, ecosystem, pkg.PurlName, ct);
+        var facts = proxyEntries.FirstOrDefault(
+            e => string.Equals(e.Version, version, StringComparison.OrdinalIgnoreCase));
+        if (facts is null)
+        {
+            return NotFound();
+        }
+
+        await _tenantAccess.DeleteAsync(orgId, facts.Id, ct);
+
+        if (ecosystem == "oci")
+        {
+            // Release this org's claim on the shared oci_blobs row (repository-scoped oci_tags, and
+            // the org's oci_blobs row once no claim anywhere in the org survives). A proxy-pulled
+            // digest is origin='proxy', so this resolves no uploaded candidate and the Cache-tier
+            // bytes are left for cache GC; a hand-off is still routed through the shared locked
+            // deleter for the rare uploaded case so no OCI blob delete ever bypasses the refcount.
+            string? uploadedManifestBlob = await _packages.ReleaseOciDigestClaimAsync(
+                orgId, pkg.PurlName, facts.Version, ct);
+            if (uploadedManifestBlob is not null)
+            {
+                await _orphanBlobs.DeleteIfUnreferencedAsync(uploadedManifestBlob, ct);
+            }
+        }
+
+        long remaining = await _tenantAccess.CountRemainingAsync(facts.Id, ct);
+        if (remaining == 0)
+        {
+            // OCI bytes are governed exclusively by the oci_blobs refcount above — the
+            // cache_artifact row is still global catalog metadata worth GC'ing, but its blob_key
+            // is the same content-addressed oci/{algo}/{hex} key oci_blobs guards, so a second,
+            // narrower-visibility delete here would risk exactly the shared-bytes destruction
+            // ReleaseOciDigestClaimAsync exists to prevent.
+            if (ecosystem != "oci")
+            {
+                await _blobStorage.Cache.DeleteAsync(BlobKeys.StoreKey(facts.BlobKey), ct);
+            }
+
+            await _cacheArtifacts.DeleteAsync(facts.Id, ct);
+        }
+
+        await _packages.DeletePackageIfEmptyAsync(pkg.Id, ct);
+
+        EvictProtocolMetadataCache(orgId, ecosystem, pkg);
+
+        if (facts.Purl is not null)
+        {
+            await _audit.LogActivityAsync(orgId, ecosystem, facts.Purl, "delete", GetUserId(),
+                actorKind: ActorKinds.User, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+        }
+
+        return NoContent();
+    }
+
+    /// <summary>
+    /// Evicts any cached metadata for <paramref name="pkg"/> so a just-deleted version stops
+    /// being served from cache. Shared by both <see cref="DeleteVersion"/> branches (hosted and
+    /// cache-plane) so eviction never drifts between the two delete paths.
+    /// </summary>
+    private void EvictProtocolMetadataCache(string orgId, string ecosystem, Package pkg)
+    {
         switch (ecosystem)
         {
             case "npm":
@@ -385,13 +505,6 @@ public sealed class OrgController : OrgScopedControllerBase
                 _rpmMergedCache.Evict(new RpmMergedRepodataKey(orgId));
                 break;
         }
-
-        // Activity is the right sink for a per-version operator action — audit_log is for
-        // tenant-level config/security events. Never dual-write the same event to both.
-        await _audit.LogActivityAsync(orgId, ecosystem, ver.Purl, "delete", GetUserId(),
-            actorKind: ActorKinds.User, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
-
-        return NoContent();
     }
 
     /// <summary>GET /api/v1/packages/{ecosystem}/{name}/{version}/download — stream one artifact to the UI</summary>

@@ -28,7 +28,8 @@
     "collapse": "Collapse sidebar",
     "expand": "Expand sidebar",
     "openMenu": "Open menu",
-    "notifications": "Notifications"
+    "notifications": "Notifications",
+    "risk": "Risk"
   },
   "globalSearch": {
     "placeholder": "Search packages",
@@ -344,6 +345,8 @@
     },
     "detail": {
       "purl": "PURL",
+      "upstreamSource": "Fetched from",
+      "upstreamSourceLink": "Source",
       "files": "Files",
       "checksum": "SHA-256",
       "published": "Published",
@@ -398,7 +401,15 @@
     },
     "system": "system",
     "anonymous": "anonymous",
-    "empty": "No activity"
+    "empty": "No activity",
+    "window": {
+      "label": "Time window",
+      "all": "All time",
+      "24h": "Last 24 hours",
+      "7d": "Last 7 days",
+      "30d": "Last 30 days",
+      "90d": "Last 90 days"
+    }
   },
   "audit": {
     "title": "Audit",
@@ -552,7 +563,7 @@
       "namespaces": "Namespaces",
       "licenses": "Licenses",
       "serviceTokens": "Service tokens",
-      "webhooks": "Webhooks",
+      "integrations": "Integrations",
       "alerts": "Alerts",
       "banners": "Banners",
       "instance": "Instance settings",
@@ -608,19 +619,65 @@
     },
     "alerts": {
       "section": "Alert center",
-      "hint": "Alerts fire on a new quarantine review item and on a vulnerability meeting the severity floor below. Slack delivery is optional and requires DEPENDABLY_MASTER_KEY to store the webhook URL.",
+      "hint": "Alerts fire on a new quarantine review item and on a vulnerability meeting the severity floor below.",
       "quarantineEnabled": "Alert on new quarantine items",
       "vulnEnabled": "Alert on vulnerabilities",
       "minSeverity": "Minimum vulnerability severity",
       "minSeverityHint": "Only advisories at or above this severity raise an alert. Unscored advisories never alert.",
-      "slackEnabled": "Send alerts to Slack",
-      "slackUrl": "Slack webhook URL",
-      "slackUrlHint": "Incoming webhook URL from Slack. Requires DEPENDABLY_MASTER_KEY to store.",
-      "slackUrlRotateHint": "Enter a new value to rotate the webhook URL. Leave blank to keep the current one.",
-      "slackLastStatus": "Last Slack delivery: {status}",
-      "testSend": "Send test message",
-      "testOk": "Test message sent.",
-      "testFail": "Test message failed."
+      "emailEnabled": "Send alerts by email",
+      "emailRecipients": "Recipients",
+      "emailRecipientsHint": "Comma-separated email addresses. Empty means nothing sends. These addresses receive admin alert emails.",
+      "pointer": "Delivery transports (webhooks, Slack, and the email SMTP server) are configured on the Integrations tab."
+    },
+    "integrations": {
+      "title": "Integrations",
+      "hint": "Delivery channels for admin alerts (quarantine + vulnerability). Configure what fires on the Alerts tab.",
+      "masterKeyHint": "Requires DEPENDABLY_MASTER_KEY to be configured on this instance before a secret can be stored.",
+      "tabs": {
+        "webhooks": "Webhooks",
+        "slack": "Slack",
+        "email": "Email"
+      },
+      "slack": {
+        "enabled": "Send alerts to Slack",
+        "url": "Slack webhook URL",
+        "urlHint": "Incoming webhook URL from Slack. Requires DEPENDABLY_MASTER_KEY to store.",
+        "urlRotateHint": "Enter a new value to rotate the webhook URL. Leave blank to keep the current one.",
+        "lastStatus": "Last Slack delivery: {status}",
+        "consecutiveFailures": "({count} consecutive failures)",
+        "failingSince": "Failing since {since}",
+        "testSend": "Send test message",
+        "testOk": "Test message sent.",
+        "testFail": "Test message failed."
+      },
+      "email": {
+        "section": "Email",
+        "hint": "SMTP transport for admin alert emails — the instance's or your own. Turn email alerts on and choose recipients on the Alerts tab.",
+        "inheritInstance": "Use the instance's SMTP transport",
+        "inheritHint": "Uncheck to configure your own SMTP server instead.",
+        "instanceConfigured": "Instance SMTP configured",
+        "instanceNotConfigured": "Instance SMTP not configured",
+        "host": "SMTP host",
+        "port": "Port",
+        "security": "Security",
+        "securityStarttls": "STARTTLS",
+        "securitySsl": "SSL/TLS",
+        "securityNone": "None",
+        "username": "Username",
+        "password": "Password",
+        "passwordSetHint": "SMTP account password. Requires DEPENDABLY_MASTER_KEY to store.",
+        "passwordRotateHint": "Enter a new value to rotate the password. Leave blank to keep the current one.",
+        "from": "From address",
+        "testSend": "Send test email",
+        "testOk": "Test email sent.",
+        "testFail": "Test email failed.",
+        "testHint": "Sends to the recipients configured on the Alerts tab.",
+        "disabledPointer": "Email alerts are turned off — enable them on the Alerts tab.",
+        "effectivelyDisabledRecipients": "Email alerts are on but no recipients are configured on the Alerts tab — nothing will send.",
+        "effectivelyDisabledInstance": "Email alerts are on but the instance SMTP transport isn't configured — nothing will send.",
+        "effectivelyDisabledOwnTransport": "Email alerts are on but your own SMTP transport is incomplete — nothing will send.",
+        "lastStatus": "Last email delivery: {status}"
+      }
     },
     "banners": {
       "severity": "Severity",
@@ -642,6 +699,28 @@
     },
     "metrics": {
       "intro": "Control access to the Prometheus /metrics endpoint for this deployment."
+    },
+    "instanceEmail": {
+      "title": "Instance email (SMTP)",
+      "hint": "SMTP relay used to deliver org invite emails. Configure it once here; every invite send and the test button below use it.",
+      "enabled": "Enabled",
+      "host": "SMTP host",
+      "port": "Port",
+      "security": "Security",
+      "securityStarttls": "STARTTLS",
+      "securitySsl": "Implicit TLS (SSL)",
+      "securityNone": "None",
+      "username": "Username",
+      "password": "Password",
+      "passwordSetHint": "Set a password to enable authenticated relay. Required unless security is None.",
+      "passwordRotateHint": "A password is stored. Enter a new value to rotate it, or leave blank to keep the current one.",
+      "from": "From address",
+      "configured": "Configured",
+      "notConfigured": "Not configured",
+      "testSend": "Send test email",
+      "testOk": "Test email sent to the from address.",
+      "testFail": "Test email failed.",
+      "masterKeyHint": "DEPENDABLY_MASTER_KEY must be configured before a password can be stored."
     },
     "auth": {
       "methodsTitle": "Sign-in methods",
@@ -920,6 +999,18 @@
           "urlHint": "Base URL of the upstream registry (e.g. https://pypi.org, https://registry.npmjs.org).",
           "name": "Label (optional)",
           "namePlaceholder": "e.g. Internal mirror"
+        },
+        "auth": {
+          "authTypeLabel": "Authentication",
+          "authType": {
+            "anonymous": "Anonymous",
+            "bearer": "Bearer (token)",
+            "basic": "Basic (username + password/token)"
+          },
+          "username": "Username",
+          "secret": "Password / token",
+          "secretHint": "Write-only — not returned by the API after saving.",
+          "credentialSet": "credential set"
         },
         "oci": {
           "host": "Host",
@@ -1297,7 +1388,9 @@
         "assistantLabel": "Choose your AI assistant",
         "installLabel": "Install skill",
         "promptLabel": "Prompt",
-        "fixedIn": "Fixed in"
+        "fixedIn": "Fixed in",
+        "copyBrief": "Copy remediation brief",
+        "copyBriefHelp": "A self-contained summary you can paste into any AI assistant or a ticket."
       }
     },
     "empty": "No vulnerable packages found"
@@ -1353,9 +1446,10 @@
       "vulnerabilities": "Vulnerability scan"
     },
     "airGapped": "Air-gapped — upstream metadata was not checked; advisories and license came from the local mirror only.",
-    "errors": {
-      "notFound": "That package or version was not found upstream.",
-      "unavailable": "The upstream registry is temporarily unavailable. Try again shortly."
+    "notFound": {
+      "title": "No such package",
+      "hint": "{registry} has no package named {name}. Check the spelling.",
+      "versionHint": "{registry} has no {name} at version {version}."
     },
     "empty": "Enter a package above to check its malware, CVE, and license status before you add it."
   },
@@ -1842,7 +1936,9 @@
       "subtitle": "Global limits and schedules — applied across every tenant.",
       "tabs": {
         "instance": "Instance settings",
-        "metrics": "Metrics access"
+        "metrics": "Metrics access",
+        "email": "Email (SMTP)",
+        "slack": "Slack"
       },
       "labels": {
         "maxUploadBytes": "Max upload size — global",
@@ -1901,6 +1997,19 @@
           "hoursAgo": "{n}h ago",
           "daysAgo": "{n}d ago"
         }
+      },
+      "slack": {
+        "title": "Operator Slack",
+        "hint": "Control-plane events only: tenant lifecycle and operator accounts. Never mirrors a per-org quarantine or vulnerability alert.",
+        "enabled": "Enabled",
+        "webhookUrl": "Webhook URL",
+        "webhookUrlHint": "Slack incoming-webhook URL. Stored encrypted; never shown again after saving.",
+        "webhookUrlRotateHint": "A webhook URL is configured. Leave blank to keep it, or paste a new one to rotate it.",
+        "masterKeyHint": "DEPENDABLY_MASTER_KEY is not configured — set it to enable operator Slack delivery.",
+        "lastStatus": "Last delivery: {status}",
+        "testSend": "Send test message",
+        "testOk": "Test message sent.",
+        "testFail": "Test failed:"
       }
     },
     "banners": {
@@ -1961,6 +2070,50 @@
         "errorInvalidCode": "Invalid code.",
         "errorWrongPassword": "Current password is incorrect."
       }
+    }
+  },
+  "risk": {
+    "title": "Risk",
+    "tabs": {
+      "operational": "Operational risk",
+      "license": "License risk"
+    },
+    "intro": {
+      "operational": "Versions that have fallen at least {threshold} stable releases behind upstream. Open a row to review the package and, if needed, block the version.",
+      "license": "Versions carrying a license on your blocklist, or with no license we could extract at all. Open a row to review the package and, if needed, block the version."
+    },
+    "summary": {
+      "operational": "{packages} packages · {versions} versions at least {threshold} behind",
+      "license": "{count} versions at license risk"
+    },
+    "filters": {
+      "ecosystem": "Ecosystem",
+      "allEcosystems": "All ecosystems"
+    },
+    "columns": {
+      "package": "Package",
+      "version": "Version",
+      "versionsBehind": "Behind",
+      "latest": "Latest upstream",
+      "licenses": "Licenses",
+      "reason": "Reason",
+      "origin": "Origin",
+      "published": "Published"
+    },
+    "reason": {
+      "blocklisted": "Blocklisted",
+      "unknown": "No license"
+    },
+    "reasonFilter": {
+      "all": "All reasons"
+    },
+    "origin": {
+      "uploaded": "Hosted",
+      "proxy": "Proxied"
+    },
+    "empty": {
+      "operational": "No versions are behind upstream by that margin.",
+      "license": "No versions are at license risk."
     }
   }
 }

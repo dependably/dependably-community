@@ -23,7 +23,7 @@ public sealed record OwaspCategory(string OwaspId, string OwaspTitle, string Owa
 public static class RemediationCatalog
 {
     /// <summary>
-    /// CWE → curated remediation skill id, for the five class skills served by
+    /// CWE → curated remediation skill id, for the class skills served by
     /// <c>RemediationController</c>. The flagship <c>fix-vulnerable-dependency</c> skill applies
     /// to every advisory with a fixed version regardless of CWE, so it is derived separately in
     /// <c>VulnerabilityController</c>, not keyed by CWE here.
@@ -67,6 +67,24 @@ public static class RemediationCatalog
         // fix-unsafe-deserialization — Software or Data Integrity Failures (A08:2025):
         // deserializing untrusted data, and the closely related mass-assignment CWE.
         AddSkill(map, "fix-unsafe-deserialization", 502, 915);
+
+        // fix-broken-access-control — the remaining Broken Access Control (A01:2025) CWEs after
+        // fix-path-traversal and fix-ssrf are carved out: missing/incorrect authorization checks
+        // and insecure direct object references (IDOR/BOLA).
+        AddSkill(map, "fix-broken-access-control", 284, 285, 639, 862, 863);
+
+        // fix-weak-cryptography — Cryptographic Failures (A04:2025): broken/outdated algorithms,
+        // non-cryptographic randomness, hardcoded keys, cleartext transmission, key/nonce reuse,
+        // and unverified signatures/password hashes.
+        AddSkill(map, "fix-weak-cryptography",
+            319, 321, 322, 323, 324, 325, 326, 327, 328, 330, 331, 338, 340, 347, 916, 1240);
+
+        // fix-authentication-failures — Authentication Failures (A07:2025): missing/incorrect
+        // authentication checks, certificate-validation gaps, unbounded login attempts, session
+        // fixation/expiry, and hardcoded credentials.
+        AddSkill(map, "fix-authentication-failures",
+            287, 288, 290, 294, 295, 297, 300, 303, 304, 305, 306, 307, 346, 384, 613, 620, 640,
+            798, 940);
 
         return map.ToFrozenDictionary();
     }

@@ -15,8 +15,9 @@ namespace Dependably.Tests.Integration;
 /// <summary>
 /// Host-header filtering: when BASE_URL contains a non-localhost host, Kestrel's
 /// HostFilteringMiddleware rejects requests with unknown Host headers before tenant resolution
-/// runs. When BASE_URL is unset or localhost (dev/local), filtering is permissive so the
-/// local loop is not broken.
+/// runs. When BASE_URL is unset or localhost (dev/local), no apex is derivable and filtering
+/// fails closed to the loopback hostnames only (never "*") so the local dev loop keeps working
+/// without opening the door to an arbitrary attacker-supplied Host header.
 ///
 /// Mixed scenario: same factory, one request with a valid Host accepted (2xx/non-400) and one
 /// request with a forged Host rejected (400) — both in a single test class.
@@ -148,12 +149,18 @@ public sealed class HostFilteringTests
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
     }
 
-    // ── No apex configured: permissive fallback ───────────────────────────────
+    // ── No apex configured: fails closed to loopback hosts only ───────────────
 
+    /// <summary>
+    /// Regression test for the Host-header-injection finding: with BASE_URL unset/localhost
+    /// (the shipped docker-compose default) and no reverse proxy configured, an arbitrary
+    /// attacker-controlled Host header must be rejected, not silently accepted. Fails on the
+    /// pre-fix code (AllowedHosts="*") and passes once the fallback is restricted to loopback
+    /// hostnames.
+    /// </summary>
     [Fact]
-    public async Task NoApex_PermissiveFallback_ArbitraryHostIsAccepted()
+    public async Task NoApex_ArbitraryHost_IsRejected()
     {
-        // Factory with localhost BASE_URL: AllowedHosts stays "*"
         await using var factory = NewNoApexFactory();
         await factory.InitializeAsync();
 
@@ -163,8 +170,60 @@ public sealed class HostFilteringTests
 
         var resp = await client.SendAsync(req);
 
-        // Permissive mode: host filtering does not reject; tenant resolver may return 404 but not 400
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+    }
+
+    /// <summary>
+    /// Mixed scenario for the same no-apex factory: the loopback hostname is still accepted
+    /// (the local dev loop is not broken) while an arbitrary forged Host is rejected.
+    /// </summary>
+    [Fact]
+    public async Task NoApex_Mixed_LoopbackAcceptedArbitraryRejected()
+    {
+        await using var factory = NewNoApexFactory();
+        await factory.InitializeAsync();
+
+        using var client = factory.CreateClient();
+
+        var goodReq = new HttpRequestMessage(HttpMethod.Get, "/health");
+        goodReq.Headers.Host = "localhost";
+        var goodResp = await client.SendAsync(goodReq);
+        Assert.NotEqual(HttpStatusCode.BadRequest, goodResp.StatusCode);
+
+        var badReq = new HttpRequestMessage(HttpMethod.Get, "/health");
+        badReq.Headers.Host = "arbitrary.unknown.test";
+        var badResp = await client.SendAsync(badReq);
+        Assert.Equal(HttpStatusCode.BadRequest, badResp.StatusCode);
+    }
+
+    [Fact]
+    public async Task NoApexMultiMode_SubdomainOfLocalhost_IsAccepted()
+    {
+        await using var factory = NewNoApexMultiModeFactory();
+        await factory.InitializeAsync();
+
+        using var client = factory.CreateClient();
+        var req = new HttpRequestMessage(HttpMethod.Get, "/health");
+        req.Headers.Host = "myorg.localhost";
+
+        var resp = await client.SendAsync(req);
+
         Assert.NotEqual(HttpStatusCode.BadRequest, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task NoApexMultiMode_ArbitraryHost_IsRejected()
+    {
+        await using var factory = NewNoApexMultiModeFactory();
+        await factory.InitializeAsync();
+
+        using var client = factory.CreateClient();
+        var req = new HttpRequestMessage(HttpMethod.Get, "/health");
+        req.Headers.Host = "arbitrary.unknown.test";
+
+        var resp = await client.SendAsync(req);
+
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
     }
 
     // ── Factory helpers ────────────────────────────────────────────────────────
@@ -185,6 +244,12 @@ public sealed class HostFilteringTests
     {
         ["BASE_URL"] = "http://localhost:8080",
         ["DEPLOYMENT_MODE"] = "single",
+    });
+
+    private static HostFilterFactory NewNoApexMultiModeFactory() => new(new Dictionary<string, string>
+    {
+        ["BASE_URL"] = "http://localhost:8080",
+        ["DEPLOYMENT_MODE"] = "multi",
     });
 
     /// <summary>
