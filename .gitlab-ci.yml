@@ -90,6 +90,7 @@ variables:
   - { job: dotnet-format,          artifacts: false }
   - { job: csp-inline-style-guard, artifacts: false }
   - { job: chrome-emoji-guard,     artifacts: false }
+  - { job: sql-interp-guard,       artifacts: false }
   - { job: i18n-validate,          artifacts: false }
   - { job: secret-scan,            artifacts: false }
   - { job: unit-tests,             artifacts: false }
@@ -560,6 +561,20 @@ chrome-emoji-guard:
         echo "Emoji codepoint detected in web/src. Use a sprite from web/public/icons.svg instead — DESIGN.md §11." >&2
         exit 1
       fi
+
+# Bans string interpolation into a Dapper Execute*/Query* call (SQL-injection vector). The
+# canonical gate is NoInterpolatedSqlComplianceTests in the unit suite; this grep runs in the
+# validate stage so the pattern is caught before the (slower) test job, and mirrors the same
+# guard the GitHub mirror runs from the one shared ci/check-sql-interp.sh script. Both honour
+# the `// rawsql: <reason>` opt-out so neither is stricter than the compliance test.
+sql-interp-guard:
+  stage: test
+  extends: [.runs-on-ci, .release-required]
+  image: ${DEP_IMAGE_REGISTRY}/library/alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
+  script:
+    - !reference [.apk-mirror-setup, script]
+    - apk add --no-cache grep
+    - sh ci/check-sql-interp.sh src
 
 # Locale completeness gate: every key in the source locale (web en.json, backend
 # SharedResource.resx) must exist in every translated locale. Missing keys fail;
