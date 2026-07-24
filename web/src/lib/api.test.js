@@ -135,6 +135,25 @@ describe('req — error path', () => {
 
     expect(get(pendingRoute)).toBeNull()
   })
+
+  it('401 while on /reset?token=... does NOT navigate away — the token must stay in the URL', async () => {
+    // Mirrors the /join bypass: an unauthenticated password-reset visitor's bootstrap me()
+    // probe returns 401 by design. Redirecting to login would replaceState the URL and strip
+    // the reset token before Reset.svelte reads it.
+    const originalPath = window.location.pathname
+    window.history.replaceState(null, '', '/reset?token=abc123')
+    try {
+      route.set({ page: 'reset', params: {} })
+      fetchMock.mockResolvedValueOnce(jsonResponse(401, { detail: 'unauthenticated' }))
+
+      await api.me().catch(() => {})
+
+      expect(get(route).page).toBe('reset')
+      expect(get(pendingRoute)).toBeNull()
+    } finally {
+      window.history.replaceState(null, '', originalPath)
+    }
+  })
 })
 
 describe('endpoint contract', () => {
@@ -149,6 +168,8 @@ describe('endpoint contract', () => {
     ['changePassword', () => api.changePassword('a', 'b'), 'POST', '/api/v1/users/me/password'],
     ['updateLanguage', () => api.updateLanguage('fr'), 'POST', '/api/v1/users/me/language'],
     ['getAuthMethods', () => api.getAuthMethods(), 'GET', '/api/v1/auth/methods'],
+    ['forgotPassword', () => api.forgotPassword('a@b'), 'POST', '/api/v1/auth/forgot-password'],
+    ['resetPassword', () => api.resetPassword('tok', 'newpw'), 'POST', '/api/v1/auth/reset-password'],
     ['getAuthConfig', () => api.getAuthConfig(), 'GET', '/api/v1/auth-config'],
     ['putAuthConfig', () => api.putAuthConfig({}), 'PUT', '/api/v1/auth-config'],
     ['uploadSamlMetadata', () => api.uploadSamlMetadata('<xml/>'), 'POST', '/api/v1/auth-config/metadata'],

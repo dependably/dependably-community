@@ -425,7 +425,7 @@ public sealed class SystemControllerUnitTests
 
         var req = new ChangePasswordRequest("OldPassword123", "short");
         // login/urls are only reached on success; null! is safe for these early-exit paths.
-        var result = await b.SystemController.ChangeMyPassword(req, td, null!, null!, CancellationToken.None);
+        var result = await b.SystemController.ChangeMyPassword(req, td, null!, null!, null!, CancellationToken.None);
         var obj = Assert.IsType<ObjectResult>(result);
         Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
     }
@@ -442,7 +442,7 @@ public sealed class SystemControllerUnitTests
         const string password = "SamePassword123!";
         var req = new ChangePasswordRequest(password, password);
         // login/urls are only reached on success; null! is safe for these early-exit paths.
-        var result = await b.SystemController.ChangeMyPassword(req, td, null!, null!, CancellationToken.None);
+        var result = await b.SystemController.ChangeMyPassword(req, td, null!, null!, null!, CancellationToken.None);
         var obj = Assert.IsType<ObjectResult>(result);
         Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
     }
@@ -961,7 +961,7 @@ public sealed class SystemControllerUnitTests
         var td = new TrustedDeviceService(s.Store, TestTime.Frozen(), new ConfigurationBuilder().Build());
         var req = new ChangePasswordRequest("OldPassword123!", "BrandNewPassword456!");
         // login/urls are only reached on success; null! is safe for this early-exit path.
-        var result = await b.SystemController.ChangeMyPassword(req, td, null!, null!, CancellationToken.None);
+        var result = await b.SystemController.ChangeMyPassword(req, td, null!, null!, null!, CancellationToken.None);
         Assert.IsType<UnauthorizedResult>(result);
     }
 
@@ -990,7 +990,7 @@ public sealed class SystemControllerUnitTests
         var b = await s.BuildAsync();
 
         var result = await b.SystemController.IssuePasswordReset(
-            "user@acme.test", null!, CancellationToken.None);
+            "user@acme.test", null!, null!, null!, CancellationToken.None);
         var obj = Assert.IsType<ObjectResult>(result);
         Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
     }
@@ -1051,7 +1051,7 @@ public sealed class SystemControllerUnitTests
         var b = await s.BuildAsync();
 
         var result = await b.SystemController.IssuePasswordReset(
-            "user@acme.test", new PasswordResetRequest(""), CancellationToken.None);
+            "user@acme.test", new PasswordResetRequest(""), null!, null!, CancellationToken.None);
         var obj = Assert.IsType<ObjectResult>(result);
         Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
     }

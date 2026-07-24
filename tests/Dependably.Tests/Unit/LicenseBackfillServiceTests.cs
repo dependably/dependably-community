@@ -173,6 +173,42 @@ public sealed class LicenseBackfillServiceTests : IAsyncLifetime
         Assert.Equal(TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"), await CheckedAtAsync(id));
     }
 
+    /// <summary>
+    /// The reported proc-macro2 case: cargo ingest extracts a licence only on a proxy cache MISS,
+    /// so a crate already in the blob store keeps an empty licence forever unless the nightly
+    /// backfill enrols it. Cargo ingest also never stamps license_checked_at, so enrolment sweeps
+    /// the whole existing backlog rather than only crates fetched from here on.
+    /// </summary>
+    [Fact]
+    public async Task BackfillPass_CargoCandidate_WithLicense_WritesRow_Stamped()
+    {
+        var blobs = new InMemoryBlobStore();
+        string key = "proxy/" + new string('p', 64);
+        await blobs.PutAsync(key, CrateTarball("proc-macro2", "1.0.1", "MIT OR Apache-2.0"));
+        string id = await SeedCacheArtifactAsync(
+            "cargo", "proc-macro2", "1.0.1", key, "proc-macro2-1.0.1.crate");
+
+        var service = BuildService(blobs);
+        await service.RunBackfillPassAsync(CancellationToken.None);
+
+        Assert.Equal(new[] { "MIT OR Apache-2.0" }, await LicensesForAsync(id));
+        Assert.Equal(TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"), await CheckedAtAsync(id));
+    }
+
+    [Fact]
+    public async Task BackfillPass_CargoCandidate_MissingBlob_StampedNoRow()
+    {
+        var blobs = new InMemoryBlobStore();
+        string id = await SeedCacheArtifactAsync(
+            "cargo", "gone-crate", "1.0.0", "proxy/" + new string('q', 64), "gone-crate-1.0.0.crate");
+
+        var service = BuildService(blobs);
+        await service.RunBackfillPassAsync(CancellationToken.None);
+
+        Assert.Empty(await LicensesForAsync(id));
+        Assert.Equal(TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"), await CheckedAtAsync(id));
+    }
+
     [Fact]
     public async Task ListNeedingLicenseBackfillAsync_MavenJarRow_ExcludedFromCandidates()
     {
@@ -420,5 +456,24 @@ public sealed class LicenseBackfillServiceTests : IAsyncLifetime
 
         public IAsyncEnumerable<BlobInfo> ListAsync(string prefix, CancellationToken ct = default) =>
             _inner.ListAsync(prefix, ct);
+    }
+
+    /// <summary>
+    /// A minimal <c>.crate</c> tarball: gzip tar with the crate's root-directory Cargo.toml,
+    /// which is where <see cref="LicenseExtractor.FromCrateTarball"/> reads the licence from.
+    /// </summary>
+    private static MemoryStream CrateTarball(string name, string version, string license)
+    {
+        using var ms = new MemoryStream();
+        using (var gz = new GZipStream(ms, CompressionMode.Compress, leaveOpen: true))
+        using (var tw = new TarWriter(gz, leaveOpen: true))
+        {
+            tw.WriteEntry(new PaxTarEntry(TarEntryType.RegularFile, $"{name}-{version}/Cargo.toml")
+            {
+                DataStream = new MemoryStream(Encoding.UTF8.GetBytes(
+                    $"[package]\nname = \"{name}\"\nversion = \"{version}\"\nlicense = \"{license}\"\n")),
+            });
+        }
+        return new MemoryStream(ms.ToArray());
     }
 }

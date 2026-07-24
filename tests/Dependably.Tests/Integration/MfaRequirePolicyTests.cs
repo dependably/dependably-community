@@ -426,6 +426,12 @@ public sealed class MfaRequireEnforcedSettingsTests : IAsyncLifetime
             builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
 
             builder.WebHost.UseTestServer();
+            // Boots a real host via Program.ConfigureBuilder; disable the background jobs
+            // that egress or mutate shared state at boot (see Infrastructure/DependablyFactory.cs
+            // for the full rationale).
+            builder.WebHost.UseSetting(
+                "DISABLE_BACKGROUND_JOBS",
+                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill");
             builder.WebHost.UseSetting("REQUIRE_MFA", "true");
             builder.WebHost.UseSetting("OSV_MODE", "local");
             builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
@@ -704,6 +710,12 @@ public sealed class SystemMfaRequirePolicyTests : IAsyncLifetime
             builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
 
             builder.WebHost.UseTestServer();
+            // Boots a real host via Program.ConfigureBuilder; disable the background jobs
+            // that egress or mutate shared state at boot (see Infrastructure/DependablyFactory.cs
+            // for the full rationale).
+            builder.WebHost.UseSetting(
+                "DISABLE_BACKGROUND_JOBS",
+                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill");
             builder.WebHost.UseSetting("REQUIRE_MFA", "true");
             builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
             builder.WebHost.UseSetting("LOGIN_RATE_LIMIT_PERMITS", "100000");

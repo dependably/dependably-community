@@ -81,7 +81,11 @@ public sealed class SystemMfaController : ControllerBase
     /// enables MFA, generates 10 recovery codes, and records the enrollment audit event.
     /// </summary>
     [HttpPost("setup/verify")]
-    public async Task<IActionResult> SetupVerify([FromBody] MfaVerifyRequest req, CancellationToken ct)
+    public async Task<IActionResult> SetupVerify(
+        [FromBody] MfaVerifyRequest req,
+        [FromServices] Dependably.Infrastructure.Mail.TransactionalEmailService mailer,
+        [FromServices] TimeProvider time,
+        CancellationToken ct)
     {
         string? adminId = GetAdminId();
         if (adminId is null)
@@ -112,6 +116,9 @@ public sealed class SystemMfaController : ControllerBase
             sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
 
+        await NotifySecurityEventAsync(adminId, mailer, time, ct,
+            (m, addr, lang, now) => m.EnqueueMfaEnabled(addr, lang, now));
+
         return Ok(new { recoveryCodes = codes });
     }
 
@@ -121,7 +128,11 @@ public sealed class SystemMfaController : ControllerBase
     /// and re-issues the caller's own session cookie at the new version.
     /// </summary>
     [HttpPost("disable")]
-    public async Task<IActionResult> Disable([FromBody] MfaDisableRequest req, CancellationToken ct)
+    public async Task<IActionResult> Disable(
+        [FromBody] MfaDisableRequest req,
+        [FromServices] Dependably.Infrastructure.Mail.TransactionalEmailService mailer,
+        [FromServices] TimeProvider time,
+        CancellationToken ct)
     {
         string? adminId = GetAdminId();
         if (adminId is null)
@@ -173,6 +184,9 @@ public sealed class SystemMfaController : ControllerBase
             detail: new MfaEvents.Disabled(method).ToJson(),
             sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
+
+        await NotifySecurityEventAsync(adminId, mailer, time, ct,
+            (m, addr, lang, now) => m.EnqueueMfaDisabled(addr, lang, now));
 
         // Re-issue the caller's own session at the new token_version so this request stays authenticated.
         string fresh = await _login.IssueSystemSessionAsync(adminId, newVersion, ct);
@@ -251,6 +265,28 @@ public sealed class SystemMfaController : ControllerBase
     private string? GetAdminId() =>
         User.FindFirst(ClaimTypes.NameIdentifier)?.Value
         ?? User.FindFirst("sub")?.Value;
+
+    // Resolves the admin's own email and effective language (per-admin override → "en"; there is
+    // no org in the system realm), then enqueues the security-event email via the supplied
+    // delegate. Non-blocking and best-effort: a missing admin row (should not happen for an
+    // authenticated session) is a silent no-op rather than a thrown exception, so an
+    // enrollment/disable response is never gated on notification delivery.
+    private async Task NotifySecurityEventAsync(
+        string adminId,
+        Dependably.Infrastructure.Mail.TransactionalEmailService mailer,
+        TimeProvider time,
+        CancellationToken ct,
+        Action<Dependably.Infrastructure.Mail.TransactionalEmailService, string, string, DateTimeOffset> enqueue)
+    {
+        var admin = await _systemAdmins.GetByIdAsync(adminId, ct);
+        if (string.IsNullOrEmpty(admin?.Email))
+        {
+            return;
+        }
+
+        string language = LanguageCodes.ResolveEffective(admin.Language);
+        enqueue(mailer, admin.Email, language, time.GetUtcNow());
+    }
 
     // Builds the otpauth URI for the system admin. Issuer is always "dependably" (no tenant slug
     // in the system realm).

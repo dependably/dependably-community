@@ -78,6 +78,20 @@ public sealed class DependablyMultiUpstreamFactory : WebApplicationFactory<Progr
 
         builder.WebHost.UseTestServer();
 
+        // Every factory instantiation boots the host, and RunOnStartup=true fires an immediate
+        // pass on four hosted services: VulnerabilityScanService (job names vuln-scan,
+        // vuln-rescan), ThreatFeedRefreshService (threat-feed), and DeprecationRefreshService
+        // (deprecation-refresh) each make a real outbound HTTP request (OSV.dev, CISA KEV,
+        // FIRST.org EPSS, npm/PyPI/NuGet deprecation feeds) against the public internet rather
+        // than the in-process WireMock upstream; LicenseBackfillService (license-backfill) makes
+        // no outbound call but mutates the shared cache_artifact.license_checked_at column under
+        // a leader lock on every boot, its own source of cross-test non-determinism. Naming all
+        // five job names here keeps the proxy-passthrough path (MockUpstream below) intact — this
+        // disables only these five, not every background job.
+        builder.WebHost.UseSetting(
+            "DISABLE_BACKGROUND_JOBS",
+            "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill");
+
         builder.WebHost.UseSetting("PyPI:Upstream", MockUpstream.Urls[0]);
         builder.WebHost.UseSetting("Npm:Upstream", MockUpstream.Urls[0]);
         builder.WebHost.UseSetting("NuGet:Upstream", MockUpstream.Urls[0]);

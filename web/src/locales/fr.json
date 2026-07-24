@@ -105,6 +105,7 @@
       "sessionExpired": "Votre session a expiré — veuillez vous reconnecter.",
       "or": "ou",
       "signInWithSso": "Se connecter avec SSO",
+      "forgotPassword": "Mot de passe oublié?",
       "totp": {
         "title": "Authentification à deux facteurs",
         "help": "Saisissez le code à 6 chiffres de votre application d'authentification.",
@@ -132,6 +133,30 @@
       "errorMinLength": "Le mot de passe doit comporter au moins 12 caractères.",
       "errorMismatch": "Les mots de passe ne correspondent pas.",
       "errorFailed": "Échec de l'acceptation de l'invitation."
+    },
+    "forgotPassword": {
+      "title": "Réinitialisez votre mot de passe",
+      "subtitle": "Entrez votre courriel et nous vous enverrons un lien pour réinitialiser votre mot de passe.",
+      "email": "Courriel",
+      "submit": "Envoyer le lien",
+      "submitting": "Envoi…",
+      "success": "Si un compte existe pour ce courriel, un lien de réinitialisation est en route. Consultez votre boîte de réception.",
+      "back": "Retour à la connexion"
+    },
+    "reset": {
+      "title": "Définir un nouveau mot de passe",
+      "newPassword": "Nouveau mot de passe",
+      "passwordHint": "(min. 12 caractères)",
+      "confirmPassword": "Confirmer le mot de passe",
+      "submit": "Réinitialiser le mot de passe",
+      "submitting": "Réinitialisation…",
+      "success": "Mot de passe réinitialisé!",
+      "signIn": "Se connecter",
+      "errorMinLength": "Le mot de passe doit comporter au moins 12 caractères.",
+      "errorMismatch": "Les mots de passe ne correspondent pas.",
+      "errorFailed": "Échec de la réinitialisation du mot de passe.",
+      "errorExpired": "Ce lien de réinitialisation est invalide, expiré ou déjà utilisé.",
+      "requestNew": "Demander un nouveau lien"
     }
   },
   "packages": {
@@ -245,6 +270,10 @@
     }
   },
   "versionDetail": {
+    "meta": {
+      "homepage": "Site web",
+      "repository": "Dépôt"
+    },
     "columns": {
       "version": "Version",
       "latest": "Dernière",
@@ -345,8 +374,8 @@
     },
     "detail": {
       "purl": "PURL",
-      "upstreamSource": "Récupéré depuis",
-      "upstreamSourceLink": "Source",
+      "registryPage": "Publié sur",
+      "registryPageLink": "Voir la page",
       "files": "Fichiers",
       "checksum": "SHA-256",
       "published": "Publié le",
@@ -1405,8 +1434,7 @@
       "version": "Version",
       "versionPlaceholder": "Laisser vide pour la dernière version",
       "submit": "Vérifier le paquet",
-      "mavenHint": "groupId:artifactId",
-      "versionRequiredHint": "Une version est requise pour cet écosystème."
+      "mavenHint": "groupId:artifactId"
     },
     "verdict": {
       "allowed": "Autorisé",

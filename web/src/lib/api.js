@@ -78,21 +78,22 @@ function downloadCsv(path, params, fallbackBaseName) {
 /**
  * Triggers the global session-expired redirect for a 401 response, unless `path` is a
  * domain-level auth endpoint (bad credentials on /auth/login, wrong TOTP on /auth/login/totp,
- * wrong-password on /mfa/disable or /system/mfa/disable) that the caller surfaces inline, or the
- * unauthenticated invite-accept bootstrap probe on /join.
+ * wrong-password on /mfa/disable or /system/mfa/disable) that the caller surfaces inline, or an
+ * unauthenticated bootstrap probe on /join or /reset.
  */
 function handleUnauthorized(path) {
   if (path === '/auth/login' || path === '/auth/login/totp' || path === '/mfa/disable' || path === '/system/mfa/disable') {
     return
   }
 
-  // The invite-accept flow lands unauthenticated invitees on /join?token=...; the bootstrap
-  // me() probe there returns 401 by design. Redirecting to login would replaceState the URL
-  // and strip the invite token before the join page reads it, so leave the join page in place
-  // and let the caller handle the 401. The route store isn't seeded yet during bootstrap, so
-  // read the live pathname rather than the route store.
-  const onJoin = typeof window !== 'undefined' && window.location.pathname === '/join'
-  if (onJoin) {
+  // The invite-accept and self-serve reset-password flows land unauthenticated visitors on
+  // /join?token=... or /reset?token=...; the bootstrap me() probe there returns 401 by design.
+  // Redirecting to login would replaceState the URL and strip the token before the page reads
+  // it, so leave the page in place and let the caller handle the 401. The route store isn't
+  // seeded yet during bootstrap, so read the live pathname rather than the route store.
+  const onTokenPage = typeof window !== 'undefined'
+    && (window.location.pathname === '/join' || window.location.pathname === '/reset')
+  if (onTokenPage) {
     return
   }
 
@@ -145,6 +146,10 @@ export const api = {
   login: (email, password) => req('POST', '/auth/login', { email, password }),
   loginTotp: (code, rememberDevice) => req('POST', '/auth/login/totp', { code, rememberDevice }),
   logout: () => req('POST', '/auth/logout'),
+  // Self-serve "forgot password". Both are anonymous; forgotPassword always resolves (202) —
+  // the enumeration defense is server-side, not something the caller branches on.
+  forgotPassword: (email) => req('POST', '/auth/forgot-password', { email }),
+  resetPassword: (token, newPassword) => req('POST', '/auth/reset-password', { token, newPassword }),
   me: () => req('GET', '/auth/me'),
   changePassword: (currentPassword, newPassword) =>
     req('POST', '/users/me/password', { currentPassword, newPassword }),

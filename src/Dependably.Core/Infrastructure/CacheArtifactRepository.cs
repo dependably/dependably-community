@@ -314,7 +314,7 @@ public sealed class CacheArtifactRepository
             FROM cache_artifact
             WHERE license_checked_at IS NULL
               AND (
-                    ecosystem IN ('npm', 'pypi', 'nuget', 'golang')
+                    ecosystem IN ('npm', 'pypi', 'nuget', 'golang', 'cargo')
                     OR (ecosystem = 'maven' AND LOWER(filename) LIKE '%.pom')
                   )
               AND (

@@ -530,7 +530,7 @@ public sealed class NuGetPublishHandler(
         // never materialized in managed memory on the push path.
         var extracted = ExtractNuspecLicense(stagedPath);
         var publishResult = await publish.StoreAndRecordAsync(
-            BuildNuspecPublishRequest(httpContext, ctx, artifact, extracted.Spdx.Count > 0 ? extracted.Spdx : null), ct);
+            BuildNuspecPublishRequest(httpContext, ctx, artifact, extracted), ct);
 
         if (publishResult is PublishResult.Rejected rej)
         {
@@ -603,7 +603,8 @@ public sealed class NuGetPublishHandler(
     }
 
     private static PublishRequest BuildNuspecPublishRequest(
-        HttpContext httpContext, NuGetPushContext ctx, NuspecArtifact artifact, IReadOnlyList<string>? licenses)
+        HttpContext httpContext, NuGetPushContext ctx, NuspecArtifact artifact,
+        LicenseExtractor.ExtractedMetadata extracted)
         => new()
         {
             OrgId = ctx.OrgId,
@@ -623,7 +624,10 @@ public sealed class NuGetPublishHandler(
             AllowOverwrite = ctx.Settings?.AllowVersionOverwrite ?? false,
             ClaimState = artifact.ClaimState,
             SourceIp = httpContext.GetNormalizedRemoteIp(),
-            Licenses = licenses,
+            Licenses = extracted.Spdx.Count > 0 ? extracted.Spdx : null,
+            Homepage = extracted.Homepage,
+            Repository = extracted.Repository,
+            Description = extracted.Description,
         };
 
     /// <summary>

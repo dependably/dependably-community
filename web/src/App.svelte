@@ -13,6 +13,7 @@
 
   import Login from './pages/Login.svelte'
   import Join from './pages/Join.svelte'
+  import Reset from './pages/Reset.svelte'
   import Packages from './pages/Packages.svelte'
   import VersionDetail from './pages/VersionDetail.svelte'
   import Audit from './pages/Audit.svelte'
@@ -92,6 +93,9 @@
     const intended = routeFor(window.location.pathname) || { page: 'dashboard', params: {} }
     const search = new URLSearchParams(window.location.search)
     const hasJoinToken = intended.page === 'join' && !!search.get('token')
+    // /reset?token=... is honored the same way as /join — a self-serve password-reset visitor
+    // has no session yet either.
+    const hasResetToken = intended.page === 'reset' && !!search.get('token')
 
     // Resolve auth — silent failure means unauthenticated.
     let me = null
@@ -110,12 +114,14 @@
     // Decide final page based on intended × auth × mustChangePassword.
     let finalPage, finalParams = {}
     if (!me) {
-      // /join?token=... is honored even without a session — invitees won't have one yet.
-      // /saml-test-result requires an authenticated admin; bounce unauth to login.
+      // /join?token=... and /reset?token=... are honored even without a session — invitees and
+      // password-reset visitors won't have one yet. /saml-test-result requires an authenticated
+      // admin; bounce unauth to login.
       if (hasJoinToken) finalPage = 'join'
+      else if (hasResetToken) finalPage = 'reset'
       else {
         // Stash the intended deep link so post-login returns the user there.
-        if (intended.page !== 'login' && intended.page !== 'join') {
+        if (intended.page !== 'login' && intended.page !== 'join' && intended.page !== 'reset') {
           pendingRoute.set(intended)
         }
         finalPage = 'login'
@@ -138,7 +144,7 @@
 
     // Single replacing navigate seats URL + state + store with no flicker, no extra entry.
     // The query string is preserved whenever the user lands on the page they asked for:
-    // list pages hydrate their table state from it, and saml-test-result/join read their
+    // list pages hydrate their table state from it, and saml-test-result/join/reset read their
     // params from window.location.search on mount. Redirected landings (login bounce,
     // dashboard fallback) get a clean URL.
     navigate(finalPage, finalParams, { replace: true, preserveSearch: finalPage === intended.page })
@@ -176,6 +182,8 @@
   <Login />
 {:else if $route.page === 'join'}
   <Join />
+{:else if $route.page === 'reset'}
+  <Reset />
 {:else}
   <div class="layout">
     <Sidebar />

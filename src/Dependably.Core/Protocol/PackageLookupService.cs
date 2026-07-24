@@ -3,6 +3,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Xml.Linq;
+using Dependably.Api;
 using Dependably.Infrastructure;
 using Dependably.Security;
 
@@ -19,11 +20,17 @@ namespace Dependably.Protocol;
 /// enrichment). <see cref="LicenseRepository.CheckPolicyAsync"/> is called read-only; this is
 /// its first production caller, informational only under <c>off</c> mode.
 ///
-/// Metadata support is per-ecosystem: npm and PyPI resolve deprecation, publish date, and SPDX
-/// license from their JSON APIs; NuGet and Maven resolve version existence only (their
-/// registration/POM endpoints are not walked at lookup time); Go and Cargo have no wired
-/// metadata source, so a lookup requires an explicit version and reports advisories/malware
-/// only. A candidate's install-script and provenance facts are never derivable at lookup time
+/// Metadata support is per-ecosystem, and every ecosystem resolves "no version given -> evaluate
+/// latest stable". npm and PyPI resolve deprecation, publish date, and SPDX license from their
+/// JSON APIs. NuGet and Maven resolve version existence only (their registration/POM endpoints
+/// are not walked at lookup time). Cargo reads the sparse index for version existence and
+/// <c>yanked</c>, and adds license and publish date from the crates.io JSON API when — and only
+/// when — the configured upstream is crates.io's own index, so a private mirror degrades to
+/// index-only facts instead of reaching a host the operator never configured. Go reads
+/// <c>@latest</c>/<c>.info</c> for version and publish date; a Go module carries no license or
+/// deprecation signal outside its zip, which lookup never downloads. An air-gapped org or
+/// instance suppresses every upstream fetch, so a lookup there still requires an explicit
+/// version. A candidate's install-script and provenance facts are never derivable at lookup time
 /// (no artifact is fetched), so those <see cref="BlockGateService"/> arms are always neutral —
 /// callers should not read <see cref="PackageLookupResult.Verdict"/> as a guarantee those
 /// checks ran. <see cref="PackageLookupResult.UnavailableChecks"/> reports only checks that
@@ -37,10 +44,11 @@ public sealed class PackageLookupService
         ["npm", "pypi", "nuget", "maven", "golang", "cargo"];
 
     // Ecosystems with a wired upstream metadata fetch (deprecation/publish-date/license and
-    // "no version given -> evaluate latest stable"). golang/cargo have no metadata source here
-    // (Go is proxy-only and Cargo's sparse index is not walked at lookup time) so a version must
-    // always be supplied for them.
-    private static readonly HashSet<string> MetadataSupportedEcosystems = ["npm", "pypi", "nuget", "maven"];
+    // "no version given -> evaluate latest stable"). Which facts each one yields varies — see the
+    // per-ecosystem summary on the class — but every member can resolve a latest version, so an
+    // omitted version is a hard failure only when no fetch is permitted at all (air-gap).
+    private static readonly HashSet<string> MetadataSupportedEcosystems =
+        ["npm", "pypi", "nuget", "maven", "cargo", "golang"];
 
     private readonly OrgRepository _orgs;
     private readonly UpstreamRegistryResolver _registries;
@@ -202,6 +210,16 @@ public sealed class PackageLookupService
         if (facts.PublishedAt is null)
         {
             unavailable.Add("release_age");
+        }
+
+        // Deprecated is null both when a source resolved "not deprecated" (npm, PyPI, Cargo) and
+        // when it carries no deprecation signal at all (NuGet, Maven, Go), so the flag — not the
+        // value — decides. Reporting the unresolved case keeps the unavailable-checks list an
+        // accurate account of what actually ran, which is the only thing that makes an "allowed"
+        // verdict readable.
+        if (!facts.DeprecationResolved)
+        {
+            unavailable.Add("deprecated");
         }
 
         if (facts.Spdx.Count == 0)
@@ -480,6 +498,8 @@ public sealed class PackageLookupService
             "pypi" => FetchPyPiAsync(orgId, name, requestedVersion, ct),
             "nuget" => FetchNuGetAsync(orgId, name, requestedVersion, ct),
             "maven" => FetchMavenAsync(orgId, name, requestedVersion, ct),
+            "cargo" => FetchCargoAsync(orgId, name, requestedVersion, ct),
+            "golang" => FetchGoAsync(orgId, name, requestedVersion, ct),
             _ => throw new ArgumentOutOfRangeException(nameof(ecosystem), ecosystem, "no metadata fetch wired"),
         };
 
@@ -782,7 +802,8 @@ public sealed class PackageLookupService
         }
 
         var spdx = await TryFetchNuGetLicenseAsync(source, lowerId, normalizedRequested, ct);
-        return FactsOutcome.Ok(version, new VersionMetadataFacts(null, null, spdx));
+        return FactsOutcome.Ok(version, new VersionMetadataFacts(
+            null, null, spdx, DeprecationResolved: false));
     }
 
     // Best-effort .nuspec fetch for the license expression. The flat-container nuspec endpoint
@@ -895,8 +916,224 @@ public sealed class PackageLookupService
         }
 
         return versions.Contains(version, StringComparer.Ordinal)
-            ? FactsOutcome.Ok(version, new VersionMetadataFacts(null, null, Array.Empty<string>()))
+            ? FactsOutcome.Ok(version, new VersionMetadataFacts(
+                null, null, Array.Empty<string>(), DeprecationResolved: false))
             : FactsOutcome.NotFound;
+    }
+
+    // ── Cargo ───────────────────────────────────────────────────────────────────
+
+    private async Task<FactsOutcome> FetchCargoAsync(
+        string orgId, string name, string? requestedVersion, CancellationToken ct)
+    {
+        var sources = await _registries.ResolveAsync(orgId, "cargo", ct);
+        if (sources.Count == 0)
+        {
+            return FactsOutcome.NotConfigured;
+        }
+
+        bool sawDefinitiveMiss = false;
+        foreach (var source in sources)
+        {
+            var attempt = await TryFetchCargoFromSourceAsync(source, orgId, name, requestedVersion, ct);
+            sawDefinitiveMiss |= attempt.DefinitiveMiss;
+            if (attempt.Result is not null)
+            {
+                return attempt.Result;
+            }
+        }
+
+        return sawDefinitiveMiss ? FactsOutcome.NotFound : FactsOutcome.Unavailable;
+    }
+
+    private async Task<SourceAttempt> TryFetchCargoFromSourceAsync(
+        UpstreamSource source, string orgId, string name, string? requestedVersion, CancellationToken ct)
+    {
+        UpstreamMetadataResponse resp;
+        try
+        {
+            resp = await _upstream.GetOrFetchMetadataAsync(
+                $"{source.Url}/{CargoController.IndexPath(name)}", source.AuthorizationHeader, ct);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex) when (IsTransientUpstreamFailure(ex)) { return SourceAttempt.Continue; }
+
+        // Only an explicit 404 from a reachable source is authoritative; a 5xx means that source
+        // is unhealthy and the next one in priority order still gets a chance.
+        if (resp.StatusCode == 404)
+        {
+            return SourceAttempt.Miss;
+        }
+
+        if (!resp.IsSuccessStatusCode)
+        {
+            return SourceAttempt.Continue;
+        }
+
+        var entries = CargoLookupMetadata.ParseIndex(resp.BodyAsString());
+        return entries.Count == 0
+            ? SourceAttempt.Miss
+            : SourceAttempt.Done(await ResolveCargoVersionAsync(source, orgId, name, entries, requestedVersion, ct));
+    }
+
+    private async Task<FactsOutcome> ResolveCargoVersionAsync(
+        UpstreamSource source, string orgId, string name,
+        IReadOnlyList<CargoLookupMetadata.CargoIndexEntry> entries, string? requestedVersion, CancellationToken ct)
+    {
+        string? version = requestedVersion;
+        if (version is null)
+        {
+            var (resolved, transient) = await TryResolveLatestAsync("cargo", orgId, name, ct);
+            if (transient)
+            {
+                return FactsOutcome.Unavailable;
+            }
+
+            // Same belt-and-braces as PyPI: fall back to the highest stable non-yanked entry in
+            // the document already in hand if the resolver and this index momentarily disagree.
+            version = resolved ?? EcosystemVersionOrdering
+                .OrderStableDescending("cargo", entries.Where(e => !e.Yanked).Select(e => e.Version))
+                .FirstOrDefault();
+            if (version is null)
+            {
+                return FactsOutcome.NotFound;
+            }
+        }
+
+        var entry = entries.FirstOrDefault(e => string.Equals(e.Version, version, StringComparison.Ordinal));
+        if (entry is null)
+        {
+            return FactsOutcome.NotFound;
+        }
+
+        // A yanked crate is Cargo's deprecation signal. The index always carries it, so cargo
+        // resolves a deprecation state even when the crates.io API leg below is unavailable.
+        string? deprecated = entry.Yanked ? "yanked" : null;
+
+        var apiFacts = await TryFetchCratesIoFactsAsync(source, name, version, ct);
+        return FactsOutcome.Ok(version, new VersionMetadataFacts(
+            apiFacts?.PublishedAt, deprecated, apiFacts?.Spdx ?? Array.Empty<string>()));
+    }
+
+    /// <summary>
+    /// Best-effort license and publish date from the crates.io JSON API, which only crates.io
+    /// serves. Returns null — never a source failure — on any non-2xx (including a 429 from the
+    /// API's tighter rate limit), throw, or parse failure, so a healthy sparse index is never
+    /// abandoned over this leg. Skipped entirely unless the configured upstream IS crates.io's
+    /// index: a private mirror's operator has not authorized an egress call to crates.io.
+    /// </summary>
+    private async Task<CargoLookupMetadata.CargoApiFacts?> TryFetchCratesIoFactsAsync(
+        UpstreamSource source, string name, string version, CancellationToken ct)
+    {
+        if (!CargoLookupMetadata.IsCratesIoIndexHost(source.Url))
+        {
+            return null;
+        }
+
+        string apiUrl = CargoLookupMetadata.CratesIoApiUrl(name);
+
+        // The API lives on crates.io while the configured index is index.crates.io, so the
+        // host-pin drops the credential — expressed through the shared helper rather than a
+        // hardcoded null so the invariant stays testable and survives a same-host registry.
+        string? authorizationHeader = UpstreamHostPin.IsSameHost(source.Url, apiUrl)
+            ? source.AuthorizationHeader
+            : null;
+
+        try
+        {
+            var resp = await _upstream.GetOrFetchMetadataAsync(apiUrl, authorizationHeader, ct);
+            return resp.IsSuccessStatusCode ? CargoLookupMetadata.ParseCratesIoCrate(resp.BodyAsString(), version) : null;
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception) { return null; }
+    }
+
+    // ── Go ──────────────────────────────────────────────────────────────────────
+
+    private async Task<FactsOutcome> FetchGoAsync(
+        string orgId, string module, string? requestedVersion, CancellationToken ct)
+    {
+        var sources = await _registries.ResolveAsync(orgId, "golang", ct);
+        if (sources.Count == 0)
+        {
+            return FactsOutcome.NotConfigured;
+        }
+
+        bool sawDefinitiveMiss = false;
+        foreach (var source in sources)
+        {
+            var attempt = await TryFetchGoFromSourceAsync(source, module, requestedVersion, ct);
+            sawDefinitiveMiss |= attempt.DefinitiveMiss;
+            if (attempt.Result is not null)
+            {
+                return attempt.Result;
+            }
+        }
+
+        return sawDefinitiveMiss ? FactsOutcome.NotFound : FactsOutcome.Unavailable;
+    }
+
+    /// <summary>
+    /// Resolves a Go module version and its publish date. Both <c>@latest</c> (no version given)
+    /// and <c>@v/{version}.info</c> answer with the same <c>{Version, Time}</c> shape, so one
+    /// parse covers both. A Go module carries no license or deprecation signal outside its zip —
+    /// which lookup must never download, that being the ingest this feature exists to avoid — so
+    /// both stay unresolved and are reported in UnavailableChecks.
+    /// </summary>
+    private async Task<SourceAttempt> TryFetchGoFromSourceAsync(
+        UpstreamSource source, string module, string? requestedVersion, CancellationToken ct)
+    {
+        string encodedModule = GoController.EncodeBangEncoding(module);
+        string url = requestedVersion is null
+            ? $"{source.Url}/{encodedModule}/@latest"
+            : $"{source.Url}/{encodedModule}/@v/{GoController.EncodeBangEncoding(requestedVersion)}.info";
+
+        UpstreamMetadataResponse resp;
+        try
+        {
+            resp = await _upstream.GetOrFetchMetadataAsync(url, source.AuthorizationHeader, ct);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex) when (IsTransientUpstreamFailure(ex)) { return SourceAttempt.Continue; }
+
+        // The Go module proxy answers an unknown module or version with 404 or 410 (gone).
+        if (resp.StatusCode is 404 or 410)
+        {
+            return SourceAttempt.Miss;
+        }
+
+        if (!resp.IsSuccessStatusCode)
+        {
+            return SourceAttempt.Continue;
+        }
+
+        JsonDocument doc;
+        try { doc = JsonDocument.Parse(resp.Body); }
+        catch (JsonException) { return SourceAttempt.Continue; }
+
+        using (doc)
+        {
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                return SourceAttempt.Continue;
+            }
+
+            string? version = requestedVersion
+                ?? (root.TryGetProperty("Version", out var vEl) && vEl.ValueKind == JsonValueKind.String
+                    ? vEl.GetString() : null);
+            if (string.IsNullOrWhiteSpace(version))
+            {
+                return SourceAttempt.Continue;
+            }
+
+            var publishedAt = root.TryGetProperty("Time", out var tEl) && tEl.ValueKind == JsonValueKind.String
+                ? TryParseDate(tEl.GetString())
+                : null;
+
+            return SourceAttempt.Done(FactsOutcome.Ok(version, new VersionMetadataFacts(
+                publishedAt, null, Array.Empty<string>(), DeprecationResolved: false)));
+        }
     }
 
     private static DateTimeOffset? TryParseDate(string? raw) =>
@@ -922,10 +1159,16 @@ public sealed class PackageLookupService
         public static readonly FactsOutcome NotConfigured = new(MetadataFetchStatus.NotConfigured, null, null);
     }
 
+    // DeprecationResolved distinguishes "this source answered 'not deprecated'" from "this source
+    // has no deprecation signal to answer with" — both leave Deprecated null, but only the second
+    // belongs in UnavailableChecks. Defaulted so the existing constructions that genuinely
+    // resolved a deprecation state need no change at their call sites.
     private sealed record VersionMetadataFacts(
-        DateTimeOffset? PublishedAt, string? Deprecated, IReadOnlyList<string> Spdx)
+        DateTimeOffset? PublishedAt, string? Deprecated, IReadOnlyList<string> Spdx,
+        bool DeprecationResolved = true)
     {
-        public static readonly VersionMetadataFacts Unavailable = new(null, null, Array.Empty<string>());
+        public static readonly VersionMetadataFacts Unavailable =
+            new(null, null, Array.Empty<string>(), DeprecationResolved: false);
     }
 
     // Outcome of a single per-source fetch attempt within a Fetch<Eco>Async loop: Result set

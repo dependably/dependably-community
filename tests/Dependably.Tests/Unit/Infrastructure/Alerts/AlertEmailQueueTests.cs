@@ -14,10 +14,16 @@ using Microsoft.Extensions.Time.Testing;
 namespace Dependably.Tests.Unit.Infrastructure.Alerts;
 
 /// <summary>
-/// Unit tests for the email delivery queue over a recording <see cref="FakeMailSender"/>: success,
+/// Unit tests for alert email delivery over a recording <see cref="FakeMailSender"/>: success,
 /// terminal failure, resolver-null no-op, auto-disable, mixed partial-failure fan-out, and the
-/// overflow drop path. Mirrors <c>AlertSlackQueueTests</c>'s construction style (real repositories
-/// over an in-memory SQLite store, a fake send seam routed by transport host substring).
+/// overflow drop path. <see cref="AlertEmailQueue"/> is now a thin <c>IAlertNotifier</c> adapter
+/// over the shared <see cref="EmailDeliveryQueue"/> (the generic worker/retry/drain core extracted
+/// so every outbound-email channel shares one delivery engine), so these tests drive the shared
+/// queue's background service directly (<c>StartAsync</c>/<c>StopAsync</c>/counters) while using
+/// <see cref="AlertEmailQueue.Notify"/> (or a directly-constructed <see cref="AlertEmailJob"/> for
+/// the tests that used to call the old <c>DeliverAsync(AlertRecord, ct)</c> overload) to exercise
+/// the alert-specific wrapping. Mirrors <c>AlertSlackQueueTests</c>'s construction style (real
+/// repositories over an in-memory SQLite store, a fake send seam routed by transport host substring).
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class AlertEmailQueueTests : IAsyncLifetime
@@ -48,14 +54,6 @@ public sealed class AlertEmailQueueTests : IAsyncLifetime
             .Build();
         return new EnvelopeProtector(new EnvFileMasterKeyProvider(config));
     }
-
-    private static IConfiguration BuildCfg(int capacity = 1024) =>
-        new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                ["ALERT_EMAIL_QUEUE_CAPACITY"] = capacity.ToString()
-            })
-            .Build();
 
     private static IStringLocalizer<SharedResource> RealLocalizer()
     {
@@ -166,12 +164,18 @@ public sealed class AlertEmailQueueTests : IAsyncLifetime
         }
     }
 
-    private static AlertEmailQueue BuildQueue(
+    private static (EmailDeliveryQueue Queue, AlertEmailQueue Alerts) BuildQueue(
         AlertSettingsRepository settings, AlertRepository alerts, SmtpMailSender sender,
-        FakeTimeProvider clock, IConfiguration? cfg = null) =>
-        new(new EffectiveEmailConfigResolver(settings, BuildUnconfiguredInstance()),
-            settings, alerts, sender, RealLocalizer(), clock, cfg ?? BuildCfg(),
-            NullLogger<AlertEmailQueue>.Instance);
+        FakeTimeProvider clock, int? capacity = null)
+    {
+        var deliveryQueue = capacity is int c
+            ? new EmailDeliveryQueue(sender, clock, NullLogger<EmailDeliveryQueue>.Instance, c)
+            : new EmailDeliveryQueue(sender, clock, NullLogger<EmailDeliveryQueue>.Instance);
+        var alertQueue = new AlertEmailQueue(
+            deliveryQueue, new EffectiveEmailConfigResolver(settings, BuildUnconfiguredInstance()),
+            settings, alerts, RealLocalizer(), NullLogger<AlertEmailQueue>.Instance);
+        return (deliveryQueue, alertQueue);
+    }
 
     // ── Success path ─────────────────────────────────────────────────────────
 
@@ -186,14 +190,14 @@ public sealed class AlertEmailQueueTests : IAsyncLifetime
         await EnableEmailAsync(settings, "org1", "good.example.com", ["a@example.com", "b@example.com"]);
         var alert = await SeedActiveAlertAsync(alerts, "org1", Guid.NewGuid().ToString("N"));
 
-        var queue = BuildQueue(settings, alerts, sender, Clock);
+        var (deliveryQueue, alertQueue) = BuildQueue(settings, alerts, sender, Clock);
         using var cts = new CancellationTokenSource();
-        _ = queue.StartAsync(cts.Token);
+        _ = deliveryQueue.StartAsync(cts.Token);
 
-        queue.Notify(alert);
+        alertQueue.Notify(alert);
         await WaitAsync(async () => (await alerts.GetByIdAsync("org1", alert.Id))?.EmailStatus is not null);
 
-        try { await queue.StopAsync(CancellationToken.None); } catch { }
+        try { await deliveryQueue.StopAsync(CancellationToken.None); } catch { }
 
         var reread = await alerts.GetByIdAsync("org1", alert.Id);
         Assert.Equal("sent", reread!.EmailStatus);
@@ -231,12 +235,12 @@ public sealed class AlertEmailQueueTests : IAsyncLifetime
         var goodAlert = await SeedActiveAlertAsync(alerts, "org1", Guid.NewGuid().ToString("N"));
         var badAlert = await SeedActiveAlertAsync(alerts, "org2", Guid.NewGuid().ToString("N"));
 
-        var queue = BuildQueue(settings, alerts, sender, emailClock);
+        var (deliveryQueue, alertQueue) = BuildQueue(settings, alerts, sender, emailClock);
         using var cts = new CancellationTokenSource();
-        _ = queue.StartAsync(cts.Token);
+        _ = deliveryQueue.StartAsync(cts.Token);
 
-        queue.Notify(goodAlert);
-        queue.Notify(badAlert);
+        alertQueue.Notify(goodAlert);
+        alertQueue.Notify(badAlert);
 
         await PumpUntilAsync(emailClock, async () =>
         {
@@ -245,10 +249,10 @@ public sealed class AlertEmailQueueTests : IAsyncLifetime
             return good?.EmailStatus is not null && bad?.EmailStatus is not null;
         }, TimeSpan.FromSeconds(1));
 
-        try { await queue.StopAsync(CancellationToken.None); } catch { }
+        try { await deliveryQueue.StopAsync(CancellationToken.None); } catch { }
 
-        Assert.Equal(1, queue.DeliveredCount);
-        Assert.Equal(1, queue.FailedCount);
+        Assert.Equal(1, deliveryQueue.DeliveredCount);
+        Assert.Equal(1, deliveryQueue.FailedCount);
 
         var goodReread = await alerts.GetByIdAsync("org1", goodAlert.Id);
         var badReread = await alerts.GetByIdAsync("org2", badAlert.Id);
@@ -295,14 +299,14 @@ public sealed class AlertEmailQueueTests : IAsyncLifetime
             Ecosystem: "npm", Purl: "pkg:npm/org2-secret@1.0.0",
             Title: "ORG2-ONLY quarantine item", Detail: "org2 detail payload"));
 
-        var queue = BuildQueue(settings, alerts, sender, Clock);
+        var (deliveryQueue, alertQueue) = BuildQueue(settings, alerts, sender, Clock);
         using var cts = new CancellationTokenSource();
-        _ = queue.StartAsync(cts.Token);
+        _ = deliveryQueue.StartAsync(cts.Token);
 
-        queue.Notify(org1Alert!);
+        alertQueue.Notify(org1Alert!);
         await WaitAsync(async () => (await alerts.GetByIdAsync("org1", org1Alert!.Id))?.EmailStatus is not null);
 
-        try { await queue.StopAsync(CancellationToken.None); } catch { }
+        try { await deliveryQueue.StopAsync(CancellationToken.None); } catch { }
 
         // The mail sender was invoked exactly once, and only with org1's recipients — org2's
         // recipients never appear in any send.
@@ -322,9 +326,10 @@ public sealed class AlertEmailQueueTests : IAsyncLifetime
         Assert.Null(org2Reread.EmailError);
     }
 
-    /// <summary>Drives the retry path directly (no queue loop) and asserts the exact backoff
-    /// schedule: 1 initial attempt at t=0, then retries at +1s, +5s, +30s (4 attempts total)
-    /// before the terminal failure is recorded.</summary>
+    /// <summary>Drives the retry path directly (no queue loop) against a directly-constructed
+    /// <see cref="AlertEmailJob"/> and asserts the exact backoff schedule: 1 initial attempt at
+    /// t=0, then retries at +1s, +5s, +30s (4 attempts total) before the terminal failure is
+    /// recorded.</summary>
     [Fact]
     public async Task DeliverAsync_TransientFailure_RetriesAtExactBackoffThenRecordsTerminalFailure()
     {
@@ -337,9 +342,12 @@ public sealed class AlertEmailQueueTests : IAsyncLifetime
         await EnableEmailAsync(settings, "org1", "bad.example.com", ["a@example.com"]);
         var alert = await SeedActiveAlertAsync(alerts, "org1", Guid.NewGuid().ToString("N"));
 
-        var queue = BuildQueue(settings, alerts, sender, emailClock);
+        var (deliveryQueue, _) = BuildQueue(settings, alerts, sender, emailClock);
+        var job = new AlertEmailJob(
+            alert, new EffectiveEmailConfigResolver(settings, BuildUnconfiguredInstance()),
+            alerts, settings, RealLocalizer(), NullLogger<AlertEmailQueue>.Instance);
 
-        var deliverTask = queue.DeliverAsync(alert, CancellationToken.None);
+        var deliverTask = deliveryQueue.DeliverAsync(job, CancellationToken.None);
 
         // 1 initial attempt fires immediately.
         await WaitAsync(() => Task.FromResult(sender.Calls >= 1));
@@ -362,7 +370,7 @@ public sealed class AlertEmailQueueTests : IAsyncLifetime
 
         await deliverTask;
 
-        Assert.Equal(1, queue.FailedCount);
+        Assert.Equal(1, deliveryQueue.FailedCount);
         var reread = await alerts.GetByIdAsync("org1", alert.Id);
         Assert.Equal("failed", reread!.EmailStatus);
         Assert.Contains("simulated SMTP failure", reread.EmailError);
@@ -376,11 +384,11 @@ public sealed class AlertEmailQueueTests : IAsyncLifetime
 
     /// <summary>
     /// Reproduces the shutdown-drop defect deterministically by invoking <c>ExecuteAsync</c>
-    /// directly (via the <see cref="AlertEmailQueue.ExecuteAsyncForTests"/> test hook) with an
+    /// directly (via the <see cref="EmailDeliveryQueue.ExecuteAsyncForTests"/> test hook) with an
     /// already-cancelled token — <see cref="BackgroundService.StartAsync"/> itself short-circuits
     /// and never calls <c>ExecuteAsync</c> at all in that case, so it cannot exercise the real
     /// race being tested (a stopping token cancelled while the read loop is genuinely running,
-    /// mid-shutdown, with an alert still buffered). Two alerts are buffered before the drain runs,
+    /// mid-shutdown, with a job still buffered). Two alerts are buffered before the drain runs,
     /// one routed to a succeeding transport and one to a failing one — the drain must deliver the
     /// first and durably record the second's failure, independently.
     /// </summary>
@@ -398,15 +406,15 @@ public sealed class AlertEmailQueueTests : IAsyncLifetime
         var goodAlert = await SeedActiveAlertAsync(alerts, "org1", Guid.NewGuid().ToString("N"));
         var badAlert = await SeedActiveAlertAsync(alerts, "org2", Guid.NewGuid().ToString("N"));
 
-        var queue = BuildQueue(settings, alerts, sender, emailClock);
+        var (deliveryQueue, alertQueue) = BuildQueue(settings, alerts, sender, emailClock);
 
         // Buffer both alerts before the worker ever starts reading.
-        queue.Notify(goodAlert);
-        queue.Notify(badAlert);
+        alertQueue.Notify(goodAlert);
+        alertQueue.Notify(badAlert);
 
         // Drives ExecuteAsync directly with an already-cancelled token — the exact state the
         // stopping token is in by the time BackgroundService.StopAsync signals cancellation.
-        var executeTask = queue.ExecuteAsyncForTests(new CancellationToken(canceled: true));
+        var executeTask = deliveryQueue.ExecuteAsyncForTests(new CancellationToken(canceled: true));
 
         // The failing alert burns through the 1s/5s/30s backoff inside the drain itself; pump
         // the fake clock so that finishes in virtual time instead of real time.
@@ -419,8 +427,8 @@ public sealed class AlertEmailQueueTests : IAsyncLifetime
 
         await executeTask;
 
-        Assert.Equal(1, queue.DeliveredCount);
-        Assert.Equal(1, queue.FailedCount);
+        Assert.Equal(1, deliveryQueue.DeliveredCount);
+        Assert.Equal(1, deliveryQueue.FailedCount);
 
         var goodReread = await alerts.GetByIdAsync("org1", goodAlert.Id);
         var badReread = await alerts.GetByIdAsync("org2", badAlert.Id);
@@ -441,20 +449,20 @@ public sealed class AlertEmailQueueTests : IAsyncLifetime
         // No EnableEmailAsync call — org1 has no settings row at all (email off by default).
         var alert = await SeedActiveAlertAsync(alerts, "org1", Guid.NewGuid().ToString("N"));
 
-        var queue = BuildQueue(settings, alerts, sender, Clock);
+        var (deliveryQueue, alertQueue) = BuildQueue(settings, alerts, sender, Clock);
         using var cts = new CancellationTokenSource();
-        _ = queue.StartAsync(cts.Token);
+        _ = deliveryQueue.StartAsync(cts.Token);
 
-        queue.Notify(alert);
+        alertQueue.Notify(alert);
         // Give the consumer a moment to process the (no-op) item.
         await Task.Delay(200);
 
         await cts.CancelAsync();
-        try { await queue.StopAsync(CancellationToken.None); } catch { }
+        try { await deliveryQueue.StopAsync(CancellationToken.None); } catch { }
 
         Assert.Equal(0, sender.Calls);
-        Assert.Equal(0, queue.DeliveredCount);
-        Assert.Equal(0, queue.FailedCount);
+        Assert.Equal(0, deliveryQueue.DeliveredCount);
+        Assert.Equal(0, deliveryQueue.FailedCount);
         var reread = await alerts.GetByIdAsync("org1", alert.Id);
         Assert.Null(reread!.EmailStatus);
 
@@ -482,8 +490,11 @@ public sealed class AlertEmailQueueTests : IAsyncLifetime
             EmailSmtpUsername: null, EmailSmtpPassword: null, EmailSmtpFrom: "alerts@example.com"));
         var alert = await SeedActiveAlertAsync(alerts, "org1", Guid.NewGuid().ToString("N"));
 
-        var queue = BuildQueue(settings, alerts, sender, Clock);
-        await queue.DeliverAsync(alert, CancellationToken.None);
+        var (deliveryQueue, _) = BuildQueue(settings, alerts, sender, Clock);
+        var job = new AlertEmailJob(
+            alert, new EffectiveEmailConfigResolver(settings, BuildUnconfiguredInstance()),
+            alerts, settings, RealLocalizer(), NullLogger<AlertEmailQueue>.Instance);
+        await deliveryQueue.DeliverAsync(job, CancellationToken.None);
 
         Assert.Equal(0, sender.Calls);
         var reread = await alerts.GetByIdAsync("org1", alert.Id);
@@ -527,14 +538,14 @@ public sealed class AlertEmailQueueTests : IAsyncLifetime
         var alert = await SeedActiveAlertAsync(alerts, "org1", Guid.NewGuid().ToString("N"));
 
         // Never started — nothing is dequeued, so the channel fills and drops.
-        var queue = BuildQueue(settings, alerts, sender, Clock, BuildCfg(capacity: 1));
+        var (deliveryQueue, alertQueue) = BuildQueue(settings, alerts, sender, Clock, capacity: 1);
 
         for (int i = 0; i < 5; i++)
         {
-            queue.Notify(alert);
+            alertQueue.Notify(alert);
         }
 
-        Assert.Equal(4, queue.DroppedCount);
+        Assert.Equal(4, deliveryQueue.DroppedCount);
     }
 
     // ── Subject/body rendering ───────────────────────────────────────────────

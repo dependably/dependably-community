@@ -154,7 +154,7 @@ public sealed class OrgController : OrgScopedControllerBase
         string blockDeprecatedMode = settings?.BlockDeprecated ?? "off";
 
         var versionsWithLicenses = versions.Select(v =>
-            ProjectVersionView(v, scoreMap, tolerance, blockDeprecatedMode, uploadedLicenses, proxyLicenses, ociTagsByDigest));
+            ProjectVersionView(v, ecosystem, pkg.Name, scoreMap, tolerance, blockDeprecatedMode, uploadedLicenses, proxyLicenses, ociTagsByDigest));
         return Ok(new { package = pkg, versions = versionsWithLicenses });
     }
 
@@ -184,6 +184,8 @@ public sealed class OrgController : OrgScopedControllerBase
     // computed gate status, and (for OCI) the tags pointing at its digest.
     private static object ProjectVersionView(
         PackageVersion v,
+        string ecosystem,
+        string packageName,
         Dictionary<string, double> scoreMap,
         double tolerance,
         string blockDeprecatedMode,
@@ -218,6 +220,9 @@ public sealed class OrgController : OrgScopedControllerBase
             v.VersionsBehind,
             v.Origin,
             v.UpstreamUrl,
+            // Public registry page (npmjs.com/pypi.org/…) reconstructed only when the recorded
+            // upstream host is a known public registry; null (link hidden) for private upstreams.
+            RegistryPageUrl = RegistryPageUrl.ForVersion(ecosystem, v.Purl, packageName, v.Version, v.UpstreamUrl),
             v.UpstreamIntegrityValue,
             v.UpstreamIntegrityAlgorithm,
             v.IsMalicious,

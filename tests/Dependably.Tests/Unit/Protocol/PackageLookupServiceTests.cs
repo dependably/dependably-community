@@ -1,4 +1,5 @@
 using Dapper;
+using Dependably.Api;
 using Dependably.Infrastructure;
 using Dependably.Protocol;
 using Dependably.Security;
@@ -31,6 +32,10 @@ public sealed class PackageLookupServiceTests : IAsyncLifetime
 {
     private readonly TestMetadataStore _db = new();
     private WireMockServer _server = null!;
+
+    // One master key per test instance: the seed side encrypts an upstream's stored credential
+    // and the service side decrypts it, so both protectors must share key material.
+    private readonly byte[] _envelopeKey = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
 
     public async Task InitializeAsync()
     {
@@ -358,15 +363,20 @@ public sealed class PackageLookupServiceTests : IAsyncLifetime
         Assert.Equal(PackageLookupStatus.UnsupportedEcosystem, outcome.Status);
     }
 
+    /// <summary>
+    /// Go resolves a latest version from its module proxy, so an omitted version is no longer a
+    /// hard failure on its own — it fails only when the org has no golang upstream to ask, which
+    /// is the transient-shaped UpstreamUnavailable rather than the client-error VersionRequired.
+    /// </summary>
     [Fact]
-    public async Task Golang_NoVersionGiven_ReturnsVersionRequired_NoMetadataSourceWired()
+    public async Task Golang_NoVersionGiven_NoGoUpstreamConfigured_ReturnsUpstreamUnavailable()
     {
         string orgId = await SeedOrgWithNpmUpstreamAsync();
         var service = BuildService(new FakeOsvSource(_ => []));
 
         var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "golang", "example.com/mod", null));
 
-        Assert.Equal(PackageLookupStatus.VersionRequired, outcome.Status);
+        Assert.Equal(PackageLookupStatus.UpstreamUnavailable, outcome.Status);
     }
 
     [Fact]
@@ -516,10 +526,367 @@ public sealed class PackageLookupServiceTests : IAsyncLifetime
         Id: id, Aliases: [], Summary: "An undisclosed-severity advisory", Severity: null, CvssScore: null,
         AffectedPackages: [], Published: null, Modified: null, IsHydrated: true);
 
+
+    // ── Cargo ────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task CargoLookup_WithNoVersion_ResolvesLatestStableFromIndex()
+    {
+        string orgId = await SeedOrgWithCargoUpstreamAsync();
+        StubCargoIndex("proc-macro2", ("1.0.0", false), ("1.0.1", false));
+        StubCratesIoApi("proc-macro2", ("1.0.1", "MIT OR Apache-2.0", "2024-03-04T05:06:07Z"));
+        var service = BuildService(NoAdvisories());
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "cargo", "proc-macro2", null));
+
+        Assert.Equal(PackageLookupStatus.Ok, outcome.Status);
+        Assert.Equal("1.0.1", outcome.Result!.Version);
+        Assert.True(outcome.Result.VersionInferred);
+    }
+
+    /// <summary>
+    /// The reported bug: a crate whose license crates.io publishes as "MIT OR Apache-2.0" read as
+    /// unknown locally. Asserts the SPDX arrives AND that none of the three checks behind the
+    /// "not checked at lookup time" note remain disclaimed.
+    /// </summary>
+    [Fact]
+    public async Task CargoLookup_CratesIoUpstream_ResolvesLicenseAndPublishedAt()
+    {
+        string orgId = await SeedOrgWithCargoUpstreamAsync();
+        StubCargoIndex("proc-macro2", ("1.0.1", false));
+        StubCratesIoApi("proc-macro2", ("1.0.1", "MIT OR Apache-2.0", "2024-03-04T05:06:07Z"));
+        var service = BuildService(NoAdvisories());
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "cargo", "proc-macro2", "1.0.1"));
+
+        Assert.Equal(PackageLookupStatus.Ok, outcome.Status);
+        Assert.Equal(["MIT OR Apache-2.0"], outcome.Result!.License.Spdx);
+        Assert.DoesNotContain("license", outcome.Result.UnavailableChecks);
+        Assert.DoesNotContain("release_age", outcome.Result.UnavailableChecks);
+        Assert.DoesNotContain("deprecated", outcome.Result.UnavailableChecks);
+    }
+
+    /// <summary>
+    /// Proves the release-age hold actually RUNS for cargo rather than merely dropping off the
+    /// unavailable list: the crate is published well inside a 720-hour hold, so the verdict has
+    /// to move. The 30-day seed offset sits far from the hold boundary so no calendar drift can
+    /// flip it.
+    /// </summary>
+    [Fact]
+    public async Task CargoLookup_MinReleaseAgeHold_FiresForCargo()
+    {
+        string orgId = await SeedOrgWithCargoUpstreamAsync();
+        await SetMinReleaseAgeHoursAsync(orgId, 720);
+        var clock = TestTime.Frozen();
+        string publishedAt = clock.GetUtcNow().AddDays(-2).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        StubCargoIndex("fresh-crate", ("1.0.0", false));
+        StubCratesIoApi("fresh-crate", ("1.0.0", "MIT", publishedAt));
+        var service = BuildService(NoAdvisories(), clock: clock);
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "cargo", "fresh-crate", "1.0.0"));
+
+        Assert.Equal(PackageLookupStatus.Ok, outcome.Status);
+        Assert.Equal("blocked", outcome.Result!.Verdict);
+        Assert.Equal("ReleaseAge", outcome.Result.BlockedReason);
+    }
+
+    [Fact]
+    public async Task CargoLookup_YankedVersion_ReportsDeprecated()
+    {
+        string orgId = await SeedOrgWithCargoUpstreamAsync();
+        await SetBlockDeprecatedAsync(orgId, "block_all");
+        StubCargoIndex("yanked-crate", ("1.0.0", true));
+        StubCratesIoApi("yanked-crate", ("1.0.0", "MIT", "2020-01-02T03:04:05Z"));
+        var service = BuildService(NoAdvisories());
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "cargo", "yanked-crate", "1.0.0"));
+
+        Assert.Equal(PackageLookupStatus.Ok, outcome.Status);
+        Assert.Equal("blocked", outcome.Result!.Verdict);
+        Assert.Equal("Deprecated", outcome.Result.BlockedReason);
+    }
+
+    /// <summary>
+    /// A mirror the operator configured deliberately must not trigger an egress call to
+    /// crates.io. The lookup still succeeds on index-only facts, and says exactly which checks
+    /// it could not run — the honest degrade, not a failure and not a false "allowed".
+    /// </summary>
+    [Fact]
+    public async Task CargoLookup_PrivateMirror_NoCratesIoApi_DegradesHonestly()
+    {
+        string orgId = await SeedOrgWithCargoUpstreamAsync(_server.Urls[0]);
+        StubCargoIndex("internal-crate", ("2.0.0", false));
+        StubCratesIoApi("internal-crate", ("2.0.0", "MIT", "2020-01-02T03:04:05Z"));
+        var service = BuildService(NoAdvisories());
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "cargo", "internal-crate", null));
+
+        Assert.Equal(PackageLookupStatus.Ok, outcome.Status);
+        Assert.Equal("2.0.0", outcome.Result!.Version);
+        Assert.Contains("license", outcome.Result.UnavailableChecks);
+        Assert.Contains("release_age", outcome.Result.UnavailableChecks);
+        // The index carries yanked, so deprecation IS resolved even with no API leg.
+        Assert.DoesNotContain("deprecated", outcome.Result.UnavailableChecks);
+        Assert.DoesNotContain(
+            _server.LogEntries,
+            e => e.RequestMessage?.Path?.Contains("/api/v1/crates", StringComparison.Ordinal) == true);
+    }
+
+    [Theory]
+    [InlineData(500)]
+    [InlineData(429)]
+    public async Task CargoLookup_CratesIoApiUnhealthy_StillReturnsIndexFacts(int statusCode)
+    {
+        string orgId = await SeedOrgWithCargoUpstreamAsync();
+        StubCargoIndex("api-down", ("3.1.0", false));
+        _server.Given(Request.Create().WithPath("/api/v1/crates/api-down").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(statusCode));
+        var service = BuildService(NoAdvisories());
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "cargo", "api-down", null));
+
+        Assert.Equal(PackageLookupStatus.Ok, outcome.Status);
+        Assert.Equal("3.1.0", outcome.Result!.Version);
+        Assert.Contains("license", outcome.Result.UnavailableChecks);
+    }
+
+    /// <summary>
+    /// The crates.io API lives on a different host than the configured index, so the upstream's
+    /// stored credential must not ride along to it.
+    /// </summary>
+    [Fact]
+    public async Task CargoLookup_Credential_NotSentToCratesIoApiHost()
+    {
+        string orgId = await SeedOrgWithCargoUpstreamAsync(
+            "https://index.crates.io", token: "super-secret-token");
+        StubCargoIndex("authed-crate", ("1.0.0", false));
+        StubCratesIoApi("authed-crate", ("1.0.0", "MIT", "2020-01-02T03:04:05Z"));
+        var service = BuildService(NoAdvisories());
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "cargo", "authed-crate", "1.0.0"));
+
+        Assert.Equal(PackageLookupStatus.Ok, outcome.Status);
+        var apiRequest = Assert.Single(
+            _server.LogEntries,
+            e => e.RequestMessage?.Path?.Contains("/api/v1/crates", StringComparison.Ordinal) == true);
+        var apiHeaders = apiRequest.RequestMessage?.Headers;
+        Assert.NotNull(apiHeaders);
+        Assert.DoesNotContain("Authorization", apiHeaders.Keys);
+    }
+
+    [Fact]
+    public async Task CargoLookup_UnknownCrate_Index404_ReturnsUpstreamNotFound()
+    {
+        string orgId = await SeedOrgWithCargoUpstreamAsync();
+        var service = BuildService(NoAdvisories());
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "cargo", "no-such-crate", null));
+
+        Assert.Equal(PackageLookupStatus.UpstreamNotFound, outcome.Status);
+    }
+
+    [Fact]
+    public async Task CargoLookup_IndexUnavailable_ExplicitVersion_DegradesInsteadOfFailing()
+    {
+        string orgId = await SeedOrgWithCargoUpstreamAsync();
+        _server.Given(Request.Create().WithPath($"/{CargoController.IndexPath("flaky-crate")}").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(503));
+        var service = BuildService(NoAdvisories());
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "cargo", "flaky-crate", "1.0.0"));
+
+        Assert.Equal(PackageLookupStatus.Ok, outcome.Status);
+        Assert.Equal("1.0.0", outcome.Result!.Version);
+        Assert.Contains("license", outcome.Result.UnavailableChecks);
+        Assert.Contains("release_age", outcome.Result.UnavailableChecks);
+        Assert.Contains("deprecated", outcome.Result.UnavailableChecks);
+    }
+
+    [Fact]
+    public async Task CargoLookup_IndexUnavailable_NoVersion_ReportsUpstreamUnavailable()
+    {
+        string orgId = await SeedOrgWithCargoUpstreamAsync();
+        _server.Given(Request.Create().WithPath($"/{CargoController.IndexPath("flaky-crate")}").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(503));
+        var service = BuildService(NoAdvisories());
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "cargo", "flaky-crate", null));
+
+        Assert.Equal(PackageLookupStatus.UpstreamUnavailable, outcome.Status);
+    }
+
+    // ── Go ───────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task GoLookup_WithNoVersion_ResolvesLatestFromAtLatest()
+    {
+        string orgId = await SeedOrgWithGoUpstreamAsync();
+        StubGoLatest("example.com/mod", "v1.4.0", "2024-05-06T07:08:09Z");
+        var service = BuildService(NoAdvisories());
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "golang", "example.com/mod", null));
+
+        Assert.Equal(PackageLookupStatus.Ok, outcome.Status);
+        Assert.Equal("v1.4.0", outcome.Result!.Version);
+        Assert.True(outcome.Result.VersionInferred);
+    }
+
+    /// <summary>
+    /// Go's proxy answers version and publish time but carries no license or deprecation signal
+    /// outside the module zip, which lookup never downloads — so those two stay disclaimed.
+    /// </summary>
+    [Fact]
+    public async Task GoLookup_ReportsReleaseAge_ButLicenseAndDeprecatedUnavailable()
+    {
+        string orgId = await SeedOrgWithGoUpstreamAsync();
+        StubGoInfo("example.com/mod", "v1.2.3", "2024-05-06T07:08:09Z");
+        var service = BuildService(NoAdvisories());
+
+        var outcome = await service.LookupAsync(
+            new PackageLookupRequest(orgId, "golang", "example.com/mod", "v1.2.3"));
+
+        Assert.Equal(PackageLookupStatus.Ok, outcome.Status);
+        Assert.DoesNotContain("release_age", outcome.Result!.UnavailableChecks);
+        Assert.Contains("license", outcome.Result.UnavailableChecks);
+        Assert.Contains("deprecated", outcome.Result.UnavailableChecks);
+    }
+
+    [Fact]
+    public async Task GoLookup_UnknownModule_ReturnsUpstreamNotFound()
+    {
+        string orgId = await SeedOrgWithGoUpstreamAsync();
+        var service = BuildService(NoAdvisories());
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "golang", "example.com/gone", null));
+
+        Assert.Equal(PackageLookupStatus.UpstreamNotFound, outcome.Status);
+    }
+
+    // ── Unavailable-checks honesty across ecosystems ─────────────────────────────
+
+    /// <summary>
+    /// NuGet resolves version existence only — it never consults a deprecation signal — so
+    /// reporting one as checked would misrepresent what an "allowed" verdict covers.
+    /// </summary>
+    [Fact]
+    public async Task NuGetLookup_ReportsDeprecatedUnavailable()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        var registries = new UpstreamRegistryRepository(_db, TimeProvider.System, TestEnvelope.Configured(_envelopeKey));
+        await registries.AddAsync(orgId, new NewUpstreamRegistry("nuget", _server.Urls[0]));
+        _server.Given(Request.Create().WithPath("/flatcontainer/newtonsoft.json/index.json").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(200)
+                .WithHeader("Content-Type", "application/json")
+                .WithBody("""{"versions":["13.0.1"]}"""));
+        var service = BuildService(NoAdvisories());
+
+        var outcome = await service.LookupAsync(
+            new PackageLookupRequest(orgId, "nuget", "Newtonsoft.Json", "13.0.1"));
+
+        Assert.Equal(PackageLookupStatus.Ok, outcome.Status);
+        Assert.Contains("deprecated", outcome.Result!.UnavailableChecks);
+    }
+
+    /// <summary>
+    /// npm DOES consult deprecation, so a clean package must not be reported as unchecked —
+    /// the guard against conflating "resolved: not deprecated" with "never looked".
+    /// </summary>
+    [Fact]
+    public async Task NpmLookup_NotDeprecated_DoesNotReportDeprecatedUnavailable()
+    {
+        string orgId = await SeedOrgWithNpmUpstreamAsync();
+        StubNpmPackument("clean-pkg", "1.0.0", license: "MIT");
+        var service = BuildService(NoAdvisories());
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "npm", "clean-pkg", "1.0.0"));
+
+        Assert.Equal(PackageLookupStatus.Ok, outcome.Status);
+        Assert.DoesNotContain("deprecated", outcome.Result!.UnavailableChecks);
+    }
+
+    // ── Cargo / Go helpers ───────────────────────────────────────────────────────
+
+    private static FakeOsvSource NoAdvisories() => new(_ => new List<OsvAdvisory>());
+
+    private async Task<string> SeedOrgWithCargoUpstreamAsync(
+        string url = "https://index.crates.io", string? token = null)
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        var registries = new UpstreamRegistryRepository(_db, TimeProvider.System, TestEnvelope.Configured(_envelopeKey));
+        await registries.AddAsync(orgId, token is null
+            ? new NewUpstreamRegistry("cargo", url)
+            : new NewUpstreamRegistry("cargo", url, AuthType: "bearer", Secret: token));
+        return orgId;
+    }
+
+    private async Task<string> SeedOrgWithGoUpstreamAsync()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        var registries = new UpstreamRegistryRepository(_db, TimeProvider.System, TestEnvelope.Configured(_envelopeKey));
+        await registries.AddAsync(orgId, new NewUpstreamRegistry("golang", _server.Urls[0]));
+        return orgId;
+    }
+
+    private async Task SetMinReleaseAgeHoursAsync(string orgId, int hours)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "UPDATE org_settings SET min_release_age_hours = @hours WHERE org_id = @orgId",
+            new { hours, orgId });
+    }
+
+    private async Task SetBlockDeprecatedAsync(string orgId, string mode)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "UPDATE org_settings SET block_deprecated = @mode WHERE org_id = @orgId",
+            new { mode, orgId });
+    }
+
+    /// <summary>
+    /// Stubs the sparse index at the crate's real spec-derived path via
+    /// <see cref="CargoController.IndexPath"/> — never a path the test computes itself, so a
+    /// wrong path in the production fetch surfaces as a 404 here rather than passing.
+    /// </summary>
+    private void StubCargoIndex(string name, params (string Version, bool Yanked)[] versions)
+    {
+        string body = string.Join('\n', versions.Select(v =>
+            $$"""{"name":"{{name}}","vers":"{{v.Version}}","cksum":"aa","yanked":{{(v.Yanked ? "true" : "false")}}}"""));
+        _server.Given(Request.Create().WithPath($"/{CargoController.IndexPath(name)}").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(200)
+                .WithHeader("Content-Type", "text/plain")
+                .WithBody(body));
+    }
+
+    private void StubCratesIoApi(
+        string name, params (string Version, string License, string CreatedAt)[] versions)
+    {
+        string body = $$"""
+            { "versions": [ {{string.Join(", ", versions.Select(v =>
+                $$"""{"num":"{{v.Version}}","license":"{{v.License}}","created_at":"{{v.CreatedAt}}","yanked":false}"""))}} ] }
+            """;
+        _server.Given(Request.Create().WithPath($"/api/v1/crates/{name}").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(200)
+                .WithHeader("Content-Type", "application/json")
+                .WithBody(body));
+    }
+
+    private void StubGoLatest(string module, string version, string time)
+        => _server.Given(Request.Create().WithPath($"/{module}/@latest").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(200)
+                .WithHeader("Content-Type", "application/json")
+                .WithBody($$"""{"Version":"{{version}}","Time":"{{time}}"}"""));
+
+    private void StubGoInfo(string module, string version, string time)
+        => _server.Given(Request.Create().WithPath($"/{module}/@v/{version}.info").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(200)
+                .WithHeader("Content-Type", "application/json")
+                .WithBody($$"""{"Version":"{{version}}","Time":"{{time}}"}"""));
+
     private async Task<string> SeedOrgWithNpmUpstreamAsync()
     {
         string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
-        var registries = new UpstreamRegistryRepository(_db, TimeProvider.System, TestEnvelope.Unconfigured());
+        var registries = new UpstreamRegistryRepository(_db, TimeProvider.System, TestEnvelope.Configured(_envelopeKey));
         await registries.AddAsync(orgId, new NewUpstreamRegistry("npm", _server.Urls[0]));
         return orgId;
     }
@@ -560,7 +927,8 @@ public sealed class PackageLookupServiceTests : IAsyncLifetime
                 .WithBody(json));
     }
 
-    private PackageLookupService BuildService(IOsvSource osv, bool instanceAirGapped = false)
+    private PackageLookupService BuildService(
+        IOsvSource osv, bool instanceAirGapped = false, TimeProvider? clock = null)
     {
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
@@ -581,7 +949,7 @@ public sealed class PackageLookupServiceTests : IAsyncLifetime
             urlValidator, airGap, new DriveInfoStagingDiskInfo(Path.GetTempPath()),
             StagingOptions.Resolve(config), NullLogger<UpstreamClient>.Instance);
 
-        var registryRepo = new UpstreamRegistryRepository(_db, TimeProvider.System, TestEnvelope.Unconfigured());
+        var registryRepo = new UpstreamRegistryRepository(_db, TimeProvider.System, TestEnvelope.Configured(_envelopeKey));
         var registryResolver = new UpstreamRegistryResolver(registryRepo);
         var latestResolver = new UpstreamLatestVersionResolver(upstreamClient, registryResolver);
 
@@ -592,7 +960,7 @@ public sealed class PackageLookupServiceTests : IAsyncLifetime
 
         return new PackageLookupService(
             orgs, registryResolver, upstreamClient, latestResolver, osv, vulns, licenses,
-            airGap, TimeProvider.System, cache);
+            airGap, clock ?? TimeProvider.System, cache);
     }
 
     /// <summary>

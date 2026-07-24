@@ -143,6 +143,16 @@ public sealed record PublishRequest
     /// that capture no license signal). Ignored entirely under 'warn'/'off'.
     /// </summary>
     public IReadOnlyList<string>? Licenses { get; init; }
+
+    /// <summary>
+    /// Package-level presentation metadata parsed from the same manifest as <see cref="Licenses"/>
+    /// (npm package.json, PyPI METADATA, NuGet .nuspec, Cargo publish envelope). Persisted on the
+    /// per-tenant <c>packages</c> row and surfaced in the UI. Each is null when the manifest omits
+    /// the field; a null never clears a value an earlier publish/fetch captured (COALESCE upsert).
+    /// </summary>
+    public string? Homepage { get; init; }
+    public string? Repository { get; init; }
+    public string? Description { get; init; }
 }
 
 /// <summary>Outcome of a <see cref="IPackagePublishService.StoreAndRecordAsync"/> call.</summary>

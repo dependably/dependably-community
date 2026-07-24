@@ -330,6 +330,12 @@ internal sealed class SystemScopeAuditFactory : WebApplicationFactory<Program>, 
         builder.Services.AddSingleton<IStartupFilter, LoopbackRemoteIpFilter>();
 
         builder.WebHost.UseTestServer();
+        // Boots a real host via Program.ConfigureBuilder; disable the background jobs
+        // that egress or mutate shared state at boot (see Infrastructure/DependablyFactory.cs
+        // for the full rationale).
+        builder.WebHost.UseSetting(
+            "DISABLE_BACKGROUND_JOBS",
+            "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill");
         builder.WebHost.UseSetting("METRICS_ALLOWED_IPS", "10.0.0.0/8");
         builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
         builder.WebHost.UseSetting("LOGIN_RATE_LIMIT_PERMITS", "100000");
@@ -453,6 +459,12 @@ internal sealed class TenantScopeAuditFactory : WebApplicationFactory<Program>, 
         builder.Services.AddSingleton<IStartupFilter, LoopbackRemoteIpFilter>();
 
         builder.WebHost.UseTestServer();
+        // Boots a real host via Program.ConfigureBuilder; disable the background jobs
+        // that egress or mutate shared state at boot (see Infrastructure/DependablyFactory.cs
+        // for the full rationale).
+        builder.WebHost.UseSetting(
+            "DISABLE_BACKGROUND_JOBS",
+            "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill");
         builder.WebHost.UseSetting("METRICS_ALLOWED_IPS", "10.0.0.0/8");
         builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
         builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");

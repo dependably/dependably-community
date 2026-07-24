@@ -13,6 +13,7 @@
   import { t } from 'svelte-i18n'
   import { api } from '../api.js'
   import { extractErrorMessage, submitForm } from '../form.js'
+  import { secretPlaceholder } from '../secretField.js'
   import ErrorBanner from '../ErrorBanner.svelte'
   import Toggle from '../Toggle.svelte'
 
@@ -169,6 +170,7 @@
     <div class="form-row">
       <label for="integrations-email-password">{$t('settings.integrations.email.password')}</label>
       <input id="integrations-email-password" type="password" bind:value={emailSmtpPassword}
+             placeholder={secretPlaceholder(settings.hasEmailSmtpPassword)}
              autocomplete="new-password"
              disabled={emailInheritInstance || !settings.secretsAvailable} />
       {#if !settings.secretsAvailable}

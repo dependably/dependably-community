@@ -9,6 +9,7 @@
   import { t } from 'svelte-i18n'
   import { systemApi } from '../api.js'
   import { extractErrorMessage, submitForm } from '../form.js'
+  import { secretPlaceholder } from '../secretField.js'
   import ErrorBanner from '../ErrorBanner.svelte'
   import InfoTip from '../InfoTip.svelte'
   import Toggle from '../Toggle.svelte'
@@ -91,6 +92,7 @@
         id="system-slack-url"
         type="password"
         bind:value={webhookUrl}
+        placeholder={secretPlaceholder(config.hasWebhook)}
         autocomplete="new-password"
         disabled={!enabled || !config.secretsAvailable}
       />

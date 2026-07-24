@@ -167,6 +167,10 @@ CREATE TABLE IF NOT EXISTS packages (
     -- Per-package same-version-push override. NULL = inherit. See Schema.sql for the full rationale.
     same_version_push_override TEXT
                                CHECK (same_version_push_override IN ('allow','block')),
+    -- Package-level metadata surfaced in the UI. See Schema.sql for the full rationale.
+    homepage       TEXT,
+    repository_url TEXT,
+    description    TEXT,
     UNIQUE (org_id, ecosystem, purl_name)
 );
 
@@ -264,6 +268,20 @@ CREATE TABLE IF NOT EXISTS invites (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_invites_unique_pending
     ON invites (org_id, email) WHERE accepted_at IS NULL;
+
+-- Self-serve "forgot password" reset links. Distinct from users.password_reset_issued_at, which
+-- backs the operator-issued temporary-password support flow (SystemAdminRepository) and carries
+-- no token of its own.
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    token_hash  TEXT NOT NULL UNIQUE,
+    created_at  TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
+    expires_at  TEXT NOT NULL,
+    consumed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_prt_user_pending ON password_reset_tokens(user_id) WHERE consumed_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS allowlist (
     id          TEXT PRIMARY KEY,

@@ -9,6 +9,7 @@
   import { t } from 'svelte-i18n'
   import { api } from '../api.js'
   import { extractErrorMessage, submitForm } from '../form.js'
+  import { secretPlaceholder } from '../secretField.js'
   import ErrorBanner from '../ErrorBanner.svelte'
   import Toggle from '../Toggle.svelte'
 
@@ -68,6 +69,7 @@
   <div class="form-row">
     <label for="integrations-slack-url">{$t('settings.integrations.slack.url')}</label>
     <input id="integrations-slack-url" type="password" bind:value={slackWebhookUrl}
+           placeholder={secretPlaceholder(settings.hasSlackWebhook)}
            autocomplete="new-password" disabled={!slackEnabled || !settings.secretsAvailable} />
     {#if !settings.secretsAvailable}
       <div class="form-hint">{$t('settings.integrations.masterKeyHint')}</div>

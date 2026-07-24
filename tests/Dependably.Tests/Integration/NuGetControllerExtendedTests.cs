@@ -415,6 +415,10 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
         var page = idx.GetProperty("items").EnumerateArray().First();
         Assert.False(string.IsNullOrEmpty(page.GetProperty("@id").GetString()));
         Assert.Equal("catalog:CatalogPage", page.GetProperty("@type").GetString());
+        // Crash regression: NuGet.Client's NuGetVersion.Parse(page.Lower/Upper) throws
+        // ArgumentException on a missing key — the page must always carry semver bounds.
+        Assert.Equal("1.1.0", page.GetProperty("lower").GetString());
+        Assert.Equal("1.1.0", page.GetProperty("upper").GetString());
         var leafItem = page.GetProperty("items").EnumerateArray().First();
         Assert.Equal("Package", leafItem.GetProperty("@type").GetString());
         Assert.False(string.IsNullOrEmpty(leafItem.GetProperty("@id").GetString()));

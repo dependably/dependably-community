@@ -228,8 +228,9 @@ public sealed class NuGetRegistrationMergeTests
     [Fact]
     public void Merge_WithBaseUrl_LocalPageEntriesStillPointToLocalRoutes()
     {
-        // The local-version page is built by BuildLocalPage which always uses relative paths,
-        // independent of the baseUrl rewrite. Both upstream and local entries must end up local.
+        // The local-version page is built by BuildLocalPage, which threads the same baseUrl
+        // through to its leaves, so local entries land under this instance's routes too —
+        // whether that base is the absolute supplied baseUrl or the relative fallback.
         string upstream = MinimalUpstream("foo", "1.0.0");
         var local = new[] { Ver("9.9.9-private") };
 
@@ -242,6 +243,58 @@ public sealed class NuGetRegistrationMergeTests
         Assert.NotNull(pc);
         Assert.Contains("/nuget/flatcontainer/foo/9.9.9-private/foo.9.9.9-private.nupkg", pc);
         Assert.DoesNotContain("api.nuget.org", pc);
+    }
+
+    [Fact]
+    public void Merge_SplicedLocalLeaf_CatalogEntryCarriesJsonLdIdAndType()
+    {
+        // The spliced local leaf's catalogEntry must carry "@id"/"@type" like every other
+        // catalogEntry in the document (upstream leaves and the local-only render path both
+        // do). A missing "@id" here is the JSON-LD verbatim-identifier defect the local-only
+        // render path already fixed but this splice path did not inherit.
+        string upstream = MinimalUpstream("foo", "1.0.0");
+        var local = new[] { Ver("9.9.9-private") };
+
+        string merged = NuGetController.MergeLocalIntoUpstreamRegistration(
+            upstream, local, Pkg("Foo"), "foo");
+
+        using var doc = JsonDocument.Parse(merged);
+        var localPage = doc.RootElement.GetProperty("items")[1];
+        var catalogEntry = localPage.GetProperty("items")[0].GetProperty("catalogEntry");
+        Assert.Equal("PackageDetails", catalogEntry.GetProperty("@type").GetString());
+        string? entryId = catalogEntry.GetProperty("@id").GetString();
+        Assert.NotNull(entryId);
+        Assert.Contains("/nuget/registration/foo/9.9.9-private.json", entryId);
+    }
+
+    [Fact]
+    public void Merge_WithBaseUrl_SplicedLocalLeaf_IdAndPackageContentAreAbsolute()
+    {
+        // Every upstream leaf in the merged document is rewritten to an absolute URL by
+        // RewriteAllLeafUrls when baseUrl is supplied. The spliced local leaf must match —
+        // packageContent deserializes into a System.Uri downstream, which throws on
+        // .AbsoluteUri for a relative value.
+        string upstream = MinimalUpstream("foo", "1.0.0");
+        var local = new[] { Ver("9.9.9-private") };
+
+        string merged = NuGetController.MergeLocalIntoUpstreamRegistration(
+            upstream, local, Pkg("Foo"), "foo", "https://my.instance/nuget");
+
+        using var doc = JsonDocument.Parse(merged);
+        var localPage = doc.RootElement.GetProperty("items")[1];
+        var leaf = localPage.GetProperty("items")[0];
+
+        string? leafId = leaf.GetProperty("@id").GetString();
+        Assert.NotNull(leafId);
+        Assert.StartsWith("https://my.instance/nuget/registration/foo/9.9.9-private.json", leafId);
+
+        string? catalogPc = leaf.GetProperty("catalogEntry").GetProperty("packageContent").GetString();
+        Assert.NotNull(catalogPc);
+        Assert.StartsWith("https://my.instance/nuget/flatcontainer/foo/9.9.9-private/", catalogPc);
+
+        // Must round-trip through System.Uri without throwing (the real NuGet client behavior).
+        var parsed = new Uri(catalogPc!);
+        Assert.Equal(catalogPc, parsed.AbsoluteUri);
     }
 
     [Fact]

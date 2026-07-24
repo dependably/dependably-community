@@ -16,5 +16,4 @@ web/.vscode/
 # Docs and metadata
 docs/
 *.md
-renovate.json
 .claude/

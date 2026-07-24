@@ -8,28 +8,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Tech stack: **ASP.NET Core 10 / C#**, **Dapper** (parameterized SQL only — no string interpolation), **SQLite** (`IMetadataStore` / `SqliteMetadataStore`), **Serilog** structured JSON logging, **JWT** sessions, **BCrypt** passwords, **NuGet.Versioning** for NuGet version normalization. **ASP.NET Core Identity Core** (`AddIdentityCore` only, no SignInManager/cookie scheme) over custom Dapper `IUserStore` implementations supplies the MFA and credential primitives (TOTP, recovery codes, BCrypt hashing, security_stamp); the first-factor login, lockout, JWT session, and per-request session-invalidation layers are bespoke for security reasons documented in `docs/adr/0001-auth-identity-hybrid.md`.
 
-## Deploy
-
-```bash
-# Build and start (ARM64 / Raspberry Pi)
-docker compose up -d --build
-
-# Rebuild after code changes
-docker compose up -d --build
-
-# View logs
-docker compose logs -f
-
-# Stop
-docker compose down
-```
-
 ## Commands
 
 ```bash
-# Build
-dotnet build
-
 # Run all unit/compliance/security tests
 dotnet test --filter "Category!=Integration"
 
@@ -38,18 +19,10 @@ dotnet test --filter "Category!=Integration"
 # — always confirm a non-zero test count in the output, never exit code alone.
 dotnet test --filter "FullyQualifiedName~PurlNormalizerTests"
 
-# Run all tests including integration (self-contained — uses in-memory blob + SQLite stores)
-dotnet test
-
-# Run the server locally (defaults to local blob store at /data)
-dotnet run --project src/Dependably
-
 # Build release binary
 dotnet publish src/Dependably -c Release -r linux-musl-x64 --self-contained true /p:PublishSingleFile=true
 
 # Web frontend (Svelte, from web/)
-cd web && npm install
-npm run dev      # Vite dev server
 npm run build    # production build into src/Dependably.Management/wwwroot — wipes ALL of wwwroot,
                  # including the tracked wwwroot/swagger/ assets; restore them afterwards
                  # (git checkout -- src/Dependably.Management/wwwroot/swagger)
@@ -69,52 +42,9 @@ src/Dependably.Edge/        — edge composition root (Program.cs); refs Core on
                               entrypoint ./Dependably.Edge → image dependably/edge
 ```
 
-Most of the tree below lives in `Dependably.Core` (the root and Edge projects are thin Program.cs
-composition roots; the admin/auth surface lives in `Dependably.Management`):
-
-```
-src/Dependably.Core/
-  Infrastructure/
-    IMetadataStore.cs     — returns DbConnection (SQLite or Postgres per DB_PROVIDER)
-    SqliteMetadataStore.cs
-    SchemaInitializer.cs  — applies the provider-selected schema on startup (idempotent)
-    FirstBootService.cs   — creates default org, JWT secret, admin password on first run
-    schema/Schema.sql + schema/Schema.pg.sql — embedded resources; provider-selected full DB schema (CREATE TABLE IF NOT EXISTS)
-  Storage/
-    IBlobStore.cs         — PutAsync/GetAsync/ExistsAsync/DeleteAsync/GetTotalSizeAsync
-    BlobKeys.cs           — single source of truth for key construction
-    LocalBlobStore.cs     — STORAGE_BACKEND=local (default, path from LOCAL_STORAGE_PATH)
-    S3BlobStore.cs        — STORAGE_BACKEND=s3 (S3_BUCKET, S3_REGION)
-    AzureBlobStore.cs     — STORAGE_BACKEND=azure (AZURE_CONNECTION_STRING, AZURE_CONTAINER)
-    InMemoryBlobStore.cs  — for tests only
-    BlobStoreFactory.cs   — reads STORAGE_BACKEND env var, instantiates correct impl
-  Protocol/
-    PurlNormalizer.cs     — canonical PURL construction for every ecosystem (pypi/npm/nuget/maven/rpm)
-    PurlParser.cs         — parses PURL strings back to (ecosystem, name, version)
-    UpstreamClient.cs     — fetches from upstream, verifies SHA-256, caches in blob store
-  Security/
-    PathSafeValidator.cs  — rejects path traversal, control chars, oversized inputs
-    TokenAuthExtensions.cs — resolves Bearer/Basic token from HttpRequest
-  Infrastructure/
-    Models.cs             — Org, OrgSettings, Package, PackageVersion, TokenRecord records
-    OrgRepository.cs      — org + settings + instance_settings queries
-    PackageRepository.cs  — package/version CRUD; GetOrCreate pattern
-    TokenRepository.cs    — resolves user + service tokens by SHA-256 hash
-    AuditRepository.cs    — append-only audit_log + activity inserts
-  Api/
-    PyPiController.cs     — GET /simple/, GET /packages/{file}, POST /pypi/legacy/
-    NpmController.cs      — GET+PUT /npm/{pkg}, GET /npm/tarballs/{pkg}/{file}
-    NuGetController.cs    — full NuGet v3: service index, registration, flatcontainer, push, unlist, symbols
-    MavenController.cs    — GET/HEAD/PUT /maven/{**path}: artifact + sidecar + metadata proxy and publish
-    RpmController.cs      — GET /rpm/repodata/* + /rpm/packages/*, PUT /rpm/upload
-    OciController.cs      — OCI Distribution Spec at /v2/{**path} (GET/HEAD/POST/PUT)
-    ProblemResults.cs     — RFC 7807 helpers (ValidationError, Conflict, PayloadTooLarge, etc.)
-
-tests/Dependably.Tests/
-  Unit/                   — fast unit tests, no I/O
-  Integration/            — WebApplicationFactory-based; use DependablyFactory
-  Fixtures/packages/      — real package files (pypi/, npm/, nuget/)
-```
+Most of the protocol, storage, and infrastructure tree lives in `Dependably.Core`; the
+admin/auth surface lives in `Dependably.Management`. Tests are in `tests/Dependably.Tests/`
+(`Unit/` no-I/O, `Integration/` via `DependablyFactory`, `Fixtures/packages/` real artefacts).
 
 ## Key architectural rules
 
@@ -154,7 +84,7 @@ tests/Dependably.Tests/
 
 - **A task is done only when the gate is green by exit code, not by tailed output.** Run `dotnet test --filter "Category!=Integration"` and build with `-p:TreatWarningsAsErrors=true` (CI treats warnings as errors when `CI=true`); read the real exit status, not the last scrolled lines of a long log.
 - **Before claiming an MR pipeline is green, fetch the actual per-job pass/fail status** — do not infer success from a single "posted note" or a truncated tail. A masked failure read as success is the most common cause of a follow-up fix pass.
-- UI changes ship no emoji codepoints in Svelte (the `chrome-emoji-guard` CI gate blocks them) — use the `icons.svg` sprite; conventions are in `DESIGN.md` §11.
+- UI changes ship no emoji codepoints in Svelte (the `dependably/no-emoji` ESLint rule in `web/eslint.config.js` blocks them — via lint-staged pre-commit, `npm run lint`, and the CI `lint` job) — use the `icons.svg` sprite; conventions are in `DESIGN.md` §11.
 
 ## Environment variables
 

@@ -857,6 +857,13 @@ public sealed partial class SchemaInitializer
             // slack_status/slack_error.
             "ALTER TABLE alert ADD COLUMN email_status TEXT",
             "ALTER TABLE alert ADD COLUMN email_error TEXT",
+            // Package-level metadata surfaced in the UI, captured at hosted publish and proxy
+            // first-fetch from the artifact manifest (npm package.json, PyPI METADATA, NuGet
+            // .nuspec, Maven .pom, Cargo.toml). All nullable; existing rows stay NULL until the
+            // next publish/fetch repopulates them (no historical backfill).
+            "ALTER TABLE packages ADD COLUMN homepage TEXT",
+            "ALTER TABLE packages ADD COLUMN repository_url TEXT",
+            "ALTER TABLE packages ADD COLUMN description TEXT",
     };
 
     private async Task RunAdditiveMigrationsAsync(DbConnection conn)

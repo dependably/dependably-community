@@ -391,6 +391,52 @@ Acceptez votre invitation à l'aide du lien ci-dessous. Le lien expire le {1} UT
 Si vous n'attendiez pas cette invitation, vous pouvez ignorer ce courriel.
 </value>
   </data>
+  <data name="email.reset.subject" xml:space="preserve">
+    <value>Réinitialisez votre mot de passe Dependably</value>
+  </data>
+  <data name="email.reset.body" xml:space="preserve">
+    <value>Une réinitialisation de mot de passe a été demandée pour votre compte Dependably.
+
+Réinitialisez votre mot de passe à l'aide du lien ci-dessous. Le lien expire le {0} UTC et ne peut être utilisé qu'une seule fois.
+
+{1}
+
+Si vous n'êtes pas à l'origine de cette demande, vous pouvez ignorer ce courriel — votre mot de passe ne sera pas modifié.
+</value>
+  </data>
+  <data name="email.security.mfaEnabled.subject" xml:space="preserve">
+    <value>L'authentification à deux facteurs a été activée sur votre compte Dependably</value>
+  </data>
+  <data name="email.security.mfaEnabled.body" xml:space="preserve">
+    <value>L'authentification à deux facteurs a été activée sur votre compte Dependably le {0} UTC.
+
+Si c'est bien vous qui avez effectué ce changement, aucune action n'est requise.
+
+Si vous n'êtes pas à l'origine de ce changement, connectez-vous et désactivez immédiatement l'authentification à deux facteurs, puis changez votre mot de passe.
+</value>
+  </data>
+  <data name="email.security.mfaDisabled.subject" xml:space="preserve">
+    <value>L'authentification à deux facteurs a été désactivée sur votre compte Dependably</value>
+  </data>
+  <data name="email.security.mfaDisabled.body" xml:space="preserve">
+    <value>L'authentification à deux facteurs a été désactivée sur votre compte Dependably le {0} UTC.
+
+Si c'est bien vous qui avez effectué ce changement, aucune action n'est requise.
+
+Si vous n'êtes pas à l'origine de ce changement, connectez-vous et réactivez immédiatement l'authentification à deux facteurs, puis changez votre mot de passe.
+</value>
+  </data>
+  <data name="email.security.passwordChanged.subject" xml:space="preserve">
+    <value>Votre mot de passe Dependably a été modifié</value>
+  </data>
+  <data name="email.security.passwordChanged.body" xml:space="preserve">
+    <value>Le mot de passe de votre compte Dependably a été modifié le {0} UTC.
+
+Si c'est bien vous qui avez effectué ce changement, aucune action n'est requise.
+
+Si vous n'êtes pas à l'origine de ce changement, contactez immédiatement votre administrateur — votre compte pourrait être compromis.
+</value>
+  </data>
   <data name="error.email.masterKeyRequired" xml:space="preserve">
     <value>DEPENDABLY_MASTER_KEY doit être configurée pour stocker un mot de passe SMTP au repos.</value>
   </data>

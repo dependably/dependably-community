@@ -144,6 +144,9 @@ public sealed class PackagePublishService : IPackagePublishService
         // Dedup vs overwrite. Resolution is policy-driven (org tri-state + per-package override).
         // ResolveOverwriteAllowed returns true only when the effective combination permits it.
         var pkg = await _packages.GetOrCreateAsync(request.OrgId, request.Ecosystem, request.Name, request.PurlName, isProxy: false, ct);
+        // Refresh the package's presentation metadata from this publish's manifest. COALESCE
+        // semantics mean a manifest that omits a field never clears an earlier value.
+        await _packages.UpdateMetadataAsync(pkg.Id, request.Homepage, request.Repository, request.Description, ct);
         var existing = await _packages.GetVersionAsync(pkg.Id, request.Version, ct);
         var settings = await _orgs.GetSettingsAsync(request.OrgId, ct);
 

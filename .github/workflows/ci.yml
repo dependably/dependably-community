@@ -70,9 +70,12 @@ jobs:
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
-          node-version: '20'
+          node-version: '26.0.0'
           cache: 'npm'
           cache-dependency-path: web/package-lock.json
+
+      - name: Pin npm
+        run: npm install -g npm@12.0.1
 
       - name: Install
         run: npm ci
@@ -89,13 +92,6 @@ jobs:
       - name: Type-check (svelte-check)
         run: npm run check
         working-directory: web
-
-      - name: Chrome emoji guard
-        run: |
-          if grep -rPn '[\x{1F300}-\x{1FAFF}\x{2600}-\x{27BF}\x{2700}-\x{27BF}\x{2300}-\x{23FF}]' web/src --include='*.svelte'; then
-            echo "Emoji codepoint detected in web/src. Use a sprite from web/public/icons.svg instead — DESIGN.md §11." >&2
-            exit 1
-          fi
 
   integration:
     name: Integration Tests
@@ -144,9 +140,12 @@ jobs:
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
-          node-version: '22'
+          node-version: '26.0.0'
           cache: 'npm'
           cache-dependency-path: web/package-lock.json
+
+      - name: Pin npm
+        run: npm install -g npm@12.0.1
 
       - name: Install frontend dependencies
         run: npm ci

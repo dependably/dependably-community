@@ -679,6 +679,15 @@ override OS preference. Adding a new themed token: write
   button background transition
 - **New UI patterns** — add them to `app.css` as global classes rather
   than scoping to one component
+- **Write-only secret inputs signal a stored value.** A secret field
+  (webhook URL, SMTP password, signing secret, upstream credential) is
+  never pre-filled from the server — it binds to an empty string so an
+  empty submit preserves the existing secret. When the server reports a
+  value is already set (`hasSlackWebhook`, `hasPassword`, `hasSecret`, …),
+  render `secretPlaceholder(isSet)` from `lib/secretField.js` as the
+  input's `placeholder` so the field reads as configured (masked dots),
+  not empty/unconfigured. Never put the secret itself in `value` or
+  `placeholder`.
 
 ---
 

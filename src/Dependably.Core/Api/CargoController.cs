@@ -512,6 +512,8 @@ public sealed partial class CargoController : OrgScopedControllerBase
         // gate inside StoreAndRecordAsync can evaluate it before the version row is persisted.
         // license-file carries no SPDX signal so it is not modelled.
         var declaredLicense = LicenseExtractor.FromCargoPublishLicense(args.Metadata.License);
+        var presentation = LicenseExtractor.PresentationOnly(
+            args.Metadata.Homepage, args.Metadata.Repository, args.Metadata.Description);
         var request = new PublishRequest
         {
             OrgId = args.OrgId,
@@ -530,6 +532,9 @@ public sealed partial class CargoController : OrgScopedControllerBase
             ClaimState = claim.State,
             SourceIp = HttpContext.GetNormalizedRemoteIp(),
             Licenses = declaredLicense.Spdx.Count > 0 ? declaredLicense.Spdx : null,
+            Homepage = presentation.Homepage,
+            Repository = presentation.Repository,
+            Description = presentation.Description,
         };
 
         var result = await _publish.StoreAndRecordAsync(request, ct);

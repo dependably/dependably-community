@@ -252,6 +252,16 @@
         }
       }
     },
+    "/api/v1/auth/forgot-password": {
+      "operations": {
+        "post": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/api/v1/auth/login": {
       "operations": {
         "post": {
@@ -295,6 +305,16 @@
     "/api/v1/auth/methods": {
       "operations": {
         "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/auth/reset-password": {
+      "operations": {
+        "post": {
           "requiredParams": [],
           "responseCodes": [
             "200"

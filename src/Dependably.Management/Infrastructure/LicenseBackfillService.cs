@@ -214,6 +214,8 @@ public sealed class LicenseBackfillService : ScheduledBackgroundService
                 return LicenseExtractor.FromGoModuleZip(blob, candidate.Name, candidate.Version);
             case "maven":
                 return LicenseExtractor.FromPomXml(blob);
+            case "cargo":
+                return LicenseExtractor.FromCrateTarball(blob);
             default:
                 // Unreachable — the repository query filters to the ecosystems above — but
                 // dispose defensively so an unexpected row never leaks the opened stream.

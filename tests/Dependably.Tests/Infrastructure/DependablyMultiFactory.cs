@@ -41,6 +41,14 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
     /// </summary>
     public string? MasterKey { get; init; }
 
+    /// <summary>
+    /// Opt-in replacement for the production <see cref="Dependably.Infrastructure.Mail.SmtpMailSender"/>
+    /// singleton — set to a <see cref="CapturingMailSender"/> so a test can assert exactly which
+    /// address a fire site enqueued a notification to. Null (default) leaves the real sender in
+    /// place, matching <see cref="DependablyFactory.MailSenderOverride"/>.
+    /// </summary>
+    public Dependably.Infrastructure.Mail.SmtpMailSender? MailSenderOverride { get; init; }
+
     private readonly TestMetadataStore _metadataStore = new();
 
     protected override IHost CreateHost(IHostBuilder _)
@@ -67,7 +75,27 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
         builder.Services.RemoveAll<IMetadataStore>();
         builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
 
+        if (MailSenderOverride is not null)
+        {
+            builder.Services.RemoveAll<Dependably.Infrastructure.Mail.SmtpMailSender>();
+            builder.Services.AddSingleton(MailSenderOverride);
+        }
+
         builder.WebHost.UseTestServer();
+
+        // Every factory instantiation boots the host, and RunOnStartup=true fires an immediate
+        // pass on four hosted services: VulnerabilityScanService (job names vuln-scan,
+        // vuln-rescan), ThreatFeedRefreshService (threat-feed), and DeprecationRefreshService
+        // (deprecation-refresh) each make a real outbound HTTP request (OSV.dev, CISA KEV,
+        // FIRST.org EPSS, npm/PyPI/NuGet deprecation feeds) against the public internet;
+        // LicenseBackfillService (license-backfill) makes no outbound call but mutates the shared
+        // cache_artifact.license_checked_at column under a leader lock on every boot, its own
+        // source of cross-test non-determinism. Naming all five job names here disables only
+        // these five, not every background job.
+        builder.WebHost.UseSetting(
+            "DISABLE_BACKGROUND_JOBS",
+            "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill");
+
         builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
         // TestServer requests share one "unknown" rate-limit partition (no remote IP);
         // keep shared-fixture tests out of each other's login/anon/management budgets.

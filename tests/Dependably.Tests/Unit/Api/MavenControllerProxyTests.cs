@@ -519,6 +519,35 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
         Assert.Equal(new[] { "Apache-2.0" }, spdx);
     }
 
+    // Regression: Maven recorded the repository-RELATIVE path in cache_artifact.upstream_url
+    // ("com/example/abs/1.0/abs-1.0.jar") while every other ecosystem records an absolute URL.
+    // A relative value cannot identify the upstream host, so any consumer that gates on origin
+    // (the registry-page link) can never resolve it and silently renders nothing.
+    [Fact]
+    public async Task ProxyMiss_RecordsAbsoluteUpstreamUrl_NotRepositoryRelativePath()
+    {
+        byte[] bytes = Encoding.UTF8.GetBytes("absolute-url-regression");
+        const string path = "com/example/abs/1.0/abs-1.0.jar";
+        StubArtifact(path, bytes);
+        StubSidecar(path, Sha256Hex(bytes));
+
+        var ctl = BuildController(CleanOsv());
+        await ctl.Download(path, CancellationToken.None);
+
+        await using var conn = await _db.OpenAsync();
+        string? recorded = await conn.ExecuteScalarAsync<string?>(
+            "SELECT upstream_url FROM cache_artifact WHERE ecosystem = 'maven' AND filename = 'abs-1.0.jar'");
+
+        Assert.False(string.IsNullOrEmpty(recorded));
+        // Must parse as an ABSOLUTE URL — the whole point of the fix.
+        Assert.True(
+            Uri.TryCreate(recorded, UriKind.Absolute, out var absolute),
+            $"upstream_url must be an absolute URL, got '{recorded}'.");
+        // ...pointing at the upstream we actually fetched from, and still carrying the repo path.
+        Assert.Equal(new Uri(_upstream).Host, absolute!.Host);
+        Assert.EndsWith(path, recorded);
+    }
+
     [Fact]
     public async Task ProxyMiss_Jar_WritesNoLicenseRows()
     {

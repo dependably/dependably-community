@@ -61,6 +61,122 @@ Si vous n&apos;attendiez pas cette invitation, vous pouvez ignorer ce courriel.
         <target>Invitation à rejoindre {0} sur Dependably</target>
       </segment>
     </unit>
+    <unit id="email.reset.body">
+      <notes>
+        <note category="translator">Plain-text password-reset email body. {0} = expiry timestamp, {1} = reset link. Keep the blank lines and the trailing newline.</note>
+      </notes>
+      <segment state="translated">
+        <source>A password reset was requested for your Dependably account.
+
+Reset your password using the link below. The link expires at {0} UTC and can only be used once.
+
+{1}
+
+If you did not request this, you can ignore this email — your password will not be changed.
+</source>
+        <target>Une réinitialisation de mot de passe a été demandée pour votre compte Dependably.
+
+Réinitialisez votre mot de passe à l&apos;aide du lien ci-dessous. Le lien expire le {0} UTC et ne peut être utilisé qu&apos;une seule fois.
+
+{1}
+
+Si vous n&apos;êtes pas à l&apos;origine de cette demande, vous pouvez ignorer ce courriel — votre mot de passe ne sera pas modifié.
+</target>
+      </segment>
+    </unit>
+    <unit id="email.reset.subject">
+      <notes>
+        <note category="translator">Subject line of the self-serve &quot;forgot password&quot; reset email.</note>
+      </notes>
+      <segment state="translated">
+        <source>Reset your Dependably password</source>
+        <target>Réinitialisez votre mot de passe Dependably</target>
+      </segment>
+    </unit>
+    <unit id="email.security.mfaDisabled.body">
+      <notes>
+        <note category="translator">Plain-text MFA-disabled security notification body. {0} = event timestamp. Keep the blank lines and the trailing newline.</note>
+      </notes>
+      <segment state="translated">
+        <source>Two-factor authentication was disabled on your Dependably account on {0} UTC.
+
+If this was you, no action is needed.
+
+If you did not make this change, sign in and re-enable two-factor authentication immediately, then change your password.
+</source>
+        <target>L&apos;authentification à deux facteurs a été désactivée sur votre compte Dependably le {0} UTC.
+
+Si c&apos;est bien vous qui avez effectué ce changement, aucune action n&apos;est requise.
+
+Si vous n&apos;êtes pas à l&apos;origine de ce changement, connectez-vous et réactivez immédiatement l&apos;authentification à deux facteurs, puis changez votre mot de passe.
+</target>
+      </segment>
+    </unit>
+    <unit id="email.security.mfaDisabled.subject">
+      <notes>
+        <note category="translator">Subject line of the account-security notification sent when MFA is disabled.</note>
+      </notes>
+      <segment state="translated">
+        <source>Two-factor authentication was disabled on your Dependably account</source>
+        <target>L&apos;authentification à deux facteurs a été désactivée sur votre compte Dependably</target>
+      </segment>
+    </unit>
+    <unit id="email.security.mfaEnabled.body">
+      <notes>
+        <note category="translator">Plain-text MFA-enabled security notification body. {0} = event timestamp. Keep the blank lines and the trailing newline.</note>
+      </notes>
+      <segment state="translated">
+        <source>Two-factor authentication was enabled on your Dependably account on {0} UTC.
+
+If this was you, no action is needed.
+
+If you did not make this change, sign in and disable two-factor authentication immediately, then change your password.
+</source>
+        <target>L&apos;authentification à deux facteurs a été activée sur votre compte Dependably le {0} UTC.
+
+Si c&apos;est bien vous qui avez effectué ce changement, aucune action n&apos;est requise.
+
+Si vous n&apos;êtes pas à l&apos;origine de ce changement, connectez-vous et désactivez immédiatement l&apos;authentification à deux facteurs, puis changez votre mot de passe.
+</target>
+      </segment>
+    </unit>
+    <unit id="email.security.mfaEnabled.subject">
+      <notes>
+        <note category="translator">Subject line of the account-security notification sent when MFA is enabled.</note>
+      </notes>
+      <segment state="translated">
+        <source>Two-factor authentication was enabled on your Dependably account</source>
+        <target>L&apos;authentification à deux facteurs a été activée sur votre compte Dependably</target>
+      </segment>
+    </unit>
+    <unit id="email.security.passwordChanged.body">
+      <notes>
+        <note category="translator">Plain-text password-changed security notification body. {0} = event timestamp. Keep the blank lines and the trailing newline.</note>
+      </notes>
+      <segment state="translated">
+        <source>Your Dependably account password was changed on {0} UTC.
+
+If this was you, no action is needed.
+
+If you did not make this change, contact your administrator immediately — your account may be compromised.
+</source>
+        <target>Le mot de passe de votre compte Dependably a été modifié le {0} UTC.
+
+Si c&apos;est bien vous qui avez effectué ce changement, aucune action n&apos;est requise.
+
+Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiatement votre administrateur — votre compte pourrait être compromis.
+</target>
+      </segment>
+    </unit>
+    <unit id="email.security.passwordChanged.subject">
+      <notes>
+        <note category="translator">Subject line of the account-security notification sent when the account password changes.</note>
+      </notes>
+      <segment state="translated">
+        <source>Your Dependably password was changed</source>
+        <target>Votre mot de passe Dependably a été modifié</target>
+      </segment>
+    </unit>
     <unit id="email.test.body">
       <notes>
         <note category="translator">Plain-text body of the test email sent by the email-config test-send endpoints.</note>
@@ -686,7 +802,7 @@ Si vous n&apos;attendiez pas cette invitation, vous pouvez ignorer ce courriel.
     </unit>
     <unit id="error.lookup.versionRequired">
       <notes>
-        <note category="translator">422 detail for GET /api/v1/lookup when no version was given and the ecosystem has no &quot;latest&quot; to resolve against (Go, Cargo, or an air-gapped org/instance). {0} = the ecosystem name (API literal).</note>
+        <note category="translator">422 detail for GET /api/v1/lookup when no version was given and there is no upstream to resolve &quot;latest&quot; against, which is an air-gapped org or instance. {0} = the ecosystem name (API literal).</note>
       </notes>
       <segment state="translated">
         <source>version is required for ecosystem &apos;{0}&apos;.</source>

@@ -251,6 +251,13 @@ CREATE TABLE IF NOT EXISTS packages (
     -- Ignored when the org policy is 'block' (hard lockdown; no per-package escape hatch).
     same_version_push_override TEXT
                                CHECK (same_version_push_override IN ('allow','block')),
+    -- Package-level metadata surfaced in the UI, captured at hosted publish and proxy
+    -- first-fetch from the artifact manifest (npm package.json, PyPI METADATA, NuGet .nuspec,
+    -- Maven .pom, Cargo.toml). All nullable; existing rows stay NULL until the next
+    -- publish/fetch repopulates them (no historical backfill).
+    homepage       TEXT,
+    repository_url TEXT,
+    description    TEXT,
     UNIQUE (org_id, ecosystem, purl_name)
 );
 
@@ -395,6 +402,20 @@ CREATE TABLE IF NOT EXISTS invites (
 -- Prevent duplicate pending invites: only one unaccepted invite per (org, email) at a time.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_invites_unique_pending
     ON invites (org_id, email) WHERE accepted_at IS NULL;
+
+-- Self-serve "forgot password" reset links. Distinct from users.password_reset_issued_at, which
+-- backs the operator-issued temporary-password support flow (SystemAdminRepository) and carries
+-- no token of its own.
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    token_hash  TEXT NOT NULL UNIQUE,
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    expires_at  TEXT NOT NULL,
+    consumed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_prt_user_pending ON password_reset_tokens(user_id) WHERE consumed_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS allowlist (
     id          TEXT PRIMARY KEY,

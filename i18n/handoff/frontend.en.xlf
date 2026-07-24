@@ -823,6 +823,48 @@
         <target>Audit</target>
       </segment>
     </unit>
+    <unit id="auth.forgotPassword.back">
+      <segment state="translated">
+        <source>Back to sign in</source>
+        <target>Retour à la connexion</target>
+      </segment>
+    </unit>
+    <unit id="auth.forgotPassword.email">
+      <segment state="translated">
+        <source>Email</source>
+        <target>Courriel</target>
+      </segment>
+    </unit>
+    <unit id="auth.forgotPassword.submit">
+      <segment state="translated">
+        <source>Send reset link</source>
+        <target>Envoyer le lien</target>
+      </segment>
+    </unit>
+    <unit id="auth.forgotPassword.submitting">
+      <segment state="translated">
+        <source>Sending…</source>
+        <target>Envoi…</target>
+      </segment>
+    </unit>
+    <unit id="auth.forgotPassword.subtitle">
+      <segment state="translated">
+        <source>Enter your email and we&apos;ll send you a link to reset your password.</source>
+        <target>Entrez votre courriel et nous vous enverrons un lien pour réinitialiser votre mot de passe.</target>
+      </segment>
+    </unit>
+    <unit id="auth.forgotPassword.success">
+      <segment state="translated">
+        <source>If an account exists for that email, a reset link is on its way. Check your inbox.</source>
+        <target>Si un compte existe pour ce courriel, un lien de réinitialisation est en route. Consultez votre boîte de réception.</target>
+      </segment>
+    </unit>
+    <unit id="auth.forgotPassword.title">
+      <segment state="translated">
+        <source>Reset your password</source>
+        <target>Réinitialisez votre mot de passe</target>
+      </segment>
+    </unit>
     <unit id="auth.join.confirmPassword">
       <segment state="translated">
         <source>Confirm Password</source>
@@ -899,6 +941,12 @@
       <segment state="translated">
         <source>Login failed.</source>
         <target>Échec de la connexion.</target>
+      </segment>
+    </unit>
+    <unit id="auth.login.forgotPassword">
+      <segment state="translated">
+        <source>Forgot password?</source>
+        <target>Mot de passe oublié?</target>
       </segment>
     </unit>
     <unit id="auth.login.or">
@@ -1025,6 +1073,84 @@
       <segment state="translated">
         <source>Use authenticator app instead</source>
         <target>Utiliser l&apos;application d&apos;authentification à la place</target>
+      </segment>
+    </unit>
+    <unit id="auth.reset.confirmPassword">
+      <segment state="translated">
+        <source>Confirm Password</source>
+        <target>Confirmer le mot de passe</target>
+      </segment>
+    </unit>
+    <unit id="auth.reset.errorExpired">
+      <segment state="translated">
+        <source>This reset link is invalid, expired, or already used.</source>
+        <target>Ce lien de réinitialisation est invalide, expiré ou déjà utilisé.</target>
+      </segment>
+    </unit>
+    <unit id="auth.reset.errorFailed">
+      <segment state="translated">
+        <source>Failed to reset password.</source>
+        <target>Échec de la réinitialisation du mot de passe.</target>
+      </segment>
+    </unit>
+    <unit id="auth.reset.errorMinLength">
+      <segment state="translated">
+        <source>Password must be at least 12 characters.</source>
+        <target>Le mot de passe doit comporter au moins 12 caractères.</target>
+      </segment>
+    </unit>
+    <unit id="auth.reset.errorMismatch">
+      <segment state="translated">
+        <source>Passwords do not match.</source>
+        <target>Les mots de passe ne correspondent pas.</target>
+      </segment>
+    </unit>
+    <unit id="auth.reset.newPassword">
+      <segment state="translated">
+        <source>New Password</source>
+        <target>Nouveau mot de passe</target>
+      </segment>
+    </unit>
+    <unit id="auth.reset.passwordHint">
+      <segment state="translated">
+        <source>(min 12 chars)</source>
+        <target>(min. 12 caractères)</target>
+      </segment>
+    </unit>
+    <unit id="auth.reset.requestNew">
+      <segment state="translated">
+        <source>Request a new link</source>
+        <target>Demander un nouveau lien</target>
+      </segment>
+    </unit>
+    <unit id="auth.reset.signIn">
+      <segment state="translated">
+        <source>Sign in</source>
+        <target>Se connecter</target>
+      </segment>
+    </unit>
+    <unit id="auth.reset.submit">
+      <segment state="translated">
+        <source>Reset Password</source>
+        <target>Réinitialiser le mot de passe</target>
+      </segment>
+    </unit>
+    <unit id="auth.reset.submitting">
+      <segment state="translated">
+        <source>Resetting…</source>
+        <target>Réinitialisation…</target>
+      </segment>
+    </unit>
+    <unit id="auth.reset.success">
+      <segment state="translated">
+        <source>Password reset!</source>
+        <target>Mot de passe réinitialisé!</target>
+      </segment>
+    </unit>
+    <unit id="auth.reset.title">
+      <segment state="translated">
+        <source>Set a new password</source>
+        <target>Définir un nouveau mot de passe</target>
       </segment>
     </unit>
     <unit id="banner.dismiss">
@@ -2039,12 +2165,6 @@
       <segment state="translated">
         <source>Leave blank for latest</source>
         <target>Laisser vide pour la dernière version</target>
-      </segment>
-    </unit>
-    <unit id="lookup.form.versionRequiredHint">
-      <segment state="translated">
-        <source>A version is required for this ecosystem.</source>
-        <target>Une version est requise pour cet écosystème.</target>
       </segment>
     </unit>
     <unit id="lookup.intro">
@@ -9421,6 +9541,18 @@ dotnet/</target>
         <target>PURL</target>
       </segment>
     </unit>
+    <unit id="versionDetail.detail.registryPage">
+      <segment state="translated">
+        <source>Published at</source>
+        <target>Publié sur</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.detail.registryPageLink">
+      <segment state="translated">
+        <source>View page</source>
+        <target>Voir la page</target>
+      </segment>
+    </unit>
     <unit id="versionDetail.detail.upstreamIntegrity.sha256">
       <segment state="translated">
         <source>Upstream SHA-256</source>
@@ -9443,18 +9575,6 @@ dotnet/</target>
       <segment state="translated">
         <source>Upstream SHA-1 (shasum)</source>
         <target>SHA-1 amont (shasum)</target>
-      </segment>
-    </unit>
-    <unit id="versionDetail.detail.upstreamSource">
-      <segment state="translated">
-        <source>Fetched from</source>
-        <target>Récupéré depuis</target>
-      </segment>
-    </unit>
-    <unit id="versionDetail.detail.upstreamSourceLink">
-      <segment state="translated">
-        <source>Source</source>
-        <target>Source</target>
       </segment>
     </unit>
     <unit id="versionDetail.detail.vulns">
@@ -9521,6 +9641,18 @@ dotnet/</target>
       <segment state="translated">
         <source>No upstream version to compare</source>
         <target>Aucune version en amont à comparer</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.meta.homepage">
+      <segment state="translated">
+        <source>Homepage</source>
+        <target>Site web</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.meta.repository">
+      <segment state="translated">
+        <source>Repository</source>
+        <target>Dépôt</target>
       </segment>
     </unit>
     <unit id="versionDetail.multiFileHint">

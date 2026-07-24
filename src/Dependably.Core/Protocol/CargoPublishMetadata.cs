@@ -23,6 +23,12 @@ public sealed class CargoPublishMetadata
     // than carrying an SPDX expression itself, so it has no license signal to extract.
     [JsonPropertyName("license")] public string? License { get; init; }
 
+    // Presentation metadata surfaced in the UI. Present in the Cargo publish envelope; the same
+    // fields are read from the crate's Cargo.toml on the proxy first-fetch path.
+    [JsonPropertyName("homepage")] public string? Homepage { get; init; }
+    [JsonPropertyName("repository")] public string? Repository { get; init; }
+    [JsonPropertyName("description")] public string? Description { get; init; }
+
     /// <summary>
     /// Builds the canonical sparse-index JSON line for this crate version from the publish
     /// metadata plus the computed crate <paramref name="cksum"/> (SHA-256 hex) and the

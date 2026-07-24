@@ -806,7 +806,10 @@ public sealed partial class SystemController : ControllerBase
     /// </summary>
     [HttpPost("users/{email}/password-reset")]
     public async Task<IActionResult> IssuePasswordReset(
-        string email, [FromBody] PasswordResetRequest req, CancellationToken ct)
+        string email, [FromBody] PasswordResetRequest req,
+        [FromServices] UserService users,
+        [FromServices] Dependably.Infrastructure.Mail.TransactionalEmailService mailer,
+        CancellationToken ct)
     {
         if (req is null || string.IsNullOrWhiteSpace(req.TenantSlug))
         {
@@ -817,6 +820,21 @@ public sealed partial class SystemController : ControllerBase
         if (result is null)
         {
             return NotFound();
+        }
+
+        // The reset target is a TENANT user (an operator resetting a tenant member's password),
+        // not the system_admin caller — resolve its own effective language (per-user override →
+        // org default → "en") and notify that user's own address, never the operator's.
+        var targetOrg = await _orgs.GetBySlugAsync(req.TenantSlug, ct: ct);
+        if (targetOrg is not null)
+        {
+            string? targetUserId = await users.FindIdByEmailAsync(targetOrg.Id, email, ct);
+            if (targetUserId is not null)
+            {
+                var targetCtx = await users.GetUserContextAsync(targetUserId, targetOrg.Id, ct);
+                string targetLanguage = LanguageCodes.ResolveEffective(targetCtx?.Language, targetCtx?.TenantDefaultLanguage);
+                mailer.EnqueuePasswordChanged(email, targetLanguage, _time.GetUtcNow());
+            }
         }
 
         string? actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
@@ -847,6 +865,7 @@ public sealed partial class SystemController : ControllerBase
         [FromServices] TrustedDeviceService trustedDevices,
         [FromServices] LoginService login,
         [FromServices] IPublicUrlBuilder urls,
+        [FromServices] Dependably.Infrastructure.Mail.TransactionalEmailService mailer,
         CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(req.CurrentPassword))
@@ -886,6 +905,13 @@ public sealed partial class SystemController : ControllerBase
 
         // Revoke all trusted-device records so remembered devices no longer bypass TOTP.
         await trustedDevices.DeleteAllForUserAsync(sub, "system", ct);
+
+        var admin = await _systemAdmins.GetByIdAsync(sub, ct);
+        if (!string.IsNullOrEmpty(admin?.Email))
+        {
+            string language = LanguageCodes.ResolveEffective(admin.Language);
+            mailer.EnqueuePasswordChanged(admin.Email, language, _time.GetUtcNow());
+        }
 
         await _audit.LogSystemAsync(
             action: "system_admin.password_changed",

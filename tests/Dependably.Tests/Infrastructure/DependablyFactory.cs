@@ -137,6 +137,16 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
     public IReadOnlyDictionary<string, string?> LegacySmtpVars { get; init; } =
         new Dictionary<string, string?>();
 
+    /// <summary>
+    /// Opt-in replacement for the production <see cref="Dependably.Infrastructure.Mail.SmtpMailSender"/>
+    /// singleton — set to a <see cref="CapturingMailSender"/> so a test can assert exactly which
+    /// address/subject/body a fire site enqueued, through the real DI-wired
+    /// <c>TransactionalEmailService</c>/<c>EmailDeliveryQueue</c> rather than a hand-built job.
+    /// Null (default) leaves the real sender in place (it never runs unless instance SMTP is
+    /// configured, which most tests leave unset).
+    /// </summary>
+    public Dependably.Infrastructure.Mail.SmtpMailSender? MailSenderOverride { get; init; }
+
     protected override IHost CreateHost(IHostBuilder _)
     {
         var builder = WebApplication.CreateBuilder();
@@ -218,6 +228,12 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         builder.Services.RemoveAll<IMetadataStore>();
         builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
 
+        if (MailSenderOverride is not null)
+        {
+            builder.Services.RemoveAll<Dependably.Infrastructure.Mail.SmtpMailSender>();
+            builder.Services.AddSingleton(MailSenderOverride);
+        }
+
         // Tests point Upstream URLs at the WireMock server on localhost; the production
         // SSRF validator (UpstreamUrlValidator) blocks 127.0.0.0/8. Substitute a permissive
         // validator so MockUpstream is reachable. Production wiring is unaffected.
@@ -238,10 +254,25 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
 
         builder.WebHost.UseTestServer();
 
+        // Every factory instantiation boots the host, and RunOnStartup=true fires an immediate
+        // pass on four hosted services: VulnerabilityScanService (job names vuln-scan,
+        // vuln-rescan), ThreatFeedRefreshService (threat-feed), and DeprecationRefreshService
+        // (deprecation-refresh) each make a real outbound HTTP request (OSV.dev, CISA KEV,
+        // FIRST.org EPSS, npm/PyPI/NuGet deprecation feeds) against the public internet rather
+        // than the in-process WireMock upstream; LicenseBackfillService (license-backfill) makes
+        // no outbound call but mutates the shared cache_artifact.license_checked_at column under
+        // a leader lock on every boot, its own source of cross-test non-determinism. Naming all
+        // five job names here keeps the proxy-passthrough path (MockUpstream below) intact — this
+        // disables only these five, not every background job.
+        builder.WebHost.UseSetting(
+            "DISABLE_BACKGROUND_JOBS",
+            "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill");
+
         builder.WebHost.UseSetting("PyPI:Upstream", MockUpstream.Urls[0]);
         builder.WebHost.UseSetting("Npm:Upstream", MockUpstream.Urls[0]);
         builder.WebHost.UseSetting("NuGet:Upstream", MockUpstream.Urls[0]);
         builder.WebHost.UseSetting("Go:Upstream", MockUpstream.Urls[0]);
+        builder.WebHost.UseSetting("Cargo:Upstream", MockUpstream.Urls[0]);
         // Go checksum-database passthrough: point the single supported sumdb at the WireMock
         // host so /go/sumdb/{host}/... proxies to the mock. The requested sumdb name in tests is
         // the WireMock host (matched case-insensitively against this value's host).

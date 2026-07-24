@@ -314,6 +314,12 @@ public class Package
     /// overwrite even when the org policy is 'allow'. Ignored when the org policy is 'block'.
     /// </summary>
     public string? SameVersionPushOverride { get; set; }
+    // Package-level metadata surfaced in the UI, captured from the artifact manifest at hosted
+    // publish and proxy first-fetch. Null when the ecosystem's manifest omits the field or the
+    // package was last ingested before capture existed (no historical backfill).
+    public string? Homepage { get; set; }
+    public string? RepositoryUrl { get; set; }
+    public string? Description { get; set; }
 }
 
 public class PackageVersion

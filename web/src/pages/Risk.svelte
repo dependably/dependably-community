@@ -108,7 +108,7 @@
     (activeTab === 'operational' ? operationalColumns : licenseColumns).map(c => [c.key, NOOP_CMP]))
 </script>
 
-<div class="page page-fluid">
+<div class="page page-wide">
   <header class="page-header">
     <h1>{$t('risk.title')}</h1>
   </header>
@@ -125,21 +125,6 @@
   <p class="intro">{$t(`risk.intro.${activeTab}`)}</p>
 
   <div class="toolbar">
-    <select bind:value={filterEco} on:change={onFilterChange} aria-label={$t('risk.filters.ecosystem')}>
-      <option value="">{$t('risk.filters.allEcosystems')}</option>
-      {#each ECOSYSTEMS as e (e)}
-        <option value={e}>{ECO_LABEL[e] ?? e}</option>
-      {/each}
-    </select>
-
-    {#if activeTab === 'license'}
-      <select bind:value={reason} on:change={onFilterChange} aria-label={$t('risk.columns.reason')}>
-        <option value="">{$t('risk.reasonFilter.all')}</option>
-        <option value="blocklisted">{$t('risk.reason.blocklisted')}</option>
-        <option value="unknown">{$t('risk.reason.unknown')}</option>
-      </select>
-    {/if}
-
     {#if !loading}
       <span class="summary">
         {#if activeTab === 'operational'}
@@ -149,6 +134,23 @@
         {/if}
       </span>
     {/if}
+
+    <div class="filters">
+      <select bind:value={filterEco} on:change={onFilterChange} aria-label={$t('risk.filters.ecosystem')}>
+        <option value="">{$t('risk.filters.allEcosystems')}</option>
+        {#each ECOSYSTEMS as e (e)}
+          <option value={e}>{ECO_LABEL[e] ?? e}</option>
+        {/each}
+      </select>
+
+      {#if activeTab === 'license'}
+        <select bind:value={reason} on:change={onFilterChange} aria-label={$t('risk.columns.reason')}>
+          <option value="">{$t('risk.reasonFilter.all')}</option>
+          <option value="blocklisted">{$t('risk.reason.blocklisted')}</option>
+          <option value="unknown">{$t('risk.reason.unknown')}</option>
+        </select>
+      {/if}
+    </div>
   </div>
 
   <ErrorBanner message={error} />
@@ -238,8 +240,9 @@
   .tab:hover { color: var(--text); background: none; }
   .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 
-  .toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
-  .summary { margin-left: auto; font-size: 12px; color: var(--text2); }
+  .toolbar { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin-bottom: 12px; }
+  .filters { display: flex; align-items: center; gap: 8px; }
+  .summary { font-size: 12px; color: var(--text2); }
 
   td { vertical-align: middle; }
   .right { text-align: right; }

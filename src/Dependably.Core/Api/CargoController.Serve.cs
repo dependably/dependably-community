@@ -479,6 +479,18 @@ public sealed partial class CargoController
             {
                 await _licenses.SetLicensesForCacheArtifactAsync(cacheArtifactId, extracted.Spdx, "upstream", ct);
             }
+
+            // Presentation metadata lives on the per-tenant packages row (ensured by
+            // RecordProxiedVersionAsync earlier on this fetch), not the global cache plane.
+            if (extracted.Homepage is not null || extracted.Repository is not null || extracted.Description is not null)
+            {
+                var pkg = await _packages.GetByPurlNameAsync(orgId, "cargo", name, ct);
+                if (pkg is not null)
+                {
+                    await _packages.UpdateMetadataAsync(
+                        pkg.Id, extracted.Homepage, extracted.Repository, extracted.Description, ct);
+                }
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -604,10 +616,13 @@ public sealed partial class CargoController
     /// Constructs the upstream crate download URL. For the crates.io sparse index
     /// (<c>index.crates.io</c>), the download base is <c>static.crates.io/crates</c>.
     /// For other sparse registries, <c>/api/v1/crates</c> is appended to the upstream base.
+    /// The crates.io test compares the parsed <see cref="Uri.Host"/>, never a substring of the
+    /// URL — a host-shaped substring can appear anywhere in an arbitrary URL, so
+    /// <c>https://attacker.example/?x=index.crates.io</c> must not be rewritten.
     /// </summary>
     internal static string BuildCrateDownloadUrl(string upstreamBase, string name, string version)
     {
-        string downloadBase = upstreamBase.Contains("index.crates.io", StringComparison.OrdinalIgnoreCase)
+        string downloadBase = CargoLookupMetadata.IsCratesIoIndexHost(upstreamBase)
             ? "https://static.crates.io/crates"
             : $"{upstreamBase}/api/v1/crates";
         return $"{downloadBase}/{name}/{version}/download";

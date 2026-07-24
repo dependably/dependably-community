@@ -113,8 +113,64 @@ public sealed class UserService
             await _trustedDevices.DeleteAllForUserAsync(userId, "tenant", ct);
         }
 
+        // Any outstanding self-serve reset link is voided by any credential change — a password
+        // change through one channel must never leave a still-valid reset link outstanding on
+        // another.
+        // xtenant: keyed by users PK; userId is the authenticated session's own subject claim.
+        await conn.ExecuteAsync(
+            "DELETE FROM password_reset_tokens WHERE user_id = @id", new { id = userId });
+
         _tokenVersions?.Invalidate(userId);
         return new PasswordChangeResult(PasswordChangeOutcome.Success, newVersion, revokedApiTokens);
+    }
+
+    /// <summary>
+    /// Completes a self-serve "forgot password" reset: sets the new credential and cuts off
+    /// every session/token minted under the old one, exactly like <see cref="ChangePasswordAsync"/>
+    /// but without a current-password check — the caller (<c>AuthController</c>) has already
+    /// authenticated the request via the one-shot reset token instead. Also voids any other
+    /// outstanding reset link for the user (defense against a stale second link being replayed
+    /// after the account's credential has already moved on) and clears
+    /// <c>must_change_password</c> so the freshly reset account is not immediately forced to
+    /// rotate again. Returns the bumped <c>token_version</c>.
+    /// </summary>
+    public async Task<long> ResetPasswordByRecoveryAsync(
+        string userId, string newPassword, CancellationToken ct = default)
+    {
+        string newHash = BCrypt.Net.BCrypt.HashPassword(newPassword, workFactor: 12);
+        // Rotating the Identity security_stamp alongside token_version keeps the Identity model
+        // consistent with the credential change; token_version remains the canonical per-request
+        // session-invalidation signal.
+        string stamp = Guid.NewGuid().ToString();
+
+        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: keyed by the users PK the reset token was minted for.
+        await conn.ExecuteAsync(
+            "UPDATE users SET password_hash = @hash, must_change_password = 0, token_version = token_version + 1, security_stamp = @stamp WHERE id = @id",
+            new { hash = newHash, stamp, id = userId });
+        // xtenant: reads back the same users PK just written.
+        long newVersion = await conn.ExecuteScalarAsync<long>(
+            "SELECT token_version FROM users WHERE id = @id", new { id = userId });
+
+        // Revoke (delete) the user's API tokens — a rotated credential must cut off everything
+        // minted under the old one. user_id is FK-bound to users.id, which is already tenant-scoped.
+        // xtenant: user_tokens.user_id is FK-bound to the reset token's users row.
+        await conn.ExecuteAsync(
+            "DELETE FROM user_tokens WHERE user_id = @id", new { id = userId });
+
+        if (_trustedDevices is not null)
+        {
+            await _trustedDevices.DeleteAllForUserAsync(userId, "tenant", ct);
+        }
+
+        // Void every outstanding reset link for the user (including the one just consumed by the
+        // caller, and any stale link requested earlier) — replay defense.
+        // xtenant: keyed by the users PK the reset token was minted for.
+        await conn.ExecuteAsync(
+            "DELETE FROM password_reset_tokens WHERE user_id = @id", new { id = userId });
+
+        _tokenVersions?.Invalidate(userId);
+        return newVersion;
     }
 
     /// <summary>
@@ -155,6 +211,20 @@ public sealed class UserService
         // xtenant: keyed by users PK from the request principal's subject claim.
         return await conn.ExecuteScalarAsync<string?>(
             "SELECT email FROM users WHERE id = @id", new { id = userId });
+    }
+
+    /// <summary>
+    /// Resolves a tenant user's id by (tenantId, email), case-insensitively — the lookup
+    /// <c>AuthController.ForgotPassword</c> uses to decide whether to issue a reset token,
+    /// without ever surfacing the distinction to the caller (a miss and a hit both continue
+    /// through the same 202 response). Missing row → null.
+    /// </summary>
+    public async Task<string?> FindIdByEmailAsync(string tenantId, string email, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        return await conn.ExecuteScalarAsync<string?>(
+            "SELECT id FROM users WHERE tenant_id = @tenantId AND lower(email) = lower(@email)",
+            new { tenantId, email });
     }
 
     /// <summary>

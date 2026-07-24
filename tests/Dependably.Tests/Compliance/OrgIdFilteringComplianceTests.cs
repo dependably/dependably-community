@@ -59,6 +59,7 @@ public sealed partial class OrgIdFilteringComplianceTests
         "user_tokens",
         "service_tokens",
         "invites",
+        "password_reset_tokens",
         "external_identities",
         "claim",
         "claim_history",

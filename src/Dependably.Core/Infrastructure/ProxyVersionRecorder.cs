@@ -110,7 +110,7 @@ public sealed class ProxyVersionRecorder
         // listings, simple index, and UI. The per-VERSION catalogue moves to the global plane
         // (cache_artifact), but the package identity stays per-tenant: packages has no
         // cross-tenant collision (its UNIQUE is per org), so each tenant keeps its own row.
-        await _packages.GetOrCreateAsync(
+        var pkg = await _packages.GetOrCreateAsync(
             req.OrgId, req.Ecosystem, req.PackageName, req.PurlName, isProxy: true, ct);
 
         // Emit the first_fetch activity row — audit still fires for proxy artifacts so the
@@ -137,6 +137,13 @@ public sealed class ProxyVersionRecorder
             {
                 await _licenses.SetLicensesForCacheArtifactAsync(cacheArtifactId, extracted.Spdx, "upstream", ct);
             }
+
+            // Presentation metadata (homepage/repository/description) lives on the per-tenant
+            // packages row — the one row that exists on both hosted and proxy paths — rather than
+            // the global cache_artifact plane. COALESCE in UpdateMetadataAsync means a manifest
+            // that omits a field never clears a previously-captured value.
+            await _packages.UpdateMetadataAsync(
+                pkg.Id, extracted.Homepage, extracted.Repository, extracted.Description, ct);
         }
 
         // Install/lifecycle-script detection on the freshly-cached artifact. Best-effort:

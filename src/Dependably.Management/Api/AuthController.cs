@@ -481,11 +481,126 @@ public sealed class AuthController : ControllerBase
         return Ok(new { message = "Account created.", enrollmentRequired });
     }
 
+    /// <summary>
+    /// POST /api/v1/auth/forgot-password — self-serve "forgot password" request. Always returns
+    /// 202, whether or not the email resolves to an account in the request's tenant: the response
+    /// shape carries no signal an attacker could use to enumerate registered emails, and the raw
+    /// reset token is never included in the response body (it reaches the user only via the
+    /// emailed link). Resolves the tenant from the same <see cref="TenantContext"/> fork
+    /// <see cref="Login"/> uses; a system-admin apex host or an uninitialized installation has no
+    /// tenant-user store to check against, so both fall through to <see cref="NotFound"/> exactly
+    /// like the corresponding branch of <see cref="Login"/>. Every request that reaches a resolved
+    /// tenant is audited under <c>user.password_reset_requested</c> — matched and unmatched emails
+    /// alike, distinguished by the boolean <c>detail.matched</c> — since an unmatched request is
+    /// itself a security-recon signal worth a per-tenant record even though no email is sent.
+    /// </summary>
+    [HttpPost("forgot-password")]
+    [AllowAnonymous]
+    [EnableRateLimiting("invite")]
+    public async Task<IActionResult> ForgotPassword(
+        [FromBody] ForgotPasswordRequest req,
+        [FromServices] PasswordResetTokenRepository resetTokens,
+        [FromServices] Dependably.Infrastructure.Mail.TransactionalEmailService mailer,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(req.Email))
+        {
+            return BadRequest(new { detail = "Email is required." });
+        }
+
+        if (HttpContext.Items[TenantContext.HttpItemsKey] is not TenantContext ctx
+            || !ctx.IsTenant || ctx.TenantId is null)
+        {
+            return NotFound();
+        }
+
+        string? userId = await _users.FindIdByEmailAsync(ctx.TenantId, req.Email, ct);
+        if (userId is not null)
+        {
+            string raw = await resetTokens.IssueAsync(userId, ctx.TenantId, ct);
+            string resetLink = _urls.Absolute(HttpContext, $"/reset?token={raw}");
+            // 30 minutes — kept in lockstep with PasswordResetTokenRepository's own expiry window.
+            var expiresAt = _time.GetUtcNow().AddMinutes(30);
+            mailer.EnqueuePasswordReset(req.Email, resetLink, expiresAt);
+        }
+
+        // Single audit pseudonym, computed once, reused for both outcomes so the row stays
+        // realm-joinable with login-failure rows without ever persisting the raw email.
+        string emailHash = LoginService.HashEmail(req.Email);
+        await _audit.LogAsync(action: "user.password_reset_requested", orgId: ctx.TenantId, actorId: userId,
+            detail: System.Text.Json.JsonSerializer.Serialize(new
+            {
+                via = "self_serve_reset_link",
+                matched = userId is not null,
+                email_hash = emailHash,
+                realm = "tenant",
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+
+        // Identical response whether or not the email resolved to an account, and regardless of
+        // whether instance SMTP is even configured — an unconfigured instance silently drops the
+        // enqueued job (TransactionalEmailService/PasswordResetEmailJob), never surfacing here.
+        return Accepted();
+    }
+
+    /// <summary>
+    /// POST /api/v1/auth/reset-password — completes a self-serve reset. The token is the sole
+    /// bearer credential (no session, no tenant header) — same shape as
+    /// <see cref="AcceptInvite"/>. No auto-login: the user is sent to /login so MFA (if enrolled)
+    /// is still enforced on the freshly reset account.
+    /// </summary>
+    [HttpPost("reset-password")]
+    [AllowAnonymous]
+    [EnableRateLimiting("login")]
+    public async Task<IActionResult> ResetPassword(
+        [FromBody] ResetPasswordRequest req,
+        [FromServices] PasswordResetTokenRepository resetTokens,
+        [FromServices] ILockoutStore lockoutStore,
+        [FromServices] Dependably.Infrastructure.Mail.TransactionalEmailService mailer,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(req.Token))
+        {
+            return BadRequest(new { detail = "Reset token is required." });
+        }
+
+        // Peek (without consuming) so a failed policy check never burns the link's single use.
+        var pending = await resetTokens.PeekAsync(req.Token, ct);
+        var pendingOrg = pending is not null ? await _orgs.GetByIdAsync(pending.OrgId, ct) : null;
+        var verdict = PasswordPolicy.Evaluate(req.NewPassword, new PasswordContext(pending?.Email, pendingOrg?.Slug));
+        if (!verdict.IsOk)
+        {
+            return BadRequest(new { detail = verdict.ToReason(), field = "newPassword" });
+        }
+
+        var consumed = await resetTokens.ConsumeAsync(req.Token, ct);
+        if (consumed is null)
+        {
+            return StatusCode(StatusCodes.Status410Gone,
+                new { detail = "Reset link is invalid, expired, or already used." });
+        }
+
+        await _users.ResetPasswordByRecoveryAsync(consumed.UserId, req.NewPassword, ct);
+        await lockoutStore.ClearAsync(LoginService.HashLockoutKey("tenant", consumed.OrgId, consumed.Email), ct);
+
+        var resetUserCtx = await _users.GetUserContextAsync(consumed.UserId, consumed.OrgId, ct);
+        string resetLanguage = LanguageCodes.ResolveEffective(resetUserCtx?.Language, resetUserCtx?.TenantDefaultLanguage);
+        mailer.EnqueuePasswordChanged(consumed.Email, resetLanguage, _time.GetUtcNow());
+
+        await _audit.LogAsync(action: "user.password_reset", orgId: consumed.OrgId, actorId: consumed.UserId,
+            detail: System.Text.Json.JsonSerializer.Serialize(new { via = "self_serve_reset_link" },
+                Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+
+        return Ok(new { message = "Password reset." });
+    }
+
     /// <summary>POST /api/v1/users/me/password — change password for the authenticated user</summary>
     [HttpPost("/api/v1/users/me/password")]
     [Authorize]
     [EnableRateLimiting("login")]
     public async Task<IActionResult> ChangePassword([FromBody] ChangePasswordRequest req,
+        [FromServices] Dependably.Infrastructure.Mail.TransactionalEmailService mailer,
         CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(req.CurrentPassword))
@@ -536,6 +651,13 @@ public sealed class AuthController : ControllerBase
         {
             string fresh = await _login.IssueTenantSessionAsync(sub, tenantId, role, newVersion, ct);
             Response.Cookies.Append("dependably_session", fresh, _urls.SessionCookieOptions(HttpContext));
+        }
+
+        if (!string.IsNullOrEmpty(emailForPolicy))
+        {
+            var changeUserCtx = await _users.GetUserContextAsync(sub, tenantId, ct);
+            string changeLanguage = LanguageCodes.ResolveEffective(changeUserCtx?.Language, changeUserCtx?.TenantDefaultLanguage);
+            mailer.EnqueuePasswordChanged(emailForPolicy, changeLanguage, _time.GetUtcNow());
         }
 
         await _audit.LogAsync(action: "user.password_changed", orgId: tenantId, actorId: sub,
@@ -702,3 +824,5 @@ public sealed record LoginTotpRequest(string Code, bool RememberDevice = false);
 public sealed record AcceptInviteRequest(string Token, string Password);
 public sealed record ChangePasswordRequest(string CurrentPassword, string NewPassword);
 public sealed record UpdateLanguageRequest(string Language);
+public sealed record ForgotPasswordRequest(string Email);
+public sealed record ResetPasswordRequest(string Token, string NewPassword);

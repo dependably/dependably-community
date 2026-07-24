@@ -4,11 +4,22 @@
 # RUN steps that need them — never as an ARG, which would persist in layer
 # metadata/history and builder cache. The non-secret REGISTRY_URL stays an ARG.
 
+# Base image refs are build ARGs so CI can rewrite them to the private registry's
+# pull-through mirror (path-flattened, e.g. mcr.microsoft.com/dotnet/sdk becomes
+# ${DEP_IMAGE_REGISTRY}/dotnet/sdk) via --build-arg, keeping base-layer pulls off
+# public registries. Declared before the first FROM (global scope) so the FROM
+# lines below can reference them; the defaults are the current public refs,
+# digest-pinned, so a plain `docker build` with no build-args (local compose, a
+# fork build with no mirror access, the GitHub Actions workflow) is unaffected.
+ARG NODE_IMAGE=node:26-alpine@sha256:e88a35be04478413b7c71c455cd9865de9b9360e1f43456be5951032d7ac1a66
+ARG SDK_IMAGE=mcr.microsoft.com/dotnet/sdk:10.0-alpine@sha256:5c559aa5d99337e400d39ab4fa1f6979d126c29b20939d53658ed38300571e74
+ARG RUNTIME_IMAGE=mcr.microsoft.com/dotnet/runtime-deps:10.0-alpine@sha256:f276c0256ffca8fe816d48ba261962b54fea1b0e6f870b6a60b3b705c89e78ac
+
 # Frontend build stage. Pinned to the build platform: the emitted wwwroot assets
 # and SBOM are architecture-independent, so this stage runs node/esbuild natively
 # on the builder instead of under QEMU emulation for the non-native target arch
 # (esbuild's native binary aborts with SIGILL under QEMU).
-FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:e88a35be04478413b7c71c455cd9865de9b9360e1f43456be5951032d7ac1a66 AS frontend
+FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS frontend
 WORKDIR /web
 COPY web/package*.json ./
 ARG REGISTRY_URL=
@@ -30,7 +41,7 @@ RUN npm run sbom:prod
 RUN npm run build
 
 # Backend build stage — restore, generate backend SBOM, publish
-FROM mcr.microsoft.com/dotnet/sdk:10.0-alpine@sha256:5c559aa5d99337e400d39ab4fa1f6979d126c29b20939d53658ed38300571e74 AS build
+FROM ${SDK_IMAGE} AS build
 WORKDIR /src
 
 COPY Dependably.sln .
@@ -97,7 +108,7 @@ RUN --mount=type=secret,id=registry_key \
 # Notices stage — combines both CycloneDX SBOMs into a curated attribution file.
 # Pinned to the build platform for the same reason as the frontend stage: it runs
 # node over architecture-independent JSON, so emulation buys nothing and risks SIGILL.
-FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:e88a35be04478413b7c71c455cd9865de9b9360e1f43456be5951032d7ac1a66 AS notices
+FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS notices
 WORKDIR /work
 COPY build/extract-notices.mjs ./
 COPY --from=frontend /web/sbom-frontend-prod.json ./
@@ -105,7 +116,7 @@ COPY --from=build /sboms/sbom-backend.json ./
 RUN node extract-notices.mjs sbom-backend.json sbom-frontend-prod.json > notices.json
 
 # Runtime stage — minimal native deps image
-FROM mcr.microsoft.com/dotnet/runtime-deps:10.0-alpine@sha256:f276c0256ffca8fe816d48ba261962b54fea1b0e6f870b6a60b3b705c89e78ac AS final
+FROM ${RUNTIME_IMAGE} AS final
 WORKDIR /app
 
 ARG REGISTRY_URL=

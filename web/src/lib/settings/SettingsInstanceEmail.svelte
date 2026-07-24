@@ -10,6 +10,7 @@
   import { onMount } from 'svelte'
   import { t } from 'svelte-i18n'
   import { extractErrorMessage, submitForm } from '../form.js'
+  import { secretPlaceholder } from '../secretField.js'
   import ErrorBanner from '../ErrorBanner.svelte'
   import InfoTip from '../InfoTip.svelte'
   import Toggle from '../Toggle.svelte'
@@ -143,6 +144,7 @@
         id="instance-email-password"
         type="password"
         bind:value={password}
+        placeholder={secretPlaceholder(config.hasPassword)}
         autocomplete="new-password"
         disabled={!enabled || !config.secretsAvailable}
       />

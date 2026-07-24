@@ -92,6 +92,12 @@ public sealed class SystemAdminRepository
         await conn.ExecuteAsync(
             "DELETE FROM user_tokens WHERE user_id = @id", new { id = userId });
 
+        // An operator-issued reset is itself a credential change, so any outstanding self-serve
+        // reset link the user requested must be voided too — replay defense.
+        // xtenant: user_id is FK-bound to the resolved users row.
+        await conn.ExecuteAsync(
+            "DELETE FROM password_reset_tokens WHERE user_id = @id", new { id = userId });
+
         // Evict the cached token_version so the stale session dies immediately on this node, and
         // drop trusted-device records so remembered devices no longer bypass TOTP.
         _tokenVersions?.Invalidate(userId);

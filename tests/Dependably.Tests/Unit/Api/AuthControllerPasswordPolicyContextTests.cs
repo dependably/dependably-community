@@ -123,7 +123,7 @@ public sealed class AuthControllerPasswordPolicyContextTests : IAsyncLifetime
         const string weakInContextOnly = "Quinlan.Vega2027!TidalWave99";
 
         var result = await controller.ChangePassword(
-            new ChangePasswordRequest("Password12345", weakInContextOnly), CancellationToken.None);
+            new ChangePasswordRequest("Password12345", weakInContextOnly), null!, CancellationToken.None);
 
         var bad = Assert.IsType<BadRequestObjectResult>(result);
         string json = System.Text.Json.JsonSerializer.Serialize(bad.Value);

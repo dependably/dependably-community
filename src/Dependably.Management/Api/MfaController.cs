@@ -84,7 +84,11 @@ public sealed class MfaController : OrgScopedControllerBase
     /// enables MFA, generates 10 recovery codes, and records the enrollment audit event.
     /// </summary>
     [HttpPost("setup/verify")]
-    public async Task<IActionResult> SetupVerify([FromBody] MfaVerifyRequest req, CancellationToken ct)
+    public async Task<IActionResult> SetupVerify(
+        [FromBody] MfaVerifyRequest req,
+        [FromServices] Dependably.Infrastructure.Mail.TransactionalEmailService mailer,
+        [FromServices] TimeProvider time,
+        CancellationToken ct)
     {
         string? userId = GetUserId();
         if (userId is null)
@@ -122,6 +126,9 @@ public sealed class MfaController : OrgScopedControllerBase
             sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
 
+        await NotifySecurityEventAsync(userId, mailer, time, ct,
+            (m, addr, lang, now) => m.EnqueueMfaEnabled(addr, lang, now));
+
         return Ok(new { recoveryCodes = codes });
     }
 
@@ -131,7 +138,11 @@ public sealed class MfaController : OrgScopedControllerBase
     /// and re-issues the caller's own session cookie.
     /// </summary>
     [HttpPost("disable")]
-    public async Task<IActionResult> Disable([FromBody] MfaDisableRequest req, CancellationToken ct)
+    public async Task<IActionResult> Disable(
+        [FromBody] MfaDisableRequest req,
+        [FromServices] Dependably.Infrastructure.Mail.TransactionalEmailService mailer,
+        [FromServices] TimeProvider time,
+        CancellationToken ct)
     {
         string? userId = GetUserId();
         if (userId is null)
@@ -188,6 +199,9 @@ public sealed class MfaController : OrgScopedControllerBase
             detail: new MfaEvents.Disabled(method).ToJson(),
             sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
+
+        await NotifySecurityEventAsync(userId, mailer, time, ct,
+            (m, addr, lang, now) => m.EnqueueMfaDisabled(addr, lang, now));
 
         // Re-issue the caller's own session at the new token_version so this request stays authenticated.
         if (!string.IsNullOrEmpty(orgId))
@@ -276,6 +290,29 @@ public sealed class MfaController : OrgScopedControllerBase
         bool enabled = await _mfa.GetEnabledAsync(userId, ct);
         int remaining = await _mfa.CountRecoveryCodesAsync(userId, ct);
         return Ok(new { enabled, recoveryCodesRemaining = remaining });
+    }
+
+    // Resolves the user's own email and effective language (per-user override → org default →
+    // "en"), then enqueues the security-event email via the supplied delegate. Non-blocking and
+    // best-effort: a missing email (should not happen for an authenticated user) is a silent
+    // no-op rather than a thrown exception, so an enrollment/disable response is never gated on
+    // notification delivery.
+    private async Task NotifySecurityEventAsync(
+        string userId,
+        Dependably.Infrastructure.Mail.TransactionalEmailService mailer,
+        TimeProvider time,
+        CancellationToken ct,
+        Action<Dependably.Infrastructure.Mail.TransactionalEmailService, string, string, DateTimeOffset> enqueue)
+    {
+        string? email = await _mfa.GetEmailAsync(userId, ct);
+        if (string.IsNullOrEmpty(email))
+        {
+            return;
+        }
+
+        var userCtx = await _userService.GetUserContextAsync(userId, GetCurrentTenantIdOrNull(), ct);
+        string language = LanguageCodes.ResolveEffective(userCtx?.Language, userCtx?.TenantDefaultLanguage);
+        enqueue(mailer, email, language, time.GetUtcNow());
     }
 
     // Returns true when the current tenant context owns the user, guarding against BOLA.

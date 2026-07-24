@@ -175,6 +175,12 @@ public sealed class ForwardedHeadersFailClosedTests : IAsyncLifetime
             builder.Services.AddSingleton<IStartupFilter>(new FixedRemoteIpFilter(IPAddress.Parse(SocketPeerIp)));
 
             builder.WebHost.UseTestServer();
+            // Boots a real host via Program.ConfigureBuilder; disable the background jobs
+            // that egress or mutate shared state at boot (see Infrastructure/DependablyFactory.cs
+            // for the full rationale).
+            builder.WebHost.UseSetting(
+                "DISABLE_BACKGROUND_JOBS",
+                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill");
             builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
             builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
             builder.WebHost.UseSetting("LOGIN_RATE_LIMIT_PERMITS", "100000");

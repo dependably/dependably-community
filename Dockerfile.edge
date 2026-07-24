@@ -13,9 +13,20 @@
 # metadata/history and builder cache. The non-secret REGISTRY_URL stays an ARG.
 #
 # There is no frontend stage: the edge serves no wwwroot/SPA or swagger assets.
+#
+# Base image refs are build ARGs so CI can rewrite them to the private registry's
+# pull-through mirror (path-flattened, e.g. mcr.microsoft.com/dotnet/sdk becomes
+# ${DEP_IMAGE_REGISTRY}/dotnet/sdk) via --build-arg, keeping base-layer pulls off
+# public registries. Declared before the first FROM (global scope) so the FROM
+# lines below can reference them; the defaults are the current public refs,
+# digest-pinned, so a plain `docker build` with no build-args (local compose, a
+# fork build with no mirror access, the GitHub Actions workflow) is unaffected.
+ARG NODE_IMAGE=node:26-alpine@sha256:e88a35be04478413b7c71c455cd9865de9b9360e1f43456be5951032d7ac1a66
+ARG SDK_IMAGE=mcr.microsoft.com/dotnet/sdk:10.0-alpine@sha256:5c559aa5d99337e400d39ab4fa1f6979d126c29b20939d53658ed38300571e74
+ARG RUNTIME_IMAGE=mcr.microsoft.com/dotnet/runtime-deps:10.0-alpine@sha256:f276c0256ffca8fe816d48ba261962b54fea1b0e6f870b6a60b3b705c89e78ac
 
 # Backend build stage — restore, generate the edge SBOM, publish
-FROM mcr.microsoft.com/dotnet/sdk:10.0-alpine@sha256:5c559aa5d99337e400d39ab4fa1f6979d126c29b20939d53658ed38300571e74 AS build
+FROM ${SDK_IMAGE} AS build
 WORKDIR /src
 
 COPY Dependably.sln .
@@ -80,14 +91,14 @@ RUN --mount=type=secret,id=registry_key \
 # backend SBOM (the script accepts one-or-more inputs). Pinned to the build
 # platform: it runs node over architecture-independent JSON, so emulation buys
 # nothing and risks SIGILL.
-FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:e88a35be04478413b7c71c455cd9865de9b9360e1f43456be5951032d7ac1a66 AS notices
+FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS notices
 WORKDIR /work
 COPY build/extract-notices.mjs ./
 COPY --from=build /sboms/sbom-edge.json ./
 RUN node extract-notices.mjs sbom-edge.json > notices.json
 
 # Runtime stage — minimal native deps image
-FROM mcr.microsoft.com/dotnet/runtime-deps:10.0-alpine@sha256:f276c0256ffca8fe816d48ba261962b54fea1b0e6f870b6a60b3b705c89e78ac AS final
+FROM ${RUNTIME_IMAGE} AS final
 WORKDIR /app
 
 ARG REGISTRY_URL=

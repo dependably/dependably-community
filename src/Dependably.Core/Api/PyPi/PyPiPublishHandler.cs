@@ -347,6 +347,9 @@ public sealed class PyPiPublishHandler(
             ClaimState = claim.State,
             SourceIp = tenant.SourceIp,
             Licenses = extracted.Spdx.Count > 0 ? extracted.Spdx : null,
+            Homepage = extracted.Homepage,
+            Repository = extracted.Repository,
+            Description = extracted.Description,
         }, ct);
 
         if (result is PublishResult.Rejected rej)

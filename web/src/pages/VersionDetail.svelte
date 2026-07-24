@@ -184,6 +184,25 @@
             </span>
           {/if}
         </h1>
+        {#if pkg.description}
+          <p class="pkg-description">{pkg.description}</p>
+        {/if}
+        {#if pkg.homepage || pkg.repositoryUrl}
+          <div class="pkg-links">
+            {#if pkg.homepage}
+              <a class="pkg-link" href={pkg.homepage} target="_blank" rel="noopener noreferrer">
+                <svg width="12" height="12" aria-hidden="true"><use href="/icons.svg#icon-external"/></svg>
+                {$t('versionDetail.meta.homepage')}
+              </a>
+            {/if}
+            {#if pkg.repositoryUrl}
+              <a class="pkg-link" href={pkg.repositoryUrl} target="_blank" rel="noopener noreferrer">
+                <svg width="12" height="12" aria-hidden="true"><use href="/icons.svg#icon-external"/></svg>
+                {$t('versionDetail.meta.repository')}
+              </a>
+            {/if}
+          </div>
+        {/if}
       {/if}
     </div>
   </div>
@@ -272,4 +291,11 @@
   .pillar-value { font-size: 13px; font-weight: 600; }
   .pillar-clean { color: var(--success); }
   .pillar-warn { color: var(--badge-warning-text); }
+
+  /* Package-level metadata (homepage / repository / description) under the title. */
+  .pkg-description { margin: 6px 0 8px; color: var(--text2); max-width: 70ch; }
+  .pkg-links { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 10px; }
+  .pkg-link { display: inline-flex; align-items: center; gap: 4px; color: var(--accent); text-decoration: none; font-size: 13px; }
+  .pkg-link:hover { text-decoration: underline; }
+  .pkg-link svg { flex-shrink: 0; }
 </style>

@@ -1,5 +1,7 @@
 using System.Net;
+using System.Net.Http.Json;
 using System.Text.Json;
+using Dependably.Api;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using WireMock.RequestBuilders;
@@ -43,6 +45,17 @@ public sealed class PackageLookupControllerTests : IClassFixture<DependablyFacto
         _factory.MockUpstream.Given(Request.Create().WithPath($"/{name}").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/json").WithBody(json));
+    }
+
+
+    private void StubCargoIndex(string name, params string[] versions)
+    {
+        string body = string.Join('\n', versions.Select(v =>
+            $$"""{"name":"{{name}}","vers":"{{v}}","cksum":"aa","yanked":false}"""));
+        _factory.MockUpstream.Given(
+            Request.Create().WithPath($"/{CargoController.IndexPath(name)}").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                .WithHeader("Content-Type", "text/plain").WithBody(body));
     }
 
     [Fact]
@@ -199,6 +212,48 @@ public sealed class PackageLookupControllerTests : IClassFixture<DependablyFacto
         var resp = await client.GetAsync($"/api/v1/lookup?ecosystem=npm&name={name}");
 
         Assert.Equal(HttpStatusCode.ServiceUnavailable, resp.StatusCode);
+    }
+
+    /// <summary>
+    /// The reported bug at the HTTP boundary: a cargo lookup with no version used to answer 422
+    /// "version is required for ecosystem 'cargo'". It now resolves the latest version from the
+    /// sparse index and says which one it picked.
+    /// </summary>
+    [Fact]
+    public async Task Lookup_Cargo_NoVersion_Returns200_NotVersionRequired422()
+    {
+        string name = $"lookupcrate{Guid.NewGuid():N}"[..20];
+        StubCargoIndex(name, "0.9.0", "1.2.0");
+        using var client = await MemberClient();
+
+        var resp = await client.GetAsync($"/api/v1/lookup?ecosystem=cargo&name={name}");
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(body.GetProperty("found").GetBoolean());
+        Assert.Equal("1.2.0", body.GetProperty("version").GetString());
+        Assert.True(body.GetProperty("versionInferred").GetBoolean());
+    }
+
+    /// <summary>
+    /// Go gained the same version-optional resolution as cargo, via the module proxy's @latest.
+    /// </summary>
+    [Fact]
+    public async Task Lookup_Golang_NoVersion_Returns200_NotVersionRequired422()
+    {
+        string module = $"example.com/{Guid.NewGuid():N}"[..28];
+        _factory.MockUpstream.Given(Request.Create().WithPath($"/{module}/@latest").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                .WithHeader("Content-Type", "application/json")
+                .WithBody("""{"Version":"v1.5.0","Time":"2024-04-05T06:07:08Z"}"""));
+        using var client = await MemberClient();
+
+        var resp = await client.GetAsync(
+            $"/api/v1/lookup?ecosystem=golang&name={Uri.EscapeDataString(module)}");
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("v1.5.0", body.GetProperty("version").GetString());
     }
 
     [Fact]

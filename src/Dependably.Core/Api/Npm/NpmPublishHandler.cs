@@ -226,11 +226,17 @@ public sealed class NpmPublishHandler(
         var fromTarball = ExtractNpmTarballLicense(attachStagingPath);
         var fromPackument = LicenseExtractor.FromNpmPackumentVersion(bodyVersion);
         var spdx = fromTarball.Spdx.Count > 0 ? fromTarball.Spdx : fromPackument.Spdx;
+        // Presentation metadata: the tarball's package.json is canonical; fall back to the
+        // packument version object per field when the tarball omits one.
+        string? homepage = fromTarball.Homepage ?? fromPackument.Homepage;
+        string? repository = fromTarball.Repository ?? fromPackument.Repository;
+        string? description = fromTarball.Description ?? fromPackument.Description;
 
         var request = BuildNpmPublishRequest(httpContext, new NpmPublishContext(
             orgId, fullName, versionKey!, filename, attachStagingPath, stagingSize,
             token.UserId, token.ActorKind, orgSettings?.AllowVersionOverwrite ?? false, claim.State,
-            manifestJson, declaredIntegrity, spdx.Count > 0 ? spdx : null));
+            manifestJson, declaredIntegrity, spdx.Count > 0 ? spdx : null,
+            homepage, repository, description));
         var result = await publish.StoreAndRecordAsync(request, ct);
 
         if (result is PublishResult.Rejected rej)
@@ -305,7 +311,8 @@ public sealed class NpmPublishHandler(
         string OrgId, string FullName, string VersionKey, string Filename,
         string StagingPath, long StagingSize,
         string? ActorUserId, string? ActorKind, bool AllowOverwrite, string ClaimState,
-        string? ManifestJson, string? DeclaredIntegritySri, IReadOnlyList<string>? Licenses);
+        string? ManifestJson, string? DeclaredIntegritySri, IReadOnlyList<string>? Licenses,
+        string? Homepage, string? Repository, string? Description);
 
     private static PublishRequest BuildNpmPublishRequest(HttpContext httpContext, NpmPublishContext ctx)
         => new()
@@ -331,6 +338,9 @@ public sealed class NpmPublishHandler(
             ManifestJson = ctx.ManifestJson,
             DeclaredIntegritySri = ctx.DeclaredIntegritySri,
             Licenses = ctx.Licenses,
+            Homepage = ctx.Homepage,
+            Repository = ctx.Repository,
+            Description = ctx.Description,
         };
 
     // stagingPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.

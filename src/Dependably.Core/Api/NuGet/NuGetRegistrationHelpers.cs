@@ -51,7 +51,7 @@ internal static class NuGetRegistrationHelpers
             return root.ToJsonString(RelaxedJsonOptions);
         }
 
-        var localPage = BuildLocalPage(localOnly, normalizedId, pkg.Name);
+        var localPage = BuildLocalPage(localOnly, normalizedId, pkg.Name, baseUrl);
         AppendPage(root, localPage);
         return root.ToJsonString(RelaxedJsonOptions);
     }
@@ -173,37 +173,51 @@ internal static class NuGetRegistrationHelpers
     internal static string? TryGetString(JsonNode? node) =>
         node is JsonValue jv && jv.TryGetValue<string>(out string? s) ? s : null;
 
-    // BaseUrl isn't available in a static context — leaves reference our own registration/
-    // flatcontainer at relative paths. NuGet clients combine these with the service-index
-    // base, so relative URLs resolve correctly.
-    internal static JsonObject BuildLocalLeaf(PackageVersion v, string normalizedId, string pkgName) => new()
+    // Local leaves are spliced into a document whose upstream leaves are all rewritten to
+    // absolute URLs by RewriteAllLeafUrls, so a local leaf must match: relative @id/packageContent
+    // here would mix reference styles in one document, and packageContent in particular
+    // deserializes into a System.Uri, which throws on .AbsoluteUri for a relative value.
+    // baseUrl already includes the /nuget segment (e.g. "https://host/nuget"); pass null only
+    // from test-only callers that don't need absolute URLs, which fall back to relative paths.
+    internal static JsonObject BuildLocalLeaf(PackageVersion v, string normalizedId, string pkgName, string? baseUrl = null)
     {
-        ["@id"] = $"/nuget/registration/{normalizedId}/{v.Version}.json",
-        ["@type"] = "Package",
-        ["catalogEntry"] = new JsonObject
+        string prefix = baseUrl ?? "/nuget";
+        string leafId = $"{prefix}/registration/{normalizedId}/{v.Version}.json";
+        string packageContent = $"{prefix}/flatcontainer/{normalizedId}/{v.Version}/{normalizedId}.{v.Version}.nupkg";
+        return new JsonObject
         {
-            ["id"] = pkgName,
-            ["version"] = v.Version,
-            ["listed"] = true,
-            ["packageContent"] = $"/nuget/flatcontainer/{normalizedId}/{v.Version}/{normalizedId}.{v.Version}.nupkg"
-        }
-    };
+            ["@id"] = leafId,
+            ["@type"] = "Package",
+            ["catalogEntry"] = new JsonObject
+            {
+                ["@id"] = leafId,
+                ["@type"] = "PackageDetails",
+                ["id"] = pkgName,
+                ["version"] = v.Version,
+                ["listed"] = true,
+                ["packageContent"] = packageContent
+            },
+            ["packageContent"] = packageContent,
+            ["registration"] = $"{prefix}/registration/{normalizedId}/index.json"
+        };
+    }
 
-    internal static JsonObject BuildLocalPage(IReadOnlyList<PackageVersion> localOnly, string normalizedId, string pkgName)
+    internal static JsonObject BuildLocalPage(IReadOnlyList<PackageVersion> localOnly, string normalizedId, string pkgName, string? baseUrl = null)
     {
+        string prefix = baseUrl ?? "/nuget";
         var localItems = new JsonArray(localOnly
-            .Select(v => (JsonNode)BuildLocalLeaf(v, normalizedId, pkgName))
+            .Select(v => (JsonNode)BuildLocalLeaf(v, normalizedId, pkgName, baseUrl))
             .ToArray());
         var (lower, upper) = ComputeRange(localOnly);
         return new JsonObject
         {
-            ["@id"] = $"/nuget/registration/{normalizedId}/index.json#page/local",
+            ["@id"] = $"{prefix}/registration/{normalizedId}/index.json#page/local",
             ["@type"] = "catalog:CatalogPage",
             ["count"] = localItems.Count,
             ["items"] = localItems,
             ["lower"] = lower,
             ["upper"] = upper,
-            ["parent"] = $"/nuget/registration/{normalizedId}/index.json"
+            ["parent"] = $"{prefix}/registration/{normalizedId}/index.json"
         };
     }
 

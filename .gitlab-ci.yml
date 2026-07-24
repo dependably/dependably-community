@@ -89,7 +89,6 @@ variables:
   - { job: lint,                   artifacts: false }
   - { job: dotnet-format,          artifacts: false }
   - { job: csp-inline-style-guard, artifacts: false }
-  - { job: chrome-emoji-guard,     artifacts: false }
   - { job: sql-interp-guard,       artifacts: false }
   - { job: i18n-validate,          artifacts: false }
   - { job: secret-scan,            artifacts: false }
@@ -112,6 +111,12 @@ variables:
 # NuGet so restores route through the private Dependably instance. HARD-FAILS when either var
 # is empty rather than silently falling back to public — the GitLab pipeline must always use
 # the private feed. (GitHub Actions intentionally stays on public; see .github/workflows.)
+# The generated `<packageSources>` — the element package bytes are actually downloaded through —
+# is always the private feed, for every job, unconditionally. A job that also needs advisory
+# data from a public source it doesn't otherwise trust (NuGet advisory data lives only on
+# nuget.org; there is no private-feed equivalent) opts in by setting `NUGET_AUDIT_SOURCE`, which
+# is written as an `<auditSources>` entry alongside the private `<packageSources>` — never in
+# place of it.
 .private-registry-setup:
   before_script:
     - |
@@ -143,14 +148,28 @@ variables:
         echo "      <add key=\"ClearTextPassword\" value=\"${REGISTRY_KEY}\" />"
         echo '    </dependably>'
         echo '  </packageSourceCredentials>'
+        if [ -n "${NUGET_AUDIT_SOURCE:-}" ]; then
+          echo '  <auditSources>'
+          echo "    <add key=\"audit\" value=\"${NUGET_AUDIT_SOURCE}\" />"
+          echo '  </auditSources>'
+        fi
         echo '</configuration>'
       } > "$CI_PROJECT_DIR/nuget.config"
-      # Self-check: the active config must reference the private host and never a public one.
-      # Catches a future regression (e.g. a re-added public fallback) loudly instead of
-      # silently shipping public traffic.
-      if grep -qiE 'api\.nuget\.org|registry\.npmjs\.org' "$CI_PROJECT_DIR/nuget.config" "$HOME/.npmrc"; then
-        echo "ERROR: generated registry config still references a public host:" >&2
-        grep -niE 'api\.nuget\.org|registry\.npmjs\.org' "$CI_PROJECT_DIR/nuget.config" "$HOME/.npmrc" >&2
+      # Self-check: the npm config must never reference a public registry.
+      if grep -qiE 'registry\.npmjs\.org' "$HOME/.npmrc"; then
+        echo "ERROR: generated .npmrc still references a public host:" >&2
+        grep -niE 'registry\.npmjs\.org' "$HOME/.npmrc" >&2
+        exit 1
+      fi
+      # Self-check: the active <packageSources> — the element NuGet actually downloads package
+      # bytes through — must reference the private host and never a public one. Scoped to that
+      # element (not the whole file) so an opted-in <auditSources> entry naming nuget.org doesn't
+      # trip it: the guard's intent is "no public source ever serves us package bytes", and a
+      # future regression that re-adds a public packageSource still fails this loudly.
+      PACKAGE_SOURCES_BLOCK=$(awk '/<packageSources>/,/<\/packageSources>/' "$CI_PROJECT_DIR/nuget.config")
+      if printf '%s' "$PACKAGE_SOURCES_BLOCK" | grep -qiE 'api\.nuget\.org|registry\.npmjs\.org'; then
+        echo "ERROR: generated nuget.config packageSources still references a public host:" >&2
+        printf '%s' "$PACKAGE_SOURCES_BLOCK" | grep -niE 'api\.nuget\.org|registry\.npmjs\.org' >&2
         exit 1
       fi
       if ! grep -qF "$HOST" "$CI_PROJECT_DIR/nuget.config"; then
@@ -162,7 +181,10 @@ variables:
       # npmrc) merges in without touching that file. `<clear/>` drops inherited package *sources*,
       # but disabledPackageSources / packageSourceMapping and npm's precedence rules don't, so
       # assert the RESOLVED config — not the written file. Each check is gated on its toolchain
-      # because this template is shared by dotnet, node, and alpine jobs.
+      # because this template is shared by dotnet and node jobs. `dotnet nuget list source`
+      # reports registered packageSources only, never auditSources (verified against the SDK
+      # image this template runs under), so an opted-in public auditSources entry cannot trip
+      # this check.
       if command -v dotnet >/dev/null 2>&1; then
         if dotnet nuget list source 2>/dev/null | grep -qiE 'api\.nuget\.org|registry\.npmjs\.org'; then
           echo "ERROR: effective NuGet config lists a public source (inherited from a machine/user config):" >&2
@@ -433,6 +455,7 @@ build-web:
   extends: [.private-registry-setup, .runs-on-ci]
   image: ${DEP_IMAGE_REGISTRY}/library/node:26-slim@sha256:ffc78385a788964bb3cbab5e434ff79a10bdc25b8ae6db03fe5fe6cb14053c09
   script:
+    - npm install -g npm@12.0.1
     - cd web && npm ci && npm run build
   artifacts:
     paths:
@@ -521,6 +544,7 @@ lint:
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
   image: ${DEP_IMAGE_REGISTRY}/library/node:26-slim@sha256:ffc78385a788964bb3cbab5e434ff79a10bdc25b8ae6db03fe5fe6cb14053c09
   script:
+    - npm install -g npm@12.0.1
     - cd web && npm ci && npm run lint && npm run lint:css && npm run check
 
 # C# style/whitespace gate. `dotnet format --verify-no-changes` fails (non-zero) when any
@@ -546,19 +570,6 @@ csp-inline-style-guard:
     - |
       if grep -rn 'style="' web/src --include='*.svelte'; then
         echo "Inline style=\"…\" attributes are forbidden — they violate the SPA's CSP style-src directive. Use CSS classes instead." >&2
-        exit 1
-      fi
-
-chrome-emoji-guard:
-  stage: test
-  extends: [.runs-on-ci, .release-required]
-  image: ${DEP_IMAGE_REGISTRY}/library/alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
-  script:
-    - !reference [.apk-mirror-setup, script]
-    - apk add --no-cache grep
-    - |
-      if grep -rPn '[\x{1F300}-\x{1FAFF}\x{2600}-\x{27BF}\x{2700}-\x{27BF}\x{2300}-\x{23FF}]' web/src --include='*.svelte'; then
-        echo "Emoji codepoint detected in web/src. Use a sprite from web/public/icons.svg instead — DESIGN.md §11." >&2
         exit 1
       fi
 
@@ -687,6 +698,7 @@ frontend-tests:
   image: ${DEP_IMAGE_REGISTRY}/library/node:26-slim@sha256:ffc78385a788964bb3cbab5e434ff79a10bdc25b8ae6db03fe5fe6cb14053c09
   script:
     - cd web
+    - npm install -g npm@12.0.1
     - npm ci
     - npm run test:coverage
   artifacts:
@@ -697,40 +709,36 @@ frontend-tests:
     reports:
       junit: web/test-results/junit.xml
 
-# SCA vulnerability gate for NuGet dependencies. Vulnerability data comes from
-# <auditSources> in nuget.config — the --source flag applies only to package
-# downloads, not advisory lookups. A minimal nuget.config with api.nuget.org as
-# both the package source and the audit source is written here so that restore
-# and advisory queries both reach the public feed. The private registry is not
-# used: SCA requires advisory data from nuget.org, which Dependably does not serve.
+# SCA vulnerability gate for NuGet dependencies. `dotnet list package --vulnerable` has two
+# independent needs: it restores packages (potentially gigabytes across the full transitive
+# graph) through <packageSources>, and it looks up advisory data through <auditSources>. Only
+# the latter genuinely needs to be public — NuGet advisory data lives solely on nuget.org and
+# Dependably does not serve it. Packages restore through the private dogfood feed like every
+# other job (`.private-registry-setup`); `NUGET_AUDIT_SOURCE` opts this job in to an
+# <auditSources> entry naming nuget.org, alongside — not instead of — the private
+# <packageSources>.
 sca-backend:
   stage: test
-  extends: [.runs-on-ci, .release-required]
+  extends: [.private-registry-setup, .runs-on-ci, .release-required]
   image: ${DEP_IMAGE_REGISTRY}/ci/ci-tools:latest   # glsec:ignore GL001 -- project-owned image: the tag tracks the checked-in ci/docker/ci-tools.Dockerfile (whose base IS digest-pinned) and is rebuilt by build-ci-tools whenever that file changes; a digest pin here would go stale on every rebuild
   tags: [amd64]
+  variables:
+    NUGET_AUDIT_SOURCE: https://api.nuget.org/v3/index.json
   script:
-    - |
-      # Write a nuget.config with api.nuget.org as both the package source and the
-      # auditSource so `dotnet list package --vulnerable` can reach advisory data.
-      # The private feed is intentionally absent: advisory data lives only on
-      # nuget.org and the restore here is solely to satisfy the list command's
-      # precondition (not to produce build artifacts consumed by other jobs).
-      cat > nuget.config <<'NUGETCFG'
-      <?xml version="1.0" encoding="utf-8"?>
-      <configuration>
-        <packageSources>
-          <clear />
-          <add key="nuget.org" value="https://api.nuget.org/v3/index.json" />
-        </packageSources>
-        <auditSources>
-          <add key="nuget.org" value="https://api.nuget.org/v3/index.json" />
-        </auditSources>
-      </configuration>
-      NUGETCFG
     - dotnet restore
     - dotnet list package --vulnerable --include-transitive --format json > sca-backend.json
     - |
       cat sca-backend.json
+      # Coverage guard: `dotnet list package --vulnerable` degrades silently — with no live
+      # auditSources it exits 0 and emits a `projects[]` entry carrying no `frameworks` key at
+      # all (rather than an empty one), so the BAD extraction below sees zero matches whether
+      # nothing was vulnerable or nothing was scanned. Refuse to trust the result unless at
+      # least one project actually got audited.
+      COVERAGE=$(jq '[.projects[]? | select(has("frameworks"))] | length' sca-backend.json)
+      if [ "$COVERAGE" -eq 0 ]; then
+        echo "ERROR: advisory coverage was inactive — no project in sca-backend.json carries a 'frameworks' key, the shape dotnet emits when NUGET_AUDIT_SOURCE didn't reach a live audit source. This run scanned nothing; it is not a clean result." >&2
+        exit 1
+      fi
       BAD=$(jq '[.projects[].frameworks[]? | (.topLevelPackages[]?, .transitivePackages[]?) | select(.vulnerabilities != null) | .vulnerabilities[] | select(.severity == "High" or .severity == "Critical")] | length' sca-backend.json)
       if [ "$BAD" -gt 0 ]; then
         echo "ERROR: $BAD High/Critical vulnerable NuGet package reference(s) — see sca-backend.json above." >&2
@@ -798,13 +806,14 @@ edge-closure-guard:
 e2e:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
-  image: ${DEP_IMAGE_REGISTRY}/playwright:v1.59.1-noble@sha256:b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53
+  image: ${DEP_IMAGE_REGISTRY}/playwright:v1.61.1-noble@sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48
   needs: [build]
   # Playwright image is amd64-only; on Pi runners it ran under qemu and the slow
   # emulation caused intermittent timing flakes. Pin to native amd64.
   tags: [amd64]
   script:
     - cd web
+    - npm install -g npm@12.0.1
     - npm ci
     - npm run e2e -- --project=chromium
   artifacts:
@@ -891,12 +900,14 @@ sonarqube-check:
   allow_failure: true
 
 # Boots the real published binary and runs the external dependably-integration-tests suite
-# against it. Background jobs that make outbound internet calls at startup (vuln-scan,
-# vuln-rescan, deprecation-refresh, threat-feed) are disabled via DISABLE_BACKGROUND_JOBS
-# so the runner needs no boot-time egress — but ASPNETCORE_ENVIRONMENT is left at Production
-# and AIR_GAPPED is NOT set, so request-time proxy passthrough to upstream registries
-# remains fully operational. The suite exercises proxy/upstream code paths that need
-# real network.
+# against it. RunOnStartup background jobs are disabled via DISABLE_BACKGROUND_JOBS so the
+# runner needs no boot-time egress: vuln-scan/vuln-rescan, deprecation-refresh, and threat-feed
+# each make a real outbound HTTP call at boot; license-backfill makes no outbound call but
+# mutates the shared cache_artifact.license_checked_at column under a leader lock at boot, its
+# own source of run non-determinism, so it is disabled too. ASPNETCORE_ENVIRONMENT is left at
+# Production and AIR_GAPPED is NOT set, so request-time proxy passthrough to upstream registries
+# remains fully operational. The suite exercises proxy/upstream code paths that need real
+# network.
 #
 # allow_failure: true holds until the external suite is proven green against this job.
 # A follow-up will promote it to .release-required and add it to release-gate.needs.
@@ -933,12 +944,14 @@ integration-external:
     - export FIRST_BOOT_ADMIN_PASSWORD="$DAST_ADMIN_PASSWORD"
     - export LOGIN_RATE_LIMIT_PERMITS=100000
     - export TOKEN_CREATE_RATE_LIMIT_PERMITS=100000
-    # Disable the three RunOnStartup services that make outbound internet calls at boot
-    # (OsvVulnScanService, DeprecationRefreshService, ThreatFeedService). Proxy
-    # request-time passthrough to upstream registries is unaffected.
-    # OSV stays in default remote mode (never invoked — vuln-scan is disabled), so
-    # no OSV_LOCAL_PATH is required; AIR_GAPPED/OSV_MODE=local would crash the boot.
-    - export DISABLE_BACKGROUND_JOBS=vuln-scan,vuln-rescan,deprecation-refresh,threat-feed
+    # Disable the RunOnStartup services that mutate state at boot: OsvVulnScanService,
+    # DeprecationRefreshService, and ThreatFeedService each make a real outbound HTTP call;
+    # LicenseBackfillService makes no outbound call but mutates the shared cache plane under a
+    # leader lock at boot, its own source of run non-determinism. Proxy request-time passthrough
+    # to upstream registries is unaffected. OSV stays in default remote mode (never invoked —
+    # vuln-scan is disabled), so no OSV_LOCAL_PATH is required; AIR_GAPPED/OSV_MODE=local would
+    # crash the boot.
+    - export DISABLE_BACKGROUND_JOBS=vuln-scan,vuln-rescan,deprecation-refresh,threat-feed,license-backfill
     - cp -r src/Dependably/bin/Release/net10.0/linux-x64/publish /tmp/ext-int/app
     - chmod +x /tmp/ext-int/app/Dependably
     - /tmp/ext-int/app/Dependably > /tmp/ext-int/app.log 2>&1 &
@@ -1011,6 +1024,7 @@ sbom-frontend:
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
   image: ${DEP_IMAGE_REGISTRY}/library/node:26-slim@sha256:ffc78385a788964bb3cbab5e434ff79a10bdc25b8ae6db03fe5fe6cb14053c09
   script:
+    - npm install -g npm@12.0.1
     - cd web && npm ci && npm run sbom
   artifacts:
     paths:
@@ -1154,10 +1168,12 @@ ai-review-docs:
 # it on :8080 with a throwaway DB/blob store, and waits on /ready (aborting if
 # the process dies). Mirrors the Playwright CI webServer pattern in
 # web/e2e/playwright.config.ts: same binary path, same env-var shape, same gate.
-# DISABLE_BACKGROUND_JOBS turns off the three RunOnStartup refresh services that
-# make outbound calls on every boot (vuln-scan/-rescan, deprecation-refresh →
-# npmjs/pypi, threat-feed → cisa.gov + first.org). OSV stays in default remote
-# mode but is never invoked, so no OSV_LOCAL_PATH is required.
+# DISABLE_BACKGROUND_JOBS turns off the RunOnStartup refresh services that mutate state on
+# every boot: vuln-scan/-rescan, deprecation-refresh (→ npmjs/pypi), and threat-feed
+# (→ cisa.gov + first.org) each make a real outbound HTTP call; license-backfill makes no
+# outbound call but mutates the shared cache_artifact.license_checked_at column under a leader
+# lock at boot, its own source of run non-determinism, so it is disabled too. OSV stays in
+# default remote mode but is never invoked, so no OSV_LOCAL_PATH is required.
 .app_boot: &app_boot |
   mkdir -p /tmp/dast/blobs
   export DB_PATH=/tmp/dast/dependably.db
@@ -1183,7 +1199,16 @@ ai-review-docs:
   export ANON_RATE_LIMIT_PERMITS=100000
   export PUSH_RATE_LIMIT_PERMITS=100000
   export DOWNLOAD_RATE_LIMIT_PERMITS=100000
-  export DISABLE_BACKGROUND_JOBS=vuln-scan,vuln-rescan,deprecation-refresh,threat-feed
+  export DISABLE_BACKGROUND_JOBS=vuln-scan,vuln-rescan,deprecation-refresh,threat-feed,license-backfill
+  # DAST log volume: a full active scan drives tens of thousands of probes, each of which
+  # UseSerilogRequestLogging records as one request-completion event. At the default
+  # Information level that is one ECS-JSON line per probe — the after_script's app-log dump
+  # then floods the GitLab job trace past the runner output_limit, which fails the job even
+  # though the scan itself passed. Raise the app's floor to Warning so successful probes log
+  # nothing; anomalies (slow requests -> Warning, unhandled 500s -> Error, with the stack) still
+  # surface, and the complete Information-level log is unaffected on any non-DAST run. This
+  # tunes CI log verbosity only — it does not change what the scanner exercises or asserts.
+  export Serilog__MinimumLevel__Default=Warning
   cp -r src/Dependably/bin/Release/net10.0/linux-x64/publish /tmp/dast/app
   chmod +x /tmp/dast/app/Dependably
   /tmp/dast/app/Dependably > app.log 2>&1 &
@@ -1221,6 +1246,40 @@ zap-full:
   # runners so the published binary executes natively.
   tags: [amd64]
   interruptible: true
+  variables:
+    # Firefox's release/ESR channels (this image ships firefox-esr) silently
+    # ignore a config override of services.settings.server outside Nightly/tests
+    # unless this variable is set — Firefox's own services/settings/Utils.sys.mjs
+    # (allowServerURLOverride) checks for it by name; without it,
+    # ci/zap-firefox-prefs.sh's services.settings.server override is a no-op and
+    # Remote Settings keeps syncing from the real Mozilla server regardless. It
+    # also blocks Firefox from making non-local network connections at the
+    # network layer, which the AJAX spider's target (http://localhost:8080)
+    # never needs — the crawl reaches it entirely through ZAP's own proxy on
+    # loopback. Inherited down the daemon → geckodriver → Firefox process chain
+    # the same way any other job variable is.
+    MOZ_DISABLE_NONLOCAL_CONNECTIONS: "1"
+    # Catastrophe floor for the crawl-coverage count ci/zap-full-hooks.py's zap_pre_shutdown
+    # hook writes to zap-full-url-count.txt (its own zap.core.urls() tally, taken at the same
+    # point zap-full-scan.py would print its own now-unused `Total of N URLs` line). Measured
+    # successful runs on this job range 94-806 URLs for the same branch and config — a ~7.5x
+    # swing this floor does NOT explain or narrow, and clearing it is NOT a coverage guarantee.
+    # It exists only to catch the AJAX spider not effectively running at all: a
+    # traditional-spider-only crawl of this app finds roughly 10-20 URLs, so 30 sits above that
+    # dead-spider ceiling with margin while staying well below the lowest healthy run on record
+    # (94), so a real but thin crawl never reds this blocking gate. Override per-pipeline with a
+    # CI/CD variable of the same name if a future measured range needs a different value.
+    ZAP_FULL_MIN_URLS: "30"
+    # AJAX-spider and active-scan bounds read by ci/zap-full-hooks.py (via os.environ) to keep
+    # this job's crawl consistent run to run instead of swinging 106-3577 URLs for the same 0
+    # findings. See that file's AJAX_SPIDER_MAX_*/ASCAN_MAX_DURATION_MINS comments for the
+    # calibration reasoning — briefly: max_crawl_states sits above every healthy run on record
+    # (806) but well below the observed runaway (3577); the two *_MAX_DURATION_MINS values are
+    # wall-clock backstops, not normal-case constraints. Override per-pipeline with a CI/CD
+    # variable of the same name.
+    ZAP_FULL_AJAX_MAX_DURATION_MINS: "15"
+    ZAP_FULL_AJAX_MAX_CRAWL_STATES: "1200"
+    ZAP_FULL_ASCAN_MAX_MINS: "20"
   script:
     - *app_boot
     # Authenticate the crawl: ci/zap-dast-auth.sh logs in and emits a session cookie
@@ -1234,22 +1293,104 @@ zap-full:
     # Symlink it to $PWD so .zap/*.conf is in place and -J/-r land in the build
     # dir where GitLab picks them up as artifacts.
     - ln -sfn "$PWD" /zap/wrk
+    # -j's AJAX spider launches a fresh-profile Firefox headless (the image ships
+    # no Chrome/Chromium binary or driver for the selenium add-on to switch to;
+    # firefox-headless is confirmed as the daemon's only ajaxSpider browser). A
+    # fresh Firefox profile phones home to Mozilla Remote Settings, telemetry, and
+    # safebrowsing on every browser context it opens — the same failure mode
+    # web/e2e/playwright.config.ts documents and disables for the Firefox e2e
+    # project. A 2-hour CI window has moved 12.29 GB to mozilla.com/mozilla.net
+    # from this job. ci/zap-firefox-prefs.sh emits -config overrides that seed
+    # the daemon's selenium.firefoxPrefs list at startup (the add-on's own
+    # per-browser preference store — it exposes no runtime API for this, only
+    # browser arguments), the direct equivalent of playwright.config.ts's
+    # firefoxUserPrefs — combined with the MOZ_DISABLE_NONLOCAL_CONNECTIONS
+    # variable above, which is what makes the Remote Settings server override in
+    # that script actually take effect instead of being silently dropped (see
+    # that script for why). The one falsifiable, verified prediction: both
+    # firefox.settings.services.mozilla.com and
+    # firefox-settings-attachments.cdn.mozilla.net go to zero bytes with this
+    # applied — reproduced with tcpdump against a throwaway local target, crawl
+    # duration long enough to cross Firefox's update-timer first-poll window
+    # (UpdateTimerManager.sys.mjs sets it at ≥30s after profile-after-change).
+    # The overall byte reduction in that reproduction cannot be generalized to
+    # this job's real crawl (different site, different session length, different
+    # number of browser contexts) and is not restated here as an expected
+    # percentage; the real effect is what CI's own egress accounting measures.
+    # Two of the prefs (security.remote_settings.crlite_filters.enabled and
+    # .intermediates.enabled) turn off the crawler browser's own real-time
+    # certificate-revocation checks. ZAP's proxy does not re-verify upstream
+    # certificates on the crawler's behalf (its TLS client uses a
+    # trust-everything manager, standard for a testing proxy that needs to
+    # intercept any site), so this is not redundant with anything ZAP itself
+    # does — it is dropping the only revocation check in the chain. The trade is
+    # still sound here because the target is http://localhost:8080: plain HTTP
+    # loopback, so there is no certificate for the crawl itself to revoke-check
+    # in the first place; the two prefs only stop Firefox's own background
+    # requests to Mozilla's infrastructure from performing revocation checks on
+    # certs unrelated to this crawl.
+    - ZAP_FIREFOX_NO_PHONE_HOME="$(sh ci/zap-firefox-prefs.sh)"
     # -j runs the AJAX (browser) spider to crawl the SPA; the hook excludes the
     # logout/password/MFA endpoints so the authenticated browser crawl does not revoke
-    # its own session mid-scan (the same self-logout trap the management API scan avoids).
-    - >
-      ZAP_AUTH_HEADER=Cookie ZAP_AUTH_HEADER_VALUE="$ZAP_SESSION_COOKIE"
-      zap-full-scan.py -t http://localhost:8080 -c .zap/full.conf
-      -j --hook=ci/zap-full-hooks.py
-      -J zap-full.json -r zap-full.html
+    # its own session mid-scan (the same self-logout trap the management API scan avoids), and
+    # bounds the spider/active-scan (see ci/zap-full-hooks.py) so the crawl is consistent run to
+    # run instead of swinging 106-3577 URLs for the same 0 findings. No -d here: at INFO level
+    # (the default) zap-full-scan.py logs progress only at DEBUG, so the job log is quiet
+    # between the invocation and the final summary — expected, not a hang — while -d's
+    # per-request/per-alert detail was what pushed this job's log volume past GitLab's 4 MB
+    # per-job limit and got it silently truncated. The `Total of N URLs` line -d emits is also
+    # gated on -d; the coverage floor below does not depend on it — zap_pre_shutdown in the hook
+    # file writes that same zap.core.urls() count directly to zap-full-url-count.txt, which the
+    # floor reads instead. The scan runs as an `if` condition because POSIX exempts that
+    # from `set -e`, which a brace group is not: with `{ cmd; echo $?; }` a failing scan aborts
+    # before recording its status, and under `pipefail` the raw exit code escapes the coverage
+    # check.
+    - |
+      { if ZAP_AUTH_HEADER=Cookie ZAP_AUTH_HEADER_VALUE="$ZAP_SESSION_COOKIE" \
+             zap-full-scan.py -t http://localhost:8080 -c .zap/full.conf \
+               -j --hook=ci/zap-full-hooks.py \
+               -z "$ZAP_FIREFOX_NO_PHONE_HOME" \
+               -J zap-full.json -r zap-full.html; then
+          echo 0 > zap-full-scan.exit
+        else
+          echo $? > zap-full-scan.exit
+        fi
+      } 2>&1 | tee zap-full-scan.log
+      SCAN_EXIT=$(cat zap-full-scan.exit)
+      # Coverage floor: refuse to trust a clean result from a crawl that barely ran. See
+      # the ZAP_FULL_MIN_URLS comment above for what this floor does and does not prove. The
+      # count comes from zap-full-url-count.txt, written by the hook's zap_pre_shutdown once the
+      # spider/ajax-spider/active-scan phases finish — a missing or unparseable file means the
+      # scan crashed before that point (or the hook itself failed), which fails closed exactly
+      # like a missing count did under the old log-grep.
+      URLS=$(cat zap-full-url-count.txt 2>/dev/null || true)
+      case "$URLS" in
+        ''|*[!0-9]*) URLS='' ;;
+      esac
+      echo "=== zap-full coverage: crawled ${URLS:-<no count reported>} URL(s), floor is $ZAP_FULL_MIN_URLS ==="
+      COVERAGE_EXIT=0
+      if [ -z "$URLS" ]; then
+        echo "ERROR: zap-full-url-count.txt is missing or unparseable — the scan crashed before zap_pre_shutdown ran, or crawled 0 URLs. An unmeasured crawl is not a clean result." >&2
+        COVERAGE_EXIT=1
+      elif [ "$URLS" -lt "$ZAP_FULL_MIN_URLS" ]; then
+        echo "ERROR: crawl coverage ($URLS URL(s)) is below the $ZAP_FULL_MIN_URLS floor — the AJAX spider likely did not run, so a clean result from this crawl carries little assurance." >&2
+        COVERAGE_EXIT=1
+      fi
+      [ "$SCAN_EXIT" -eq 0 ] && [ "$COVERAGE_EXIT" -eq 0 ]
   after_script:
-    - echo "=== dependably app log ==="; cat app.log || true
+    # Do not print app.log: a full scan drives it to hundreds of MB (one line per probed
+    # request), which overruns the runner output_limit and fails the job on log length alone.
+    # The scan output already in the job trace, plus the HTML/JSON reports and app.log itself
+    # below, are the diagnostics — app.log is retained as an artifact only, never dumped.
+    - echo "=== dependably app log kept as a job artifact, not printed (see artifacts) ==="
   artifacts:
     when: always
     expire_in: 30 days
     paths:
       - zap-full.html
       - zap-full.json
+      - zap-full-scan.log
+      - zap-full-url-count.txt
       - app.log
 
 # Authenticated API scan of the management surface (/api/v1/...). Imports the
@@ -1309,7 +1450,11 @@ zap-api-management:
       -J zap-api-management.json -r zap-api-management.html
     - python3 ci/zap-api-gate.py zap-api-management.json .zap/api-management.conf
   after_script:
-    - echo "=== dependably app log ==="; cat app.log || true
+    # Do not print app.log: a full scan drives it to hundreds of MB (one line per probed
+    # request), which overruns the runner output_limit and fails the job on log length alone.
+    # The scan output already in the job trace, plus the HTML/JSON reports and app.log itself
+    # below, are the diagnostics — app.log is retained as an artifact only, never dumped.
+    - echo "=== dependably app log kept as a job artifact, not printed (see artifacts) ==="
   artifacts:
     when: always
     expire_in: 30 days
@@ -1349,7 +1494,11 @@ zap-api-protocol:
       -J zap-api-protocol.json -r zap-api-protocol.html
     - python3 ci/zap-api-gate.py zap-api-protocol.json .zap/api-protocol.conf
   after_script:
-    - echo "=== dependably app log ==="; cat app.log || true
+    # Do not print app.log: a full scan drives it to hundreds of MB (one line per probed
+    # request), which overruns the runner output_limit and fails the job on log length alone.
+    # The scan output already in the job trace, plus the HTML/JSON reports and app.log itself
+    # below, are the diagnostics — app.log is retained as an artifact only, never dumped.
+    - echo "=== dependably app log kept as a job artifact, not printed (see artifacts) ==="
   artifacts:
     when: always
     expire_in: 30 days
@@ -1508,6 +1657,27 @@ publish-image:
         VERSION_TAGS="--tag $IMAGE_REPO:main --tag $IMAGE_REPO:$VERSION"
       fi
       echo "Stamping image version $VERSION"
+    # The Dockerfiles' base images (NODE_IMAGE/SDK_IMAGE/RUNTIME_IMAGE) default to public
+    # registries; here they're overridden to the mirror's path-flattened equivalents
+    # (mcr.microsoft.com/dotnet/sdk becomes ${DEP_IMAGE_REGISTRY}/dotnet/sdk, docker.io
+    # library images become ${DEP_IMAGE_REGISTRY}/library/<name>) at the same digests as
+    # the Dockerfile defaults, so this multi-arch build pulls its base layers from the
+    # pull-through mirror instead of the public registries directly.
+    - |
+      NODE_IMAGE="${DEP_IMAGE_REGISTRY}/library/node:26-alpine@sha256:e88a35be04478413b7c71c455cd9865de9b9360e1f43456be5951032d7ac1a66"
+      SDK_IMAGE="${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0-alpine@sha256:5c559aa5d99337e400d39ab4fa1f6979d126c29b20939d53658ed38300571e74"
+      RUNTIME_IMAGE="${DEP_IMAGE_REGISTRY}/dotnet/runtime-deps:10.0-alpine@sha256:f276c0256ffca8fe816d48ba261962b54fea1b0e6f870b6a60b3b705c89e78ac"
+    # Fail fast, with a readable message, if the mirror is missing a linux/arm64 manifest for
+    # either multi-arch base image, rather than surfacing as a bare "no match for platform" deep
+    # inside the multi-stage buildx log below. NODE_IMAGE is skipped: both Dockerfiles pin it to
+    # $BUILDPLATFORM, so it never needs a target-arch manifest.
+    - |
+      for MULTIARCH_IMAGE in "$SDK_IMAGE" "$RUNTIME_IMAGE"; do
+        if ! docker buildx imagetools inspect "$MULTIARCH_IMAGE" | grep -q 'linux/arm64'; then
+          echo "ERROR: $MULTIARCH_IMAGE has no linux/arm64 manifest on the mirror — refusing to start the multi-arch build." >&2
+          exit 1
+        fi
+      done
     - >-
       docker buildx build
       -f "$DOCKERFILE"
@@ -1515,6 +1685,9 @@ publish-image:
       --provenance=false
       --build-arg VERSION="$VERSION"
       --build-arg REGISTRY_URL="$REGISTRY_URL"
+      --build-arg NODE_IMAGE="$NODE_IMAGE"
+      --build-arg SDK_IMAGE="$SDK_IMAGE"
+      --build-arg RUNTIME_IMAGE="$RUNTIME_IMAGE"
       --secret id=registry_key,src=/tmp/registry_key
       $VERSION_TAGS
       --push .

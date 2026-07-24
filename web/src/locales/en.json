@@ -105,6 +105,7 @@
       "sessionExpired": "Your session expired — please sign in again.",
       "or": "or",
       "signInWithSso": "Sign in with SSO",
+      "forgotPassword": "Forgot password?",
       "totp": {
         "title": "Two-factor authentication",
         "help": "Enter the 6-digit code from your authenticator app.",
@@ -132,6 +133,30 @@
       "errorMinLength": "Password must be at least 12 characters.",
       "errorMismatch": "Passwords do not match.",
       "errorFailed": "Failed to accept invite."
+    },
+    "forgotPassword": {
+      "title": "Reset your password",
+      "subtitle": "Enter your email and we'll send you a link to reset your password.",
+      "email": "Email",
+      "submit": "Send reset link",
+      "submitting": "Sending…",
+      "success": "If an account exists for that email, a reset link is on its way. Check your inbox.",
+      "back": "Back to sign in"
+    },
+    "reset": {
+      "title": "Set a new password",
+      "newPassword": "New Password",
+      "passwordHint": "(min 12 chars)",
+      "confirmPassword": "Confirm Password",
+      "submit": "Reset Password",
+      "submitting": "Resetting…",
+      "success": "Password reset!",
+      "signIn": "Sign in",
+      "errorMinLength": "Password must be at least 12 characters.",
+      "errorMismatch": "Passwords do not match.",
+      "errorFailed": "Failed to reset password.",
+      "errorExpired": "This reset link is invalid, expired, or already used.",
+      "requestNew": "Request a new link"
     }
   },
   "packages": {
@@ -245,6 +270,10 @@
     }
   },
   "versionDetail": {
+    "meta": {
+      "homepage": "Homepage",
+      "repository": "Repository"
+    },
     "columns": {
       "version": "Version",
       "latest": "Latest",
@@ -345,8 +374,8 @@
     },
     "detail": {
       "purl": "PURL",
-      "upstreamSource": "Fetched from",
-      "upstreamSourceLink": "Source",
+      "registryPage": "Published at",
+      "registryPageLink": "View page",
       "files": "Files",
       "checksum": "SHA-256",
       "published": "Published",
@@ -1405,8 +1434,7 @@
       "version": "Version",
       "versionPlaceholder": "Leave blank for latest",
       "submit": "Check package",
-      "mavenHint": "groupId:artifactId",
-      "versionRequiredHint": "A version is required for this ecosystem."
+      "mavenHint": "groupId:artifactId"
     },
     "verdict": {
       "allowed": "Allowed",

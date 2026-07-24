@@ -118,6 +118,8 @@
       upstreamIntegrityAlgorithm: single ? rep.upstreamIntegrityAlgorithm : null,
       // The origin URL belongs to one file; multi-file groups surface it per-file in the panel.
       upstreamUrl: single ? rep.upstreamUrl : null,
+      // Public registry page link (null when the version was proxied from a private/unknown upstream).
+      registryPageUrl: single ? rep.registryPageUrl : null,
       origin: rep.origin,
       licenses: [...new Set(files.flatMap(f => f.licenses ?? []))],
       // Operational-risk signal (Deliverable 1): all files under one version share the same
@@ -419,7 +421,7 @@
                         <th>{$t('versionDetail.columns.checksum')}</th>
                         <th>{$t('versionDetail.columns.size')}</th>
                         <th class="num-col">{$t('versionDetail.columns.downloads')}</th>
-                        <th>{$t('versionDetail.detail.upstreamSource')}</th>
+                        <th>{$t('versionDetail.detail.registryPage')}</th>
                         <th></th>
                       </tr>
                     </thead>
@@ -441,10 +443,10 @@
                           <td class="nowrap">{$formatBytes(f.sizeBytes)}</td>
                           <td class="nowrap num-col">{$formatNumber(f.downloadCount)}</td>
                           <td>
-                            {#if f.upstreamUrl}
-                              <a class="upstream-link" href={f.upstreamUrl} target="_blank" rel="noopener noreferrer" title={f.upstreamUrl}>
+                            {#if f.registryPageUrl}
+                              <a class="upstream-link" href={f.registryPageUrl} target="_blank" rel="noopener noreferrer" title={f.registryPageUrl}>
                                 <svg width="12" height="12" aria-hidden="true"><use href="/icons.svg#icon-external"/></svg>
-                                {$t('versionDetail.detail.upstreamSourceLink')}
+                                {$t('versionDetail.detail.registryPageLink')}
                               </a>
                             {:else}
                               <span class="text-muted">—</span>
@@ -466,11 +468,11 @@
                 <button class="copy-btn" on:click={() => copy(g.purl)}>{$t('versionDetail.detail.copy')}</button>
               </div>
 
-              {#if g.single && g.upstreamUrl}
+              {#if g.single && g.registryPageUrl}
                 <div class="detail-section">
-                  <span class="detail-label">{$t('versionDetail.detail.upstreamSource')}</span>
-                  <a class="detail-value upstream-link" href={g.upstreamUrl} target="_blank" rel="noopener noreferrer">
-                    {g.upstreamUrl}
+                  <span class="detail-label">{$t('versionDetail.detail.registryPage')}</span>
+                  <a class="detail-value upstream-link" href={g.registryPageUrl} target="_blank" rel="noopener noreferrer">
+                    {g.registryPageUrl}
                     <svg width="12" height="12" aria-hidden="true"><use href="/icons.svg#icon-external"/></svg>
                   </a>
                 </div>

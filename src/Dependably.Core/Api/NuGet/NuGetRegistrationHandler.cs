@@ -362,9 +362,26 @@ public sealed class NuGetRegistrationHandler(
         // Exclude yanked versions and versions the block gate will hard-block on the download
         // path. The registration index must not advertise a version the flatcontainer endpoint
         // will 403 — keeping the two surfaces in sync is the invariant this renderer enforces.
-        var leaves = versions
+        var servable = versions
             .Where(v => !v.Yanked
                 && !BlockGateService.IsHardBlockedByStoredState(v, settings, signals.GetValueOrDefault(v.Id), now))
+            .ToList();
+
+        if (servable.Count == 0)
+        {
+            // No servable versions: a spec-valid empty registration index with no page object.
+            // A page always carries lower/upper semver bounds computed from at least one version,
+            // so emitting one here with neither would repeat the crash this renderer exists to avoid.
+            return new Dictionary<string, object?>
+            {
+                ["@id"] = registration,
+                ["@type"] = new[] { "catalog:CatalogRoot", "PackageRegistration", "catalog:Permalink" },
+                ["count"] = 0,
+                ["items"] = Array.Empty<object?>()
+            };
+        }
+
+        var leaves = servable
             .Select(v =>
             {
                 string leafId = $"{baseUrl}/registration/{normalizedId}/{v.Version}.json";
@@ -379,12 +396,15 @@ public sealed class NuGetRegistrationHandler(
                 };
             }).ToList();
 
+        var (lower, upper) = NuGetRegistrationHelpers.ComputeRange(servable);
         var page = new Dictionary<string, object?>
         {
             ["@id"] = $"{registration}#page",
             ["@type"] = "catalog:CatalogPage",
             ["count"] = leaves.Count,
-            ["items"] = leaves
+            ["items"] = leaves,
+            ["lower"] = lower,
+            ["upper"] = upper
         };
 
         return new Dictionary<string, object?>

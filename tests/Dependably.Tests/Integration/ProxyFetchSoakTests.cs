@@ -293,6 +293,12 @@ public sealed class ProxyFetchSoakTests
                 }));
 
             builder.WebHost.UseTestServer();
+            // Boots a real host via Program.ConfigureBuilder; disable the background jobs
+            // that egress or mutate shared state at boot (see Infrastructure/DependablyFactory.cs
+            // for the full rationale).
+            builder.WebHost.UseSetting(
+                "DISABLE_BACKGROUND_JOBS",
+                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill");
             builder.WebHost.UseSetting("Npm:Upstream", "http://upstream.invalid");
             builder.WebHost.UseSetting("PROXY_STAGING_PATH", _stagingDir);
             builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");

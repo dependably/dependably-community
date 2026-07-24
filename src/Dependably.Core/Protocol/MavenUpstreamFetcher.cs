@@ -198,7 +198,8 @@ public sealed class MavenUpstreamFetcher
                 Sha1: sha1,
                 Md5: md5,
                 SizeBytes: size,
-                IsFromCache: isHit);
+                IsFromCache: isHit,
+                UpstreamUrl: upstreamUrl);
         }
         catch (ChecksumException)
         {
@@ -313,7 +314,7 @@ public sealed class MavenUpstreamFetcher
 
         return new MavenArtifactFetchResult(
             BlobKey: fetched.BlobKey, Sha256: fetched.Sha256Hex, Sha1: sha1, Md5: md5,
-            SizeBytes: fetched.SizeBytes, IsFromCache: false);
+            SizeBytes: fetched.SizeBytes, IsFromCache: false, UpstreamUrl: upstreamUrl);
     }
 
     /// <summary>
@@ -613,7 +614,14 @@ public sealed record MavenArtifactFetchResult(
     string Sha1,
     string Md5,
     long SizeBytes,
-    bool IsFromCache);
+    bool IsFromCache,
+    /// <summary>
+    /// Absolute URL the artifact bytes were fetched from (resolved upstream base + repository
+    /// path). Recorded on the cache_artifact row so the origin is a full URL, matching every other
+    /// ecosystem and the column's contract — a repository-relative path cannot identify the
+    /// upstream host. Null only when no fetch occurred.
+    /// </summary>
+    string? UpstreamUrl = null);
 
 /// <summary>
 /// Parsed representation of a SNAPSHOT version-level <c>maven-metadata.xml</c> document.

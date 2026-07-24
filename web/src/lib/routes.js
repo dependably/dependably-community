@@ -28,6 +28,7 @@ const TENANT_STATIC = [
   ['lookup',            '/lookup'],
   ['profile',           '/profile'],
   ['join',              '/join'],
+  ['reset',             '/reset'],
   ['saml-test-result',  '/saml-test-result'],
   ['dashboard',         '/dashboard'], // alias — canonical is '/'
 ]

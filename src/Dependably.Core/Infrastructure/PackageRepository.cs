@@ -52,6 +52,9 @@ public sealed partial class PackageRepository
                    p.upstream_latest_version as UpstreamLatestVersion,
                    p.upstream_latest_published_at as UpstreamLatestPublishedAt,
                    p.same_version_push_override as SameVersionPushOverride,
+                   p.homepage as Homepage,
+                   p.repository_url as RepositoryUrl,
+                   p.description as Description,
                    CASE
                      WHEN p.upstream_latest_version IS NULL THEN 'unknown'
                      WHEN EXISTS (
@@ -139,6 +142,34 @@ public sealed partial class PackageRepository
             FROM packages WHERE org_id = @orgId AND ecosystem = @ecosystem AND purl_name = @purlName
             """,
             new { orgId, ecosystem, purlName }))!;
+    }
+
+    /// <summary>
+    /// Persists package-level metadata (homepage / repository / description) parsed from an
+    /// artifact manifest at hosted publish or proxy first-fetch. Each field is COALESCEd against
+    /// the stored value, so a later ingest whose manifest omits a field never nulls out a value an
+    /// earlier ingest captured. A no-op when all three inputs are null. Keyed by the FK-bound
+    /// package id, which is already org-scoped.
+    /// </summary>
+    public async Task UpdateMetadataAsync(
+        string packageId, string? homepage, string? repositoryUrl, string? description, CancellationToken ct = default)
+    {
+        if (homepage is null && repositoryUrl is null && description is null)
+        {
+            return;
+        }
+
+        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: keyed by the packages.id primary key, which is itself org-scoped.
+        await conn.ExecuteAsync(
+            """
+            UPDATE packages
+               SET homepage       = COALESCE(@homepage, homepage),
+                   repository_url = COALESCE(@repositoryUrl, repository_url),
+                   description    = COALESCE(@description, description)
+             WHERE id = @packageId
+            """,
+            new { packageId, homepage, repositoryUrl, description });
     }
 
     /// <summary>

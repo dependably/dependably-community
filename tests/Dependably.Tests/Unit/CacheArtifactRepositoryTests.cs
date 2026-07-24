@@ -114,14 +114,16 @@ public class CacheArtifactRepositoryTests : IAsyncLifetime
         var repo = new CacheArtifactRepository(_db);
         var t = TestTime.KnownNow;
 
-        // Supported ecosystems, all un-checked. first_cached_at ascending order is b, a, c.
+        // Supported ecosystems, all un-checked. first_cached_at ascending order is e, b, a, c.
         await repo.InsertAsync(SampleEco("npm", "a", "1.0.0", t.AddDays(-3)));
         await repo.InsertAsync(SampleEco("pypi", "b", "1.0.0", t.AddDays(-5)));
         await repo.InsertAsync(SampleEco("nuget", "c", "1.0.0", t.AddDays(-1)));
-
-        // Excluded — unsupported ecosystems (no bytes-level license manifest / no extractor yet).
-        await repo.InsertAsync(SampleEco("maven", "d", "1.0.0", t.AddDays(-10)));
+        // Every cargo cache row is the crate tarball itself, so no filename discriminator is
+        // needed the way maven's .pom sidecar needs one below.
         await repo.InsertAsync(SampleEco("cargo", "e", "1.0.0", t.AddDays(-10)));
+
+        // Excluded — a maven row whose filename is not the .pom that carries the licence block.
+        await repo.InsertAsync(SampleEco("maven", "d", "1.0.0", t.AddDays(-10)));
 
         // Excluded — already license-checked.
         var already = SampleEco("npm", "f", "1.0.0", t.AddDays(-9));
@@ -130,9 +132,9 @@ public class CacheArtifactRepositoryTests : IAsyncLifetime
 
         var results = await repo.ListNeedingLicenseBackfillAsync(limit: 100);
 
-        Assert.Equal(new[] { "b", "a", "c" }, results.Select(r => r.Name).ToList());
+        Assert.Equal(new[] { "e", "b", "a", "c" }, results.Select(r => r.Name).ToList());
         // Projection carries the fields the backfill service needs.
-        var first = results[0];
+        var first = results[1];
         Assert.Equal("pypi", first.Ecosystem);
         Assert.Equal("b-1.0.0.tgz", first.Filename);
         Assert.StartsWith("proxy/", first.BlobKey);

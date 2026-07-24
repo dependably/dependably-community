@@ -820,9 +820,14 @@ public sealed partial class MavenController : OrgScopedControllerBase
             ActorKind: token?.ActorKind,
             SourceIp: HttpContext.GetNormalizedRemoteIp(),
             MaxOsvScoreTolerance: settings?.MaxOsvScoreTolerance ?? DefaultMaxOsvScoreTolerance,
+            // The ABSOLUTE fetch URL (resolved upstream base + repository path), not the
+            // repository-relative path: cache_artifact.upstream_url is contracted to hold a full
+            // URL — every other ecosystem stores one — and a relative path cannot identify the
+            // upstream host, so consumers that gate on origin (e.g. the registry-page link) can
+            // never resolve it. Falls back to the relative path only if the fetcher supplied none.
             CacheAccess: new CacheAccess(orgId, "maven", resolvedCoords.PackageName,
                 resolvedCoords.Version!, resolvedCoords.Filename,
-                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: upstreamPath),
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: result.UpstreamUrl ?? upstreamPath),
             MinReleaseAgeHours: settings?.MinReleaseAgeHours,
             Sha1Hex: result.Sha1,
             BlockDeprecatedMode: settings?.BlockDeprecated,
@@ -1026,7 +1031,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
         // never fail the publish — the artifact is already stored and the row already written.
         if (string.Equals(coords.Extension, "pom", StringComparison.OrdinalIgnoreCase))
         {
-            await ExtractAndAttachPomLicensesAsync(staged.Path, versionId, purl, ct);
+            await ExtractAndAttachPomLicensesAsync(staged.Path, pkg.Id, versionId, purl, ct);
         }
 
         await _svc.Audit.LogActivityAsync(orgId, "maven", purl, "push",
@@ -1077,7 +1082,8 @@ public sealed partial class MavenController : OrgScopedControllerBase
 
     // staged.Path is under the operator-configured staging root — no user input reaches the path.
     // FromPomXml takes ownership of and disposes the stream (class stream-ownership contract).
-    private async Task ExtractAndAttachPomLicensesAsync(string stagedPath, string versionId, string purl, CancellationToken ct)
+    private async Task ExtractAndAttachPomLicensesAsync(
+        string stagedPath, string packageId, string versionId, string purl, CancellationToken ct)
     {
         try
         {
@@ -1088,6 +1094,10 @@ public sealed partial class MavenController : OrgScopedControllerBase
             {
                 await _svc.Licenses.SetLicensesAsync(versionId, licenses.Spdx, "upstream", ct);
             }
+
+            // The POM's <url>/<scm><url>/<description> feed the per-tenant packages presentation row.
+            await _svc.Packages.UpdateMetadataAsync(
+                packageId, licenses.Homepage, licenses.Repository, licenses.Description, ct);
         }
         catch (Exception ex)
         {

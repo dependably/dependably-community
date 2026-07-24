@@ -10,11 +10,14 @@
   let lockoutSeconds = 0
   let countdown
 
-  // Two-step state: 'credentials' shows the normal login form; 'totp' shows the MFA step.
+  // Step state: 'credentials' shows the normal login form; 'totp' shows the MFA step;
+  // 'forgot' shows the self-serve "forgot password" request form.
   let step = 'credentials'
   let totpCode = ''
   let rememberDevice = false
   let useRecovery = false
+
+  let forgotEmail = '', forgotSubmitted = false
 
   // Auth methods enabled for this tenant. Defaults to forms-only so the form renders even if
   // the discovery call fails for any reason.
@@ -122,8 +125,32 @@
     totpCode = ''
     rememberDevice = false
     useRecovery = false
+    forgotSubmitted = false
     error = ''
     resetLockout()
+  }
+
+  function openForgotPassword() {
+    step = 'forgot'
+    forgotEmail = email
+    forgotSubmitted = false
+    error = ''
+  }
+
+  async function submitForgotPassword() {
+    error = ''
+    loading = true
+    try {
+      // Always resolves 202 regardless of whether the email is registered — the response
+      // never distinguishes a known from an unknown account (enumeration defense), so the
+      // confirmation message is shown unconditionally on success.
+      await api.forgotPassword(forgotEmail)
+      forgotSubmitted = true
+    } catch (e) {
+      error = e.message || $t('auth.forgotPassword.title')
+    } finally {
+      loading = false
+    }
   }
 </script>
 
@@ -163,6 +190,9 @@
           <div class="form-row">
             <label for="password">{$t('auth.login.password')}</label>
             <input id="password" type="password" bind:value={password} autocomplete="current-password" required />
+            <button type="button" class="link-btn forgot-link" on:click={openForgotPassword}>
+              {$t('auth.login.forgotPassword')}
+            </button>
           </div>
           <button type="submit" class="primary login-action" disabled={loading || lockoutSeconds > 0}>
             {loading ? $t('auth.login.submitting') : $t('auth.login.submit')}
@@ -178,6 +208,39 @@
         <a class="primary login-action sso-action" href="/saml/login">
           {methods.samlButtonLabel || $t('auth.login.signInWithSso')}
         </a>
+      {/if}
+
+    {:else if step === 'forgot'}
+      <h1>{$t('auth.forgotPassword.title')}</h1>
+
+      {#if forgotSubmitted}
+        <p class="login-subtitle">{$t('auth.forgotPassword.success')}</p>
+        <button type="button" class="primary login-action" on:click={backToCredentials}>
+          {$t('auth.forgotPassword.back')}
+        </button>
+      {:else}
+        <p class="login-subtitle">{$t('auth.forgotPassword.subtitle')}</p>
+
+        {#if error}
+          <div class="error-msg">{error}</div>
+        {/if}
+
+        <form on:submit|preventDefault={submitForgotPassword}>
+          <div class="form-row">
+            <label for="forgot-email">{$t('auth.forgotPassword.email')}</label>
+            <input id="forgot-email" type="email" bind:value={forgotEmail} autocomplete="username" required />
+          </div>
+          <button type="submit" class="primary login-action" disabled={loading}>
+            {loading ? $t('auth.forgotPassword.submitting') : $t('auth.forgotPassword.submit')}
+          </button>
+        </form>
+
+        <div class="totp-links">
+          <button type="button" class="link-btn" on:click={backToCredentials}>
+            <svg width="12" height="12" aria-hidden="true"><use href="/icons.svg#icon-chevron-down" class="chev-left"/></svg>
+            {$t('auth.login.totp.back')}
+          </button>
+        </div>
       {/if}
 
     {:else}
@@ -330,6 +393,11 @@
   }
   .link-btn:hover {
     text-decoration: underline;
+  }
+  .forgot-link {
+    display: block;
+    margin-top: 6px;
+    align-self: flex-end;
   }
   .chev-left {
     transform: rotate(90deg);

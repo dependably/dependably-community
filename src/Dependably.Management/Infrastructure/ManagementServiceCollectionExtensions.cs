@@ -33,6 +33,7 @@ public static class ManagementServiceCollectionExtensions
         services.AddSingleton<UserService>();
         services.AddSingleton<IAuditEmitter, AuditEmitter>();
         services.AddSingleton<InviteRepository>();
+        services.AddSingleton<PasswordResetTokenRepository>();
         services.AddSingleton<SpdxLicenseRepository>();
         services.AddSingleton<SamlConfigRepository>();
         services.AddSingleton<ExternalIdentityRepository>();
@@ -135,6 +136,12 @@ public static class ManagementServiceCollectionExtensions
     /// <c>SocketsHttpHandler</c> to hang a shared callback off) so it can resolve and vet the SMTP
     /// host itself before dialing. Reuses <c>WEBHOOK_ALLOW_PRIVATE</c> — an SMTP relay host is a
     /// caller-supplied value with the same SSRF risk profile as a generic outbound webhook.
+    ///
+    /// Also registers <see cref="EmailDeliveryQueue"/> — the shared channel/worker/retry core
+    /// every outbound-email delivery channel enqueues onto (alert email, transactional account
+    /// email) — as both the hosted background service and the singleton those channels resolve,
+    /// plus <see cref="TransactionalEmailService"/> for account-lifecycle email that isn't tied to
+    /// a specific alert or invite (currently: self-serve password reset).
     /// </summary>
     public static IServiceCollection AddDependablyMail(this IServiceCollection services, IConfiguration config)
     {
@@ -156,6 +163,10 @@ public static class ManagementServiceCollectionExtensions
         // Resolves an org's effective alert-email transport (own SMTP or instance inheritance);
         // depends on both the per-org settings repository and the instance resolver above.
         services.AddSingleton<EffectiveEmailConfigResolver>();
+
+        services.AddSingleton<EmailDeliveryQueue>();
+        services.AddHostedService(sp => sp.GetRequiredService<EmailDeliveryQueue>());
+        services.AddSingleton<TransactionalEmailService>();
         return services;
     }
 
@@ -225,11 +236,13 @@ public static class ManagementServiceCollectionExtensions
     /// Registers the per-org alert delivery channels: <see cref="SlackWebhookClient"/> (typed
     /// HTTP client with SSRF connect-time guard, same posture as
     /// <see cref="WebhookDeliveryClient"/>) backing <see cref="AlertSlackQueue"/>, and
-    /// <see cref="AlertEmailQueue"/> (over the <see cref="AddDependablyMail"/> registrations).
-    /// Both queues are registered as singletons and hosted background services in their own
-    /// right; <see cref="CompositeAlertNotifier"/> fans out to both and is the only
-    /// <see cref="IAlertNotifier"/> the container exposes, so <c>AlertService</c> (Core) never
-    /// depends on either concrete queue.
+    /// <see cref="AlertEmailQueue"/> (a thin adapter over the shared
+    /// <see cref="Mail.EmailDeliveryQueue"/> registered by <see cref="AddDependablyMail"/>).
+    /// <see cref="AlertSlackQueue"/> is its own hosted background service; <see cref="AlertEmailQueue"/>
+    /// is not — it only wraps alerts as jobs and enqueues them, the shared queue owns the
+    /// worker/retry/drain machinery. <see cref="CompositeAlertNotifier"/> fans out to both and is
+    /// the only <see cref="IAlertNotifier"/> the container exposes, so <c>AlertService</c> (Core)
+    /// never depends on either concrete channel.
     ///
     /// Reuses <c>WEBHOOK_ALLOW_PRIVATE</c> (default <c>false</c>) — a Slack webhook URL is a
     /// tenant-user-supplied value with the same SSRF risk profile as a generic outbound webhook.
@@ -256,7 +269,6 @@ public static class ManagementServiceCollectionExtensions
         services.AddHostedService(sp => sp.GetRequiredService<AlertSlackQueue>());
 
         services.AddSingleton<AlertEmailQueue>();
-        services.AddHostedService(sp => sp.GetRequiredService<AlertEmailQueue>());
 
         services.AddSingleton<IAlertNotifier>(sp => new CompositeAlertNotifier(
             [sp.GetRequiredService<AlertSlackQueue>(), sp.GetRequiredService<AlertEmailQueue>()],

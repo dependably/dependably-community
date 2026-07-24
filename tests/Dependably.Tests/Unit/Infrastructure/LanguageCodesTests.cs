@@ -51,4 +51,55 @@ public class LanguageCodesTests
     {
         Assert.False(LanguageCodes.IsSupported(null!));
     }
+
+    // ── ResolveEffective: per-user → org default → "en" chain ──────────────
+
+    [Fact]
+    public void ResolveEffective_SupportedUserLanguage_Wins_EvenWithASupportedFallback()
+    {
+        Assert.Equal("fr", LanguageCodes.ResolveEffective("fr", "en"));
+    }
+
+    [Fact]
+    public void ResolveEffective_NullUserLanguage_FallsBackToOrgDefault()
+    {
+        Assert.Equal("fr", LanguageCodes.ResolveEffective(null, "fr"));
+    }
+
+    [Fact]
+    public void ResolveEffective_EmptyUserLanguage_FallsBackToOrgDefault()
+    {
+        Assert.Equal("fr", LanguageCodes.ResolveEffective("", "fr"));
+    }
+
+    [Fact]
+    public void ResolveEffective_UnsupportedUserLanguage_FallsBackToOrgDefault()
+    {
+        Assert.Equal("fr", LanguageCodes.ResolveEffective("de", "fr"));
+    }
+
+    [Fact]
+    public void ResolveEffective_UnsupportedUserLanguage_UnsupportedFallback_ReturnsDefault()
+    {
+        Assert.Equal(LanguageCodes.Default, LanguageCodes.ResolveEffective("de", "es"));
+    }
+
+    [Fact]
+    public void ResolveEffective_BothNull_ReturnsDefault()
+    {
+        Assert.Equal(LanguageCodes.Default, LanguageCodes.ResolveEffective(null, null));
+    }
+
+    [Fact]
+    public void ResolveEffective_NoFallbackArgument_NullUser_ReturnsDefault()
+    {
+        // The system-admin realm has no org — only a single-argument chain applies.
+        Assert.Equal(LanguageCodes.Default, LanguageCodes.ResolveEffective(null));
+    }
+
+    [Fact]
+    public void ResolveEffective_NoFallbackArgument_SupportedUser_ReturnsUser()
+    {
+        Assert.Equal("fr", LanguageCodes.ResolveEffective("fr"));
+    }
 }

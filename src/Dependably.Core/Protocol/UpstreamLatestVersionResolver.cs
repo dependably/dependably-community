@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using System.Xml.Linq;
+using Dependably.Api;
 using Dependably.Api.NuGetProtocol;
 using NuGet.Versioning;
 
@@ -57,6 +58,12 @@ public interface IUpstreamLatestVersionResolver
 ///         document's <c>metadata/versioning/lastUpdated</c> (a whole-metadata timestamp, not
 ///         necessarily the release version's own publish time, but the cheapest signal Maven
 ///         exposes without a per-version fetch).</item>
+///   <item>Cargo — the highest stable non-yanked version in the sparse index, which enumerates
+///         every published version with its yank state; the index carries no publish date, so
+///         the timestamp stays null.</item>
+///   <item>Go — <c>@latest</c>, the module proxy's own choice of latest version, with the
+///         <c>Time</c> it reports alongside; that endpoint does not enumerate the full version
+///         set, so the stable-version list stays null.</item>
 /// </list>
 ///
 /// Every ecosystem's upstream base URL is resolved per-org through <see cref="UpstreamRegistryResolver"/>
@@ -90,8 +97,83 @@ public sealed class UpstreamLatestVersionResolver : IUpstreamLatestVersionResolv
             "pypi" => ResolvePyPiAsync(orgId, purlName, ct),
             "nuget" => ResolveNuGetAsync(orgId, purlName, ct),
             "maven" => ResolveMavenAsync(orgId, purlName, ct),
+            "cargo" => ResolveCargoAsync(orgId, purlName, ct),
+            "golang" => ResolveGoAsync(orgId, purlName, ct),
             _ => Task.FromResult(UpstreamLatestVersion.None),
         };
+
+    /// <summary>
+    /// Cargo: the sparse index enumerates every published version with its yank state. Yanked
+    /// versions are excluded — a yanked crate is not a release Cargo resolves to. The index
+    /// carries no publish date, so PublishedAt stays null.
+    /// </summary>
+    private async Task<UpstreamLatestVersion> ResolveCargoAsync(string orgId, string purlName, CancellationToken ct)
+    {
+        foreach (var source in await _registries.ResolveAsync(orgId, "cargo", ct))
+        {
+            var resp = await _upstream.GetOrFetchMetadataAsync(
+                $"{source.Url}/{CargoController.IndexPath(purlName)}", source.AuthorizationHeader, ct);
+            if (!resp.IsSuccessStatusCode)
+            {
+                continue;
+            }
+
+            var stableVersions = EcosystemVersionOrdering.OrderStableDescending(
+                "cargo",
+                CargoLookupMetadata.ParseIndex(resp.BodyAsString()).Where(e => !e.Yanked).Select(e => e.Version));
+            if (stableVersions.Count == 0)
+            {
+                continue;
+            }
+
+            return new UpstreamLatestVersion(stableVersions[0], null, stableVersions);
+        }
+
+        return UpstreamLatestVersion.None;
+    }
+
+    /// <summary>
+    /// Go: <c>@latest</c> answers with the module proxy's own choice of latest version and its
+    /// publish time. That endpoint does not enumerate the full version set, so
+    /// StableVersionsDescending stays null (unknown, not empty).
+    /// </summary>
+    private async Task<UpstreamLatestVersion> ResolveGoAsync(string orgId, string purlName, CancellationToken ct)
+    {
+        string encodedModule = GoController.EncodeBangEncoding(purlName);
+        foreach (var source in await _registries.ResolveAsync(orgId, "golang", ct))
+        {
+            var resp = await _upstream.GetOrFetchMetadataAsync(
+                $"{source.Url}/{encodedModule}/@latest", source.AuthorizationHeader, ct);
+            if (!resp.IsSuccessStatusCode)
+            {
+                continue;
+            }
+
+            using var doc = JsonDocument.Parse(resp.Body);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            string? latest = doc.RootElement.TryGetProperty("Version", out var versionEl)
+                && versionEl.ValueKind == JsonValueKind.String
+                ? NullIfBlank(versionEl.GetString())
+                : null;
+            if (latest is null)
+            {
+                continue;
+            }
+
+            var publishedAt = doc.RootElement.TryGetProperty("Time", out var timeEl)
+                && timeEl.ValueKind == JsonValueKind.String
+                ? ParseTimestampOrNull(timeEl.GetString())
+                : null;
+
+            return new UpstreamLatestVersion(latest, publishedAt, null);
+        }
+
+        return UpstreamLatestVersion.None;
+    }
 
     private async Task<UpstreamLatestVersion> ResolveNpmAsync(string orgId, string purlName, CancellationToken ct)
     {

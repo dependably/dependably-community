@@ -7,6 +7,7 @@
   import { onMount } from 'svelte'
   import { t } from 'svelte-i18n'
   import { api } from '../api.js'
+  import { secretPlaceholder } from '../secretField.js'
   import ErrorBanner from '../ErrorBanner.svelte'
   import InfoTip from '../InfoTip.svelte'
   import Toggle from '../Toggle.svelte'
@@ -222,7 +223,8 @@
 
       <div class="form-row">
         <label for="wh-secret">{$t('settings.webhooks.modal.secret')}</label>
-        <input id="wh-secret" type="password" bind:value={modalSecret} autocomplete="new-password" />
+        <input id="wh-secret" type="password" bind:value={modalSecret} autocomplete="new-password"
+               placeholder={secretPlaceholder(editTarget?.hasSecret)} />
         <div class="form-hint">
           {editTarget ? $t('settings.webhooks.modal.secretRotateHint') : $t('settings.webhooks.modal.secretHint')}
         </div>

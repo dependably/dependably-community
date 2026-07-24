@@ -110,6 +110,22 @@ public sealed class EdgeFactory : WebApplicationFactory<EdgeProgram>, IAsyncLife
 
         builder.WebHost.UseTestServer();
 
+        // Every factory instantiation boots the host, and RunOnStartup=true fires an immediate
+        // pass on the two hosted services the edge composition root registers:
+        // VulnerabilityScanService (job names vuln-scan, vuln-rescan) and
+        // ThreatFeedRefreshService (threat-feed) each make a real outbound HTTP request (OSV.dev,
+        // CISA KEV, FIRST.org EPSS) against the public internet rather than the in-process
+        // WireMock master. deprecation-refresh and license-backfill are also named here for
+        // parity with the four canonical factories even though the edge composition root never
+        // registers DeprecationRefreshService or LicenseBackfillService (Management-only
+        // services) — naming all five keeps the proxy-passthrough path (MockUpstream below)
+        // intact and this disables only these jobs, not every background job. Edge mode's
+        // allowlist inversion already force-disables all five; the explicit list keeps the guard
+        // in place even if that allowlist changes.
+        builder.WebHost.UseSetting(
+            "DISABLE_BACKGROUND_JOBS",
+            "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill");
+
         builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
         builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
         builder.WebHost.UseSetting("ANON_RATE_LIMIT_PERMITS", "100000");
