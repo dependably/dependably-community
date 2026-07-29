@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Security.Cryptography;
 using System.Text;
 using Dependably.Infrastructure;
 using Dependably.Protocol.Provenance;
@@ -13,52 +14,294 @@ namespace Dependably.Tests.Unit.Protocol;
 
 /// <summary>
 /// Exercises <see cref="RpmProvenanceVerifier"/> end-to-end with self-generated OpenPGP keys
-/// and hand-crafted RPM binary fixtures. The verifier resolves the per-org trust ring from
-/// <see cref="StubPerOrgTrustAnchorStore"/> and confirms key-pinning on the extracted
-/// OpenPGP blob; the test constructs minimal RPM lead + signature header structures with the
-/// <c>RPMSIGTAG_GPG</c> (1005) tag.
+/// and hand-crafted RPM binary fixtures. Fixtures are built the way rpm builds them: the main
+/// header and payload are laid out first, the detached signature is computed over the region
+/// the chosen tag actually covers, and only then is it embedded in the signature header.
 ///
-/// The verifier's security note explicitly states that full content-over-bytes verification
-/// is bounded by UpstreamClient's SHA-256 hash-and-stage; here we verify the key-pinning
-/// and format-parsing paths only.
+/// The security property under test is that a verdict of
+/// <see cref="ProvenanceStatus.Verified"/> requires the signature to verify mathematically over
+/// those bytes under a pinned key — not merely that the packet's issuer key-id resolves in the
+/// pinned ring. The key-id is unauthenticated attacker-controlled metadata, so the fixtures
+/// include a packet whose key-id is rewritten to a pinned key's id and a package whose bytes
+/// were altered after signing; both must come back non-Verified.
+///
+/// The header-only tag (<c>RPMSIGTAG_RSA</c>) carries a second property: the payload sits outside
+/// the signed region and is bound to it only by <c>RPMTAG_PAYLOADDIGEST</c> inside the signed
+/// header. Fixtures therefore build that tag the way rpm does — the digest is computed over the
+/// payload before signing — and the suite pins both directions: a package whose payload still
+/// matches the signed digest verifies, and one whose payload was altered, truncated, extended,
+/// or left undigested does not.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class RpmProvenanceVerifierTests
 {
-    // Minimal payload — actual content doesn't affect key-pinning verification.
-    private static readonly byte[] SamplePayload = Encoding.UTF8.GetBytes("rpm-header-payload-stub");
+    // Stand-in for the compressed cpio payload that follows the main header.
+    private static readonly byte[] SamplePayload = Encoding.UTF8.GetBytes("rpm-cpio-payload-stub");
 
     // Org ID used in per-org tests.
     private const string TestOrgId = "test-org";
 
+    private const long TestCap = 10 * 1024 * 1024;
+
     // ── happy path ──────────────────────────────────────────────────────────────
 
-    [Fact]
-    public async Task ValidGpgTag_FromPinnedKey_Verifies()
+    [Theory]
+    [InlineData(SigTagGpg)]
+    [InlineData(SigTagPgp)]
+    [InlineData(SigTagRsa)]
+    public async Task GenuineSignature_OverCoveredRegion_FromPinnedKey_Verifies(int tag)
     {
         var (secretKey, publicKey) = GeneratePgpKeyPair();
-        byte[] rpbBlob = BuildRawPgpSignaturePacket(SamplePayload, secretKey);
-        byte[] rpmBytes = BuildRpmWithSigTag(SigTagGpg, rpbBlob);
+        byte[] rpmBytes = BuildSignedRpm(tag, secretKey);
         var verifier = VerifierWithKey(publicKey);
 
-        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), maxBytes: 10 * 1024 * 1024);
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), TestCap);
 
         Assert.Equal(ProvenanceStatus.Verified, result.Status);
         Assert.NotNull(result.Signer);
         Assert.Matches("^[0-9a-f]+$", result.Signer);
     }
 
-    [Fact]
-    public async Task ValidPgpTag_FromPinnedKey_Verifies()
+    // ── #415 regression: key-id match is not a verdict ──────────────────────────
+
+    [Theory]
+    [InlineData(SigTagGpg)]
+    [InlineData(SigTagPgp)]
+    [InlineData(SigTagRsa)]
+    public async Task ForgedKeyId_ResolvesPinnedKey_ButSignatureIsInvalid_IsNotVerified(int tag)
     {
+        // The exact attacker capability: a syntactically valid OpenPGP signature packet stamped
+        // with a PINNED key's issuer key-id, carrying signature material the pinned key never
+        // produced. Resolving that key-id in the ring must not, on its own, yield Verified.
+        var (attackerKey, _) = GeneratePgpKeyPair();
+        var (_, pinnedPublicKey) = GeneratePgpKeyPair();
+
+        byte[] rpmBytes = BuildRpmWithForgedKeyId(tag, attackerKey, pinnedPublicKey.KeyId);
+
+        // Precondition: the embedded packet really does name the pinned key, so the key-id lookup
+        // in the verifier succeeds and the test is not passing for some unrelated parse failure.
+        Assert.Equal(pinnedPublicKey.KeyId, ExtractEmbeddedSignature(rpmBytes).KeyId);
+
+        var verifier = VerifierWithKey(pinnedPublicKey);
+
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), TestCap);
+
+        Assert.NotEqual(ProvenanceStatus.Verified, result.Status);
+        Assert.Equal(ProvenanceStatus.Failed, result.Status);
+        Assert.Null(result.Signer);
+    }
+
+    [Fact]
+    public async Task PayloadTamperedAfterSigning_IsNotVerified()
+    {
+        // Mirror-swap shape: the distro's genuine header+payload signature is kept verbatim and
+        // the payload bytes are replaced. RPMSIGTAG_GPG covers the payload, so this must fail.
         var (secretKey, publicKey) = GeneratePgpKeyPair();
-        byte[] sigBlob = BuildRawPgpSignaturePacket(SamplePayload, secretKey);
-        byte[] rpmBytes = BuildRpmWithSigTag(SigTagPgp, sigBlob);
+        byte[] rpmBytes = BuildSignedRpm(SigTagGpg, secretKey, tamperPayloadAfterSigning: true);
         var verifier = VerifierWithKey(publicKey);
 
-        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), maxBytes: 10 * 1024 * 1024);
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), TestCap);
+
+        Assert.Equal(ProvenanceStatus.Failed, result.Status);
+        Assert.Null(result.Signer);
+    }
+
+    [Theory]
+    [InlineData(SigTagGpg)]
+    [InlineData(SigTagRsa)]
+    public async Task MainHeaderTamperedAfterSigning_IsNotVerified(int tag)
+    {
+        // Every accepted tag covers the main header, so altering it invalidates all of them.
+        var (secretKey, publicKey) = GeneratePgpKeyPair();
+        byte[] rpmBytes = BuildSignedRpm(tag, secretKey, tamperMainHeaderAfterSigning: true);
+        var verifier = VerifierWithKey(publicKey);
+
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), TestCap);
+
+        Assert.Equal(ProvenanceStatus.Failed, result.Status);
+    }
+
+    // ── header-only tag: payload coverage via RPMTAG_PAYLOADDIGEST ──────────────
+
+    [Fact]
+    public async Task RsaTag_PayloadTamperedAfterSigning_IsNotVerified()
+    {
+        // The header-only tag signs the main header, not the payload. The payload is bound to that
+        // header by RPMTAG_PAYLOADDIGEST, which the verifier recomputes — so substituting the
+        // payload while keeping the genuine signed header intact must be rejected.
+        var (secretKey, publicKey) = GeneratePgpKeyPair();
+        byte[] rpmBytes = BuildSignedRpm(SigTagRsa, secretKey, tamperPayloadAfterSigning: true);
+        var verifier = VerifierWithKey(publicKey);
+
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), TestCap);
+
+        Assert.Equal(ProvenanceStatus.Failed, result.Status);
+        Assert.Null(result.Signer);
+    }
+
+    [Fact]
+    public async Task RsaTag_PayloadMatchesSignedDigest_Verifies()
+    {
+        // Adversarial twin of the case above: an untouched RSA-only package, whose payload still
+        // hashes to the digest in the signed header, must still verify. The digest check tightens
+        // the verdict, it does not reject genuine packages.
+        var (secretKey, publicKey) = GeneratePgpKeyPair();
+        byte[] rpmBytes = BuildSignedRpm(SigTagRsa, secretKey);
+        var verifier = VerifierWithKey(publicKey);
+
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), TestCap);
 
         Assert.Equal(ProvenanceStatus.Verified, result.Status);
+        Assert.NotNull(result.Signer);
+    }
+
+    [Theory]
+    [InlineData(4)]    // payload truncated after signing
+    [InlineData(-6)]   // payload extended after signing
+    public async Task RsaTag_PayloadLengthChangedAfterSigning_IsNotVerified(int trimBytes)
+    {
+        // Length changes are the cheapest payload substitution: neither shortening nor appending
+        // touches the signed header, so only the recomputed digest catches them.
+        var (secretKey, publicKey) = GeneratePgpKeyPair();
+        byte[] rpmBytes = BuildSignedRpm(SigTagRsa, secretKey);
+        byte[] altered = trimBytes > 0
+            ? rpmBytes[..^trimBytes]
+            : Concat(rpmBytes, new byte[-trimBytes]);
+        var verifier = VerifierWithKey(publicKey);
+
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(altered), TestCap);
+
+        Assert.Equal(ProvenanceStatus.Failed, result.Status);
+    }
+
+    [Fact]
+    public async Task RsaTag_NoPayloadDigest_IsNotVerified()
+    {
+        // Fail-closed: the signature is genuine and covers the main header, but nothing in that
+        // header binds the payload. Stripping the digest tag is exactly how an attacker would
+        // re-open the substitution hole, so an undigested payload is unverifiable, not verified.
+        var (secretKey, publicKey) = GeneratePgpKeyPair();
+        byte[] rpmBytes = BuildSignedRpm(SigTagRsa, secretKey, payloadDigest: PayloadDigest.None);
+        var verifier = VerifierWithKey(publicKey);
+
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), TestCap);
+
+        Assert.Equal(ProvenanceStatus.Failed, result.Status);
+        Assert.Null(result.Signer);
+    }
+
+    [Theory]
+    [InlineData(SigTagGpg)]
+    [InlineData(SigTagPgp)]
+    public async Task HeaderAndPayloadTag_NoPayloadDigest_StillVerifies(int tag)
+    {
+        // Adversarial twin of the fail-closed rule: it is scoped to the header-only tag. GPG/PGP
+        // sign the payload directly, so a package carrying no payload-digest tag at all — the
+        // shape every pre-rpm-4.14 package has — must keep verifying.
+        var (secretKey, publicKey) = GeneratePgpKeyPair();
+        byte[] rpmBytes = BuildSignedRpm(tag, secretKey, payloadDigest: PayloadDigest.None);
+        var verifier = VerifierWithKey(publicKey);
+
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), TestCap);
+
+        Assert.Equal(ProvenanceStatus.Verified, result.Status);
+    }
+
+    [Fact]
+    public async Task RsaTag_OnlyAlternatePayloadDigest_IsNotVerified()
+    {
+        // RPMTAG_PAYLOADDIGESTALT digests the UNCOMPRESSED archive, so it cannot be checked
+        // against the payload as stored without decompressing it. It does not substitute for
+        // RPMTAG_PAYLOADDIGEST, and its presence alone must not read as payload coverage.
+        var (secretKey, publicKey) = GeneratePgpKeyPair();
+        byte[] rpmBytes = BuildSignedRpm(SigTagRsa, secretKey, payloadDigest: PayloadDigest.AlternateOnly);
+        var verifier = VerifierWithKey(publicKey);
+
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), TestCap);
+
+        Assert.Equal(ProvenanceStatus.Failed, result.Status);
+    }
+
+    [Theory]
+    [InlineData(HashAlgoSha256)]
+    [InlineData(HashAlgoSha384)]
+    [InlineData(HashAlgoSha512)]
+    public async Task RsaTag_SupportedDigestAlgorithms_Verify(int algo)
+    {
+        // RPMTAG_PAYLOADDIGESTALGO selects the hash; all three collision-resistant ids rpm can
+        // emit must be honoured, not just the SHA-256 default.
+        var (secretKey, publicKey) = GeneratePgpKeyPair();
+        byte[] rpmBytes = BuildSignedRpm(SigTagRsa, secretKey, digestAlgo: algo);
+        var verifier = VerifierWithKey(publicKey);
+
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), TestCap);
+
+        Assert.Equal(ProvenanceStatus.Verified, result.Status);
+    }
+
+    [Theory]
+    [InlineData(1)]    // MD5
+    [InlineData(2)]    // SHA-1
+    [InlineData(99)]   // unassigned
+    public async Task RsaTag_WeakOrUnknownDigestAlgorithm_IsNotVerified(int algo)
+    {
+        // The payload digest is the only thing binding the payload here, so a collision-prone or
+        // unrecognised algorithm id yields no usable binding — unverifiable, not verified.
+        var (secretKey, publicKey) = GeneratePgpKeyPair();
+        byte[] rpmBytes = BuildSignedRpm(SigTagRsa, secretKey, digestAlgo: algo);
+        var verifier = VerifierWithKey(publicKey);
+
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), TestCap);
+
+        Assert.Equal(ProvenanceStatus.Failed, result.Status);
+    }
+
+    [Fact]
+    public async Task RsaTag_NoAlgorithmTag_DefaultsToSha256_Verifies()
+    {
+        // rpm omits RPMTAG_PAYLOADDIGESTALGO when the digest is its SHA-256 default.
+        var (secretKey, publicKey) = GeneratePgpKeyPair();
+        byte[] rpmBytes = BuildSignedRpm(SigTagRsa, secretKey, payloadDigest: PayloadDigest.NoAlgorithmTag);
+        var verifier = VerifierWithKey(publicKey);
+
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), TestCap);
+
+        Assert.Equal(ProvenanceStatus.Verified, result.Status);
+    }
+
+    [Fact]
+    public async Task RsaTag_MalformedPayloadDigest_IsNotVerified()
+    {
+        // A digest string that is not hex of the algorithm's length cannot be compared, so the
+        // payload is unbound — the same fail-closed answer as no digest at all.
+        var (secretKey, publicKey) = GeneratePgpKeyPair();
+        byte[] rpmBytes = BuildSignedRpm(SigTagRsa, secretKey, payloadDigest: PayloadDigest.Malformed);
+        var verifier = VerifierWithKey(publicKey);
+
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), TestCap);
+
+        Assert.Equal(ProvenanceStatus.Failed, result.Status);
+    }
+
+    [Fact]
+    public async Task Mixed_TwoRsaOnlyRpms_OneIntact_OnePayloadSwapped()
+    {
+        // Partial-failure shape: the same pinned key signed both headers, both signatures verify,
+        // and only the recomputed payload digest separates them.
+        var (secretKey, publicKey) = GeneratePgpKeyPair();
+
+        byte[] intact = BuildSignedRpm(SigTagRsa, secretKey);
+        byte[] swapped = BuildSignedRpm(SigTagRsa, secretKey, tamperPayloadAfterSigning: true);
+
+        var verifier = VerifierWithKey(publicKey);
+
+        var intactResult = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(intact), TestCap);
+        var swappedResult = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(swapped), TestCap);
+
+        Assert.Equal(ProvenanceStatus.Verified, intactResult.Status);
+        Assert.Equal(ProvenanceStatus.Failed, swappedResult.Status);
+        Assert.NotNull(intactResult.Signer);
+        Assert.Null(swappedResult.Signer);
     }
 
     // ── failure paths ───────────────────────────────────────────────────────────
@@ -67,13 +310,12 @@ public sealed class RpmProvenanceVerifierTests
     public async Task WrongKey_KeyNotPinned_Fails()
     {
         var (secretKey, _) = GeneratePgpKeyPair();
-        byte[] sigBlob = BuildRawPgpSignaturePacket(SamplePayload, secretKey);
-        byte[] rpmBytes = BuildRpmWithSigTag(SigTagGpg, sigBlob);
-        // Pin a DIFFERENT key — signature is well-formed but keyid is not in the pinned ring.
+        byte[] rpmBytes = BuildSignedRpm(SigTagGpg, secretKey);
+        // Pin a DIFFERENT key — signature is genuine but its key-id is not in the pinned ring.
         var (_, differentPublicKey) = GeneratePgpKeyPair();
         var verifier = VerifierWithKey(differentPublicKey);
 
-        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), maxBytes: 10 * 1024 * 1024);
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), TestCap);
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
         Assert.Null(result.Signer);
@@ -87,7 +329,7 @@ public sealed class RpmProvenanceVerifierTests
         var (_, publicKey) = GeneratePgpKeyPair();
         var verifier = VerifierWithKey(publicKey);
 
-        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), maxBytes: 10 * 1024 * 1024);
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), TestCap);
 
         Assert.Equal(ProvenanceStatus.Unsigned, result.Status);
     }
@@ -100,7 +342,7 @@ public sealed class RpmProvenanceVerifierTests
         var (_, publicKey) = GeneratePgpKeyPair();
         var verifier = VerifierWithKey(publicKey);
 
-        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(notRpm), maxBytes: 10 * 1024 * 1024);
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(notRpm), TestCap);
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
     }
@@ -110,13 +352,42 @@ public sealed class RpmProvenanceVerifierTests
     {
         // RPM truncated mid-signature-header.
         var (secretKey, publicKey) = GeneratePgpKeyPair();
-        byte[] sigBlob = BuildRawPgpSignaturePacket(SamplePayload, secretKey);
-        byte[] rpmBytes = BuildRpmWithSigTag(SigTagGpg, sigBlob);
-        // Keep only the lead + 8 bytes of the sig header.
+        byte[] rpmBytes = BuildSignedRpm(SigTagGpg, secretKey);
         byte[] truncated = rpmBytes[..(LeadSize + 8)];
         var verifier = VerifierWithKey(publicKey);
 
-        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(truncated), maxBytes: 10 * 1024 * 1024);
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(truncated), TestCap);
+
+        Assert.Equal(ProvenanceStatus.Failed, result.Status);
+    }
+
+    [Fact]
+    public async Task TruncatedPayload_UnderHeaderAndPayloadTag_Fails()
+    {
+        // The covered region is cut short after signing: the bytes that remain are a strict
+        // prefix of what was signed, so the digest cannot match.
+        var (secretKey, publicKey) = GeneratePgpKeyPair();
+        byte[] rpmBytes = BuildSignedRpm(SigTagGpg, secretKey);
+        byte[] truncated = rpmBytes[..^4];
+        var verifier = VerifierWithKey(publicKey);
+
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(truncated), TestCap);
+
+        Assert.Equal(ProvenanceStatus.Failed, result.Status);
+    }
+
+    [Fact]
+    public async Task TruncatedMainHeader_UnderHeaderOnlyTag_Fails()
+    {
+        // Header-only coverage has a fixed length: a stream that ends before the covered region
+        // is complete must never be treated as verified.
+        var (secretKey, publicKey) = GeneratePgpKeyPair();
+        byte[] rpmBytes = BuildSignedRpm(SigTagRsa, secretKey);
+        // Cut inside the main header (which begins right after the aligned signature header).
+        byte[] truncated = rpmBytes[..(rpmBytes.Length - SamplePayload.Length - 4)];
+        var verifier = VerifierWithKey(publicKey);
+
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(truncated), TestCap);
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
     }
@@ -126,13 +397,43 @@ public sealed class RpmProvenanceVerifierTests
     {
         // Embed garbage bytes as the signature blob — OpenPGP parsing must fail gracefully.
         byte[] garbage = Encoding.UTF8.GetBytes("not an OpenPGP signature");
-        byte[] rpmBytes = BuildRpmWithSigTag(SigTagGpg, garbage);
+        byte[] rpmBytes = BuildRpm([(SigTagGpg, garbage)], MainHeader(), SamplePayload);
         var (_, publicKey) = GeneratePgpKeyPair();
         var verifier = VerifierWithKey(publicKey);
 
-        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), maxBytes: 10 * 1024 * 1024);
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), TestCap);
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
+    }
+
+    [Fact]
+    public async Task PackageLargerThanCap_Fails()
+    {
+        // The cap bounds how much of the package the verifier will read; a package that runs past
+        // it is unverifiable, never verified-by-default.
+        var (secretKey, publicKey) = GeneratePgpKeyPair();
+        byte[] rpmBytes = BuildSignedRpm(SigTagGpg, secretKey);
+        var verifier = VerifierWithKey(publicKey);
+
+        var result = await verifier.VerifyPackageAsync(
+            TestOrgId, new MemoryStream(rpmBytes), maxBytes: rpmBytes.Length - 1);
+
+        Assert.Equal(ProvenanceStatus.Failed, result.Status);
+    }
+
+    [Fact]
+    public async Task PackageExactlyAtCap_Verifies()
+    {
+        // Boundary twin of the case above: a package whose last byte lands exactly on the cap is
+        // fully read and verifies. The bound must not shave the final chunk.
+        var (secretKey, publicKey) = GeneratePgpKeyPair();
+        byte[] rpmBytes = BuildSignedRpm(SigTagGpg, secretKey);
+        var verifier = VerifierWithKey(publicKey);
+
+        var result = await verifier.VerifyPackageAsync(
+            TestOrgId, new MemoryStream(rpmBytes), maxBytes: rpmBytes.Length);
+
+        Assert.Equal(ProvenanceStatus.Verified, result.Status);
     }
 
     [Fact]
@@ -144,10 +445,9 @@ public sealed class RpmProvenanceVerifierTests
             NullLogger<RpmProvenanceVerifier>.Instance);
 
         var (secretKey, _) = GeneratePgpKeyPair();
-        byte[] sigBlob = BuildRawPgpSignaturePacket(SamplePayload, secretKey);
-        byte[] rpmBytes = BuildRpmWithSigTag(SigTagGpg, sigBlob);
+        byte[] rpmBytes = BuildSignedRpm(SigTagGpg, secretKey);
 
-        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), maxBytes: 10 * 1024 * 1024);
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), TestCap);
 
         Assert.Equal(ProvenanceStatus.NotApplicable, result.Status);
     }
@@ -160,17 +460,14 @@ public sealed class RpmProvenanceVerifierTests
         var (secretKeyA, publicKeyA) = GeneratePgpKeyPair();
         var (secretKeyB, _) = GeneratePgpKeyPair();
 
-        byte[] sigBlobA = BuildRawPgpSignaturePacket(SamplePayload, secretKeyA);
-        byte[] sigBlobB = BuildRawPgpSignaturePacket(SamplePayload, secretKeyB);
-
-        byte[] rpmA = BuildRpmWithSigTag(SigTagGpg, sigBlobA);
-        byte[] rpmB = BuildRpmWithSigTag(SigTagGpg, sigBlobB);
+        byte[] rpmA = BuildSignedRpm(SigTagGpg, secretKeyA);
+        byte[] rpmB = BuildSignedRpm(SigTagGpg, secretKeyB);
 
         // Pin only key A.
         var verifier = VerifierWithKey(publicKeyA);
 
-        var resultA = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmA), maxBytes: 10 * 1024 * 1024);
-        var resultB = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmB), maxBytes: 10 * 1024 * 1024);
+        var resultA = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmA), TestCap);
+        var resultB = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmB), TestCap);
 
         Assert.Equal(ProvenanceStatus.Verified, resultA.Status);
         Assert.Equal(ProvenanceStatus.Failed, resultB.Status);
@@ -179,52 +476,48 @@ public sealed class RpmProvenanceVerifierTests
     }
 
     [Fact]
-    public async Task Mixed_OneUnsigned_OneVerified_OneKeyNotPinned()
+    public async Task Mixed_OneUnsigned_OneVerified_OneForgedKeyId()
     {
         var (secretKeyPinned, publicKeyPinned) = GeneratePgpKeyPair();
-        var (secretKeyUnpinned, _) = GeneratePgpKeyPair();
+        var (attackerKey, _) = GeneratePgpKeyPair();
 
-        byte[] sigPinned = BuildRawPgpSignaturePacket(SamplePayload, secretKeyPinned);
-        byte[] sigUnpinned = BuildRawPgpSignaturePacket(SamplePayload, secretKeyUnpinned);
-
-        byte[] rpmVerified = BuildRpmWithSigTag(SigTagGpg, sigPinned);
-        byte[] rpmFailed = BuildRpmWithSigTag(SigTagGpg, sigUnpinned);
+        byte[] rpmVerified = BuildSignedRpm(SigTagGpg, secretKeyPinned);
+        byte[] rpmForged = BuildRpmWithForgedKeyId(SigTagGpg, attackerKey, publicKeyPinned.KeyId);
         byte[] rpmUnsigned = BuildRpmWithNoSigTag();
 
         var verifier = VerifierWithKey(publicKeyPinned);
 
-        var verified = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmVerified), 10 * 1024 * 1024);
-        var failed = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmFailed), 10 * 1024 * 1024);
-        var unsigned = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmUnsigned), 10 * 1024 * 1024);
+        var verified = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmVerified), TestCap);
+        var forged = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmForged), TestCap);
+        var unsigned = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmUnsigned), TestCap);
 
         Assert.Equal(ProvenanceStatus.Verified, verified.Status);
-        Assert.Equal(ProvenanceStatus.Failed, failed.Status);
+        Assert.Equal(ProvenanceStatus.Failed, forged.Status);
         Assert.Equal(ProvenanceStatus.Unsigned, unsigned.Status);
     }
 
-    // ── VerifyBytes internal static (direct access) ──────────────────────────────
+    // ── VerifyBytesAsync internal static (direct access) ─────────────────────────
 
     [Fact]
-    public void VerifyBytes_ValidGpgTag_Verifies()
+    public async Task VerifyBytesAsync_ValidGpgTag_Verifies()
     {
         var (secretKey, publicKey) = GeneratePgpKeyPair();
-        byte[] sigBlob = BuildRawPgpSignaturePacket(SamplePayload, secretKey);
-        byte[] rpmBytes = BuildRpmWithSigTag(SigTagGpg, sigBlob);
+        byte[] rpmBytes = BuildSignedRpm(SigTagGpg, secretKey);
         var keyRing = KeyRingFor(publicKey);
 
-        var result = RpmProvenanceVerifier.VerifyBytes(rpmBytes, keyRing);
+        var result = await RpmProvenanceVerifier.VerifyBytesAsync(rpmBytes, keyRing);
 
         Assert.Equal(ProvenanceStatus.Verified, result.Status);
     }
 
     [Fact]
-    public void VerifyBytes_NoSigTag_ReturnsUnsigned()
+    public async Task VerifyBytesAsync_NoSigTag_ReturnsUnsigned()
     {
         byte[] rpmBytes = BuildRpmWithNoSigTag();
         var (_, publicKey) = GeneratePgpKeyPair();
         var keyRing = KeyRingFor(publicKey);
 
-        var result = RpmProvenanceVerifier.VerifyBytes(rpmBytes, keyRing);
+        var result = await RpmProvenanceVerifier.VerifyBytesAsync(rpmBytes, keyRing);
 
         Assert.Equal(ProvenanceStatus.Unsigned, result.Status);
     }
@@ -232,50 +525,40 @@ public sealed class RpmProvenanceVerifierTests
     // ── multi-entry signature-header scan ────────────────────────────────────────
 
     [Fact]
-    public async Task ValidRsaTag_FromPinnedKey_Verifies()
-    {
-        // RPMSIGTAG_RSA (268) is accepted alongside GPG/PGP.
-        var (secretKey, publicKey) = GeneratePgpKeyPair();
-        byte[] sigBlob = BuildRawPgpSignaturePacket(SamplePayload, secretKey);
-        byte[] rpmBytes = BuildRpmWithEntries((SigTagRsa, sigBlob));
-        var verifier = VerifierWithKey(publicKey);
-
-        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), 10 * 1024 * 1024);
-
-        Assert.Equal(ProvenanceStatus.Verified, result.Status);
-    }
-
-    [Fact]
     public async Task NonSignatureEntryBeforeSigTag_IsSkipped_ThenVerifies()
     {
         // A leading non-OpenPGP tag entry must be scanned past to reach the GPG signature.
         var (secretKey, publicKey) = GeneratePgpKeyPair();
-        byte[] sigBlob = BuildRawPgpSignaturePacket(SamplePayload, secretKey);
+        byte[] main = MainHeader();
+        byte[] sigBlob = SignRegion(Concat(main, SamplePayload), secretKey);
         byte[] filler = Encoding.UTF8.GetBytes("non-signature header blob");
-        byte[] rpmBytes = BuildRpmWithEntries((NonSigTag, filler), (SigTagGpg, sigBlob));
+        byte[] rpmBytes = BuildRpm([(NonSigTag, filler), (SigTagGpg, sigBlob)], main, SamplePayload);
         var verifier = VerifierWithKey(publicKey);
 
-        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), 10 * 1024 * 1024);
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), TestCap);
 
         Assert.Equal(ProvenanceStatus.Verified, result.Status);
     }
 
     [Fact]
-    public async Task MultipleSignatureTags_FirstInIndexOrderIsSelected()
+    public async Task MultipleSignatureTags_WidestCoverageWins_NotIndexOrder()
     {
-        // Selection is positional: the first OpenPGP tag in index order is the one verified.
-        // Entry 1 (PGP) is signed by an UNPINNED key; entry 2 (GPG) by the PINNED key. First-match
-        // picks entry 1 and fails — proving the scan does not prefer a later GPG over an earlier tag.
-        var (secretPinned, publicPinned) = GeneratePgpKeyPair();
-        var (secretUnpinned, _) = GeneratePgpKeyPair();
-        byte[] firstPgp = BuildRawPgpSignaturePacket(SamplePayload, secretUnpinned);
-        byte[] secondGpg = BuildRawPgpSignaturePacket(SamplePayload, secretPinned);
-        byte[] rpmBytes = BuildRpmWithEntries((SigTagPgp, firstPgp), (SigTagGpg, secondGpg));
-        var verifier = VerifierWithKey(publicPinned);
+        // rpm writes RPMSIGTAG_RSA (268, main header only) ahead of RPMSIGTAG_GPG (1005, main
+        // header + payload) because the index is tag-ordered. Selection is by coverage, not
+        // position: the GPG entry is chosen even though the RSA entry comes first.
+        var (secretKey, publicKey) = GeneratePgpKeyPair();
+        var (otherKey, _) = GeneratePgpKeyPair();
+        byte[] main = MainHeader();
+        // The RSA entry is signed by an UNPINNED key: if selection were positional it would be
+        // picked and the result would be Failed.
+        byte[] rsaBlob = SignRegion(main, otherKey);
+        byte[] gpgBlob = SignRegion(Concat(main, SamplePayload), secretKey);
+        byte[] rpmBytes = BuildRpm([(SigTagRsa, rsaBlob), (SigTagGpg, gpgBlob)], main, SamplePayload);
+        var verifier = VerifierWithKey(publicKey);
 
-        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), 10 * 1024 * 1024);
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), TestCap);
 
-        Assert.Equal(ProvenanceStatus.Failed, result.Status);
+        Assert.Equal(ProvenanceStatus.Verified, result.Status);
     }
 
     // ── RPM binary builder ───────────────────────────────────────────────────────
@@ -294,7 +577,6 @@ public sealed class RpmProvenanceVerifierTests
 
     // Lead size; header intro is 16 bytes.
     private const int LeadSize = 96;
-    private const int HdrIntroSize = 16;
     private const int IndexEntrySize = 16;
 
     // TypeBin used for OpenPGP signature blobs.
@@ -308,68 +590,203 @@ public sealed class RpmProvenanceVerifierTests
     // A non-OpenPGP signature-header tag (RPMSIGTAG_SIZE) — scanned past, never selected.
     private const int NonSigTag = 1000;
 
-    // Builds a minimal RPM binary with a single index entry carrying tag <paramref name="tag"/>
-    // and the given <paramref name="sigBlob"/> in the store region. The rest of the RPM
-    // (after the sig header) is a stub — it is not read by VerifyBytes.
-    private static byte[] BuildRpmWithSigTag(int tag, byte[] sigBlob)
-    {
-        int nindex = 1;
-        int hsize = sigBlob.Length;
+    // Main-header tags binding the payload to the signed header, and their index-entry types.
+    private const int MainTagPayloadDigest = 5092;
+    private const int MainTagPayloadDigestAlgo = 5093;
+    private const int MainTagPayloadDigestAlt = 5097;
+    private const int TypeInt32 = 4;
+    private const int TypeStringArray = 8;
 
-        // index offset is 0 (relative to store start).
+    // OpenPGP hash-algorithm ids rpm writes into RPMTAG_PAYLOADDIGESTALGO.
+    private const int HashAlgoSha256 = 8;
+    private const int HashAlgoSha384 = 9;
+    private const int HashAlgoSha512 = 10;
+
+    /// <summary>Shape of the payload-digest tags a fixture's main header carries.</summary>
+    private enum PayloadDigest
+    {
+        /// <summary>RPMTAG_PAYLOADDIGEST + RPMTAG_PAYLOADDIGESTALGO, as rpm 4.14+ writes them.</summary>
+        Standard,
+
+        /// <summary>No payload-digest tags at all — the shape of a pre-rpm-4.14 package.</summary>
+        None,
+
+        /// <summary>The uncompressed-archive digest only; no digest over the payload as stored.</summary>
+        AlternateOnly,
+
+        /// <summary>Digest present, algorithm tag omitted (rpm's SHA-256 default implied).</summary>
+        NoAlgorithmTag,
+
+        /// <summary>Digest present but not hex of the algorithm's length.</summary>
+        Malformed,
+    }
+
+    // A minimal but structurally valid main header: intro + index entries + their store.
+    // Non-empty so the header-only (RSA) covered length is a real computed span, not zero.
+    private static byte[] MainHeader()
+        => MainHeaderFor(SamplePayload, PayloadDigest.None, HashAlgoSha256);
+
+    // Builds a main header carrying the requested payload-digest shape over <paramref name="payload"/>.
+    private static byte[] MainHeaderFor(byte[] payload, PayloadDigest digest, int digestAlgo)
+    {
+        var entries = new List<(int Tag, int Type, int Count, byte[] Value)>
+        {
+            (NonSigTag, TypeBin, 8, Encoding.UTF8.GetBytes("mainhdr!")),
+        };
+
+        switch (digest)
+        {
+            case PayloadDigest.Standard:
+                entries.Add((MainTagPayloadDigest, TypeStringArray, 1, NulTerminated(PayloadDigestHex(payload, digestAlgo))));
+                entries.Add((MainTagPayloadDigestAlgo, TypeInt32, 1, Int32Be(digestAlgo)));
+                break;
+            case PayloadDigest.NoAlgorithmTag:
+                entries.Add((MainTagPayloadDigest, TypeStringArray, 1, NulTerminated(PayloadDigestHex(payload, HashAlgoSha256))));
+                break;
+            case PayloadDigest.AlternateOnly:
+                entries.Add((MainTagPayloadDigestAlt, TypeStringArray, 1, NulTerminated(PayloadDigestHex(payload, HashAlgoSha256))));
+                entries.Add((MainTagPayloadDigestAlgo, TypeInt32, 1, Int32Be(HashAlgoSha256)));
+                break;
+            case PayloadDigest.Malformed:
+                entries.Add((MainTagPayloadDigest, TypeStringArray, 1, NulTerminated("not-a-hex-digest")));
+                entries.Add((MainTagPayloadDigestAlgo, TypeInt32, 1, Int32Be(HashAlgoSha256)));
+                break;
+            default:
+                break;
+        }
+
+        int hsize = 0;
+        foreach (var (_, _, _, value) in entries)
+        {
+            hsize += value.Length;
+        }
+
         using var ms = new MemoryStream();
         using var w = new BinaryWriter(ms);
 
-        // Lead: 96 bytes. Magic in first 4 bytes; rest zero.
-        w.Write(Lead0); w.Write(Lead1); w.Write(Lead2); w.Write(Lead3);
-        w.Write(new byte[LeadSize - 4]);
-
-        // Signature header intro: magic(4) + reserved(4) + nindex(4 BE) + hsize(4 BE).
         w.Write(HdrMagic0); w.Write(HdrMagic1); w.Write(HdrMagic2); w.Write(HdrVersion);
-        w.Write(new byte[4]); // reserved
-        WriteInt32Be(w, nindex);
-        WriteInt32Be(w, hsize);
+        w.Write(new byte[4]);            // reserved
+        WriteInt32Be(w, entries.Count);  // nindex
+        WriteInt32Be(w, hsize);          // hsize
 
-        // One index entry: tag(4 BE) + type(4 BE) + offset(4 BE) + count(4 BE).
-        WriteInt32Be(w, tag);
-        WriteInt32Be(w, TypeBin);
-        WriteInt32Be(w, 0); // offset in store
-        WriteInt32Be(w, sigBlob.Length);
+        int offset = 0;
+        foreach (var (tag, type, count, value) in entries)
+        {
+            WriteInt32Be(w, tag);
+            WriteInt32Be(w, type);
+            WriteInt32Be(w, offset);
+            WriteInt32Be(w, count);
+            offset += value.Length;
+        }
 
-        // Store region: the sig blob bytes.
-        w.Write(sigBlob);
+        foreach (var (_, _, _, value) in entries)
+        {
+            w.Write(value);
+        }
 
-        // Append minimal stub for the remainder (avoids any bounds check failures).
-        w.Write(new byte[16]);
-
+        w.Flush();
         return ms.ToArray();
     }
 
-    // Builds a minimal RPM with an empty signature header (no index entries, no sig tags).
-    private static byte[] BuildRpmWithNoSigTag()
+    // Hex digest of the payload under the given algorithm id. Ids the verifier does not accept
+    // (MD5, SHA-1, unassigned) fall back to SHA-256 bytes: those fixtures exercise the algorithm
+    // gate, which rejects before any comparison happens.
+    private static string PayloadDigestHex(byte[] payload, int algo)
     {
-        using var ms = new MemoryStream();
-        using var w = new BinaryWriter(ms);
-
-        w.Write(Lead0); w.Write(Lead1); w.Write(Lead2); w.Write(Lead3);
-        w.Write(new byte[LeadSize - 4]);
-
-        // Sig header with 0 entries and 0 hsize.
-        w.Write(HdrMagic0); w.Write(HdrMagic1); w.Write(HdrMagic2); w.Write(HdrVersion);
-        w.Write(new byte[4]);
-        WriteInt32Be(w, 0); // nindex = 0
-        WriteInt32Be(w, 0); // hsize = 0
-
-        // No index entries, no store. Add minimal stub.
-        w.Write(new byte[16]);
-
-        return ms.ToArray();
+        byte[] hash = algo switch
+        {
+            HashAlgoSha384 => SHA384.HashData(payload),
+            HashAlgoSha512 => SHA512.HashData(payload),
+            _ => SHA256.HashData(payload),
+        };
+        return Convert.ToHexString(hash).ToLowerInvariant();
     }
 
-    // Builds a minimal RPM whose signature header carries multiple index entries (each typed
-    // TypeBin) in order, with their blobs concatenated in the store region. Lets a test place a
-    // non-signature or earlier signature tag ahead of the one under test.
-    private static byte[] BuildRpmWithEntries(params (int Tag, byte[] Blob)[] entries)
+    private static byte[] NulTerminated(string value) => Encoding.ASCII.GetBytes(value + '\0');
+
+    private static byte[] Int32Be(int value)
+    {
+        byte[] buf = new byte[4];
+        BinaryPrimitives.WriteInt32BigEndian(buf, value);
+        return buf;
+    }
+
+    // Builds a genuinely signed RPM: the signature is computed over exactly the region the tag
+    // covers (main header + payload for GPG/PGP, main header alone for RSA), with the payload
+    // digest embedded in the header before signing the way rpm does. The optional tamper switches
+    // mutate the package AFTER signing, the way a hostile mirror would.
+    private static byte[] BuildSignedRpm(
+        int tag, PgpSecretKey secretKey,
+        bool tamperPayloadAfterSigning = false,
+        bool tamperMainHeaderAfterSigning = false,
+        PayloadDigest payloadDigest = PayloadDigest.Standard,
+        int digestAlgo = HashAlgoSha256)
+    {
+        byte[] payload = SamplePayload;
+        byte[] main = MainHeaderFor(payload, payloadDigest, digestAlgo);
+        byte[] covered = tag == SigTagRsa ? main : Concat(main, payload);
+        byte[] sigBlob = SignRegion(covered, secretKey);
+
+        if (tamperMainHeaderAfterSigning)
+        {
+            main = (byte[])main.Clone();
+            main[^1] ^= 0xFF;
+        }
+
+        if (tamperPayloadAfterSigning)
+        {
+            payload = (byte[])payload.Clone();
+            payload[^1] ^= 0xFF;
+        }
+
+        return BuildRpm([(tag, sigBlob)], main, payload);
+    }
+
+    // Builds an RPM whose signature packet was produced by <paramref name="attackerKey"/> but
+    // whose issuer key-id bytes are rewritten to <paramref name="pinnedKeyId"/>. The key-id lives
+    // in the packet's unhashed area, so rewriting it leaves a parseable packet that names a
+    // trusted key while the signature material stays the attacker's.
+    private static byte[] BuildRpmWithForgedKeyId(int tag, PgpSecretKey attackerKey, long pinnedKeyId)
+    {
+        // Carries a genuine payload digest, so the only thing wrong with the package is the
+        // signature material — the verdict cannot be reached through the payload-coverage gate.
+        byte[] main = MainHeaderFor(SamplePayload, PayloadDigest.Standard, HashAlgoSha256);
+        byte[] covered = tag == SigTagRsa ? main : Concat(main, SamplePayload);
+        byte[] sigBlob = SignRegion(covered, attackerKey);
+
+        Span<byte> attackerId = stackalloc byte[8];
+        Span<byte> pinnedId = stackalloc byte[8];
+        BinaryPrimitives.WriteInt64BigEndian(attackerId, attackerKey.KeyId);
+        BinaryPrimitives.WriteInt64BigEndian(pinnedId, pinnedKeyId);
+
+        byte[] forged = (byte[])sigBlob.Clone();
+        for (int i = 0; i + 8 <= forged.Length; i++)
+        {
+            if (forged.AsSpan(i, 8).SequenceEqual(attackerId))
+            {
+                pinnedId.CopyTo(forged.AsSpan(i, 8));
+            }
+        }
+
+        return BuildRpm([(tag, forged)], main, SamplePayload);
+    }
+
+    // Re-reads the OpenPGP signature packet a fixture embedded, so a test can assert on what the
+    // verifier will see (notably: which key-id the packet claims).
+    private static PgpSignature ExtractEmbeddedSignature(byte[] rpmBytes)
+    {
+        // The signature blob starts after lead + sig-header intro + one index entry.
+        int blobStart = LeadSize + HdrIntroSize + IndexEntrySize;
+        int blobLength = BinaryPrimitives.ReadInt32BigEndian(
+            rpmBytes.AsSpan(LeadSize + HdrIntroSize + 12, 4));
+        var factory = new PgpObjectFactory(new MemoryStream(rpmBytes, blobStart, blobLength));
+        return ((PgpSignatureList)factory.NextPgpObject())[0];
+    }
+
+    private const int HdrIntroSize = 16;
+
+    // Assembles lead + signature header (entries + store, 8-byte aligned) + main header + payload.
+    private static byte[] BuildRpm((int Tag, byte[] Blob)[] entries, byte[] mainHeader, byte[] payload)
     {
         int nindex = entries.Length;
         int hsize = 0;
@@ -384,8 +801,9 @@ public sealed class RpmProvenanceVerifierTests
         w.Write(Lead0); w.Write(Lead1); w.Write(Lead2); w.Write(Lead3);
         w.Write(new byte[LeadSize - 4]);
 
+        // Signature header intro: magic(4) + reserved(4) + nindex(4 BE) + hsize(4 BE).
         w.Write(HdrMagic0); w.Write(HdrMagic1); w.Write(HdrMagic2); w.Write(HdrVersion);
-        w.Write(new byte[4]); // reserved
+        w.Write(new byte[4]);
         WriteInt32Be(w, nindex);
         WriteInt32Be(w, hsize);
 
@@ -394,7 +812,7 @@ public sealed class RpmProvenanceVerifierTests
         {
             WriteInt32Be(w, tag);
             WriteInt32Be(w, TypeBin);
-            WriteInt32Be(w, offset); // offset into the store region
+            WriteInt32Be(w, offset);
             WriteInt32Be(w, blob.Length);
             offset += blob.Length;
         }
@@ -404,15 +822,32 @@ public sealed class RpmProvenanceVerifierTests
             w.Write(blob);
         }
 
-        w.Write(new byte[16]); // trailing stub
+        // The signature header's store is padded so the main header starts 8-byte aligned.
+        w.Write(new byte[(8 - hsize % 8) % 8]);
+
+        w.Write(mainHeader);
+        w.Write(payload);
+        w.Flush();
         return ms.ToArray();
     }
+
+    // Builds a minimal RPM with an empty signature header (no index entries, no sig tags).
+    private static byte[] BuildRpmWithNoSigTag()
+        => BuildRpm([], MainHeader(), SamplePayload);
 
     private static void WriteInt32Be(BinaryWriter w, int value)
     {
         Span<byte> buf = stackalloc byte[4];
         BinaryPrimitives.WriteInt32BigEndian(buf, value);
         w.Write(buf.ToArray());
+    }
+
+    private static byte[] Concat(byte[] a, byte[] b)
+    {
+        byte[] result = new byte[a.Length + b.Length];
+        a.CopyTo(result, 0);
+        b.CopyTo(result, a.Length);
+        return result;
     }
 
     // ── OpenPGP helpers ──────────────────────────────────────────────────────────
@@ -440,9 +875,9 @@ public sealed class RpmProvenanceVerifierTests
         return (secretKey, secretKey.PublicKey);
     }
 
-    // Produces a raw (non-armored) OpenPGP binary signature packet over the given data.
-    // This matches what RPM embeds in the RPMSIGTAG_GPG tag.
-    private static byte[] BuildRawPgpSignaturePacket(byte[] data, PgpSecretKey secretKey)
+    // Produces a raw (non-armored) OpenPGP detached signature over the given region.
+    // This matches what RPM embeds in the RPMSIGTAG_GPG / _PGP / _RSA tags.
+    private static byte[] SignRegion(byte[] data, PgpSecretKey secretKey)
     {
         var privateKey = secretKey.ExtractPrivateKey(passPhrase: null);
         var sigGen = new PgpSignatureGenerator(
@@ -464,21 +899,8 @@ public sealed class RpmProvenanceVerifierTests
     // trust anchor in the stub store under TestOrgId.
     private static RpmProvenanceVerifier VerifierWithKey(PgpPublicKey publicKey)
     {
-        using var armoredMs = new MemoryStream();
-        using (var ao = new ArmoredOutputStream(armoredMs))
-        {
-            publicKey.Encode(ao);
-        }
-        string armoredKey = Encoding.ASCII.GetString(armoredMs.ToArray());
-
         var store = new StubPerOrgTrustAnchorStore();
-        store.AddAnchor(TestOrgId, "rpm", new TrustAnchorMaterial
-        {
-            Id = "test-anchor",
-            AnchorKind = "pgp",
-            Material = armoredKey,
-        });
-
+        store.AddAnchor(TestOrgId, "rpm", AnchorFor(publicKey, "test-anchor"));
         return new RpmProvenanceVerifier(store, NullLogger<RpmProvenanceVerifier>.Instance);
     }
 
@@ -497,26 +919,14 @@ public sealed class RpmProvenanceVerifierTests
         var (_, publicKey) = GeneratePgpKeyPair();
         byte[] unsignedRpm = BuildRpmWithNoSigTag();
 
-        using var armoredMs = new MemoryStream();
-        using (var ao = new ArmoredOutputStream(armoredMs))
-        {
-            publicKey.Encode(ao);
-        }
-        string armoredKey = Encoding.ASCII.GetString(armoredMs.ToArray());
-
         var store = new StubPerOrgTrustAnchorStore();
-        store.AddAnchor(orgA, "rpm", new TrustAnchorMaterial
-        {
-            Id = "anchor-a",
-            AnchorKind = "pgp",
-            Material = armoredKey,
-        });
+        store.AddAnchor(orgA, "rpm", AnchorFor(publicKey, "anchor-a"));
         // orgB intentionally has no anchor seeded.
 
         var verifier = new RpmProvenanceVerifier(store, NullLogger<RpmProvenanceVerifier>.Instance);
 
-        var resultA = await verifier.VerifyPackageAsync(orgA, new MemoryStream(unsignedRpm), 10 * 1024 * 1024);
-        var resultB = await verifier.VerifyPackageAsync(orgB, new MemoryStream(unsignedRpm), 10 * 1024 * 1024);
+        var resultA = await verifier.VerifyPackageAsync(orgA, new MemoryStream(unsignedRpm), TestCap);
+        var resultB = await verifier.VerifyPackageAsync(orgB, new MemoryStream(unsignedRpm), TestCap);
 
         // Org A has a trust anchor: verification is active and the unsigned package is flagged.
         Assert.Equal(ProvenanceStatus.Unsigned, resultA.Status);
@@ -537,8 +947,7 @@ public sealed class RpmProvenanceVerifierTests
         var (secretKeyA, publicKeyA) = GeneratePgpKeyPair();
         var (_, publicKeyB) = GeneratePgpKeyPair();
 
-        byte[] sigBlob = BuildRawPgpSignaturePacket(SamplePayload, secretKeyA);
-        byte[] rpmBytes = BuildRpmWithSigTag(SigTagGpg, sigBlob);
+        byte[] rpmBytes = BuildSignedRpm(SigTagGpg, secretKeyA);
 
         var store = new StubPerOrgTrustAnchorStore();
         store.AddAnchor(orgA, "rpm", AnchorFor(publicKeyA, "anchor-a"));
@@ -546,8 +955,8 @@ public sealed class RpmProvenanceVerifierTests
 
         var verifier = new RpmProvenanceVerifier(store, NullLogger<RpmProvenanceVerifier>.Instance);
 
-        var resultA = await verifier.VerifyPackageAsync(orgA, new MemoryStream(rpmBytes), 10 * 1024 * 1024);
-        var resultB = await verifier.VerifyPackageAsync(orgB, new MemoryStream(rpmBytes), 10 * 1024 * 1024);
+        var resultA = await verifier.VerifyPackageAsync(orgA, new MemoryStream(rpmBytes), TestCap);
+        var resultB = await verifier.VerifyPackageAsync(orgB, new MemoryStream(rpmBytes), TestCap);
 
         Assert.Equal(ProvenanceStatus.Verified, resultA.Status);
         Assert.Equal(ProvenanceStatus.Failed, resultB.Status);

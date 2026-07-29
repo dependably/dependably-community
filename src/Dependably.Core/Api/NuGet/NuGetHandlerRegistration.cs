@@ -37,7 +37,7 @@ internal static class NuGetHandlerRegistration
                 claimResolver: sp.GetRequiredService<ClaimResolver>(),
                 licenses: sp.GetRequiredService<LicenseRepository>(),
                 symbolIndex: sp.GetRequiredService<NuGetSymbolIndexRepository>(),
-                cache: sp.GetRequiredService<RenderedResponseCache<NuGetRegistrationKey>>(),
+                invalidation: sp.GetRequiredService<MetadataInvalidationCoordinator>(),
                 logger: sp.GetRequiredService<ILogger<NuGetPublishHandler>>(),
                 time: sp.GetRequiredService<TimeProvider>(),
                 stagingPath: stagingPath,

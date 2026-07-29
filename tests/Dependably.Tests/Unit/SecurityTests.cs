@@ -163,6 +163,40 @@ public class UpstreamUrlValidatorTests
         Assert.Equal("Invalid URL format.", error);
     }
 
+    // #437 item 2: an upstream URL embedding user:pass@ credentials must be rejected at save
+    // time. Storing it plaintext in upstream_registry.url leaks the credential to any
+    // read:packages caller through the per-version projection (unlike the encrypted secret column).
+    [Theory]
+    [InlineData("https://svc:s3cr3t@nexus.corp.example/repository/npm/")]
+    [InlineData("https://user@nexus.corp.example/repository/npm/")]
+    [InlineData("http://svc:pw@mirror.example.com/pypi/simple/")]
+    public void ValidateUrl_EmbeddedCredentials_ReturnsError(string url)
+    {
+        string? error = UpstreamUrlValidator.ValidateUrl(url);
+        Assert.NotNull(error);
+        Assert.Contains("must not embed credentials", error);
+    }
+
+    // #437 item 2: legacy rows written before the save-time gate can still hold userinfo, so the
+    // projection strips it. Adversarial twins: a credential-free URL and a non-URL pass through
+    // unchanged so the redaction never mangles a legitimate value.
+    [Fact]
+    public void StripCredentials_RemovesUserInfo_PreservesCleanValues()
+    {
+        Assert.Equal(
+            "https://nexus.corp.example/repository/npm/",
+            UpstreamUrlValidator.StripCredentials("https://svc:s3cr3t@nexus.corp.example/repository/npm/"));
+
+        // No userinfo — returned verbatim.
+        Assert.Equal(
+            "https://registry.npmjs.org/left-pad",
+            UpstreamUrlValidator.StripCredentials("https://registry.npmjs.org/left-pad"));
+
+        // Not parseable as absolute — returned verbatim, never crashes.
+        Assert.Equal("not-a-url", UpstreamUrlValidator.StripCredentials("not-a-url"));
+        Assert.Null(UpstreamUrlValidator.StripCredentials(null));
+    }
+
     [Theory]
     [InlineData("http://[::1]/packages")]            // IPv6 loopback
     [InlineData("http://[fc00::1]/packages")]        // IPv6 unique-local

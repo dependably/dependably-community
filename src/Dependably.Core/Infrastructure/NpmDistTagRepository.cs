@@ -41,7 +41,7 @@ public sealed class NpmDistTagRepository
     public async Task SetTagAsync(
         string orgId, string packageId, string tag, string version, CancellationToken ct = default)
     {
-        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToUtcIso();
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             """

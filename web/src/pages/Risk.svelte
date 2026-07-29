@@ -11,11 +11,13 @@
   import { t } from 'svelte-i18n'
   import { api } from '../lib/api.js'
   import { currentOrg, navigate } from '../lib/store.js'
+  import { reportPageLoad } from '../lib/pageLoad.js'
   import { formatDateShort } from '../lib/format.js'
   import { extractErrorMessage } from '../lib/form.js'
   import DataTable from '../lib/DataTable.svelte'
   import Pagination from '../lib/Pagination.svelte'
   import ErrorBanner from '../lib/ErrorBanner.svelte'
+  import Skeleton from '../lib/Skeleton.svelte'
   import { ECOSYSTEMS, ECO_LABEL } from '../lib/ecosystems.js'
   import { readQuery, writeQuery } from '../lib/tableState.js'
 
@@ -24,6 +26,9 @@
   // click into version-detail and back.
   const DEFAULTS = { tab: 'operational', eco: '', reason: '', page: 1, limit: 50 }
   const init = readQuery(DEFAULTS)
+
+  /** The route transition this page was mounted for, supplied by RouteView. @type {number | null} */
+  export let pageToken = null
 
   let activeTab = init.tab === 'license' ? 'license' : 'operational'
   let filterEco = init.eco
@@ -40,6 +45,9 @@
   }
 
   $: org = $currentOrg
+  // Holds the deferred navigation that mounted this page until the data is here, so the swap
+  // shows the loaded page rather than a shimmer that lives for a hundred milliseconds.
+  $: reportPageLoad(pageToken, loading)
 
   async function load() {
     loading = true
@@ -125,15 +133,17 @@
   <p class="intro">{$t(`risk.intro.${activeTab}`)}</p>
 
   <div class="toolbar">
-    {#if !loading}
-      <span class="summary">
-        {#if activeTab === 'operational'}
-          {$t('risk.summary.operational', { values: { packages: packageCount, versions: total, threshold } })}
-        {:else}
-          {$t('risk.summary.license', { values: { count: total } })}
-        {/if}
-      </span>
-    {/if}
+    <!-- The toolbar stacks vertically, so hiding this line while loading dropped the filter row
+         below it the moment the counts arrived. Render it always and reserve its height. -->
+    <span class="summary">
+      {#if loading}
+        <Skeleton width="280px" height="12px" />
+      {:else if activeTab === 'operational'}
+        {$t('risk.summary.operational', { values: { packages: packageCount, versions: total, threshold } })}
+      {:else}
+        {$t('risk.summary.license', { values: { count: total } })}
+      {/if}
+    </span>
 
     <div class="filters">
       <select bind:value={filterEco} on:change={onFilterChange} aria-label={$t('risk.filters.ecosystem')}>
@@ -161,6 +171,8 @@
       rows={items}
       {comparators}
       {loading}
+      loadingRows={limit}
+      memoryKey="risk:operational"
       emptyText={$t('risk.empty.operational')}
       let:row={r}
     >
@@ -184,6 +196,8 @@
       rows={items}
       {comparators}
       {loading}
+      loadingRows={limit}
+      memoryKey="risk:license"
       emptyText={$t('risk.empty.license')}
       let:row={r}
     >
@@ -212,11 +226,9 @@
     </DataTable>
   {/if}
 
-  {#if !loading}
-    <Pagination {total} {page} {limit}
-      on:pagechange={onPageChange}
-      on:limitchange={onLimitChange} />
-  {/if}
+  <Pagination {total} {page} {limit}
+    on:pagechange={onPageChange}
+    on:limitchange={onLimitChange} />
 </div>
 
 <style>
@@ -242,7 +254,7 @@
 
   .toolbar { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin-bottom: 12px; }
   .filters { display: flex; align-items: center; gap: 8px; }
-  .summary { font-size: 12px; color: var(--text2); }
+  .summary { font-size: 12px; color: var(--text2); min-height: 1.25em; }
 
   td { vertical-align: middle; }
   .right { text-align: right; }

@@ -162,4 +162,41 @@ public class ClaimResolverTests : IAsyncLifetime
         Assert.Equal(ClaimStateMachine.LocalOnly, (await resolver.ResolveAsync("o1", "npm", "shared-name")).State);
         Assert.Equal(ClaimStateMachine.Unclaimed, (await resolver.ResolveAsync("o2", "npm", "shared-name")).State);
     }
+
+    // ── resurrection tombstone (name-binding survives last-version deletion) ──
+
+    [Fact]
+    public async Task NameBinding_KeepsLocalOnly_AfterLastVersionDeleted()
+    {
+        // The resurrection guard: a name the org has hosted-published (so a binding row exists) but
+        // whose versions have all since been deleted must NOT revert to Unclaimed — that would let
+        // the proxy fetch a squatter's package from the public registry. The binding row outlives
+        // the versions and holds the name at local_only.
+        var bindings = new NameBindingRepository(_db);
+        await bindings.BindIfAbsentAsync("o1", "npm", "billing-sdk", new NamePrincipal(ActorKinds.User, "u1"));
+
+        // No package_versions rows exist for this name (simulating a delete-all rollback).
+        var withTombstone = new ClaimResolver(new ClaimRepository(_db), AirGap(false), bindings);
+        var eff = await withTombstone.ResolveAsync("o1", "npm", "billing-sdk");
+
+        Assert.Equal(ClaimStateMachine.LocalOnly, eff.State);
+        Assert.False(await withTombstone.IsProxyFetchAllowedAsync("o1", "npm", "billing-sdk"));
+
+        // Adversarial twin: WITHOUT the binding repository (pre-fix behaviour), the very same
+        // versionless name resolves Unclaimed and would proxy upstream — the exact hole this closes.
+        var withoutTombstone = new ClaimResolver(new ClaimRepository(_db), AirGap(false));
+        Assert.Equal(
+            ClaimStateMachine.Unclaimed,
+            (await withoutTombstone.ResolveAsync("o1", "npm", "billing-sdk")).State);
+    }
+
+    [Fact]
+    public async Task NameBinding_DoesNotAffectNeverHostedName()
+    {
+        // A name the org never hosted has no binding row, so it still proxies normally.
+        var bindings = new NameBindingRepository(_db);
+        var resolver = new ClaimResolver(new ClaimRepository(_db), AirGap(false), bindings);
+        Assert.Equal(ClaimStateMachine.Unclaimed, (await resolver.ResolveAsync("o1", "npm", "never-hosted")).State);
+        Assert.True(await resolver.IsProxyFetchAllowedAsync("o1", "npm", "never-hosted"));
+    }
 }

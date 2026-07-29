@@ -197,7 +197,7 @@ public sealed class SystemHealthTests
         await statsSnaps.UpsertSnapshotAsync(
             orgId,
             """{"packagesByEcosystem":[],"downloadsByHour":[],"vulnsByEcosystemAndSeverity":[],"diskByEcosystem":[],"totalDiskBytes":0,"newVulns":{"day":0,"week":0,"month":0},"activeUsers7d":0,"blockedPulls30d":0,"totalDownloads30d":0}""",
-            staleTime.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            staleTime.ToUtcIso(),
             100);
 
         await s.WithOrgAsync();
@@ -224,7 +224,16 @@ public sealed class SystemHealthTests
         string orgId = await OrgSeeder.InsertAsync(s.Store, slug);
 
         // Valid stats_json (so the JSON-parse path stays clean) but a garbage
-        // computed_at timestamp — must still surface as stale rather than fall through.
+        // computed_at timestamp — must still surface as stale rather than fall through. Real
+        // production writes are always canonical, so this simulates a row on a database that
+        // predates the canonical-timestamp CHECK entirely (see
+        // SchemaInitializer.TemporalColumnNaming.cs); the defensive parsing this test pins is
+        // what protects those, not what a fresh write can produce.
+        await using (var conn = await s.Store.OpenAsync())
+        {
+            await TemporalCheckTestHelper.StripSqliteCheckAsync(conn, "org_stats_snapshot", "computed_at");
+        }
+
         var statsSnaps = new StatsSnapshotRepository(s.Store);
         await statsSnaps.UpsertSnapshotAsync(
             orgId,
@@ -275,7 +284,7 @@ public sealed class SystemHealthTests
             quarantinePending = 0,
         }, WebJson);
         await statsSnaps.UpsertSnapshotAsync(
-            orgId, statsJson, freshTime.ToString("yyyy-MM-ddTHH:mm:ssZ"), 50);
+            orgId, statsJson, freshTime.ToUtcIso(), 50);
 
         await s.WithOrgAsync();
         await s.WithUserAsync(role: "owner");
@@ -316,7 +325,7 @@ public sealed class SystemHealthTests
             quarantinePending = 5,
         }, WebJson);
         await statsSnaps.UpsertSnapshotAsync(
-            orgId, statsJson, freshTime.ToString("yyyy-MM-ddTHH:mm:ssZ"), 50);
+            orgId, statsJson, freshTime.ToUtcIso(), 50);
 
         await s.WithOrgAsync();
         await s.WithUserAsync(role: "owner");
@@ -381,7 +390,7 @@ public sealed class SystemHealthTests
             quarantinePending = 3,
         }, WebJson);
         await statsSnaps.UpsertSnapshotAsync(
-            orgId, statsJson, freshTime.ToString("yyyy-MM-ddTHH:mm:ssZ"), 50);
+            orgId, statsJson, freshTime.ToUtcIso(), 50);
 
         await s.WithOrgAsync();
         await s.WithUserAsync(role: "owner");
@@ -423,8 +432,9 @@ public sealed class SystemHealthTests
         var statsSnaps = new StatsSnapshotRepository(b.Db);
         var snapshots = new Dependably.Infrastructure.Observability.MetricsSnapshotProvider(s.Clock);
         var orgs = new OrgRepository(b.Db);
+        var trustAnchors = new TrustAnchorRepository(b.Db, s.Clock);
         var healthSvc = new Dependably.Infrastructure.Health.HealthService(
-            readiness, jobRuns, snapshots, airGap, statsSnaps, orgs, s.Clock);
+            readiness, jobRuns, snapshots, airGap, statsSnaps, orgs, trustAnchors, s.Clock);
 
         var result = await b.SystemController.GetHealth(healthSvc, CancellationToken.None);
         var ok = Assert.IsType<OkObjectResult>(result);
@@ -494,8 +504,9 @@ public sealed class SystemHealthTests
         var statsSnaps = new StatsSnapshotRepository(b.Db);
         var snapshots = new Dependably.Infrastructure.Observability.MetricsSnapshotProvider(s.Clock);
         var orgs = new OrgRepository(b.Db);
+        var trustAnchors = new TrustAnchorRepository(b.Db, s.Clock);
         var healthSvc = new Dependably.Infrastructure.Health.HealthService(
-            readiness, jobRuns, snapshots, airGap, statsSnaps, orgs, s.Clock);
+            readiness, jobRuns, snapshots, airGap, statsSnaps, orgs, trustAnchors, s.Clock);
 
         // Seed a run row for one job so we can verify field population.
         var seedTime = s.Clock.GetUtcNow().AddMinutes(-30);
@@ -558,7 +569,7 @@ public sealed class SystemHealthTests
             quarantinePending = 0,
         }, WebJson);
         await statsSnaps.UpsertSnapshotAsync(
-            orgId, statsJson, freshTime.ToString("yyyy-MM-ddTHH:mm:ssZ"), 100);
+            orgId, statsJson, freshTime.ToUtcIso(), 100);
 
         await s.WithOrgAsync();
         await s.WithUserAsync(role: "owner");
@@ -597,7 +608,7 @@ public sealed class SystemHealthTests
             INSERT INTO org_stats_snapshot (org_id, stats_json, computed_at, duration_ms)
             VALUES (@orgId, 'NOT_JSON', @computedAt, 0)
             """,
-            new { orgId, computedAt = s.Clock.GetUtcNow().AddMinutes(-1).ToString("yyyy-MM-ddTHH:mm:ssZ") });
+            new { orgId, computedAt = s.Clock.GetUtcNow().AddMinutes(-1).ToUtcIso() });
 
         await s.WithOrgAsync();
         await s.WithUserAsync(role: "owner");

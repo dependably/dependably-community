@@ -4,8 +4,9 @@ namespace Dependably.Infrastructure.Audit.Events;
 
 /// <summary>
 /// Typed payloads for authentication events. Email is intentionally never recorded
-/// in plaintext — login.failure carries an email_hash. Login realm is <c>tenant</c> (regular
-/// user) or <c>system</c> (operator dashboard).
+/// in plaintext — login.failure carries an email_hash, and the SAML events carry a
+/// nameid_hash (the NameID is very commonly the subject's email). Login realm is
+/// <c>tenant</c> (regular user) or <c>system</c> (operator dashboard).
 /// </summary>
 public static class AuthEvents
 {
@@ -31,12 +32,12 @@ public static class AuthEvents
     public const string TypeSamlSuccess = "auth.saml.login.success";
     public const string TypeSamlFailure = "auth.saml.login.failure";
 
-    public sealed record SamlSuccess(string IdpEntityId, string NameId, string Path)
+    public sealed record SamlSuccess(string IdpEntityId, string? NameIdHash, string Path)
     {
         public string ToJson() => JsonSerializer.Serialize(this, EventJsonOptions.Snake);
     }
 
-    public sealed record SamlFailure(string Reason, string? IdpEntityId, string? NameId)
+    public sealed record SamlFailure(string Reason, string? IdpEntityId, string? NameIdHash)
     {
         public string ToJson() => JsonSerializer.Serialize(this, EventJsonOptions.Snake);
     }

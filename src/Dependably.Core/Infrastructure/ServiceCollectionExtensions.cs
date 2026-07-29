@@ -52,6 +52,7 @@ public static class ServiceCollectionExtensions
         services.AddHostedService(sp => sp.GetRequiredService<DownloadCountWriterHostedService>());
         services.AddSingleton<AuditRepository>();
         services.AddSingleton<AuditEventRepository>();
+        services.AddSingleton<Privacy.PersonalDataExportRepository>();
         services.AddSingleton<BackgroundJobRunRepository>();
         services.AddSingleton<AllowlistRepository>();
         services.AddSingleton<BlocklistRepository>();
@@ -67,6 +68,9 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<SpdxLicenseSeeder>();
         services.AddSingleton<ProxyVersionRecorder>();
         services.AddSingleton<SourcePinRepository>();
+        // Operator opt-ins for weak-digest acceptance (npm SHA-1 shasum, apk SHA-1 index
+        // signatures). Singleton so the once-per-process acceptance/refusal warnings latch once.
+        services.AddSingleton<Dependably.Security.WeakAlgorithmAcceptance>();
         services.AddSingleton<Dependably.Storage.ProxyFetchService>();
 
         // Two-tier storage formalisation
@@ -83,6 +87,12 @@ public static class ServiceCollectionExtensions
 
         // Name-claim mechanism
         services.AddSingleton<ClaimRepository>();
+        // Name-ownership binding store. Registered here (alongside ClaimRepository) rather than in
+        // the publish pipeline because ClaimResolver depends on it for the resurrection tombstone,
+        // and ClaimResolver is composed in every deployment mode.
+        services.AddSingleton<NameBindingRepository>();
+        // Version-granular delete tombstones, read by the publish dedup/overwrite gate.
+        services.AddSingleton<VersionTombstoneRepository>();
         services.AddSingleton<ClaimResolver>();
         services.AddSingleton<NpmDistTagRepository>();
         services.AddSingleton<CargoMetadataRepository>();

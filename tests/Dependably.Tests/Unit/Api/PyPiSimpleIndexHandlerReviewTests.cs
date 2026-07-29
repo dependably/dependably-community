@@ -118,7 +118,7 @@ public sealed class PyPiSimpleIndexHandlerReviewTests : IAsyncLifetime
             {
                 id = "ver-local",
                 bk = "registry/hosted-pkg-1.0.0.whl",
-                ts = _clock.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                ts = _clock.GetUtcNow().ToUtcIso(),
             });
     }
 

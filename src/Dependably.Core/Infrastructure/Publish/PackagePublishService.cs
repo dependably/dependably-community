@@ -23,6 +23,8 @@ public sealed class PackagePublishService : IPackagePublishService
     private readonly OrgRepository _orgs;
     private readonly ITenantStorageResolver _storage;
     private readonly PublishGate _publishGate;
+    private readonly NameBindingGate _nameBinding;
+    private readonly VersionTombstoneRepository _tombstones;
     private readonly EdgePublishGuard _edgeGuard;
     private readonly PublishAuditor _auditor;
     private readonly VulnerabilityScanService _scanner;
@@ -39,6 +41,8 @@ public sealed class PackagePublishService : IPackagePublishService
         OrgRepository orgs,
         ITenantStorageResolver storage,
         PublishGate publishGate,
+        NameBindingGate nameBinding,
+        VersionTombstoneRepository tombstones,
         EdgePublishGuard edgeGuard,
         PublishAuditor auditor,
         VulnerabilityScanService scanner,
@@ -57,6 +61,8 @@ public sealed class PackagePublishService : IPackagePublishService
         // bucket raises TenantNotReadyException before any blob bytes are written.
         _storage = storage;
         _publishGate = publishGate;
+        _nameBinding = nameBinding;
+        _tombstones = tombstones;
         _auditor = auditor;
         _scanner = scanner;
         _licenses = licenses;
@@ -75,6 +81,9 @@ public sealed class PackagePublishService : IPackagePublishService
         activity?.SetTag("dependably.purl", request.Purl);
         activity?.SetTag("dependably.size_bytes", ArtifactLength(request));
 
+        // now-ok: measures real elapsed time for a duration log/metric only — no control
+        // flow branches on the value, so a substitutable clock would change the reported
+        // number without changing what the code does.
         var stopwatch = Stopwatch.StartNew();
         string outcome = "success";
         try
@@ -141,6 +150,14 @@ public sealed class PackagePublishService : IPackagePublishService
                 $"Name '{request.PurlName}' is unclaimed; create a 'local_only' or 'mixed' claim first.");
         }
 
+        // Name-level publish authorization. Keys on the authenticated principal (never a request
+        // field), so a token scoped only to publish this ecosystem cannot seize a name a
+        // different principal already owns.
+        if (await NameBindingRejectionAsync(request, ct) is { } nameReject)
+        {
+            return nameReject;
+        }
+
         // Dedup vs overwrite. Resolution is policy-driven (org tri-state + per-package override).
         // ResolveOverwriteAllowed returns true only when the effective combination permits it.
         var pkg = await _packages.GetOrCreateAsync(request.OrgId, request.Ecosystem, request.Name, request.PurlName, isProxy: false, ct);
@@ -153,8 +170,10 @@ public sealed class PackagePublishService : IPackagePublishService
         // License hard-block. Runs before any dedup/quota/blob work so a blocked publish never
         // reaches the version-row write — the caller's PublishRequest.Licenses carries whatever
         // the format-specific extractor already pulled from the artifact (wheel METADATA, npm
-        // tarball/packument, .nuspec, Cargo publish envelope). Strictly guarded by 'block': under
-        // 'warn'/'off', or when the caller passed no license signal, this reads nothing extra.
+        // tarball/packument, .nuspec, Cargo publish envelope). A declared license is gated by
+        // 'block'-only org_settings.license_enforcement_mode (the serve-path mode); no declared
+        // license at all is gated separately by org_settings.license_publish_enforcement_mode,
+        // which defaults 'off' and never touches the serve-path mode.
         if (await CheckLicensePolicyAsync(request, settings, ct) is { } licenseReject)
         {
             return licenseReject;
@@ -168,13 +187,22 @@ public sealed class PackagePublishService : IPackagePublishService
         // already holds is a true overwrite and stays policy-gated. Every other ecosystem
         // keeps the one-artifact-per-version model and its filename-mismatch guard.
         var (existingFile, pypiAddsNewFile) = await ResolvePypiFileSlotAsync(request, existing, ct);
+        bool overwriteAllowed = ResolveOverwriteAllowed(
+            settings?.VersionOverwritePolicy, pkg.SameVersionPushOverride);
 
-        if (existing is not null && !pypiAddsNewFile
-            && !ResolveOverwriteAllowed(settings?.VersionOverwritePolicy, pkg.SameVersionPushOverride))
+        if (existing is not null && !pypiAddsNewFile && !overwriteAllowed)
         {
             return new PublishResult.Rejected(409, "version_exists",
                 $"Tarball parsed as {request.PurlName}@{request.Version}; that version already exists. " +
                 "Same-version push is blocked by this package's policy.");
+        }
+
+        // Same gate, one step further back in time: a coordinate that was published and then
+        // hard-deleted is still spent. Runs before the quota reservation and the blob write.
+        if (existing is null
+            && await TombstoneRejectionAsync(request, overwriteAllowed, ct) is { } tombstoneReject)
+        {
+            return tombstoneReject;
         }
 
         if (request.Ecosystem != "pypi"
@@ -183,12 +211,13 @@ public sealed class PackagePublishService : IPackagePublishService
             return filenameMismatch;
         }
 
-        // Atomic quota reservation: reserves the net delta (new size minus replaced size)
-        // against the counter before any bytes are written. 0 rows affected = quota exceeded.
-        // SQLite's single-writer lock (busy_timeout=5000) serialises the reserve UPDATE, so
-        // two publishes that each individually fit cannot both pass when their combined size
-        // would exceed the cap. The reservation is released on any failure after this point.
-        // When quota is null (unlimited), skip the reservation — no counter to maintain.
+        // Quota reservation: claims the net delta (new size minus replaced size) against the
+        // tenant's ceiling before any bytes are written — the same gate, reading the same derived
+        // org_storage_bytes sum and charging the same in-flight ledger, that OCI push and the
+        // proxy cache fill go through. Two publishes that each individually fit therefore cannot
+        // both pass when their combined size would exceed the cap, and neither can a publish
+        // racing a proxy fill. Held until the version row is committed — that commit is what makes
+        // these bytes visible to the sum — and released by the same `using` on any failure.
         // PyPI accounts at file granularity: a new file of an existing version replaces
         // nothing; an overwrite replaces exactly the prior bytes of that filename.
         long artifactLength = ArtifactLength(request);
@@ -197,22 +226,49 @@ public sealed class PackagePublishService : IPackagePublishService
             : existing?.SizeBytes ?? 0;
         long delta = artifactLength - replacedBytes;
         long? quota = await _orgs.GetEffectiveStorageQuotaAsync(request.OrgId, ct);
-        bool reserved = false;
-        if (quota is not null)
+        using var reservation = await _orgs.TryReserveStorageAsync(request.OrgId, delta, quota, ct);
+        if (reservation is null)
         {
-            if (!await _orgs.TryReserveStorageAsync(request.OrgId, delta, quota, ct))
-            {
-                return new PublishResult.Rejected(413, "tenant_quota_exceeded",
-                    $"Tenant storage quota ({quota.Value} bytes) would be exceeded by this publish.");
-            }
-            reserved = true;
+            return new PublishResult.Rejected(413, "tenant_quota_exceeded",
+                $"Tenant storage quota ({quota!.Value} bytes) would be exceeded by this publish.");
         }
 
-        return await HashAndStoreBlobAsync(
+        var result = await HashAndStoreBlobAsync(
             request,
-            new PublishStorageContext(pkg, existing, existingFile, artifactLength, delta, reserved),
+            new PublishStorageContext(pkg, existing, existingFile, artifactLength),
             ct);
+
+        // Record first-publisher ownership only after the artifact is durably stored, so a
+        // publish that fails a later step never leaves a stray binding (and tombstone) behind.
+        if (result is PublishResult.Accepted && NameBindingEcosystems.Covers(request.Ecosystem))
+        {
+            await _nameBinding.RecordOwnershipAsync(
+                request.OrgId, request.Ecosystem, request.PurlName, PrincipalOf(request), ct);
+        }
+
+        return result;
     }
+
+    // Projects the publish request's authenticated actor into a name-ownership principal. A
+    // service-token publish carries no ActorUserId, so its stable identity is the token id;
+    // user/import callers attribute to their user id. Null for anonymous/background callers.
+    private static NamePrincipal? PrincipalOf(PublishRequest request)
+        => request.ActorKind == ActorKinds.Service
+            ? NamePrincipal.From(ActorKinds.Service, request.ActorTokenId)
+            : NamePrincipal.From(ActorKinds.User, request.ActorUserId);
+
+    // Name-level authorization gate: rejects when enforcement is on and the authenticated
+    // principal is neither the name's owner nor a grantee. No-op for ecosystems without a hosted
+    // push, when enforcement is off, or for an unattributed caller.
+    private async Task<PublishResult.Rejected?> NameBindingRejectionAsync(
+        PublishRequest request, CancellationToken ct)
+        => !NameBindingEcosystems.Covers(request.Ecosystem)
+            || await _nameBinding.IsPublishAuthorizedAsync(
+                request.OrgId, request.Ecosystem, request.PurlName, PrincipalOf(request), ct)
+            ? null
+            : new PublishResult.Rejected(403, "name_not_owned",
+                $"Publishing to '{request.PurlName}' is not permitted: the name is owned by a " +
+                "different principal in this org and you hold no publish grant for it.");
 
     // Probes the per-file slot for a PyPI same-version upload: returns the file record the
     // incoming filename would overwrite (null when the filename is new to the version), and
@@ -235,12 +291,13 @@ public sealed class PackagePublishService : IPackagePublishService
     // content-addressed and therefore not knowable until the artifact has been hashed.
     private sealed record PublishStorageContext(
         Package Pkg, PackageVersion? Existing, PackageVersionFile? ExistingFile,
-        long ArtifactSizeBytes, long Delta, bool Reserved);
+        long ArtifactSizeBytes);
 
     // Resolves the artifact's SHA-256 (and npm SHA-1), derives the content-addressed blob key
     // from that digest, opens the artifact stream, puts the blob, commits the metadata and OSV
-    // scan, emits the audit record, and releases the quota reservation on any failure to keep
-    // the storage counter accurate.
+    // scan, and emits the audit record. The caller holds the quota reservation across this whole
+    // call, so a failure here needs no compensating release — nothing was committed, and the
+    // derived sum never saw the bytes.
     private async Task<PublishResult> HashAndStoreBlobAsync(
         PublishRequest request, PublishStorageContext ctx, CancellationToken ct)
     {
@@ -279,9 +336,24 @@ public sealed class PackagePublishService : IPackagePublishService
             artifactStream = new MemoryStream(bytes);
         }
 
-        // The publisher's verbatim dist.integrity claim wins (it is what the publishing
-        // client computed over the same bytes it uploaded); the server-computed SRI covers
-        // clients that sent none (and the in-repo import path, which has no publish body).
+        // A publisher-declared dist.integrity is compared against the server-computed SRI over
+        // the bytes actually staged, and rejected on mismatch: a caller that PUTs one tarball
+        // while declaring another's SRI must not have the registry advertise dist.integrity that
+        // is untrue of the bytes it stores. When the two agree — or the caller declared none —
+        // the server-computed SRI covers the response and the packument (and the in-repo import
+        // path, which has no publish body and so never sets DeclaredIntegritySri).
+        if (request.DeclaredIntegritySri is { } declared && sha512Sri is { } computed
+            && !string.Equals(declared, computed, StringComparison.Ordinal))
+        {
+            if (ownsStream)
+            {
+                await artifactStream.DisposeAsync();
+            }
+
+            return new PublishResult.Rejected(422, "integrity_mismatch",
+                "Declared dist.integrity does not match the SHA-512 of the uploaded bytes.");
+        }
+
         string? integritySri = request.DeclaredIntegritySri ?? sha512Sri;
 
         // Content-addressed key: the artifact's own digest is a key segment, so the bytes at
@@ -305,26 +377,6 @@ public sealed class PackagePublishService : IPackagePublishService
             await _auditor.RecordAsync(request, sha256, ctx.Existing, ctx.ArtifactSizeBytes, ct);
 
             return new PublishResult.Accepted(newVersion.Id, request.Purl, sha256, blobKey);
-        }
-        catch
-        {
-            // Release the reservation so the quota counter stays accurate when the
-            // blob put or metadata commit fails. Fire-and-forget: a release failure
-            // leaves the counter high (conservative — subsequent publishes are more
-            // likely to 413), which is safer than leaving it low.
-            if (ctx.Reserved)
-            {
-                try { await _orgs.ReleaseStorageAsync(request.OrgId, ctx.Delta, CancellationToken.None); }
-                catch (Exception releaseEx)
-                {
-                    _logger.LogError(releaseEx,
-                        "Quota counter release failed for org {OrgId} after publish failure; " +
-                        "counter may be high until the next successful publish or manual reset. TraceId={TraceId}",
-                        request.OrgId,
-                        System.Diagnostics.Activity.Current?.TraceId.ToString());
-                }
-            }
-            throw;
         }
         finally
         {
@@ -370,6 +422,13 @@ public sealed class PackagePublishService : IPackagePublishService
                 $"Name '{request.PurlName}' is unclaimed; create a 'local_only' or 'mixed' claim first.");
         }
 
+        // Name-level authorization mirrors the real path so bulk-import pre-validation surfaces
+        // the same rejection. Dry run stores nothing, so no ownership is recorded here.
+        if (await NameBindingRejectionAsync(request, ct) is { } nameReject)
+        {
+            return nameReject;
+        }
+
         if (await CheckDedupForValidateAsync(request, ct) is { } dedupReject)
         {
             return dedupReject;
@@ -390,28 +449,59 @@ public sealed class PackagePublishService : IPackagePublishService
     private async Task<PublishResult.Rejected?> CheckDedupForValidateAsync(
         PublishRequest request, CancellationToken ct)
     {
+        // The package row is absent both for a name never published and for one whose last
+        // version was deleted (empty-package GC removes it), so the tombstone probe cannot be
+        // gated on it — that second case is exactly the one this gate exists for.
         var pkg = await _packages.GetByPurlNameAsync(request.OrgId, request.Ecosystem, request.PurlName, ct);
-        if (pkg is null)
-        {
-            return null;
-        }
+        var settings = await _orgs.GetSettingsAsync(request.OrgId, ct);
+        bool overwriteAllowed = ResolveOverwriteAllowed(
+            settings?.VersionOverwritePolicy, pkg?.SameVersionPushOverride);
 
-        var existing = await _packages.GetVersionAsync(pkg.Id, request.Version, ct);
+        var existing = pkg is null ? null : await _packages.GetVersionAsync(pkg.Id, request.Version, ct);
         if (existing is null)
         {
-            return null;
+            return await TombstoneRejectionAsync(request, overwriteAllowed, ct);
         }
 
         var (_, pypiAddsNewFile) = await ResolvePypiFileSlotAsync(request, existing, ct);
-        var settings = await _orgs.GetSettingsAsync(request.OrgId, ct);
-        return !pypiAddsNewFile
-            && !ResolveOverwriteAllowed(settings?.VersionOverwritePolicy, pkg.SameVersionPushOverride)
+        return !pypiAddsNewFile && !overwriteAllowed
             ? new PublishResult.Rejected(409, "version_exists",
                 $"Tarball parsed as {request.PurlName}@{request.Version}; that version already exists. " +
                 "Same-version push is blocked by this package's policy.")
             : request.Ecosystem != "pypi"
                 ? ArtifactFilenameMismatch(existing, request.Filename)
                 : null;
+    }
+
+    // Version-granular delete tombstone. A hard delete of a hosted version records its
+    // coordinate, so a republish of that coordinate is gated by exactly the policy that gates
+    // overwriting the live version: an org whose policy permits the overwrite is unaffected (for
+    // it, delete-then-republish was always a supported workflow), while under a blocking policy
+    // the coordinate stays spent. Without this, deleting the version first defeats the policy —
+    // there is nothing left to collide with — which puts an immutable-version guarantee inside
+    // the reach of the publish+yank credential it exists to constrain.
+    //
+    // Relaxing the org's version_overwrite_policy is the deliberate escape hatch; it takes
+    // tenant:configure, which a publish token does not hold, and it is audited.
+    private async Task<PublishResult.Rejected?> TombstoneRejectionAsync(
+        PublishRequest request, bool overwriteAllowed, CancellationToken ct)
+    {
+        if (overwriteAllowed
+            || !await _tombstones.ExistsAsync(
+                request.OrgId, request.Ecosystem, request.PurlName, request.Version, ct))
+        {
+            return null;
+        }
+
+        _logger.LogWarning(
+            "Republish of deleted version refused: {Ecosystem}/{PurlName}@{Version} in org {OrgId} " +
+            "carries a delete tombstone and the version-overwrite policy blocks reuse.",
+            request.Ecosystem, request.PurlName, request.Version, request.OrgId);
+
+        return new PublishResult.Rejected(409, "version_tombstoned",
+            $"{request.PurlName}@{request.Version} was previously published and then deleted. " +
+            "This org's version-overwrite policy blocks reusing a deleted version's coordinates; " +
+            "publish a new version, or have an administrator relax the policy.");
     }
 
     // Path safety on the components that land verbatim in path positions. Name is
@@ -508,11 +598,18 @@ public sealed class PackagePublishService : IPackagePublishService
     // ('off'/'warn'/'block'). Only 'block' can reject; 'warn'/'off' never touch this path.
     // request.Licenses may carry a whole compound expression per entry — CheckPolicyAsync
     // evaluates OR/AND semantics and normalizes both the observed leaves and the stored
-    // allow/block entries before comparing, mirroring the serve-path license arm.
+    // allow/block entries before comparing, mirroring the serve-path license arm. A caller that
+    // passed no license signal skips this arm entirely and falls through to the independent
+    // publish-side gate below.
     private async Task<PublishResult.Rejected?> CheckLicensePolicyAsync(
         PublishRequest request, OrgSettings? settings, CancellationToken ct)
     {
-        if (settings?.LicenseEnforcementMode != "block" || request.Licenses is not { Count: > 0 } licenses)
+        if (request.Licenses is not { Count: > 0 } licenses)
+        {
+            return await CheckLicenselessPublishPolicyAsync(request, settings, ct);
+        }
+
+        if (settings?.LicenseEnforcementMode != "block")
         {
             return null;
         }
@@ -522,6 +619,37 @@ public sealed class PackagePublishService : IPackagePublishService
             ? null
             : new PublishResult.Rejected(403, "license_blocked",
                 $"License '{blockedLicense}' is not permitted by this org's license policy.");
+    }
+
+    // Publish-side licence gate for a hosted publish that declares no license at all, governed by
+    // the independent org_settings.license_publish_enforcement_mode ('off' default / 'warn' /
+    // 'block') — never license_enforcement_mode, which stays the serve-path gate's alone. Only
+    // engages for the ecosystems whose manifests declare a licence (BlockGateService.
+    // DeclaredLicenseEcosystems); go/apk/oci keep the empty-set pass-through because they
+    // routinely record no licence at all. 'off' (the default) reproduces today's behaviour
+    // byte-for-byte: no currently-succeeding licence-less publish starts failing on upgrade.
+    private async Task<PublishResult.Rejected?> CheckLicenselessPublishPolicyAsync(
+        PublishRequest request, OrgSettings? settings, CancellationToken ct)
+    {
+        if (!BlockGateService.DeclaredLicenseEcosystems.Contains(request.Ecosystem))
+        {
+            return null;
+        }
+
+        string mode = settings?.LicensePublishEnforcementMode ?? "off";
+        switch (mode)
+        {
+            case "off":
+                return null;
+            case "warn":
+                await _auditor.RecordLicensePublishWarnAsync(request, ct);
+                return null;
+            default:
+                return new PublishResult.Rejected(403, "license_publish_blocked",
+                    $"Publish rejected: {request.Ecosystem} declares no license, and this org's " +
+                    "publish policy (license_publish_enforcement_mode=block) refuses an artifact " +
+                    "with no declared license.");
+        }
     }
 
     // Size cap. Callers know per-tenant + per-ecosystem cap; we enforce as a final

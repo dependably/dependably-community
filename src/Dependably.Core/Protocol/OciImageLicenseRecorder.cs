@@ -279,7 +279,7 @@ public sealed class OciImageLicenseRecorder
         }
     }
 
-    private string NowIso() => _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+    private string NowIso() => _time.GetUtcNow().ToUtcIso();
 
     private sealed record ConfigBlobRow(string BlobKey, string Origin);
 }

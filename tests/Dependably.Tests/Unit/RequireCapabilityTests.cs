@@ -16,9 +16,12 @@ public sealed class RequireCapabilityTests
     private static CapabilityPolicyProvider NewProvider() =>
         new(Options.Create(new AuthorizationOptions()));
 
-    private static AuthorizationHandlerContext ContextFor(string capability, params Claim[] claims)
+    private static AuthorizationHandlerContext ContextFor(string capability, params Claim[] claims) =>
+        ContextForScheme(capability, "test", claims);
+
+    private static AuthorizationHandlerContext ContextForScheme(string capability, string authType, params Claim[] claims)
     {
-        var identity = new ClaimsIdentity(claims, authenticationType: "test");
+        var identity = new ClaimsIdentity(claims, authenticationType: authType);
         var principal = new ClaimsPrincipal(identity);
         var requirements = new IAuthorizationRequirement[] { new CapabilityRequirement(capability) };
         return new AuthorizationHandlerContext(requirements, principal, resource: null);
@@ -121,5 +124,53 @@ public sealed class RequireCapabilityTests
             new Claim("cap", Capabilities.ReadMetadata));
         await handler.HandleAsync(denies);
         Assert.False(denies.HasSucceeded);
+    }
+
+    // ── API-token principals with zero cap claims must NOT inherit the owner's role ──────
+
+    [Fact]
+    public async Task Handler_ApiTokenNoCapClaims_DeniesRoleFallback()
+    {
+        // A user-owned API token whose `capabilities` column is legacy-NULL emits zero `cap`
+        // claims but still carries the owner's `role` claim. It authenticates under the ApiToken
+        // scheme, so the role fallback must NOT run — the empty capability set denies. Otherwise
+        // the zero-capability token silently inherits its owner's full owner-role grant.
+        var handler = new CapabilityHandler();
+        var ctx = ContextForScheme(
+            Capabilities.PublishNpm,
+            TokenAuthenticationDefaults.Scheme,
+            new Claim("role", "owner"));
+        await handler.HandleAsync(ctx);
+        Assert.False(ctx.HasSucceeded);
+    }
+
+    [Fact]
+    public async Task Handler_ApiTokenWithCapClaim_Grants()
+    {
+        // Adversarial twin: an API token that DOES carry the required explicit capability still
+        // authorizes — the fix denies only the zero-capability legacy case, not narrowed tokens.
+        var handler = new CapabilityHandler();
+        var ctx = ContextForScheme(
+            Capabilities.PublishNpm,
+            TokenAuthenticationDefaults.Scheme,
+            new Claim("role", "member"),
+            new Claim("cap", Capabilities.PublishNpm));
+        await handler.HandleAsync(ctx);
+        Assert.True(ctx.HasSucceeded);
+    }
+
+    [Fact]
+    public async Task Handler_JwtSessionNoCapClaims_StillGrantsViaRole()
+    {
+        // Adversarial twin: a genuine JWT-session principal (non-ApiToken scheme) carrying a
+        // `role` claim and no `cap` claims must still be granted via the role fallback — that
+        // fallback is legitimate for sessions and must not regress when the ApiToken leg is closed.
+        var handler = new CapabilityHandler();
+        var ctx = ContextForScheme(
+            Capabilities.PublishNpm,
+            "AuthenticationTypes.Federation",                 // JwtBearer's default identity scheme
+            new Claim("role", "owner"));
+        await handler.HandleAsync(ctx);
+        Assert.True(ctx.HasSucceeded);
     }
 }

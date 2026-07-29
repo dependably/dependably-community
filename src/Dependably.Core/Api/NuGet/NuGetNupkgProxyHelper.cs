@@ -192,6 +192,7 @@ internal static class NuGetNupkgProxyHelper
             BlockDeprecatedMode: settings.BlockDeprecated,
             BlockMaliciousMode: settings.BlockMalicious,
             BlockKevMode: settings.BlockKev,
+            BlockRevokedMode: settings.BlockRevoked,
             MaxEpssTolerance: settings.MaxEpssTolerance,
             BlockInstallScriptsMode: settings.BlockInstallScripts,
             ProvenanceStatus: Dependably.Protocol.Provenance.ProvenanceStatuses.ToColumn(prov.Status),

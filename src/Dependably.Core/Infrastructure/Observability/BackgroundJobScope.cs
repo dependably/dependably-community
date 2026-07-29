@@ -71,6 +71,9 @@ public sealed class BackgroundJobScope : IDisposable
         _activity?.SetTag("dependably.job_run_id", JobRunId);
 
         _startedAt = _time.GetUtcNow();
+        // now-ok: measures real elapsed time for a duration log/metric only — no control
+        // flow branches on the value, so a substitutable clock would change the reported
+        // number without changing what the code does.
         _stopwatch = Stopwatch.StartNew();
     }
 

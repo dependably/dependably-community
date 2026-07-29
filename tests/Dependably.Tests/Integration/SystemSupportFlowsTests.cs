@@ -71,8 +71,8 @@ public sealed class SystemSupportFlowsTests : IClassFixture<DependablyMultiFacto
         using var sys = await _factory.CreateSystemAdminClient();
 
         // Lock the owner.
-        var lockResp = await sys.PatchAsJsonAsync($"/api/v1/system/users/{Uri.EscapeDataString(ownerEmail)}/account-status",
-            new { tenantSlug = slug, accountStatus = "locked" });
+        var lockResp = await sys.PatchAsJsonAsync("/api/v1/system/users/account-status",
+            new { email = ownerEmail, tenantSlug = slug, accountStatus = "locked" });
         Assert.Equal(HttpStatusCode.NoContent, lockResp.StatusCode);
 
         // Verify lookup reflects status.
@@ -88,8 +88,8 @@ public sealed class SystemSupportFlowsTests : IClassFixture<DependablyMultiFacto
         Assert.Equal(HttpStatusCode.Unauthorized, loginResp.StatusCode);
 
         // Unlock.
-        var unlockResp = await sys.PatchAsJsonAsync($"/api/v1/system/users/{Uri.EscapeDataString(ownerEmail)}/account-status",
-            new { tenantSlug = slug, accountStatus = "active" });
+        var unlockResp = await sys.PatchAsJsonAsync("/api/v1/system/users/account-status",
+            new { email = ownerEmail, tenantSlug = slug, accountStatus = "active" });
         Assert.Equal(HttpStatusCode.NoContent, unlockResp.StatusCode);
     }
 
@@ -98,8 +98,8 @@ public sealed class SystemSupportFlowsTests : IClassFixture<DependablyMultiFacto
     {
         var (slug, ownerEmail) = await CreateTenant();
         using var sys = await _factory.CreateSystemAdminClient();
-        var resp = await sys.PatchAsJsonAsync($"/api/v1/system/users/{Uri.EscapeDataString(ownerEmail)}/account-status",
-            new { tenantSlug = slug, accountStatus = "exploded" });
+        var resp = await sys.PatchAsJsonAsync("/api/v1/system/users/account-status",
+            new { email = ownerEmail, tenantSlug = slug, accountStatus = "exploded" });
         Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
     }
 
@@ -108,8 +108,8 @@ public sealed class SystemSupportFlowsTests : IClassFixture<DependablyMultiFacto
     {
         var (slug, _) = await CreateTenant();
         using var sys = await _factory.CreateSystemAdminClient();
-        var resp = await sys.PatchAsJsonAsync($"/api/v1/system/users/nobody@example.com/account-status",
-            new { tenantSlug = slug, accountStatus = "locked" });
+        var resp = await sys.PatchAsJsonAsync("/api/v1/system/users/account-status",
+            new { email = "nobody@example.com", tenantSlug = slug, accountStatus = "locked" });
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
     }
 
@@ -119,8 +119,8 @@ public sealed class SystemSupportFlowsTests : IClassFixture<DependablyMultiFacto
         var (slug, ownerEmail) = await CreateTenant();
         using var sys = await _factory.CreateSystemAdminClient();
 
-        var resp = await sys.PostAsJsonAsync($"/api/v1/system/users/{Uri.EscapeDataString(ownerEmail)}/password-reset",
-            new { tenantSlug = slug });
+        var resp = await sys.PostAsJsonAsync("/api/v1/system/users/password-reset",
+            new { email = ownerEmail, tenantSlug = slug });
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
         var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
@@ -147,8 +147,8 @@ public sealed class SystemSupportFlowsTests : IClassFixture<DependablyMultiFacto
     {
         var (slug, _) = await CreateTenant();
         using var sys = await _factory.CreateSystemAdminClient();
-        var resp = await sys.PostAsJsonAsync($"/api/v1/system/users/nobody@example.com/password-reset",
-            new { tenantSlug = slug });
+        var resp = await sys.PostAsJsonAsync("/api/v1/system/users/password-reset",
+            new { email = "nobody@example.com", tenantSlug = slug });
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
     }
 

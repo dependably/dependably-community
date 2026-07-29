@@ -51,6 +51,11 @@ public sealed class ShutdownOrchestrator : IHostedService
 
             // Block the ApplicationStopping callback for the pre-stop delay.
             // This keeps Kestrel accepting connections while the LB drains.
+            // now-ok: the blocking is the mechanism, not an incidental wait — ApplicationStopping
+            // is a synchronous callback, and Kestrel begins its drain the moment it returns. The
+            // delay must be real elapsed time because the thing being waited for is an external
+            // load balancer noticing /ready has gone 503; a substitutable clock has nothing to
+            // advance it and would return immediately, dropping in-flight requests.
             Thread.Sleep(_preStopDelay);
 
             _logger.LogInformation("Pre-stop delay elapsed. Kestrel drain starting.");

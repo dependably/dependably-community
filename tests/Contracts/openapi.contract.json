@@ -252,6 +252,16 @@
         }
       }
     },
+    "/api/v1/auth/confirm-email-change": {
+      "operations": {
+        "post": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/api/v1/auth/forgot-password": {
       "operations": {
         "post": {
@@ -704,6 +714,44 @@
           "requiredParams": [],
           "responseCodes": [
             "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/name-bindings": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/name-grants": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "post": {
+          "requiredParams": [],
+          "responseCodes": [
+            "201"
+          ]
+        }
+      }
+    },
+    "/api/v1/name-grants/{grantId}": {
+      "operations": {
+        "delete": {
+          "requiredParams": [
+            "grantId"
+          ],
+          "responseCodes": [
+            "204"
           ]
         }
       }
@@ -1482,6 +1530,16 @@
         }
       }
     },
+    "/api/v1/system/trust-anchors/suspect": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/api/v1/system/users": {
       "operations": {
         "get": {
@@ -1492,24 +1550,20 @@
         }
       }
     },
-    "/api/v1/system/users/{email}/account-status": {
+    "/api/v1/system/users/account-status": {
       "operations": {
         "patch": {
-          "requiredParams": [
-            "email"
-          ],
+          "requiredParams": [],
           "responseCodes": [
             "204"
           ]
         }
       }
     },
-    "/api/v1/system/users/{email}/password-reset": {
+    "/api/v1/system/users/password-reset": {
       "operations": {
         "post": {
-          "requiredParams": [
-            "email"
-          ],
+          "requiredParams": [],
           "responseCodes": [
             "200"
           ]
@@ -1622,6 +1676,16 @@
         }
       }
     },
+    "/api/v1/users/me/export": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/api/v1/users/me/language": {
       "operations": {
         "post": {
@@ -1642,6 +1706,16 @@
         }
       }
     },
+    "/api/v1/users/me/timezone": {
+      "operations": {
+        "post": {
+          "requiredParams": [],
+          "responseCodes": [
+            "204"
+          ]
+        }
+      }
+    },
     "/api/v1/users/{userId}": {
       "operations": {
         "delete": {
@@ -1650,6 +1724,18 @@
           ],
           "responseCodes": [
             "204"
+          ]
+        }
+      }
+    },
+    "/api/v1/users/{userId}/email": {
+      "operations": {
+        "patch": {
+          "requiredParams": [
+            "userId"
+          ],
+          "responseCodes": [
+            "202"
           ]
         }
       }
@@ -1911,16 +1997,6 @@
       }
     },
     "/npm/-/npm/v1/security/advisories/bulk": {
-      "operations": {
-        "post": {
-          "requiredParams": [],
-          "responseCodes": [
-            "200"
-          ]
-        }
-      }
-    },
-    "/npm/-/npm/v1/security/audits/quick": {
       "operations": {
         "post": {
           "requiredParams": [],

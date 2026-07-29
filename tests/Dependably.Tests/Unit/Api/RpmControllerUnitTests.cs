@@ -30,6 +30,7 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
     private RpmController _controller = null!;
     private string _orgId = null!;
     private TokenRepository _tokens = null!;
+    private readonly StubPerOrgTrustAnchorStore _trustStub = new();
 
     public async Task InitializeAsync()
     {
@@ -54,9 +55,10 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
         var tenantAccess = new TenantArtifactAccessRepository(_db);
         var cacheRecorder = new CacheAccessRecorder(cacheArtifacts, tenantAccess,
             Microsoft.Extensions.Logging.Abstractions.NullLogger<CacheAccessRecorder>.Instance, _clock);
-        // No trust anchors seeded — IsConfiguredForAsync returns false, provenance skipped.
+        // No trust anchors seeded by default — IsConfiguredForAsync returns false, provenance
+        // skipped. Tests that need a pinned RPM key seed _trustStub, which also backs TrustStore.
         var rpmProvenance = new Dependably.Protocol.Provenance.RpmProvenanceVerifier(
-            new StubPerOrgTrustAnchorStore(),
+            _trustStub,
             Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.RpmProvenanceVerifier>.Instance);
         var svc = new RpmControllerServices(packages, _tokens, audit, orgs, new TieredBlobStorage(_blobs, _blobs), _db, repodata,
             new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, _clock, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured())),
@@ -64,6 +66,7 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
                 new MemoryCache(new MemoryCacheOptions()), MetadataCacheKeys.RpmMergedRepodata),
             new RenderedResponseCache<RpmLocalRepodataKey>(
                 new MemoryCache(new MemoryCacheOptions()), MetadataCacheKeys.RpmLocalRepodata),
+            Dependably.Tests.Infrastructure.TestMetadataInvalidation.Coordinator(),
             _clock,
             cacheRecorder,
             cacheArtifacts,
@@ -71,8 +74,10 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
             rpmProvenance,
             Dependably.Tests.Infrastructure.TestEdgeMode.DisabledPublishGuard(),
             Dependably.Tests.Infrastructure.TestBlockGate.Create(_db, _clock),
+            Dependably.Tests.Infrastructure.TestScanner.NoFindings(_db, _clock),
             new Dependably.Infrastructure.StagingOptions(System.IO.Path.GetTempPath(), 0),
-            new LicenseRepository(_db, _clock, TestNormalizers.License(_db)));
+            new LicenseRepository(_db, _clock, TestNormalizers.License(_db)),
+            TrustStore: _trustStub);
         _controller = new RpmController(svc)
         {
             ControllerContext = BuildContext(_orgId),
@@ -432,6 +437,38 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
         Assert.IsType<NotFoundResult>(result);
     }
 
+    // ── GPG key pinning (#437 item 3) ───────────────────────────────────────────
+
+    [Fact]
+    public async Task GpgKey_OrgHasPinnedAnchor_ServesAnchorNotUpstreamKey()
+    {
+        // With a per-org RPM PGP trust anchor configured, the endpoint serves the operator-pinned
+        // key — never a key relayed unpinned from the same upstream that served the packages
+        // (which would make the client's gpgcheck circular).
+        const string armored = "-----BEGIN PGP PUBLIC KEY BLOCK-----\npinned-operator-key\n-----END PGP PUBLIC KEY BLOCK-----";
+        _trustStub.AddAnchor(_orgId, "rpm", new TrustAnchorMaterial { AnchorKind = "pgp", Material = armored });
+        SetEmptyRequest();
+
+        var result = await _controller.GpgKey(CancellationToken.None);
+
+        var file = Assert.IsType<FileContentResult>(result);
+        Assert.Equal("application/pgp-keys", file.ContentType);
+        Assert.Equal(armored, Encoding.UTF8.GetString(file.FileContents));
+    }
+
+    [Fact]
+    public async Task GpgKey_NoAnchorNoUpstream_Returns404()
+    {
+        // Adversarial twin: no pinned anchor and no configured upstream ⇒ nothing to serve.
+        // (The pinning branch must not fabricate a key, and it must not throw when TrustStore
+        // has no rpm anchors.)
+        SetEmptyRequest();
+
+        var result = await _controller.GpgKey(CancellationToken.None);
+
+        Assert.IsType<NotFoundResult>(result);
+    }
+
     // ── Test helpers ───────────────────────────────────────────────────────────
 
     private static ControllerContext BuildContext(string orgId)
@@ -480,7 +517,7 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
                 u = userId,
                 h = hash,
                 c = """["publish:rpm"]""",
-                ts = _clock.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                ts = _clock.GetUtcNow().ToUtcIso(),
             });
         return raw;
     }

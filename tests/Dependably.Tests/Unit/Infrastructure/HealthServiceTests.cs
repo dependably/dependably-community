@@ -4,6 +4,7 @@ using Dependably.Infrastructure.Health;
 using Dependably.Infrastructure.Observability;
 using Dependably.Storage;
 using Dependably.Tests.Infrastructure;
+using Dependably.Tests.Infrastructure.Seeding;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
@@ -32,6 +33,7 @@ public sealed class HealthServiceTests : IAsyncLifetime
     private BackgroundJobRunRepository _jobRuns = null!;
     private StatsSnapshotRepository _statsSnapshots = null!;
     private OrgRepository _orgs = null!;
+    private TrustAnchorRepository _trustAnchors = null!;
 
     // Frozen at a known instant well inside all threshold windows.
     // KnownNow = 2026-06-15 12:00:00 UTC. Using a stable base far from any edge.
@@ -50,6 +52,7 @@ public sealed class HealthServiceTests : IAsyncLifetime
         _jobRuns = new BackgroundJobRunRepository(_db);
         _statsSnapshots = new StatsSnapshotRepository(_db);
         _orgs = new OrgRepository(_db);
+        _trustAnchors = new TrustAnchorRepository(_db, TimeProvider.System);
     }
 
     public async Task DisposeAsync() => await _db.DisposeAsync();
@@ -70,6 +73,7 @@ public sealed class HealthServiceTests : IAsyncLifetime
             airGap,
             _statsSnapshots,
             _orgs,
+            _trustAnchors,
             clock);
     }
 
@@ -99,6 +103,7 @@ public sealed class HealthServiceTests : IAsyncLifetime
             airGap,
             _statsSnapshots,
             _orgs,
+            _trustAnchors,
             clock);
     }
 
@@ -115,6 +120,70 @@ public sealed class HealthServiceTests : IAsyncLifetime
             Outcome: outcome,
             ErrorMessage: outcome != "success" ? "test error" : null);
         await _jobRuns.RecordAsync(run);
+    }
+
+    // ── Trust-anchor integrity count ─────────────────────────────────────────────
+
+    [Fact]
+    public async Task GetReportAsync_NoAnchorsAtAll_SuspectCountIsZero_AndOverallIsHealthy()
+    {
+        var clock = TestTime.Frozen(Now);
+        foreach (string jobName in HealthService.RunRowJobs)
+        {
+            await RecordJobRunAsync(jobName, "success", Now.AddMinutes(-5));
+        }
+
+        var report = await BuildService(clock).GetReportAsync(CancellationToken.None);
+
+        Assert.Equal(0, report.TrustAnchors.SuspectCount);
+        Assert.Equal("healthy", report.Overall);
+    }
+
+    [Fact]
+    public async Task GetReportAsync_OnlyRegisteredPairs_SuspectCountStaysZero()
+    {
+        // Adversarial twin for the positive case below: a properly registered anchor must not be
+        // counted, or the tile would cry wolf on every correctly configured instance.
+        var clock = TestTime.Frozen(Now);
+        string orgId = await OrgSeeder.InsertAsync(_db, $"h-ok-{Guid.NewGuid():N}");
+        await _trustAnchors.AddAsync(orgId, new NewTrustAnchor("rpm", "pgp", "PGPMAT", null, null, null));
+        await _trustAnchors.AddAsync(orgId, new NewTrustAnchor("pypi", "rekor_key", "PEM", null, null, null));
+
+        var report = await BuildService(clock).GetReportAsync(CancellationToken.None);
+
+        Assert.Equal(0, report.TrustAnchors.SuspectCount);
+    }
+
+    [Fact]
+    public async Task GetReportAsync_SuspectTrustAnchorsAcrossTwoTenants_AreCounted_WithoutPromotingOverall()
+    {
+        // Visible-but-non-degrading, the same treatment Tenants.NeedAttention gets: a suspect
+        // anchor is a latent audit finding an operator resolves by hand, not a live outage.
+        // The baseline report is taken with the same two tenants already seeded, so the only
+        // difference between the two rollups is the suspect rows themselves.
+        var clock = TestTime.Frozen(Now);
+        foreach (string jobName in HealthService.RunRowJobs)
+        {
+            await RecordJobRunAsync(jobName, "success", Now.AddMinutes(-5));
+        }
+
+        string orgA = await OrgSeeder.InsertAsync(_db, $"h-bad-a-{Guid.NewGuid():N}");
+        string orgB = await OrgSeeder.InsertAsync(_db, $"h-bad-b-{Guid.NewGuid():N}");
+        var svc = BuildService(clock);
+
+        var baseline = await svc.GetReportAsync(CancellationToken.None);
+        Assert.Equal(0, baseline.TrustAnchors.SuspectCount);
+
+        await _trustAnchors.AddAsync(orgA, new NewTrustAnchor("npm", "pgp", "GARBAGE", null, null, null));
+        await _trustAnchors.AddAsync(orgA, new NewTrustAnchor("nuget", "rsa", "GARBAGE", null, null, null));
+        await _trustAnchors.AddAsync(orgB, new NewTrustAnchor("maven", "x509", "GARBAGE", null, null, null));
+        // Mixed with a registered pair on the same tenant — only the three above may be counted.
+        await _trustAnchors.AddAsync(orgB, new NewTrustAnchor("apk", "rsa", "PEMRSA", null, null, null));
+
+        var report = await svc.GetReportAsync(CancellationToken.None);
+
+        Assert.Equal(3, report.TrustAnchors.SuspectCount);
+        Assert.Equal(baseline.Overall, report.Overall);
     }
 
     // ── Job status matrix ────────────────────────────────────────────────────────

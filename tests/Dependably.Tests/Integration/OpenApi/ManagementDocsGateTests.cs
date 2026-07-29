@@ -246,6 +246,8 @@ public sealed class ManagementDocsGateTests : IAsyncLifetime
             var now = DateTime.UtcNow;
 
             var token = new JwtSecurityToken(
+                issuer: Dependably.Security.JwtTokenBinding.Issuer,
+                audience: Dependably.Security.JwtTokenBinding.SessionAudience,
                 claims: new[]
                 {
                     new Claim(JwtRegisteredClaimNames.Sub, adminId),

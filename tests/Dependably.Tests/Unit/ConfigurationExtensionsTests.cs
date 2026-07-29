@@ -92,4 +92,55 @@ public sealed class ConfigurationExtensionsTests
         var (networks, _) = Dependably.Infrastructure.ConfigurationExtensions.ParseTrustedProxies("10.0.0.0/8,172.16.0.0/12");
         Assert.Equal(2, networks.Count);
     }
+
+    [Theory]
+    [InlineData("10.0.0.0/16", true)]     // whole-VPC-sized CIDR — every in-VPC host can forge its own source IP
+    [InlineData("10.0.0.0/8", true)]
+    [InlineData("10.0.0.0/22", false)]    // exactly at the threshold — not broader than it
+    [InlineData("10.0.0.0/24", false)]    // a single conventional subnet — narrow
+    [InlineData("10.0.0.0/28", false)]
+    public void IsBroadTrustedProxyNetwork_Ipv4_MatchesPer22Threshold(string cidr, bool expectedBroad)
+    {
+        var network = System.Net.IPNetwork.Parse(cidr);
+        Assert.Equal(expectedBroad, Dependably.Infrastructure.ConfigurationExtensions.IsBroadTrustedProxyNetwork(network));
+    }
+
+    [Theory]
+    [InlineData("fd00::/8", true)]        // whole ULA range — far broader than a routed subnet
+    [InlineData("2001:db8::/56", true)]   // a multi-subnet site allocation
+    [InlineData("2001:db8::/64", false)]  // exactly one routed subnet — not broader than the threshold
+    [InlineData("2001:db8::/112", false)]
+    public void IsBroadTrustedProxyNetwork_Ipv6_MatchesPer64Threshold(string cidr, bool expectedBroad)
+    {
+        var network = System.Net.IPNetwork.Parse(cidr);
+        Assert.Equal(expectedBroad, Dependably.Infrastructure.ConfigurationExtensions.IsBroadTrustedProxyNetwork(network));
+    }
+
+    // ── IPv4-mapped IPv6 networks: ForwardedHeadersMiddleware.CheckKnownAddress matches an
+    // IPv4-mapped peer against an IPv4-mapped KnownIPNetworks entry, so ::ffff:a.b.c.d/N trusts
+    // IPv4 peers exactly as the equivalent IPv4 network would (N-96). Judging the literal IPv6
+    // prefix length against the IPv6 threshold would misjudge a wide one as narrow.
+
+    [Theory]
+    [InlineData("::ffff:10.0.0.0/104", true)]   // equivalent to IPv4 /8 — far broader than /22
+    [InlineData("::ffff:10.0.0.0/118", false)]  // equivalent to IPv4 /22 — exactly at the threshold
+    [InlineData("::ffff:10.0.0.0/120", false)]  // equivalent to IPv4 /24 — narrow
+    public void IsBroadTrustedProxyNetwork_Ipv4MappedIpv6_JudgedByEquivalentIpv4Prefix(string cidr, bool expectedBroad)
+    {
+        var network = System.Net.IPNetwork.Parse(cidr);
+        Assert.Equal(expectedBroad, Dependably.Infrastructure.ConfigurationExtensions.IsBroadTrustedProxyNetwork(network));
+    }
+
+    [Fact]
+    public void ParseTrustedProxies_Ipv4MappedCatchAllRange_ThrowsAtStartup()
+    {
+        // ::ffff:0:0/96 is the mapped form of a zero-length (/0) IPv4 prefix — it declares every
+        // IPv4 address a forwarding proxy, so it must be rejected on the same structural basis as
+        // the literal /0 form rather than slipping through because its literal IPv6 prefix length
+        // (96) is nonzero. Fail-closed and forward-looking: this is not a claim that the current
+        // runtime's forwarded-header matching treats this specific mapped form as exploitable today.
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => Dependably.Infrastructure.ConfigurationExtensions.ParseTrustedProxies("::ffff:0:0/96"));
+        Assert.Contains("TRUSTED_PROXIES", ex.Message, StringComparison.Ordinal);
+    }
 }

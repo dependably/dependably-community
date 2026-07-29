@@ -15,6 +15,9 @@ namespace Dependably.Api;
 /// set only — no user input ever reaches a file/resource path.
 /// </summary>
 [ApiController]
+// authz-ok: static curated remediation content embedded in this assembly, identical for every
+// tenant and carrying zero tenant data; anonymity is what makes the documented curl one-liner
+// work. skillId is validated against the closed embedded manifest, never a path.
 [AllowAnonymous]
 [EnableRateLimiting("anon")]
 public sealed class RemediationController : ControllerBase

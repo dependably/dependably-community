@@ -531,7 +531,7 @@ public sealed class NpmPackumentHandler(
     // behaviour sees them. Yanked local versions are not spliced (they are hidden from the
     // local packument too) but do not remove a colliding upstream entry — yank withdraws
     // the local advertisement, not upstream's.
-    private static HashSet<string> MergeLocalVersionsIntoPackument(
+    internal static HashSet<string> MergeLocalVersionsIntoPackument(
         string tarballBase, JsonNode packument, Package localPkg,
         IReadOnlyList<PackageVersion> localVersions,
         OrgSettings settings, IReadOnlyDictionary<string, VulnGateSignals> signals, DateTimeOffset now)
@@ -555,8 +555,23 @@ public sealed class NpmPackumentHandler(
                 {
                     versionsObj.Remove(v.Version);
                     removed.Add(v.Version);
+                    continue;
                 }
 
+                // A yanked local row is never served (the tarball route 403s the local uploaded
+                // row), so leave the upstream version object untouched rather than advertise a
+                // local integrity for bytes that won't be handed out.
+                if (v.Yanked)
+                {
+                    continue;
+                }
+
+                // Version collision on a served local row: the tarball route resolves the LOCAL
+                // uploaded row by version, so replace the upstream version object with the local
+                // one. Keeping upstream's dist.shasum/dist.integrity while serving local bytes
+                // hands npm an SRI it can never satisfy → EINTEGRITY. Mirror the PyPI simple-index
+                // rule, which advertises the local digest for a locally-served filename.
+                versionsObj[v.Version] = BuildVersionObject(localPkg.Name, v, tarballBase);
                 continue;
             }
 
@@ -588,6 +603,8 @@ public sealed class NpmPackumentHandler(
 
         if (!timeObj.ContainsKey(v.Version))
         {
+            // utcformat-ok: npm packument "time" wire field, not a DB write — npm clients expect
+            // this ISO-8601 shape verbatim.
             timeObj[v.Version] = v.CreatedAt.ToString("o");
         }
     }
@@ -802,6 +819,8 @@ public sealed class NpmPackumentHandler(
         foreach (var v in activeVersions)
         {
             versionsObj[v.Version] = BuildVersionObject(pkg.Name, v, tarballBase);
+            // utcformat-ok: npm packument "time" wire field, not a DB write — npm clients expect
+            // this ISO-8601 shape verbatim.
             timeObj[v.Version] = (v.PublishedAt ?? v.CreatedAt).ToString("o");
         }
 

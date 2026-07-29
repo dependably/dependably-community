@@ -52,7 +52,7 @@ public sealed class JwtRevocationRepositoryTests : IAsyncLifetime
         {
             await conn.ExecuteAsync(
                 "INSERT INTO jwt_revocations (jti, expires_at) VALUES (@jti, @exp)",
-                new { jti = "jti-1", exp = TestTime.KnownNow.AddHours(1).ToString("yyyy-MM-ddTHH:mm:ssZ") });
+                new { jti = "jti-1", exp = TestTime.KnownNow.AddHours(1).ToUtcIso() });
         }
 
         // Second call: cache hit, still returns false (proves we actually cached).
@@ -88,7 +88,7 @@ public sealed class JwtRevocationRepositoryTests : IAsyncLifetime
         {
             await conn.ExecuteAsync(
                 "UPDATE jwt_revocations SET expires_at = @past WHERE jti = @jti",
-                new { jti = "jti-3", past = TestTime.KnownNow.AddHours(-1).ToString("yyyy-MM-ddTHH:mm:ssZ") });
+                new { jti = "jti-3", past = TestTime.KnownNow.AddHours(-1).ToUtcIso() });
         }
 
         Assert.False(await repo.IsRevokedAsync("jti-3"));
@@ -164,7 +164,7 @@ public sealed class JwtRevocationRepositoryTests : IAsyncLifetime
         {
             await conn.ExecuteAsync(
                 "INSERT INTO jwt_revocations (jti, expires_at) VALUES (@jti, @exp)",
-                new { jti = "jti-revoked-leak", exp = TestTime.KnownNow.AddHours(1).ToString("yyyy-MM-ddTHH:mm:ssZ") });
+                new { jti = "jti-revoked-leak", exp = TestTime.KnownNow.AddHours(1).ToUtcIso() });
         }
 
         Assert.True(await repo.IsRevokedAsync("jti-revoked-leak"));

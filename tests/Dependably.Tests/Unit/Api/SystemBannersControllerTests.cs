@@ -59,8 +59,8 @@ public sealed class SystemBannersControllerTests : IAsyncLifetime
         LinkUrl: null,
         LinkLabel: null,
         TargetRole: targetRole,
-        StartsAt: KnownNow.AddDays(-1).ToString("yyyy-MM-ddTHH:mm:ssZ"),
-        EndsAt: KnownNow.AddDays(30).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+        StartsAt: KnownNow.AddDays(-1).ToUtcIso(),
+        EndsAt: KnownNow.AddDays(30).ToUtcIso(),
         Enabled: true);
 
     private static BannerUpdateRequest ValidUpdateRequest(string severity = "warn") => new(
@@ -69,8 +69,8 @@ public sealed class SystemBannersControllerTests : IAsyncLifetime
         LinkUrl: null,
         LinkLabel: null,
         TargetRole: "all",
-        StartsAt: KnownNow.AddDays(-1).ToString("yyyy-MM-ddTHH:mm:ssZ"),
-        EndsAt: KnownNow.AddDays(30).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+        StartsAt: KnownNow.AddDays(-1).ToUtcIso(),
+        EndsAt: KnownNow.AddDays(30).ToUtcIso(),
         Enabled: true);
 
     // ── List ─────────────────────────────────────────────────────────────────────────────────
@@ -142,8 +142,8 @@ public sealed class SystemBannersControllerTests : IAsyncLifetime
         var ctrl = BuildController();
         var req = ValidCreateRequest() with
         {
-            StartsAt = KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-            EndsAt = KnownNow.AddDays(-1).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            StartsAt = KnownNow.ToUtcIso(),
+            EndsAt = KnownNow.AddDays(-1).ToUtcIso(),
         };
         var result = await ctrl.Create(req, CancellationToken.None);
         Assert.Equal(StatusCodes.Status422UnprocessableEntity, ((ObjectResult)result).StatusCode);

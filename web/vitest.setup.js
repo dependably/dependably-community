@@ -36,6 +36,13 @@ class MemoryStorage {
   }
 }
 
+// jsdom has no layout engine, so window.scrollTo is a not-implemented stub that writes to the
+// virtual console on every call. navigate() seats the viewport on each route change, which would
+// otherwise bury the test output in those notices. A no-op keeps it readable and stays spy-able.
+if (typeof window !== 'undefined') {
+  window.scrollTo = () => {}
+}
+
 for (const name of ['localStorage', 'sessionStorage']) {
   if (typeof globalThis[name] === 'undefined') {
     Object.defineProperty(globalThis, name, {

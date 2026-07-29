@@ -41,6 +41,7 @@ public sealed class OrgSettingsRepository
 
         await using var conn = await _db.OpenAsync(ct);
         string? lang = string.IsNullOrWhiteSpace(update.DefaultLanguage) ? null : update.DefaultLanguage;
+        string? timezone = string.IsNullOrWhiteSpace(update.DefaultTimezone) ? null : update.DefaultTimezone;
         // Resolve the effective legacy boolean and policy from whichever field the caller set.
         // If VersionOverwritePolicy is supplied it is authoritative; allow_version_overwrite
         // is derived from it for blue-green compatibility. If only AllowVersionOverwrite is
@@ -56,11 +57,11 @@ public sealed class OrgSettingsRepository
             INSERT INTO org_settings (org_id, anonymous_pull, allowlist_mode,
                 max_upload_bytes, max_upload_bytes_pypi, max_upload_bytes_npm, max_upload_bytes_nuget,
                 max_upload_bytes_maven, max_upload_bytes_rpm, max_upload_bytes_oci, max_upload_bytes_cargo,
-                default_language, allow_version_overwrite, version_overwrite_policy, air_gapped, require_mfa,
-                rpm_upstream_mode)
+                default_language, default_timezone, allow_version_overwrite, version_overwrite_policy,
+                air_gapped, require_mfa, rpm_upstream_mode)
             VALUES (@orgId, @anonPull, @allowlist, @maxBytes, @maxBytesPyPi, @maxBytesNpm, @maxBytesNuGet,
                 @maxBytesMaven, @maxBytesRpm, @maxBytesOci, @maxBytesCargo,
-                COALESCE(@lang, 'en'), COALESCE(@legacyOverwrite, 0),
+                COALESCE(@lang, 'en'), COALESCE(@timezone, 'UTC'), COALESCE(@legacyOverwrite, 0),
                 COALESCE(@policy, 'block'), COALESCE(@airGapped, 0), COALESCE(@requireMfa, 0),
                 COALESCE(@rpmUpstreamMode, 'passthrough'))
             ON CONFLICT(org_id) DO UPDATE SET
@@ -75,6 +76,7 @@ public sealed class OrgSettingsRepository
                 max_upload_bytes_oci   = @maxBytesOci,
                 max_upload_bytes_cargo = @maxBytesCargo,
                 default_language    = COALESCE(@lang, default_language),
+                default_timezone    = COALESCE(@timezone, default_timezone),
                 version_overwrite_policy = COALESCE(@policy, version_overwrite_policy),
                 allow_version_overwrite  = CASE WHEN @legacyOverwrite IS NULL THEN allow_version_overwrite
                                                 ELSE @legacyOverwrite END,
@@ -96,6 +98,7 @@ public sealed class OrgSettingsRepository
                 maxBytesOci = Clamp(update.MaxUploadBytesOci, update.InstanceMaxUploadBytes),
                 maxBytesCargo = Clamp(update.MaxUploadBytesCargo, update.InstanceMaxUploadBytes),
                 lang,
+                timezone,
                 legacyOverwrite,
                 policy,
                 airGapped = ToBoolFlag(update.AirGapped),
@@ -146,8 +149,10 @@ public sealed class OrgSettingsRepository
             VALUES (
                 @orgId, @proxyEnabled, @maxScore, @minAgeHours,
                 @blockDeprecated, @blockMalicious, @blockKev, @maxEpss,
-                @blockInstallScripts, @verifyNpmSignatures, @verifyNuGetSignatures,
-                @verifyPyPiAttestations, @verifyRpmSignatures, @verifyMavenSignatures,
+                @blockInstallScripts,
+                COALESCE(@verifyNpmSignatures, 'off'), COALESCE(@verifyNuGetSignatures, 'off'),
+                COALESCE(@verifyPyPiAttestations, 'off'), COALESCE(@verifyRpmSignatures, 'off'),
+                COALESCE(@verifyMavenSignatures, 'off'),
                 @blockRevoked)
             ON CONFLICT(org_id) DO UPDATE SET
                 proxy_passthrough_enabled = @proxyEnabled,
@@ -159,11 +164,11 @@ public sealed class OrgSettingsRepository
                 block_kev                 = @blockKev,
                 max_epss_tolerance        = @maxEpss,
                 block_install_scripts     = @blockInstallScripts,
-                verify_npm_signatures     = @verifyNpmSignatures,
-                verify_nuget_signatures   = @verifyNuGetSignatures,
-                verify_pypi_attestations  = @verifyPyPiAttestations,
-                verify_rpm_signatures     = @verifyRpmSignatures,
-                verify_maven_signatures   = @verifyMavenSignatures
+                verify_npm_signatures     = COALESCE(@verifyNpmSignatures, verify_npm_signatures),
+                verify_nuget_signatures   = COALESCE(@verifyNuGetSignatures, verify_nuget_signatures),
+                verify_pypi_attestations  = COALESCE(@verifyPyPiAttestations, verify_pypi_attestations),
+                verify_rpm_signatures     = COALESCE(@verifyRpmSignatures, verify_rpm_signatures),
+                verify_maven_signatures   = COALESCE(@verifyMavenSignatures, verify_maven_signatures)
             """,
             new
             {
@@ -226,6 +231,11 @@ public sealed class OrgSettingsRepository
 /// <summary>
 /// Proxy and block-gate policy values written by <see cref="OrgSettingsRepository.UpsertProxySettingsAsync"/>.
 /// Grouped as a record to keep the method within a sane parameter count.
+///
+/// The five <c>Verify*</c> signature gates are nullable and mean <em>leave unchanged</em> when
+/// null, matching how <c>air_gapped</c> / <c>require_mfa</c> behave: a client PUTting a payload
+/// shape that predates these fields must not silently downgrade a stored 'block' to 'off'.
+/// On a first insert (no stored row to preserve) null falls back to the column default, 'off'.
 /// </summary>
 public sealed record ProxyPolicySettings(
     bool ProxyPassthroughEnabled,
@@ -236,9 +246,9 @@ public sealed record ProxyPolicySettings(
     string BlockKev = "off",
     double? MaxEpssTolerance = null,
     string BlockInstallScripts = "off",
-    string VerifyNpmSignatures = "off",
-    string VerifyNuGetSignatures = "off",
-    string VerifyPyPiAttestations = "off",
-    string VerifyRpmSignatures = "off",
-    string VerifyMavenSignatures = "off",
+    string? VerifyNpmSignatures = null,
+    string? VerifyNuGetSignatures = null,
+    string? VerifyPyPiAttestations = null,
+    string? VerifyRpmSignatures = null,
+    string? VerifyMavenSignatures = null,
     string BlockRevoked = "warn");

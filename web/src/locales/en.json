@@ -696,6 +696,7 @@
         "password": "Password",
         "passwordSetHint": "SMTP account password. Requires DEPENDABLY_MASTER_KEY to store.",
         "passwordRotateHint": "Enter a new value to rotate the password. Leave blank to keep the current one.",
+        "cleartextCredentials": "Security is None and a username and password are set, so the SMTP AUTH exchange is sent unencrypted and anyone on the network path can read these credentials. Use STARTTLS or SSL/TLS, or clear the username and password if the relay does not require authentication.",
         "from": "From address",
         "testSend": "Send test email",
         "testOk": "Test email sent.",
@@ -743,6 +744,7 @@
       "password": "Password",
       "passwordSetHint": "Set a password to enable authenticated relay. Required unless security is None.",
       "passwordRotateHint": "A password is stored. Enter a new value to rotate it, or leave blank to keep the current one.",
+      "cleartextCredentials": "Security is None and a username and password are set, so the SMTP AUTH exchange is sent unencrypted and anyone on the network path can read these credentials. Use STARTTLS or Implicit TLS, or clear the username and password if the relay does not require authentication.",
       "from": "From address",
       "configured": "Configured",
       "notConfigured": "Not configured",
@@ -876,6 +878,8 @@
         "colKind": "Kind",
         "colLabel": "Label",
         "colAdded": "Added",
+        "unsupportedPair": "unsupported — never validated",
+        "unsupportedPairTitle": "This anchor's ecosystem and kind combination has no validator, so its key material was never checked. Verify it is still needed before removing it — removing the only anchor for an ecosystem with signature verification set to block denies every artifact of that ecosystem.",
         "modal": {
           "title": "Add trust anchor",
           "ecosystem": "Ecosystem",
@@ -1328,13 +1332,17 @@
     "title": "Quarantine",
     "intro": "Every automatic policy block (deprecated, release age, malicious, KEV, EPSS, vulnerability score) lands here for review while downloads keep returning 403. Approving sets the version's manual allow override — it outranks every policy gate; denying records a manual block. Decisions are written to the audit log.",
     "empty": "No entries.",
+    "searchPlaceholder": "Search package, gate, note, or reviewer…",
     "approve": "Approve",
     "deny": "Deny",
     "filters": {
       "pending": "Pending",
       "approved": "Approved",
       "denied": "Denied",
-      "all": "All"
+      "all": "All",
+      "allGates": "All gates",
+      "gateLabel": "Filter by gate",
+      "stateLabel": "Filter by state"
     },
     "states": {
       "pending": "Pending",
@@ -1347,13 +1355,18 @@
       "malicious": "malicious",
       "kev": "KEV",
       "epss": "EPSS",
-      "vuln_score": "vuln score"
+      "vuln_score": "vuln score",
+      "revoked": "revoked",
+      "license": "license",
+      "install_script": "install script",
+      "provenance": "provenance"
     },
     "columns": {
       "package": "Package",
       "gate": "Gate",
       "detail": "Detail",
-      "updated": "Updated"
+      "updated": "Updated",
+      "decidedBy": "Decided by"
     },
     "actions": {
       "menuLabel": "Change decision",
@@ -1545,7 +1558,11 @@
       "themeHelp": "Choose how Dependably looks to you.",
       "languageTitle": "Language",
       "languageHelpTenantDefault": "Tenant default: {language}.",
-      "languageHelpSystemFallback": "Falls back to {language} when unset."
+      "languageHelpSystemFallback": "Falls back to {language} when unset.",
+      "timezoneTitle": "Timezone",
+      "timezoneHelp": "Times are shown in this zone. Organization default: {timezone}.",
+      "timezoneInherit": "Use organization default ({timezone})",
+      "timezoneError": "Could not save timezone. Try again."
     },
     "theme": {
       "light": "Light",
@@ -1647,6 +1664,11 @@
           "needAttention": "{count} tenant needs attention",
           "needAttentionPlural": "{count} tenants need attention",
           "viewAll": "View tenants →"
+        },
+        "trustAnchors": {
+          "suspect": "{count} trust anchor was never validated",
+          "suspectPlural": "{count} trust anchors were never validated",
+          "detail": "These anchors were stored under an ecosystem and kind combination that has no validator, so their key material was never checked. Review each one in its tenant's Settings → Security before removing it: removing the only anchor for an ecosystem whose signature verification is set to block denies every artifact of that ecosystem."
         },
         "overallSummary": {
           "healthy": "All systems healthy",

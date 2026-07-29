@@ -29,7 +29,7 @@ public sealed partial class SchemaInitializer
     private async Task MigrateProxyVersionsToCachePlaneAsync(DbConnection conn)
     {
         // now-ok: one-shot migration timestamp; no TimeProvider injected into SchemaInitializer.
-        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = DateTimeOffset.UtcNow.ToUtcIso();
 
         // xtenant: cross-tenant SELECT; results are keyed by org so tenant state is preserved.
         var proxyRows = (await conn.QueryAsync<(
@@ -41,6 +41,8 @@ public sealed partial class SchemaInitializer
             string? ProvenanceStatus, string? ProvenanceSigner,
             string? ManualBlockState, bool Yanked, string? YankReason, string? LastUsed,
             long DownloadCount, string OrgId, string Ecosystem, string PackageName)>(
+            // xtenant: one-shot migration sweep over every tenant's proxy rows; each row carries
+            // its own p.org_id through to the plane it is rewritten into, so tenancy is preserved.
             """
             SELECT pv.id, pv.package_id, pv.version, pv.purl,
                    pv.blob_key, pv.filename, pv.size_bytes, pv.checksum_sha256,
@@ -755,7 +757,7 @@ public sealed partial class SchemaInitializer
     private async Task BackfillOciCacheArtifactAsync(DbConnection conn)
     {
         // now-ok: one-shot migration timestamp; no TimeProvider injected into SchemaInitializer.
-        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = DateTimeOffset.UtcNow.ToUtcIso();
         // Keyed on (OrgId, Repository, Digest) — not just (OrgId, Digest) — because the same
         // digest can be tagged under two different repositories in one org with only one of
         // them ever having earned a package_versions row; deduping on digest alone would wrongly
@@ -1005,10 +1007,18 @@ public sealed partial class SchemaInitializer
         return await reader.ReadToEndAsync(ct);
     }
 
+    // Global fallback for any call site that binds a raw DateTimeOffset as a Dapper parameter
+    // instead of formatting explicitly through UtcTimestamp. Canonical second precision — the
+    // shape every DEFAULT and explicit writer on these TEXT timestamp columns already uses — and
+    // always converts to UTC first, so a non-zero-offset instant is never stored with its offset
+    // intact (which would sort wrong by that offset). A column whose rows need finer-than-second
+    // precision (e.g. audit/activity events sharing a wall-clock second) must NOT rely on this
+    // default; its writer binds an explicit UtcTimestamp.ToUtcIsoMillis()/ToUtcIsoPrecise() string
+    // instead, matching every other writer of that column.
     private sealed class DateTimeOffsetHandler : SqlMapper.TypeHandler<DateTimeOffset>
     {
         public override void SetValue(IDbDataParameter parameter, DateTimeOffset value)
-            => parameter.Value = value.ToString("o");
+            => parameter.Value = value.ToUtcIso();
 
         public override DateTimeOffset Parse(object value)
             => DateTimeOffset.Parse((string)value, null,

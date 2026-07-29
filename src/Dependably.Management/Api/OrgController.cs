@@ -6,7 +6,6 @@ using Dependably.Storage;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Caching.Memory;
 
 namespace Dependably.Api;
 
@@ -40,9 +39,7 @@ public sealed class OrgController : OrgScopedControllerBase
     private readonly ArtifactInventoryRepository _inventory;
     private readonly IPublicUrlBuilder _urls;
     private readonly ILogger<OrgController> _logger;
-    private readonly IMemoryCache _cache;
-    private readonly MetadataResponseCache<RpmMergedRepodataKey, MergedRepodataCache> _rpmMergedCache;
-    private readonly RenderedResponseCache<RpmLocalRepodataKey> _rpmLocalCache;
+    private readonly MetadataInvalidationCoordinator _invalidation;
     private readonly CacheArtifactRepository _cacheArtifacts;
     private readonly TenantArtifactAccessRepository _tenantAccess;
     private readonly TimeProvider _time;
@@ -64,9 +61,7 @@ public sealed class OrgController : OrgScopedControllerBase
         _inventory = svc.Inventory;
         _urls = svc.Urls;
         _logger = svc.Logger;
-        _cache = svc.Cache;
-        _rpmMergedCache = svc.RpmMergedCache;
-        _rpmLocalCache = svc.RpmLocalCache;
+        _invalidation = svc.Invalidation;
         _cacheArtifacts = svc.CacheArtifacts;
         _tenantAccess = svc.TenantAccess;
         _time = svc.Time;
@@ -195,13 +190,16 @@ public sealed class OrgController : OrgScopedControllerBase
     {
         bool hasMax = scoreMap.TryGetValue(v.Id, out double maxScore);
         string status = ComputeVersionStatus(v, hasMax ? maxScore : (double?)null, tolerance, blockDeprecatedMode);
+        string? redactedUpstreamUrl = UpstreamUrlValidator.StripCredentials(v.UpstreamUrl);
         return new
         {
             v.Id,
             v.PackageId,
             v.Version,
             v.Purl,
-            v.BlobKey,
+            // BlobKey is deliberately omitted: it embeds the object-store layout and the raw org
+            // UUID, which members otherwise never see. No route accepts a blob key as input; the
+            // frontend downloads via the /download endpoint.
             v.Filename,
             v.SizeBytes,
             v.ChecksumSha256,
@@ -219,10 +217,13 @@ public sealed class OrgController : OrgScopedControllerBase
             v.RevokedAt,
             v.VersionsBehind,
             v.Origin,
-            v.UpstreamUrl,
+            // Strip any embedded user:pass@ credential before it reaches a read:packages caller.
+            // Save-time validation rejects userinfo on new rows; this defends legacy rows written
+            // before that gate existed so the projection never leaks an upstream credential.
+            UpstreamUrl = redactedUpstreamUrl,
             // Public registry page (npmjs.com/pypi.org/…) reconstructed only when the recorded
             // upstream host is a known public registry; null (link hidden) for private upstreams.
-            RegistryPageUrl = RegistryPageUrl.ForVersion(ecosystem, v.Purl, packageName, v.Version, v.UpstreamUrl),
+            RegistryPageUrl = RegistryPageUrl.ForVersion(ecosystem, v.Purl, packageName, v.Version, redactedUpstreamUrl),
             v.UpstreamIntegrityValue,
             v.UpstreamIntegrityAlgorithm,
             v.IsMalicious,
@@ -256,7 +257,7 @@ public sealed class OrgController : OrgScopedControllerBase
         string orgId, string packageId, string ecosystem, string purlName, CancellationToken ct)
     {
         var versions = await _inventory.ListServeableVersionsAsync(orgId, packageId, ecosystem, purlName, ct);
-        return ecosystem == "nuget" ? ArtifactInventoryRepository.DedupeProxyVersionsByVersion(versions) : versions;
+        return ArtifactInventoryRepository.CollapseSidecarProxyRows(ecosystem, versions);
     }
 
     private static string ComputeVersionStatus(PackageVersion v, double? maxScore, double tolerance, string blockDeprecatedMode = "off")
@@ -382,7 +383,7 @@ public sealed class OrgController : OrgScopedControllerBase
         // Atomic NOT EXISTS guard handles the race against a concurrent publish.
         await _packages.DeletePackageIfEmptyAsync(pkg.Id, ct);
 
-        EvictProtocolMetadataCache(orgId, ecosystem, pkg);
+        EvictProtocolMetadataCache(orgId, ecosystem, pkg, version);
 
         // Activity is the right sink for a per-version operator action — audit_log is for
         // tenant-level config/security events. Never dual-write the same event to both.
@@ -470,7 +471,7 @@ public sealed class OrgController : OrgScopedControllerBase
 
         await _packages.DeletePackageIfEmptyAsync(pkg.Id, ct);
 
-        EvictProtocolMetadataCache(orgId, ecosystem, pkg);
+        EvictProtocolMetadataCache(orgId, ecosystem, pkg, version);
 
         if (facts.Purl is not null)
         {
@@ -482,34 +483,45 @@ public sealed class OrgController : OrgScopedControllerBase
     }
 
     /// <summary>
-    /// Evicts any cached metadata for <paramref name="pkg"/> so a just-deleted version stops
+    /// Invalidates any cached metadata for <paramref name="pkg"/> so a just-deleted version stops
     /// being served from cache. Shared by both <see cref="DeleteVersion"/> branches (hosted and
-    /// cache-plane) so eviction never drifts between the two delete paths.
+    /// cache-plane) so eviction never drifts between the two delete paths, and routed through
+    /// <see cref="MetadataInvalidationCoordinator"/> so it expands the identical variant matrix
+    /// the protocol-plane publish paths use — and reaches peer replicas the same way.
     /// </summary>
-    private void EvictProtocolMetadataCache(string orgId, string ecosystem, Package pkg)
+    private void EvictProtocolMetadataCache(string orgId, string ecosystem, Package pkg, string version)
     {
-        switch (ecosystem)
+        var invalidation = ecosystem switch
         {
-            case "npm":
-                _cache.Remove($"metadata:{orgId}:npm:{pkg.Name}");
-                break;
-            case "pypi":
-                _cache.Remove($"metadata:{orgId}:pypi:{pkg.Name}");
-                break;
-            case "nuget":
-                string nugetId = pkg.Name.ToLowerInvariant();
-                _cache.Remove($"metadata:{orgId}:nuget:{nugetId}:sv1");
-                _cache.Remove($"metadata:{orgId}:nuget:{nugetId}:sv2");
-                break;
-            case "rpm":
-                // Evict the local per-document cache (primary, filelists, other) and the
-                // merged-repodata tuple so a yanked package no longer appears in repodata.
-                _rpmLocalCache.Evict(new RpmLocalRepodataKey(orgId, "primary"));
-                _rpmLocalCache.Evict(new RpmLocalRepodataKey(orgId, "filelists"));
-                _rpmLocalCache.Evict(new RpmLocalRepodataKey(orgId, "other"));
-                _rpmMergedCache.Evict(new RpmMergedRepodataKey(orgId));
-                break;
+            "npm" => MetadataInvalidation.ForNpm(orgId, pkg.PurlName),
+            "pypi" => MetadataInvalidation.ForPyPi(orgId, pkg.PurlName),
+            "nuget" => MetadataInvalidation.ForNuGet(orgId, pkg.PurlName),
+            // Maven package rows carry "groupId:artifactId" as their PURL name; a deleted
+            // SNAPSHOT also changes the version-level build-list document.
+            "maven" => MavenInvalidation(orgId, pkg.PurlName, version),
+            "rpm" => MetadataInvalidation.ForRpm(orgId),
+            _ => null,
+        };
+
+        if (invalidation is not null)
+        {
+            _invalidation.Invalidate(invalidation);
         }
+    }
+
+    // Splits a Maven package row's "groupId:artifactId" PURL name back into its coordinates.
+    // Returns null for a malformed name rather than inventing an empty groupId.
+    private static MetadataInvalidation? MavenInvalidation(string orgId, string purlName, string version)
+    {
+        int separator = purlName.IndexOf(':', StringComparison.Ordinal);
+        if (separator <= 0 || separator == purlName.Length - 1)
+        {
+            return null;
+        }
+
+        bool isSnapshot = version.EndsWith("-SNAPSHOT", StringComparison.Ordinal);
+        return MetadataInvalidation.ForMaven(
+            orgId, purlName[..separator], purlName[(separator + 1)..], isSnapshot ? version : null);
     }
 
     /// <summary>GET /api/v1/packages/{ecosystem}/{name}/{version}/download — stream one artifact to the UI</summary>

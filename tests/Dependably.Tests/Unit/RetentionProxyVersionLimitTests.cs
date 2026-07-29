@@ -9,12 +9,13 @@ using Microsoft.Extensions.Time.Testing;
 namespace Dependably.Tests.Unit;
 
 /// <summary>
-/// <see cref="RetentionService.EnforceVersionLimitAsync"/>'s keep_versions cap counts VERSIONS on
-/// the proxy plane, and evicts a version whole or not at all.
+/// Both proxy-plane retention passes — <see cref="RetentionService.EnforceVersionLimitAsync"/>'s
+/// keep_versions cap and <see cref="RetentionService.EvictStaleBlobsAsync"/>'s keep_days age
+/// filter — decide per VERSION, and evict a version whole or not at all.
 ///
 /// cache_artifact is keyed UNIQUE (ecosystem, name, version, filename): one version owns one row
-/// per file. Capping rows would make keep_versions=5 retain about one real Maven version, and —
-/// because the cut can fall between two files of one version — could evict a version's .pom while
+/// per file, and those rows carry independent timestamps. Judging rows would make keep_versions=5
+/// retain about one real Maven version, and — on either pass — could drop a version's .pom while
 /// keeping its .jar. That partial version still lists and still resolves, right up until the
 /// missing file 404s, which is worse than either keeping or dropping the version whole.
 /// </summary>
@@ -39,15 +40,23 @@ public sealed class RetentionProxyVersionLimitTests : IAsyncLifetime
         var cfg = new ConfigurationBuilder().Build();
         return new RetentionService(new RetentionService.Dependencies(
             _db, _blobs, new JwtRevocationRepository(_db, time: _clock),
-            new InviteRepository(_db, _clock), new SamlConfigRepository(_db, _clock),
+            new InviteRepository(_db, _clock), new SamlConfigRepository(_db, _clock), new TrustedDeviceService(_db, _clock, cfg),
             cfg, new AirGapMode(cfg), NullLogger<RetentionService>.Instance, _clock,
-            new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock)));
+            new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock),
+            new Dependably.Protocol.OciOrphanBlobDeleter(
+                _db, new Dependably.Storage.TieredBlobStorage(_blobs, _blobs),
+                new Dependably.Protocol.OciBlobKeyLock())));
     }
 
-    // Seeds one proxied FILE of a version, with its blob, for org 'o1'. Every file of a version
-    // shares that version's access timestamp — the recency the keep-set ranks on.
+    // Seeds one proxied FILE of a version, with its blob, for org 'o1'.
+    //
+    // Two independent timestamps, because the two passes read different ones: last_accessed_at is
+    // the recency keep_versions ranks on, last_used is what the keep_days age filter compares to
+    // its cutoff. A null lastUsed leaves the column NULL — a file this tenant has never
+    // downloaded, which keep_days must treat as not-evictable.
     private async Task SeedFileAsync(
-        string ecosystem, string name, string version, string filename, DateTimeOffset accessed)
+        string ecosystem, string name, string version, string filename, DateTimeOffset accessed,
+        DateTimeOffset? lastUsed = null)
     {
         string blobKey = BlobKeys.Proxy(Convert.ToHexString(
             System.Security.Cryptography.SHA256.HashData(
@@ -68,17 +77,23 @@ public sealed class RetentionProxyVersionLimitTests : IAsyncLifetime
             LastAccessedAt = accessed,
         });
 
-        await new TenantArtifactAccessRepository(_db).UpsertAsync("o1", inserted.Id, accessed);
+        var access = new TenantArtifactAccessRepository(_db);
+        await access.UpsertAsync("o1", inserted.Id, accessed);
+        if (lastUsed is { } used)
+        {
+            await access.UpsertStateAsync("o1", inserted.Id, used);
+        }
     }
 
     // The four files a Maven resolve caches for one version.
     private static readonly string[] MavenSuffixes = [".jar", ".pom", "-sources.jar", "-javadoc.jar"];
 
-    private async Task SeedMavenVersionAsync(string name, string version, DateTimeOffset accessed)
+    private async Task SeedMavenVersionAsync(
+        string name, string version, DateTimeOffset accessed, DateTimeOffset? lastUsed = null)
     {
         foreach (string suffix in MavenSuffixes)
         {
-            await SeedFileAsync("maven", name, version, $"widget-{version}{suffix}", accessed);
+            await SeedFileAsync("maven", name, version, $"widget-{version}{suffix}", accessed, lastUsed);
         }
     }
 
@@ -246,9 +261,12 @@ public sealed class RetentionProxyVersionLimitTests : IAsyncLifetime
         var cfg = new ConfigurationBuilder().Build();
         var svc = new RetentionService(new RetentionService.Dependencies(
             _db, blobs, new JwtRevocationRepository(_db, time: _clock),
-            new InviteRepository(_db, _clock), new SamlConfigRepository(_db, _clock),
+            new InviteRepository(_db, _clock), new SamlConfigRepository(_db, _clock), new TrustedDeviceService(_db, _clock, cfg),
             cfg, new AirGapMode(cfg), NullLogger<RetentionService>.Instance, _clock,
-            new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock)));
+            new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock),
+            new Dependably.Protocol.OciOrphanBlobDeleter(
+                _db, new Dependably.Storage.TieredBlobStorage(_blobs, _blobs),
+                new Dependably.Protocol.OciBlobKeyLock())));
 
         await using var conn = await _db.OpenAsync();
         await svc.EnforceVersionLimitAsync(conn, "o1", keepVersions: 1, cts.Token);
@@ -257,6 +275,114 @@ public sealed class RetentionProxyVersionLimitTests : IAsyncLifetime
 
         // Every version still present is COMPLETE: the interrupted version either finished
         // evicting (no rows) or was never started (all 4 files) — never 1 of 4.
+        foreach (string version in await SurvivingVersionsAsync("com.acme:widget"))
+        {
+            Assert.Equal(MavenSuffixes.Length, await FileCountAsync("com.acme:widget", version));
+        }
+    }
+
+    // ── keep_days (EvictStaleBlobsAsync): the same rule via the age filter ───
+
+    // The bug: last_used is per FILE, so a Maven version whose .jar is re-read on every build
+    // while its .pom is not would have the .pom aged out from under it — a version that still
+    // lists and 404s on resolve.
+    [Fact]
+    public async Task KeepDays_VersionWhoseJarIsStillUsed_KeepsItsPomToo()
+    {
+        var t = _clock.GetUtcNow();
+
+        // One version, four files. The .jar was downloaded yesterday; the other three not in 50
+        // days. Against a 30-day cutoff a per-row filter evicts three of four files.
+        await SeedFileAsync("maven", "com.acme:widget", "1.0.0", "widget-1.0.0.pom", t.AddDays(-50), t.AddDays(-50));
+        await SeedFileAsync("maven", "com.acme:widget", "1.0.0", "widget-1.0.0.jar", t.AddDays(-1), t.AddDays(-1));
+        await SeedFileAsync("maven", "com.acme:widget", "1.0.0", "widget-1.0.0-sources.jar", t.AddDays(-50), t.AddDays(-50));
+        await SeedFileAsync("maven", "com.acme:widget", "1.0.0", "widget-1.0.0-javadoc.jar", t.AddDays(-50), t.AddDays(-50));
+
+        var svc = Build();
+        await using var conn = await _db.OpenAsync();
+        await svc.EvictStaleBlobsAsync(conn, "o1", keepDays: 30, default);
+
+        // The version is in use, so it is retained COMPLETE — not reduced to the one fresh file.
+        Assert.Equal(["1.0.0"], await SurvivingVersionsAsync("com.acme:widget"));
+        Assert.Equal(MavenSuffixes.Length, await FileCountAsync("com.acme:widget", "1.0.0"));
+    }
+
+    // The mixed pass the ticket asks for: in ONE call some versions age out and some stay, and no
+    // version survives in pieces either way.
+    [Fact]
+    public async Task KeepDays_MixedPass_EvictsWhollyStaleVersions_AndRetainsTheRestComplete()
+    {
+        var t = _clock.GetUtcNow();
+
+        // Wholly stale — every file last used 50 days ago.
+        await SeedMavenVersionAsync("com.acme:widget", "1.0.0", t.AddDays(-50), t.AddDays(-50));
+        await SeedMavenVersionAsync("com.acme:widget", "2.0.0", t.AddDays(-50), t.AddDays(-50));
+        // Wholly fresh.
+        await SeedMavenVersionAsync("com.acme:widget", "4.0.0", t.AddDays(-1), t.AddDays(-1));
+        // Mixed: one fresh file, three stale — the shape a per-row filter shreds.
+        await SeedFileAsync("maven", "com.acme:widget", "3.0.0", "widget-3.0.0.pom", t.AddDays(-50), t.AddDays(-50));
+        await SeedFileAsync("maven", "com.acme:widget", "3.0.0", "widget-3.0.0.jar", t.AddDays(-1), t.AddDays(-1));
+        await SeedFileAsync("maven", "com.acme:widget", "3.0.0", "widget-3.0.0-sources.jar", t.AddDays(-50), t.AddDays(-50));
+        await SeedFileAsync("maven", "com.acme:widget", "3.0.0", "widget-3.0.0-javadoc.jar", t.AddDays(-50), t.AddDays(-50));
+
+        var svc = Build();
+        await using var conn = await _db.OpenAsync();
+        await svc.EvictStaleBlobsAsync(conn, "o1", keepDays: 30, default);
+
+        await AssertNoPartialVersionAsync(
+            "com.acme:widget",
+            expectedSurvivors: ["3.0.0", "4.0.0"],
+            expectedEvicted: ["1.0.0", "2.0.0"]);
+    }
+
+    // A NULL last_used means this tenant has never downloaded the file — the per-row filter's
+    // `last_used IS NOT NULL` never evicted those, and grouping must not start evicting them by
+    // taking MAX over the non-null rows and finding the group stale.
+    [Fact]
+    public async Task KeepDays_VersionHoldingANeverDownloadedFile_IsNotEvicted()
+    {
+        var t = _clock.GetUtcNow();
+
+        await SeedFileAsync("maven", "com.acme:widget", "1.0.0", "widget-1.0.0.pom", t.AddDays(-50), t.AddDays(-50));
+        await SeedFileAsync("maven", "com.acme:widget", "1.0.0", "widget-1.0.0.jar", t.AddDays(-50), lastUsed: null);
+
+        var svc = Build();
+        await using var conn = await _db.OpenAsync();
+        await svc.EvictStaleBlobsAsync(conn, "o1", keepDays: 30, default);
+
+        Assert.Equal(["1.0.0"], await SurvivingVersionsAsync("com.acme:widget"));
+        Assert.Equal(2, await FileCountAsync("com.acme:widget", "1.0.0"));
+    }
+
+    // Shutdown lands mid-eviction on the age pass too. The checkpoint is the version boundary, so
+    // a version whose eviction has begun runs to completion rather than being left in pieces.
+    [Fact]
+    public async Task KeepDays_CancelledPartWayThroughAVersion_StillEvictsThatVersionWhole()
+    {
+        var t = _clock.GetUtcNow();
+
+        await SeedMavenVersionAsync("com.acme:widget", "1.0.0", t.AddDays(-50), t.AddDays(-50));
+        await SeedMavenVersionAsync("com.acme:widget", "2.0.0", t.AddDays(-50), t.AddDays(-50));
+        await SeedMavenVersionAsync("com.acme:widget", "3.0.0", t.AddDays(-1), t.AddDays(-1));
+
+        using var cts = new CancellationTokenSource();
+        var blobs = new CancelOnFirstDeleteBlobStore(_blobs, cts);
+
+        var cfg = new ConfigurationBuilder().Build();
+        var svc = new RetentionService(new RetentionService.Dependencies(
+            _db, blobs, new JwtRevocationRepository(_db, time: _clock),
+            new InviteRepository(_db, _clock), new SamlConfigRepository(_db, _clock), new TrustedDeviceService(_db, _clock, cfg),
+            cfg, new AirGapMode(cfg), NullLogger<RetentionService>.Instance, _clock,
+            new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock),
+            new Dependably.Protocol.OciOrphanBlobDeleter(
+                _db, new Dependably.Storage.TieredBlobStorage(_blobs, _blobs),
+                new Dependably.Protocol.OciBlobKeyLock())));
+
+        await using var conn = await _db.OpenAsync();
+        await svc.EvictStaleBlobsAsync(conn, "o1", keepDays: 30, cts.Token);
+
+        Assert.True(blobs.DeleteCount > 0, "the pass must have started evicting for this to test anything");
+
         foreach (string version in await SurvivingVersionsAsync("com.acme:widget"))
         {
             Assert.Equal(MavenSuffixes.Length, await FileCountAsync("com.acme:widget", version));

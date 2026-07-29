@@ -153,10 +153,31 @@ public sealed class ApkController : OrgScopedControllerBase
         }
 
         var upstreamBases = await _svc.Registries.ResolveAsync(orgId, "apk", ct);
-        return upstreamBases.Count == 0
-            ? NotFound()
-            : await FetchApkArtifactFromUpstreamsAsync(
+        if (upstreamBases.Count == 0)
+        {
+            return NotFound();
+        }
+
+        try
+        {
+            return await FetchApkArtifactFromUpstreamsAsync(
                 orgId, release, repo, arch, file, parsed, purl, blobKey, negativeCacheKey, upstreamBases, token, ct);
+        }
+        catch (ProxyCatalogueUnavailableException)
+        {
+            // The package could not be recorded on the cache plane, so it could not be gated — and
+            // an artefact the registry cannot vouch for is not served. 503, never 404: the package
+            // exists upstream, we just could not admit it.
+            // release/repo/arch/file pass PathSafeValidator; Serilog structured rendering prevents log injection.
+            _svc.Logger.LogWarning(
+                "Cache plane unavailable recording apk {File} ({Release}/{Repo}/{Arch}) for org {OrgId}; refusing the fetch.",
+                file, release, repo, arch, orgId);
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new ProblemDetails
+            {
+                Detail = "Package could not be recorded on the cache plane; retry.",
+                Status = StatusCodes.Status503ServiceUnavailable,
+            });
+        }
     }
 
     // Walks the configured upstream sources in priority order (Go precedent — apk is
@@ -213,7 +234,7 @@ public sealed class ApkController : OrgScopedControllerBase
 
             if (parsed is { } p)
             {
-                await RecordApkFirstFetchAsync(orgId, p, repo, arch, file, fetchResult, upstreamUrl, purl, ct);
+                await RecordApkFirstFetchOrRefuseAsync(orgId, p, repo, arch, file, fetchResult, upstreamUrl, purl, ct);
             }
 
             await _svc.Audit.LogActivityAsync(
@@ -326,14 +347,30 @@ public sealed class ApkController : OrgScopedControllerBase
         }
     }
 
-    // Records an apk package first-fetch into the global cache plane. Mirrors the
-    // GoController zip first-fetch pattern: a per-tenant packages row for discoverability, plus
-    // the global cache_artifact + tenant_artifact_access rows carrying the TOFU-observed
-    // SHA-256 as an upstream-integrity fact (not a verified checksum — apk clients verify the
-    // embedded RSA signature themselves).
+    /// <summary>
+    /// Records an apk package first-fetch into the global cache plane, enforcing the fail-closed
+    /// contract: a package the plane could not take a row for is one the registry cannot scan,
+    /// gate, or reclaim, so it is refused rather than served ungated. Mirrors the GoController zip
+    /// first-fetch pattern otherwise — a per-tenant packages row for discoverability, plus the
+    /// global cache_artifact + tenant_artifact_access rows carrying the TOFU-observed SHA-256 as
+    /// an upstream-integrity fact (not a verified checksum — apk clients verify the embedded RSA
+    /// signature themselves).
+    ///
+    /// The staged blob is discarded along with the refusal, and that half is load-bearing. The
+    /// content-addressed ecosystems (npm/PyPI/NuGet/Maven) get it for free: their cache-hit lookup
+    /// is row-driven, so no row already means the next request re-enters the fetch path. An apk
+    /// package is keyed by its org-scoped coordinate and found by probing the blob store, and
+    /// <see cref="IsApkBlockedAsync"/> allows a hit it has no row for — so a staged-but-unrecorded
+    /// blob would answer every later request from cache with nothing to gate against, a permanent
+    /// bypass rather than a deferred one. Dropping it restores the "no row ⇒ miss ⇒ re-fetch ⇒
+    /// re-record" invariant, at the cost of one re-download once the plane is back. apk blob keys
+    /// are org-scoped, so discarding one affects no other tenant — unlike RPM, whose proxy blobs
+    /// are content-addressed and shared.
+    /// </summary>
+    /// <exception cref="ProxyCatalogueUnavailableException">The recorder returned no row.</exception>
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
         Justification = "Each argument is a distinct fetch-coordinate input; the trailing optional context params add no cohesion when bundled.")]
-    private async Task RecordApkFirstFetchAsync(
+    private async Task RecordApkFirstFetchOrRefuseAsync(
         string orgId, (string PkgName, string PkgVer, string PkgRel) p, string repo, string arch, string file,
         UpstreamFetchResult fetchResult, string upstreamUrl, string? purl, CancellationToken ct)
     {
@@ -345,24 +382,27 @@ public sealed class ApkController : OrgScopedControllerBase
         string? cacheArtifactId = await _svc.CacheRecorder.RecordAccessAsync(
             new CacheAccess(orgId, "apk", p.PkgName, version, coordFilename,
                 fetchResult.Sha256Hex, fetchResult.SizeBytes, fetchResult.BlobKey, upstreamUrl), ct);
-        if (cacheArtifactId is not null)
+        if (cacheArtifactId is null)
         {
-            await _svc.TenantAccess.UpsertStateAsync(orgId, cacheArtifactId, _svc.Time.GetUtcNow(), ct);
-
-            await _svc.CacheArtifacts.UpdateGlobalFactsAsync(
-                cacheArtifactId,
-                purl: purl,
-                checksumSha1: null,
-                publishedAt: null,
-                deprecated: null,
-                hasInstallScript: false,
-                installScriptKind: null,
-                provenanceStatus: null,
-                provenanceSigner: null,
-                upstreamIntegrityValue: fetchResult.Sha256Hex,
-                upstreamIntegrityAlgorithm: "sha256",
-                ct: ct);
+            await _svc.Blobs.DeleteAsync(BlobKeys.StoreKey(fetchResult.BlobKey), ct);
+            throw new ProxyCatalogueUnavailableException("apk", p.PkgName, version);
         }
+
+        await _svc.TenantAccess.UpsertStateAsync(orgId, cacheArtifactId, _svc.Time.GetUtcNow(), ct);
+
+        await _svc.CacheArtifacts.UpdateGlobalFactsAsync(
+            cacheArtifactId,
+            purl: purl,
+            checksumSha1: null,
+            publishedAt: null,
+            deprecated: null,
+            hasInstallScript: false,
+            installScriptKind: null,
+            provenanceStatus: null,
+            provenanceSigner: null,
+            upstreamIntegrityValue: fetchResult.Sha256Hex,
+            upstreamIntegrityAlgorithm: "sha256",
+            ct: ct);
     }
 
     // ── Negative cache ────────────────────────────────────────────────────────
@@ -374,7 +414,7 @@ public sealed class ApkController : OrgScopedControllerBase
     private async Task<bool> IsApkNegativelyCachedAsync(string coordinate, CancellationToken ct)
     {
         string urlKey = NegativeCacheUrlKey(coordinate);
-        string cutoff = _svc.Time.GetUtcNow().UtcDateTime.Add(-_svc.NegativeCacheTtl).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string cutoff = _svc.Time.GetUtcNow().UtcDateTime.Add(-_svc.NegativeCacheTtl).ToUtcIso();
         await using var conn = await _svc.Db.OpenAsync(ct);
         string? hit = await conn.ExecuteScalarAsync<string?>(
             "SELECT url_key FROM upstream_negative_cache WHERE url_key = @key AND ecosystem = 'apk' AND fetched_at >= @cutoff",
@@ -385,7 +425,7 @@ public sealed class ApkController : OrgScopedControllerBase
     private async Task RecordApkNegativeAsync(string coordinate, CancellationToken ct)
     {
         string urlKey = NegativeCacheUrlKey(coordinate);
-        string now = _svc.Time.GetUtcNow().UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _svc.Time.GetUtcNow().UtcDateTime.ToUtcIso();
         await using var conn = await _svc.Db.OpenAsync(ct);
         await conn.ExecuteAsync(
             """
@@ -523,6 +563,7 @@ public sealed class ApkIndexFetchCoordinator
     private readonly IUpstreamUrlValidator _urlValidator;
     private readonly IPerOrgTrustAnchorStore _trustStore;
     private readonly ILogger<ApkIndexFetchCoordinator> _logger;
+    private readonly Dependably.Security.WeakAlgorithmAcceptance _weakAlgorithms;
     private readonly TimeSpan _ttl;
 
     // When true, APKINDEX.tar.gz signature verification is enforced regardless of whether the
@@ -538,7 +579,8 @@ public sealed class ApkIndexFetchCoordinator
     public ApkIndexFetchCoordinator(
         IHttpClientFactory http, IMemoryCache cache, IAirGapMode airGap,
         IUpstreamUrlValidator urlValidator, IPerOrgTrustAnchorStore trustStore, IConfiguration configuration,
-        ILogger<ApkIndexFetchCoordinator> logger)
+        ILogger<ApkIndexFetchCoordinator> logger,
+        Dependably.Security.WeakAlgorithmAcceptance? weakAlgorithms = null)
     {
         _http = http;
         _cache = cache;
@@ -546,6 +588,9 @@ public sealed class ApkIndexFetchCoordinator
         _urlValidator = urlValidator;
         _trustStore = trustStore;
         _logger = logger;
+
+        // Absent the DI singleton the safe posture applies: SHA-1 index signatures are refused.
+        _weakAlgorithms = weakAlgorithms ?? Dependably.Security.WeakAlgorithmAcceptance.RefuseAll;
         _ttl = TimeSpan.TryParse(configuration["Apk:IndexTtl"], out var t) ? t : TimeSpan.FromSeconds(60);
         _verifyIndexSignatureOverride = bool.TryParse(configuration["Apk:VerifyIndexSignature"], out bool vf)
             ? vf
@@ -634,7 +679,8 @@ public sealed class ApkIndexFetchCoordinator
             return false;
         }
 
-        var (verified, reason) = ApkIndexSignatureVerifier.VerifyWithReason(body, anchors, _logger);
+        var (verified, reason) = ApkIndexSignatureVerifier.VerifyWithReason(
+            body, anchors, _logger, _weakAlgorithms);
         if (!verified)
         {
             RecordIndexSignatureFailure(reason, upstreamBase);

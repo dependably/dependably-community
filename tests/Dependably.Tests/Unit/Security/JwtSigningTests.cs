@@ -10,7 +10,7 @@ namespace Dependably.Tests.Unit.Security;
 /// Enforces the JWT crypto invariants declared in encryption.md §2: algorithm is
 /// HS256, signing key has 256 bits of entropy, and validation rejects tampered,
 /// re-signed, expired, or alg=none tokens under the production
-/// <see cref="TokenValidationParameters"/> (mirroring Program.cs:238-247).
+/// <see cref="TokenValidationParameters"/>.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class JwtSigningTests
@@ -19,15 +19,15 @@ public sealed class JwtSigningTests
     private static string FreshSecret() =>
         Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
 
-    private static TokenValidationParameters ProductionValidationParams(string secret) => new()
+    // The host's own validation rules, plus the signing key the running process resolves per
+    // validation from JwtSigningKeyProvider. Taking the rules from the production factory rather
+    // than restating them here means a relaxation of any of them fails these tests.
+    private static TokenValidationParameters ProductionValidationParams(string secret)
     {
-        ValidateIssuer = false,
-        ValidateAudience = false,
-        ValidateLifetime = true,
-        ClockSkew = TimeSpan.Zero,
-        ValidateIssuerSigningKey = true,
-        IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secret)),
-    };
+        var parameters = Dependably.Security.JwtTokenBinding.SessionValidationParameters();
+        parameters.IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secret));
+        return parameters;
+    }
 
     [Fact]
     public void Tenant_JWT_is_signed_with_HS256()
@@ -90,13 +90,16 @@ public sealed class JwtSigningTests
     public void Unsigned_alg_none_token_is_rejected()
     {
         string secret = FreshSecret();
-        // Hand-craft an alg=none token with the same claims a legitimate one would carry.
-        // exp is a fixed far-future instant: IdentityModel validates lifetime against its
-        // internal real clock, and the rejection must be attributable to alg=none, not expiry.
+        // Hand-craft an alg=none token with the same claims a legitimate one would carry —
+        // including the bound issuer and audience, so the rejection is attributable to alg=none
+        // and not to a registered claim the crafted token happens to omit. exp is a fixed
+        // far-future instant: IdentityModel validates lifetime against its internal real clock.
         var farFuture = new DateTimeOffset(2123, 1, 1, 0, 0, 0, TimeSpan.Zero);
         string header = Base64UrlEncode("{\"alg\":\"none\",\"typ\":\"JWT\"}"u8);
         string payload = Base64UrlEncode(Encoding.UTF8.GetBytes(
             $"{{\"sub\":\"user-id\",\"tid\":\"tenant-id\",\"role\":\"member\",\"scope\":\"tenant\"," +
+            $"\"iss\":\"{Dependably.Security.JwtTokenBinding.Issuer}\"," +
+            $"\"aud\":\"{Dependably.Security.JwtTokenBinding.SessionAudience}\"," +
             $"\"exp\":{farFuture.ToUnixTimeSeconds()}}}"));
         string unsigned = $"{header}.{payload}.";
 
@@ -117,6 +120,8 @@ public sealed class JwtSigningTests
         var pastExpired = new DateTime(2020, 1, 1, 8, 0, 0, DateTimeKind.Utc);
 
         var expired = new JwtSecurityToken(
+            issuer: Dependably.Security.JwtTokenBinding.Issuer,
+            audience: Dependably.Security.JwtTokenBinding.SessionAudience,
             claims: new[]
             {
                 new System.Security.Claims.Claim("sub", "user-id"),

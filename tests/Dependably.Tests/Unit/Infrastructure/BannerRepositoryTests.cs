@@ -53,8 +53,8 @@ public sealed class BannerRepositoryTests : IClassFixture<InMemoryDbFixture>
             LinkUrl: linkUrl,
             LinkLabel: linkLabel,
             TargetRole: targetRole,
-            StartsAt: (startsAt ?? KnownNow.AddDays(-30)).ToString("yyyy-MM-ddTHH:mm:ssZ"),
-            EndsAt: (endsAt ?? KnownNow.AddDays(+30)).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            StartsAt: (startsAt ?? KnownNow.AddDays(-30)).ToUtcIso(),
+            EndsAt: (endsAt ?? KnownNow.AddDays(+30)).ToUtcIso(),
             Enabled: enabled);
 
     // ── Tenant CRUD ──────────────────────────────────────────────────────────────────────────
@@ -315,7 +315,7 @@ public sealed class BannerRepositoryTests : IClassFixture<InMemoryDbFixture>
 
         var banner = await repo.CreateTenantAsync(orgId, userId, ActiveReq(), CancellationToken.None);
 
-        await repo.DismissAsync(banner.Id, userId);
+        await repo.DismissAsync(orgId, banner.Id, userId);
 
         var active = await repo.GetActiveAsync(orgId, userId, "member");
         Assert.DoesNotContain(active, b => b.Id == banner.Id);
@@ -328,9 +328,71 @@ public sealed class BannerRepositoryTests : IClassFixture<InMemoryDbFixture>
         var repo = Repo();
         var banner = await repo.CreateTenantAsync(orgId, userId, ActiveReq(), CancellationToken.None);
 
-        await repo.DismissAsync(banner.Id, userId);
-        var ex = await Record.ExceptionAsync(() => repo.DismissAsync(banner.Id, userId));
+        await repo.DismissAsync(orgId, banner.Id, userId);
+        var ex = await Record.ExceptionAsync(() => repo.DismissAsync(orgId, banner.Id, userId));
         Assert.Null(ex);
+    }
+
+    /// <summary>
+    /// BOLA: the dismissal existence probe must be scoped to what the caller can actually see.
+    /// An unscoped probe answers "does banner id X exist anywhere on this instance" — a
+    /// cross-tenant object-existence oracle — and writes a dismissal row against another
+    /// tenant's banner.
+    /// </summary>
+    [Fact]
+    public async Task Dismiss_OtherTenantsBanner_Returns404_AndWritesNoRow()
+    {
+        var (orgA, userA) = await SeedTenantAsync("member");
+        var (orgB, userB) = await SeedTenantAsync("member");
+        var repo = Repo();
+
+        var bannerB = await repo.CreateTenantAsync(orgB, userB, ActiveReq(), CancellationToken.None);
+
+        bool found = await repo.DismissAsync(orgA, bannerB.Id, userA);
+
+        Assert.False(found);
+        Assert.Equal(0, await DismissalCountAsync(bannerB.Id));
+    }
+
+    /// <summary>
+    /// Adversarial twin to the BOLA test: the scoping must not break the system plane.
+    /// GetActive unions system-scope banners into every tenant's stack, so every tenant member
+    /// must still be able to dismiss one.
+    /// </summary>
+    [Fact]
+    public async Task Dismiss_SystemScopeBanner_IsAllowedForAnyTenantMember()
+    {
+        var (orgA, userA) = await SeedTenantAsync("member");
+        var repo = Repo();
+
+        var systemBanner = await repo.CreateSystemAsync(userA, ActiveReq(), CancellationToken.None);
+
+        bool found = await repo.DismissAsync(orgA, systemBanner.Id, userA);
+
+        Assert.True(found);
+        Assert.Equal(1, await DismissalCountAsync(systemBanner.Id));
+
+        var active = await repo.GetActiveAsync(orgA, userA, "member");
+        Assert.DoesNotContain(active, b => b.Id == systemBanner.Id);
+    }
+
+    /// <summary>The caller's own tenant banner stays dismissible — the happy path the scoping keeps.</summary>
+    [Fact]
+    public async Task Dismiss_OwnTenantBanner_WritesTheRow()
+    {
+        var (orgId, userId) = await SeedTenantAsync("member");
+        var repo = Repo();
+        var banner = await repo.CreateTenantAsync(orgId, userId, ActiveReq(), CancellationToken.None);
+
+        Assert.True(await repo.DismissAsync(orgId, banner.Id, userId));
+        Assert.Equal(1, await DismissalCountAsync(banner.Id));
+    }
+
+    private async Task<int> DismissalCountAsync(string bannerId)
+    {
+        await using var conn = await _fixture.Store.OpenAsync();
+        return await Dapper.SqlMapper.ExecuteScalarAsync<int>(
+            conn, "SELECT COUNT(*) FROM banner_dismissals WHERE banner_id = @bannerId", new { bannerId });
     }
 
     [Fact]
@@ -341,7 +403,7 @@ public sealed class BannerRepositoryTests : IClassFixture<InMemoryDbFixture>
         var repo = Repo();
 
         var banner = await repo.CreateTenantAsync(orgId, userId, ActiveReq(), CancellationToken.None);
-        await repo.DismissAsync(banner.Id, userId);
+        await repo.DismissAsync(orgId, banner.Id, userId);
 
         var active2 = await repo.GetActiveAsync(orgId, userId2, "member");
         Assert.Contains(active2, b => b.Id == banner.Id);
@@ -418,7 +480,7 @@ public sealed class BannerRepositoryTests : IClassFixture<InMemoryDbFixture>
 
         // Not visible: dismissed by user.
         var suppressed4 = await repo.CreateTenantAsync(orgId, userId, ActiveReq(), CancellationToken.None);
-        await repo.DismissAsync(suppressed4.Id, userId);
+        await repo.DismissAsync(orgId, suppressed4.Id, userId);
 
         var active = await repo.GetActiveAsync(orgId, userId, "member");
 

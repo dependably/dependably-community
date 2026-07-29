@@ -162,7 +162,7 @@ public sealed partial class PackageRepository
         var pkg = await GetOrCreateAsync(
             orgId, "golang", module, module, isProxy: true, ct);
 
-        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToUtcIso();
         string filename = DeriveFilename(blobKey);
         await using var conn = await _db.OpenAsync(ct);
         // xtenant: INSERT pinned to package_id resolved by GetOrCreateAsync under the caller's org.

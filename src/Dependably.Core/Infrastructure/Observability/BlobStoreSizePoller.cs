@@ -44,6 +44,8 @@ public sealed class BlobStoreSizePoller : BackgroundService
     {
         // First poll happens 30s after startup so the gauge isn't empty for
         // the first poll interval.
+        // now-ok: gauge poll cadence is real elapsed time — no scheduled work observes
+        // this deadline, and tests exercise PollOnce/PollOnceAsync directly, never the loop.
         try { await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken); }
         catch (OperationCanceledException) { return; }
 
@@ -51,6 +53,7 @@ public sealed class BlobStoreSizePoller : BackgroundService
         {
             await PollOnceAsync(stoppingToken);
 
+            // now-ok: same real-time poll cadence as the startup delay above.
             try { await Task.Delay(_interval, stoppingToken); }
             catch (OperationCanceledException) { break; }
         }

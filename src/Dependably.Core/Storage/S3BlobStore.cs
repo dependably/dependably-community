@@ -4,7 +4,7 @@ using Amazon.S3.Model;
 
 namespace Dependably.Storage;
 
-public sealed class S3BlobStore : IBlobStore, IAsyncDisposable
+public sealed class S3BlobStore : IBlobStore, IPresignedReadBlobStore, IAsyncDisposable
 {
     private readonly IAmazonS3 _client;
     private readonly string _bucket;
@@ -120,6 +120,37 @@ public sealed class S3BlobStore : IBlobStore, IAsyncDisposable
         {
             return false;
         }
+    }
+
+    /// <summary>
+    /// S3 SigV4 query-string signing is always available: the same credential that reads the
+    /// object signs the URL, so a client that can be served can also be redirected.
+    /// </summary>
+    public bool SupportsPresignedReads => true;
+
+    /// <summary>
+    /// Mints a GET-only SigV4 URL for <paramref name="key"/>. The existence probe in front of the
+    /// signing call is deliberate — <c>GetPreSignedURL</c> signs a key whether or not an object
+    /// sits at it, and a URL for an evicted blob would turn a cache miss (which the caller answers
+    /// by falling through to upstream) into a 404 from S3 that the caller never sees.
+    /// </summary>
+    public async Task<Uri?> TryCreatePresignedReadUrlAsync(
+        string key, DateTimeOffset expiresAt, CancellationToken ct = default)
+    {
+        if (!await ExistsAsync(key, ct))
+        {
+            return null;
+        }
+
+        string url = await _client.GetPreSignedURLAsync(new GetPreSignedUrlRequest
+        {
+            BucketName = _bucket,
+            Key = key,
+            Verb = HttpVerb.GET,
+            Expires = expiresAt.UtcDateTime,
+        });
+
+        return Uri.TryCreate(url, UriKind.Absolute, out var uri) ? uri : null;
     }
 
     public async Task DeleteAsync(string key, CancellationToken ct = default)

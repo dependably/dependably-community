@@ -57,7 +57,8 @@ public sealed class NuGetSearchHandlerBoundedFanOutTests : IAsyncLifetime
 
         var httpContext = NewAnonymousHttpContext();
         var result = await handler.SearchAsync(
-            httpContext, orgId, q: "boundedfanout", skip: 0, take: Take, CancellationToken.None);
+            httpContext, orgId, q: "boundedfanout", skip: 0, take: Take,
+            prerelease: false, ct: CancellationToken.None);
 
         var jsonResult = Assert.IsType<JsonResult>(result);
         using var doc = JsonDocument.Parse(JsonSerializer.Serialize(jsonResult.Value));

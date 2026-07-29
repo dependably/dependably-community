@@ -56,7 +56,7 @@ public sealed class OrgRepositoryTests : IClassFixture<InMemoryDbFixture>
         // Force the stale one's deleted_at to 60 days ago.
         await using (var conn = await _fixture.Store.OpenAsync())
         {
-            string sixtyDaysAgo = TestTime.KnownNow.AddDays(-60).ToString("yyyy-MM-ddTHH:mm:ssZ");
+            string sixtyDaysAgo = TestTime.KnownNow.AddDays(-60).ToUtcIso();
             await conn.ExecuteAsync(
                 "UPDATE orgs SET deleted_at = @t WHERE id = @id", new { t = sixtyDaysAgo, id = staleId });
         }
@@ -260,6 +260,43 @@ public sealed class OrgRepositoryTests : IClassFixture<InMemoryDbFixture>
         Assert.Equal("warn", (await _repo.GetSettingsAsync(orgId))!.LicenseEnforcementMode);
         await _repo.UpsertLicensePolicyModeAsync(orgId, "block");
         Assert.Equal("block", (await _repo.GetSettingsAsync(orgId))!.LicenseEnforcementMode);
+    }
+
+    [Fact]
+    public async Task UpsertLicensePolicyModeAsync_PublishMode_RoundTrip()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        await _repo.UpsertLicensePolicyModeAsync(orgId, "off", "warn");
+        Assert.Equal("warn", (await _repo.GetSettingsAsync(orgId))!.LicensePublishEnforcementMode);
+        await _repo.UpsertLicensePolicyModeAsync(orgId, "off", "block");
+        Assert.Equal("block", (await _repo.GetSettingsAsync(orgId))!.LicensePublishEnforcementMode);
+    }
+
+    [Fact]
+    public async Task UpsertLicensePolicyModeAsync_PublishModeOmitted_LeavesStoredValueUnchanged()
+    {
+        // Fail-closed contract: an omitted publishMode (an older caller that only knows the
+        // serve-path 'mode' field) must never silently reset the stored publish policy back to
+        // 'off' — mirrors how the five verify_* fields on proxy-settings behave.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        await _repo.UpsertLicensePolicyModeAsync(orgId, "off", "block");
+        Assert.Equal("block", (await _repo.GetSettingsAsync(orgId))!.LicensePublishEnforcementMode);
+
+        // Calling again without a publishMode must preserve 'block', not reset to 'off'.
+        await _repo.UpsertLicensePolicyModeAsync(orgId, "warn");
+        var settings = await _repo.GetSettingsAsync(orgId);
+        Assert.Equal("warn", settings!.LicenseEnforcementMode);
+        Assert.Equal("block", settings.LicensePublishEnforcementMode);
+    }
+
+    [Fact]
+    public async Task UpsertLicensePolicyModeAsync_PublishModeDefault_IsOffOnFirstInsert()
+    {
+        // A brand-new org row (never touched by the publish-mode field) defaults to 'off' —
+        // no currently-succeeding licence-less publish workflow starts failing on upgrade.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        await _repo.UpsertLicensePolicyModeAsync(orgId, "block");
+        Assert.Equal("off", (await _repo.GetSettingsAsync(orgId))!.LicensePublishEnforcementMode);
     }
 
     [Fact]

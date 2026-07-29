@@ -296,6 +296,9 @@ public sealed class PyPiSimpleIndexHandler(
     // win outright — a tie keeps the HTML default. A bare "*/*" from a generic client counts
     // toward HTML alone, and no Accept header at all keeps HTML too, so only a client that
     // explicitly asks for JSON receives it.
+    //
+    // q=0 means "not acceptable" (RFC 9110 §12.4.2), so a JSON offer at q=0 is never selected —
+    // including when it is the only entry present and would otherwise beat HTML's "absent" score.
     private static bool PrefersJson(HttpContext httpContext)
     {
         var acceptValues = httpContext.Request.Headers.Accept;
@@ -336,7 +339,7 @@ public sealed class PyPiSimpleIndexHandler(
             }
         }
 
-        return jsonQuality >= 0 && jsonQuality > htmlQuality;
+        return jsonQuality > 0 && jsonQuality > htmlQuality;
     }
 
     private static double ParseQuality(string[] mediaTypeParts)

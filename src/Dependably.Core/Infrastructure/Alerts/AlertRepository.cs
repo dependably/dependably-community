@@ -20,7 +20,7 @@ public sealed class AlertRepository
         _time = time;
     }
 
-    private string NowIso() => _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+    private string NowIso() => _time.GetUtcNow().ToUtcIso();
 
     /// <summary>
     /// Inserts a new alert row, deduplicated on (org_id, type, source_ref). Returns the inserted
@@ -32,7 +32,7 @@ public sealed class AlertRepository
     {
         string id = Guid.NewGuid().ToString("N");
         var nowOffset = _time.GetUtcNow();
-        string now = nowOffset.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = nowOffset.ToUtcIso();
 
         await using var conn = await _db.OpenAsync(ct);
         int rows = await conn.ExecuteAsync(

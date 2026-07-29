@@ -70,6 +70,8 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
         var auditor = new Dependably.Infrastructure.Publish.PublishAuditor(audit, emitter);
         var licenses = new LicenseRepository(_db, _clock, TestNormalizers.License(_db));
         return new PackagePublishService(packages, new PackageVersionFilesRepository(_db), new OrgRepository(_db), storage, gate,
+            new Dependably.Security.NameBindingGate(cfg, new Dependably.Infrastructure.NameBindingRepository(_db), NullLogger<Dependably.Security.NameBindingGate>.Instance),
+            new Dependably.Infrastructure.VersionTombstoneRepository(_db),
             new Dependably.Infrastructure.Edge.EdgePublishGuard(TestEdgeMode.Disabled()),
             auditor, scanner, licenses, NullLogger<PackagePublishService>.Instance);
     }
@@ -809,6 +811,8 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
         var auditor = new Dependably.Infrastructure.Publish.PublishAuditor(audit, emitter);
         var licenses = new LicenseRepository(_db, _clock, TestNormalizers.License(_db));
         return new PackagePublishService(packages, new PackageVersionFilesRepository(_db), new OrgRepository(_db), storage, gate,
+            new Dependably.Security.NameBindingGate(cfg, new Dependably.Infrastructure.NameBindingRepository(_db), NullLogger<Dependably.Security.NameBindingGate>.Instance),
+            new Dependably.Infrastructure.VersionTombstoneRepository(_db),
             new Dependably.Infrastructure.Edge.EdgePublishGuard(TestEdgeMode.Disabled()),
             auditor, scanner, licenses, NullLogger<PackagePublishService>.Instance);
     }
@@ -1023,12 +1027,11 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Pypi_FileRowInsertFailureOnNewVersion_ReleasesQuotaExactlyOnce()
+    public async Task Pypi_FileRowInsertFailureOnNewVersion_LeavesTheTenantsUsageUnchanged()
     {
-        // A failed file-row insert after the version row was created rolls the ROW back
-        // without touching the tenant counter — the publish's own reservation release is
-        // the single give-back. A counter-coupled rollback would decrement twice and drift
-        // the counter low (the direction that lets a tenant exceed its real quota).
+        // A failed file-row insert after the version row was created rolls the ROW back, so the
+        // tenant's usage must settle on the bytes of the one publish that actually committed —
+        // not on those bytes plus the rolled-back publish's.
         await new OrgRepository(_db).SetStorageQuotaBytesAsync("o1", 10_000);
         var svc = Build();
         Assert.IsType<PublishResult.Accepted>(
@@ -1041,10 +1044,9 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
         await Assert.ThrowsAnyAsync<Exception>(() =>
             failing.StoreAndRecordAsync(PypiSample("mfroll", "1.0.0", "mfroll-1.0.0-py3-none-any.whl", size: 100)));
 
+        Assert.Equal(500, await new OrgRepository(_db).GetLiveStorageBytesAsync("o1"));
+
         await using var conn = await _db.OpenAsync();
-        long used = await conn.ExecuteScalarAsync<long>(
-            "SELECT storage_used_bytes FROM org_settings WHERE org_id = 'o1'");
-        Assert.Equal(500, used);
 
         // The rolled-back version row is gone (no zero-file version survives).
         long orphanVersions = await conn.ExecuteScalarAsync<long>(
@@ -1268,5 +1270,241 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
             keys.Add(blob.Key);
         }
         return keys;
+    }
+
+    // ── Publish-side licence gate: license_publish_enforcement_mode ─────────────
+    //
+    // Independent of the existing serve-path org_settings.license_enforcement_mode: a hosted
+    // publish carrying no declared licence used to be accepted unconditionally and only fail
+    // downstream at serve time. These pin the three-state contract for the ecosystems whose
+    // manifests declare a licence (BlockGateService.DeclaredLicenseEcosystems).
+
+    private static PublishRequest NoLicenseSample(
+        string ecosystem, string name, string version = "1.0.0", IReadOnlyList<string>? licenses = null) => new()
+        {
+            OrgId = "o1",
+            Ecosystem = ecosystem,
+            Name = name,
+            PurlName = name,
+            Version = version,
+            Filename = $"{name}-{version}.tgz",
+            Purl = $"pkg:{ecosystem}/{name}@{version}",
+            ArtifactBytes = new byte[16],
+            Origin = "uploaded",
+            SizeCap = long.MaxValue,
+            ActorUserId = "u1",
+            Licenses = licenses,
+        };
+
+    private async Task SetLicensePublishModeAsync(string mode)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "INSERT INTO org_settings (org_id, license_publish_enforcement_mode) VALUES ('o1', @mode) "
+            + "ON CONFLICT(org_id) DO UPDATE SET license_publish_enforcement_mode = @mode",
+            new { mode });
+    }
+
+    [Fact]
+    public async Task LicenselessPublish_DefaultOff_AcceptedUnchanged()
+    {
+        // No org_settings row at all — the default posture reproduces today's behaviour
+        // byte-for-byte: a licence-less hosted publish is accepted.
+        var svc = Build();
+        var result = await svc.StoreAndRecordAsync(NoLicenseSample("npm", "no-license-default"));
+        Assert.IsType<PublishResult.Accepted>(result);
+    }
+
+    [Fact]
+    public async Task LicenselessPublish_ExplicitOff_AcceptedUnchanged()
+    {
+        // Adversarial twin of the default case: an explicitly-stored 'off' behaves identically
+        // to the column's own default, not merely to an absent row.
+        await SetLicensePublishModeAsync("off");
+        var svc = Build();
+        var result = await svc.StoreAndRecordAsync(NoLicenseSample("npm", "no-license-explicit-off"));
+        Assert.IsType<PublishResult.Accepted>(result);
+    }
+
+    [Fact]
+    public async Task LicenselessPublish_PublishModeBlock_DeclaredLicenseEcosystem_RejectedWith403()
+    {
+        // The gap #449 reports: a hosted publish with no declared licence was accepted
+        // unconditionally and only failed downstream at serve time. With
+        // license_publish_enforcement_mode='block' it must instead reject up front, before any
+        // version row is written — mirroring the existing license_blocked rejection shape.
+        await SetLicensePublishModeAsync("block");
+        var svc = Build();
+        var result = await svc.StoreAndRecordAsync(NoLicenseSample("npm", "no-license-block"));
+
+        var rej = Assert.IsType<PublishResult.Rejected>(result);
+        Assert.Equal(403, rej.HttpStatus);
+        Assert.Equal("license_publish_blocked", rej.Code);
+
+        await using var conn = await _db.OpenAsync();
+        long count = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM package_versions WHERE purl = 'pkg:npm/no-license-block@1.0.0'");
+        Assert.Equal(0, count);
+    }
+
+    [Fact]
+    public async Task LicenselessPublish_PublishModeWarn_AcceptedAndRecordsActivityRow()
+    {
+        await SetLicensePublishModeAsync("warn");
+        var svc = Build();
+        var result = await svc.StoreAndRecordAsync(NoLicenseSample("npm", "no-license-warn"));
+        Assert.IsType<PublishResult.Accepted>(result);
+
+        await using var conn = await _db.OpenAsync();
+        long count = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM activity WHERE org_id = 'o1' AND event_type = 'license_publish_warn' "
+            + "AND purl = 'pkg:npm/no-license-warn@1.0.0'");
+        Assert.Equal(1, count);
+    }
+
+    [Theory]
+    [InlineData("go")]
+    [InlineData("oci")]
+    [InlineData("apk")]
+    public async Task LicenselessPublish_PublishModeBlock_NonDeclaringEcosystem_Unaffected(string ecosystem)
+    {
+        // Adversarial twin: go/apk/oci keep the empty-set pass-through — they routinely record
+        // no licence at all, so denying on absence would refuse every artifact of that ecosystem.
+        await SetLicensePublishModeAsync("block");
+        var svc = Build();
+        var result = await svc.StoreAndRecordAsync(NoLicenseSample(ecosystem, $"nolicense-{ecosystem}-mod"));
+        Assert.IsType<PublishResult.Accepted>(result);
+    }
+
+    [Fact]
+    public async Task DeclaredLicensePublish_PublishModeBlock_AllowlistedLicense_StillSucceeds()
+    {
+        // Adversarial twin: a publish that DOES declare a licence is untouched by the new gate
+        // regardless of license_publish_enforcement_mode — a declared licence is evaluated only
+        // by the existing serve-mode-gated allow/block-list arm, which stays 'off' (default) here.
+        await SetLicensePublishModeAsync("block");
+        var svc = Build();
+        var result = await svc.StoreAndRecordAsync(
+            NoLicenseSample("npm", "declared-mit", licenses: new[] { "MIT" }));
+        Assert.IsType<PublishResult.Accepted>(result);
+    }
+
+    [Fact]
+    public async Task PublishedLicenselessArtifact_PublishModeOff_ServeGateStillBlocksUnderBlockMode()
+    {
+        // Pins the !770 serve-path behaviour against the new publish-side gate: leaving
+        // license_publish_enforcement_mode at its default ('off') accepts the licence-less
+        // publish, but the independent serve-path license_enforcement_mode='block' gate still
+        // denies it on every subsequent serve — the two decisions never share state, so adding
+        // the publish-side gate can never silently relax the existing serve gate.
+        var svc = Build();
+        var accepted = Assert.IsType<PublishResult.Accepted>(
+            await svc.StoreAndRecordAsync(NoLicenseSample("npm", "serve-gate-pin")));
+
+        var blockGate = BuildBlockGate();
+        var req = new BlockGateRequest(
+            OrgId: "o1",
+            Ecosystem: "npm",
+            Purl: "pkg:npm/serve-gate-pin@1.0.0",
+            VersionId: accepted.VersionId,
+            ManualState: null,
+            VulnCheckedAt: null,
+            UserId: null,
+            MaxOsvScoreTolerance: 10.0,
+            LicenseEnforcementMode: "block");
+
+        Assert.Equal(BlockDecision.Blocked, await blockGate.EvaluateAsync(req));
+    }
+
+    private BlockGateService BuildBlockGate()
+    {
+        var alerts = new Dependably.Infrastructure.Alerts.AlertService(
+            new Dependably.Infrastructure.Alerts.AlertRepository(_db, _clock),
+            new Dependably.Infrastructure.Alerts.NoOpAlertNotifier(),
+            NullLogger<Dependably.Infrastructure.Alerts.AlertService>.Instance);
+        return new BlockGateService(
+            new VulnerabilityRepository(_db, _clock),
+            new AuditRepository(_db),
+            new QuarantineRepository(_db, _clock),
+            alerts,
+            new InstallScriptAllowlistService(_db, new Microsoft.Extensions.Caching.Memory.MemoryCache(
+                new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), _clock),
+            new LicenseRepository(_db, _clock, TestNormalizers.License(_db)),
+            new StubPerOrgTrustAnchorStore(),
+            NullLogger<BlockGateService>.Instance,
+            _clock);
+    }
+
+    // ── #438 item 6: declared dist.integrity is compared, not trusted verbatim ──
+
+    [Fact]
+    public async Task DeclaredSri_MatchesComputedBytes_Accepted()
+    {
+        byte[] bytes = Bytes(0x42, 64);
+        string correctSri = "sha512-" + Convert.ToBase64String(System.Security.Cryptography.SHA512.HashData(bytes));
+        var svc = Build();
+        var req = Sample(name: "sri-match", version: "1.0.0") with
+        {
+            ArtifactBytes = bytes,
+            DeclaredIntegritySri = correctSri,
+        };
+
+        var result = await svc.StoreAndRecordAsync(req);
+        var accepted = Assert.IsType<PublishResult.Accepted>(result);
+
+        var packages = new PackageRepository(_db);
+        var pkg = await packages.GetByPurlNameAsync("o1", "npm", "sri-match");
+        var version = await packages.GetVersionAsync(pkg!.Id, "1.0.0");
+        Assert.Equal(correctSri, version!.UpstreamIntegrityValue);
+        Assert.True(await _blobs.ExistsAsync(accepted.BlobKey));
+    }
+
+    [Fact]
+    public async Task DeclaredSri_MismatchesComputedBytes_RejectedWith422_NoBlobWritten()
+    {
+        // The bug #438 item 6 reports: a publisher could PUT tarball A while declaring the SRI
+        // of tarball B, and the registry would advertise dist.integrity untrue of the bytes it
+        // stores. The declared value must be compared against the server-computed SHA-512 over
+        // the staged bytes and rejected on mismatch, before anything is written.
+        byte[] bytes = Bytes(0x42, 64);
+        string wrongSri = "sha512-" + Convert.ToBase64String(
+            System.Security.Cryptography.SHA512.HashData(Bytes(0x99, 64)));
+        var svc = Build();
+        var req = Sample(name: "sri-mismatch", version: "1.0.0") with
+        {
+            ArtifactBytes = bytes,
+            DeclaredIntegritySri = wrongSri,
+        };
+
+        var result = await svc.StoreAndRecordAsync(req);
+        var rej = Assert.IsType<PublishResult.Rejected>(result);
+        Assert.Equal(422, rej.HttpStatus);
+        Assert.Equal("integrity_mismatch", rej.Code);
+
+        // Nothing was written: no version row, no orphaned blob.
+        await using var conn = await _db.OpenAsync();
+        long count = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM package_versions WHERE purl = 'pkg:npm/sri-mismatch@1.0.0'");
+        Assert.Equal(0, count);
+        Assert.Empty(await HostedKeysAsync());
+    }
+
+    [Fact]
+    public async Task NoDeclaredSri_ServerComputedSriUsed_Accepted()
+    {
+        // Adversarial twin: a caller that declares no SRI at all (npm clients that omit
+        // dist.integrity, and the in-repo import path, which has no publish body) keeps working —
+        // the server-computed SHA-512 over the staged bytes backs the packument.
+        byte[] bytes = Bytes(0x07, 64);
+        string expectedSri = "sha512-" + Convert.ToBase64String(System.Security.Cryptography.SHA512.HashData(bytes));
+        var svc = Build();
+        var req = Sample(name: "sri-none-declared", version: "1.0.0") with { ArtifactBytes = bytes };
+
+        Assert.IsType<PublishResult.Accepted>(await svc.StoreAndRecordAsync(req));
+
+        var packages = new PackageRepository(_db);
+        var pkg = await packages.GetByPurlNameAsync("o1", "npm", "sri-none-declared");
+        var version = await packages.GetVersionAsync(pkg!.Id, "1.0.0");
+        Assert.Equal(expectedSri, version!.UpstreamIntegrityValue);
     }
 }

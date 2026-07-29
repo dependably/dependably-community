@@ -108,6 +108,18 @@ internal static class ProtocolStartupExtensions
         builder.Services.AddSingleton<OciUploadService.Dependencies>();
         builder.Services.AddSingleton<OciUploadService>();
         builder.Services.AddHostedService<OciStagingJanitorService>();
+        // Records manifest closures for content stored before the reference graph existed; both
+        // write paths record their own going forward.
+        builder.Services.AddSingleton<OciReferenceGraph>();
+        // Registered as singletons and resolved into the hosted-service slot rather than via
+        // AddHostedService<T>, so one instance serves both the schedule and any direct caller.
+        builder.Services.AddSingleton<OciReferenceGraphBackfillService>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<OciReferenceGraphBackfillService>());
+        // Reclaims the layers and config blobs an evicted or deleted image leaves unreferenced;
+        // gated per org on the backfill above having completed for that tenant.
+        builder.Services.AddSingleton<OciBlobReclaimer>();
+        builder.Services.AddSingleton<OciBlobSweepService>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<OciBlobSweepService>());
 
         // Upload limit resolver
         builder.Services.AddSingleton<IUploadLimitResolver, UploadLimitResolver>();
@@ -205,8 +217,20 @@ internal static class ProtocolStartupExtensions
                 acquireTimeout: null,
                 sp.GetRequiredService<ILogger<UpstreamQueueThrottleHandler>>()));
 
-        // Fallback generic client (used by non-upstream code)
-        builder.Services.AddHttpClient();
+        // Harden the default (unnamed) client. The IHttpClientFactory core registers a transient
+        // HttpClient for the default name transitively for every named/typed client above, so a
+        // default client is always resolvable — by direct HttpClient injection or
+        // IHttpClientFactory.CreateClient(). Left at framework defaults its primary handler has no
+        // SsrfConnectCallback, so any future default-client consumer would silently bypass the
+        // connect-time IP guard every named client applies. Give it the same guard here.
+        // AllowAutoRedirect=false matches the named clients (no redirect can forward to an
+        // internal host). DefaultHttpClientSsrfGuardTests asserts the wiring holds.
+        builder.Services.AddHttpClient(Microsoft.Extensions.Options.Options.DefaultName)
+        .ConfigurePrimaryHttpMessageHandler(sp => new System.Net.Http.SocketsHttpHandler
+        {
+            AllowAutoRedirect = false,
+            ConnectCallback = sp.GetRequiredService<SsrfConnectCallback>().ConnectAsync,
+        });
 
         // Named client for outbound healthcheck pinger — no redirects, no auth, short timeout
         builder.Services.AddHttpClient("healthcheck-pinger", client => client.Timeout = TimeSpan.FromSeconds(

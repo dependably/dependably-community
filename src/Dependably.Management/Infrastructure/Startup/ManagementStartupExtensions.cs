@@ -53,7 +53,7 @@ public static class ManagementStartupExtensions
                 Licenses: sp.GetRequiredService<LicenseRepository>(),
                 LimitResolver: sp.GetRequiredService<Dependably.Protocol.IUploadLimitResolver>(),
                 StagingPath: stagingPath,
-                Cache: sp.GetRequiredService<Microsoft.Extensions.Caching.Memory.IMemoryCache>());
+                Invalidation: sp.GetRequiredService<Dependably.Infrastructure.Caching.MetadataInvalidationCoordinator>());
         });
 
         // Claim REST surface. State machine + repository are registered by the Core wiring; the

@@ -78,9 +78,7 @@ public sealed class PyPiProxyFetcherUnclassifiedExceptionTests : IAsyncLifetime
         var licenses = new LicenseRepository(_db, TimeProvider.System, TestNormalizers.License(_db));
         var proxyVersions = new ProxyVersionRecorder(packages, _audit, licenses, cacheArtifact,
             Substitute.For<IUpstreamLatestVersionResolver>(), NullLogger<ProxyVersionRecorder>.Instance);
-        var osv = Substitute.For<IOsvSource>();
-        osv.QueryAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
-           .Returns(Task.FromResult(new List<OsvAdvisory>()));
+        var osv = TestOsvSource.Create();
         var vulns = new VulnerabilityRepository(_db, TimeProvider.System);
         var scanner = new VulnerabilityScanService(new VulnerabilityScanService.Dependencies(
             _db, osv, vulns, _audit, config, new StubAirGapMode(),

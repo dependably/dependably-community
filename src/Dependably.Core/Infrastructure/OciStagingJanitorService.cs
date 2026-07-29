@@ -75,7 +75,7 @@ public sealed class OciStagingJanitorService : ScheduledBackgroundService
     {
         int ttlMinutes = ParseTtlMinutes();
         var cutoff = _time.GetUtcNow().AddMinutes(-ttlMinutes);
-        string cutoffStr = cutoff.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string cutoffStr = cutoff.ToUtcIso();
 
         _logger.LogDebug(
             "OCI staging janitor starting (ttlMinutes={TtlMinutes}, cutoff={Cutoff}).",

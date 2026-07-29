@@ -2,6 +2,7 @@ using System.Formats.Tar;
 using System.IO.Compression;
 using System.Security.Cryptography;
 using Dependably.Protocol.Provenance;
+using Dependably.Security;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -21,6 +22,13 @@ public sealed class ApkIndexSignatureVerifierTests
         Path.Combine(FixtureManifest.FixturesRoot, "apk", "APKINDEX-signed.tar.gz");
     private static readonly string FixtureKeyPath =
         Path.Combine(FixtureManifest.FixturesRoot, "apk", "test-signing-key.pub.pem");
+
+    // The committed fixture is signed .SIGN.RSA.<keyname> — SHA-1, the variant Alpine ships —
+    // so every fixture-based verification test must state its SHA-1 posture explicitly.
+    private static WeakAlgorithmAcceptance AcceptSha1 =>
+        new(npmSha1Shasum: false, apkSha1IndexSignatures: true, NullLogger.Instance);
+
+    private static WeakAlgorithmAcceptance RefuseSha1 => WeakAlgorithmAcceptance.RefuseAll;
 
     // ── Real fixture: structural parse ───────────────────────────────────────────
 
@@ -43,15 +51,53 @@ public sealed class ApkIndexSignatureVerifierTests
     // ── Real fixture: end-to-end verification ────────────────────────────────────
 
     [Fact]
-    public void Verify_RealFixture_WithMatchingAnchor_Succeeds()
+    public void Verify_RealFixture_WithMatchingAnchor_AndSha1OptIn_Succeeds()
     {
         byte[] apkindex = File.ReadAllBytes(FixtureIndexPath);
         string pem = File.ReadAllText(FixtureKeyPath);
         Assert.True(ApkTrustAnchorKeyStore.TryParseRsaPublicKey(pem, out var rsa, NullLogger.Instance));
 
-        bool verified = ApkIndexSignatureVerifier.Verify(apkindex, [rsa!], NullLogger.Instance);
+        bool verified = ApkIndexSignatureVerifier.Verify(apkindex, [rsa!], NullLogger.Instance, AcceptSha1);
 
         Assert.True(verified);
+        rsa!.Dispose();
+    }
+
+    /// <summary>
+    /// The adversarial twin of the test above: the same fixture, the same correct anchor, and a
+    /// signature that is cryptographically valid — refused anyway, because the digest algorithm
+    /// is named by the index under verification and SHA-1 acceptance is off by default.
+    /// </summary>
+    [Fact]
+    public void Verify_RealFixture_WithMatchingAnchor_Sha1OptInOff_RefusesAsWeakAlgorithm()
+    {
+        byte[] apkindex = File.ReadAllBytes(FixtureIndexPath);
+        string pem = File.ReadAllText(FixtureKeyPath);
+        Assert.True(ApkTrustAnchorKeyStore.TryParseRsaPublicKey(pem, out var rsa, NullLogger.Instance));
+
+        var (verified, reason) = ApkIndexSignatureVerifier.VerifyWithReason(
+            apkindex, [rsa!], NullLogger.Instance, RefuseSha1);
+
+        Assert.False(verified);
+        Assert.Equal("weak_signature_algorithm", reason);
+        rsa!.Dispose();
+    }
+
+    /// <summary>
+    /// Omitting the acceptance argument entirely must land on the refusing posture, not the
+    /// permissive one — a call site that has not been handed the DI singleton fails closed.
+    /// </summary>
+    [Fact]
+    public void Verify_RealFixture_DefaultAcceptanceArgument_RefusesSha1()
+    {
+        byte[] apkindex = File.ReadAllBytes(FixtureIndexPath);
+        string pem = File.ReadAllText(FixtureKeyPath);
+        Assert.True(ApkTrustAnchorKeyStore.TryParseRsaPublicKey(pem, out var rsa, NullLogger.Instance));
+
+        var (verified, reason) = ApkIndexSignatureVerifier.VerifyWithReason(apkindex, [rsa!], NullLogger.Instance);
+
+        Assert.False(verified);
+        Assert.Equal("weak_signature_algorithm", reason);
         rsa!.Dispose();
     }
 
@@ -61,7 +107,8 @@ public sealed class ApkIndexSignatureVerifierTests
         byte[] apkindex = File.ReadAllBytes(FixtureIndexPath);
         using var unrelated = RSA.Create(2048);
 
-        var (verified, reason) = ApkIndexSignatureVerifier.VerifyWithReason(apkindex, [unrelated], NullLogger.Instance);
+        var (verified, reason) = ApkIndexSignatureVerifier.VerifyWithReason(
+            apkindex, [unrelated], NullLogger.Instance, AcceptSha1);
 
         Assert.False(verified);
         Assert.Equal("bad_signature", reason);
@@ -78,10 +125,94 @@ public sealed class ApkIndexSignatureVerifierTests
         byte[] tampered = (byte[])apkindex.Clone();
         tampered[^10] ^= 0xFF;
 
-        bool verified = ApkIndexSignatureVerifier.Verify(tampered, [rsa!], NullLogger.Instance);
+        bool verified = ApkIndexSignatureVerifier.Verify(tampered, [rsa!], NullLogger.Instance, AcceptSha1);
 
         Assert.False(verified);
         rsa!.Dispose();
+    }
+
+    // ── SHA-1 acceptance opt-in ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// SHA-256 and SHA-512 index signatures are outside the opt-in: they verify identically
+    /// whichever way the SHA-1 switch is set.
+    /// </summary>
+    [Theory]
+    [InlineData(ApkSignatureAlgorithm.Sha256, true)]
+    [InlineData(ApkSignatureAlgorithm.Sha256, false)]
+    [InlineData(ApkSignatureAlgorithm.Sha512, true)]
+    [InlineData(ApkSignatureAlgorithm.Sha512, false)]
+    public void Verify_StrongAlgorithms_AreUnaffectedByTheSha1OptIn(
+        ApkSignatureAlgorithm algorithm, bool acceptSha1)
+    {
+        using var rsa = RSA.Create(2048);
+        byte[] apkindex = BuildSignedApkIndex(
+            "APKINDEX content"u8.ToArray(), rsa, "test@example.com-deadbeef.rsa.pub", algorithm);
+
+        var acceptance = new WeakAlgorithmAcceptance(false, acceptSha1, NullLogger.Instance);
+        var (verified, reason) = ApkIndexSignatureVerifier.VerifyWithReason(
+            apkindex, [rsa], NullLogger.Instance, acceptance);
+
+        Assert.True(verified);
+        Assert.Equal("", reason);
+    }
+
+    /// <summary>
+    /// An index carrying both a refused SHA-1 entry and a SHA-256 entry still verifies: the weak
+    /// entry is skipped, not treated as a whole-index veto.
+    /// </summary>
+    [Fact]
+    public void Verify_MixedAlgorithms_Sha1OptInOff_StillVerifiesViaSha256Entry()
+    {
+        using var signer = RSA.Create(2048);
+        byte[] payload = "APKINDEX content"u8.ToArray();
+        byte[] member2 = BuildGzipMember(payload);
+        byte[] sha1Sig = signer.SignData(member2, HashAlgorithmName.SHA1, RSASignaturePadding.Pkcs1);
+        byte[] sha256Sig = signer.SignData(member2, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+
+        byte[] member1 = BuildGzipTarMember(
+            (".SIGN.RSA.legacy", sha1Sig),
+            (".SIGN.RSA256.modern", sha256Sig));
+        byte[] apkindex = [.. member1, .. member2];
+
+        var (verified, reason) = ApkIndexSignatureVerifier.VerifyWithReason(
+            apkindex, [signer], NullLogger.Instance, RefuseSha1);
+
+        Assert.True(verified);
+        Assert.Equal("", reason);
+    }
+
+    /// <summary>
+    /// A refused SHA-1 entry reports <c>weak_signature_algorithm</c>, never the
+    /// <c>bad_signature</c> reason a genuine mismatch produces — the operator has to be able to
+    /// tell "we do not accept this algorithm" from "this signature is wrong".
+    /// </summary>
+    [Fact]
+    public void Verify_HandCraftedSha1_OptInOff_ReportsWeakAlgorithmNotBadSignature()
+    {
+        using var rsa = RSA.Create(2048);
+        byte[] apkindex = BuildSignedApkIndex(
+            "APKINDEX content"u8.ToArray(), rsa, "test@example.com-deadbeef.rsa.pub", ApkSignatureAlgorithm.Sha1);
+
+        var (verified, reason) = ApkIndexSignatureVerifier.VerifyWithReason(
+            apkindex, [rsa], NullLogger.Instance, RefuseSha1);
+
+        Assert.False(verified);
+        Assert.Equal("weak_signature_algorithm", reason);
+    }
+
+    [Fact]
+    public void Verify_HandCraftedSha1_OptInOn_Verifies()
+    {
+        using var rsa = RSA.Create(2048);
+        byte[] apkindex = BuildSignedApkIndex(
+            "APKINDEX content"u8.ToArray(), rsa, "test@example.com-deadbeef.rsa.pub", ApkSignatureAlgorithm.Sha1);
+
+        var (verified, reason) = ApkIndexSignatureVerifier.VerifyWithReason(
+            apkindex, [rsa], NullLogger.Instance, AcceptSha1);
+
+        Assert.True(verified);
+        Assert.Equal("", reason);
     }
 
     // ── Hand-crafted payloads: parser edge cases ─────────────────────────────────
@@ -186,7 +317,7 @@ public sealed class ApkIndexSignatureVerifierTests
 
         // Only signer B is a trusted anchor; verification must still succeed because the
         // codebase's anchor semantics accept a signature verified by *any* configured anchor.
-        bool verified = ApkIndexSignatureVerifier.Verify(apkindex, [signerB], NullLogger.Instance);
+        bool verified = ApkIndexSignatureVerifier.Verify(apkindex, [signerB], NullLogger.Instance, AcceptSha1);
 
         Assert.True(verified);
     }
@@ -217,13 +348,21 @@ public sealed class ApkIndexSignatureVerifierTests
     }
 
     private static byte[] BuildGzipTarMember(string entryName, byte[] entryContent)
+        => BuildGzipTarMember((entryName, entryContent));
+
+    private static byte[] BuildGzipTarMember(params (string Name, byte[] Content)[] entries)
     {
         using var ms = new MemoryStream();
         using (var gz = new GZipStream(ms, CompressionMode.Compress, leaveOpen: true))
         using (var tw = new TarWriter(gz, leaveOpen: true))
         {
-            var entry = new PaxTarEntry(TarEntryType.RegularFile, entryName) { DataStream = new MemoryStream(entryContent) };
-            tw.WriteEntry(entry);
+            foreach (var (name, content) in entries)
+            {
+                tw.WriteEntry(new PaxTarEntry(TarEntryType.RegularFile, name)
+                {
+                    DataStream = new MemoryStream(content),
+                });
+            }
         }
         return ms.ToArray();
     }

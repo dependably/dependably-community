@@ -63,8 +63,8 @@ public sealed class NpmPackumentBlockGateParityTests : IAsyncLifetime
         var frozenNow = TestTime.KnownNow;
         // 1.0.0: 30 days ago (well past any reasonable hold — must survive).
         // 2.0.0: 1 hour ago (within a 24-hour hold — must be dropped).
-        string oldTs = frozenNow.AddDays(-30).ToString("o");
-        string youngTs = frozenNow.AddHours(-1).ToString("o");
+        string oldTs = frozenNow.AddDays(-30).ToUtcIso();
+        string youngTs = frozenNow.AddHours(-1).ToUtcIso();
 
         string upstreamBase = _factory.MockUpstream.Urls[0];
         string upstreamJson = $$"""
@@ -143,8 +143,8 @@ public sealed class NpmPackumentBlockGateParityTests : IAsyncLifetime
         string name = $"npmageoff{Guid.NewGuid():N}"[..16].ToLowerInvariant();
 
         var frozenNow = TestTime.KnownNow;
-        string oldTs = frozenNow.AddDays(-30).ToString("o");
-        string youngTs = frozenNow.AddHours(-1).ToString("o");
+        string oldTs = frozenNow.AddDays(-30).ToUtcIso();
+        string youngTs = frozenNow.AddHours(-1).ToUtcIso();
 
         string upstreamBase = _factory.MockUpstream.Urls[0];
         string upstreamJson = $$"""

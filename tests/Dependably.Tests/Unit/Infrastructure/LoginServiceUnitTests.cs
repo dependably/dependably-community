@@ -181,7 +181,7 @@ public sealed class LoginServiceUnitTests : IClassFixture<InMemoryDbFixture>
 
         // Stamp lockout state directly using the realm+tenant scoped key.
         string lockoutKey = HashLockoutKey("tenant", orgId, email);
-        string lockedUntil = _clock.GetUtcNow().AddMinutes(5).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string lockedUntil = _clock.GetUtcNow().AddMinutes(5).ToUtcIso();
         await using (var conn = await _fixture.Store.OpenAsync())
         {
             await conn.ExecuteAsync(

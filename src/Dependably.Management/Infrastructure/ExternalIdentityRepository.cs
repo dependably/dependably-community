@@ -45,7 +45,7 @@ public sealed class ExternalIdentityRepository
     {
         string id = Guid.NewGuid().ToString("N");
         var nowDto = _time.GetUtcNow();
-        string now = nowDto.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = nowDto.ToUtcIso();
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             """
@@ -84,13 +84,15 @@ public sealed class ExternalIdentityRepository
             {
                 id,
                 emailSnapshot,
-                now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                now = _time.GetUtcNow().ToUtcIso(),
             });
     }
 
     public async Task<IReadOnlyList<ExternalIdentity>> ListByUserAsync(string userId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+        // xtenant: keyed on user_id, the globally-unique users PK, which is itself org-bound —
+        // every row returned belongs to that one user's tenant by construction.
         var rows = await conn.QueryAsync<ExternalIdentity>(
             """
             SELECT id            AS Id,

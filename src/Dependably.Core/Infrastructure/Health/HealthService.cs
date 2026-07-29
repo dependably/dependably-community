@@ -72,8 +72,10 @@ public sealed class HealthService
     private readonly IAirGapMode _airGap;
     private readonly StatsSnapshotRepository _statsSnapshots;
     private readonly OrgRepository _orgs;
+    private readonly TrustAnchorRepository _trustAnchors;
     private readonly TimeProvider _time;
 
+#pragma warning disable S107 // DI constructor — each dependency feeds one independent section of the rollup.
     public HealthService(
         ReadinessAggregator readiness,
         BackgroundJobRunRepository jobRuns,
@@ -81,7 +83,9 @@ public sealed class HealthService
         IAirGapMode airGap,
         StatsSnapshotRepository statsSnapshots,
         OrgRepository orgs,
+        TrustAnchorRepository trustAnchors,
         TimeProvider time)
+#pragma warning restore S107
     {
         _readiness = readiness;
         _jobRuns = jobRuns;
@@ -89,6 +93,7 @@ public sealed class HealthService
         _airGap = airGap;
         _statsSnapshots = statsSnapshots;
         _orgs = orgs;
+        _trustAnchors = trustAnchors;
         _time = time;
     }
 
@@ -98,11 +103,12 @@ public sealed class HealthService
         var now = _time.GetUtcNow();
 
         // ── Dependency checks ────────────────────────────────────────────────
-        var checks = await _readiness.CheckAsync(ct);
-        var dependencies = checks.Select(kv => new DependencyStatus(
-            Name: kv.Key,
-            Status: kv.Value is null ? "ok" : "error",
-            Error: kv.Value)).ToList();
+        var report = await _readiness.CheckAsync(ct);
+        var dependencies = report.Checks.Select(c => new DependencyStatus(
+            Name: c.Name,
+            Status: c.Ok ? "ok" : "error",
+            Error: c.Error,
+            Required: c.Required)).ToList();
 
         // ── Background jobs ─────────────────────────────────────────────────
         // Keep the in-memory snapshot available for the /observability hint only.
@@ -134,12 +140,23 @@ public sealed class HealthService
         // xtenant: system-admin cross-tenant operator view — counting stale snapshots across all tenants.
         int staleSnapshotCount = await CountStaleSnapshotsAsync(now, ct);
 
-        // ── Overall rollup ───────────────────────────────────────────────────
-        bool anyDepError = dependencies.Any(d => d.Status == "error");
-        bool anyJobBad = jobs.Any(j => j.Status is "failing" or "stale");
-        bool degraded = anyJobBad || stagingBelowThreshold || staleSnapshotCount > 0;
+        // ── Trust-anchor integrity ───────────────────────────────────────────
+        // xtenant: system-admin cross-tenant operator view — counting suspect anchors across all tenants.
+        int suspectAnchorCount = await CountSuspectTrustAnchorsAsync(ct);
 
-        string overall = anyDepError ? "down" : degraded ? "degraded" : "healthy";
+        // ── Overall rollup ───────────────────────────────────────────────────
+        // Only a required dependency drives "down" — the same classification /ready applies.
+        // A failing non-required dependency (blob store, Redis on a full host) is real
+        // degradation an operator must see, but the instance still serves.
+        bool anyRequiredDepError = report.Checks.Any(c => c.Required && !c.Ok);
+        bool anySoftDepError = report.Checks.Any(c => !c.Required && !c.Ok);
+        bool anyJobBad = jobs.Any(j => j.Status is "failing" or "stale");
+        // suspectAnchorCount is deliberately absent from this expression. A suspect trust anchor
+        // is a latent audit finding an operator resolves by hand, not a live outage — the same
+        // visible-but-non-degrading treatment Tenants.NeedAttention gets.
+        bool degraded = anySoftDepError || anyJobBad || stagingBelowThreshold || staleSnapshotCount > 0;
+
+        string overall = anyRequiredDepError ? "down" : degraded ? "degraded" : "healthy";
 
         return new HealthReport(
             Overall: overall,
@@ -152,6 +169,7 @@ public sealed class HealthService
                 StagingBelowThreshold: stagingBelowThreshold),
             Tenants: new TenantsSummary(
                 NeedAttention: await CountTenantsNeedingAttentionAsync(ct)),
+            TrustAnchors: new TrustAnchorsSummary(SuspectCount: suspectAnchorCount),
             StaleSnapshotCount: staleSnapshotCount,
             CapturedAt: now);
     }
@@ -182,6 +200,7 @@ public sealed class HealthService
         if (string.Equals(latestRun.Outcome, "server_error", StringComparison.OrdinalIgnoreCase))
         {
             long? ageSeconds = ComputeAgeSeconds(latestRun.FinishedAt, now);
+            // utcformat-ok: /health JSON wire field, not a DB write.
             return new JobStatus(Name: jobName, Status: "failing", AgeSeconds: ageSeconds,
                 LastRunAt: latestRun.FinishedAt.ToString("O"),
                 LastOutcome: latestRun.Outcome);
@@ -213,6 +232,7 @@ public sealed class HealthService
         if (refRun is null || !string.Equals(refRun.Outcome, "success", StringComparison.OrdinalIgnoreCase))
         {
             // No usable success run found (only cancelled or nothing) — startup grace.
+            // utcformat-ok: /health JSON wire field, not a DB write.
             return new JobStatus(Name: jobName, Status: "ok", AgeSeconds: null,
                 LastRunAt: latestRun.FinishedAt.ToString("O"),
                 LastOutcome: latestRun.Outcome);
@@ -220,6 +240,7 @@ public sealed class HealthService
 
         long age = (long)(now - refRun.FinishedAt).TotalSeconds;
         string status = age > (long)threshold.TotalSeconds ? "stale" : "ok";
+        // utcformat-ok: /health JSON wire field, not a DB write.
         return new JobStatus(
             Name: jobName,
             Status: status,
@@ -280,6 +301,24 @@ public sealed class HealthService
         return stale;
     }
 
+    /// <summary>
+    /// Counts signature trust anchors, across every live tenant, whose
+    /// <c>(ecosystem, anchor_kind)</c> pair has no registered material validator — rows whose
+    /// material was never parsed and cannot produce a <c>verified</c> verdict.
+    ///
+    /// Reporting only: nothing here modifies or removes a row, and the count never promotes
+    /// <c>overall</c>. For rpm/maven/npm/nuget/apk such a row still satisfies the
+    /// any-row-present <c>IsConfiguredFor</c> test, so deleting one flips
+    /// <c>verify_*_signatures='block'</c> from silently passing every artifact to denying every
+    /// artifact in a single step — a consequence only an operator can weigh, which is why this
+    /// surfaces the finding rather than acting on it.
+    /// </summary>
+    private async Task<int> CountSuspectTrustAnchorsAsync(CancellationToken ct)
+    {
+        // xtenant: system-admin cross-tenant operator view — scanning all org trust-anchor rows.
+        return await _trustAnchors.CountSuspectAsync(ct);
+    }
+
     private async Task<int> CountTenantsNeedingAttentionAsync(CancellationToken ct)
     {
         var (items, _) = await _orgs.ListOrgsAsync(TenantScanPageSize, 0, includeDeleted: false, ct: ct);
@@ -304,10 +343,17 @@ public sealed record HealthReport(
     IReadOnlyList<JobStatus> Jobs,
     StorageStatus Storage,
     TenantsSummary Tenants,
+    TrustAnchorsSummary TrustAnchors,
     int StaleSnapshotCount,
     DateTimeOffset CapturedAt);
 
-public sealed record DependencyStatus(string Name, string Status, string? Error);
+/// <summary>
+/// One backing-store dependency in the <see cref="HealthReport"/>.
+/// <paramref name="Required"/> mirrors the <see cref="ReadinessOptions"/> classification: a
+/// failing required dependency drives the report to "down", a failing non-required one to
+/// "degraded".
+/// </summary>
+public sealed record DependencyStatus(string Name, string Status, string? Error, bool Required);
 
 /// <summary>Per-job health status in the <see cref="HealthReport"/>.</summary>
 /// <param name="Name">Registered job name (e.g. "vuln-scan").</param>
@@ -328,3 +374,15 @@ public sealed record StorageStatus(
     long StagingUsedBytes,
     bool StagingBelowThreshold);
 public sealed record TenantsSummary(int NeedAttention);
+
+/// <summary>
+/// Trust-anchor integrity rollup in the <see cref="HealthReport"/>.
+/// </summary>
+/// <param name="SuspectCount">
+/// Number of <c>signature_trust_anchor</c> rows, across every live tenant, stored under an
+/// <c>(ecosystem, anchor_kind)</c> pair with no registered material validator. Visible-but-non-
+/// degrading: a positive count never promotes <see cref="HealthReport.Overall"/>, because the
+/// remedy is an operator judgement call (removing such a row can flip an ecosystem from serving
+/// everything to denying everything) rather than an automated repair.
+/// </param>
+public sealed record TrustAnchorsSummary(int SuspectCount);

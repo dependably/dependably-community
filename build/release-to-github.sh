@@ -26,6 +26,19 @@ git remote remove github 2>/dev/null || true
 git remote add github "https://github.com/${EXPECTED_REPO}.git"
 AUTH_HEADER="AUTHORIZATION: basic $(printf 'oauth2:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
 
+# Run a git command with the GitHub Authorization header attached. The header travels
+# through GIT_CONFIG_COUNT/KEY/VALUE rather than `git -c http.extraHeader=…` because
+# /proc/<pid>/cmdline is world-readable on the runner host while /proc/<pid>/environ is
+# owner-only — the `-c` form would publish the token in the process argv. The variables
+# are scoped to the single invocation (a command-prefix assignment, not an export) so no
+# stray Authorization header is sent to `origin`.
+git_github() {
+  GIT_CONFIG_COUNT=1 \
+  GIT_CONFIG_KEY_0=http.extraHeader \
+  GIT_CONFIG_VALUE_0="$AUTH_HEADER" \
+  git "$@"
+}
+
 # Paranoia: confirm the remote URL still matches the expected repo slug.
 # This guards against a misconfigured CI variable swapping the destination
 # repo — something validate-release-tag (which runs before auth) can't see.
@@ -44,7 +57,7 @@ git fetch origin --tags --force --quiet
 # repository. The GH HEAD's GitLab-Source trailer is the deterministic
 # baseline anchor — see baseline resolution below.
 GH_HEAD=""
-if git -c "http.extraHeader=$AUTH_HEADER" fetch --no-tags github main 2>/dev/null; then
+if git_github fetch --no-tags github main 2>/dev/null; then
   GH_HEAD=$(git rev-parse FETCH_HEAD)
   echo "GitHub main HEAD: $GH_HEAD"
 else
@@ -142,11 +155,11 @@ git tag -af "$TAG" "$SQUASH_SHA" -m "$TAG"
 # Atomic push of branch + tag together. Atomic is the protocol-level guard
 # against a split-state outcome; the ls-remote below is the verification
 # that catches any residual partial-push / auth-failure case.
-git -c "http.extraHeader=$AUTH_HEADER" push --atomic github "$SQUASH_SHA:refs/heads/main" "refs/tags/$TAG"
+git_github push --atomic github "$SQUASH_SHA:refs/heads/main" "refs/tags/$TAG"
 
 # Post-push verification — identity is asserted by provenance.json (below);
 # this only catches silent partial-push / auth failures.
-git -c "http.extraHeader=$AUTH_HEADER" ls-remote --exit-code github "refs/tags/${TAG}" >/dev/null \
+git_github ls-remote --exit-code github "refs/tags/${TAG}" >/dev/null \
   || { echo "ERROR: post-push: tag ${TAG} not visible on GitHub" >&2; exit 1; }
 
 echo "Mirror complete: $TAG -> github/main"

@@ -7,6 +7,143 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-07-29
+
+A patch release carrying the 0.4.1 and 0.4.2 cycles, which shipped without their own
+sections here. **Read "Changed — action required" before upgrading**: existing browser
+sessions are signed out, API tokens minted before the `capabilities` column are deleted,
+and two weak-hash acceptances become default-off opt-ins.
+
+### Added
+
+- **Unexpected server errors now return a problem document with a correlation id.** A request
+  that fails in a way no typed handler covers previously produced a bare `500` with an empty
+  body; it now returns localized `application/problem+json` (en/fr) carrying a `correlationId`
+  — the request's W3C trace id, the same value the logs and traces are stamped with — so an
+  operator can find the failure from what the caller quotes. The body still carries no
+  exception type, message, or stack trace. Applies to both the community and edge images.
+- **`RATE_LIMIT_REDIS_FAILURE_MODE` — fail-open vs fail-closed for the Redis-backed
+  abuse-prevention limiters** (`login`, `invite`, `token-create`). `open` (the default, and the
+  behaviour every existing deployment already has) grants the request when Redis cannot be
+  reached; `closed` denies it with `429`. **Only `open` and `closed` are accepted — any other
+  value fails startup** rather than resolving to the permissive default, so a misspelled `closed`
+  can never read as configured fail-closed while behaving fail-open. Ignored by edge nodes, which
+  run only in-process limiters.
+- **`dependably.rate_limit.backend_unavailable` counter** (attributes: `policy`, `decision`),
+  incremented alongside a `Warning` log every time one of those limiters resolves a request
+  without Redis. Under the default fail-open posture this is the only signal that login rate
+  limiting is currently switched off — alert on it.
+
+### Deprecated
+
+- **`org_settings.storage_used_bytes` is dormant and will be dropped in the release after this
+  one.** Every quota check now derives a tenant's stored bytes from the live `org_storage_bytes`
+  view, so there is one definition of "bytes this org holds" and nothing to drift; nothing in this
+  release reads or writes the counter. The column itself is deliberately retained — 0.4.2 still
+  *increments* it, and dropping it now would fail that slot's quota `UPDATE` for the whole
+  blue-green cutover window. No operator action is needed for this release, in either direction: a
+  0.4.2 slot keeps working alongside it, and rolling back to 0.4.2 keeps the counter's stored value.
+
+### Changed — action required
+
+- **Weak-hash acceptance is now an explicit, default-off operator opt-in, in the two places a
+  broken digest still carried weight in a security decision.**
+  - `Npm__AcceptSha1Shasum` (default `false`) — an npm packument carrying only a hex SHA-1
+    `dist.shasum` and no `sha512` SRI is now treated as **unverified** for proxy cache admission
+    rather than checksum-verified. The tarball still serves, on the same footing as an upstream
+    that publishes no digest at all; the registry simply no longer records a
+    chosen-prefix-collision-broken digest as an integrity guarantee. Packages carrying a `sha512`
+    SRI — everything published this decade — are unaffected, as is every SHA-256/SHA-512 spec.
+  - `Apk__AcceptSha1IndexSignatures` (default `false`) — a SHA-1 `.SIGN.RSA.<keyname>` entry in an
+    `APKINDEX.tar.gz` no longer satisfies index signature verification. The digest algorithm there
+    is named by the upstream-supplied index itself, so an attacker who can produce a chosen-prefix
+    SHA-1 collision was choosing the weak arm. Refusal is a verification failure (new reason
+    `weak_signature_algorithm` on `dependably.apk.index_signature_failures`); the index is neither
+    cached nor served. **Alpine's own mirrors still sign with SHA-1**, so an org that has pinned an
+    apk trust anchor (or set `Apk__VerifyIndexSignature=true`) must set this opt-in to keep
+    verifying a stock Alpine index. Orgs with no apk anchor never ran verification and are
+    unaffected. `.SIGN.RSA256.*` / `.SIGN.RSA512.*` signatures verify in either posture.
+
+  Each acceptance and each refusal logs once per process, mirroring
+  `Mfa__AcceptLegacyRecoveryCodes`.
+
+- **Signature trust anchors must clear a minimum-strength floor at import.** `POST
+  /api/v1/trust-anchors` (Settings → Trust Anchors) now rejects material whose key is below
+  RSA/DSA/ElGamal 2048 bits or a 255-bit elliptic-curve field, across every `anchor_kind` that
+  carries a key — `rsa` (apk), `pgp` (RPM, Maven), `spki` (npm), `x509` (NuGet), `sigstore_root`
+  and `rekor_key` (PyPI). An anchor bounds the strength of every signature verdict derived from
+  it, and RSA below 2048 has been under the NIST SP 800-57 / BSI TR-02102 floor since 2010. This
+  is a hard floor rather than an opt-in because the anchor key is the operator's own choice, not
+  something an upstream ecosystem forces. **Anchors already stored are not re-checked** and keep
+  verifying — the floor applies only when adding one, so no upgrade breaks a running deployment;
+  rotate a legacy key at your own pace.
+
+- **Existing browser sessions are signed out on upgrade.** Session JWTs now carry a bound
+  `iss`/`aud` pair, and validation requires both, so a session cookie minted by an earlier
+  version no longer authenticates. Users log in again once; nothing else is affected — API
+  tokens, service tokens, and `token_version` invalidation are unchanged. There is no new
+  configuration: the issuer and audience are fixed values, since tokens are already signed with
+  the instance's own `jwt_secret`.
+
+- **API tokens that carry no capability set are deleted on upgrade and must be re-minted.**
+  The `capabilities` column was added to `user_tokens` / `service_tokens` by an `ALTER TABLE
+  ADD COLUMN` with no default, so every token minted before it exists with `capabilities =
+  NULL`. Such a token authenticates but grants nothing — an API token's capability set is its
+  ceiling and never falls back to its owner's role — so it now fails every capability-gated
+  route and management action. Rather than leave those rows listed as live while denying them
+  at each request, the `purge_legacy_null_capability_tokens` migration deletes them at startup.
+  **Any automation still using a pre-capabilities token stops working and the token disappears
+  from Settings → Tokens; mint a replacement with an explicit capability set.** Tokens created
+  with capabilities are untouched, and fresh installs have nothing to purge.
+
+- **RPM signature verification now checks the payload digest, so an RPM signed only with
+  `RPMSIGTAG_RSA` and carrying no `RPMTAG_PAYLOADDIGEST` records `failed` instead of `verified`.**
+  That tag signs the main header, not the payload; the payload is bound to it by the digest inside
+  the signed header, which is now recomputed over the streamed payload rather than assumed. With
+  no digest present nothing binds the payload, so the verdict is fail-closed. rpm has written the
+  digest since 4.14 and older packages carry a header+payload signature that is verified directly,
+  so this affects only packages that have neither. Under `verify_rpm_signatures=block` such a
+  package is refused; under `warn`/`off` behaviour is unchanged.
+
+### Security
+
+- **Deleting a hosted version no longer frees its coordinates for reuse under a blocking
+  version-overwrite policy.** Each hard delete records a version tombstone, and a republish of
+  a tombstoned `(org, ecosystem, name, version)` is refused with `409 version_tombstoned` under
+  exactly the policy that would refuse overwriting the live version. This closes
+  delete-then-republish as a way around `version_overwrite_policy=block` (the default) using
+  only publish + delete rights. Orgs on `allow`, or on `exception` with a package-level
+  `allow` override, are unaffected. Only deletions from this release forward are remembered,
+  and retention/cache-eviction deletes never tombstone. To republish a deleted coordinate,
+  an administrator relaxes the org's version-overwrite policy (Settings → Gates).
+- **A JWT's type is now bound into the token, not inferred from its `scope` claim.** Every JWT
+  the instance mints is signed with the same `jwt_secret`, so a pre-second-factor MFA challenge
+  and a full session token were distinguishable only by an application-layer scope check that had
+  to name each non-session scope explicitly. Session tokens now carry the session audience and
+  challenge tokens the challenge audience, and each validator pins the one it accepts — so a
+  token minted for another purpose is refused during token validation, before any claim check
+  runs, and a new token type added later inherits the refusal without an allow-list update. The
+  scope check is retained as a second, independent barrier.
+
+### Fixed
+
+- **A Redis outage no longer disables login, invite, and token-create rate limiting silently.**
+  The Redis fixed-window limiter caught every exception and granted the request from a bare
+  `catch` with no log and no metric, so there was no way to know it was happening, alert on it, or
+  size the exposure afterwards. Grants (and, under the new fail-closed posture, denials) are now
+  logged at `Warning` with the policy name and counted. Account lockout is unaffected and was
+  never bypassed by this: the lockout store's errors propagate and the login path does not catch
+  them, so an attempt that cannot read or write lockout state fails closed before any session is
+  issued.
+
+  **This does not mean lockout state is durable in HA.** With `DEPENDABLY_DEPLOYMENT_MODE=ha`
+  the lockout store is Redis-resident with no database fallback, so a flush, an eviction under
+  `maxmemory`, or a failover to a lagging replica resets every account's failed-attempt counter
+  — and unlike an outage, that path returns *successfully*, reading as a clean account rather
+  than an error. Run Redis with `maxmemory-policy noeviction` so lockout keys are never evicted
+  to make room, and treat a failover as a security-relevant event. See CONTRIBUTING.md →
+  "Account lockout state in HA is Redis-resident".
+
 ## [0.4.0] - 2026-07-17
 
 A minor release: new protocol and operator surfaces, a large correction to how proxied

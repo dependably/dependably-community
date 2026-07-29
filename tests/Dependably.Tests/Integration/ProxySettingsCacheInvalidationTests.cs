@@ -155,7 +155,7 @@ public sealed class ProxySettingsCacheInvalidationTests : IAsyncLifetime
                 JOIN packages p ON p.id = pv.package_id
                 WHERE p.name = @pkgName AND pv.version = @version LIMIT 1)
             """,
-            new { ts = publishedAt.ToString("o"), pkgName, version });
+            new { ts = publishedAt.ToUtcIso(), pkgName, version });
     }
 
     private async Task SetMinReleaseAgeHoursAsync(int? minReleaseAgeHours)

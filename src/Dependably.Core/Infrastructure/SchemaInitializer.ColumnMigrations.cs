@@ -187,6 +187,8 @@ public sealed partial class SchemaInitializer
         // index, so for both providers we use the recreate-table pattern. The CREATE TABLE
         // text below intentionally omits the DEFAULT clause for created_at — copied rows
         // carry their original timestamps, and fresh inserts always provide their own value.
+        // xtenant: recreate-table DDL plus its row-preserving copy. Every copied row carries its own
+        // org_id across, and the new tables keep the UNIQUE (org_id, …) tenant key.
         const string sqliteSql = """
             CREATE TABLE allowlist_new (
                 id           TEXT PRIMARY KEY,
@@ -215,6 +217,8 @@ public sealed partial class SchemaInitializer
             ALTER TABLE blocklist_new RENAME TO blocklist;
             """;
 
+        // xtenant: recreate-table DDL plus its row-preserving copy. Every copied row carries its own
+        // org_id across, and the new tables keep the UNIQUE (org_id, …) tenant key.
         const string pgSql = """
             CREATE TABLE allowlist_new (
                 id           TEXT PRIMARY KEY,
@@ -262,6 +266,31 @@ public sealed partial class SchemaInitializer
         {
             await conn.ExecuteAsync("ALTER TABLE service_tokens DROP COLUMN scope");
         }
+    }
+
+    // Deletes API tokens that carry no capability set. `capabilities` arrived as a bare
+    // ALTER TABLE ADD COLUMN with no default, so every token minted before it exists with
+    // NULL. The authorization layer denies such a token outright — it must never inherit its
+    // owner's role — which leaves it authenticating successfully while granting nothing: a
+    // token the operator sees listed as live that fails every capability-gated route. The
+    // rows are deleted rather than backfilled so the invalidation is visible at the surface
+    // an operator actually reads, and re-minting is the only way forward.
+    //
+    // Empty, whitespace-only, and canonical-empty-array values are the same inert state and
+    // go with them. A malformed non-empty value is left alone: recognising it needs JSON
+    // parsing neither provider does portably, and the runtime denial already covers it.
+    //
+    private static async Task PurgeLegacyNullCapabilityTokensAsync(DbConnection conn)
+    {
+        // xtenant: instance-wide one-shot; a capability-less token is invalid in every tenant,
+        // so the purge is keyed on the capability column alone rather than on org_id.
+        await conn.ExecuteAsync(
+            "DELETE FROM user_tokens WHERE capabilities IS NULL OR TRIM(capabilities) = '' OR TRIM(capabilities) = '[]'");
+
+        // xtenant: instance-wide one-shot; a capability-less token is invalid in every tenant,
+        // so the purge is keyed on the capability column alone rather than on org_id.
+        await conn.ExecuteAsync(
+            "DELETE FROM service_tokens WHERE capabilities IS NULL OR TRIM(capabilities) = '' OR TRIM(capabilities) = '[]'");
     }
 
     // Renames the legacy `tokens` table to `user_tokens` (and its index). Runs before the
@@ -439,11 +468,22 @@ public sealed partial class SchemaInitializer
             "ALTER TABLE activity ADD COLUMN detail TEXT",
             "ALTER TABLE activity ADD COLUMN source_ip TEXT",
             "ALTER TABLE org_settings ADD COLUMN license_enforcement_mode TEXT NOT NULL DEFAULT 'off'",
+            // Publish-side licence gate, independent of the serve-side license_enforcement_mode
+            // above. Defaults to 'off' so no currently-succeeding hosted publish starts failing
+            // on upgrade. CHECK constraint applies on fresh installs only (see Schema.sql);
+            // upgraded databases rely on controller-side validation, mirroring how
+            // license_enforcement_mode itself was added.
+            "ALTER TABLE org_settings ADD COLUMN license_publish_enforcement_mode TEXT NOT NULL DEFAULT 'off'",
             "ALTER TABLE org_settings ADD COLUMN proxy_passthrough_enabled INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE org_settings ADD COLUMN max_osv_score_tolerance REAL NOT NULL DEFAULT 10.0",
             "ALTER TABLE org_settings ADD COLUMN default_language TEXT NOT NULL DEFAULT 'en'",
             "ALTER TABLE users ADD COLUMN language TEXT",
             "ALTER TABLE system_admins ADD COLUMN language TEXT",
+            // Display-only render zone, on the same per-user-override → org-default → instance
+            // chain as language. Stored instants stay UTC regardless of any value here.
+            "ALTER TABLE org_settings ADD COLUMN default_timezone TEXT NOT NULL DEFAULT 'UTC'",
+            "ALTER TABLE users ADD COLUMN timezone TEXT",
+            "ALTER TABLE system_admins ADD COLUMN timezone TEXT",
             "ALTER TABLE package_versions ADD COLUMN manual_block_state TEXT",
             "ALTER TABLE users ADD COLUMN account_type TEXT NOT NULL DEFAULT 'forms' CHECK (account_type IN ('forms','saml'))",
             "ALTER TABLE package_versions ADD COLUMN deprecated TEXT",
@@ -617,12 +657,6 @@ public sealed partial class SchemaInitializer
             // behaviour change until an operator opts in.
             "ALTER TABLE org_settings ADD COLUMN block_kev TEXT NOT NULL DEFAULT 'off'",
             "ALTER TABLE org_settings ADD COLUMN max_epss_tolerance REAL",
-            // Atomic storage-usage counter for the publish quota check. Replaces the live
-            // SUM aggregate that was subject to a TOCTOU race under concurrent publishes.
-            // New rows default to 0 (back-compat); the publish path backfills from
-            // SUM(package_versions.size_bytes) on first access when the counter is 0 and
-            // the real sum is positive.
-            "ALTER TABLE org_settings ADD COLUMN storage_used_bytes INTEGER NOT NULL DEFAULT 0",
             // Tracks the stage of the most recently emitted SAML IdP cert-expiry audit event
             // ('30','14','7','1','expired'). NULL = no alert emitted (or cert replaced). Reset
             // to NULL by the cert-upload/clear paths so the sweep re-evaluates on the new cert.
@@ -870,15 +904,19 @@ public sealed partial class SchemaInitializer
     {
         foreach (string? ddl in BuildAdditiveMigrations())
         {
-            if (_db.Provider == DbProvider.Sqlite)
-            {
-                await MigrateSqliteAsync(conn, ddl);
-            }
-            else
-            {
-                await conn.ExecuteAsync(ddl.Replace("ADD COLUMN ", "ADD COLUMN IF NOT EXISTS "));
-            }
+            await ApplyAdditiveAsync(conn, ddl);
         }
+
+        // org_settings.storage_used_bytes is dormant capacity: nothing in this release reads or
+        // writes it, and every quota check derives a tenant's stored bytes from the org_storage_bytes
+        // view instead. It is re-added here — and declared in both schema files — so that a slot of
+        // the preceding release, which still increments the counter, keeps working against this
+        // schema for the whole blue-green cutover window. The width is provider-specific (SQLite
+        // INTEGER is 64-bit; Postgres INTEGER is 32-bit and would overflow at 2 GiB), so this runs
+        // outside the shared loop with explicit branching, like the cargo_metadata table below.
+        await ApplyAdditiveAsync(conn, _db.Provider == DbProvider.Sqlite
+            ? "ALTER TABLE org_settings ADD COLUMN storage_used_bytes INTEGER NOT NULL DEFAULT 0"
+            : "ALTER TABLE org_settings ADD COLUMN storage_used_bytes BIGINT NOT NULL DEFAULT 0");
 
         // Cargo sparse registry index metadata. CREATE TABLE syntax is provider-specific
         // (SQLite uses AUTOINCREMENT; Postgres uses BIGSERIAL), so this migration runs
@@ -900,5 +938,67 @@ public sealed partial class SchemaInitializer
             await conn.ExecuteAsync(cargoPg);
         }
         await conn.ExecuteAsync("CREATE INDEX IF NOT EXISTS idx_cargo_metadata_version ON cargo_metadata(version_id)");
+    }
+
+    // Postgres-only. Three columns were declared TIMESTAMPTZ while their SQLite counterparts —
+    // and every reader on both providers — use the canonical ISO-8601 TEXT form. Reading
+    // upstream_negative_cache.fetched_at into a string therefore failed on Postgres, and the
+    // comparisons against it depended on an implicit cast of the bound text parameter.
+    // Converts in place, rendering the stored instants in UTC so they collate with the values
+    // written from here on. Skips a column that is already TEXT, so this is a no-op on a fresh
+    // database created from the current schema and safe to re-run.
+    private async Task ConvertLegacyTimestamptzColumnsAsync(DbConnection conn)
+    {
+        if (_db.Provider != DbProvider.Postgres)
+        {
+            return;
+        }
+
+        (string Table, string Column)[] columns =
+        [
+            ("upstream_negative_cache", "fetched_at"),
+            ("npm_dist_tags", "created_at"),
+            ("npm_dist_tags", "updated_at"),
+        ];
+
+        foreach (var (table, column) in columns)
+        {
+            string? dataType = await conn.ExecuteScalarAsync<string?>(
+                """
+                SELECT data_type FROM information_schema.columns
+                WHERE table_name = @table AND column_name = @column
+                """,
+                new { table, column });
+
+            if (!string.Equals(dataType, "timestamp with time zone", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            // rawsql: the table and column names come from the hard-coded list above, never from
+            // data or configuration, and Postgres has no parameter form for a DDL identifier.
+            await conn.ExecuteAsync(
+                $"""
+                ALTER TABLE {table}
+                    ALTER COLUMN {column} DROP DEFAULT,
+                    ALTER COLUMN {column} TYPE TEXT
+                        USING to_char({column} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+                    ALTER COLUMN {column} SET DEFAULT
+                        (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
+                """);
+        }
+    }
+
+    // Applies one additive DDL statement, duplicate-column-safe on both providers: SQLite swallows
+    // the duplicate-column error, Postgres gets the IF NOT EXISTS form.
+    private async Task ApplyAdditiveAsync(DbConnection conn, string ddl)
+    {
+        if (_db.Provider == DbProvider.Sqlite)
+        {
+            await MigrateSqliteAsync(conn, ddl);
+            return;
+        }
+
+        await conn.ExecuteAsync(ddl.Replace("ADD COLUMN ", "ADD COLUMN IF NOT EXISTS "));
     }
 }

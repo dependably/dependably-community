@@ -27,20 +27,30 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
     private readonly AuditRepository _audit;
     private readonly ProblemResults _problems;
     private readonly EnvelopeProtector _envelope;
+    private readonly IConfiguration _config;
 
     public UpstreamRegistryController(
         UpstreamRegistryRepository registries,
         OrgAccessGuard guard,
         AuditRepository audit,
         ProblemResults problems,
-        EnvelopeProtector envelope)
+        EnvelopeProtector envelope,
+        IConfiguration config)
     {
         _registries = registries;
         _guard = guard;
         _audit = audit;
         _problems = problems;
         _envelope = envelope;
+        _config = config;
     }
+
+    // Instance-level opt-out that permits plaintext http:// upstreams. Default false: an http
+    // upstream carries both the artifact and its declared checksum over the same cleartext
+    // channel, so an on-path attacker substitutes both consistently and the content-addressing
+    // invariant verifies bytes it never should have trusted.
+    private bool AllowInsecureUpstreams =>
+        _config.GetValue("Proxy:AllowInsecureUpstreams", defaultValue: false);
 
     /// <summary>GET /api/v1/orgs/{org}/upstream-registries</summary>
     [HttpGet("api/v1/upstream-registries")]
@@ -89,11 +99,21 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
             return _problems.ValidationErrorActionKey("prefixes", "error.upstream.ociOnlyFields");
         }
 
-        string? url = req.Url?.Trim();
+        string? url = NormalizeUpstreamBaseUrl(ecosystem, req.Url?.Trim());
         string? urlProblem = UpstreamUrlValidator.ValidateUrl(url);
         if (urlProblem is not null)
         {
             return _problems.ValidationErrorAction("url", urlProblem);
+        }
+
+        // Reject plaintext http:// upstreams unless the instance opts in. An http upstream lets an
+        // on-path attacker rewrite the artifact and its declared checksum together, defeating the
+        // proxy's content-addressing integrity story.
+        if (!AllowInsecureUpstreams
+            && Uri.TryCreate(url, UriKind.Absolute, out var schemeCheck)
+            && schemeCheck.Scheme == Uri.UriSchemeHttp)
+        {
+            return _problems.ValidationErrorActionKey("url", "error.upstream.httpsRequired");
         }
 
         // RPM upstreams are anonymous-only for now (RPM mirrors are public distro repos and the
@@ -148,6 +168,40 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
             }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
 
         return CreatedAtAction(nameof(List), null, entry);
+    }
+
+    /// <summary>
+    /// Normalizes an upstream base URL to the shape the proxy paths append onto.
+    ///
+    /// Every ecosystem's fetcher builds its URLs as <c>{base}/{something}</c>, so a stored trailing
+    /// slash yields a double slash on every request. NuGet gets one more: its base is the v3
+    /// SERVICE ROOT (<c>https://api.nuget.org/v3</c>), but the URL an operator has in hand — the
+    /// one NuGet's own UI and docs show, and the one <c>nuget.config</c> takes — is the service
+    /// index, <c>https://api.nuget.org/v3/index.json</c>. Pasting that produces
+    /// <c>…/v3/index.json/registration5-semver1/…</c>, which 404s forever, and a permanent 404 on
+    /// registration is invisible: the handler falls back to local-only data and serves a
+    /// structurally valid document that simply omits every upstream version.
+    ///
+    /// Normalizing rather than rejecting: the operator's input is unambiguous about intent, and
+    /// the two forms differ by a suffix the server can remove exactly.
+    /// </summary>
+    internal static string? NormalizeUpstreamBaseUrl(string ecosystem, string? url)
+    {
+        if (string.IsNullOrEmpty(url))
+        {
+            return url;
+        }
+
+        string normalized = url.TrimEnd('/');
+        const string ServiceIndexSuffix = "/index.json";
+        if (ecosystem == "nuget" && normalized.EndsWith(ServiceIndexSuffix, StringComparison.OrdinalIgnoreCase))
+        {
+            normalized = normalized[..^ServiceIndexSuffix.Length].TrimEnd('/');
+        }
+
+        // Never normalize a URL down to nothing — "https://" alone is malformed input the
+        // validator below should reject on its own terms, not something to silently accept.
+        return normalized.Length > 0 ? normalized : url;
     }
 
     // Validates the auth_type-specific field requirements for a non-OCI upstream registry.

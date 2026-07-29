@@ -329,7 +329,7 @@ public sealed class OciPushTests : IClassFixture<DependablyFactory>, IAsyncLifet
             await PushBlobMonolithicAsync(client, layerBytes, layerDigest);
 
             // Read current usage and clamp the quota to it, leaving no room for the manifest.
-            long used = await ReadStorageUsedBytesAsync(orgId);
+            long used = await ReadStoredBytesAsync(orgId);
             await SetStorageQuotaAsync(orgId, used);
 
             // Manifest PUT must be rejected.
@@ -358,9 +358,7 @@ public sealed class OciPushTests : IClassFixture<DependablyFactory>, IAsyncLifet
         string token = await _factory.CreateToken("push");
         using var client = _factory.CreateClientWithBearer(token);
 
-        // Trigger the backfill so the baseline counter is accurate before we set a quota.
-        // (TryReserveStorageAsync backfills from the live SUM on first call when counter = 0.)
-        long baseline = await TriggerBackfillAndReadCounterAsync(orgId);
+        long baseline = await ReadStoredBytesAsync(orgId);
         long quota = baseline + 700; // 500 fits, 500 + 400 = 900 > 700 head-room
         await SetStorageQuotaAsync(orgId, quota);
         try
@@ -389,9 +387,8 @@ public sealed class OciPushTests : IClassFixture<DependablyFactory>, IAsyncLifet
             using var putFail = await client.PutAsync($"{location2}?digest={Digest(blob2)}", new ByteArrayContent([]));
             Assert.Equal(HttpStatusCode.RequestEntityTooLarge, putFail.StatusCode);
 
-            // Counter must be exactly baseline + 500 (the rejected blob must not add to it).
-            long counter = await ReadStorageUsedBytesAsync(orgId);
-            Assert.Equal(baseline + 500, counter);
+            // Usage must be exactly baseline + 500 — the rejected blob stored nothing.
+            Assert.Equal(baseline + 500, await ReadStoredBytesAsync(orgId));
         }
         finally
         {
@@ -571,29 +568,14 @@ public sealed class OciPushTests : IClassFixture<DependablyFactory>, IAsyncLifet
         await orgs.SetStorageQuotaBytesAsync(orgId, quota);
     }
 
-    private async Task<long> ReadStorageUsedBytesAsync(string orgId)
-    {
-        var db = _factory.Services.GetRequiredService<IMetadataStore>();
-        await using var conn = await db.OpenAsync();
-        return await conn.ExecuteScalarAsync<long>(
-            "SELECT COALESCE(storage_used_bytes, 0) FROM org_settings WHERE org_id = @orgId",
-            new { orgId });
-    }
-
     /// <summary>
-    /// Forces the quota counter backfill (live SUM of package_versions) that
-    /// TryReserveStorageAsync runs on first call when the counter is 0, then returns the
-    /// accurate baseline. Without this, a test that sets a quota before any reserve call
-    /// would see the counter backfill on the first reserve — potentially invalidating the
-    /// expected arithmetic when the backfill value exceeds the test's quota headroom.
+    /// The tenant's stored bytes as the quota gate reads them — the live <c>org_storage_bytes</c>
+    /// sum across every plane. Tests that set a quota relative to current usage take their
+    /// baseline from here so other tests' seeded data cannot skew the arithmetic.
     /// </summary>
-    private async Task<long> TriggerBackfillAndReadCounterAsync(string orgId)
+    private async Task<long> ReadStoredBytesAsync(string orgId)
     {
         var orgs = _factory.Services.GetRequiredService<OrgRepository>();
-        // A reserve-with-null-quota never modifies the counter but still runs the backfill
-        // (the UPDATE's WHERE clause succeeds when storage_used_bytes = 0 and quota is null).
-        // After this call the counter reflects the live SUM from package_versions.
-        await orgs.TryReserveStorageAsync(orgId, delta: 0, quota: null, ct: default);
-        return await ReadStorageUsedBytesAsync(orgId);
+        return await orgs.GetLiveStorageBytesAsync(orgId);
     }
 }

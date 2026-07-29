@@ -165,10 +165,7 @@ public sealed class MavenSnapshotProxyTests : IAsyncLifetime
 
     private static IOsvSource CleanOsv()
     {
-        var osv = Substitute.For<IOsvSource>();
-        osv.QueryAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
-           .Returns(Task.FromResult(new List<OsvAdvisory>()));
-        return osv;
+        return TestOsvSource.Create();
     }
 
     private MavenController BuildController(IOsvSource osv, string? authHeader = null)
@@ -232,6 +229,7 @@ public sealed class MavenSnapshotProxyTests : IAsyncLifetime
                     new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), TimeProvider.System),
             Registries: new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured())),
             MetadataCache: _metadataCache,
+            Invalidation: Dependably.Tests.Infrastructure.TestMetadataInvalidation.ForMaven(_metadataCache),
             CacheOptions: new Dependably.Infrastructure.RenderedMetadataCacheOptions(
                 TimeSpan.FromMinutes(10), TimeSpan.FromMinutes(5)),
             Log: NullLogger<MavenController>.Instance,

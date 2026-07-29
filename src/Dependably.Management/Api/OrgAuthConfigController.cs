@@ -175,7 +175,13 @@ public sealed class OrgAuthConfigController : ControllerBase
 
         IdpMetadataParser.ParsedIdp parsed;
         try { parsed = IdpMetadataParser.Parse(req.MetadataXml, requireCert: !hasOverride); }
-        catch (Exception ex) { return _problems.ValidationErrorAction("metadataXml", ex.Message); }
+        // The parser signals validation failures with InvalidOperationException carrying
+        // server-authored, constant messages ("Metadata is missing entityID." etc.) — safe to
+        // echo. Any other exception (e.g. XmlException from malformed input, or an unexpected
+        // framework fault whose message could leak file paths or internal type names) maps to a
+        // generic localized key; its detail is never reflected to the caller.
+        catch (InvalidOperationException ex) { return _problems.ValidationErrorAction("metadataXml", ex.Message); }
+        catch (Exception) { return _problems.ValidationErrorActionKey("metadataXml", "error.saml.metadataInvalid"); }
 
         await _samlConfig.UpsertMetadataAsync(orgId, parsed.EntityId, parsed.SsoUrl, parsed.SigningCertBase64, req.MetadataXml, ct);
         // Cert changed — reset the alert stage so the sweep re-evaluates against the new cert.
@@ -229,10 +235,12 @@ public sealed class OrgAuthConfigController : ControllerBase
             return _problems.ValidationErrorActionKey("certificate", "error.saml.certificateRequired");
         }
 
-        // Accept PEM or raw base64 DER.
+        // Accept PEM or raw base64 DER. NormalizeCertInput is pure string manipulation with no
+        // declared validation exception, so any fault maps to the generic localized key rather
+        // than echoing a raw framework exception message to the caller.
         string certBase64;
         try { certBase64 = NormalizeCertInput(req.Certificate); }
-        catch (Exception ex) { return _problems.ValidationErrorAction("certificate", ex.Message); }
+        catch (Exception) { return _problems.ValidationErrorActionKey("certificate", "error.saml.certificateInvalid"); }
 
         System.Security.Cryptography.X509Certificates.X509Certificate2 cert;
         try
@@ -381,8 +389,8 @@ public sealed class OrgAuthConfigController : ControllerBase
             Fingerprint: cert.Thumbprint,
             Subject: cert.Subject,
             Issuer: cert.Issuer,
-            NotBefore: cert.NotBefore.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ"),
-            NotAfter: cert.NotAfter.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+            NotBefore: cert.NotBefore.ToUniversalTime().ToUtcIso(),
+            NotAfter: cert.NotAfter.ToUniversalTime().ToUtcIso()
         );
 
     private static string? ThumbprintOrNull(string? base64Cert)
@@ -441,8 +449,8 @@ public sealed class OrgAuthConfigController : ControllerBase
         return new
         {
             thumbprint = cert.Thumbprint,
-            notBefore = cert.NotBefore.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ"),
-            notAfter = notAfter.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            notBefore = cert.NotBefore.ToUniversalTime().ToUtcIso(),
+            notAfter = notAfter.ToUtcIso(),
             daysRemaining = (int)Math.Floor(daysRemaining),
             status,
         };

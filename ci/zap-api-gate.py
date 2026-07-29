@@ -20,6 +20,14 @@ This gate combines two filters:
 
 Nothing is disabled: non-ignored rules stay armed, the bar is on how sure ZAP is.
 
+Server errors get one extra, advisory pass. ZAP files its client-error (4xx) and
+server-error (5xx) findings under a single rule id, so accept-listing the high-volume 4xx
+probe results also accepts every 5xx, and ZAP rates the rule Low either way — a 500 would
+otherwise sit as one line among thousands of triaged 404s. print_server_errors re-reads the
+per-instance status code and lists 5xx responses separately. It never changes the exit code:
+the protocol surface answers 501 by design on its deliberate stubs, so this is a signal for
+a human to read, not a gate.
+
 ZAP encodes both axes as numeric strings 0-3 on each alert: riskcode
 (0 Informational, 1 Low, 2 Medium, 3 High) and confidence (0 False Positive,
 1 Low, 2 Medium, 3 High).
@@ -81,6 +89,43 @@ def print_alert_line(a):
           f"(plugin {a.get('pluginid')}, count {a.get('count')})")
 
 
+def server_error_instances(alert):
+    """The alert's instances whose evidence is a 5xx status code.
+
+    ZAP records the observed status code in each instance's `evidence`, and raises its
+    client-error (4xx) and server-error (5xx) findings under a single rule id. The
+    accept-list works per rule id, so accepting the high-volume 4xx probe results also
+    accepts any 5xx. Reading the per-instance code separates them again.
+    """
+    hits = []
+    for inst in alert.get("instances", []):
+        evidence = str(inst.get("evidence", "")).strip()
+        if len(evidence) == 3 and evidence.isdigit() and evidence.startswith("5"):
+            hits.append((inst, evidence))
+    return hits
+
+
+def print_server_errors(alerts):
+    """Surface 5xx responses on their own, whatever bucket their rule landed in.
+
+    Advisory, never blocking: ZAP rates its generic server-error rule Low, so it does not
+    reach the risk bar anyway, and the protocol surface answers 501 by design on its
+    deliberate stubs. A 500 on an otherwise benign request is a defect signal rather than
+    scan noise, so it gets its own section instead of one line among the triaged findings.
+    """
+    hits = [(a, insts) for a in alerts if (insts := server_error_instances(a))]
+    if not hits:
+        return
+    total = sum(len(insts) for _, insts in hits)
+    print(f"\nZAP gate: {total} server-error (5xx) response(s) observed — advisory, not "
+          "blocking. A deliberate 501 stub is expected; a 500 on a benign request is a "
+          "defect signal, not scan noise:")
+    for alert, insts in hits:
+        for inst, code in insts[:10]:
+            print(f"  ! {code} {inst.get('method')} {inst.get('uri')} "
+                  f"(plugin {alert.get('pluginid')})")
+
+
 def print_accepted(accepted, conf_path):
     if not accepted:
         return
@@ -115,10 +160,14 @@ def main(argv):
         return 2
 
     ignored = load_ignored_rules(argv[2])
-    blocking, accepted, below_bar = categorize(load_alerts(argv[1]), ignored)
+    # Materialized: categorize consumes the iterator, and the server-error pass re-reads
+    # the same alerts across every bucket.
+    alerts = list(load_alerts(argv[1]))
+    blocking, accepted, below_bar = categorize(alerts, ignored)
 
     print_accepted(accepted, argv[2])
     print_below_bar(below_bar)
+    print_server_errors(alerts)
 
     if not blocking:
         print("ZAP gate PASSED: no un-accepted finding at risk>=Medium and confidence>=Medium.")

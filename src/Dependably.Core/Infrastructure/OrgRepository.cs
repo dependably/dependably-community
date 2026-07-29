@@ -27,6 +27,12 @@ public sealed class OrgRepository
     private readonly UserTokenVersionStore? _tokenVersions;
     private readonly EnvelopeProtector? _envelope;
 
+    // In-flight quota reservations for this process. Owned here rather than injected because
+    // OrgRepository is the single gate every write path goes through (hosted publish, OCI push,
+    // proxy cache fill all call TryReserveStorageAsync) and is registered as a singleton — so one
+    // repository instance is one ledger is one view of a tenant's uncommitted bytes.
+    private readonly StorageQuotaLedger _storageLedger = new();
+
     public OrgRepository(IMetadataStore db, IMemoryCache? cache = null, TimeProvider? time = null, UserTokenVersionStore? tokenVersions = null, EnvelopeProtector? envelope = null)
     {
         _db = db;
@@ -78,10 +84,12 @@ public sealed class OrgRepository
                activity_retention_days as ActivityRetentionDays,
                purge_unlisted_after_days as PurgeUnlistedAfterDays,
                COALESCE(license_enforcement_mode, 'off') as LicenseEnforcementMode,
+               COALESCE(license_publish_enforcement_mode, 'off') as LicensePublishEnforcementMode,
                COALESCE(proxy_passthrough_enabled, 1) as ProxyPassthroughEnabled,
                COALESCE(max_osv_score_tolerance, 10.0) as MaxOsvScoreTolerance,
                min_release_age_hours as MinReleaseAgeHours,
                COALESCE(default_language, 'en') as DefaultLanguage,
+               COALESCE(default_timezone, 'UTC') as DefaultTimezone,
                COALESCE(allow_version_overwrite, 0) as AllowVersionOverwrite,
                COALESCE(version_overwrite_policy, 'block') as VersionOverwritePolicy,
                COALESCE(air_gapped, 0) as AirGapped,
@@ -97,7 +105,6 @@ public sealed class OrgRepository
                COALESCE(verify_pypi_attestations, 'off') as VerifyPyPiAttestations,
                COALESCE(verify_rpm_signatures, 'off') as VerifyRpmSignatures,
                COALESCE(verify_maven_signatures, 'off') as VerifyMavenSignatures,
-               COALESCE(storage_used_bytes, 0) as StorageUsedBytes,
                rpm_upstream_mode as RpmUpstreamMode
         FROM org_settings WHERE org_id = @orgId
         """;
@@ -248,7 +255,7 @@ public sealed class OrgRepository
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             "UPDATE orgs SET deleted_at = @now WHERE id = @orgId",
-            new { orgId, now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ") });
+            new { orgId, now = _time.GetUtcNow().ToUtcIso() });
     }
 
     /// <summary>Restore: clear deleted_at. Returns true if a row was restored.</summary>
@@ -265,7 +272,7 @@ public sealed class OrgRepository
     public async Task<IReadOnlyList<string>> ListExpiredSoftDeletedOrgIdsAsync(int graceDays, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        string cutoff = _time.GetUtcNow().AddDays(-graceDays).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string cutoff = _time.GetUtcNow().AddDays(-graceDays).ToUtcIso();
         var rows = await conn.QueryAsync<string>(
             "SELECT id FROM orgs WHERE deleted_at IS NOT NULL AND deleted_at < @cutoff",
             new { cutoff });
@@ -294,17 +301,26 @@ public sealed class OrgRepository
         await conn.ExecuteAsync("DELETE FROM orgs WHERE id = @orgId", new { orgId });
     }
 
+    /// <summary>
+    /// Sets the serve-path licence enforcement mode (<paramref name="mode"/>, always applied)
+    /// and, optionally, the independent publish-path mode (<paramref name="publishMode"/>).
+    /// <paramref name="publishMode"/> is leave-unchanged-on-absent (COALESCE) — a caller that
+    /// omits it (an older client hitting this endpoint before the publish-side gate existed)
+    /// must never silently reset an operator's stored publish policy back to 'off'.
+    /// </summary>
     public async Task UpsertLicensePolicyModeAsync(
-        string orgId, string mode, CancellationToken ct = default)
+        string orgId, string mode, string? publishMode = null, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             """
-            INSERT INTO org_settings (org_id, license_enforcement_mode)
-            VALUES (@orgId, @mode)
-            ON CONFLICT(org_id) DO UPDATE SET license_enforcement_mode = @mode
+            INSERT INTO org_settings (org_id, license_enforcement_mode, license_publish_enforcement_mode)
+            VALUES (@orgId, @mode, COALESCE(@publishMode, 'off'))
+            ON CONFLICT(org_id) DO UPDATE SET
+                license_enforcement_mode = @mode,
+                license_publish_enforcement_mode = COALESCE(@publishMode, license_publish_enforcement_mode)
             """,
-            new { orgId, mode });
+            new { orgId, mode, publishMode });
         InvalidateSettingsCache(orgId);
     }
 
@@ -556,14 +572,104 @@ public sealed class OrgRepository
     }
 
     /// <summary>
-    /// Removes a user from a tenant. With 1:1 user:tenant, this deletes the user record.
+    /// Erases a user from a tenant. With 1:1 user:tenant, "remove member" is a full account erasure.
+    /// A bare <c>DELETE FROM users</c> is neither complete nor reliable: seven columns across other
+    /// tables carry a restrict FK to <c>users(id)</c>, so deleting a user who ever invited a
+    /// colleague, reserved a namespace, decided a quarantine, dismissed an alert, created a claim,
+    /// or allowlisted an install script would throw a foreign-key violation (an unhandled 500 during
+    /// routine offboarding); and several tables with no FK (audit_log, activity, mfa_trusted_devices,
+    /// login_attempts) would otherwise retain the person's IPs, device fingerprints, a still-valid
+    /// trusted-device credential, and email-derived hashes after the account is gone.
+    ///
+    /// This runs the whole erasure in one transaction:
+    ///   * deletes invites the user created (created_by is NOT NULL + restrict, so it cannot be
+    ///     nulled — the attribution goes with the invite);
+    ///   * nulls the six nullable attribution columns (reserved_namespace / quarantine / alert /
+    ///     claim / claim_history / install_script_allowlist) — the audit value is the action, not
+    ///     the actor's continued existence;
+    ///   * revokes the user's trusted-device rows (a remembered-device cookie is a separate live
+    ///     credential that must not outlive the account — Art. 32);
+    ///   * pseudonymizes retained forensic rows (drops source_ip / detail linking to the actor in
+    ///     activity and the tenant's audit_log);
+    ///   * clears the login_attempts and account_send_throttle rows keyed by
+    ///     <paramref name="loginAttemptKey"/>;
+    ///   * deletes the user row (cascading user_tokens, password_reset_tokens, external_identities,
+    ///     banner_dismissals).
+    /// Encoding this as the sole delete chokepoint keeps existing databases (whose FKs are still
+    /// restrict) working without a seven-table recreate reshape, and removes the personal data that
+    /// FK actions alone cannot (trusted devices, login_attempts/account_send_throttle, and the
+    /// source_ip/detail scrub).
     /// </summary>
-    public async Task RemoveOrgMemberAsync(string orgId, string userId, CancellationToken ct = default)
+    /// <param name="loginAttemptKey">
+    /// The subject's <c>login_attempts</c>/<c>account_send_throttle</c> primary-key pseudonym —
+    /// <see cref="Dependably.Infrastructure.LoginService.HashLockoutKey"/> over the subject's
+    /// (realm, tenant, email), computed by the caller (Management) since the hash helper lives in
+    /// the Management assembly. Mirrors the shape <c>PersonalDataExportRepository.ExportAsync</c>
+    /// already uses for its own <c>loginAttemptKey</c> parameter.
+    /// </param>
+    public async Task RemoveOrgMemberAsync(
+        string orgId, string userId, string loginAttemptKey, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        await conn.ExecuteAsync(
+        await using var tx = await conn.BeginTransactionAsync(ct);
+
+        // invites.created_by is NOT NULL with a restrict FK, so it cannot be nulled — the user's
+        // created invites (pending and accepted) go with the erasure.
+        await conn.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM invites WHERE org_id = @orgId AND created_by = @userId",
+            new { orgId, userId }, transaction: tx, cancellationToken: ct));
+
+        // Six nullable attribution columns carry a restrict FK: null them so the row (the action's
+        // forensic record) survives while the actor reference is removed.
+        foreach (string sql in new[]
+        {
+            "UPDATE reserved_namespace   SET created_by  = NULL WHERE org_id = @orgId AND created_by  = @userId",
+            "UPDATE quarantine           SET decided_by  = NULL WHERE org_id = @orgId AND decided_by  = @userId",
+            "UPDATE alert                SET dismissed_by = NULL WHERE org_id = @orgId AND dismissed_by = @userId",
+            "UPDATE claim                SET created_by  = NULL WHERE org_id = @orgId AND created_by  = @userId",
+            "UPDATE claim_history        SET actor_id    = NULL WHERE org_id = @orgId AND actor_id    = @userId",
+            "UPDATE install_script_allowlist SET created_by = NULL WHERE org_id = @orgId AND created_by = @userId",
+        })
+        {
+            await conn.ExecuteAsync(new CommandDefinition(sql, new { orgId, userId }, transaction: tx, cancellationToken: ct));
+        }
+
+        // Revoke remembered-device credentials — a live cookie must not authenticate a deleted user.
+        // xtenant: user_id is FK-bound to the user, already tenant-scoped via the users table; realm
+        // pins the tenant realm (system-realm rows reference system_admins, not users).
+        await conn.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM mfa_trusted_devices WHERE user_id = @userId AND realm = 'tenant'",
+            new { userId }, transaction: tx, cancellationToken: ct));
+
+        // Pseudonymize retained forensic rows: keep the actor_id skeleton, drop the identifiers.
+        await conn.ExecuteAsync(new CommandDefinition(
+            "UPDATE activity SET source_ip = NULL WHERE org_id = @orgId AND actor_id = @userId",
+            new { orgId, userId }, transaction: tx, cancellationToken: ct));
+        await conn.ExecuteAsync(new CommandDefinition(
+            "UPDATE audit_log SET source_ip = NULL, detail = NULL WHERE org_id = @orgId AND actor_id = @userId",
+            new { orgId, userId }, transaction: tx, cancellationToken: ct));
+
+        // Clear the lockout throttle and send-throttle rows. loginAttemptKey is
+        // HashLockoutKey("tenant", orgId, email) — the tenant-scoped pseudonym the lockout store
+        // and the send throttle actually key on, not the bare unsalted email hash. Neither table
+        // has a tenant column of its own; the tenant is folded into the key, so this bare equality
+        // predicate is already tenant-scoped.
+        await conn.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM login_attempts WHERE email_hash = @loginAttemptKey",
+            new { loginAttemptKey }, transaction: tx, cancellationToken: ct));
+        await conn.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM account_send_throttle WHERE email_hash = @loginAttemptKey",
+            new { loginAttemptKey }, transaction: tx, cancellationToken: ct));
+
+        await conn.ExecuteAsync(new CommandDefinition(
             "DELETE FROM users WHERE id = @userId AND tenant_id = @orgId",
-            new { orgId, userId });
+            new { orgId, userId }, transaction: tx, cancellationToken: ct));
+
+        await tx.CommitAsync(ct);
+
+        // Invalidate the cached session-version so the erased user's tokens fail closed immediately
+        // rather than lingering until the in-memory cache entry expires.
+        _tokenVersions?.Invalidate(userId);
     }
 
     /// <summary>
@@ -601,9 +707,8 @@ public sealed class OrgRepository
     /// Derived, never accumulated: a row leaving any plane (a version deleted, a
     /// <c>cache_artifact</c> evicted or aged out by retention) leaves this sum by itself, so it
     /// cannot drift away from the bytes actually stored and needs nothing released back into it.
-    /// The proxy cache-fill gate enforces against this rather than <c>storage_used_bytes</c>: the
-    /// cache plane is content-addressed and shared, so its bytes have no single owning tenant to
-    /// charge and uncharge symmetrically.
+    /// Every quota gate — hosted publish, OCI push, proxy cache fill — enforces against this one
+    /// reading, so no two paths can disagree about what "bytes this org holds" means.
     /// </summary>
     public async Task<long> GetLiveStorageBytesAsync(string orgId, CancellationToken ct = default)
     {
@@ -612,78 +717,36 @@ public sealed class OrgRepository
     }
 
     /// <summary>
-    /// Atomically reserves <paramref name="delta"/> bytes against the tenant's quota counter.
-    /// Issues a single UPDATE that increments <c>storage_used_bytes</c> only when the result
-    /// would not exceed <paramref name="quota"/> (NULL = unlimited). Returns true when the
-    /// reservation succeeded; false when the quota would be exceeded (caller should return 413).
+    /// Reserves <paramref name="delta"/> bytes of quota headroom for <paramref name="orgId"/>.
+    /// Returns the reservation the caller must dispose once its write is committed (or has
+    /// failed), or <c>null</c> when the write would carry the tenant past
+    /// <paramref name="quota"/> — the caller's 413. A null <paramref name="quota"/> means
+    /// unlimited and yields <see cref="StorageReservation.None"/>, so callers dispose
+    /// unconditionally.
     ///
-    /// SQLite's single-writer lock (busy_timeout=5000, DELETE journal) serialises concurrent
-    /// UPDATEs, so no two publishes can both pass the guard simultaneously. The backfill guard
-    /// (WHERE storage_used_bytes = 0 ... live SUM) runs first so a freshly-upgraded row with
-    /// counter = 0 gets the correct baseline before the first atomic reserve attempt.
+    /// Usage is derived from <c>org_storage_bytes</c> (<see cref="GetLiveStorageBytesAsync"/>),
+    /// never accumulated onto a counter. A counter has to be decremented by every path that frees
+    /// bytes — version delete, cache eviction, retention age-out — and a single missed decrement
+    /// ratchets the tenant into refusals it cannot recover from. Deriving the number means
+    /// deleting the row IS the release. The cache plane also has no single owning tenant to charge
+    /// symmetrically: one <c>cache_artifact</c> row is charged to every tenant holding
+    /// <c>tenant_artifact_access</c> on it.
+    ///
+    /// What the committed sum cannot do alone is see a write in flight: the bytes are invisible
+    /// until the row commits after the blob write. <see cref="StorageQuotaLedger"/> charges
+    /// admitted-but-uncommitted bytes so concurrent writes — publish and proxy fill alike — weigh
+    /// each other rather than all reading the same pre-write sum.
     /// </summary>
-    public async Task<bool> TryReserveStorageAsync(string orgId, long delta, long? quota, CancellationToken ct = default)
+    public async Task<StorageReservation?> TryReserveStorageAsync(
+        string orgId, long delta, long? quota, CancellationToken ct = default)
     {
-        await using var conn = await _db.OpenAsync(ct);
+        if (quota is null)
+        {
+            return StorageReservation.None;
+        }
 
-        // Ensure the org_settings row exists. CreateOrgAsync always creates one, but some
-        // code paths (unit test seeds, operator-managed orgs pre-dating this column) may
-        // omit it. ON CONFLICT DO NOTHING is a no-op when the row already exists.
-        await conn.ExecuteAsync(
-            "INSERT INTO org_settings (org_id) VALUES (@orgId) ON CONFLICT(org_id) DO NOTHING",
-            new { orgId });
-
-        // Backfill: if the counter is still 0 and the real sum is positive, set it from the
-        // live aggregate. WHERE storage_used_bytes = 0 makes this a no-op on rows that were
-        // already incremented by a prior publish, so concurrent callers racing the backfill
-        // can only inflate the counter, never set it to a stale-low value.
-        //
-        // The aggregate spans every plane — the same definition the admin tenant list reports.
-        // Summing package_versions alone omits every proxied byte the org holds, and sizes an OCI
-        // image by its manifest rather than its layers, so an org well over its quota could be
-        // baselined at almost nothing and keep publishing.
-        long liveBytes = await conn.ExecuteScalarAsync<long>(LiveStorageBytesSql, new { orgId });
-
-        // Reading the aggregate and writing it are two statements, but the guard is unchanged: the
-        // UPDATE still only fires while the counter is 0, so a publish that incremented it in the
-        // meantime turns this into a no-op rather than resetting it to a stale value.
-        await conn.ExecuteAsync(
-            """
-            UPDATE org_settings
-            SET storage_used_bytes = @liveBytes
-            WHERE org_id = @orgId AND storage_used_bytes = 0
-            """,
-            new { liveBytes, orgId });
-
-        // Atomic reserve: increment the counter only when the new value fits inside the quota.
-        // 0 rows affected means quota would be exceeded; caller treats that as 413.
-        int rows = await conn.ExecuteAsync(
-            """
-            UPDATE org_settings
-            SET storage_used_bytes = storage_used_bytes + @delta
-            WHERE org_id = @orgId
-              AND (@quota IS NULL OR storage_used_bytes + @delta <= @quota)
-            """,
-            new { orgId, delta, quota });
-
-        return rows > 0;
-    }
-
-    /// <summary>
-    /// Releases a previously reserved <paramref name="delta"/> back to the quota counter.
-    /// Called when a publish fails after the reservation, or when a version is deleted.
-    /// Clamps at 0 to guard against counter underflow from out-of-order releases.
-    /// </summary>
-    public async Task ReleaseStorageAsync(string orgId, long delta, CancellationToken ct = default)
-    {
-        await using var conn = await _db.OpenAsync(ct);
-        await conn.ExecuteAsync(
-            """
-            UPDATE org_settings
-            SET storage_used_bytes = MAX(0, storage_used_bytes - @delta)
-            WHERE org_id = @orgId
-            """,
-            new { orgId, delta });
+        long usedBytes = await GetLiveStorageBytesAsync(orgId, ct);
+        return _storageLedger.TryReserve(orgId, usedBytes, delta, quota.Value);
     }
 
     /// <summary>
@@ -693,7 +756,7 @@ public sealed class OrgRepository
     /// </summary>
     public async Task<int> CountActiveTokensAsync(string orgId, CancellationToken ct = default)
     {
-        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToUtcIso();
         await using var conn = await _db.OpenAsync(ct);
         return await conn.ExecuteScalarAsync<int>(
             """
@@ -785,4 +848,7 @@ public sealed record OrgSettingsUpdate(
     // Per-tenant MFA enrollment requirement. null = leave unchanged.
     bool? RequireMfa = null,
     // Per-tenant RPM hosted-publishing posture. null = leave unchanged. 'passthrough' | 'merged'.
-    string? RpmUpstreamMode = null);
+    string? RpmUpstreamMode = null,
+    // IANA zone name used to render stored instants for tenant users who have not chosen one.
+    // null = leave unchanged. Display only — instants are stored in UTC regardless.
+    string? DefaultTimezone = null);

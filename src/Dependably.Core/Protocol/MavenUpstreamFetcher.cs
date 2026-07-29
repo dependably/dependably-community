@@ -46,12 +46,19 @@ public sealed class MavenUpstreamFetcher
     private readonly ILogger<MavenUpstreamFetcher> _logger;
     private readonly TimeProvider _time;
 
-    // SHA-256 of the upstream path (first 32 hex chars) is the url_key.
-    private static string UrlHash(string upstreamPath)
+    // SHA-256 of the fully-resolved upstream URL (first 32 hex chars) is the url_key. The
+    // upstream base is part of the hashed value so a negative entry recorded against one org's
+    // upstream can never answer another org's lookup against a different host — the same Maven
+    // path resolves against different upstreams for different tenants (per-org upstream_registry).
+    private static string UrlHash(string upstreamBase, string upstreamPath)
     {
-        byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(upstreamPath));
+        string resolvedUrl = ResolvedUrl(upstreamBase, upstreamPath);
+        byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(resolvedUrl));
         return Convert.ToHexString(hash).ToLowerInvariant()[..UrlHashPrefixLength];
     }
+
+    private static string ResolvedUrl(string upstreamBase, string upstreamPath) =>
+        $"{upstreamBase.TrimEnd('/')}/{upstreamPath.TrimStart('/')}";
 
     public MavenUpstreamFetcher(
         UpstreamClient upstream,
@@ -79,14 +86,15 @@ public sealed class MavenUpstreamFetcher
 
     // ── Negative cache ─────────────────────────────────────────────────────────
 
-    public async Task<bool> IsNegativelyCachedAsync(string upstreamPath, CancellationToken ct)
+    public async Task<bool> IsNegativelyCachedAsync(string upstreamBase, string upstreamPath, CancellationToken ct)
     {
-        string key = UrlHash(upstreamPath);
+        string key = UrlHash(upstreamBase, upstreamPath);
         await using var conn = await _db.OpenAsync(ct);
         string? fetchedAt = await conn.ExecuteScalarAsync<string?>(
-            // xtenant: upstream_negative_cache is not tenant-scoped; ecosystem + url_key
-            // uniquely identifies the upstream resource independent of tenant. Negative
-            // cache entries are a per-instance concern (the upstream either has it or doesn't).
+            // xtenant: url_key is SHA-256 of the fully-resolved upstream URL (base host + path),
+            // so the row identifies one upstream resource regardless of which tenant fetched it.
+            // Two orgs sharing the same upstream host intentionally share the entry; two orgs on
+            // different upstream hosts get distinct keys and never cross-poison each other.
             "SELECT fetched_at FROM upstream_negative_cache WHERE ecosystem = 'maven' AND url_key = @key",
             new { key });
 
@@ -100,18 +108,19 @@ public sealed class MavenUpstreamFetcher
         return age < NegativeCacheTtl;
     }
 
-    public async Task RecordNegativeAsync(string upstreamPath, CancellationToken ct)
+    public async Task RecordNegativeAsync(string upstreamBase, string upstreamPath, CancellationToken ct)
     {
-        string key = UrlHash(upstreamPath);
+        string key = UrlHash(upstreamBase, upstreamPath);
         await using var conn = await _db.OpenAsync(ct);
-        // xtenant: see IsNegativelyCachedAsync — instance-scoped, not tenant-scoped.
+        // xtenant: url_key is SHA-256 of the fully-resolved upstream URL (base host + path) — see
+        // IsNegativelyCachedAsync. Keyed on the upstream resource, not the tenant, but host-qualified.
         await conn.ExecuteAsync(
             """
-            INSERT INTO upstream_negative_cache (url_key, ecosystem)
-            VALUES (@key, 'maven')
-            ON CONFLICT(url_key, ecosystem) DO UPDATE SET fetched_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+            INSERT INTO upstream_negative_cache (url_key, ecosystem, fetched_at)
+            VALUES (@key, 'maven', @now)
+            ON CONFLICT(url_key, ecosystem) DO UPDATE SET fetched_at = excluded.fetched_at
             """,
-            new { key });
+            new { key, now = UtcTimestamp.Now(_time) });
     }
 
     // ── Artifact fetch ─────────────────────────────────────────────────────────
@@ -136,7 +145,7 @@ public sealed class MavenUpstreamFetcher
         string? purl = null,
         string? authorizationHeader = null)
     {
-        if (await IsNegativelyCachedAsync(upstreamPath, ct))
+        if (await IsNegativelyCachedAsync(upstreamBase, upstreamPath, ct))
         {
             return null; // negative cache hit
         }
@@ -281,7 +290,7 @@ public sealed class MavenUpstreamFetcher
             // reset, TLS) surface as HttpRequestException with a null StatusCode; those fall through
             // to the log-and-return-null path below so a one-off network blip is never poisoned into
             // a sticky 404 for the negative-cache TTL.
-            await RecordNegativeAsync(upstreamPath, ct);
+            await RecordNegativeAsync(upstreamBase, upstreamPath, ct);
             return null;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

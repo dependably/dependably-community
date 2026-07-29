@@ -146,7 +146,7 @@ public sealed class SystemControllerUnitTests
             // math runs on the frozen clock, and the two must never diverge.
             await conn.ExecuteAsync(
                 "UPDATE orgs SET deleted_at = @now WHERE id = @id",
-                new { id = orgId, now = s.Clock.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ") });
+                new { id = orgId, now = s.Clock.GetUtcNow().ToUtcIso() });
         }
         var b = await s.BuildAsync();
 
@@ -405,9 +405,9 @@ public sealed class SystemControllerUnitTests
         await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var req = new SetAccountStatusRequest("unknown_status", "acme");
+        var req = new SetAccountStatusRequest("owner@acme.test", "unknown_status", "acme");
         var result = await b.SystemController.SetAccountStatus(
-            "owner@acme.test", req, CancellationToken.None);
+            req, CancellationToken.None);
         var obj = Assert.IsType<ObjectResult>(result);
         Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
     }
@@ -976,7 +976,7 @@ public sealed class SystemControllerUnitTests
         var b = await s.BuildAsync();
 
         var result = await b.SystemController.SetAccountStatus(
-            "user@acme.test", null!, CancellationToken.None);
+            null!, CancellationToken.None);
         var obj = Assert.IsType<ObjectResult>(result);
         Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
     }
@@ -990,7 +990,7 @@ public sealed class SystemControllerUnitTests
         var b = await s.BuildAsync();
 
         var result = await b.SystemController.IssuePasswordReset(
-            "user@acme.test", null!, null!, null!, CancellationToken.None);
+            null!, null!, null!, CancellationToken.None);
         var obj = Assert.IsType<ObjectResult>(result);
         Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
     }
@@ -1051,7 +1051,7 @@ public sealed class SystemControllerUnitTests
         var b = await s.BuildAsync();
 
         var result = await b.SystemController.IssuePasswordReset(
-            "user@acme.test", new PasswordResetRequest(""), null!, null!, CancellationToken.None);
+            new PasswordResetRequest("user@acme.test", ""), null!, null!, CancellationToken.None);
         var obj = Assert.IsType<ObjectResult>(result);
         Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
     }
@@ -1123,7 +1123,7 @@ public sealed class SystemControllerUnitTests
         {
             await conn.ExecuteAsync(
                 "UPDATE orgs SET deleted_at = @now WHERE id = @id",
-                new { id = orgId, now = s.Clock.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ") });
+                new { id = orgId, now = s.Clock.GetUtcNow().ToUtcIso() });
         }
         var notifier = new RecordingSystemEventNotifier();
         var b = await s.BuildAsync(systemEvents: notifier);

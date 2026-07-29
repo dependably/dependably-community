@@ -4,6 +4,10 @@
   import { api } from '../lib/api.js'
   import ErrorBanner from '../lib/ErrorBanner.svelte'
   import LicenseTextModal from '../lib/LicenseTextModal.svelte'
+  import { reportPageLoad } from '../lib/pageLoad.js'
+
+  /** The route transition this page was mounted for, supplied by RouteView. @type {number | null} */
+  export let pageToken = null
 
   let mode = 'off'
   let allowEntries = []
@@ -14,6 +18,10 @@
   let error = ''
   // Identifier of the license whose bundled text popup is open, or null.
   let licenseTextModal = null
+
+  // Holds the deferred navigation that mounted this page until the data is here, so the swap
+  // shows the loaded page rather than a shimmer that lives for a hundred milliseconds.
+  $: reportPageLoad(pageToken, loading)
 
   onMount(async () => {
     try {

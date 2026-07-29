@@ -57,6 +57,9 @@ public sealed partial class UpstreamClient
         activity?.SetTag("dependably.operation", "proxy.fetch");
         activity?.SetTag("dependably.tier", "cache");
 
+        // now-ok: measures real elapsed time for a duration log/metric only — no control
+        // flow branches on the value, so a substitutable clock would change the reported
+        // number without changing what the code does.
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         string outcome = "success";
 
@@ -135,6 +138,9 @@ public sealed partial class UpstreamClient
     private async Task<UpstreamFetchResult> FetchAndStageToContentKeyAsync(
         string url, ChecksumSpec? spec, string ecosystem, string? orgId, string? authorizationHeader, CancellationToken ct)
     {
+        // now-ok: measures real elapsed time for a duration log/metric only — no control
+        // flow branches on the value, so a substitutable clock would change the reported
+        // number without changing what the code does.
         var stopwatch = Stopwatch.StartNew();
         string outcome = "success";
         DependablyMeter.UpstreamInflightFetches.Add(1, new KeyValuePair<string, object?>("ecosystem", ecosystem));

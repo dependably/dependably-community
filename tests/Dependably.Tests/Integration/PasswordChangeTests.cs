@@ -266,6 +266,8 @@ public sealed class PasswordChangeTests : IClassFixture<DependablyFactory>, IAsy
         // now-ok: mints a JWT the host validates against its (default: real) clock.
         var now = DateTime.UtcNow;
         var token = new System.IdentityModel.Tokens.Jwt.JwtSecurityToken(
+            issuer: Dependably.Security.JwtTokenBinding.Issuer,
+            audience: Dependably.Security.JwtTokenBinding.SessionAudience,
             claims: new[]
             {
                 new System.Security.Claims.Claim(

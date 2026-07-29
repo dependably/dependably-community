@@ -242,6 +242,32 @@ public sealed class OrgControllerExtendedTests
         Assert.Equal(expectedStatus, status);
     }
 
+    [Fact]
+    public async Task GetPackage_VersionProjection_DoesNotLeakBlobKey()
+    {
+        // The internal object-store blob key (hosted/{orgId}/…) embeds the store layout and the
+        // raw org UUID, which members otherwise never see. It must not appear in the package-detail
+        // projection — the frontend downloads via /download, never a blob key. Without the fix
+        // (v.BlobKey in the anonymous projection) the reflected version carries a BlobKey property,
+        // failing the assertions below.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "member");
+        await s.WithPackageAsync("keypkg");
+        await s.WithPackageVersionAsync("keypkg", "1.0.0");
+        var b = await s.BuildAsync();
+
+        var result = await b.OrgController.GetPackage("npm", "keypkg", CancellationToken.None);
+        var ok = Assert.IsType<OkObjectResult>(result);
+        var versions = (System.Collections.IEnumerable)ok.Value!.GetType().GetProperty("versions")!.GetValue(ok.Value)!;
+        object? first = null;
+        foreach (object? v in versions) { first = v; break; }
+        Assert.NotNull(first);
+        Assert.Null(first!.GetType().GetProperty("BlobKey"));
+        Assert.DoesNotContain(
+            first.GetType().GetProperties(),
+            p => p.Name.Contains("blob", StringComparison.OrdinalIgnoreCase));
+    }
+
     // ── GetPackage: deprecated status ─────────────────────────────────
 
     [Theory]

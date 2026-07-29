@@ -76,7 +76,15 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
 
     // ── helpers ─────────────────────────────────────────────────────────────
 
-    private MavenController BuildController(string? authHeader = null, bool authenticated = true)
+    /// <param name="anchors">
+    /// Trust-anchor store backing the block gate's provenance arm. Defaults to an empty stub; a
+    /// test that sets <c>verify_maven_signatures='block'</c> and wants the denial attributable to
+    /// the artifact's own verdict (rather than to unbacked enforcement) passes one carrying a
+    /// Maven anchor.
+    /// </param>
+    private MavenController BuildController(
+        string? authHeader = null, bool authenticated = true,
+        Dependably.Infrastructure.IPerOrgTrustAnchorStore? anchors = null)
     {
         var http = new DefaultHttpContext();
         http.Request.Scheme = "https";
@@ -102,6 +110,10 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
             http.Request.Headers.Authorization = authHeader;
         }
 
+        var metadataCache = new Dependably.Infrastructure.Caching.RenderedResponseCache<Dependably.Infrastructure.Caching.MavenMetadataKey>(
+            new Microsoft.Extensions.Caching.Memory.MemoryCache(
+                new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions { SizeLimit = 8 * 1024 * 1024 }),
+            Dependably.Infrastructure.Caching.MetadataCacheKeys.MavenMetadata);
         var svc = new MavenControllerServices(
             Packages: _packages,
             Tokens: _tokens,
@@ -114,17 +126,15 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
             // ProxyFetch is only reached on the proxy-miss path, which short-circuits to 404
             // here because Upstream is null. BlockGate runs on every cache hit, so it's real.
             ProxyFetch: null!,
-            BlockGate: Dependably.Tests.Infrastructure.TestBlockGate.Create(_db, _clock),
+            BlockGate: Dependably.Tests.Infrastructure.TestBlockGate.Create(_db, _clock, anchors),
             ReservedNamespaces: new ReservedNamespaceService(
                 _db, new Microsoft.Extensions.Caching.Memory.MemoryCache(
                     new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), _clock),
             // Real resolver over an empty registry list — these tests exercise publish/auth
             // paths, not proxy fetches.
             Registries: new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, _clock, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured())),
-            MetadataCache: new Dependably.Infrastructure.Caching.RenderedResponseCache<Dependably.Infrastructure.Caching.MavenMetadataKey>(
-                new Microsoft.Extensions.Caching.Memory.MemoryCache(
-                    new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions { SizeLimit = 8 * 1024 * 1024 }),
-                Dependably.Infrastructure.Caching.MetadataCacheKeys.MavenMetadata),
+            MetadataCache: metadataCache,
+            Invalidation: Dependably.Tests.Infrastructure.TestMetadataInvalidation.ForMaven(metadataCache),
             CacheOptions: new Dependably.Infrastructure.RenderedMetadataCacheOptions(
                 TimeSpan.FromMinutes(10), TimeSpan.FromMinutes(5)),
             Log: Microsoft.Extensions.Logging.Abstractions.NullLogger<MavenController>.Instance,
@@ -979,7 +989,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
             new { pvvId, pv = versionId, vuln = vulnId });
         await conn.ExecuteAsync(
             "UPDATE package_versions SET vuln_checked_at = @ts WHERE id = @id",
-            new { ts = _clock.GetUtcNow().ToString("o"), id = versionId });
+            new { ts = _clock.GetUtcNow().ToUtcIso(), id = versionId });
     }
 
     [Fact]
@@ -1049,6 +1059,214 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
         await SetManualBlockStateAsync(verId, "allowed");
 
         var ctl = BuildController();
+        var result = await ctl.Download("com/example/lib/1.0/lib-1.0.jar", CancellationToken.None);
+
+        Assert.IsType<FileStreamResult>(result).FileStream.Dispose();
+    }
+
+    // ── Block gate: the arms whose facts live on package_versions ───────────
+    // provenance_status, revoked_at, has_install_script and the licence rows all hang off the
+    // owning package_versions row rather than off maven_version_files. These assert that the
+    // maven_version_files serve path reads them, so a policy an operator has configured is not
+    // silently inert on the plane every hosted `mvn deploy` writes to.
+
+    private async Task SetVerifyMavenSignaturesAsync(string mode)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "UPDATE org_settings SET verify_maven_signatures = @mode WHERE org_id = @org",
+            new { mode, org = _orgId });
+    }
+
+    private async Task SetLicenseEnforcementModeAsync(string mode)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "UPDATE org_settings SET license_enforcement_mode = @mode WHERE org_id = @org",
+            new { mode, org = _orgId });
+    }
+
+    private async Task SetBlockRevokedAsync(string mode)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "UPDATE org_settings SET block_revoked = @mode WHERE org_id = @org",
+            new { mode, org = _orgId });
+    }
+
+    private async Task SetBlockInstallScriptsAsync(string mode)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "UPDATE org_settings SET block_install_scripts = @mode WHERE org_id = @org",
+            new { mode, org = _orgId });
+    }
+
+    private async Task SetProvenanceStatusAsync(string versionId, string status)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "UPDATE package_versions SET provenance_status = @status WHERE id = @id",
+            new { status, id = versionId });
+    }
+
+    private async Task SetRevokedAtAsync(string versionId, DateTimeOffset revokedAt)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "UPDATE package_versions SET revoked_at = @ts WHERE id = @id",
+            new { ts = revokedAt.ToUtcIso(), id = versionId });
+    }
+
+    private async Task SetHasInstallScriptAsync(string versionId)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "UPDATE package_versions SET has_install_script = 1, install_script_kind = 'maven:plugin' WHERE id = @id",
+            new { id = versionId });
+    }
+
+    private static Dependably.Tests.Infrastructure.StubPerOrgTrustAnchorStore MavenAnchors(string orgId)
+    {
+        var store = new Dependably.Tests.Infrastructure.StubPerOrgTrustAnchorStore();
+        store.AddPresenceAnchor(orgId, "maven", "pgp");
+        return store;
+    }
+
+    private LicenseRepository Licenses() => new(_db, _clock, TestNormalizers.License(_db));
+
+    [Fact]
+    public async Task Download_FailedProvenance_UnderVerifyMavenSignaturesBlock_Returns403()
+    {
+        await SetAnonymousPullAsync(true);
+        var (_, verId, _) = await SeedMavenProxyArtifactAsync(
+            "com.example", "lib", "1.0", Encoding.UTF8.GetBytes("bad-signature-jar"));
+        await SetProvenanceStatusAsync(verId, "failed");
+        await SetVerifyMavenSignaturesAsync("block");
+
+        // An anchor is configured, so the denial is the artifact's own 'failed' verdict rather
+        // than the unbacked-enforcement fallback.
+        var ctl = BuildController(anchors: MavenAnchors(_orgId));
+        var result = await ctl.Download("com/example/lib/1.0/lib-1.0.jar", CancellationToken.None);
+
+        Assert.Equal(403, Assert.IsType<StatusCodeResult>(result).StatusCode);
+    }
+
+    [Fact]
+    public async Task Download_VerifiedProvenance_UnderVerifyMavenSignaturesBlock_StillServes()
+    {
+        // Adversarial twin: the same enforcing policy must not refuse a version that verified.
+        await SetAnonymousPullAsync(true);
+        var (_, verId, _) = await SeedMavenProxyArtifactAsync(
+            "com.example", "lib", "1.0", Encoding.UTF8.GetBytes("good-signature-jar"));
+        await SetProvenanceStatusAsync(verId, "verified");
+        await SetVerifyMavenSignaturesAsync("block");
+
+        var ctl = BuildController(anchors: MavenAnchors(_orgId));
+        var result = await ctl.Download("com/example/lib/1.0/lib-1.0.jar", CancellationToken.None);
+
+        Assert.IsType<FileStreamResult>(result).FileStream.Dispose();
+    }
+
+    [Fact]
+    public async Task Download_FailedProvenanceChecksumSidecar_UnderBlock_Returns403()
+    {
+        // The gate precedes the sidecar branch, so a refused artifact's hashes stay unreadable.
+        await SetAnonymousPullAsync(true);
+        var (_, verId, _) = await SeedMavenProxyArtifactAsync(
+            "com.example", "lib", "1.0", Encoding.UTF8.GetBytes("bad-signature-sidecar-jar"));
+        await SetProvenanceStatusAsync(verId, "failed");
+        await SetVerifyMavenSignaturesAsync("block");
+
+        var ctl = BuildController(anchors: MavenAnchors(_orgId));
+        var result = await ctl.Download("com/example/lib/1.0/lib-1.0.jar.sha1", CancellationToken.None);
+
+        Assert.Equal(403, Assert.IsType<StatusCodeResult>(result).StatusCode);
+    }
+
+    [Fact]
+    public async Task Download_BlocklistedLicense_UnderLicenseEnforcementBlock_Returns403()
+    {
+        await SetAnonymousPullAsync(true);
+        var (_, verId, _) = await SeedMavenProxyArtifactAsync(
+            "com.example", "lib", "1.0", Encoding.UTF8.GetBytes("gpl-jar"));
+        var licenses = Licenses();
+        await licenses.SetLicensesAsync(verId, ["GPL-3.0"], "upstream");
+        await licenses.AddBlocklistAsync(_orgId, "GPL-3.0");
+        await SetLicenseEnforcementModeAsync("block");
+
+        var ctl = BuildController();
+        var result = await ctl.Download("com/example/lib/1.0/lib-1.0.jar", CancellationToken.None);
+
+        Assert.Equal(403, Assert.IsType<StatusCodeResult>(result).StatusCode);
+    }
+
+    [Fact]
+    public async Task Download_AllowlistedLicense_UnderLicenseEnforcementBlock_StillServes()
+    {
+        // Adversarial twin: an allowlisted licence under the same enforcing policy still serves.
+        await SetAnonymousPullAsync(true);
+        var (_, verId, _) = await SeedMavenProxyArtifactAsync(
+            "com.example", "lib", "1.0", Encoding.UTF8.GetBytes("mit-jar"));
+        var licenses = Licenses();
+        await licenses.SetLicensesAsync(verId, ["MIT"], "upstream");
+        await licenses.AddAllowlistAsync(_orgId, "MIT");
+        await SetLicenseEnforcementModeAsync("block");
+
+        var ctl = BuildController();
+        var result = await ctl.Download("com/example/lib/1.0/lib-1.0.jar", CancellationToken.None);
+
+        Assert.IsType<FileStreamResult>(result).FileStream.Dispose();
+    }
+
+    [Fact]
+    public async Task Download_RevokedVersion_UnderBlockRevoked_Returns403()
+    {
+        await SetAnonymousPullAsync(true);
+        var (_, verId, _) = await SeedMavenProxyArtifactAsync(
+            "com.example", "lib", "1.0", Encoding.UTF8.GetBytes("withdrawn-jar"));
+        await SetRevokedAtAsync(verId, _clock.GetUtcNow());
+        await SetBlockRevokedAsync("block");
+
+        var ctl = BuildController();
+        var result = await ctl.Download("com/example/lib/1.0/lib-1.0.jar", CancellationToken.None);
+
+        Assert.Equal(403, Assert.IsType<StatusCodeResult>(result).StatusCode);
+    }
+
+    [Fact]
+    public async Task Download_InstallScriptVersion_UnderBlockInstallScripts_Returns403()
+    {
+        await SetAnonymousPullAsync(true);
+        var (_, verId, _) = await SeedMavenProxyArtifactAsync(
+            "com.example", "lib", "1.0", Encoding.UTF8.GetBytes("script-jar"));
+        await SetHasInstallScriptAsync(verId);
+        await SetBlockInstallScriptsAsync("block");
+
+        var ctl = BuildController();
+        var result = await ctl.Download("com/example/lib/1.0/lib-1.0.jar", CancellationToken.None);
+
+        Assert.Equal(403, Assert.IsType<StatusCodeResult>(result).StatusCode);
+    }
+
+    [Fact]
+    public async Task Download_CleanArtifact_UnderEveryEnforcingPolicy_StillServes()
+    {
+        // The adversarial twin for the whole set: all four arms enforcing at once, and an
+        // artifact with nothing against it still serves from this plane.
+        await SetAnonymousPullAsync(true);
+        var (_, verId, _) = await SeedMavenProxyArtifactAsync(
+            "com.example", "lib", "1.0", Encoding.UTF8.GetBytes("clean-jar"));
+        await SetProvenanceStatusAsync(verId, "verified");
+        var licenses = Licenses();
+        await licenses.SetLicensesAsync(verId, ["MIT"], "upstream");
+        await licenses.AddAllowlistAsync(_orgId, "MIT");
+        await SetVerifyMavenSignaturesAsync("block");
+        await SetLicenseEnforcementModeAsync("block");
+        await SetBlockRevokedAsync("block");
+        await SetBlockInstallScriptsAsync("block");
+
+        var ctl = BuildController(anchors: MavenAnchors(_orgId));
         var result = await ctl.Download("com/example/lib/1.0/lib-1.0.jar", CancellationToken.None);
 
         Assert.IsType<FileStreamResult>(result).FileStream.Dispose();

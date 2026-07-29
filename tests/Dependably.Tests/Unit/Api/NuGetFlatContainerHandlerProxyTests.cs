@@ -111,9 +111,7 @@ public sealed class NuGetFlatContainerHandlerProxyTests : IAsyncLifetime
 
         var vulns = new VulnerabilityRepository(_db, TimeProvider.System);
         var licenses = new LicenseRepository(_db, TimeProvider.System, TestNormalizers.License(_db));
-        var osv = Substitute.For<IOsvSource>();
-        osv.QueryAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
-           .Returns(Task.FromResult(new List<OsvAdvisory>()));
+        var osv = TestOsvSource.Create();
         var scanner = new VulnerabilityScanService(new VulnerabilityScanService.Dependencies(
             _db, osv, vulns, _audit, config, new StubAirGapMode(),
             NullLogger<VulnerabilityScanService>.Instance, TimeProvider.System,

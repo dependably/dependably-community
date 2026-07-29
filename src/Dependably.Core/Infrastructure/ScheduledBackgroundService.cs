@@ -98,8 +98,11 @@ public abstract class ScheduledBackgroundService : BackgroundService
     protected virtual string LeaderLockName => $"job:{GetType().Name}";
 
     /// <summary>
-    /// TTL held on the leader lock for the duration of a tick. Sized well above a normal pass so
-    /// the lock is not lost mid-run; it is released as soon as the tick completes. Default 5 min.
+    /// TTL held on the leader lock for the duration of a tick, and the window a
+    /// <see cref="LeaderLease"/> renewal extends it by. A running tick heartbeats the lock well
+    /// inside this window, so the TTL bounds how long the lock survives a crashed or wedged
+    /// holder rather than how long a pass may run. It is released as soon as the tick completes.
+    /// Default 5 min.
     /// </summary>
     protected virtual TimeSpan LeaderLockTtl => TimeSpan.FromMinutes(5);
 
@@ -131,11 +134,12 @@ public abstract class ScheduledBackgroundService : BackgroundService
     protected abstract Task RunTickAsync(CancellationToken ct);
 
     /// <summary>
-    /// Delays execution until the next scheduled occurrence. Override in tests to
-    /// advance a <c>FakeTimeProvider</c> instead of waiting on real wall-clock time.
+    /// Delays execution until the next scheduled occurrence. Runs on the injected
+    /// <see cref="TimeProvider"/>, so advancing a <c>FakeTimeProvider</c> releases the wait;
+    /// still virtual for subclasses that need a different waiting strategy entirely.
     /// </summary>
     protected virtual Task DelayAsync(TimeSpan delay, CancellationToken ct) =>
-        Task.Delay(delay, ct);
+        Task.Delay(delay, _time, ct);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -257,13 +261,33 @@ public abstract class ScheduledBackgroundService : BackgroundService
                 return;
             }
 
+            // Hold the lock for the whole tick with a renewal heartbeat: a pass that outruns the
+            // TTL would otherwise let the lock lapse mid-run and a second replica start a
+            // concurrent pass over the same destructive work. The lease also cancels the tick if
+            // renewal fails — an instance that has lost its lease is no longer the leader and
+            // must stop, not finish unleased.
+            var lease = LeaderLease.Start(leaderLock, LeaderLockTtl, _time, _logger, ct);
             try
             {
-                await RunTickCoreAsync(ct);
+                await RunTickCoreAsync(lease.Token, lease);
+            }
+            catch (OperationCanceledException) when (lease.LeaseLost)
+            {
+                // Backstop for the no-scope, ContinueOnTickError = false shape, where
+                // RunTickCoreAsync deliberately lets everything through: swallow the abort so a
+                // lost lease cannot fault ExecuteAsync and take the replica down under
+                // BackgroundService's default StopHost behavior.
             }
             finally
             {
-                await leaderLock.DisposeAsync();
+                await lease.DisposeAsync();
+            }
+
+            if (lease.LeaseLost)
+            {
+                _logger.LogWarning(
+                    "{ServiceType} tick aborted — the {LockName} leader lease was lost mid-run.",
+                    GetType().Name, LeaderLockName);
             }
             return;
         }
@@ -271,7 +295,13 @@ public abstract class ScheduledBackgroundService : BackgroundService
         await RunTickCoreAsync(ct);
     }
 
-    private async Task RunTickCoreAsync(CancellationToken ct)
+    // A tick cancelled because its leader lease was lost is a coordinated stop, not a job failure.
+    // It has to be recognised here rather than only around the call: with ContinueOnTickError true
+    // — the default, and what the destructive jobs use — the catch-all below would otherwise
+    // swallow the abort first and record it as a failed pass with a "tick failed" error.
+    private static bool IsLeaseAbort(LeaderLease? lease) => lease is { LeaseLost: true };
+
+    private async Task RunTickCoreAsync(CancellationToken ct, LeaderLease? lease = null)
     {
         if (ScopeJobName is { } jobName && ScopeMetricName is { } metricName)
         {
@@ -280,6 +310,13 @@ public abstract class ScheduledBackgroundService : BackgroundService
             {
                 await RunTickAsync(ct);
                 scope.Complete();
+            }
+            catch (OperationCanceledException) when (IsLeaseAbort(lease))
+            {
+                // Neither Complete nor Fail: the scope's default outcome is "cancelled", which is
+                // what a leadership handover is. Recording Fail here would put a server_error
+                // job-run row and an error-status span on every handover. RunTickGuardedAsync
+                // logs the abort once, with the lock name.
             }
             catch (Exception ex)
             {
@@ -299,6 +336,10 @@ public abstract class ScheduledBackgroundService : BackgroundService
             try
             {
                 await RunTickAsync(ct);
+            }
+            catch (OperationCanceledException) when (IsLeaseAbort(lease))
+            {
+                // Coordinated stop; RunTickGuardedAsync logs it as an abort, not a tick failure.
             }
             catch (Exception ex)
             {

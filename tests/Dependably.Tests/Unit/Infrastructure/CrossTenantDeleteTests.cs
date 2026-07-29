@@ -63,7 +63,7 @@ public sealed class CrossTenantDeleteTests : IClassFixture<InMemoryDbFixture>
         // invites.created_by is a NOT NULL FK to users(id), so seed a real inviter in org A.
         string inviter = await UserSeeder.InsertAsync(_fixture.Store, orgA, $"inviter-{Guid.NewGuid():N}@x.test", "admin");
         var repo = new InviteRepository(_fixture.Store, TimeProvider.System);
-        var (_, invite) = await repo.CreateAsync(orgA, $"invitee-{Guid.NewGuid():N}@x.test", inviter);
+        var (_, invite) = (await repo.CreateAsync(orgA, $"invitee-{Guid.NewGuid():N}@x.test", inviter))!;
 
         Assert.Equal(0, await repo.DeleteAsync(orgB, invite.Id));
         Assert.Contains(await repo.ListAsync(orgA), i => i.Id == invite.Id);

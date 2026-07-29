@@ -21,11 +21,16 @@ public sealed class ClaimResolver
 {
     private readonly ClaimRepository _claims;
     private readonly IAirGapMode _airGap;
+    private readonly NameBindingRepository? _nameBindings;
 
-    public ClaimResolver(ClaimRepository claims, IAirGapMode airGap)
+    // nameBindings is optional so the many test constructions that predate the name-binding
+    // model keep compiling; production DI always injects the registered repository, which
+    // enables the resurrection tombstone below.
+    public ClaimResolver(ClaimRepository claims, IAirGapMode airGap, NameBindingRepository? nameBindings = null)
     {
         _claims = claims;
         _airGap = airGap;
+        _nameBindings = nameBindings;
     }
 
     /// <summary>
@@ -47,7 +52,18 @@ public sealed class ClaimResolver
 
         // Hosted-name shadowing guard: a name with hosted versions but no claim row is
         // implicitly local_only so the proxy never merges or fetches upstream for it.
-        string defaultState = await _claims.HasUploadedVersionsAsync(orgId, ecosystem, name, ct)
+        //
+        // Resurrection tombstone: a name-binding row records that this org has hosted-published
+        // the name at least once. It outlives deletion of the last hosted version (it is keyed to
+        // the org, not the packages row), so a routine bad-release rollback that deletes every
+        // version no longer silently reverts the name to Unclaimed — where the proxy would fetch a
+        // squatter's package from the public registry (dependency-confusion resurrection). An
+        // explicit claim still overrides this, the deliberate operator opt-in back to upstream.
+        bool hostedOnceOrOwned =
+            await _claims.HasUploadedVersionsAsync(orgId, ecosystem, name, ct)
+            || (_nameBindings is not null
+                && await _nameBindings.HasBindingAsync(orgId, ecosystem, name, ct));
+        string defaultState = hostedOnceOrOwned
             ? ClaimStateMachine.LocalOnly
             : ClaimStateMachine.Unclaimed;
         return new EffectiveClaim(defaultState, null, IsImplicit: true);

@@ -34,7 +34,7 @@ public sealed class InviteRepositoryTests : IClassFixture<InMemoryDbFixture>
         var (orgId, inviterId) = await SeedOrgAndInviterAsync(Guid.NewGuid().ToString("N"));
         var repo = new InviteRepository(_fixture.Store, clock);
 
-        var (raw, _) = await repo.CreateAsync(orgId, "invited@x.test", inviterId);
+        var (raw, _) = (await repo.CreateAsync(orgId, "invited@x.test", inviterId))!;
 
         var record = await repo.AcceptAsync(raw);
 
@@ -52,7 +52,7 @@ public sealed class InviteRepositoryTests : IClassFixture<InMemoryDbFixture>
         var (orgId, inviterId) = await SeedOrgAndInviterAsync(Guid.NewGuid().ToString("N"));
         var repo = new InviteRepository(_fixture.Store, clock);
 
-        var (raw, _) = await repo.CreateAsync(orgId, "double@x.test", inviterId);
+        var (raw, _) = (await repo.CreateAsync(orgId, "double@x.test", inviterId))!;
 
         var first = await repo.AcceptAsync(raw);
         var second = await repo.AcceptAsync(raw);
@@ -69,7 +69,7 @@ public sealed class InviteRepositoryTests : IClassFixture<InMemoryDbFixture>
         var repo = new InviteRepository(_fixture.Store, clock);
 
         // Create with the clock frozen at T0, then advance clock far past the 24-hour TTL.
-        var (raw, _) = await repo.CreateAsync(orgId, "expired@x.test", inviterId);
+        var (raw, _) = (await repo.CreateAsync(orgId, "expired@x.test", inviterId))!;
         clock.Advance(TimeSpan.FromHours(48));
 
         var record = await repo.AcceptAsync(raw);
@@ -98,9 +98,9 @@ public sealed class InviteRepositoryTests : IClassFixture<InMemoryDbFixture>
         var repo = new InviteRepository(_fixture.Store, clock);
 
         // Seed three invites: one pending, one to accept, one that will expire.
-        var (_, _) = await repo.CreateAsync(orgId, "pending@x.test", inviterId);
-        var (rawAccept, _) = await repo.CreateAsync(orgId, "accept@x.test", inviterId);
-        var (_, _) = await repo.CreateAsync(orgId, "expire@x.test", inviterId);
+        var (_, _) = (await repo.CreateAsync(orgId, "pending@x.test", inviterId))!;
+        var (rawAccept, _) = (await repo.CreateAsync(orgId, "accept@x.test", inviterId))!;
+        var (_, _) = (await repo.CreateAsync(orgId, "expire@x.test", inviterId))!;
 
         // Accept one.
         await repo.AcceptAsync(rawAccept);
@@ -116,7 +116,7 @@ public sealed class InviteRepositoryTests : IClassFixture<InMemoryDbFixture>
 
         // Create a fresh invite at T+48h; it expires at T+72h.
         clock.Advance(TimeSpan.FromHours(0)); // still T+48h
-        var (_, _) = await repo.CreateAsync(orgId, "fresh@x.test", inviterId);
+        var (_, _) = (await repo.CreateAsync(orgId, "fresh@x.test", inviterId))!;
         int countWithFresh = await repo.CountPendingAsync(orgId);
         Assert.Equal(1, countWithFresh);
     }
@@ -157,8 +157,8 @@ public sealed class InviteRepositoryTests : IClassFixture<InMemoryDbFixture>
         string emailFresh = $"fresh-{suffix}@x.test";
 
         // Seed: one pending (will expire), one to be accepted before expiry.
-        var (_, _) = await repo.CreateAsync(orgId, emailExpiring, inviterId);
-        var (rawAccept, _) = await repo.CreateAsync(orgId, emailAccepted, inviterId);
+        var (_, _) = (await repo.CreateAsync(orgId, emailExpiring, inviterId))!;
+        var (rawAccept, _) = (await repo.CreateAsync(orgId, emailAccepted, inviterId))!;
 
         // Accept one now (before advancing clock).
         await repo.AcceptAsync(rawAccept);
@@ -245,7 +245,7 @@ public sealed class InviteRepositoryTests : IClassFixture<InMemoryDbFixture>
         var (orgId, inviterId) = await SeedOrgAndInviterAsync(Guid.NewGuid().ToString("N"));
         var repo = new InviteRepository(_fixture.Store, clock);
 
-        var (raw, _) = await repo.CreateAsync(orgId, "race@x.test", inviterId);
+        var (raw, _) = (await repo.CreateAsync(orgId, "race@x.test", inviterId))!;
 
         const int Attempts = 5;
         var results = new List<bool>();
@@ -276,8 +276,8 @@ public sealed class InviteRepositoryTests : IClassFixture<InMemoryDbFixture>
         string emailValid = $"mix-valid-{suffix}@x.test";
 
         // Three rows: one pending (will expire), one accepted (will expire), one still-valid.
-        var (_, _) = await repo.CreateAsync(orgId, emailPending, inviterId);
-        var (rawAccepted, _) = await repo.CreateAsync(orgId, emailAccepted, inviterId);
+        var (_, _) = (await repo.CreateAsync(orgId, emailPending, inviterId))!;
+        var (rawAccepted, _) = (await repo.CreateAsync(orgId, emailAccepted, inviterId))!;
         await repo.AcceptAsync(rawAccepted);
 
         clock.Advance(TimeSpan.FromHours(36)); // past 24h TTL

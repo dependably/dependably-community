@@ -4,7 +4,9 @@
   import { api } from '../lib/api.js'
   import { submitForm, extractErrorMessage } from '../lib/form.js'
   import { user, bootstrapInfo } from '../lib/store.js'
+  import { reportPageLoad } from '../lib/pageLoad.js'
   import ErrorBanner from '../lib/ErrorBanner.svelte'
+  import Skeleton from '../lib/Skeleton.svelte'
   import { formatDateShort } from '../lib/format.js'
   import SpdxPicker from '../lib/SpdxPicker.svelte'
   import LicenseTextModal from '../lib/LicenseTextModal.svelte'
@@ -23,9 +25,15 @@
   import SettingsInstanceEmail from '../lib/settings/SettingsInstanceEmail.svelte'
   import Toggle from '../lib/Toggle.svelte'
 
+  /** The route transition this page was mounted for, supplied by RouteView. @type {number | null} */
+  export let pageToken = null
+
   let tab = 'general'
   let settings = null, retention = null, instanceMax = null, proxySettings = null
   let loading = true, saving = false, error = '', success = ''
+  // Holds the deferred navigation that mounted this page until the data is here, so the swap
+  // shows the loaded page rather than a shimmer that lives for a hundred milliseconds.
+  $: reportPageLoad(pageToken, loading)
 
   // Allowlist state
   let allowlistEntries = [], allowlistLoaded = false
@@ -468,19 +476,34 @@
 <div class="page page-fluid">
   <div class="page-header"><h1 class="page-title">{$t('settings.title')}</h1></div>
 
-  {#if loading}<span class="spinner"></span>
-  {:else}
-    <div class="tabs">
-      {#each tabKeys as tk (tk.key)}
-        <button class="tab" class:active={tab===tk.key} data-testid={`tab-${tk.key}`} on:click={() => switchTab(tk.key)}>
-          {$t(tk.label)}
-        </button>
-      {/each}
+  <!-- The tab strip is decided by role and deployment mode, both resolved before this page
+       mounts, so it renders immediately and only the panel below waits on the settings fetch.
+       Gating the strip too made the whole page — tabs included — pop in at once. -->
+  <div class="tabs">
+    {#each tabKeys as tk (tk.key)}
+      <button class="tab" class:active={tab===tk.key} data-testid={`tab-${tk.key}`} on:click={() => switchTab(tk.key)}>
+        {$t(tk.label)}
+      </button>
+    {/each}
+  </div>
+
+  <ErrorBanner message={error} />
+  {#if success}<div class="text-success mb-3">{success}</div>{/if}
+
+  {#if loading}
+    <!-- Stands in for the General tab's form until the settings requests resolve. -->
+    <div class="settings-loading" aria-busy="true">
+      <Skeleton width="180px" height="13px" />
+      <Skeleton height="34px" />
+      <Skeleton width="180px" height="13px" />
+      <Skeleton height="34px" />
+      <Skeleton width="220px" height="13px" />
+      <Skeleton height="34px" />
+      <Skeleton width="140px" height="13px" />
+      <Skeleton height="34px" />
+      <Skeleton width="120px" height="36px" />
     </div>
-
-    <ErrorBanner message={error} />
-    {#if success}<div class="text-success mb-3">{success}</div>{/if}
-
+  {:else}
     {#if tab === 'general'}
       <SettingsGeneral {settings} {saving} onSave={saveSettings} />
 
@@ -819,6 +842,16 @@
 </div>
 
 <style>
+  /* Reserved block for the settings form while its requests resolve. Settings forms are
+     width-capped, so the placeholder occupies the same column the loaded fields will. */
+  .settings-loading {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    max-width: 480px;
+    min-height: 360px;
+  }
+
   /* Supply-chain warning surface used when allow_version_overwrite is on. Same shape as the
      warning-card on Claims.svelte / Import.svelte; consistent across all three places. */
   .warning-box {

@@ -3,7 +3,9 @@
   import { t, locale } from 'svelte-i18n'
   import { get } from 'svelte/store'
   import { api, systemApi } from '../lib/api.js'
-  import { user, route, navigate, pendingRoute } from '../lib/store.js'
+  import { user, route, activeRoute, navigate, restoreScroll, pendingRoute,
+           cancelTransition, transitionPending } from '../lib/store.js'
+  import RouteView from '../lib/RouteView.svelte'
   import { armSessionWatch, disarmSessionWatch } from '../lib/session.js'
   import { useRouter, routeFor } from '../lib/routes.js'
   import { applyLocale } from '../lib/locale.js'
@@ -23,7 +25,11 @@
 
   onMount(async () => {
     if (typeof window !== 'undefined' && window.history && 'scrollRestoration' in window.history) {
-      window.history.scrollRestoration = 'auto'
+      // The SPA owns scroll placement: navigate() seats new pages at the top and stamps the
+      // offset it is leaving onto the outgoing history entry, and the popstate handler below
+      // reapplies it. The browser's own restore fires before the arriving page has fetched its
+      // data and clamps the offset against the short document.
+      window.history.scrollRestoration = 'manual'
     }
 
     const intended = routeFor(window.location.pathname) || { page: 'system-dashboard', params: {} }
@@ -32,7 +38,9 @@
     try { me = await systemApi.me() } catch { /* unauthenticated */ }
     if (me) {
       user.set(me)
-      if (me.language && me.language !== get(locale)) applyLocale(me.language)
+      // Awaited so the shell's first paint is already in the user's language — without it a
+      // non-English user gets a frame of English before the dictionary flushes.
+      if (me.language && me.language !== get(locale)) await applyLocale(me.language)
       // Arm the proactive session-expiry watcher with the exp claim surfaced by me().
       armSessionWatch(me.sessionExpiresAt, systemApi.me)
     }
@@ -55,17 +63,27 @@
 
     window.addEventListener('popstate', (e) => {
       const next = (e.state && e.state.page) ? e.state : routeFor(window.location.pathname)
-      if (next) route.set({ page: next.page, params: next.params ?? {} })
+      if (next) {
+        // The user moved history themselves, so whatever was being held for a deferred commit is
+        // no longer where they are going — drop it and show the popped entry directly.
+        cancelTransition()
+        route.set({ page: next.page, params: next.params ?? {} })
+        restoreScroll(e.state)
+      }
     })
 
     initialized = true
   })
 
+  // The guards below read $activeRoute, not $route: a deferred navigation holds the outgoing page
+  // on screen while the incoming one loads, and a route a guard is going to reject should be
+  // rejected before it is ever committed rather than after it lands.
+
   // Belt-and-suspenders: if anyone navigates away while still on the must-rotate flag,
   // bounce back to the profile page. Replace so they can't back out of it.
   $: if ($user?.mustChangePassword
-        && $route.page !== 'system-profile'
-        && $route.page !== 'system-login') {
+        && $activeRoute.page !== 'system-profile'
+        && $activeRoute.page !== 'system-login') {
     navigate('system-profile', {}, { replace: true })
   }
 
@@ -73,13 +91,14 @@
   // navigates away, bounce to profile so they can enroll. Rotation takes priority.
   $: if ($user?.mfaEnrollmentRequired
         && !$user?.mustChangePassword
-        && $route.page !== 'system-profile'
-        && $route.page !== 'system-login') {
+        && $activeRoute.page !== 'system-profile'
+        && $activeRoute.page !== 'system-login') {
     navigate('system-profile', {}, { replace: true })
   }
 
   async function logout() {
     await api.logout().catch(() => {})
+    cancelTransition()
     disarmSessionWatch()
     user.set(null)
     pendingRoute.set(null)
@@ -99,38 +118,47 @@
         <span class="brand-text">{$t('nav.brand')}</span>
         <span class="apex-badge">{$t('system.badge')}</span>
       </button>
+      <!-- Highlighting follows the route the user asked for rather than the one on screen, so a
+           held navigation still lights its link the instant it is clicked. -->
       <div class="nav-links">
-        <button class="nav-link" class:active={$route.page === 'system-tenants'} on:click={() => navigate('system-tenants')}>{$t('system.nav.tenants')}</button>
-        <button class="nav-link" class:active={$route.page === 'system-admins'} on:click={() => navigate('system-admins')}>{$t('system.nav.admins')}</button>
-        <button class="nav-link" class:active={$route.page === 'system-users'} on:click={() => navigate('system-users')}>{$t('system.nav.users')}</button>
-        <button class="nav-link" class:active={$route.page === 'system-audit'} on:click={() => navigate('system-audit')}>{$t('system.nav.audit')}</button>
-        <button class="nav-link" class:active={$route.page === 'system-banners'} on:click={() => navigate('system-banners')}>{$t('system.nav.banners')}</button>
-        <button class="nav-link" class:active={$route.page === 'system-settings'} on:click={() => navigate('system-settings')}>{$t('system.nav.settings')}</button>
+        <button class="nav-link" class:active={$activeRoute.page === 'system-tenants'} on:click={() => navigate('system-tenants')}>{$t('system.nav.tenants')}</button>
+        <button class="nav-link" class:active={$activeRoute.page === 'system-admins'} on:click={() => navigate('system-admins')}>{$t('system.nav.admins')}</button>
+        <button class="nav-link" class:active={$activeRoute.page === 'system-users'} on:click={() => navigate('system-users')}>{$t('system.nav.users')}</button>
+        <button class="nav-link" class:active={$activeRoute.page === 'system-audit'} on:click={() => navigate('system-audit')}>{$t('system.nav.audit')}</button>
+        <button class="nav-link" class:active={$activeRoute.page === 'system-banners'} on:click={() => navigate('system-banners')}>{$t('system.nav.banners')}</button>
+        <button class="nav-link" class:active={$activeRoute.page === 'system-settings'} on:click={() => navigate('system-settings')}>{$t('system.nav.settings')}</button>
       </div>
       <div class="nav-actions">
-        <button class="nav-link" class:active={$route.page === 'system-profile'} on:click={() => navigate('system-profile')}>{$t('system.nav.profile')}</button>
+        <button class="nav-link" class:active={$activeRoute.page === 'system-profile'} on:click={() => navigate('system-profile')}>{$t('system.nav.profile')}</button>
         <button on:click={logout}>{$t('system.nav.signOut')}</button>
       </div>
     </nav>
 
+    <div class="nav-progress" class:visible={$transitionPending} aria-hidden="true"></div>
+
     <main class="main-content">
-      {#if $route.page === 'system-dashboard'}
-        <SystemDashboard />
-      {:else if $route.page === 'system-tenants'}
-        <SystemTenants />
-      {:else if $route.page === 'system-admins'}
-        <SystemAdmins />
-      {:else if $route.page === 'system-users'}
-        <SystemUserLookup />
-      {:else if $route.page === 'system-audit'}
-        <SystemAudit />
-      {:else if $route.page === 'system-banners'}
-        <SystemBanners />
-      {:else if $route.page === 'system-settings'}
-        <SystemSettings />
-      {:else if $route.page === 'system-profile'}
-        <SystemProfile />
-      {/if}
+      <!-- `pageToken` goes to the pages that fetch on arrival: it is how they hold the transition
+           open until their data lands. Pages without an initial fetch take none and are committed
+           on the auto-commit frame. -->
+      <RouteView let:page let:token>
+        {#if page === 'system-dashboard'}
+          <SystemDashboard pageToken={token} />
+        {:else if page === 'system-tenants'}
+          <SystemTenants pageToken={token} />
+        {:else if page === 'system-admins'}
+          <SystemAdmins pageToken={token} />
+        {:else if page === 'system-users'}
+          <SystemUserLookup />
+        {:else if page === 'system-audit'}
+          <SystemAudit pageToken={token} />
+        {:else if page === 'system-banners'}
+          <SystemBanners pageToken={token} />
+        {:else if page === 'system-settings'}
+          <SystemSettings />
+        {:else if page === 'system-profile'}
+          <SystemProfile pageToken={token} />
+        {/if}
+      </RouteView>
     </main>
   </div>
 {/if}

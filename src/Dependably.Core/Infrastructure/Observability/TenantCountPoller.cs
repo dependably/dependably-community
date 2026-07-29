@@ -32,6 +32,8 @@ public sealed class TenantCountPoller : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         // First poll right after startup so the gauge isn't empty on cold launch.
+        // now-ok: gauge poll cadence is real elapsed time — no scheduled work observes
+        // this deadline, and tests exercise PollOnce/PollOnceAsync directly, never the loop.
         try { await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken); }
         catch (OperationCanceledException) { return; }
 
@@ -39,6 +41,7 @@ public sealed class TenantCountPoller : BackgroundService
         {
             await PollOnceAsync(stoppingToken);
 
+            // now-ok: same real-time poll cadence as the startup delay above.
             try { await Task.Delay(_interval, stoppingToken); }
             catch (OperationCanceledException) { break; }
         }

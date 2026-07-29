@@ -25,6 +25,7 @@
 <script>
   import { createEventDispatcher } from 'svelte'
   import { sortIndicator } from './sortIndicator.js'
+  import { rememberedRowCount, rememberRowCount } from './tableSize.js'
 
   /** @type {Array<{ key: string, label: string, sortable?: boolean, defaultDir?: string, width?: string, align?: string }>} */
   export let columns = []
@@ -37,7 +38,42 @@
   export let emptyText = ''
   export let tableClass = 'table-auto'
   export let loading = false
+  /**
+   * Placeholder rows drawn while `loading` and the table has nothing to show yet. Paged callers
+   * pass their page size as the first-visit estimate; once this table has rendered real rows the
+   * remembered count takes over, because a page size overstates every table that holds fewer rows
+   * than its limit. Unpaged callers keep the small default.
+   */
   export let loadingRows = 5
+  /**
+   * Height of one placeholder row, matching a loaded row of this table. The default suits a
+   * single-line row; tables whose cells stack two lines (a badge over a package name) pass their
+   * own, otherwise the reserved height is short by a third.
+   */
+  export let loadingRowHeight = '34px'
+  /**
+   * Stable identifier under which this table's real row count is remembered for the session, so a
+   * later load reserves the height it is actually going to need. Omit to opt out.
+   */
+  export let memoryKey = ''
+
+  // Reserving past the fold buys nothing: rows arriving below the viewport grow the document
+  // without moving anything the reader can see. Capping keeps a `limit=200` page from drawing a
+  // screen-and-a-half of shimmer, and keeps the overshoot bounded on a registry too sparse to
+  // fill the page it asked for.
+  const MAX_PLACEHOLDER_ROWS = 30
+  // What this table held last time, which beats the page size as an estimate — reserving fifty
+  // rows for a table that turns out to hold four moves everything below it further than
+  // reserving nothing would have.
+  const remembered = rememberedRowCount(memoryKey)
+  $: placeholderRows = Math.max(1, Math.min(remembered ?? loadingRows, MAX_PLACEHOLDER_ROWS))
+  $: if (!loading) rememberRowCount(memoryKey, rows.length)
+
+  // A table that already has rows keeps showing them while the next load is in flight: replacing
+  // a rendered page with shimmer and back again is the same flicker as a route change committing
+  // early, and paging, sorting, and filtering all take this path. The placeholder is for a table
+  // with nothing to show yet.
+  $: showPlaceholder = loading && rows.length === 0
 
   let sortCol = initialSort?.key ?? columns.find(c => c.sortable)?.key ?? ''
   let sortDir = initialSort?.dir ?? columns.find(c => c.key === sortCol)?.defaultDir ?? 'asc'
@@ -70,7 +106,7 @@
   })
 </script>
 
-<table class={tableClass}>
+<table class={tableClass} aria-busy={loading || undefined}>
   {#if columns.some(c => c.width)}
     <colgroup>
       {#each columns as c (c.key)}
@@ -91,10 +127,12 @@
       {/each}
     </tr>
   </thead>
-  {#if loading}
-    <tbody>
-      {#each [...Array(loadingRows).keys()] as i (i)}
-        <tr><td colspan={columns.length}><span class="skeleton"></span></td></tr>
+  {#if showPlaceholder}
+    <tbody aria-hidden="true">
+      {#each [...Array(placeholderRows).keys()] as i (i)}
+        <tr class="skeleton-row" style:height={loadingRowHeight}>
+          <td colspan={columns.length}><span class="skeleton"></span></td>
+        </tr>
       {/each}
     </tbody>
   {:else}
@@ -108,3 +146,9 @@
     </tbody>
   {/if}
 </table>
+
+<style>
+  /* The row height is the reserved height, so pin it on the cell too: a <tr> height is advisory
+     in table layout, while a <td> height acts as the row's minimum. */
+  .skeleton-row td { height: inherit; }
+</style>

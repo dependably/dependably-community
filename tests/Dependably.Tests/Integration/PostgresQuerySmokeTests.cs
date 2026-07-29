@@ -71,13 +71,12 @@ public sealed class PostgresQuerySmokeTests
         Assert.Equal(OrgId, orgItem.Id);
         Assert.Equal(TotalStorageBytes, orgItem.StorageBytes);
 
-        bool reserved = await orgs.TryReserveStorageAsync(OrgId, delta: 0, quota: null);
-        Assert.True(reserved);
-        await using (var conn = await store.OpenAsync())
+        // The quota gate's one reading of "bytes this org holds" must execute against live
+        // Postgres and total every plane — hosted, cache, and OCI.
+        Assert.Equal(TotalStorageBytes, await orgs.GetLiveStorageBytesAsync(OrgId));
+        using (var reservation = await orgs.TryReserveStorageAsync(OrgId, delta: 0, quota: null))
         {
-            long baseline = await conn.ExecuteScalarAsync<long>(
-                "SELECT storage_used_bytes FROM org_settings WHERE org_id = @OrgId", new { OrgId });
-            Assert.Equal(TotalStorageBytes, baseline);
+            Assert.NotNull(reservation);
         }
 
         // ── PackageAnalyticsRepository ──────────────────────────────────────
@@ -187,6 +186,27 @@ public sealed class PostgresQuerySmokeTests
         var proxiedOnly = await inventory.ListServeableVersionsAsync(OrgId, "p3", "npm", "proxied-pkg");
         Assert.Equal("2.0.0", Assert.Single(proxiedOnly).Version);
 
+        // ── InviteRepository — upsert against a partial unique index ────────
+        // CreateAsync names idx_invites_unique_pending as its conflict target
+        // (ON CONFLICT (org_id, email) WHERE accepted_at IS NULL). Postgres has to infer the
+        // partial index from that predicate; a mismatch is a runtime error SQLite never raises.
+        await using (var conn = await store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO users (id, tenant_id, email, password_hash) VALUES ('u1', @OrgId, 'inviter@smoke.test', 'x')",
+                new { OrgId });
+        }
+
+        var invites = new InviteRepository(store, clock);
+        Assert.NotNull(await invites.CreateAsync(OrgId, "invitee@smoke.test", "u1"));
+        Assert.True(await invites.HasPendingAsync(OrgId, "invitee@smoke.test"));
+        // Second create for the same pending address resolves to a zero-row no-op, not an error.
+        Assert.Null(await invites.CreateAsync(OrgId, "invitee@smoke.test", "u1"));
+        Assert.Single(await invites.ListAsync(OrgId));
+        // A different address in the same tenant is unaffected by the conflict target.
+        Assert.NotNull(await invites.CreateAsync(OrgId, "other@smoke.test", "u1"));
+        Assert.False(await invites.HasPendingAsync(OrgId, "absent@smoke.test"));
+
         // ── Direct SELECT from each canonical view ──────────────────────────
         await using (var conn = await store.OpenAsync())
         {
@@ -215,7 +235,7 @@ public sealed class PostgresQuerySmokeTests
     private static async Task SeedEveryArtifactShapeAsync(NpgsqlMetadataStore store)
     {
         await using var conn = await store.OpenAsync();
-        string now = TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = TestTime.KnownNow.ToUtcIso();
 
         await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES (@OrgId, 'smoke-org')", new { OrgId });
         await conn.ExecuteAsync("INSERT INTO org_settings (org_id) VALUES (@OrgId)", new { OrgId });

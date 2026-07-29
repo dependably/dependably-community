@@ -70,6 +70,7 @@ public sealed class LicenseController : ControllerBase
         return Ok(new
         {
             mode = settings?.LicenseEnforcementMode ?? "off",
+            publishMode = settings?.LicensePublishEnforcementMode ?? "off",
             allowlist,
             blocklist
         });
@@ -97,7 +98,12 @@ public sealed class LicenseController : ControllerBase
 
     // ── Enforcement mode ──────────────────────────────────────────────────────
 
-    /// <summary>PUT /api/v1/orgs/{org}/license-policy/mode</summary>
+    /// <summary>
+    /// PUT /api/v1/orgs/{org}/license-policy/mode. <c>mode</c> (the serve-path gate) is
+    /// required and always applied. <c>publishMode</c> (the independent publish-path gate) is
+    /// optional and leave-unchanged-on-absent — an older client that only knows about
+    /// <c>mode</c> never resets the stored publish policy back to 'off'.
+    /// </summary>
     [HttpPut("api/v1/license-policy/mode")]
     public async Task<IActionResult> SetMode([FromBody] SetModeRequest req, CancellationToken ct)
     {
@@ -112,14 +118,20 @@ public sealed class LicenseController : ControllerBase
             return _problems.ValidationErrorActionKey("mode", "error.license.modeInvalid");
         }
 
+        if (req.PublishMode is not (null or "off" or "warn" or "block"))
+        {
+            return _problems.ValidationErrorActionKey("publish_mode", "error.license.publishModeInvalid");
+        }
+
         string orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
 
-        await _orgs.UpsertLicensePolicyModeAsync(orgId, req.Mode, ct);
+        await _orgs.UpsertLicensePolicyModeAsync(orgId, req.Mode, req.PublishMode, ct);
 
         await _audit.LogAsync("license_policy_mode_changed", orgId, GetUserId(),
-            detail: System.Text.Json.JsonSerializer.Serialize(new { mode = req.Mode }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+            detail: System.Text.Json.JsonSerializer.Serialize(new { mode = req.Mode, publish_mode = req.PublishMode }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
 
-        return Ok(new { mode = req.Mode });
+        var updated = await _orgs.GetSettingsAsync(orgId, ct);
+        return Ok(new { mode = req.Mode, publishMode = updated?.LicensePublishEnforcementMode ?? "off" });
     }
 
     // ── Allowlist ─────────────────────────────────────────────────────────────
@@ -274,5 +286,5 @@ public sealed class LicenseController : ControllerBase
 
 }
 
-public record SetModeRequest(string Mode);
+public record SetModeRequest(string Mode, string? PublishMode = null);
 public record LicenseSpdxRequest(string LicenseSpdx);

@@ -53,6 +53,12 @@
     } catch (e) { error = extractErrorMessage(e) }
   }
 
+  // Mirrors SmtpTransportSettings.SendsCredentialsInCleartextWhen. Computed from the live form
+  // rather than the saved config so the warning appears while the operator is choosing "none",
+  // not only after they have already saved credentials into a cleartext session.
+  $: cleartextCredentials =
+    security === 'none' && !!username && (config?.hasPassword || !!password)
+
   async function save() {
     success = ''
     testMsg = ''
@@ -164,6 +170,10 @@
       <input id="instance-email-from" type="text" bind:value={fromAddress} disabled={!enabled} />
     </div>
 
+    {#if cleartextCredentials}
+      <div class="cleartext-warning" role="status">{$t('settings.instanceEmail.cleartextCredentials')}</div>
+    {/if}
+
     {#if testMsg}<p class="test-msg">{testMsg}</p>{/if}
 
     <div class="form-actions">
@@ -203,6 +213,15 @@
   .form-hint { font-size: 11px; color: var(--text2); }
   .test-msg { font-size: 13px; color: var(--text2); margin: 6px 0; }
   .form-actions { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+  .cleartext-warning {
+    background: var(--warning-bg);
+    border: 1px solid var(--warning-border);
+    color: var(--warning-text);
+    border-radius: var(--radius);
+    padding: 8px 12px;
+    margin: 12px 0;
+    font-size: 12px;
+  }
   .env-banner {
     background: rgba(255, 180, 0, 0.15);
     border: 1px solid rgba(255, 180, 0, 0.4);

@@ -147,6 +147,7 @@
   rows={claims}
   {comparators}
   {loading}
+  memoryKey="claims"
   initialSort={{ key: 'name', dir: 'asc' }}
   emptyText={$t('claims.empty')}
   tableClass="list-table"

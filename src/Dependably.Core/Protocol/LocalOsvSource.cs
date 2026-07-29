@@ -30,7 +30,7 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
     private readonly string _path;
     private readonly ILogger<LocalOsvSource> _logger;
     private readonly Lazy<Task> _initialLoad;
-    private readonly System.Threading.Timer? _refreshTimer;
+    private readonly ITimer? _refreshTimer;
 
     // Index by (ecosystem-lowercase, name-lowercase) → list of advisories.
     // Replaced atomically on each reload; reads can run lock-free.
@@ -44,7 +44,7 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
     // empty or malware-free dump set.
     private volatile bool _sourceReachable;
 
-    public LocalOsvSource(IConfiguration config, ILogger<LocalOsvSource> logger)
+    public LocalOsvSource(IConfiguration config, ILogger<LocalOsvSource> logger, TimeProvider time)
     {
         _logger = logger;
         _path = config["OSV_LOCAL_PATH"]
@@ -54,7 +54,7 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
         var refreshInterval = TimeSpan.FromMinutes(minutes);
 
         _initialLoad = new Lazy<Task>(() => Task.Run(() => ReloadAsync(default)));
-        _refreshTimer = new System.Threading.Timer(OnRefreshTick, null, refreshInterval, refreshInterval);
+        _refreshTimer = time.CreateTimer(OnRefreshTick, null, refreshInterval, refreshInterval);
     }
 
     /// <summary>Test-only constructor: fixed path, no refresh timer.</summary>

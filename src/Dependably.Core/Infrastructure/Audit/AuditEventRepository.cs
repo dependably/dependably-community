@@ -24,7 +24,28 @@ public sealed class AuditEventRepository
                 @EventId, @SchemaVersion, @EventType, @OrgId, @TenantResolver,
                 @ActorType, @ActorId, @RequestId, @SourceIp, @UserAgent,
                 @Outcome, @Payload, @OccurredAt)
-            """, ev);
+            """,
+            new
+            {
+                ev.EventId,
+                ev.SchemaVersion,
+                ev.EventType,
+                ev.OrgId,
+                ev.TenantResolver,
+                ev.ActorType,
+                ev.ActorId,
+                ev.RequestId,
+                ev.SourceIp,
+                ev.UserAgent,
+                ev.Outcome,
+                ev.Payload,
+                // Millisecond precision, matching audit_log/activity: this append-only forensic
+                // table needs a deterministic order for events sharing a wall-clock second. Bound
+                // explicitly rather than through the global DateTimeOffsetHandler default (second
+                // precision) — passing `ev` directly here would silently drop the sub-second
+                // component this table's ordering relies on.
+                OccurredAt = ev.OccurredAt.ToUtcIsoMillis(),
+            });
     }
 
     public async Task<IReadOnlyList<AuditEvent>> ListByTenantAsync(
@@ -39,7 +60,7 @@ public sealed class AuditEventRepository
                    occurred_at AS OccurredAt
             FROM audit_event
             WHERE org_id = @orgId
-            ORDER BY occurred_at DESC
+            ORDER BY occurred_at DESC, event_id DESC
             LIMIT @limit
             """, new { orgId, limit });
         return rows.AsList();

@@ -20,13 +20,29 @@ namespace Dependably.Infrastructure;
 /// <c>ecosystem</c> column spanning both shadows, so that predicate finally means what every author
 /// already believes it means.
 ///
-/// Views are stateless, so they are dropped and recreated unconditionally on every boot rather than
-/// migrated. That is also why the drop runs early and the create runs last: a view holding a
-/// dependency on a table blocks a Postgres <c>ALTER COLUMN</c> and dangles across a SQLite
-/// DROP+RENAME, and several recreate-table migrations do exactly that. Dropping first means no view
-/// is ever in the way; creating last means every column and table shape the bodies reference is
-/// guaranteed to exist, including those added by the additive migrations that run after the schema
-/// file.
+/// View creation is idempotent, because a replica boot is not a schema change. A rolling restart,
+/// a scale-out event, and a blue-green cutover all start replicas against a database other replicas
+/// are already querying, so an unconditional DROP+CREATE would remove a live object once per task
+/// start — and <c>org_storage_bytes</c> is on the quota read path. A boot that changes nothing
+/// therefore touches nothing: Postgres issues <c>CREATE OR REPLACE VIEW</c>, which swaps the
+/// definition in place and never leaves the name unresolvable; SQLite, which has no
+/// <c>CREATE OR REPLACE VIEW</c>, compares the desired statement against the one stored in
+/// <c>sqlite_master</c> and only drops when they genuinely differ.
+///
+/// The drop that recreate-table migrations need is taken lazily instead of unconditionally. A view
+/// holding a dependency on a table blocks a Postgres <c>ALTER COLUMN</c> and dangles across a SQLite
+/// DROP+RENAME, and several one-time migrations do exactly that — so <c>RunOnceAsync</c> drops the
+/// views once, immediately before the first migration body it actually runs. A boot with nothing
+/// pending runs no migration body and so takes no drop at all. Creation still runs last, once every
+/// column and table shape the bodies reference is guaranteed to exist, including those added by the
+/// additive migrations that run after the schema file.
+///
+/// A view's shape is under the same blue-green rule as a table's: blue reads the view while green
+/// replaces it, so a view may gain columns but may not drop, rename, or retype them in one release
+/// — that is an expand/migrate/contract sequence. Postgres enforces the rule mechanically, because
+/// <c>CREATE OR REPLACE VIEW</c> refuses any of those three changes; the guarded drop+create
+/// fallback below is the deliberate escape hatch for the contract step, and is the only path that
+/// makes a view briefly absent.
 ///
 /// Both providers share one body per view, so there is no SQLite/Postgres pair to drift. The bodies
 /// are therefore held to the portability rules the schema files follow: timestamps are ISO-8601 TEXT
@@ -35,9 +51,6 @@ namespace Dependably.Infrastructure;
 /// </summary>
 public sealed partial class SchemaInitializer
 {
-    private static readonly string[] ViewNames =
-        ["artifact_inventory", "artifact_license", "org_storage_bytes"];
-
     /// <summary>
     /// One row per (org, artifact), across both catalogues.
     ///
@@ -135,6 +148,8 @@ public sealed partial class SchemaInitializer
     /// artifact's own <c>artifact_inventory.created_at</c>. The license review queue's first-seen
     /// column depends on this distinction.
     /// </summary>
+    // xtenant: view DDL. The view projects org_id as its own column so that every consumer can
+    // filter on it; the definition itself necessarily spans all tenants.
     private const string ArtifactLicenseView =
         """
         CREATE VIEW artifact_license AS
@@ -166,6 +181,8 @@ public sealed partial class SchemaInitializer
     /// digest casts no catalogue row at all. So OCI is excluded from both catalogue arms and summed
     /// whole from <c>oci_blobs</c>, which is the only table that sees an image's real bytes.
     /// </summary>
+    // xtenant: view DDL. The view groups by org_id and projects it as its own column so that every
+    // consumer can filter on it; the definition itself necessarily spans all tenants.
     private const string OrgStorageBytesView =
         """
         CREATE VIEW org_storage_bytes AS
@@ -187,23 +204,102 @@ public sealed partial class SchemaInitializer
         GROUP BY sb.org_id
         """;
 
-    // Runs before the schema pass and before every recreate-table migration, so no view is ever
-    // holding a dependency on a table one of them is about to reshape.
-    private static async Task DropViewsAsync(DbConnection conn)
+    // Name paired with the statement that declares it. The statement text is also the comparison key
+    // on SQLite, so it is stored verbatim rather than rebuilt per provider.
+    private static readonly (string Name, string Sql)[] ViewDefinitions =
+    [
+        ("artifact_inventory", ArtifactInventoryView),
+        ("artifact_license", ArtifactLicenseView),
+        ("org_storage_bytes", OrgStorageBytesView),
+    ];
+
+    // Set once per boot, the first time a one-time migration is about to run a body that may reshape
+    // a table a view depends on. A boot with no pending migration never sets it and never drops.
+    private bool _viewsDropped;
+
+    // Called by RunOnceAsync immediately before it executes a pending migration body. Idempotent
+    // within a boot, so every subsequent pending migration in the same run reuses the first drop.
+    private async Task EnsureViewsDroppedAsync(DbConnection conn)
     {
-        foreach (string view in ViewNames)
+        if (_viewsDropped)
         {
-            // rawsql: the name comes from ViewNames, a private compile-time constant array.
+            return;
+        }
+
+        _viewsDropped = true;
+        foreach ((string view, _) in ViewDefinitions)
+        {
+            // rawsql: the name comes from ViewDefinitions, a private compile-time constant array.
             await conn.ExecuteAsync($"DROP VIEW IF EXISTS {view}");
         }
     }
 
     // Runs last, once every table and column the bodies reference is guaranteed present — including
     // the columns added by the additive migrations, which run after the schema file.
-    private static async Task CreateViewsAsync(DbConnection conn)
+    private async Task EnsureViewsAsync(DbConnection conn)
     {
-        await conn.ExecuteAsync(ArtifactInventoryView);
-        await conn.ExecuteAsync(ArtifactLicenseView);
-        await conn.ExecuteAsync(OrgStorageBytesView);
+        foreach ((string name, string sql) in ViewDefinitions)
+        {
+            if (_db.Provider == DbProvider.Postgres)
+            {
+                await EnsurePostgresViewAsync(conn, name, sql);
+            }
+            else
+            {
+                await EnsureSqliteViewAsync(conn, name, sql);
+            }
+        }
     }
+
+    // CREATE OR REPLACE VIEW swaps the definition atomically: the name is never unresolvable, so a
+    // concurrent reader on another replica cannot observe the view missing. It refuses to remove,
+    // rename, or retype an existing output column, which is exactly the blue-green rule for view
+    // shape — so that refusal is honoured as a signal, not worked around: the fallback drops and
+    // recreates, which is the contract step of an expand/migrate/contract sequence and the only path
+    // that leaves a window. If the body is simply invalid, the CREATE in the fallback throws the real
+    // error rather than the replace's.
+    private static async Task EnsurePostgresViewAsync(DbConnection conn, string name, string sql)
+    {
+        try
+        {
+            // rawsql: `sql` is a private compile-time constant; only the CREATE keyword is rewritten.
+            await conn.ExecuteAsync(string.Concat("CREATE OR REPLACE ", sql.AsSpan("CREATE ".Length)));
+            return;
+        }
+        catch (DbException)
+        {
+            // Output column list changed. Fall through to the guarded drop+create below.
+        }
+
+        // rawsql: the name comes from ViewDefinitions, a private compile-time constant array.
+        await conn.ExecuteAsync($"DROP VIEW IF EXISTS {name}");
+        await conn.ExecuteAsync(sql);
+    }
+
+    // SQLite has no CREATE OR REPLACE VIEW, and stores each view's CREATE statement verbatim in
+    // sqlite_master. Comparing the stored text against the desired text — with whitespace runs
+    // collapsed, so reindenting a body is not mistaken for a definition change — makes the common
+    // case (nothing changed) a pure read, and confines the drop to a boot that genuinely changes
+    // the definition.
+    private static async Task EnsureSqliteViewAsync(DbConnection conn, string name, string sql)
+    {
+        string? stored = await conn.ExecuteScalarAsync<string?>(
+            "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = @name", new { name });
+
+        if (stored is not null)
+        {
+            if (string.Equals(CollapseWhitespace(stored), CollapseWhitespace(sql), StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            // rawsql: the name comes from ViewDefinitions, a private compile-time constant array.
+            await conn.ExecuteAsync($"DROP VIEW IF EXISTS {name}");
+        }
+
+        await conn.ExecuteAsync(sql);
+    }
+
+    private static string CollapseWhitespace(string sql) =>
+        string.Join(' ', sql.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 }

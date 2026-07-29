@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using System.Security.Cryptography;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Caching;
 using Dependably.Infrastructure.Publish;
 using Dependably.Protocol;
 using Dependably.Security;
@@ -8,7 +9,6 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
-using Microsoft.Extensions.Caching.Memory;
 
 namespace Dependably.Api;
 
@@ -69,7 +69,7 @@ public sealed class ImportController : ControllerBase
     private readonly LicenseRepository _licenses;
     private readonly IUploadLimitResolver _limitResolver;
     private readonly string _stagingPath;
-    private readonly IMemoryCache _cache;
+    private readonly MetadataInvalidationCoordinator _invalidation;
 
     // Total batch ceiling: 1 GB. Individual file caps come from the per-tenant
     // upload-limit chain; this constant bounds the whole multipart envelope before
@@ -95,7 +95,7 @@ public sealed class ImportController : ControllerBase
         _stagingPath = string.IsNullOrWhiteSpace(svc.StagingPath)
             ? Path.GetTempPath()
             : svc.StagingPath;
-        _cache = svc.Cache;
+        _invalidation = svc.Invalidation;
     }
 
     /// <summary>Per-batch context threaded through the upload + manifest paths.</summary>
@@ -827,20 +827,20 @@ public sealed class ImportController : ControllerBase
                 await _licenses.SetLicensesAsync(accepted.VersionId, extracted.Spdx, "uploaded", ct);
             }
 
-            // Evict cached metadata so the imported version appears immediately.
-            switch (detection.Ecosystem)
+            // Invalidate cached metadata so the imported version appears immediately — through
+            // the coordinator, so every variant the ecosystem renders is covered and peer
+            // replicas evict theirs too.
+            var invalidation = detection.Ecosystem switch
             {
-                case "npm":
-                    _cache.Remove($"metadata:{ctx.OrgId}:npm:{detection.PurlName}");
-                    break;
-                case "pypi":
-                    _cache.Remove($"metadata:{ctx.OrgId}:pypi:{detection.PurlName}");
-                    break;
-                case "nuget":
-                    string nugetId = detection.PurlName.ToLowerInvariant();
-                    _cache.Remove($"metadata:{ctx.OrgId}:nuget:{nugetId}:sv1");
-                    _cache.Remove($"metadata:{ctx.OrgId}:nuget:{nugetId}:sv2");
-                    break;
+                "npm" => MetadataInvalidation.ForNpm(ctx.OrgId, detection.PurlName),
+                "pypi" => MetadataInvalidation.ForPyPi(ctx.OrgId, detection.PurlName),
+                "nuget" => MetadataInvalidation.ForNuGet(ctx.OrgId, detection.PurlName),
+                _ => null,
+            };
+
+            if (invalidation is not null)
+            {
+                _invalidation.Invalidate(invalidation);
             }
         }
 
@@ -968,4 +968,4 @@ public sealed record ImportControllerServices(
     LicenseRepository Licenses,
     IUploadLimitResolver LimitResolver,
     string StagingPath,
-    IMemoryCache Cache);
+    MetadataInvalidationCoordinator Invalidation);

@@ -48,6 +48,11 @@ public sealed class SiemControllerSecurityTests : IClassFixture<DependablyFactor
         // Insert audit rows in two distinct orgs. An owner-role JWT (cap=read:audit, no
         // platform:*) calling /siem with no ?org= must see only its own tenant's row.
         var db = _factory.Services.GetRequiredService<IMetadataStore>();
+        // audit_log.created_at is explicit here (millisecond precision, matching
+        // AuditRepository.LogAsync's real NowMs() writer) rather than left to the schema
+        // DEFAULT, which is only second-precision — a mismatch that the SIEM window's
+        // millisecond-precision `until` bound would otherwise be able to exclude this row on.
+        string createdAt = _factory.Services.GetRequiredService<TimeProvider>().GetUtcNow().ToUtcIsoMillis();
         await using (var conn = await db.OpenAsync())
         {
             await conn.ExecuteAsync(
@@ -55,14 +60,14 @@ public sealed class SiemControllerSecurityTests : IClassFixture<DependablyFactor
                 "ON CONFLICT(id) DO NOTHING",
                 new { slug = $"other-{Guid.NewGuid():N}" });
             await conn.ExecuteAsync(
-                "INSERT INTO audit_log (id, scope, org_id, action, actor_id, detail) " +
-                "VALUES (@id, 'tenant', @orgId, 'login.success', 'foreign-user', '{}')",
-                new { id = Guid.NewGuid().ToString("N"), orgId = "other-tenant" });
+                "INSERT INTO audit_log (id, scope, org_id, action, actor_id, detail, created_at) " +
+                "VALUES (@id, 'tenant', @orgId, 'login.success', 'foreign-user', '{}', @createdAt)",
+                new { id = Guid.NewGuid().ToString("N"), orgId = "other-tenant", createdAt });
             string? defaultOrgId = await conn.ExecuteScalarAsync<string>("SELECT id FROM orgs WHERE slug = 'default'");
             await conn.ExecuteAsync(
-                "INSERT INTO audit_log (id, scope, org_id, action, actor_id, detail) " +
-                "VALUES (@id, 'tenant', @orgId, 'login.success', 'home-user', '{}')",
-                new { id = Guid.NewGuid().ToString("N"), orgId = defaultOrgId });
+                "INSERT INTO audit_log (id, scope, org_id, action, actor_id, detail, created_at) " +
+                "VALUES (@id, 'tenant', @orgId, 'login.success', 'home-user', '{}', @createdAt)",
+                new { id = Guid.NewGuid().ToString("N"), orgId = defaultOrgId, createdAt });
         }
 
         string jwt = await _factory.CreateAdminJwt(); // role=owner, scope=tenant on default

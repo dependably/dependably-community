@@ -2,7 +2,7 @@ using Azure.Storage.Blobs;
 
 namespace Dependably.Storage;
 
-public sealed class AzureBlobStore : IBlobStore
+public sealed class AzureBlobStore : IBlobStore, IPresignedReadBlobStore
 {
     private readonly IAzureBlobContainer _container;
 
@@ -54,6 +54,17 @@ public sealed class AzureBlobStore : IBlobStore
 
     public Task DeleteAsync(string key, CancellationToken ct = default)
         => _container.DeleteIfExistsAsync(key, ct);
+
+    /// <summary>
+    /// Service-SAS signing needs an account key. A container bound to a SAS URL or a token
+    /// credential has none, so the capability is reported false rather than discovered by a
+    /// throwing signing call.
+    /// </summary>
+    public bool SupportsPresignedReads => _container.CanGenerateReadSasUri;
+
+    public Task<Uri?> TryCreatePresignedReadUrlAsync(
+        string key, DateTimeOffset expiresAt, CancellationToken ct = default)
+        => _container.TryGenerateReadSasUriAsync(key, expiresAt, ct);
 
     public async Task<long> GetTotalSizeAsync(CancellationToken ct = default)
     {

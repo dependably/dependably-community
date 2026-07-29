@@ -26,13 +26,28 @@ internal static partial class SchemaSqlParser
     [GeneratedRegex(@"CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?(?<name>""?\w+""?)", RegexOptions.IgnoreCase)]
     private static partial Regex CreateIndexNameRegex();
 
+    [GeneratedRegex(@"\bCHECK\s*\(", RegexOptions.IgnoreCase)]
+    private static partial Regex CheckKeywordRegex();
+
     private static readonly string[] ConstraintLeaders = ["PRIMARY", "FOREIGN", "UNIQUE", "CHECK", "CONSTRAINT"];
 
     /// <summary>Maps table name → ordered column names declared in its CREATE TABLE body (comments stripped).</summary>
-    public static Dictionary<string, List<string>> ParseTables(string sql)
+    public static Dictionary<string, List<string>> ParseTables(string sql) =>
+        ParseTableDefinitions(sql).ToDictionary(
+            kv => kv.Key,
+            kv => kv.Value.Columns.Select(c => c.Name).ToList(),
+            StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Maps table name → its full <c>CREATE TABLE</c> shape: every column with the raw text of its
+    /// declaration, plus the table-level constraint items. The raw text is what the nullability /
+    /// DEFAULT / CHECK inspections in <see cref="SchemaBackwardCompatibility"/> read; the column
+    /// split itself is shared with <see cref="ParseTables"/> so both views agree on what a column is.
+    /// </summary>
+    public static Dictionary<string, SchemaTable> ParseTableDefinitions(string sql)
     {
         string clean = StripComments(sql);
-        var tables = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        var tables = new Dictionary<string, SchemaTable>(StringComparer.OrdinalIgnoreCase);
         foreach (Match header in CreateTableHeaderRegex().Matches(clean))
         {
             // The header regex ends at the opening '('. Bracket-match to find the table body.
@@ -43,24 +58,68 @@ internal static partial class SchemaSqlParser
                 continue;
             }
 
-            var columns = new List<string>();
+            var columns = new List<SchemaColumn>();
+            var constraints = new List<string>();
             foreach (string item in SplitTopLevel(clean[(openParen + 1)..closeParen]))
             {
                 string trimmed = item.Trim();
-                if (trimmed.Length == 0 || IsConstraint(trimmed))
+                if (trimmed.Length == 0)
                 {
+                    continue;
+                }
+
+                if (IsConstraint(trimmed))
+                {
+                    constraints.Add(trimmed);
                     continue;
                 }
 
                 string name = Unquote(FirstToken(trimmed));
                 if (name.Length > 0)
                 {
-                    columns.Add(name);
+                    columns.Add(new SchemaColumn(name, trimmed));
                 }
             }
-            tables[Unquote(header.Groups["name"].Value)] = columns;
+            string table = Unquote(header.Groups["name"].Value);
+            tables[table] = new SchemaTable(table, columns, constraints);
         }
         return tables;
+    }
+
+    /// <summary>
+    /// The <c>CHECK (...)</c> expression bodies inside a single table-body item — the parenthesised
+    /// text after each <c>CHECK</c> keyword, bracket-matched so a nested expression survives whole.
+    /// </summary>
+    public static List<string> CheckExpressions(string item)
+    {
+        var found = new List<string>();
+        foreach (Match m in CheckKeywordRegex().Matches(item))
+        {
+            int open = m.Index + m.Length - 1;
+            int close = MatchingParen(item, open);
+            if (close > open)
+            {
+                found.Add(item[(open + 1)..close]);
+            }
+        }
+        return found;
+    }
+
+    /// <summary>The item text with every <c>CHECK (...)</c> expression removed, so keyword scans for
+    /// <c>NOT NULL</c> / <c>DEFAULT</c> can't be fooled by an <c>IS NOT NULL</c> inside a constraint.</summary>
+    public static string WithoutCheckExpressions(string item)
+    {
+        string result = item;
+        foreach (var m in CheckKeywordRegex().Matches(item).OrderByDescending(m => m.Index))
+        {
+            int open = m.Index + m.Length - 1;
+            int close = MatchingParen(result, open);
+            if (close > open)
+            {
+                result = result.Remove(m.Index, close - m.Index + 1);
+            }
+        }
+        return result;
     }
 
     public static List<string> CreatedTableNames(string sql) =>
@@ -233,6 +292,17 @@ internal static partial class SchemaSqlParser
 
     private static string Unquote(string s) => s.Trim('"', '`', '[', ']');
 }
+
+/// <summary>One column of a <c>CREATE TABLE</c> body: its name and the raw text of its declaration
+/// (type, <c>NOT NULL</c>, <c>DEFAULT</c>, inline <c>CHECK</c>, …), comments already stripped.</summary>
+internal sealed record SchemaColumn(string Name, string Declaration);
+
+/// <summary>A parsed <c>CREATE TABLE</c>: its columns in declaration order plus the table-level
+/// constraint items (<c>PRIMARY KEY (...)</c>, <c>CHECK (...)</c>, …) that are not columns.</summary>
+internal sealed record SchemaTable(
+    string Name,
+    IReadOnlyList<SchemaColumn> Columns,
+    IReadOnlyList<string> TableConstraints);
 
 /// <summary>Locates the live source tree (not embedded resources) so the static schema checks can
 /// read both provider files regardless of which one the running provider would load. The one

@@ -3,11 +3,23 @@
   import { t } from 'svelte-i18n'
   import { api } from '../lib/api.js'
   import ErrorBanner from '../lib/ErrorBanner.svelte'
+  import Skeleton from '../lib/Skeleton.svelte'
   import VersionTable from '../lib/VersionTable.svelte'
-  import { route, navigate, user } from '../lib/store.js'
+  import { navigate, user } from '../lib/store.js'
+  import { reportPageLoad } from '../lib/pageLoad.js'
   import { copyToClipboard } from '../lib/clipboard.js'
 
-  $: params = $route.params
+  /**
+   * The route params this page was mounted for, supplied by RouteView. Read as a prop rather than
+   * from the `route` store because a deferred navigation mounts this page while the store still
+   * names the page being left — asking the store would fetch the outgoing package.
+   * @type {Record<string, any>}
+   */
+  export let params = {}
+
+  /** The route transition this page was mounted for, supplied by RouteView. @type {number | null} */
+  export let pageToken = null
+
   let pkg = null, versions = [], loading = true, error = ''
   // Claim badge: surface the resolved claim state on the package header. null = no
   // claim row (implicit unclaimed in connected mode, implicit local_only in air-gap).
@@ -20,6 +32,7 @@
   let licenseBlocklist = new Set()
 
   $: if (params.ecosystem && params.name) load()
+  $: reportPageLoad(pageToken, loading)
 
   async function load() {
     loading = true
@@ -166,28 +179,34 @@
         if ((window.history.state?.idx ?? 0) > 0) window.history.back()
         else navigate('packages', {}, { replace: true })
       }} class="mb-2">{$t('common.actions.back')}</button>
-      {#if pkg}
-        <h1 class="page-title">
-          <span class="badge {pkg.ecosystem}">{pkg.ecosystem}</span>
-          {pkg.name}
-          {#if claim && (claim.state === 'local_only' || claim.state === 'mixed')}
-            <span
-              class="badge has-icon state-{claim.state}"
-              title={$t(`claims.states.${claim.state}`) + (claim.isImplicit ? ' (implicit)' : '')}
-              aria-label={$t(`claims.states.${claim.state}`) + (claim.isImplicit ? ' (implicit)' : '')}>
-              {#if claim.state === 'local_only'}
-                <svg width="12" height="12" aria-hidden="true"><use href="/icons.svg#icon-lock"/></svg>
-              {:else}
-                <svg width="12" height="12" aria-hidden="true"><use href="/icons.svg#icon-exchange"/></svg>
-              {/if}
-              {$t(`claims.states.${claim.state}`)}
-            </span>
-          {/if}
-        </h1>
-        {#if pkg.description}
+      <!-- Ecosystem and name come from the route, so the title stands before the package
+           fetch resolves and the table below it does not shift down when it lands. The
+           fetched display name replaces the purl name in place. -->
+      <h1 class="page-title">
+        <span class="badge {pkg?.ecosystem ?? params.ecosystem}">{pkg?.ecosystem ?? params.ecosystem}</span>
+        {pkg?.name ?? params.name}
+        {#if claim && (claim.state === 'local_only' || claim.state === 'mixed')}
+          <span
+            class="badge has-icon state-{claim.state}"
+            title={$t(`claims.states.${claim.state}`) + (claim.isImplicit ? ' (implicit)' : '')}
+            aria-label={$t(`claims.states.${claim.state}`) + (claim.isImplicit ? ' (implicit)' : '')}>
+            {#if claim.state === 'local_only'}
+              <svg width="12" height="12" aria-hidden="true"><use href="/icons.svg#icon-lock"/></svg>
+            {:else}
+              <svg width="12" height="12" aria-hidden="true"><use href="/icons.svg#icon-exchange"/></svg>
+            {/if}
+            {$t(`claims.states.${claim.state}`)}
+          </span>
+        {/if}
+      </h1>
+      <!-- Rendered in both states and floored at two clamped description lines plus the link
+           row, so the risk pillars and table below sit at the same offset before and after
+           the fetch resolves. -->
+      <div class="pkg-meta">
+        {#if pkg?.description}
           <p class="pkg-description">{pkg.description}</p>
         {/if}
-        {#if pkg.homepage || pkg.repositoryUrl}
+        {#if pkg?.homepage || pkg?.repositoryUrl}
           <div class="pkg-links">
             {#if pkg.homepage}
               <a class="pkg-link" href={pkg.homepage} target="_blank" rel="noopener noreferrer">
@@ -203,7 +222,7 @@
             {/if}
           </div>
         {/if}
-      {/if}
+      </div>
     </div>
   </div>
 
@@ -212,11 +231,13 @@
 
   <!-- Three-pillar risk summary: Security / License / Operational, side by side. Signal-display
        only — no composite/weighted score across the pillars. -->
-  {#if pkg && !loading && versions.length > 0}
+  {#if loading || (pkg && versions.length > 0)}
     <div class="risk-pillars">
       <div class="pillar">
         <span class="pillar-label">{$t('versionDetail.pillars.security')}</span>
-        {#if worstSeverity}
+        {#if loading}
+          <span class="pillar-value"><Skeleton width="80px" height="16px" /></span>
+        {:else if worstSeverity}
           <span class="pillar-value sev {worstSeverity === 'UNKNOWN' ? 'sev-unknown' : 'sev-' + worstSeverity.toLowerCase()}">
             {worstSeverity === 'UNKNOWN' ? $t('dashboard.unscored') : worstSeverity}
           </span>
@@ -226,13 +247,19 @@
       </div>
       <div class="pillar">
         <span class="pillar-label">{$t('versionDetail.pillars.license')}</span>
-        <span class="pillar-value" class:pillar-warn={licenseRiskCount > 0}>
-          {$t('versionDetail.pillars.licenseCount', { values: { count: licenseRiskCount } })}
-        </span>
+        {#if loading}
+          <span class="pillar-value"><Skeleton width="80px" height="16px" /></span>
+        {:else}
+          <span class="pillar-value" class:pillar-warn={licenseRiskCount > 0}>
+            {$t('versionDetail.pillars.licenseCount', { values: { count: licenseRiskCount } })}
+          </span>
+        {/if}
       </div>
       <div class="pillar">
         <span class="pillar-label">{$t('versionDetail.pillars.operational')}</span>
-        {#if operationalWorst !== null}
+        {#if loading}
+          <span class="pillar-value"><Skeleton width="80px" height="16px" /></span>
+        {:else if operationalWorst !== null}
           <span class="pillar-value" class:pillar-warn={operationalWorst > 0}>
             {$t('versionDetail.behindCell.count', { values: { count: operationalWorst } })}
           </span>
@@ -292,8 +319,20 @@
   .pillar-clean { color: var(--success); }
   .pillar-warn { color: var(--badge-warning-text); }
 
-  /* Package-level metadata (homepage / repository / description) under the title. */
-  .pkg-description { margin: 6px 0 8px; color: var(--text2); max-width: 70ch; }
+  /* Package-level metadata (homepage / repository / description) under the title. Floored at
+     two clamped description lines plus the link row, and rendered whether or not the fetch has
+     landed, so the risk pillars and version table sit at the same offset either way. */
+  .pkg-meta { min-height: 62px; }
+  .pkg-description {
+    margin: 6px 0 8px;
+    color: var(--text2);
+    max-width: 70ch;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
   .pkg-links { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 10px; }
   .pkg-link { display: inline-flex; align-items: center; gap: 4px; color: var(--accent); text-decoration: none; font-size: 13px; }
   .pkg-link:hover { text-decoration: underline; }

@@ -1,4 +1,5 @@
 using Dependably.Protocol;
+using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -190,7 +191,7 @@ public sealed class LocalOsvSourceExtendedTests : IDisposable
             })
             .Build();
 
-        var src = new LocalOsvSource(config, NullLogger<LocalOsvSource>.Instance);
+        var src = new LocalOsvSource(config, NullLogger<LocalOsvSource>.Instance, TestTime.Frozen());
         Assert.Null(Record.Exception(() =>
         {
             src.Dispose();

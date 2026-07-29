@@ -73,6 +73,12 @@ internal static class StorageStartupExtensions
         });
         builder.Services.AddSingleton<IBlobStore>(sp =>
             sp.GetRequiredService<TieredBlobStorage>().Registry);
+        // Presigned-read policy. Bound once at startup and default-off: with it off, no serve
+        // path ever asks a store to sign a URL, so the registry stays the only way artefact
+        // bytes leave. Registered unconditionally (including on edge nodes) so the serve paths
+        // can take a non-null dependency and branch on Enabled rather than on nullability.
+        builder.Services.AddSingleton(PresignedReadOptions.FromConfiguration(builder.Configuration));
+        builder.Services.AddSingleton<BlobPresignService>();
         // Tenant-aware registry resolver. Singleton lifetime is non-negotiable: the
         // enterprise impl memoizes per-tenant S3BlobStore instances and per-request
         // scoping would defeat the cache and leak S3 clients. Community impl returns

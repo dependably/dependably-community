@@ -34,6 +34,8 @@ public static class ManagementServiceCollectionExtensions
         services.AddSingleton<IAuditEmitter, AuditEmitter>();
         services.AddSingleton<InviteRepository>();
         services.AddSingleton<PasswordResetTokenRepository>();
+        services.AddSingleton<AccountSendThrottle>();
+        services.AddSingleton<EmailChangeTokenRepository>();
         services.AddSingleton<SpdxLicenseRepository>();
         services.AddSingleton<SamlConfigRepository>();
         services.AddSingleton<ExternalIdentityRepository>();

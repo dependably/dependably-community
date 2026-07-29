@@ -257,8 +257,8 @@ describe('systemApi contract', () => {
     ['listAudit', (s) => s.listAudit(), 'GET', '/api/v1/system/audit?'],
     ['getSettings', (s) => s.getSettings(), 'GET', '/api/v1/system/settings'],
     ['updateSettings', (s) => s.updateSettings({}), 'PUT', '/api/v1/system/settings'],
-    ['setAccountStatus', (s) => s.setAccountStatus('a@b', 'acme', 'locked'), 'PATCH', '/api/v1/system/users/a%40b/account-status'],
-    ['issuePasswordReset', (s) => s.issuePasswordReset('a@b', 'acme'), 'POST', '/api/v1/system/users/a%40b/password-reset'],
+    ['setAccountStatus', (s) => s.setAccountStatus('a@b', 'acme', 'locked'), 'PATCH', '/api/v1/system/users/account-status'],
+    ['issuePasswordReset', (s) => s.issuePasswordReset('a@b', 'acme'), 'POST', '/api/v1/system/users/password-reset'],
     ['changePassword', (s) => s.changePassword('a', 'b'), 'POST', '/api/v1/system/me/password'],
     ['updateLanguage', (s) => s.updateLanguage('fr'), 'POST', '/api/v1/system/me/language'],
     ['getEmailConfig', (s) => s.getEmailConfig(), 'GET', '/api/v1/system/email-config'],
@@ -334,6 +334,37 @@ describe('qs (via listPackages)', () => {
     await api.listPackages({ page: undefined })
 
     const url = fetchMock.mock.calls[0][0]
+    expect(url).not.toContain('page=')
+  })
+})
+
+describe('getQuarantine', () => {
+  it('sends filter, sort, and paging params, and defaults the page window', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { total: 0, items: [] }))
+
+    await api.getQuarantine({ state: 'pending', gate: 'malicious', search: 'lodash', sort: 'package', dir: 'asc' })
+
+    const url = fetchMock.mock.calls[0][0]
+    expect(url).toContain('/quarantine?')
+    expect(url).toContain('state=pending')
+    expect(url).toContain('gate=malicious')
+    expect(url).toContain('search=lodash')
+    expect(url).toContain('sort=package')
+    expect(url).toContain('dir=asc')
+    expect(url).toContain('limit=50')  // default
+    expect(url).toContain('offset=0')  // default
+  })
+
+  it('walks the queue by offset rather than page number', async () => {
+    // The endpoint pages by offset; the page component converts. Sending `page` instead would be
+    // silently ignored by the server and every page would return the first one.
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { total: 0, items: [] }))
+
+    await api.getQuarantine({ limit: 20, offset: 40 })
+
+    const url = fetchMock.mock.calls[0][0]
+    expect(url).toContain('limit=20')
+    expect(url).toContain('offset=40')
     expect(url).not.toContain('page=')
   })
 })

@@ -15,14 +15,17 @@ namespace Dependably.Tests.Unit;
 ///
 /// Covers:
 /// - Blob finalize returns QuotaExceeded when the tenant's storage ceiling would be
-///   breached; the quota counter stays accurate (no increment on rejection).
+///   breached, and a rejection stores nothing (the org's usage is unchanged).
 /// - Manifest store returns QuotaExceeded when the manifest would breach the ceiling.
 /// - Both succeed when the quota is unset (unlimited).
 /// - Mixed partial-failure: the first blob fits under the cap, the second is rejected
 ///   (each individually fits, but together they would exceed the cap). Exactly one
-///   succeeds and the quota counter reflects only the accepted blob.
-/// - Counter is released when a blob finalize fails after the reservation (blob write
-///   simulation via ThrowOnPutBlobStore) so the counter stays accurate on retries.
+///   succeeds and the org's usage reflects only the accepted blob.
+/// - A finalize that fails after reserving (blob write simulation via ThrowOnPutBlobStore)
+///   gives its headroom back, so a retry that needs it fits.
+///
+/// Usage is read the way the gate reads it — the derived org_storage_bytes sum, which counts
+/// oci_blobs whole — never a counter the push path maintains alongside the rows.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class OciStorageQuotaTests : IAsyncLifetime
@@ -114,13 +117,7 @@ public sealed class OciStorageQuotaTests : IAsyncLifetime
         return Encoding.UTF8.GetBytes(json);
     }
 
-    private async Task<long> ReadStorageUsedBytes()
-    {
-        await using var conn = await _db.OpenAsync();
-        return await conn.ExecuteScalarAsync<long>(
-            "SELECT COALESCE(storage_used_bytes, 0) FROM org_settings WHERE org_id = @orgId",
-            new { orgId = _orgId });
-    }
+    private Task<long> ReadStoredBytes() => _orgs.GetLiveStorageBytesAsync(_orgId);
 
     // ── Blob finalize quota tests ─────────────────────────────────────────────
 
@@ -146,9 +143,8 @@ public sealed class OciStorageQuotaTests : IAsyncLifetime
         var result = await FinalizeAsync(svc, blob);
 
         Assert.Equal(OciFinalizeStatus.QuotaExceeded, result.Status);
-        // Counter must not have been incremented on rejection.
-        long counter = await ReadStorageUsedBytes();
-        Assert.Equal(0, counter);
+        // A rejected finalize stores nothing.
+        Assert.Equal(0, await ReadStoredBytes());
     }
 
     [Fact]
@@ -180,8 +176,8 @@ public sealed class OciStorageQuotaTests : IAsyncLifetime
         Assert.Equal(OciFinalizeStatus.Ok, layerResult.Status);
 
         // The config and layer blobs are already stored, so the org really is holding their bytes —
-        // the zero-baseline backfill inside the reserve discovers them from oci_blobs. Pin the quota
-        // to exactly that, leaving no room for the manifest.
+        // the gate reads them straight out of oci_blobs. Pin the quota to exactly that, leaving no
+        // room for the manifest.
         long storedBytes = configBytes.Length + layerBytes.Length;
         await _orgs.SetStorageQuotaBytesAsync(_orgId, storedBytes); // no room for the manifest
 
@@ -191,10 +187,9 @@ public sealed class OciStorageQuotaTests : IAsyncLifetime
             "application/vnd.oci.image.manifest.v1+json", default);
 
         Assert.Equal(OciManifestStatus.QuotaExceeded, storeResult.Status);
-        // The rejected manifest reserves nothing: the counter settles on the bytes already stored,
-        // never those bytes plus the manifest's.
-        long counterAfter = await ReadStorageUsedBytes();
-        Assert.Equal(storedBytes, counterAfter);
+        // The rejected manifest stores nothing: usage settles on the bytes already stored, never
+        // those bytes plus the manifest's.
+        Assert.Equal(storedBytes, await ReadStoredBytes());
     }
 
     [Fact]
@@ -221,11 +216,11 @@ public sealed class OciStorageQuotaTests : IAsyncLifetime
     // ── Mixed partial-failure (house rule) ────────────────────────────────────
 
     [Fact]
-    public async Task BlobFinalize_MixedScenario_FirstFitsSecondRejected_CounterAccurate()
+    public async Task BlobFinalize_MixedScenario_FirstFitsSecondRejected_UsageAccurate()
     {
         // Cap: 800 bytes. First blob = 500 bytes (fits). Second blob = 400 bytes (together
-        // would be 900 > 800 → rejected). The quota counter must reflect only the 500 bytes
-        // of the accepted blob; the rejected blob must not inflate it.
+        // would be 900 > 800 → rejected). Usage must reflect only the 500 bytes of the accepted
+        // blob; the rejected blob must not inflate it.
         await _orgs.SetStorageQuotaBytesAsync(_orgId, 800);
         var svc = BuildService();
 
@@ -238,19 +233,19 @@ public sealed class OciStorageQuotaTests : IAsyncLifetime
         var result2 = await FinalizeAsync(svc, blob2);
         Assert.Equal(OciFinalizeStatus.QuotaExceeded, result2.Status);
 
-        // Counter must equal exactly the first blob's size.
-        long counter = await ReadStorageUsedBytes();
-        Assert.Equal(500, counter);
+        // Usage must equal exactly the first blob's size.
+        Assert.Equal(500, await ReadStoredBytes());
     }
 
-    // ── Counter release on blob write failure ─────────────────────────────────
+    // ── Reservation release on blob write failure ─────────────────────────────
 
     [Fact]
-    public async Task BlobFinalize_WriteFailureAfterReservation_ReleasesCounter()
+    public async Task BlobFinalize_WriteFailureAfterReservation_ReleasesTheHeadroomItClaimed()
     {
-        // Set a generous quota and make one successful blob push (300 bytes). Then attempt a
-        // second push using a registry that throws on PutAsync to simulate a blob-write fault.
-        // The quota counter must be back at 300 after the failure — not 700 — so a retry fits.
+        // Cap 2000, one successful 300-byte push, then a 400-byte push that dies during blob
+        // write. The failed push must give its 400 bytes of headroom back: a follow-up 1700-byte
+        // push exactly fills the ceiling (300 + 1700 = 2000). A leaked reservation would make
+        // that read as 300 + 400 + 1700 and refuse it.
         await _orgs.SetStorageQuotaBytesAsync(_orgId, 2_000);
         var svc = BuildService();
 
@@ -258,8 +253,7 @@ public sealed class OciStorageQuotaTests : IAsyncLifetime
         var result1 = await FinalizeAsync(svc, blob1);
         Assert.Equal(OciFinalizeStatus.Ok, result1.Status);
 
-        long counterAfterFirst = await ReadStorageUsedBytes();
-        Assert.Equal(300, counterAfterFirst);
+        Assert.Equal(300, await ReadStoredBytes());
 
         // Wire a throwing registry to simulate a blob-write fault on the second push.
         var throwingRegistry = new ThrowOnPutBlobStore(_registry);
@@ -268,9 +262,11 @@ public sealed class OciStorageQuotaTests : IAsyncLifetime
         byte[] blob2 = RandomBytes(400);
         await Assert.ThrowsAnyAsync<Exception>(() => FinalizeAsync(failingSvc, blob2));
 
-        // Counter must be back at 300 (not 700) after the aborted reservation.
-        long counterAfterFailure = await ReadStorageUsedBytes();
-        Assert.Equal(300, counterAfterFailure);
+        // Nothing was committed, so usage is still 300...
+        Assert.Equal(300, await ReadStoredBytes());
+        // ...and the headroom the aborted push reserved is genuinely back.
+        var retry = await FinalizeAsync(svc, RandomBytes(1_700));
+        Assert.Equal(OciFinalizeStatus.Ok, retry.Status);
     }
 
     // ── Test doubles ─────────────────────────────────────────────────────────

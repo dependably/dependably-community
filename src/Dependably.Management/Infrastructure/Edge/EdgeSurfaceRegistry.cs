@@ -50,6 +50,7 @@ public static class EdgeSurfaceRegistry
         typeof(Api.SearchController),
         typeof(Api.LookupController),
         typeof(Api.ClaimsController),
+        typeof(Api.NameGrantsController),
         typeof(Api.VulnerabilityController),
         typeof(Api.LicenseController),
         typeof(Api.LicensesController),

@@ -15,21 +15,29 @@ using NSubstitute;
 namespace Dependably.Tests.Unit;
 
 /// <summary>
-/// Tests for the atomic storage-quota reservation introduced to close the TOCTOU race in
-/// <see cref="PackagePublishService.StoreAndRecordAsync"/>.
+/// Tests for the tenant storage-quota gate on <see cref="PackagePublishService.StoreAndRecordAsync"/>.
 ///
-/// Covers:
-/// - Concurrent publishes where each fits individually but together exceed the cap — exactly
-///   one must succeed and the other must get 413.
-/// - Quota counter is decremented when a publish fails after the reservation (blob write
-///   simulation, metadata commit failure path exercised via the existing orphan-delete harness).
-/// - Counter is decremented on version delete.
+/// The gate derives usage from the live <c>org_storage_bytes</c> view and charges
+/// admitted-but-uncommitted bytes to a per-process ledger, so these assert on the two properties
+/// that model has to hold:
+/// - It still refuses concurrent publishes that individually fit but together overshoot (the
+///   ledger, not a counter UPDATE, is what makes exactly one of them lose).
+/// - Bytes that leave any plane — a version deleted, a cache artifact evicted — free real
+///   headroom, because the sum is recomputed rather than decremented. A counter that missed one
+///   of those decrements refused a tenant that was under its real quota, unrecoverably.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class QuotaReservationTests : IAsyncLifetime
 {
     private readonly TestMetadataStore _db = new();
     private readonly InMemoryBlobStore _blobs = new();
+
+    // One repository instance across every service this fixture builds: the in-flight
+    // reservation ledger lives on it, so sharing it is what makes a publish and a concurrently
+    // held proxy-fill reservation weigh the same ceiling.
+    private readonly OrgRepository _orgs;
+
+    public QuotaReservationTests() => _orgs = new OrgRepository(_db);
 
     public async Task InitializeAsync()
     {
@@ -68,7 +76,9 @@ public sealed class QuotaReservationTests : IAsyncLifetime
             Dependably.Tests.Infrastructure.TestAlerts.NoOp(_db, TimeProvider.System)));
         var auditor = new Dependably.Infrastructure.Publish.PublishAuditor(audit, emitter);
         var licenses = new LicenseRepository(_db, TimeProvider.System, TestNormalizers.License(_db));
-        return new PackagePublishService(packages, new PackageVersionFilesRepository(_db), new OrgRepository(_db), storage, gate,
+        return new PackagePublishService(packages, new PackageVersionFilesRepository(_db), _orgs, storage, gate,
+            new Dependably.Security.NameBindingGate(cfg, new Dependably.Infrastructure.NameBindingRepository(_db), NullLogger<Dependably.Security.NameBindingGate>.Instance),
+            new Dependably.Infrastructure.VersionTombstoneRepository(_db),
             new Dependably.Infrastructure.Edge.EdgePublishGuard(TestEdgeMode.Disabled()),
             auditor, scanner, licenses, NullLogger<PackagePublishService>.Instance);
     }
@@ -96,8 +106,7 @@ public sealed class QuotaReservationTests : IAsyncLifetime
         // Set quota to 1000 bytes. Two concurrent 600-byte publishes each fit individually
         // but together overshoot. The atomic reserve-before-write must ensure exactly one
         // succeeds and the other gets tenant_quota_exceeded.
-        var orgs = new OrgRepository(_db);
-        await orgs.SetStorageQuotaBytesAsync("o1", 1_000);
+        await _orgs.SetStorageQuotaBytesAsync("o1", 1_000);
         var svc = Build();
 
         var task1 = svc.StoreAndRecordAsync(Sample(name: "pkg-a", size: 600));
@@ -115,24 +124,20 @@ public sealed class QuotaReservationTests : IAsyncLifetime
         Assert.Equal(413, rejected.HttpStatus);
     }
 
-    // ── Counter decremented on blob/metadata failure ─────────────────────────
+    // ── Reservation released on blob/metadata failure ────────────────────────
 
     [Fact]
-    public async Task PublishFailureAfterReservation_ReleasesCounter()
+    public async Task PublishFailureAfterReservation_ReleasesTheHeadroomItClaimed()
     {
-        // Set a quota and make a first successful publish (600 bytes). Then attempt a second
-        // publish that fails during blob put (using a throwing store). The quota counter must
-        // be back at 600 after the failure — not 1200 — so a retry can succeed.
-        var orgs = new OrgRepository(_db);
-        await orgs.SetStorageQuotaBytesAsync("o1", 2_000);
+        // Quota 2000, one successful 600-byte publish, then a 400-byte publish that dies during
+        // blob put. The failed publish must give its 400 bytes of headroom back: a follow-up
+        // 1400-byte publish exactly fills the remaining ceiling (600 + 1400 = 2000) and must be
+        // accepted. A leaked reservation would make that read as 600 + 400 + 1400 and 413.
+        await _orgs.SetStorageQuotaBytesAsync("o1", 2_000);
         var svc = Build();
 
-        // First publish succeeds; counter should now be 600.
         Assert.IsType<PublishResult.Accepted>(await svc.StoreAndRecordAsync(Sample(name: "pkg-a", size: 600)));
-
-        // Verify counter after first publish.
-        long counterAfterFirst = await ReadStorageUsedBytes();
-        Assert.Equal(600, counterAfterFirst);
+        Assert.Equal(600, await ReadLiveStorageBytes());
 
         // Wire a blob store that throws on PutAsync to simulate a mid-publish failure.
         var throwingBlobs = new ThrowOnPutBlobStore(_blobs);
@@ -141,111 +146,125 @@ public sealed class QuotaReservationTests : IAsyncLifetime
         await Assert.ThrowsAnyAsync<Exception>(() =>
             svcFailing.StoreAndRecordAsync(Sample(name: "pkg-b", size: 400)));
 
-        // Counter must be back at 600 (not 1000 after aborted reservation).
-        long counterAfterFailure = await ReadStorageUsedBytes();
-        Assert.Equal(600, counterAfterFailure);
+        // Nothing committed, so the derived sum never saw the failed publish's bytes...
+        Assert.Equal(600, await ReadLiveStorageBytes());
+        // ...and the headroom it reserved is genuinely back.
+        Assert.IsType<PublishResult.Accepted>(await svc.StoreAndRecordAsync(Sample(name: "pkg-c", size: 1_400)));
     }
 
-    // ── Counter decremented on version delete ─────────────────────────────────
+    // ── Freed bytes free real headroom ───────────────────────────────────────
 
     [Fact]
-    public async Task DeleteVersion_DecrementsStorageCounter()
+    public async Task DeleteVersion_FreesTheQuotaHeadroomTheVersionHeld()
     {
-        // Publish a 600-byte version. After delete, the counter should be back at 0.
-        var orgs = new OrgRepository(_db);
-        await orgs.SetStorageQuotaBytesAsync("o1", 2_000);
+        // Publish 600 against a 1000 cap, delete it, then publish the full 1000. The delete has
+        // to free headroom, not just remove a row.
+        await _orgs.SetStorageQuotaBytesAsync("o1", 1_000);
         var svc = Build();
 
         var accepted = Assert.IsType<PublishResult.Accepted>(
             await svc.StoreAndRecordAsync(Sample(name: "pkg-a", size: 600)));
-
-        long counterBeforeDelete = await ReadStorageUsedBytes();
-        Assert.Equal(600, counterBeforeDelete);
+        Assert.Equal(600, await ReadLiveStorageBytes());
 
         var packages = new PackageRepository(_db);
         await packages.DeleteVersionAsync(accepted.VersionId);
 
-        long counterAfterDelete = await ReadStorageUsedBytes();
-        Assert.Equal(0, counterAfterDelete);
+        Assert.Equal(0, await ReadLiveStorageBytes());
+        Assert.IsType<PublishResult.Accepted>(await svc.StoreAndRecordAsync(Sample(name: "pkg-b", size: 1_000)));
     }
 
     [Fact]
-    public async Task DeleteVersion_NeverGoesNegative_WhenCounterIsAlreadyZero()
+    public async Task EvictedCacheBytes_DoNotKeepRefusingAPublishThatFitsTheRealUsage()
     {
-        // If the counter is 0 (e.g. upgraded from pre-counter schema) and a version is deleted,
-        // the counter must clamp at 0 rather than going negative.
+        // The counter's unrecoverable failure mode, on the path that produced it: cache bytes are
+        // counted into usage, then eviction deletes the cache_artifact row. A counter baselined
+        // from those bytes never decrements — eviction had no counter to pay back — so the tenant
+        // stays refused while sitting well under its real quota. Deriving the sum cannot do that.
+        await _orgs.SetStorageQuotaBytesAsync("o1", 2_000);
         var svc = Build();
-        var accepted = Assert.IsType<PublishResult.Accepted>(
+
+        // 800 bytes of proxied artefacts this tenant holds through the shared cache plane.
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash, size_bytes) " +
+                "VALUES ('ca1', 'npm', 'left-pad', '1.0.0', 'left-pad-1.0.0.tgz', 'proxy/aa', 'aa', 800)");
+            await conn.ExecuteAsync(
+                "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES ('o1', 'ca1')");
+        }
+
+        // A publish while those bytes are resident: 800 + 300 = 1100, inside the 2000 cap.
+        Assert.IsType<PublishResult.Accepted>(await svc.StoreAndRecordAsync(Sample(name: "pkg-a", size: 300)));
+        Assert.Equal(1_100, await ReadLiveStorageBytes());
+
+        // Retention evicts the cache artifact. Real usage drops to the 300 hosted bytes.
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync("DELETE FROM tenant_artifact_access WHERE cache_artifact_id = 'ca1'");
+            await conn.ExecuteAsync("DELETE FROM cache_artifact WHERE id = 'ca1'");
+        }
+        Assert.Equal(300, await ReadLiveStorageBytes());
+
+        // 300 + 1000 = 1300, comfortably inside the cap. A counter stuck at 1100 would have made
+        // this 2100 and returned 413.
+        Assert.IsType<PublishResult.Accepted>(await svc.StoreAndRecordAsync(Sample(name: "pkg-b", size: 1_000)));
+    }
+
+    // ── One ceiling across write paths ───────────────────────────────────────
+
+    [Fact]
+    public async Task AProxyFillHoldingHeadroom_IsWeighedByAConcurrentPublish()
+    {
+        // Failure mode the split enabled: a proxy fill and a hosted publish each enforcing the
+        // ceiling from its own reading admit a combined footprint approaching 2x the quota. Both
+        // now reserve through the same gate, so bytes one has admitted but not yet committed are
+        // visible to the other.
+        await _orgs.SetStorageQuotaBytesAsync("o1", 1_000);
+        var svc = Build();
+
+        // A proxy fill of 600 bytes, admitted and mid-flight — nothing recorded on the cache
+        // plane yet, so the live sum still reads 0.
+        using var fill = await _orgs.TryReserveStorageAsync("o1", 600, quota: 1_000);
+        Assert.NotNull(fill);
+        Assert.Equal(0, await ReadLiveStorageBytes());
+
+        // A 600-byte publish would make the combined footprint 1200 against a 1000 cap.
+        var rejected = Assert.IsType<PublishResult.Rejected>(
             await svc.StoreAndRecordAsync(Sample(name: "pkg-a", size: 600)));
+        Assert.Equal(413, rejected.HttpStatus);
+        Assert.Equal("tenant_quota_exceeded", rejected.Code);
 
-        // Force counter to 0 to simulate a pre-migration database.
-        await using (var conn = await _db.OpenAsync())
-        {
-            await conn.ExecuteAsync(
-                "UPDATE org_settings SET storage_used_bytes = 0 WHERE org_id = 'o1'");
-        }
-
-        var packages = new PackageRepository(_db);
-        await packages.DeleteVersionAsync(accepted.VersionId);
-
-        long counterAfterDelete = await ReadStorageUsedBytes();
-        Assert.Equal(0, counterAfterDelete);
+        // Once the fill completes and releases, the same publish fits.
+        fill.Dispose();
+        Assert.IsType<PublishResult.Accepted>(await svc.StoreAndRecordAsync(Sample(name: "pkg-a", size: 600)));
     }
 
-    // ── Backfill: counter 0 upgraded from pre-counter schema ─────────────────
+    // ── Rows the gate never reserved still count ─────────────────────────────
 
     [Fact]
-    public async Task Backfill_WhenCounterIsZeroAndRealSumIsPositive_CounterSetOnFirstPublish()
+    public async Task PublishGate_CountsRowsItNeverReserved()
     {
-        // Simulate a database that was upgraded: org_settings row exists with
-        // storage_used_bytes = 0 but package_versions has bytes from a previous publish
-        // (inserted directly, bypassing the counter). The next atomic reserve must backfill
-        // from the live sum before evaluating the quota.
-        var orgs = new OrgRepository(_db);
-        await orgs.SetStorageQuotaBytesAsync("o1", 2_000);
+        // Rows can exist that no reservation ever passed through — an import, a restore, a
+        // publish from before the gate existed. Deriving from the view counts them for free.
+        await _orgs.SetStorageQuotaBytesAsync("o1", 2_000);
         var svc = Build();
 
-        // Seed a version row directly (simulating pre-counter publish) with size = 800.
-        await using (var conn = await _db.OpenAsync())
-        {
-            await conn.ExecuteAsync(
-                "INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy) " +
-                "VALUES ('p1', 'o1', 'npm', 'legacy', 'legacy', 0)");
-            await conn.ExecuteAsync(
-                "INSERT INTO package_versions (id, package_id, version, purl, blob_key, size_bytes, origin) " +
-                "VALUES ('v1', 'p1', '1.0.0', 'pkg:npm/legacy@1.0.0', 'k', 800, 'uploaded')");
-        }
+        await SeedHostedVersionAsync(sizeBytes: 800);
 
-        // counter is still 0 at this point. A 300-byte publish should backfill to 800 then
-        // add 300, landing at 1100 — under the 2000 cap.
         var result = await svc.StoreAndRecordAsync(Sample(name: "new-pkg", size: 300));
         Assert.IsType<PublishResult.Accepted>(result);
-
-        long counter = await ReadStorageUsedBytes();
-        Assert.Equal(1100, counter);
+        Assert.Equal(1_100, await ReadLiveStorageBytes());
     }
 
     [Fact]
-    public async Task Backfill_WhenCounterIsZeroAndRealSumExceedsCap_Rejects413()
+    public async Task PublishGate_RejectsWhenRowsItNeverReservedAlreadyExceedTheCap()
     {
-        // If the counter was 0 (pre-migration) and the backfill reveals the tenant is already
-        // over quota, the first post-backfill publish must be rejected.
-        var orgs = new OrgRepository(_db);
-        await orgs.SetStorageQuotaBytesAsync("o1", 1_000);
+        // Same shape, over the cap: an org already at 800 of a 1000 ceiling cannot add 300.
+        await _orgs.SetStorageQuotaBytesAsync("o1", 1_000);
         var svc = Build();
 
-        // Seed 800 bytes of existing data with counter = 0.
-        await using (var conn = await _db.OpenAsync())
-        {
-            await conn.ExecuteAsync(
-                "INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy) " +
-                "VALUES ('p1', 'o1', 'npm', 'legacy', 'legacy', 0)");
-            await conn.ExecuteAsync(
-                "INSERT INTO package_versions (id, package_id, version, purl, blob_key, size_bytes, origin) " +
-                "VALUES ('v1', 'p1', '1.0.0', 'pkg:npm/legacy@1.0.0', 'k', 800, 'uploaded')");
-        }
+        await SeedHostedVersionAsync(sizeBytes: 800);
 
-        // A 300-byte publish would put usage at 1100 > 1000 cap → must reject.
         var result = await svc.StoreAndRecordAsync(Sample(name: "new-pkg", size: 300));
         var rej = Assert.IsType<PublishResult.Rejected>(result);
         Assert.Equal(413, rej.HttpStatus);
@@ -254,11 +273,18 @@ public sealed class QuotaReservationTests : IAsyncLifetime
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
-    private async Task<long> ReadStorageUsedBytes()
+    private Task<long> ReadLiveStorageBytes() => _orgs.GetLiveStorageBytesAsync("o1");
+
+    private async Task SeedHostedVersionAsync(long sizeBytes)
     {
         await using var conn = await _db.OpenAsync();
-        return await conn.ExecuteScalarAsync<long>(
-            "SELECT storage_used_bytes FROM org_settings WHERE org_id = 'o1'");
+        await conn.ExecuteAsync(
+            "INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy) " +
+            "VALUES ('p1', 'o1', 'npm', 'legacy', 'legacy', 0)");
+        await conn.ExecuteAsync(
+            "INSERT INTO package_versions (id, package_id, version, purl, blob_key, size_bytes, origin) " +
+            "VALUES ('v1', 'p1', '1.0.0', 'pkg:npm/legacy@1.0.0', 'k', @sizeBytes, 'uploaded')",
+            new { sizeBytes });
     }
 
     private PackagePublishService BuildWithRegistry(IBlobStore registry)
@@ -289,7 +315,9 @@ public sealed class QuotaReservationTests : IAsyncLifetime
             Dependably.Tests.Infrastructure.TestAlerts.NoOp(_db, TimeProvider.System)));
         var auditor = new Dependably.Infrastructure.Publish.PublishAuditor(audit, emitter);
         var licenses = new LicenseRepository(_db, TimeProvider.System, TestNormalizers.License(_db));
-        return new PackagePublishService(packages, new PackageVersionFilesRepository(_db), new OrgRepository(_db), storage, gate,
+        return new PackagePublishService(packages, new PackageVersionFilesRepository(_db), _orgs, storage, gate,
+            new Dependably.Security.NameBindingGate(cfg, new Dependably.Infrastructure.NameBindingRepository(_db), NullLogger<Dependably.Security.NameBindingGate>.Instance),
+            new Dependably.Infrastructure.VersionTombstoneRepository(_db),
             new Dependably.Infrastructure.Edge.EdgePublishGuard(TestEdgeMode.Disabled()),
             auditor, scanner, licenses, NullLogger<PackagePublishService>.Instance);
     }

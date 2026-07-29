@@ -39,13 +39,14 @@ public sealed class ProxyFetchService
     private readonly AuditRepository _audit;
     private readonly TimeProvider _time;
     private readonly Infrastructure.SourcePinRepository _sourcePins;
+    private readonly Security.WeakAlgorithmAcceptance _weakAlgorithms;
 
-    // DI constructor: 9 dependencies are required by the post-fetch pipeline stages (access
+    // DI constructor: 10 dependencies are required by the post-fetch pipeline stages (access
     // recording, version recording, artifact repository, tenant access, scan, block gate,
-    // audit, time, and source-pin enforcement). No cleaner grouping exists — each
-    // dependency serves a distinct pipeline step and splitting the class would scatter the shared
-    // sequencing logic.
-#pragma warning disable S107 // DI constructor — all 9 dependencies are distinct pipeline stages
+    // audit, time, source-pin enforcement, and the weak-algorithm acceptance posture). No
+    // cleaner grouping exists — each dependency serves a distinct pipeline step and splitting
+    // the class would scatter the shared sequencing logic.
+#pragma warning disable S107 // DI constructor — all 10 dependencies are distinct pipeline stages
     public ProxyFetchService(
         CacheAccessRecorder cacheRecorder,
         ProxyVersionRecorder proxyVersions,
@@ -55,7 +56,8 @@ public sealed class ProxyFetchService
         BlockGateService blockGate,
         AuditRepository audit,
         TimeProvider time,
-        Infrastructure.SourcePinRepository sourcePins)
+        Infrastructure.SourcePinRepository sourcePins,
+        Security.WeakAlgorithmAcceptance? weakAlgorithms = null)
 #pragma warning restore S107
     {
         _cacheRecorder = cacheRecorder;
@@ -67,6 +69,9 @@ public sealed class ProxyFetchService
         _audit = audit;
         _time = time;
         _sourcePins = sourcePins;
+
+        // Absent the DI singleton the safe posture applies: every weak-algorithm opt-in off.
+        _weakAlgorithms = weakAlgorithms ?? Security.WeakAlgorithmAcceptance.RefuseAll;
     }
 
     /// <summary>
@@ -135,12 +140,30 @@ public sealed class ProxyFetchService
     // inline by UpstreamClient.FetchAndStageAsync; for other algorithms we stream the cached
     // blob through ChecksumVerifier. On mismatch audits a checksum_failure event and throws
     // ChecksumException → caller returns 502 Bad Gateway.
+    //
+    // This is the cache-admission decision, so it is also where a weak digest is refused the
+    // status of "verified": a SHA-1 spec (an npm packument carrying only dist.shasum) counts as
+    // a verification only under the Npm:AcceptSha1Shasum opt-in. Otherwise the artefact is
+    // admitted unverified — the same footing as an upstream that publishes no digest at all —
+    // rather than the registry recording a chosen-prefix-collision-broken digest as an
+    // integrity guarantee. The spec is honoured for every other algorithm.
     private async Task VerifyChecksumOrThrowAsync(
         ProxyFetchRequest request, string sha256, CancellationToken ct)
     {
         if (request.UpstreamChecksum is not { } spec)
         {
             return;
+        }
+
+        if (spec.Algorithm == ChecksumAlgorithm.Sha1)
+        {
+            if (!_weakAlgorithms.NpmSha1Shasum)
+            {
+                _weakAlgorithms.NoteNpmSha1Skipped();
+                return;
+            }
+
+            _weakAlgorithms.NoteNpmSha1Accepted();
         }
 
         if (await VerifyChecksumAsync(spec, sha256, request, ct))
@@ -222,12 +245,10 @@ public sealed class ProxyFetchService
         if (request.Deprecated is not null)
         {
             var firstFetch = await _blockGate.EvaluateFirstFetchDeprecationAsync(
-                new BlockGateRequest(request.OrgId, request.Ecosystem, request.Purl, string.Empty,
-                    null, null,
-                    request.UserId, request.MaxOsvScoreTolerance, request.SourceIp,
-                    ActorKind: request.ActorKind,
-                    Deprecated: request.Deprecated,
-                    BlockDeprecatedMode: request.BlockDeprecatedMode), ct);
+                BlockGateRequest.ForFirstFetchDeprecation(
+                    request.OrgId, request.Ecosystem, request.Purl,
+                    request.UserId, request.ActorKind, request.MaxOsvScoreTolerance, request.SourceIp,
+                    request.Deprecated, request.BlockDeprecatedMode), ct);
             if (firstFetch == BlockDecision.Blocked)
             {
                 return new ProxyFetchResult(BlockDecision.Blocked, sha256, blobKey);
@@ -238,17 +259,29 @@ public sealed class ProxyFetchService
         // fails signature verification under a block policy is never adopted into the cache
         // catalogue (fail closed). The provenance result was computed by the ecosystem handler;
         // warn/off/NotApplicable proceed and the status is persisted on the recorded row.
-        if (request.VerifyProvenanceMode == "block" &&
-            request.ProvenanceStatus is ProvenanceStatuses.Failed or ProvenanceStatuses.Unsigned)
+        //
+        // A 'block' policy whose trust-anchor set is empty produces NotApplicable for every
+        // artifact — the ecosystem handlers short-circuit verification when nothing can verify —
+        // so the unbacked-enforcement check is what keeps that from reading as a pass.
+        if (request.VerifyProvenanceMode == "block")
         {
-            await _blockGate.RecordProvenanceBlockAsync(
-                new BlockGateRequest(request.OrgId, request.Ecosystem, request.Purl, string.Empty,
-                    null, null,
-                    request.UserId, request.MaxOsvScoreTolerance, request.SourceIp,
-                    ActorKind: request.ActorKind,
-                    ProvenanceStatus: request.ProvenanceStatus,
-                    VerifyProvenanceMode: request.VerifyProvenanceMode), ct);
-            return new ProxyFetchResult(BlockDecision.Blocked, sha256, blobKey);
+            string? status =
+                request.ProvenanceStatus is ProvenanceStatuses.Failed or ProvenanceStatuses.Unsigned
+                    ? request.ProvenanceStatus
+                    : await _blockGate.IsProvenanceEnforcementUnbackedAsync(
+                        request.OrgId, request.Ecosystem, request.VerifyProvenanceMode, ct)
+                        ? ProvenanceStatuses.Unverifiable
+                        : null;
+
+            if (status is not null)
+            {
+                await _blockGate.RecordProvenanceBlockAsync(
+                    BlockGateRequest.ForFirstFetchProvenance(
+                        request.OrgId, request.Ecosystem, request.Purl,
+                        request.UserId, request.ActorKind, request.MaxOsvScoreTolerance, request.SourceIp,
+                        status, request.VerifyProvenanceMode), ct);
+                return new ProxyFetchResult(BlockDecision.Blocked, sha256, blobKey);
+            }
         }
 
         return null;
@@ -297,6 +330,13 @@ public sealed class ProxyFetchService
     // Global-plane scan and block-gate path: cacheArtifactId is set, RecordAsync returned null.
     // Provenance facts are written to cache_artifact; the scan and block-gate use
     // the cache_artifact id rather than a version id.
+    //
+    // The facts come from GetServeFactsByIdAsync — the same per-tenant projection the cache-HIT
+    // serve path reads — and the request is built by BlockGateRequest.ForProxyFirstFetch, which
+    // lives next to ForProxyCacheFacts. Both halves are deliberate: reading the same row means the
+    // first requester cannot be shown something a later one would be refused, and building both
+    // requests in one file means a gate signal added later reaches both paths at once instead of
+    // waiting for someone to notice the second call site.
     private async Task<ProxyFetchResult> ScanAndGateGlobalPlaneAsync(
         ProxyFetchRequest request, string sha256, string blobKey, string cacheArtifactId, CancellationToken ct)
     {
@@ -320,27 +360,30 @@ public sealed class ProxyFetchService
         await _scanner.ScanCacheArtifactAsync(request.Purl, cacheArtifactId,
             request.Ecosystem, request.PurlName, ct);
 
-        var caFacts = await _cacheArtifacts.GetByIdForGateAsync(cacheArtifactId, ct);
+        var caFacts = await _cacheArtifacts.GetServeFactsByIdAsync(request.OrgId, cacheArtifactId, ct);
+        if (caFacts is null)
+        {
+            // The row was written a few statements ago and is already unreadable through the serve
+            // projection. Whatever the cause, this request cannot be gated on the facts a later
+            // request would be gated on, and the bytes have not reached the client yet — so refuse
+            // rather than serve ungated, the same posture the missing-catalogue-row branch takes.
+            return new ProxyFetchResult(BlockDecision.Blocked, sha256, blobKey);
+        }
+
         var caDecision = await _blockGate.EvaluateAsync(
-            new BlockGateRequest(request.OrgId, request.Ecosystem, request.Purl, string.Empty,
-                caFacts?.ManualBlockState, caFacts?.VulnCheckedAt,
-                request.UserId, request.MaxOsvScoreTolerance, request.SourceIp,
-                MinReleaseAgeHours: request.MinReleaseAgeHours,
-                PublishedAt: request.PublishedAt,
-                ActorKind: request.ActorKind,
-                Deprecated: caFacts?.Deprecated,
-                BlockDeprecatedMode: request.BlockDeprecatedMode,
-                BlockMaliciousMode: request.BlockMaliciousMode,
-                BlockKevMode: request.BlockKevMode,
-                MaxEpssTolerance: request.MaxEpssTolerance,
-                Origin: "proxy",
-                HasInstallScript: caFacts?.HasInstallScript ?? false,
-                InstallScriptKind: caFacts?.InstallScriptKind,
-                BlockInstallScriptsMode: request.BlockInstallScriptsMode,
-                ProvenanceStatus: caFacts?.ProvenanceStatus,
-                VerifyProvenanceMode: request.VerifyProvenanceMode,
-                LicenseEnforcementMode: request.LicenseEnforcementMode,
-                CacheArtifactId: cacheArtifactId), ct);
+            BlockGateRequest.ForProxyFirstFetch(
+                request.OrgId, request.Ecosystem, caFacts,
+                request.UserId, request.ActorKind, request.SourceIp,
+                request.MaxOsvScoreTolerance,
+                request.MinReleaseAgeHours,
+                request.BlockDeprecatedMode,
+                request.BlockMaliciousMode,
+                request.BlockKevMode,
+                request.MaxEpssTolerance,
+                request.BlockInstallScriptsMode,
+                request.VerifyProvenanceMode,
+                request.BlockRevokedMode,
+                request.LicenseEnforcementMode), ct);
 
         return new ProxyFetchResult(caDecision, sha256, blobKey);
     }
@@ -483,6 +526,14 @@ public sealed record ProxyFetchRequest(
     string? BlockMaliciousMode = null,
     /// <summary>Tenant policy from <c>org_settings.block_kev</c>: 'off' | 'warn' | 'block'.</summary>
     string? BlockKevMode = null,
+    /// <summary>
+    /// Tenant policy from <c>org_settings.block_revoked</c>: 'off' | 'warn' | 'block'. Only 'block'
+    /// denies a version withdrawn upstream. This reaches the first-fetch gate for the same reason
+    /// every other mode does: the fetch path is re-entered whenever the cached blob has been
+    /// evicted, so an artifact that has since been revoked upstream would otherwise be re-served to
+    /// the very requester a 'block' policy exists to protect.
+    /// </summary>
+    string? BlockRevokedMode = null,
     /// <summary>Tenant ceiling from <c>org_settings.max_epss_tolerance</c> (0.0–1.0); null = off.</summary>
     double? MaxEpssTolerance = null,
     /// <summary>

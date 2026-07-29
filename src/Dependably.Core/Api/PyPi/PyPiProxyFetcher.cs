@@ -346,6 +346,7 @@ public sealed class PyPiProxyFetcher(
             BlockDeprecatedMode: gate.Settings.BlockDeprecated,
             BlockMaliciousMode: gate.Settings.BlockMalicious,
             BlockKevMode: gate.Settings.BlockKev,
+            BlockRevokedMode: gate.Settings.BlockRevoked,
             MaxEpssTolerance: gate.Settings.MaxEpssTolerance,
             BlockInstallScriptsMode: gate.Settings.BlockInstallScripts,
             ProvenanceStatus: Dependably.Protocol.Provenance.ProvenanceStatuses.ToColumn(prov.Status),

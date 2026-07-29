@@ -3,10 +3,14 @@
   import { api } from '../lib/api.js'
   import ErrorBanner from '../lib/ErrorBanner.svelte'
   import { currentOrg, user } from '../lib/store.js'
+  import { reportPageLoad } from '../lib/pageLoad.js'
   import { formatDateShort } from '../lib/format.js'
   import { copyToClipboard } from '../lib/clipboard.js'
   import DataTable from '../lib/DataTable.svelte'
   import { presetToCapabilities, capabilitiesToLabel, PACKAGE_PRESETS, PRIVILEGED_PRESETS } from '../lib/tokenCapabilities.js'
+
+  /** The route transition this page was mounted for, supplied by RouteView. @type {number | null} */
+  export let pageToken = null
 
   let tokens = [], loading = true, error = ''
   let showCreate = false, newScope = 'pull', newExpiry = '', newDescription = '', creating = false
@@ -20,6 +24,9 @@
   }
 
   $: org = $currentOrg
+  // Holds the deferred navigation that mounted this page until the data is here, so the swap
+  // shows the loaded page rather than a shimmer that lives for a hundred milliseconds.
+  $: reportPageLoad(pageToken, loading)
   $: if (org) load()
 
   // Package presets are always offered; admin/audit only to admin/owner callers. The
@@ -100,6 +107,7 @@
     rows={tokens}
     {comparators}
     {loading}
+    memoryKey="tokens"
     initialSort={{ key: 'createdAt', dir: 'desc' }}
     emptyText={$t('tokens.empty')}
     tableClass="tokens-table"

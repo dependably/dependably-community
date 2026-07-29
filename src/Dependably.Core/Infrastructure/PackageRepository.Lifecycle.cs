@@ -84,18 +84,11 @@ public sealed partial class PackageRepository
     }
 
     /// <summary>
-    /// Deletes a <c>package_versions</c> row, decrements the tenant's
-    /// <c>org_settings.storage_used_bytes</c> counter by the version's <c>size_bytes</c>,
-    /// and recomputes <c>packages.is_proxy</c> so it is <c>true</c> exactly when no
-    /// <c>origin='uploaded'</c> versions remain for the parent package.
-    /// The decrement uses the same MAX(0, …) clamp as the release path so counter underflow
-    /// (e.g. a row deleted before the counter column existed) cannot produce negative values.
-    /// </summary>
-    /// <summary>
-    /// Deletes a version ROW without touching the tenant storage counter — the publish
-    /// rollback path only. The failed publish's own quota reservation is released by its
-    /// caller, so the counter-coupled <see cref="DeleteVersionAsync"/> would decrement the
-    /// tenant's <c>storage_used_bytes</c> a second time and drift it low.
+    /// Deletes a version ROW and nothing else — the publish rollback path only.
+    /// <see cref="DeleteVersionAsync"/> also recomputes the parent package's <c>is_proxy</c>
+    /// flag, which a rolled-back publish has no business touching: its row never became part of
+    /// the package's visible version set. The tenant's storage bytes need no adjustment on either
+    /// path — they are derived from the surviving rows, so deleting the row IS the release.
     /// </summary>
     public async Task DeleteVersionRowForPublishRollbackAsync(string versionId, CancellationToken ct = default)
     {
@@ -105,53 +98,60 @@ public sealed partial class PackageRepository
         await conn.ExecuteAsync("DELETE FROM package_versions WHERE id = @id", new { id = versionId });
     }
 
+    /// <summary>
+    /// Deletes a <c>package_versions</c> row and recomputes <c>packages.is_proxy</c> so it is
+    /// <c>true</c> exactly when no <c>origin='uploaded'</c> versions remain for the parent
+    /// package. The tenant's storage usage needs no decrement: it is derived live from
+    /// <c>org_storage_bytes</c>, so the deleted row's bytes leave the sum with the row.
+    ///
+    /// Deleting an <c>origin='uploaded'</c> version also records a
+    /// <c>package_version_tombstone</c> row in the same transaction, so the coordinate survives
+    /// the deletion of both the version row and (when it was the last version) its parent
+    /// <c>packages</c> row. The publish dedup gate reads that tombstone to refuse a republish of
+    /// the coordinate under a blocking version-overwrite policy. Proxy-origin rows are cache
+    /// entries, not publishes, and are never tombstoned.
+    /// </summary>
     public async Task DeleteVersionAsync(string versionId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
 
-        // Resolve org, size, and parent package before the delete so we can decrement the
-        // counter and recompute is_proxy. Version rows are immutable once created, so a read
-        // that predates the transaction below by a few statements is still valid input — what
-        // actually prevents the double-decrement is gating on THIS call's own DELETE having
-        // removed the row (below), not on how fresh this read is. Reading outside the
-        // transaction also lets two concurrent deletes' reads genuinely overlap instead of
-        // serializing on each other's transaction the way two open write transactions would.
+        // Resolve the parent package before the delete so is_proxy can be recomputed after the
+        // row is gone, and the coordinate so the tombstone can be recorded from it. Version rows
+        // are immutable once created, so a read that predates the transaction below by a few
+        // statements is still valid input. Reading outside the transaction also lets two
+        // concurrent deletes' reads genuinely overlap instead of serializing on each other's
+        // transaction the way two open write transactions would.
         // xtenant: keyed by version PK (pv.id), a globally unique surrogate; caller already
-        // verified org ownership before invoking this method.
-        var info = await conn.QuerySingleOrDefaultAsync<(string OrgId, long SizeBytes, string PackageId)>(
+        // verified org ownership before invoking this method. The joined packages row supplies
+        // the org the tombstone is written under.
+        var coordinate = await conn.QuerySingleOrDefaultAsync<DeletedVersionCoordinate>(
             // plane-ok: point lookup by version PK on the hosted-version delete path; proxy deletes go through the cache plane.
             """
-            SELECT p.org_id AS OrgId, pv.size_bytes AS SizeBytes, pv.package_id AS PackageId
+            SELECT pv.package_id AS PackageId, p.org_id AS OrgId, p.ecosystem AS Ecosystem,
+                   p.purl_name AS PurlName, pv.version AS Version,
+                   pv.checksum_sha256 AS ContentHash, pv.origin AS Origin
             FROM package_versions pv
             JOIN packages p ON p.id = pv.package_id
             WHERE pv.id = @id
             """,
             new { id = versionId });
+        string? packageId = coordinate?.PackageId;
 
         await using var dbTx = await conn.BeginTransactionAsync(ct);
         try
         {
-            // Two concurrent deletes of the same version can both resolve `info` above before
-            // either DELETE lands. Gating the decrement on this connection's own DELETE
-            // affecting a row (rather than on the earlier SELECT) means only the delete that
-            // actually removed the row ever decrements the counter — the other's DELETE is a
-            // no-op past this point. The DELETE and the decrement/is_proxy-recompute run in one
-            // transaction so a crash between them can't drift the counter either.
+            // Two concurrent deletes of the same version can both resolve packageId above before
+            // either DELETE lands. Gating the recompute on this connection's own DELETE affecting
+            // a row (rather than on the earlier SELECT) keeps the pair in one transaction, so a
+            // crash between them cannot leave is_proxy describing a version set that no longer
+            // exists.
             // xtenant: keyed by version PK (id), a globally unique surrogate the caller already
             // resolved through an org-scoped lookup before invoking this method.
             int affected = await conn.ExecuteAsync(
                 "DELETE FROM package_versions WHERE id = @id", new { id = versionId }, dbTx);
 
-            if (affected == 1 && info != default)
+            if (affected == 1 && packageId is not null)
             {
-                await conn.ExecuteAsync(
-                    """
-                    UPDATE org_settings
-                    SET storage_used_bytes = MAX(0, storage_used_bytes - @delta)
-                    WHERE org_id = @orgId
-                    """,
-                    new { orgId = info.OrgId, delta = info.SizeBytes }, dbTx);
-
                 // xtenant: keyed by packages.id (the package PK resolved above from an
                 // org-scoped version PK); the NOT EXISTS sub-select stays bound to that same id.
                 await conn.ExecuteAsync(
@@ -163,7 +163,19 @@ public sealed partial class PackageRepository
                     )
                     WHERE id = @pkgId
                     """,
-                    new { pkgId = info.PackageId }, dbTx);
+                    new { pkgId = packageId }, dbTx);
+            }
+
+            // Tombstone the coordinate only when this delete actually removed a hosted version.
+            // The DELETE's own affected count (not the pre-transaction read) is the gate, so two
+            // concurrent deletes of the same row record exactly one tombstone, and a delete that
+            // lost the race records none.
+            if (affected == 1 && coordinate is { Origin: "uploaded" })
+            {
+                await VersionTombstoneRepository.RecordAsync(
+                    conn, dbTx, coordinate.OrgId, coordinate.Ecosystem, coordinate.PurlName,
+                    coordinate.Version, coordinate.ContentHash,
+                    _time.GetUtcNow().ToUtcIso());
             }
 
             await dbTx.CommitAsync(ct);
@@ -308,7 +320,7 @@ public sealed partial class PackageRepository
         await using var conn = await _db.OpenAsync(ct);
         // Stamp yanked_at on yank, clear it on un-yank, so the unlist-age retention gate
         // measures time since the most recent unlist rather than since publish.
-        string? yankedAt = yanked ? _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ") : null;
+        string? yankedAt = yanked ? _time.GetUtcNow().ToUtcIso() : null;
         // xtenant: keyed by version PK; CargoController resolves it via
         // GetByPurlNameAsync(orgId, …) → GetVersionAsync(pkg.Id, …) and 404s an unknown name.
         await conn.ExecuteAsync(
@@ -322,7 +334,7 @@ public sealed partial class PackageRepository
     /// </summary>
     public async Task UpdateDeprecationCheckedAtAsync(string versionId, CancellationToken ct = default)
     {
-        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToUtcIso();
         await using var conn = await _db.OpenAsync(ct);
         // xtenant: keyed by version PK, supplied by the deprecation refresh pass that enumerated
         // the version from an org-scoped query.
@@ -337,7 +349,7 @@ public sealed partial class PackageRepository
     /// </summary>
     public async Task UpdateDeprecatedAndCheckedAsync(string versionId, string? deprecated, CancellationToken ct = default)
     {
-        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToUtcIso();
         await using var conn = await _db.OpenAsync(ct);
         // xtenant: keyed by version PK, supplied by the deprecation refresh pass that enumerated
         // the version from an org-scoped query.
@@ -373,8 +385,13 @@ public sealed partial class PackageRepository
     public async Task UpdateUpstreamLatestAsync(
         string packageId, string? latestVersion, DateTimeOffset? publishedAt = null, CancellationToken ct = default)
     {
-        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
-        string? publishedAtIso = publishedAt?.ToUniversalTime().ToString("o");
+        string now = _time.GetUtcNow().ToUtcIso();
+        // Microsecond precision, matching CacheArtifactRepository.UpdateGlobalFactsAsync's writer
+        // of the same logical published_at/upstream_latest_published_at column (see
+        // artifact_inventory / QuarantineRepository's cross-plane MAX() aggregation) — this
+        // instant is upstream-declared, not derived from our own clock, so seconds would drop
+        // information the registry reports.
+        string? publishedAtIso = publishedAt.ToUtcIsoPreciseOrNull();
         await using var conn = await _db.OpenAsync(ct);
         // xtenant: UPDATE keyed by the package id (already org-scoped via FK); caller resolves
         // the package within a single org's refresh pass.
@@ -410,7 +427,7 @@ public sealed partial class PackageRepository
     public async Task<IReadOnlyList<(string Ecosystem, string Name, string OrgId)>>
         ListHostedGroupsNeedingUpstreamRefreshAsync(int ageHours, int limit, TimeProvider time, CancellationToken ct = default)
     {
-        string threshold = time.GetUtcNow().AddHours(-ageHours).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string threshold = time.GetUtcNow().AddHours(-ageHours).ToUtcIso();
         await using var conn = await _db.OpenAsync(ct);
         var rows = await conn.QueryAsync<(string Ecosystem, string Name, string OrgId)>(
             """
@@ -475,4 +492,18 @@ public sealed partial class PackageRepository
         return blobKey is null || origin != "uploaded" ? null : blobKey;
     }
 
+    // The identity of a version resolved just before its row is deleted: the parent package id
+    // for the is_proxy recompute, plus the (org, ecosystem, purl_name, version) coordinate and
+    // digest the tombstone is written from. Origin discriminates a hosted publish from a
+    // cache-plane row, which is never tombstoned.
+    private sealed class DeletedVersionCoordinate
+    {
+        public string? PackageId { get; init; }
+        public string OrgId { get; init; } = "";
+        public string Ecosystem { get; init; } = "";
+        public string PurlName { get; init; } = "";
+        public string Version { get; init; } = "";
+        public string? ContentHash { get; init; }
+        public string? Origin { get; init; }
+    }
 }

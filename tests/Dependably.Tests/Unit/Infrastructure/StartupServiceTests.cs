@@ -371,15 +371,16 @@ public sealed class StartupServiceTests : IAsyncLifetime
 
     private const string CoLocatedProxyWarningMarker = "silently defeats that allowlist";
 
-    // Minimal logger that captures only Warning-level (and above) messages, mirroring the
-    // AirGapModeTests capture pattern.
-    private sealed class CapturingLogger(List<string> sink) : ILogger<CoreStartupService>
+    // Minimal logger that captures messages at or above a configurable floor, mirroring the
+    // AirGapModeTests capture pattern. Defaults to Warning (and above); pass LogLevel.Information
+    // to also capture the resolved-set audit log.
+    private sealed class CapturingLogger(List<string> sink, LogLevel minLevel = LogLevel.Warning) : ILogger<CoreStartupService>
     {
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
-        public bool IsEnabled(LogLevel level) => level >= LogLevel.Warning;
+        public bool IsEnabled(LogLevel level) => level >= minLevel;
         public void Log<TState>(LogLevel level, EventId eventId, TState state, Exception? ex, Func<TState, Exception?, string> formatter)
         {
-            if (level >= LogLevel.Warning)
+            if (level >= minLevel)
             {
                 sink.Add(formatter(state, ex));
             }
@@ -392,6 +393,14 @@ public sealed class StartupServiceTests : IAsyncLifetime
         var pair = BuildService(config: config, logger: new CapturingLogger(warnings));
         await pair.StartAsync(CancellationToken.None);
         return warnings;
+    }
+
+    private async Task<List<string>> StartAndCaptureLogsAsync(IConfiguration config, LogLevel minLevel)
+    {
+        var logs = new List<string>();
+        var pair = BuildService(config: config, logger: new CapturingLogger(logs, minLevel));
+        await pair.StartAsync(CancellationToken.None);
+        return logs;
     }
 
     [Fact]
@@ -441,5 +450,149 @@ public sealed class StartupServiceTests : IAsyncLifetime
         Assert.Equal(
             expected,
             CoreStartupService.ShouldWarnCoLocatedProxyDefeatsMetricsAllowlist(trustedProxiesUnset, allowlistSource));
+    }
+
+    // ── TRUSTED_PROXIES breadth warning: a broad but non-zero CIDR (e.g. a whole VPC range) ──
+    //
+    // makes every host inside it a trusted forwarding hop (ForwardLimit=null walks the chain to
+    // the first untrusted hop), so an in-VPC client can present its own forged address as the
+    // client-facing source IP. The warning fires per-family (IPv4 broader than /22, IPv6 broader
+    // than /64) and never fails startup — a large proxy subnet can be a legitimate deployment.
+
+    private const string BreadthWarningMarker = "is broader than the recommended";
+
+    [Fact]
+    public async Task StartAsync_BroadIpv4Cidr_Warns()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["TRUSTED_PROXIES"] = "10.0.0.0/16" })
+            .Build();
+
+        var warnings = await StartAndCaptureWarningsAsync(config);
+
+        Assert.Contains(warnings, w => w.Contains(BreadthWarningMarker, StringComparison.Ordinal)
+            && w.Contains("10.0.0.0/16", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task StartAsync_NarrowIpv4Cidr_DoesNotWarn()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["TRUSTED_PROXIES"] = "10.0.0.0/24" })
+            .Build();
+
+        var warnings = await StartAndCaptureWarningsAsync(config);
+
+        Assert.DoesNotContain(warnings, w => w.Contains(BreadthWarningMarker, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task StartAsync_BroadIpv6Prefix_Warns()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["TRUSTED_PROXIES"] = "2001:db8::/56" })
+            .Build();
+
+        var warnings = await StartAndCaptureWarningsAsync(config);
+
+        Assert.Contains(warnings, w => w.Contains(BreadthWarningMarker, StringComparison.Ordinal)
+            && w.Contains("2001:db8::/56", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task StartAsync_NarrowIpv6Prefix_DoesNotWarn()
+    {
+        // A single routed /64 subnet is the conventional narrowest IPv6 allocation — not broader
+        // than the threshold, so it should not warn.
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["TRUSTED_PROXIES"] = "2001:db8::/64" })
+            .Build();
+
+        var warnings = await StartAndCaptureWarningsAsync(config);
+
+        Assert.DoesNotContain(warnings, w => w.Contains(BreadthWarningMarker, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task StartAsync_BroadIpv4MappedCidr_WarnsWithEffectiveIpv4Range()
+    {
+        // The entry's literal family is IPv6, but the /22 threshold named in the warning is the
+        // IPv4 one it was actually judged against — the message must name the effective IPv4
+        // range (10.0.0.0/8) rather than pairing the mapped entry's own /104 against /22, which
+        // would read as a non sequitur.
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["TRUSTED_PROXIES"] = "::ffff:10.0.0.0/104" })
+            .Build();
+
+        var warnings = await StartAndCaptureWarningsAsync(config);
+
+        Assert.Contains(warnings, w => w.Contains(BreadthWarningMarker, StringComparison.Ordinal)
+            && w.Contains("effective IPv4 range (10.0.0.0/8)", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task StartAsync_MixedNarrowAndBroadEntries_WarnsOnlyForTheBroadOne()
+    {
+        // The production shape TRUSTED_PROXIES normally takes: a single proxy address, a narrow
+        // subnet, and (the mistake this feature exists to catch) a broad range further along in
+        // the list. Every entry must be inspected — a loop that only checks the first network
+        // entry would silently miss the broad one here, since the narrow network sorts first.
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            { ["TRUSTED_PROXIES"] = "10.0.0.1,10.0.0.0/24,10.16.0.0/12" })
+            .Build();
+
+        var warnings = await StartAndCaptureWarningsAsync(config);
+
+        var breadthWarnings = warnings
+            .Where(w => w.Contains(BreadthWarningMarker, StringComparison.Ordinal))
+            .ToList();
+
+        Assert.Single(breadthWarnings);
+        Assert.Contains("10.16.0.0/12", breadthWarnings[0], StringComparison.Ordinal);
+        Assert.DoesNotContain(breadthWarnings, w => w.Contains("10.0.0.0/24", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("0.0.0.0/0")]
+    [InlineData("::/0")]
+    public async Task StartAsync_CatchAllRange_StillRejectedAtStartup(string value)
+    {
+        // The breadth warning is a distinct, lesser posture from the /0 catch-all case: /0 must
+        // still fail startup outright rather than merely warn, exercised here through the real
+        // hosted-service StartAsync path (not just ParseTrustedProxies directly), since the
+        // breadth-warning code re-parses TRUSTED_PROXIES during startup.
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["TRUSTED_PROXIES"] = value })
+            .Build();
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => BuildService(config: config).StartAsync(CancellationToken.None));
+        Assert.Contains("TRUSTED_PROXIES", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task StartAsync_TrustedProxiesSet_LogsResolvedNetworkSetAtInformation()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            { ["TRUSTED_PROXIES"] = "10.0.0.0/24,172.18.0.1" })
+            .Build();
+
+        var logs = await StartAndCaptureLogsAsync(config, LogLevel.Information);
+
+        Assert.Contains(logs, l => l.Contains("TRUSTED_PROXIES resolves to", StringComparison.Ordinal)
+            && l.Contains("10.0.0.0/24", StringComparison.Ordinal)
+            && l.Contains("172.18.0.1", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task StartAsync_TrustedProxiesUnset_NoResolvedSetLog()
+    {
+        var config = new ConfigurationBuilder().Build();
+
+        var logs = await StartAndCaptureLogsAsync(config, LogLevel.Information);
+
+        Assert.DoesNotContain(logs, l => l.Contains("TRUSTED_PROXIES resolves to", StringComparison.Ordinal));
     }
 }

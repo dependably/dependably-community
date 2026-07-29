@@ -53,6 +53,56 @@ public sealed class PackageAnalyticsRepositoryTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Dashboard_windows_include_millisecond_precision_activity_rows_exactly_at_the_boundary_second()
+    {
+        // activity.created_at is millisecond-precision text (AuditRepository.LogActivityAsync's
+        // only writer stamps NowMs()). Every window cutoff below is a lexicographic string compare
+        // against that column, so a probe seeded through the real writer at the cutoff's exact whole
+        // second (plus a sub-second offset) pins the regression: '.' (0x2E) collates before 'Z'
+        // (0x5A), so a second-precision cutoff wrongly excludes a millisecond row in that second.
+        var now = TestTime.KnownNow;
+
+        var hourCutoff = now.AddHours(-24);
+        var sevenDaysCutoff = now.AddDays(-7);
+        var thirtyDaysCutoff = now.AddDays(-30);
+
+        // FakeTimeProvider refuses to go backward, so seed in ascending chronological order,
+        // starting from before the earliest (30-day) boundary.
+        var writerClock = TestTime.Frozen(thirtyDaysCutoff.AddMilliseconds(-1));
+        var audit = new AuditRepository(_db, time: writerClock);
+
+        // 30-day total (thirtyDaysCutoff): one row just outside the window, one just inside — the
+        // adversarial twin proving the fix doesn't just return everything.
+        await audit.LogActivityAsync("o1", "npm", "pkg:npm/out-of-30d@1.0.0", "download");
+        writerClock.SetUtcNow(thirtyDaysCutoff.AddMilliseconds(500));
+        await audit.LogActivityAsync("o1", "npm", "pkg:npm/in-30d@1.0.0", "download");
+
+        // 7-day active users (sevenDaysCutoff): one actor just outside, one just inside.
+        writerClock.SetUtcNow(sevenDaysCutoff.AddMilliseconds(-1));
+        await audit.LogActivityAsync("o1", "npm", "pkg:npm/actor-out@1.0.0", "pull", actorId: "user-out");
+        writerClock.SetUtcNow(sevenDaysCutoff.AddMilliseconds(500));
+        await audit.LogActivityAsync("o1", "npm", "pkg:npm/actor-in@1.0.0", "pull", actorId: "user-in");
+
+        // Hourly download chart (hourCutoff): one row just outside the 24h window, one just inside.
+        writerClock.SetUtcNow(hourCutoff.AddMilliseconds(-1));
+        await audit.LogActivityAsync("o1", "npm", "pkg:npm/out-of-hour@1.0.0", "download");
+        writerClock.SetUtcNow(hourCutoff.AddMilliseconds(500));
+        await audit.LogActivityAsync("o1", "npm", "pkg:npm/in-hour@1.0.0", "download");
+
+        var stats = await new PackageAnalyticsRepository(_db, time: TestTime.Frozen(now)).GetOrgStatsAsync("o1");
+
+        // Hourly chart: only the in-window download falls inside the 24h bucket.
+        Assert.Equal(1, stats.DownloadsByHour.Sum(h => h.Count));
+
+        // 30-day total spans the two hour-boundary downloads (both far inside 30 days) plus the
+        // dedicated 30-day boundary probe; the row just outside the 30-day window is excluded.
+        Assert.Equal(3, stats.TotalDownloads30d);
+
+        // 7-day active users: only the in-window actor counts.
+        Assert.Equal(1, stats.ActiveUsers7d);
+    }
+
+    [Fact]
     public async Task Blocked_pulls_count_every_gate_and_break_down_per_gate()
     {
         var audit = new AuditRepository(_db);

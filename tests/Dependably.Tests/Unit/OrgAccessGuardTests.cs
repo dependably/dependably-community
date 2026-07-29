@@ -210,6 +210,67 @@ public sealed class OrgAccessGuardTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task CheckCapAsync_ApiTokenWithUsersRow_NoCapClaims_DeniesRoleFallback()
+    {
+        // #418 regression: a user-owned API token whose `capabilities` column is legacy-NULL
+        // emits zero `cap` claims, yet its `sub` (u-admin) resolves to a real users row. The
+        // primary users lookup succeeds and hands the owner's DB role to ResolveCallerCapabilities.
+        // Because the principal authenticated under the ApiToken scheme, the role fallback must NOT
+        // run — the empty capability set denies. Otherwise the zero-capability token silently
+        // inherits its admin owner's tenant:configure grant.
+        var principal = new ClaimsPrincipal(new ClaimsIdentity(new[]
+        {
+            new Claim("sub", "u-admin"),
+            new Claim("org_id", "o1"),
+            new Claim("tid", "o1"),
+            new Claim("role", "admin"),
+            new Claim("scope", "tenant"),
+        }, TokenAuthenticationDefaults.Scheme));
+
+        var result = await _guard.CheckCapAsync(
+            principal, "u-admin", "o1", Capabilities.TenantConfigure);
+        Assert.Equal(OrgAccessGuard.AccessResult.Forbidden, result);
+    }
+
+    [Fact]
+    public async Task CheckCapAsync_ApiTokenWithUsersRow_WithCapClaim_Allowed()
+    {
+        // Adversarial twin: the same user-owned API token, but carrying the explicit capability,
+        // still authorizes — the fix denies only the zero-capability legacy case.
+        var principal = new ClaimsPrincipal(new ClaimsIdentity(new[]
+        {
+            new Claim("sub", "u-admin"),
+            new Claim("org_id", "o1"),
+            new Claim("tid", "o1"),
+            new Claim("role", "admin"),
+            new Claim("scope", "tenant"),
+            new Claim("cap", Capabilities.TenantConfigure),
+        }, TokenAuthenticationDefaults.Scheme));
+
+        var result = await _guard.CheckCapAsync(
+            principal, "u-admin", "o1", Capabilities.TenantConfigure);
+        Assert.Equal(OrgAccessGuard.AccessResult.Allowed, result);
+    }
+
+    [Fact]
+    public async Task CheckCapAsync_JwtSessionWithUsersRow_NoCapClaims_StillAllowedViaRole()
+    {
+        // Adversarial twin: a genuine JWT session (non-ApiToken scheme) for the same admin,
+        // carrying a `role` claim and no `cap` claims, must still authorize via the role
+        // fallback — that fallback is legitimate for sessions and must not regress.
+        var principal = new ClaimsPrincipal(new ClaimsIdentity(new[]
+        {
+            new Claim("sub", "u-admin"),
+            new Claim("role", "admin"),
+            new Claim("scope", "tenant"),
+        }, "AuthenticationTypes.Federation"));
+
+        var result = await _guard.CheckCapAsync(
+            principal, "u-admin", "o1", Capabilities.TenantConfigure);
+        Assert.Equal(OrgAccessGuard.AccessResult.Allowed, result);
+    }
+
+    [Fact]
     public async Task CheckCapAsync_ExplicitCapClaims_NarrowBelowRole()
     {
         // u-admin's role would grant publish:* via ForRole, but the principal also carries

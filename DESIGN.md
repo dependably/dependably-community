@@ -13,7 +13,8 @@
 - [8. Accessibility](#8-accessibility)
 - [9. Dark mode](#9-dark-mode)
 - [10. Conventions](#10-conventions)
-- [11. Don'ts](#11-donts)
+- [11. Time & timezone](#11-time--timezone)
+- [12. Don'ts](#12-donts)
 
 ---
 
@@ -261,7 +262,7 @@ redefine them in component `<style>` blocks.
 | §5.6    | `.title-row`, `.ribbon`, `.ribbon.hot`                     | Page-title row with inline status ribbon        | Dashboard.svelte                |
 | §5.6    | `.eco-name-cell`, `.eco-bar.{eco}`                         | Ecosystem table name cell (donut legend proxy)  | Dashboard.svelte                |
 | §5.7    | `.detail-panel`, `.detail-section`, `.detail-label`, `.detail-value` | Expanded-row receipts drawer      | VersionDetail.svelte            |
-| §5.8    | `th.sortable`                                                          | Sortable column header (cursor + indicator) | All data tables        |
+| §5.8    | `DataTable` + `th.sortable`, `.page-toolbar` filters, `Pagination`     | Data table: sortable headers, toolbar filters, paging | All list pages |
 | —       | `.card`                                                    | Generic surface card                            | Multiple                        |
 | —       | `.badge` + ecosystem modifiers                             | Ecosystem and status labels                     | Multiple                        |
 | —       | `.badge.state-{unclaimed,local_only,mixed}`                | Claims state badges                             | Claims.svelte, VersionDetail.svelte |
@@ -284,6 +285,8 @@ redefine them in component `<style>` blocks.
 | —       | `.modal`, `.modal-backdrop`, `.modal-actions`              | Modal dialogs                                   | Multiple                        |
 | —       | `.spinner`                                                 | Loading state (mid-flight actions, modal submit)| Multiple                        |
 | —       | `.skeleton`                                                | Shimmer placeholder for initial table fetch     | Tables (Packages, VersionDetail, Vulnerabilities) |
+| `Skeleton.svelte` | —                                                | Reserves the loaded box for a card, panel, header, or stat tile | Multiple |
+| —       | `.nav-progress`                                            | Navigation held past its grace period           | App.svelte, SystemApp.svelte    |
 | —       | `.error-msg`                                               | Inline form-field validation error              | Forms                           |
 | —       | `.page-error`                                              | Top-of-page fetch failure banner                | All data pages                  |
 | —       | `.page-header`, `.page-title`                              | Page chrome                                     | All pages                       |
@@ -292,9 +295,49 @@ redefine them in component `<style>` blocks.
 | —       | `.btn-row`                                                 | Compact in-row action button (28–32px tall)     | VersionDetail.svelte            |
 
 **`.skeleton`** — shimmer placeholder for table rows / single text
-lines during the initial fetch. Use 3-5 placeholder rows per table; do
-not mix with `.spinner` on the same view. `.spinner` stays for
-mid-flight actions like modal submit and inline retry.
+lines during the initial fetch. Do not mix with `.spinner` on the same
+view. `.spinner` stays for mid-flight actions like modal submit and
+inline retry.
+
+A placeholder is for a wait the reader can feel, not for every wait.
+Most navigations resolve in well under the time a loading state takes to
+read as one, and a shimmer that appears and vanishes inside a few frames
+is a flicker, not information. Two rules keep them off screen:
+
+- **Navigation commits late.** `navigate()` does not swap the page on
+  click. The incoming page mounts in a detached container, runs its
+  initial fetch, and `route` flips only once that page reports its data
+  has landed — `reportPageLoad(pageToken, loading)`, with the token
+  arriving as a `RouteView` slot prop — or once the 400 ms budget
+  expires. Until then the loaded page the reader is already looking at
+  stays on screen and the URL still names it, so the two never
+  disagree; the clicked sidebar link lights up immediately
+  (`activeRoute`), which is what makes the hold read as responsive.
+  Past 150 ms the `.nav-progress` strip turns on; past the budget the
+  swap happens and the arriving page shows its own placeholders,
+  because by then the wait is real. Redirects (`{ replace: true }` —
+  the initial landing, guard bounces, post-logout) commit immediately:
+  there is no loaded page worth holding. See `RouteView`, `RouteHost`,
+  and the deferred-commit block in `store.js`.
+- **A table that already has rows keeps them.** `DataTable` and
+  `VersionTable` draw placeholders only when they have nothing to show,
+  so paging, sorting, and filtering leave the current rows up while the
+  next set is in flight.
+
+When a placeholder *is* drawn it reserves the box its real content will
+occupy, so the page does not collapse and then re-expand when the data
+lands: a body that shrinks below one viewport also retracts the document
+scrollbar, which shifts the whole layout sideways. The reserve comes from
+what that table actually held last time (`memoryKey` on `DataTable`,
+recorded per session by `tableSize.js`) — a page size is a guess that
+overstates every table holding fewer rows than its limit, and fifty
+placeholder rows collapsing to four moves more than reserving nothing
+would have. `loadingRows` is the first-visit estimate until a real count
+is known, `loadingRowHeight` matches rows that stack two lines, and the
+count is capped at a viewport's worth: rows arriving below the fold grow
+the document without moving anything the reader can see. A loading page
+renders its real chrome — header, toolbar, tabs, pagination — and swaps
+only the values it is waiting on.
 
 **`.page-error`** — full-width banner used at the top of a page when a
 fetch fails. Distinct from `.error-msg`, which is reserved for inline
@@ -526,13 +569,37 @@ Label / value layout:
 
 Every `detail-value` with copyable content carries an inline `.copy-btn`.
 
-### 5.8 Sortable tables
+### 5.8 Data tables
 
 All data tables use `table-layout: fixed`. This prevents column widths from shifting when sort indicators appear and avoids content-driven layout thrash.
 
+**Build every list table out of `DataTable.svelte`.** It owns the sort state, the header row, the `<colgroup>`, the loading placeholders, and the empty row; the page supplies `columns` and one `<tr>` per row through the default slot. A page that hand-rolls `<thead>` re-implements all five and drifts from the rest of the site — that is how a table ends up unsortable. Two shapes are exempt, and only these two:
+
+- a table that groups several source rows into one visible row (`VersionTable.svelte` — Maven jar/pom, PyPI wheel/sdist), which the one-slot-per-array-element contract cannot express. Copy `VersionTable`'s use of the shared `sortIndicator`/`tableSize` helpers rather than inventing new ones.
+- a fixed-row table where sort is meaningless (see **Skip list** below).
+
+**Every list table is sortable, filterable, and paged the same way**
+
+| Concern | Where it lives | Never |
+|---|---|---|
+| Sort | Clickable `<th>` via `DataTable` `columns[].sortable` | A sort control outside the header |
+| Filters | `.page-toolbar` above the table — `SearchInput`, then selects, then chips/toggles | A filter widget inside a `<th>` |
+| Paging | `Pagination` below the table | An unpaged table with a server-side row cap |
+| State | The URL query string via `readQuery`/`writeQuery` (`tableState.js`) | Component-local state that dies on navigation |
+
+Filters belong in the toolbar, not in the column headers: the header's whole job is sort, the toolbar is where every other list page puts its filters, and a per-header dropdown would need a popover primitive the design system deliberately does not have. Column labels always come from `$t('<page>.columns.<key>')` in a **reactive** `$: columns = [...]` — a `const` freezes the labels in whichever locale was active at mount.
+
+**A page of a queue is not the queue**
+
+Once a table is paged, its filters and sort must be server-side. A client-side filter over the current page narrows the page rather than the result set, and silently disagrees with the `total` the pager is drawn from — the table then offers pages that hold nothing. The two go together: pick client-side sort/filter only for a table that loads all of its rows at once.
+
+Client-side sort with server-side paging is spelled with `NOOP_CMP` comparators (see Packages, Quarantine): the server returns the page in order, and returning `0` for every comparator lets `DataTable`'s stable sort preserve it.
+
+**Never render a bare id where a name exists.** A `user_id`, `actor_id`, or `decided_by` column resolves to an email in the query — `LEFT JOIN users u ON u.id = <col> AND u.tenant_id = <org column>`, keeping both the id and the resolved email on the row. The join is tenant-bound so a stale or cross-tenant id resolves to null instead of another tenant's address, and the display falls back id-wards: `{row.email ?? row.id ?? '—'}`, since an erased account leaves the id behind. Precedents: `AuditRepository`, `QuarantineRepository`.
+
 **Sortable header class**
 
-Use `class="sortable"` on any `<th>` that triggers sort. Do not use `style="cursor:pointer"` on `<th>` — that is a §10 violation.
+Use `class="sortable"` on any `<th>` that triggers sort. `DataTable` applies it for you; author it by hand only in the grouped-row exemption above. Do not use `style="cursor:pointer"` on `<th>` — that is a §10 violation.
 
 ```css
 th.sortable { cursor: pointer; user-select: none; }
@@ -551,33 +618,39 @@ th:empty { width: 90px; }
 
 Append `{sortIndicator('col')}` to the column label text. Returns ` ↑` (ascending), ` ↓` (descending), or `''` when inactive.
 
-**Standard sort helpers**
+**Standard shape**
 
 ```javascript
-let sortCol = 'email', sortDir = 'asc'
-$: sorted = [...items].sort((a, b) => {
-  let av = a[sortCol] ?? '', bv = b[sortCol] ?? ''
-  if (av < bv) return sortDir === 'asc' ? -1 : 1
-  if (av > bv) return sortDir === 'asc' ? 1 : -1
-  return 0
-})
-function toggleSort(col) {
-  if (sortCol === col) sortDir = sortDir === 'asc' ? 'desc' : 'asc'
-  else { sortCol = col; sortDir = 'asc' }
-}
-function sortIndicator(col) {
-  if (sortCol !== col) return ''
-  return sortDir === 'asc' ? ' ↑' : ' ↓'
-}
+const DEFAULTS = { q: '', eco: '', page: 1, limit: 50, sort: 'updated', dir: 'desc' }
+const init = readQuery(DEFAULTS)
+let search = init.q, page = init.page, limit = init.limit, total = 0
+let sortCol = init.sort, sortDir = init.dir
+
+function sync() { writeQuery({ q: search, page, limit, sort: sortCol, dir: sortDir }, DEFAULTS) }
+function onPageChange(e) { page = e.detail.page; sync(); load() }
+function onLimitChange(e) { limit = e.detail.limit; page = 1; sync(); load() }
+function onSortChange(e) { sortCol = e.detail.col; sortDir = e.detail.dir; page = 1; sync(); load() }
+function onFilterChange() { page = 1; sync(); load() }   // every filter control
+
+const NOOP_CMP = () => 0        // server-sorted: preserve the order it returned
+$: columns = [
+  { key: 'name',    label: $t('page.columns.name'),    sortable: true },
+  { key: 'updated', label: $t('page.columns.updated'), sortable: true, width: '150px', defaultDir: 'desc' },
+  { key: 'actions', label: '',                         sortable: false, width: '180px' },
+]
 ```
 
-When a component has two independent tables (e.g. Users.svelte members and invites, OrgSettings.svelte allowlist and blocklist), prefix the variable names: `memberSortCol`, `alSortCol`, etc.
+Sorting, paging, and filtering all reset `page` to 1 — page 4 of the old result set is rarely a page of the new one.
+
+When a component has two independent tables (e.g. Users.svelte members and invites, OrgSettings.svelte allowlist and blocklist), give each its own `memoryKey` (`users:members`, `users:invites`); `DataTable` holds the sort state per instance, so the prefixed `memberSortCol`-style variables are only needed by the hand-rolled exemption.
 
 **Client-side vs. server-side sort**
 
-- **Server-side sort** (API params, paginated across all pages): Packages.
+- **Server-side sort + server-side filters + pagination** (the default for a table that can outgrow one page): Packages, Quarantine.
 - **Client-side sort** (in-memory, all rows loaded at once): Vulnerabilities, VersionDetail, Users, Tokens, SettingsServiceTokens, OrgSettings allowlist/blocklist, Claims (server-filtered, client-sorted).
 - **Client-side sort on current page only** (acceptable for admin/audit tables): AdminOrgs, Activity.
+
+The server's accepted `sort=` values are a whitelist, and it should equal the set of sortable headers — keeping the two in step is what makes the accepted surface reviewable. An unrecognised value falls back to the default rather than erroring, so a stale bookmark still renders.
 
 **Skip list**
 
@@ -691,7 +764,96 @@ override OS preference. Adding a new themed token: write
 
 ---
 
-## 11. Don'ts
+## 11. Time & timezone
+
+Dependably is a forensic tool: a first-fetch time, a revocation time, and
+an audit timestamp are evidence. A time rendered without its zone is not
+evidence — it is a guess about which machine formatted it.
+
+### 11.1 The storage invariant
+
+**Every instant is stored in UTC, in one format, regardless of the
+timezone of the frontend, the backend host, or the database server.**
+The wire format is ISO 8601 with an explicit `Z`:
+
+```
+yyyy-MM-ddTHH:mm:ssZ        2026-07-25T12:00:00Z
+```
+
+Rules that keep the invariant true:
+
+- **Instants are normalized before they are formatted.** Call
+  `.ToUniversalTime()` on any `DateTimeOffset` that did not come from
+  `TimeProvider.GetUtcNow()` — anything parsed from upstream registry
+  metadata, an X.509 certificate, a SAML assertion, or a request body
+  carries the offset it arrived with.
+- **`Z` in a .NET custom format string is a literal, not a conversion.**
+  `dto.ToString("yyyy-MM-ddTHH:mm:ssZ")` on a `+02:00` value writes the
+  `+02:00` wall-clock time and labels it `Z`. The value is then wrong by
+  the offset, and nothing downstream can detect it. Normalize first.
+- **Never bind a `DateTimeOffset` straight into a timestamp column.**
+  Dapper/`Microsoft.Data.Sqlite` renders it as
+  `2026-07-25 14:00:00+02:00` — space-separated, offset preserved, not
+  UTC. That collates differently from every `Z` value in the same
+  column, so the lexicographic `TEXT` comparisons these columns rely on
+  (`WHERE starts_at <= @now`) silently stop working. Bind the
+  normalized string.
+- **Client-supplied instants are normalized at the edge**, in the
+  controller, before they reach a repository — parse, convert to UTC,
+  re-format, and persist *that*. Validating that a string parses and
+  then storing the original string leaves the client's offset (or no
+  offset at all) in the database.
+
+Timestamp columns are `TEXT` in both `Schema.sql` and `Schema.pg.sql`.
+Do not introduce `TIMESTAMPTZ` for new columns — a provider-native type
+on one side and `TEXT` on the other means the two schemas no longer
+round-trip the same string.
+
+### 11.2 The display rule
+
+**Every rendered timestamp carries an explicit zone.** A bare
+`14:32` is never shipped. The zone is resolved once, in this order:
+
+1. The user's profile timezone preference (`users.timezone`)
+2. The org default (`org_settings.default_timezone`)
+3. The browser's IANA zone, via
+   `Intl.DateTimeFormat().resolvedOptions().timeZone`
+
+This mirrors the language preference exactly (`users.language` → `org_settings.default_language` → browser locale): a nullable per-user
+column whose `NULL` means *inherit*, never a duplicated default.
+
+Formatting rules:
+
+- **Absolute times name their zone.** `25 Jul 2026, 14:32 EDT`. Pass an
+  explicit `timeZone` and `timeZoneName: 'short'` to
+  `Intl.DateTimeFormat` — the resolved zone from above, never the
+  implicit browser default.
+- **Relative times are for recency only** — "3 minutes ago" is legible
+  where a clock time is not. Use it under ~24h; past that, show the
+  absolute time. A relative time never stands alone as evidence: it
+  carries the absolute time in a `title` tooltip.
+- **The tooltip is always the full UTC instant.** Hovering any rendered
+  time shows `2026-07-25T18:32:04Z` — the stored value, unconverted, so
+  an operator can correlate against a log line without doing arithmetic.
+- **Tables sort on the raw ISO string, never the formatted one.**
+- **Log and export surfaces stay UTC.** Audit CSV exports, SIEM
+  payloads, and `@timestamp` log fields are machine-read and are not
+  localized to the viewer's zone.
+
+### 11.3 The profile preference
+
+A **Timezone** row in Profile, directly below Language, using the same
+`settings-row` shape: a title, help text naming the inherited org
+default, and a `<select>`. Options come from
+`Intl.supportedValuesOf('timeZone')`, with the browser-detected zone
+offered first as the default choice. Selecting the org default is
+expressed by an explicit "Use organization default" option that writes
+`NULL` — not by picking the matching zone by hand, which would pin the
+user and silently ignore a later change to the org default.
+
+---
+
+## 12. Don'ts
 
 - Don't add a second accent hue (badge palettes don't count).
 - Don't use emoji for status — use the badge system.

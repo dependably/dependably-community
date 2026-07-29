@@ -54,7 +54,7 @@ public sealed class WebhookDeliveryClient
 
         req.Headers.Add("X-Dependably-Event", envelope.EventType);
         req.Headers.Add("X-Dependably-Delivery", deliveryId);
-        req.Headers.Add("X-Dependably-Timestamp", envelope.OccurredAt.ToString("yyyy-MM-ddTHH:mm:ssZ"));
+        req.Headers.Add("X-Dependably-Timestamp", envelope.OccurredAt.ToUtcIso());
 
         if (!string.IsNullOrEmpty(secret))
         {
@@ -106,7 +106,7 @@ public sealed class WebhookDeliveryClient
             writer.WriteStartObject();
             writer.WriteString("event", envelope.EventType);
             writer.WriteString("delivery_id", deliveryId);
-            writer.WriteString("occurred_at", envelope.OccurredAt.ToString("yyyy-MM-ddTHH:mm:ssZ"));
+            writer.WriteString("occurred_at", envelope.OccurredAt.ToUtcIso());
             writer.WriteString("org", envelope.OrgSlug);
             writer.WriteString("ecosystem", envelope.Ecosystem);
             writer.WriteString("name", envelope.Name);

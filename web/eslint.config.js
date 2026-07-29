@@ -5,7 +5,7 @@ import globals from 'globals'
 import prettier from 'eslint-config-prettier'
 
 // Emoji codepoints are banned in Svelte markup — the UI renders icons from the
-// web/public/icons.svg sprite instead (DESIGN.md §11). This rule is the single
+// web/public/icons.svg sprite instead (DESIGN.md §12). This rule is the single
 // enforcing gate: it runs via lint-staged pre-commit, `npm run lint`, and the CI
 // frontend-lint job. The PostToolUse hook in .claude/hooks/ carries its own copy
 // of this range as fast edit-time advice; that copy is not a gate.
@@ -22,7 +22,7 @@ const dependably = {
         docs: { description: 'Disallow emoji codepoints; use the icons.svg sprite.' },
         schema: [],
         messages: {
-          emoji: 'Emoji codepoint {{cp}} — use a sprite from web/public/icons.svg instead (DESIGN.md §11).',
+          emoji: 'Emoji codepoint {{cp}} — use a sprite from web/public/icons.svg instead (DESIGN.md §12).',
         },
       },
       create(context) {

@@ -76,10 +76,14 @@ REVIEW_LABEL="${AI_REVIEW_LABEL:-${REPORT_FILE%.md}}"
 emit_report() {  # <status-suffix> <body-text>
   # Title carries the lens label so each report/comment is self-identifying
   # (e.g. "AI review — Security"); $1 is an optional state suffix like " (skipped)".
+  # A standing provenance banner precedes every report. The MR diff is the entire
+  # user turn handed to the model, so text in the diff can shape what appears
+  # below — including a fabricated all-clear. The banner keeps reviewers from
+  # reading this comment as an authoritative security assessment.
   # Backticks are literal Markdown; the format string must not expand (values
   # arrive as positional args), so single quotes are intentional.
   # shellcheck disable=SC2016
-  printf '# AI review — %s%s\n\n_Model `%s` · MR !%s · %s UTC_\n\n%s\n' \
+  printf '# AI review — %s%s\n\n_Model `%s` · MR !%s · %s UTC_\n\n> **Advisory, machine-generated, unverified.** The MR diff is the entire user turn handed to the model, so anything below can be shaped by the diff itself. Treat findings as leads to verify; a clean report is not evidence that a change is safe.\n\n%s\n' \
     "$REVIEW_LABEL" "$1" "$OLLAMA_MODEL" "$CI_MERGE_REQUEST_IID" "$(date -u +%Y-%m-%dT%H:%M:%S)" "$2" \
     > "$REPORT_FILE"
   # Also echo the report into the job log, inside an expanded collapsible GitLab

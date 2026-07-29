@@ -1,5 +1,5 @@
-using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
+using Dependably.Tests.Compliance;
 
 namespace Dependably.Tests.Unit.Observability;
 
@@ -44,18 +44,10 @@ public sealed partial class OutcomeValueTests
     [Fact]
     public void NoOutcomeValueOutsideClosedEnum()
     {
-        string srcDir = GetSourceDir();
-        Assert.True(Directory.Exists(srcDir), $"Source directory not found: {srcDir}");
-
         var violations = new List<string>();
 
-        foreach (string file in Directory.EnumerateFiles(srcDir, "*.cs", SearchOption.AllDirectories))
+        foreach (string file in SourceRoots.AllCSharpFiles())
         {
-            if (file.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-            {
-                continue;
-            }
-
             string content = File.ReadAllText(file);
 
             foreach (var pattern in new[] { AttributePattern(), AssignmentPattern() })
@@ -69,7 +61,7 @@ public sealed partial class OutcomeValueTests
                     }
 
                     int line = content.AsSpan(0, m.Index).Count('\n') + 1;
-                    string rel = Path.GetRelativePath(srcDir, file);
+                    string rel = Path.GetRelativePath(SourceRoots.OwningRoot(file), file);
                     violations.Add($"{rel}:{line}  outcome value \"{value}\" not in the closed enum");
                 }
             }
@@ -79,14 +71,5 @@ public sealed partial class OutcomeValueTests
             violations.Count == 0,
             "Outcome-vocabulary violation. See taxonomy.md#outcome-vocabulary.\n  " +
             string.Join("\n  ", violations));
-    }
-
-    // Scans the whole src/ tree: since the assembly split the outcome-emitting code lives in
-    // Dependably.Core (and Dependably.Management), not the thin src/Dependably composition root.
-    private static string GetSourceDir([CallerFilePath] string callerFilePath = "")
-    {
-        string dir = Path.GetDirectoryName(callerFilePath)!;
-        string repoRoot = Path.GetFullPath(Path.Combine(dir, "..", "..", "..", ".."));
-        return Path.Combine(repoRoot, "src");
     }
 }

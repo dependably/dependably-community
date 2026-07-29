@@ -43,6 +43,7 @@ public sealed class MetadataRebuildCachingTests : IAsyncLifetime
     private TokenRepository _tokens = null!;
     private RenderedResponseCache<RpmLocalRepodataKey> _localRepodataCache = null!;
     private MetadataResponseCache<RpmMergedRepodataKey, MergedRepodataCache> _mergedRepodataCache = null!;
+    private MetadataInvalidationCoordinator _invalidation = null!;
 
     public async Task InitializeAsync()
     {
@@ -336,12 +337,14 @@ public sealed class MetadataRebuildCachingTests : IAsyncLifetime
 
     private RpmController BuildRpmController()
     {
-        _localRepodataCache = new RenderedResponseCache<RpmLocalRepodataKey>(
-            new MemoryCache(new MemoryCacheOptions { SizeLimit = 50 * 1024 * 1024 }),
-            MetadataCacheKeys.RpmLocalRepodata);
-        _mergedRepodataCache = new MetadataResponseCache<RpmMergedRepodataKey, MergedRepodataCache>(
-            new MemoryCache(new MemoryCacheOptions()),
-            MetadataCacheKeys.RpmMergedRepodata);
+        // One harness so the RPM controller, the management-plane OrgController, and the
+        // assertions below all read and evict the same cache instances — exactly the sharing a
+        // running process has, which is what makes a cross-surface eviction gap observable here.
+        var harness = Dependably.Tests.Infrastructure.TestMetadataInvalidation.Build(
+            new MemoryCache(new MemoryCacheOptions { SizeLimit = 50 * 1024 * 1024 }));
+        _localRepodataCache = harness.RpmLocal;
+        _mergedRepodataCache = harness.RpmMerged;
+        _invalidation = harness.Coordinator;
 
         var packages = new PackageRepository(_db);
         var audit = new AuditRepository(_db);
@@ -362,6 +365,7 @@ public sealed class MetadataRebuildCachingTests : IAsyncLifetime
             new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, _clock, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured())),
             _mergedRepodataCache,
             _localRepodataCache,
+            _invalidation,
             _clock,
             cacheRecorder,
             cacheArtifacts,
@@ -369,6 +373,7 @@ public sealed class MetadataRebuildCachingTests : IAsyncLifetime
             rpmProvenance,
             Dependably.Tests.Infrastructure.TestEdgeMode.DisabledPublishGuard(),
             Dependably.Tests.Infrastructure.TestBlockGate.Create(_db, _clock),
+            Dependably.Tests.Infrastructure.TestScanner.NoFindings(_db, _clock),
             new Dependably.Infrastructure.StagingOptions(System.IO.Path.GetTempPath(), 0),
             new LicenseRepository(_db, _clock, TestNormalizers.License(_db)));
         return new RpmController(svc) { ControllerContext = BuildRpmContext() };
@@ -414,7 +419,7 @@ public sealed class MetadataRebuildCachingTests : IAsyncLifetime
                 u = userId,
                 h = hash,
                 c = """["publish:rpm"]""",
-                ts = _clock.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                ts = _clock.GetUtcNow().ToUtcIso(),
             });
         return raw;
     }
@@ -474,9 +479,7 @@ public sealed class MetadataRebuildCachingTests : IAsyncLifetime
             Vulns: null!,
             Urls: null!,
             AuditEmitter: null!,
-            Cache: null!,
-            RpmMergedCache: _mergedRepodataCache,
-            RpmLocalCache: _localRepodataCache,
+            Invalidation: _invalidation,
             CacheArtifacts: null!,
             TenantAccess: null!,
             Time: null!);

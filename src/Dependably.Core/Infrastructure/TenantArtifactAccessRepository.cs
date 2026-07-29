@@ -184,6 +184,8 @@ public sealed class TenantArtifactAccessRepository
         string ecosystem, string name, string version, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+        // xtenant: deliberate cross-tenant fan-out — the list of affected tenants IS the answer.
+        // Platform-admin scope only; callers enforce.
         var rows = await conn.QueryAsync<string>("""
             SELECT DISTINCT taa.org_id
             FROM tenant_artifact_access taa

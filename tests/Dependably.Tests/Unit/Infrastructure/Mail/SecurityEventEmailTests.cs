@@ -334,28 +334,14 @@ public sealed class SecurityEventEmailTests
         service.EnqueueMfaEnabled("good-user@example.com", "en", clock.GetUtcNow());
         service.EnqueuePasswordChanged("bad-user@example.com", "en", clock.GetUtcNow());
 
-        // now-ok: polling deadline awaiting the background queue's real async delivery loop;
-        // the frozen clock (not this wall-clock read) drives the failing job's retry backoff.
-        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(2);
-        while (queue.DeliveredCount < 1 && DateTimeOffset.UtcNow < deadline)
-        {
-            await Task.Delay(10);
-        }
-
-        // Pump the failing job's retry backoff (1s/5s/30s) through to its terminal failure
-        // without waiting out 36 real seconds.
-        foreach (var step in new[] { TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(30) })
-        {
-            clock.Advance(step);
-            await Task.Delay(50);
-        }
-
-        // now-ok: polling deadline awaiting the background queue's real async delivery loop.
-        var failDeadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(2);
-        while (queue.FailedCount < 1 && DateTimeOffset.UtcNow < failDeadline)
-        {
-            await Task.Delay(10);
-        }
+        // The good job delivers on its first attempt; the bad one burns its full 1s/5s/30s retry
+        // backoff before its terminal failure is recorded. Pump the frozen clock in a loop that
+        // keeps advancing until BOTH terminal outcomes are observed — advancing a fixed number of
+        // times instead races the single-reader loop: an Advance issued before the loop registers
+        // its next backoff timer is lost, and the job then parks forever on a tick that never comes.
+        await ClockPump.UntilAsync(
+            clock, () => queue.DeliveredCount == 1 && queue.FailedCount == 1, TimeSpan.FromSeconds(1),
+            maxAdvances: 400);
 
         try { await queue.StopAsync(CancellationToken.None); } catch { }
 

@@ -225,7 +225,7 @@ public sealed class NpmUnpublishWireTests : IAsyncLifetime
                 bk = $"registry/left-pad-{version}.tgz",
                 origin,
                 fn = $"left-pad-{version}.tgz",
-                ts = _clock.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                ts = _clock.GetUtcNow().ToUtcIso(),
             });
     }
 
@@ -283,14 +283,12 @@ public sealed class NpmUnpublishWireTests : IAsyncLifetime
         var claims = new ClaimResolver(new ClaimRepository(_db), new AirGapMode(config));
         var licenses = new LicenseRepository(_db, _clock, TestNormalizers.License(_db));
         var distTags = new NpmDistTagRepository(_db, _clock);
-        var cache = new RenderedResponseCache<NpmPackumentKey>(
-            new MemoryCache(new MemoryCacheOptions { SizeLimit = 32 * 1024 * 1024 }),
-            MetadataCacheKeys.NpmPackument);
+        var invalidation = TestMetadataInvalidation.Coordinator();
         var uploadLimits = Substitute.For<IUploadLimitResolver>();
         var publish = Substitute.For<Dependably.Infrastructure.Publish.IPackagePublishService>();
 
         return new NpmPublishHandler(
             orgs, packages, tokens, audit, _blobs, publish, claims, licenses, uploadLimits,
-            distTags, cache, TestEdgeMode.DisabledPublishGuard(), config["PROXY_STAGING_PATH"]!);
+            distTags, invalidation, TestEdgeMode.DisabledPublishGuard(), config["PROXY_STAGING_PATH"]!);
     }
 }

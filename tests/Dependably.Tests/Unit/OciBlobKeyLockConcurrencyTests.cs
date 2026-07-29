@@ -122,12 +122,15 @@ public sealed class OciBlobKeyLockConcurrencyTests : IAsyncLifetime
     public async Task BlobFinalize_ConcurrentSameNewBlob_ReservesQuotaOnce()
     {
         // Two concurrent finalizes of the SAME new content-addressed blob (same tenant). Without
-        // the per-key lock both observe "does not exist", both reserve the byte count, and the
-        // quota counter is charged twice for one physically-stored blob. The lock serialises them
-        // so the second finalize sees the blob the first stored and reserves nothing.
-        await _orgs.SetStorageQuotaBytesAsync(_orgA, 10_000_000);
-
+        // the per-key lock both observe "does not exist" and both reserve the byte count, so one
+        // physically-stored blob is charged twice. The lock serialises them, so the second
+        // finalize sees the blob the first stored and reserves nothing.
+        //
+        // The quota is pinned to exactly one blob's worth, which is what gives that its teeth: a
+        // second reservation taken while the first is still in flight would be weighed against
+        // the same ceiling and refused outright.
         byte[] blob = RandomBytes(4096);
+        await _orgs.SetStorageQuotaBytesAsync(_orgA, blob.Length);
         string hex = HexOf(blob);
         string digest = "sha256:" + hex;
         string blobKey = BlobKeys.OciBlob("sha256", hex);
@@ -157,8 +160,7 @@ public sealed class OciBlobKeyLockConcurrencyTests : IAsyncLifetime
         // completed during the bounded wait.
         Assert.False(t2CompletedEarly);
 
-        long counter = await ReadStorageUsedBytes(_orgA);
-        Assert.Equal(blob.Length, counter);
+        Assert.Equal(blob.Length, await _orgs.GetLiveStorageBytesAsync(_orgA));
     }
 
     // ── Finding 2: dangling-row race (push vs refcount-guarded delete) ────────────
@@ -438,9 +440,7 @@ public sealed class OciBlobKeyLockConcurrencyTests : IAsyncLifetime
             Vulns: null!,
             Urls: null!,
             AuditEmitter: null!,
-            Cache: new MemoryCache(new MemoryCacheOptions()),
-            RpmMergedCache: null!,
-            RpmLocalCache: null!,
+            Invalidation: Dependably.Tests.Infrastructure.TestMetadataInvalidation.Coordinator(),
             CacheArtifacts: null!,
             TenantAccess: null!,
             Time: TimeProvider.System);
@@ -449,13 +449,6 @@ public sealed class OciBlobKeyLockConcurrencyTests : IAsyncLifetime
         {
             ControllerContext = new ControllerContext { HttpContext = http },
         };
-    }
-
-    private async Task<long> ReadStorageUsedBytes(string orgId)
-    {
-        await using var conn = await _db.OpenAsync();
-        return await conn.ExecuteScalarAsync<long>(
-            "SELECT COALESCE(storage_used_bytes, 0) FROM org_settings WHERE org_id = @orgId", new { orgId });
     }
 
     private async Task<bool> BlobRowExistsAsync(string orgId, string digest)

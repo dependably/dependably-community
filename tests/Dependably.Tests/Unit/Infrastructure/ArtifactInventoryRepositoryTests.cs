@@ -53,11 +53,7 @@ public sealed class ArtifactInventoryRepositoryTests : IAsyncLifetime
         await SeedEveryPlaneAsync();
 
         var orgs = new OrgRepository(_db);
-        await orgs.TryReserveStorageAsync("o1", delta: 0, quota: null);
-
-        await using var conn = await _db.OpenAsync();
-        long enforced = await conn.ExecuteScalarAsync<long>(
-            "SELECT storage_used_bytes FROM org_settings WHERE org_id = 'o1'");
+        long enforced = await orgs.GetLiveStorageBytesAsync("o1");
         var (items, _) = await orgs.ListOrgsAsync(limit: 10, offset: 0);
         long reported = items.Single(i => i.Id == "o1").StorageBytes;
         long computed = await NewInventory().ComputeStorageBytesAsync("o1");
@@ -228,6 +224,110 @@ public sealed class ArtifactInventoryRepositoryTests : IAsyncLifetime
         var proxied = deduped.Single(v => v.Version == "13.0.3");
         Assert.Equal("proxy", proxied.Origin);
         Assert.Equal("newtonsoft.json.13.0.3.nupkg", proxied.Filename);
+    }
+
+    /// <summary>
+    /// The packages-list version count and the package detail endpoint must report the same number
+    /// of versions for the same package, in every ecosystem. The tile counts
+    /// <c>COUNT(DISTINCT version)</c> across both planes; the detail path returns rows that the
+    /// version table groups by version string. They agree only if the detail path's distinct
+    /// version strings match the tile — which is the invariant a per-file ecosystem could quietly
+    /// break, and which no test pinned before.
+    ///
+    /// The three shapes together are the point: NuGet collapses (its sidecars are not artifacts),
+    /// Maven and multi-file PyPI do NOT collapse (their rows are real files, and dropping them
+    /// would take per-file size, digest, and origin off the page), and all three still agree with
+    /// the tile because agreement is about DISTINCT VERSIONS, not row counts.
+    /// </summary>
+    [Theory]
+    [InlineData("nuget", 1)]
+    [InlineData("maven", 4)]
+    [InlineData("pypi", 2)]
+    public async Task The_packages_tile_count_and_the_detail_rows_agree_on_version_count(
+        string ecosystem, int expectedDetailRows)
+    {
+        const string name = "agreement-probe";
+        const string version = "1.2.3";
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy) " +
+                "VALUES ('p1', 'o1', @ecosystem, @name, @name, 1)",
+                new { ecosystem, name });
+            await SeedProxyFilesAsync(conn, ecosystem, name, version, FilenamesFor(ecosystem, name, version));
+        }
+
+        var (packages, _) = await new PackageRepository(_db, time: _clock).ListPaginatedAsync(
+            new PackageListQuery("o1", Limit: 10, Offset: 0, Ecosystem: ecosystem));
+        int tileCount = packages.Single(p => p.Name == name).VersionCount;
+
+        var detail = ArtifactInventoryRepository.CollapseSidecarProxyRows(
+            ecosystem, await NewInventory().ListServeableVersionsAsync("o1", "p1", ecosystem, name));
+
+        // The tile says one version; the detail path returns rows whose distinct version set is
+        // also exactly one — however many rows that takes.
+        Assert.Equal(1, tileCount);
+        Assert.Equal(tileCount, detail.Select(v => v.Version).Distinct(StringComparer.OrdinalIgnoreCase).Count());
+
+        // And the row count is the deliberate part: sidecars collapse, real files survive.
+        Assert.Equal(expectedDetailRows, detail.Count);
+    }
+
+    /// <summary>
+    /// Maven's four files per version are distinct artifacts, so the detail path must keep all four
+    /// with their own filenames — the per-file size, digest, and origin the version table's
+    /// expanded panel renders. Collapsing them to match the tile's row count would trade a number
+    /// nobody reads for information a user does.
+    /// </summary>
+    [Fact]
+    public async Task A_multi_file_maven_version_keeps_every_file_row_on_the_detail_path()
+    {
+        const string name = "com.acme:widget";
+        const string version = "2.0.0";
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy) " +
+                "VALUES ('p1', 'o1', 'maven', @name, @name, 1)", new { name });
+            await SeedProxyFilesAsync(conn, "maven", name, version, FilenamesFor("maven", name, version));
+        }
+
+        var detail = ArtifactInventoryRepository.CollapseSidecarProxyRows(
+            "maven", await NewInventory().ListServeableVersionsAsync("o1", "p1", "maven", name));
+
+        Assert.Equal(
+            ["widget-2.0.0-javadoc.jar", "widget-2.0.0-sources.jar", "widget-2.0.0.jar", "widget-2.0.0.pom"],
+            detail.Select(v => v.Filename).OrderBy(f => f, StringComparer.Ordinal));
+    }
+
+    // What one proxied version records on the cache plane, per ecosystem: NuGet mirrors the
+    // flatcontainer trio (only the .nupkg is installable), Maven caches the four files a resolve
+    // pulls, multi-file PyPI caches the sdist plus each wheel.
+    private static string[] FilenamesFor(string ecosystem, string name, string version) => ecosystem switch
+    {
+        "nuget" => [$"{name}.{version}.nupkg", $"{name}.nuspec", $"{name}.{version}.nupkg.sha512"],
+        "maven" =>
+        [
+            $"widget-{version}.jar", $"widget-{version}.pom",
+            $"widget-{version}-sources.jar", $"widget-{version}-javadoc.jar",
+        ],
+        _ => [$"{name}-{version}.tar.gz", $"{name}-{version}-py3-none-any.whl"],
+    };
+
+    private static async Task SeedProxyFilesAsync(
+        System.Data.Common.DbConnection conn, string ecosystem, string name, string version, string[] filenames)
+    {
+        foreach (string filename in filenames)
+        {
+            string id = $"ca-{ecosystem}-{filename}";
+            await conn.ExecuteAsync(
+                "INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash) " +
+                "VALUES (@id, @ecosystem, @name, @version, @filename, @blobKey, @id)",
+                new { id, ecosystem, name, version, filename, blobKey = $"proxy/{id}" });
+            await conn.ExecuteAsync(
+                "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES ('o1', @id)",
+                new { id });
+        }
     }
 
     // Seeds the three cache_artifact rows a single proxied NuGet version casts

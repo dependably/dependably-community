@@ -1,4 +1,5 @@
 <script>
+  import { reportPageLoad } from '../lib/pageLoad.js'
   import { onMount } from 'svelte'
   import { t } from 'svelte-i18n'
   import { systemApi } from '../lib/api.js'
@@ -7,6 +8,12 @@
 
   let data = null
   let loading = true
+
+  /** The route transition this page was mounted for, supplied by RouteView. @type {number | null} */
+  export let pageToken = null
+  // Holds the deferred navigation that mounted this page until the data is here, so the
+  // swap shows the loaded page rather than a shimmer that lives for a hundred milliseconds.
+  $: reportPageLoad(pageToken, loading)
   let error = ''
 
   let health = null
@@ -29,6 +36,24 @@
       health = await systemApi.getHealth()
     } catch (e) { healthError = e.message }
     finally { healthLoading = false }
+  }
+
+  // Suspect trust anchors — anchors stored under an (ecosystem, anchorKind) pair with no
+  // material validator, so their key material was never checked. Loaded lazily on first
+  // expand; the health rollup only carries the count.
+  /** @type {any[] | null} */
+  let suspectAnchors = null
+  let suspectAnchorsOpen = false
+  let suspectAnchorsError = ''
+
+  async function toggleSuspectAnchors() {
+    suspectAnchorsOpen = !suspectAnchorsOpen
+    if (!suspectAnchorsOpen || suspectAnchors !== null) return
+    suspectAnchorsError = ''
+    try {
+      const resp = await systemApi.listSuspectTrustAnchors()
+      suspectAnchors = resp?.items ?? []
+    } catch (e) { suspectAnchorsError = e.message }
   }
 
   onMount(() => { load(); loadHealth() })
@@ -188,6 +213,39 @@
             </button>
           </div>
         {/if}
+
+        <!-- Trust anchors stored under a pair that has no material validator -->
+        {#if (health.trustAnchors?.suspectCount ?? 0) > 0}
+          <div class="health-section">
+            <button class="link-button" type="button" on:click={toggleSuspectAnchors}>
+              {health.trustAnchors.suspectCount === 1
+                ? $t('system.dashboard.health.trustAnchors.suspect', { values: { count: health.trustAnchors.suspectCount } })
+                : $t('system.dashboard.health.trustAnchors.suspectPlural', { values: { count: health.trustAnchors.suspectCount } })}
+            </button>
+            {#if suspectAnchorsOpen}
+              {#if suspectAnchorsError}
+                <span class="health-warn-text">{suspectAnchorsError}</span>
+              {:else if suspectAnchors === null}
+                <span class="spinner"></span>
+              {:else}
+                <ul class="suspect-anchor-list">
+                  {#each suspectAnchors as anchor (anchor.id)}
+                    <li>
+                      <code class="job-name">{anchor.orgSlug}</code>
+                      <span class="muted">{anchor.ecosystem} / {anchor.anchorKind}</span>
+                      {#if anchor.keyId || anchor.label}
+                        <span class="muted">{anchor.label || anchor.keyId}</span>
+                      {/if}
+                    </li>
+                  {/each}
+                </ul>
+                <p class="muted suspect-anchor-hint">
+                  {$t('system.dashboard.health.trustAnchors.detail')}
+                </p>
+              {/if}
+            {/if}
+          </div>
+        {/if}
       </div>
     {/if}
   </section>
@@ -337,6 +395,18 @@
   .job-name { background: var(--bg); padding: 1px 5px; border-radius: 3px; font-size: 11px; }
   .job-age { font-size: 11px; }
   .jobs-link { font-size: 11px; }
+
+  /* Suspect trust anchors */
+  .suspect-anchor-list {
+    list-style: none;
+    margin: 4px 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .suspect-anchor-list li { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+  .suspect-anchor-hint { font-size: 11px; margin: 6px 0 0; }
 
   /* Storage */
   .health-warn-text { color: var(--warning); font-size: 13px; }

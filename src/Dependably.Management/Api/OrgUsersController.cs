@@ -1,3 +1,4 @@
+using System.Net.Mail;
 using Dependably.Infrastructure;
 using Dependably.Security;
 using Microsoft.AspNetCore.Authorization;
@@ -167,9 +168,128 @@ public sealed class OrgUsersController : OrgScopedControllerBase
             return _problems.ConflictActionKey("error.member.lastOwnerRemove");
         }
 
-        await _orgs.RemoveOrgMemberAsync(orgId, userId, ct);
+        // login_attempts/account_send_throttle key on the tenant-scoped lockout pseudonym, whose
+        // hash helper lives here in Management; compute it and hand the opaque key to Core.
+        string loginAttemptKey = LoginService.HashLockoutKey("tenant", orgId, target.Email);
+        await _orgs.RemoveOrgMemberAsync(orgId, userId, loginAttemptKey, ct);
         await _audit.LogAsync("member_removed", orgId, GetUserId(),
             detail: System.Text.Json.JsonSerializer.Serialize(new { user_id = userId }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
         return NoContent();
     }
+    /// <summary>
+    /// PATCH /api/v1/users/{userId}/email — requests an email change (GDPR Art. 16 rectification).
+    ///
+    /// Nothing changes here. The endpoint issues a one-shot link and mails it to the address being
+    /// moved TO; the account keeps its current address until that link is redeemed. Possession of
+    /// the new mailbox is what authorizes the move, which is the point: email is the login
+    /// identifier and the destination for password-reset links, so a change that needed only a
+    /// session would let a hijacked session repoint account recovery to an attacker's mailbox.
+    ///
+    /// Two callers are allowed — the subject themselves, who must re-enter their password, and an
+    /// admin holding tenant:configure, who is fixing someone else's record and is audited doing
+    /// it. Self-service reauthentication is the same posture as a password change: a session alone
+    /// is not enough to move the account's identity.
+    ///
+    /// SAML accounts are refused. The IdP is authoritative for those; a local edit would be
+    /// overwritten on next login and the account would silently drift back.
+    /// </summary>
+    [HttpPatch("api/v1/users/{userId}/email")]
+    [ProducesResponseType(StatusCodes.Status202Accepted)]
+    public async Task<IActionResult> RequestEmailChange(
+        string userId,
+        [FromBody] ChangeEmailRequest req,
+        [FromServices] EmailChangeTokenRepository changeTokens,
+        [FromServices] UserService users,
+        [FromServices] Dependably.Infrastructure.Mail.TransactionalEmailService mailer,
+        [FromServices] TimeProvider time,
+        CancellationToken ct)
+    {
+        string orgId = CurrentTenantId();
+        string callerId = GetUserId()!;
+        bool isSelf = string.Equals(callerId, userId, StringComparison.Ordinal);
+
+        // An admin acting on someone else needs tenant:configure; the subject acting on their own
+        // record needs no capability beyond being that subject.
+        if (!isSelf)
+        {
+            var denied = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
+            if (denied is not null)
+            {
+                return denied;
+            }
+        }
+
+        // Same validation the invite path applies: a bare, deliverable mailbox — MailAddress
+        // rejects malformed input and embedded CR/LF (header injection), and comparing the parsed
+        // address back rejects the display-name forms it otherwise accepts.
+        string email = (req.Email ?? string.Empty).Trim();
+        if (!MailAddress.TryCreate(email, out var parsed) || parsed.Address != email)
+        {
+            return _problems.ValidationErrorActionKey("email", "error.invite.emailInvalid");
+        }
+
+        var members = await _orgs.ListOrgMembersAsync(orgId, ct);
+        var target = members.FirstOrDefault(m => m.UserId == userId);
+        if (target is null)
+        {
+            return NotFound();
+        }
+
+        if (string.Equals(target.AccountType, "saml", StringComparison.Ordinal))
+        {
+            return _problems.ConflictActionKey("error.user.emailManagedByIdp");
+        }
+
+        // Self-service requires re-entering the current password. An admin does not supply the
+        // subject's password (they do not have it) — their authority is the capability, and the
+        // audit row below is what makes the action accountable.
+        if (isSelf)
+        {
+            if (string.IsNullOrEmpty(req.CurrentPassword)
+                || !await users.VerifyCurrentPasswordAsync(userId, req.CurrentPassword, ct))
+            {
+                return _problems.ValidationErrorActionKey("currentPassword", "error.user.reauthRequired");
+            }
+        }
+
+        // A no-op request still consumes a link and mails the same address; refuse it rather than
+        // send a confirmation for a change that would not change anything.
+        if (string.Equals(target.Email, email, StringComparison.OrdinalIgnoreCase))
+        {
+            return _problems.ConflictActionKey("error.user.emailUnchanged");
+        }
+
+        // Best-effort pre-check. UNIQUE (tenant_id, email) is the real arbiter at redemption time,
+        // because the address can be claimed in the hours between request and confirmation — this
+        // just avoids mailing a link that is already doomed. Deliberately reported the same way
+        // whether the address is free or taken by another member would be a membership oracle, so
+        // it is NOT: an admin-visible conflict here is acceptable, the caller already has the
+        // roster via GET /api/v1/users.
+        if (members.Any(m => string.Equals(m.Email, email, StringComparison.OrdinalIgnoreCase)))
+        {
+            return _problems.ConflictActionKey("error.user.emailTaken");
+        }
+
+        string raw = await changeTokens.IssueAsync(userId, orgId, email, ct);
+        var expiresAt = changeTokens.ExpiryFor(time.GetUtcNow());
+        mailer.EnqueueEmailChangeVerification(email, _urls.Absolute(HttpContext, $"/confirm-email?token={raw}"), expiresAt);
+
+        // The NEW address is recorded in the audit detail deliberately: this is an account-identity
+        // change, and a record that cannot say what the account was moved to cannot answer the
+        // question it exists for. The OLD address is already on the users row.
+        await _audit.LogAsync("user.email_change_requested", orgId, callerId,
+            detail: System.Text.Json.JsonSerializer.Serialize(new
+            {
+                user_id = userId,
+                new_email = email,
+                self_service = isSelf,
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+
+        return Accepted();
+    }
 }
+
+/// <summary>Body of PATCH /api/v1/users/{userId}/email. CurrentPassword is required for a
+/// self-service request and ignored for an admin acting on another member.</summary>
+public sealed record ChangeEmailRequest(string? Email, string? CurrentPassword);

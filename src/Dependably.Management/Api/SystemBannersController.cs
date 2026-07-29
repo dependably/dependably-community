@@ -45,11 +45,15 @@ public sealed class SystemBannersController : ControllerBase
     [HttpPost("banners")]
     public async Task<IActionResult> Create([FromBody] BannerCreateRequest req, CancellationToken ct)
     {
-        var validationResult = ValidateRequest(req.Severity, req.Body, req.LinkUrl, req.LinkLabel, req.TargetRole, req.StartsAt, req.EndsAt);
+        var validationResult = ValidateRequest(
+            req.Severity, req.Body, req.LinkUrl, req.LinkLabel, req.TargetRole, req.StartsAt, req.EndsAt,
+            out string startsAtUtc, out string endsAtUtc);
         if (validationResult is not null)
         {
             return validationResult;
         }
+
+        req = req with { StartsAt = startsAtUtc, EndsAt = endsAtUtc };
 
         int activeCount = await _banners.CountActiveForScopeAsync("system", null, ct);
         if (activeCount >= BannerRepository.MaxActiveBannersPerScope)
@@ -73,11 +77,15 @@ public sealed class SystemBannersController : ControllerBase
     [HttpPut("banners/{id}")]
     public async Task<IActionResult> Update(string id, [FromBody] BannerUpdateRequest req, CancellationToken ct)
     {
-        var validationResult = ValidateRequest(req.Severity, req.Body, req.LinkUrl, req.LinkLabel, req.TargetRole, req.StartsAt, req.EndsAt);
+        var validationResult = ValidateRequest(
+            req.Severity, req.Body, req.LinkUrl, req.LinkLabel, req.TargetRole, req.StartsAt, req.EndsAt,
+            out string startsAtUtc, out string endsAtUtc);
         if (validationResult is not null)
         {
             return validationResult;
         }
+
+        req = req with { StartsAt = startsAtUtc, EndsAt = endsAtUtc };
 
         bool updated = await _banners.UpdateSystemAsync(id, req, ct);
         if (!updated)
@@ -113,14 +121,21 @@ public sealed class SystemBannersController : ControllerBase
         return NoContent();
     }
 
-    // Shared validation for create and update requests.
+    // Shared validation for create and update requests. The scheduling window comes back
+    // normalized to canonical UTC so the caller persists that rather than the caller-supplied
+    // text: banners are selected by a lexicographic `starts_at <= @now` comparison against a
+    // UTC `Z` string, which a stored `+02:00` (or offset-less) value does not order against.
     private IActionResult? ValidateRequest(
         string severity, string body, string? linkUrl, string? linkLabel,
-        string targetRole, string startsAt, string endsAt)
+        string targetRole, string startsAt, string endsAt,
+        out string normalizedStartsAt, out string normalizedEndsAt)
     {
+        normalizedStartsAt = string.Empty;
+        normalizedEndsAt = string.Empty;
+
         return ValidateBody(body)
             ?? ValidateLink(linkUrl, linkLabel)
-            ?? ValidateWindow(startsAt, endsAt)
+            ?? ValidateWindow(startsAt, endsAt, out normalizedStartsAt, out normalizedEndsAt)
             ?? ValidateSeverityAndRole(severity, targetRole);
     }
 
@@ -154,13 +169,18 @@ public sealed class SystemBannersController : ControllerBase
             : null;
     }
 
-    private IActionResult? ValidateWindow(string startsAt, string endsAt)
+    private IActionResult? ValidateWindow(
+        string startsAt, string endsAt, out string normalizedStartsAt, out string normalizedEndsAt)
     {
-        return !DateTimeOffset.TryParse(startsAt, null, System.Globalization.DateTimeStyles.RoundtripKind, out var parsedStart)
+        normalizedEndsAt = string.Empty;
+
+        return !UtcTimestamp.TryNormalize(startsAt, out normalizedStartsAt)
             ? _problems.ValidationErrorActionKey("startsAt", "error.banner.startsAtInvalid")
-            : !DateTimeOffset.TryParse(endsAt, null, System.Globalization.DateTimeStyles.RoundtripKind, out var parsedEnd)
+            : !UtcTimestamp.TryNormalize(endsAt, out normalizedEndsAt)
             ? _problems.ValidationErrorActionKey("endsAt", "error.banner.endsAtInvalid")
-            : parsedEnd <= parsedStart
+            // Compared as normalized UTC strings, so two instants written with different
+            // offsets still order by the instant they denote rather than by wall-clock text.
+            : string.CompareOrdinal(normalizedEndsAt, normalizedStartsAt) <= 0
             ? _problems.ValidationErrorActionKey("endsAt", "error.banner.endsAfterStarts")
             : null;
     }

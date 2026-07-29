@@ -76,6 +76,39 @@ public sealed class SamlCertExpiryCheckServiceResilienceTests
             time);
     }
 
+    // The sweep-lock name and TTL RunCheckPassInnerAsync acquires with, mirrored here because the
+    // service keeps them private.
+    private const string SweepLockName = "saml-cert-expiry:sweep";
+    private static readonly TimeSpan SweepLockTtl = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// A sweep across many tenants with slow cert parsing can outrun the sweep-lock TTL. While it
+    /// runs, the lock must be renewed so a second replica cannot acquire it and emit duplicate
+    /// expiry alerts — the lock is acquired once per pass, so without renewal it lapses under the
+    /// running sweep. The probe fires on the pass's own first connection open, which is inside the
+    /// lease window.
+    /// </summary>
+    [Fact]
+    public async Task RunCheckPassAsync_SweepOutrunsLockTtl_LeaseRenewed_SecondReplicaRefused()
+    {
+        var time = TestTime.Frozen();
+        await using var store = new TestMetadataStore();
+        await new SchemaInitializer(store).InitializeAsync();
+
+        var locks = new LeasedTestLock(time);
+        var slowStore = new LeaseProbeStore(
+            store, time, locks, SweepLockName, SweepLockTtl, probeOnOpen: 1);
+        var service = BuildService(slowStore, time, locks);
+
+        await service.RunCheckPassAsync(CancellationToken.None);
+
+        Assert.True(locks.ExtendSuccesses >= 4,
+            $"expected the sweep to renew its lease while running; got {locks.ExtendSuccesses} renewal(s)");
+        Assert.True(slowStore.SecondAcquirerRefusedMidPass,
+            "a second replica must not be able to acquire the sweep lock while the sweep is still running");
+        Assert.False(locks.IsHeld(SweepLockName), "the lease must release the lock when the sweep finishes");
+    }
+
     [Fact]
     public async Task RunCheckPassAsync_DbError_Propagates()
     {

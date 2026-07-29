@@ -165,6 +165,8 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
         // now-ok: mints a JWT the host validates against its real clock.
         var now = DateTime.UtcNow;
         var token = new JwtSecurityToken(
+            issuer: Dependably.Security.JwtTokenBinding.Issuer,
+            audience: Dependably.Security.JwtTokenBinding.SessionAudience,
             claims: new[]
             {
                 new Claim(JwtRegisteredClaimNames.Sub, sysId),
@@ -196,6 +198,8 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
         // now-ok: mints a JWT the host validates against its real clock.
         var now = DateTime.UtcNow;
         var token = new JwtSecurityToken(
+            issuer: Dependably.Security.JwtTokenBinding.Issuer,
+            audience: Dependably.Security.JwtTokenBinding.SessionAudience,
             claims: new[]
             {
                 new Claim(JwtRegisteredClaimNames.Sub, adminId),
@@ -225,6 +229,8 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
         // now-ok: mints a JWT the host validates against its real clock.
         var now = DateTime.UtcNow;
         var token = new JwtSecurityToken(
+            issuer: Dependably.Security.JwtTokenBinding.Issuer,
+            audience: Dependably.Security.JwtTokenBinding.SessionAudience,
             claims: new[]
             {
                 new Claim(JwtRegisteredClaimNames.Sub, userId),

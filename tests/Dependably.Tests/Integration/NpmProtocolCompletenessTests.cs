@@ -180,6 +180,24 @@ public sealed class NpmProtocolCompletenessTests : IClassFixture<DependablyFacto
     }
 
     [Fact]
+    public async Task PutDistTag_YankedVersion_Returns422()
+    {
+        // #437 item 8: a publish:npm token must not be able to move a dist-tag onto a yanked
+        // version — that would steer `npm install` at an artifact the download path 403s.
+        string pkg = $"dt-yank-{Guid.NewGuid():N}"[..24].ToLowerInvariant();
+        await _factory.PushNpmPackage(pkg, "1.0.0");
+        await _factory.SetVersionYanked("default", "npm", pkg, "1.0.0", "compromised");
+
+        string token = await _factory.CreateToken("push");
+        using var client = _factory.CreateClientWithBearer(token);
+
+        using var content = new StringContent("\"1.0.0\"", Encoding.UTF8, "application/json");
+        var resp = await client.PutAsync($"/npm/-/package/{pkg}/dist-tags/latest", content);
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
+    }
+
+    [Fact]
     public async Task PutDistTag_VersionDoesNotExist_Returns404()
     {
         string pkg = $"dt-put404-{Guid.NewGuid():N}"[..24].ToLowerInvariant();

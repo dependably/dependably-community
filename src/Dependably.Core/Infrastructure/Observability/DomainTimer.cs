@@ -30,6 +30,9 @@ public sealed class DomainTimer : IDisposable
         _histogram = histogram;
         _labels = labels;
         Activity = activity;
+        // now-ok: measures real elapsed time for a duration log/metric only — no control
+        // flow branches on the value, so a substitutable clock would change the reported
+        // number without changing what the code does.
         _stopwatch = Stopwatch.StartNew();
     }
 

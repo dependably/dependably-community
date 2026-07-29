@@ -45,10 +45,40 @@ public sealed class UpstreamUrlValidator : IUpstreamUrlValidator
             return "Only http:// and https:// schemes are accepted.";
         }
 
+        // Reject embedded credentials (user:pass@host). Unlike the first-class secret column, a
+        // userinfo component is stored plaintext in upstream_registry.url, concatenated into every
+        // fetch URL, persisted onto cache_artifact/package_versions.upstream_url, and echoed back to
+        // any read:packages caller through the per-version projection — leaking the credential to a
+        // member-level user. Operators must use the authType/username/secret fields instead.
+        if (!string.IsNullOrEmpty(uri.UserInfo))
+        {
+            return "Upstream URL must not embed credentials (user:pass@host). Use the auth type, username, and secret fields instead.";
+        }
+
         // Static host check (IP addresses only — hostnames checked at request time)
         return IPAddress.TryParse(uri.Host, out var ip) && SsrfGuard.IsBlockedIp(ip)
             ? $"Upstream URL resolves to a blocked IP range: {ip}"
             : null;
+    }
+
+    /// <summary>
+    /// Removes any embedded <c>user:pass@</c> userinfo from a URL so a credential accidentally
+    /// stored on a legacy row (before save-time rejection existed) is never echoed back to a
+    /// read:packages caller through the per-version projection. Returns the input unchanged when
+    /// it has no userinfo or cannot be parsed as an absolute URL.
+    /// </summary>
+    public static string? StripCredentials(string? url)
+    {
+        if (string.IsNullOrEmpty(url)
+            || !Uri.TryCreate(url, UriKind.Absolute, out var uri)
+            || string.IsNullOrEmpty(uri.UserInfo))
+        {
+            return url;
+        }
+
+        var builder = new UriBuilder(uri) { UserName = string.Empty, Password = string.Empty };
+        return builder.Uri.GetComponents(
+            UriComponents.AbsoluteUri & ~UriComponents.UserInfo, UriFormat.UriEscaped);
     }
 
     /// <summary>

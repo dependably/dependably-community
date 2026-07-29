@@ -454,6 +454,222 @@ public sealed class NuGetRegistrationMergeTests
         Assert.DoesNotContain("api.nuget.org", goodPc);
     }
 
+    // ── Externalized upstream pages ──────────────────────────────────────────
+
+    // What api.nuget.org returns for a package past its page-size threshold: the page object
+    // carries an @id pointing at a separate document and omits `items` entirely.
+    private static string UpstreamWithExternalizedPage(string id, string pageUrl) =>
+        new JsonObject
+        {
+            ["@id"] = $"https://api.nuget.org/v3/registration5-semver1/{id}/index.json",
+            ["@type"] = new JsonArray("catalog:CatalogRoot", "PackageRegistration"),
+            ["count"] = 1,
+            ["items"] = new JsonArray(new JsonObject
+            {
+                ["@id"] = pageUrl,
+                ["@type"] = "catalog:CatalogPage",
+                ["count"] = 2,
+                ["lower"] = "1.0.0",
+                ["upper"] = "2.0.0",
+            }),
+        }.ToJsonString();
+
+    // The document that @id points at: the same page shape, this time with its leaves.
+    private static string ExternalPageDocument(string id, string pageUrl, params string[] versions)
+    {
+        var entries = new JsonArray();
+        foreach (string v in versions)
+        {
+            entries.Add(new JsonObject
+            {
+                ["@id"] = $"https://api.nuget.org/v3/registration5-semver1/{id}/{v}.json",
+                ["@type"] = "Package",
+                ["packageContent"] = $"https://api.nuget.org/v3-flatcontainer/{id}/{v}/{id}.{v}.nupkg",
+                ["catalogEntry"] = new JsonObject
+                {
+                    ["id"] = id,
+                    ["version"] = v,
+                    ["listed"] = true,
+                    ["packageContent"] = $"https://api.nuget.org/v3-flatcontainer/{id}/{v}/{id}.{v}.nupkg",
+                },
+            });
+        }
+        return new JsonObject
+        {
+            ["@id"] = pageUrl,
+            ["@type"] = "catalog:CatalogPage",
+            ["count"] = versions.Length,
+            ["items"] = entries,
+            ["lower"] = versions[0],
+            ["upper"] = versions[^1],
+        }.ToJsonString();
+    }
+
+    private static Func<string, CancellationToken, Task<string?>> ServePage(string url, string document) =>
+        (requested, _) => Task.FromResult<string?>(requested == url ? document : null);
+
+    /// <summary>
+    /// The bug: an externalized page contributes nothing to the upstream version set, so every
+    /// proxy-cached version of that package is misread as local-only and re-spliced as a duplicate
+    /// local page. Inlining the page first is what makes the dedupe see those versions.
+    ///
+    /// Mixed by construction: one cached version that exists upstream must be deduped away while a
+    /// genuinely local-only version in the same batch is still spliced — so the rule cannot be
+    /// satisfied by simply never splicing.
+    /// </summary>
+    [Fact]
+    public async Task ExternalizedPage_CachedVersionThatExistsUpstream_IsNotRespliced()
+    {
+        const string pageUrl = "https://api.nuget.org/v3/registration5-semver1/foo/page/1.0.0/2.0.0.json";
+        string index = UpstreamWithExternalizedPage("foo", pageUrl);
+
+        // The behaviour without inlining, asserted rather than described: the externalized page
+        // contributes no versions, so BOTH cached versions are misread as local-only and 2.0.0 is
+        // re-emitted as a duplicate of a version the same document already advertises upstream.
+        using (var unInlined = JsonDocument.Parse(NuGetRegistrationHelpers.MergeLocalIntoUpstreamRegistration(
+            index, [Ver("2.0.0"), Ver("9.9.9")], Pkg("Foo"), "foo", "https://proxy.example/nuget")))
+        {
+            var splicedWithoutInlining = unInlined.RootElement.GetProperty("items")[1]
+                .GetProperty("items").EnumerateArray()
+                .Select(l => l.GetProperty("catalogEntry").GetProperty("version").GetString())
+                .ToList();
+            Assert.Equal(["2.0.0", "9.9.9"], splicedWithoutInlining);
+        }
+
+        string inlined = await NuGetRegistrationHelpers.InlineExternalizedPagesAsync(
+            index, ServePage(pageUrl, ExternalPageDocument("foo", pageUrl, "1.0.0", "2.0.0")),
+            maxPages: 32, CancellationToken.None);
+
+        string merged = NuGetRegistrationHelpers.MergeLocalIntoUpstreamRegistration(
+            inlined, [Ver("2.0.0"), Ver("9.9.9")], Pkg("Foo"), "foo", "https://proxy.example/nuget");
+
+        using var doc = JsonDocument.Parse(merged);
+        var pages = doc.RootElement.GetProperty("items").EnumerateArray().ToList();
+
+        // The upstream page is now inline (2 leaves), and exactly one local page was appended.
+        Assert.Equal(2, pages.Count);
+        Assert.Equal(2, pages[0].GetProperty("items").GetArrayLength());
+
+        var localVersions = pages[1].GetProperty("items").EnumerateArray()
+            .Select(l => l.GetProperty("catalogEntry").GetProperty("version").GetString())
+            .ToList();
+        // 2.0.0 exists upstream and must NOT be re-emitted; 9.9.9 is genuinely local-only.
+        Assert.Equal(["9.9.9"], localVersions);
+    }
+
+    /// <summary>
+    /// The proxy-bypass half. An externalized page's leaves keep api.nuget.org URLs because the
+    /// rewrite, like the dedupe, walks page items that were not there. After inlining, no @id or
+    /// packageContent anywhere in the document may point at the upstream host — including the
+    /// page's own @id, which is inline now and dereferenced by nobody.
+    /// </summary>
+    [Fact]
+    public async Task ExternalizedPage_AfterInlining_NoUrlPointsAtTheUpstreamHost()
+    {
+        const string pageUrl = "https://api.nuget.org/v3/registration5-semver1/foo/page/1.0.0/2.0.0.json";
+
+        string inlined = await NuGetRegistrationHelpers.InlineExternalizedPagesAsync(
+            UpstreamWithExternalizedPage("foo", pageUrl),
+            ServePage(pageUrl, ExternalPageDocument("foo", pageUrl, "1.0.0", "2.0.0")),
+            maxPages: 32, CancellationToken.None);
+
+        string merged = NuGetRegistrationHelpers.MergeLocalIntoUpstreamRegistration(
+            inlined, [Ver("9.9.9")], Pkg("Foo"), "foo", "https://proxy.example/nuget");
+
+        // The index root @id is upstream-supplied and informational; every url the client would
+        // dereference to download or resolve must be local.
+        using var doc = JsonDocument.Parse(merged);
+        foreach (var page in doc.RootElement.GetProperty("items").EnumerateArray())
+        {
+            Assert.DoesNotContain("api.nuget.org", page.GetProperty("@id").GetString());
+            foreach (var leaf in page.GetProperty("items").EnumerateArray())
+            {
+                Assert.DoesNotContain("api.nuget.org", leaf.GetProperty("@id").GetString());
+                Assert.DoesNotContain("api.nuget.org", leaf.GetProperty("packageContent").GetString());
+                Assert.DoesNotContain("api.nuget.org",
+                    leaf.GetProperty("catalogEntry").GetProperty("packageContent").GetString());
+            }
+        }
+    }
+
+    /// <summary>
+    /// A page that cannot be fetched is left exactly as it was — externalized, with its upstream
+    /// @id intact. Rewriting that @id to a local route this instance cannot serve would turn a
+    /// degraded dedupe into an unresolvable document, and dropping the page would hide versions.
+    /// </summary>
+    [Fact]
+    public async Task ExternalizedPage_ThatCannotBeFetched_IsLeftDereferenceable()
+    {
+        const string pageUrl = "https://api.nuget.org/v3/registration5-semver1/foo/page/1.0.0/2.0.0.json";
+
+        string inlined = await NuGetRegistrationHelpers.InlineExternalizedPagesAsync(
+            UpstreamWithExternalizedPage("foo", pageUrl),
+            (_, _) => Task.FromResult<string?>(null),
+            maxPages: 32, CancellationToken.None);
+
+        string merged = NuGetRegistrationHelpers.MergeLocalIntoUpstreamRegistration(
+            inlined, [Ver("2.0.0")], Pkg("Foo"), "foo", "https://proxy.example/nuget");
+
+        using var doc = JsonDocument.Parse(merged);
+        var upstreamPage = doc.RootElement.GetProperty("items")[0];
+        Assert.Equal(pageUrl, upstreamPage.GetProperty("@id").GetString());
+        Assert.False(upstreamPage.TryGetProperty("items", out _));
+    }
+
+    /// <summary>
+    /// A response that is not a page document (no items) must not replace the page object — a
+    /// malformed or hostile upstream should degrade to the un-inlined page, not to a page whose
+    /// leaves vanished.
+    /// </summary>
+    [Fact]
+    public async Task ExternalizedPage_FetchReturningANonPage_LeavesThePageAlone()
+    {
+        const string pageUrl = "https://api.nuget.org/v3/registration5-semver1/foo/page/1.0.0/2.0.0.json";
+        string index = UpstreamWithExternalizedPage("foo", pageUrl);
+
+        string inlined = await NuGetRegistrationHelpers.InlineExternalizedPagesAsync(
+            index, ServePage(pageUrl, """{"@id":"whatever","count":0}"""),
+            maxPages: 32, CancellationToken.None);
+
+        Assert.Equal(index, inlined);
+    }
+
+    /// <summary>
+    /// maxPages bounds the upstream fan-out one registration request can trigger, so a hostile
+    /// index listing pages without end cannot turn one client request into unbounded outbound
+    /// traffic. Pages past the cap keep their upstream @id and stay dereferenceable.
+    /// </summary>
+    [Fact]
+    public async Task ExternalizedPages_BeyondTheCap_AreLeftExternalized()
+    {
+        var pageArray = new JsonArray();
+        for (int i = 0; i < 5; i++)
+        {
+            pageArray.Add(new JsonObject
+            {
+                ["@id"] = $"https://api.nuget.org/v3/registration5-semver1/foo/page/{i}.json",
+                ["@type"] = "catalog:CatalogPage",
+            });
+        }
+        string index = new JsonObject { ["count"] = 5, ["items"] = pageArray }.ToJsonString();
+
+        int fetches = 0;
+        string inlined = await NuGetRegistrationHelpers.InlineExternalizedPagesAsync(
+            index,
+            (url, _) =>
+            {
+                fetches++;
+                return Task.FromResult<string?>(ExternalPageDocument("foo", url, "1.0.0"));
+            },
+            maxPages: 2, CancellationToken.None);
+
+        Assert.Equal(2, fetches);
+        using var doc = JsonDocument.Parse(inlined);
+        var pages = doc.RootElement.GetProperty("items").EnumerateArray().ToList();
+        Assert.Equal(2, pages.Count(p => p.TryGetProperty("items", out _)));
+        Assert.Equal(3, pages.Count(p => !p.TryGetProperty("items", out _)));
+    }
+
     [Fact]
     public void HostedRegistration_NoUpstream_UrlsAlwaysLocal()
     {

@@ -291,6 +291,58 @@ public sealed partial class OciController : OrgScopedControllerBase
         return (token, null);
     }
 
+    /// <summary>
+    /// The OCI plane's license block-gate arm, shared by the manifest and blob read paths.
+    /// Returns a 403 result when the tenant enforces licenses in 'block' mode and the SPDX
+    /// expression captured on this <c>oci_blobs</c> row fails the policy; returns <c>null</c>
+    /// (serve) otherwise — including whenever the row carries no captured expression, which is
+    /// every layer and config blob.
+    ///
+    /// <para>
+    /// Both read paths run it because both can return the same bytes: a manifest is reachable at
+    /// <c>/v2/{name}/manifests/{ref}</c> and, by its digest, at <c>/v2/{name}/blobs/{digest}</c>.
+    /// Gating only the first would leave the second as an ungated route to a blocked image's
+    /// manifest, and would leave the presigned-redirect path issuing a URL for content the
+    /// streaming path refuses.
+    /// </para>
+    /// </summary>
+    private async Task<IActionResult?> EvaluateLicenseBlockAsync(
+        string orgId, string purl, string? licenseSpdx, TokenRecord? token, CancellationToken ct)
+    {
+        if (licenseSpdx is null)
+        {
+            return null;
+        }
+
+        var settings = await _svc.Orgs.GetSettingsAsync(orgId, ct);
+        if (settings?.LicenseEnforcementMode != "block")
+        {
+            return null;
+        }
+
+        // gate-request-ok: not a download block-gate request. EvaluateLicenseExpressionAsync
+        // reads only the licence policy and the expression handed to it, so the remaining
+        // arms have nothing to act on; a factory here would thread a dozen fields into a
+        // call that reads one.
+        var gate = new BlockGateRequest(
+            OrgId: orgId,
+            Ecosystem: "oci",
+            Purl: purl,
+            VersionId: "",
+            ManualState: null,
+            VulnCheckedAt: null,
+            UserId: token?.UserId,
+            MaxOsvScoreTolerance: settings.MaxOsvScoreTolerance,
+            SourceIp: HttpContext.GetNormalizedRemoteIp(),
+            ActorKind: token?.ActorKind,
+            LicenseEnforcementMode: settings.LicenseEnforcementMode);
+
+        return await _svc.BlockGate.EvaluateLicenseExpressionAsync(gate, [licenseSpdx], ct) == BlockDecision.Blocked
+            ? OciError(StatusCodes.Status403Forbidden, OciErrorCode.DENIED,
+                "Image license is blocked by the organization's license policy.")
+            : null;
+    }
+
     private async Task<string?> ResolveDigestAsync(string orgId, OciCoordinates coords, CancellationToken ct)
     {
         if (coords.IsDigest)
@@ -317,6 +369,45 @@ public sealed partial class OciController : OrgScopedControllerBase
     /// key, and the content metadata stamped on the response.
     /// </summary>
     private sealed record ResolvedLocalBlob(IBlobStore Tier, string BlobKey, long SizeBytes, string? MediaType);
+
+    /// <summary>
+    /// True when <paramref name="ex"/> is the upstream registry failing at the transport layer —
+    /// DNS, connect, TLS, or a read timeout — rather than a fault in this registry.
+    ///
+    /// <para>
+    /// A caller-cancelled request is deliberately excluded: when <paramref name="ct"/> is already
+    /// cancelled the client hung up, and there is nobody to send a status to. Swallowing that as an
+    /// upstream failure would report a client disconnect as an upstream outage in the logs and the
+    /// metrics, which is the sort of noise that makes a real outage harder to see.
+    /// </para>
+    /// </summary>
+    private static bool IsUpstreamTransportFailure(Exception ex, CancellationToken ct) =>
+        !ct.IsCancellationRequested
+        && ex is HttpRequestException
+            or System.Net.Sockets.SocketException
+            or System.Security.Authentication.AuthenticationException
+            or TaskCanceledException;   // HttpClient surfaces its own timeout as this
+
+    /// <summary>
+    /// The answer when a configured upstream could not be reached: 502, not 500.
+    ///
+    /// <para>
+    /// The distinction matters to the caller. 500 says "this registry is broken" — a client cannot
+    /// tell whether retrying helps, and an operator starts looking in the wrong place. 502 says the
+    /// gateway's upstream failed, which is exactly what happened and is worth retrying. The
+    /// exception is logged with the repository and reference so the next occurrence is diagnosable
+    /// from the log alone rather than from a status code with no context.
+    /// </para>
+    /// </summary>
+    private ObjectResult UpstreamUnreachable(Exception ex, string name, string reference)
+    {
+        _logger.LogWarning(ex,
+            "OCI upstream unreachable while resolving {Repository}/{Reference}: {ExceptionType}",
+            name, reference, ex.GetType().Name);
+
+        return OciError(StatusCodes.Status502BadGateway, OciErrorCode.UNAVAILABLE,
+            $"Upstream registry unreachable while resolving {reference}.");
+    }
 
     private static ObjectResult OciError(int statusCode, OciErrorCode code, string message)
     {
@@ -406,4 +497,6 @@ public sealed record OciControllerServices(
     BlockGateService BlockGate,
     Dependably.Infrastructure.Edge.EdgePublishGuard EdgeGuard,
     PackageRepository Packages,
-    TenantArtifactAccessRepository TenantArtifactAccess);
+    TenantArtifactAccessRepository TenantArtifactAccess,
+    Dependably.Security.NameBindingGate? NameBinding = null,
+    BlobPresignService? Presign = null);

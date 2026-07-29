@@ -99,28 +99,6 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
         }
     }
 
-    /// <summary>
-    /// Drives a queue's retry backoff deterministically: advances <paramref name="clock"/> by
-    /// <paramref name="step"/> and yields briefly so the background delivery loop observes each
-    /// fired timer, repeating until <paramref name="condition"/> is met. The tiny real-time yield
-    /// only gives the scheduler a turn — it does not wait out the backoff itself, which is driven
-    /// entirely by the advancing fake clock.
-    /// </summary>
-    private static async Task PumpUntilAsync(
-        FakeTimeProvider clock, Func<Task<bool>> condition, TimeSpan step, int maxIterations = 200)
-    {
-        for (int i = 0; i < maxIterations && !await condition(); i++)
-        {
-            clock.Advance(step);
-            await Task.Delay(5);
-        }
-
-        if (!await condition())
-        {
-            throw new TimeoutException("Condition never satisfied while pumping the fake clock.");
-        }
-    }
-
     // ── HMAC signing ──────────────────────────────────────────────────────────
 
     [Fact]
@@ -427,7 +405,7 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
             Secret: null, Description: null));
 
         // Manually set failing_since to 49 hours ago so the window is already exceeded
-        string staleFailingSince = Clock.GetUtcNow().AddHours(-49).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string staleFailingSince = Clock.GetUtcNow().AddHours(-49).ToUtcIso();
         await using var conn = await _db.OpenAsync();
         await conn.ExecuteAsync(
             "UPDATE webhook_subscription SET failing_since = @s WHERE id = @id",
@@ -568,7 +546,7 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
         // retries cost virtual time, not real time — and wait on the DURABLE end state (the
         // persisted subscription rows) rather than the in-memory counters, so the assertion does
         // not depend on the queue's internal increment ordering.
-        await PumpUntilAsync(webhookClock, async () =>
+        await ClockPump.UntilAsync(webhookClock, async () =>
         {
             var good = await repo.GetAsync("org1", subGood.Id);
             var bad = await repo.GetAsync("org1", subBad.Id);
@@ -756,7 +734,7 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
             ConsecutiveFailures: WebhookDispatchQueue.AutoDisableAfterFailures - 1, FailingSince: null);
 
         var deliverTask = queue.DeliverToSubscriptionAsync(SampleEnvelope(), delivery, cts.Token);
-        await PumpUntilAsync(webhookClock, () => Task.FromResult(cts.IsCancellationRequested), TimeSpan.FromSeconds(1));
+        await ClockPump.UntilAsync(webhookClock, () => Task.FromResult(cts.IsCancellationRequested), TimeSpan.FromSeconds(1));
         await deliverTask;
 
         Assert.True(cts.IsCancellationRequested);
@@ -891,7 +869,7 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
 
         // The failing subscription burns through the 1s/5s/30s backoff inside the drain itself;
         // pump the fake clock so that finishes in virtual time instead of real time.
-        await PumpUntilAsync(webhookClock, async () =>
+        await ClockPump.UntilAsync(webhookClock, async () =>
         {
             var good = await repo.GetAsync("org1", subGood.Id);
             var bad = await repo.GetAsync("org1", subBad.Id);

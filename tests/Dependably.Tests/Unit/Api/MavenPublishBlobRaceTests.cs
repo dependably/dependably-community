@@ -229,6 +229,9 @@ public sealed class MavenPublishBlobRaceTests : IAsyncLifetime
             ],
             authenticationType: "test"));
 
+        var metadataCache = new Dependably.Infrastructure.Caching.RenderedResponseCache<Dependably.Infrastructure.Caching.MavenMetadataKey>(
+            new MemoryCache(new MemoryCacheOptions { SizeLimit = 8 * 1024 * 1024 }),
+            Dependably.Infrastructure.Caching.MetadataCacheKeys.MavenMetadata);
         var svc = new MavenControllerServices(
             Packages: new PackageRepository(_db),
             Tokens: _tokens,
@@ -244,9 +247,8 @@ public sealed class MavenPublishBlobRaceTests : IAsyncLifetime
                 _db, new MemoryCache(new MemoryCacheOptions()), _clock),
             Registries: new UpstreamRegistryResolver(
                 new UpstreamRegistryRepository(_db, _clock, TestEnvelope.Unconfigured())),
-            MetadataCache: new Dependably.Infrastructure.Caching.RenderedResponseCache<Dependably.Infrastructure.Caching.MavenMetadataKey>(
-                new MemoryCache(new MemoryCacheOptions { SizeLimit = 8 * 1024 * 1024 }),
-                Dependably.Infrastructure.Caching.MetadataCacheKeys.MavenMetadata),
+            MetadataCache: metadataCache,
+            Invalidation: Dependably.Tests.Infrastructure.TestMetadataInvalidation.ForMaven(metadataCache),
             CacheOptions: new RenderedMetadataCacheOptions(TimeSpan.FromMinutes(10), TimeSpan.FromMinutes(5)),
             Log: NullLogger<MavenController>.Instance,
             CacheArtifacts: new CacheArtifactRepository(_db),

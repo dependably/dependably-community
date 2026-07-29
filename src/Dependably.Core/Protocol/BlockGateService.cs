@@ -31,7 +31,10 @@ namespace Dependably.Protocol;
 ///      'block'. Runs ahead of the score gate because MAL advisories usually carry no CVSS
 ///      score and the score comparison would otherwise never see them.
 ///   5b. Provenance/signature gate — blocks versions whose <c>ProvenanceStatus</c> is
-///      <c>Failed</c>/<c>Unsigned</c> when the tenant's <c>VerifyProvenanceMode</c> is 'block'.
+///      <c>Failed</c>/<c>Unsigned</c> when the tenant's <c>VerifyProvenanceMode</c> is 'block',
+///      and blocks every version of that ecosystem when 'block' is set with no trust anchor
+///      configured (enforcement that cannot be satisfied denies rather than degrading to
+///      allow-all — see <see cref="IsProvenanceEnforcementUnbackedAsync"/>).
 ///      Just below malicious (a known-malicious advisory is a stronger reason to deny than a
 ///      missing signature); independent of scan state.
 ///   6. KEV gate — blocks versions whose advisories alias a CISA-KEV-listed CVE
@@ -63,6 +66,7 @@ public sealed class BlockGateService
     private readonly AlertService _alerts;
     private readonly InstallScriptAllowlistService _installScriptAllowlist;
     private readonly LicenseRepository _licenses;
+    private readonly IPerOrgTrustAnchorStore _anchors;
     private readonly ILogger<BlockGateService> _logger;
     private readonly TimeProvider _time;
 
@@ -74,6 +78,7 @@ public sealed class BlockGateService
         AlertService alerts,
         InstallScriptAllowlistService installScriptAllowlist,
         LicenseRepository licenses,
+        IPerOrgTrustAnchorStore anchors,
         ILogger<BlockGateService> logger,
         TimeProvider time)
 #pragma warning restore S107
@@ -84,8 +89,47 @@ public sealed class BlockGateService
         _alerts = alerts;
         _installScriptAllowlist = installScriptAllowlist;
         _licenses = licenses;
+        _anchors = anchors;
         _logger = logger;
         _time = time;
+    }
+
+    /// <summary>
+    /// True when the tenant requires provenance verification for <paramref name="ecosystem"/>
+    /// (<paramref name="verifyMode"/> == 'block') but has no trust anchors configured for it, so
+    /// no artifact can ever produce a <c>verified</c> verdict. Enforcement that cannot be
+    /// satisfied must deny, not pass: the settings API refuses to turn verification on without an
+    /// anchor, but nothing stops the anchors being deleted afterwards, and that drift would
+    /// otherwise turn the policy into a silent no-op.
+    ///
+    /// Only called when the mode is 'block', and the anchor read is served from the trust-anchor
+    /// store's per-org hot cache, so the serve path pays one cached lookup and 'off'/'warn'
+    /// tenants pay nothing.
+    /// </summary>
+    public async Task<bool> IsProvenanceEnforcementUnbackedAsync(
+        string orgId, string ecosystem, string? verifyMode, CancellationToken ct = default)
+    {
+        if (verifyMode != "block")
+        {
+            return false;
+        }
+
+        // PyPI needs BOTH a sigstore root and a trusted publisher to verify anything, so the
+        // generic any-anchor-present test would call a half-configured org backed. The other
+        // ecosystems verify from a single anchor kind.
+        bool configured = ecosystem == "pypi"
+            ? (await _anchors.GetPyPiTrustAsync(orgId, ct)).IsConfigured
+            : await _anchors.IsConfiguredForAsync(orgId, ecosystem, ct);
+
+        if (!configured)
+        {
+            _logger.LogWarning(
+                "Provenance verification is set to 'block' for {Ecosystem} in org {OrgId} but no trust "
+                + "anchors are configured; denying the artifact — add a trust anchor or lower the policy.",
+                ecosystem, orgId);
+        }
+
+        return !configured;
     }
 
     // Best-effort review-queue write beside each policy block's activity row. Failures are
@@ -144,6 +188,17 @@ public sealed class BlockGateService
             }
         }
 
+        // Under a 'block' policy with no configured trust anchor the stored status is NULL for
+        // every artifact (verification was never attempted), which would read as "not applicable"
+        // and pass. Synthesize the unverifiable marker so the arm denies and the audit trail
+        // names the reason.
+        string? provenanceStatus = request.ProvenanceStatus;
+        if (await IsProvenanceEnforcementUnbackedAsync(
+                request.OrgId, request.Ecosystem, request.VerifyProvenanceMode, ct))
+        {
+            provenanceStatus = ProvenanceStatuses.Unverifiable;
+        }
+
         var facts = new VersionFacts(
             ManualState: request.ManualState,
             Deprecated: request.Deprecated,
@@ -156,7 +211,7 @@ public sealed class BlockGateService
             MaxCvss: signals?.MaxCvss,
             Origin: request.Origin,
             HasInstallScript: request.HasInstallScript,
-            ProvenanceStatus: request.ProvenanceStatus,
+            ProvenanceStatus: provenanceStatus,
             InstallScriptAllowlisted: installScriptAllowlisted,
             RevokedAt: request.RevokedAt);
 
@@ -175,7 +230,14 @@ public sealed class BlockGateService
 
         if (!verdict.Servable)
         {
-            await ApplySideEffectsAsync(verdict.Arm, request, signals, ct);
+            // Side effects read the effective status so an unbacked-enforcement denial is audited
+            // as 'unverifiable' rather than as a null verdict.
+            await ApplySideEffectsAsync(
+                verdict.Arm,
+                provenanceStatus == request.ProvenanceStatus
+                    ? request
+                    : request with { ProvenanceStatus = provenanceStatus },
+                signals, ct);
             return BlockDecision.Blocked;
         }
 
@@ -191,12 +253,34 @@ public sealed class BlockGateService
             : BlockDecision.Allowed;
     }
 
+    /// <summary>
+    /// Ecosystems whose package manifests carry a declared license field that ingest extracts into
+    /// <c>package_version_licenses</c>. For these, an artifact with zero recorded SPDX entries is
+    /// an <em>absent</em> signal, not a "this ecosystem has no licenses" signal — under an
+    /// enforcing policy it is treated as an unknown license and denied, so omitting or malforming
+    /// the manifest's license field is not a way around the tenant's allowlist.
+    ///
+    /// Ecosystems outside this set (go — LICENSE-text classification only; apk — no license
+    /// metadata; oci — the SPDX expression lives on the manifest's <c>oci_blobs</c> row and is
+    /// evaluated by <see cref="EvaluateLicenseExpressionAsync"/>) keep the empty-set pass-through:
+    /// they routinely record nothing, so denying on absence would refuse every artifact.
+    /// </summary>
+    // Internal (not private) so PackagePublishService's publish-side licence gate reads the
+    // same set rather than maintaining a second, driftable copy.
+    internal static readonly HashSet<string> DeclaredLicenseEcosystems =
+        new(StringComparer.Ordinal) { "npm", "pypi", "nuget", "maven", "cargo", "rpm" };
+
+    // The SPDX token for "no license assertion was made". Named as the offending license on an
+    // unknown-license block so the activity row and the review queue say what is actually wrong.
+    // Internal so the publish-side gate can record the same token for its own 'warn'/'block' cases.
+    internal const string NoLicenseAssertion = "NOASSERTION";
+
     // License-policy arm. Reads the artifact's SPDX license entries by owner (cache_artifact on
     // the proxy/global-plane path, package_version otherwise), evaluates them against the tenant's
     // allow/block policy in 'block' mode, and — on a rejection — records the side effects
-    // (meter + activity row + review row) mirroring the other arms. No license rows (Go/Apk/OCI
-    // capture none, or extraction was skipped) means an empty entry set, which CheckPolicyAsync
-    // treats as allowed — fail-open, consistent with the other content-signal arms.
+    // (meter + activity row + review row) mirroring the other arms. An empty entry set is
+    // resolved by ecosystem: a declared-license ecosystem denies (unknown license), the rest
+    // pass through. See <see cref="DeclaredLicenseEcosystems"/>.
     private async Task<BlockDecision> EvaluateLicenseArmAsync(BlockGateRequest request, CancellationToken ct)
     {
         var lookup = request.CacheArtifactId is not null
@@ -207,7 +291,13 @@ public sealed class BlockGateService
         var entries = lookup[ownerId].ToList();
         if (entries.Count == 0)
         {
-            return BlockDecision.Allowed;
+            if (!DeclaredLicenseEcosystems.Contains(request.Ecosystem))
+            {
+                return BlockDecision.Allowed;
+            }
+
+            await RecordLicenseBlockAsync(request, NoLicenseAssertion, ct);
+            return BlockDecision.Blocked;
         }
 
         var (allowed, blockedLicense) = await _licenses.CheckPolicyAsync(request.OrgId, "block", entries, ct);
@@ -324,7 +414,7 @@ public sealed class BlockGateService
     {
         var publishedAt = request.PublishedAt!.Value;
         double ageHours = (_time.GetUtcNow() - publishedAt).TotalHours;
-        string publishedIso = publishedAt.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture);
+        string publishedIso = publishedAt.ToUtcIso();
         double ageRounded = Math.Round(ageHours, 2);
         string ageDetail = string.Format(
             CultureInfo.InvariantCulture,
@@ -508,7 +598,7 @@ public sealed class BlockGateService
         DependablyMeter.RevokedBlocks.Add(1,
             new KeyValuePair<string, object?>("ecosystem", request.Ecosystem));
         string detail = System.Text.Json.JsonSerializer.Serialize(
-            new { revoked_at = request.RevokedAt?.ToString("yyyy-MM-ddTHH:mm:ssZ") }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
+            new { revoked_at = request.RevokedAt?.ToUtcIso() }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
         await _audit.LogActivityAsync(
             request.OrgId, request.Ecosystem, request.Purl,
             "blocked_revoked", request.UserId, actorKind: request.ActorKind,
@@ -697,11 +787,14 @@ public sealed class BlockGateService
         // Arm 8: provenance/signature gate. Sits just below the malicious arm in priority (a
         // known-malicious advisory is a stronger reason to deny than a missing signature) and
         // above the install-script arm. Independent of scan state — provenance is captured at
-        // ingest, not from the OSV scan. Only the require mode ('block') denies; under 'block'
-        // both a Failed and an Unsigned outcome refuse the version (fail closed). 'warn'/'off'/
-        // null and a NULL status (verification not applicable) all pass.
+        // ingest, not from the OSV scan. Only the require mode ('block') denies; under 'block' a
+        // Failed, an Unsigned, and an Unverifiable outcome all refuse the version (fail closed).
+        // Unverifiable is the caller-synthesized "enforcement on, no trust anchor configured"
+        // marker, never a stored value. 'warn'/'off'/null and a NULL status (verification not
+        // applicable) all pass.
         if (policy.VerifyProvenanceMode == "block" &&
-            facts.ProvenanceStatus is ProvenanceStatuses.Failed or ProvenanceStatuses.Unsigned)
+            facts.ProvenanceStatus is ProvenanceStatuses.Failed or ProvenanceStatuses.Unsigned
+                or ProvenanceStatuses.Unverifiable)
         {
             return new BlockVerdict(Servable: false, Arm: BlockArm.Provenance);
         }
@@ -989,6 +1082,10 @@ public sealed record BlockGateRequest(
             HasInstallScript: version.HasInstallScript,
             InstallScriptKind: version.InstallScriptKind,
             BlockInstallScriptsMode: settings?.BlockInstallScripts,
+            ProvenanceStatus: version.ProvenanceStatus,
+            // Per-ecosystem toggle over the ecosystem-agnostic stored status, matching the
+            // index-filter path so a version hidden from the index is not downloadable by URL.
+            VerifyProvenanceMode: settings?.VerifyProvenanceMode(ecosystem),
             RevokedAt: version.RevokedAt,
             BlockRevokedMode: settings?.BlockRevoked,
             LicenseEnforcementMode: settings?.LicenseEnforcementMode);
@@ -1025,8 +1122,108 @@ public sealed record BlockGateRequest(
             InstallScriptKind: caFacts.InstallScriptKind,
             BlockInstallScriptsMode: settings?.BlockInstallScripts,
             ProvenanceStatus: caFacts.ProvenanceStatus,
+            // The stored provenance_status column is ecosystem-agnostic; the toggle that interprets
+            // it is per-ecosystem. Without the mode the persisted verdict is inert on the serve
+            // path and a 'block' policy would only ever be enforced by the index filters.
+            VerifyProvenanceMode: settings?.VerifyProvenanceMode(ecosystem),
             RevokedAt: caFacts.RevokedAt,
             BlockRevokedMode: settings?.BlockRevoked,
             LicenseEnforcementMode: settings?.LicenseEnforcementMode,
             CacheArtifactId: caFacts.Id);
+
+    /// <summary>
+    /// Constructs a <see cref="BlockGateRequest"/> for the proxy FIRST-FETCH serve gate — the
+    /// evaluation that runs after the artifact is recorded and scanned, before its bytes reach the
+    /// client that triggered the fetch.
+    ///
+    /// <para>
+    /// It reads the same <see cref="Infrastructure.CacheArtifactServeFacts"/> projection the
+    /// cache-hit path reads, and differs from <see cref="ForProxyCacheFacts"/> in exactly one
+    /// respect: the tenant policy arrives as loose fields rather than an <see cref="OrgSettings"/>,
+    /// because <c>ProxyFetchService</c>'s callers resolve those values well before the fetch. Every
+    /// FACT still comes from the row. That is what makes the two paths symmetric by construction:
+    /// a new fact added to the projection reaches both gates, and neither can read a fact the other
+    /// cannot see.
+    /// </para>
+    ///
+    /// <para>
+    /// The predecessor of this factory built the request field-by-field at the call site against a
+    /// narrower, tenant-blind projection. That shape silently dropped <c>manual_block_state</c> and
+    /// <c>revoked_at</c> from the first-fetch decision — so a tenant that had manually blocked a
+    /// proxy artifact, or an artifact upstream had withdrawn, was served anyway whenever the cached
+    /// blob had been evicted and the request re-entered the fetch path. Building both proxy gate
+    /// requests in this one file from this one facts type is the fix for the class, not just the
+    /// instance.
+    /// </para>
+    /// </summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
+        Justification = "Single-source factory for the proxy first-fetch gate request: the parameter list IS the threaded field set, and grouping it would reintroduce the field-by-field indirection this factory exists to remove.")]
+    public static BlockGateRequest ForProxyFirstFetch(
+        string orgId,
+        string ecosystem,
+        Infrastructure.CacheArtifactServeFacts caFacts,
+        string? userId,
+        string? actorKind,
+        string? sourceIp,
+        double maxOsvScoreTolerance,
+        int? minReleaseAgeHours,
+        string? blockDeprecatedMode,
+        string? blockMaliciousMode,
+        string? blockKevMode,
+        double? maxEpssTolerance,
+        string? blockInstallScriptsMode,
+        string? verifyProvenanceMode,
+        string? blockRevokedMode,
+        string? licenseEnforcementMode) =>
+        new(orgId, ecosystem, caFacts.Purl ?? string.Empty, string.Empty,
+            caFacts.ManualBlockState, caFacts.VulnCheckedAt,
+            userId, maxOsvScoreTolerance, sourceIp,
+            MinReleaseAgeHours: minReleaseAgeHours,
+            PublishedAt: caFacts.PublishedAt,
+            ActorKind: actorKind,
+            Deprecated: caFacts.Deprecated,
+            BlockDeprecatedMode: blockDeprecatedMode,
+            BlockMaliciousMode: blockMaliciousMode,
+            BlockKevMode: blockKevMode,
+            MaxEpssTolerance: maxEpssTolerance,
+            Origin: "proxy",
+            HasInstallScript: caFacts.HasInstallScript,
+            InstallScriptKind: caFacts.InstallScriptKind,
+            BlockInstallScriptsMode: blockInstallScriptsMode,
+            ProvenanceStatus: caFacts.ProvenanceStatus,
+            VerifyProvenanceMode: verifyProvenanceMode,
+            RevokedAt: caFacts.RevokedAt,
+            BlockRevokedMode: blockRevokedMode,
+            LicenseEnforcementMode: licenseEnforcementMode,
+            CacheArtifactId: caFacts.Id);
+
+    /// <summary>
+    /// Constructs the request for the pre-record first-fetch DEPRECATION gate. This one runs before
+    /// any cache-plane row exists, so it carries no facts — only the coordinate and the two values
+    /// the deprecation arm reads. Kept here beside the others so every <see cref="BlockGateRequest"/>
+    /// in the codebase is built in this file.
+    /// </summary>
+    public static BlockGateRequest ForFirstFetchDeprecation(
+        string orgId, string ecosystem, string purl, string? userId, string? actorKind,
+        double maxOsvScoreTolerance, string? sourceIp, string? deprecated, string? blockDeprecatedMode) =>
+        new(orgId, ecosystem, purl, string.Empty, null, null,
+            userId, maxOsvScoreTolerance, sourceIp,
+            ActorKind: actorKind,
+            Deprecated: deprecated,
+            BlockDeprecatedMode: blockDeprecatedMode);
+
+    /// <summary>
+    /// Constructs the request for the pre-record first-fetch PROVENANCE gate, which refuses a
+    /// version that failed signature verification before it is adopted into the cache catalogue.
+    /// Like the deprecation twin it precedes the facts row, so the verdict is the one the ecosystem
+    /// handler just computed rather than one read back from storage.
+    /// </summary>
+    public static BlockGateRequest ForFirstFetchProvenance(
+        string orgId, string ecosystem, string purl, string? userId, string? actorKind,
+        double maxOsvScoreTolerance, string? sourceIp, string provenanceStatus, string? verifyProvenanceMode) =>
+        new(orgId, ecosystem, purl, string.Empty, null, null,
+            userId, maxOsvScoreTolerance, sourceIp,
+            ActorKind: actorKind,
+            ProvenanceStatus: provenanceStatus,
+            VerifyProvenanceMode: verifyProvenanceMode);
 }

@@ -101,7 +101,7 @@ public sealed class WebhookSubscriptionRepository
         string orgId, NewWebhookSubscription req, CancellationToken ct = default)
     {
         string id = Guid.NewGuid().ToString("N");
-        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToUtcIso();
         string eventTypesJson = JsonSerializer.Serialize(req.EventTypes);
         // An empty (or absent) secret means unsigned delivery — never protect it. Only a
         // non-empty secret is envelope-encrypted, which requires a configured master key.
@@ -133,7 +133,7 @@ public sealed class WebhookSubscriptionRepository
     public async Task<WebhookSubscription?> UpdateAsync(
         string orgId, string id, UpdateWebhookSubscription req, CancellationToken ct = default)
     {
-        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToUtcIso();
         string eventTypesJson = JsonSerializer.Serialize(req.EventTypes);
         // A non-empty secret rotates the stored secret; null or empty leaves it unchanged.
         bool rotateSecret = !string.IsNullOrEmpty(req.Secret);
@@ -203,7 +203,7 @@ public sealed class WebhookSubscriptionRepository
     /// </summary>
     public async Task RecordSuccessAsync(string orgId, string id, CancellationToken ct = default)
     {
-        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToUtcIso();
         await using var conn = await _db.OpenAsync(ct);
         // xtenant: id is already org-scoped by the FK; explicit org_id filter is defense-in-depth
         await conn.ExecuteAsync(
@@ -227,7 +227,7 @@ public sealed class WebhookSubscriptionRepository
         int autoDisableAfterFailures, TimeSpan autoDisableAfterDuration,
         CancellationToken ct = default)
     {
-        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToUtcIso();
         await using var conn = await _db.OpenAsync(ct);
 
         // Read current counters to decide whether to auto-disable.

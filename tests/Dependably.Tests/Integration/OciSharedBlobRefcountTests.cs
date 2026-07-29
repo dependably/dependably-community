@@ -102,9 +102,17 @@ public sealed class OciSharedBlobRefcountTests : IClassFixture<DependablyMultiFa
         }
 
         // Org A must now get 404 for the manifest.
+        //
+        // The status is asserted with the response body attached. This assertion has failed in CI
+        // with a 500 whose cause could not be recovered afterwards — the job log carries the status
+        // and nothing else — so a bare Assert.Equal here costs a whole pipeline round-trip to learn
+        // anything. The OCI error body names the condition.
         using (var get = await clientA.GetAsync($"/v2/{repo}/manifests/{manifestDigest}"))
         {
-            Assert.Equal(HttpStatusCode.NotFound, get.StatusCode);
+            string body = await get.Content.ReadAsStringAsync();
+            Assert.True(get.StatusCode == HttpStatusCode.NotFound,
+                $"expected 404 after org A deleted its manifest; got {(int)get.StatusCode} "
+                + $"{get.StatusCode}. Response body: {body}");
         }
 
         // Physical blob must still exist — org B still holds a reference.

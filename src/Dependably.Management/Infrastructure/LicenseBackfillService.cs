@@ -83,6 +83,9 @@ public sealed class LicenseBackfillService : ScheduledBackgroundService
             return;
         }
 
+        // now-ok: measures real elapsed time for a duration log/metric only — no control
+        // flow branches on the value, so a substitutable clock would change the reported
+        // number without changing what the code does.
         var sw = System.Diagnostics.Stopwatch.StartNew();
         int scanned = 0;
         int found = 0;

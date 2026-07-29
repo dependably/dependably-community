@@ -38,7 +38,7 @@ public sealed class PasswordResetTokenRepository
         string hash = Convert.ToHexString(hashBytes).ToLowerInvariant();
         string id = Guid.NewGuid().ToString("N");
         var expiresAt = _time.GetUtcNow().AddMinutes(ExpiryMinutes);
-        string expiresStr = expiresAt.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string expiresStr = expiresAt.ToUtcIso();
 
         await using var conn = await _db.OpenAsync(ct);
 
@@ -68,7 +68,7 @@ public sealed class PasswordResetTokenRepository
     {
         byte[] hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(rawToken));
         string hash = Convert.ToHexString(hashBytes).ToLowerInvariant();
-        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToUtcIso();
 
         await using var conn = await _db.OpenAsync(ct);
         // xtenant: keyed by the SHA-256 of the reset token, same rationale as InviteRepository.AcceptAsync.
@@ -97,7 +97,7 @@ public sealed class PasswordResetTokenRepository
     {
         byte[] hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(rawToken));
         string hash = Convert.ToHexString(hashBytes).ToLowerInvariant();
-        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToUtcIso();
 
         await using var conn = await _db.OpenAsync(ct);
 

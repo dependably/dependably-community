@@ -211,7 +211,21 @@ public sealed class CacheEvictionService : ScheduledBackgroundService
         foreach (var row in rows)
         {
             if (ct.IsCancellationRequested) { break; }
-            if (!await EvictAsync(row, ct))
+
+            bool rowEvicted;
+            try
+            {
+                rowEvicted = await EvictAsync(row, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                // The pass is stopping (host shutdown, or a lost leader lease handing the sweep to
+                // another replica). That is a cancelled eviction, not a failed one: end the batch
+                // instead of letting it read as a row that could not be evicted.
+                break;
+            }
+
+            if (!rowEvicted)
             {
                 continue;
             }
@@ -247,8 +261,10 @@ public sealed class CacheEvictionService : ScheduledBackgroundService
             await _orphanBlobs.DeleteIfUnreferencedAsync(
                 a.BlobKey, a.Id, BlobKeys.StoreKey(a.BlobKey), _blobs, ct);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            // Cancellation is excluded deliberately: it means the pass is stopping, not that this
+            // row's blob could not be deleted, and the caller ends the batch on it.
             _logger.LogWarning(ex,
                 "Cache eviction: blob delete failed for {Id} ({Key}); row left in place to retry next pass.",
                 a.Id, a.BlobKey);

@@ -10,8 +10,8 @@ using WireMock.ResponseBuilders;
 namespace Dependably.Tests.Integration;
 
 /// <summary>
-/// The fail-closed cache-plane contract for the two ecosystems whose proxy blobs are addressed by
-/// their package coordinate rather than by content hash: Go and Cargo.
+/// The fail-closed cache-plane contract for the ecosystems whose proxy blobs are addressed by
+/// their package coordinate rather than by content hash: Go, Cargo, and apk.
 ///
 /// A proxied artefact's <c>cache_artifact</c> row is what the registry scans, gates, and reclaims
 /// against. When the plane cannot take that row the fetch is refused (503) rather than served
@@ -19,11 +19,15 @@ namespace Dependably.Tests.Integration;
 /// <see cref="Dependably.Protocol.ProxyCatalogueUnavailableException"/>.
 ///
 /// Those four ecosystems key their proxy blobs by SHA-256 and find them through a row-driven
-/// lookup, so "no row" already means "cache miss" and a retry re-enters the fetch path. Go and
-/// Cargo probe the blob store by an org-scoped coordinate key instead, and both cache-hit gates
-/// allow a hit they hold no row for — so a staged-but-unrecorded blob would answer every later
-/// request with nothing to gate against. These tests pin both halves: the refusal, and the fact
-/// that the refusal is not undone by the next request.
+/// lookup, so "no row" already means "cache miss" and a retry re-enters the fetch path. Go, Cargo,
+/// and apk probe the blob store by an org-scoped coordinate key instead, and all three cache-hit
+/// gates allow a hit they hold no row for — so a staged-but-unrecorded blob would answer every
+/// later request with nothing to gate against. These tests pin both halves: the refusal, and the
+/// fact that the refusal is not undone by the next request.
+///
+/// RPM is deliberately absent: its serve path is row-driven (a null row is a cache MISS that
+/// re-fetches and re-records), so it has no permanent bypass, and its proxy blobs are
+/// content-addressed and shared across tenants, which makes blob-discard actively wrong there.
 ///
 /// The outage is simulated with a trigger that aborts <c>cache_artifact</c> inserts. That models
 /// the real failure precisely: reads and existing rows keep working (so a recorded artefact still
@@ -242,6 +246,147 @@ public sealed class ProxyCataloguePlaneFailClosedTests
         Assert.Equal(0, await CacheArtifactCountAsync(factory, "cargo", firstFetch, version));
     }
 
+    // ── apk ───────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// An .apk first fetch whose cache-plane row cannot be written is answered 503 and serves no
+    /// bytes. The staged blob is dropped with the refusal: apk blob keys are org-scoped and the
+    /// hit path probes the blob store, so leaving it behind would let every later request serve
+    /// the package from cache with no row to gate against.
+    /// </summary>
+    [Fact]
+    public async Task Apk_FirstFetch_CachePlaneUnavailable_Refuses503AndLeavesNothingServable()
+    {
+        const string release = "v3.90";
+        const string repo = "main";
+        const string arch = "x86_64";
+        const string file = "failclosed-1.0.0-r0.apk";
+        byte[] apkBytes = "failclosed-apk-bytes"u8.ToArray();
+
+        await using var factory = new DependablyFactory();
+        StubApk(factory, release, repo, arch, file, apkBytes);
+
+        await BreakCachePlaneAsync(factory);
+
+        using var client = factory.CreateClientWithBearer(await factory.CreateToken("pull"));
+        var resp = await client.GetAsync($"/apk/{release}/{repo}/{arch}/{file}");
+
+        // 503, not 404: the package exists upstream — we could not admit it.
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, resp.StatusCode);
+        Assert.NotEqual(apkBytes, await resp.Content.ReadAsByteArrayAsync());
+
+        string orgId = await DefaultOrgIdAsync(factory);
+        Assert.False(await factory.BlobStore.ExistsAsync(
+            Dependably.Storage.BlobKeys.Apk(orgId, release, repo, arch, file)));
+        Assert.Equal(0, await CacheArtifactCountAsync(factory, "apk", "failclosed", "1.0.0-r0"));
+    }
+
+    /// <summary>
+    /// The pin for the hit-gate hole. A second request during the same outage is refused again
+    /// rather than served from the blob the first fetch staged — the bypass this closes is
+    /// permanent, because nothing would ever re-record that blob. Once the plane recovers the
+    /// package serves normally and lands its row; <c>X-Cache: MISS</c> proves the recovered serve
+    /// re-fetched rather than finding a leftover blob.
+    /// </summary>
+    [Fact]
+    public async Task Apk_RetryDuringOutage_StillRefused_ThenReFetchesOnceCachePlaneRecovers()
+    {
+        const string release = "v3.91";
+        const string repo = "main";
+        const string arch = "x86_64";
+        const string file = "fcretry-2.1.0-r3.apk";
+        byte[] apkBytes = "apk-retry-during-outage"u8.ToArray();
+
+        await using var factory = new DependablyFactory();
+        StubApk(factory, release, repo, arch, file, apkBytes);
+
+        using var client = factory.CreateClientWithBearer(await factory.CreateToken("pull"));
+
+        await BreakCachePlaneAsync(factory);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable,
+            (await client.GetAsync($"/apk/{release}/{repo}/{arch}/{file}")).StatusCode);
+
+        // The hit path probes the blob store and its gate allows a hit with no row, so this is the
+        // request the discarded blob protects.
+        var retry = await client.GetAsync($"/apk/{release}/{repo}/{arch}/{file}");
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, retry.StatusCode);
+        Assert.NotEqual(apkBytes, await retry.Content.ReadAsByteArrayAsync());
+
+        await RestoreCachePlaneAsync(factory);
+
+        var recovered = await client.GetAsync($"/apk/{release}/{repo}/{arch}/{file}");
+        Assert.Equal(HttpStatusCode.OK, recovered.StatusCode);
+        Assert.Equal(apkBytes, await recovered.Content.ReadAsByteArrayAsync());
+        Assert.Equal("MISS", recovered.Headers.GetValues("X-Cache").First());
+        Assert.Equal(1, await CacheArtifactCountAsync(factory, "apk", "fcretry", "2.1.0-r3"));
+    }
+
+    /// <summary>
+    /// Mixed outcomes inside one outage: a package already on the cache plane keeps serving (its
+    /// row exists, so the serve path can still gate it — only the access tick is lost), while a
+    /// package being fetched for the first time is refused. The contract refuses admission, not
+    /// traffic.
+    /// </summary>
+    [Fact]
+    public async Task ApkOutage_MixedRecordedAndFirstFetch_RefusesOnlyTheUnrecordedPackage()
+    {
+        const string release = "v3.92";
+        const string repo = "main";
+        const string arch = "x86_64";
+        const string recorded = "fcwarm-1.0.0-r0.apk";
+        const string firstFetch = "fccold-1.0.0-r0.apk";
+        byte[] recordedBytes = "already-catalogued-apk"u8.ToArray();
+        byte[] firstFetchBytes = "never-catalogued-apk"u8.ToArray();
+
+        await using var factory = new DependablyFactory();
+        StubApk(factory, release, repo, arch, recorded, recordedBytes);
+        StubApk(factory, release, repo, arch, firstFetch, firstFetchBytes);
+
+        using var client = factory.CreateClientWithBearer(await factory.CreateToken("pull"));
+
+        // Admit the first package while the plane is healthy.
+        Assert.Equal(HttpStatusCode.OK,
+            (await client.GetAsync($"/apk/{release}/{repo}/{arch}/{recorded}")).StatusCode);
+        Assert.Equal(1, await CacheArtifactCountAsync(factory, "apk", "fcwarm", "1.0.0-r0"));
+
+        await BreakCachePlaneAsync(factory);
+
+        var warm = await client.GetAsync($"/apk/{release}/{repo}/{arch}/{recorded}");
+        Assert.Equal(HttpStatusCode.OK, warm.StatusCode);
+        Assert.Equal(recordedBytes, await warm.Content.ReadAsByteArrayAsync());
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable,
+            (await client.GetAsync($"/apk/{release}/{repo}/{arch}/{firstFetch}")).StatusCode);
+        Assert.Equal(0, await CacheArtifactCountAsync(factory, "apk", "fccold", "1.0.0-r0"));
+    }
+
+    /// <summary>
+    /// A filename that does not parse as {pkgname}-{pkgver}-r{pkgrel} has no coordinate to record
+    /// or gate on — the controller's documented "never fail on an unparsable filename" contract
+    /// skips both. It must therefore keep serving through an outage: refusing it would trade a
+    /// bypass that does not exist for an availability loss that does.
+    /// </summary>
+    [Fact]
+    public async Task Apk_UnparsableFilename_KeepsServingDuringOutage()
+    {
+        const string release = "v3.93";
+        const string repo = "main";
+        const string arch = "x86_64";
+        const string file = "no-release-suffix.apk";
+        byte[] apkBytes = "unparsable-apk-bytes"u8.ToArray();
+
+        await using var factory = new DependablyFactory();
+        StubApk(factory, release, repo, arch, file, apkBytes);
+
+        await BreakCachePlaneAsync(factory);
+
+        using var client = factory.CreateClientWithBearer(await factory.CreateToken("pull"));
+        var resp = await client.GetAsync($"/apk/{release}/{repo}/{arch}/{file}");
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        Assert.Equal(apkBytes, await resp.Content.ReadAsByteArrayAsync());
+    }
+
     // ── Cache-plane outage ────────────────────────────────────────────────────
 
     // Aborts every cache_artifact INSERT, leaving reads and existing rows intact — the shape of a
@@ -302,6 +447,15 @@ public sealed class ProxyCataloguePlaneFailClosedTests
                 .WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/zip")
                 .WithBody(zipBytes));
+
+    private static void StubApk(
+        DependablyFactory factory, string release, string repo, string arch, string file, byte[] bytes) =>
+        factory.MockUpstream
+            .Given(Request.Create().WithPath($"/{release}/{repo}/{arch}/{file}").UsingGet())
+            .RespondWith(Response.Create()
+                .WithStatusCode(HttpStatusCode.OK)
+                .WithHeader("Content-Type", "application/octet-stream")
+                .WithBody(bytes));
 
     private static void StubGoText(DependablyFactory factory, string path, string contentType, string body) =>
         factory.MockUpstream

@@ -45,7 +45,7 @@ public sealed class TenantCountPollerTests : IAsyncLifetime
         await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o2', 'beta')");
         // Soft-deleted org — must be excluded by the WHERE deleted_at IS NULL clause.
         await conn.ExecuteAsync(
-            "INSERT INTO orgs (id, slug, deleted_at) VALUES ('o3', 'old', CURRENT_TIMESTAMP)");
+            "INSERT INTO orgs (id, slug, deleted_at) VALUES ('o3', 'old', strftime('%Y-%m-%dT%H:%M:%SZ','now'))");
 
         var poller = new TenantCountPoller(_db, Config(), NoAirGap(), NullLogger<TenantCountPoller>.Instance);
         await poller.PollOnceAsync(CancellationToken.None);

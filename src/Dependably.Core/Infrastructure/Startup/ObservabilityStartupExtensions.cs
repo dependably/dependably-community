@@ -33,6 +33,9 @@ internal static class ObservabilityStartupExtensions
                .ReadFrom.Services(services)
                .Enrich.FromLogContext()
                .Enrich.With<SensitivePropertyEnricher>()
+               // Mask email local-parts in the request-log RequestPath before any sink renders
+               // it — keeps PII out of the console/OTLP log estate even if a route embeds one.
+               .Enrich.With<RequestPathScrubbingEnricher>()
                .Destructure.With<LogSanitizingDestructuringPolicy>();
 
             if (textMode)
@@ -130,6 +133,8 @@ internal static class ObservabilityStartupExtensions
                   .AddHttpClientInstrumentation()
                   .AddSource(DependablyActivitySource.SourceName)
                   .AddProcessor<TenantSpanEnricher>()
+                  // Mask email local-parts in url.path / http.target before OTLP export.
+                  .AddProcessor(new SpanUrlPathScrubProcessor())
                   .SetSampler(new ParentBasedSampler(new TraceIdRatioBasedSampler(sampleRatio)));
 
                 if (!string.IsNullOrWhiteSpace(otlpEndpoint))

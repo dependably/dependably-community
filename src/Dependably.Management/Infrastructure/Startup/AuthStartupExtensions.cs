@@ -1,3 +1,4 @@
+using Dependably.Infrastructure.Caching;
 using Dependably.Infrastructure.Health;
 using Dependably.Infrastructure.Identity;
 using Dependably.Infrastructure.Redis;
@@ -7,7 +8,6 @@ using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.DataProtection.KeyManagement;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
-using Microsoft.IdentityModel.Tokens;
 using StackExchange.Redis;
 
 namespace Dependably.Infrastructure.Startup;
@@ -50,16 +50,13 @@ public static class AuthStartupExtensions
                 };
                 // Keep JWT claim names as-is (role, sub, org_id) without mapping to ClaimTypes URIs
                 options.MapInboundClaims = false;
-                options.TokenValidationParameters = new TokenValidationParameters
-                {
-                    ValidateIssuer = false,
-                    ValidateAudience = false,
-                    ValidateLifetime = true,
-                    ClockSkew = TimeSpan.Zero,
-                    ValidateIssuerSigningKey = true,
-                    // Explicit algorithm allow-list so only HS256 tokens are accepted, matching issuance in LoginService
-                    ValidAlgorithms = [SecurityAlgorithms.HmacSha256],
-                };
+                // Audience and issuer are pinned by JwtTokenBinding, so a JWT minted for another
+                // purpose — the pre-second-factor MFA challenge is the one that exists today —
+                // is refused during validation rather than by a claim check further down. It is
+                // signed with the same instance secret and satisfies the same algorithm and
+                // lifetime constraints, so before that binding the `scope` claim was the only
+                // thing telling the two apart.
+                options.TokenValidationParameters = JwtTokenBinding.SessionValidationParameters();
             });
 
         builder.Services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
@@ -108,9 +105,10 @@ public static class AuthStartupExtensions
     }
 
     // Validates a JWT after signature verification: checks the jti against the revocation
-    // store, then verifies the token_version claim for both tenant and system scope sessions
-    // so a password change immediately invalidates all outstanding sessions regardless of
-    // which surface issued them.
+    // store, rejects any non-session scope (only tenant/system sessions may authenticate a
+    // request via the session cookie), then verifies the token_version claim for both tenant
+    // and system scope sessions so a password change immediately invalidates all outstanding
+    // sessions regardless of which surface issued them.
     private static async Task OnJwtTokenValidatedAsync(TokenValidatedContext ctx)
     {
         string? jti = ctx.Principal?.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Jti)?.Value;
@@ -127,8 +125,16 @@ public static class AuthStartupExtensions
         string? scope = ctx.Principal?.FindFirst("scope")?.Value;
         string? sub = ctx.Principal?.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value;
 
+        // Second, independent barrier behind the audience binding in
+        // JwtTokenBinding.SessionValidationParameters: only full session tokens (scope=tenant or
+        // scope=system) authenticate a request. A non-session token no longer reaches this point
+        // — audience validation rejects it before the principal is built — but this allow-list
+        // stays because it does not depend on the mint site having chosen the right audience, and
+        // it applies uniformly rather than relying on the /api/v1/-only RouteScopeFilter path
+        // prefix, which any [Authorize] route added outside /api/v1/ would silently bypass.
         if (sub is null || (scope != "tenant" && scope != "system"))
         {
+            ctx.Fail("Non-session token presented as a session credential.");
             return;
         }
 
@@ -164,6 +170,12 @@ public static class AuthStartupExtensions
     // adds to the same options instance AddRateLimiter created, after that call has run.
     public static void AddDependablyRedisRateLimitPolicies(this WebApplicationBuilder builder)
     {
+        // Validated before the Redis check so a misspelled posture fails the boot on the
+        // management composition root whether or not Redis is configured, rather than only where
+        // the setting takes effect. The edge root never calls this method (it has no Redis-backed
+        // limiters), so an edge node ignores the setting and boots regardless of its spelling.
+        RateLimitFailureMode.Validate(builder.Configuration);
+
         if (string.IsNullOrWhiteSpace(builder.Configuration["REDIS_CONNECTION_STRING"]))
         {
             return;
@@ -277,6 +289,16 @@ public static class AuthStartupExtensions
         builder.Services.AddSingleton<IRedisHealthProbe>(sp => sp.GetRequiredService<RedisClient>());
         builder.Services.AddSingleton<IDistributedLock, RedisDistributedLock>();
         builder.Services.AddSingleton<ILockoutStore, RedisLockoutStore>();
+
+        // Cross-replica rendered-metadata invalidation. Replaces the no-op bus Core registered,
+        // so a push on one replica evicts the matching packument / simple index / registration /
+        // maven-metadata / repodata entries on every other replica instead of leaving them to
+        // expire on their TTL. Registered as a hosted service too — the same singleton both
+        // publishes and subscribes, so a received message is recognisably its own and skipped.
+        builder.Services.AddSingleton<RedisMetadataInvalidationBus>();
+        builder.Services.AddSingleton<IMetadataInvalidationBus>(
+            sp => sp.GetRequiredService<RedisMetadataInvalidationBus>());
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<RedisMetadataInvalidationBus>());
 
         // Func<IDatabase> defers resolution until after DI is built.
         builder.Services.AddDataProtection()

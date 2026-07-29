@@ -115,6 +115,11 @@ public sealed class ActivityWriterHostedService : BackgroundService
         CancellationToken stoppingToken)
     {
         buffer.Clear();
+
+        // now-ok: the flush window bounds real end-to-end write latency for a row already
+        // accepted from a request. The loop leaves on channel arrivals and on the linked
+        // CancelAfter below, both of which run on the real clock, so measuring the window on a
+        // substitutable clock would only desynchronise the deadline from the wait it governs.
         var flushDeadline = Stopwatch.StartNew();
 
         // Greedy fill within the flush window. Alternates between draining whatever's
@@ -278,6 +283,9 @@ public sealed class ActivityWriterHostedService : BackgroundService
             timeout = TimeSpan.FromSeconds(5);
         }
 
+        // now-ok: a polling deadline awaiting genuine async completion of the writer drain.
+        // Both the elapsed check and the poll interval have to advance on the real clock —
+        // the condition being waited on is another thread finishing work, not a scheduled tick.
         var sw = Stopwatch.StartNew();
         while (sw.Elapsed < timeout)
         {
@@ -286,6 +294,7 @@ public sealed class ActivityWriterHostedService : BackgroundService
                 return;
             }
 
+            // now-ok: poll interval of the real-time drain wait above.
             await Task.Delay(IdleCheckIntervalMs, ct);
         }
         throw new TimeoutException(

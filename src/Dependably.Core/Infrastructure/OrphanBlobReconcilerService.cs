@@ -134,6 +134,13 @@ public sealed class OrphanBlobReconcilerService : ScheduledBackgroundService
                     "Orphan reconciled: deleted {Key} ({Bytes} bytes, last modified {LastModified:o}).",
                     blob.Key, blob.SizeBytes, blob.LastModified);
             }
+            catch (OperationCanceledException)
+            {
+                // The pass is stopping (host shutdown, or a lost leader lease handing the sweep to
+                // another replica). That is a cancelled delete, not a failed one: end the sweep
+                // instead of counting it toward deletionFailures and warning about a retry.
+                break;
+            }
             catch (Exception ex)
             {
                 deletionFailures++;

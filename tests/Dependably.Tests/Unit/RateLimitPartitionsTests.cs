@@ -314,6 +314,189 @@ public sealed class RateLimitPartitionsTests
         Assert.Equal("user:ni-user-id", key);
     }
 
+    // ── #427: IPv6 partition keys collapse to the /64 in the IP-fallback arm ───────────
+
+    /// <summary>
+    /// Regression (#427): two unauthenticated requests from two addresses in the SAME IPv6 /64
+    /// share one "ip:" partition, so an attacker rebinding source addresses inside their own /64
+    /// cannot mint fresh per-IP budgets. Must fail on the pre-fix implementation (which keyed on the
+    /// full /128 via GetNormalizedRemoteIp) and pass once the fallback keys on the /64.
+    /// </summary>
+    [Fact]
+    public void GetPartitionKey_TwoAddressesInSameIpv6Slash64_ShareOneBucket()
+    {
+        var ctx1 = new DefaultHttpContext();
+        ctx1.Connection.RemoteIpAddress = System.Net.IPAddress.Parse("2001:db8:aa:bb::1");
+        var ctx2 = new DefaultHttpContext();
+        ctx2.Connection.RemoteIpAddress = System.Net.IPAddress.Parse("2001:db8:aa:bb:ffff::9");
+
+        Assert.Equal(
+            RateLimitPartitions.GetPartitionKey(ctx1),
+            RateLimitPartitions.GetPartitionKey(ctx2));
+        Assert.Equal("ip:2001:db8:aa:bb::/64", RateLimitPartitions.GetPartitionKey(ctx1));
+    }
+
+    /// <summary>
+    /// Adversarial twin: two DIFFERENT IPv6 /64s do NOT share a bucket — no over-collapsing that
+    /// would let one subnet's traffic exhaust an unrelated subnet's budget.
+    /// </summary>
+    [Fact]
+    public void GetPartitionKey_TwoDifferentIpv6Slash64s_YieldDifferentBuckets()
+    {
+        var ctx1 = new DefaultHttpContext();
+        ctx1.Connection.RemoteIpAddress = System.Net.IPAddress.Parse("2001:db8:aa:bb::1");
+        var ctx2 = new DefaultHttpContext();
+        ctx2.Connection.RemoteIpAddress = System.Net.IPAddress.Parse("2001:db8:aa:cc::1");
+
+        Assert.NotEqual(
+            RateLimitPartitions.GetPartitionKey(ctx1),
+            RateLimitPartitions.GetPartitionKey(ctx2));
+    }
+
+    /// <summary>
+    /// The management global limiter's IP-fallback arm collapses to the /64 as well — otherwise the
+    /// anonymous /api/v1 surface stays evadable from a routed /64.
+    /// </summary>
+    [Fact]
+    public void GetManagementPartitionKey_SameIpv6Slash64_ShareOneBucket()
+    {
+        var ctx1 = new DefaultHttpContext();
+        ctx1.Connection.RemoteIpAddress = System.Net.IPAddress.Parse("2001:db8:1:2::1");
+        var ctx2 = new DefaultHttpContext();
+        ctx2.Connection.RemoteIpAddress = System.Net.IPAddress.Parse("2001:db8:1:2::dead");
+
+        Assert.Equal(
+            RateLimitPartitions.GetManagementPartitionKey(ctx1),
+            RateLimitPartitions.GetManagementPartitionKey(ctx2));
+        Assert.Equal("ip:2001:db8:1:2::/64", RateLimitPartitions.GetManagementPartitionKey(ctx1));
+    }
+
+    // ── #426: the GlobalLimiter is default-deny for policy-less protocol surfaces ──────
+
+    /// <summary>
+    /// Regression (#426): a routed protocol CONTROLLER ACTION with no endpoint policy classifies as
+    /// ProtocolDefault, so the GlobalLimiter applies a real per-IP limit instead of NoLimiter. Must
+    /// fail on the pre-fix implementation (which returned NoLimiter for every non-/api/v1 path) and
+    /// pass once the GlobalLimiter defaults to a limit. This is the durable "missing attribute ≠ no
+    /// limit" fix — and it is scoped to controller actions so the SPA/static plane is untouched.
+    /// </summary>
+    [Fact]
+    public void ClassifyGlobalScope_ProtocolControllerActionWithNoPolicy_IsDefaultDenied()
+    {
+        var ctx = new DefaultHttpContext();
+        ctx.Request.Path = "/pypi/somepkg/json";
+        // A real registry endpoint carries a ControllerActionDescriptor but no rate-limit policy.
+        ctx.SetEndpoint(new Microsoft.AspNetCore.Http.Endpoint(
+            requestDelegate: null,
+            new Microsoft.AspNetCore.Http.EndpointMetadataCollection(
+                new Microsoft.AspNetCore.Mvc.Controllers.ControllerActionDescriptor()),
+            "test-protocol-controller-action"));
+
+        Assert.Equal(RateLimitPartitions.GlobalScope.ProtocolDefault, RateLimitPartitions.ClassifyGlobalScope(ctx));
+    }
+
+    /// <summary>
+    /// Regression (the e2e-gate defect): the embedded SPA is served by UseStaticFiles, which is NOT
+    /// endpoint routing — index.html, hashed /assets/* bundles, favicon and fonts reach the rate
+    /// limiter with NO endpoint at all. They must classify as Deferred, never ProtocolDefault:
+    /// a browser fires dozens of asset GETs per navigation from one IP, so a shared per-IP protocol
+    /// cap would 429 the SPA and the login page would never render. Must fail on the "no endpoint →
+    /// ProtocolDefault" implementation and pass once static serving defers.
+    /// </summary>
+    [Theory]
+    [InlineData("/")]
+    [InlineData("/index.html")]
+    [InlineData("/assets/index-a1b2c3d4.js")]
+    [InlineData("/assets/index-a1b2c3d4.css")]
+    [InlineData("/favicon.ico")]
+    [InlineData("/fonts/inter.woff2")]
+    [InlineData("/docs/swagger-ui.css")]
+    public void ClassifyGlobalScope_StaticAssetPathWithNoEndpoint_Defers(string path)
+    {
+        var ctx = new DefaultHttpContext();
+        ctx.Request.Path = path;
+        // No endpoint: UseStaticFiles is terminal middleware, not a routed endpoint.
+
+        Assert.Equal(RateLimitPartitions.GlobalScope.Deferred, RateLimitPartitions.ClassifyGlobalScope(ctx));
+    }
+
+    /// <summary>
+    /// Regression (the e2e-gate defect): the SPA MapFallback route DOES produce an endpoint, but it
+    /// is not a controller action and carries no policy. It must classify as Deferred so the
+    /// index.html fallback that boots the SPA is never throttled by the protocol default.
+    /// </summary>
+    [Fact]
+    public void ClassifyGlobalScope_SpaFallbackEndpoint_Defers()
+    {
+        var ctx = new DefaultHttpContext();
+        ctx.Request.Path = "/dashboard/settings/tokens";
+        // A MapFallback endpoint: no ControllerActionDescriptor, no rate-limit policy.
+        ctx.SetEndpoint(new Microsoft.AspNetCore.Http.Endpoint(
+            requestDelegate: _ => Task.CompletedTask,
+            new Microsoft.AspNetCore.Http.EndpointMetadataCollection(),
+            "test-spa-fallback"));
+
+        Assert.Equal(RateLimitPartitions.GlobalScope.Deferred, RateLimitPartitions.ClassifyGlobalScope(ctx));
+    }
+
+    /// <summary>
+    /// A protocol endpoint that DOES declare its own policy defers (NoLimiter from the global) so
+    /// the default never double-counts on top of download/metadata/push.
+    /// </summary>
+    [Fact]
+    public void ClassifyGlobalScope_EndpointWithExplicitPolicy_Defers()
+    {
+        var ctx = new DefaultHttpContext();
+        ctx.Request.Path = "/npm/react";
+        ctx.SetEndpoint(new Microsoft.AspNetCore.Http.Endpoint(
+            requestDelegate: null,
+            new Microsoft.AspNetCore.Http.EndpointMetadataCollection(
+                new Microsoft.AspNetCore.RateLimiting.EnableRateLimitingAttribute("metadata")),
+            "test-metadata-endpoint"));
+
+        Assert.Equal(RateLimitPartitions.GlobalScope.Deferred, RateLimitPartitions.ClassifyGlobalScope(ctx));
+    }
+
+    /// <summary>An authenticated management path with no endpoint policy is the management default.</summary>
+    [Fact]
+    public void ClassifyGlobalScope_ManagementApiPath_IsManagement()
+    {
+        var ctx = new DefaultHttpContext();
+        ctx.Request.Path = "/api/v1/orgs";
+
+        Assert.Equal(RateLimitPartitions.GlobalScope.ManagementApi, RateLimitPartitions.ClassifyGlobalScope(ctx));
+    }
+
+    /// <summary>
+    /// The management per-principal ceiling STACKS: an /api/v1 endpoint that also declares its own
+    /// policy (e.g. the "anon" bootstrap surface) still classifies as ManagementApi, so the global
+    /// budget applies on top of the endpoint policy. Pins the behavior the pipeline-hardening
+    /// integration test depends on (a policy-bearing /api/v1 endpoint must not defer the global).
+    /// </summary>
+    [Fact]
+    public void ClassifyGlobalScope_ManagementApiPathWithEndpointPolicy_StillManagement()
+    {
+        var ctx = new DefaultHttpContext();
+        ctx.Request.Path = "/api/v1/bootstrap";
+        ctx.SetEndpoint(new Microsoft.AspNetCore.Http.Endpoint(
+            requestDelegate: null,
+            new Microsoft.AspNetCore.Http.EndpointMetadataCollection(
+                new Microsoft.AspNetCore.RateLimiting.EnableRateLimitingAttribute("anon")),
+            "test-bootstrap-endpoint"));
+
+        Assert.Equal(RateLimitPartitions.GlobalScope.ManagementApi, RateLimitPartitions.ClassifyGlobalScope(ctx));
+    }
+
+    /// <summary>Swagger UI docs assets stay exempt (deferred), as before.</summary>
+    [Fact]
+    public void ClassifyGlobalScope_DocsPath_Defers()
+    {
+        var ctx = new DefaultHttpContext();
+        ctx.Request.Path = "/api/v1/docs/index.html";
+
+        Assert.Equal(RateLimitPartitions.GlobalScope.Deferred, RateLimitPartitions.ClassifyGlobalScope(ctx));
+    }
+
     private static ClaimsPrincipal MakePrincipal(string sub)
     {
         var identity = new ClaimsIdentity(

@@ -111,7 +111,7 @@ public sealed class OciStagingJanitorTests : IAsyncLifetime
     private async Task SeedSessionAsync(
         string orgId, string uploadId, DateTimeOffset createdAt, bool createFile = true)
     {
-        string createdAtStr = createdAt.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string createdAtStr = createdAt.ToUtcIso();
         string stagingPath = Path.Combine(_stagingDir, $"oci-upload-{uploadId}");
 
         if (createFile)

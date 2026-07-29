@@ -578,7 +578,7 @@ public sealed class PackageLookupServiceTests : IAsyncLifetime
         string orgId = await SeedOrgWithCargoUpstreamAsync();
         await SetMinReleaseAgeHoursAsync(orgId, 720);
         var clock = TestTime.Frozen();
-        string publishedAt = clock.GetUtcNow().AddDays(-2).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string publishedAt = clock.GetUtcNow().AddDays(-2).ToUtcIso();
         StubCargoIndex("fresh-crate", ("1.0.0", false));
         StubCratesIoApi("fresh-crate", ("1.0.0", "MIT", publishedAt));
         var service = BuildService(NoAdvisories(), clock: clock);

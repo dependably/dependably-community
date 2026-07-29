@@ -146,7 +146,7 @@ public class TokenAuthExtensionsTests : IAsyncLifetime
                     user = "user-unit",
                     hash,
                     caps = """["read:metadata"]""",
-                    createdAt = TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                    createdAt = TestTime.KnownNow.ToUtcIso(),
                 });
         }
 
@@ -182,7 +182,7 @@ public class TokenAuthExtensionsTests : IAsyncLifetime
                     name = "ci",
                     hash,
                     caps = """["publish:npm"]""",
-                    createdAt = TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                    createdAt = TestTime.KnownNow.ToUtcIso(),
                 });
         }
 
@@ -231,7 +231,7 @@ public class TokenAuthExtensionsTests : IAsyncLifetime
                     user = "user-touch",
                     hash,
                     caps = """["read:metadata"]""",
-                    createdAt = TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                    createdAt = TestTime.KnownNow.ToUtcIso(),
                 });
         }
 
@@ -305,8 +305,8 @@ public class TokenAuthExtensionsTests : IAsyncLifetime
                 user = $"user-{orgSlug}",
                 hash,
                 caps = """["read:metadata"]""",
-                createdAt = TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                lastUsed = lastUsedAt?.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                createdAt = TestTime.KnownNow.ToUtcIso(),
+                lastUsed = lastUsedAt?.ToUtcIso(),
             });
         return (spy, rawToken);
     }
@@ -382,7 +382,7 @@ public class TokenAuthExtensionsTests : IAsyncLifetime
                     name = "ci",
                     hash,
                     caps = """["publish:npm"]""",
-                    createdAt = TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                    createdAt = TestTime.KnownNow.ToUtcIso(),
                 });
         }
 

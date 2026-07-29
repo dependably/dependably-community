@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Caching;
+using Dependably.Infrastructure.Observability;
 using Dependably.Protocol;
 using Dependably.Security;
 using Dependably.Storage;
@@ -234,6 +235,10 @@ public sealed class NuGetRegistrationHandler(
         var proxyCacheKey = new NuGetRegistrationKey(orgId, normalizedId, semVer2) { IsProxy = true };
         if (cache.TryGet(proxyCacheKey, out byte[]? proxyHit) && proxyHit is not null)
         {
+            // This request made no upstream call, so it reports neither ok nor error. The
+            // flatcontainer path's vocabulary, extended with the one outcome only a cached
+            // document has.
+            httpContext.Response.Headers["X-Upstream-Status"] = "cached";
             return RegistrationBytesResult(httpContext, proxyHit, "private, max-age=60");
         }
 
@@ -252,14 +257,23 @@ public sealed class NuGetRegistrationHandler(
         // caller's conditional-request header can never suppress caching for the others.
         // An upstream-unreachable local fallback carries the longer local-only max-age hint;
         // the merged/rewritten upstream response uses the shorter proxy max-age.
+        //
+        // The rebuild also reports whether upstream answered, so a caller can see per-request that
+        // it was served the local-only fallback — the state that hid a permanently misconfigured
+        // upstream until clients started crashing on the document it produced. A caller that JOINS
+        // another's single flight does not run this lambda and keeps the "cached" default: it made
+        // no upstream call of its own, which is what the header describes.
         string cacheControl = "private, max-age=60";
+        string upstreamStatus = "cached";
         byte[]? proxyBytes = await cache.GetOrRebuildAsync(proxyCacheKey, RegistrationProxyTtl, async rebuildCt =>
         {
             var (bytes, upstreamReached) = await BuildProxyMergedRegistrationBytesAsync(orgId, id, pkg, semVer2, baseUrl, rebuildCt);
             cacheControl = upstreamReached ? "private, max-age=60" : "private, max-age=300";
+            upstreamStatus = upstreamReached ? "ok" : "error";
             return bytes;
         }, ct);
 
+        httpContext.Response.Headers["X-Upstream-Status"] = upstreamStatus;
         return proxyBytes is null
             ? new NotFoundResult()
             : RegistrationBytesResult(httpContext, proxyBytes, cacheControl);
@@ -436,7 +450,18 @@ public sealed class NuGetRegistrationHandler(
         // the gzip transparently.
         string variant = semVer2 ? "registration5-gz-semver2" : "registration5-semver1";
 
-        string? upstreamJson = await FetchUpstreamRegistrationJsonAsync(orgId, variant, normalizedId, ct);
+        var (upstreamJsonResult, upstreamFailures) = await FetchUpstreamRegistrationJsonAsync(orgId, variant, normalizedId, ct);
+        string? upstreamJson = upstreamJsonResult;
+        if (upstreamJson is not null)
+        {
+            // Resolve externalized pages before anything reads the document: the dedupe and the
+            // URL rewrite both walk page items, and a page that only carries an @id has none.
+            upstreamJson = await NuGetRegistrationHelpers.InlineExternalizedPagesAsync(
+                upstreamJson,
+                (pageUrl, pageCt) => FetchUpstreamRegistrationPageAsync(orgId, pageUrl, pageCt),
+                MaxExternalizedPagesPerIndex,
+                ct);
+        }
 
         var localVersions = pkg is null
             ? Array.Empty<PackageVersion>() as IReadOnlyList<PackageVersion>
@@ -450,6 +475,12 @@ public sealed class NuGetRegistrationHandler(
         {
             if (pkg is null || localVersions.Count == 0)
             {
+                // No local row to fall back on either. A genuine "every configured upstream
+                // confirmed absent (404/410)" answer stays a 404 below; a non-clean failure
+                // (timeout, 5xx, refusal, ...) on at least one upstream must surface as a real
+                // upstream failure instead of the silent, non-retryable 404 that makes
+                // `dotnet restore` report NU1101 even when the package genuinely exists.
+                upstreamFailures.ThrowIfFailed();
                 return (null, false);
             }
 
@@ -473,13 +504,68 @@ public sealed class NuGetRegistrationHandler(
         return (System.Text.Encoding.UTF8.GetBytes(responseJson), true);
     }
 
+    // Bounds the upstream fan-out one registration request can trigger. api.nuget.org pages hold
+    // 64 leaves each, so even a thousand-version package externalizes well under this; the cap is
+    // a backstop against a hostile or malformed index listing pages without end, not a limit any
+    // real package reaches. A page past the cap keeps its upstream @id and stays dereferenceable.
+    private const int MaxExternalizedPagesPerIndex = 32;
+
+    // Fetches one externalized registration page document, or returns null when it must not be
+    // fetched.
+    //
+    // The page @id is upstream-controlled, so it is host-pinned to one of the org's configured
+    // nuget upstreams before any request is made: a compromised or hostile index could otherwise
+    // name any host and turn this into a server-side request forgery with the upstream's
+    // credentials attached. The credential is only threaded for the upstream whose host matched,
+    // never carried to a host named by the document.
+    private async Task<string?> FetchUpstreamRegistrationPageAsync(
+        string orgId, string pageUrl, CancellationToken ct)
+    {
+        var bases = await registries.ResolveAsync(orgId, "nuget", ct);
+        var source = bases.FirstOrDefault(b => UpstreamHostPin.IsSameHost(b.Url, pageUrl));
+        if (source is null)
+        {
+            // RenderedCompactJsonFormatter JSON-encodes {Url}.
+            logger.LogWarning(
+                "NuGet upstream registration page {Url} is not on a configured upstream host; " +
+                "leaving the page externalized.", pageUrl);
+            return null;
+        }
+
+        try
+        {
+            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+            var resp = await upstream.GetOrFetchMetadataAsync(pageUrl, source.AuthorizationHeader, linkedCts.Token);
+            if (resp.IsSuccessStatusCode)
+            {
+                return resp.BodyAsString();
+            }
+
+            // RenderedCompactJsonFormatter JSON-encodes {Url}.
+            logger.LogWarning(
+                "NuGet upstream registration page fetch failed: {Status} for {Url}", resp.StatusCode, pageUrl);
+        }
+        catch (Exception ex)
+        {
+            // RenderedCompactJsonFormatter JSON-encodes {Url}.
+            logger.LogWarning(ex, "NuGet upstream registration page fetch threw for {Url}", pageUrl);
+        }
+
+        return null;
+    }
+
     // Walks the org's configured upstreams in priority order and returns the first
     // registration index that answers successfully. No configured upstream ⇒ proxying is
-    // disabled for nuget, so the loop is skipped; null means the caller falls back to
-    // local-only data.
-    private async Task<string?> FetchUpstreamRegistrationJsonAsync(
+    // disabled for nuget, so the loop is skipped; a null Json means the caller falls back to
+    // local-only data. The returned tracker distinguishes a genuine "every upstream confirmed
+    // absent (404/410)" outcome from "at least one upstream failed non-cleanly" — the caller
+    // decides whether that failure must surface as an UpstreamFetchFailedException, since only
+    // it knows whether a local fallback exists.
+    private async Task<(string? Json, UpstreamMetadataFailureTracker Failures)> FetchUpstreamRegistrationJsonAsync(
         string orgId, string variant, string normalizedId, CancellationToken ct)
     {
+        var failures = new UpstreamMetadataFailureTracker();
         var bases = await registries.ResolveAsync(orgId, "nuget", ct);
         foreach (var source in bases)
         {
@@ -492,18 +578,35 @@ public sealed class NuGetRegistrationHandler(
                 var resp = await upstream.GetOrFetchMetadataAsync(upstreamUrl, source.AuthorizationHeader, linkedCts.Token);
                 if (resp.IsSuccessStatusCode)
                 {
-                    return resp.BodyAsString();
+                    return (resp.BodyAsString(), failures);
                 }
+                failures.RecordHttpStatus(upstreamUrl, resp.StatusCode, source.AuthorizationHeader);
+                DependablyMeter.NuGetRegistrationUpstreamFailures.Add(1,
+                    new KeyValuePair<string, object?>("reason", "http_error"));
                 // RenderedCompactJsonFormatter JSON-encodes {Url}.
                 logger.LogWarning("NuGet upstream registration fetch failed: {Status} for {Url}", resp.StatusCode, upstreamUrl);
             }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                // The 10s per-upstream deadline, not the caller giving up. Counted separately from
+                // a refusal: a timing-out upstream and a 404ing one are different operator
+                // problems, and the 404 is the one a bad base URL produces.
+                failures.RecordFailure(upstreamUrl);
+                DependablyMeter.NuGetRegistrationUpstreamFailures.Add(1,
+                    new KeyValuePair<string, object?>("reason", "timeout"));
+                // RenderedCompactJsonFormatter JSON-encodes {Url}.
+                logger.LogWarning("NuGet upstream registration fetch timed out for {Url}", upstreamUrl);
+            }
             catch (Exception ex)
             {
+                failures.RecordFailure(upstreamUrl);
+                DependablyMeter.NuGetRegistrationUpstreamFailures.Add(1,
+                    new KeyValuePair<string, object?>("reason", "exception"));
                 // RenderedCompactJsonFormatter JSON-encodes {Url}.
                 logger.LogWarning(ex, "NuGet upstream registration fetch threw for {Url}", upstreamUrl);
             }
         }
-        return null;
+        return (null, failures);
     }
 
     // Returns (settings, token) when the caller is authorized to read NuGet packages from this org,

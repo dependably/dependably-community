@@ -50,6 +50,7 @@ public sealed class SystemSlackQueue : BackgroundService, ISystemEventNotifier
     private long _droppedCount;
     private long _deliveredCount;
     private long _failedCount;
+    private long _processedCount;
 
     public SystemSlackQueue(
         OrgRepository orgs,
@@ -89,6 +90,16 @@ public sealed class SystemSlackQueue : BackgroundService, ISystemEventNotifier
     public long DroppedCount => Interlocked.Read(ref _droppedCount);
     public long DeliveredCount => Interlocked.Read(ref _deliveredCount);
     public long FailedCount => Interlocked.Read(ref _failedCount);
+
+    /// <summary>
+    /// Total events that have left the channel and run through delivery to a terminal outcome,
+    /// counted only after the outcome columns (<c>system_slack_last_status</c> and its siblings)
+    /// have been written — distinct from <see cref="DeliveredCount"/>/<see cref="FailedCount"/>,
+    /// which are bumped mid-delivery, before the status write. A caller can wait on this to observe
+    /// that a specific notification has been fully handled including its durable outcome record,
+    /// closing the race where a test synchronizes on the counter but asserts on the later status.
+    /// </summary>
+    public long ProcessedCount => Interlocked.Read(ref _processedCount);
 
     /// <summary>
     /// Test-only direct invocation of <see cref="ExecuteAsync"/>. <see cref="BackgroundService.StartAsync"/>
@@ -162,6 +173,21 @@ public sealed class SystemSlackQueue : BackgroundService, ISystemEventNotifier
     }
 
     private async Task DeliverAsync(SystemEventRecord record, CancellationToken ct)
+    {
+        try
+        {
+            await DeliverCoreAsync(record, ct);
+        }
+        finally
+        {
+            // Count every event exactly once, after its terminal outcome (including the durable
+            // status write) has been recorded, whatever that outcome was. A caller can then wait
+            // for a specific notification to have been fully handled — see ProcessedCount.
+            Interlocked.Increment(ref _processedCount);
+        }
+    }
+
+    private async Task DeliverCoreAsync(SystemEventRecord record, CancellationToken ct)
     {
         string? webhookUrl;
         try
@@ -253,7 +279,7 @@ public sealed class SystemSlackQueue : BackgroundService, ISystemEventNotifier
         try
         {
             await _orgs.SetInstanceSettingAsync(
-                "system_slack_last_delivery_at", _time.GetUtcNow().ToString("O"), ct);
+                "system_slack_last_delivery_at", _time.GetUtcNow().ToUtcIso(), ct);
             await _orgs.SetInstanceSettingAsync("system_slack_last_status", status, ct);
             await _orgs.SetInstanceSettingAsync("system_slack_last_error", error ?? "", ct);
         }

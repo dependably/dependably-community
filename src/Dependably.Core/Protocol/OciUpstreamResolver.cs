@@ -63,6 +63,7 @@ public sealed class OciUpstreamResolver
     private readonly UpstreamRegistryRepository _upstreamRepo;
     private readonly IAirGapMode _airGap;
     private readonly OciImageLicenseRecorder _licenseRecorder;
+    private readonly OciReferenceGraph _referenceGraph;
     private readonly CacheAccessRecorder _cacheRecorder;
     private readonly CacheArtifactRepository _cacheArtifacts;
     private readonly ILogger<OciUpstreamResolver> _logger;
@@ -121,6 +122,7 @@ public sealed class OciUpstreamResolver
         // Built here rather than injected to avoid capturing Scoped services in this Singleton.
         _packages = new PackageRepository(db, time: time);
         _upstreamRepo = new UpstreamRegistryRepository(db, time, envelope);
+        _referenceGraph = new OciReferenceGraph(db);
         _airGap = airGap;
         _licenseRecorder = licenseRecorder;
         // CacheAccessRecorder and CacheArtifactRepository are registered as singletons (stateless
@@ -807,16 +809,33 @@ public sealed class OciUpstreamResolver
         await conn.ExecuteAsync(
             """
             INSERT INTO oci_blobs (digest, org_id, media_type, size_bytes, blob_key, origin, cached_at)
-            VALUES (@digest, @orgId, @mediaType, @sizeBytes, @blobKey, 'proxy',
-                    strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            VALUES (@digest, @orgId, @mediaType, @sizeBytes, @blobKey, 'proxy', @now)
             ON CONFLICT(digest, org_id) DO UPDATE SET
-                upstream_checked_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+                upstream_checked_at = @now
             """,
-            new { digest = m.Digest, orgId, mediaType = m.MediaType, sizeBytes = (long)m.Bytes.Length, blobKey });
+            new
+            {
+                digest = m.Digest,
+                orgId,
+                mediaType = m.MediaType,
+                sizeBytes = (long)m.Bytes.Length,
+                blobKey,
+                now = UtcTimestamp.Now(_time),
+            });
 
         // Capture the image license from the config label onto this manifest row. Runs outside the
         // tag branch so by-digest child manifests of a pulled index are covered too. Best-effort.
         await _licenseRecorder.RecordManifestAsync(orgId, m.Digest, m.Bytes, ct);
+
+        // Record what this manifest references, so eviction can tell a shared layer from an
+        // orphaned one. Outside the tag branch for the same reason as the license capture: an
+        // index's by-digest children are manifests in their own right and each has a closure.
+        // A body that does not parse records nothing, leaving the manifest un-evictable — the
+        // conservative direction, and the same posture the read path takes on a malformed body.
+        if (OciManifestParser.ParseReferences(m.Bytes) is { } refs)
+        {
+            await _referenceGraph.RecordAsync(orgId, m.Digest, refs.Digests, ct);
+        }
 
         // Upsert tag → digest when the reference is a tag (not a digest).
         if (!OciCoordinatesParser.IsValidDigest(reference))
@@ -825,15 +844,13 @@ public sealed class OciUpstreamResolver
             await conn.ExecuteAsync(
                 """
                 INSERT INTO oci_tags (org_id, repository, tag, digest, updated_at, last_revalidated)
-                VALUES (@orgId, @repo, @tag, @digest,
-                        strftime('%Y-%m-%dT%H:%M:%SZ','now'),
-                        strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                VALUES (@orgId, @repo, @tag, @digest, @now, @now)
                 ON CONFLICT(org_id, repository, tag) DO UPDATE SET
                     digest          = excluded.digest,
-                    updated_at      = strftime('%Y-%m-%dT%H:%M:%SZ','now'),
-                    last_revalidated = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+                    updated_at      = excluded.updated_at,
+                    last_revalidated = excluded.last_revalidated
                 """,
-                new { orgId, repo = repository, tag = reference, digest = m.Digest });
+                new { orgId, repo = repository, tag = reference, digest = m.Digest, now = UtcTimestamp.Now(_time) });
 
             // Surface the pulled image in the shared package catalogue the dashboards +
             // Packages page read from. OCI otherwise lives only in oci_blobs/oci_tags and
@@ -1064,11 +1081,10 @@ public sealed class OciUpstreamResolver
         int rows = await conn.ExecuteAsync(
             """
             INSERT INTO oci_blobs (digest, org_id, media_type, size_bytes, blob_key, origin, cached_at)
-            VALUES (@digest, @orgId, @mediaType, @sizeBytes, @blobKey, 'proxy',
-                    strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            VALUES (@digest, @orgId, @mediaType, @sizeBytes, @blobKey, 'proxy', @now)
             ON CONFLICT(digest, org_id) DO NOTHING
             """,
-            new { digest, orgId, mediaType, sizeBytes, blobKey });
+            new { digest, orgId, mediaType, sizeBytes, blobKey, now = UtcTimestamp.Now(_time) });
         return rows > 0;
     }
 }

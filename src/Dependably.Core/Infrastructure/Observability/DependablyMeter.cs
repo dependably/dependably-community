@@ -47,7 +47,8 @@ public static class DependablyMeter
         Meter.CreateCounter<long>(
             "dependably.apk.index_signature_failures",
             description: "apk APKINDEX.tar.gz embedded RSA signature verification failures. " +
-                         "Attributes: reason (no_trusted_key|missing_signature|bad_signature|malformed_index).");
+                         "Attributes: reason (no_trusted_key|missing_signature|bad_signature|" +
+                         "weak_signature_algorithm|malformed_index).");
 
     public static readonly UpDownCounter<long> UpstreamInflightFetches =
         Meter.CreateUpDownCounter<long>(
@@ -76,6 +77,20 @@ public static class DependablyMeter
         Meter.CreateCounter<long>(
             "dependably.maven.sidecar_missing",
             description: "Maven artifact fetch bailed out because sidecar SHA-256 was unavailable or verification disabled. Attributes: reason.");
+
+    /// <summary>
+    /// A NuGet registration-index fetch that did not answer, per attempted upstream. A sustained
+    /// nonzero rate is the signal that clients are being served the local-only fallback: the
+    /// document is still valid, so nothing fails loudly, but it advertises only what this instance
+    /// has cached. That is what a misconfigured upstream base URL looks like — a permanently
+    /// 404ing registration path produces a steady <c>http_error</c> rate and nothing else.
+    /// Attributes: <c>reason</c> (<c>http_error</c>|<c>timeout</c>|<c>exception</c>) — bounded set,
+    /// no tenant_id (per the observability convention).
+    /// </summary>
+    public static readonly Counter<long> NuGetRegistrationUpstreamFailures =
+        Meter.CreateCounter<long>(
+            "dependably.nuget.registration_upstream_failures",
+            description: "NuGet upstream registration-index fetches that did not answer, per attempted upstream. Attributes: reason.");
 
     public static readonly Counter<long> AuditEmitFailures =
         Meter.CreateCounter<long>(
@@ -168,15 +183,47 @@ public static class DependablyMeter
             description: "Vuln-scan findings. Attributes: severity, ecosystem.");
 
     /// <summary>
+    /// Artefacts whose vulnerability scan was deferred because the advisory source was not
+    /// reached (network failure, non-2xx, rate limit, or an empty local corpus). A deferred
+    /// artefact is left unstamped — <c>vuln_checked_at</c> stays NULL — so the record never
+    /// claims a screening that did not happen. A sustained non-zero rate here is an outage
+    /// signal, and is the only thing distinguishing it from a genuinely clean sweep.
+    /// Attributes: <c>pass</c> (scan|rescan|on_demand|cache_artifact).
+    /// </summary>
+    public static readonly Counter<long> ScanDeferred =
+        Meter.CreateCounter<long>(
+            "dependably.scan.deferred",
+            description: "Vuln scans deferred because the advisory source was unreachable. Attributes: pass.");
+
+    /// <summary>
     /// Requests rejected by the download / push rate limiters. Attributes:
-    /// <c>policy</c> (download|push|...), <c>partition</c> prefix (<c>token:HHHH</c>
-    /// or <c>ip:1.2.3.4</c>). Lets operators see when a single token is rate-locked
-    /// and identify it via the 12-hex prefix without leaking the full hash.
+    /// <c>policy</c> (download|push|...) and <c>partition</c>, the bounded partition
+    /// <em>kind</em> (<c>token</c>|<c>user</c>|<c>ip</c>|<c>unknown</c>). The partition key
+    /// itself stays off the metric: it embeds a token-hash prefix, a user id, or a
+    /// caller-controlled source address, any of which mints one time series per caller.
+    /// Identifying the throttled caller is the audit log's job.
     /// </summary>
     public static readonly Counter<long> RateLimitRejected =
         Meter.CreateCounter<long>(
             "dependably.rate_limit.rejected",
             description: "Requests rejected by rate limiting. Attributes: policy, partition.");
+
+    /// <summary>
+    /// Rate-limit decisions taken without the rate-limit backend: the limiter either could not
+    /// reach Redis or received a reply it could not parse, so the request was resolved by the
+    /// configured failure posture instead of by a counter. A non-zero rate means the
+    /// abuse-prevention limiters (login, invite, token-create) are not actually limiting
+    /// (<c>decision=allowed</c>) or are refusing every request in the policy
+    /// (<c>decision=denied</c>) — both are alertable, and the fail-open case is the only signal
+    /// that login rate limiting is currently off. Attributes: <c>policy</c>
+    /// (login|invite|token-create|unknown), <c>decision</c> (allowed|denied), <c>cause</c>
+    /// (connection|malformed_reply) — a steady trickle of <c>malformed_reply</c> points at a
+    /// script or client-library incompatibility rather than a network/availability problem.
+    /// </summary>
+    public static readonly Counter<long> RateLimitBackendUnavailable =
+        Meter.CreateCounter<long>(
+            "dependably.rate_limit.backend_unavailable",
+            description: "Rate-limit decisions taken without the Redis backend, resolved by the configured failure posture. Attributes: policy, decision (allowed|denied), cause (connection|malformed_reply).");
 
     /// <summary>
     /// Package versions whose deprecation status changed during a refresh pass.
@@ -310,6 +357,30 @@ public static class DependablyMeter
         Meter.CreateCounter<long>(
             "dependably.cache.content_divergences",
             description: "First-fetch content divergences on the shared cache plane: a tenant's fetched SHA-256 differs from the cached global row. Attributes: ecosystem.");
+
+    /// <summary>
+    /// Rendered-metadata invalidations this replica broadcast to its peers after a mutation.
+    /// Attributes: <c>ecosystem</c> (npm|pypi|nuget|maven|rpm) and <c>outcome</c>
+    /// (<c>success</c> when the broker accepted the message, <c>server_error</c> when the
+    /// broadcast was dropped and the peers fall back to TTL expiry). A rising
+    /// <c>server_error</c> rate is the operator's signal that cross-replica convergence has
+    /// silently degraded to the TTL. No per-tenant or per-package labels (cardinality budget).
+    /// </summary>
+    public static readonly Counter<long> MetadataInvalidationsPublished =
+        Meter.CreateCounter<long>(
+            "dependably.metadata.invalidations_published",
+            description: "Rendered-metadata invalidations broadcast to peer replicas. Attributes: ecosystem, outcome (success|server_error).");
+
+    /// <summary>
+    /// Rendered-metadata invalidations received from a peer replica and applied to this replica's
+    /// caches. Messages this replica published itself are not counted — it evicted before
+    /// broadcasting — so the counter measures genuine cross-replica fan-out. Attributes:
+    /// <c>ecosystem</c>. No per-tenant or per-package labels (cardinality budget).
+    /// </summary>
+    public static readonly Counter<long> MetadataInvalidationsReceived =
+        Meter.CreateCounter<long>(
+            "dependably.metadata.invalidations_received",
+            description: "Rendered-metadata invalidations received from a peer replica and applied locally. Attributes: ecosystem.");
 
     // ── Foundation instruments — declared here; emission wired in follow-up ──
 

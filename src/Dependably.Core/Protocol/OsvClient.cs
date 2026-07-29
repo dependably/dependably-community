@@ -272,6 +272,9 @@ public sealed class OsvClient : IOsvSource
             }
 
             _logger.LogWarning("OSV rate-limited; retrying in {Delay}ms (attempt {Attempt}/3)", delay, attempt + 1);
+            // now-ok: back-off between live HTTP attempts against a rate-limiting upstream —
+            // the pause has to be real elapsed time for the server's window to reopen, and no
+            // caller observes it as a deadline.
             try { await Task.Delay(delay, ct); } catch (OperationCanceledException) { break; }
             delay = Math.Min(delay * OsvRetryBackoffMultiplier, OsvRetryMaxDelayMs);
         }

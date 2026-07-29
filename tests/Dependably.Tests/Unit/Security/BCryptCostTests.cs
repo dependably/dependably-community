@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using Dependably.Tests.Compliance;
 using Xunit.Abstractions;
 
 namespace Dependably.Tests.Unit.Security;
@@ -31,28 +32,25 @@ public sealed partial class BCryptCostTests
     /// production source must pass workFactor: with a literal int ≥ 12. The
     /// default BCrypt.Net work factor is 11 (below our floor), so the parameter
     /// is mandatory — omitting it counts as a violation.
+    ///
+    /// <para>
+    /// Scans every <c>src/Dependably*</c> source root: the credential-hashing code lives in
+    /// <c>Dependably.Management</c>, so a gate anchored on the thin composition root would
+    /// pass without reading a single hashing call site.
+    /// </para>
     /// </summary>
     [Fact]
     public void Every_HashPassword_call_site_uses_workFactor_at_least_12()
     {
-        string srcRoot = LocateSourceRoot();
-        Assert.True(Directory.Exists(srcRoot), $"src root not found at {srcRoot}");
-
         var violations = new List<string>();
-        foreach (string file in Directory.EnumerateFiles(srcRoot, "*.cs", SearchOption.AllDirectories))
+        foreach (string file in SourceRoots.AllCSharpFiles())
         {
-            if (file.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}") ||
-                file.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}"))
-            {
-                continue;
-            }
-
             string source = File.ReadAllText(file);
             foreach (Match call in HashPasswordCallRegex().Matches(source))
             {
                 string args = call.Groups["args"].Value;
                 int lineNumber = source[..call.Index].Count(c => c == '\n') + 1;
-                string rel = Path.GetRelativePath(srcRoot, file);
+                string rel = Path.GetRelativePath(SourceRoots.OwningRoot(file), file);
 
                 var workFactor = WorkFactorRegex().Match(args);
                 if (!workFactor.Success)
@@ -79,22 +77,6 @@ public sealed partial class BCryptCostTests
             Assert.Fail($"{violations.Count} BCrypt.HashPassword call(s) violate the cost floor. " +
                         $"encryption.md §1 mandates workFactor ≥ {MinCostFactor}.");
         }
-    }
-
-    private static string LocateSourceRoot()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null)
-        {
-            string candidate = Path.Combine(dir.FullName, "src", "Dependably");
-            if (Directory.Exists(candidate))
-            {
-                return candidate;
-            }
-
-            dir = dir.Parent;
-        }
-        return string.Empty;
     }
 
     [GeneratedRegex(@"^\$2[aby]\$(?<cost>\d{2})\$")]

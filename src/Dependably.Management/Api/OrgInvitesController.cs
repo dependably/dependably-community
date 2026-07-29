@@ -1,3 +1,4 @@
+using System.Net.Mail;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Mail;
 using Dependably.Security;
@@ -79,6 +80,17 @@ public sealed class OrgInvitesController : OrgScopedControllerBase
             return _problems.ValidationErrorActionKey("email", "error.invite.emailRequired");
         }
 
+        // The invite address must be a bare, deliverable mailbox. MailAddress.TryCreate rejects
+        // malformed input and embedded CR/LF (header injection); comparing the parsed Address back
+        // to the input additionally rejects the display-name forms TryCreate accepts
+        // ("Name" <a@b.c>), so the stored value is exactly what the mailer will send to and
+        // exactly what the pending-invite uniqueness check compares.
+        string email = req.Email.Trim();
+        if (!MailAddress.TryCreate(email, out var parsed) || parsed.Address != email)
+        {
+            return _problems.ValidationErrorActionKey("email", "error.invite.emailInvalid");
+        }
+
         string orgId = CurrentTenantId();
         string? userId = GetUserId();
         string role = string.IsNullOrWhiteSpace(req.Role) ? "member" : req.Role.Trim().ToLowerInvariant();
@@ -110,7 +122,24 @@ public sealed class OrgInvitesController : OrgScopedControllerBase
             return _problems.ValidationErrorActionKey("invites", "error.invite.limitReached", cap);
         }
 
-        var (raw, record) = await _invites.CreateAsync(orgId, req.Email, userId!, role, ct);
+        // One pending invite per (tenant, address) — the state idx_invites_unique_pending
+        // enforces. Pre-check so the common case answers 409 with a message the inviter can act
+        // on (cancel the outstanding invite, then re-send) instead of surfacing a store error.
+        if (await _invites.HasPendingAsync(orgId, email, ct))
+        {
+            return _problems.ConflictActionKey("error.invite.duplicatePending", reason: "duplicate_pending_invite");
+        }
+
+        // The pre-check is advisory: two concurrent creates for the same address can both pass
+        // it. CreateAsync resolves the loser to null via the index's conflict target rather than
+        // throwing, so the race lands on the same 409 as the sequential case.
+        var created = await _invites.CreateAsync(orgId, email, userId!, role, ct);
+        if (created is null)
+        {
+            return _problems.ConflictActionKey("error.invite.duplicatePending", reason: "duplicate_pending_invite");
+        }
+
+        var (raw, record) = created;
 
         await _audit.LogAsync("invite_created", orgId, userId,
             detail: System.Text.Json.JsonSerializer.Serialize(new
@@ -127,7 +156,8 @@ public sealed class OrgInvitesController : OrgScopedControllerBase
         // route, so BASE_URL must not win here.
         string inviteLink = _urls.Absolute(HttpContext, $"/join?token={raw}");
 
-        if (_mailer is null || !await _mailer.IsAvailableAsync(ct))
+        var mailer = await ResolveAvailableMailerAsync(record.Id, orgId, ct);
+        if (mailer is null)
         {
             // Invite id + tenant id are enough to correlate without exposing the recipient's
             // email or the invite token. The email lives in the audit_log entry above
@@ -152,7 +182,7 @@ public sealed class OrgInvitesController : OrgScopedControllerBase
             string inviteLanguage = settings?.DefaultLanguage ?? LanguageCodes.Default;
             // the mailer logs only the recipient's domain
             // (ExtractDomain) — the email local-part, invite link, and token never reach a log sink.
-            await _mailer.SendInviteAsync(record.Email, orgSlug, inviteLink, record.ExpiresAt, inviteLanguage, ct);
+            await mailer.SendInviteAsync(record.Email, orgSlug, inviteLink, record.ExpiresAt, inviteLanguage, ct);
             return Ok(new { record, invite_link = (string?)null, delivered_via = "email" });
         }
         catch (Exception ex)
@@ -165,6 +195,38 @@ public sealed class OrgInvitesController : OrgScopedControllerBase
                 record.Id,
                 orgId);
             return Ok(new { record, invite_link = inviteLink, delivered_via = "link" });
+        }
+    }
+
+    /// <summary>
+    /// Returns the mailer when instance SMTP can deliver, or null when it cannot. The
+    /// availability probe reads <c>instance_settings</c> (and decrypts the stored SMTP secret
+    /// when a master key is configured), so it has failure modes of its own. It runs after the
+    /// invite row is committed, so a throwing probe degrades to the link-in-response path
+    /// exactly as a throwing <c>SendInviteAsync</c> does — the alternative is a 500 that hides
+    /// an invite the tenant can neither retrieve nor re-issue.
+    /// Logs only the invite id and tenant id; no email, token, or link reaches the sink.
+    /// </summary>
+    private async Task<IInviteMailer?> ResolveAvailableMailerAsync(string inviteId, string orgId, CancellationToken ct)
+    {
+        if (_mailer is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return await _mailer.IsAvailableAsync(ct) ? _mailer : null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "ExceptionType={ExceptionType} instance SMTP availability probe failed for invite {InviteId} on tenant {TenantId}; treating delivery as unavailable and returning link as fallback.",
+                ex.GetType().Name,
+                inviteId,
+                orgId);
+            return null;
         }
     }
 

@@ -3,6 +3,7 @@
   import { t } from 'svelte-i18n'
   import { api } from '../lib/api.js'
   import { currentOrg } from '../lib/store.js'
+  import { reportPageLoad } from '../lib/pageLoad.js'
   import { formatDate } from '../lib/format.js'
   import { copyToClipboard } from '../lib/clipboard.js'
   import { ASSISTANTS, remediationBrief, remediationSkillIds, resolvedFixedVersion, skillInstallCommand, skillPrompt } from '../lib/remediation.js'
@@ -24,7 +25,13 @@
   // (critical/high/medium/low) — note it's "medium", not "moderate".
   const SEVERITIES = ['critical', 'high', 'medium', 'low']
 
+  /** The route transition this page was mounted for, supplied by RouteView. @type {number | null} */
+  export let pageToken = null
+
   let items = [], loading = true, error = ''
+  // Holds the deferred navigation that mounted this page until the data is here, so the swap
+  // shows the loaded page rather than a shimmer that lives for a hundred milliseconds.
+  $: reportPageLoad(pageToken, loading)
   let ecosystem = init.eco
   let search = init.q
   let severityFilter = init.sev
@@ -201,6 +208,9 @@
     rows={filtered}
     {comparators}
     {loading}
+    loadingRows={limit}
+    memoryKey="vulnerabilities"
+    loadingRowHeight="48px"
     initialSort={{ key: sortCol, dir: sortDir }}
     on:sortchange={onSortChange}
     emptyText={$t('vulnerabilities.empty')}
@@ -473,11 +483,9 @@
     {/if}
   </DataTable>
 
-  {#if !loading}
-    <Pagination {total} {page} {limit}
-      on:pagechange={onPageChange}
-      on:limitchange={onLimitChange} />
-  {/if}
+  <Pagination {total} {page} {limit}
+    on:pagechange={onPageChange}
+    on:limitchange={onLimitChange} />
 </div>
 
 <style>

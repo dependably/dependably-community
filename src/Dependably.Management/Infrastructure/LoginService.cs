@@ -272,7 +272,7 @@ public sealed class LoginService
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             "UPDATE users SET last_login_at = @now WHERE id = @id",
-            new { id = userId, now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ") });
+            new { id = userId, now = _time.GetUtcNow().ToUtcIso() });
 
         string jwtSecret = await _orgs.GetInstanceSettingAsync("jwt_secret", ct)
             ?? throw new InvalidOperationException("JWT secret not found in instance_settings.");
@@ -331,8 +331,9 @@ public sealed class LoginService
     /// <summary>
     /// Issues a short-lived MFA challenge JWT (<c>scope=mfa_challenge</c>). The challenge
     /// is signed with the instance JWT secret and expires in 5 minutes. It is validated
-    /// manually by <see cref="TryReadMfaChallenge"/>; it never flows through JwtBearer
-    /// (which only reads <c>scope=tenant</c> tokens).
+    /// manually by <see cref="TryReadMfaChallenge"/>. It carries the challenge audience
+    /// (<see cref="Dependably.Security.JwtTokenBinding.MfaChallengeAudience"/>), so the session
+    /// scheme — which pins the session audience — rejects it during token validation.
     /// </summary>
     internal static string IssueMfaChallengeJwt(
         string userId, string tenantId, string role, string email,
@@ -356,6 +357,8 @@ public sealed class LoginService
         };
 
         var token = new JwtSecurityToken(
+            issuer: Dependably.Security.JwtTokenBinding.Issuer,
+            audience: Dependably.Security.JwtTokenBinding.MfaChallengeAudience,
             claims: claims,
             notBefore: now,
             expires: now.AddMinutes(5),
@@ -393,8 +396,13 @@ public sealed class LoginService
             {
                 ValidateIssuerSigningKey = true,
                 IssuerSigningKey = key,
-                ValidateIssuer = false,
-                ValidateAudience = false,
+                // Pin the challenge audience so a full session JWT — same secret, same
+                // algorithm, longer lifetime — cannot be replayed as a second-factor
+                // challenge. The scope check below is the second, independent barrier.
+                ValidateIssuer = true,
+                ValidIssuer = Dependably.Security.JwtTokenBinding.Issuer,
+                ValidateAudience = true,
+                ValidAudience = Dependably.Security.JwtTokenBinding.MfaChallengeAudience,
                 ValidateLifetime = true,
                 ClockSkew = TimeSpan.Zero,
                 ValidAlgorithms = new[] { SecurityAlgorithms.HmacSha256 },
@@ -659,6 +667,8 @@ public sealed class LoginService
         };
 
         var token = new JwtSecurityToken(
+            issuer: Dependably.Security.JwtTokenBinding.Issuer,
+            audience: Dependably.Security.JwtTokenBinding.MfaChallengeAudience,
             claims: claims,
             notBefore: now,
             expires: now.AddMinutes(5),
@@ -782,7 +792,7 @@ public sealed class LoginService
                 ceiling = IdpRoleCeiling(ctx),
                 idp_can_assign_admin = ctx.IdpCanAssignAdmin,
                 idp_entity_id = ctx.IdpEntityId,
-                nameid = ctx.NameId,
+                nameid_hash = HashNameId(ctx.NameId),
             }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             sourceIp: ctx.SourceIp, ct: ct);
 
@@ -861,7 +871,7 @@ public sealed class LoginService
                 {
                     reason = "email_link_password_account_blocked",
                     idp_entity_id = ctx.IdpEntityId,
-                    nameid = ctx.NameId,
+                    nameid_hash = HashNameId(ctx.NameId),
                 }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
                 sourceIp: ctx.SourceIp, ct: ct);
             await EmitSamlFailureAsync(ctx.TenantId, Id,
@@ -885,7 +895,7 @@ public sealed class LoginService
                     ceiling = IdpRoleCeiling(ctx),
                     idp_can_assign_admin = ctx.IdpCanAssignAdmin,
                     idp_entity_id = ctx.IdpEntityId,
-                    nameid = ctx.NameId,
+                    nameid_hash = HashNameId(ctx.NameId),
                 }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
                 sourceIp: ctx.SourceIp, ct: ct);
             await EmitSamlFailureAsync(ctx.TenantId, Id,
@@ -896,7 +906,15 @@ public sealed class LoginService
         await _externalIdentities.LinkAsync(ctx.TenantId, Id, ctx.IdpEntityId, ctx.NameId, ctx.AssertionEmail, ct);
         await StampUserLoginAsync(conn, Id, ctx.AssertionEmail, currentEmail: ctx.AssertionEmail);
 
-        var userLinkedDetail = new { idp_entity_id = ctx.IdpEntityId, nameid = ctx.NameId, email = ctx.AssertionEmail };
+        // The email stays in PLAINTEXT here, deliberately, and this is the one audit family where
+        // that is the right call. The NameID is hashed everywhere because it is an opaque
+        // identifier the record does not need in the clear; this record's entire subject is which
+        // mailbox the IdP asserted and which local account it was bound to, so hashing it leaves a
+        // forensic entry that cannot answer the only question it exists to answer. It also holds
+        // nothing new: the same address is already durable account data in users.email and
+        // external_identities.email_snapshot, so masking it here reduces what the record can
+        // explain without reducing what the system stores.
+        var userLinkedDetail = new { idp_entity_id = ctx.IdpEntityId, nameid_hash = HashNameId(ctx.NameId), email = ctx.AssertionEmail };
         await _audit.LogAsync("auth.saml.user_linked",
             orgId: ctx.TenantId, actorId: Id,
             detail: System.Text.Json.JsonSerializer.Serialize(userLinkedDetail, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
@@ -916,7 +934,7 @@ public sealed class LoginService
     {
         if (string.IsNullOrWhiteSpace(ctx.AssertionEmail))
         {
-            var noEmailDetail = new { reason = "no_email_in_assertion", idp_entity_id = ctx.IdpEntityId, nameid = ctx.NameId };
+            var noEmailDetail = new { reason = "no_email_in_assertion", idp_entity_id = ctx.IdpEntityId, nameid_hash = HashNameId(ctx.NameId) };
             await _audit.LogAsync("auth.saml.login.failure",
                 orgId: ctx.TenantId,
                 detail: System.Text.Json.JsonSerializer.Serialize(noEmailDetail, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
@@ -945,7 +963,7 @@ public sealed class LoginService
             await AuditRoleMappingBlockedAsync(ctx, newUserId, requestedRole, jitRole, ct);
         }
 
-        var userProvisionedDetail = new { idp_entity_id = ctx.IdpEntityId, nameid = ctx.NameId, email = ctx.AssertionEmail, role = jitRole };
+        var userProvisionedDetail = new { idp_entity_id = ctx.IdpEntityId, nameid_hash = HashNameId(ctx.NameId), email = ctx.AssertionEmail, role = jitRole };
         await _audit.LogAsync("auth.saml.user_provisioned",
             orgId: ctx.TenantId, actorId: newUserId,
             detail: System.Text.Json.JsonSerializer.Serialize(userProvisionedDetail, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
@@ -1022,7 +1040,7 @@ public sealed class LoginService
     private async Task StampUserLoginAsync(
         System.Data.Common.DbConnection conn, string userId, string? assertionEmail, string? currentEmail)
     {
-        string nowStr = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string nowStr = _time.GetUtcNow().ToUtcIso();
         bool emailChanged = !string.IsNullOrWhiteSpace(assertionEmail)
             && !string.Equals(assertionEmail, currentEmail, StringComparison.OrdinalIgnoreCase);
         if (emailChanged)
@@ -1044,9 +1062,10 @@ public sealed class LoginService
     private async Task LogSamlSuccessAsync(
         string tenantId, string userId, string idpEntityId, string nameId, string path, string? sourceIp, CancellationToken ct)
     {
+        string? nameIdHash = HashNameId(nameId);
         await _audit.LogAsync("auth.saml.login.success",
             orgId: tenantId, actorId: userId,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { idp_entity_id = idpEntityId, nameid = nameId, path }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            detail: System.Text.Json.JsonSerializer.Serialize(new { idp_entity_id = idpEntityId, nameid_hash = nameIdHash, path }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             sourceIp: sourceIp, ct: ct);
         await _audit.LogActivityAsync(tenantId, "auth", purl: null, "login.success", actorId: userId,
             detail: System.Text.Json.JsonSerializer.Serialize(new { method = "saml" }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
@@ -1054,7 +1073,7 @@ public sealed class LoginService
         await _auditEmitter.EmitAsync(
             Dependably.Infrastructure.Audit.Events.AuthEvents.TypeSamlSuccess,
             tenantId, "user", userId, "accepted",
-            new Dependably.Infrastructure.Audit.Events.AuthEvents.SamlSuccess(idpEntityId, nameId, path).ToJson(), ct);
+            new Dependably.Infrastructure.Audit.Events.AuthEvents.SamlSuccess(idpEntityId, nameIdHash, path).ToJson(), ct);
     }
 
     // Writes the audit event and emitter call for a locked/disabled account, then returns the
@@ -1076,7 +1095,7 @@ public sealed class LoginService
         _auditEmitter.EmitAsync(
             Dependably.Infrastructure.Audit.Events.AuthEvents.TypeSamlFailure,
             tenantId, actorId is null ? "system" : "user", actorId, "rejected",
-            new Dependably.Infrastructure.Audit.Events.AuthEvents.SamlFailure(reason, idpEntityId, nameId).ToJson(), ct);
+            new Dependably.Infrastructure.Audit.Events.AuthEvents.SamlFailure(reason, idpEntityId, HashNameId(nameId)).ToJson(), ct);
 
     /// <summary>Test-mode SAML run: writes audit record but does not provision a user or issue a JWT.</summary>
     public async Task RecordSamlTestAsync(
@@ -1084,7 +1103,7 @@ public sealed class LoginService
     {
         await _audit.LogAsync("auth.saml.test.success",
             orgId: tenantId, actorId: actorId,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { idp_entity_id = idpEntityId, nameid = nameId, email }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            detail: System.Text.Json.JsonSerializer.Serialize(new { idp_entity_id = idpEntityId, nameid_hash = HashNameId(nameId), email }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             ct: ct);
     }
 
@@ -1109,6 +1128,18 @@ public sealed class LoginService
     private readonly record struct LoginFailureTarget(
         string LockoutKey, string EmailHash, string Realm, string? OrgIdForActivity);
 
+    /// <summary>
+    /// Increments the failure counter for the attempt and writes the failure to audit.
+    ///
+    /// A lockout-store failure is deliberately not caught, here or at any other
+    /// <see cref="ILockoutStore"/> call site in this service: the attempt aborts with the store's
+    /// exception (the caller returns 500) rather than continuing on an unrecorded failure count.
+    /// Swallowing it would return a normal 401 while the counter stayed put, turning a
+    /// lockout-store outage into unlimited password guessing with no signal. Every lockout call
+    /// in this service runs before the credential check or before session issuance, so aborting
+    /// commits nothing and never leaks a session — see <see cref="ILockoutStore"/> for the full
+    /// contract, including the one call site outside this service where the abort is not clean.
+    /// </summary>
     private async Task RecordFailureAsync(
         LoginFailureTarget target, int currentFailedCount, string? sourceIp, string reason, CancellationToken ct)
     {
@@ -1156,7 +1187,8 @@ public sealed class LoginService
         // Tenant-scoped JWT. `org_id` carries the same value as `tid` for compatibility with
         // controllers that read the legacy claim name directly. `tver` snapshots
         // users.token_version at issuance; JwtBearer OnTokenValidated rejects the session when
-        // the stored version has moved on (password change).
+        // the stored version has moved on (password change). `aud` marks it a session token —
+        // the session scheme accepts no other audience.
         var claims = new List<Claim>
         {
             new(JwtRegisteredClaimNames.Sub, userId),
@@ -1169,6 +1201,8 @@ public sealed class LoginService
         };
 
         var token = new JwtSecurityToken(
+            issuer: Dependably.Security.JwtTokenBinding.Issuer,
+            audience: Dependably.Security.JwtTokenBinding.SessionAudience,
             claims: claims,
             notBefore: now,
             expires: now.AddHours(8),
@@ -1193,6 +1227,8 @@ public sealed class LoginService
         };
 
         var token = new JwtSecurityToken(
+            issuer: Dependably.Security.JwtTokenBinding.Issuer,
+            audience: Dependably.Security.JwtTokenBinding.SessionAudience,
             claims: claims,
             notBefore: now,
             expires: now.AddHours(8),
@@ -1209,6 +1245,25 @@ public sealed class LoginService
     public static string HashEmail(string email)
     {
         byte[] bytes = SHA256.HashData(Encoding.UTF8.GetBytes(email.ToLowerInvariant()));
+        return Convert.ToHexString(bytes).ToLowerInvariant();
+    }
+
+    /// <summary>
+    /// Unsalted SHA-256 pseudonym for a SAML NameID. NameID is very commonly the subject's email
+    /// address, so recording it verbatim in audit_log.detail (which has a bounded but real
+    /// retention) and forwarding it to the SIEM defeats the "email is never stored in plaintext"
+    /// contract on <see cref="Dependably.Infrastructure.Audit.Events.AuthEvents"/>. The hash keeps
+    /// the audit trail correlatable across events without the plaintext identifier. The raw NameID
+    /// is not lowercased first — unlike email it is not case-normalized upstream. Returns null for a
+    /// null/empty NameID so the payload records an explicit absence rather than a hash of "".
+    /// </summary>
+    public static string? HashNameId(string? nameId)
+    {
+        if (string.IsNullOrEmpty(nameId))
+        {
+            return null;
+        }
+        byte[] bytes = SHA256.HashData(Encoding.UTF8.GetBytes(nameId));
         return Convert.ToHexString(bytes).ToLowerInvariant();
     }
 

@@ -35,7 +35,7 @@ public sealed class BannerRepository
     }
 
     private string NowZ() =>
-        _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture);
+        _time.GetUtcNow().ToUtcIso();
 
     // ── Tenant CRUD ──────────────────────────────────────────────────────────────────────────
 
@@ -151,6 +151,8 @@ public sealed class BannerRepository
     public async Task<IReadOnlyList<Banner>> ListSystemAsync(CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+        // xtenant: system-plane banners carry org_id IS NULL and belong to no tenant;
+        // `scope = 'system'` is the complete bound. Operator-scope callers only.
         var rows = await conn.QueryAsync<Banner>(
             """
             SELECT id, scope, org_id as OrgId, severity, body, link_url as LinkUrl,
@@ -221,6 +223,8 @@ public sealed class BannerRepository
         string endsAt = req.EndsAt;
         bool enabled = req.Enabled;
         await using var conn = await _db.OpenAsync(ct);
+        // xtenant: system-plane banners carry org_id IS NULL and belong to no tenant;
+        // `scope = 'system'` is the complete bound. Operator-scope callers only.
         int rows = await conn.ExecuteAsync(
             """
             UPDATE banners
@@ -239,6 +243,8 @@ public sealed class BannerRepository
     public async Task<bool> DeleteSystemAsync(string id, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+        // xtenant: system-plane banners carry org_id IS NULL and belong to no tenant;
+        // `scope = 'system'` is the complete bound. Operator-scope callers only.
         int rows = await conn.ExecuteAsync(
             "DELETE FROM banners WHERE id = @id AND scope = 'system'",
             new { id });
@@ -286,17 +292,25 @@ public sealed class BannerRepository
     // ── Dismissal ────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Records that the user dismissed the given banner. Idempotent via ON CONFLICT DO NOTHING.
-    /// Returns <c>true</c> when the banner exists (the dismissal was recorded or was already
-    /// present); <c>false</c> when no banner with the given id exists (caller should 404).
+    /// Records that the caller dismissed the given banner. Idempotent via ON CONFLICT DO NOTHING.
+    /// Returns <c>true</c> when the banner is one the caller can actually see; <c>false</c> when no
+    /// such banner exists (caller should 404).
+    ///
+    /// <para>
+    /// The existence probe is scoped exactly like <see cref="GetActiveAsync"/> resolves banners —
+    /// the system plane plus the caller's own tenant. An unscoped probe would answer "does banner
+    /// id X exist anywhere on this instance", which is a cross-tenant object-existence oracle, and
+    /// would write a <c>banner_dismissals</c> row against another tenant's banner.
+    /// </para>
     /// </summary>
-    public async Task<bool> DismissAsync(string bannerId, string userId, CancellationToken ct = default)
+    public async Task<bool> DismissAsync(
+        string orgId, string bannerId, string userId, CancellationToken ct = default)
     {
         string now = NowZ();
         await using var conn = await _db.OpenAsync(ct);
         int bannerCount = await conn.ExecuteScalarAsync<int>(
-            "SELECT COUNT(*) FROM banners WHERE id = @bannerId",
-            new { bannerId });
+            "SELECT COUNT(*) FROM banners WHERE id = @bannerId AND (scope = 'system' OR org_id = @orgId)",
+            new { bannerId, orgId });
         if (bannerCount == 0)
         {
             return false;

@@ -100,6 +100,18 @@ public static class ProvenanceStatuses
     public const string Failed = "failed";
     public const string Unsigned = "unsigned";
 
+    /// <summary>
+    /// In-flight marker for "enforcement is on but no verdict is obtainable" — the tenant set
+    /// <c>verify_*_signatures = 'block'</c> while its trust-anchor set for that ecosystem is
+    /// empty, so no artifact can ever reach <see cref="Verified"/>. It is never written to
+    /// <c>provenance_status</c> (<see cref="ToColumn"/> never emits it) and never read back from
+    /// the database: the gate synthesizes it at evaluation time from the live anchor state so an
+    /// operator who enabled enforcement gets a denial and an audit trail rather than a silent
+    /// allow-all. Distinct from <see cref="Unsigned"/>, which is a real verdict about a real
+    /// artifact.
+    /// </summary>
+    public const string Unverifiable = "unverifiable";
+
     public static string? ToColumn(ProvenanceStatus status) => status switch
     {
         ProvenanceStatus.Verified => Verified,

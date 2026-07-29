@@ -200,6 +200,7 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
                     new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()),
                 TimeProvider.System),
             new LicenseRepository(_db, TimeProvider.System, normalizer),
+            new StubPerOrgTrustAnchorStore(),
             NullLogger<BlockGateService>.Instance,
             TimeProvider.System);
     }

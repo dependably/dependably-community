@@ -31,8 +31,11 @@ public sealed class RetentionPurgeUnlistedTests : IAsyncLifetime
         var invites = new InviteRepository(_db, clock);
         var samlConfig = new SamlConfigRepository(_db, clock);
         return new RetentionService(new RetentionService.Dependencies(
-            _db, _blobs, jwt, invites, samlConfig, cfg, new AirGapMode(cfg), NullLogger<RetentionService>.Instance, clock,
-            new Dependably.Infrastructure.Redis.InProcessDistributedLock(clock)));
+            _db, _blobs, jwt, invites, samlConfig, new TrustedDeviceService(_db, clock, cfg), cfg, new AirGapMode(cfg), NullLogger<RetentionService>.Instance, clock,
+            new Dependably.Infrastructure.Redis.InProcessDistributedLock(clock),
+            new Dependably.Protocol.OciOrphanBlobDeleter(
+                _db, new Dependably.Storage.TieredBlobStorage(_blobs, _blobs),
+                new Dependably.Protocol.OciBlobKeyLock())));
     }
 
     // Seeds a package + version (one package per version so purl_name stays unique), puts a
@@ -47,7 +50,7 @@ public sealed class RetentionPurgeUnlistedTests : IAsyncLifetime
         string versionId = await PackageSeeder.InsertVersionAsync(
             _db, pkgId, "1.0.0", $"pkg:nuget/{slug}@1.0.0", origin: origin, blobKey: blobKey);
 
-        string? yankedAtStr = yankedAt?.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string? yankedAtStr = yankedAt?.ToUtcIso();
         await using var conn = await _db.OpenAsync();
         await conn.ExecuteAsync(
             "UPDATE package_versions SET yanked = @yanked, yanked_at = @yankedAt WHERE id = @id",

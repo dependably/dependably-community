@@ -384,6 +384,7 @@ public sealed class CoreStartupService : IHostedService
     {
         LogBaseUrlCookieWarning();
         await LogTrustedProxiesWarningAsync(ct);
+        LogTrustedProxiesBreadthAndResolvedSet();
         LogApexHostWarning();
         LogReplicaAffinityWarning();
         LogHaLocalStorageWarning();
@@ -524,6 +525,73 @@ public sealed class CoreStartupService : IHostedService
                 "TRUSTED_PROXIES to the proxy's IP(s)/CIDR(s) so the allowlist evaluates the real " +
                 "client IP instead of the proxy's loopback peer address.");
         }
+    }
+
+    // When TRUSTED_PROXIES is set, logs the resolved trusted-network set at Information so the
+    // effective configuration is auditable, and warns (never fails closed) on any entry broader
+    // than ConfigurationExtensions.IsBroadTrustedProxyNetwork's per-family threshold. ForwardLimit
+    // is null (ConfigureDependablyForwardedHeaders walks the X-Forwarded-For chain to the first
+    // untrusted hop), so every host inside a broad trusted network is itself a trusted hop and can
+    // present its own forged source address as the client IP — minting a fresh rate-limit
+    // partition per request and forging audit_log.source_ip. A large proxy subnet can be a
+    // legitimate deployment choice, so this stays a warning rather than a startup failure.
+    private void LogTrustedProxiesBreadthAndResolvedSet()
+    {
+        string? raw = _config["TRUSTED_PROXIES"];
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return;
+        }
+
+        var (networks, proxies) = ConfigurationExtensions.ParseTrustedProxies(raw);
+
+        foreach (var network in networks)
+        {
+            if (!ConfigurationExtensions.IsBroadTrustedProxyNetwork(network))
+            {
+                continue;
+            }
+
+            int threshold = ConfigurationExtensions.BroadThresholdFor(network);
+
+            if (network.BaseAddress.IsIPv4MappedToIPv6)
+            {
+                // The entry's literal family is IPv6, but the threshold named here is the IPv4
+                // one it was judged against — naming the effective IPv4 range alongside it avoids
+                // a nonsensical-looking pairing like "/104 ... /22 for its address family".
+                var (_, effectivePrefixLength) = ConfigurationExtensions.NormalizeTrustedProxyNetwork(network);
+                _logger.LogWarning(
+                    "TRUSTED_PROXIES entry {Entry} is broader than the recommended /{Threshold} " +
+                    "for its effective IPv4 range ({EffectiveRange}). Every host inside this " +
+                    "network is a trusted forwarding hop — ForwardLimit is null, so the " +
+                    "forwarded-header walk trusts each hop in turn — and can present its own " +
+                    "forged address as the client-facing source IP, minting a fresh per-IP " +
+                    "rate-limit partition per request and forging audit_log.source_ip. This is " +
+                    "not rejected: a large proxy subnet can be a legitimate deployment. Narrow " +
+                    "the entry to the actual reverse-proxy address(es) if the wider range was " +
+                    "not intentional.",
+                    network, threshold, $"{network.BaseAddress.MapToIPv4()}/{effectivePrefixLength}");
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "TRUSTED_PROXIES entry {Entry} is broader than the recommended threshold " +
+                    "(/{Threshold} for its address family). Every host inside this network is a " +
+                    "trusted forwarding hop — ForwardLimit is null, so the forwarded-header walk " +
+                    "trusts each hop in turn — and can present its own forged address as the " +
+                    "client-facing source IP, minting a fresh per-IP rate-limit partition per " +
+                    "request and forging audit_log.source_ip. This is not rejected: a large proxy " +
+                    "subnet can be a legitimate deployment. Narrow the entry to the actual " +
+                    "reverse-proxy address(es) if the wider range was not intentional.",
+                    network, threshold);
+            }
+        }
+
+        _logger.LogInformation(
+            "TRUSTED_PROXIES resolves to {NetworkCount} trusted network(s) [{Networks}] and " +
+            "{ProxyCount} trusted single address(es) [{Proxies}] for forwarded-header processing.",
+            networks.Count, string.Join(", ", networks),
+            proxies.Count, string.Join(", ", proxies));
     }
 
     /// <summary>

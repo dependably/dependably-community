@@ -4,9 +4,13 @@
   import { submitForm, extractErrorMessage } from '../lib/form.js'
   import ErrorBanner from '../lib/ErrorBanner.svelte'
   import { currentOrg, user } from '../lib/store.js'
+  import { reportPageLoad } from '../lib/pageLoad.js'
   import { formatDateShort } from '../lib/format.js'
   import { copyToClipboard } from '../lib/clipboard.js'
   import DataTable from '../lib/DataTable.svelte'
+
+  /** The route transition this page was mounted for, supplied by RouteView. @type {number | null} */
+  export let pageToken = null
 
   let users = [], invites = [], tab = 'members', loading = true, error = ''
   let showInvite = false, inviteEmail = '', inviteRole = 'member', inviting = false, inviteLink = null
@@ -17,6 +21,10 @@
   // Viewer can change a row's role iff they have tenant:configure (admin/owner). Owner-touch
   // (modifying owner rows or granting owner) is gated separately by the backend; the UI mirrors
   // that by hiding the owner option and disabling the change button on owner rows for admins.
+  // Holds the deferred navigation that mounted this page until the data is here, so the swap
+  // shows the loaded page rather than a shimmer that lives for a hundred milliseconds.
+  $: reportPageLoad(pageToken, loading)
+
   $: viewerRole = $user?.role ?? ''
   $: viewerCanManageRoles = viewerRole === 'admin' || viewerRole === 'owner'
   $: viewerIsOwner = viewerRole === 'owner'
@@ -160,6 +168,7 @@
       columns={memberColumns}
       rows={users}
       {loading}
+      memoryKey="users:members"
       initialSort={{ key: 'email', dir: 'asc' }}
       emptyText={$t('users.members.empty')}
       tableClass="table-auto members-table"
@@ -210,6 +219,7 @@
       rows={invites}
       comparators={inviteComparators}
       {loading}
+      memoryKey="users:invites"
       initialSort={{ key: 'createdAt', dir: 'desc' }}
       emptyText={$t('users.invites.empty')}
       tableClass="table-auto invites-table"

@@ -56,6 +56,23 @@ public sealed class SecurityEventEmailFireSiteTests
         return sender.Sent;
     }
 
+    // Waits until the background delivery loop has fully handled at least <paramref name="atLeast"/>
+    // jobs. The MFA-disable tests use this to drain the enrollment email (enqueued while SMTP is
+    // unconfigured, so resolved to null and dropped) BEFORE enabling SMTP — transport is resolved
+    // at delivery time, so enabling SMTP while the enrollment job is still queued would let it be
+    // delivered against the now-configured transport, and the single-message assertion would see
+    // the enrollment email alongside the disable one.
+    private static async Task WaitForProcessedAsync(
+        Dependably.Infrastructure.Mail.EmailDeliveryQueue queue, long atLeast, TimeSpan? timeout = null)
+    {
+        // now-ok: polling deadline awaiting the background delivery loop's real async progress.
+        var deadline = DateTimeOffset.UtcNow + (timeout ?? TimeSpan.FromSeconds(5));
+        while (queue.ProcessedCount < atLeast && DateTimeOffset.UtcNow < deadline)
+        {
+            await Task.Delay(10);
+        }
+    }
+
     // ── Tenant MFA enable/disable (MfaController) ───────────────────────────
 
     [Fact]
@@ -135,10 +152,14 @@ public sealed class SecurityEventEmailFireSiteTests
         string jwt = await factory.CreateUserJwt(userId, "member");
         using var client = factory.CreateClient();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
+
+        var queue = factory.Services.GetRequiredService<Dependably.Infrastructure.Mail.EmailDeliveryQueue>();
+        long processedBefore = queue.ProcessedCount;
         string manualKey = await EnrollTenantMfaAsync(client);
 
-        // Enable SMTP only after enrollment so the captured send below is unambiguously the
-        // disable notification, not the enable one from the setup above.
+        // Drain the enrollment email (dropped, since SMTP is unconfigured) before enabling SMTP so
+        // the captured send below is unambiguously the disable notification, not the enable one.
+        await WaitForProcessedAsync(queue, processedBefore + 1);
         await EnableInstanceSmtpAsync(factory.Services);
 
         string code = TotpTestHelper.Compute(manualKey);
@@ -360,10 +381,13 @@ public sealed class SecurityEventEmailFireSiteTests
         using var apex = factory.CreateClientForHost(DependablyMultiFactory.ApexHost);
 
         string email = $"sys-mfa-disable-recipient-{Guid.NewGuid():N}@test.local";
+        var queue = factory.Services.GetRequiredService<Dependably.Infrastructure.Mail.EmailDeliveryQueue>();
+        long processedBefore = queue.ProcessedCount;
         var (_, manualKey) = await SeedAndEnrollSystemAdminAsync(factory, apex, email);
 
-        // Enable SMTP only after enrollment so the captured send is unambiguously the disable
-        // notification, not the enable one from enrollment above.
+        // Drain the enrollment email (dropped, since SMTP is unconfigured) before enabling SMTP so
+        // the captured send is unambiguously the disable notification, not the enable one.
+        await WaitForProcessedAsync(queue, processedBefore + 1);
         await EnableInstanceSmtpAsync(factory.Services);
 
         string code = TotpTestHelper.Compute(manualKey);
@@ -442,8 +466,8 @@ public sealed class SecurityEventEmailFireSiteTests
                 "UPDATE users SET language = 'fr' WHERE lower(email) = lower(@email)", new { email = ownerEmail });
         }
 
-        var resp = await sys.PostAsJsonAsync($"/api/v1/system/users/{Uri.EscapeDataString(ownerEmail)}/password-reset",
-            new { tenantSlug = slug });
+        var resp = await sys.PostAsJsonAsync("/api/v1/system/users/password-reset",
+            new { email = ownerEmail, tenantSlug = slug });
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
@@ -471,8 +495,8 @@ public sealed class SecurityEventEmailFireSiteTests
         var createResp = await sys.PostAsJsonAsync("/api/v1/system/tenants", new { slug, ownerEmail });
         createResp.EnsureSuccessStatusCode();
 
-        var resp = await sys.PostAsJsonAsync($"/api/v1/system/users/{Uri.EscapeDataString(ownerEmail)}/password-reset",
-            new { tenantSlug = slug });
+        var resp = await sys.PostAsJsonAsync("/api/v1/system/users/password-reset",
+            new { email = ownerEmail, tenantSlug = slug });
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
         var sent = await WaitForSentAsync(sender, atLeast: 1);
@@ -524,8 +548,8 @@ public sealed class SecurityEventEmailFireSiteTests
         }
 
         // Reset scoped to org A → org A's user, rendered in org A's "fr" default.
-        var respA = await sys.PostAsJsonAsync($"/api/v1/system/users/{Uri.EscapeDataString(sharedEmail)}/password-reset",
-            new { tenantSlug = slugA });
+        var respA = await sys.PostAsJsonAsync("/api/v1/system/users/password-reset",
+            new { email = sharedEmail, tenantSlug = slugA });
         Assert.Equal(HttpStatusCode.OK, respA.StatusCode);
 
         var sentAfterA = await WaitForSentAsync(sender, atLeast: 1);
@@ -536,8 +560,8 @@ public sealed class SecurityEventEmailFireSiteTests
         // Reset scoped to org B (still default "en") for the SAME address → a second message,
         // rendered in English — proving the first reset resolved org A's row, not a global/
         // cross-tenant lookup that would have picked up whichever org's row came first.
-        var respB = await sys.PostAsJsonAsync($"/api/v1/system/users/{Uri.EscapeDataString(sharedEmail)}/password-reset",
-            new { tenantSlug = slugB });
+        var respB = await sys.PostAsJsonAsync("/api/v1/system/users/password-reset",
+            new { email = sharedEmail, tenantSlug = slugB });
         Assert.Equal(HttpStatusCode.OK, respB.StatusCode);
 
         var sentAfterB = await WaitForSentAsync(sender, atLeast: 2);
@@ -559,8 +583,8 @@ public sealed class SecurityEventEmailFireSiteTests
             new { slug, ownerEmail = $"owner-{Guid.NewGuid():N}@example.com" });
         createResp.EnsureSuccessStatusCode();
 
-        var resp = await sys.PostAsJsonAsync("/api/v1/system/users/nobody-here@example.com/password-reset",
-            new { tenantSlug = slug });
+        var resp = await sys.PostAsJsonAsync("/api/v1/system/users/password-reset",
+            new { email = "nobody-here@example.com", tenantSlug = slug });
 
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
     }

@@ -35,7 +35,7 @@ internal static class NpmHandlerRegistration
                 licenses: sp.GetRequiredService<LicenseRepository>(),
                 uploadLimits: sp.GetRequiredService<IUploadLimitResolver>(),
                 distTags: sp.GetRequiredService<NpmDistTagRepository>(),
-                cache: sp.GetRequiredService<RenderedResponseCache<NpmPackumentKey>>(),
+                invalidation: sp.GetRequiredService<MetadataInvalidationCoordinator>(),
                 edgeGuard: sp.GetRequiredService<Dependably.Infrastructure.Edge.EdgePublishGuard>(),
                 stagingPath: path);
         });

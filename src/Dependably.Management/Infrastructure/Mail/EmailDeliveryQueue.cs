@@ -37,6 +37,7 @@ public sealed class EmailDeliveryQueue : BackgroundService
     private long _droppedCount;
     private long _deliveredCount;
     private long _failedCount;
+    private long _processedCount;
 
     public EmailDeliveryQueue(
         SmtpMailSender sender,
@@ -84,6 +85,17 @@ public sealed class EmailDeliveryQueue : BackgroundService
     public long DroppedCount => Interlocked.Read(ref _droppedCount);
     public long DeliveredCount => Interlocked.Read(ref _deliveredCount);
     public long FailedCount => Interlocked.Read(ref _failedCount);
+
+    /// <summary>
+    /// Total jobs that have left the channel and run through <see cref="DeliverAsync"/> to a
+    /// terminal outcome (delivered, failed, or dropped because the transport resolved to null) —
+    /// distinct from <see cref="DroppedCount"/>, which counts only channel-overflow drops that
+    /// never reach delivery. Lets a caller observe that a specific enqueued job has been fully
+    /// handled; tests use it to wait out a setup email (enqueued while SMTP was unconfigured, so
+    /// resolved to null and dropped) before mutating SMTP config, closing the enqueue-vs-drain
+    /// race that delivery-time transport resolution otherwise leaves open.
+    /// </summary>
+    public long ProcessedCount => Interlocked.Read(ref _processedCount);
 
     /// <summary>
     /// Test-only direct invocation of <see cref="ExecuteAsync"/>. <see cref="BackgroundService.StartAsync"/>
@@ -157,6 +169,21 @@ public sealed class EmailDeliveryQueue : BackgroundService
     }
 
     internal async Task DeliverAsync(IEmailDeliveryJob job, CancellationToken ct)
+    {
+        try
+        {
+            await DeliverCoreAsync(job, ct);
+        }
+        finally
+        {
+            // Count every job exactly once, whatever its terminal outcome (delivered, failed, or
+            // dropped on a null transport). A caller can then wait for a specific enqueued job to
+            // have been handled — see ProcessedCount.
+            Interlocked.Increment(ref _processedCount);
+        }
+    }
+
+    private async Task DeliverCoreAsync(IEmailDeliveryJob job, CancellationToken ct)
     {
         (SmtpTransportSettings Transport, IReadOnlyList<string> Recipients)? resolved;
         try

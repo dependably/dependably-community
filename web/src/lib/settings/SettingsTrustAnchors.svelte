@@ -29,6 +29,19 @@
     { key: 'rsa',              label: 'RSA public key (PEM)' },
   ]
 
+  // Mirrors TrustAnchorController.EcosystemValidators on the backend: the only
+  // (ecosystem, anchorKind) pairs a POST actually accepts. Keeping the add form's kind options
+  // scoped to this map means the two independent selects can never offer an unregistered pair
+  // that the backend would reject with 422.
+  const ALLOWED_KINDS_BY_ECO = {
+    rpm: ['pgp'],
+    maven: ['pgp'],
+    npm: ['spki'],
+    nuget: ['x509'],
+    pypi: ['sigstore_root', 'trusted_publisher', 'rekor_key'],
+    apk: ['rsa'],
+  }
+
   /** @type {any[]} */
   let entries = []
   let loaded = false
@@ -143,6 +156,15 @@
 
   function extract(e) { return e?.body?.detail || e?.message || e?.detail || String(e) }
 
+  // anchorKind options scoped to the selected ecosystem — an unregistered pair is never
+  // offerable in the first place. Reassigning addKind here (rather than only in openAdd/an
+  // on:change handler) also covers the case where the user changes the ecosystem select after
+  // opening the modal.
+  $: allowedAnchorKinds = ANCHOR_KINDS.filter(k => (ALLOWED_KINDS_BY_ECO[addEco] || []).includes(k.key))
+  $: if (!allowedAnchorKinds.some(k => k.key === addKind)) {
+    addKind = allowedAnchorKinds[0]?.key ?? addKind
+  }
+
   $: isTP = isPyPiTrustedPublisher(addEco, addKind)
   $: addDisabled = adding || (isTP
     ? (!tpIssuer.trim() || !tpSubject.trim())
@@ -193,7 +215,15 @@
           {#each byEco[eco.key] as entry (entry.id)}
             <tr>
               <td class="t-mono">{entry.keyId || '—'}</td>
-              <td><span class="kind-badge">{kindLabel(entry.anchorKind)}</span></td>
+              <td>
+                <span class="kind-badge">{kindLabel(entry.anchorKind)}</span>
+                {#if entry.isRegisteredPair === false}
+                  <span class="unsupported-badge"
+                        title={$t('settings.security.trustAnchors.unsupportedPairTitle')}>
+                    {$t('settings.security.trustAnchors.unsupportedPair')}
+                  </span>
+                {/if}
+              </td>
               <td>{entry.label || '—'}</td>
               <td class="text-muted">{$formatDateShort(entry.createdAt)}</td>
               <td>
@@ -226,7 +256,7 @@
       <div class="form-row">
         <label for="ta-kind">{$t('settings.security.trustAnchors.modal.anchorKind')}</label>
         <select id="ta-kind" bind:value={addKind}>
-          {#each ANCHOR_KINDS as k (k.key)}<option value={k.key}>{k.label}</option>{/each}
+          {#each allowedAnchorKinds as k (k.key)}<option value={k.key}>{k.label}</option>{/each}
         </select>
       </div>
 
@@ -314,6 +344,22 @@
     background: var(--bg2);
     color: var(--text2);
     font-family: var(--mono, monospace);
+  }
+
+  /* Deliberately unlike .kind-badge: this is a warning about the row, not a category label
+     for it. A row carrying it was stored under an (ecosystem, kind) pair with no material
+     validator, so its key material was never parsed or strength-checked. */
+  .unsupported-badge {
+    display: inline-block;
+    margin-left: 6px;
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    border: 1px solid var(--warning);
+    color: var(--warning);
+    background: transparent;
+    font-weight: 600;
+    cursor: help;
   }
 
   .row-actions { display: flex; gap: 4px; }

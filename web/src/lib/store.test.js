@@ -106,40 +106,260 @@ describe('sidebarCollapsed store', () => {
 })
 
 describe('navigate + takePendingRoute', () => {
+  // A user navigation is deferred: it mounts the incoming page hidden and commits when that page
+  // reports its data has landed. Tests that care about the committed side drive the commit
+  // themselves, standing in for the page that would have settled it.
+  const commit = (store) => store.commitTransition()
+
   it('pushState increments idx and updates route store', async () => {
-    const { navigate, route } = await import('./store.js')
-    navigate('packages', { search: 'foo' })
-    expect(get(route)).toEqual({ page: 'packages', params: { search: 'foo' } })
+    const store = await import('./store.js')
+    store.navigate('packages', { search: 'foo' })
+    commit(store)
+    expect(get(store.route)).toEqual({ page: 'packages', params: { search: 'foo' } })
     expect(window.history.state?.idx).toBeGreaterThanOrEqual(1)
+  })
+
+  it('a forward navigation holds the visible page until the arriving one settles', async () => {
+    const store = await import('./store.js')
+    store.navigate('packages', {})
+    commit(store)
+    const pushSpy = vi.spyOn(window.history, 'pushState')
+
+    store.navigate('vulnerabilities', {})
+    // Nothing has swapped: the package list is still what the user is looking at, its URL is
+    // still the one in the address bar, and no history entry has been created for a page that
+    // may yet be abandoned.
+    expect(get(store.route).page).toBe('packages')
+    expect(pushSpy).not.toHaveBeenCalled()
+    // The incoming page is mounted (hidden) so it can fetch, and nav highlighting follows it.
+    expect(get(store.incomingRoute)?.page).toBe('vulnerabilities')
+    expect(get(store.activeRoute).page).toBe('vulnerabilities')
+
+    store.settleTransition(store.currentTransitionToken())
+    expect(get(store.route).page).toBe('vulnerabilities')
+    expect(get(store.incomingRoute)).toBeNull()
+    expect(pushSpy).toHaveBeenCalled()
+  })
+
+  it('a page that never declares a load commits on the auto-commit frame', async () => {
+    const store = await import('./store.js')
+    store.navigate('packages', {})
+    commit(store)
+
+    store.navigate('upload', {})
+    // RouteHost calls this a frame after mounting. A page with no initial fetch has nothing to
+    // wait for, so holding it for the full budget would make static pages the slowest in the app.
+    store.settleIfUnclaimed(store.currentTransitionToken())
+    expect(get(store.route).page).toBe('upload')
+  })
+
+  it('a page that declares a load is not committed by the auto-commit frame', async () => {
+    const store = await import('./store.js')
+    store.navigate('packages', {})
+    commit(store)
+
+    store.navigate('vulnerabilities', {})
+    const token = store.currentTransitionToken()
+    store.claimTransition(token)
+    store.settleIfUnclaimed(token)
+    expect(get(store.route).page).toBe('packages')
+
+    store.settleTransition(token)
+    expect(get(store.route).page).toBe('vulnerabilities')
+  })
+
+  it('a stale token settles nothing', async () => {
+    const store = await import('./store.js')
+    store.navigate('packages', {})
+    commit(store)
+
+    // The user clicks through to a second destination before the first has loaded. The first
+    // page's fetch still resolves — and must not commit the page the user is now waiting on.
+    store.navigate('vulnerabilities', {})
+    const abandoned = store.currentTransitionToken()
+    store.navigate('audit', {})
+    expect(get(store.incomingRoute)?.page).toBe('audit')
+
+    store.settleTransition(abandoned)
+    expect(get(store.route).page).toBe('packages')
+    expect(get(store.incomingRoute)?.page).toBe('audit')
+
+    store.settleTransition(store.currentTransitionToken())
+    expect(get(store.route).page).toBe('audit')
+  })
+
+  it('the visible page finishing a background load does not commit the incoming one', async () => {
+    const store = await import('./store.js')
+    store.navigate('packages', {})
+    commit(store)
+    // The page being left was mounted outside any transition, so it holds no token at all —
+    // its later loads (a poll, a row action's refetch) report against null and settle nothing.
+    store.navigate('audit', {})
+    store.settleTransition(null)
+    expect(get(store.route).page).toBe('packages')
+  })
+
+  it('a transition commits on its own once the budget runs out', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = await import('./store.js')
+      store.navigate('packages', {})
+      commit(store)
+
+      store.navigate('vulnerabilities', {})
+      store.claimTransition(store.currentTransitionToken())
+      // Held while the fetch is plausibly still in flight...
+      vi.advanceTimersByTime(399)
+      expect(get(store.route).page).toBe('packages')
+      // ...but a page that never lands must not strand the user on the page they left.
+      vi.advanceTimersByTime(1)
+      expect(get(store.route).page).toBe('vulnerabilities')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('the progress strip stays dark through a fast navigation', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = await import('./store.js')
+      store.navigate('packages', {})
+      commit(store)
+
+      store.navigate('vulnerabilities', {})
+      store.claimTransition(store.currentTransitionToken())
+      // A bar that appeared here would itself be the flicker — it would show and vanish inside
+      // a few frames on a fetch that was never slow.
+      vi.advanceTimersByTime(149)
+      expect(get(store.transitionPending)).toBe(false)
+      store.settleTransition(store.currentTransitionToken())
+      vi.advanceTimersByTime(1000)
+      expect(get(store.transitionPending)).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('the progress strip lights up for a navigation that outlives the grace period', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = await import('./store.js')
+      store.navigate('packages', {})
+      commit(store)
+
+      store.navigate('vulnerabilities', {})
+      store.claimTransition(store.currentTransitionToken())
+      vi.advanceTimersByTime(150)
+      expect(get(store.transitionPending)).toBe(true)
+      store.settleTransition(store.currentTransitionToken())
+      expect(get(store.transitionPending)).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('cancelTransition drops the held route without touching history', async () => {
+    const store = await import('./store.js')
+    store.navigate('packages', {})
+    commit(store)
+    const pushSpy = vi.spyOn(window.history, 'pushState')
+
+    // popstate: the user moved history themselves, so the destination being held is not where
+    // they are going.
+    store.navigate('vulnerabilities', {})
+    store.cancelTransition()
+    expect(get(store.incomingRoute)).toBeNull()
+    expect(get(store.route).page).toBe('packages')
+    expect(get(store.activeRoute).page).toBe('packages')
+    expect(pushSpy).not.toHaveBeenCalled()
+    // The abandoned page's fetch resolving afterwards settles nothing.
+    store.settleTransition(1)
+    expect(get(store.route).page).toBe('packages')
+  })
+
+  it('a cancelled transition stops its own budget timer', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = await import('./store.js')
+      store.navigate('packages', {})
+      commit(store)
+
+      store.navigate('vulnerabilities', {})
+      store.cancelTransition()
+      vi.advanceTimersByTime(5000)
+      expect(get(store.route).page).toBe('packages')
+      expect(get(store.transitionPending)).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('re-navigating to the visible page abandons the transition in flight', async () => {
+    const store = await import('./store.js')
+    store.navigate('packages', {})
+    commit(store)
+
+    store.navigate('vulnerabilities', {})
+    // The user changes their mind and clicks back onto the page already on screen.
+    store.navigate('packages', {})
+    expect(get(store.incomingRoute)).toBeNull()
+    expect(get(store.route).page).toBe('packages')
+  })
+
+  it('a replace navigation commits immediately rather than holding', async () => {
+    const store = await import('./store.js')
+    // Redirects — the initial landing, a guard bounce, a post-logout reset — have no outgoing
+    // page worth holding, and deferring one would only delay the bounce.
+    store.navigate('profile', {}, { replace: true })
+    expect(get(store.route).page).toBe('profile')
+    expect(get(store.incomingRoute)).toBeNull()
+  })
+
+  it('a replace navigation cancels a transition in flight', async () => {
+    const store = await import('./store.js')
+    store.navigate('packages', {})
+    commit(store)
+
+    store.navigate('settings', {})
+    // A guard rejects the held route before it is ever shown.
+    store.navigate('dashboard', {}, { replace: true })
+    expect(get(store.route).page).toBe('dashboard')
+    expect(get(store.incomingRoute)).toBeNull()
+    // The rejected page's fetch landing afterwards must not resurrect it.
+    store.settleTransition(store.currentTransitionToken())
+    expect(get(store.route).page).toBe('dashboard')
   })
 
   it('a fresh navigation serializes params into the URL query string', async () => {
     // The dashboard ribbon deep-links the vulnerabilities list to a non-default sort; the
     // list page reads that sort from window.location.search on mount, so navigate() must put
     // the params there (not just in the route store).
-    const { navigate } = await import('./store.js')
+    const store = await import('./store.js')
     const spy = vi.spyOn(window.history, 'pushState')
-    navigate('vulnerabilities', { sort: 'published', dir: 'desc' })
+    store.navigate('vulnerabilities', { sort: 'published', dir: 'desc' })
+    commit(store)
     const url = spy.mock.calls[spy.mock.calls.length - 1][2]
     expect(url).toBe('/vulnerabilities?sort=published&dir=desc')
   })
 
   it('replace: true uses replaceState and does not bump idx', async () => {
-    const { navigate, route } = await import('./store.js')
-    navigate('packages', {})            // push #1, idx=1
+    const store = await import('./store.js')
+    store.navigate('packages', {})            // push #1, idx=1
+    commit(store)
     const beforeIdx = window.history.state?.idx
-    navigate('audit', {}, { replace: true })
-    expect(get(route).page).toBe('audit')
+    store.navigate('audit', {}, { replace: true })
+    expect(get(store.route).page).toBe('audit')
     expect(window.history.state?.idx).toBe(beforeIdx)
   })
 
   it('navigating to the same route does not re-set the store', async () => {
-    const { navigate, route } = await import('./store.js')
-    navigate('packages', { q: 'x' })
+    const store = await import('./store.js')
+    store.navigate('packages', { q: 'x' })
+    commit(store)
     let calls = 0
-    const unsub = route.subscribe(() => calls++)
+    const unsub = store.route.subscribe(() => calls++)
     calls = 0
-    navigate('packages', { q: 'x' })
+    store.navigate('packages', { q: 'x' })
     unsub()
     expect(calls).toBe(0)
   })
@@ -164,9 +384,10 @@ describe('navigate + takePendingRoute', () => {
       configurable: true,
       value: { hostname: 'localhost', search: '?foo=bar' },
     })
-    const { navigate } = await import('./store.js')
+    const store = await import('./store.js')
     const spy = vi.spyOn(window.history, 'pushState')
-    navigate('packages', {}, { preserveSearch: true })
+    store.navigate('packages', {}, { preserveSearch: true })
+    commit(store)
     expect(spy).toHaveBeenCalled()
     const url = spy.mock.calls[spy.mock.calls.length - 1][2]
     expect(url).toContain('?foo=bar')
@@ -177,15 +398,105 @@ describe('navigate + takePendingRoute', () => {
       configurable: true,
       value: { hostname: 'localhost', search: '?q=react&page=2' },
     })
-    const { navigate } = await import('./store.js')
-    navigate('packages', {})
+    const store = await import('./store.js')
+    store.navigate('packages', {})
+    commit(store)
     const spy = vi.spyOn(window.history, 'replaceState')
     // Same route again (nav-link click on the page already shown): the component is
     // not remounted, so the table-state query params must survive in the URL.
-    navigate('packages', {})
+    store.navigate('packages', {})
     expect(spy).toHaveBeenCalled()
     const url = spy.mock.calls[spy.mock.calls.length - 1][2]
     expect(url).toContain('?q=react&page=2')
+  })
+
+  it('a forward navigation seats the new page at the top', async () => {
+    const store = await import('./store.js')
+    const frames = []
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => { frames.push(cb); return 1 })
+    const spy = vi.spyOn(window, 'scrollTo')
+    store.navigate('packages', {})
+    // Seated at the commit, not the click: while the transition is held the user is still
+    // reading the outgoing page and moving them would be moving a page they did not leave.
+    expect(spy).not.toHaveBeenCalled()
+    commit(store)
+    expect(spy).toHaveBeenCalledWith(0, 0)
+    // Re-asserted after the page swap draws, because scroll anchoring restores the offset as
+    // the arriving page's placeholders grow the document back.
+    spy.mockClear()
+    frames.forEach(cb => cb(0))
+    expect(spy).toHaveBeenCalledWith(0, 0)
+  })
+
+  it('a forward navigation stamps the outgoing offset and starts the new entry at 0', async () => {
+    const store = await import('./store.js')
+    store.navigate('packages', {})
+    commit(store)
+    // The user scrolled the package list before drilling into a version. The offset is read at
+    // the commit, so scrolling further while the version page loads is still captured.
+    vi.spyOn(window, 'scrollY', 'get').mockReturnValue(420)
+    const replaceSpy = vi.spyOn(window.history, 'replaceState')
+    const pushSpy = vi.spyOn(window.history, 'pushState')
+    store.navigate('version-detail', { ecosystem: 'npm', name: 'left-pad' })
+    commit(store)
+    // Outgoing entry keeps the offset so Back lands where the user was...
+    expect(replaceSpy.mock.calls[0][0]).toMatchObject({ page: 'packages', scroll: 420 })
+    // ...while the arriving entry starts at the top.
+    expect(pushSpy.mock.calls[0][0]).toMatchObject({ page: 'version-detail', scroll: 0 })
+  })
+
+  it('a same-route navigation neither scrolls nor clobbers the recorded offset', async () => {
+    const store = await import('./store.js')
+    store.navigate('packages', {})
+    commit(store)
+    window.history.replaceState({ ...window.history.state, scroll: 300 }, '')
+    const scrollSpy = vi.spyOn(window, 'scrollTo')
+    const replaceSpy = vi.spyOn(window.history, 'replaceState')
+    // Nav-link click on the page already shown: nothing unmounts, so the viewport must not move.
+    store.navigate('packages', {})
+    expect(scrollSpy).not.toHaveBeenCalled()
+    expect(replaceSpy.mock.calls[0][0]).toMatchObject({ page: 'packages', scroll: 300 })
+  })
+
+  it('restoreScroll reapplies a popped entry offset on the next frame', async () => {
+    const { restoreScroll } = await import('./store.js')
+    const frames = []
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => { frames.push(cb); return 1 })
+    const spy = vi.spyOn(window, 'scrollTo')
+    // The offset sticks on the first try — the page is already tall enough.
+    vi.spyOn(window, 'scrollY', 'get').mockReturnValue(320)
+    restoreScroll({ scroll: 320 })
+    // Deferred: the arriving page must draw its placeholders before the offset is applied,
+    // otherwise the browser clamps it against a document that is still a few lines tall.
+    expect(spy).not.toHaveBeenCalled()
+    frames.shift()(0)
+    expect(spy).toHaveBeenCalledWith(0, 320)
+    // Landed, so it stops rather than burning the remaining frames.
+    expect(frames).toHaveLength(0)
+  })
+
+  it('restoreScroll retries while the arriving page is still too short to hold the offset', async () => {
+    const { restoreScroll } = await import('./store.js')
+    const frames = []
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => { frames.push(cb); return 1 })
+    const spy = vi.spyOn(window, 'scrollTo')
+    // The document is short, so every scrollTo is clamped back to 0 — the exact failure that
+    // made a single deferred frame land Back at the top of a list the user had scrolled.
+    vi.spyOn(window, 'scrollY', 'get').mockReturnValue(0)
+    restoreScroll({ scroll: 900 })
+    let ticks = 0
+    while (frames.length && ticks < 50) { frames.shift()(0); ticks++ }
+    expect(spy).toHaveBeenCalledWith(0, 900)
+    // Bounded: it gives up rather than re-arming forever on a page that never grows.
+    expect(spy.mock.calls.length).toBe(10)
+  })
+
+  it('restoreScroll falls back to the top for an entry with no stamped offset', async () => {
+    const { restoreScroll } = await import('./store.js')
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => { cb(0); return 1 })
+    const spy = vi.spyOn(window, 'scrollTo')
+    restoreScroll(null)
+    expect(spy).toHaveBeenCalledWith(0, 0)
   })
 
   it('navigate is a no-op on history when window.history is unavailable', async () => {
@@ -193,10 +504,11 @@ describe('navigate + takePendingRoute', () => {
     // Force `window.history` to be falsy so the history branch is skipped.
     Object.defineProperty(window, 'history', { configurable: true, value: undefined })
     try {
-      const { navigate, route } = await import('./store.js')
-      navigate('audit', {})
+      const store = await import('./store.js')
+      store.navigate('audit', {})
+      commit(store)
       // Store still updates even though history is unavailable.
-      expect(get(route).page).toBe('audit')
+      expect(get(store.route).page).toBe('audit')
     } finally {
       Object.defineProperty(window, 'history', { configurable: true, value: originalHistory })
     }

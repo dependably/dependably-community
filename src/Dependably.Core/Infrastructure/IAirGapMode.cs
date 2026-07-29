@@ -42,6 +42,8 @@ internal static class BackgroundJobs
             "retention",
             "orphan-reconciler",
             "oci-staging-janitor",
+            "oci-reference-graph-backfill",
+            "oci-blob-sweep",
             "tenant-hard-delete",
             "blob-size-poller",
             "tenant-count-poller",

@@ -86,6 +86,62 @@ public sealed class LicenseControllerUnitTests
         Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
     }
 
+    [Theory]
+    [InlineData("off")]
+    [InlineData("warn")]
+    [InlineData("block")]
+    public async Task SetMode_PublishMode_AcceptsAndPersists(string publishMode)
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var result = await b.LicenseController.SetMode(
+            new SetModeRequest("off", publishMode), CancellationToken.None);
+        Assert.IsType<OkObjectResult>(result);
+
+        var policy = await b.LicenseController.GetPolicy(CancellationToken.None);
+        var ok = Assert.IsType<OkObjectResult>(policy);
+        Assert.Equal(publishMode, GetProp(ok.Value!, "publishMode"));
+    }
+
+    [Fact]
+    public async Task SetMode_PublishModeOmitted_LeavesStoredPublishModeUnchanged()
+    {
+        // Fail-closed contract: an omitted publishMode must not silently reset an
+        // operator's stored publish-side policy back to 'off'.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        await b.LicenseController.SetMode(new SetModeRequest("off", "block"), CancellationToken.None);
+        // Second call omits publishMode entirely — the pre-publish-gate request shape.
+        await b.LicenseController.SetMode(new SetModeRequest("warn"), CancellationToken.None);
+
+        var policy = await b.LicenseController.GetPolicy(CancellationToken.None);
+        var ok = Assert.IsType<OkObjectResult>(policy);
+        Assert.Equal("block", GetProp(ok.Value!, "publishMode"));
+        Assert.Equal("warn", GetProp(ok.Value!, "mode"));
+    }
+
+    [Fact]
+    public async Task SetMode_InvalidPublishMode_Returns422()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var result = await b.LicenseController.SetMode(
+            new SetModeRequest("off", "panic"), CancellationToken.None);
+        var obj = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
+    }
+
+    // Reads a property off an anonymous/object response value via reflection (the controller
+    // returns `new { mode, publishMode, ... }`, not a named DTO).
+    private static object? GetProp(object value, string name)
+        => value.GetType().GetProperty(name)?.GetValue(value);
+
     [Fact]
     public async Task SetMode_Member_Forbidden()
     {

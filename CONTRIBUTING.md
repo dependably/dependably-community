@@ -28,9 +28,9 @@ cd web && npm ci && npm run prepare
 
 When dependency manifests change, the pre-commit hook audits them with the dependably
 checkers: `@dependably/npm-check` runs on `web/package.json` / `web/package-lock.json`, and
-`Dependably.NuGetCheck` (the `nuget-check` local dotnet tool) runs on the backend
+`Dependably.NuCheck` (the `nucheck` local dotnet tool) runs on the backend
 `packages.lock.json` files. Both flag known vulnerabilities and any package source/registry
-host that isn't public or allowlisted in the repo-root **`.dependably-check`** config.
+host that isn't public or allowlisted in the repo-root **`.dependably`** config.
 
 Both tools live on the private dogfood feed, so the checks require a `DEPENDABLY_TOKEN`
 environment variable with access to `dependably.northwardlabs.ca`:
@@ -39,9 +39,28 @@ environment variable with access to `dependably.northwardlabs.ca`:
 export DEPENDABLY_TOKEN=…   # a dogfood-registry token; read from env, never committed
 ```
 
-Without `DEPENDABLY_TOKEN` the checks are skipped with a warning (so contributors without
-feed access can still commit); CI enforces them regardless. To trust an additional private
-registry host, add it to `.dependably-check`:
+Without `DEPENDABLY_TOKEN` the checks are skipped with a warning, so contributors without
+feed access can still commit. **These two checkers are pre-commit only — CI does not run
+them.** What CI enforces instead is the `lockfile-registry-guard` job, which fails the MR
+when `web/package-lock.json` resolves a package anywhere other than `registry.npmjs.org`,
+when a solution project is missing its committed `packages.lock.json`, or when
+`nuget.config` names a package source host that is neither public nor listed in
+`.dependably`. Vulnerability screening in CI is the `sca-backend` / `sca-frontend`
+gates, not these tools.
+
+Those two gates, plus `secret-scan`, additionally run on **scheduled pipelines** (they extend
+`.runs-on-ci-or-schedule` rather than `.runs-on-ci`). Their subject changes without anyone
+touching the repository — a CVE disclosed against an already-pinned transitive dependency, or a
+credential committed to a branch nobody has opened an MR for — so an event-driven run alone goes
+blind for as long as the repo is quiet. Only those three jobs run on a schedule; re-running the
+whole MR job set nightly would re-derive results that cannot have changed, on a single serialized
+runner.
+
+**The schedule itself is a project setting, not repository configuration.** Create it under
+**Settings → CI/CD → Schedules** targeting `main` (nightly is the intended cadence). Until that
+schedule exists this wiring is inert — the rules admit a scheduled pipeline, but nothing triggers
+one. To trust an additional private registry host, add it to
+`.dependably`:
 
 ```json
 { "common": { "allowedRegistryHosts": ["dependably.northwardlabs.ca"] } }
@@ -173,7 +192,155 @@ The endpoint and tuning knobs are job variables on the `.ai-review` template in 
 
 **MR comments require a secret.** Set `AI_REVIEW_GITLAB_TOKEN` — a **masked, unprotected** CI/CD variable — to a project or group access token with **`api`** scope and at least the **Reporter** role. Without it the jobs still run and produce artifacts and job-log output; they just skip commenting. (`CI_JOB_TOKEN` can't create MR notes, hence the dedicated token.)
 
-The runner must be able to reach `OLLAMA_URL`. Comment posting goes over the GitLab API and automatically falls back from `http` to `https` if the configured `CI_API_V4_URL` route-misses — some instances serve the v4 API only over https.
+GitLab has no scope narrower than `api` for creating notes, and the job that holds this
+token runs `ci/ai-review.sh` **from the merge-request branch** — i.e. code the MR author
+controls. Keep the blast radius small: give the token the **Reporter** role (never
+Developer or Maintainer, which would let it read CI/CD variables), scope it to this project
+only, and rotate it on a schedule. The jobs are `allow_failure: true` and are not in
+`.release-required`, so this token can never gate a release.
+
+The runner must be able to reach `OLLAMA_URL`. Comment posting goes over the GitLab API and automatically falls back from `http` to `https` if the configured `CI_API_V4_URL` route-misses — some instances serve the v4 API only over https. `OLLAMA_URL` defaults to a plaintext `http://` LAN endpoint: the MR diff (up to `AI_REVIEW_MAX_DIFF_BYTES`) crosses the network unencrypted on every MR, so terminate TLS in front of Ollama or bind it to the runner host and reach it over loopback. Every posted report carries a standing banner marking it as unverified model output — the diff is the model's entire user turn, so its content can shape (or fabricate) what the comment says.
+
+---
+
+## Registry credentials in CI
+
+Two registry tokens, split by capability. The split exists because a merge-request pipeline
+executes code authored in the merge request (`web/vite.config.js` via `npm run build`, any
+MSBuild target added to a `.csproj`, `ci/ai-review.sh`, and `.gitlab-ci.yml` itself), and
+therefore sees every **unprotected** CI/CD variable before a human reviews anything.
+
+| Variable | Capability | Protected? | Masked? | Used by |
+| --- | --- | --- | --- | --- |
+| `REGISTRY_URL` | none (not a secret) | no | no | every restore/publish job |
+| `REGISTRY_KEY` | **read / restore only** | **no** (deliberately) | yes | `.private-registry-setup` (npm `_authToken`, NuGet `ClearTextPassword`), `.apk-mirror-setup`, `private-registry-guard`, the `registry_key` BuildKit secret in `publish-image` |
+| `REGISTRY_PUBLISH_KEY` | **`publish:oci`** | **yes** | yes | `publish-image` and `build-ci-tools` — the `docker login` before a push, nothing else |
+
+`REGISTRY_KEY` stays unprotected on purpose: MR pipelines must resolve dependencies through
+the private feed rather than falling back to public registries, and restoring is read-only.
+Leaking it costs read access to the mirror. `REGISTRY_PUBLISH_KEY` is protected, so GitLab
+exposes it only on protected refs — a feature-branch MR pipeline cannot see it even when the
+MR fully controls the job script, and therefore cannot push an image.
+
+**Prerequisite:** `main` and the `v*` tag pattern must both be **protected refs**
+(Settings → Repository → Protected branches / Protected tags). `publish-image` runs on main
+pushes and on `vX.Y.Z` tags; if the tag pattern is not protected, the publish token is not
+exposed on release-tag pipelines.
+
+### Cutover (one manual step, still outstanding)
+
+Creating the token needs registry credentials that CI cannot mint for itself, so the YAML
+currently reads `${REGISTRY_PUBLISH_KEY:-$REGISTRY_KEY}` — it falls back to the read token
+and logs a warning when the publish variable is unset, keeping publishing green in the
+meantime. To finish the split:
+
+1. Mint a token on `$DEP_IMAGE_REGISTRY` carrying **`publish:oci` only** (no read-only
+   scope needed beyond what the push requires).
+2. Add it as project CI/CD variable `REGISTRY_PUBLISH_KEY` with **Protect variable** and
+   **Mask variable** both checked.
+3. Confirm `main` and `v*` are protected refs (above).
+4. Delete the fallback: replace `${REGISTRY_PUBLISH_KEY:-$REGISTRY_KEY}` with
+   `${REGISTRY_PUBLISH_KEY:?REGISTRY_PUBLISH_KEY must be set (protected + masked)}` in both
+   `publish-image` and `build-ci-tools`, and drop the warning block in `publish-image`.
+5. Re-scope `REGISTRY_KEY` on the registry to read-only, so an unprotected pipeline holds a
+   token that physically cannot publish. Verify by the token's capability set in the
+   registry UI — do not test by attempting a push from a scratch branch.
+
+Until step 4 lands, an MR pipeline still sees a publish-capable token; steps 1–3 alone do
+not close the issue.
+
+---
+
+## Staging deployment (CI)
+
+Every green `main` pipeline — and every release-tag pipeline — deploys the image it just
+published onto a staging host and proves it boots there. The release stages run in order:
+
+| Stage     | Job                 | Runs on                    | Effect                                                |
+| --------- | ------------------- | -------------------------- | ----------------------------------------------------- |
+| `release` | `publish-image`     | `main` push, `vX.Y.Z` tag  | Multi-arch (amd64+arm64) push to the Dependably registry |
+| `staging` | `deploy-staging`    | `main` push, `vX.Y.Z` tag  | Pulls that image onto the staging host, waits for healthy |
+| `mirror`  | `release-to-github` | `vX.Y.Z` tag, **manual**   | Mirrors the tag to GitHub once staging is green         |
+
+`release-to-github` is manual and `needs: [release-gate, deploy-staging]`, so the button does
+not appear until the tagged image has actually run somewhere. Its `when: manual` lives inside
+the `rules:` entry, not at job level — a matching rule with no `when:` defaults to `on_success`
+and would override a job-level `when:`.
+
+### The staging runner
+
+The staging host runs its own GitLab Runner, registered **project-scoped** with:
+
+- **executor `shell`** — the job drives `docker compose` against the host's own daemon, so
+  there is no container to nest or socket to mount.
+- **one tag, `staging`**, and **`run_untagged = false`**. `deploy-staging` is the only job in
+  the pipeline carrying that tag, and a runner only accepts jobs whose tags it holds, so the
+  host executes that job and nothing else. It is a deploy target, not build capacity — it
+  never compiles, tests, or scans.
+- the runner's user in the `docker` group.
+
+Registering it needs a token with the `create_runner` scope: create the runner under
+**Settings → CI/CD → Runners → New project runner** (tag `staging`, "Run untagged jobs"
+unchecked), then on the host:
+
+```bash
+sudo gitlab-runner register --non-interactive \
+  --url https://gitlab.northwardlabs.ca/ \
+  --token "$RUNNER_TOKEN" \
+  --executor shell \
+  --description rpi2-staging
+sudo usermod -aG docker gitlab-runner && sudo systemctl restart gitlab-runner
+```
+
+### What the deploy job does
+
+`deploy-staging` resolves the **immutable version-stamped tag** `publish-image` produced in the
+same pipeline (`X.Y.Z` on a tag, `X.Y.Z-main.g<sha>` on `main`) rather than a moving `:main` or
+`:latest`. A moving tag would let a concurrent pipeline substitute a different build between
+the push and the pull.
+
+It then logs in with the read-only `REGISTRY_KEY`, pulls, brings the `dependably-staging`
+compose project up from `docker-compose.staging.yml`, asserts the running container's image is
+the one requested, and blocks on the image's own `HEALTHCHECK` until it reports healthy. A
+`trap` logs out on exit — **the staging host holds no standing registry credential**; the token
+reaches it only for the lifetime of the job.
+
+### Host configuration
+
+The host's identity and tenancy mode live in an env file **on the host**, not in CI variables —
+they describe the machine, not the build, so they survive pipeline edits and differ per staging
+host. The deploy job passes it to compose as `--env-file`; the path is the `STAGING_ENV_FILE`
+variable, default `/etc/dependably/staging.env`:
+
+```bash
+DEPLOYMENT_MODE=single
+BASE_URL=http://rpi2.northwardlabs.ca:8080
+DEFAULT_ORG_SLUG=default
+```
+
+If the file is absent the job warns and falls back to the defaults baked into
+`docker-compose.staging.yml` (single-tenant, `default` org) rather than failing — `--env-file`
+against a missing path is a hard error in compose, which would break a freshly provisioned host
+over what is host configuration rather than a build input.
+
+Switching a host to `DEPLOYMENT_MODE=multi` additionally needs wildcard DNS for the org
+subdomains (`*.host`), since multi-tenant mode routes each org by subdomain.
+
+### Database continuity
+
+Staging keeps **one** database across deploys, so every deploy exercises the real migration path
+from the previous build — the failure staging exists to catch. Two things secure that:
+
+- The volume is pinned by **explicit name** (`STAGING_DATA_VOLUME`, default
+  `dependably-community_dependably-data`) rather than left to compose's `<project>_<volume>`
+  derivation. A project rename would otherwise mint a fresh empty volume and the deploy would
+  report healthy against an empty instance — a failure that looks exactly like success.
+- The job reuses the **same compose project** as the appliance already on the host, so compose
+  recreates that container in place: the old one is stopped before the replacement starts, the
+  port is never double-bound, and two processes never hold the one SQLite file open at once.
+
+`stop_grace_period` is set to 45s so the outgoing container finishes its drain and releases the
+SQLite instance-lock row; otherwise the replacement waits out the 90s staleness window.
 
 ---
 
@@ -251,9 +418,25 @@ docker inspect dependably:test \
 docker build --build-arg VERSION=0.x.y-rc1 -t dependably:rc .
 ```
 
-### Build provenance (SLSA L2)
+### Build provenance (SLSA L2) — GitHub channel only
 
-The `publish` job signs SLSA build provenance over the released GHCR image (keyless
+Images ship through two channels, and they do **not** carry the same guarantee:
+
+| Channel | Images | Provenance |
+| --- | --- | --- |
+| GitHub Actions → GHCR | `ghcr.io/<owner>/dependably` | Signed SLSA L2 build provenance + SBOM attestation, keyless OIDC/sigstore, verifiable by digest |
+| GitLab CI → private registry | `dependably/community`, `dependably/edge` (`:X.Y.Z`, `:latest`, `:main`) | **None.** `docker buildx build` runs with `--provenance=false`, nothing signs the pushed digest, and `:latest`/`:main` are mutable |
+
+The GitLab channel is the one this project dogfoods and the one `docker-compose.edge.yml`
+pulls from, so treat a private-registry image as trusted-by-access-control only: its
+integrity rests on who can push to the registry, not on anything you can verify offline.
+Pin a private-registry image by digest rather than by `:latest` when that matters.
+
+Closing the gap needs a signing identity that does not exist yet — a self-hosted GitLab is
+not a Fulcio-trusted OIDC issuer, so cosign keyless is unavailable and a stored cosign key
+pair would have to be provisioned and rotated. Tracked separately.
+
+The GitHub `publish` job signs SLSA build provenance over the released GHCR image (keyless
 OIDC/sigstore — no stored key) and attaches it to the registry alongside the image. The
 provenance covers the exact image by digest, so consumers can confirm it was built by this
 repo's CI and not swapped after the fact:
@@ -295,7 +478,7 @@ This table is the canonical reference — other docs (including `CLAUDE.md`) lin
 | `Proxy__MetadataCacheMaxStaleSeconds` | `86400` | Serve-stale window: how long past its TTL an expired cached metadata document may still be served when the refresh fetch fails with a *transient* upstream failure (network error, timeout, 5xx). Only meaningful when the cache is enabled. A 404 is not transient and is never served stale. |
 | `Proxy__MetadataCacheNegativeTtlSeconds` | `60` | TTL for cached upstream 404s, so repeated misses for a missing package don't stampede the master. `0` disables negative caching. Only meaningful when the cache is enabled. |
 | `Proxy__MetadataCacheMaxBytes` | `134217728` (128 MB) | Total memory bound for cached metadata bodies. Entry size is the buffered body length plus a small overhead constant; the byte-bounded cache evicts least-recently-used entries under pressure. A single document larger than the 32 MB metadata cap passes through uncached rather than evicting the cache. |
-| `METADATA_LOCAL_CACHE_TTL_SECONDS` | `600` | TTL for the rendered-response cache of **locally-owned** metadata (npm packument, NuGet registration, PyPI simple index, Maven metadata) — distinct from the `Proxy__MetadataCache*` family above, which caches the *upstream-fetch* result. Invalidated on publish/unpublish on the node that served the mutation; other replicas keep serving their cached copy for up to this TTL. Lower this (e.g. `30`) in a multi-instance deployment where post-push staleness on non-publishing replicas matters — see [Metadata caches are per-instance](#metadata-caches-are-per-instance). |
+| `METADATA_LOCAL_CACHE_TTL_SECONDS` | `600` | TTL for the rendered-response cache of **locally-owned** metadata (npm packument, NuGet registration, PyPI simple index, Maven metadata, RPM repodata) — distinct from the `Proxy__MetadataCache*` family above, which caches the *upstream-fetch* result. Invalidated on publish/unpublish, and (when `REDIS_CONNECTION_STRING` is set) fanned out to every other replica, so this TTL is a backstop for a dropped broadcast rather than the primary convergence mechanism — see [Metadata caches are per-instance, invalidated across replicas over Redis](#metadata-caches-are-per-instance-invalidated-across-replicas-over-redis). The default is the recommended value in multi-instance deployments too. |
 | `METADATA_PROXY_CACHE_TTL_SECONDS` | `300` | TTL for the rendered-response cache of **proxy-merged** metadata (same four ecosystems), shorter than the local TTL because the upstream can change independently of any local publish. |
 | `RESERVED_SUBDOMAINS` | — | Comma-separated slugs to add to the built-in reserved list (e.g. `api,status,docs`). Prevents those subdomains from being claimed as tenant slugs in multi-tenant mode. |
 | `DEPENDABLY_DEPLOYMENT_MODE` | `standalone` | Set to `ha` to require Redis and enable distributed locking |
@@ -306,12 +489,13 @@ This table is the canonical reference — other docs (including `CLAUDE.md`) lin
 | `REDIS_SSL` | `false` | Set `true` to require TLS for the Redis connection. |
 | `REDIS_DATABASE` | `0` | Redis logical database index. |
 | `REDIS_KEY_PREFIX` | `dependably:` | Prefix for all Redis keys written by Dependably. Change when sharing a Redis instance with other applications. |
-| `TRUSTED_PROXIES` | — (fail-closed: forwarded headers ignored) | Comma-separated IPs/CIDRs whose `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Host` headers are trusted (e.g. `10.0.0.0/8,172.18.0.1`). **When unset, all three forwarded headers are ignored** (fail-closed): `Connection.RemoteIpAddress`, `Request.Host`, and `Request.Scheme` reflect the real socket peer. A startup warning is logged. Set this to your reverse proxy's address(es) in any deployment that sits behind a TLS-terminating or IP-forwarding proxy — without it, `X-Forwarded-*` from the proxy are discarded, so `/metrics`/`/version` see the proxy's socket address, HSTS is not emitted, and scheme-dependent redirects may break. **A co-located proxy (same host/docker network, forwarding to Kestrel over loopback) additionally defeats the `/metrics`, `/version`, and management docs/OpenAPI loopback-default IP allowlists** — every caller it forwards appears as `127.0.0.1`, an allowlisted operator; see [Security model](#security-model). |
+| `TRUSTED_PROXIES` | — (fail-closed: forwarded headers ignored) | Comma-separated IPs/CIDRs whose `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Host` headers are trusted (e.g. `10.0.1.0/24,172.18.0.1`). **When unset, all three forwarded headers are ignored** (fail-closed): `Connection.RemoteIpAddress`, `Request.Host`, and `Request.Scheme` reflect the real socket peer. A startup warning is logged. Set this to your reverse proxy's address(es) in any deployment that sits behind a TLS-terminating or IP-forwarding proxy — without it, `X-Forwarded-*` from the proxy are discarded, so `/metrics`/`/version` see the proxy's socket address, HSTS is not emitted, and scheme-dependent redirects may break. **A co-located proxy (same host/docker network, forwarding to Kestrel over loopback) additionally defeats the `/metrics`, `/version`, and management docs/OpenAPI loopback-default IP allowlists** — every caller it forwards appears as `127.0.0.1`, an allowlisted operator; see [Security model](#security-model). Forwarded-header processing walks the whole `X-Forwarded-For` chain to the first untrusted hop, so **every host inside a trusted CIDR is itself a trusted forwarding hop and can present its own forged address as the client-facing source IP** — this matters most for a broad range like a whole VPC CIDR, where every in-VPC client (not just the reverse proxy) gains that power. A `/0` entry is rejected outright at startup; a narrower-but-still-broad entry (wider than `/22` for IPv4, wider than `/64` for IPv6) is not rejected — a large proxy subnet can be a legitimate deployment — but logs a startup warning naming the entry, and the full resolved trusted-network set is logged at `Information` on every boot so the effective configuration is auditable. |
 | `DEPENDABLY_MASTER_KEY` | — (opt-in; secrets stored unencrypted, startup warning) | Operator master key (KEK) that envelope-encrypts the DB-resident secrets — `jwt_secret`, `mfa_encryption_key`, and the DataProtection key ring — at rest. Value is an inline base64-encoded **32-byte** key (AES-256) **or** a path to a file containing one. When set, those secrets are transparently encrypted (`enc:v1:` envelope) and migrated in place on startup; **when unset, they are stored unencrypted** and a startup warning is logged — place the SQLite file / Postgres data directory on an OS-encrypted volume (LUKS/dm-crypt, encrypted EBS) instead. The key lives **outside** the database and must be injected identically into every replica. **Fail-closed:** if encrypted secrets exist but the key is absent (or invalid), the server refuses to start rather than mint new ones. Losing the key is unrecoverable for the encrypted data (`jwt_secret`/DataProtection regenerate at the cost of forced re-login; losing `mfa_encryption_key` forces MFA re-enrollment). Rotation is a manual offline re-wrap. See `docs/adr/0002-envelope-encryption-db-secrets.md`. |
 | `Auth__JwtSigningKeyRefreshSeconds` | `1` | How often each replica re-reads `instance_settings.jwt_secret` to pick up a rotation performed elsewhere (`POST /api/v1/system/jwt-secret/rotate`, apex + `scope=system`). The rotating replica reloads synchronously, so this bounds only how long *other* replicas keep honouring the superseded secret — the single trust window rotation leaves open. `0` re-reads on every validation, closing the window at the cost of a DB round trip per authenticated request. There is no old-key grace period: rotation invalidates every session, including the caller's. |
 | `HOST_ROUTING` | — | Comma-separated `host=ecosystem` pairs that map incoming `Host` headers to an ecosystem prefix (e.g. `registry.npmjs.org=npm,pypi.org=pypi`). When set, requests whose `Host` matches an entry are treated as if the ecosystem path prefix were present, enabling clients that hardcode ecosystem registry hostnames to work without path rewriting. |
 | `TENANT_HEADER_NAME` | `X-Dependably-Tenant` | Header name used by `HeaderTenantResolver` to identify the tenant in reverse-proxy deployments that inject a trusted tenant slug. |
 | `CLAIM_ENFORCEMENT` | `off` | Set `on` to require packages to carry an upstream-provenance claim before publish is accepted. `off` (default) disables the gate; `on` enforces it on every push handler. |
+| `PUBLISH_NAME_BINDING` | `off` | Set `on` to enforce name-level publish authorization: the first principal to hosted-publish a `(ecosystem, name)` owns it, and a later publish by a different principal (a token bound to a different identity) is refused with 403 unless it holds a grant. Applies to every hosted push path (npm, PyPI, NuGet, Maven, RPM, OCI, Cargo). Ownership is recorded on first publish **regardless** of this flag (so enabling it later has authoritative first-publisher data, and so a deleted internal name never silently reverts to upstream resolution — the dependency-confusion resurrection guard). Default `off` because binding a name to its first post-upgrade publisher would otherwise break orgs that publish one name from several principals (rotated CI tokens, shared packages); enable it once grants are in place. A user token's principal is its owning user; a service token's is the token itself. Grants are currently managed at the data layer (`package_name_grant`); a management API is a planned follow-up. |
 | `AIR_GAPPED` | `false` | Set `true` (or `1`) to declare the instance air-gapped. Skips all outbound network calls (OSV queries, deprecation refresh, threat-feed, healthcheck pings) and logs a warning if any network-dependent setting is configured. Also see `OSV_MODE=local`. |
 | `DISABLE_BACKGROUND_JOBS` | — | Comma-separated list of background job names to disable without fully air-gapping the instance (e.g. `vuln-scan,deprecation-refresh`). Known names are logged on startup. `AIR_GAPPED=true` disables all background jobs and takes precedence. |
 | `REQUIRE_MFA` | — | Set `true` (or `1`) to enforce MFA enrollment instance-wide. When set, every authenticated user (tenant and system_admin) must complete TOTP enrollment before accessing any API endpoint. Composes with the per-tenant `require_mfa` setting in org_settings: either signal triggers enforcement. |
@@ -346,7 +530,10 @@ Storage has two tiers: **cache** (proxy artefacts, eviction-friendly) and **regi
 | `S3_REGION` | — | AWS region (required when `STORAGE_BACKEND=s3`) |
 | `AZURE_CONNECTION_STRING` | — | Azure Storage connection string (required when `STORAGE_BACKEND=azure`) |
 | `AZURE_CONTAINER` | — | Azure blob container name (required when `STORAGE_BACKEND=azure`) |
+| `STORAGE_PRESIGNED_READS` | `false` (off) | When on, a **full, digest-addressed OCI blob `GET`** that hits the local cache is answered with a `307` to a short-lived presigned URL on the object store, so the layer bytes never transit the application tier. Applies only to object-store backends that can sign (`s3`, and `azure` when the container client holds an account key); the `local` backend and any store that cannot sign stream as before. The redirect is issued **after** the same pull authorization, tenant-scoped lookup, and block gate the streaming path runs, and only for immutable digest-addressed content — manifests, tag lists, ranged reads, and the upstream cache-miss path are never redirected. Off by default: the URL is a replayable bearer credential for that one blob until it expires, and a redirected read is not observable by this instance beyond the moment it is granted. |
+| `STORAGE_PRESIGNED_READ_TTL_SECONDS` | `60` | Lifetime of a minted presigned read URL. Clamped to `5`–`900`; an unparseable value falls back to the default. Keep it just long enough for a client to follow the redirect — it bounds the window in which a leaked URL is useful. |
 | `PROXY_STAGING_PATH` | OS temp dir | Hash-and-stage directory for the proxy-fetch MISS path. Container deployments expecting large artefacts should set this to a disk-backed volume (e.g. `/data/staging`) — `/tmp` is often tmpfs (RAM-backed), which defeats the memory-bounding goal. |
+| `PROXY_SOURCE_PINNING` (`Proxy__SourcePinning`) | `false` (off) | Dependency-confusion guard for non-OCI proxying. When on, the **first** upstream host to successfully serve a proxied `(org, ecosystem, package-name)` binds that name to that host; a later proxy fetch resolving the same name from a **different** upstream host is refused (before any version row is written). Off by default so it never surprises an existing multi-mirror deployment or blocks proxying after an operator legitimately re-points an upstream. **Set this to `true` on any deployment that mixes a private/internal registry with a public one** (the confusion window a public squatter would exploit); OCI already gets equivalent protection from per-upstream repository-prefix routing. Note the two fail-open skips: when pinning is off, or when an upstream row has no parseable URL, the pin check is bypassed. |
 | `STAGING_DISK_WARN_THRESHOLD_PERCENT` | `10` | Serilog `Warning` is emitted when available space on the staging volume falls below this percentage of total volume size. Set `0` to disable the warning. |
 | `STAGING_DISK_FLOOR_BYTES` | `536870912` (512 MiB) | Hard floor: proxy fetches are rejected with 507 Insufficient Storage when available staging disk space falls below this value. When `Content-Length` is present the effective floor is `max(STAGING_DISK_FLOOR_BYTES, 2 × Content-Length)`. An explicit `0` is a deliberate opt-out that disables the guardrail entirely — both the absolute floor and the dynamic `2 × Content-Length` floor are skipped, and a startup `Warning` is logged (not recommended). A negative or unparseable value falls back to the default rather than disabling. |
 | `STAGING_DISK_POLL_INTERVAL_SECONDS` | `60` | How often the background staging-disk monitor samples free/used space on the staging volume and evaluates `STAGING_DISK_WARN_THRESHOLD_PERCENT`. Independent of the per-request `STAGING_DISK_FLOOR_BYTES` check, which is evaluated live on each proxy fetch. |
@@ -383,6 +570,7 @@ Instance-wide defaults for per-tenant caps.
 |---|---|---|
 | `PyPI__Upstream` | `https://pypi.org` | Upstream PyPI registry for proxy cache, seeded for new orgs. Per-org registries are managed from Settings → Proxy; this value seeds the initial row. |
 | `Npm__Upstream` | `https://registry.npmjs.org` | Upstream npm registry for proxy cache, seeded for new orgs. Per-org registries are managed from Settings → Proxy; this value seeds the initial row. |
+| `Npm__AcceptSha1Shasum` | `false` | Set `true` to let a hex SHA-1 `dist.shasum` count as the integrity check that admits an npm tarball to the proxy cache. npm publishes a `sha512` SRI in `dist.integrity` for anything published this decade; only older packuments carry `dist.shasum` alone. SHA-1 is chosen-prefix-collision-broken, so **off by default** a shasum-only packument is treated as **unverified** rather than verified: the tarball still serves — exactly like an upstream that publishes no digest at all — but the registry does not record a broken digest as an integrity guarantee. Cache placement is unaffected either way (the blob is stored under its own SHA-256, so a SHA-1 collision cannot displace an existing entry). Packages carrying a `sha512` SRI are unaffected by this setting, and every other algorithm (SHA-256, SHA-512) still decides admission normally. A warning is logged once per process the first time a shasum-only packument is admitted. |
 | `NuGet__Upstream` | `https://api.nuget.org/v3` | Upstream NuGet registry for proxy cache, seeded for new orgs. Per-org registries are managed from Settings → Proxy; this value seeds the initial row. |
 | `Maven__Upstream` | `https://repo1.maven.org/maven2` | Upstream Maven registry (Maven Central) for proxy cache, seeded for new orgs. Per-org registries are managed from Settings → Proxy; this value seeds the initial row. |
 | `Maven__NegativeCacheTtl` | `01:00:00` | TTL (`TimeSpan` format) for negative (not-found) cache entries in the Maven proxy |
@@ -397,7 +585,8 @@ Instance-wide defaults for per-tenant caps.
 | `Oci__ManifestTagTtl` / `Oci__TokenCacheDuration` / `Oci__UpstreamHttpTimeout` / `Oci__CatalogEnabled` | 5m / 55m / 30m / off | Instance-level OCI proxy tunings. **Upstream OCI registries are no longer configured here** — they are per-org and managed in Settings → Proxy → Upstream registries (host + repository-prefix routing + auth type), like every other ecosystem. Every org is seeded with Docker Hub and `mcr.microsoft.com` defaults. |
 | `Apk__Upstream` | `https://dl-cdn.alpinelinux.org/alpine` | Upstream Alpine apk mirror seeded for new orgs. The route is 1:1 with dl-cdn's `{release}/{repo}/{arch}/{file}` layout, so a sed rewrite of `/etc/apk/repositories` is the only client-side change. Per-org registries are managed from Settings → Proxy; this value seeds the initial row. apk is proxy-only (no hosted push, like Go). |
 | `Apk__IndexTtl` | `00:01:00` (60s) | TTL (`TimeSpan` format) for the memory-cached passthrough of `APKINDEX.tar.gz` and other index-adjacent files (`.SIGN.RSA.*`, etc). `.apk` package blobs stay TOFU-only (see `Apk__NegativeCacheTtl` note); `APKINDEX.tar.gz` itself is signature-verified server-side — see `Apk__VerifyIndexSignature`. |
-| `Apk__VerifyIndexSignature` | derived | Instance-level override for `APKINDEX.tar.gz` embedded RSA signature verification. When unset, verification is enabled iff the org has at least one apk `rsa` trust anchor in `signature_trust_anchor`. Setting `true` with no per-org anchor configured fails every resolution closed. `APKINDEX.tar.gz` is two concatenated gzip members — the first decompresses to a tiny tar of `.SIGN.RSA[256\|512].<keyname>` entries (raw PKCS#1v1.5 signatures over the raw compressed bytes of the second member); a failed check refuses to cache or serve the index (502). `.apk` package fetches remain TOFU regardless of this setting — only the index is verified. Trust anchors are per-org and managed via Settings → Trust Anchors (or `POST /api/v1/trust-anchors`), not via an env key. |
+| `Apk__VerifyIndexSignature` | derived | Instance-level override for `APKINDEX.tar.gz` embedded RSA signature verification. When unset, verification is enabled iff the org has at least one apk `rsa` trust anchor in `signature_trust_anchor`. Setting `true` with no per-org anchor configured fails every resolution closed. `APKINDEX.tar.gz` is two concatenated gzip members — the first decompresses to a tiny tar of `.SIGN.RSA[256\|512].<keyname>` entries (raw PKCS#1v1.5 signatures over the raw compressed bytes of the second member); a failed check refuses to cache or serve the index (502). `.apk` package fetches remain TOFU regardless of this setting — only the index is verified. SHA-1 (`.SIGN.RSA.<keyname>`) signatures verify only under `Apk__AcceptSha1IndexSignatures`. Trust anchors are per-org and managed via Settings → Trust Anchors (or `POST /api/v1/trust-anchors`), not via an env key; anchor keys must clear the minimum-strength floor (RSA ≥ 2048 bits, elliptic curves ≥ 255-bit field) at import. |
+| `Apk__AcceptSha1IndexSignatures` | `false` | Set `true` to let a SHA-1 `.SIGN.RSA.<keyname>` entry satisfy `APKINDEX.tar.gz` signature verification. The digest algorithm is named by the `.SIGN.*` entry inside the **upstream-supplied index**, so leaving SHA-1 acceptable lets the artefact under verification choose the broken arm — the reason it is **off by default**. With it off, only `.SIGN.RSA256.*` / `.SIGN.RSA512.*` entries can verify; an index that carries nothing else fails the check (reason `weak_signature_algorithm`, `dependably.apk.index_signature_failures`), and a failed check refuses to cache or serve the index. **Alpine's own mirrors still sign with SHA-1**, so an org that has pinned an apk trust anchor (or set `Apk__VerifyIndexSignature=true`) needs this opt-in to verify a stock Alpine index. Orgs with no apk trust anchor are unaffected — verification does not run at all. A warning is logged once per process the first time a SHA-1 index signature is accepted, and once the first time one is refused. |
 | `Apk__NegativeCacheTtl` | `00:05:00` (5m) | TTL (`TimeSpan` format) for cached upstream 404s on `.apk` package fetches, so repeated misses for a missing package/arch combination don't repeat the upstream round-trip on every request. |
 
 ### Observability
@@ -444,7 +633,14 @@ The overlay sets `OTEL_EXPORTER_OTLP_ENDPOINT` for you and runs a collector whos
 |---|---|---|
 | `GC_SCHEDULE` | `0 3 * * *` | Cron schedule for the retention GC pass (per-org version limits, proxy eviction, activity pruning). |
 | `AUDIT_EVENT_RETENTION_DAYS` | `365` | Delete `audit_event` rows older than this many days. The GC pass enforces this on each run. |
-| `TENANT_HARD_DELETE_GRACE_DAYS` | `30` | Days after a tenant is marked for deletion before its data is permanently removed. During the grace period the deletion can be cancelled. |
+| `ACTIVITY_RETENTION_DAYS` | `90` | Instance default for pruning `activity` rows (per-download IP/actor events) when an org's `activity_retention_days` is NULL. A per-org value overrides it; NULL means "use this default", not "retain forever". |
+| `AUDIT_LOG_PII_DAYS` | `90` | Pseudonymization horizon for `audit_log`: the GC pass clears `source_ip` and `detail` (which carry IPs and email/SAML-NameID data) on rows older than this while keeping the forensic skeleton (actor, action, scope, timestamp). |
+| `AUDIT_LOG_RETENTION_DAYS` | `365` | Deletion horizon for `audit_log`: the GC pass deletes rows older than this many days across every scope. Must be ≥ `AUDIT_LOG_PII_DAYS` to get a pseudonymized window before deletion. |
+| `AUDIT_TRUNCATE_IP` | `false` | When true, audit events record the source **network** rather than the host: `/24` for IPv4, `/48` for IPv6 (e.g. `192.0.2.0/24`). Off by default because attribution is what an audit trail is for; turning it on trades that for a smaller personal-data footprint at write time. Applies only to the audit write path — rate-limit partition keys aggregate independently and are unaffected. |
+| `AUDIT_DISABLE_USER_AGENT` | `false` | When true, audit events record no `user_agent` at all. A UA string is a browser/device fingerprint with little forensic value beyond "which client", so a deployment that does not want to hold one need not. |
+| `LOGIN_ATTEMPTS_RETENTION_DAYS` | `30` | Delete idle, unlocked `login_attempts` rows older than this many days. The window is far beyond any lockout duration, so an active throttle is never dropped; it bounds the email-hash membership set. |
+| `ACCOUNT_SEND_THROTTLE_RETENTION_DAYS` | `7` | Delete `account_send_throttle` rows whose window started more than this many days ago. A row that old is inert — the next request for that account restarts its window regardless — so the sweep changes no decision; it bounds the pseudonym set the same way `LOGIN_ATTEMPTS_RETENTION_DAYS` does. |
+| `TENANT_HARD_DELETE_GRACE_DAYS` | `30` | Days after a tenant is marked for deletion before its data is permanently removed. During the grace period the deletion can be cancelled. On permanent removal the tenant's `scope='tenant'` `audit_log` rows are erased (no FK cascade covers them). |
 | `TENANT_HARD_DELETE_SCHEDULE` | `0 4 * * *` | Cron schedule for the tenant hard-delete sweep. |
 | `ORPHAN_RECONCILE_SCHEDULE` | `0 4 * * *` | Cron schedule for the orphan-blob reconciliation pass. Lists the `hosted/` prefix in the registry tier and deletes blobs that no metadata row references. The referenced set is the union of every table that can hold a hosted blob key — `package_versions` plus the secondary-file tables (`package_version_files`, `maven_version_files`, `nuget_symbol_index`), whose rows are the sole reference to artefacts such as a Maven `.pom`/sources jar, a PyPI sdist published alongside a wheel, or a NuGet symbols package. Registry tier only: the cache tier is `CacheEvictionService`'s concern, and the `proxy/`, `oci/`, `go/`, `cargo/`, and `apk/` key namespaces fall outside the `hosted/` prefix this sweep walks. Set to a non-parseable value to disable. |
 | `ORPHAN_RECONCILE_GRACE_MINUTES` | `30` | Blobs modified more recently than this many minutes are skipped by the orphan reconciler, protecting in-flight publish operations that have written the blob but not yet committed the metadata row. |
@@ -465,6 +661,33 @@ The overlay sets `OTEL_EXPORTER_OTLP_ENDPOINT` for you and runs a collector whos
 |---|---|---|
 | `LICENSE_BACKFILL_SCHEDULE` | `0 6 * * *` | Cron schedule for the license backfill pass. Reads the cached bytes of npm/PyPI/NuGet proxy artifacts that have never had a license-extraction pass (ingested before ingest-time license capture existed), writes any SPDX identifiers to the cache plane, and stamps them so each is scanned exactly once. Cache-only; never fetches upstream. |
 
+### License enforcement — serve vs. publish
+
+License policy is a per-org DB setting (`org_settings`), managed from Settings → License policy
+(`PUT /api/v1/license-policy/mode`) rather than an environment variable — there is no seeding
+env var because the allow/block lists and mode are meaningless until an operator populates them.
+Two independent tri-state (`off` / `warn` / `block`) modes govern it:
+
+- **`license_enforcement_mode`** (the `mode` field) gates the **serve** path: `BlockGateService`
+  evaluates it on every download and index render. Under `block`, an artifact with zero recorded
+  SPDX entries is treated as an unknown license (`NOASSERTION`) and denied — for the ecosystems
+  whose manifests declare a license (npm/pypi/nuget/maven/cargo/rpm); go/apk/oci keep the
+  empty-set pass-through because they routinely record no license at all.
+- **`license_publish_enforcement_mode`** (the `publishMode` field) gates the **publish** path
+  for the same license-less case, independently: `off` (the default) reproduces the original
+  behavior — a license-less hosted publish is accepted, occupies storage, and is judged only at
+  serve time by `license_enforcement_mode`; `warn` accepts the publish but records a
+  `license_publish_warn` activity row noting it will not be servable under the current serve
+  policy; `block` rejects the publish outright (`license_publish_blocked`, HTTP 403), before any
+  version row is written.
+
+The two modes are deliberately independent, not linked: an operator who turns on the serve-path
+gate did not necessarily ask for publishes to start failing too, so `license_publish_enforcement_mode`
+defaults `off` and no currently-succeeding publish workflow starts rejecting on upgrade. Mirroring
+the same leave-unchanged-on-absent contract the five `verify_*` fields on `PUT /api/v1/proxy-settings`
+use, a `PUT /api/v1/license-policy/mode` call that omits `publishMode` leaves the stored
+publish-side value untouched rather than resetting it to `off`.
+
 ### SAML certificate expiry
 
 Daily background sweep that checks the effective IdP signing certificate expiry for every tenant with SAML configured and emits `audit_log` events at configurable day-to-expiry thresholds.
@@ -479,15 +702,18 @@ Daily background sweep that checks the effective IdP signing certificate expiry 
 
 Dependably can forward audit events to an external SIEM collector in real time. Configure either the webhook or the syslog forwarder (not both). When neither is configured the SIEM queue is not started and `SIEM_QUEUE_CAPACITY` has no effect.
 
+> **Both SIEM sinks are personal-data egress points, as is the SMTP relay.** A forwarded event carries `actor_id` and the typed `detail` payload; the SMTP relay carries recipient addresses and security-notification content. Configuring any of them sends personal data to a system outside this instance — if that system is in another jurisdiction, that is a Chapter V transfer and needs its own Art. 46 mechanism. Both SIEM transports therefore default to encrypted, and a plaintext one has to be chosen explicitly. (`SiemEvent` deliberately omits `source_ip`, so the address never leaves the instance through this path at all.)
+
 | Variable | Default | Description |
 |---|---|---|
 | `SIEM_MAX_LOOKBACK_DAYS` | `90` | Maximum look-back window (days) for the `/api/v1/siem` pull endpoint. Requests beyond this window are rejected. Also seeds `instance_settings.siem_max_lookback_days` on first boot. |
-| `SIEM_WEBHOOK_URL` | — | HTTPS endpoint to POST audit events to as NDJSON. Activates the webhook forwarder. |
+| `SIEM_WEBHOOK_URL` | — | HTTPS endpoint to POST audit events to as NDJSON. Activates the webhook forwarder. **Must be `https://`** — a cleartext URL is refused at startup, because the POST carries actor ids, event payloads, and the `SIEM_WEBHOOK_BEARER` credential. Override with `SIEM_WEBHOOK_ALLOW_INSECURE`. |
 | `SIEM_WEBHOOK_BEARER` | — | Bearer token added to the `Authorization` header of each webhook POST. |
+| `SIEM_WEBHOOK_ALLOW_INSECURE` | `false` | When `true`, permits a plaintext `http://` `SIEM_WEBHOOK_URL` (e.g. a collector on a trusted loopback interface). Off by default: the request carries personal data and the bearer credential. Distinct from `SIEM_WEBHOOK_ALLOW_PRIVATE`, which governs the address *range*, not the transport. |
 | `SIEM_WEBHOOK_ALLOW_PRIVATE` | `true` | When `true`, RFC 1918 addresses (10/8, 172.16/12, 192.168/16) are allowed in `SIEM_WEBHOOK_URL` so self-hosted collectors on private networks are reachable. Loopback, link-local (169.254/16), and cloud-metadata addresses remain blocked regardless. Set to `false` to require a public IP or hostname. |
 | `SIEM_SYSLOG_HOST` | — | Hostname of the syslog receiver. Required to activate the syslog forwarder. |
 | `SIEM_SYSLOG_PORT` | `514` | Port of the syslog receiver. |
-| `SIEM_SYSLOG_PROTO` | `udp` | Transport: `udp`, `tcp`, or `tls`. |
+| `SIEM_SYSLOG_PROTO` | `tls` | Transport: `udp`, `tcp`, or `tls`. Defaults to `tls` because the stream carries personal data; `udp`/`tcp` stay selectable and log a startup warning naming the exposure. Over UDP the events can also be forged, not merely read. |
 | `SIEM_SYSLOG_FORMAT` | `cef` | Message format: `cef` (ArcSight Common Event Format) or `rfc5424`. |
 | `SIEM_QUEUE_CAPACITY` | `1024` | In-memory queue depth for outbound SIEM events. Events are dropped (with a metric) when the queue is full. Increase for high-audit-volume deployments or a slow collector. |
 
@@ -499,6 +725,40 @@ Per-org outbound webhooks deliver signed JSON payloads to subscriber URLs when p
 |---|---|---|
 | `WEBHOOK_ALLOW_PRIVATE` | — | When `true`, RFC 1918 addresses (10/8, 172.16/12, 192.168/16) are allowed as webhook endpoint targets — for example, self-hosted receivers on a private network. Loopback, link-local (169.254/16), and cloud-metadata addresses remain blocked regardless. Unset or `false` requires a public IP or hostname. |
 | `WEBHOOK_QUEUE_CAPACITY` | `1024` | In-memory queue depth for outbound webhook deliveries. Events are dropped (with a log warning) when the queue is full. |
+
+### Health probes (`/health`, `/ready`)
+
+`GET /health` is a flat liveness OK — the process is running. `GET /ready` is the readiness probe: it fans out to the metadata store, the blob store, and (when configured) Redis, and short-circuits to `503 {"status":"draining"}` from the moment `SIGTERM` starts graceful shutdown, so it carries the drain signal `/health` does not.
+
+**Required vs reported dependencies.** Every dependency `/ready` probes is shared by the whole replica fleet, so a failure is perfectly correlated across it: an RDS failover, an S3 5xx window, or an ElastiCache failover makes all N replicas answer identically. A load balancer that deregisters on those signals removes the entire fleet for a condition it cannot route around — partial degradation becomes total outage, and it gets worse as the replica count grows. So `/ready` answers 503 only when a **required** dependency is down; the rest are reported in the body as degradation and left to alerting. That makes `/ready` safe to point an ALB/NLB target group or a Kubernetes readiness probe at.
+
+Defaults differ per plane. On a full host the metadata store is the only required dependency — nothing resolves without it, while blob-store and Redis failures leave metadata reads, index generation, and cached-manifest serving working. On an edge node (`DEPLOYMENT_MODE=edge`) the blob store joins the required set: serving artefact bytes out of its own, usually node-local, store is the node's entire purpose, and a node-local failure is exactly the uncorrelated condition a load balancer *can* route around.
+
+| Plane | Required (503 on failure) | Reported only (200, shown in body) |
+|---|---|---|
+| Full host (`DEPLOYMENT_MODE=single` / `multi`) | `db` | `blob_store`, `redis` |
+| Edge node (`DEPLOYMENT_MODE=edge`) | `db`, `blob_store` | `redis` |
+
+**Strict view.** `GET /ready?strict=true` demands every dependency green and answers 503 if any is down, required or not. Point deployment gating and alerting at the strict view; point the load balancer at the plain `/ready`. The outbound healthcheck pinger (below) always uses the strict view, since it is an alerting signal.
+
+The body names both sets so the distinction is legible without knowing the configuration:
+
+```json
+{
+  "status": "degraded",
+  "strict": false,
+  "checks": { "db": "ok", "blob_store": "error", "redis": "ok" },
+  "required": ["db"],
+  "degraded": ["blob_store"]
+}
+```
+
+`status` is `ready` (all green), `degraded` (something is down but nothing load-bearing), `unready` (a required dependency is down), or `draining` (graceful shutdown). Intersect `degraded` with `required` to see whether a current failure is load-bearing. Per-check values are `ok`/`error` only — raw failure text (file paths, Redis endpoints, driver errors) is logged server-side and never returned to the anonymous caller.
+
+| Variable | Default | Description |
+|---|---|---|
+| `READINESS_HARD_DEPENDENCIES` | `db` (full host), `db,blob_store` (edge) | Comma-separated readiness check names whose failure makes `/ready` answer 503. Known names: `db`, `blob_store`, `redis`. Overrides the per-plane default wholesale — set `db,blob_store,redis` to restore strict-on-every-probe behaviour, or narrow it further if your deployment genuinely serves without one of them. Unknown names are simply never matched by a check. |
+| `READINESS_BLOB_PROBE_TTL_SECONDS` | `15` | How long a blob-store probe result (success *or* failure) is reused before the store is probed again. Readiness is polled by every load-balancer node against every replica; without a TTL that is one object-store metadata request per poll, a permanent unbudgeted load floor. The probe itself is already the cheapest call the backend offers (a path stat locally, a `HEAD`-equivalent metadata request on S3/Azure — never an object read). `0` disables caching and probes on every call; values above 300 are clamped. The metadata-store probe is never cached — it is the required dependency and must reflect live state. |
 
 ### Healthcheck pinging
 
@@ -559,14 +819,19 @@ All limiters are per-token (download/push) or per-source-IP (login/anonymous/met
 | `DOWNLOAD_RATE_LIMIT_PERMITS` | `1000` | Sliding-window permits per second per token/IP for package downloads. |
 | `DOWNLOAD_RATE_LIMIT_QUEUE` | `500` | Queue depth for the download limiter. Requests that exceed the window are queued up to this depth before returning `429`. |
 | `PUSH_RATE_LIMIT_PERMITS` | `20` | Sliding-window permits per second per token for package publish. Queue depth is `0` (no queuing — burst is rejected immediately). |
-| `LOGIN_RATE_LIMIT_PERMITS` | `10` | Fixed-window permits per minute per IP for the login endpoint. |
-| `TOKEN_CREATE_RATE_LIMIT_PERMITS` | `60` | Fixed-window permits per hour per IP for token-creation endpoints. |
-| `INVITE_RATE_LIMIT_PERMITS` | `20` | Fixed-window permits per hour per IP for invite and sensitive-config write endpoints (member invites, instance email/Slack config, alert settings). |
+| `LOGIN_RATE_LIMIT_PERMITS` | `10` | Fixed-window permits per minute per IP for the login endpoint. Honoured by both the in-process limiter (standalone) and the Redis-backed limiter (`DEPENDABLY_DEPLOYMENT_MODE=ha`); the window itself (one minute) is not configurable in either mode. |
+| `TOKEN_CREATE_RATE_LIMIT_PERMITS` | `60` | Fixed-window permits per hour per IP for token-creation endpoints. Honoured by both the in-process limiter (standalone) and the Redis-backed limiter (`DEPENDABLY_DEPLOYMENT_MODE=ha`); the window itself (one hour) is not configurable in either mode. |
+| `INVITE_RATE_LIMIT_PERMITS` | `20` | Fixed-window permits per hour per IP for invite and sensitive-config write endpoints (member invites, instance email/Slack config, alert settings). Honoured by both the in-process limiter (standalone) and the Redis-backed limiter (`DEPENDABLY_DEPLOYMENT_MODE=ha`); the window itself (one hour) is not configurable in either mode. |
 | `ANON_RATE_LIMIT_PERMITS` | `120` | Fixed-window permits per minute per IP for unauthenticated probe endpoints (`/health`, `/ready`, `/version`, `/api/v1/bootstrap`, `/api/v1/auth/methods`, `/api/v1/licenses`). |
 | `IMPORT_RATE_LIMIT_PERMITS` | `5` | Sliding-window permits per minute per token for bulk import requests. Queue depth is `0` (burst is rejected immediately). |
 | `MANAGEMENT_RATE_LIMIT_PERMITS` | `300` | Sliding-window permits per minute per principal for authenticated management endpoints (`/api/v1/*`) not covered by a more specific policy. `/api/v1/docs/` is exempt. |
 | `METADATA_RATE_LIMIT_PERMITS` | `500` | Sliding-window permits per second per source IP for metadata GET endpoints (npm packument, PyPI simple index, NuGet registration). |
 | `METADATA_RATE_LIMIT_QUEUE` | `100` | Queue depth for the metadata rate limiter. Short bursts are absorbed; sustained floods return `429` once the queue fills. |
+| `PROTOCOL_DEFAULT_RATE_LIMIT_PERMITS` | `300` | Sliding-window permits per minute per source IP for the default-deny backstop applied by the global limiter to any protocol route that declares no explicit rate-limit policy. A route needing more throughput carries an explicit `download`/`metadata` policy; this only bounds otherwise-unmetered routes so a forgotten policy is never entirely unlimited. |
+| `RATE_LIMIT_REDIS_FAILURE_MODE` | `open` | What the Redis-backed abuse-prevention limiters (`login`, `invite`, `token-create`) do when Redis cannot be reached, or replies with something the limiter cannot parse, and there is no counter to decide with. `open` grants the request — a Redis outage does not lock every user out, at the cost of running with no login rate limiting for its duration. `closed` denies with `429` instead (`Retry-After` = the policy's window length), keeping the abuse budget enforced through the outage at the cost of refusing legitimate logins. Either way every such decision is logged at `Warning` and counted on `dependably.rate_limit.backend_unavailable` (attributes `policy`, `decision`, and `cause` — `connection` when Redis could not be reached, `malformed_reply` when it replied but not in the shape the limiter's script expects) — alert on that counter: under `open` it is the only signal that login rate limiting is currently switched off. Applies only to the Redis-backed limiters; the in-process limiters have no such failure mode. Any value other than `open` or `closed` fails startup rather than silently resolving to the permissive default. |
+| `RATE_LIMIT_IPV6_PREFIX` | `64` | IPv6 network prefix (bits, `1`–`128`) that per-IP rate-limit partition keys collapse to. A routed `/64` is the smallest per-subscriber allocation, so keying below it lets one attacker mint a fresh budget per source address. IPv4 always partitions at the full `/32`; audit `source_ip` fields always record the full address regardless of this setting. |
+| `ACCOUNT_SEND_MAX_PER_WINDOW` | `5` | Account-targeted transactional emails (today: the self-serve password-reset link) permitted per **target account** per window, independent of source IP. Every per-IP limiter is blind to who the mail is addressed to, so a distributed attacker can mail-bomb one mailbox from many prefixes without ever tripping one; this budget is what stops that. Raising it weakens the mail-bomb defense; lowering it lets an attacker deny a specific user their reset link for longer. |
+| `ACCOUNT_SEND_WINDOW_MINUTES` | `60` | Window length for `ACCOUNT_SEND_MAX_PER_WINDOW`. The budget restarts once a window elapses, so an account can be held down for at most one window past the attacker's last request. |
 | `METADATA_REBUILD_CONCURRENCY` | `8` | Maximum number of simultaneous cache-MISS metadata rebuilds (upstream fetches that buffer a full response). Limits peak in-flight memory allocation. Cache HITs are unaffected. |
 
 ---
@@ -630,9 +895,15 @@ Upstreams are per-org and DB-backed (the `upstream_registry` table) — the reso
 
 ## High-availability deployment
 
-Multi-replica deployments require Redis (`DEPENDABLY_DEPLOYMENT_MODE=ha`, `REDIS_CONNECTION_STRING`). Redis backs distributed locking, rate-limit state (login / invite / token-create limiters), and ASP.NET Core Data Protection key sharing.
+Multi-replica deployments require Redis (`DEPENDABLY_DEPLOYMENT_MODE=ha`, `REDIS_CONNECTION_STRING`). Redis backs distributed locking, rate-limit state (login / invite / token-create limiters), ASP.NET Core Data Protection key sharing, and the cross-replica rendered-metadata invalidation channel.
 
 The sections below call out constraints that are silent data-loss or security risks when violated. Read these before running more than one instance.
+
+### Load-balancer health checks — use `/ready`, gate on `/ready?strict=true`
+
+Point the target group / readiness probe at `GET /ready`. It fails only on a **required** dependency (the metadata store by default) and reports shared-dependency failures as degradation instead, so an object-store or cache incident cannot deregister every replica at once — see [Health probes](#health-probes-health-ready) for the classification and how to override it with `READINESS_HARD_DEPENDENCIES`. `/ready` is also shutdown-aware: it turns 503 the moment `SIGTERM` lands, which is what lets `SHUTDOWN_PRESTOP_DELAY` drain a replica out of rotation before it stops accepting connections. `/health` carries no drain signal and should not be used for rotation.
+
+Point deployment gating and alerting at `GET /ready?strict=true`, which still demands every dependency green.
 
 ### SQLite metadata store — do not share over NFS
 
@@ -649,6 +920,8 @@ A fresh heartbeat on the row does not by itself prove the holder is alive — a 
 **Do:**
 - Use `DB_PROVIDER=postgres` with a shared Postgres connection string (`DB_CONNECTION_STRING`) for multi-instance deployments. Each instance connects to the same Postgres database; Postgres handles concurrent writers correctly.
 
+An **existing standalone install already on SQLite** moves to Postgres in place with the `migrate-to-postgres` / `verify-postgres-migration` subcommands of the product image. The full procedure — quiescing writes via the instance lock, the per-type conversion rules, the verification pass to run before cutting over, and the rollback — is in [docs/sqlite-to-postgres-migration.md](docs/sqlite-to-postgres-migration.md). The migration moves metadata only; the blob store is untouched, so point the new deployment at the same one.
+
 ### Local blob store — do not share LOCAL_STORAGE_PATH over NFS
 
 `LocalBlobStore` reads and writes files under `LOCAL_STORAGE_PATH`. Atomic publish operations rely on `File.Move` for the final rename (which is atomic on a local POSIX filesystem). NFS does not guarantee atomic cross-directory renames, and cross-instance visibility of partial writes is undefined.
@@ -661,7 +934,7 @@ A fresh heartbeat on the row does not by itself prove the holder is alive — a 
 
 ### OCI chunked uploads — session affinity required
 
-OCI clients push image layers via a two-step chunked upload: a `POST /v2/{name}/blobs/uploads/` creates a session UUID, then one or more `PATCH` requests append data to a local staging file on the replica that owns the session. **If a subsequent PATCH is routed to a different replica, that replica has no staging file and returns 404.**
+OCI clients push image layers via a two-step chunked upload: a `POST /v2/{name}/blobs/uploads/` creates a session UUID, then one or more `PATCH` requests append data to a local staging file on the replica that owns the session. The session row itself lives in the shared database, so a mis-routed `PATCH` still *resolves* the session — it is the staging file that is replica-local. **A `PATCH` routed to a replica that does not own the session is refused with `416 Requested Range Not Satisfiable`**, carrying a `Range` header with the offset the session is actually at. The upload is not destroyed: it stays resumable from that offset on the replica that owns it.
 
 Configure your load balancer to pin `/v2/*/blobs/uploads/*` requests to the replica that issued the session UUID:
 
@@ -677,7 +950,14 @@ Set `REPLICA_HINT=true` (or `INSTANCE_ROLE=replica`) on each replica instance; D
 
 The download, push, import, management-API, and anonymous-probe rate limiters maintain their sliding-window counters in process memory on each replica. Without a shared backing store, each replica enforces the configured limit independently. A client that distributes requests across N replicas can exceed the nominal per-tenant limit by up to a factor of N before any single replica returns `429`.
 
-The login, invite, and token-create limiters are Redis-backed when `REDIS_CONNECTION_STRING` is set (`DEPENDABLY_DEPLOYMENT_MODE=ha`), so those abuse-prevention limits hold across replicas in HA mode.
+The login, invite, and token-create limiters are Redis-backed when `REDIS_CONNECTION_STRING` is set (`DEPENDABLY_DEPLOYMENT_MODE=ha`), so those abuse-prevention limits hold across replicas in HA mode. When Redis cannot be reached these limiters have no counter to decide with; the request is resolved by [`RATE_LIMIT_REDIS_FAILURE_MODE`](#rate-limiting) (`open` by default — the request is granted, so login rate limiting is off for the duration of the outage) and the decision is logged at `Warning` and counted on `dependably.rate_limit.backend_unavailable`. Alert on that counter.
+
+### Account lockout state in HA is Redis-resident
+
+In standalone deployments the failed-login counters and lockout expiries live in the SQLite `login_attempts` table. In HA mode they live in Redis under TTL keys (`lockout:attempts:*`, `lockout:locked:*`) with no database mirror, so **anything that loses recent Redis writes — a flush, an eviction under `maxmemory`, or a failover to a replica behind on replication — resets the failed-attempt counters for every account and releases any active lockout.** Two operational consequences:
+
+- Treat Redis availability and persistence as a security-relevant signal, not just an availability one. Run Redis with `maxmemory-policy noeviction` (or a policy that cannot evict these keys) so lockout state is never dropped to make room, and alert on failover and on `dependably.rate_limit.backend_unavailable`.
+- A Redis outage does *not* silently bypass lockout. The lockout store lets its errors propagate and the login path does not catch them, so an attempt that cannot read or write lockout state aborts with a `500` before any session is issued — login fails closed even though the rate limiter defaults to failing open.
 
 **The download and push limiters remain in-process even when Redis is configured.** These are per-second sliding-window limiters on the very hot path; adding Redis round-trips to every artefact download and every package push would increase latency on the path most sensitive to it. The practical risk in a typical multi-instance deployment is proportional to the number of replicas and the configured permit ceiling — two replicas at the default 1000 permits/sec per token gives an effective ceiling of ~2000 before both replicas 429 simultaneously.
 
@@ -689,9 +969,17 @@ Remediation options, in order of preference:
 
 See [`DOWNLOAD_RATE_LIMIT_PERMITS`](#rate-limiting), [`PUSH_RATE_LIMIT_PERMITS`](#rate-limiting), and [`REDIS_CONNECTION_STRING`](#core) for the relevant environment variables.
 
-### Metadata caches are per-instance
+### Metadata caches are per-instance, invalidated across replicas over Redis
 
-Ecosystem metadata responses (the npm/PyPI/NuGet/Maven index and registration documents) are cached in an in-process `MemoryCache` on each instance. The cache is not shared across replicas and there is no cross-instance invalidation. After a push that lands on one instance, other instances continue serving their own cached metadata until that entry's TTL expires, so a client routed to a different replica can briefly see a stale index. Convergence relies on the short cache TTLs rather than active invalidation. Out-of-process cache invalidation (for example, a Redis pub/sub fan-out on push) is future work; until then, keep metadata TTLs short in multi-instance deployments where post-push staleness matters by setting [`METADATA_LOCAL_CACHE_TTL_SECONDS`](#core) (default `600`) and [`METADATA_PROXY_CACHE_TTL_SECONDS`](#core) (default `300`) — for example `30`/`15` if a rolling deploy's post-push staleness window needs to be tight.
+Ecosystem metadata responses (the npm packument, PyPI simple index, NuGet registration, Maven `maven-metadata.xml`, and RPM repodata documents) are cached in an in-process `MemoryCache` on each instance. The cache itself is not shared across replicas — but the *invalidation* is.
+
+When `REDIS_CONNECTION_STRING` is set, a mutation that changes a package's rendered metadata (publish, unpublish, dist-tag change, deprecate, unlist, admin upload, admin delete) publishes the package coordinates — org, ecosystem, and package identity — to the `<REDIS_KEY_PREFIX>metadata-invalidation` pub/sub channel. Every replica subscribes and evicts the matching entries locally, expanding the coordinates into that ecosystem's full cache-key variant set (npm local + proxy; PyPI HTML + JSON; NuGet SemVer1/2 × local/proxy; Maven artifact-level + SNAPSHOT version-level; every RPM repodata document plus the merged tuple). Both the publish path and the receive path run the same expansion, so an invalidation can never be complete on the pushing replica and partial on its peers.
+
+**Because this is a freshness optimisation, it degrades rather than fails.** If Redis is unreachable the broadcast is dropped, logged at warning, and counted on `dependably.metadata.invalidations_published{outcome="server_error"}`; the push still succeeds and peer replicas converge on TTL expiry exactly as they did before the channel existed. `dependably.metadata.invalidations_received` counts messages applied from peers, so a working channel is visible in metrics. A replica that cannot subscribe at startup logs a warning and keeps serving.
+
+**Standalone deployments need no Redis.** With `REDIS_CONNECTION_STRING` unset the in-process eviction on the single replica is the whole invalidation, and no broker dependency is introduced.
+
+The TTLs ([`METADATA_LOCAL_CACHE_TTL_SECONDS`](#core), default `600`, and [`METADATA_PROXY_CACHE_TTL_SECONDS`](#core), default `300`) are therefore a backstop for a dropped broadcast, not the primary convergence mechanism — **leave them at their defaults**, including in multi-instance deployments. Shortening them does not reduce upstream network fetches (that is the separate `Proxy__MetadataCache*` family); it only multiplies re-render and re-merge work on every replica.
 
 ### Scheduled background jobs — leader-coordinated per job
 
@@ -699,14 +987,18 @@ Scheduled background jobs that mutate shared state (the database or the shared c
 
 `OciStagingJanitorService` is deliberately **not** leader-coordinated — it sweeps this replica's own local staging directory, and its shared-row cleanup is an idempotent no-op on a losing race, so every replica must run its own pass.
 
-A distributed-lock backend failure (a Redis connection blip or failover, not a clean "lock held by another instance" response) is treated as a skipped tick rather than a fatal error, so a transient Redis hiccup does not stop a replica.
+The lock is held for the whole pass through a renewal lease, not just for a fixed TTL: a running job heartbeats its lock three times per TTL window, so a pass that takes longer than the TTL (a large orphan-blob reconcile, a big tenant hard-delete sweep, a wide retention pass) keeps the lock instead of letting it lapse under itself and handing a second replica a concurrent run. The TTL therefore bounds how long a lock survives a *crashed* leader, not how long a pass may take.
+
+If renewal stops being confirmable — the backend answers that this instance no longer holds the lock, or a whole TTL window passes with the lock backend unreachable — the lease is treated as lost and the in-flight pass is **cancelled**: an instance that has lost its lease is no longer the leader and stops rather than finishing unleased. The aborted pass is logged at warning level and the next scheduled tick on any instance retries. A single transient renewal failure inside the window does not abort the pass; the lease retries within the time it has left.
+
+A distributed-lock backend failure (a Redis connection blip or failover, not a clean "lock held by another instance" response) on the *acquire* path is treated as a skipped tick rather than a fatal error, so a transient Redis hiccup does not stop a replica.
 
 ---
 
 ## Security model
 
 - **OWASP API Security Top 10** alignment: BOLA/IDOR protection, SSRF protection with DNS rebinding re-validation, path traversal rejection, CRLF injection prevention
-- **Authentication**: JWT HS256 sessions (8h, HttpOnly SameSite=Strict cookie); BCrypt-12 passwords; CSPRNG token generation; constant-time comparison
+- **Authentication**: JWT HS256 sessions (8h, HttpOnly SameSite=Strict cookie); BCrypt-12 passwords; CSPRNG token generation; constant-time comparison. Each JWT is bound to its purpose by a fixed `iss` and a per-purpose `aud` (session vs MFA challenge), and each validator pins the audience it accepts — so a token minted for one purpose is refused for another during token validation, not by a downstream claim check. Both values are fixed constants, not configuration.
 - **Capability enforcement**: tokens carry an explicit capability subset (e.g. `read:artifact`, `publish:npm`), checked at the HTTP handler level; capability mismatch returns 403, not 401 — see [Tokens](#tokens)
 - **Account lockout**: 10 failed login attempts → 15-minute lockout with `Retry-After` header
 - **Security headers**: `X-Content-Type-Options`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Content-Security-Policy` (management API), `Strict-Transport-Security` (when behind HTTPS proxy)

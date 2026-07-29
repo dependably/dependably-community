@@ -3,6 +3,7 @@
   import { api } from '../lib/api.js'
   import ErrorBanner from '../lib/ErrorBanner.svelte'
   import { currentOrg } from '../lib/store.js'
+  import { reportPageLoad } from '../lib/pageLoad.js'
   import { formatDate } from '../lib/format.js'
   import DataTable from '../lib/DataTable.svelte'
   import Pagination from '../lib/Pagination.svelte'
@@ -26,7 +27,13 @@
   let activeTab = init.tab
 
   // ── Lifecycle tab (activity) ─────────────────────────────────────────────
+  /** The route transition this page was mounted for, supplied by RouteView. @type {number | null} */
+  export let pageToken = null
+
   let lcItems = [], lcLoading = true, lcError = ''
+  // The lifecycle feed is what this page opens on, so it is what the deferred navigation waits
+  // for — the admin-actions tab loads only once selected, which is a click, not a page arrival.
+  $: reportPageLoad(pageToken, lcLoading)
   let lcFilterType = init.type
   let lcSearch = init.q
   // Time window (''|24h|7d|30d|90d). The dashboard's blocked-pull tiles deep-link here with
@@ -232,6 +239,8 @@
       columns={lcColumns}
       rows={lcItems}
       loading={lcLoading}
+      loadingRows={lcLimit}
+      memoryKey="audit:lifecycle"
       initialSort={{ key: 'createdAt', dir: 'desc' }}
       emptyText={$t('activity.empty')}
       tableClass="table-auto activity-table"
@@ -252,11 +261,9 @@
       </tr>
     </DataTable>
 
-    {#if !lcLoading}
-      <Pagination total={lcTotal} page={lcPage} limit={lcLimit}
-        on:pagechange={lcOnPageChange}
-        on:limitchange={lcOnLimitChange} />
-    {/if}
+    <Pagination total={lcTotal} page={lcPage} limit={lcLimit}
+      on:pagechange={lcOnPageChange}
+      on:limitchange={lcOnLimitChange} />
   {:else}
     <div class="page-toolbar">
       <SearchInput class="toolbar-search" placeholder={$t('audit.searchPlaceholder')}
@@ -279,6 +286,8 @@
       columns={adColumns}
       rows={adItems}
       loading={adLoading}
+      loadingRows={adLimit}
+      memoryKey="audit:admin"
       initialSort={{ key: 'createdAt', dir: 'desc' }}
       emptyText={$t('audit.empty')}
       tableClass="table-auto audit-table"
@@ -292,11 +301,9 @@
       </tr>
     </DataTable>
 
-    {#if !adLoading}
-      <Pagination total={adTotal} page={adPage} limit={adLimit}
-        on:pagechange={adOnPageChange}
-        on:limitchange={adOnLimitChange} />
-    {/if}
+    <Pagination total={adTotal} page={adPage} limit={adLimit}
+      on:pagechange={adOnPageChange}
+      on:limitchange={adOnLimitChange} />
   {/if}
 </div>
 

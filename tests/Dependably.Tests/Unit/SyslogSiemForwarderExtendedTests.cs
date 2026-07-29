@@ -48,12 +48,13 @@ public sealed class SyslogSiemForwarderExtendedTests
     [Fact]
     public void Constructor_PortDefaultsTo514_WhenAbsent()
     {
-        // No SIEM_SYSLOG_PORT — must construct successfully with the syslog default port.
+        // No SIEM_SYSLOG_PORT — must construct successfully with the syslog default port. Name
+        // reflects the default transport, which is tls (SiemTransportSecurityTests owns that rule).
         var sut = new SyslogSiemForwarder(Cfg(new Dictionary<string, string?>
         {
             ["SIEM_SYSLOG_HOST"] = "siem.example.com"
         }));
-        Assert.Equal("syslog/udp", sut.Name);
+        Assert.Equal("syslog/tls", sut.Name);
     }
 
     [Fact]
@@ -65,7 +66,7 @@ public sealed class SyslogSiemForwarderExtendedTests
             ["SIEM_SYSLOG_HOST"] = "siem.example.com",
             ["SIEM_SYSLOG_PORT"] = "garbage"
         }));
-        Assert.Equal("syslog/udp", sut.Name);
+        Assert.Equal("syslog/tls", sut.Name);
     }
 
     // ── FormatCef: friendly-name + severity branch coverage ──────────────────

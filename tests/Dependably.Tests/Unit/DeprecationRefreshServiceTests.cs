@@ -387,7 +387,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         await using var conn = await _db.OpenAsync();
         string? revokedAt = await conn.QuerySingleAsync<string?>(
             "SELECT revoked_at FROM cache_artifact WHERE id = @id", new { id = caId });
-        Assert.Equal(TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"), revokedAt);
+        Assert.Equal(TestTime.KnownNow.ToUtcIso(), revokedAt);
 
         var (eventCount, purl) = await conn.QuerySingleAsync<(int, string?)>(
             "SELECT COUNT(*), MAX(purl) FROM activity WHERE event_type = 'version_revoked' AND org_id = @orgId",
@@ -512,7 +512,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         await using var conn = await _db.OpenAsync();
         string? revokedAt = await conn.QuerySingleAsync<string?>(
             "SELECT revoked_at FROM cache_artifact WHERE id = @id", new { id = caId });
-        Assert.Equal(TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"), revokedAt);
+        Assert.Equal(TestTime.KnownNow.ToUtcIso(), revokedAt);
     }
 
     [Fact]
@@ -633,7 +633,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     [Fact]
     public async Task ListGroupsNeedingDeprecationRefresh_FreshRow_NotReturned()
     {
-        string freshAt = _clock.GetUtcNow().AddMinutes(-30).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string freshAt = _clock.GetUtcNow().AddMinutes(-30).ToUtcIso();
         var (orgId, _, _, _) = await SeedVersionAsync(ecosystem: "npm", name: "fresh-pkg",
             version: "1.0.0", origin: "proxy", deprecated: null, deprecationCheckedAt: freshAt);
 
@@ -647,7 +647,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     public async Task ListGroupsNeedingDeprecationRefresh_StaleRow_Returned()
     {
         // 48 hours old, well outside the 24-hour window
-        string staleAt = _clock.GetUtcNow().AddHours(-48).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string staleAt = _clock.GetUtcNow().AddHours(-48).ToUtcIso();
         var (orgId, _, _, _) = await SeedVersionAsync(ecosystem: "npm", name: "stale-pkg2",
             version: "1.0.0", origin: "proxy", deprecated: null, deprecationCheckedAt: staleAt);
 
@@ -684,7 +684,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         await using var conn = await _db.OpenAsync();
         string? checkedAt = await conn.QuerySingleAsync<string?>(
             "SELECT deprecation_checked_at FROM package_versions WHERE id = @id", new { id = versionId });
-        Assert.Equal(TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"), checkedAt);
+        Assert.Equal(TestTime.KnownNow.ToUtcIso(), checkedAt);
     }
 
     [Fact]
@@ -703,7 +703,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
             "SELECT deprecated, deprecation_checked_at FROM package_versions WHERE id = @id",
             new { id = versionId });
         Assert.Equal("some reason", dep);
-        Assert.Equal(TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"), checkedAt);
+        Assert.Equal(TestTime.KnownNow.ToUtcIso(), checkedAt);
     }
 
     [Fact]

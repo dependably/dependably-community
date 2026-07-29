@@ -125,6 +125,89 @@ public sealed class UserService
     }
 
     /// <summary>
+    /// Verifies a user's current password without changing anything — the reauthentication gate in
+    /// front of an identity-altering self-service action. Returns false for an unknown user, so a
+    /// caller cannot distinguish "no such account" from "wrong password".
+    /// </summary>
+    public async Task<bool> VerifyCurrentPasswordAsync(
+        string userId, string currentPassword, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: keyed by users PK; userId is the authenticated session's own subject claim.
+        string? hash = await conn.ExecuteScalarAsync<string?>(
+            "SELECT password_hash FROM users WHERE id = @id", new { id = userId });
+        return hash is not null && BCrypt.Net.BCrypt.Verify(currentPassword, hash);
+    }
+
+    /// <summary>
+    /// Applies a verified email change (GDPR Art. 16 rectification) and cuts off every session and
+    /// token minted under the old address. Returns the bumped <c>token_version</c>, or null when
+    /// the new address is already taken inside the tenant.
+    ///
+    /// The session bump is not optional bookkeeping. Email is the account's login identifier and
+    /// the delivery address for password resets and security notices, so the change is a
+    /// credential-class event: anything holding a session issued to the old identity must
+    /// re-authenticate, exactly as it must after a password change.
+    ///
+    /// <c>UNIQUE (tenant_id, email)</c> is the arbiter of a collision, not a prior SELECT. The
+    /// address is checked when the change is requested, but hours can pass before the link is
+    /// redeemed and another member may claim it meanwhile; catching the constraint violation here
+    /// is what makes the outcome correct rather than merely likely.
+    /// </summary>
+    public async Task<long?> ApplyVerifiedEmailChangeAsync(
+        string userId, string newEmail, CancellationToken ct = default)
+    {
+        string normalized = newEmail.Trim().ToLowerInvariant();
+        // Rotating the Identity security_stamp alongside token_version keeps the Identity model
+        // consistent; token_version remains the canonical per-request invalidation signal.
+        string stamp = Guid.NewGuid().ToString();
+
+        await using var conn = await _db.OpenAsync(ct);
+        try
+        {
+            // xtenant: keyed by the users PK the change token was minted for.
+            await conn.ExecuteAsync(
+                """
+                UPDATE users
+                SET email = @email, token_version = token_version + 1, security_stamp = @stamp
+                WHERE id = @id
+                """,
+                new { email = normalized, stamp, id = userId });
+        }
+        catch (Exception ex) when (IsUniqueViolation(ex))
+        {
+            // Someone claimed the address between the request and the redemption.
+            return null;
+        }
+
+        // xtenant: reads back the same users PK just written.
+        long newVersion = await conn.ExecuteScalarAsync<long>(
+            "SELECT token_version FROM users WHERE id = @id", new { id = userId });
+
+        // xtenant: user_tokens.user_id is FK-bound to the users row above.
+        await conn.ExecuteAsync("DELETE FROM user_tokens WHERE user_id = @id", new { id = userId });
+
+        if (_trustedDevices is not null)
+        {
+            await _trustedDevices.DeleteAllForUserAsync(userId, "tenant", ct);
+        }
+
+        // Any reset link outstanding against the OLD address must die with it — otherwise a link
+        // mailed to the previous mailbox still resets the account that mailbox no longer owns.
+        // xtenant: keyed by the same users PK.
+        await conn.ExecuteAsync("DELETE FROM password_reset_tokens WHERE user_id = @id", new { id = userId });
+
+        _tokenVersions?.Invalidate(userId);
+        return newVersion;
+    }
+
+    // Both providers surface a UNIQUE violation as a provider-specific exception; matching on the
+    // message keeps this free of a provider reference in a shared service.
+    private static bool IsUniqueViolation(Exception ex) =>
+        ex.Message.Contains("UNIQUE", StringComparison.OrdinalIgnoreCase)
+        || ex.Message.Contains("duplicate key", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// Completes a self-serve "forgot password" reset: sets the new credential and cuts off
     /// every session/token minted under the old one, exactly like <see cref="ChangePasswordAsync"/>
     /// but without a current-password check — the caller (<c>AuthController</c>) has already
@@ -228,15 +311,19 @@ public sealed class UserService
     }
 
     /// <summary>
-    /// "Me" projection: per-user must_change_password + language override + the tenant's
-    /// default_language. Returns null when the user row doesn't exist.
+    /// "Me" projection: per-user must_change_password + language/timezone overrides + the
+    /// tenant's defaults for both. Returns null when the user row doesn't exist.
     /// </summary>
     public async Task<UserContext?> GetUserContextAsync(string userId, string? orgId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
         // xtenant: "me" projection keyed by the session subject's own users PK.
         var row = await conn.QuerySingleOrDefaultAsync<UserRow>(
-            "SELECT must_change_password AS MustChangePassword, language AS Language, mfa_enabled AS MfaEnabled FROM users WHERE id = @id",
+            """
+            SELECT must_change_password AS MustChangePassword, language AS Language,
+                   timezone AS Timezone, mfa_enabled AS MfaEnabled
+            FROM users WHERE id = @id
+            """,
             new { id = userId });
         if (row is null)
         {
@@ -256,6 +343,8 @@ public sealed class UserService
             MustChangePassword: row.MustChangePassword == 1,
             Language: string.IsNullOrEmpty(row.Language) ? null : row.Language,
             TenantDefaultLanguage: orgSettings?.DefaultLanguage,
+            Timezone: string.IsNullOrEmpty(row.Timezone) ? null : row.Timezone,
+            TenantDefaultTimezone: orgSettings?.DefaultTimezone,
             MfaEnabled: mfaEnabled,
             MfaEnrollmentRequired: requireMfa && !mfaEnabled);
     }
@@ -267,6 +356,20 @@ public sealed class UserService
         await conn.ExecuteAsync(
             "UPDATE users SET language = @lang WHERE id = @id",
             new { lang = language, id = userId });
+    }
+
+    /// <summary>
+    /// Sets the user's display-timezone override. A null <paramref name="timezone"/> clears it,
+    /// which is how "use the organization default" is expressed — storing the matching zone by
+    /// name instead would pin the user and silently ignore a later change to that default.
+    /// </summary>
+    public async Task UpdateTimezoneAsync(string userId, string? timezone, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: self-service preference write keyed by the session subject's users PK.
+        await conn.ExecuteAsync(
+            "UPDATE users SET timezone = @tz WHERE id = @id",
+            new { tz = timezone, id = userId });
     }
 
     /// <summary>
@@ -302,7 +405,7 @@ public sealed class UserService
 
     // SQLite stores INTEGER as Int64; Dapper requires the positional record signature to
     // match exactly, so MustChangePassword is long here and converted to bool at the call site.
-    private sealed record UserRow(long MustChangePassword, string? Language, long MfaEnabled);
+    private sealed record UserRow(long MustChangePassword, string? Language, string? Timezone, long MfaEnabled);
 }
 
 public enum PasswordChangeOutcome
@@ -325,5 +428,7 @@ public sealed record UserContext(
     bool MustChangePassword,
     string? Language,
     string? TenantDefaultLanguage,
+    string? Timezone = null,
+    string? TenantDefaultTimezone = null,
     bool MfaEnabled = false,
     bool MfaEnrollmentRequired = false);

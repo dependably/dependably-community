@@ -1,5 +1,23 @@
 -- Dependably database schema
 -- Applied on first boot via SchemaInitializer
+--
+-- Every temporal TEXT column below carries a CHECK accepting exactly the three canonical
+-- UtcTimestamp shapes (second/millisecond/microsecond precision, always UTC 'Z') and NULL —
+-- see TemporalCheckPredicate.ForSqlite. Fresh installs get it here, from CREATE TABLE. An
+-- existing SQLite database is deliberately NOT retrofitted with this CHECK: SQLite cannot
+-- ALTER ADD CONSTRAINT, and the alternative (a recreate-table reshape across every temporal
+-- table at boot) is a far larger hazard than the invariant is worth given every writer of
+-- these columns is already canonical and the every-boot sweep in
+-- SchemaInitializer.TimestampNormalization.cs repairs any legacy shape a stale binary still
+-- produces. Existing Postgres databases are not retrofitted with this CHECK this release
+-- either — see SchemaInitializer.TemporalColumnNaming.cs for the expand/migrate/contract
+-- sequencing that defers the retrofit to a later release, once the released baseline writes
+-- canonical shapes everywhere.
+--
+-- Schema.pg.sql additionally declares COLLATE "C" on its indexed temporal columns, for
+-- byte-exact ordering and immunity to glibc collation-version drift. SQLite needs no
+-- equivalent here: its default TEXT collation (BINARY) is already byte order, so there is
+-- nothing to opt into — this is why the two files diverge on that one point.
 
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
@@ -9,7 +27,8 @@ CREATE TABLE IF NOT EXISTS orgs (
     slug        TEXT NOT NULL UNIQUE,
     -- Soft-delete: set on DELETE /api/v1/system/tenants/{slug}; cleared on restore.
     -- TenantHardDeleteService cascade-deletes rows where deleted_at < now() - 30 days.
-    deleted_at  TEXT,
+    deleted_at  TEXT
+        CHECK (deleted_at IS NULL OR deleted_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR deleted_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR deleted_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     -- Tenant lifecycle gate consulted by ITenantStorageResolver before every registry write.
     -- 'active' is the only state that admits writes; 'suspended'/'archived'/'deleting' raise
     -- TenantNotReadyException. Community has no UI to change this beyond 'active' today, but
@@ -33,6 +52,7 @@ CREATE TABLE IF NOT EXISTS orgs (
     -- guard for multi-tenant pool deployments; trivially satisfied in single-tenant installs.
     storage_quota_bytes INTEGER,
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
 );
 
 CREATE TABLE IF NOT EXISTS org_settings (
@@ -49,9 +69,18 @@ CREATE TABLE IF NOT EXISTS org_settings (
     max_upload_bytes_cargo  INTEGER,           -- per-ecosystem Cargo cap; falls back to max_upload_bytes
     keep_versions       INTEGER,            -- GC: max versions to retain per package per ecosystem
     keep_days           INTEGER,            -- GC: evict proxy blobs unused for this many days
-    activity_retention_days INTEGER,        -- GC: delete activity rows older than this
+    activity_retention_days INTEGER DEFAULT 90,  -- GC: delete activity rows older than this; NULL resolves to the ACTIVITY_RETENTION_DAYS instance default (90) so activity is bounded by default
     purge_unlisted_after_days INTEGER,      -- GC: hard-delete uploaded versions unlisted longer than this (opt-in; NULL = off)
     license_enforcement_mode  TEXT    NOT NULL DEFAULT 'off',
+    -- Publish-side licence gate, independent of license_enforcement_mode (the serve-path gate
+    -- above): 'off' (default) accepts a licence-less hosted publish exactly as before; 'warn'
+    -- accepts it but records an activity row noting it will not be servable under the current
+    -- serve-path policy; 'block' rejects the publish outright with 'license_blocked'. Only
+    -- engages for the ecosystems whose manifests declare a licence (npm/pypi/nuget/maven/cargo/
+    -- rpm — see BlockGateService.DeclaredLicenseEcosystems); go/apk/oci keep the empty-set
+    -- pass-through since they routinely record no licence at all.
+    license_publish_enforcement_mode TEXT NOT NULL DEFAULT 'off'
+                              CHECK (license_publish_enforcement_mode IN ('off','warn','block')),
     proxy_passthrough_enabled INTEGER NOT NULL DEFAULT 1,
     max_osv_score_tolerance   REAL    NOT NULL DEFAULT 10.0,
     -- Minimum upstream-release age (hours) before a proxy-fetched version is allowed past the
@@ -62,6 +91,9 @@ CREATE TABLE IF NOT EXISTS org_settings (
     -- row created when the hold first fired is cleared from the queue at that point.
     min_release_age_hours     INTEGER,
     default_language          TEXT    NOT NULL DEFAULT 'en',  -- new tenant users start with this locale
+    -- IANA zone name used to render stored instants for users who have not chosen one.
+    -- Display only: every instant is stored in UTC regardless of this setting.
+    default_timezone          TEXT    NOT NULL DEFAULT 'UTC',
     allow_version_overwrite   INTEGER NOT NULL DEFAULT 0,   -- legacy boolean; kept for blue-green safety; see version_overwrite_policy
     -- Tri-state same-version-push policy: 'block' (default) = always reject duplicates;
     -- 'exception' = reject by default but individual packages can grant permission;
@@ -140,11 +172,13 @@ CREATE TABLE IF NOT EXISTS org_settings (
     -- at least one per-org Maven PGP anchor in signature_trust_anchor; without one the verifier
     -- reports not-applicable and nothing blocks. A manual per-version allow override still wins.
     verify_maven_signatures   TEXT    NOT NULL DEFAULT 'off' CHECK (verify_maven_signatures IN ('off', 'warn', 'block')),
-    -- Running tally of hosted-artefact bytes for this tenant. Maintained atomically by the
-    -- publish path (reserve-before-write) and decremented on delete. Backfilled from
-    -- SUM(package_versions.size_bytes) on first access when the counter is 0 and the real
-    -- sum is positive. Used in place of a live aggregate query to close the TOCTOU race
-    -- in concurrent publish quota checks.
+    -- Dormant running tally of a tenant's hosted-artefact bytes. Nothing in this release reads or
+    -- writes it: every quota check derives stored bytes from the live org_storage_bytes view, which
+    -- is the single definition and cannot drift. The column is retained for one release so a slot of
+    -- the preceding release — which still increments the counter — keeps working against this schema
+    -- for the whole blue-green cutover window; it is the expand step of expand/migrate/contract and
+    -- is dropped in the release after this one. NOT NULL DEFAULT 0 keeps it omittable from every
+    -- INSERT and gives the older slot's `storage_used_bytes + n` arithmetic a number rather than NULL.
     storage_used_bytes        INTEGER NOT NULL DEFAULT 0,
     -- Per-tenant RPM hosted-publishing posture override. NULL (default) inherits the instance
     -- Rpm:UpstreamMode env value; an explicit 'passthrough' or 'merged' overrides the env value
@@ -174,6 +208,7 @@ CREATE TABLE IF NOT EXISTS data_protection_keys (
 -- Tenant users. 1:1 with tenants — a user belongs to exactly one tenant. The same email may
 -- exist as separate accounts in different tenants (UNIQUE(tenant_id, email)) — by design,
 -- modeled on Slack/Auth0/Notion-style strict tenant isolation.
+-- personal-data: included — the subject's own account row (email, role, login history)
 CREATE TABLE IF NOT EXISTS users (
     id          TEXT PRIMARY KEY,
     tenant_id   TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -182,11 +217,14 @@ CREATE TABLE IF NOT EXISTS users (
     role        TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('member','admin','owner','auditor')),
     account_type TEXT NOT NULL DEFAULT 'forms' CHECK (account_type IN ('forms','saml')),
     must_change_password INTEGER NOT NULL DEFAULT 0,
-    last_login_at TEXT,
+    last_login_at TEXT
+        CHECK (last_login_at IS NULL OR last_login_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR last_login_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR last_login_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     account_status TEXT NOT NULL DEFAULT 'active' CHECK (account_status IN ('active','locked','disabled')),
     mfa_enabled INTEGER NOT NULL DEFAULT 0,
-    password_reset_issued_at TEXT,
+    password_reset_issued_at TEXT
+        CHECK (password_reset_issued_at IS NULL OR password_reset_issued_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR password_reset_issued_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR password_reset_issued_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     language    TEXT,  -- NULL = inherit org_settings.default_language
+    timezone    TEXT,  -- IANA zone name; NULL = inherit org_settings.default_timezone
     -- Monotonic session-invalidation counter. Embedded in tenant JWTs as the `tver` claim
     -- and bumped on password change so outstanding sessions go stale immediately.
     token_version INTEGER NOT NULL DEFAULT 1,
@@ -197,25 +235,30 @@ CREATE TABLE IF NOT EXISTS users (
     mfa_authenticator_key TEXT,
     mfa_recovery_codes TEXT,
     security_stamp TEXT,
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     UNIQUE (tenant_id, email)
 );
 
 -- Operator identity for multi-tenant deployments. Empty in single-mode installs. system_admins
 -- see only the control plane (tenant CRUD, instance settings, minimal user lookup) and never
 -- tenant business data. Strictly separate from `users` — different lifecycle, no tenant_id.
+-- personal-data: excluded — operator-plane identity with no tenant_id; the tenant self-service export serves tenant data subjects only
 CREATE TABLE IF NOT EXISTS system_admins (
     id          TEXT PRIMARY KEY,
     email       TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     must_change_password INTEGER NOT NULL DEFAULT 0,
-    last_login_at TEXT,
+    last_login_at TEXT
+        CHECK (last_login_at IS NULL OR last_login_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR last_login_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR last_login_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     -- Mirrors users.account_status: 'active' (can log in), 'locked' (auto-lockout from
     -- throttling), 'disabled' (operator-set). Required for /api/v1/system/admins CRUD so
     -- operators can disable peers without hard-deleting and losing the audit-trail identity.
     account_status TEXT NOT NULL DEFAULT 'active' CHECK (account_status IN ('active','locked','disabled')),
-    password_reset_issued_at TEXT,
+    password_reset_issued_at TEXT
+        CHECK (password_reset_issued_at IS NULL OR password_reset_issued_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR password_reset_issued_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR password_reset_issued_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     language    TEXT,  -- NULL = fall back to 'en'
+    timezone    TEXT,  -- IANA zone name; NULL = fall back to 'UTC'
     -- MFA fields used by the ASP.NET Core Identity UserStore. Mirrors the same set on users.
     mfa_enabled INTEGER NOT NULL DEFAULT 0,
     mfa_authenticator_key TEXT,
@@ -225,6 +268,7 @@ CREATE TABLE IF NOT EXISTS system_admins (
     -- embed this as the `tver` claim and are rejected when the stored version advances.
     token_version INTEGER NOT NULL DEFAULT 1,
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
 );
 
 CREATE TABLE IF NOT EXISTS packages (
@@ -234,17 +278,20 @@ CREATE TABLE IF NOT EXISTS packages (
     name        TEXT NOT NULL,
     purl_name   TEXT NOT NULL,   -- normalized per ecosystem
     is_proxy    INTEGER NOT NULL DEFAULT 0,
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     -- Upstream's declared latest version (npm dist-tags.latest / PyPI info.version), refreshed by
     -- the background upstream-metadata pass. NULL when no upstream baseline is known.
     upstream_latest_version    TEXT,
-    upstream_latest_checked_at TEXT,
+    upstream_latest_checked_at TEXT
+        CHECK (upstream_latest_checked_at IS NULL OR upstream_latest_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR upstream_latest_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR upstream_latest_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     -- Publish timestamp of upstream_latest_version, when the ecosystem's metadata carries a
     -- per-release timestamp (npm packument time[], PyPI release upload_time_iso_8601, NuGet
     -- registration leaf published, Maven maven-metadata.xml lastUpdated). NULL when the baseline
     -- itself is unknown or the ecosystem's metadata doesn't expose a timestamp. Drives the
     -- packages-list/detail "abandoned" (>= 365 days since publish) signal.
-    upstream_latest_published_at TEXT,
+    upstream_latest_published_at TEXT
+        CHECK (upstream_latest_published_at IS NULL OR upstream_latest_published_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR upstream_latest_published_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR upstream_latest_published_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     -- Per-package same-version-push override. NULL = inherit the org version_overwrite_policy.
     -- 'allow' = grant overwrite even when the org policy is 'exception' (blocked by default).
     -- 'block' = deny overwrite even when the org policy is 'allow' (allowed by default).
@@ -274,14 +321,17 @@ CREATE TABLE IF NOT EXISTS package_versions (
     -- ISO 8601 UTC; stamped when yanked is set to 1, cleared to NULL on un-yank. NULL for
     -- never-yanked rows and for legacy rows pre-dating the column. Drives the org
     -- purge_unlisted_after_days retention gate — a NULL yanked_at is never age-purgeable.
-    yanked_at   TEXT,
+    yanked_at   TEXT
+        CHECK (yanked_at IS NULL OR yanked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR yanked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR yanked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     first_fetch INTEGER NOT NULL DEFAULT 0,  -- 1 if this was a cache-miss proxy fetch
-    last_used   TEXT,                         -- ISO 8601 UTC; updated on each download
+    last_used   TEXT    -- ISO 8601 UTC; updated on each download
+        CHECK (last_used IS NULL OR last_used GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR last_used GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR last_used GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     -- Cumulative count of served downloads (every 'download' + 'first_fetch' event:
     -- proxy first-fetch, protocol-client pulls, and UI downloads). Monotonic; survives
     -- activity-log pruning so it remains an all-time total.
     download_count INTEGER NOT NULL DEFAULT 0,
-    vuln_checked_at TEXT,        -- ISO 8601 UTC; set after OSV vulnerability scan
+    vuln_checked_at TEXT    -- ISO 8601 UTC; set after OSV vulnerability scan
+        CHECK (vuln_checked_at IS NULL OR vuln_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR vuln_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR vuln_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     manual_block_state TEXT,     -- NULL = follow auto policy, 'blocked' = manual block, 'allowed' = manual override of auto-block
     deprecated  TEXT,            -- NULL = not deprecated; otherwise upstream deprecation message (npm/NuGet)
     -- origin tracking: 'proxy' = upstream cache; 'uploaded' = user-pushed file (admin
@@ -293,7 +343,8 @@ CREATE TABLE IF NOT EXISTS package_versions (
     -- (PyPI upload_time_iso_8601, npm time[version], NuGet catalogEntry.published). Captured on
     -- first proxy fetch, fail-soft (null if upstream metadata can't be parsed). Always NULL for
     -- origin='uploaded' rows — uploaded versions have no upstream publish date.
-    published_at TEXT,
+    published_at TEXT
+        CHECK (published_at IS NULL OR published_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR published_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR published_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     -- Hex SHA-1 of the artefact bytes. Captured on every npm publish (the packument
     -- dist.shasum field uses SHA-1 by spec) and from upstream packuments on proxy first-fetch.
     -- NULL for PyPI / NuGet versions and for legacy rows pre-dating the column.
@@ -318,12 +369,14 @@ CREATE TABLE IF NOT EXISTS package_versions (
     filename    TEXT,
     -- ISO 8601 UTC; set after the last upstream deprecation metadata refresh.
     -- NULL on rows that pre-date the deprecation refresh service or have never been checked.
-    deprecation_checked_at TEXT,
+    deprecation_checked_at TEXT
+        CHECK (deprecation_checked_at IS NULL OR deprecation_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR deprecation_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR deprecation_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     -- ISO 8601 UTC; first time this version was observed REMOVED from the upstream registry
     -- (npm unpublish, PyPI delete, registry takedown). NULL = still published upstream.
     -- Distinct from deprecated (still published, advised against): revoked = gone entirely.
     -- Reset to NULL if the version reappears upstream. Set by DeprecationRefreshService.
-    revoked_at TEXT,
+    revoked_at TEXT
+        CHECK (revoked_at IS NULL OR revoked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR revoked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR revoked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     -- Operational-risk signal: count of upstream STABLE versions strictly newer than this one,
     -- using each ecosystem's native version ordering (NuGet.Versioning, PEP 440, semver, Maven
     -- ComparableVersion). NULL = unknown (hosted-only package with no upstream counterpart,
@@ -357,13 +410,16 @@ CREATE TABLE IF NOT EXISTS package_versions (
     -- rows (the upstream packument is served directly), for non-npm rows, and for hosted
     -- rows published before the column existed (those render the legacy minimal shape).
     manifest_json TEXT,
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     -- ISO 8601 UTC; stamped when a same-version re-push overwrites this row's bytes.
     -- NULL means never overwritten, in which case the effective pushed date is created_at.
-    updated_at  TEXT,
+    updated_at  TEXT
+        CHECK (updated_at IS NULL OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     UNIQUE (package_id, version)
 );
 
+-- personal-data: included — the subject's personal access tokens
 CREATE TABLE IF NOT EXISTS user_tokens (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -371,9 +427,12 @@ CREATE TABLE IF NOT EXISTS user_tokens (
     token_hash  TEXT NOT NULL UNIQUE,
     capabilities TEXT,           -- JSON array of capability strings, e.g. ["publish:npm"].
     description TEXT,            -- optional free-text label set at creation time.
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-    expires_at  TEXT,
-    last_used_at TEXT            -- updated (throttled ~60s) when the token authenticates a request.
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    expires_at  TEXT
+        CHECK (expires_at IS NULL OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    last_used_at TEXT    -- updated (throttled ~60s) when the token authenticates a request.
+        CHECK (last_used_at IS NULL OR last_used_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR last_used_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR last_used_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
 );
 
 CREATE TABLE IF NOT EXISTS service_tokens (
@@ -383,11 +442,15 @@ CREATE TABLE IF NOT EXISTS service_tokens (
     token_hash  TEXT NOT NULL UNIQUE,
     capabilities TEXT,           -- JSON array of capability strings.
     description TEXT,            -- optional free-text label set at creation time.
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-    expires_at  TEXT,
-    last_used_at TEXT            -- updated (throttled ~60s) when the token authenticates a request.
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    expires_at  TEXT
+        CHECK (expires_at IS NULL OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    last_used_at TEXT    -- updated (throttled ~60s) when the token authenticates a request.
+        CHECK (last_used_at IS NULL OR last_used_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR last_used_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR last_used_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
 );
 
+-- personal-data: included — invites the subject created, and invites addressed to their email
 CREATE TABLE IF NOT EXISTS invites (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -395,9 +458,12 @@ CREATE TABLE IF NOT EXISTS invites (
     role        TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('member','admin','owner','auditor')),
     token_hash  TEXT NOT NULL UNIQUE,
     created_by  TEXT NOT NULL REFERENCES users(id),
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-    expires_at  TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    expires_at  TEXT NOT NULL
+        CHECK (expires_at IS NULL OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     accepted_at TEXT
+        CHECK (accepted_at IS NULL OR accepted_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR accepted_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR accepted_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
 );
 -- Prevent duplicate pending invites: only one unaccepted invite per (org, email) at a time.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_invites_unique_pending
@@ -406,22 +472,51 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_invites_unique_pending
 -- Self-serve "forgot password" reset links. Distinct from users.password_reset_issued_at, which
 -- backs the operator-issued temporary-password support flow (SystemAdminRepository) and carries
 -- no token of its own.
+-- personal-data: included — the subject's self-serve reset links
 CREATE TABLE IF NOT EXISTS password_reset_tokens (
     id          TEXT PRIMARY KEY,
     user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
     token_hash  TEXT NOT NULL UNIQUE,
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-    expires_at  TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    expires_at  TEXT NOT NULL
+        CHECK (expires_at IS NULL OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     consumed_at TEXT
+        CHECK (consumed_at IS NULL OR consumed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR consumed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR consumed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
 );
 CREATE INDEX IF NOT EXISTS idx_prt_user_pending ON password_reset_tokens(user_id) WHERE consumed_at IS NULL;
+
+-- Self-service email rectification (GDPR Art. 16). Structurally a sibling of
+-- password_reset_tokens, with one deliberate difference: the pending NEW address lives on the
+-- token row rather than on users, so the account keeps its current, already-verified address
+-- until the link mailed to the new one is redeemed. An unredeemed or expired request therefore
+-- changes nothing — a mistyped address cannot lock a user out of their own account, and someone
+-- who gets a session cannot silently repoint the account's recovery mailbox.
+-- personal-data: included — the subject's pending email rectifications, including the new address
+CREATE TABLE IF NOT EXISTS email_change_tokens (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    -- The address being moved to, lowercased. Verified only when the token is consumed; the
+    -- UNIQUE (tenant_id, email) constraint on users is what finally arbitrates a collision.
+    new_email   TEXT NOT NULL,
+    token_hash  TEXT NOT NULL UNIQUE,
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    expires_at  TEXT NOT NULL
+        CHECK (expires_at IS NULL OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    consumed_at TEXT
+        CHECK (consumed_at IS NULL OR consumed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR consumed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR consumed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
+);
+CREATE INDEX IF NOT EXISTS idx_ect_user_pending ON email_change_tokens(user_id) WHERE consumed_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS allowlist (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
     purl_pattern TEXT NOT NULL,
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     UNIQUE (org_id, purl_pattern)
 );
 
@@ -429,7 +524,8 @@ CREATE TABLE IF NOT EXISTS blocklist (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
     pattern     TEXT NOT NULL,  -- regex matched against the full package PURL
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     UNIQUE (org_id, pattern)
 );
 
@@ -437,13 +533,15 @@ CREATE TABLE IF NOT EXISTS blocklist (
 -- its ecosystem never consults upstream — no metadata merge, no proxy fetch. Patterns are
 -- exact names or trailing-`*` globs ('@acme/*', 'acme-*', 'Acme.*'); maven patterns use
 -- dot-boundary prefix semantics ('com.acme' also covers 'com.acme.*' groupIds).
+-- personal-data: excluded — created_by is an authorship stamp on org-owned namespace governance, not the subject's data
 CREATE TABLE IF NOT EXISTS reserved_namespace (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
     ecosystem   TEXT NOT NULL,  -- 'npm' | 'pypi' | 'nuget' | 'maven' | 'cargo' | 'golang' | 'apk'
     pattern     TEXT NOT NULL,
     created_by  TEXT REFERENCES users(id),
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     UNIQUE (org_id, ecosystem, pattern)
 );
 
@@ -455,6 +553,7 @@ CREATE TABLE IF NOT EXISTS reserved_namespace (
 -- ON CONFLICT DO UPDATE ... WHERE state='pending' and never resurrect a decided one.
 -- package_version_id is NULL for first-fetch blocks where no version row exists yet; an
 -- approved version-less row unblocks the next first fetch of that purl.
+-- personal-data: excluded — decided_by is a provenance stamp on an org-owned supply-chain decision
 CREATE TABLE IF NOT EXISTS quarantine (
     id                  TEXT PRIMARY KEY,
     org_id              TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -465,10 +564,13 @@ CREATE TABLE IF NOT EXISTS quarantine (
     detail              TEXT,           -- same JSON the blocked_* activity row carries
     state               TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'approved', 'denied')),
     decided_by          TEXT REFERENCES users(id),
-    decided_at          TEXT,
+    decided_at          TEXT
+        CHECK (decided_at IS NULL OR decided_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR decided_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR decided_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     note                TEXT,           -- optional reviewer note recorded with the decision
-    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-    updated_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    updated_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (updated_at IS NULL OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     UNIQUE (org_id, purl)
 );
 
@@ -496,13 +598,16 @@ CREATE TABLE IF NOT EXISTS alert (
     detail       TEXT,           -- JSON detail, same convention as quarantine.detail
     state        TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'dismissed')),
     dismissed_by TEXT REFERENCES users(id),
-    dismissed_at TEXT,
+    dismissed_at TEXT
+        CHECK (dismissed_at IS NULL OR dismissed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR dismissed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR dismissed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     slack_status TEXT,           -- 'sent' | 'failed' | NULL (Slack off, or delivery not yet attempted)
     slack_error  TEXT,
     email_status TEXT,           -- 'sent' | 'failed' | NULL (email off, or delivery not yet attempted)
     email_error  TEXT,
-    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-    updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (updated_at IS NULL OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     UNIQUE (org_id, type, source_ref)
 );
 CREATE INDEX IF NOT EXISTS idx_alert_org_state ON alert(org_id, state, created_at DESC);
@@ -526,10 +631,12 @@ CREATE TABLE IF NOT EXISTS alert_settings (
     vuln_min_severity         TEXT NOT NULL DEFAULT 'HIGH' CHECK (vuln_min_severity IN ('LOW', 'MEDIUM', 'HIGH', 'CRITICAL')),
     slack_enabled              INTEGER NOT NULL DEFAULT 0,
     slack_webhook_url          TEXT,   -- enc:v1: envelope-encrypted; NULL when Slack is disabled/unset
-    slack_last_delivery_at     TEXT,
+    slack_last_delivery_at     TEXT
+        CHECK (slack_last_delivery_at IS NULL OR slack_last_delivery_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR slack_last_delivery_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR slack_last_delivery_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     slack_last_status          TEXT,   -- 'ok' | 'failed' | NULL (never delivered)
     slack_consecutive_failures INTEGER NOT NULL DEFAULT 0,
-    slack_failing_since        TEXT,
+    slack_failing_since        TEXT
+        CHECK (slack_failing_since IS NULL OR slack_failing_since GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR slack_failing_since GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR slack_failing_since GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     slack_last_error           TEXT,
     email_enabled              INTEGER NOT NULL DEFAULT 0,
     email_inherit_instance     INTEGER NOT NULL DEFAULT 1,
@@ -540,13 +647,17 @@ CREATE TABLE IF NOT EXISTS alert_settings (
     email_smtp_username        TEXT,
     email_smtp_password        TEXT,   -- enc:v1: envelope-encrypted; write-only, NULL when unset
     email_smtp_from            TEXT,
-    email_last_delivery_at     TEXT,
+    email_last_delivery_at     TEXT
+        CHECK (email_last_delivery_at IS NULL OR email_last_delivery_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR email_last_delivery_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR email_last_delivery_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     email_last_status          TEXT,   -- 'ok' | 'failed' | NULL (never delivered)
     email_consecutive_failures INTEGER NOT NULL DEFAULT 0,
-    email_failing_since        TEXT,
+    email_failing_since        TEXT
+        CHECK (email_failing_since IS NULL OR email_failing_since GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR email_failing_since GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR email_failing_since GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     email_last_error           TEXT,
-    created_at                 TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    created_at                 TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     updated_at                 TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (updated_at IS NULL OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
 );
 
 -- Per-org upstream proxy registries. One ordered list per ecosystem; `position` ascending is
@@ -571,7 +682,8 @@ CREATE TABLE IF NOT EXISTS upstream_registry (
     secret         TEXT,
     token_endpoint TEXT,                       -- OCI: operator-pinned token-exchange realm URL
     prefixes       TEXT,                       -- OCI: JSON array of repository-name prefix strings
-    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     UNIQUE (org_id, ecosystem, url)
 );
 CREATE INDEX IF NOT EXISTS idx_upstream_registry_org_eco
@@ -588,7 +700,8 @@ CREATE TABLE IF NOT EXISTS upstream_source_pin (
     ecosystem     TEXT NOT NULL,
     name          TEXT NOT NULL,
     upstream_host TEXT NOT NULL,
-    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     PRIMARY KEY (org_id, ecosystem, name)
 );
 
@@ -605,7 +718,8 @@ CREATE TABLE IF NOT EXISTS nuget_symbol_index (
     ssqp_key           TEXT NOT NULL,   -- lowercased 40-hex key: GUID (N format) + 'ffffffff' age
     snupkg_blob_key    TEXT NOT NULL,   -- blob key of the stored .snupkg holding this PDB
     entry_path         TEXT NOT NULL,   -- path of the PDB entry within the .snupkg ZIP
-    created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     UNIQUE (org_id, ssqp_key, pdb_filename, package_version_id)
 );
 -- Primary SSQP resolution path: (org, key, filename) lookup.
@@ -623,6 +737,7 @@ CREATE INDEX IF NOT EXISTS idx_nuget_symbol_index_pv ON nuget_symbol_index(packa
 -- material is PUBLIC key material stored plaintext (PGP public keys, X.509 certs,
 -- SPKI DER base64, Sigstore bundle JSON, etc.) — no envelope encryption.
 -- created_by holds the user id of the operator who added the anchor.
+-- personal-data: excluded — created_by is a provenance stamp on org-owned trust-anchor config
 CREATE TABLE IF NOT EXISTS signature_trust_anchor (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -631,7 +746,8 @@ CREATE TABLE IF NOT EXISTS signature_trust_anchor (
     key_id      TEXT,            -- optional key fingerprint / subject for display
     material    TEXT NOT NULL,   -- public key material: armored PGP / base64 DER / PEM / JSON
     label       TEXT,            -- operator-supplied display label
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     created_by  TEXT             -- user id of the operator who added this anchor
 );
 -- FK-column index: cascade deletes on orgs scan this table without it.
@@ -639,6 +755,7 @@ CREATE TABLE IF NOT EXISTS signature_trust_anchor (
 CREATE INDEX IF NOT EXISTS idx_signature_trust_anchor_org_eco
     ON signature_trust_anchor(org_id, ecosystem);
 
+-- personal-data: included — security/config rows attributed to the subject (source_ip history)
 CREATE TABLE IF NOT EXISTS audit_log (
     id          TEXT PRIMARY KEY,
     -- 'tenant' for per-tenant business events; 'system' for operator events (tenant.created,
@@ -660,10 +777,18 @@ CREATE TABLE IF NOT EXISTS audit_log (
     purl        TEXT,
     detail      TEXT,           -- JSON
     source_ip   TEXT,           -- canonical remote IP (IPv4-mapped IPv6 collapsed); null for background paths
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+    -- Millisecond precision, matching AuditRepository's NowMs() writer: SIEM's since/until window
+    -- and pagination cursor (ListAuthEventsAsync) compare this column at millisecond precision,
+    -- so a second-precision DEFAULT-written row would silently fall outside every future window.
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
 );
 CREATE INDEX IF NOT EXISTS idx_audit_log_scope ON audit_log(scope, created_at DESC);
+-- Retention sweep index: RetentionService pseudonymizes then deletes rows by created_at age
+-- across every scope, so the sweep needs a scope-independent index on the age column.
+CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at);
 
+-- personal-data: included — activity-feed rows attributed to the subject (source_ip history)
 CREATE TABLE IF NOT EXISTS activity (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -674,7 +799,11 @@ CREATE TABLE IF NOT EXISTS activity (
     actor_kind  TEXT,           -- see audit_log.actor_kind; 'user' | 'service' | NULL
     detail      TEXT,
     source_ip   TEXT,           -- captured for HTTP-originated events (downloads, push, delete, blocked_*); null for background paths
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+    -- Millisecond precision, matching AuditRepository.LogActivityAsync's NowMs() writer: the
+    -- activity feed's since window (OrgAuditController) compares this column at millisecond
+    -- precision.
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
 );
 
 CREATE TABLE IF NOT EXISTS vulnerabilities (
@@ -689,18 +818,23 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
     cvss_score      REAL,
     affected_versions TEXT,         -- JSON array of version strings
     osv_json        TEXT,           -- full OSV advisory JSON; source of truth for the rich detail panel
-    published_at    TEXT,
-    modified_at     TEXT,
-    fetched_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    published_at    TEXT
+        CHECK (published_at IS NULL OR published_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR published_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR published_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    modified_at     TEXT
+        CHECK (modified_at IS NULL OR modified_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR modified_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR modified_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    fetched_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (fetched_at IS NULL OR fetched_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR fetched_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR fetched_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     -- Threat-feed enrichment, refreshed by ThreatFeedRefreshService against the advisory's CVE
     -- aliases. is_kev = 1 when any alias is in the CISA Known Exploited Vulnerabilities catalog
     -- (recomputed each pass, so catalog removals clear it). epss_score is the maximum FIRST.org
     -- EPSS exploitation probability (0..1) across the aliases; NULL = no alias known to EPSS or
     -- not yet checked. The *_checked_at stamps record the last refresh per feed.
     is_kev          INTEGER NOT NULL DEFAULT 0,
-    kev_checked_at  TEXT,
+    kev_checked_at  TEXT
+        CHECK (kev_checked_at IS NULL OR kev_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR kev_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR kev_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     epss_score      REAL,
     epss_checked_at TEXT
+        CHECK (epss_checked_at IS NULL OR epss_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR epss_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR epss_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
 );
 
 CREATE TABLE IF NOT EXISTS package_version_vulns (
@@ -709,7 +843,8 @@ CREATE TABLE IF NOT EXISTS package_version_vulns (
     -- NULL when owner_kind='cache_artifact'; NOT NULL for the 'package_version' arm.
     package_version_id  TEXT REFERENCES package_versions(id) ON DELETE CASCADE,
     vuln_id             TEXT NOT NULL REFERENCES vulnerabilities(id) ON DELETE CASCADE,
-    checked_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    checked_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (checked_at IS NULL OR checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     -- Polymorphic metadata owner: NULL for the package_version arm; set to the
     -- cache_artifact row for proxy-origin metadata. owner_kind discriminates which FK
     -- is authoritative.
@@ -734,15 +869,34 @@ CREATE INDEX IF NOT EXISTS idx_package_version_vulns_cache_artifact
     ON package_version_vulns (cache_artifact_id);
 
 -- Indexes for common query patterns
--- Cross-tenant email-hash throttle: lockout is keyed by SHA-256(lowercased email) with no tenant
--- component, so repeated attempts from different tenants share the same failure counter. This is
--- intentional anti-enumeration behaviour — an attacker who controls one tenant cannot probe
--- whether a given email exists in another by observing different lockout responses.
+-- Tenant-scoped lockout throttle: keyed by LoginService.HashLockoutKey(realm, tenantId, email), a
+-- SHA-256 pseudonym that folds the realm and tenant into the hash, so a tenant login and a
+-- system-admin login for the same address track independent failure counters, and one tenant's
+-- lockout state is never observable from another tenant.
+-- personal-data: included — the subject's failed-login / lockout throttle row (pseudonymized key)
 CREATE TABLE IF NOT EXISTS login_attempts (
-    email_hash  TEXT PRIMARY KEY,   -- SHA-256 of lowercased email — avoids storing PII
+    email_hash  TEXT PRIMARY KEY,   -- LoginService.HashLockoutKey(realm, tenantId, email): pseudonymized, not anonymous (a candidate address is confirmable). RetentionService prunes idle rows.
     failed_count INTEGER NOT NULL DEFAULT 0,
-    locked_until TEXT,              -- ISO 8601 UTC; NULL = not locked
+    locked_until TEXT    -- ISO 8601 UTC; NULL = not locked
+        CHECK (locked_until IS NULL OR locked_until GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR locked_until GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR locked_until GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     last_attempt TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (last_attempt IS NULL OR last_attempt GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR last_attempt GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR last_attempt GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
+);
+
+-- Per-account send throttle for account-targeted transactional mail (password reset today).
+-- Keyed on the same (realm, tenant, email) pseudonym as login_attempts.email_hash, so the bucket
+-- follows the TARGET account rather than the source IP: a distributed attacker spread over many
+-- /64s still shares one bucket per account. Complements — never replaces — the per-IP limiter.
+-- The row exists for every requested address, matched or not, so the write path is uniform and
+-- introduces no timing divergence an attacker could read as an account-existence oracle.
+-- personal-data: included — the subject's per-account transactional-mail send budget (same pseudonymized key as login_attempts)
+CREATE TABLE IF NOT EXISTS account_send_throttle (
+    email_hash   TEXT NOT NULL,    -- LoginService.HashLockoutKey("tenant", orgId, email): pseudonymized, not anonymous. RetentionService prunes idle rows.
+    purpose      TEXT NOT NULL,    -- which account-targeted send this bucket bounds, e.g. 'password_reset'
+    window_start TEXT NOT NULL    -- ISO 8601 UTC; start of the current fixed window
+        CHECK (window_start IS NULL OR window_start GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR window_start GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR window_start GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    send_count   INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (email_hash, purpose)
 );
 
 CREATE INDEX IF NOT EXISTS idx_packages_org_ecosystem ON packages(org_id, ecosystem);
@@ -778,7 +932,8 @@ CREATE TABLE IF NOT EXISTS package_version_licenses (
     package_version_id  TEXT REFERENCES package_versions(id) ON DELETE CASCADE,
     license_spdx        TEXT NOT NULL,                  -- SPDX identifier e.g. MIT, Apache-2.0
     source              TEXT NOT NULL DEFAULT 'upstream',   -- 'upstream' | 'sbom' | 'manual'
-    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     -- Polymorphic metadata owner: NULL for hosted package_version rows; set to the
     -- cache_artifact row for proxy-origin metadata scanned before a version row exists.
     -- owner_kind discriminates which FK is authoritative. Reserved capacity in community.
@@ -801,7 +956,8 @@ CREATE TABLE IF NOT EXISTS license_allowlist (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
     license_spdx TEXT NOT NULL,
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     UNIQUE (org_id, license_spdx)
 );
 
@@ -809,7 +965,8 @@ CREATE TABLE IF NOT EXISTS license_blocklist (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
     license_spdx TEXT NOT NULL,
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     UNIQUE (org_id, license_spdx)
 );
 
@@ -851,7 +1008,8 @@ CREATE TABLE IF NOT EXISTS rpm_metadata (
     files_json          TEXT NOT NULL DEFAULT '[]',
     changelogs_json     TEXT NOT NULL DEFAULT '[]',
     rpm_license         TEXT,
-    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     -- Polymorphic metadata owner: NULL for hosted package_version rows; set to the
     -- cache_artifact row for proxy-origin metadata scanned before a version row exists.
     -- owner_kind discriminates which FK is authoritative. Reserved capacity in community.
@@ -881,7 +1039,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_rpm_metadata_ca
 CREATE TABLE IF NOT EXISTS rpm_repodata_state (
     org_id        TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
     arch          TEXT NOT NULL,
-    last_built_at TEXT,
+    last_built_at TEXT
+        CHECK (last_built_at IS NULL OR last_built_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR last_built_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR last_built_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     dirty         INTEGER NOT NULL DEFAULT 1,
     generation    INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (org_id, arch)
@@ -907,7 +1066,8 @@ CREATE TABLE IF NOT EXISTS maven_version_files (
     checksum_sha1       TEXT,
     checksum_md5        TEXT,
     origin              TEXT NOT NULL DEFAULT 'uploaded',  -- 'uploaded' | 'proxy'
-    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     -- Polymorphic metadata owner: NULL for hosted package_version rows; set to the
     -- cache_artifact row for proxy-origin metadata scanned before a version row exists.
     -- owner_kind discriminates which FK is authoritative. Reserved capacity in community.
@@ -949,7 +1109,8 @@ CREATE TABLE IF NOT EXISTS package_version_files (
     blob_key            TEXT NOT NULL,
     size_bytes          INTEGER NOT NULL DEFAULT 0,
     checksum_sha256     TEXT,
-    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     UNIQUE (package_version_id, filename)
 );
 -- The UNIQUE(package_version_id, filename) index covers the version FK (leftmost member);
@@ -969,12 +1130,15 @@ CREATE TABLE IF NOT EXISTS oci_blobs (
     media_type    TEXT NOT NULL,
     size_bytes    INTEGER NOT NULL DEFAULT 0,
     blob_key      TEXT NOT NULL,           -- BlobKeys.OciBlob(...)
-    cached_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-    upstream_checked_at TEXT,
+    cached_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (cached_at IS NULL OR cached_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR cached_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR cached_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    upstream_checked_at TEXT
+        CHECK (upstream_checked_at IS NULL OR upstream_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR upstream_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR upstream_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     origin        TEXT NOT NULL DEFAULT 'uploaded',  -- 'uploaded' (local push) or 'proxy' (upstream cache)
     config_digest       TEXT,    -- image manifests only: the config blob digest parsed from the manifest body
     license_spdx        TEXT,    -- SPDX expression from the config's org.opencontainers.image.licenses label
-    license_checked_at  TEXT,    -- stamped when the config bytes were read (label present or not); NULL = config not yet seen
+    license_checked_at  TEXT    -- stamped when the config bytes were read (label present or not); NULL = config not yet seen
+        CHECK (license_checked_at IS NULL OR license_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR license_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR license_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     PRIMARY KEY (digest, org_id)
 );
 CREATE INDEX IF NOT EXISTS idx_oci_blobs_org ON oci_blobs(org_id);
@@ -988,11 +1152,43 @@ CREATE TABLE IF NOT EXISTS oci_tags (
     -- No FK to oci_blobs: a tag may validly dangle to a GC'd or not-yet-stored manifest.
     -- Dangling tags are resolved lazily; the OCI pull path re-fetches the manifest on miss.
     digest      TEXT NOT NULL,
-    updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-    last_revalidated TEXT,  -- per-tag TTL revalidation timestamp; NULL forces a re-check on first access
+    updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (updated_at IS NULL OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    last_revalidated TEXT    -- per-tag TTL revalidation timestamp; NULL forces a re-check on first access
+        CHECK (last_revalidated IS NULL OR last_revalidated GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR last_revalidated GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR last_revalidated GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     PRIMARY KEY (org_id, repository, tag)
 );
 CREATE INDEX IF NOT EXISTS idx_oci_tags_repository ON oci_tags(org_id, repository);
+
+-- manifest → referenced-blob edges: the reference graph an OCI image forms over oci_blobs.
+-- An image manifest references its config blob and every layer; an image index references its
+-- child manifests. Layers are shared by design (content-addressing is the point), across
+-- repositories and across images, so "is this layer still needed" is a graph question that
+-- oci_blobs alone cannot answer — the row records that a digest exists for the org, not who
+-- depends on it. Without these edges the only safe policy is to never reclaim an OCI blob.
+--
+-- Recorded on both write paths (hosted push and proxy pull) as the manifest body is parsed, and
+-- backfilled for manifests stored before the graph existed by re-parsing their bytes.
+--
+-- Absence is not "no references": a manifest with no rows here is one whose closure is unknown,
+-- and callers must treat it as un-evictable rather than as a leaf. That distinction is what keeps
+-- an incomplete graph from authorizing a delete.
+--
+-- No FK on either digest: edges legitimately outlive the blobs they name (a partially-pulled
+-- index records children before their bytes arrive), and a dangling edge is harmless — it can
+-- only ever make the refcount more conservative.
+CREATE TABLE IF NOT EXISTS oci_manifest_blobs (
+    org_id          TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    manifest_digest TEXT NOT NULL,   -- the referencing manifest / index
+    blob_digest     TEXT NOT NULL,   -- config, layer, or child manifest it references
+    recorded_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (recorded_at IS NULL OR recorded_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR recorded_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR recorded_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    PRIMARY KEY (org_id, manifest_digest, blob_digest)
+);
+-- The refcount direction: "which manifests still reference this blob". Leftmost-column coverage
+-- for the org FK cascade comes from the PK.
+CREATE INDEX IF NOT EXISTS idx_oci_manifest_blobs_org_blob
+    ON oci_manifest_blobs(org_id, blob_digest);
 
 -- In-progress OCI blob upload sessions (push). A `docker push` opens a session via
 -- POST /v2/{name}/blobs/uploads/, streams the blob via PATCH chunks, then finalizes with
@@ -1006,7 +1202,8 @@ CREATE TABLE IF NOT EXISTS oci_uploads (
     repository     TEXT NOT NULL,
     staging_path   TEXT NOT NULL,
     received_bytes INTEGER NOT NULL DEFAULT 0,
-    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     PRIMARY KEY (upload_id, org_id)
 );
 CREATE INDEX IF NOT EXISTS idx_oci_uploads_org ON oci_uploads(org_id);
@@ -1039,7 +1236,8 @@ CREATE INDEX IF NOT EXISTS idx_spdx_license_copyleft ON spdx_license(copyleft);
 -- Rows are cleaned up by the GC pass via RetentionService.
 CREATE TABLE IF NOT EXISTS jwt_revocations (
     jti         TEXT PRIMARY KEY,
-    expires_at  TEXT NOT NULL  -- ISO 8601 UTC; row can be deleted after this time
+    expires_at  TEXT NOT NULL    -- ISO 8601 UTC; row can be deleted after this time
+        CHECK (expires_at IS NULL OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
 );
 CREATE INDEX IF NOT EXISTS idx_jwt_revocations_expires ON jwt_revocations(expires_at);
 
@@ -1048,6 +1246,7 @@ CREATE INDEX IF NOT EXISTS idx_jwt_revocations_expires ON jwt_revocations(expire
 -- so the cookie bears the only copy of the preimage). user_id is not FK'd because system
 -- realm rows reference system_admins, which is the MR-4 concern; tenant rows reference users.
 -- Revoked on MFA disable and on password change.
+-- personal-data: included — the subject's remembered MFA devices (user_agent history)
 CREATE TABLE IF NOT EXISTS mfa_trusted_devices (
     id          TEXT PRIMARY KEY,
     user_id     TEXT NOT NULL,
@@ -1055,9 +1254,12 @@ CREATE TABLE IF NOT EXISTS mfa_trusted_devices (
     tenant_id   TEXT REFERENCES orgs(id) ON DELETE CASCADE,
     token_hash  TEXT NOT NULL UNIQUE,
     user_agent  TEXT,
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-    last_seen_at TEXT,
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    last_seen_at TEXT
+        CHECK (last_seen_at IS NULL OR last_seen_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR last_seen_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR last_seen_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     expires_at  TEXT NOT NULL
+        CHECK (expires_at IS NULL OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
 );
 CREATE INDEX IF NOT EXISTS idx_mfa_trusted_devices_token ON mfa_trusted_devices(token_hash);
 CREATE INDEX IF NOT EXISTS idx_mfa_trusted_devices_user ON mfa_trusted_devices(user_id, realm);
@@ -1078,7 +1280,8 @@ CREATE TABLE IF NOT EXISTS tenant_saml_config (
     name_id_format      TEXT NOT NULL DEFAULT 'urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress',
     email_attribute     TEXT,                          -- attribute name; NULL = use NameID
     button_label        TEXT,
-    last_test_at        TEXT,
+    last_test_at        TEXT
+        CHECK (last_test_at IS NULL OR last_test_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR last_test_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR last_test_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     last_test_email     TEXT,
     last_test_claims    TEXT,                          -- JSON array of {type,values[]} from latest test
     idp_signing_cert_override TEXT,                    -- base64 X.509 admin-pinned override; sole trust anchor when set
@@ -1094,19 +1297,24 @@ CREATE TABLE IF NOT EXISTS tenant_saml_config (
     -- 'expired'). Reset to NULL whenever the metadata cert or the override cert is replaced.
     cert_expiry_alert_stage TEXT,
     updated_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (updated_at IS NULL OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
 );
 
 -- One-shot correlation-id store for SAML admin-test runs. The signed test cookie carries a
 -- cid (Guid) that maps back to a row here; ACS atomically stamps consumed_at on first use,
 -- so a leaked or replayed cookie can't drive a second IdP round-trip. Rows expire after the
 -- cookie TTL (15 minutes) and are GC'd by the retention pass.
+-- personal-data: excluded — actor_id is a provenance stamp on org IdP-configuration diagnostics
 CREATE TABLE IF NOT EXISTS saml_test_runs (
     cid          TEXT PRIMARY KEY,
     tenant_id    TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
     actor_id     TEXT,
-    issued_at    TEXT NOT NULL,
-    expires_at   TEXT NOT NULL,
+    issued_at    TEXT NOT NULL
+        CHECK (issued_at IS NULL OR issued_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR issued_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR issued_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    expires_at   TEXT NOT NULL
+        CHECK (expires_at IS NULL OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     consumed_at  TEXT
+        CHECK (consumed_at IS NULL OR consumed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR consumed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR consumed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
 );
 CREATE INDEX IF NOT EXISTS idx_saml_test_runs_expires ON saml_test_runs(expires_at);
 -- FK-column index: tenant_id is not the PK; without this, cascade deletes on orgs scan the table.
@@ -1119,9 +1327,12 @@ CREATE INDEX IF NOT EXISTS idx_saml_test_runs_tenant ON saml_test_runs(tenant_id
 CREATE TABLE IF NOT EXISTS saml_pending_requests (
     request_id   TEXT PRIMARY KEY,
     tenant_id    TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-    issued_at    TEXT NOT NULL,
-    expires_at   TEXT NOT NULL,
+    issued_at    TEXT NOT NULL
+        CHECK (issued_at IS NULL OR issued_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR issued_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR issued_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    expires_at   TEXT NOT NULL
+        CHECK (expires_at IS NULL OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     consumed_at  TEXT
+        CHECK (consumed_at IS NULL OR consumed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR consumed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR consumed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
 );
 CREATE INDEX IF NOT EXISTS idx_saml_pending_requests_expires ON saml_pending_requests(expires_at);
 -- FK-column index: tenant_id is not the PK; without this, cascade deletes on orgs scan the table.
@@ -1138,8 +1349,10 @@ CREATE TABLE IF NOT EXISTS saml_consumed_assertions (
     tenant_id     TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
     assertion_id  TEXT NOT NULL,
     idp_entity_id TEXT,
-    consumed_at   TEXT NOT NULL,
-    expires_at    TEXT NOT NULL,
+    consumed_at   TEXT NOT NULL
+        CHECK (consumed_at IS NULL OR consumed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR consumed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR consumed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    expires_at    TEXT NOT NULL
+        CHECK (expires_at IS NULL OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     PRIMARY KEY (tenant_id, assertion_id)
 );
 CREATE INDEX IF NOT EXISTS idx_saml_consumed_assertions_expires ON saml_consumed_assertions(expires_at);
@@ -1148,6 +1361,7 @@ CREATE INDEX IF NOT EXISTS idx_saml_consumed_assertions_expires ON saml_consumed
 -- email. NameID is the IdP's stable subject identifier; email can change in the IdP without
 -- breaking login. Multiple IdPs per user is supported by design (UNIQUE allows many rows
 -- per user_id). email_snapshot is recorded for audit/UX only.
+-- personal-data: included — the subject's linked SAML identities (NameID, email snapshot)
 CREATE TABLE IF NOT EXISTS external_identities (
     id              TEXT PRIMARY KEY,
     org_id          TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -1155,8 +1369,10 @@ CREATE TABLE IF NOT EXISTS external_identities (
     idp_entity_id   TEXT NOT NULL,
     nameid          TEXT NOT NULL,
     email_snapshot  TEXT,
-    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-    last_login_at   TEXT,
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    last_login_at   TEXT
+        CHECK (last_login_at IS NULL OR last_login_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR last_login_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR last_login_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     UNIQUE (org_id, idp_entity_id, nameid)
 );
 CREATE INDEX IF NOT EXISTS idx_external_identities_user ON external_identities(user_id);
@@ -1167,6 +1383,7 @@ CREATE INDEX IF NOT EXISTS idx_external_identities_user ON external_identities(u
 
 -- Per-tenant package name claims. Three states: unclaimed (default; reject local writes),
 -- local_only (proxy disabled, local writes accepted), mixed (both, local wins on collision).
+-- personal-data: excluded — created_by is a provenance stamp on org package-name claim governance
 CREATE TABLE IF NOT EXISTS claim (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -1175,9 +1392,12 @@ CREATE TABLE IF NOT EXISTS claim (
     state       TEXT NOT NULL CHECK (state IN ('unclaimed','local_only','mixed')),
     reason      TEXT NOT NULL,
     created_by  TEXT REFERENCES users(id),
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-    updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-    deleted_at  TEXT,
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (updated_at IS NULL OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    deleted_at  TEXT
+        CHECK (deleted_at IS NULL OR deleted_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR deleted_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR deleted_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     UNIQUE (org_id, ecosystem, name)
 );
 CREATE INDEX IF NOT EXISTS idx_claim_org_state ON claim (org_id, state);
@@ -1185,6 +1405,7 @@ CREATE INDEX IF NOT EXISTS idx_claim_org_state ON claim (org_id, state);
 CREATE INDEX IF NOT EXISTS idx_claim_created_by ON claim(created_by);
 
 -- Append-only history of claim transitions. Forensic record + UI history view.
+-- personal-data: excluded — actor_id is a provenance stamp on an org-owned claim-history row
 CREATE TABLE IF NOT EXISTS claim_history (
     id              TEXT PRIMARY KEY,
     org_id          TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -1197,11 +1418,83 @@ CREATE TABLE IF NOT EXISTS claim_history (
     purged_count    INTEGER NOT NULL DEFAULT 0,  -- proxy artifacts purged on transition
     actor_id        TEXT REFERENCES users(id),
     occurred_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (occurred_at IS NULL OR occurred_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR occurred_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR occurred_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
 );
 CREATE INDEX IF NOT EXISTS idx_claim_history_org_time ON claim_history (org_id, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_claim_history_claim ON claim_history (claim_id, occurred_at DESC);
 -- FK-column index: actor_id references users(id) but is not covered by any other index.
 CREATE INDEX IF NOT EXISTS idx_claim_history_actor ON claim_history(actor_id);
+
+-- Name-ownership binding. The first hosted publisher of a (org, ecosystem, purl_name) is
+-- recorded here as its owner (trust-on-first-use). When PUBLISH_NAME_BINDING enforcement is
+-- on, later hosted publishes to the same name are authorized against this owner, so a token
+-- scoped only to publish an ecosystem cannot seize a name a different principal already owns.
+-- owner_id is a users.id (owner_kind='user') or a service_tokens.id (owner_kind='service') —
+-- no FK, because the referent table depends on owner_kind (mirrors audit_log.actor_id).
+-- The row is keyed to the org, never to the packages row, so it SURVIVES deletion of the last
+-- hosted version: it is the tombstone that stops a deleted internal-only name from silently
+-- reverting to upstream (public-registry) resolution — the dependency-confusion resurrection
+-- guard read by ClaimResolver. An explicit claim overrides it (operator escape hatch).
+CREATE TABLE IF NOT EXISTS package_name_binding (
+    id          TEXT PRIMARY KEY,
+    org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    ecosystem   TEXT NOT NULL,
+    purl_name   TEXT NOT NULL,   -- canonical PurlNormalizer identity, matching packages.purl_name
+    owner_kind  TEXT NOT NULL CHECK (owner_kind IN ('user','service')),
+    owner_id    TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    UNIQUE (org_id, ecosystem, purl_name)
+);
+-- Point lookups filter (org_id, ecosystem, purl_name); the UNIQUE index (org_id leftmost)
+-- covers both them and the org-cascade delete, so no additional index is needed.
+
+-- Additional principals explicitly permitted to publish to an already-bound name. A grant is
+-- the deliberate operator opt-in that lets a second token/user co-publish a name owned by a
+-- different principal (a rotated CI token, or a shared package). Keyed like the binding;
+-- grantee_id/grantee_kind identify the co-publisher the same way owner_id/owner_kind do.
+-- personal-data: excluded — created_by is a provenance stamp on an org-owned authorization row
+CREATE TABLE IF NOT EXISTS package_name_grant (
+    id            TEXT PRIMARY KEY,
+    org_id        TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    ecosystem     TEXT NOT NULL,
+    purl_name     TEXT NOT NULL,
+    grantee_kind  TEXT NOT NULL CHECK (grantee_kind IN ('user','service')),
+    grantee_id    TEXT NOT NULL,
+    created_by    TEXT REFERENCES users(id),
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    UNIQUE (org_id, ecosystem, purl_name, grantee_kind, grantee_id)
+);
+-- Grant lookups filter (org_id, ecosystem, purl_name); the UNIQUE index (that prefix
+-- leftmost) covers them and the org-cascade delete.
+-- FK-column index: created_by references users(id) but is not covered by any other index.
+CREATE INDEX IF NOT EXISTS idx_package_name_grant_created_by ON package_name_grant(created_by);
+
+-- Version-granular delete tombstone. One row per (org, ecosystem, purl_name, version) whose
+-- hosted version row has been hard-deleted, so the coordinate is remembered after the
+-- package_versions row (and possibly its parent packages row) is gone. The publish dedup gate
+-- reads it: a republish of a tombstoned coordinate is refused under exactly the policy that
+-- would refuse an overwrite of the live version, so delete-then-republish cannot smuggle
+-- different bytes past an immutable-version policy. Distinct from package_name_binding, which
+-- is name-granular and answers "who owns this name"; this is version-granular and answers
+-- "have these coordinates already been spent". Rows are recorded on the interactive hosted
+-- version-delete path only — proxy/cache-plane evictions and retention GC leave no tombstone.
+-- content_hash carries the digest of the removed artifact so an operator investigating a
+-- refused republish can tell a re-upload of the same bytes from a substitution.
+CREATE TABLE IF NOT EXISTS package_version_tombstone (
+    id            TEXT PRIMARY KEY,
+    org_id        TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    ecosystem     TEXT NOT NULL,
+    purl_name     TEXT NOT NULL,   -- canonical PurlNormalizer identity, matching packages.purl_name
+    version       TEXT NOT NULL,
+    content_hash  TEXT,            -- sha256 hex of the deleted artifact; NULL when unrecorded
+    deleted_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (deleted_at IS NULL OR deleted_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR deleted_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR deleted_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    UNIQUE (org_id, ecosystem, purl_name, version)
+);
+-- Point lookups filter (org_id, ecosystem, purl_name, version); the UNIQUE index (org_id
+-- leftmost) covers both them and the org-cascade delete, so no additional index is needed.
 
 -- Global shared proxy-cache index. One row per (ecosystem, name, version, filename).
 -- No tenant column: the artifact is content-addressed and shared across tenants.
@@ -1221,22 +1514,27 @@ CREATE TABLE IF NOT EXISTS cache_artifact (
     size_bytes          INTEGER NOT NULL DEFAULT 0,
     upstream_url        TEXT,
     upstream_etag       TEXT,
-    first_cached_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-    last_accessed_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    first_cached_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (first_cached_at IS NULL OR first_cached_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR first_cached_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR first_cached_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    last_accessed_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (last_accessed_at IS NULL OR last_accessed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR last_accessed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR last_accessed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     -- Canonical PURL for this artifact. No UNIQUE: Maven maps one purl to many filenames.
     purl                TEXT,
     -- Hex SHA-1 of the artifact bytes (npm packument shasum field uses SHA-1 by spec).
     checksum_sha1       TEXT,
     -- ISO 8601 UTC; upstream first-publish timestamp captured at ingest. NULL when unavailable.
-    published_at        TEXT,
+    published_at        TEXT
+        CHECK (published_at IS NULL OR published_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR published_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR published_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     -- Upstream deprecation message when set; NULL when not deprecated.
     deprecated          TEXT,
     -- ISO 8601 UTC; last time the deprecation state was refreshed from upstream.
-    deprecation_checked_at TEXT,
+    deprecation_checked_at TEXT
+        CHECK (deprecation_checked_at IS NULL OR deprecation_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR deprecation_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR deprecation_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     -- ISO 8601 UTC; first time this version was observed REMOVED from the upstream registry.
     -- NULL = still published upstream. Reset to NULL if the version reappears. Distinct from
     -- deprecated (still published, advised against). Set by DeprecationRefreshService.
-    revoked_at          TEXT,
+    revoked_at          TEXT
+        CHECK (revoked_at IS NULL OR revoked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR revoked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR revoked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     -- Operational-risk signal: count of upstream STABLE versions strictly newer than this one.
     -- See package_versions.versions_behind for the full rationale; NULL = unknown, never 0.
     versions_behind     INTEGER,
@@ -1253,12 +1551,14 @@ CREATE TABLE IF NOT EXISTS cache_artifact (
     -- Algorithm tag for upstream_integrity_value: 'sha256' | 'sha512-sri' | 'sha512-b64'.
     upstream_integrity_algorithm TEXT,
     -- ISO 8601 UTC; set after the last OSV vulnerability scan against this artifact.
-    vuln_checked_at     TEXT,
+    vuln_checked_at     TEXT
+        CHECK (vuln_checked_at IS NULL OR vuln_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR vuln_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR vuln_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     -- ISO 8601 UTC; set after the last license-extraction pass against this artifact. NULL =
     -- never scanned for licenses. Stamped by LicenseBackfillService so artifacts ingested
     -- before ingest-time license capture existed are extracted exactly once, and a
     -- persistently-unparseable artifact is not rescanned forever.
-    license_checked_at  TEXT,
+    license_checked_at  TEXT
+        CHECK (license_checked_at IS NULL OR license_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR license_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR license_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     -- JSON install-manifest subset (dependencies/optionalDependencies/bin/engines), same shape as
     -- package_versions.manifest_json. Populated at npm proxy first-fetch from the tarball's
     -- package.json; NULL for artifacts cached before ingest-time capture existed (backfilled lazily
@@ -1276,8 +1576,10 @@ CREATE INDEX IF NOT EXISTS idx_cache_artifact_purl ON cache_artifact (purl);
 CREATE TABLE IF NOT EXISTS tenant_artifact_access (
     org_id              TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
     cache_artifact_id   TEXT NOT NULL REFERENCES cache_artifact(id) ON DELETE CASCADE,
-    first_accessed_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-    last_accessed_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    first_accessed_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (first_accessed_at IS NULL OR first_accessed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR first_accessed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR first_accessed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    last_accessed_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (last_accessed_at IS NULL OR last_accessed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR last_accessed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR last_accessed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     access_count        INTEGER NOT NULL DEFAULT 1,
     -- Per-tenant manual policy override: NULL = follow auto policy, 'blocked' = manual block,
     -- 'allowed' = manual override of auto-block. Mirrors package_versions.manual_block_state.
@@ -1287,7 +1589,8 @@ CREATE TABLE IF NOT EXISTS tenant_artifact_access (
     -- Optional reason recorded when yanked = 1.
     yank_reason         TEXT,
     -- ISO 8601 UTC; most recent time any user in this tenant downloaded this artifact.
-    last_used           TEXT,
+    last_used           TEXT
+        CHECK (last_used IS NULL OR last_used GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR last_used GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR last_used GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     -- Cumulative download count for this tenant. Monotonic; survives activity-log pruning.
     download_count      INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (org_id, cache_artifact_id)
@@ -1297,6 +1600,7 @@ CREATE INDEX IF NOT EXISTS idx_tenant_artifact_access_artifact
 
 -- Typed audit events. Replaces the freeform audit_log gradually; both tables coexist.
 -- Envelope columns are required; payload is JSON. event_id is UUIDv7.
+-- personal-data: included — structured audit events attributed to the subject (source_ip/user_agent)
 CREATE TABLE IF NOT EXISTS audit_event (
     event_id            TEXT PRIMARY KEY,                    -- UUIDv7
     schema_version      INTEGER NOT NULL DEFAULT 1,
@@ -1312,7 +1616,11 @@ CREATE TABLE IF NOT EXISTS audit_event (
     user_agent          TEXT,
     outcome             TEXT NOT NULL CHECK (outcome IN ('accepted','rejected','error')),
     payload             TEXT NOT NULL,                       -- JSON; per-event-type shape
-    occurred_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+    -- Millisecond precision (matches AuditEmitter's ToUtcIsoMillis() writer): this append-only
+    -- forensic table needs a deterministic order for events sharing a wall-clock second, exactly
+    -- like audit_log/activity.
+    occurred_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        CHECK (occurred_at IS NULL OR occurred_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR occurred_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR occurred_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
 );
 CREATE INDEX IF NOT EXISTS idx_audit_event_org_time ON audit_event (org_id, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_event_org_type ON audit_event (org_id, event_type, occurred_at DESC);
@@ -1334,6 +1642,7 @@ CREATE TABLE IF NOT EXISTS tenant_storage (
     registry_endpoint           TEXT,
     registry_force_path_style   INTEGER NOT NULL DEFAULT 0,
     created_at                  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
 );
 
 -- Async provisioning state machine for cloud-resource creation (R2 buckets, KMS keys,
@@ -1352,8 +1661,10 @@ CREATE TABLE IF NOT EXISTS tenant_provisioning_jobs (
                     CHECK (state IN ('creating','ready','failed')),
     idempotency_key TEXT,
     last_error      TEXT,
-    started_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-    completed_at    TEXT,
+    started_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (started_at IS NULL OR started_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR started_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR started_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    completed_at    TEXT
+        CHECK (completed_at IS NULL OR completed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR completed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR completed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     UNIQUE (org_id, kind)
 );
 CREATE INDEX IF NOT EXISTS idx_tenant_provisioning_jobs_org ON tenant_provisioning_jobs(org_id, kind);
@@ -1370,8 +1681,10 @@ CREATE TABLE IF NOT EXISTS background_job_runs (
     job_name        TEXT NOT NULL,
     operation       TEXT NOT NULL,
     run_id          TEXT NOT NULL,
-    started_at      TEXT NOT NULL,
-    finished_at     TEXT NOT NULL,
+    started_at      TEXT NOT NULL
+        CHECK (started_at IS NULL OR started_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR started_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR started_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    finished_at     TEXT NOT NULL
+        CHECK (finished_at IS NULL OR finished_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR finished_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR finished_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     duration_ms     INTEGER NOT NULL,
     outcome         TEXT NOT NULL,
     error_message   TEXT
@@ -1382,13 +1695,17 @@ CREATE INDEX IF NOT EXISTS idx_background_job_runs_job_started
     ON background_job_runs(job_name, started_at DESC);
 
 -- Content-addressed negative cache for upstream 404 responses.
--- Shared across tenants — the key is SHA-256(url)[..32] which is content-addressed;
--- a URL either 404s or it doesn't, regardless of which tenant fetched it first.
+-- The key is SHA-256(resolved-upstream-URL)[..32], where the resolved URL includes the org's
+-- upstream base host, not just the artifact path/filename. Rows are therefore shared across
+-- tenants that resolve the same host (intended dedup) but distinct across tenants whose per-org
+-- upstreams point at different hosts — so one org's 404 can never suppress another org's fetch
+-- against a host that does have the artifact.
 -- TTL is enforced at query time (fetched_at >= now - ttl), not by a background sweep.
 CREATE TABLE IF NOT EXISTS upstream_negative_cache (
     url_key     TEXT NOT NULL,   -- SHA-256(url)[..32] hex
     ecosystem   TEXT NOT NULL,
-    fetched_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    fetched_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (fetched_at IS NULL OR fetched_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR fetched_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR fetched_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     PRIMARY KEY (url_key, ecosystem)
 );
 
@@ -1399,7 +1716,8 @@ CREATE TABLE IF NOT EXISTS upstream_negative_cache (
 CREATE TABLE IF NOT EXISTS org_stats_snapshot (
     org_id      TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
     stats_json  TEXT NOT NULL,
-    computed_at TEXT NOT NULL,
+    computed_at TEXT NOT NULL
+        CHECK (computed_at IS NULL OR computed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR computed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR computed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     duration_ms INTEGER NOT NULL DEFAULT 0
 );
 
@@ -1413,8 +1731,10 @@ CREATE TABLE IF NOT EXISTS npm_dist_tags (
     package_id  TEXT NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
     tag         TEXT NOT NULL,
     version     TEXT NOT NULL,
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-    updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (updated_at IS NULL OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     UNIQUE (package_id, tag)
 );
 CREATE INDEX IF NOT EXISTS idx_npm_dist_tags_org ON npm_dist_tags(org_id, package_id);
@@ -1463,6 +1783,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_cargo_metadata_ca
 -- single (org, ecosystem, name) tuple; version_pattern optionally restricts to matching
 -- versions (NULL = all versions). Matching uses simple trailing-glob semantics on version
 -- strings; NULL matches any version.
+-- personal-data: excluded — created_by is a provenance stamp on org allowlist config
 CREATE TABLE IF NOT EXISTS install_script_allowlist (
     id               TEXT PRIMARY KEY,
     org_id           TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -1470,7 +1791,8 @@ CREATE TABLE IF NOT EXISTS install_script_allowlist (
     name             TEXT NOT NULL,       -- exact package name (purl name segment)
     version_pattern  TEXT,                -- NULL = all versions; non-NULL = exact or trailing-* glob
     created_by       TEXT REFERENCES users(id),
-    created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     UNIQUE (org_id, ecosystem, name, version_pattern)
 );
 -- Primary lookup path: all allowlist entries for a given org.
@@ -1482,6 +1804,7 @@ CREATE INDEX IF NOT EXISTS idx_install_script_allowlist_created_by ON install_sc
 -- audit_log design: scope='tenant' rows carry a non-null org_id; scope='system' rows have
 -- org_id IS NULL. No FK on org_id (rows may outlive a tenant soft-delete;
 -- TenantHardDeleteService explicitly deletes scope='tenant' rows on hard-delete).
+-- personal-data: excluded — created_by is authorship provenance on an org/instance announcement; the subject's own dismissals ARE exported, via banner_dismissals
 CREATE TABLE IF NOT EXISTS banners (
     id          TEXT PRIMARY KEY,
     scope       TEXT NOT NULL DEFAULT 'tenant' CHECK (scope IN ('tenant','system')),
@@ -1491,21 +1814,26 @@ CREATE TABLE IF NOT EXISTS banners (
     link_url    TEXT,                           -- optional; must be http/https scheme
     link_label  TEXT,                           -- optional; rendered as anchor text
     target_role TEXT NOT NULL DEFAULT 'all' CHECK (target_role IN ('all','member','admin','owner','auditor')),
-    starts_at   TEXT NOT NULL,                  -- ISO-8601 UTC Z string
-    ends_at     TEXT NOT NULL,                  -- ISO-8601 UTC Z string; ends_at > starts_at
+    starts_at   TEXT NOT NULL    -- ISO-8601 UTC Z string
+        CHECK (starts_at IS NULL OR starts_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR starts_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR starts_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    ends_at     TEXT NOT NULL    -- ISO-8601 UTC Z string; ends_at > starts_at
+        CHECK (ends_at IS NULL OR ends_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR ends_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR ends_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     enabled     INTEGER NOT NULL DEFAULT 1,
     created_by  TEXT,                           -- actor id; no FK (mirrors audit_log.actor_id)
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
 );
 -- Serves the active-banner resolution query: both resolution arms (scope='system' and
 -- scope='tenant' AND org_id=@orgId) filter on enabled and ends_at.
 CREATE INDEX IF NOT EXISTS idx_banners_resolution ON banners(scope, org_id, enabled, ends_at);
 
 -- Per-user server-side dismissal records. Cascade-delete when the banner or user is deleted.
+-- personal-data: included — banners the subject dismissed
 CREATE TABLE IF NOT EXISTS banner_dismissals (
     banner_id   TEXT NOT NULL REFERENCES banners(id) ON DELETE CASCADE,
     user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    dismissed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    dismissed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (dismissed_at IS NULL OR dismissed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR dismissed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR dismissed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     PRIMARY KEY (banner_id, user_id)
 );
 -- FK-column index: cascade deletes on users scan this table without it.
@@ -1529,18 +1857,22 @@ CREATE TABLE IF NOT EXISTS webhook_subscription (
     enabled              INTEGER NOT NULL DEFAULT 1,
     description          TEXT,
     -- ISO 8601 UTC; set after every terminal delivery attempt (success or all retries exhausted).
-    last_delivery_at     TEXT,
+    last_delivery_at     TEXT
+        CHECK (last_delivery_at IS NULL OR last_delivery_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR last_delivery_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR last_delivery_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     -- 'ok' | 'failed' | NULL (never delivered). Only updated after terminal outcome.
     last_status          TEXT,
     -- Running count of consecutive delivery failures. Reset to 0 on success.
     consecutive_failures INTEGER NOT NULL DEFAULT 0,
     -- ISO 8601 UTC; set when the first failure in the current consecutive-failure run
     -- is recorded. Reset to NULL on success.
-    failing_since        TEXT,
+    failing_since        TEXT
+        CHECK (failing_since IS NULL OR failing_since GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR failing_since GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR failing_since GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     -- Free-text last error string; recorded on terminal failure and cleared on success.
     last_error           TEXT,
-    created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     updated_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (updated_at IS NULL OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
 );
 -- Delivery fan-out query: enabled subscriptions for an org, indexed for fast event-type matching.
 CREATE INDEX IF NOT EXISTS idx_webhook_sub_org_enabled ON webhook_subscription(org_id, enabled);
@@ -1562,9 +1894,11 @@ CREATE TABLE IF NOT EXISTS instance_lock (
     -- Operator-facing label for the holder (container hostname) in the takeover error message.
     hostname     TEXT,
     -- ISO 8601 UTC of the last heartbeat refresh; freshness is measured against this.
-    heartbeat_at TEXT NOT NULL,
+    heartbeat_at TEXT NOT NULL
+        CHECK (heartbeat_at IS NULL OR heartbeat_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR heartbeat_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR heartbeat_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     -- ISO 8601 UTC of when this holder first acquired the lock.
     acquired_at  TEXT NOT NULL
+        CHECK (acquired_at IS NULL OR acquired_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR acquired_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR acquired_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
 );
 
 -- NOTE: SchemaInitializer also runs ALTER TABLE statements for the columns above.

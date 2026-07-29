@@ -91,9 +91,16 @@ internal static class NuGetRegistrationHelpers
     }
 
     // Walks the pages and leaf entries inside a parsed registration index and rewrites each
-    // leaf's @id and packageContent to local routes. Page @id fields are informational (the
-    // server inlines all pages and never externalises them), but rewriting them avoids leaking
-    // upstream URLs into the document. Absent or non-object nodes are silently skipped.
+    // leaf's @id and packageContent to local routes.
+    //
+    // A page that carries inline items also has its own @id rewritten to a local anchor: nothing
+    // dereferences an inline page, so the upstream URL there is pure leakage. A page WITHOUT items
+    // is externalized — its @id is the only way a client can reach those leaves, so it is left
+    // pointing upstream. InlineExternalizedPagesAsync runs first and normally leaves none of those
+    // behind; one that survives (unfetchable, or hosted off the configured upstream) keeps a
+    // working document rather than a local URL this instance cannot serve.
+    //
+    // Absent or non-object nodes are silently skipped — upstream JSON is untrusted input.
     internal static void RewriteAllLeafUrls(JsonObject root, string normalizedId, string baseUrl)
     {
         if (root["items"] is not JsonArray pages)
@@ -108,11 +115,94 @@ internal static class NuGetRegistrationHelpers
                 continue;
             }
 
+            pageNode["@id"] = LocalPageId(pageNode, normalizedId, baseUrl);
+
             foreach (var leafNode in leaves.OfType<JsonObject>())
             {
                 RewriteLeafNode(leafNode, normalizedId, baseUrl);
             }
         }
+    }
+
+    // A local anchor for an inline page, shaped like the one BuildLocalPage mints. The lower/upper
+    // range disambiguates pages of the same index; a page missing them falls back to a bare anchor.
+    private static string LocalPageId(JsonObject page, string normalizedId, string baseUrl)
+    {
+        string @base = $"{baseUrl}/registration/{normalizedId}/index.json#page";
+        string? lower = TryGetString(page["lower"]);
+        string? upper = TryGetString(page["upper"]);
+        return lower is not null && upper is not null ? $"{@base}/{lower}/{upper}" : @base;
+    }
+
+    /// <summary>
+    /// Replaces every externalized page in a registration index with the page document it points
+    /// at, so the rest of the pipeline sees one fully inline index.
+    ///
+    /// api.nuget.org externalizes registration pages once a package passes its page-size
+    /// threshold: the page object carries an <c>@id</c> pointing at a separate document and omits
+    /// <c>items</c>. Everything downstream reads <c>items</c> —
+    /// <see cref="CollectUpstreamVersions"/> to dedupe local versions against upstream, and
+    /// <see cref="RewriteAllLeafUrls"/> to point leaves at this instance. Left externalized, both
+    /// silently no-op for that page: every proxy-cached version of a large package is misread as
+    /// local-only and re-spliced as a duplicate, and the page's leaves keep upstream URLs that
+    /// route the client straight past the proxy's download gate. It needs no upstream outage and
+    /// hits exactly the high-version-count packages.
+    ///
+    /// <paramref name="fetchPage"/> returns the page document for an <c>@id</c>, or null when it
+    /// must not or cannot be fetched — the caller owns that decision, including pinning the page
+    /// host to the configured upstream so an upstream-controlled <c>@id</c> cannot aim this at an
+    /// arbitrary host. A page that cannot be inlined is left exactly as it was: degraded dedupe
+    /// for that page, which is the behaviour before this existed, rather than a broken document.
+    ///
+    /// <paramref name="maxPages"/> bounds the fan-out one registration request can trigger.
+    /// </summary>
+    internal static async Task<string> InlineExternalizedPagesAsync(
+        string indexJson,
+        Func<string, CancellationToken, Task<string?>> fetchPage,
+        int maxPages,
+        CancellationToken ct)
+    {
+        JsonObject? root;
+        try { root = JsonNode.Parse(indexJson) as JsonObject; }
+        catch (JsonException) { return indexJson; }
+        if (root?["items"] is not JsonArray pages)
+        {
+            return indexJson;
+        }
+
+        int inlined = 0;
+        bool changed = false;
+        for (int i = 0; i < pages.Count && inlined < maxPages; i++)
+        {
+            if (pages[i] is not JsonObject page
+                || page["items"] is JsonArray
+                || TryGetString(page["@id"]) is not { Length: > 0 } pageUrl)
+            {
+                continue;
+            }
+
+            string? pageJson = await fetchPage(pageUrl, ct);
+            if (pageJson is null)
+            {
+                continue;
+            }
+
+            JsonObject? fetched;
+            try { fetched = JsonNode.Parse(pageJson) as JsonObject; }
+            catch (JsonException) { continue; }
+
+            // Only an object that actually carries leaves is an improvement on what is there.
+            if (fetched?["items"] is not JsonArray)
+            {
+                continue;
+            }
+
+            pages[i] = fetched;
+            inlined++;
+            changed = true;
+        }
+
+        return changed ? root.ToJsonString(RelaxedJsonOptions) : indexJson;
     }
 
     // Rewrites the leaf @id and packageContent fields (at the leaf root and inside catalogEntry)

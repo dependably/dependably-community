@@ -31,7 +31,7 @@ public sealed class NpmPublishHandler(
     LicenseRepository licenses,
     IUploadLimitResolver uploadLimits,
     NpmDistTagRepository distTags,
-    RenderedResponseCache<NpmPackumentKey> cache,
+    MetadataInvalidationCoordinator invalidation,
     EdgePublishGuard edgeGuard,
     string stagingPath)
 {
@@ -236,7 +236,8 @@ public sealed class NpmPublishHandler(
             orgId, fullName, versionKey!, filename, attachStagingPath, stagingSize,
             token.UserId, token.ActorKind, orgSettings?.AllowVersionOverwrite ?? false, claim.State,
             manifestJson, declaredIntegrity, spdx.Count > 0 ? spdx : null,
-            homepage, repository, description));
+            homepage, repository, description)) with
+        { ActorTokenId = token.Id };
         var result = await publish.StoreAndRecordAsync(request, ct);
 
         if (result is PublishResult.Rejected rej)
@@ -262,9 +263,9 @@ public sealed class NpmPublishHandler(
             await PersistPublishDistTagsAsync(orgId, pkg.Id, body, versionKey!, ct);
         }
 
-        // Evict the cached packument so the newly-published version appears immediately.
-        cache.Evict(new NpmPackumentKey(orgId, fullName));
-        cache.Evict(new NpmPackumentKey(orgId, fullName) { IsProxy = true });
+        // Invalidate the cached packument so the newly-published version appears immediately —
+        // on this replica and, when a fan-out transport is configured, on its peers.
+        invalidation.Invalidate(MetadataInvalidation.ForNpm(orgId, fullName));
 
         return new OkResult();
     }
@@ -402,9 +403,8 @@ public sealed class NpmPublishHandler(
         await audit.LogActivityAsync(orgId, "npm", fullName, "deprecate", token.UserId,
             actorKind: token.ActorKind, sourceIp: httpContext.GetNormalizedRemoteIp(), ct: ct);
 
-        // Evict the cached packument so the deprecation change is visible immediately.
-        cache.Evict(new NpmPackumentKey(orgId, fullName));
-        cache.Evict(new NpmPackumentKey(orgId, fullName) { IsProxy = true });
+        // Invalidate the cached packument so the deprecation change is visible immediately.
+        invalidation.Invalidate(MetadataInvalidation.ForNpm(orgId, fullName));
 
         return new OkResult();
     }
@@ -737,9 +737,8 @@ public sealed class NpmPublishHandler(
             }
         }
 
-        // Evict the cached packument so the removed versions disappear immediately.
-        cache.Evict(new NpmPackumentKey(orgId, fullName));
-        cache.Evict(new NpmPackumentKey(orgId, fullName) { IsProxy = true });
+        // Invalidate the cached packument so the removed versions disappear immediately.
+        invalidation.Invalidate(MetadataInvalidation.ForNpm(orgId, fullName));
     }
 
     // Reads the pruned packument PUT body and returns its "versions" map (the versions to keep),

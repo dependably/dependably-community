@@ -307,6 +307,19 @@ public sealed class InstanceController : ControllerBase
         await Dependably.Infrastructure.Mail.EmailConfigEditing.ApplyAsync(_orgs, req, ct);
         smtp.Invalidate();
 
+        // Resolved before auditing so the cleartext-credential finding is read off the transport
+        // that actually resulted — a save that omits the password keeps the stored one, which the
+        // request body alone cannot tell you.
+        var resolved = await smtp.ResolveAsync(ct);
+        bool cleartextCredentials = resolved.Transport.SendsCredentialsInCleartext;
+        if (cleartextCredentials)
+        {
+            _logger.LogWarning(
+                "Instance SMTP transport saved with security=none and credentials set: AUTH will be "
+                + "sent in cleartext. host={Host}",
+                resolved.Transport.Host);
+        }
+
         string? actor = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
             ?? User.FindFirst("sub")?.Value;
         await _audit.LogSystemAsync(
@@ -321,10 +334,10 @@ public sealed class InstanceController : ControllerBase
                 username = req.Username,
                 fromAddress = req.FromAddress,
                 passwordRotated = !string.IsNullOrEmpty(req.Password),
+                cleartextCredentials,
             }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             ct: ct);
 
-        var resolved = await smtp.ResolveAsync(ct);
         return Ok(Dependably.Infrastructure.Mail.EmailConfigEditing.BuildView(resolved, envelope.IsConfigured));
     }
 

@@ -51,6 +51,53 @@ public class TenantArtifactAccessRepositoryTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Upsert_LastAccessedAt_MatchesExplicitCanonicalWriterShape()
+    {
+        // Regression: UpsertAsync binds `at` as a raw DateTimeOffset through the global Dapper
+        // DateTimeOffsetHandler (SchemaInitializer.OwnerPlane.cs). Before the fix, Dapper's
+        // built-in typeMap claimed the parameter ahead of the registered handler, so SetValue
+        // never ran; Microsoft.Data.Sqlite's own serialization wrote it space-separated with the
+        // offset preserved instead (e.g. "2026-05-01 08:09:10+00:00"), disagreeing in shape with
+        // every column that goes through UtcTimestamp.ToUtcIso() explicitly — including this same
+        // column's own schema DEFAULT.
+        string caId = await InsertCacheArtifact("5.0.0");
+        var repo = new TenantArtifactAccessRepository(_db);
+        var instant = new DateTimeOffset(2026, 5, 1, 8, 9, 10, TimeSpan.Zero);
+
+        await repo.UpsertAsync("o1", caId, instant);
+
+        await using var conn = await _db.OpenAsync();
+        var (firstAt, lastAt) = await conn.QuerySingleAsync<(string FirstAt, string LastAt)>(
+            "SELECT first_accessed_at AS FirstAt, last_accessed_at AS LastAt " +
+            "FROM tenant_artifact_access WHERE org_id = 'o1' AND cache_artifact_id = @caId",
+            new { caId });
+
+        Assert.Equal(instant.ToUtcIso(), firstAt);
+        Assert.Equal(instant.ToUtcIso(), lastAt);
+    }
+
+    [Fact]
+    public async Task Upsert_NonZeroOffsetInstant_NormalizesToCanonicalUtc()
+    {
+        // +02:00 offset representing 2026-05-01T06:09:10Z. Before the fix SetValue never ran
+        // (see the comment above) — the provider's own serialization preserved the +02:00 offset
+        // instead of converting to UTC first, so the stored row would sort by its wall-clock time
+        // rather than its real instant.
+        string caId = await InsertCacheArtifact("5.0.1");
+        var repo = new TenantArtifactAccessRepository(_db);
+        var instant = new DateTimeOffset(2026, 5, 1, 8, 9, 10, TimeSpan.FromHours(2));
+
+        await repo.UpsertAsync("o1", caId, instant);
+
+        await using var conn = await _db.OpenAsync();
+        string stored = await conn.QuerySingleAsync<string>(
+            "SELECT last_accessed_at FROM tenant_artifact_access WHERE org_id = 'o1' AND cache_artifact_id = @caId",
+            new { caId });
+
+        Assert.Equal("2026-05-01T06:09:10Z", stored);
+    }
+
+    [Fact]
     public async Task ListAffectedTenants_DistinctAcrossOrgs()
     {
         string caId = await InsertCacheArtifact("4.17.21");

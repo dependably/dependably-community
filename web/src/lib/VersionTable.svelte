@@ -23,6 +23,7 @@
   import VulnerabilityRow from './VulnerabilityRow.svelte'
   import { formatDate, formatBytes, formatNumber } from './format.js'
   import { sortIndicator } from './sortIndicator.js'
+  import { rememberedRowCount, rememberRowCount } from './tableSize.js'
 
   /** @type {{ ecosystem: string, isProxy: boolean, name: string, upstreamLatestVersion?: string | null, latestState?: string, abandonedState?: string } | null} */
   export let pkg = null
@@ -34,6 +35,12 @@
   export let isAdmin = false
   export let scanningId = null
   export let loading = false
+  /**
+   * Placeholder rows drawn while `loading` and the table has nothing to show yet. A package's
+   * version list is unpaged and usually long, so the first-visit reserve is larger than the paged
+   * tables' default; after that the remembered count for this ecosystem takes over.
+   */
+  export let loadingRows = 8
   /**
    * Returns ms remaining in the post-scan cooldown (0 if cooldown expired).
    * @type {(ver: { vulnCheckedAt?: string | null }) => number}
@@ -148,6 +155,18 @@
     else if (sortCol === 'status')    cmp = (a.status ?? '').localeCompare(b.status ?? '')
     return sortDir === 'asc' ? cmp : -cmp
   })
+
+  // One key for every package rather than one per package: the reserve only needs to be close,
+  // and the last package the user opened is a far better predictor of the next one than a fixed
+  // count is. See tableSize.js for why the last real count beats a nominal size.
+  const VERSION_ROW_MEMORY = 'version-detail:versions'
+  const rememberedVersionRows = rememberedRowCount(VERSION_ROW_MEMORY)
+  $: placeholderRows = rememberedVersionRows ?? loadingRows
+  $: if (!loading) rememberRowCount(VERSION_ROW_MEMORY, sortedGroups.length)
+
+  // An already-rendered version list stays on screen while the next load runs — swapping loaded
+  // rows out for shimmer and back is the flicker this page is trying not to have.
+  $: showPlaceholder = loading && sortedGroups.length === 0
 
   function toggleSort(col) {
     if (sortCol === col) sortDir = sortDir === 'asc' ? 'desc' : 'asc'
@@ -280,10 +299,10 @@
       <th>{$t('versionDetail.columns.actions')}</th>
     </tr>
   </thead>
-  {#if loading}
-    <tbody>
-      {#each [0,1,2,3,4] as i (i)}
-        <tr><td colspan={pkg?.ecosystem === 'oci' ? 12 : 11}><span class="skeleton"></span></td></tr>
+  {#if showPlaceholder}
+    <tbody aria-hidden="true">
+      {#each [...Array(placeholderRows).keys()] as i (i)}
+        <tr class="skeleton-row"><td colspan={pkg?.ecosystem === 'oci' ? 12 : 11}><span class="skeleton"></span></td></tr>
       {/each}
     </tbody>
   {:else}

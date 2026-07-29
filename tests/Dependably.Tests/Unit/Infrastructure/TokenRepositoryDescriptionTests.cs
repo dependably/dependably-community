@@ -135,7 +135,7 @@ public sealed class TokenRepositoryDescriptionTests : IAsyncLifetime
         {
             await conn.ExecuteAsync(
                 "UPDATE user_tokens SET last_used_at = @ts WHERE id = @id",
-                new { id = rec.Id, ts = TestTime.KnownNow.AddMinutes(-5).ToString("yyyy-MM-ddTHH:mm:ssZ") });
+                new { id = rec.Id, ts = TestTime.KnownNow.AddMinutes(-5).ToUtcIso() });
         }
 
         var before = (await _tokens.GetTokenByIdAsync(rec.Id, rec.OrgId))!.LastUsedAt;

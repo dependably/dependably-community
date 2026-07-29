@@ -127,6 +127,11 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
             return BadRequest(new { detail = $"Unsupported language code '{lang}'. Allowed: {string.Join(", ", LanguageCodes.Supported)}." });
         }
 
+        if (req.DefaultTimezone is { } tz && !TimeZoneCodes.IsSupported(tz))
+        {
+            return BadRequest(new { detail = $"Unrecognised timezone '{tz}'. Use an IANA zone name, e.g. 'America/Toronto'." });
+        }
+
         if (req.VersionOverwritePolicy is { } pol && pol is not ("block" or "exception" or "allow"))
         {
             return _problems.ValidationErrorActionKey("version_overwrite_policy", "error.settings.overwritePolicyInvalid");
@@ -157,7 +162,8 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
             MaxUploadBytesCargo: req.MaxUploadBytesCargo,
             AirGapped: req.AirGapped,
             VersionOverwritePolicy: req.VersionOverwritePolicy,
-            RequireMfa: req.RequireMfa), ct);
+            RequireMfa: req.RequireMfa,
+            DefaultTimezone: req.DefaultTimezone), ct);
 
         await _audit.LogAsync("org_settings_updated", orgId, GetUserId(),
             detail: System.Text.Json.JsonSerializer.Serialize(new
@@ -173,6 +179,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                 max_upload_bytes_oci = req.MaxUploadBytesOci,
                 max_upload_bytes_cargo = req.MaxUploadBytesCargo,
                 default_language = req.DefaultLanguage,
+                default_timezone = req.DefaultTimezone,
                 version_overwrite_policy = req.VersionOverwritePolicy,
                 air_gapped = req.AirGapped,
                 require_mfa = req.RequireMfa,
@@ -513,12 +520,17 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         string orgId,
         CancellationToken ct)
     {
-        // Absent = off for all verification fields, matching the column defaults — each is opt-in.
-        string verifyNpmSignatures = req.VerifyNpmSignatures ?? "off";
-        string verifyNuGetSignatures = req.VerifyNuGetSignatures ?? "off";
-        string verifyPyPiAttestations = req.VerifyPyPiAttestations ?? "off";
-        string verifyRpmSignatures = req.VerifyRpmSignatures ?? "off";
-        string verifyMavenSignatures = req.VerifyMavenSignatures ?? "off";
+        // An absent verification field means "leave as stored", not "off" — the opposite of the
+        // block-policy fields above, which carry a secure default. These five are security
+        // controls whose stored value may already be 'block'; defaulting an omitted field to
+        // 'off' would let a client sending a payload shape that predates them silently disable
+        // signature and attestation verification tenant-wide. Null flows through to the repository,
+        // which COALESCEs it against the stored column (falling back to 'off' on first insert).
+        string? verifyNpmSignatures = req.VerifyNpmSignatures;
+        string? verifyNuGetSignatures = req.VerifyNuGetSignatures;
+        string? verifyPyPiAttestations = req.VerifyPyPiAttestations;
+        string? verifyRpmSignatures = req.VerifyRpmSignatures;
+        string? verifyMavenSignatures = req.VerifyMavenSignatures;
 
         bool npmConfigured = await _npmProvenance.IsConfiguredForAsync(orgId, ct);
         bool nugetConfigured = await _nugetProvenance.IsConfiguredForAsync(orgId, ct);
@@ -554,19 +566,26 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
 
     // Return type for ValidateSignatureVerificationFieldsAsync. Bundles the validation error
     // (null = pass) together with the normalized field values so the method can be async.
+    // A null field value means the caller omitted it and the stored value is preserved.
     private sealed record SigVerifyResult(
         IActionResult? Error,
-        string VerifyNpmSignatures,
-        string VerifyNuGetSignatures,
-        string VerifyPyPiAttestations,
-        string VerifyRpmSignatures,
-        string VerifyMavenSignatures);
+        string? VerifyNpmSignatures,
+        string? VerifyNuGetSignatures,
+        string? VerifyPyPiAttestations,
+        string? VerifyRpmSignatures,
+        string? VerifyMavenSignatures);
 
     // Validates one sig-verify field: rejects values outside the allowed enum and, when
-    // the value is non-off, rejects if the operator trust anchor is not configured.
+    // the value is non-off, rejects if the operator trust anchor is not configured. An omitted
+    // (null) field is not validated — nothing is being changed.
     private IActionResult? ValidateOneSigVerifyField(
-        string value, string field, bool isConfigured, string trustMsg)
+        string? value, string field, bool isConfigured, string trustMsg)
     {
+        if (value is null)
+        {
+            return null;
+        }
+
         if (value is not ("off" or "warn" or "block"))
         {
             return _problems.ValidationErrorAction(field, "Must be 'off', 'warn', or 'block'.");

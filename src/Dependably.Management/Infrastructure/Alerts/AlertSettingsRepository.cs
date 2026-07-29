@@ -27,7 +27,7 @@ public sealed class AlertSettingsRepository
         _time = time;
     }
 
-    private string NowIso() => _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+    private string NowIso() => _time.GetUtcNow().ToUtcIso();
 
     /// <summary>API-facing read: never returns the raw Slack webhook URL or SMTP password, only
     /// <c>HasSlackWebhook</c>/<c>HasEmailSmtpPassword</c>.</summary>
@@ -478,6 +478,19 @@ public sealed record AlertSettings(
     bool SecretsAvailable = false,
     bool InstanceEmailConfigured = false)
 {
+    /// <summary>
+    /// True when this org's own SMTP transport would put its AUTH credentials on the wire in the
+    /// clear (<c>security=none</c> with a username and a stored password). Reported on every read
+    /// rather than only on the save that introduced it, because the config is DB-backed and an
+    /// operator inheriting someone else's setting never sees that save. Always false while the org
+    /// inherits the instance transport: those columns are then unused, and the instance surface
+    /// reports its own transport separately.
+    /// </summary>
+    public bool EmailSmtpCleartextCredentials =>
+        !EmailInheritInstance
+        && Mail.SmtpTransportSettings.SendsCredentialsInCleartextWhen(
+            EmailSmtpSecurity, EmailSmtpUsername, HasEmailSmtpPassword);
+
     /// <summary>The documented defaults for an org with no settings row: both alert types on, HIGH
     /// severity floor, Slack off, email off inheriting the instance transport.</summary>
     public static AlertSettings Defaults(string orgId) =>

@@ -63,7 +63,7 @@ public class TokenRepository
 
         await using var conn = await _db.OpenAsync(ct);
 
-        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToUtcIso();
 
         // Single UNION ALL query collapses the previous two-round-trip lookup
         // (user_tokens THEN service_tokens) into one. token_hash is SHA-256 of a
@@ -134,19 +134,36 @@ public class TokenRepository
         return Convert.ToHexString(bytes).ToLowerInvariant();
     }
 
+    // The capability set a token carries is its ceiling — an API token never falls back to its
+    // owner's role — so a null, empty, or empty-array value mints a row that authenticates and
+    // then fails every capability-gated route. Refusing it at the only two write paths is what
+    // keeps the state the `purge_legacy_null_capability_tokens` migration cleared from returning.
+    private static void RequireGrantingCapabilities(string capabilities)
+    {
+        if (string.IsNullOrWhiteSpace(capabilities) || capabilities.Trim() == "[]")
+        {
+            throw new ArgumentException(
+                "A token must be issued with at least one capability; it never inherits its owner's role.",
+                nameof(capabilities));
+        }
+    }
+
     /// <summary>
     /// Issues a user token. <paramref name="capabilities"/> is the canonical JSON capability
     /// array produced by <c>Capabilities.TryNormalizeAndAuthorize</c> at the controller
     /// boundary — the repository assumes it's already validated and writes it verbatim.
+    /// A capability-less value is refused: the authorization layer denies such a token
+    /// outright, so writing one mints a row that authenticates and grants nothing.
     /// </summary>
     public async Task<(string RawToken, TokenRecord Record)> CreateUserTokenAsync(
         string orgId, string userId, string capabilities,
         DateTimeOffset? expiresAt, string? description = null, CancellationToken ct = default)
     {
+        RequireGrantingCapabilities(capabilities);
         string raw = Security.TokenGenerator.Generate();
         string hash = HashToken(raw);
         string id = Guid.NewGuid().ToString("N");
-        string? expiresStr = expiresAt?.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string? expiresStr = expiresAt?.ToUtcIso();
 
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
@@ -225,16 +242,18 @@ public class TokenRepository
 
     /// <summary>
     /// Service-token sibling of <see cref="CreateUserTokenAsync"/>. <paramref name="capabilities"/>
-    /// is the canonical JSON array supplied by the controller after validation.
+    /// is the canonical JSON array supplied by the controller after validation, and is
+    /// refused when it grants nothing, for the reason given on <see cref="CreateUserTokenAsync"/>.
     /// </summary>
     public async Task<(string RawToken, ServiceTokenRecord Record)> CreateServiceTokenAsync(
         string orgId, string name, string capabilities,
         DateTimeOffset? expiresAt, string? description = null, CancellationToken ct = default)
     {
+        RequireGrantingCapabilities(capabilities);
         string raw = Security.TokenGenerator.Generate();
         string hash = HashToken(raw);
         string id = Guid.NewGuid().ToString("N");
-        string? expiresStr = expiresAt?.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string? expiresStr = expiresAt?.ToUtcIso();
 
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
@@ -357,8 +376,8 @@ public class TokenRepository
         };
 
         var nowDto = _time.GetUtcNow();
-        string now = nowDto.ToString("yyyy-MM-ddTHH:mm:ssZ");
-        string threshold = nowDto.AddSeconds(-minIntervalSeconds).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = nowDto.ToUtcIso();
+        string threshold = nowDto.AddSeconds(-minIntervalSeconds).ToUtcIso();
 
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(sql, new { id = tokenId, now, threshold });

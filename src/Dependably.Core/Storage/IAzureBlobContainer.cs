@@ -25,6 +25,20 @@ public interface IAzureBlobContainer
     Task DeleteIfExistsAsync(string key, CancellationToken ct);
 
     /// <summary>
+    /// True when this container holds a credential capable of signing a service SAS. A container
+    /// client built from a connection string with an account key can sign; one built from a SAS
+    /// URL or a token credential cannot, and reports false so callers stream instead.
+    /// </summary>
+    bool CanGenerateReadSasUri { get; }
+
+    /// <summary>
+    /// Mints a read-only service SAS URL for <paramref name="key"/> expiring at
+    /// <paramref name="expiresAt"/>. Returns <c>null</c> when the blob does not exist or when no
+    /// signing credential is available.
+    /// </summary>
+    Task<Uri?> TryGenerateReadSasUriAsync(string key, DateTimeOffset expiresAt, CancellationToken ct);
+
+    /// <summary>
     /// Enumerates blob content lengths. Returning the raw sizes (rather than a single
     /// total) lets tests assert pagination iteration in addition to summing — see the
     /// blob-store plan's "GetTotalSizeAsync iterates pagination cursors" requirement.

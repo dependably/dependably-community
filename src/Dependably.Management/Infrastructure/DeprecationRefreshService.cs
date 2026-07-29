@@ -115,6 +115,9 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
         _logger.LogInformation(
             "Deprecation refresh pass starting (ageHours={AgeHours}, batchSize={BatchSize}).",
             ageHours, batchSize);
+        // now-ok: measures real elapsed time for a duration log/metric only — no control
+        // flow branches on the value, so a substitutable clock would change the reported
+        // number without changing what the code does.
         var sw = System.Diagnostics.Stopwatch.StartNew();
 
         var groups = await _cacheArtifacts.ListGroupsNeedingDeprecationRefreshAsync(ageHours, batchSize, _time, ct);
@@ -160,7 +163,7 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
 
             if (batchDelayMs > 0 && !ct.IsCancellationRequested)
             {
-                try { await Task.Delay(batchDelayMs, ct); }
+                try { await Task.Delay(TimeSpan.FromMilliseconds(batchDelayMs), _time, ct); }
                 catch (OperationCanceledException) { break; }
             }
         }
@@ -352,7 +355,7 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
             try
             {
                 string detail = System.Text.Json.JsonSerializer.Serialize(
-                    new { version, revoked_at = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ") }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
+                    new { version, revoked_at = _time.GetUtcNow().ToUtcIso() }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
                 await _audit.LogActivityAsync(
                     orgId,
                     ecosystem: ecosystem,

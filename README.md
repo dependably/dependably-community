@@ -160,9 +160,18 @@ the org has AnonymousPull enabled.
 
 ```
 GET /health             → 200 OK (process is running)
-GET /ready              → 200 OK when database is reachable, 503 otherwise
+GET /ready              → 200 OK while every required dependency is reachable, 503 otherwise
+GET /ready?strict=true  → 200 OK only when every dependency is reachable
 GET /api/v1/licenses    → third-party attribution data (CycloneDX subset)
 ```
+
+`/ready` is the load-balancer check: it fails only on a *required* dependency (the metadata
+store; also the blob store on an edge node) so a failure of a dependency shared by the whole
+fleet is reported as degradation rather than deregistering every replica at once. It also turns
+503 during graceful shutdown, so it carries the drain signal `/health` does not. The strict view
+demands everything green and is what deployment gating and alerting should poll. Classification
+is configurable — see
+[CONTRIBUTING.md → Health probes](CONTRIBUTING.md#health-probes-health-ready).
 
 ---
 
@@ -181,7 +190,22 @@ Both API surfaces are documented as live OpenAPI documents served by the running
 
 The full route surface is contract-tested against [`tests/Contracts/openapi.contract.json`](tests/Contracts/openapi.contract.json) — any route change fails CI until the contract is regenerated.
 
+Per-ecosystem client guides, where a protocol's behaviour differs from the public registry it
+mirrors:
+
+- [docs/cargo.md](docs/cargo.md) — Cargo sparse registry: config, publish, yank, and why crate
+  ownership is org membership rather than `cargo owner`
+
 For the developer-facing remediation walkthrough — reading the vulnerability report (CVSS/EPSS/KEV), the OWASP Top 10 mapping, and the curated fix skills for Claude Code / OpenAI Codex / GitHub Copilot — see [docs/fixing-vulnerabilities.md](docs/fixing-vulnerabilities.md).
+
+Operator runbooks:
+
+- [docs/edge-node.md](docs/edge-node.md) — enrolling and running a cache-only edge node
+- [docs/sqlite-to-postgres-migration.md](docs/sqlite-to-postgres-migration.md) — moving an existing
+  standalone (SQLite) install onto Postgres for high availability, with verification and rollback
+- [docs/postgres-collate-migration.md](docs/postgres-collate-migration.md) — opting an existing
+  Postgres database into `COLLATE "C"` on its indexed temporal columns, for byte-exact ordering and
+  immunity to glibc collation-version drift
 
 ---
 

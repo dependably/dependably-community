@@ -36,6 +36,32 @@ public sealed record SmtpTransportSettings(
             || string.Equals(Security, "none", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
+    /// True when this transport would put SMTP AUTH credentials on the wire in the clear: a
+    /// username and password are configured, but <see cref="Security"/> is <c>none</c>, so the
+    /// session is never wrapped in TLS and the AUTH exchange is readable by anything on the path.
+    ///
+    /// <para>
+    /// <c>none</c> is a legitimate setting on its own — an unauthenticated relay on a trusted
+    /// segment has nothing to protect. It becomes a finding only once credentials are attached to
+    /// it, which is the combination reported here. The configuration is DB-backed (per-org for the
+    /// alert transport, <c>instance_settings</c> for the instance one), so there is no boot-time
+    /// moment at which a static startup warning could see it; the settings read and write surfaces
+    /// are where the answer lives, and both report it.
+    /// </para>
+    /// </summary>
+    public bool SendsCredentialsInCleartext =>
+        SendsCredentialsInCleartextWhen(Security, Username, !string.IsNullOrEmpty(Password));
+
+    /// <summary>
+    /// <see cref="SendsCredentialsInCleartext"/> for callers holding the stored password only as a
+    /// "one is set" boolean — the per-org alert transport never decrypts it on a response path.
+    /// </summary>
+    public static bool SendsCredentialsInCleartextWhen(string? security, string? username, bool hasPassword)
+        => string.Equals(security, "none", StringComparison.OrdinalIgnoreCase)
+           && !string.IsNullOrWhiteSpace(username)
+           && hasPassword;
+
+    /// <summary>
     /// Validates the fields an endpoint accepts on write (host/port/security/from — password and
     /// username are opaque strings with no format to check). Returns the first failing field name
     /// via <paramref name="invalidField"/> and a resource key describing the failure, or

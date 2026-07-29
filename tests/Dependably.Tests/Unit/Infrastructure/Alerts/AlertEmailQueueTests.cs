@@ -115,23 +115,6 @@ public sealed class AlertEmailQueueTests : IAsyncLifetime
         }
     }
 
-    /// <summary>Drives a queue's retry backoff deterministically — see
-    /// <c>AlertSlackQueueTests.PumpUntilAsync</c> for the full rationale.</summary>
-    private static async Task PumpUntilAsync(
-        FakeTimeProvider clock, Func<Task<bool>> condition, TimeSpan step, int maxIterations = 1000)
-    {
-        for (int i = 0; i < maxIterations && !await condition(); i++)
-        {
-            clock.Advance(step);
-            await Task.Delay(20);
-        }
-
-        if (!await condition())
-        {
-            throw new TimeoutException("Condition never satisfied while pumping the fake clock.");
-        }
-    }
-
     /// <summary>Records every send and routes success/failure by a "good"/"bad" substring in the
     /// transport host — the SMTP-send analog of <c>AlertSlackQueueTests.RoutingHandler</c>. Since
     /// the queue's channel has a single reader, alerts are delivered one at a time, so the shared
@@ -242,12 +225,12 @@ public sealed class AlertEmailQueueTests : IAsyncLifetime
         alertQueue.Notify(goodAlert);
         alertQueue.Notify(badAlert);
 
-        await PumpUntilAsync(emailClock, async () =>
+        await ClockPump.UntilAsync(emailClock, async () =>
         {
             var good = await alerts.GetByIdAsync("org1", goodAlert.Id);
             var bad = await alerts.GetByIdAsync("org2", badAlert.Id);
             return good?.EmailStatus is not null && bad?.EmailStatus is not null;
-        }, TimeSpan.FromSeconds(1));
+        }, TimeSpan.FromSeconds(1), maxAdvances: 1000);
 
         try { await deliveryQueue.StopAsync(CancellationToken.None); } catch { }
 
@@ -418,12 +401,12 @@ public sealed class AlertEmailQueueTests : IAsyncLifetime
 
         // The failing alert burns through the 1s/5s/30s backoff inside the drain itself; pump
         // the fake clock so that finishes in virtual time instead of real time.
-        await PumpUntilAsync(emailClock, async () =>
+        await ClockPump.UntilAsync(emailClock, async () =>
         {
             var good = await alerts.GetByIdAsync("org1", goodAlert.Id);
             var bad = await alerts.GetByIdAsync("org2", badAlert.Id);
             return good?.EmailStatus is not null && bad?.EmailStatus is not null;
-        }, TimeSpan.FromSeconds(1));
+        }, TimeSpan.FromSeconds(1), maxAdvances: 1000);
 
         await executeTask;
 
@@ -510,7 +493,7 @@ public sealed class AlertEmailQueueTests : IAsyncLifetime
         var settings = new AlertSettingsRepository(_db, ep, Clock);
         await EnableEmailAsync(settings, "org1", "bad.example.com", ["a@example.com"]);
 
-        string staleFailingSince = Clock.GetUtcNow().AddHours(-49).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string staleFailingSince = Clock.GetUtcNow().AddHours(-49).ToUtcIso();
         await using var conn = await _db.OpenAsync();
         await conn.ExecuteAsync(
             "UPDATE alert_settings SET email_failing_since = @s WHERE org_id = @id",

@@ -1,7 +1,8 @@
 <script>
   import { onMount } from 'svelte'
   import { t, isLoading, locale } from 'svelte-i18n'
-  import { route, user, navigate, bootstrapInfo, pendingRoute, noticesOpen } from './lib/store.js'
+  import { route, user, navigate, restoreScroll, bootstrapInfo, pendingRoute, noticesOpen,
+           activeRoute, cancelTransition, transitionPending } from './lib/store.js'
   import { useRouter, routeFor, ADMIN_ONLY_PAGES } from './lib/routes.js'
   import { api } from './lib/api.js'
   import { setupI18n } from './i18n/index.js'
@@ -31,6 +32,7 @@
   import Profile from './pages/Profile.svelte'
   import SamlTestResult from './pages/SamlTestResult.svelte'
   import SystemApp from './system/SystemApp.svelte'
+  import RouteView from './lib/RouteView.svelte'
   import Sidebar from './lib/Sidebar.svelte'
   import TopBar from './lib/TopBar.svelte'
   import Licenses from './pages/Licenses.svelte'
@@ -40,12 +42,24 @@
 
   let initialized = false
 
+  // The shell must not paint before the first dictionary lands, or every label renders as its
+  // raw i18n key. Later loads — a language switch — keep the shell mounted: svelte-i18n reports
+  // isLoading again while the new dictionary streams in, but holds $locale (and therefore $t) on
+  // the previous language until it flushes, so the tree stays valid and correct throughout.
+  // Tearing the shell down for that round trip flashes a full-page spinner over a working app.
+  let localeReady = false
+  $: if (!$isLoading) localeReady = true
+
+  // The guards below read $activeRoute, not $route: a deferred navigation holds the outgoing page
+  // on screen while the incoming one loads, and a route a guard is going to reject should be
+  // rejected before it is ever committed rather than after it lands.
+
   // Guard: if a forced-rotation user navigates anywhere else, bounce back to profile.
   // Replace, not push — they shouldn't be able to back out of the rotation requirement.
   // Skip in apex mode: SystemApp owns the rotation guard there with its own page names.
   $: if ($user?.mustChangePassword
         && !($bootstrapInfo?.mode === 'multi' && $bootstrapInfo?.isApex)
-        && $route.page !== 'profile' && $route.page !== 'login') {
+        && $activeRoute.page !== 'profile' && $activeRoute.page !== 'login') {
     navigate('profile', {}, { replace: true })
   }
 
@@ -54,7 +68,7 @@
   $: if ($user?.mfaEnrollmentRequired
         && !$user?.mustChangePassword
         && !($bootstrapInfo?.mode === 'multi' && $bootstrapInfo?.isApex)
-        && $route.page !== 'profile' && $route.page !== 'login') {
+        && $activeRoute.page !== 'profile' && $activeRoute.page !== 'login') {
     navigate('profile', {}, { replace: true })
   }
 
@@ -67,13 +81,17 @@
   $: if ($user
         && !($user.role === 'admin' || $user.role === 'owner')
         && !($bootstrapInfo?.mode === 'multi' && $bootstrapInfo?.isApex)
-        && ADMIN_ONLY_PAGES.has($route.page)) {
+        && ADMIN_ONLY_PAGES.has($activeRoute.page)) {
     navigate('dashboard', {}, { replace: true })
   }
 
   onMount(async () => {
     if (typeof window !== 'undefined' && window.history && 'scrollRestoration' in window.history) {
-      window.history.scrollRestoration = 'auto'
+      // The SPA owns scroll placement: navigate() seats new pages at the top and stamps the
+      // offset it is leaving onto the outgoing history entry, and the popstate handler below
+      // reapplies it. The browser's own restore fires before the arriving page has fetched its
+      // data and clamps the offset against the short document.
+      window.history.scrollRestoration = 'manual'
     }
 
     // Phase 1: fetch deployment-mode info before anything else.
@@ -104,7 +122,9 @@
       user.set(me)
       // Server resolves the effective locale (user override → tenant default → 'en'). If the
       // browser is currently rendering in a different locale, realign locally — no API echo.
-      if (me.language && me.language !== get(locale)) applyLocale(me.language)
+      // Awaited so the shell's first paint is already in the user's language — without it a
+      // non-English user gets a frame of English before the dictionary flushes.
+      if (me.language && me.language !== get(locale)) await applyLocale(me.language)
       // Load active banners once after auth. One-shot — no polling.
       loadActiveBanners()
       // Arm the proactive session-expiry watcher with the exp claim surfaced by me().
@@ -154,7 +174,13 @@
     // returns can drop state). Don't push — popstate already moved history.
     window.addEventListener('popstate', (e) => {
       const next = (e.state && e.state.page) ? e.state : routeFor(window.location.pathname)
-      if (next) route.set({ page: next.page, params: next.params ?? {} })
+      if (next) {
+        // The user moved history themselves, so whatever was being held for a deferred commit is
+        // no longer where they are going — drop it and show the popped entry directly.
+        cancelTransition()
+        route.set({ page: next.page, params: next.params ?? {} })
+        restoreScroll(e.state)
+      }
     })
 
     initialized = true
@@ -162,6 +188,7 @@
 
   async function logout() {
     await api.logout().catch(() => {})
+    cancelTransition()
     disarmSessionWatch()
     user.set(null)
     pendingRoute.set(null)
@@ -172,7 +199,7 @@
   let httpBannerDismissed = typeof localStorage !== 'undefined' && !!localStorage.getItem('httpBannerDismissed')
 </script>
 
-{#if $isLoading || !initialized}
+{#if !localeReady || !initialized}
   <div class="app-loading">
     <span class="spinner"></span>
   </div>
@@ -211,40 +238,50 @@
       />
     {/each}
 
+    <!-- Progress strip for a navigation that outlives the grace period. Decorative: the arriving
+         page is what will announce its own loading state, and a bar that appears and vanishes
+         inside a few frames would be the very flicker this transition exists to remove. -->
+    <div class="nav-progress" class:visible={$transitionPending} aria-hidden="true"></div>
+
     <main class="main-content">
-      {#if $route.page === 'dashboard'}
-        <Dashboard />
-      {:else if $route.page === 'packages'}
-        <Packages />
-      {:else if $route.page === 'version-detail'}
-        <VersionDetail />
-      {:else if $route.page === 'audit'}
-        <Audit />
-      {:else if $route.page === 'tokens'}
-        <Tokens />
-      {:else if $route.page === 'settings'}
-        <OrgSettings />
-      {:else if $route.page === 'users'}
-        <Users />
-      {:else if $route.page === 'setup'}
-        <Setup />
-      {:else if $route.page === 'upload'}
-        <Upload />
-      {:else if $route.page === 'vulnerabilities'}
-        <Vulnerabilities />
-      {:else if $route.page === 'quarantine'}
-        <Quarantine />
-      {:else if $route.page === 'risk'}
-        <Risk />
-      {:else if $route.page === 'license-policy'}
-        <LicensePolicy />
-      {:else if $route.page === 'lookup'}
-        <Lookup />
-      {:else if $route.page === 'profile'}
-        <Profile />
-      {:else if $route.page === 'saml-test-result'}
-        <SamlTestResult />
-      {/if}
+      <!-- `pageToken` goes to the pages that fetch on arrival: it is how they hold the transition
+           open until their data lands. Pages without an initial fetch take none and are committed
+           on the auto-commit frame. -->
+      <RouteView let:page let:params let:token>
+        {#if page === 'dashboard'}
+          <Dashboard pageToken={token} />
+        {:else if page === 'packages'}
+          <Packages pageToken={token} />
+        {:else if page === 'version-detail'}
+          <VersionDetail {params} pageToken={token} />
+        {:else if page === 'audit'}
+          <Audit pageToken={token} />
+        {:else if page === 'tokens'}
+          <Tokens pageToken={token} />
+        {:else if page === 'settings'}
+          <OrgSettings pageToken={token} />
+        {:else if page === 'users'}
+          <Users pageToken={token} />
+        {:else if page === 'setup'}
+          <Setup />
+        {:else if page === 'upload'}
+          <Upload />
+        {:else if page === 'vulnerabilities'}
+          <Vulnerabilities pageToken={token} />
+        {:else if page === 'quarantine'}
+          <Quarantine pageToken={token} />
+        {:else if page === 'risk'}
+          <Risk pageToken={token} />
+        {:else if page === 'license-policy'}
+          <LicensePolicy pageToken={token} />
+        {:else if page === 'lookup'}
+          <Lookup />
+        {:else if page === 'profile'}
+          <Profile />
+        {:else if page === 'saml-test-result'}
+          <SamlTestResult />
+        {/if}
+      </RouteView>
     </main>
     </div>
   </div>
@@ -273,6 +310,9 @@
     flex-direction: column;
   }
 
+  /* No min-height here: `.layout { min-height: 100vh }` plus the sidebar's own 100vh already
+     floor the content column at one viewport, and an explicit height would exceed 100vh
+     whenever a banner is showing and force a permanent scrollbar on every page. */
   .main-content { flex: 1; }
 
   /* Mobile: the sidebar collapses to a horizontal bar (see Sidebar.svelte) and the

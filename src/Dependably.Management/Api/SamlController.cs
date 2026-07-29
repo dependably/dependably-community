@@ -27,6 +27,9 @@ namespace Dependably.Api;
 /// </summary>
 [ApiController]
 [Route("saml")]
+// authz-ok: SAML SP endpoints are the login path itself — metadata is public by spec, and the
+// ACS callback arrives from the IdP with the signed assertion as its only credential. Each
+// action resolves and pins the tenant, and apex/uninitialized requests 404.
 [AllowAnonymous]
 public sealed class SamlController : ControllerBase
 {
@@ -483,8 +486,12 @@ public sealed class SamlController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "SAML response validation failed for tenant {TenantId}", tenantId);
-            return (null, SamlFailure(isTest, "validation_failed", ex.Message, StatusCodes.Status401Unauthorized,
-                realProblemDetail: "SAML response validation failed."));
+            // ex.Message from ITfoxtec embeds response-derived values (issuer, audience,
+            // destination) — IdP-controlled text. It stays in the log above; the test-result
+            // redirect gets only the fixed reason code, keeping the closed-set invariant that
+            // RedirectToTestResult documents. The exception detail is never reflected to the caller.
+            return (null, SamlFailure(isTest, "validation_failed", "SAML response validation failed.",
+                StatusCodes.Status401Unauthorized, realProblemDetail: "SAML response validation failed."));
         }
     }
 
@@ -619,7 +626,7 @@ public sealed class SamlController : ControllerBase
                     "SAML IdP signing cert for org {OrgId} expired: thumbprint={Thumbprint}, notAfter={NotAfter}. " +
                     "Replace the cert in Settings → Authentication to restore SAML login.",
                     cfg!.OrgId, idpCert.Thumbprint,
-                    idpCert.NotAfter.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ"));
+                    idpCert.NotAfter.ToUniversalTime().ToUtcIso());
 
                 if (!allowExpiredCert)
                 {
@@ -641,7 +648,7 @@ public sealed class SamlController : ControllerBase
     {
         string? actorId = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
             ?? User.FindFirst("sub")?.Value;
-        string cid = Guid.NewGuid().ToString("N");
+        string cid = TokenGenerator.Generate();
         var expiresAt = _time.GetUtcNow().Add(TestCookieLifetime);
 
         // Server-side correlation row makes the cid one-shot: TryConsumeTestRunAsync stamps

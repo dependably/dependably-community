@@ -29,6 +29,38 @@ Consultez cette alerte dans les paramètres Alertes de Dependably.
         <target>Alerte Dependably : {0}</target>
       </segment>
     </unit>
+    <unit id="email.emailChange.body">
+      <notes>
+        <note category="translator">Plain-text email-change verification body, sent to the NEW address. {0} = expiry timestamp, {1} = confirmation link. Keep the blank lines and the trailing newline.</note>
+      </notes>
+      <segment state="translated">
+        <source>Someone asked to change a Dependably account&apos;s email address to this one.
+
+Confirm the change using the link below. The link expires at {0} UTC and can only be used once. Until then the account keeps its current address and nothing has changed.
+
+{1}
+
+If you did not expect this, you can ignore this email — no account will be moved to this address.
+</source>
+        <target>Une demande a été faite pour remplacer l&apos;adresse courriel d&apos;un compte Dependably par celle-ci.
+
+Confirmez le changement à l&apos;aide du lien ci-dessous. Le lien expire le {0} UTC et ne peut être utilisé qu&apos;une seule fois. D&apos;ici là, le compte conserve son adresse actuelle et rien n&apos;a changé.
+
+{1}
+
+Si vous ne vous attendiez pas à ce message, vous pouvez l&apos;ignorer — aucun compte ne sera déplacé vers cette adresse.
+</target>
+      </segment>
+    </unit>
+    <unit id="email.emailChange.subject">
+      <notes>
+        <note category="translator">Subject line of the email-change verification message, sent to the NEW address.</note>
+      </notes>
+      <segment state="translated">
+        <source>Confirm your new Dependably email address</source>
+        <target>Confirmez votre nouvelle adresse courriel Dependably</target>
+      </segment>
+    </unit>
     <unit id="email.invite.body">
       <notes>
         <note category="translator">Plain-text invite email body. {0} = organization name, {1} = expiry timestamp, {2} = invite link. Keep the blank lines and the trailing newline.</note>
@@ -91,6 +123,38 @@ Si vous n&apos;êtes pas à l&apos;origine de cette demande, vous pouvez ignorer
       <segment state="translated">
         <source>Reset your Dependably password</source>
         <target>Réinitialisez votre mot de passe Dependably</target>
+      </segment>
+    </unit>
+    <unit id="email.security.emailChanged.body">
+      <notes>
+        <note category="translator">Plain-text email-changed security notification body, sent to the OLD address. {0} = event timestamp. Keep the blank lines and the trailing newline.</note>
+      </notes>
+      <segment state="translated">
+        <source>The Dependably account that used this email address was moved to a different address on {0} UTC.
+
+This address can no longer sign in or receive password resets for that account.
+
+If this was you, no action is needed.
+
+If you did not make this change, contact your administrator immediately — your account may be compromised.
+</source>
+        <target>Le compte Dependably qui utilisait cette adresse courriel a été déplacé vers une autre adresse le {0} UTC.
+
+Cette adresse ne peut plus servir à se connecter ni recevoir de réinitialisation de mot de passe pour ce compte.
+
+Si vous êtes à l&apos;origine de ce changement, aucune action n&apos;est requise.
+
+Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiatement votre administrateur — votre compte pourrait être compromis.
+</target>
+      </segment>
+    </unit>
+    <unit id="email.security.emailChanged.subject">
+      <notes>
+        <note category="translator">Subject line of the security notification sent to the OLD address after an email change is confirmed.</note>
+      </notes>
+      <segment state="translated">
+        <source>Your Dependably account moved to a different email address</source>
+        <target>Votre compte Dependably a été déplacé vers une autre adresse courriel</target>
       </segment>
     </unit>
     <unit id="email.security.mfaDisabled.body">
@@ -611,6 +675,42 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
         <target>Accès refusé</target>
       </segment>
     </unit>
+    <unit id="error.internal.detail">
+      <notes>
+        <note category="translator">Body of the HTTP 500 problem response. Deliberately says nothing about the underlying fault — the correlation id is the only handle the caller gets. &quot;correlation id&quot; refers to the correlationId field of the same response.</note>
+      </notes>
+      <segment state="translated">
+        <source>The request could not be completed because of an unexpected server error. The failure has been logged; quote the correlation id when reporting it.</source>
+        <target>La requête n&apos;a pas pu aboutir en raison d&apos;une erreur inattendue du serveur. L&apos;incident a été journalisé ; indiquez l&apos;identifiant de corrélation lors de son signalement.</target>
+      </segment>
+    </unit>
+    <unit id="error.internal.title">
+      <notes>
+        <note category="translator">Title of the HTTP 500 problem response returned when a request fails unexpectedly.</note>
+      </notes>
+      <segment state="translated">
+        <source>Internal Server Error</source>
+        <target>Erreur interne du serveur</target>
+      </segment>
+    </unit>
+    <unit id="error.invite.duplicatePending">
+      <notes>
+        <note category="translator">409 detail: one pending invite per tenant and address.</note>
+      </notes>
+      <segment state="translated">
+        <source>An invitation for this email address is already pending. Cancel it before sending a new one.</source>
+        <target>Une invitation pour cette adresse courriel est déjà en attente. Annulez-la avant d&apos;en envoyer une nouvelle.</target>
+      </segment>
+    </unit>
+    <unit id="error.invite.emailInvalid">
+      <notes>
+        <note category="translator">Inviting an organization member with a malformed email address.</note>
+      </notes>
+      <segment state="translated">
+        <source>Enter a valid email address.</source>
+        <target>Saisissez une adresse courriel valide.</target>
+      </segment>
+    </unit>
     <unit id="error.invite.emailRequired">
       <notes>
         <note category="translator">Inviting an organization member without an email address.</note>
@@ -654,6 +754,15 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       <segment state="translated">
         <source>Mode must be &apos;off&apos;, &apos;warn&apos;, or &apos;block&apos;.</source>
         <target>Le mode doit être « off », « warn » ou « block ».</target>
+      </segment>
+    </unit>
+    <unit id="error.license.publishModeInvalid">
+      <notes>
+        <note category="translator">422 detail. The quoted values are API literals - do not translate them.</note>
+      </notes>
+      <segment state="translated">
+        <source>Publish mode must be &apos;off&apos;, &apos;warn&apos;, or &apos;block&apos;.</source>
+        <target>Le mode de publication doit être « off », « warn » ou « block ».</target>
       </segment>
     </unit>
     <unit id="error.license.spdxRequired">
@@ -836,6 +945,42 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
         <target>Le rôle doit être « member », « admin », « owner » ou « auditor ».</target>
       </segment>
     </unit>
+    <unit id="error.nameGrant.granteeIdRequired">
+      <notes>
+        <note category="translator">422 detail on the name-grant endpoints. &apos;granteeId&apos; is the API field name - keep it verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>granteeId is required.</source>
+        <target>granteeId est obligatoire.</target>
+      </segment>
+    </unit>
+    <unit id="error.nameGrant.granteeUnknown">
+      <notes>
+        <note category="translator">422 detail. Deliberately does not distinguish &quot;no such principal&quot; from &quot;belongs to another organization&quot;. &apos;granteeId&apos; is the API field name - keep it verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>granteeId does not name a user or service token in this organization.</source>
+        <target>granteeId ne désigne aucun utilisateur ni jeton de service de cette organisation.</target>
+      </segment>
+    </unit>
+    <unit id="error.nameGrant.nameNotBound">
+      <notes>
+        <note category="translator">404 detail on POST /api/v1/name-grants.</note>
+      </notes>
+      <segment state="translated">
+        <source>No publisher is bound to that package name in this organization, so a co-publish grant would have no effect.</source>
+        <target>Aucun éditeur n&apos;est lié à ce nom de paquet dans cette organisation ; une autorisation de copublication n&apos;aurait donc aucun effet.</target>
+      </segment>
+    </unit>
+    <unit id="error.nameGrant.nameRequired">
+      <notes>
+        <note category="translator">422 detail on the name-grant endpoints. &apos;name&apos; is the API field name - keep it verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>name is required.</source>
+        <target>name est obligatoire.</target>
+      </segment>
+    </unit>
     <unit id="error.notFound.title">
       <notes>
         <note category="translator">Title of the HTTP 404 problem response.</note>
@@ -978,6 +1123,15 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       <segment state="translated">
         <source>Forms login can only be disabled when SAML is enabled.</source>
         <target>La connexion par formulaire ne peut être désactivée que lorsque SAML est activé.</target>
+      </segment>
+    </unit>
+    <unit id="error.saml.metadataInvalid">
+      <notes>
+        <note category="translator">422 detail: uploaded SAML IdP metadata failed to parse (generic fallback; raw parser exception text is never echoed).</note>
+      </notes>
+      <segment state="translated">
+        <source>IdP metadata XML could not be parsed.</source>
+        <target>Les métadonnées XML de l&apos;IdP n&apos;ont pas pu être analysées.</target>
       </segment>
     </unit>
     <unit id="error.saml.metadataXmlRequired">
@@ -1223,6 +1377,15 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
         <target>material ne doit pas être vide.</target>
       </segment>
     </unit>
+    <unit id="error.trustAnchor.unsupportedAnchorKindForEcosystem">
+      <notes>
+        <note category="translator">422 detail when the (ecosystem, anchorKind) pair has no registered material validator. {0} = the rejected anchorKind, {1} = the ecosystem, {2} = comma-joined allowed anchorKind values for that ecosystem (API literals).</note>
+      </notes>
+      <segment state="translated">
+        <source>anchorKind &quot;{0}&quot; is not supported for ecosystem &quot;{1}&quot;. Supported anchorKind values for {1}: {2}.</source>
+        <target>anchorKind « {0} » n&apos;est pas pris en charge pour ecosystem « {1} ». Valeurs anchorKind prises en charge pour {1} : {2}.</target>
+      </segment>
+    </unit>
     <unit id="error.unauthorized.title">
       <notes>
         <note category="translator">Title of the HTTP 401 problem response (authentication missing or failed).</note>
@@ -1286,6 +1449,15 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
         <target>secret est obligatoire pour authType=bearer.</target>
       </segment>
     </unit>
+    <unit id="error.upstream.httpsRequired">
+      <notes>
+        <note category="translator">422 detail. Keep &apos;http://&apos;, &apos;https://&apos;, and the config key &apos;Proxy:AllowInsecureUpstreams&apos; verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>Plaintext http:// upstreams are not allowed. Use an https:// URL, or set Proxy:AllowInsecureUpstreams to permit insecure upstreams.</source>
+        <target>Les amonts http:// en clair ne sont pas autorisés. Utilisez une URL https://, ou définissez Proxy:AllowInsecureUpstreams pour autoriser les amonts non sécurisés.</target>
+      </segment>
+    </unit>
     <unit id="error.upstream.httpsRequiredForAuth">
       <notes>
         <note category="translator">422 detail. Keep the URL schemes &apos;https://&apos; and &apos;http://&apos; verbatim.</note>
@@ -1347,6 +1519,42 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       <segment state="translated">
         <source>Authenticated upstreams are not supported for ecosystem=rpm.</source>
         <target>Les amonts authentifiés ne sont pas pris en charge pour ecosystem=rpm.</target>
+      </segment>
+    </unit>
+    <unit id="error.user.emailManagedByIdp">
+      <notes>
+        <note category="translator">Conflict returned when an email change is requested for a SAML-backed account.</note>
+      </notes>
+      <segment state="translated">
+        <source>This account signs in through your identity provider, which is authoritative for its email address. Change it there instead — a local edit would be overwritten at the next login.</source>
+        <target>Ce compte se connecte via votre fournisseur d&apos;identité, qui fait autorité sur son adresse courriel. Modifiez-la à cet endroit — une modification locale serait écrasée à la prochaine connexion.</target>
+      </segment>
+    </unit>
+    <unit id="error.user.emailTaken">
+      <notes>
+        <note category="translator">Conflict returned when the requested new email address is already taken in the tenant.</note>
+      </notes>
+      <segment state="translated">
+        <source>That email address is already used by another member of this organization.</source>
+        <target>Cette adresse courriel est déjà utilisée par un autre membre de cette organisation.</target>
+      </segment>
+    </unit>
+    <unit id="error.user.emailUnchanged">
+      <notes>
+        <note category="translator">Conflict returned when an email change requests the address the account already has.</note>
+      </notes>
+      <segment state="translated">
+        <source>That is already this account&apos;s email address.</source>
+        <target>Il s&apos;agit déjà de l&apos;adresse courriel de ce compte.</target>
+      </segment>
+    </unit>
+    <unit id="error.user.reauthRequired">
+      <notes>
+        <note category="translator">Validation error returned when a self-service email change omits or fails the password re-entry.</note>
+      </notes>
+      <segment state="translated">
+        <source>Enter your current password to change your email address.</source>
+        <target>Saisissez votre mot de passe actuel pour modifier votre adresse courriel.</target>
       </segment>
     </unit>
     <unit id="error.validation.title">

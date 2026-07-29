@@ -61,7 +61,7 @@ public sealed class InstanceLockTests : IAsyncLifetime
     private async Task SeedForeignHolderAsync(string instanceId, DateTimeOffset heartbeat)
     {
         await using var conn = await _db.OpenAsync();
-        string iso = heartbeat.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string iso = heartbeat.UtcDateTime.ToUtcIso();
         await conn.ExecuteAsync(
             """
             INSERT INTO instance_lock (id, instance_id, hostname, heartbeat_at, acquired_at)
@@ -76,7 +76,7 @@ public sealed class InstanceLockTests : IAsyncLifetime
         await using var conn = await _db.OpenAsync();
         await conn.ExecuteAsync(
             "UPDATE instance_lock SET heartbeat_at = @hb WHERE id = 'primary'",
-            new { hb = heartbeat.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ") });
+            new { hb = heartbeat.UtcDateTime.ToUtcIso() });
     }
 
     // Drives a pending acquisition that is waiting out a fresh foreign holder: steps the fake clock
@@ -278,7 +278,7 @@ public sealed class InstanceLockTests : IAsyncLifetime
                 INSERT INTO instance_lock (id, instance_id, hostname, heartbeat_at, acquired_at)
                 VALUES ('primary', 'foreign', 'h', @hb, @hb)
                 """,
-                new { hb = clock.GetUtcNow().UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ") });
+                new { hb = clock.GetUtcNow().UtcDateTime.ToUtcIso() });
         }
 
         await guard.TryAcquireAsync(); // must not throw

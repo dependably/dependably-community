@@ -1,10 +1,17 @@
 <script>
+  import { reportPageLoad } from '../lib/pageLoad.js'
   import { onMount } from 'svelte'
   import { t } from 'svelte-i18n'
   import { systemApi } from '../lib/api.js'
 
   let banners = []
   let loading = true
+
+  /** The route transition this page was mounted for, supplied by RouteView. @type {number | null} */
+  export let pageToken = null
+  // Holds the deferred navigation that mounted this page until the data is here, so the
+  // swap shows the loaded page rather than a shimmer that lives for a hundred milliseconds.
+  $: reportPageLoad(pageToken, loading)
   let error = ''
 
   let createOpen = false

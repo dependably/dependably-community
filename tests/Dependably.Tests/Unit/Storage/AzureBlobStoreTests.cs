@@ -202,6 +202,40 @@ public sealed class AzureBlobStoreTests
             () => new AzureBlobStore(connectionString: "not-a-real-connection-string", containerName: "c"));
     }
 
+    // ── Presigned reads ───────────────────────────────────────────────────────
+
+    [Fact]
+    public void SupportsPresignedReads_MirrorsTheContainersSigningCredential()
+    {
+        // A container bound to a SAS URL or a token credential cannot sign a service SAS. The
+        // store reports that as "unsupported" so the caller streams, rather than discovering it
+        // through a throwing signing call on a live pull.
+        _container.CanGenerateReadSasUri.Returns(false);
+        Assert.False(Sut.SupportsPresignedReads);
+
+        _container.CanGenerateReadSasUri.Returns(true);
+        Assert.True(Sut.SupportsPresignedReads);
+    }
+
+    [Fact]
+    public async Task TryCreatePresignedReadUrlAsync_DelegatesToContainerWithTheGivenExpiry()
+    {
+        var expiresAt = new DateTimeOffset(2026, 6, 15, 12, 1, 0, TimeSpan.Zero);
+        var signed = new Uri("https://acct.blob.core.windows.net/c/k?sig=abc");
+        _container.TryGenerateReadSasUriAsync("k", expiresAt, Arg.Any<CancellationToken>()).Returns(signed);
+
+        Assert.Same(signed, await Sut.TryCreatePresignedReadUrlAsync("k", expiresAt));
+    }
+
+    [Fact]
+    public async Task TryCreatePresignedReadUrlAsync_MissingBlob_PassesThroughNull()
+    {
+        _container.TryGenerateReadSasUriAsync(Arg.Any<string>(), Arg.Any<DateTimeOffset>(), Arg.Any<CancellationToken>())
+            .Returns((Uri?)null);
+
+        Assert.Null(await Sut.TryCreatePresignedReadUrlAsync("gone", DateTimeOffset.UnixEpoch));
+    }
+
     private static async IAsyncEnumerable<long> AsyncEnum(params long[] values)
     {
         foreach (long v in values) { await Task.Yield(); yield return v; }

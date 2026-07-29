@@ -149,6 +149,50 @@ public sealed class S3BlobStoreTests
         Assert.Equal(1234, await sut.GetTotalSizeAsync());
     }
 
+    // ── Presigned reads ───────────────────────────────────────────────────────
+
+    [Fact]
+    public void S3_AdvertisesThePresignCapability()
+    {
+        // SigV4 query signing uses the same credential that reads the object, so a store that
+        // can serve a key can always sign one.
+        var sut = NewSut();
+        Assert.True(Assert.IsAssignableFrom<IPresignedReadBlobStore>(sut).SupportsPresignedReads);
+    }
+
+    [Fact]
+    public async Task TryCreatePresignedReadUrlAsync_ExistingObject_SignsGetForTheGivenExpiry()
+    {
+        var expiresAt = new DateTimeOffset(2026, 6, 15, 12, 1, 0, TimeSpan.Zero);
+        _s3.GetPreSignedURLAsync(Arg.Any<GetPreSignedUrlRequest>())
+            .Returns("https://bucket.s3.amazonaws.com/oci/sha256/abc?X-Amz-Signature=deadbeef");
+
+        await using var sut = NewSut("the-bucket");
+        var url = await sut.TryCreatePresignedReadUrlAsync("oci/sha256/abc", expiresAt);
+
+        Assert.NotNull(url);
+        Assert.Equal("https://bucket.s3.amazonaws.com/oci/sha256/abc?X-Amz-Signature=deadbeef", url!.ToString());
+        await _s3.Received(1).GetPreSignedURLAsync(Arg.Is<GetPreSignedUrlRequest>(r =>
+            r.BucketName == "the-bucket"
+            && r.Key == "oci/sha256/abc"
+            && r.Verb == HttpVerb.GET
+            && r.Expires == expiresAt.UtcDateTime));
+    }
+
+    [Fact]
+    public async Task TryCreatePresignedReadUrlAsync_MissingObject_ReturnsNullWithoutSigning()
+    {
+        // Signing a key with no object behind it would hand the caller a URL that 404s at S3,
+        // replacing the caller's cache-miss fall-through with a dead end.
+        _s3.GetObjectMetadataAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns<Task<GetObjectMetadataResponse>>(
+                _ => throw new AmazonS3Exception("404") { StatusCode = HttpStatusCode.NotFound });
+
+        await using var sut = NewSut();
+        Assert.Null(await sut.TryCreatePresignedReadUrlAsync("gone/key", DateTimeOffset.UnixEpoch));
+        await _s3.DidNotReceive().GetPreSignedURLAsync(Arg.Any<GetPreSignedUrlRequest>());
+    }
+
     [Fact]
     public async Task DisposeAsync_WhenOwnsClient_DisposesUnderlyingClient()
     {

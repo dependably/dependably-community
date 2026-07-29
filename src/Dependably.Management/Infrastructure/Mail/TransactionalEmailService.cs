@@ -38,6 +38,16 @@ public sealed class TransactionalEmailService
         _queue.Enqueue(new PasswordResetEmailJob(toAddress, resetLink, expiresAt, _instanceConfig, _localizer, _logger));
 
     /// <summary>
+    /// Non-blocking: enqueues the verification link for a pending email change to the address
+    /// being moved TO — possession of that mailbox is what authorizes the move. A no-op when the
+    /// instance SMTP transport is not enabled/configured, in which case the pending request simply
+    /// expires unredeemed and the account keeps its current address.
+    /// </summary>
+    public void EnqueueEmailChangeVerification(string toAddress, string verifyLink, DateTimeOffset expiresAt) =>
+        _queue.Enqueue(new EmailChangeVerificationJob(
+            toAddress, verifyLink, expiresAt, _instanceConfig, _localizer, _logger));
+
+    /// <summary>
     /// Non-blocking: enqueues an "MFA enabled" notification to the acting user's own address, in
     /// their already-resolved effective language. A no-op when the instance SMTP transport is not
     /// enabled/configured — callers never gate the HTTP response on delivery.
@@ -54,6 +64,16 @@ public sealed class TransactionalEmailService
     public void EnqueueMfaDisabled(string toAddress, string language, DateTimeOffset occurredAt) =>
         _queue.Enqueue(new SecurityEventEmailJob(
             SecurityEventKind.MfaDisabled, toAddress, language, occurredAt, _instanceConfig, _localizer, _logger));
+
+    /// <summary>
+    /// Non-blocking: enqueues an "email address changed" notification to the address the account
+    /// just moved AWAY from, in the user's effective language. That mailbox has lost control of
+    /// the account, so it is the one place a hostile change still surfaces to someone able to act
+    /// on it. A no-op when the instance SMTP transport is not enabled/configured.
+    /// </summary>
+    public void EnqueueEmailChanged(string toAddress, string language, DateTimeOffset occurredAt) =>
+        _queue.Enqueue(new SecurityEventEmailJob(
+            SecurityEventKind.EmailChanged, toAddress, language, occurredAt, _instanceConfig, _localizer, _logger));
 
     /// <summary>
     /// Non-blocking: enqueues a "password changed" notification to the affected user's own

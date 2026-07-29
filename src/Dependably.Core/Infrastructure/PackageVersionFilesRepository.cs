@@ -29,7 +29,7 @@ public sealed class PackageVersionFilesRepository
     {
         await using var conn = await _db.OpenAsync(ct);
         string id = Guid.NewGuid().ToString("N");
-        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToUtcIso();
         await conn.ExecuteAsync(
             """
             INSERT INTO package_version_files
@@ -63,7 +63,7 @@ public sealed class PackageVersionFilesRepository
             new { fileId });
         if (versionId is not null)
         {
-            string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+            string now = _time.GetUtcNow().ToUtcIso();
             await RefreshVersionAfterFileChangeAsync(conn, versionId, now);
         }
     }

@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using Dependably.Infrastructure;
 using Dependably.Protocol;
 using Dependably.Security;
@@ -9,7 +10,8 @@ namespace Dependably.Api;
 /// <summary>
 /// Review queue for policy-gate blocks. An admin surface end to end: list requires
 /// ReadTenant, decisions require TenantConfigure.
-///   GET  /api/v1/quarantine                — list entries, filterable by state/ecosystem
+///   GET  /api/v1/quarantine                — paged list, filtered by state/ecosystem/gate/search
+///                                            and sorted by a whitelisted column
 ///   POST /api/v1/quarantine/{id}/decide    — approve or deny a pending entry
 /// Approval sets the version's manual allow override (the existing short-circuit unblocks
 /// every gate); denial sets the manual block. Version-less entries (proxy artifacts, which
@@ -24,6 +26,9 @@ public sealed class QuarantineController : OrgScopedControllerBase
 {
     // Maximum page size for quarantine list responses.
     private const int MaxQuarantinePageSize = 200;
+
+    // Longest accepted `search` term; anything past this is truncated, not rejected.
+    private const int MaxSearchLength = 200;
 
     private readonly QuarantineRepository _quarantine;
     private readonly PackageRepository _packages;
@@ -58,13 +63,26 @@ public sealed class QuarantineController : OrgScopedControllerBase
         _tenantAccess = tenantAccess;
     }
 
-    /// <summary>GET /api/v1/quarantine?state=pending&amp;ecosystem=npm&amp;limit=50&amp;offset=0</summary>
+    /// <summary>
+    /// GET /api/v1/quarantine?state=pending&amp;ecosystem=npm&amp;gate=malicious&amp;search=lodash
+    ///     &amp;sort=updated&amp;dir=desc&amp;limit=50&amp;offset=0
+    /// </summary>
     // Read-only: accepts a PAT/service token carrying read:tenant. The decide action below
     // stays JWT-only (class-level [Authorize]) — its TenantConfigure gate is unaffected.
+    //
+    // Every filter is a server parameter rather than something the client narrows after the fact:
+    // the response is one page of a larger queue, so a client-side filter would filter the page
+    // and disagree with the `total` the pager is drawn from.
     [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [HttpGet("api/v1/quarantine")]
+    [SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
+        Justification = "Each parameter is an independent query-string filter, sort, or paging " +
+                        "input bound by the framework; bundling them into a model would hide the " +
+                        "endpoint's contract from the generated OpenAPI document.")]
     public async Task<IActionResult> List(
         [FromQuery] string? state, [FromQuery] string? ecosystem,
+        [FromQuery] string? gate, [FromQuery] string? search,
+        [FromQuery] string? sort, [FromQuery] string? dir,
         [FromQuery] int limit = 50, [FromQuery] int offset = 0,
         CancellationToken ct = default)
     {
@@ -81,11 +99,23 @@ public sealed class QuarantineController : OrgScopedControllerBase
 
         limit = Math.Clamp(limit, 1, MaxQuarantinePageSize);
         offset = Math.Max(offset, 0);
+        // An over-long search is truncated rather than rejected: it only ever widens into a LIKE
+        // pattern, and a bounded one keeps the scan bounded too. `gate`, `sort`, and `dir` need no
+        // validation here — an unknown gate simply matches nothing, and the repository's sort
+        // whitelist falls back to its default for anything it does not recognise.
+        if (search is { Length: > MaxSearchLength })
+        {
+            search = search[..MaxSearchLength];
+        }
 
         string orgId = CurrentTenantId();
         var settings = await _orgs.GetSettingsAsync(orgId, ct);
         await _quarantine.PurgeAgedReleaseHoldsAsync(orgId, settings?.MinReleaseAgeHours, ct);
-        var (items, total) = await _quarantine.ListAsync(orgId, state, ecosystem, limit, offset, ct);
+        var (items, total) = await _quarantine.ListAsync(
+            new QuarantineListQuery(orgId, state, ecosystem, gate, search, limit, offset, sort, dir), ct);
+        // snake_case, unlike the camelCase house style for browser-facing payloads: this endpoint
+        // already ships decided_by/updated_at to PAT and service-token consumers, and recasing it
+        // would break them for no gain. The frontend reads these names as they are.
         return Ok(new
         {
             total,
@@ -98,6 +128,7 @@ public sealed class QuarantineController : OrgScopedControllerBase
                 detail = e.Detail,
                 state = e.State,
                 decided_by = e.DecidedBy,
+                decided_by_email = e.DecidedByEmail,
                 decided_at = e.DecidedAt,
                 note = e.Note,
                 created_at = e.CreatedAt,

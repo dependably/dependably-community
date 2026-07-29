@@ -85,8 +85,10 @@ public sealed class OrgAuditController : OrgScopedControllerBase
                 return _problems.ValidationErrorActionKey("since", "error.activity.sinceInvalid");
             }
 
-            sinceIso = _time.GetUtcNow().Subtract(window).UtcDateTime.ToString(
-                "yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture);
+            // Millisecond precision — activity.created_at is written at millisecond precision
+            // (AuditRepository.LogActivityAsync's NowMs()); a second-precision bound here would
+            // drop rows landing in the same wall-clock second as the window boundary.
+            sinceIso = _time.GetUtcNow().Subtract(window).ToUtcIsoMillis();
         }
 
         if (string.Equals(format, "csv", StringComparison.OrdinalIgnoreCase))
@@ -96,6 +98,8 @@ public sealed class OrgAuditController : OrgScopedControllerBase
             CsvWriter.WriteRow(sb, "created_at", "event_type", "ecosystem", "purl", "actor_email", "source_ip", "detail");
             foreach (var item in csvItems)
             {
+                // utcformat-ok: CSV export wire format, not a DB write — preserves the millisecond
+                // precision activity.created_at actually carries rather than truncating it away.
                 CsvWriter.WriteRow(sb,
                     item.CreatedAt.ToString("o", System.Globalization.CultureInfo.InvariantCulture),
                     item.EventType, item.Ecosystem, item.Purl,
@@ -143,6 +147,8 @@ public sealed class OrgAuditController : OrgScopedControllerBase
             CsvWriter.WriteRow(sb, "created_at", "action", "actor_email", "ecosystem", "purl", "detail");
             foreach (var item in csvItems)
             {
+                // utcformat-ok: CSV export wire format, not a DB write — preserves the millisecond
+                // precision audit_log.created_at actually carries rather than truncating it away.
                 CsvWriter.WriteRow(sb,
                     item.CreatedAt.ToString("o", System.Globalization.CultureInfo.InvariantCulture),
                     item.Action, item.ActorEmail, item.Ecosystem, item.Purl, item.Detail);

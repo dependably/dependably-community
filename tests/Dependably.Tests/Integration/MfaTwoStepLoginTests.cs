@@ -398,15 +398,13 @@ public sealed class MfaTwoStepLoginTests : IClassFixture<DependablyFactory>, IAs
         Assert.NotNull(mfaCookie);
 
         // Try to access a protected endpoint using the challenge token as a session cookie.
-        // The RouteScopeFilter rejects scope=mfa_challenge on tenant routes — it returns
-        // NotFound (404) per the 404-not-403 realm-boundary stance so cross-realm probing
-        // reveals nothing, rather than Unauthorized (401).
+        // The challenge carries the MFA-challenge audience and the session scheme pins the
+        // session audience, so token validation refuses it and the request never authenticates:
+        // 401, decided before RouteScopeFilter or any scope check gets a principal to inspect.
         using var req = new HttpRequestMessage(HttpMethod.Get, "/api/v1/auth/me");
         req.Headers.Add("Cookie", $"dependably_session={mfaCookie}");
         var meResp = await c.SendAsync(req);
-        Assert.True(
-            meResp.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.NotFound,
-            $"Expected 401 or 404, got {meResp.StatusCode}");
+        Assert.Equal(HttpStatusCode.Unauthorized, meResp.StatusCode);
     }
 
     // ── Remember-device skips step 2 ──────────────────────────────────────────

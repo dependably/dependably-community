@@ -18,8 +18,7 @@ public sealed class AuditRepository
 
     // Millisecond-precision UTC ISO-8601, so multiple events emitted in the same wall-clock
     // second still order deterministically (e.g. first_fetch → vuln_scan → blocked_vuln_score).
-    private string NowMs() =>
-        _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture);
+    private string NowMs() => _time.GetUtcNow().ToUtcIsoMillis();
 
     // Convenience overload for tenant-scope events. Most call sites use this; the action plus
     // a handful of optional named arguments (orgId, actorId, actorKind, ecosystem, purl, detail,
@@ -298,6 +297,19 @@ public sealed class AuditRepository
     /// Lists auth-relevant audit events for the SIEM events/auth endpoint.
     /// Filters by action prefix (e.g. "login.") and optional org scope.
     /// Paged by (created_at DESC, id DESC); cursor = base64(timestamp|id).
+    ///
+    /// <c>audit_log.created_at</c> is millisecond-precision text (<see cref="NowMs"/> is its only
+    /// writer), so <paramref name="since"/>/<paramref name="until"/> and the cursor timestamp are
+    /// all formatted through <see cref="UtcTimestamp.ToUtcIsoMillis"/> to match: comparing a
+    /// second-precision bound against millisecond-precision rows misorders on <c>'.'</c> (0x2E)
+    /// sorting before <c>'Z'</c> (0x5A), so a row at <c>:00.500Z</c> would fail
+    /// <c>&gt;= :00Z</c> and one at <c>:00.000Z</c> would falsely fail <c>&lt;= :00Z</c>. The window
+    /// stays closed on both ends (<c>&gt;=</c>/<c>&lt;=</c>) — <see cref="SiemController"/>'s
+    /// default <paramref name="until"/> is "now", so a half-open upper bound would silently drop
+    /// the instant the request was made; a poller re-supplying the previous page's <c>until</c> as
+    /// the next <c>since</c> can see one event appear on both polls only when an event landed
+    /// exactly on that millisecond, which the cursor's own strictly-less-than comparison already
+    /// prevents from being returned twice within a single paged read.
     /// </summary>
     public async Task<(IReadOnlyList<AuditEntry> Items, string? NextCursor)> ListAuthEventsAsync(
         DateTimeOffset since,
@@ -316,7 +328,10 @@ public sealed class AuditRepository
             ? actionFilter.Select(a => a.TrimEnd('.') + ".").ToArray()
             : defaultActions;
 
-        // Decode cursor
+        // Decode cursor. A cursor whose timestamp half doesn't parse as exact millisecond-precision
+        // canonical UTC text is rejected outright (treated the same as no cursor — first page)
+        // rather than bound as-is: a mismatched shape would silently mis-compare against the
+        // millisecond-precision column instead of failing loudly.
         string? cursorTs = null;
         string? cursorId = null;
         if (afterCursor is not null)
@@ -325,7 +340,14 @@ public sealed class AuditRepository
             {
                 string decoded = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(afterCursor));
                 string[] parts = decoded.Split('|', 2);
-                if (parts.Length == 2) { cursorTs = parts[0]; cursorId = parts[1]; }
+                if (parts.Length == 2
+                    && DateTimeOffset.TryParseExact(
+                        parts[0], UtcTimestamp.MillisecondFormat, System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.AssumeUniversal, out _))
+                {
+                    cursorTs = parts[0];
+                    cursorId = parts[1];
+                }
             }
             catch { /* invalid cursor — ignore, return first page */ }
         }
@@ -351,8 +373,8 @@ public sealed class AuditRepository
         var rows = (await conn.QueryAsync<AuditEntry>(sql, new
         {
             patternsJson,
-            since = since.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-            until = until.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            since = since.ToUtcIsoMillis(),
+            until = until.ToUtcIsoMillis(),
             orgId,
             fetch = limit + 1,
             cursorTs,
@@ -365,7 +387,7 @@ public sealed class AuditRepository
             rows.RemoveAt(rows.Count - 1);
             var last = rows[^1];
             nextCursor = Convert.ToBase64String(
-                System.Text.Encoding.UTF8.GetBytes($"{last.CreatedAt:yyyy-MM-ddTHH:mm:ssZ}|{last.Id}"));
+                System.Text.Encoding.UTF8.GetBytes($"{last.CreatedAt.ToUtcIsoMillis()}|{last.Id}"));
         }
 
         return (rows, nextCursor);

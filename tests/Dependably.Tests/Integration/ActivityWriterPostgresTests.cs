@@ -92,8 +92,7 @@ public sealed class ActivityWriterPostgresTests
                 ActorKind: null,
                 Detail: null,
                 SourceIp: null,
-                CreatedAt: TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ",
-                    System.Globalization.CultureInfo.InvariantCulture));
+                CreatedAt: TestTime.KnownNow.ToUtcIsoMillis());
             if (writer.TryEnqueue(record))
             {
                 enqueued++;

@@ -40,7 +40,11 @@ namespace Dependably.Security;
 /// that trusts every address on the internet, which would also let any
 /// caller impersonate an allowlisted address against <c>/version</c> and the
 /// management OpenAPI/Swagger IP gates); narrower-but-still-broad ranges are
-/// an operator judgment call this code cannot safely make for them.</para>
+/// not rejected — a large proxy subnet can be a legitimate deployment — but
+/// <c>CoreStartupService</c> logs a startup warning naming any entry wider
+/// than <see cref="Dependably.Infrastructure.ConfigurationExtensions.BroadIpv4PrefixThreshold"/>
+/// or <see cref="Dependably.Infrastructure.ConfigurationExtensions.BroadIpv6PrefixThreshold"/>,
+/// so the trade-off is visible at boot rather than silent.</para>
 ///
 /// <para><see cref="AuditRepository"/> is resolved per-request via
 /// <c>ctx.RequestServices</c> because this middleware is a singleton and

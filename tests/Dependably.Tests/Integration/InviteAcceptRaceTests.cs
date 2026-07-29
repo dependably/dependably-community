@@ -47,7 +47,7 @@ public sealed class InviteAcceptRaceTests : IClassFixture<DependablyFactory>, IA
 
         var invites = _factory.Services.GetRequiredService<InviteRepository>();
         string email = $"race-{Guid.NewGuid():N}@x.test";
-        var (raw, _) = await invites.CreateAsync(orgId, email, adminId, "member");
+        var (raw, _) = (await invites.CreateAsync(orgId, email, adminId, "member"))!;
         return (orgId, raw);
     }
 
@@ -150,14 +150,14 @@ public sealed class InviteAcceptRaceTests : IClassFixture<DependablyFactory>, IA
         // Create a valid invite via the repo, then back-date its expires_at in the DB.
         var invites = _factory.Services.GetRequiredService<InviteRepository>();
         string email = $"expired-{Guid.NewGuid():N}@x.test";
-        var (raw, record) = await invites.CreateAsync(orgId, email, adminId, "member");
+        var (raw, record) = (await invites.CreateAsync(orgId, email, adminId, "member"))!;
 
         await using (var conn = await store.OpenAsync())
         {
             // now-ok: back-dating an invite row in the DB for test purposes; no frozen clock
             // is available here because InviteRepository.CreateAsync uses the real system
             // clock in the integration host (DependablyFactory does not freeze by default).
-            string pastExpiry = DateTimeOffset.UtcNow.AddHours(-48).ToString("yyyy-MM-ddTHH:mm:ssZ");
+            string pastExpiry = DateTimeOffset.UtcNow.AddHours(-48).ToUtcIso();
             await conn.ExecuteAsync(
                 "UPDATE invites SET expires_at = @expiry WHERE id = @id",
                 new { expiry = pastExpiry, id = record.Id });

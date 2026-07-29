@@ -82,4 +82,72 @@ public sealed class EdgeRootStartupGuardTests
         Assert.Throws<InvalidOperationException>(
             () => EdgeProgram.ValidateEdgeConfigurationForTest(config));
     }
+
+    /// <summary>
+    /// Multi-replica edge is not a supported topology (#465): this composition root registers
+    /// <c>InProcessDistributedLock</c> unconditionally and runs the full background-service set, so
+    /// N edge replicas sharing one Postgres database would let every replica win every leader-lock
+    /// acquisition and run every scheduled job concurrently — including
+    /// <c>OrphanBlobReconcilerService</c> deleting blobs from N replicas at once. DB_PROVIDER=postgres
+    /// must fail fast rather than silently permit that topology.
+    /// </summary>
+    [Fact]
+    public void PostgresDbProvider_FailsFast()
+    {
+        var config = Config(
+            ("DB_PROVIDER", "postgres"),
+            ("EDGE_MASTER_URL", "https://master.example.com"),
+            ("EDGE_MASTER_TOKEN", "tok"));
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => EdgeProgram.ValidateEdgeConfigurationForTest(config));
+        Assert.Contains("DB_PROVIDER", ex.Message);
+        Assert.Contains("postgres", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("sqlite")]
+    [InlineData(null)]
+    public void NonPostgresDbProvider_Passes(string? provider)
+    {
+        var config = Config(
+            ("DB_PROVIDER", provider),
+            ("EDGE_MASTER_URL", "https://master.example.com"),
+            ("EDGE_MASTER_TOKEN", "tok"));
+
+        EdgeProgram.ValidateEdgeConfigurationForTest(config);
+    }
+
+    /// <summary>
+    /// The other half of the same guard (#465): DEPENDABLY_DEPLOYMENT_MODE=ha names Redis-coordinated
+    /// multi-replica orchestration the edge root cannot honour — it has no Redis wiring and no
+    /// leader-aware background services — so it must fail fast rather than silently run every
+    /// scheduled job on every replica.
+    /// </summary>
+    [Fact]
+    public void HaDeploymentMode_FailsFast()
+    {
+        var config = Config(
+            ("DEPENDABLY_DEPLOYMENT_MODE", "ha"),
+            ("EDGE_MASTER_URL", "https://master.example.com"),
+            ("EDGE_MASTER_TOKEN", "tok"));
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => EdgeProgram.ValidateEdgeConfigurationForTest(config));
+        Assert.Contains("DEPENDABLY_DEPLOYMENT_MODE", ex.Message);
+        Assert.Contains("ha", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("standalone")]
+    [InlineData(null)]
+    public void NonHaDeploymentMode_Passes(string? mode)
+    {
+        var config = Config(
+            ("DEPENDABLY_DEPLOYMENT_MODE", mode),
+            ("EDGE_MASTER_URL", "https://master.example.com"),
+            ("EDGE_MASTER_TOKEN", "tok"));
+
+        EdgeProgram.ValidateEdgeConfigurationForTest(config);
+    }
 }

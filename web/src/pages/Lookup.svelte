@@ -11,6 +11,7 @@
   import { extractErrorMessage } from '../lib/form.js'
   import { readQuery, writeQuery } from '../lib/tableState.js'
   import ErrorBanner from '../lib/ErrorBanner.svelte'
+  import Skeleton from '../lib/Skeleton.svelte'
 
   // Only the ecosystems GET /api/v1/lookup accepts — a subset of the full registry vocabulary
   // (RPM and OCI are not OSV-covered and have no wired lookup metadata source).
@@ -106,7 +107,24 @@
   <ErrorBanner message={error} />
 
   {#if loading}
-    <p class="text-muted">{$t('common.loading')}</p>
+    <!-- Built from the real verdict classes so the reserved box is the loaded box: three cards
+         matching the malware / vulnerabilities / license trio below. .check-grid is
+         auto-fit, so the placeholder wraps to the same rows the result will. -->
+    <div class="verdict-panel" aria-busy="true">
+      <div class="verdict-header">
+        <Skeleton width="90px" height="20px" />
+        <Skeleton width="260px" height="14px" />
+      </div>
+      <div class="check-grid">
+        {#each [0, 1, 2] as i (i)}
+          <div class="check-card">
+            <Skeleton width="130px" height="14px" />
+            <Skeleton width="80%" height="12px" />
+            <Skeleton width="55%" height="12px" />
+          </div>
+        {/each}
+      </div>
+    </div>
   {:else if result && !result.found}
     <!--
       A package the upstream has never heard of is an answer, not an error — the endpoint

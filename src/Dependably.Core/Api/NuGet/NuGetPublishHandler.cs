@@ -35,7 +35,7 @@ public sealed class NuGetPublishHandler(
     ClaimResolver claimResolver,
     LicenseRepository licenses,
     NuGetSymbolIndexRepository symbolIndex,
-    RenderedResponseCache<NuGetRegistrationKey> cache,
+    MetadataInvalidationCoordinator invalidation,
     ILogger<NuGetPublishHandler> logger,
     TimeProvider time,
     string stagingPath,
@@ -140,20 +140,16 @@ public sealed class NuGetPublishHandler(
         await using var conn = await db.OpenAsync(ct);
         // Stamp yanked_at so the unlist-age retention gate (purge_unlisted_after_days) can
         // measure time since this unlist rather than since the version was published.
-        string yankedAt = time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string yankedAt = time.GetUtcNow().ToUtcIso();
         // xtenant: keyed by the version PK resolved above via GetByPurlNameAsync(orgId, …) →
         // GetVersionAsync(pkg.Id, …); an unknown or cross-tenant coordinate already 404'd.
         await conn.ExecuteAsync(
             "UPDATE package_versions SET yanked = 1, yanked_at = @yankedAt WHERE id = @id",
             new { id = pkgVersion.Id, yankedAt });
 
-        // Evict all four registration cache entries (semver1/2 × local/proxy) so the
+        // Invalidate all four registration cache entries (semver1/2 x local/proxy) so the
         // unlisted version disappears from registration index responses immediately.
-        string normalizedPurl = id.ToLowerInvariant();
-        cache.Evict(new NuGetRegistrationKey(orgId, normalizedPurl, SemVer2: false));
-        cache.Evict(new NuGetRegistrationKey(orgId, normalizedPurl, SemVer2: true));
-        cache.Evict(new NuGetRegistrationKey(orgId, normalizedPurl, SemVer2: false) { IsProxy = true });
-        cache.Evict(new NuGetRegistrationKey(orgId, normalizedPurl, SemVer2: true) { IsProxy = true });
+        invalidation.Invalidate(MetadataInvalidation.ForNuGet(orgId, id));
 
         // Per-version operator action → activity (audit gap: unlist had no activity row before).
         string? actorId = token?.UserId;
@@ -572,12 +568,9 @@ public sealed class NuGetPublishHandler(
             }
         }
 
-        // Evict all four registration cache entries (semver1/2 × local/proxy) so the
+        // Invalidate all four registration cache entries (semver1/2 x local/proxy) so the
         // newly-pushed version appears immediately on the next registration index request.
-        cache.Evict(new NuGetRegistrationKey(ctx.OrgId, purlName, SemVer2: false));
-        cache.Evict(new NuGetRegistrationKey(ctx.OrgId, purlName, SemVer2: true));
-        cache.Evict(new NuGetRegistrationKey(ctx.OrgId, purlName, SemVer2: false) { IsProxy = true });
-        cache.Evict(new NuGetRegistrationKey(ctx.OrgId, purlName, SemVer2: true) { IsProxy = true });
+        invalidation.Invalidate(MetadataInvalidation.ForNuGet(ctx.OrgId, purlName));
 
         return new StatusCodeResult(StatusCodes.Status201Created);
     }
@@ -620,6 +613,7 @@ public sealed class NuGetPublishHandler(
             SizeCap = ctx.Limit,
             ActorUserId = ctx.Token.UserId,
             ActorKind = ctx.Token.ActorKind,
+            ActorTokenId = ctx.Token.Id,
             AuditAction = "push",
             AllowOverwrite = ctx.Settings?.AllowVersionOverwrite ?? false,
             ClaimState = artifact.ClaimState,

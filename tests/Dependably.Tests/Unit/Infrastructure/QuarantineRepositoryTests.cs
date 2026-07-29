@@ -58,17 +58,17 @@ public sealed class QuarantineRepositoryTests : IClassFixture<InMemoryDbFixture>
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"purge-a-{Guid.NewGuid():N}");
         string purl = $"pkg:npm/purge-aged-{Guid.NewGuid():N}@1.0.0";
         // 50 hours before now — well past the 24-hour hold; seed offsets are far from boundary.
-        string oldTs = TestTime.KnownNow.AddHours(-50).ToString("o");
+        string oldTs = TestTime.KnownNow.AddHours(-50).ToUtcIso();
         var (_, verId) = await SeedVersionWithPublishedAt(orgId, Guid.NewGuid().ToString("N"), oldTs);
 
         await repo.UpsertPendingAsync(orgId, "npm", purl, "release_age", null, verId);
-        var (before, beforeTotal) = await repo.ListAsync(orgId, "pending", null, 10, 0);
+        var (before, beforeTotal) = await repo.ListAsync(new QuarantineListQuery(orgId, State: "pending", Limit: 10));
         Assert.Equal(1, before.Count(e => e.Purl == purl));
 
         int deleted = await repo.PurgeAgedReleaseHoldsAsync(orgId, 24);
 
         Assert.Equal(1, deleted);
-        var (after, _) = await repo.ListAsync(orgId, null, null, 10, 0);
+        var (after, _) = await repo.ListAsync(new QuarantineListQuery(orgId, Limit: 10));
         Assert.DoesNotContain(after, e => e.Purl == purl);
     }
 
@@ -84,7 +84,7 @@ public sealed class QuarantineRepositoryTests : IClassFixture<InMemoryDbFixture>
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"purge-b-{Guid.NewGuid():N}");
         string purl = $"pkg:npm/purge-young-{Guid.NewGuid():N}@1.0.0";
         // 1 hour before now — well within the 24-hour hold.
-        string youngTs = TestTime.KnownNow.AddHours(-1).ToString("o");
+        string youngTs = TestTime.KnownNow.AddHours(-1).ToUtcIso();
         var (_, verId) = await SeedVersionWithPublishedAt(orgId, Guid.NewGuid().ToString("N"), youngTs);
 
         await repo.UpsertPendingAsync(orgId, "npm", purl, "release_age", null, verId);
@@ -92,7 +92,7 @@ public sealed class QuarantineRepositoryTests : IClassFixture<InMemoryDbFixture>
         int deleted = await repo.PurgeAgedReleaseHoldsAsync(orgId, 24);
 
         Assert.Equal(0, deleted);
-        var (remaining, _) = await repo.ListAsync(orgId, "pending", null, 10, 0);
+        var (remaining, _) = await repo.ListAsync(new QuarantineListQuery(orgId, State: "pending", Limit: 10));
         Assert.Contains(remaining, e => e.Purl == purl);
     }
 
@@ -108,7 +108,7 @@ public sealed class QuarantineRepositoryTests : IClassFixture<InMemoryDbFixture>
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"purge-c-{Guid.NewGuid():N}");
         string purl = $"pkg:npm/purge-policyoff-{Guid.NewGuid():N}@1.0.0";
         // Age does not matter when policy is off — use an arbitrary published_at.
-        string ts = TestTime.KnownNow.AddHours(-5).ToString("o");
+        string ts = TestTime.KnownNow.AddHours(-5).ToUtcIso();
         var (_, verId) = await SeedVersionWithPublishedAt(orgId, Guid.NewGuid().ToString("N"), ts);
 
         await repo.UpsertPendingAsync(orgId, "npm", purl, "release_age", null, verId);
@@ -116,7 +116,7 @@ public sealed class QuarantineRepositoryTests : IClassFixture<InMemoryDbFixture>
         int deleted = await repo.PurgeAgedReleaseHoldsAsync(orgId, null);
 
         Assert.Equal(1, deleted);
-        var (after, _) = await repo.ListAsync(orgId, null, null, 10, 0);
+        var (after, _) = await repo.ListAsync(new QuarantineListQuery(orgId, Limit: 10));
         Assert.DoesNotContain(after, e => e.Purl == purl);
     }
 
@@ -132,7 +132,7 @@ public sealed class QuarantineRepositoryTests : IClassFixture<InMemoryDbFixture>
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"purge-d-{Guid.NewGuid():N}");
         string purl = $"pkg:npm/purge-other-{Guid.NewGuid():N}@1.0.0";
         // Version is aged out, but the gate is 'deprecated', not 'release_age'.
-        string oldTs = TestTime.KnownNow.AddHours(-50).ToString("o");
+        string oldTs = TestTime.KnownNow.AddHours(-50).ToUtcIso();
         var (_, verId) = await SeedVersionWithPublishedAt(orgId, Guid.NewGuid().ToString("N"), oldTs);
 
         await repo.UpsertPendingAsync(orgId, "npm", purl, "deprecated", null, verId);
@@ -140,7 +140,7 @@ public sealed class QuarantineRepositoryTests : IClassFixture<InMemoryDbFixture>
         int deleted = await repo.PurgeAgedReleaseHoldsAsync(orgId, 24);
 
         Assert.Equal(0, deleted);
-        var (remaining, _) = await repo.ListAsync(orgId, "pending", null, 10, 0);
+        var (remaining, _) = await repo.ListAsync(new QuarantineListQuery(orgId, State: "pending", Limit: 10));
         Assert.Contains(remaining, e => e.Purl == purl);
     }
 
@@ -155,11 +155,11 @@ public sealed class QuarantineRepositoryTests : IClassFixture<InMemoryDbFixture>
         var repo = RepoWithClock(clock);
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"purge-e-{Guid.NewGuid():N}");
         string purl = $"pkg:npm/purge-decided-{Guid.NewGuid():N}@1.0.0";
-        string oldTs = TestTime.KnownNow.AddHours(-50).ToString("o");
+        string oldTs = TestTime.KnownNow.AddHours(-50).ToUtcIso();
         var (_, verId) = await SeedVersionWithPublishedAt(orgId, Guid.NewGuid().ToString("N"), oldTs);
 
         await repo.UpsertPendingAsync(orgId, "npm", purl, "release_age", null, verId);
-        var (pending, _) = await repo.ListAsync(orgId, "pending", null, 10, 0);
+        var (pending, _) = await repo.ListAsync(new QuarantineListQuery(orgId, State: "pending", Limit: 10));
         string id = pending.Single(e => e.Purl == purl).Id;
         await repo.DecideAsync(orgId, id, "denied", null, null);
 
@@ -184,8 +184,8 @@ public sealed class QuarantineRepositoryTests : IClassFixture<InMemoryDbFixture>
         string purlAged = $"pkg:npm/purge-mixed-aged-{Guid.NewGuid():N}@1.0.0";
         string purlYoung = $"pkg:npm/purge-mixed-young-{Guid.NewGuid():N}@1.0.0";
 
-        string oldTs = TestTime.KnownNow.AddHours(-50).ToString("o");
-        string youngTs = TestTime.KnownNow.AddHours(-1).ToString("o");
+        string oldTs = TestTime.KnownNow.AddHours(-50).ToUtcIso();
+        string youngTs = TestTime.KnownNow.AddHours(-1).ToUtcIso();
 
         var (_, verAged) = await SeedVersionWithPublishedAt(orgId, Guid.NewGuid().ToString("N"), oldTs);
         var (_, verYoung) = await SeedVersionWithPublishedAt(orgId, Guid.NewGuid().ToString("N"), youngTs);
@@ -196,7 +196,7 @@ public sealed class QuarantineRepositoryTests : IClassFixture<InMemoryDbFixture>
         int deleted = await repo.PurgeAgedReleaseHoldsAsync(orgId, 24);
 
         Assert.Equal(1, deleted);
-        var (remaining, total) = await repo.ListAsync(orgId, "pending", null, 10, 0);
+        var (remaining, total) = await repo.ListAsync(new QuarantineListQuery(orgId, State: "pending", Limit: 10));
         Assert.Equal(1, total);
         Assert.Contains(remaining, e => e.Purl == purlYoung);
         Assert.DoesNotContain(remaining, e => e.Purl == purlAged);
@@ -213,7 +213,7 @@ public sealed class QuarantineRepositoryTests : IClassFixture<InMemoryDbFixture>
         string orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"purge-ga-{Guid.NewGuid():N}");
         string orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"purge-gb-{Guid.NewGuid():N}");
         string purlB = $"pkg:npm/purge-xorg-{Guid.NewGuid():N}@1.0.0";
-        string oldTs = TestTime.KnownNow.AddHours(-50).ToString("o");
+        string oldTs = TestTime.KnownNow.AddHours(-50).ToUtcIso();
         var (_, verB) = await SeedVersionWithPublishedAt(orgB, Guid.NewGuid().ToString("N"), oldTs);
 
         await repo.UpsertPendingAsync(orgB, "npm", purlB, "release_age", null, verB);
@@ -222,7 +222,7 @@ public sealed class QuarantineRepositoryTests : IClassFixture<InMemoryDbFixture>
         int deleted = await repo.PurgeAgedReleaseHoldsAsync(orgA, 24);
 
         Assert.Equal(0, deleted);
-        var (remaining, _) = await repo.ListAsync(orgB, "pending", null, 10, 0);
+        var (remaining, _) = await repo.ListAsync(new QuarantineListQuery(orgB, State: "pending", Limit: 10));
         Assert.Contains(remaining, e => e.Purl == purlB);
     }
 
@@ -237,7 +237,7 @@ public sealed class QuarantineRepositoryTests : IClassFixture<InMemoryDbFixture>
         await _repo.UpsertPendingAsync(orgId, "npm", purl, "release_age", "{\"a\":1}", null);
         await _repo.UpsertPendingAsync(orgId, "npm", purl, "malicious", "{\"b\":2}", verId);
 
-        var (items, total) = await _repo.ListAsync(orgId, null, null, 10, 0);
+        var (items, total) = await _repo.ListAsync(new QuarantineListQuery(orgId, Limit: 10));
         Assert.Equal(1, total);
         // Latest gate + detail win; a later version id fills the initially-null column.
         Assert.Equal("malicious", items[0].Gate);
@@ -253,7 +253,7 @@ public sealed class QuarantineRepositoryTests : IClassFixture<InMemoryDbFixture>
         string purl = $"pkg:npm/decided-{Guid.NewGuid():N}@1.0.0";
 
         await _repo.UpsertPendingAsync(orgId, "npm", purl, "kev", null, null);
-        var (items, _) = await _repo.ListAsync(orgId, "pending", null, 10, 0);
+        var (items, _) = await _repo.ListAsync(new QuarantineListQuery(orgId, State: "pending", Limit: 10));
         string id = items.Single(i => i.Purl == purl).Id;
         Assert.True(await _repo.DecideAsync(orgId, id, "denied", null, null));
 
@@ -269,7 +269,7 @@ public sealed class QuarantineRepositoryTests : IClassFixture<InMemoryDbFixture>
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"q-{Guid.NewGuid():N}");
         string purl = $"pkg:npm/double-{Guid.NewGuid():N}@1.0.0";
         await _repo.UpsertPendingAsync(orgId, "npm", purl, "epss", null, null);
-        var (items, _) = await _repo.ListAsync(orgId, "pending", null, 10, 0);
+        var (items, _) = await _repo.ListAsync(new QuarantineListQuery(orgId, State: "pending", Limit: 10));
         string id = items.Single(i => i.Purl == purl).Id;
 
         Assert.True(await _repo.DecideAsync(orgId, id, "approved", null, "fine"));
@@ -289,7 +289,7 @@ public sealed class QuarantineRepositoryTests : IClassFixture<InMemoryDbFixture>
         string bob = await UserSeeder.InsertAsync(_fixture.Store, orgId, $"bob-{Guid.NewGuid():N}@x");
         string purl = $"pkg:npm/redecide-{Guid.NewGuid():N}@1.0.0";
         await _repo.UpsertPendingAsync(orgId, "npm", purl, "epss", null, null);
-        var (items, _) = await _repo.ListAsync(orgId, "pending", null, 10, 0);
+        var (items, _) = await _repo.ListAsync(new QuarantineListQuery(orgId, State: "pending", Limit: 10));
         string id = items.Single(i => i.Purl == purl).Id;
         Assert.True(await _repo.DecideAsync(orgId, id, "approved", alice, "vetted"));
 
@@ -309,7 +309,7 @@ public sealed class QuarantineRepositoryTests : IClassFixture<InMemoryDbFixture>
         string alice = await UserSeeder.InsertAsync(_fixture.Store, orgId, $"alice-{Guid.NewGuid():N}@x");
         string purl = $"pkg:npm/reset-{Guid.NewGuid():N}@1.0.0";
         await _repo.UpsertPendingAsync(orgId, "npm", purl, "kev", null, null);
-        var (items, _) = await _repo.ListAsync(orgId, "pending", null, 10, 0);
+        var (items, _) = await _repo.ListAsync(new QuarantineListQuery(orgId, State: "pending", Limit: 10));
         string id = items.Single(i => i.Purl == purl).Id;
         Assert.True(await _repo.DecideAsync(orgId, id, "approved", alice, "vetted"));
 
@@ -329,7 +329,7 @@ public sealed class QuarantineRepositoryTests : IClassFixture<InMemoryDbFixture>
         string orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"qb-{Guid.NewGuid():N}");
         string purl = $"pkg:npm/xorg-{Guid.NewGuid():N}@1.0.0";
         await _repo.UpsertPendingAsync(orgA, "npm", purl, "deprecated", null, null);
-        var (items, _) = await _repo.ListAsync(orgA, null, null, 10, 0);
+        var (items, _) = await _repo.ListAsync(new QuarantineListQuery(orgA, Limit: 10));
         string id = items.Single(i => i.Purl == purl).Id;
         await _repo.DecideAsync(orgA, id, "approved", null, null);
 
@@ -345,7 +345,7 @@ public sealed class QuarantineRepositoryTests : IClassFixture<InMemoryDbFixture>
         string orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"qb-{Guid.NewGuid():N}");
         string purl = $"pkg:npm/cross-{Guid.NewGuid():N}@1.0.0";
         await _repo.UpsertPendingAsync(orgA, "npm", purl, "deprecated", null, null);
-        var (items, _) = await _repo.ListAsync(orgA, null, null, 10, 0);
+        var (items, _) = await _repo.ListAsync(new QuarantineListQuery(orgA, Limit: 10));
         string id = items.Single(i => i.Purl == purl).Id;
 
         Assert.Null(await _repo.GetByIdAsync(orgB, id));
@@ -367,7 +367,7 @@ public sealed class QuarantineRepositoryTests : IClassFixture<InMemoryDbFixture>
         await _repo.ResolveForVersionAsync(orgId, verA, "allowed", null);
         await _repo.ResolveForVersionAsync(orgId, verB, "blocked", null);
 
-        var (items, _) = await _repo.ListAsync(orgId, null, null, 10, 0);
+        var (items, _) = await _repo.ListAsync(new QuarantineListQuery(orgId, Limit: 10));
         Assert.Equal("approved", items.Single(i => i.Purl == purlA).State);
         Assert.Equal("denied", items.Single(i => i.Purl == purlB).State);
     }
@@ -380,7 +380,7 @@ public sealed class QuarantineRepositoryTests : IClassFixture<InMemoryDbFixture>
         await _repo.UpsertPendingAsync(orgId, "npm", purl, "deprecated", null, null);
         Assert.False(await _repo.HasApprovedForPurlAsync(orgId, purl));
 
-        var (items, _) = await _repo.ListAsync(orgId, "pending", null, 10, 0);
+        var (items, _) = await _repo.ListAsync(new QuarantineListQuery(orgId, State: "pending", Limit: 10));
         string id = items.Single(i => i.Purl == purl).Id;
         await _repo.DecideAsync(orgId, id, "approved", null, null);
 
@@ -397,12 +397,181 @@ public sealed class QuarantineRepositoryTests : IClassFixture<InMemoryDbFixture>
         await _repo.UpsertPendingAsync(orgId, "npm", $"pkg:npm/f1-{Guid.NewGuid():N}@1", "kev", null, null);
         await _repo.UpsertPendingAsync(orgId, "pypi", $"pkg:pypi/f2-{Guid.NewGuid():N}@1", "kev", null, null);
 
-        var (npmOnly, npmTotal) = await _repo.ListAsync(orgId, "pending", "npm", 10, 0);
+        var (npmOnly, npmTotal) = await _repo.ListAsync(new QuarantineListQuery(orgId, State: "pending", Ecosystem: "npm", Limit: 10));
         Assert.Equal(1, npmTotal);
         Assert.All(npmOnly, e => Assert.Equal("npm", e.Ecosystem));
 
-        var (denied, deniedTotal) = await _repo.ListAsync(orgId, "denied", null, 10, 0);
+        var (denied, deniedTotal) = await _repo.ListAsync(new QuarantineListQuery(orgId, State: "denied", Limit: 10));
         Assert.Equal(0, deniedTotal);
         Assert.Empty(denied);
+    }
+
+    // ── List: sort, paging, gate/search filters, decider resolution ────────────
+
+    /// <summary>
+    /// A whitelisted sort orders the whole queue, and LIMIT/OFFSET walks that order without
+    /// dropping or repeating a row. Total stays the unpaged count.
+    /// </summary>
+    [Fact]
+    public async Task List_SortsByPackage_AndPagesStably()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"q-{Guid.NewGuid():N}");
+        string tag = Guid.NewGuid().ToString("N");
+        // Inserted out of order, so passing is the sort's doing rather than insertion order's.
+        await _repo.UpsertPendingAsync(orgId, "npm", $"pkg:npm/{tag}-charlie@1", "kev", null, null);
+        await _repo.UpsertPendingAsync(orgId, "npm", $"pkg:npm/{tag}-alpha@1", "kev", null, null);
+        await _repo.UpsertPendingAsync(orgId, "npm", $"pkg:npm/{tag}-bravo@1", "kev", null, null);
+
+        var (all, total) = await _repo.ListAsync(
+            new QuarantineListQuery(orgId, Sort: "package", Dir: "asc", Limit: 10));
+        Assert.Equal(3, total);
+        Assert.Equal(
+            new[] { $"pkg:npm/{tag}-alpha@1", $"pkg:npm/{tag}-bravo@1", $"pkg:npm/{tag}-charlie@1" },
+            all.Select(e => e.Purl));
+
+        // Each single-row page is the corresponding entry of that same ordering, and the total is
+        // the queue depth rather than the page size.
+        for (int i = 0; i < 3; i++)
+        {
+            var (page, pageTotal) = await _repo.ListAsync(
+                new QuarantineListQuery(orgId, Sort: "package", Dir: "asc", Limit: 1, Offset: i));
+            Assert.Equal(3, pageTotal);
+            Assert.Equal(all[i].Purl, Assert.Single(page).Purl);
+        }
+
+        var (descending, _) = await _repo.ListAsync(
+            new QuarantineListQuery(orgId, Sort: "package", Dir: "desc", Limit: 10));
+        Assert.Equal(all.Select(e => e.Purl).Reverse(), descending.Select(e => e.Purl));
+    }
+
+    /// <summary>
+    /// An unrecognised sort key falls back to updated-descending rather than erroring, and never
+    /// reaches the SQL — a stale bookmark or a hand-edited query string still renders the queue.
+    /// </summary>
+    [Fact]
+    public async Task List_UnknownSort_FallsBackToUpdatedDesc()
+    {
+        var clock = TestTime.Frozen();
+        var repo = RepoWithClock(clock);
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"q-{Guid.NewGuid():N}");
+        string first = $"pkg:npm/fallback-first-{Guid.NewGuid():N}@1";
+        string second = $"pkg:npm/fallback-second-{Guid.NewGuid():N}@1";
+        await repo.UpsertPendingAsync(orgId, "npm", first, "kev", null, null);
+        clock.Advance(TimeSpan.FromHours(3));
+        await repo.UpsertPendingAsync(orgId, "npm", second, "kev", null, null);
+
+        var (items, _) = await repo.ListAsync(
+            new QuarantineListQuery(orgId, Sort: "'; DROP TABLE quarantine; --", Limit: 10));
+        Assert.Equal(new[] { second, first }, items.Select(e => e.Purl));
+    }
+
+    /// <summary>The decider's id is resolved to their email, with the id retained alongside it.</summary>
+    [Fact]
+    public async Task List_ResolvesDecidedByToEmail()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"q-{Guid.NewGuid():N}");
+        string email = $"reviewer-{Guid.NewGuid():N}@example.test";
+        string userId = await UserSeeder.InsertAsync(_fixture.Store, orgId, email, role: "admin");
+        string purl = $"pkg:npm/decided-{Guid.NewGuid():N}@1";
+        await _repo.UpsertPendingAsync(orgId, "npm", purl, "kev", null, null);
+        var (pending, _) = await _repo.ListAsync(new QuarantineListQuery(orgId, State: "pending", Limit: 10));
+        string id = pending.Single(e => e.Purl == purl).Id;
+
+        await _repo.DecideAsync(orgId, id, "approved", userId, null);
+
+        var entry = (await _repo.ListAsync(new QuarantineListQuery(orgId, State: "approved", Limit: 10)))
+            .Items.Single(e => e.Purl == purl);
+        Assert.Equal(email, entry.DecidedByEmail);
+        Assert.Equal(userId, entry.DecidedBy);
+    }
+
+    /// <summary>
+    /// The email join is tenant-bound. A decided_by pointing at a user of another org resolves to
+    /// null rather than surfacing a foreign tenant's address — the id still comes back, so the
+    /// queue can fall back to it. This is what pins the join's <c>u.tenant_id = q.org_id</c>
+    /// condition: without it the row below would render another org's email address.
+    /// </summary>
+    [Fact]
+    public async Task List_DecidedByEmail_DoesNotResolveAcrossTenants()
+    {
+        string orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"qa-{Guid.NewGuid():N}");
+        string orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"qb-{Guid.NewGuid():N}");
+        string foreignUser = await UserSeeder.InsertAsync(
+            _fixture.Store, orgB, $"outsider-{Guid.NewGuid():N}@other.test");
+        string purl = $"pkg:npm/xtenant-{Guid.NewGuid():N}@1";
+        await _repo.UpsertPendingAsync(orgA, "npm", purl, "kev", null, null);
+        var (pending, _) = await _repo.ListAsync(new QuarantineListQuery(orgA, State: "pending", Limit: 10));
+        string id = pending.Single(e => e.Purl == purl).Id;
+
+        // Straight to SQL: the controller cannot produce this, but a stale row or a future caller
+        // could, and the join condition is the only thing between it and a leaked address.
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "UPDATE quarantine SET state = 'approved', decided_by = @userId WHERE id = @id AND org_id = @orgId",
+                new { userId = foreignUser, id, orgId = orgA });
+        }
+
+        var entry = (await _repo.ListAsync(new QuarantineListQuery(orgA, State: "approved", Limit: 10)))
+            .Items.Single(e => e.Purl == purl);
+        Assert.Null(entry.DecidedByEmail);
+        Assert.Equal(foreignUser, entry.DecidedBy);
+    }
+
+    /// <summary>The gate filter narrows to one gate and the total follows it.</summary>
+    [Fact]
+    public async Task List_FiltersByGate()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"q-{Guid.NewGuid():N}");
+        await _repo.UpsertPendingAsync(orgId, "npm", $"pkg:npm/g1-{Guid.NewGuid():N}@1", "malicious", null, null);
+        await _repo.UpsertPendingAsync(orgId, "npm", $"pkg:npm/g2-{Guid.NewGuid():N}@1", "license", null, null);
+
+        var (malicious, total) = await _repo.ListAsync(
+            new QuarantineListQuery(orgId, Gate: "malicious", Limit: 10));
+        Assert.Equal(1, total);
+        Assert.Equal("malicious", Assert.Single(malicious).Gate);
+    }
+
+    /// <summary>
+    /// LIKE wildcards inside the search term are escaped, not honoured. PyPI names carry '_'
+    /// routinely, and unescaped it matches any single character — so a search for 'my_pkg' would
+    /// otherwise also return 'myxpkg'.
+    /// </summary>
+    [Fact]
+    public async Task List_Search_EscapesLikeWildcards()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"q-{Guid.NewGuid():N}");
+        string tag = Guid.NewGuid().ToString("N");
+        string underscored = $"pkg:pypi/{tag}my_pkg@1";
+        await _repo.UpsertPendingAsync(orgId, "pypi", underscored, "kev", null, null);
+        await _repo.UpsertPendingAsync(orgId, "pypi", $"pkg:pypi/{tag}myxpkg@1", "kev", null, null);
+
+        var (hits, total) = await _repo.ListAsync(
+            new QuarantineListQuery(orgId, Search: $"{tag}my_pkg", Limit: 10));
+        Assert.Equal(1, total);
+        Assert.Equal(underscored, Assert.Single(hits).Purl);
+    }
+
+    /// <summary>
+    /// Search reaches the joined decider email, and the count query carries the same join — a
+    /// total computed without it would advertise pages the list cannot fill.
+    /// </summary>
+    [Fact]
+    public async Task List_SearchOnDeciderEmail_KeepsTotalInStepWithItems()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"q-{Guid.NewGuid():N}");
+        string tag = Guid.NewGuid().ToString("N");
+        string userId = await UserSeeder.InsertAsync(_fixture.Store, orgId, $"{tag}@example.test", role: "admin");
+        string decided = $"pkg:npm/searched-{tag}@1";
+        await _repo.UpsertPendingAsync(orgId, "npm", decided, "kev", null, null);
+        await _repo.UpsertPendingAsync(orgId, "npm", $"pkg:npm/untouched-{tag}@1", "kev", null, null);
+        var (pending, _) = await _repo.ListAsync(new QuarantineListQuery(orgId, State: "pending", Limit: 10));
+        await _repo.DecideAsync(orgId, pending.Single(e => e.Purl == decided).Id, "approved", userId, null);
+
+        // The term matches nothing but the decider's email — not the purl, gate, detail, or note.
+        var (items, total) = await _repo.ListAsync(
+            new QuarantineListQuery(orgId, Search: $"{tag}@example.test", Limit: 10));
+        Assert.Equal(1, total);
+        Assert.Equal(decided, Assert.Single(items).Purl);
     }
 }

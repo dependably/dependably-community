@@ -80,9 +80,20 @@ internal static class AuthStartupExtensions
         builder.Services.AddSingleton<HostEcosystemMap>();
     }
 
+    // IPv6 network prefix (bits) that rate-limit partition keys collapse to. A routed /64 is the
+    // smallest allocation a single subscriber receives, so keying below it (the full /128) lets one
+    // attacker mint 2^64 fresh budgets. Operators can widen or narrow via RATE_LIMIT_IPV6_PREFIX;
+    // clamped to a legal prefix length. Audit source_ip fields are unaffected — they keep the full
+    // address (see GetRateLimitPartitionIp vs GetNormalizedRemoteIp).
+    internal static int ResolveIpv6PartitionPrefix(ConfigurationManager cfg) =>
+        int.TryParse(cfg["RATE_LIMIT_IPV6_PREFIX"], out int p) && p is >= 1 and <= 128
+            ? p
+            : IpAddressExtensions.DefaultIpv6PartitionPrefixBits;
+
     internal static void AddDependablyRateLimiter(this WebApplicationBuilder builder)
     {
         bool useRedis = !string.IsNullOrWhiteSpace(builder.Configuration["REDIS_CONNECTION_STRING"]);
+        int ipv6Prefix = ResolveIpv6PartitionPrefix(builder.Configuration);
         builder.Services.AddRateLimiter(o =>
         {
             o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -94,13 +105,14 @@ internal static class AuthStartupExtensions
                         : "60";
 
                 // Metric. Endpoint metadata carries the policy name set by
-                // [EnableRateLimiting("…")]; partition prefix lets operators identify which
-                // token (12-hex SHA prefix) or IP is being rate-locked without leaking the
-                // full hash on the cardinality budget.
+                // [EnableRateLimiting("…")]; the partition attribute carries only the bounded
+                // partition kind (token|user|ip|unknown), never the key — the key embeds a
+                // caller-controlled source address, so emitting it would let a caller mint
+                // time series at will.
                 string policy = ctx.HttpContext.GetEndpoint()
                     ?.Metadata.GetMetadata<EnableRateLimitingAttribute>()
                     ?.PolicyName ?? "unknown";
-                string partition = RateLimitPartitions.GetMetricLabel(ctx.HttpContext);
+                string partition = RateLimitPartitions.GetMetricLabel(ctx.HttpContext, ipv6Prefix);
                 Dependably.Infrastructure.Observability.DependablyMeter.RateLimitRejected.Add(1,
                     new KeyValuePair<string, object?>("policy", policy),
                     new KeyValuePair<string, object?>("partition", partition));
@@ -116,22 +128,22 @@ internal static class AuthStartupExtensions
             // (edge/standalone) host needs. Download/push run in-process in both modes.
             if (!useRedis)
             {
-                AddInProcessLimiters(builder.Configuration, o);
+                AddInProcessLimiters(builder.Configuration, o, ipv6Prefix);
             }
 
-            AddDownloadPushLimiters(builder.Configuration, o);
+            AddDownloadPushLimiters(builder.Configuration, o, ipv6Prefix);
 
             // The anonymous-probe limiter is in-process in both modes: liveness /
             // bootstrap endpoints are polled per replica, so per-replica state is the
             // correct scope and Redis round-trips would add latency to health probes.
-            AddAnonymousProbeLimiter(builder.Configuration, o);
+            AddAnonymousProbeLimiter(builder.Configuration, o, ipv6Prefix);
 
             // Metadata limiter is always in-process: npm/PyPI/NuGet packument/index GETs are
             // already on the very hot path — a Redis round-trip per request would negate the
             // latency advantage of the in-process RenderedResponseCache. The sliding window and
             // queue depth together absorb short bursts (CI tool startup stampede) while still
             // shedding sustained floods with 429.
-            AddMetadataLimiter(builder.Configuration, o);
+            AddMetadataLimiter(builder.Configuration, o, ipv6Prefix);
 
             // Global default covers authenticated management endpoints (/api/v1/*) that
             // carry no endpoint-specific policy. The SPA and CI tooling hit /api/v1 at
@@ -139,13 +151,13 @@ internal static class AuthStartupExtensions
             // (package-list pagination, audit log queries, settings reads) without 429s.
             // Paths outside /api/v1/ and /api/v1/docs/* get NoLimiter — protocol surfaces,
             // health probes, and Swagger UI assets are guarded by their own policies.
-            AddManagementApiLimiter(builder.Configuration, o);
+            AddManagementApiLimiter(builder.Configuration, o, ipv6Prefix);
         });
     }
 
     // Download / push limiters. Partition by token-hash with IP fallback so a single
     // misbehaving client can't saturate the writer queue and DoS other tenants.
-    private static void AddDownloadPushLimiters(ConfigurationManager cfg, RateLimiterOptions o)
+    private static void AddDownloadPushLimiters(ConfigurationManager cfg, RateLimiterOptions o, int ipv6Prefix)
     {
         // Defaults sized for real-world enterprise CI bursts, not single-tenant lab use:
         // a normal `npm install` of a Next.js-sized app fires ~600 tarball GETs from one
@@ -165,7 +177,7 @@ internal static class AuthStartupExtensions
         int downloadQueue = int.TryParse(cfg["DOWNLOAD_RATE_LIMIT_QUEUE"], out int dq) ? dq : 500;
         o.AddPolicy("download", httpContext =>
         {
-            string key = RateLimitPartitions.GetPartitionKey(httpContext);
+            string key = RateLimitPartitions.GetPartitionKey(httpContext, ipv6Prefix);
             return RateLimitPartition.GetSlidingWindowLimiter(key,
                 _ => new SlidingWindowRateLimiterOptions
                 {
@@ -182,7 +194,7 @@ internal static class AuthStartupExtensions
         int pushLimit = int.TryParse(cfg["PUSH_RATE_LIMIT_PERMITS"], out int pp) ? pp : 20;
         o.AddPolicy("push", httpContext =>
         {
-            string key = RateLimitPartitions.GetPartitionKey(httpContext);
+            string key = RateLimitPartitions.GetPartitionKey(httpContext, ipv6Prefix);
             return RateLimitPartition.GetSlidingWindowLimiter(key,
                 _ => new SlidingWindowRateLimiterOptions
                 {
@@ -202,7 +214,7 @@ internal static class AuthStartupExtensions
         int importLimit = int.TryParse(cfg["IMPORT_RATE_LIMIT_PERMITS"], out int ip) ? ip : 5;
         o.AddPolicy("import", httpContext =>
         {
-            string key = RateLimitPartitions.GetPartitionKey(httpContext);
+            string key = RateLimitPartitions.GetPartitionKey(httpContext, ipv6Prefix);
             return RateLimitPartition.GetSlidingWindowLimiter(key,
                 _ => new SlidingWindowRateLimiterOptions
                 {
@@ -224,13 +236,13 @@ internal static class AuthStartupExtensions
     // (multiple parallel install processes hitting one packument) is absorbed without 429s.
     // Sustained floods see 429 once the queue fills. Operators dial METADATA_RATE_LIMIT_PERMITS
     // up for large-fleet deployments.
-    private static void AddMetadataLimiter(ConfigurationManager cfg, RateLimiterOptions o)
+    private static void AddMetadataLimiter(ConfigurationManager cfg, RateLimiterOptions o, int ipv6Prefix)
     {
         int metadataLimit = int.TryParse(cfg["METADATA_RATE_LIMIT_PERMITS"], out int mp) ? mp : 500;
         int metadataQueue = int.TryParse(cfg["METADATA_RATE_LIMIT_QUEUE"], out int mq) ? mq : 100;
         o.AddPolicy("metadata", httpContext =>
         {
-            string key = httpContext.GetNormalizedRemoteIp() ?? "unknown";
+            string key = httpContext.GetRateLimitPartitionIp(ipv6Prefix) ?? "unknown";
             return RateLimitPartition.GetSlidingWindowLimiter(key,
                 _ => new SlidingWindowRateLimiterOptions
                 {
@@ -249,16 +261,16 @@ internal static class AuthStartupExtensions
     // normalized remote IP (not the token-preferring download/push key): these endpoints
     // are hit before credentials are validated, and an attacker-supplied Authorization
     // header must not buy a fresh partition per attempt.
-    private static void AddInProcessLimiters(ConfigurationManager cfg, RateLimiterOptions o)
+    private static void AddInProcessLimiters(ConfigurationManager cfg, RateLimiterOptions o, int ipv6Prefix)
     {
         int loginLimit = int.TryParse(cfg["LOGIN_RATE_LIMIT_PERMITS"], out int p) ? p : 10;
-        AddPerIpFixedWindowLimiter(o, "login", loginLimit, TimeSpan.FromMinutes(1));
+        AddPerIpFixedWindowLimiter(o, "login", loginLimit, TimeSpan.FromMinutes(1), ipv6Prefix);
 
         int inviteLimit = int.TryParse(cfg["INVITE_RATE_LIMIT_PERMITS"], out int inv) ? inv : InviteRateLimitPermitsDefault;
-        AddPerIpFixedWindowLimiter(o, "invite", inviteLimit, TimeSpan.FromHours(1));
+        AddPerIpFixedWindowLimiter(o, "invite", inviteLimit, TimeSpan.FromHours(1), ipv6Prefix);
 
         int tokenCreateLimit = int.TryParse(cfg["TOKEN_CREATE_RATE_LIMIT_PERMITS"], out int t) ? t : 60;
-        AddPerIpFixedWindowLimiter(o, "token-create", tokenCreateLimit, TimeSpan.FromHours(1));
+        AddPerIpFixedWindowLimiter(o, "token-create", tokenCreateLimit, TimeSpan.FromHours(1), ipv6Prefix);
     }
 
     // Per-IP cap for the unauthenticated probe surface (/health, /ready, /version,
@@ -267,56 +279,78 @@ internal static class AuthStartupExtensions
     // DB + blob store + Redis per call, so an anonymous flood amplifies load onto the
     // backing stores. The default budget is generous: orchestrator health probes run a
     // few requests per minute per prober, far below 120/min per source IP.
-    private static void AddAnonymousProbeLimiter(ConfigurationManager cfg, RateLimiterOptions o)
+    private static void AddAnonymousProbeLimiter(ConfigurationManager cfg, RateLimiterOptions o, int ipv6Prefix)
     {
         int anonLimit = int.TryParse(cfg["ANON_RATE_LIMIT_PERMITS"], out int a) ? a : 120;
-        AddPerIpFixedWindowLimiter(o, "anon", anonLimit, TimeSpan.FromMinutes(1));
+        AddPerIpFixedWindowLimiter(o, "anon", anonLimit, TimeSpan.FromMinutes(1), ipv6Prefix);
     }
 
-    // Default guard for the authenticated management surface (/api/v1/*). Partitions by
-    // the principal identity — API-token hash first, then authenticated user (sub claim
-    // from the cookie session), then client IP for anonymous requests — so a misbehaving
-    // automation client or a NAT'd-office burst can't starve other principals.
-    // /api/v1/docs/* is exempt: Swagger UI assets are IP-allowlisted, not API traffic,
-    // and should not consume API budget.
-    // Non-management paths receive NoLimiter; endpoint-specific policies (login, push,
-    // download, …) stack on top.
-    // QueueLimit=0: management callers receive 429 immediately and should back off
-    // exponentially; the SPA handles this at the fetch layer.
-    private static void AddManagementApiLimiter(ConfigurationManager cfg, RateLimiterOptions o)
+    // GlobalLimiter: the fail-closed backstop that runs for EVERY request. Three postures,
+    // resolved by RateLimitPartitions.ClassifyGlobalScope:
+    //
+    //   Deferred        — the endpoint declares its own [EnableRateLimiting]/[DisableRateLimiting]
+    //                     policy (download/push/metadata/login/anon/…) or is a Swagger docs asset:
+    //                     NoLimiter here, so the global never double-counts on top of it.
+    //   ManagementApi   — an authenticated /api/v1/* surface with no endpoint policy: per-principal
+    //                     sliding window (API-token hash → sub claim → source subnet), so a
+    //                     misbehaving automation client or a NAT'd-office burst can't starve others.
+    //   ProtocolDefault — DEFAULT-DENY. Any other surface with no endpoint policy — a protocol route
+    //                     that carries no explicit [EnableRateLimiting] — gets a per-IP default limit
+    //                     rather than NoLimiter. A newly added unmetered protocol route is therefore
+    //                     bounded by default instead of entirely unlimited; the compliance gate still
+    //                     requires each such route to declare an explicit policy, but the default
+    //                     closes the window between "route added" and "gate enforced in review".
+    //
+    // QueueLimit=0: callers receive 429 immediately and should back off exponentially.
+    private static void AddManagementApiLimiter(ConfigurationManager cfg, RateLimiterOptions o, int ipv6Prefix)
     {
-        int permitLimit = int.TryParse(cfg["MANAGEMENT_RATE_LIMIT_PERMITS"], out int m) ? m : 300;
+        int permitLimit = RateLimitCeilings.ResolveManagementPermitLimit(cfg);
+        // Default-deny ceiling for unclassified protocol surfaces. Generous enough that an
+        // orchestrator or a modest CI client polling a niche route stays well under it, tight
+        // enough that an unmetered-route flood (upstream-fetch amplification, catalogue scans)
+        // cannot exhaust the shared upstream semaphore or the single-writer DB. Any route that
+        // legitimately needs more throughput carries an explicit download/metadata policy.
+        int protocolDefault = RateLimitCeilings.ResolveProtocolDefaultPermitLimit(cfg);
         o.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(ctx =>
         {
-            string? path = ctx.Request.Path.Value;
-            if (path is null
-                || !path.StartsWith("/api/v1/", StringComparison.OrdinalIgnoreCase)
-                || path.StartsWith("/api/v1/docs/", StringComparison.OrdinalIgnoreCase)
-                || path.Equals("/api/v1/docs", StringComparison.OrdinalIgnoreCase))
+            switch (RateLimitPartitions.ClassifyGlobalScope(ctx))
             {
-                return RateLimitPartition.GetNoLimiter<string>("none");
-            }
+                case RateLimitPartitions.GlobalScope.ManagementApi:
+                    string mkey = RateLimitPartitions.GetManagementPartitionKey(ctx, ipv6Prefix);
+                    return RateLimitPartition.GetSlidingWindowLimiter(mkey,
+                        _ => new SlidingWindowRateLimiterOptions
+                        {
+                            PermitLimit = permitLimit,
+                            Window = TimeSpan.FromMinutes(1),
+                            SegmentsPerWindow = ManagementRateLimitWindowSegments,
+                            QueueLimit = 0,
+                        });
 
-            string key = RateLimitPartitions.GetManagementPartitionKey(ctx);
-            return RateLimitPartition.GetSlidingWindowLimiter(key,
-                _ => new SlidingWindowRateLimiterOptions
-                {
-                    PermitLimit = permitLimit,
-                    Window = TimeSpan.FromMinutes(1),
-                    SegmentsPerWindow = ManagementRateLimitWindowSegments,
-                    QueueLimit = 0,
-                });
+                case RateLimitPartitions.GlobalScope.ProtocolDefault:
+                    string pkey = "proto:" + (ctx.GetRateLimitPartitionIp(ipv6Prefix) ?? "unknown");
+                    return RateLimitPartition.GetSlidingWindowLimiter(pkey,
+                        _ => new SlidingWindowRateLimiterOptions
+                        {
+                            PermitLimit = protocolDefault,
+                            Window = TimeSpan.FromMinutes(1),
+                            SegmentsPerWindow = ManagementRateLimitWindowSegments,
+                            QueueLimit = 0,
+                        });
+
+                default:
+                    return RateLimitPartition.GetNoLimiter<string>("none");
+            }
         });
     }
 
     // Requests with no resolvable remote IP (in-process probes) share one "unknown"
     // bucket rather than bypassing the limiter entirely.
     private static void AddPerIpFixedWindowLimiter(
-        RateLimiterOptions o, string policyName, int permitLimit, TimeSpan window)
+        RateLimiterOptions o, string policyName, int permitLimit, TimeSpan window, int ipv6Prefix)
     {
         o.AddPolicy(policyName, httpContext =>
         {
-            string key = httpContext.GetNormalizedRemoteIp() ?? "unknown";
+            string key = httpContext.GetRateLimitPartitionIp(ipv6Prefix) ?? "unknown";
             return RateLimitPartition.GetFixedWindowLimiter(key,
                 _ => new FixedWindowRateLimiterOptions
                 {

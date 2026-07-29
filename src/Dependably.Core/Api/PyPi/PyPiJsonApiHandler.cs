@@ -182,6 +182,8 @@ public sealed class PyPiJsonApiHandler(
         }
         if (v.PublishedAt is not null)
         {
+            // utcformat-ok: PyPI JSON API wire field, not a DB write — mirrors the
+            // upload_time_iso_8601 shape PyPI clients expect.
             fileEntry["upload_time_iso_8601"] = v.PublishedAt.Value.ToString("o");
         }
         return fileEntry;

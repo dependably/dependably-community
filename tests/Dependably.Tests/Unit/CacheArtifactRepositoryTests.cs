@@ -259,6 +259,57 @@ public class CacheArtifactRepositoryTests : IAsyncLifetime
         Assert.Equal(3, fact.ToPackageVersionSynthetic(new Dictionary<string, VulnGateSignals>()).VersionsBehind);
     }
 
+    // ── DateTimeOffsetHandler round-trip — SchemaInitializer.OwnerPlane.cs's global Dapper
+    // handler is the sole thing standing between a raw DateTimeOffset property (FirstCachedAt,
+    // LastAccessedAt below) and the TEXT the column actually stores. ─────────────────────────
+
+    [Fact]
+    public async Task InsertAsync_FirstCachedAt_MatchesExplicitCanonicalWriterShape()
+    {
+        // Regression: cache_artifact.first_cached_at is also written by an explicit
+        // UtcTimestamp.ToUtcIso() string (the schema DEFAULT and the one-shot cache-plane
+        // migration both use that shape). Before the fix, Dapper's built-in typeMap claimed the
+        // DateTimeOffset parameter before the registered DateTimeOffsetHandler ever saw it, so
+        // SetValue never ran; the ADO.NET provider serialized it directly instead — space-
+        // separated, offset preserved (Microsoft.Data.Sqlite: "2026-03-04 05:06:07+00:00"), never
+        // the canonical "T…Z" form. That disagreed with every other writer of the same columns,
+        // breaking lexicographic ordering whenever rows from both writers land in the same table
+        // (the mismatch flips ordering only within the same calendar day — the date prefix still
+        // sorts correctly across days).
+        var repo = new CacheArtifactRepository(_db);
+        var instant = new DateTimeOffset(2026, 3, 4, 5, 6, 7, TimeSpan.Zero);
+        var a = Sample("9.0.0", instant);
+        await repo.InsertAsync(a);
+
+        await using var conn = await _db.OpenAsync();
+        var (firstCachedAt, lastAccessedAt) = await conn.QuerySingleAsync<(string FirstCachedAt, string LastAccessedAt)>(
+            "SELECT first_cached_at AS FirstCachedAt, last_accessed_at AS LastAccessedAt " +
+            "FROM cache_artifact WHERE id = @id",
+            new { id = a.Id });
+
+        Assert.Equal(instant.ToUtcIso(), firstCachedAt);
+        Assert.Equal(instant.ToUtcIso(), lastAccessedAt);
+    }
+
+    [Fact]
+    public async Task InsertAsync_NonZeroOffsetInstant_NormalizesToCanonicalUtc()
+    {
+        // +02:00 offset representing 2026-03-04T03:06:07Z. Before the fix, SetValue never ran
+        // (see the class summary above) — Microsoft.Data.Sqlite's own DateTimeOffset
+        // serialization preserved the +02:00 offset verbatim instead of converting to UTC first,
+        // so this row would sort by its wall-clock time rather than its real instant.
+        var repo = new CacheArtifactRepository(_db);
+        var instant = new DateTimeOffset(2026, 3, 4, 5, 6, 7, TimeSpan.FromHours(2));
+        var a = Sample("9.0.1", instant);
+        await repo.InsertAsync(a);
+
+        await using var conn = await _db.OpenAsync();
+        string stored = await conn.QuerySingleAsync<string>(
+            "SELECT first_cached_at FROM cache_artifact WHERE id = @id", new { id = a.Id });
+
+        Assert.Equal("2026-03-04T03:06:07Z", stored);
+    }
+
     [Fact]
     public async Task UpstreamUrl_RoundTripsThroughListServeFactsAndSyntheticProjection()
     {

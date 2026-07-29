@@ -49,6 +49,14 @@
     <value>Service Unavailable</value>
     <comment>Title of the HTTP 503 problem response (a dependency the request needs is temporarily unreachable).</comment>
   </data>
+  <data name="error.internal.title" xml:space="preserve">
+    <value>Internal Server Error</value>
+    <comment>Title of the HTTP 500 problem response returned when a request fails unexpectedly.</comment>
+  </data>
+  <data name="error.internal.detail" xml:space="preserve">
+    <value>The request could not be completed because of an unexpected server error. The failure has been logged; quote the correlation id when reporting it.</value>
+    <comment>Body of the HTTP 500 problem response. Deliberately says nothing about the underlying fault — the correlation id is the only handle the caller gets. "correlation id" refers to the correlationId field of the same response.</comment>
+  </data>
   <data name="error.org.notFound" xml:space="preserve">
     <value>Organization not found.</value>
     <comment>404 body when the organization (tenant) addressed by the request does not exist.</comment>
@@ -84,6 +92,14 @@
   <data name="error.invite.emailRequired" xml:space="preserve">
     <value>Email is required.</value>
     <comment>Inviting an organization member without an email address.</comment>
+  </data>
+  <data name="error.invite.emailInvalid" xml:space="preserve">
+    <value>Enter a valid email address.</value>
+    <comment>Inviting an organization member with a malformed email address.</comment>
+  </data>
+  <data name="error.invite.duplicatePending" xml:space="preserve">
+    <value>An invitation for this email address is already pending. Cancel it before sending a new one.</value>
+    <comment>409 detail: one pending invite per tenant and address.</comment>
   </data>
   <data name="error.member.roleInvalid" xml:space="preserve">
     <value>Role must be 'member', 'admin', 'owner', or 'auditor'.</value>
@@ -161,8 +177,28 @@
     <value>Must be one of: {0}.</value>
     <comment>Generic enum-validation 422 detail. {0} = comma-joined allowed values (API literals).</comment>
   </data>
+  <data name="error.nameGrant.nameRequired" xml:space="preserve">
+    <value>name is required.</value>
+    <comment>422 detail on the name-grant endpoints. 'name' is the API field name - keep it verbatim.</comment>
+  </data>
+  <data name="error.nameGrant.granteeIdRequired" xml:space="preserve">
+    <value>granteeId is required.</value>
+    <comment>422 detail on the name-grant endpoints. 'granteeId' is the API field name - keep it verbatim.</comment>
+  </data>
+  <data name="error.nameGrant.granteeUnknown" xml:space="preserve">
+    <value>granteeId does not name a user or service token in this organization.</value>
+    <comment>422 detail. Deliberately does not distinguish "no such principal" from "belongs to another organization". 'granteeId' is the API field name - keep it verbatim.</comment>
+  </data>
+  <data name="error.nameGrant.nameNotBound" xml:space="preserve">
+    <value>No publisher is bound to that package name in this organization, so a co-publish grant would have no effect.</value>
+    <comment>404 detail on POST /api/v1/name-grants.</comment>
+  </data>
   <data name="error.license.modeInvalid" xml:space="preserve">
     <value>Mode must be 'off', 'warn', or 'block'.</value>
+    <comment>422 detail. The quoted values are API literals - do not translate them.</comment>
+  </data>
+  <data name="error.license.publishModeInvalid" xml:space="preserve">
+    <value>Publish mode must be 'off', 'warn', or 'block'.</value>
     <comment>422 detail. The quoted values are API literals - do not translate them.</comment>
   </data>
   <data name="error.license.spdxRequired" xml:space="preserve">
@@ -196,6 +232,10 @@
   <data name="error.saml.certificateInvalid" xml:space="preserve">
     <value>Certificate is not valid base64 X.509.</value>
     <comment>422 detail: uploaded SAML signing certificate failed to parse.</comment>
+  </data>
+  <data name="error.saml.metadataInvalid" xml:space="preserve">
+    <value>IdP metadata XML could not be parsed.</value>
+    <comment>422 detail: uploaded SAML IdP metadata failed to parse (generic fallback; raw parser exception text is never echoed).</comment>
   </data>
   <data name="error.saml.formsLoginRequiresSaml" xml:space="preserve">
     <value>Forms login can only be disabled when SAML is enabled.</value>
@@ -381,6 +421,10 @@
     <value>material must not be empty.</value>
     <comment>422 detail. 'material' is the JSON field name - keep it verbatim.</comment>
   </data>
+  <data name="error.trustAnchor.unsupportedAnchorKindForEcosystem" xml:space="preserve">
+    <value>anchorKind "{0}" is not supported for ecosystem "{1}". Supported anchorKind values for {1}: {2}.</value>
+    <comment>422 detail when the (ecosystem, anchorKind) pair has no registered material validator. {0} = the rejected anchorKind, {1} = the ecosystem, {2} = comma-joined allowed anchorKind values for that ecosystem (API literals).</comment>
+  </data>
   <data name="error.upstream.ociOnlyFields" xml:space="preserve">
     <value>Fields prefixes and tokenEndpoint are only valid for ecosystem=oci.</value>
     <comment>422 detail. Field names and 'ecosystem=oci' are API literals.</comment>
@@ -396,6 +440,10 @@
   <data name="error.upstream.httpsRequiredForAuth" xml:space="preserve">
     <value>Authenticated upstreams require https:// — a plaintext http:// URL would leak the credential.</value>
     <comment>422 detail. Keep the URL schemes 'https://' and 'http://' verbatim.</comment>
+  </data>
+  <data name="error.upstream.httpsRequired" xml:space="preserve">
+    <value>Plaintext http:// upstreams are not allowed. Use an https:// URL, or set Proxy:AllowInsecureUpstreams to permit insecure upstreams.</value>
+    <comment>422 detail. Keep 'http://', 'https://', and the config key 'Proxy:AllowInsecureUpstreams' verbatim.</comment>
   </data>
   <data name="error.upstream.anonymousNoCredentials" xml:space="preserve">
     <value>username and secret are not valid for authType=anonymous.</value>
@@ -641,6 +689,21 @@ If you did not request this, you can ignore this email — your password will no
 </value>
     <comment>Plain-text password-reset email body. {0} = expiry timestamp, {1} = reset link. Keep the blank lines and the trailing newline.</comment>
   </data>
+  <data name="email.emailChange.subject" xml:space="preserve">
+    <value>Confirm your new Dependably email address</value>
+    <comment>Subject line of the email-change verification message, sent to the NEW address.</comment>
+  </data>
+  <data name="email.emailChange.body" xml:space="preserve">
+    <value>Someone asked to change a Dependably account's email address to this one.
+
+Confirm the change using the link below. The link expires at {0} UTC and can only be used once. Until then the account keeps its current address and nothing has changed.
+
+{1}
+
+If you did not expect this, you can ignore this email — no account will be moved to this address.
+</value>
+    <comment>Plain-text email-change verification body, sent to the NEW address. {0} = expiry timestamp, {1} = confirmation link. Keep the blank lines and the trailing newline.</comment>
+  </data>
   <data name="email.security.mfaEnabled.subject" xml:space="preserve">
     <value>Two-factor authentication was enabled on your Dependably account</value>
     <comment>Subject line of the account-security notification sent when MFA is enabled.</comment>
@@ -679,5 +742,36 @@ If this was you, no action is needed.
 If you did not make this change, contact your administrator immediately — your account may be compromised.
 </value>
     <comment>Plain-text password-changed security notification body. {0} = event timestamp. Keep the blank lines and the trailing newline.</comment>
+  </data>
+  <data name="email.security.emailChanged.subject" xml:space="preserve">
+    <value>Your Dependably account moved to a different email address</value>
+    <comment>Subject line of the security notification sent to the OLD address after an email change is confirmed.</comment>
+  </data>
+  <data name="email.security.emailChanged.body" xml:space="preserve">
+    <value>The Dependably account that used this email address was moved to a different address on {0} UTC.
+
+This address can no longer sign in or receive password resets for that account.
+
+If this was you, no action is needed.
+
+If you did not make this change, contact your administrator immediately — your account may be compromised.
+</value>
+    <comment>Plain-text email-changed security notification body, sent to the OLD address. {0} = event timestamp. Keep the blank lines and the trailing newline.</comment>
+  </data>
+  <data name="error.user.emailManagedByIdp" xml:space="preserve">
+    <value>This account signs in through your identity provider, which is authoritative for its email address. Change it there instead — a local edit would be overwritten at the next login.</value>
+    <comment>Conflict returned when an email change is requested for a SAML-backed account.</comment>
+  </data>
+  <data name="error.user.emailUnchanged" xml:space="preserve">
+    <value>That is already this account's email address.</value>
+    <comment>Conflict returned when an email change requests the address the account already has.</comment>
+  </data>
+  <data name="error.user.emailTaken" xml:space="preserve">
+    <value>That email address is already used by another member of this organization.</value>
+    <comment>Conflict returned when the requested new email address is already taken in the tenant.</comment>
+  </data>
+  <data name="error.user.reauthRequired" xml:space="preserve">
+    <value>Enter your current password to change your email address.</value>
+    <comment>Validation error returned when a self-service email change omits or fails the password re-entry.</comment>
   </data>
 </root>

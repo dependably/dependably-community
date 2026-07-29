@@ -32,7 +32,25 @@ public sealed class LocalBlobStore : IBlobStore
     /// </summary>
     public void RecomputeSize() => _sizeCounter.Recompute();
 
-    private string FullPath(string key) => Path.Combine(_root, key.Replace('/', Path.DirectorySeparatorChar));
+    // Resolves a blob key to an absolute filesystem path, confined to the storage root. Blob keys
+    // come from BlobKeys and callers validate their segments, but this is the last line of defence:
+    // Path.Combine returns the second argument outright when it is rooted (absolute-path key), and
+    // `../` segments traverse freely — so a single unvalidated future caller would otherwise read or
+    // write outside _root. Canonicalise and reject anything that escapes.
+    private string FullPath(string key)
+    {
+        string combined = Path.Combine(_root, key.Replace('/', Path.DirectorySeparatorChar));
+        string full = Path.GetFullPath(combined);
+
+        string rootFull = Path.GetFullPath(_root);
+        string rootPrefix = rootFull.EndsWith(Path.DirectorySeparatorChar)
+            ? rootFull
+            : rootFull + Path.DirectorySeparatorChar;
+
+        return full != rootFull && !full.StartsWith(rootPrefix, StringComparison.Ordinal)
+            ? throw new ArgumentException($"Blob key resolves outside the storage root: '{key}'.", nameof(key))
+            : full;
+    }
 
     public async Task PutAsync(string key, Stream data, CancellationToken ct = default)
     {

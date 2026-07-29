@@ -493,7 +493,7 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
         var result = await fetcher.FetchArtifactAsync(_upstream, path, default);
 
         Assert.Null(result);
-        Assert.False(await fetcher.IsNegativelyCachedAsync(path, default));
+        Assert.False(await fetcher.IsNegativelyCachedAsync(_upstream, path, default));
     }
 
     [Fact]
@@ -502,7 +502,7 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
         string path = "com/example/nope/9.9/nope-9.9.jar";
         var fetcher = BuildFetcher();
 
-        await fetcher.RecordNegativeAsync(path, default);
+        await fetcher.RecordNegativeAsync(_upstream, path, default);
 
         var result = await fetcher.FetchArtifactAsync(_upstream, path, default);
         Assert.Null(result);
@@ -602,9 +602,9 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
     public async Task NegativeCache_RecordThenRead_ReturnsTrueWithinTtl()
     {
         var fetcher = BuildFetcher();
-        await fetcher.RecordNegativeAsync("com/example/x/1.0/x-1.0.jar", default);
+        await fetcher.RecordNegativeAsync(_upstream, "com/example/x/1.0/x-1.0.jar", default);
 
-        bool hit = await fetcher.IsNegativelyCachedAsync("com/example/x/1.0/x-1.0.jar", default);
+        bool hit = await fetcher.IsNegativelyCachedAsync(_upstream, "com/example/x/1.0/x-1.0.jar", default);
         Assert.True(hit);
     }
 
@@ -612,10 +612,43 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
     public async Task NegativeCache_DifferentPath_ReturnsFalse()
     {
         var fetcher = BuildFetcher();
-        await fetcher.RecordNegativeAsync("com/example/a/1.0/a-1.0.jar", default);
+        await fetcher.RecordNegativeAsync(_upstream, "com/example/a/1.0/a-1.0.jar", default);
 
-        bool hit = await fetcher.IsNegativelyCachedAsync("com/example/b/1.0/b-1.0.jar", default);
+        bool hit = await fetcher.IsNegativelyCachedAsync(_upstream, "com/example/b/1.0/b-1.0.jar", default);
         Assert.False(hit);
+    }
+
+    [Fact]
+    public async Task NegativeCache_DifferentUpstreamHost_DoesNotCrossPoison()
+    {
+        // #435 regression: org A's upstream (Maven Central) 404s a coordinate, but org B's
+        // upstream (an internal Nexus that DOES host it) must still resolve it. The negative
+        // entry is keyed on the resolved URL (host + path), so a record against host A must not
+        // answer a lookup against host B for the same path.
+        var fetcher = BuildFetcher();
+        const string path = "com/acme/private-lib/1.0/private-lib-1.0.jar";
+        const string hostA = "https://repo.maven.apache.org/maven2";
+        const string hostB = "https://nexus.corp.internal/repository/maven";
+
+        await fetcher.RecordNegativeAsync(hostA, path, default);
+
+        Assert.True(await fetcher.IsNegativelyCachedAsync(hostA, path, default));
+        Assert.False(await fetcher.IsNegativelyCachedAsync(hostB, path, default));
+    }
+
+    [Fact]
+    public async Task NegativeCache_SameUpstreamHost_SharesEntry()
+    {
+        // Adversarial twin to the cross-host test: two orgs pointed at the SAME upstream host
+        // must still share the negative-cache entry — the fix must not disable the intended
+        // cross-tenant dedup the table exists for.
+        var fetcher = BuildFetcher();
+        const string path = "com/acme/missing/1.0/missing-1.0.jar";
+        const string host = "https://repo.maven.apache.org/maven2";
+
+        await fetcher.RecordNegativeAsync(host, path, default);
+
+        Assert.True(await fetcher.IsNegativelyCachedAsync(host, path, default));
     }
 
     // ── Test doubles ──────────────────────────────────────────────────────────

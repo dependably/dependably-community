@@ -1,5 +1,6 @@
 using System.Reflection;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Migration;
 using Dependably.Infrastructure.Startup;
 using Dependably.Security;
 using Microsoft.Extensions.FileProviders;
@@ -19,6 +20,17 @@ Log.Logger = new LoggerConfiguration()
 
 try
 {
+    // One-shot maintenance modes. `Dependably migrate-to-postgres` / `verify-postgres-migration`
+    // move a standalone SQLite deployment onto the Postgres an HA deployment requires, and confirm
+    // the move was complete. They run the copy and exit instead of starting the web host, so the
+    // procedure needs no artefact beyond the product image itself.
+    if (DatabaseMigrationCommand.IsMigrationVerb(args))
+    {
+        using var migrationLoggerFactory = LoggerFactory.Create(logging => logging.AddSerilog(Log.Logger));
+        return await DatabaseMigrationCommand.RunAsync(
+            args, bootstrapConfig, migrationLoggerFactory, TimeProvider.System);
+    }
+
     var builder = WebApplication.CreateBuilder(args);
     Program.ConfigureBuilder(builder);
     var app = builder.Build();
@@ -155,6 +167,7 @@ public partial class Program
         builder.AddDependablyCors();
         builder.AddDependablyHttpClients();
         builder.AddDependablyLocalization();
+        builder.AddDependablyTerminalExceptionHandler();
         builder.AddDependablyControllerAggregates();
         builder.AddDependablyManagementControllerAggregates();
         builder.AddDependablyControllers();
@@ -324,6 +337,11 @@ public partial class Program
     public static void ConfigureApp(WebApplication app)
     {
         // ── Middleware pipeline (order matters) ─────────────────────────────────
+
+        // Terminal exception handler, outermost so it sees every exception the typed
+        // middlewares below decline. Turns an otherwise bare framework 500 into localized
+        // problem+json with a correlation id, and writes the single structured Error log.
+        app.UseDependablyTerminalExceptionHandler();
 
         // Forwarded headers run first. When TRUSTED_PROXIES is set, every downstream consumer
         // of Connection.RemoteIpAddress and Request.IsHttps — the /metrics IP allowlist,

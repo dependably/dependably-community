@@ -49,7 +49,7 @@ public sealed class AuditorRoleMigrationTests : IAsyncLifetime
         await conn.ExecuteAsync("""
             INSERT INTO invites (id, org_id, email, role, token_hash, created_by, expires_at)
             VALUES ('i1', 'o1', 'b@example.com', 'auditor', 'h1', 'u1',
-                    datetime('now','+7 days'))
+                    strftime('%Y-%m-%dT%H:%M:%SZ','now','+7 days'))
             """);
 
         string? role = await conn.ExecuteScalarAsync<string>(

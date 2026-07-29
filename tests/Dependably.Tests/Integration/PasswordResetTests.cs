@@ -298,8 +298,14 @@ public sealed class PasswordResetTests : IAsyncLifetime
         Assert.True(string.IsNullOrEmpty(sourceIp) || !sourceIp!.Contains(email));
         var parsed = System.Text.Json.JsonDocument.Parse(detail);
         var props = parsed.RootElement.EnumerateObject().Select(p => p.Name).OrderBy(p => p, StringComparer.Ordinal).ToList();
-        Assert.Equal(new[] { "email_hash", "matched", "realm", "via" }, props);
+        Assert.Equal(new[] { "email_hash", "link_issued", "matched", "realm", "throttled", "via" }, props);
         Assert.Equal("self_serve_reset_link", parsed.RootElement.GetProperty("via").GetString());
+
+        // The throttle outcome is recorded, and a single request is never over its budget. The
+        // link_issued flag is stamped inside the branch that mints and mails the link, so it tracks
+        // whether a send actually happened rather than restating `matched`.
+        Assert.False(parsed.RootElement.GetProperty("throttled").GetBoolean());
+        Assert.Equal(knownEmail, parsed.RootElement.GetProperty("link_issued").GetBoolean());
         string emailHash = parsed.RootElement.GetProperty("email_hash").GetString()!;
         Assert.NotEqual(email, emailHash);
         Assert.Equal(LoginService.HashEmail(email), emailHash);

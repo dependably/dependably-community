@@ -64,7 +64,7 @@ public sealed class BannerControllerAuthTests : IAsyncLifetime
 
         // Seed a shared active banner so Dismiss tests can pass a real banner_id (FK enforced).
         _sharedBannerId = Guid.NewGuid().ToString("N");
-        string createdAt = KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string createdAt = KnownNow.ToUtcIso();
         await conn.ExecuteAsync(
             """
             INSERT INTO banners (id, scope, org_id, severity, body, link_url, link_label,
@@ -76,8 +76,8 @@ public sealed class BannerControllerAuthTests : IAsyncLifetime
             {
                 id = _sharedBannerId,
                 orgId = _orgId,
-                starts = KnownNow.AddDays(-1).ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                ends = KnownNow.AddDays(30).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                starts = KnownNow.AddDays(-1).ToUtcIso(),
+                ends = KnownNow.AddDays(30).ToUtcIso(),
                 createdBy = _userIds["owner"],
                 now = createdAt,
             });
@@ -198,8 +198,8 @@ public sealed class BannerControllerAuthTests : IAsyncLifetime
             LinkUrl: null,
             LinkLabel: null,
             TargetRole: "auditor",
-            StartsAt: KnownNow.AddDays(-1).ToString("yyyy-MM-ddTHH:mm:ssZ"),
-            EndsAt: KnownNow.AddDays(30).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            StartsAt: KnownNow.AddDays(-1).ToUtcIso(),
+            EndsAt: KnownNow.AddDays(30).ToUtcIso(),
             Enabled: true), CancellationToken.None);
 
         var dismissedBanner = await repo.CreateTenantAsync(_orgId, userId, new BannerCreateRequest(
@@ -208,11 +208,11 @@ public sealed class BannerControllerAuthTests : IAsyncLifetime
             LinkUrl: null,
             LinkLabel: null,
             TargetRole: "auditor",
-            StartsAt: KnownNow.AddDays(-1).ToString("yyyy-MM-ddTHH:mm:ssZ"),
-            EndsAt: KnownNow.AddDays(30).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            StartsAt: KnownNow.AddDays(-1).ToUtcIso(),
+            EndsAt: KnownNow.AddDays(30).ToUtcIso(),
             Enabled: true), CancellationToken.None);
 
-        await repo.DismissAsync(dismissedBanner.Id, userId, CancellationToken.None);
+        await repo.DismissAsync(_orgId, dismissedBanner.Id, userId, CancellationToken.None);
 
         var ctrl = BuildController(userId, "auditor");
         var okResult = Assert.IsType<OkObjectResult>(await ctrl.GetActive(CancellationToken.None));
@@ -251,8 +251,8 @@ public sealed class BannerControllerAuthTests : IAsyncLifetime
             LinkUrl: null,
             LinkLabel: null,
             TargetRole: "all",
-            StartsAt: KnownNow.AddDays(-1).ToString("yyyy-MM-ddTHH:mm:ssZ"),
-            EndsAt: KnownNow.AddDays(30).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            StartsAt: KnownNow.AddDays(-1).ToUtcIso(),
+            EndsAt: KnownNow.AddDays(30).ToUtcIso(),
             Enabled: true), CancellationToken.None);
 
         var ctrl = BuildController(userId, "member");
@@ -272,8 +272,8 @@ public sealed class BannerControllerAuthTests : IAsyncLifetime
             LinkUrl: null,
             LinkLabel: null,
             TargetRole: "all",
-            StartsAt: KnownNow.AddDays(-1).ToString("yyyy-MM-ddTHH:mm:ssZ"),
-            EndsAt: KnownNow.AddDays(30).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            StartsAt: KnownNow.AddDays(-1).ToUtcIso(),
+            EndsAt: KnownNow.AddDays(30).ToUtcIso(),
             Enabled: true), CancellationToken.None);
 
         var ctrl = BuildController(userId, "admin");
@@ -303,8 +303,8 @@ public sealed class BannerControllerAuthTests : IAsyncLifetime
             LinkUrl: null,
             LinkLabel: null,
             TargetRole: "all",
-            StartsAt: KnownNow.AddDays(-1).ToString("yyyy-MM-ddTHH:mm:ssZ"),
-            EndsAt: KnownNow.AddDays(30).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            StartsAt: KnownNow.AddDays(-1).ToUtcIso(),
+            EndsAt: KnownNow.AddDays(30).ToUtcIso(),
             Enabled: true), CancellationToken.None);
 
         string fakeBannerId = Guid.NewGuid().ToString("N");
@@ -337,8 +337,8 @@ public sealed class BannerControllerAuthTests : IAsyncLifetime
         var result = await ctrl.Create(new BannerCreateRequest(
             Severity: "info", Body: "Test", LinkUrl: null, LinkLabel: null,
             TargetRole: "all",
-            StartsAt: KnownNow.AddDays(-1).ToString("yyyy-MM-ddTHH:mm:ssZ"),
-            EndsAt: KnownNow.AddDays(30).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            StartsAt: KnownNow.AddDays(-1).ToUtcIso(),
+            EndsAt: KnownNow.AddDays(30).ToUtcIso(),
             Enabled: true), CancellationToken.None);
         Assert.IsType<ForbidResult>(result);
     }
@@ -351,8 +351,8 @@ public sealed class BannerControllerAuthTests : IAsyncLifetime
         LinkUrl: null,
         LinkLabel: null,
         TargetRole: targetRole,
-        StartsAt: KnownNow.AddDays(-1).ToString("yyyy-MM-ddTHH:mm:ssZ"),
-        EndsAt: KnownNow.AddDays(30).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+        StartsAt: KnownNow.AddDays(-1).ToUtcIso(),
+        EndsAt: KnownNow.AddDays(30).ToUtcIso(),
         Enabled: true);
 
     [Fact]
@@ -415,8 +415,8 @@ public sealed class BannerControllerAuthTests : IAsyncLifetime
             LinkUrl: null,
             LinkLabel: null,
             TargetRole: "all",
-            StartsAt: KnownNow.AddDays(-1).ToString("yyyy-MM-ddTHH:mm:ssZ"),
-            EndsAt: KnownNow.AddDays(30).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            StartsAt: KnownNow.AddDays(-1).ToUtcIso(),
+            EndsAt: KnownNow.AddDays(30).ToUtcIso(),
             Enabled: true);
 
         var result = await ctrl.Update(banner.Id, updateReq, CancellationToken.None);
@@ -432,8 +432,8 @@ public sealed class BannerControllerAuthTests : IAsyncLifetime
         var ctrl = BuildController(_userIds["owner"], "owner");
         var result = await ctrl.Update(Guid.NewGuid().ToString("N"), new BannerUpdateRequest(
             Severity: "warn", Body: "x", LinkUrl: null, LinkLabel: null, TargetRole: "all",
-            StartsAt: KnownNow.AddDays(-1).ToString("yyyy-MM-ddTHH:mm:ssZ"),
-            EndsAt: KnownNow.AddDays(30).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            StartsAt: KnownNow.AddDays(-1).ToUtcIso(),
+            EndsAt: KnownNow.AddDays(30).ToUtcIso(),
             Enabled: true), CancellationToken.None);
         Assert.IsType<NotFoundResult>(result);
     }
@@ -444,8 +444,8 @@ public sealed class BannerControllerAuthTests : IAsyncLifetime
         var ctrl = BuildController(_userIds["auditor"], "auditor");
         var result = await ctrl.Update(_sharedBannerId, new BannerUpdateRequest(
             Severity: "warn", Body: "x", LinkUrl: null, LinkLabel: null, TargetRole: "all",
-            StartsAt: KnownNow.AddDays(-1).ToString("yyyy-MM-ddTHH:mm:ssZ"),
-            EndsAt: KnownNow.AddDays(30).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            StartsAt: KnownNow.AddDays(-1).ToUtcIso(),
+            EndsAt: KnownNow.AddDays(30).ToUtcIso(),
             Enabled: true), CancellationToken.None);
         Assert.IsType<ForbidResult>(result);
     }

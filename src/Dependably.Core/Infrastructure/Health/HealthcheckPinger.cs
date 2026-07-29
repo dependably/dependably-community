@@ -88,7 +88,7 @@ public sealed class HealthcheckPinger : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            await Task.Delay(_interval, stoppingToken);
+            await Task.Delay(_interval, _time, stoppingToken);
             await PingOnceAsync(stoppingToken);
         }
     }
@@ -112,10 +112,15 @@ public sealed class HealthcheckPinger : BackgroundService
             }
         }
 
-        var checks = await _readiness.CheckAsync(ct);
-        bool ready = checks.Values.All(v => v is null);
+        // The dead-man's-switch heartbeat is an alerting signal, so it takes the strict view:
+        // any failing dependency, required or not, routes to the fail URL.
+        var report = await _readiness.CheckAsync(ct);
+        bool ready = report.AllOk;
 
         string targetUrl = ready ? _pingUrl! : (_failUrl ?? _pingUrl!);
+        // now-ok: measures real elapsed time for a duration log/metric only — no control
+        // flow branches on the value, so a substitutable clock would change the reported
+        // number without changing what the code does.
         var stopwatch = Stopwatch.StartNew();
 
         try
@@ -123,7 +128,7 @@ public sealed class HealthcheckPinger : BackgroundService
             using var client = _http.CreateClient("healthcheck-pinger");
             client.Timeout = _timeout;
 
-            using var resp = await SendPingAsync(client, targetUrl, ready, checks, ct);
+            using var resp = await SendPingAsync(client, targetUrl, ready, report, ct);
             RecordPingResult(resp, targetUrl);
         }
         catch (Exception ex)
@@ -140,7 +145,7 @@ public sealed class HealthcheckPinger : BackgroundService
     // POSTs a JSON status payload when configured (HEALTHCHECK_USE_POST / payload mode), else
     // issues a lightweight GET. Caller owns disposal of the returned response.
     private async Task<HttpResponseMessage> SendPingAsync(
-        HttpClient client, string targetUrl, bool ready, IReadOnlyDictionary<string, string?> checks, CancellationToken ct)
+        HttpClient client, string targetUrl, bool ready, ReadinessReport report, CancellationToken ct)
     {
         if (_usePost || _sendPayload)
         {
@@ -151,9 +156,8 @@ public sealed class HealthcheckPinger : BackgroundService
                 uptime_seconds = uptime,
                 deployment_mode = _deploymentMode,
                 status = ready ? "ready" : "degraded",
-                checks = checks.ToDictionary(
-                    kv => kv.Key,
-                    kv => kv.Value is null ? "ok" : "error"),
+                checks = report.ToStatusMap(),
+                required = report.RequiredChecks,
             };
             return await client.PostAsJsonAsync(targetUrl, body, ct);
         }

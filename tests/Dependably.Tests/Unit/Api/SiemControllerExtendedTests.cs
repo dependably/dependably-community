@@ -68,7 +68,10 @@ public sealed class SiemControllerExtendedTests
                 ecosystem,
                 purl,
                 detail,
-                createdAt = createdAt.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                // Millisecond precision — matches AuditRepository.LogAsync's real writer
+                // (NowMs()) so a since/until bound compared against a seeded row here behaves
+                // exactly as it would against a genuinely-written row.
+                createdAt = createdAt.ToUtcIsoMillis(),
             });
     }
 
@@ -426,7 +429,7 @@ public sealed class SiemControllerExtendedTests
                 new
                 {
                     id = Guid.NewGuid().ToString("N"),
-                    createdAt = s.Clock.GetUtcNow().AddMinutes(-1).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                    createdAt = s.Clock.GetUtcNow().AddMinutes(-1).ToUtcIso(),
                 });
         }
         b.SiemController.Request.Headers.Accept = "application/x-cef";

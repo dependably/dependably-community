@@ -35,8 +35,8 @@ public sealed class TrustedDeviceService
         string raw = TokenGenerator.Generate();
         string hash = TokenRepository.HashToken(raw);
         string id = Guid.NewGuid().ToString("N");
-        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
-        string expiresAt = _time.GetUtcNow().AddDays(TtlDays).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToUtcIso();
+        string expiresAt = _time.GetUtcNow().AddDays(TtlDays).ToUtcIso();
 
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
@@ -57,7 +57,7 @@ public sealed class TrustedDeviceService
         string userId, string realm, string? tenantId, string rawCookie, CancellationToken ct = default)
     {
         string hash = TokenRepository.HashToken(rawCookie);
-        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToUtcIso();
 
         await using var conn = await _db.OpenAsync(ct);
         string? id = await conn.ExecuteScalarAsync<string?>(
@@ -101,7 +101,7 @@ public sealed class TrustedDeviceService
     /// <summary>Removes expired trusted-device rows (called by RetentionService GC pass).</summary>
     public async Task PruneExpiredAsync(CancellationToken ct = default)
     {
-        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToUtcIso();
         await using var conn = await _db.OpenAsync(ct);
         // xtenant: retention sweep deletes globally expired rows across all tenants
         await conn.ExecuteAsync(

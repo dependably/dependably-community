@@ -52,6 +52,27 @@ public class AuditEventRepositoryTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task InsertAsync_OccurredAt_StoredAsCanonicalUtcMillisecondText()
+    {
+        // InsertAsync binds OccurredAt explicitly via ToUtcIsoMillis() (not the whole `ev` record
+        // through the global DateTimeOffsetHandler default, which is second precision) — this
+        // append-only forensic table needs sub-second ordering for events sharing a wall-clock
+        // second, the same reason audit_log/activity are millisecond. A +03:00 offset instant
+        // must normalize to UTC `Z` text at millisecond precision, matching
+        // audit_event.occurred_at's schema DEFAULT.
+        var repo = new AuditEventRepository(_db);
+        var instant = new DateTimeOffset(2026, 4, 10, 9, 0, 0, 500, TimeSpan.FromHours(3));
+        var ev = Sample("o1", "package.publish", instant);
+        await repo.InsertAsync(ev);
+
+        await using var conn = await _db.OpenAsync();
+        string stored = await conn.QuerySingleAsync<string>(
+            "SELECT occurred_at FROM audit_event WHERE event_id = @id", new { id = ev.EventId });
+
+        Assert.Equal("2026-04-10T06:00:00.500Z", stored);
+    }
+
+    [Fact]
     public async Task ListByTenant_ScopedToOrg()
     {
         var repo = new AuditEventRepository(_db);

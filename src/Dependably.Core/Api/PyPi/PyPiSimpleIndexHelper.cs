@@ -90,26 +90,106 @@ public static class PyPiSimpleIndexHelper
         Array.Empty<PackageVersionFile>().ToLookup(f => f.PackageVersionId);
 
     /// <summary>
+    /// One resolved file entry of a simple index, independent of wire format: what the merge rule
+    /// decided should be advertised, before anything decides how to spell it. Both renderers read
+    /// this and nothing else, so a rule that changes here changes in HTML and JSON at once.
+    ///
+    /// <paramref name="SizeBytes"/> is JSON-only (PEP 691 optional; PEP 503 HTML has no vehicle
+    /// for it) and <paramref name="Yanked"/>/<paramref name="YankReason"/> are spelled differently
+    /// per format (a <c>data-yanked</c> attribute vs. PEP 592's <c>reason | true | false</c>).
+    /// Those are format differences, not merge differences — which is exactly the distinction this
+    /// type exists to keep visible.
+    /// </summary>
+    public sealed record SimpleIndexFileEntry(
+        string Filename, string? Sha256, long? SizeBytes, bool Yanked, string? YankReason);
+
+    /// <summary>
+    /// The one merge rule, applied once. Resolves the set of files a simple index should
+    /// advertise for a package: locally-hosted versions first, then upstream entries that no local
+    /// file already claimed.
+    ///
+    /// - Versions the download path would hard-block (manual block, deprecated, KEV, EPSS, CVSS,
+    ///   release-age) are omitted, so the index never advertises an artifact that returns 403. The
+    ///   shared predicate mirrors <c>BlockGateService.EvaluateAsync</c>, so this filter and the
+    ///   download gate cannot diverge. Upstream-only (not-yet-cached) entries cannot be filtered
+    ///   here — no stored state exists for them yet.
+    /// - A hosted version with rows in <paramref name="hostedFiles"/> contributes one entry per
+    ///   distribution file (wheel + sdist + per-platform wheels); a version without file rows
+    ///   (synthetic proxy projection) contributes its single version-row artifact.
+    /// - Filenames dedupe case-insensitively, first writer wins. Local files are collected before
+    ///   upstream entries, so a filename published both places is listed once carrying the LOCAL
+    ///   sha256 — matching the download path, which resolves an uploaded file before consulting
+    ///   the proxy cache. Advertising the upstream digest for a filename served from local storage
+    ///   would hand pip a hash it can never satisfy.
+    /// </summary>
+    public static List<SimpleIndexFileEntry> CollectSimpleIndexEntries(
+        IReadOnlyList<PackageVersion> localVersions,
+        ILookup<string, PackageVersionFile> hostedFiles,
+        OrgSettings settings,
+        IReadOnlyDictionary<string, VulnGateSignals> signals,
+        DateTimeOffset now,
+        IReadOnlyList<UpstreamSimpleIndexEntry> upstreamEntries)
+    {
+        var seenFilenames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var entries = new List<SimpleIndexFileEntry>();
+
+        foreach (var v in localVersions)
+        {
+            if (BlockGateService.IsHardBlockedByStoredState(v, settings, signals.GetValueOrDefault(v.Id), now))
+            {
+                continue;
+            }
+
+            var files = hostedFiles[v.Id].ToList();
+            if (files.Count == 0)
+            {
+                // Synthetic proxy projections carry exactly one artifact on the version row itself.
+                string filename = string.IsNullOrEmpty(v.Filename) ? v.BlobKey.Split('/').Last() : v.Filename;
+                AddEntry(entries, seenFilenames, new SimpleIndexFileEntry(
+                    filename, v.ChecksumSha256, Positive(v.SizeBytes), v.Yanked, v.YankReason));
+                continue;
+            }
+
+            // The block gate and yank state are per-version, so every file of a version shares them.
+            foreach (var file in files)
+            {
+                AddEntry(entries, seenFilenames, new SimpleIndexFileEntry(
+                    file.Filename, file.ChecksumSha256, Positive(file.SizeBytes), v.Yanked, v.YankReason));
+            }
+        }
+
+        foreach (var upstream in upstreamEntries)
+        {
+            // Skips a duplicate anchor on the same upstream page as well as any filename a local
+            // hosted file already claimed.
+            AddEntry(entries, seenFilenames, new SimpleIndexFileEntry(
+                upstream.Filename, upstream.Sha256, SizeBytes: null, Yanked: false, YankReason: null));
+        }
+
+        return entries;
+    }
+
+    private static void AddEntry(
+        List<SimpleIndexFileEntry> entries, HashSet<string> seenFilenames, SimpleIndexFileEntry entry)
+    {
+        if (seenFilenames.Add(entry.Filename))
+        {
+            entries.Add(entry);
+        }
+    }
+
+    // A recorded size of 0 means "not recorded", not "an empty file" — omitted rather than
+    // advertised as zero.
+    private static long? Positive(long sizeBytes) => sizeBytes > 0 ? sizeBytes : null;
+
+    /// <summary>
     /// Renders a PEP 503 simple-index HTML page for a set of locally-hosted versions.
-    /// Versions blocked by the block gate (manual block, deprecated, KEV, EPSS, CVSS,
-    /// release-age) are omitted so the index never advertises an artifact that returns 403.
-    /// A hosted version with rows in <paramref name="hostedFiles"/> renders one anchor per
-    /// distribution file (wheel + sdist + per-platform wheels); versions without file rows
-    /// (synthetic proxy projections) render their single version-row artifact.
     /// </summary>
     public static string RenderLocalSimpleIndex(
         string purlName, IReadOnlyList<PackageVersion> versions, ILookup<string, PackageVersionFile> hostedFiles,
-        OrgSettings settings, IReadOnlyDictionary<string, VulnGateSignals> signals, DateTimeOffset now)
-    {
-        var sb = new StringBuilder();
-        sb.AppendLine("<!DOCTYPE html>");
-        sb.AppendLine($"<html><head><title>Links for {System.Web.HttpUtility.HtmlEncode(purlName)}</title></head><body>");
-        sb.AppendLine($"<h1>Links for {System.Web.HttpUtility.HtmlEncode(purlName)}</h1>");
-        var seenFilenames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        AppendLocalVersions(sb, versions, hostedFiles, settings, signals, now, seenFilenames);
-        sb.AppendLine("</body></html>");
-        return sb.ToString();
-    }
+        OrgSettings settings, IReadOnlyDictionary<string, VulnGateSignals> signals, DateTimeOffset now) =>
+        RenderSimpleIndexHtml(purlName, CollectSimpleIndexEntries(
+            versions, hostedFiles, settings, signals, now, []));
 
     /// <summary>
     /// Renders the served simple-index page entirely from parsed data: locally-hosted versions
@@ -119,13 +199,6 @@ public static class PyPiSimpleIndexHelper
     /// fragments, so a hostile or compromised upstream (or a MITM'd response) cannot inject
     /// markup that reaches the client, whether inside an unmatched anchor attribute or entirely
     /// outside any anchor (e.g. a stray <c>&lt;script&gt;</c> tag in the page body).
-    ///
-    /// Local hosted files are rendered first, so a filename published both upstream and locally
-    /// is listed once carrying the LOCAL <c>sha256</c>. This matches the download path, which
-    /// resolves an uploaded file before consulting the proxy cache/upstream — advertising the
-    /// upstream digest for a filename served from local storage would hand pip a hash it can
-    /// never satisfy. Upstream-only (not-yet-cached) versions cannot be filtered by the block
-    /// gate here because stored state does not exist for them yet.
     /// </summary>
     public static string RenderMergedSimpleIndex(
         string purlName,
@@ -134,102 +207,35 @@ public static class PyPiSimpleIndexHelper
         ILookup<string, PackageVersionFile> hostedFiles,
         OrgSettings settings,
         IReadOnlyDictionary<string, VulnGateSignals> signals,
-        DateTimeOffset now)
+        DateTimeOffset now) =>
+        RenderSimpleIndexHtml(purlName, CollectSimpleIndexEntries(
+            localVersions, hostedFiles, settings, signals, now, upstreamEntries));
+
+    // The PEP 503 rendering of a merged entry list. Every value is HTML-encoded here; nothing
+    // upstream-supplied reaches the response un-encoded.
+    private static string RenderSimpleIndexHtml(string purlName, List<SimpleIndexFileEntry> entries)
     {
         var sb = new StringBuilder();
         sb.AppendLine("<!DOCTYPE html>");
         sb.AppendLine($"<html><head><title>Links for {System.Web.HttpUtility.HtmlEncode(purlName)}</title></head><body>");
         sb.AppendLine($"<h1>Links for {System.Web.HttpUtility.HtmlEncode(purlName)}</h1>");
 
-        var seenFilenames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        AppendLocalVersions(sb, localVersions, hostedFiles, settings, signals, now, seenFilenames);
-        AppendUpstreamEntries(sb, upstreamEntries, seenFilenames);
-
-        sb.AppendLine("</body></html>");
-        return sb.ToString();
-    }
-
-    // Renders one anchor per not-yet-seen upstream entry, skipping a duplicate anchor on the
-    // same upstream page and any filename already emitted by a local hosted version (the local
-    // file wins the dedupe so the advertised sha256 matches the blob the download path serves).
-    private static void AppendUpstreamEntries(
-        StringBuilder sb, IReadOnlyList<UpstreamSimpleIndexEntry> upstreamEntries, HashSet<string> seenFilenames)
-    {
-        foreach (var entry in upstreamEntries)
+        foreach (var entry in entries)
         {
-            if (!seenFilenames.Add(entry.Filename))
-            {
-                continue; // duplicate anchor on the same upstream page
-            }
-
             string href = OrgPath($"packages/{entry.Filename}");
             if (entry.Sha256 is not null)
             {
                 href += $"#sha256={entry.Sha256}";
             }
 
-            sb.AppendLine($"<a href=\"{System.Web.HttpUtility.HtmlAttributeEncode(href)}\">{System.Web.HttpUtility.HtmlEncode(entry.Filename)}</a><br/>");
-        }
-    }
-
-    // Renders anchors for each locally-hosted version not hard-blocked: one anchor per hosted
-    // distribution file when the version has file rows, otherwise the version row's single
-    // artifact (synthetic proxy projections). Local files are emitted before upstream entries
-    // in the merged index, so a filename hosted locally claims the seenFilenames slot with its
-    // own sha256 before any colliding upstream entry can. The block gate and yank state are
-    // per-version, so every file of a version shares them.
-    private static void AppendLocalVersions(
-        StringBuilder sb, IReadOnlyList<PackageVersion> localVersions,
-        ILookup<string, PackageVersionFile> hostedFiles, OrgSettings settings,
-        IReadOnlyDictionary<string, VulnGateSignals> signals, DateTimeOffset now, HashSet<string> seenFilenames)
-    {
-        foreach (var v in localVersions)
-        {
-            // Omit versions the download path will hard-block so they are never advertised.
-            // The shared predicate mirrors BlockGateService.EvaluateAsync exactly so this
-            // filter and the download gate can never diverge.
-            if (BlockGateService.IsHardBlockedByStoredState(v, settings, signals.GetValueOrDefault(v.Id), now))
-            {
-                continue;
-            }
-
-            var files = hostedFiles[v.Id].ToList();
-            if (files.Count == 0)
-            {
-                string filename = string.IsNullOrEmpty(v.Filename) ? v.BlobKey.Split('/').Last() : v.Filename;
-                AppendFileAnchor(sb, v, filename, v.ChecksumSha256, seenFilenames);
-                continue;
-            }
-
-            foreach (var file in files)
-            {
-                AppendFileAnchor(sb, v, file.Filename, file.ChecksumSha256, seenFilenames);
-            }
-        }
-    }
-
-    // Renders one file anchor with the per-file sha256 fragment and the owning version's yank
-    // state, skipping filenames already listed (first writer wins; duplicates collapse). In the
-    // merged index local files are appended first, so a locally-hosted filename always wins a
-    // collision with an upstream entry of the same name.
-    private static void AppendFileAnchor(
-        StringBuilder sb, PackageVersion v, string filename, string? sha256, HashSet<string> seenFilenames)
-    {
-        if (!seenFilenames.Add(filename))
-        {
-            return;
+            string yankAttr = entry.Yanked
+                ? $" data-yanked=\"{System.Web.HttpUtility.HtmlAttributeEncode(entry.YankReason ?? "")}\""
+                : "";
+            sb.AppendLine($"<a href=\"{System.Web.HttpUtility.HtmlAttributeEncode(href)}\"{yankAttr}>{System.Web.HttpUtility.HtmlEncode(entry.Filename)}</a><br/>");
         }
 
-        string href = OrgPath($"packages/{filename}");
-        if (sha256 is not null)
-        {
-            href += $"#sha256={sha256}";
-        }
-
-        string yankAttr = v.Yanked
-            ? $" data-yanked=\"{System.Web.HttpUtility.HtmlAttributeEncode(v.YankReason ?? "")}\""
-            : "";
-        sb.AppendLine($"<a href=\"{System.Web.HttpUtility.HtmlAttributeEncode(href)}\"{yankAttr}>{System.Web.HttpUtility.HtmlEncode(filename)}</a><br/>");
+        sb.AppendLine("</body></html>");
+        return sb.ToString();
     }
 
     /// <summary>
@@ -249,30 +255,19 @@ public static class PyPiSimpleIndexHelper
 
     /// <summary>
     /// Renders the PEP 691 JSON per-package index for locally-hosted versions only — the JSON
-    /// counterpart of <see cref="RenderLocalSimpleIndex"/>. Shares the same block-gate filtering
-    /// so a client negotiating JSON can never discover an artifact the HTML form (or the
-    /// download gate) would hide.
+    /// counterpart of <see cref="RenderLocalSimpleIndex"/>, off the same entry list, so a client
+    /// negotiating JSON can never discover an artifact the HTML form (or the download gate) hides.
     /// </summary>
     public static string RenderLocalSimpleIndexJson(
         string purlName, IReadOnlyList<PackageVersion> versions, ILookup<string, PackageVersionFile> hostedFiles,
-        OrgSettings settings, IReadOnlyDictionary<string, VulnGateSignals> signals, DateTimeOffset now)
-    {
-        var seenFilenames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var files = CollectLocalJsonFiles(versions, hostedFiles, settings, signals, now, seenFilenames);
-        return SerializePackageIndexJson(purlName, files);
-    }
+        OrgSettings settings, IReadOnlyDictionary<string, VulnGateSignals> signals, DateTimeOffset now) =>
+        RenderSimpleIndexJson(purlName, CollectSimpleIndexEntries(
+            versions, hostedFiles, settings, signals, now, []));
 
     /// <summary>
     /// Renders the PEP 691 JSON per-package index merged from locally-hosted versions plus parsed
-    /// upstream file entries — the JSON counterpart of <see cref="RenderMergedSimpleIndex"/>,
-    /// applying the identical merge rule.
-    ///
-    /// Local hosted files are collected first, so a filename published both upstream and locally
-    /// is listed once carrying the LOCAL <c>sha256</c>. This matches the download path, which
-    /// resolves an uploaded file before consulting the proxy cache/upstream — advertising the
-    /// upstream digest for a filename served from local storage would hand pip a hash it can
-    /// never satisfy. Upstream-only (not-yet-cached) versions cannot be filtered by the block
-    /// gate here because stored state does not exist for them yet.
+    /// upstream file entries — the JSON counterpart of <see cref="RenderMergedSimpleIndex"/>, off
+    /// the same entry list rather than a second implementation of the same merge rule.
     /// </summary>
     public static string RenderMergedSimpleIndexJson(
         string purlName,
@@ -281,88 +276,30 @@ public static class PyPiSimpleIndexHelper
         ILookup<string, PackageVersionFile> hostedFiles,
         OrgSettings settings,
         IReadOnlyDictionary<string, VulnGateSignals> signals,
-        DateTimeOffset now)
+        DateTimeOffset now) =>
+        RenderSimpleIndexJson(purlName, CollectSimpleIndexEntries(
+            localVersions, hostedFiles, settings, signals, now, upstreamEntries));
+
+    // The PEP 691 rendering of a merged entry list.
+    private static string RenderSimpleIndexJson(string purlName, List<SimpleIndexFileEntry> entries)
+        => SerializePackageIndexJson(purlName, entries.Select(BuildJsonFileEntry).ToList());
+
+    private static Dictionary<string, object?> BuildJsonFileEntry(SimpleIndexFileEntry entry)
     {
-        var seenFilenames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var files = CollectLocalJsonFiles(localVersions, hostedFiles, settings, signals, now, seenFilenames);
-        foreach (var entry in upstreamEntries)
+        var json = new Dictionary<string, object?>
         {
-            // Skips a duplicate anchor on the same upstream page and any filename already
-            // emitted by a local hosted version (the local file wins the dedupe so the
-            // advertised sha256 matches the blob the download path serves).
-            if (!seenFilenames.Add(entry.Filename))
-            {
-                continue;
-            }
-
-            files.Add(BuildJsonFileEntry(entry.Filename, entry.Sha256, size: null, yanked: false, yankReason: null));
-        }
-
-        return SerializePackageIndexJson(purlName, files);
-    }
-
-    // Builds the JSON file-entry list for locally-hosted versions not hard-blocked and not
-    // already present in seenFilenames: one entry per hosted distribution file when the version
-    // has file rows, otherwise the version row's single artifact (synthetic proxy projections).
-    // Mirrors AppendLocalVersions's filtering exactly so the HTML and JSON forms never diverge.
-    private static List<Dictionary<string, object?>> CollectLocalJsonFiles(
-        IReadOnlyList<PackageVersion> localVersions, ILookup<string, PackageVersionFile> hostedFiles,
-        OrgSettings settings, IReadOnlyDictionary<string, VulnGateSignals> signals, DateTimeOffset now,
-        HashSet<string> seenFilenames)
-    {
-        var result = new List<Dictionary<string, object?>>();
-        foreach (var v in localVersions)
-        {
-            if (BlockGateService.IsHardBlockedByStoredState(v, settings, signals.GetValueOrDefault(v.Id), now))
-            {
-                continue;
-            }
-
-            var files = hostedFiles[v.Id].ToList();
-            if (files.Count == 0)
-            {
-                AddSingleArtifactJsonEntry(v, seenFilenames, result);
-                continue;
-            }
-
-            result.AddRange(files
-                .Where(file => seenFilenames.Add(file.Filename))
-                .Select(file => BuildJsonFileEntry(
-                    file.Filename, file.ChecksumSha256, file.SizeBytes > 0 ? file.SizeBytes : null, v.Yanked, v.YankReason)));
-        }
-        return result;
-    }
-
-    // Emits the version row's single artifact when no per-file rows exist (synthetic proxy
-    // projections carry exactly one artifact on the version row itself).
-    private static void AddSingleArtifactJsonEntry(
-        PackageVersion v, HashSet<string> seenFilenames, List<Dictionary<string, object?>> result)
-    {
-        string filename = string.IsNullOrEmpty(v.Filename) ? v.BlobKey.Split('/').Last() : v.Filename;
-        if (seenFilenames.Add(filename))
-        {
-            result.Add(BuildJsonFileEntry(
-                filename, v.ChecksumSha256, v.SizeBytes > 0 ? v.SizeBytes : null, v.Yanked, v.YankReason));
-        }
-    }
-
-    private static Dictionary<string, object?> BuildJsonFileEntry(
-        string filename, string? sha256, long? size, bool yanked, string? yankReason)
-    {
-        var entry = new Dictionary<string, object?>
-        {
-            ["filename"] = filename,
-            ["url"] = OrgPath($"packages/{filename}"),
-            ["hashes"] = sha256 is null
+            ["filename"] = entry.Filename,
+            ["url"] = OrgPath($"packages/{entry.Filename}"),
+            ["hashes"] = entry.Sha256 is null
                 ? new Dictionary<string, string>()
-                : new Dictionary<string, string> { ["sha256"] = sha256 },
-            ["yanked"] = YankedValue(yanked, yankReason),
+                : new Dictionary<string, string> { ["sha256"] = entry.Sha256 },
+            ["yanked"] = YankedValue(entry.Yanked, entry.YankReason),
         };
-        if (size is not null)
+        if (entry.SizeBytes is not null)
         {
-            entry["size"] = size;
+            json["size"] = entry.SizeBytes;
         }
-        return entry;
+        return json;
     }
 
     // Per PEP 592/691: false when not yanked; when yanked, a non-empty reason string, or the

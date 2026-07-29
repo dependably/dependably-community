@@ -2,15 +2,23 @@
   import { t } from 'svelte-i18n'
   import { api } from '../lib/api.js'
   import ErrorBanner from '../lib/ErrorBanner.svelte'
+  import Skeleton from '../lib/Skeleton.svelte'
   import { currentOrg, navigate, user } from '../lib/store.js'
+  import { reportPageLoad } from '../lib/pageLoad.js'
   import { formatBytes } from '../lib/format.js'
   import { ECOSYSTEMS, ECO_LABEL } from '../lib/ecosystems.js'
+
+  /** The route transition this page was mounted for, supplied by RouteView. @type {number | null} */
+  export let pageToken = null
 
   let stats = null
   let loading = true
   let error = ''
 
   $: org = $currentOrg
+  // Holds the deferred navigation that mounted this page until the data is here, so the swap
+  // shows the loaded page rather than a shimmer that lives for a hundred milliseconds.
+  $: reportPageLoad(pageToken, loading)
 
   async function load() {
     loading = true
@@ -47,6 +55,11 @@
     if (!stats) return 0
     return stats.packagesByEcosystem.reduce((s, e) => s + e.count, 0)
   }
+
+  // Reactive mirror of totalPackages() for the markup. A bare `totalPackages()` in a template
+  // names no reactive variable, so the compiler has no dependency to invalidate on and the call
+  // keeps its mount-time value of 0 after `stats` lands. Everything below reads this.
+  $: totalPackageCount = stats ? stats.packagesByEcosystem.reduce((s, e) => s + e.count, 0) : 0
 
   function diskFor(eco) {
     if (!stats) return 0
@@ -196,14 +209,18 @@
           <span class="split"><b>{newVulns30d}</b>{$t('dashboard.window30d')}</span>
         </span>
       </button>
+    {:else}
+      <!-- Same box as the loaded ribbon, so the page header does not change height. -->
+      <span class="ribbon" aria-hidden="true"><Skeleton width="240px" height="14px" /></span>
     {/if}
   </div>
 
   <ErrorBanner message={error} />
 
-  {#if loading}
-    <span class="spinner"></span>
-  {:else if stats}
+  <!-- Rendered whether or not `stats` has arrived: every helper above is null-safe and returns
+       0 or an empty list, so the grid, donut, table, and chart all stand at their loaded size
+       from the first paint and only the values swap in. Collapsing the body to a spinner
+       instead would retract the document scrollbar and shift the whole layout. -->
 
     <!-- ── SAML cert-expiry alert card (admins/owners only; hot when ≤7d or expired) ── -->
     {#if samlCertHot}
@@ -225,25 +242,21 @@
     <div class="stat-grid">
       <div class="stat-card">
         <div class="eyebrow">{$t('dashboard.totalPackages')}</div>
-        <div class="stat-value">{totalPackages().toLocaleString()}</div>
-        {#if hostedPackages > 0 || proxiedPackages > 0}
-          <div class="stat-sub">{$t('dashboard.hostedProxied', { values: { hosted: hostedPackages.toLocaleString(), proxied: proxiedPackages.toLocaleString() } })}</div>
-        {/if}
+        <div class="stat-value">{#if stats}{totalPackageCount.toLocaleString()}{:else}<Skeleton width="72px" height="28px" />{/if}</div>
+        <div class="stat-sub">{#if hostedPackages > 0 || proxiedPackages > 0}{$t('dashboard.hostedProxied', { values: { hosted: hostedPackages.toLocaleString(), proxied: proxiedPackages.toLocaleString() } })}{/if}</div>
       </div>
       <div class="stat-card">
         <div class="eyebrow">{$t('dashboard.totalDisk')}</div>
-        <div class="stat-value">{$formatBytes(stats.totalDiskBytes)}</div>
-        {#if storageQuotaBytes}
-          <div class="stat-sub">{$t('dashboard.quotaUsage', { values: { total: $formatBytes(storageQuotaBytes) } })}</div>
-        {/if}
+        <div class="stat-value">{#if stats}{$formatBytes(stats.totalDiskBytes)}{:else}<Skeleton width="72px" height="28px" />{/if}</div>
+        <div class="stat-sub">{#if storageQuotaBytes}{$t('dashboard.quotaUsage', { values: { total: $formatBytes(storageQuotaBytes) } })}{/if}</div>
       </div>
       <div class="stat-card">
         <div class="eyebrow">{$t('dashboard.activeUsers')}</div>
-        <div class="stat-value">{stats.activeUsers7d ?? 0}</div>
+        <div class="stat-value">{#if stats}{stats.activeUsers7d ?? 0}{:else}<Skeleton width="72px" height="28px" />{/if}</div>
       </div>
       <div class="stat-card">
         <div class="eyebrow">{$t('dashboard.totalDownloads')}</div>
-        <div class="stat-value">{(stats.totalDownloads30d ?? 0).toLocaleString()}</div>
+        <div class="stat-value">{#if stats}{(stats.totalDownloads30d ?? 0).toLocaleString()}{:else}<Skeleton width="72px" height="28px" />{/if}</div>
       </div>
       <!-- The two blocked tiles drill into the Audit page's lifecycle feed, scoped to the same
            30-day window they count. That page is admin-only (ADMIN_ONLY_PAGES), so only an
@@ -256,12 +269,12 @@
           aria-label={$t('dashboard.blockedPulls')}
         >
           <div class="eyebrow">{$t('dashboard.blockedPulls')}</div>
-          <div class="stat-value" class:warn={stats.blockedPulls30d > 0}>{(stats.blockedPulls30d ?? 0).toLocaleString()}</div>
+          <div class="stat-value" class:warn={stats?.blockedPulls30d > 0}>{#if stats}{(stats.blockedPulls30d ?? 0).toLocaleString()}{:else}<Skeleton width="72px" height="28px" />{/if}</div>
         </button>
       {:else}
         <div class="stat-card" title={blockedBreakdown}>
           <div class="eyebrow">{$t('dashboard.blockedPulls')}</div>
-          <div class="stat-value" class:warn={stats.blockedPulls30d > 0}>{(stats.blockedPulls30d ?? 0).toLocaleString()}</div>
+          <div class="stat-value" class:warn={stats?.blockedPulls30d > 0}>{#if stats}{(stats.blockedPulls30d ?? 0).toLocaleString()}{:else}<Skeleton width="72px" height="28px" />{/if}</div>
         </div>
       {/if}
       {#if isAdmin}
@@ -271,12 +284,12 @@
           aria-label={$t('dashboard.blockedMalicious')}
         >
           <div class="eyebrow">{$t('dashboard.blockedMalicious')}</div>
-          <div class="stat-value" class:danger={maliciousBlocked > 0}>{maliciousBlocked.toLocaleString()}</div>
+          <div class="stat-value" class:danger={maliciousBlocked > 0}>{#if stats}{maliciousBlocked.toLocaleString()}{:else}<Skeleton width="72px" height="28px" />{/if}</div>
         </button>
       {:else}
         <div class="stat-card">
           <div class="eyebrow">{$t('dashboard.blockedMalicious')}</div>
-          <div class="stat-value" class:danger={maliciousBlocked > 0}>{maliciousBlocked.toLocaleString()}</div>
+          <div class="stat-value" class:danger={maliciousBlocked > 0}>{#if stats}{maliciousBlocked.toLocaleString()}{:else}<Skeleton width="72px" height="28px" />{/if}</div>
         </div>
       {/if}
       <!-- Risk is not admin-gated: read:packages serves both the tile and the drill-down. -->
@@ -286,10 +299,8 @@
         aria-label={$t('dashboard.operationalRisk')}
       >
         <div class="eyebrow">{$t('dashboard.operationalRisk')}</div>
-        <div class="stat-value" class:warn={operationalRiskPackageCount > 0}>{operationalRiskPackageCount.toLocaleString()}</div>
-        {#if versionsBehindThreshold > 0}
-          <div class="stat-sub">{$t('dashboard.operationalRiskSub', { values: { threshold: versionsBehindThreshold } })}</div>
-        {/if}
+        <div class="stat-value" class:warn={operationalRiskPackageCount > 0}>{#if stats}{operationalRiskPackageCount.toLocaleString()}{:else}<Skeleton width="72px" height="28px" />{/if}</div>
+        <div class="stat-sub">{#if versionsBehindThreshold > 0}{$t('dashboard.operationalRiskSub', { values: { threshold: versionsBehindThreshold } })}{/if}</div>
       </button>
       <button
         class="stat-card stat-link"
@@ -297,7 +308,7 @@
         aria-label={$t('dashboard.licenseRisk')}
       >
         <div class="eyebrow">{$t('dashboard.licenseRisk')}</div>
-        <div class="stat-value" class:warn={licenseRiskVersionCount > 0}>{licenseRiskVersionCount.toLocaleString()}</div>
+        <div class="stat-value" class:warn={licenseRiskVersionCount > 0}>{#if stats}{licenseRiskVersionCount.toLocaleString()}{:else}<Skeleton width="72px" height="28px" />{/if}</div>
       </button>
       {#if isAdmin}
         <button
@@ -307,12 +318,12 @@
           aria-label={$t('dashboard.quarantinePending')}
         >
           <div class="eyebrow">{$t('dashboard.quarantinePending')}</div>
-          <div class="stat-value" class:warn={quarantinePending > 0}>{quarantinePending.toLocaleString()}</div>
+          <div class="stat-value" class:warn={quarantinePending > 0}>{#if stats}{quarantinePending.toLocaleString()}{:else}<Skeleton width="72px" height="28px" />{/if}</div>
         </button>
       {:else}
         <div class="stat-card">
           <div class="eyebrow">{$t('dashboard.quarantinePending')}</div>
-          <div class="stat-value" class:warn={quarantinePending > 0}>{quarantinePending.toLocaleString()}</div>
+          <div class="stat-value" class:warn={quarantinePending > 0}>{#if stats}{quarantinePending.toLocaleString()}{:else}<Skeleton width="72px" height="28px" />{/if}</div>
         </div>
       {/if}
     </div>
@@ -324,14 +335,14 @@
 
         <!-- Donut chart -->
         <div class="donut-wrap">
-          {#if totalPackages() === 0}
+          {#if totalPackageCount === 0}
             <div class="donut-empty">{$t('dashboard.donutEmpty')}</div>
           {:else}
             <svg viewBox="0 0 100 100" class="donut-svg">
               {#each slices as s (s.eco)}
                 <path d={s.d} fill-rule="evenodd" class="slice slice-{s.eco}" />
               {/each}
-              <text x="50" y="54" text-anchor="middle" class="donut-center-num">{totalPackages().toLocaleString()}</text>
+              <text x="50" y="54" text-anchor="middle" class="donut-center-num">{totalPackageCount.toLocaleString()}</text>
             </svg>
           {/if}
         </div>
@@ -363,6 +374,15 @@
                 <th class="text-right">{$t('dashboard.vulns')}</th>
               </tr>
             </thead>
+            {#if loading}
+              <!-- Four rows plus the header stand at roughly the 160px donut beside them, which
+                   is what pins this section's height once loaded. -->
+              <tbody aria-hidden="true">
+                {#each [0, 1, 2, 3] as i (i)}
+                  <tr><td colspan="9"><span class="skeleton"></span></td></tr>
+                {/each}
+              </tbody>
+            {:else}
             <tbody>
               {#each visibleEcos as eco (eco)}
                 {@const total = totalVulns(eco)}
@@ -393,6 +413,7 @@
                 </tr>
               {/each}
             </tbody>
+            {/if}
           </table>
         </div>
       </div>
@@ -419,8 +440,6 @@
         {$t('dashboard.fetchesTotal', { values: { n: hourBars.reduce((s, b) => s + b.count, 0).toLocaleString() } })}
       </div>
     </section>
-
-  {/if}
 </div>
 
 <style>
@@ -430,11 +449,14 @@
   /* Stat grid bottom margin */
   .stat-grid { margin-bottom: 32px; }
 
-  /* Secondary line under a stat value (hosted/proxied split, quota, gate breakdown). */
+  /* Secondary line under a stat value (hosted/proxied split, quota, gate breakdown). Rendered
+     on every tile that can carry one, empty or not, and floored at one line so the grid's row
+     height is settled before the numbers arrive and the tiles below do not shift. */
   .stat-sub {
     font-size: 12px;
     color: var(--text2);
     line-height: 1.3;
+    min-height: 1.3em;
   }
 
   /* Quarantine card doubles as a link to the review queue. Reset the button chrome so it

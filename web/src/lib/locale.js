@@ -8,9 +8,16 @@ export const locales = [
   { code: 'fr', label: 'Français' }
 ]
 
-/** Apply a locale client-side: store, cookie, html[lang]. No backend call. */
+/**
+ * Apply a locale client-side: store, cookie, html[lang]. No backend call.
+ *
+ * Returns the svelte-i18n load promise. It resolves once the requested dictionary has flushed,
+ * and $locale — and therefore every $t — stays on the previous language until it does, so the
+ * tree renders correctly for the whole round trip. Callers that must not paint in the outgoing
+ * language (the boot path, which realigns to the user's stored preference) await it.
+ */
 export function applyLocale(code) {
-  locale.set(code)
+  const applied = locale.set(code)
   // Cookie is what ASP.NET CookieRequestCultureProvider reads, so server-rendered errors
   // and login pages stay in the chosen language.
   const value = encodeURIComponent(`c=${code}|uic=${code}`)
@@ -21,6 +28,7 @@ export function applyLocale(code) {
   document.cookie = `.AspNetCore.Culture=${value}; path=/; max-age=31536000; SameSite=Lax${secure}`
   localStorage.setItem('locale', code)
   if (typeof document !== 'undefined') document.documentElement.lang = code
+  return applied
 }
 
 /**

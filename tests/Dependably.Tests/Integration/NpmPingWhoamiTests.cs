@@ -206,7 +206,7 @@ public sealed class NpmPingWhoamiTests : IClassFixture<DependablyFactory>, IAsyn
                 "UPDATE service_tokens SET expires_at = @past WHERE id = @id",
                 // now-ok: seeds relative to the host's real clock so the resolver's
                 // expires_at > now filter rejects it; 1h clears the cutoff by a wide margin.
-                new { past = DateTimeOffset.UtcNow.AddHours(-1).ToString("yyyy-MM-ddTHH:mm:ssZ"), id = record.Id });
+                new { past = DateTimeOffset.UtcNow.AddHours(-1).ToUtcIso(), id = record.Id });
         }
 
         using var client = _factory.CreateClientWithBearer(raw);
@@ -219,19 +219,24 @@ public sealed class NpmPingWhoamiTests : IClassFixture<DependablyFactory>, IAsyn
     // ── /-/npm/v1/security/... (npm audit) ──────────────────────────────────
 
     /// <summary>
-    /// The npm 6-era quick-audit shape is a deliberate 501 refusal, not a bare 404 — npm 7 and
-    /// newer audit exclusively through the bulk-advisories endpoint, which
-    /// <see cref="NpmAuditBulkAdvisoriesTests"/> covers.
+    /// The npm 6-era quick-audit shape has been removed — every supported npm version audits
+    /// exclusively through the bulk-advisories endpoint, which
+    /// <see cref="NpmAuditBulkAdvisoriesTests"/> covers. The route now falls through to a clean
+    /// 404, not the SPA's index.html: <c>/npm/</c> is listed in Program.cs's
+    /// <c>NonSpaPathPrefixes</c>, so the fallback middleware answers 404 for any unmatched path
+    /// under that prefix rather than serving the SPA shell.
     /// </summary>
     [Fact]
-    public async Task AuditQuick_Returns501NotImplemented()
+    public async Task AuditQuick_RouteRemoved_Returns404NotSpaHtml()
     {
         using var client = _factory.CreateClient();
         using var content = new StringContent("{}", Encoding.UTF8, "application/json");
 
         var resp = await client.PostAsync("/npm/-/npm/v1/security/audits/quick", content);
 
-        Assert.Equal(HttpStatusCode.NotImplemented, resp.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+        string body = await resp.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("<html", body, StringComparison.OrdinalIgnoreCase);
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────

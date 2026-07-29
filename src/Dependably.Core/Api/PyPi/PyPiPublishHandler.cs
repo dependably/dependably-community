@@ -22,7 +22,7 @@ public sealed class PyPiPublishHandler(
     IPackagePublishService publish,
     ClaimResolver claimResolver,
     LicenseRepository licenses,
-    RenderedResponseCache<PyPiSimpleIndexKey> cache,
+    MetadataInvalidationCoordinator invalidation,
     ILogger<PyPiPublishHandler> logger,
     IUploadLimitResolver uploadLimits,
     string stagingPath)
@@ -342,6 +342,7 @@ public sealed class PyPiPublishHandler(
             SizeCap = long.MaxValue,        // size cap already enforced upstream by CheckPyPiUploadSizeAsync
             ActorUserId = tenant.Token?.UserId,
             ActorKind = tenant.Token?.ActorKind,
+            ActorTokenId = tenant.Token?.Id,
             AuditAction = "push",
             AllowOverwrite = orgSettings?.AllowVersionOverwrite ?? false,
             ClaimState = claim.State,
@@ -363,12 +364,11 @@ public sealed class PyPiPublishHandler(
             await licenses.SetLicensesAsync(versionId, extracted.Spdx, "upstream", ct);
         }
 
-        // Evict the cached simple index so the newly-published version appears immediately.
-        // The formatter normalizes the name (PEP 503), so the raw upload name is passed. Both
-        // negotiated representations are evicted — a client on either would otherwise keep
-        // receiving a pre-publish index until its TTL expired.
-        cache.Evict(new PyPiSimpleIndexKey(tenant.OrgId, upload.Name));
-        cache.Evict(new PyPiSimpleIndexKey(tenant.OrgId, upload.Name) { WantsJson = true });
+        // Invalidate the cached simple index so the newly-published version appears immediately.
+        // The raw upload name is passed: the key formatter owns PEP 503 normalization, and the
+        // coordinator expands both negotiated representations (PEP 503 HTML and PEP 691 JSON) —
+        // a client on either would otherwise keep receiving a pre-publish index until TTL expiry.
+        invalidation.Invalidate(MetadataInvalidation.ForPyPi(tenant.OrgId, upload.Name));
 
         return new OkResult();
     }

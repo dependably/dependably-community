@@ -80,29 +80,9 @@ public sealed partial class OciController
 
         // License-arm enforcement: when this manifest carries a captured SPDX expression and the
         // tenant enforces licenses in 'block' mode, deny both GET and HEAD before serving.
-        if (LicenseSpdx is not null)
+        if (await EvaluateLicenseBlockAsync(orgId, $"pkg:oci/{name}@{resolved}", LicenseSpdx, token, ct) is { } blocked)
         {
-            var settings = await _svc.Orgs.GetSettingsAsync(orgId, ct);
-            if (settings?.LicenseEnforcementMode == "block")
-            {
-                var gate = new BlockGateRequest(
-                    OrgId: orgId,
-                    Ecosystem: "oci",
-                    Purl: $"pkg:oci/{name}@{resolved}",
-                    VersionId: "",
-                    ManualState: null,
-                    VulnCheckedAt: null,
-                    UserId: token?.UserId,
-                    MaxOsvScoreTolerance: settings.MaxOsvScoreTolerance,
-                    SourceIp: HttpContext.GetNormalizedRemoteIp(),
-                    ActorKind: token?.ActorKind,
-                    LicenseEnforcementMode: settings.LicenseEnforcementMode);
-                if (await _svc.BlockGate.EvaluateLicenseExpressionAsync(gate, [LicenseSpdx], ct) == BlockDecision.Blocked)
-                {
-                    return OciError(StatusCodes.Status403Forbidden, OciErrorCode.DENIED,
-                        "Image license is blocked by the organization's license policy.");
-                }
-            }
+            return blocked;
         }
 
         if (headOnly)
@@ -156,8 +136,20 @@ public sealed partial class OciController
             // manifest body. The resolver issues a HEAD request; the response headers carry
             // Docker-Content-Digest and Content-Length which are sufficient to satisfy the
             // OCI spec HEAD contract.
-            var meta = await _svc.Upstream.FetchManifestMetadataAsync(
-                orgId, name, reference, isDigest, ct);
+            OciManifestMetadata? meta;
+            try
+            {
+                meta = await _svc.Upstream.FetchManifestMetadataAsync(orgId, name, reference, isDigest, ct);
+            }
+            catch (AirGappedException)
+            {
+                return AirGappedManifestMiss(name, reference);
+            }
+            catch (Exception ex) when (IsUpstreamTransportFailure(ex, ct))
+            {
+                return UpstreamUnreachable(ex, name, reference);
+            }
+
             if (meta is null)
             {
                 return OciError(StatusCodes.Status404NotFound, OciErrorCode.MANIFEST_UNKNOWN,
@@ -168,8 +160,20 @@ public sealed partial class OciController
             return Ok();
         }
 
-        var upstreamResult = await _svc.Upstream.FetchManifestAsync(
-            orgId, name, reference, isDigest, ct);
+        OciManifestResult? upstreamResult;
+        try
+        {
+            upstreamResult = await _svc.Upstream.FetchManifestAsync(orgId, name, reference, isDigest, ct);
+        }
+        catch (AirGappedException)
+        {
+            return AirGappedManifestMiss(name, reference);
+        }
+        catch (Exception ex) when (IsUpstreamTransportFailure(ex, ct))
+        {
+            return UpstreamUnreachable(ex, name, reference);
+        }
+
         if (upstreamResult is null)
         {
             return OciError(StatusCodes.Status404NotFound, OciErrorCode.MANIFEST_UNKNOWN,
@@ -181,6 +185,29 @@ public sealed partial class OciController
             actorId: token?.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         return File(upstreamResult.Content, upstreamResult.MediaType);
     }
+
+    /// <summary>
+    /// The answer for a manifest that is not held locally on an air-gapped instance.
+    ///
+    /// <para>
+    /// Without this, <see cref="AirGappedException"/> escapes to <c>AirGappedExceptionMiddleware</c>
+    /// and the client is told 503 — "temporarily unavailable, try again". On an air-gapped instance
+    /// that is never true: there is no upstream by policy, so the manifest will not appear however
+    /// long the client waits. An OCI client reading 503 retries; reading 404 it reports the image as
+    /// absent, which is both correct and the signal the operator needs ("this image was never
+    /// mirrored"). The Distribution Spec has exactly one status for "this registry does not have
+    /// that", and air-gap does not make it a different question.
+    /// </para>
+    ///
+    /// <para>
+    /// The message names air-gap so the 404 is still diagnosable — the operator learns why the
+    /// registry could not go and look, without the status lying to the client about it.
+    /// </para>
+    /// </summary>
+    private static ObjectResult AirGappedManifestMiss(string name, string reference) =>
+        OciError(StatusCodes.Status404NotFound, OciErrorCode.MANIFEST_UNKNOWN,
+            $"Manifest unknown: {reference}. This instance is air-gapped, so {name} was not "
+            + "fetched from an upstream registry; only locally held images are available.");
 
     /// <summary>
     /// Sets the manifest response headers shared by the local-cache and upstream paths.
@@ -511,6 +538,19 @@ public sealed partial class OciController
 
         string orgId = CurrentTenantId();
 
+        // Name-level publish authorization. Keys on the authenticated token principal (never the
+        // request path), so a token holding only publish:oci cannot seize a repository a different
+        // principal already owns. Enforced at manifest PUT — the point a tag/name is published.
+        // No-op unless PUBLISH_NAME_BINDING=on.
+        var namePrincipal = Dependably.Infrastructure.NamePrincipal.FromToken(Token);
+        if (_svc.NameBinding is { } nameGate
+            && !await nameGate.IsPublishAuthorizedAsync(orgId, "oci", name, namePrincipal, ct))
+        {
+            return OciError(StatusCodes.Status403Forbidden, OciErrorCode.DENIED,
+                $"Publishing to '{name}' is not permitted: the repository is owned by a different " +
+                "principal in this org and you hold no publish grant for it.");
+        }
+
         // Cap the manifest body BEFORE buffering it. Wrapping Request.Body in a LimitedReadStream
         // means a hostile chunked (or over-large declared) body is aborted at 4 MiB instead of
         // being copied into a growing MemoryStream that could reach ~2 GiB (plus the ToArray
@@ -545,6 +585,11 @@ public sealed partial class OciController
         switch (result.Status)
         {
             case OciManifestStatus.Ok:
+                // Record first-publisher ownership now that the manifest is durably stored.
+                if (_svc.NameBinding is { } ownerGate)
+                {
+                    await ownerGate.RecordOwnershipAsync(orgId, "oci", name, namePrincipal, ct);
+                }
                 await _svc.Audit.LogActivityAsync(orgId, "oci", $"pkg:oci/{name}@{result.Digest}", "push",
                     actorId: Token?.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
                 Response.Headers.Location = $"/v2/{name}/manifests/{result.Digest}";

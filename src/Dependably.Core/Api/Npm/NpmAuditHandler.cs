@@ -122,18 +122,6 @@ public sealed class NpmAuditHandler(
                 : await QueryAndProjectAsync(pairs, ct);
     }
 
-    /// <summary>
-    /// Deliberate refusal for the quick-audit endpoint. <c>npm audit</c> on every supported npm
-    /// version asks the bulk-advisories endpoint and nothing else — arborist's audit report has a
-    /// single request path and no quick-audit fallback — so this route exists only to keep an
-    /// npm 6-era client from receiving an unexplained 404. Returning 501 with a problem body lets
-    /// it degrade to a warning instead. The bulk endpoint is the implemented surface.
-    /// </summary>
-    public static IActionResult QuickAuditNotImplemented() => Problem(
-        StatusCodes.Status501NotImplemented,
-        "npm quick audit is not implemented by this registry; use the bulk advisories endpoint " +
-        "at /-/npm/v1/security/advisories/bulk, which npm 7 and newer use by default.");
-
     // Flattens the request into the (name, version) pairs to query, enforcing every cap.
     // Malformed entries are skipped rather than failing the whole request: npm audit is advisory,
     // and one odd tree node should not blind the caller to the rest of the report.
@@ -425,7 +413,6 @@ public sealed class NpmAuditHandler(
         StatusCodes.Status400BadRequest => "Bad Request",
         StatusCodes.Status413PayloadTooLarge => "Payload Too Large",
         StatusCodes.Status415UnsupportedMediaType => "Unsupported Media Type",
-        StatusCodes.Status501NotImplemented => "Not Implemented",
         StatusCodes.Status503ServiceUnavailable => "Service Unavailable",
         _ => "Error",
     };

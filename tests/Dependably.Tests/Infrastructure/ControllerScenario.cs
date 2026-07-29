@@ -53,6 +53,7 @@ public sealed class ControllerScenario : IAsyncDisposable
     private bool _actorIsAnonymous;
     private string? _actorOrgOverride;
     private bool _masterKeyConfigured;
+    private bool _allowInsecureUpstreams;
     private bool _built;
 
     private ControllerScenario() { }
@@ -93,6 +94,14 @@ public sealed class ControllerScenario : IAsyncDisposable
     {
         EnsureNotBuilt();
         _masterKeyConfigured = true;
+        return this;
+    }
+
+    /// <summary>Sets Proxy:AllowInsecureUpstreams=true so plaintext http:// upstreams are accepted.</summary>
+    public ControllerScenario WithInsecureUpstreams()
+    {
+        EnsureNotBuilt();
+        _allowInsecureUpstreams = true;
         return this;
     }
 
@@ -308,9 +317,7 @@ public sealed class ControllerScenario : IAsyncDisposable
 
         // Real VulnerabilityScanService over a no-op IOsvSource — the SUT is the controller,
         // not the scanner. Returning zero advisories keeps the rescan path deterministic.
-        var osv = Substitute.For<IOsvSource>();
-        osv.QueryAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
-           .Returns(Task.FromResult(new List<OsvAdvisory>()));
+        var osv = TestOsvSource.Create();
         var noAirGap = Substitute.For<IAirGapMode>();
         noAirGap.IsEnabled.Returns(false);
         noAirGap.DisabledJobs.Returns(new System.Collections.Generic.HashSet<string>());
@@ -377,8 +384,14 @@ public sealed class ControllerScenario : IAsyncDisposable
             Clock, envelope, NullLogger<SystemController>.Instance,
             tenantCache: null, requireMfa: null, systemEvents: systemEvents)
         { ControllerContext = ctx };
+        var upstreamConfig = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Proxy:AllowInsecureUpstreams"] = _allowInsecureUpstreams ? "true" : "false",
+            })
+            .Build();
         var upstreamRegistries = new UpstreamRegistryController(
-            new UpstreamRegistryRepository(db, Clock, envelope), guard, audit, problems, envelope)
+            new UpstreamRegistryRepository(db, Clock, envelope), guard, audit, problems, envelope, upstreamConfig)
         { ControllerContext = ctx };
 
         var packageAnalytics = new PackageAnalyticsRepository(db);
@@ -398,11 +411,7 @@ public sealed class ControllerScenario : IAsyncDisposable
             Logger: NullLogger<OrgController>.Instance, Problems: problems,
             Licenses: licenses, Vulns: vulns, Urls: publicUrl,
             AuditEmitter: orgAuditEmitter,
-            Cache: scenarioCache,
-            RpmMergedCache: new Dependably.Infrastructure.Caching.MetadataResponseCache<Dependably.Infrastructure.Caching.RpmMergedRepodataKey, Dependably.Infrastructure.Caching.MergedRepodataCache>(
-                scenarioCache, Dependably.Infrastructure.Caching.MetadataCacheKeys.RpmMergedRepodata),
-            RpmLocalCache: new Dependably.Infrastructure.Caching.RenderedResponseCache<Dependably.Infrastructure.Caching.RpmLocalRepodataKey>(
-                scenarioCache, Dependably.Infrastructure.Caching.MetadataCacheKeys.RpmLocalRepodata),
+            Invalidation: TestMetadataInvalidation.Coordinator(scenarioCache),
             CacheArtifacts: new Dependably.Infrastructure.CacheArtifactRepository(db),
             TenantAccess: new Dependably.Infrastructure.TenantArtifactAccessRepository(db),
             Time: Clock);
@@ -489,7 +498,7 @@ public sealed class ControllerScenario : IAsyncDisposable
             Publish: PublishService, ClaimResolver: claimResolver,
             Licenses: licenses, LimitResolver: uploadLimitResolver,
             StagingPath: Path.GetTempPath(),
-            Cache: new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()));
+            Invalidation: TestMetadataInvalidation.Coordinator(scenarioCache));
         var import = new ImportController(importSvc) { ControllerContext = ctx };
         var search = new SearchController(packages, guard) { ControllerContext = ctx };
 

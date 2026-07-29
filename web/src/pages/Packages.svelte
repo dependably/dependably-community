@@ -3,6 +3,7 @@
   import { api } from '../lib/api.js'
   import ErrorBanner from '../lib/ErrorBanner.svelte'
   import { currentOrg, navigate } from '../lib/store.js'
+  import { reportPageLoad } from '../lib/pageLoad.js'
   import { formatDateShort } from '../lib/format.js'
   import DataTable from '../lib/DataTable.svelte'
   import Pagination from '../lib/Pagination.svelte'
@@ -16,6 +17,9 @@
   // change) as well as reloads and copied links.
   const DEFAULTS = { q: '', eco: '', page: 1, limit: 50, sort: 'name', dir: 'asc' }
   const init = readQuery(DEFAULTS)
+
+  /** The route transition this page was mounted for, supplied by RouteView. @type {number | null} */
+  export let pageToken = null
 
   let items = [], loading = true, error = ''
   let search = init.q, filterEco = init.eco
@@ -46,6 +50,9 @@
   }
 
   $: if (org) load()
+  // Holds the deferred navigation that mounted this page until the data is here, so the swap
+  // shows the loaded page rather than a shimmer that lives for a hundred milliseconds.
+  $: reportPageLoad(pageToken, loading)
 
   function onPageChange(e) { page = e.detail.page; sync(); load() }
   function onLimitChange(e) { limit = e.detail.limit; page = 1; sync(); load() }
@@ -133,6 +140,8 @@
     rows={items}
     {comparators}
     {loading}
+    loadingRows={limit}
+    memoryKey="packages"
     initialSort={{ key: sortCol, dir: sortDir }}
     emptyText={$t('packages.empty')}
     on:sortchange={onSortChange}
@@ -232,11 +241,9 @@
     </tr>
   </DataTable>
 
-  {#if !loading}
-    <Pagination {total} {page} {limit}
-      on:pagechange={onPageChange}
-      on:limitchange={onLimitChange} />
-  {/if}
+  <Pagination {total} {page} {limit}
+    on:pagechange={onPageChange}
+    on:limitchange={onLimitChange} />
 </div>
 
 <style>

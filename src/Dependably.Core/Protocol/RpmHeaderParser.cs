@@ -30,6 +30,11 @@ public static class RpmHeaderParser
     private const byte LeadMagic1 = 0xAB;
     private const byte LeadMagic2 = 0xEE;
     private const byte LeadMagic3 = 0xDB;
+    // Absolute upper bound on the number of entries in an RPM string array, checked before the
+    // reference-array allocation in ReadStringArray so an inflated Count cannot amplify into a
+    // multi-GB allocation (8 bytes per reference) ahead of the per-element sanity checks.
+    internal const int MaxStringArrayCount = 4_194_304;
+
     private const int LeadSize = 96;
 
     private const byte HeaderMagic0 = 0x8E;
@@ -414,7 +419,7 @@ public static class RpmHeaderParser
         return arr;
     }
 
-    private static string[] ReadStringArray(byte[] data, int offset, int count)
+    internal static string[] ReadStringArray(byte[] data, int offset, int count)
     {
         // Validate before allocation: the number of NUL-terminated strings the
         // caller claims to be present cannot exceed the number of bytes remaining
@@ -432,6 +437,18 @@ public static class RpmHeaderParser
         if (count < 0)
         {
             throw new RpmParseException($"String array count {count} is negative.");
+        }
+
+        // Absolute ceiling BEFORE allocation. The bytes-available guard below reasons in bytes
+        // (1 byte minimum per NUL-terminated string), but `new string[count]` allocates an array
+        // of *references* — 8 bytes each on x64. A ~500 MiB .rpm claiming Count ≈ 5×10^8 would
+        // therefore allocate ~4 GB before the per-element check runs. A real RPM string array
+        // (basenames, dirnames, requires/provides, changelog) is O(10^5) entries; this bound is
+        // generous while capping the reference allocation at tens of MB.
+        if (count > MaxStringArrayCount)
+        {
+            throw new RpmParseException(
+                $"String array count {count} exceeds the maximum permitted ({MaxStringArrayCount}).");
         }
 
         int maxPossibleStrings = data.Length - offset;

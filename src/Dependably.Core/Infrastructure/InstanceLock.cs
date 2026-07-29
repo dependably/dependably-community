@@ -319,7 +319,7 @@ public sealed class InstanceLock
         TimeSpan.FromSeconds(Math.Clamp(StaleWindow.TotalSeconds / 18.0, 1, 5));
 
     private static string ToIso(DateTimeOffset value) =>
-        value.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
+        value.UtcDateTime.ToUtcIso();
 
     private static DateTimeOffset ParseIso(string value) =>
         DateTimeOffset.TryParse(

@@ -5,9 +5,12 @@ namespace Dependably.Tests.Compliance;
 
 /// <summary>
 /// Static check: no SQL string in the codebase is built by string interpolation
-/// (<c>$"…"</c>, <c>$@"…"</c>, or <c>$"""…"""</c>). Interpolating runtime values into a
-/// SQL command is the classic injection vector; the project rule is parameterized Dapper
-/// only (<c>@name</c> placeholders). This is the interpolation companion to
+/// (<c>$"…"</c>, <c>$@"…"</c>, or <c>$"""…"""</c>) or by concatenating a SQL-keyword-headed
+/// literal onto a non-literal operand (<c>"SELECT … " + ident</c>). Interpolating or splicing
+/// runtime values into a SQL command is the classic injection vector; the project rule is
+/// parameterized Dapper only (<c>@name</c> placeholders). A literal-to-literal splice
+/// (<c>"SELECT … " + "FROM …"</c>) is compiler-folded and safe, so the concatenation arm
+/// deliberately does not match it. This is the interpolation companion to
 /// <see cref="OrgIdFilteringComplianceTests"/> — same crude static-scan style, runs in the
 /// test suite so violations surface locally and on every PR, not only under an analyzer
 /// warning nobody reads.
@@ -44,6 +47,13 @@ public sealed partial class NoInterpolatedSqlComplianceTests
     [GeneratedRegex(@"\$""(?<sql>(?:[^""\\]|\\.)*)""")]
     private static partial Regex InterpolatedRegularRegex();
 
+    // Concatenated SQL: a plain string literal spliced onto a NON-literal operand — "…" + ident,
+    // "…" + (expr), "…" + method(...). The trailing [A-Za-z_(] excludes a following quote, so a
+    // safe literal-to-literal fold ("…" + "…") is not matched. LooksLikeSql then narrows to
+    // operands whose captured literal actually opens with a SQL keyword.
+    [GeneratedRegex(@"""(?<sql>(?:[^""\\]|\\.)*)""\s*\+\s*[A-Za-z_(]", RegexOptions.Singleline)]
+    private static partial Regex ConcatenatedSqlRegex();
+
     [Fact]
     public void NoSqlIsBuiltByStringInterpolation()
     {
@@ -72,6 +82,27 @@ public sealed partial class NoInterpolatedSqlComplianceTests
                     $"Dapper query (@name placeholders). If the interpolated fragment is a compile-time " +
                     $"constant (e.g. whitelisted ORDER BY), annotate the opening line with " +
                     $"`// rawsql: <reason>`. SQL: {Truncate(match.Sql, 120)}");
+            }
+
+            foreach (var match in EnumerateConcatenatedSqlLiterals(source))
+            {
+                if (!LooksLikeSql(match.Sql))
+                {
+                    continue;
+                }
+
+                int lineNumber = CountLinesUpTo(source, match.StartIndex);
+                if (HasOptOutComment(lines, lineNumber))
+                {
+                    continue;
+                }
+
+                string rel = Path.GetRelativePath(SourceRoots.OwningRoot(file), file);
+                violations.Add(
+                    $"{rel}:{lineNumber + 1}: SQL built by string concatenation onto a non-literal " +
+                    $"operand. Use a parameterized Dapper query (@name placeholders). If every spliced " +
+                    $"operand is itself a compile-time constant (a body `const`, a DapperInClause IN list), " +
+                    $"annotate the opening line with `// rawsql: <reason>`. SQL: {Truncate(match.Sql, 120)}");
             }
         }
 
@@ -105,6 +136,42 @@ public sealed partial class NoInterpolatedSqlComplianceTests
         {
             yield return new SqlMatch(m.Groups["sql"].Value, m.Index);
         }
+    }
+
+    private static IEnumerable<SqlMatch> EnumerateConcatenatedSqlLiterals(string source)
+    {
+        foreach (Match m in ConcatenatedSqlRegex().Matches(source))
+        {
+            yield return new SqlMatch(m.Groups["sql"].Value, m.Index);
+        }
+    }
+
+    // ── Self-tests: the concatenation arm sees a runtime splice and ignores the safe forms. ──
+
+    [Fact]
+    public void ConcatScanner_FlagsSqlLiteralSplicedOntoIdentifier()
+    {
+        const string bad = "\"DELETE FROM quarantine WHERE id IN \" + idsClause";
+        var hits = EnumerateConcatenatedSqlLiterals(bad).Where(m => LooksLikeSql(m.Sql)).ToList();
+        Assert.Single(hits);
+    }
+
+    [Fact]
+    public void ConcatScanner_IgnoresLiteralToLiteralFold()
+    {
+        // "SELECT … " + "FROM …" is compiler-folded; no runtime value enters, so it is not a hit.
+        const string good = "\"SELECT id \" + \"FROM instance_lock WHERE id = @id\"";
+        var hits = EnumerateConcatenatedSqlLiterals(good).Where(m => LooksLikeSql(m.Sql)).ToList();
+        Assert.Empty(hits);
+    }
+
+    [Fact]
+    public void ConcatScanner_IgnoresNonSqlConcatenation()
+    {
+        // A non-SQL literal spliced onto an identifier (paths, log messages) is not SQL.
+        const string good = "\"artifacts/\" + orgId + \"/blob\"";
+        var hits = EnumerateConcatenatedSqlLiterals(good).Where(m => LooksLikeSql(m.Sql)).ToList();
+        Assert.Empty(hits);
     }
 
     private static bool LooksLikeSql(string s)

@@ -22,6 +22,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
     private readonly FakeTimeProvider _clock = TestTime.Frozen();
     private readonly BlockGateService _sut;
     private readonly AuditRepository _audit;
+    private readonly StubPerOrgTrustAnchorStore _anchors = new();
 
     public BlockGateServiceTests(InMemoryDbFixture fixture)
     {
@@ -34,6 +35,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
             new AlertService(new AlertRepository(_fixture.Store, _clock), new NoOpAlertNotifier(), Microsoft.Extensions.Logging.Abstractions.NullLogger<AlertService>.Instance),
             new InstallScriptAllowlistService(_fixture.Store, new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), _clock),
             new LicenseRepository(_fixture.Store, _clock, new LicenseNormalizer(_fixture.Store, Microsoft.Extensions.Logging.Abstractions.NullLogger<LicenseNormalizer>.Instance)),
+            _anchors,
             Microsoft.Extensions.Logging.Abstractions.NullLogger<BlockGateService>.Instance,
             _clock);
     }
@@ -320,7 +322,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
         Assert.Contains("\"revoked_at\":", detail);
 
         var quarantine = new QuarantineRepository(_fixture.Store, _clock);
-        var (items, total) = await quarantine.ListAsync(orgId, "pending", null, 10, 0);
+        var (items, total) = await quarantine.ListAsync(new QuarantineListQuery(orgId, State: "pending", Limit: 10));
         Assert.Equal(1, total);
         Assert.Equal("revoked", items[0].Gate);
     }
@@ -785,7 +787,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
         Assert.Equal(BlockDecision.Blocked, await _sut.EvaluateAsync(req));
 
         var quarantine = new QuarantineRepository(_fixture.Store, _clock);
-        var (items, total) = await quarantine.ListAsync(orgId, "pending", null, 10, 0);
+        var (items, total) = await quarantine.ListAsync(new QuarantineListQuery(orgId, State: "pending", Limit: 10));
         Assert.Equal(1, total);
         Assert.Equal("release_age", items[0].Gate);
         Assert.Equal(req.Purl, items[0].Purl);
@@ -802,7 +804,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
         Assert.Equal(BlockDecision.Blocked, await _sut.EvaluateAsync(req));
 
         var quarantine = new QuarantineRepository(_fixture.Store, _clock);
-        var (_, total) = await quarantine.ListAsync(orgId, null, null, 10, 0);
+        var (_, total) = await quarantine.ListAsync(new QuarantineListQuery(orgId, Limit: 10));
         Assert.Equal(0, total);
     }
 
@@ -822,7 +824,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
         // First fetch blocks and queues the pending row.
         Assert.Equal(BlockDecision.Blocked, await _sut.EvaluateFirstFetchDeprecationAsync(req));
         var quarantine = new QuarantineRepository(_fixture.Store, _clock);
-        var (items, _) = await quarantine.ListAsync(orgId, "pending", null, 10, 0);
+        var (items, _) = await quarantine.ListAsync(new QuarantineListQuery(orgId, State: "pending", Limit: 10));
         string id = items.Single(i => i.Purl == req.Purl).Id;
 
         // Approval flips the next first fetch to allowed.
@@ -843,7 +845,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
 
         Assert.Equal(BlockDecision.Blocked, await _sut.EvaluateFirstFetchDeprecationAsync(req));
         var quarantine = new QuarantineRepository(_fixture.Store, _clock);
-        var (items, _) = await quarantine.ListAsync(orgId, "pending", null, 10, 0);
+        var (items, _) = await quarantine.ListAsync(new QuarantineListQuery(orgId, State: "pending", Limit: 10));
         await quarantine.DecideAsync(orgId, items.Single(i => i.Purl == req.Purl).Id, "denied", null, null);
 
         Assert.Equal(BlockDecision.Blocked, await _sut.EvaluateFirstFetchDeprecationAsync(req));
@@ -962,7 +964,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
         Assert.Equal(1, await CountActivityAsync(orgId, "blocked_license"));
 
         var quarantine = new QuarantineRepository(_fixture.Store, _clock);
-        var (items, total) = await quarantine.ListAsync(orgId, "pending", null, 10, 0);
+        var (items, total) = await quarantine.ListAsync(new QuarantineListQuery(orgId, State: "pending", Limit: 10));
         Assert.Equal(1, total);
         Assert.Equal(req.Purl, items.Single().Purl);
     }

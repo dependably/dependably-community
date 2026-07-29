@@ -113,4 +113,50 @@ public sealed class EmailConfigEditingTests : IClassFixture<InMemoryDbFixture>
         Assert.Equal("587", await _repo.GetInstanceSettingAsync("smtp_port"));
         Assert.Equal("1", await _repo.GetInstanceSettingAsync("smtp_enabled"));
     }
+
+    /// <summary>
+    /// The view reports the cleartext-credential finding on every read, not only on the save that
+    /// introduced it — an operator who inherited someone else's configuration never sees that save,
+    /// and the DB-backed config gives no boot-time moment at which to warn instead.
+    /// </summary>
+    [Fact]
+    public void BuildView_ReportsCleartextCredentials_WhenSecurityIsNoneWithCredentials()
+    {
+        var transport = new SmtpTransportSettings(
+            "smtp.example.com", 25, "none", "user", "super-secret", "noreply@example.com");
+        var resolved = new InstanceSmtpConfig.ResolvedSmtpConfig(true, transport, true);
+
+        string json = System.Text.Json.JsonSerializer.Serialize(
+            EmailConfigEditing.BuildView(resolved, secretsAvailable: true));
+
+        Assert.Contains("\"cleartextCredentials\":true", json);
+        Assert.DoesNotContain("super-secret", json);
+    }
+
+    /// <summary>Adversarial twin: an unauthenticated relay on security=none is not a finding.</summary>
+    [Fact]
+    public void BuildView_DoesNotReportCleartextCredentials_ForAnUnauthenticatedRelay()
+    {
+        var transport = new SmtpTransportSettings(
+            "smtp.example.com", 25, "none", null, null, "noreply@example.com");
+        var resolved = new InstanceSmtpConfig.ResolvedSmtpConfig(true, transport, true);
+
+        string json = System.Text.Json.JsonSerializer.Serialize(
+            EmailConfigEditing.BuildView(resolved, secretsAvailable: true));
+
+        Assert.Contains("\"cleartextCredentials\":false", json);
+    }
+
+    [Fact]
+    public void BuildView_DoesNotReportCleartextCredentials_WhenTheSessionIsProtected()
+    {
+        var transport = new SmtpTransportSettings(
+            "smtp.example.com", 587, "starttls", "user", "super-secret", "noreply@example.com");
+        var resolved = new InstanceSmtpConfig.ResolvedSmtpConfig(true, transport, true);
+
+        string json = System.Text.Json.JsonSerializer.Serialize(
+            EmailConfigEditing.BuildView(resolved, secretsAvailable: true));
+
+        Assert.Contains("\"cleartextCredentials\":false", json);
+    }
 }

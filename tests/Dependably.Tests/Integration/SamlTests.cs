@@ -454,10 +454,66 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
         string relayState = relayValues.FirstOrDefault() ?? "";
         Assert.StartsWith("test:", relayState, StringComparison.Ordinal);
 
-        // The suffix should be a 32-character hex cid
+        // The suffix is an opaque cid minted by TokenGenerator (CSPRNG, URL-safe base64), not a
+        // Guid — see TokenGenerator's "Guid.NewGuid() is never used for security-sensitive values"
+        // rule. 32 random bytes → 43 trimmed base64url chars from the [A-Za-z0-9-_] alphabet.
         string cid = relayState["test:".Length..];
-        Assert.Equal(32, cid.Length);
-        Assert.All(cid, c => Assert.True(char.IsAsciiHexDigit(c), $"'{c}' is not a hex digit"));
+        Assert.Equal(43, cid.Length);
+        Assert.All(cid, c => Assert.True(
+            char.IsAsciiLetterOrDigit(c) || c == '-' || c == '_',
+            $"'{c}' is not a URL-safe base64 character"));
+    }
+
+    [Fact]
+    public async Task Login_TestMode_MfaChallengeCookie_IsNotAcceptedAsSession()
+    {
+        // Boundary invariant: a pre-second-factor mfa_challenge JWT (issued after password, BEFORE
+        // TOTP) must NOT authenticate a request as a full session on a route outside /api/v1/.
+        // /saml/login?test=1 is the only [Authorize]-equivalent management action outside /api/v1/,
+        // and its capability guard resolves the caller from the JWT `sub` + a live DB role lookup —
+        // which a tenant owner passes. The mfa_challenge token is signed with the same instance
+        // secret and satisfies the same TokenValidationParameters as a real session, so nothing but
+        // the fail-closed scope check at the JwtBearer validation layer stops it. The RouteScopeFilter
+        // that guards the /api/v1/ surface never runs here.
+        await SeedFakeSamlConfigAsync(enabled: false, formsLoginEnabled: true, withMetadata: true);
+
+        string challengeJwt = await MintMfaChallengeForBootstrapOwnerAsync();
+
+        using var attacker = _factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        attacker.DefaultRequestHeaders.Add("Cookie", $"dependably_session={challengeJwt}");
+        var challengeResp = await attacker.GetAsync("/saml/login?test=1");
+
+        // The challenge token authenticates as nobody → the guard returns 401. It must never
+        // reach the 302 redirect that a real session produces.
+        Assert.Equal(HttpStatusCode.Unauthorized, challengeResp.StatusCode);
+
+        // Adversarial twin: a genuine full-session JWT in the very same cookie DOES authorize on
+        // this route (302 redirect), proving the fix rejects only the non-session scope, not
+        // cookie-borne sessions in general.
+        string sessionJwt = await _factory.CreateAdminJwt();
+        using var legit = _factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        legit.DefaultRequestHeaders.Add("Cookie", $"dependably_session={sessionJwt}");
+        var sessionResp = await legit.GetAsync("/saml/login?test=1");
+
+        Assert.Equal(HttpStatusCode.Redirect, sessionResp.StatusCode);
+    }
+
+    // Mints an mfa_challenge JWT (scope=mfa_challenge) for the bootstrap owner, signed with the
+    // instance JWT secret — the exact token LoginService hands back after a correct password when
+    // MFA is required, before the second factor is presented.
+    private async Task<string> MintMfaChallengeForBootstrapOwnerAsync()
+    {
+        await using var conn = await _factory.Services.GetRequiredService<IMetadataStore>().OpenAsync();
+        string orgId = await GetDefaultOrgIdAsync();
+        var (ownerId, ownerEmail) = await conn.QuerySingleAsync<(string Id, string Email)>(
+            "SELECT id AS Id, email AS Email FROM users WHERE tenant_id = @orgId AND role = 'owner' LIMIT 1",
+            new { orgId });
+        string jwtSecret = await conn.ExecuteScalarAsync<string>(
+            "SELECT value FROM instance_settings WHERE key = 'jwt_secret' LIMIT 1")
+            ?? throw new InvalidOperationException("JWT secret not found.");
+
+        return LoginService.IssueMfaChallengeJwt(
+            ownerId, orgId, "owner", ownerEmail, tokenVersion: 1, jwtSecret, TimeProvider.System);
     }
 
     [Fact]
@@ -641,7 +697,7 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
                 ssoUrl = withMetadata ? "https://idp.example.com/sso" : null,
                 cert = withMetadata ? SampleIdpCertBase64 : null,
                 nameIdFormat = "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
-                lastTestAt = lastTestAt?.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                lastTestAt = lastTestAt?.ToUtcIso(),
             });
     }
 
@@ -662,6 +718,8 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
         // now-ok: mints a JWT the host validates against its (default: real) clock.
         var now = DateTime.UtcNow;
         var token = new System.IdentityModel.Tokens.Jwt.JwtSecurityToken(
+            issuer: Dependably.Security.JwtTokenBinding.Issuer,
+            audience: Dependably.Security.JwtTokenBinding.SessionAudience,
             claims: new[]
             {
                 new System.Security.Claims.Claim(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub, userId),

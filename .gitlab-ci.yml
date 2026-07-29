@@ -3,9 +3,16 @@
 # the explicit `when: never` for "push when an MR is open" must come before
 # the main-branch and tag rules so it isn't shadowed.
 workflow:
-  # On a re-push to an open MR, cancel the superseded pipeline's still-running
-  # interruptible jobs (the DAST scans below) instead of stacking a second run
-  # behind it on the single serialized runner.
+  # When a newer commit lands on the same ref — an MR re-push, or a merge onto
+  # main — cancel the superseded pipeline's interruptible jobs instead of
+  # stacking a second full run behind it on the single serialized amd64 runner.
+  # `interruptible` cancels per job with no latch: a running `interruptible:
+  # false` job (the publish/side-effect jobs below) does NOT protect the rest of
+  # the pipeline from cancellation, which is why those jobs opt out individually
+  # rather than relying on the `conservative` mode's whole-pipeline behaviour.
+  # Requires Settings > CI/CD > General pipelines > "Auto-cancel redundant
+  # pipelines" to be enabled; with it off this block and every `interruptible:`
+  # below are inert.
   auto_cancel:
     on_new_commit: interruptible
   rules:
@@ -14,6 +21,27 @@ workflow:
       when: never
     - if: $CI_COMMIT_BRANCH == "main"
     - if: $CI_COMMIT_TAG
+    # Scheduled pipelines run the time-driven scans only (see
+    # .runs-on-ci-or-schedule). CVE disclosure is not an event in this repo's
+    # history, so an event-driven SCA goes blind for as long as the repo is quiet.
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+
+# Every job is cancellable by default, so a superseded pipeline stops burning
+# the shared runner. The exceptions are the jobs with an external side effect
+# that must not be cut mid-flight — a registry push, an SBOM upload, a mirror
+# push — each of which sets `interruptible: false` at its own definition.
+default:
+  interruptible: true
+  # Image pulls resolve DEP_IMAGE_REGISTRY on the runner host's docker daemon,
+  # before any job script runs; a name-resolution blip there fails the job with
+  # runner_system_failure and skips every downstream job in the pipeline. Retry
+  # that class only — a script_failure is a real result and must never be
+  # retried into a false green.
+  retry:
+    max: 2
+    when:
+      - runner_system_failure
+      - stuck_or_timeout_failure
 
 stages:
   - validate
@@ -22,7 +50,9 @@ stages:
   - sbom
   - ai-review      # advisory LLM review of the MR diff (local Ollama)
   - dast
-  - release
+  - release        # publish the runtime image to the Dependably registry
+  - staging        # deploy that published image to the staging host
+  - mirror         # manual: mirror a release tag to GitHub
 
 # OCI pull-through mirror for CI container images. Override DEP_IMAGE_REGISTRY
 # per-fork or unset (set to empty string) to fall back to pulling directly from
@@ -31,6 +61,11 @@ stages:
 # for authenticated pulls (GitLab's standard mechanism for OCI credentials).
 variables:
   DEP_IMAGE_REGISTRY: "dependably.northwardlabs.ca"
+  # glsec release consumed by ci-config-lint and mirrored by mirror-glsec. Both
+  # jobs read these, so the version and its digest are pinned in one place; bump
+  # them together and the next main pipeline republishes the mirrored copy.
+  GLSEC_VERSION: "1.7.0"
+  GLSEC_SHA256: "1d906a5a1ae51f1a2e787f49e2666168821a852559481130b154d21ed6e174a8"
 
 # All job images are pinned by digest; bump tag+digest together.
 # No container image is built in CI (deploy builds locally via docker compose), so no image-scanning job exists by design.
@@ -49,6 +84,20 @@ variables:
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == "main"
+    - *release-tag-rule
+
+# Same coverage as .runs-on-ci, plus scheduled pipelines. Carried by the scans
+# whose subject changes without anyone touching the repo: a CVE disclosed against
+# an already-pinned transitive dependency, or a credential committed to a branch
+# nobody has opened an MR for. Deliberately a separate provider rather than a
+# schedule rule on .runs-on-ci — the latter would run the entire MR job set
+# nightly on the single serialized runner to re-derive results that cannot have
+# changed, since the inputs are the same commit.
+.runs-on-ci-or-schedule:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_PIPELINE_SOURCE == "schedule"
     - *release-tag-rule
 
 # Post-merge-only jobs: side effects on real systems (DT publish) and scans
@@ -107,10 +156,23 @@ variables:
   - { job: sca-backend,            artifacts: false }
   - { job: sca-frontend,           artifacts: false }
 
-# Wires `REGISTRY_URL` + `REGISTRY_KEY` (set as unprotected project CI variables) into npm +
-# NuGet so restores route through the private Dependably instance. HARD-FAILS when either var
-# is empty rather than silently falling back to public — the GitLab pipeline must always use
-# the private feed. (GitHub Actions intentionally stays on public; see .github/workflows.)
+# Registry credentials are split by capability, because an MR pipeline runs code authored in
+# the merge request and therefore sees every unprotected variable:
+#
+#   REGISTRY_KEY         — READ/restore only. Unprotected on purpose, so MR pipelines can
+#                          resolve dependencies through the private feed instead of falling
+#                          back to public registries. Restoring is read-only, so an MR that
+#                          exfiltrates this token gains read access to the mirror, not the
+#                          ability to overwrite a published image or package.
+#   REGISTRY_PUBLISH_KEY — PUBLISH (publish:oci). Protected + masked, so it is exposed only on
+#                          protected refs (`main`, `v*` tags) and is invisible to a
+#                          feature-branch MR pipeline even when the MR fully controls the job
+#                          script. Referenced only by the jobs that push images.
+#
+# Only the read key is wired into npm/NuGet below. HARD-FAILS when either REGISTRY_URL or
+# REGISTRY_KEY is empty rather than silently falling back to public — the GitLab pipeline must
+# always use the private feed. (GitHub Actions intentionally stays on public; see
+# .github/workflows.)
 # The generated `<packageSources>` — the element package bytes are actually downloaded through —
 # is always the private feed, for every job, unconditionally. A job that also needs advisory
 # data from a public source it doesn't otherwise trust (NuGet advisory data lives only on
@@ -201,8 +263,34 @@ variables:
         esac
       fi
 
-# Wires `REGISTRY_URL` + `REGISTRY_KEY` (the same unprotected project CI variables used by
-# `.private-registry-setup`) into apk so runtime package fetches route through the private
+# Exports `API_BASE`, a GitLab v4 API root that actually resolves from a runner.
+# `CI_API_V4_URL` inherits the instance `external_url`, which on this instance names a
+# host runners cannot resolve; `CI_REPOSITORY_URL` carries the host the runner really
+# clones from, so its authority is the reliable one. Prefer that, fall back to
+# `CI_API_V4_URL` when the repository URL is absent (GIT_STRATEGY: none leaves it set,
+# but a future caller might not have it). Userinfo is stripped — `CI_REPOSITORY_URL`
+# embeds `gitlab-ci-token:<job token>@`, which must never reach a URL that gets echoed.
+# `ci/ai-review.sh` solves the same problem for MR comments; keep the two in step.
+# Referenced (not extended) directly above the first API call in a job's script.
+.gitlab-api-base:
+  script:
+    - |
+      # No `set -eu` — this block is concatenated into the job's single shell
+      # invocation, so a stray `set -u` would leak into later script lines.
+      API_HOST=$(printf '%s' "${CI_REPOSITORY_URL:-}" | sed -E 's|^[a-z]+://||; s|^[^@]*@||; s|/.*||')
+      if [ -n "$API_HOST" ]; then
+        API_BASE="https://${API_HOST}/api/v4"
+      else
+        API_BASE="${CI_API_V4_URL:-}"
+      fi
+      if [ -z "$API_BASE" ]; then
+        echo "ERROR: neither CI_REPOSITORY_URL nor CI_API_V4_URL is set — cannot address the GitLab API." >&2
+        exit 1
+      fi
+      echo "GitLab API base: ${API_BASE}"
+
+# Wires `REGISTRY_URL` + `REGISTRY_KEY` (the same unprotected read-only project CI variables
+# used by `.private-registry-setup`) into apk so runtime package fetches route through the private
 # Dependably instance's apk pull-through proxy instead of the public Alpine CDN. HARD-FAILS
 # when either var is empty rather than silently falling back to public — the GitLab pipeline
 # must always use the private feed. The apk route is 1:1 with dl-cdn paths
@@ -226,9 +314,13 @@ variables:
       HOST=$(printf '%s' "$REGISTRY_URL" | sed -E 's|^https?://||; s|/.*||')
       sed -i -E "s|https://dl-cdn\.alpinelinux\.org/alpine|${SCHEME}://ci:${REGISTRY_KEY}@${HOST}/apk|g" /etc/apk/repositories
       # Self-check: the active repositories file must never fall back to the public mirror.
+      # The diagnostic print strips URL userinfo (`//user:token@host` -> `//***@host`) before it
+      # reaches the job trace. Job traces on this project are readable by every member down to
+      # Guest, and GitLab's variable masking silently declines values that fail its masking
+      # requirements — so redaction here is the control, not a second line of defence.
       if grep -q dl-cdn /etc/apk/repositories; then
         echo "ERROR: /etc/apk/repositories still references dl-cdn.alpinelinux.org after rewrite:" >&2
-        cat /etc/apk/repositories >&2
+        sed -E 's|//[^@]*@|//***@|g' /etc/apk/repositories >&2
         exit 1
       fi
 
@@ -324,7 +416,8 @@ release-contract-lint:
       # .runs-on-ci{,-main}. Any other `rules:` source — inline on the job,
       # or via another extended template — wins under GitLab's extends
       # merging and would silently skip the job on tag pipelines.
-      RULE_PROVIDERS = {'.runs-on-ci', '.runs-on-ci-main', '.runs-on-release-tag'}
+      RULE_PROVIDERS = {'.runs-on-ci', '.runs-on-ci-or-schedule', '.runs-on-ci-main',
+                        '.runs-on-release-tag'}
       for name in required:
           job = jobs[name]
           ext = extends_of(job)
@@ -370,12 +463,39 @@ ci-config-lint:
   script:
     - !reference [.apk-mirror-setup, script]
     - apk add --no-cache curl tar
-    - |
+    - !reference [.gitlab-api-base, script]
+    - | # glsec:ignore GL004 -- JOB-TOKEN rides only the $API_BASE fetch; the github.com fallback is a separate curl with no header
       set -eu
-      GLSEC_VERSION="1.7.0"
-      GLSEC_SHA256="1d906a5a1ae51f1a2e787f49e2666168821a852559481130b154d21ed6e174a8"
-      curl -sSL "https://github.com/glsec/glsec/releases/download/v${GLSEC_VERSION}/glsec_${GLSEC_VERSION}_linux_amd64.tar.gz" \
-        -o /tmp/glsec.tar.gz
+      TARBALL="glsec_${GLSEC_VERSION}_linux_amd64.tar.gz"
+      # Prefer this project's generic package registry: it lives on the GitLab host
+      # every job already clones from, so it adds no egress dependency the pipeline
+      # does not already have. github.com is the fallback for a version that has not
+      # been mirrored yet — reaching it from a runner is the single public-internet
+      # dependency in the validate stage, and it is where the observed connect
+      # timeouts occur. Whichever source answers, the pinned digest below is the
+      # gate: a wrong or tampered artifact from either fails closed.
+      #
+      # The two fetches are written out separately, and share no helper, so the
+      # JOB-TOKEN header cannot reach the upstream call: the mirror fetch carries
+      # the token and never redirects off-host (--proto-redir, no cross-host auth),
+      # while the upstream fetch follows redirects and sends no credentials at all.
+      CURL_NET="--connect-timeout 15 --max-time 120 --retry 3 --retry-delay 5 --retry-all-errors"
+      GLSEC_MIRROR="${API_BASE}/projects/${CI_PROJECT_ID}/packages/generic/glsec/${GLSEC_VERSION}/${TARBALL}"
+      # No --fail on the mirror fetch: a 404 is the expected "this version is not
+      # mirrored yet" answer, and --fail would recast it as an error that
+      # --retry-all-errors then retries three times before the fallback runs.
+      # Branch on the status code instead — curl exits 0 on 4xx, so the code is
+      # the only reliable signal. Transient faults (DNS, connect, 5xx) still retry.
+      code=$(curl -sS $CURL_NET --proto-redir =https -w '%{http_code}' \
+               --header "JOB-TOKEN: ${CI_JOB_TOKEN}" "$GLSEC_MIRROR" -o /tmp/glsec.tar.gz || echo 000)
+      if [ "$code" = "200" ]; then
+        echo "glsec ${GLSEC_VERSION} from the project package registry"
+      else
+        echo "package registry miss (HTTP ${code}) — falling back to upstream" >&2
+        curl -sSL --fail $CURL_NET \
+          "https://github.com/glsec/glsec/releases/download/v${GLSEC_VERSION}/${TARBALL}" \
+          -o /tmp/glsec.tar.gz
+      fi
       echo "${GLSEC_SHA256}  /tmp/glsec.tar.gz" | sha256sum -c
       tar -xzf /tmp/glsec.tar.gz -C /usr/local/bin glsec
       chmod +x /usr/local/bin/glsec
@@ -385,10 +505,73 @@ ci-config-lint:
       # the suite is verified continuously. It is the only git clone in this file.
       glsec --strict --skip GL022,GL024,GL026,GL032 .gitlab-ci.yml
 
-# Fails MRs that leak the private dependably registry into web/package-lock.json.
+# Publishes the pinned glsec release into this project's generic package registry,
+# so ci-config-lint fetches it from the GitLab host every job already clones from
+# instead of reaching github.com on the critical path. Reaching github.com is what
+# this job absorbs: it runs post-merge only, off the gating path, and a failure
+# here leaves ci-config-lint on its upstream fallback rather than blocking anyone.
+# No-ops once the version is present, so it costs a single HEAD on most pipelines.
+# GIT_STRATEGY: none — it needs no working tree, only the two pinned variables.
+mirror-glsec:
+  stage: validate
+  extends: .runs-on-ci-main
+  image: ${DEP_IMAGE_REGISTRY}/library/alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
+  tags: [amd64]
+  # Publishes a package version; cancellation must not race a partial upload.
+  interruptible: false
+  variables:
+    GIT_STRATEGY: none
+  allow_failure: true
+  script:
+    - !reference [.apk-mirror-setup, script]
+    - apk add --no-cache curl
+    - !reference [.gitlab-api-base, script]
+    - | # glsec:ignore GL004 -- JOB-TOKEN rides only the two $API_BASE calls; the github.com download is a separate curl with no header
+      set -eu
+      TARBALL="glsec_${GLSEC_VERSION}_linux_amd64.tar.gz"
+      PKG="${API_BASE}/projects/${CI_PROJECT_ID}/packages/generic/glsec/${GLSEC_VERSION}/${TARBALL}"
+      CURL_NET="--connect-timeout 15 --max-time 300 --retry 3 --retry-delay 5 --retry-all-errors"
+      # Same split as ci-config-lint: the credentialled calls address $API_BASE
+      # and never follow a cross-host redirect; the upstream download follows
+      # redirects and sends no header.
+      #
+      # The existence probe deliberately omits --fail. A 404 is the answer this
+      # probe exists to get, not a fault; with --fail it becomes an error that
+      # --retry-all-errors retries three times, costing ~15s on every first
+      # mirror of a new version. --fail stays on the download and the upload,
+      # where a non-2xx genuinely is a failure.
+      code=$(curl -sS $CURL_NET --proto-redir =https -o /dev/null -w '%{http_code}' \
+               --header "JOB-TOKEN: ${CI_JOB_TOKEN}" "$PKG" || echo 000)
+      if [ "$code" = "200" ]; then
+        echo "glsec ${GLSEC_VERSION} already mirrored — nothing to do."
+        exit 0
+      fi
+      echo "Mirroring glsec ${GLSEC_VERSION} from upstream (probe returned HTTP ${code})"
+      curl -sSL --fail $CURL_NET \
+        "https://github.com/glsec/glsec/releases/download/v${GLSEC_VERSION}/${TARBALL}" \
+        -o /tmp/glsec.tar.gz
+      # Verify BEFORE publishing: the mirrored copy must be byte-identical to the
+      # digest ci-config-lint enforces, or the mirror becomes a way to feed the
+      # gate an artifact it would otherwise reject.
+      echo "${GLSEC_SHA256}  /tmp/glsec.tar.gz" | sha256sum -c
+      curl -sS --fail $CURL_NET --proto-redir =https --upload-file /tmp/glsec.tar.gz \
+        --header "JOB-TOKEN: ${CI_JOB_TOKEN}" "$PKG"
+      echo "Published glsec ${GLSEC_VERSION} to the project package registry."
+
+# Lockfile/source hygiene gate, both ecosystems.
+#
+# npm: fails MRs that leak the private dependably registry into web/package-lock.json.
 # Happens when a dev's ~/.npmrc points npm at the private proxy and `npm install`
 # writes those URLs as `resolved`. Catches pre-mirror — GitHub runners have no
 # auth for the private host and would fail `npm ci` after the merge.
+#
+# NuGet: packages.lock.json records versions and content hashes but no source URL, so
+# there is no per-package host to grep. The two checkable invariants are instead
+# (a) every project in the solution ships a committed lock file — otherwise the
+# locked-mode restores silently degrade to unpinned resolution for that project — and
+# (b) the committed nuget.config names only public or `.dependably`-allowlisted
+# hosts, which is the allowlist the pre-commit `Dependably.NuCheck` applies and
+# which nothing else in CI enforces.
 lockfile-registry-guard:
   stage: validate
   extends: [.runs-on-ci, .release-required]
@@ -405,6 +588,30 @@ lockfile-registry-guard:
         echo "Re-resolve those packages against https://registry.npmjs.org/ before committing." >&2
         exit 1
       fi
+    - |
+      # (a) Every solution project must carry a committed packages.lock.json.
+      rc=0
+      for proj in $(grep -oE '"[^"]*\.csproj"' Dependably.sln | tr -d '"' | tr '\\' '/'); do
+        lock="$(dirname "$proj")/packages.lock.json"
+        if [ ! -f "$lock" ]; then
+          echo "ERROR: $proj has no committed $lock — its restore would resolve unpinned." >&2
+          rc=1
+        fi
+      done
+      # (b) Every packageSource host in the committed nuget.config must be public or
+      # allowlisted in .dependably. Hosts are compared literally, not by suffix,
+      # so `evil-api.nuget.org.example` cannot pass as `api.nuget.org`.
+      ALLOWED="api.nuget.org
+      $(grep -oE '"[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"' .dependably | tr -d '"')"
+      for host in $(grep -oE '<add key="[^"]+" value="https?://[^"/]+' nuget.config \
+                    | sed -E 's|.*https?://||'); do
+        if ! printf '%s\n' "$ALLOWED" | tr -d ' ' | grep -qxF "$host"; then
+          echo "ERROR: nuget.config packageSource host '$host' is neither public nor allowlisted in .dependably." >&2
+          rc=1
+        fi
+      done
+      [ "$rc" -eq 0 ] || exit 1
+      echo "lockfile-registry-guard: npm lockfile clean; NuGet lock files present; nuget.config sources allowlisted."
 
 # Fails the pipeline early when the private registry isn't actually in effect, so a
 # misconfigured pipeline can't silently restore from public registries. Not release-gating
@@ -471,6 +678,16 @@ build:
   # runners so the publish happens natively (faster, and avoids qemu surprises).
   tags: [amd64]
   script:
+    # Lock-file gate, ahead of the publish. A `-r <rid>` restore cannot run in locked mode
+    # (NuGet requires the lock file's runtime-identifier set to equal the project's, so a
+    # RID restore against a RID-less lock file fails NU1004), which leaves the publish
+    # below resolving its graph unpinned. This RID-less locked restore resolves the same
+    # graph from the same feed first: it fails on a version the committed
+    # packages.lock.json does not pin (NU1004) or on package bytes whose content hash does
+    # not match it (NU1403), and the publish then reuses those verified packages out of the
+    # global packages folder. Explicit -p:RestoreLockedMode rather than relying on the
+    # CI-conditioned default in Directory.Build.props, so the gate is visible here.
+    - dotnet restore src/Dependably -p:RestoreLockedMode=true
     # PublishSingleFile=true (set in csproj) requires a RID and emits to bin/Release/net10.0/<rid>/publish/.
     # Pin linux-x64 so the artifact path and the e2e job's invocation are deterministic. Self-contained
     # is required because csproj enables EnableCompressionInSingleFile, which the SDK rejects otherwise.
@@ -480,13 +697,25 @@ build:
       - src/Dependably/bin/Release/net10.0/linux-x64/publish/
     expire_in: 1 hour
 
-# Builds and pushes the prebaked ci-tools image under ci/docker/ — jq + a JRE
+# Builds the prebaked ci-tools image under ci/docker/ — jq + a JRE
 # + a Node runtime on top of the .NET SDK, consumed by sca-backend (jq for
 # parsing `dotnet list package --vulnerable` output) and sonarqube-check (the
 # JRE the SonarScanner engine needs, plus Node for its JS analysis sensors).
-# Runs automatically whenever a Dockerfile under ci/docker/ changes, on both
-# MR and main pipelines, so the pushed tag always reflects the checked-in
-# source. Modeled on publish-image's dind/login mechanics. Hard-fails on an
+# Runs whenever a Dockerfile under ci/docker/ changes, on both MR and main
+# pipelines — but the PUSH happens only from `main`.
+#
+# `ci/ci-tools:latest` is a mutable tag that later pipelines execute: sca-backend
+# (a release gate) and sonarqube-check (which holds SONAR_TOKEN and the full
+# source tree) both run ON this image. A build from an unmerged branch must
+# therefore never be allowed to overwrite it — otherwise an MR that is opened,
+# fires this job, and is then closed unmerged leaves a persistent foothold in the
+# release path with no trace in main's history. The MR run is a build-only
+# validation that the Dockerfile still builds; only a main build publishes, which
+# keeps the tag tracking source that is genuinely checked in. The gate is enforced
+# twice over: by the `rules:` below, and by the ref check in the script (so the
+# `build-ci-tools-manual` variant, which replaces `rules:`, inherits it).
+#
+# Modeled on publish-image's dind/login mechanics. Hard-fails on an
 # empty DEP_IMAGE_REGISTRY rather than silently building without a push
 # target. Deliberately has NO manual fallback rule: sonarqube-check's `needs:
 # [{job: build-ci-tools, optional: true}]` only skips waiting on this job when
@@ -497,6 +726,9 @@ build:
 # build-ci-tools-manual job below, which no needs edge references.
 build-ci-tools:
   stage: build
+  # Pushes the shared ci/ci-tools:latest tag on main; cancellation must not race
+  # a partial push.
+  interruptible: false
   image: ${DEP_IMAGE_REGISTRY}/library/docker:27-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c
   services:
     - name: ${DEP_IMAGE_REGISTRY}/library/docker:27-dind@sha256:aa3df78ecf320f5fafdce71c659f1629e96e9de0968305fe1de670e0ca9176ce   # glsec:ignore GL054 -- buildx needs BuildKit; privileged/BuildKit runner is the documented, chosen prerequisite
@@ -518,6 +750,7 @@ build-ci-tools:
         echo "ERROR: DEP_IMAGE_REGISTRY is empty — refusing to build and push CI tool images nowhere." >&2
         exit 1
       fi
+    # Read-scoped login: the build below pulls its base layers through the mirror.
     - echo "$REGISTRY_KEY" | docker login "$DEP_IMAGE_REGISTRY" -u api --password-stdin
     # The dind service daemon comes up a few seconds after the job container; wait
     # for it to accept connections before the first command that talks to it.
@@ -525,16 +758,30 @@ build-ci-tools:
       for i in $(seq 30); do docker info >/dev/null 2>&1 && break; echo "waiting for dind ($i)..."; sleep 1; done
       docker info >/dev/null 2>&1 || { echo "dind daemon did not become ready on $DOCKER_HOST"; exit 1; }
     - docker build -f ci/docker/ci-tools.Dockerfile --build-arg DEP_IMAGE_REGISTRY="$DEP_IMAGE_REGISTRY" -t "$DEP_IMAGE_REGISTRY/ci/ci-tools:latest" .
-    - docker push "$DEP_IMAGE_REGISTRY/ci/ci-tools:latest"
+    - |
+      # Ref gate. CI_COMMIT_BRANCH is unset on merge-request and tag pipelines, so
+      # only a push pipeline on the protected default branch reaches the push. The
+      # publish credential is re-logged-in here (see .private-registry-setup for the
+      # read/publish split) so the write-capable token is used for the write only.
+      if [ "${CI_COMMIT_BRANCH:-}" != "main" ]; then
+        echo "Ref '${CI_COMMIT_REF_NAME:-unknown}' is not main: ci-tools image build validated, shared tag NOT overwritten."
+      else
+        echo "${REGISTRY_PUBLISH_KEY:-$REGISTRY_KEY}" | docker login "$DEP_IMAGE_REGISTRY" -u api --password-stdin
+        docker push "$DEP_IMAGE_REGISTRY/ci/ci-tools:latest"
+      fi
 
 # Manual-only convenience rebuild of the same image with no ci/docker/** change
 # (e.g. a base-image digest bump). Not referenced by any `needs:` edge, so it
 # can sit unplayed indefinitely without blocking a downstream DAG job the way
-# build-ci-tools' old manual fallback blocked sonarqube-check.
+# build-ci-tools' manual fallback would block sonarqube-check. Scoped to main:
+# a rule with no `if:` offers the job as a manual play on every MR and tag
+# pipeline, which would hand an unmerged branch a second, entirely unrestricted
+# route to overwrite the shared ci-tools tag.
 build-ci-tools-manual:
   extends: build-ci-tools
   rules:
-    - when: manual
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"
+      when: manual
       allow_failure: true
 
 # === test ===
@@ -605,7 +852,7 @@ i18n-validate:
 # any real finding fails the pipeline.
 secret-scan:
   stage: test
-  extends: [.runs-on-ci, .release-required]
+  extends: [.runs-on-ci-or-schedule, .release-required]
   image:
     name: ${DEP_IMAGE_REGISTRY}/trufflesecurity/trufflehog:3.95.3@sha256:9cc33bb080cac0efbbf228a17667172875b529eeeab01efcc4697adfb55f568a
     entrypoint: [""]
@@ -664,8 +911,11 @@ integration-tests:
 # Schema/migration guard. Two test categories, both gating:
 #   Category=Schema         — applies the full schema to a fresh SQLite DB and asserts structural
 #                             soundness + idempotent replay (SchemaIntegrityTests), and statically
-#                             checks additive-migration sync, NOT NULL-without-DEFAULT, and
-#                             SQLite↔Postgres source parity (Schema*ComplianceTests). No external deps.
+#                             checks additive-migration sync, NOT NULL-without-DEFAULT,
+#                             SQLite↔Postgres source parity, and backward compatibility with the
+#                             previous release tag (Schema*ComplianceTests). The backward-compat
+#                             gate reads the previous release's schema out of git; it fetches that
+#                             tag explicitly, so the runner's shallow checkout is enough.
 #   Category=SchemaPostgres — applies Schema.pg.sql + migrations against the live postgres service
 #                             below via NpgsqlMetadataStore (PostgresSchemaApplyTests), proving the
 #                             Postgres path boots, is idempotent, and matches the SQLite shape.
@@ -684,6 +934,9 @@ schema-integrity:
     POSTGRES_USER: dependably
     POSTGRES_PASSWORD: dependably_test_pw
     TEST_POSTGRES_CONNECTION: "Host=postgres;Port=5432;Database=dependably_test;Username=dependably;Password=dependably_test_pw"
+    # A repository with release tags whose baseline schema cannot be read is a broken signal, not a
+    # pass: fail the job instead of letting the blue-green gate quietly stop comparing anything.
+    SCHEMA_BACKCOMPAT_REQUIRE_BASELINE: "true"
   script:
     - dotnet test --filter "Category=Schema|Category=SchemaPostgres" --logger "junit;LogFilePath=$CI_PROJECT_DIR/test-results/schema.xml"
   artifacts:
@@ -719,8 +972,8 @@ frontend-tests:
 # <packageSources>.
 sca-backend:
   stage: test
-  extends: [.private-registry-setup, .runs-on-ci, .release-required]
-  image: ${DEP_IMAGE_REGISTRY}/ci/ci-tools:latest   # glsec:ignore GL001 -- project-owned image: the tag tracks the checked-in ci/docker/ci-tools.Dockerfile (whose base IS digest-pinned) and is rebuilt by build-ci-tools whenever that file changes; a digest pin here would go stale on every rebuild
+  extends: [.private-registry-setup, .runs-on-ci-or-schedule, .release-required]
+  image: ${DEP_IMAGE_REGISTRY}/ci/ci-tools:latest   # glsec:ignore GL001 -- project-owned image: build-ci-tools publishes this tag only from a `main` push, so it always tracks the checked-in ci/docker/ci-tools.Dockerfile (whose base IS digest-pinned) and no unmerged branch can overwrite it; a digest pin here would go stale on every rebuild
   tags: [amd64]
   variables:
     NUGET_AUDIT_SOURCE: https://api.nuget.org/v3/index.json
@@ -754,7 +1007,7 @@ sca-backend:
 # the /-/npm/v1/security/advisories/bulk endpoint that npm audit requires.
 sca-frontend:
   stage: test
-  extends: [.private-registry-setup, .runs-on-ci, .release-required]
+  extends: [.private-registry-setup, .runs-on-ci-or-schedule, .release-required]
   image: ${DEP_IMAGE_REGISTRY}/library/node:26-slim@sha256:ffc78385a788964bb3cbab5e434ff79a10bdc25b8ae6db03fe5fe6cb14053c09
   script:
     - cd web
@@ -837,7 +1090,7 @@ e2e:
 sonarqube-check:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci-main]
-  image: ${DEP_IMAGE_REGISTRY}/ci/ci-tools:latest   # glsec:ignore GL001 -- project-owned image: the tag tracks the checked-in ci/docker/ci-tools.Dockerfile (whose base IS digest-pinned) and is rebuilt by build-ci-tools whenever that file changes; a digest pin here would go stale on every rebuild
+  image: ${DEP_IMAGE_REGISTRY}/ci/ci-tools:latest   # glsec:ignore GL001 -- project-owned image: build-ci-tools publishes this tag only from a `main` push, so it always tracks the checked-in ci/docker/ci-tools.Dockerfile (whose base IS digest-pinned) and no unmerged branch can overwrite it; a digest pin here would go stale on every rebuild
   # needs bypasses stage ordering, so the ci-tools image build (present only in
   # pipelines where ci/docker/** changed) must be an explicit optional edge —
   # otherwise this job can start before the image it pulls has been pushed.
@@ -851,7 +1104,10 @@ sonarqube-check:
     paths:
       - .sonar/cache
   script:
-    - dotnet tool install --global dotnet-sonarscanner
+    # Pinned: an unpinned global tool install resolves whatever the feed currently serves as
+    # latest and then executes it in a job holding SONAR_TOKEN and the full source tree.
+    # Bump deliberately, alongside a SonarQube server-compatibility check.
+    - dotnet tool install --global dotnet-sonarscanner --version 11.2.1
     - export PATH="$PATH:$HOME/.dotnet/tools"
     # The token is passed explicitly via /d:sonar.token — the SONAR_TOKEN environment
     # variable alone is NOT honored by the scanner's begin step against this SonarQube
@@ -976,10 +1232,16 @@ integration-external:
     - export DEPENDABLY_ADMIN_PASSWORD="$DAST_ADMIN_PASSWORD"
     # Clone the external suite from this project's own self-hosted GitLab. The
     # CI_JOB_TOKEN is sent as an Authorization header rather than embedded in the
-    # remote URL, so it never lands in .git/config or the process argv.
+    # remote URL, so it never lands in .git/config. The header is handed to git via
+    # GIT_CONFIG_COUNT/KEY/VALUE rather than `git -c …`: /proc/<pid>/cmdline is
+    # world-readable on the runner host, /proc/<pid>/environ is not, so the env-var
+    # form keeps the credential out of the process argv as well.
     - | # glsec:ignore GL004 -- gitlab.northwardlabs.ca is this project's own self-hosted GitLab; CI_JOB_TOKEN is a first-party credential
       AUTH_B64=$(printf 'gitlab-ci-token:%s' "$CI_JOB_TOKEN" | base64 | tr -d '\n')
-      git -c http.extraHeader="Authorization: Basic ${AUTH_B64}" clone --depth 1 --branch "$INTEGRATION_TESTS_REF" "https://gitlab.northwardlabs.ca/moonlitlabs/dependably-integration-tests.git" /tmp/integration-tests
+      GIT_CONFIG_COUNT=1 \
+      GIT_CONFIG_KEY_0=http.extraHeader \
+      GIT_CONFIG_VALUE_0="Authorization: Basic ${AUTH_B64}" \
+      git clone --depth 1 --branch "$INTEGRATION_TESTS_REF" "https://gitlab.northwardlabs.ca/moonlitlabs/dependably-integration-tests.git" /tmp/integration-tests
     # .private-registry-setup writes nuget.config to $CI_PROJECT_DIR (not $HOME), so
     # dotnet restore inside the cloned suite — running from /tmp/integration-tests —
     # would fall back to public nuget.org. Copy the generated config into the clone
@@ -1034,6 +1296,9 @@ sbom-frontend:
 dt-publish:
   stage: sbom
   extends: [.runs-on-ci-main, .release-required]
+  # Uploads SBOMs to Dependency-Track; cancellation must not race a partial
+  # publish of the parent/child project set.
+  interruptible: false
   image: ${DEP_IMAGE_REGISTRY}/library/alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
   needs:
     - job: sbom-backend
@@ -1199,6 +1464,13 @@ ai-review-docs:
   export ANON_RATE_LIMIT_PERMITS=100000
   export PUSH_RATE_LIMIT_PERMITS=100000
   export DOWNLOAD_RATE_LIMIT_PERMITS=100000
+  # The GlobalLimiter's default-deny ceiling for any controller route that declares no explicit
+  # policy (protocol registry routes, plus non-/api/v1 management routes like /saml/*). Left at its
+  # 300/min default it is the one limiter the scan can still cross — a system-admin ZAP run fuzzing
+  # those paths produces a 429 flood that perturbs the active scan into spurious findings. Raise it
+  # with the rest so the bounded scan probes unthrottled; a high (not infinite) ceiling still bounds
+  # a real DoS on any non-DAST run.
+  export PROTOCOL_DEFAULT_RATE_LIMIT_PERMITS=100000
   export DISABLE_BACKGROUND_JOBS=vuln-scan,vuln-rescan,deprecation-refresh,threat-feed,license-backfill
   # DAST log volume: a full active scan drives tens of thousands of probes, each of which
   # UseSerilogRequestLogging records as one request-completion event. At the default
@@ -1527,9 +1799,21 @@ release-gate:
 # provenance-emitting. CI owns tag identity (validate-release-tag);
 # this job owns publishing only. See build/release-to-github.sh.
 release-to-github:
-  stage: release
-  extends: .runs-on-release-tag
-  needs: [release-gate]
+  stage: mirror
+  # Inline rules rather than `extends: .runs-on-release-tag` because the manual
+  # gate has to live inside the rule: when a matching rule carries no `when:`,
+  # GitLab defaults it to on_success, and that default overrides a job-level
+  # `when: manual` under rules/when precedence. The YAML merge key keeps the tag
+  # regex in its single home rather than duplicating it here.
+  rules:
+    - <<: *release-tag-rule
+      when: manual
+      allow_failure: false
+  # release-gate proves the release contract held; deploy-staging proves the
+  # exact image this tag produced actually boots on a real host. Both are named
+  # explicitly because `needs:` releases a job from stage ordering — with only
+  # release-gate listed, the mirror would be offered before staging had run.
+  needs: [release-gate, deploy-staging]
   # See validate-release-tag for why the alpine/git entrypoint is overridden.
   image:
     name: ${DEP_IMAGE_REGISTRY}/alpine/git@sha256:d453f54c83320412aa89c391b076930bd8569bc1012285e8c68ce2d4435826a3
@@ -1576,11 +1860,17 @@ release-to-github:
 # suites). arm64 is cross-compiled by the Dockerfile (TARGETARCH→RID); only the
 # final-stage apk layer runs under QEMU, installed via the binfmt image below.
 #
-# Prereqs (set as masked CI/CD variables):
-#   REGISTRY_KEY  — token for $DEP_IMAGE_REGISTRY. Already used by the build job
-#                   for proxy dep routing; must carry publish:oci to push here.
-#                   If it doesn't, add a dedicated publish token var and use it
-#                   for `docker login` below.
+# Prereqs (set as CI/CD variables):
+#   REGISTRY_PUBLISH_KEY — publish:oci token for $DEP_IMAGE_REGISTRY, set PROTECTED +
+#                   MASKED so it is exposed only on protected refs (`main`, `v*`) and
+#                   never to a feature-branch MR pipeline. This job is the only image
+#                   push besides build-ci-tools. Falls back to REGISTRY_KEY when unset
+#                   so the publish path keeps working until the variable is created;
+#                   delete the fallback once it exists (see CONTRIBUTING > Registry
+#                   credentials in CI).
+#   REGISTRY_KEY  — read-only token, unprotected. Used here ONLY as the BuildKit
+#                   secret that routes the image build's own dependency restores
+#                   through the private feed. It is not the push credential.
 #   DOCKER_AUTH_CONFIG — base-image pull creds (already required pipeline-wide).
 # Two-image publish. `parallel: matrix` fans this one definition into
 # publish-image: [community] and publish-image: [edge]: the community image builds
@@ -1606,6 +1896,8 @@ publish-image:
   # serialize publishes so concurrent main pipelines can't race the registry (GL019);
   # per-flavor group so the community and edge pushes don't block each other.
   resource_group: publish-image-${IMAGE_FLAVOR}
+  # Cancellation must not race a partial multi-arch manifest push.
+  interruptible: false
   variables:
     # Talk to the dind service over its plaintext endpoint. TLS (2376) needs the
     # runner to share dind's generated /certs/client volume into the job container;
@@ -1614,8 +1906,10 @@ publish-image:
     # bridge network, which is never reachable outside the job.
     DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: "" # glsec:ignore GL031 -- TLS on 2376 needs the runner to share dind's /certs/client volume into the job, which these self-hosted runners do not; the docker executor isolates the dind daemon on this job's per-build service network, so 2375 is not reachable by other jobs
-  # Auth + build-time dep routing reuse the existing REGISTRY_URL / REGISTRY_KEY
-  # CI vars (same as the build job); REGISTRY_KEY must carry publish:oci to push.
+  # Registry auth is split by capability: the push authenticates with
+  # REGISTRY_PUBLISH_KEY (protected + masked), while build-time dependency routing
+  # reuses the unprotected read-only REGISTRY_URL / REGISTRY_KEY pair the build job
+  # uses. See .private-registry-setup for the rationale.
   script:
     - |
       case "$IMAGE_FLAVOR" in
@@ -1624,7 +1918,16 @@ publish-image:
         *) echo "unknown IMAGE_FLAVOR: $IMAGE_FLAVOR" >&2; exit 1 ;;
       esac
     - echo "Publishing $IMAGE_FLAVOR image from $DOCKERFILE to $IMAGE_REPO"
-    - echo "$REGISTRY_KEY" | docker login "$DEP_IMAGE_REGISTRY" -u api --password-stdin
+    - |
+      # The publish credential, with a fallback to the read key so the push keeps
+      # working until REGISTRY_PUBLISH_KEY is created as a protected + masked
+      # variable. Removing the fallback is the one manual cutover step: once the
+      # variable exists, `${REGISTRY_PUBLISH_KEY:?...}` should replace it so an
+      # unprotected pipeline can never reach a write-capable token.
+      if [ -z "${REGISTRY_PUBLISH_KEY:-}" ]; then
+        echo "WARNING: REGISTRY_PUBLISH_KEY is unset — falling back to the unprotected read token for the push. Create it as a Protected + Masked CI/CD variable and drop the fallback (CONTRIBUTING > Registry credentials in CI)." >&2
+      fi
+      echo "${REGISTRY_PUBLISH_KEY:-$REGISTRY_KEY}" | docker login "$DEP_IMAGE_REGISTRY" -u api --password-stdin
     # The dind service daemon comes up a few seconds after the job container, so the
     # first command that talks to it races startup ("Cannot connect to the Docker
     # daemon at tcp://docker:2375"). docker login above is a local config write and
@@ -1637,6 +1940,8 @@ publish-image:
     # cross-compiled (TARGETARCH→RID), so only that layer needs emulation.
     - docker run --privileged --rm ${DEP_IMAGE_REGISTRY}/tonistiigi/binfmt:latest@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 --install arm64 # glsec:ignore GL056 -- binfmt_misc registration needs privileged (cap-add alone cannot mount /proc/sys/fs/binfmt_misc); one-shot container inside this job's isolated, already-privileged dind daemon
     - docker buildx create --use --name dep-builder
+    # BuildKit secret for the image build's own npm/NuGet/apk restores — the READ
+    # token, deliberately not the publish one.
     - printf '%s' "$REGISTRY_KEY" > /tmp/registry_key
     # Pick the tag set from the trigger. On a vX.Y.Z tag the tag is the source of
     # truth (validate-release-tag already matched it to Directory.Build.props):
@@ -1692,3 +1997,126 @@ publish-image:
       $VERSION_TAGS
       --push .
     - rm -f /tmp/registry_key
+
+# === staging ===
+#
+# Deploy the image publish-image just pushed onto the staging host, and prove it
+# boots there before a release tag can be mirrored. Runs on the shell runner
+# registered on that host carrying the single tag `staging` with
+# run_untagged=false, so the host executes this job and nothing else in the
+# pipeline — it is a deploy target, not build capacity.
+#
+# Deliberately has NO `needs:`. Stage ordering alone makes it wait for every
+# publish-image matrix job, which is exactly the precondition: the image must be
+# in the registry before it can be pulled. Adding `needs:` would release this
+# job from stage ordering and let it start against an image not yet pushed.
+#
+# `dependencies: []` because the host needs only the checkout (the compose file
+# and Directory.Build.props). Without it GitLab would ship every earlier stage's
+# artifacts — SBOMs, ZAP reports, provenance — onto a small shared host for no
+# reason.
+#
+# Prereqs (already set as CI/CD variables):
+#   REGISTRY_KEY — the read-only pull token, unprotected so it resolves on main
+#                  and tag pipelines alike. It reaches the host only for the
+#                  lifetime of this job and the trap removes it; the staging
+#                  host holds no standing registry credential of its own.
+deploy-staging:
+  stage: staging
+  extends: .runs-on-ci-main
+  tags: [staging]
+  dependencies: []
+  # Two main pipelines finishing close together must not race each other's
+  # `compose up` against the same host.
+  resource_group: staging-deploy
+  # Cancellation must not leave the host stranded between two images.
+  interruptible: false
+  variables:
+    GIT_DEPTH: 1
+    STAGING_PORT: "8080"
+    # The host's own env file, carrying its identity and tenancy mode (BASE_URL,
+    # DEPLOYMENT_MODE, DEFAULT_ORG_SLUG). Deliberately on the host rather than in
+    # CI variables: it describes the machine, not the build, so it survives
+    # pipeline edits and differs per staging host.
+    STAGING_ENV_FILE: /etc/dependably/staging.env
+    # Deliberately the SAME compose project as the appliance already running on
+    # the host. Compose then recreates that container in place — it stops the old
+    # one before starting the replacement, so the port is never double-bound and
+    # two processes can never hold the one SQLite database open at once. A
+    # separate project would leave the original container owning both.
+    COMPOSE_PROJECT: dependably-community
+  environment:
+    # glsec's static check doesn't resolve GitLab `extends:` merging (the same gap
+    # already accepted for GL022/024/026/032 above): the job's actual rules come
+    # from `extends: .runs-on-ci-main` (main push + release tag only) — confirmed
+    # live by release-contract-lint's RULE_PROVIDERS check and by `glab ci lint`.
+    name: staging  # glsec:ignore GL013 -- rules inherited via extends: .runs-on-ci-main, see above
+    url: http://rpi2.northwardlabs.ca:8080
+  script:
+    # One block, so the logout trap covers every command that follows the login.
+    - |
+      set -eu
+
+      # Resolve the same tag publish-image stamped in this pipeline. A moving tag
+      # (:main, :latest) would let a concurrent pipeline substitute a different
+      # build between that push and this pull, so the immutable version-stamped
+      # tag is the only safe reference to deploy.
+      if echo "${CI_COMMIT_TAG:-}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+        VERSION="${CI_COMMIT_TAG#v}"
+      else
+        FILE_VERSION=$(grep -oE '<Version>[^<]+</Version>' Directory.Build.props \
+          | sed -E 's|<Version>(.*)</Version>|\1|')
+        VERSION="${FILE_VERSION}-main.g${CI_COMMIT_SHORT_SHA}"
+      fi
+      export STAGING_IMAGE="${DEP_IMAGE_REGISTRY}/dependably/community:${VERSION}"
+      echo "Deploying $STAGING_IMAGE to staging"
+
+      trap 'docker logout "$DEP_IMAGE_REGISTRY" >/dev/null 2>&1 || true' EXIT
+      echo "$REGISTRY_KEY" | docker login "$DEP_IMAGE_REGISTRY" -u api --password-stdin
+
+      COMPOSE="docker compose -p $COMPOSE_PROJECT -f docker-compose.staging.yml"
+      # Absent env file falls back to the compose defaults rather than failing:
+      # `--env-file` pointing at a missing path is a hard error in compose, which
+      # would break the deploy on a freshly provisioned host for a file that is
+      # host configuration, not a build input. Warn loudly instead — a silently
+      # default-configured staging box is the confusing outcome to avoid.
+      if [ -f "$STAGING_ENV_FILE" ]; then
+        COMPOSE="$COMPOSE --env-file $STAGING_ENV_FILE"
+        echo "Using host env file $STAGING_ENV_FILE"
+      else
+        echo "WARNING: $STAGING_ENV_FILE is absent — deploying with docker-compose.staging.yml defaults (single-tenant, default org)." >&2
+      fi
+
+      $COMPOSE pull
+      $COMPOSE up -d --remove-orphans
+
+      CID=$($COMPOSE ps -q dependably)
+      [ -n "$CID" ] || { echo "deploy-staging: no container id for service dependably" >&2; exit 1; }
+
+      # The image the container actually runs must be the one this pipeline built.
+      # Guards against compose reusing an existing container whose image differs.
+      RUNNING_IMAGE=$(docker inspect -f '{{.Config.Image}}' "$CID")
+      if [ "$RUNNING_IMAGE" != "$STAGING_IMAGE" ]; then
+        echo "deploy-staging: expected $STAGING_IMAGE but container runs $RUNNING_IMAGE" >&2
+        exit 1
+      fi
+
+      # A started container is not a working one. Block on the image's own
+      # HEALTHCHECK (the image's own /ready probe) so a boot failure — a bad migration, a schema
+      # change the previous release cannot read — fails this job rather than
+      # leaving a dead container behind a green pipeline.
+      STATUS=unknown
+      for _ in $(seq 90); do
+        STATUS=$(docker inspect -f '{{.State.Health.Status}}' "$CID" 2>/dev/null || echo unknown)
+        case "$STATUS" in
+          healthy) break ;;
+          unhealthy) break ;;
+        esac
+        sleep 2
+      done
+      if [ "$STATUS" != healthy ]; then
+        echo "deploy-staging: container did not become healthy (last status: $STATUS)" >&2
+        docker logs --tail 200 "$CID" >&2 || true
+        exit 1
+      fi
+      echo "deploy-staging: $STAGING_IMAGE healthy on port ${STAGING_PORT}"

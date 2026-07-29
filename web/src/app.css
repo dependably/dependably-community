@@ -85,6 +85,13 @@
 
 *, *::before, *::after { box-sizing: border-box; }
 
+/* The document element is the app's only vertical scroll container: the sidebar scrolls
+   internally and the topbar is a sticky strip. Reserving the scrollbar gutter here keeps the
+   usable viewport width constant whether or not the current page overflows, so moving between
+   a long list and a short form does not shift the whole layout sideways by the scrollbar's
+   width. Platforms with overlay scrollbars ignore this and lose nothing. */
+html { scrollbar-gutter: stable; }
+
 body {
   margin: 0;
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -421,6 +428,32 @@ tr:hover td { background: var(--bg2); }
 @keyframes skel {
   0%   { background-position: 100% 0; }
   100% { background-position: -100% 0; }
+}
+
+/* Navigation progress strip, under the topbar in both shells. A deferred navigation holds the
+   outgoing page while the incoming one loads, and past the grace period that hold needs to read
+   as progress rather than as a dead click. The strip keeps its 2px whether or not a navigation is
+   in flight, so turning on costs no layout shift — only the sweep inside it appears. */
+.nav-progress {
+  height: 2px;
+  overflow: hidden;
+  position: relative;
+}
+.nav-progress.visible::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  animation: nav-progress-sweep 900ms ease-in-out infinite;
+}
+@keyframes nav-progress-sweep {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* Steady tint rather than a sweep — the point is "something is happening", and the motion is
+     the part that is optional. */
+  .nav-progress.visible::after { animation: none; background: var(--accent); }
 }
 
 .page-error {

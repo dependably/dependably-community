@@ -72,11 +72,17 @@ public sealed class CacheArtifactRepository
 
     /// <summary>
     /// Returns artifacts eligible for LRU eviction in oldest-access-first order. The caller
-    /// decides how many to evict per pass based on size/count caps. Excludes OCI: evicting an
-    /// OCI cache_artifact row would delete the manifest blob while its oci_blobs row and layer
-    /// blobs survive, leaving a broken serve path and orphaned layers. Correct OCI eviction
-    /// needs layer refcounting, which is out of scope — OCI stays never-evicted from the cache
-    /// plane, the same behavior as before it joined the plane at all.
+    /// decides how many to evict per pass based on size/count caps.
+    ///
+    /// Excludes OCI, but no longer because OCI is un-evictable — the per-org retention arms
+    /// (keep_versions, keep_days, purge_unlisted) now evict OCI images by releasing the digest
+    /// claim, and OciBlobReclaimer's sweep reclaims what that orphans. The exclusion here is
+    /// narrower: this path is global rather than per-org, and the caller's blob delete is guarded
+    /// only against sibling cache_artifact rows, not against the oci_blobs rows that also point at
+    /// a manifest. Evicting an OCI row here would still delete manifest bytes out from under them.
+    /// Doing it correctly means releasing the claim for every org holding access before the row
+    /// goes, inside a sweep that has no org context — a change with its own failure modes, so it
+    /// is deliberately not folded in here.
     /// </summary>
     public async Task<IReadOnlyList<CacheArtifact>> ListLruCandidatesAsync(
         DateTimeOffset olderThan, int limit, CancellationToken ct = default)
@@ -99,9 +105,9 @@ public sealed class CacheArtifactRepository
 
     /// <summary>
     /// Total bytes on the evictable cache plane, used by <c>CacheEvictionService</c>'s size cap.
-    /// Excludes OCI — see <see cref="ListLruCandidatesAsync"/> — so the size cap is measured
-    /// against the bytes that eviction can actually reclaim; including never-evicted OCI bytes
-    /// here would make the cap unreachable once OCI images accumulate.
+    /// Excludes OCI to stay consistent with <see cref="ListLruCandidatesAsync"/>: the cap has to be
+    /// measured against the bytes this path can actually reclaim, or counting rows it will never
+    /// select makes the cap unreachable and the sweep spins.
     /// </summary>
     public async Task<long> GetTotalSizeBytesAsync(CancellationToken ct = default)
     {
@@ -112,9 +118,9 @@ public sealed class CacheArtifactRepository
 
     /// <summary>
     /// Total row count on the evictable cache plane, used by <c>CacheEvictionService</c>'s
-    /// artifact-count cap. Excludes OCI — see <see cref="ListLruCandidatesAsync"/> — so the count
-    /// cap is measured against the rows that eviction can actually reclaim; including
-    /// never-evicted OCI rows here would make the cap unreachable once OCI images accumulate.
+    /// artifact-count cap. Excludes OCI for the same reason as
+    /// <see cref="GetTotalSizeBytesAsync"/> — the cap must range over the rows this path can
+    /// actually select.
     /// </summary>
     public async Task<long> GetTotalCountAsync(CancellationToken ct = default)
     {
@@ -221,32 +227,6 @@ public sealed class CacheArtifactRepository
     }
 
     /// <summary>
-    /// Returns the block-gate-relevant facts from a <c>cache_artifact</c> row by id. Used by
-    /// the proxy first-fetch path after scanning to build a <see cref="Protocol.BlockGateRequest"/>
-    /// without a tenant context (global facts only; <c>ManualBlockState</c> is null for freshly
-    /// created access rows). Returns null when the id is not found.
-    /// </summary>
-    // xtenant: cache_artifact is global; id comes from the caller's CacheAccessRecorder result
-    // so no arbitrary cross-tenant row is reachable.
-    public async Task<CacheArtifactGateFacts?> GetByIdForGateAsync(string id, CancellationToken ct = default)
-    {
-        await using var conn = await _db.OpenAsync(ct);
-        return await conn.QuerySingleOrDefaultAsync<CacheArtifactGateFacts>("""
-            SELECT
-                id              AS Id,
-                deprecated      AS Deprecated,
-                vuln_checked_at AS VulnCheckedAt,
-                has_install_script   AS HasInstallScript,
-                install_script_kind  AS InstallScriptKind,
-                provenance_status    AS ProvenanceStatus,
-                provenance_signer    AS ProvenanceSigner
-            FROM cache_artifact
-            WHERE id = @id
-            """,
-            new { id });
-    }
-
-    /// <summary>
     /// Returns distinct (ecosystem, name, org_id) groups in <c>cache_artifact</c> whose
     /// <c>deprecation_checked_at</c> is stale — never checked or checked more than
     /// <paramref name="ageHours"/> ago. Ordered oldest-first so a partial run still makes
@@ -260,7 +240,7 @@ public sealed class CacheArtifactRepository
     public async Task<IReadOnlyList<(string Ecosystem, string Name, string OrgId)>>
         ListGroupsNeedingDeprecationRefreshAsync(int ageHours, int limit, TimeProvider time, CancellationToken ct = default)
     {
-        string threshold = time.GetUtcNow().AddHours(-ageHours).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string threshold = time.GetUtcNow().AddHours(-ageHours).ToUtcIso();
         await using var conn = await _db.OpenAsync(ct);
         var rows = await conn.QueryAsync<(string Ecosystem, string Name, string OrgId)>(
             """
@@ -338,7 +318,7 @@ public sealed class CacheArtifactRepository
     // xtenant: UPDATE keyed by cache_artifact PK (global); no org_id needed.
     public async Task MarkLicenseCheckedAsync(string id, DateTimeOffset checkedAt, CancellationToken ct = default)
     {
-        string checkedAtIso = checkedAt.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string checkedAtIso = checkedAt.ToUtcIso();
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             "UPDATE cache_artifact SET license_checked_at = @checkedAtIso WHERE id = @id",
@@ -376,7 +356,7 @@ public sealed class CacheArtifactRepository
     // xtenant: UPDATE keyed by cache_artifact PK (global); no org_id needed.
     public async Task UpdateDeprecationAsync(string id, string? deprecated, TimeProvider time, CancellationToken ct = default)
     {
-        string now = time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = time.GetUtcNow().ToUtcIso();
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             "UPDATE cache_artifact SET deprecated = @deprecated, deprecation_checked_at = @now WHERE id = @id",
@@ -390,7 +370,7 @@ public sealed class CacheArtifactRepository
     // xtenant: UPDATE keyed by cache_artifact PK (global); no org_id needed.
     public async Task TouchDeprecationCheckedAtAsync(string id, TimeProvider time, CancellationToken ct = default)
     {
-        string now = time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = time.GetUtcNow().ToUtcIso();
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             "UPDATE cache_artifact SET deprecation_checked_at = @now WHERE id = @id",
@@ -420,7 +400,7 @@ public sealed class CacheArtifactRepository
     // xtenant: UPDATE keyed by cache_artifact PK (global); no org_id needed.
     public async Task SetRevokedAtAsync(string id, TimeProvider time, CancellationToken ct = default)
     {
-        string now = time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = time.GetUtcNow().ToUtcIso();
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             "UPDATE cache_artifact SET revoked_at = @now WHERE id = @id",
@@ -477,6 +457,43 @@ public sealed class CacheArtifactRepository
               AND ca.filename  = @filename
             """,
             new { orgId, ecosystem, name, version, filename });
+    }
+
+    /// <summary>
+    /// Same per-tenant serve-facts projection as <see cref="GetServeFactsByCoordinateAsync"/>, but
+    /// keyed on the <c>cache_artifact</c> id. The proxy first-fetch path uses this to gate exactly
+    /// the row it just recorded, rather than re-deriving the coordinate — the recorded name comes
+    /// from upstream repository metadata and need not match the name parsed out of the requested
+    /// filename, so a coordinate round-trip could miss the row that is about to be served.
+    /// </summary>
+    // xtenant: cache_artifact is global (no org_id); org_id filter is on tenant_artifact_access.
+    public async Task<CacheArtifactServeFacts?> GetServeFactsByIdAsync(
+        string orgId, string id, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        return await conn.QuerySingleOrDefaultAsync<CacheArtifactServeFacts>("""
+            SELECT
+                ca.id               AS Id,
+                ca.blob_key         AS BlobKey,
+                ca.size_bytes       AS SizeBytes,
+                ca.content_hash     AS ContentHash,
+                ca.purl             AS Purl,
+                ca.published_at     AS PublishedAt,
+                ca.deprecated       AS Deprecated,
+                ca.revoked_at       AS RevokedAt,
+                ca.vuln_checked_at  AS VulnCheckedAt,
+                ca.has_install_script      AS HasInstallScript,
+                ca.install_script_kind     AS InstallScriptKind,
+                ca.provenance_status       AS ProvenanceStatus,
+                ca.provenance_signer       AS ProvenanceSigner,
+                taa.manual_block_state     AS ManualBlockState,
+                taa.yanked                 AS Yanked
+            FROM cache_artifact ca
+            JOIN tenant_artifact_access taa
+              ON taa.cache_artifact_id = ca.id AND taa.org_id = @orgId
+            WHERE ca.id = @id
+            """,
+            new { orgId, id });
     }
 
     /// <summary>
@@ -583,7 +600,13 @@ public sealed class CacheArtifactRepository
                 id,
                 purl,
                 checksumSha1,
-                publishedAt,
+                // Normalized to the canonical UTC string rather than bound as a DateTimeOffset:
+                // the provider renders that type as `2026-07-25 14:00:00+02:00` — space-separated,
+                // offset preserved — which neither matches the ISO-8601 `Z` form every other value
+                // in this TEXT column uses nor collates with it. Microsecond precision because
+                // this instant is declared by the upstream registry and re-served to clients
+                // (PyPI's upload_time_iso_8601), so seconds would drop information we report.
+                publishedAt = publishedAt.ToUtcIsoPreciseOrNull(),
                 deprecated,
                 hasInstallScript = hasInstallScript ? 1 : 0,
                 installScriptKind,
@@ -781,26 +804,3 @@ public sealed class CacheArtifactIndexFacts
     }
 }
 
-/// <summary>
-/// Minimal projection of <c>cache_artifact</c> needed to build a
-/// <see cref="Protocol.BlockGateRequest"/> on the proxy first-fetch path. No tenant columns —
-/// use <see cref="CacheArtifactServeFacts"/> when tenant context is available.
-/// </summary>
-public sealed class CacheArtifactGateFacts
-{
-    public string Id { get; init; } = "";
-    public string? Deprecated { get; init; }
-    public DateTimeOffset? VulnCheckedAt { get; init; }
-    public bool HasInstallScript { get; init; }
-    public string? InstallScriptKind { get; init; }
-    public string? ProvenanceStatus { get; init; }
-    public string? ProvenanceSigner { get; init; }
-    /// <summary>
-    /// Always null at the proxy first-fetch path (the tenant_artifact_access row was just
-    /// created with no manual_block_state set). Present here so callers do not need to
-    /// special-case the null check.
-    /// </summary>
-    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822:Mark members as static",
-        Justification = "Instance property kept for shape parity with sibling gate-facts DTOs consumed uniformly by BlockGateRequest builders.")]
-    public string? ManualBlockState => null;
-}

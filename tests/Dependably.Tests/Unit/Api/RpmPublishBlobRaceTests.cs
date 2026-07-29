@@ -182,6 +182,7 @@ public sealed class RpmPublishBlobRaceTests : IAsyncLifetime
                 new MemoryCache(new MemoryCacheOptions()), MetadataCacheKeys.RpmMergedRepodata),
             new RenderedResponseCache<RpmLocalRepodataKey>(
                 new MemoryCache(new MemoryCacheOptions()), MetadataCacheKeys.RpmLocalRepodata),
+            TestMetadataInvalidation.Coordinator(),
             _clock,
             new CacheAccessRecorder(cacheArtifacts, tenantAccess,
                 NullLogger<CacheAccessRecorder>.Instance, _clock),
@@ -192,6 +193,7 @@ public sealed class RpmPublishBlobRaceTests : IAsyncLifetime
                 NullLogger<Dependably.Protocol.Provenance.RpmProvenanceVerifier>.Instance),
             TestEdgeMode.DisabledPublishGuard(),
             TestBlockGate.Create(_db, _clock),
+            TestScanner.NoFindings(_db, _clock),
             new StagingOptions(Path.GetTempPath(), 0),
             new LicenseRepository(_db, _clock, TestNormalizers.License(_db)));
 

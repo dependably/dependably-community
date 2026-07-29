@@ -7,9 +7,19 @@ namespace Dependably.Infrastructure;
 /// <summary>
 /// Background GC worker that runs on a cron schedule (GC_SCHEDULE env var, default daily at 3am).
 /// Enforces per-org retention policies:
-///   - keep_versions: delete oldest versions beyond the limit per package
-///   - keep_days: evict proxy blobs unused beyond this many days
-///   - activity_retention_days: delete old activity rows
+///   - keep_versions: delete oldest versions beyond the limit per package (opt-in; NULL = off)
+///   - keep_days: evict proxy blobs unused beyond this many days (opt-in; NULL = off)
+///   - purge_unlisted_after_days: hard-delete long-unlisted versions (opt-in; NULL = off)
+///   - activity_retention_days: delete old activity rows; NULL resolves to the
+///     ACTIVITY_RETENTION_DAYS instance default (90) so per-download IP/actor rows are bounded
+///     by default rather than retained forever.
+/// Plus instance-wide personal-data sweeps that run once per pass, not per org:
+///   - audit_log: pseudonymize source_ip/detail past AUDIT_LOG_PII_DAYS (90), then delete past
+///     AUDIT_LOG_RETENTION_DAYS (365) — a storage-limit for the highest-fidelity PII table.
+///   - login_attempts: delete idle, unlocked rows past LOGIN_ATTEMPTS_RETENTION_DAYS (30).
+///   - account_send_throttle: delete rolled-over windows past ACCOUNT_SEND_THROTTLE_RETENTION_DAYS (7).
+///   - mfa_trusted_devices: delete expired remembered-device rows.
+///   - audit_event / JWT revocations / invites / SAML one-shots: expiry prunes.
 /// Respects the shutdown CancellationToken — stops at the next checkpoint.
 /// </summary>
 public sealed class RetentionService : ScheduledBackgroundService
@@ -24,21 +34,26 @@ public sealed class RetentionService : ScheduledBackgroundService
         JwtRevocationRepository JwtRevocations,
         InviteRepository Invites,
         SamlConfigRepository SamlConfig,
+        TrustedDeviceService TrustedDevices,
         IConfiguration Config,
         IAirGapMode AirGap,
         ILogger<RetentionService> Logger,
         TimeProvider Time,
-        IDistributedLock Locks);
+        IDistributedLock Locks,
+        Dependably.Protocol.OciOrphanBlobDeleter OciOrphanBlobs);
 
     private readonly IMetadataStore _db;
     private readonly IBlobStore _blobs;
     private readonly JwtRevocationRepository _jwtRevocations;
     private readonly InviteRepository _invites;
     private readonly SamlConfigRepository _samlConfig;
+    private readonly TrustedDeviceService _trustedDevices;
     private readonly IConfiguration _config;
     private readonly IAirGapMode _airGap;
     private readonly ILogger<RetentionService> _logger;
     private readonly TimeProvider _time;
+    private readonly PackageRepository _packages;
+    private readonly Dependably.Protocol.OciOrphanBlobDeleter _ociOrphanBlobs;
 
     protected override string CronEnvKey => "GC_SCHEDULE";
     protected override string DefaultCron => "0 3 * * *";
@@ -56,15 +71,23 @@ public sealed class RetentionService : ScheduledBackgroundService
         _jwtRevocations = deps.JwtRevocations;
         _invites = deps.Invites;
         _samlConfig = deps.SamlConfig;
+        _trustedDevices = deps.TrustedDevices;
         _config = deps.Config;
         _airGap = deps.AirGap;
         _logger = deps.Logger;
         _time = deps.Time;
+        // Stateless Dapper wrapper over the same IMetadataStore; built here rather than injected so
+        // this singleton does not capture a scoped repository.
+        _packages = new PackageRepository(deps.Db, time: deps.Time);
+        _ociOrphanBlobs = deps.OciOrphanBlobs;
     }
 
     protected override Task RunTickAsync(CancellationToken ct) => RunGcPassAsync(ct);
 
-    private async Task RunGcPassAsync(CancellationToken ct)
+    // internal (not private) so RetentionPersonalDataSweepTests can drive a full pass — the
+    // activity NULL-resolves-to-default logic and the instance-wide personal-data sweeps live
+    // here, not in a per-table helper.
+    internal async Task RunGcPassAsync(CancellationToken ct)
     {
         // A headless edge node holds no durable registry tier and no per-tenant retention
         // policy, so GC is inert there — edge mode force-disables retention (not in the allowlist).
@@ -79,16 +102,19 @@ public sealed class RetentionService : ScheduledBackgroundService
 
         await using var conn = await _db.OpenAsync(ct);
 
-        // Fetch active orgs with retention settings (skip soft-deleted — TenantHardDeleteService
-        // owns those, and retention work on a tenant pending hard-delete is wasted I/O).
+        // Fetch every active org (skip soft-deleted — TenantHardDeleteService owns those, and
+        // retention work on a tenant pending hard-delete is wasted I/O). Unlike the version/blob
+        // policies, which stay opt-in, activity pruning applies to every org: a NULL
+        // activity_retention_days resolves to the instance default below, so the per-download
+        // IP/actor rows are bounded for orgs that never set an explicit window. Iterating an org
+        // whose opt-in policies are all NULL costs one indexed activity DELETE.
+        int activityDefaultDays = ResolveActivityRetentionDefaultDays();
         var orgs = await conn.QueryAsync<(string OrgId, int? KeepVersions, int? KeepDays, int? ActivityRetentionDays, int? PurgeUnlistedAfterDays)>(
             """
             SELECT o.id, s.keep_versions, s.keep_days, s.activity_retention_days, s.purge_unlisted_after_days
             FROM orgs o
             JOIN org_settings s ON s.org_id = o.id
             WHERE o.deleted_at IS NULL
-              AND (s.keep_versions IS NOT NULL OR s.keep_days IS NOT NULL
-                   OR s.activity_retention_days IS NOT NULL OR s.purge_unlisted_after_days IS NOT NULL)
             """);
 
         foreach (var (OrgId, KeepVersions, KeepDays, ActivityRetentionDays, PurgeUnlistedAfterDays) in orgs)
@@ -108,10 +134,8 @@ public sealed class RetentionService : ScheduledBackgroundService
                 await EvictStaleBlobsAsync(conn, OrgId, KeepDays.Value, ct);
             }
 
-            if (ActivityRetentionDays.HasValue)
-            {
-                await PruneActivityAsync(conn, OrgId, ActivityRetentionDays.Value, _time.GetUtcNow(), ct);
-            }
+            // NULL means "not configured", not "retain forever": fall back to the instance default.
+            await PruneActivityAsync(conn, OrgId, ActivityRetentionDays ?? activityDefaultDays, _time.GetUtcNow(), ct);
 
             if (PurgeUnlistedAfterDays.HasValue)
             {
@@ -139,7 +163,144 @@ public sealed class RetentionService : ScheduledBackgroundService
         // These prune on write too; this sweep bounds them when a tenant goes idle.
         await _samlConfig.PurgeExpiredSamlAsync(ct);
 
+        // Pseudonymize then delete personal data in audit_log by age. audit_log has no FK to orgs
+        // (forensic-retention design), so it neither cascades on tenant delete nor ages out on its
+        // own — before this sweep it was the one high-fidelity PII table with no storage limit.
+        await PruneAuditLogAsync(conn, ct);
+
+        // Delete idle, unlocked login_attempts rows so the email-hash membership set does not grow
+        // unbounded (one permanent, confirmable row per address ever attempted, incl. non-users).
+        await PruneLoginAttemptsAsync(conn, ct);
+
+        // Delete send-throttle rows whose window has long since rolled. Same membership-oracle
+        // argument as login_attempts: a row is created for every address a reset was requested for,
+        // including addresses that resolve to no account.
+        await PruneAccountSendThrottleAsync(conn, ct);
+
+        // Delete expired remembered-device rows. The service exposes this prune; nothing else calls
+        // it, so an unbounded user_agent/last_seen_at device history accrued before this wiring.
+        await _trustedDevices.PruneExpiredAsync(ct);
+
         _logger.LogInformation("Retention GC pass complete.");
+    }
+
+    // Instance default (days) for orgs whose activity_retention_days is NULL. 90 days matches the
+    // schema column default and the aggregate-survives-pruning design (tenant_artifact_access
+    // carries the monotonic download_count, so analytics value does not depend on the per-event
+    // IP rows). Configurable via ACTIVITY_RETENTION_DAYS.
+    private const int DefaultActivityRetentionDays = 90;
+
+    private int ResolveActivityRetentionDefaultDays() =>
+        int.TryParse(_config["ACTIVITY_RETENTION_DAYS"], out int d) && d > 0 ? d : DefaultActivityRetentionDays;
+
+    // Two-horizon personal-data policy for audit_log, reconciling forensic value against Art.
+    // 5(1)(e) storage limitation / Art. 17 erasure:
+    //   * pseudonymize (drop source_ip + email/NameID-bearing detail) past AUDIT_LOG_PII_DAYS (90) —
+    //     the forensic skeleton (actor_id, action, scope, timestamp) survives, the identifiers do not;
+    //   * delete the row entirely past AUDIT_LOG_RETENTION_DAYS (365), matching the audit_event reaper.
+    // Both horizons span every scope; per-tenant erasure on hard-delete is a separate org-scoped
+    // path in TenantHardDeleteService. Chunked delete mirrors PruneAuditEventsAsync so a large
+    // backlog never holds the writer lock for one long statement.
+    internal async Task PruneAuditLogAsync(System.Data.Common.DbConnection conn, CancellationToken ct)
+    {
+        int piiDays = int.TryParse(_config["AUDIT_LOG_PII_DAYS"], out int p) && p > 0 ? p : 90;
+        int retentionDays = int.TryParse(_config["AUDIT_LOG_RETENTION_DAYS"], out int r) && r > 0 ? r : 365;
+        var now = _time.GetUtcNow();
+        // audit_log.created_at is millisecond-precision text (AuditRepository.WriteAsync is its only
+        // writer), so both cutoffs are formatted at the same precision — a second-precision cutoff
+        // sorts wrong against it on the boundary second, since '.' (0x2E) collates before 'Z' (0x5A),
+        // which would delete/scrub rows one second newer than intended.
+        string piiCutoff = now.AddDays(-piiDays).ToUtcIsoMillis();
+        string deleteCutoff = now.AddDays(-retentionDays).ToUtcIsoMillis();
+
+        // xtenant: instance-wide pseudonymization by age, same posture as PruneAuditEventsAsync —
+        // every org's aged rows lose their identifiers together. actor_id is an opaque id, retained
+        // as the forensic "who"; source_ip and detail are the personal fields dropped.
+        int scrubbed = await conn.ExecuteAsync(new CommandDefinition(
+            """
+            UPDATE audit_log SET source_ip = NULL, detail = NULL
+            WHERE created_at < @piiCutoff AND (source_ip IS NOT NULL OR detail IS NOT NULL)
+            """,
+            new { piiCutoff },
+            cancellationToken: ct));
+
+        int totalDeleted = 0;
+        int deletedInChunk;
+        do
+        {
+            // xtenant: instance-wide retention sweep by age; same shape as the audit_event reaper.
+            deletedInChunk = await conn.ExecuteAsync(new CommandDefinition(
+                """
+                DELETE FROM audit_log
+                WHERE id IN (
+                    SELECT id FROM audit_log WHERE created_at < @deleteCutoff LIMIT @batchSize
+                )
+                """,
+                new { deleteCutoff, batchSize = AuditEventPruneBatchSize },
+                cancellationToken: ct));
+            totalDeleted += deletedInChunk;
+        }
+        while (deletedInChunk >= AuditEventPruneBatchSize && !ct.IsCancellationRequested);
+
+        if (scrubbed > 0 || totalDeleted > 0)
+        {
+            _logger.LogInformation(
+                "Audit reaper: pseudonymized {Scrubbed} audit_log rows older than {PiiDays} days, deleted {Deleted} older than {RetentionDays} days.",
+                scrubbed, piiDays, totalDeleted, retentionDays);
+        }
+    }
+
+    // Prune login_attempts rows that are idle past LOGIN_ATTEMPTS_RETENTION_DAYS (30) and not
+    // currently locked. The window is far beyond any lockout duration, so an active throttle is
+    // never dropped; the membership oracle over arbitrary attempted addresses is what ages out.
+    internal async Task PruneLoginAttemptsAsync(System.Data.Common.DbConnection conn, CancellationToken ct)
+    {
+        int retentionDays = int.TryParse(_config["LOGIN_ATTEMPTS_RETENTION_DAYS"], out int d) && d > 0 ? d : 30;
+        var now = _time.GetUtcNow();
+        string cutoff = now.AddDays(-retentionDays).ToUtcIso();
+        string nowStr = now.ToUtcIso();
+
+        // login_attempts has no org/tenant column of its own — the tenant is folded into the key
+        // (LoginService.HashLockoutKey over realm/tenantId/email), not dropped from it. This sweep
+        // is instance-wide because it is a single time-based retention pass over one physical
+        // table, not because the throttle itself spans tenants.
+        int deleted = await conn.ExecuteAsync(new CommandDefinition(
+            """
+            DELETE FROM login_attempts
+            WHERE last_attempt < @cutoff AND (locked_until IS NULL OR locked_until < @now)
+            """,
+            new { cutoff, now = nowStr },
+            cancellationToken: ct));
+
+        if (deleted > 0)
+        {
+            _logger.LogInformation(
+                "Retention GC: pruned {Count} idle login_attempts rows older than {Days} days.", deleted, retentionDays);
+        }
+    }
+
+    // Prune account_send_throttle rows whose window started more than
+    // ACCOUNT_SEND_THROTTLE_RETENTION_DAYS (7) ago. A row that old is inert — the next request for
+    // that account restarts the window from 1 regardless — so deleting it changes no decision; it
+    // only stops the pseudonym set growing without bound.
+    internal async Task PruneAccountSendThrottleAsync(System.Data.Common.DbConnection conn, CancellationToken ct)
+    {
+        int retentionDays = int.TryParse(_config["ACCOUNT_SEND_THROTTLE_RETENTION_DAYS"], out int d) && d > 0 ? d : 7;
+        string cutoff = _time.GetUtcNow().AddDays(-retentionDays).ToUtcIso();
+
+        // account_send_throttle has no org/tenant column — the tenant is folded into the key by
+        // LoginService.HashLockoutKey, exactly as it is for login_attempts.
+        // xtenant: instance-wide age sweep over a table keyed by a tenant-encoding pseudonym.
+        int deleted = await conn.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM account_send_throttle WHERE window_start < @cutoff",
+            new { cutoff },
+            cancellationToken: ct));
+
+        if (deleted > 0)
+        {
+            _logger.LogInformation(
+                "Retention GC: pruned {Count} account_send_throttle rows older than {Days} days.", deleted, retentionDays);
+        }
     }
 
     // Chunk size for the batched audit_event delete below. Small enough that each chunk's
@@ -152,7 +313,7 @@ public sealed class RetentionService : ScheduledBackgroundService
     {
         int retentionDays = int.TryParse(_config["AUDIT_EVENT_RETENTION_DAYS"], out int d) && d > 0
             ? d : 365;
-        string cutoff = _time.GetUtcNow().AddDays(-retentionDays).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string cutoff = _time.GetUtcNow().AddDays(-retentionDays).ToUtcIso();
 
         // Hard-delete is the right shape today: there's no archive destination yet (decision
         // deferred per cross-cutting-decisions.md). When archive lands, this becomes a copy
@@ -188,25 +349,61 @@ public sealed class RetentionService : ScheduledBackgroundService
         }
     }
 
+    /// <summary>
+    /// Releases the bytes behind a version whose catalogue row this pass has just deleted.
+    ///
+    /// For every ecosystem but OCI the catalogue row owns its blob one-to-one, so the blob is
+    /// deleted here directly. OCI is the exception, and the reason the eviction drivers excluded it
+    /// outright until now: an OCI catalogue row's <c>blob_key</c> is the *manifest*, which
+    /// <c>oci_blobs</c> also points at and which the image's layers hang off. Deleting it here would
+    /// destroy the manifest while its <c>oci_blobs</c> row, its tags, and every layer survived — a
+    /// broken serve path plus orphaned bytes nothing would ever reclaim.
+    ///
+    /// So an OCI version is *released*, not deleted. <see cref="PackageRepository.ReleaseOciDigestClaimAsync"/>
+    /// drops the repository's tags for the digest and removes this org's <c>oci_blobs</c> row only
+    /// when no claim survives anywhere in the org — a tag under another repository, or a hosted
+    /// <c>package_versions</c> row carrying the digest — returning the blob key just when the row
+    /// actually came off and the bytes were uploaded. Physical deletion then goes through
+    /// <see cref="OciOrphanBlobDeleter"/>, which holds the per-key lock and counts across every org,
+    /// because OCI blob keys carry no org segment. The image's layers are left to
+    /// <see cref="OciBlobReclaimer"/>'s sweep, which reclaims them once nothing references them.
+    ///
+    /// Dropping the tags matters as much as dropping the row: a surviving <c>oci_tags</c> row is one
+    /// of the four claims the sweep honours, so an eviction that left the tag behind would pin the
+    /// manifest and its whole layer closure forever — the eviction would appear to work and reclaim
+    /// nothing.
+    /// </summary>
+    private async Task RetireVersionAsync(
+        string orgId, string ecosystem, string name, string version, string blobKey, CancellationToken ct)
+    {
+        if (!string.Equals(ecosystem, "oci", StringComparison.Ordinal))
+        {
+            await _blobs.DeleteAsync(BlobKeys.StoreKey(blobKey), ct);
+            return;
+        }
+
+        string? orphaned = await _packages.ReleaseOciDigestClaimAsync(orgId, name, version, ct);
+        if (orphaned is not null)
+        {
+            await _ociOrphanBlobs.DeleteIfUnreferencedAsync(orphaned, ct);
+        }
+    }
+
     // internal (not private) so RetentionServiceCacheExclusionTests can drive it directly without
     // the full cron/config scheduling machinery — mirrors PurgeUnlistedAsync below.
     internal async Task EnforceVersionLimitAsync(
         System.Data.Common.DbConnection conn, string orgId, int keepVersions, CancellationToken ct)
     {
         // Uploaded versions: keep the most recent N per package; delete older ones from package_versions.
-        // OCI is excluded here for the same reason it is excluded from the proxy eviction below: a
-        // tag push catalogues the image as a package_versions row whose blob_key is the manifest,
-        // so deleting it destroys the manifest while the oci_blobs row, the tags, and every layer
-        // blob survive — a broken serve path and orphaned layers. An image reaches the catalogue
-        // through either plane, so both arms carry the guard.
-        var uploadedToDelete = await conn.QueryAsync<(string VersionId, string BlobKey)>(
-            // plane-ok: uploaded-plane version-limit driver; the proxy plane is evicted by the sibling cache_artifact/tenant_artifact_access query below in this method (OCI excluded on both arms).
+        // OCI participates, but never through the direct blob delete below — see RetireVersionAsync.
+        var uploadedToDelete = await conn.QueryAsync<(string VersionId, string BlobKey, string Ecosystem, string Name, string Version)>(
+            // plane-ok: uploaded-plane version-limit driver; the proxy plane is evicted by the sibling cache_artifact/tenant_artifact_access query below in this method.
             """
-            SELECT pv.id as VersionId, pv.blob_key as BlobKey
+            SELECT pv.id as VersionId, pv.blob_key as BlobKey, p.ecosystem AS Ecosystem,
+                   p.purl_name AS Name, pv.version AS Version
             FROM package_versions pv
             JOIN packages p ON p.id = pv.package_id
             WHERE p.org_id = @orgId AND pv.origin = 'uploaded'
-              AND p.ecosystem != 'oci'
               AND pv.id NOT IN (
                   SELECT id FROM package_versions pv2
                   WHERE pv2.package_id = pv.package_id
@@ -217,12 +414,12 @@ public sealed class RetentionService : ScheduledBackgroundService
             """,
             new { orgId, keepVersions });
 
-        foreach (var (VersionId, BlobKey) in uploadedToDelete)
+        foreach (var (VersionId, BlobKey, Ecosystem, Name, Version) in uploadedToDelete)
         {
             if (ct.IsCancellationRequested) { break; }
             // xtenant: keyed by a version PK from the p.org_id = @orgId SELECT above.
-            await _blobs.DeleteAsync(BlobKeys.StoreKey(BlobKey), ct);
             await conn.ExecuteAsync("DELETE FROM package_versions WHERE id = @id", new { id = VersionId });
+            await RetireVersionAsync(orgId, Ecosystem, Name, Version, BlobKey, ct);
             _logger.LogDebug("GC: deleted uploaded version {Id} (blob {Key})", VersionId, BlobKey);
         }
 
@@ -240,10 +437,8 @@ public sealed class RetentionService : ScheduledBackgroundService
         // wholly kept or wholly evicted. Versions are ordered by recency then by version as a
         // tiebreak, so two versions cached within the same second cut deterministically rather
         // than by plan order.
-        // OCI is excluded: evicting an OCI cache_artifact row would delete the manifest blob
-        // while its oci_blobs row and layer blobs survive, leaving a broken serve path and
-        // orphaned layers. Correct OCI eviction needs layer refcounting, which is out of scope —
-        // OCI stays never-evicted from the cache plane, matching its pre-existing behavior.
+        // OCI participates; its rows are retired through RetireProxyVersionAsync rather than the
+        // direct blob delete, for the reason spelled out on RetireVersionAsync.
         // xtenant: cache_artifact is global; org_id filter is in tenant_artifact_access.
         var proxyToEvict = await conn.QueryAsync<(string CacheArtifactId, string Ecosystem, string Name, string Version, string BlobKey)>(
             """
@@ -252,7 +447,6 @@ public sealed class RetentionService : ScheduledBackgroundService
             FROM tenant_artifact_access taa
             JOIN cache_artifact ca ON ca.id = taa.cache_artifact_id
             WHERE taa.org_id = @orgId
-              AND ca.ecosystem != 'oci'
               AND ca.version NOT IN (
                   SELECT ca2.version
                   FROM tenant_artifact_access taa2
@@ -274,11 +468,13 @@ public sealed class RetentionService : ScheduledBackgroundService
         {
             if (ct.IsCancellationRequested) { break; }
 
-            foreach (var (CacheArtifactId, _, Name, Version, BlobKey) in versionGroup)
+            foreach (var (CacheArtifactId, Ecosystem, Name, Version, BlobKey) in versionGroup)
             {
                 await conn.ExecuteAsync(
                     "DELETE FROM tenant_artifact_access WHERE org_id = @orgId AND cache_artifact_id = @id",
                     new { orgId, id = CacheArtifactId });
+
+                bool isOci = string.Equals(Ecosystem, "oci", StringComparison.Ordinal);
 
                 // Delete the global cache_artifact and its blob when no tenant retains access.
                 // xtenant: deliberately cross-tenant — this counts whether ANY OTHER tenant still
@@ -289,13 +485,29 @@ public sealed class RetentionService : ScheduledBackgroundService
                     new { id = CacheArtifactId });
                 if (remaining == 0)
                 {
-                    // CancellationToken.None, unlike every other blob delete in this service: the
-                    // version boundary above is the checkpoint, and honouring ct here would let a
-                    // shutdown abort between two files of one version — dropping a version's .jar
-                    // while its .pom survives. The extra work a cancelled pass takes on is bounded
-                    // by one version's file count.
-                    await _blobs.DeleteAsync(BlobKeys.StoreKey(BlobKey), CancellationToken.None);
+                    if (!isOci)
+                    {
+                        // CancellationToken.None, unlike every other blob delete in this service: the
+                        // version boundary above is the checkpoint, and honouring ct here would let a
+                        // shutdown abort between two files of one version — dropping a version's .jar
+                        // while its .pom survives. The extra work a cancelled pass takes on is bounded
+                        // by one version's file count.
+                        await _blobs.DeleteAsync(BlobKeys.StoreKey(BlobKey), CancellationToken.None);
+                    }
+
+                    // The catalogue row goes either way — for OCI it is metadata over a manifest
+                    // oci_blobs owns, so dropping it is both safe and necessary: a surviving
+                    // cache_artifact row is one of the claims that would pin the manifest.
                     await conn.ExecuteAsync("DELETE FROM cache_artifact WHERE id = @id", new { id = CacheArtifactId });
+                }
+
+                // Released per org rather than inside the remaining == 0 guard: oci_blobs is keyed
+                // (digest, org_id), so this org's row comes off when this org stops holding the
+                // image, whatever other tenants still cache it. The cross-org question is settled
+                // by OciOrphanBlobDeleter before any byte is removed.
+                if (isOci)
+                {
+                    await RetireVersionAsync(orgId, Ecosystem, Name, Version, BlobKey, CancellationToken.None);
                 }
                 _logger.LogDebug("GC: evicted proxy artifact {Id} name={Name} version={Version} (blob {Key})",
                     CacheArtifactId, Name, Version, BlobKey);
@@ -308,66 +520,106 @@ public sealed class RetentionService : ScheduledBackgroundService
     internal async Task EvictStaleBlobsAsync(
         System.Data.Common.DbConnection conn, string orgId, int keepDays, CancellationToken ct)
     {
-        string cutoff = _time.GetUtcNow().AddDays(-keepDays).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string cutoff = _time.GetUtcNow().AddDays(-keepDays).ToUtcIso();
 
-        // Uploaded versions: evict by last_used timestamp on package_versions. OCI is excluded on
-        // both planes — deleting a pushed image's catalogue row destroys its manifest blob and
-        // orphans every layer (see EnforceVersionLimitAsync).
-        var uploadedStale = await conn.QueryAsync<(string VersionId, string BlobKey)>(
-            // plane-ok: uploaded-plane stale-blob driver; the proxy plane is evicted by the sibling cache_artifact/tenant_artifact_access query below in this method (OCI excluded on both arms).
+        // Uploaded versions: evict by last_used timestamp on package_versions. OCI participates,
+        // retired through RetireVersionAsync rather than the direct blob delete.
+        var uploadedStale = await conn.QueryAsync<(string VersionId, string BlobKey, string Ecosystem, string Name, string Version)>(
+            // plane-ok: uploaded-plane stale-blob driver; the proxy plane is evicted by the sibling cache_artifact/tenant_artifact_access query below in this method.
             """
-            SELECT pv.id as VersionId, pv.blob_key as BlobKey
+            SELECT pv.id as VersionId, pv.blob_key as BlobKey, p.ecosystem AS Ecosystem,
+                   p.purl_name AS Name, pv.version AS Version
             FROM package_versions pv
             JOIN packages p ON p.id = pv.package_id
             WHERE p.org_id = @orgId AND pv.origin = 'uploaded'
-              AND p.ecosystem != 'oci'
               AND pv.last_used IS NOT NULL AND pv.last_used < @cutoff
             """,
             new { orgId, cutoff });
 
-        foreach (var (VersionId, BlobKey) in uploadedStale)
+        foreach (var (VersionId, BlobKey, Ecosystem, Name, Version) in uploadedStale)
         {
             if (ct.IsCancellationRequested) { break; }
             // xtenant: keyed by a version PK from the p.org_id = @orgId SELECT above.
-            await _blobs.DeleteAsync(BlobKeys.StoreKey(BlobKey), ct);
             await conn.ExecuteAsync("DELETE FROM package_versions WHERE id = @id", new { id = VersionId });
+            await RetireVersionAsync(orgId, Ecosystem, Name, Version, BlobKey, ct);
         }
 
-        // Proxy versions: evict this org's tenant_artifact_access rows where the tenant's
-        // last_used is older than the cutoff. Removes the per-tenant row; cascade-deletes the
-        // global cache_artifact and its blob when no other tenant retains access.
-        // OCI is excluded — see the age-based eviction comment in EnforceVersionLimitAsync above;
-        // the same broken-serve / orphaned-layer risk applies here.
+        // Proxy versions: evict every row of this org's versions whose whole file set has aged
+        // past the cutoff. Removes the per-tenant rows; cascade-deletes the global cache_artifact
+        // and its blob when no other tenant retains access.
+        //
+        // The staleness decision is per VERSION, not per row, because cache_artifact is keyed
+        // UNIQUE (ecosystem, name, version, filename): one version owns one row per file, and
+        // those rows carry independent last_used values — a Maven version's .jar is re-read on
+        // every build while its .pom may not be. Judging rows would evict the .pom and keep the
+        // .jar, leaving a partial version that resolves broken. Same failure the keep_versions
+        // arm above ranks versions to avoid, reached by the age filter instead.
+        //
+        // A version is stale only when NO file of it is either fresh or never-used: the NOT EXISTS
+        // treats a NULL last_used as not-evictable, exactly as the previous per-row
+        // `last_used IS NOT NULL` predicate did, so a version holding one never-read file survives
+        // whole rather than being half-evicted. That is the conservative reading — it can retain a
+        // version the newest-file rule would drop, never the reverse.
+        // OCI participates — retired through RetireVersionAsync, see EnforceVersionLimitAsync.
         // xtenant: cache_artifact is global; org_id filter is in tenant_artifact_access.
-        var proxyStale = await conn.QueryAsync<(string CacheArtifactId, string BlobKey)>(
+        var proxyStale = await conn.QueryAsync<(string CacheArtifactId, string Ecosystem, string Name, string Version, string BlobKey)>(
             """
-            SELECT ca.id AS CacheArtifactId, ca.blob_key AS BlobKey
+            SELECT ca.id AS CacheArtifactId, ca.ecosystem AS Ecosystem, ca.name AS Name,
+                   ca.version AS Version, ca.blob_key AS BlobKey
             FROM tenant_artifact_access taa
             JOIN cache_artifact ca ON ca.id = taa.cache_artifact_id
             WHERE taa.org_id = @orgId
-              AND ca.ecosystem != 'oci'
-              AND taa.last_used IS NOT NULL AND taa.last_used < @cutoff
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM tenant_artifact_access taa2
+                  JOIN cache_artifact ca2 ON ca2.id = taa2.cache_artifact_id
+                  WHERE taa2.org_id = @orgId
+                    AND ca2.ecosystem = ca.ecosystem
+                    AND ca2.name = ca.name
+                    AND ca2.version = ca.version
+                    AND (taa2.last_used IS NULL OR taa2.last_used >= @cutoff)
+              )
             """,
             new { orgId, cutoff });
 
-        foreach (var (CacheArtifactId, BlobKey) in proxyStale)
+        // Grouped by full version identity — (ecosystem, name, version), since two names or two
+        // ecosystems can share a version string — so the cancellation checkpoint falls on a version
+        // boundary. Checking it per row would let a shutdown land mid-version and leave exactly the
+        // partial version the query above is shaped to prevent.
+        foreach (var versionGroup in proxyStale.GroupBy(r => (r.Ecosystem, r.Name, r.Version)))
         {
             if (ct.IsCancellationRequested) { break; }
 
-            await conn.ExecuteAsync(
-                "DELETE FROM tenant_artifact_access WHERE org_id = @orgId AND cache_artifact_id = @id",
-                new { orgId, id = CacheArtifactId });
-
-            // xtenant: deliberately cross-tenant — this counts whether ANY OTHER tenant still
-            // retains access to the shared cache_artifact before its blob is deleted. Filtering
-            // by org_id here would always return 0 and delete a blob other tenants still use.
-            long remaining = await conn.ExecuteScalarAsync<long>(
-                "SELECT COUNT(*) FROM tenant_artifact_access WHERE cache_artifact_id = @id",
-                new { id = CacheArtifactId });
-            if (remaining == 0)
+            foreach (var (CacheArtifactId, Ecosystem, Name, VersionId, BlobKey) in versionGroup)
             {
-                await _blobs.DeleteAsync(BlobKeys.StoreKey(BlobKey), ct);
-                await conn.ExecuteAsync("DELETE FROM cache_artifact WHERE id = @id", new { id = CacheArtifactId });
+                await conn.ExecuteAsync(
+                    "DELETE FROM tenant_artifact_access WHERE org_id = @orgId AND cache_artifact_id = @id",
+                    new { orgId, id = CacheArtifactId });
+
+                // xtenant: deliberately cross-tenant — this counts whether ANY OTHER tenant still
+                // retains access to the shared cache_artifact before its blob is deleted. Filtering
+                // by org_id here would always return 0 and delete a blob other tenants still use.
+                long remaining = await conn.ExecuteScalarAsync<long>(
+                    "SELECT COUNT(*) FROM tenant_artifact_access WHERE cache_artifact_id = @id",
+                    new { id = CacheArtifactId });
+                bool isOci = string.Equals(Ecosystem, "oci", StringComparison.Ordinal);
+                if (remaining == 0)
+                {
+                    if (!isOci)
+                    {
+                        // CancellationToken.None, unlike the uploaded arm above: the version boundary
+                        // is the checkpoint, and honouring ct here would let a shutdown abort between
+                        // two files of one version. Bounded by one version's file count.
+                        await _blobs.DeleteAsync(BlobKeys.StoreKey(BlobKey), CancellationToken.None);
+                    }
+
+                    await conn.ExecuteAsync("DELETE FROM cache_artifact WHERE id = @id", new { id = CacheArtifactId });
+                }
+
+                if (isOci)
+                {
+                    await RetireVersionAsync(orgId, Ecosystem, Name, VersionId, BlobKey, CancellationToken.None);
+                }
             }
         }
     }
@@ -383,29 +635,28 @@ public sealed class RetentionService : ScheduledBackgroundService
     internal async Task PurgeUnlistedAsync(
         System.Data.Common.DbConnection conn, string orgId, int afterDays, CancellationToken ct)
     {
-        string cutoff = _time.GetUtcNow().AddDays(-afterDays).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string cutoff = _time.GetUtcNow().AddDays(-afterDays).ToUtcIso();
 
-        // OCI is excluded on both planes — deleting a pushed image's catalogue row destroys its
-        // manifest blob and orphans every layer (see EnforceVersionLimitAsync).
-        var toPurge = await conn.QueryAsync<(string VersionId, string BlobKey)>(
+        // OCI participates, retired through RetireVersionAsync rather than the direct blob delete.
+        var toPurge = await conn.QueryAsync<(string VersionId, string BlobKey, string Ecosystem, string Name, string Version)>(
             // plane-ok: uploaded-plane unlisted purge; proxy rows are excluded by the origin discriminator and cache-tier eviction is owned by CacheEvictionService.
             """
-            SELECT pv.id as VersionId, pv.blob_key as BlobKey
+            SELECT pv.id as VersionId, pv.blob_key as BlobKey, p.ecosystem AS Ecosystem,
+                   p.purl_name AS Name, pv.version AS Version
             FROM package_versions pv
             JOIN packages p ON p.id = pv.package_id
             WHERE p.org_id = @orgId AND pv.origin = 'uploaded'
-              AND p.ecosystem != 'oci'
               AND pv.yanked = 1
               AND pv.yanked_at IS NOT NULL AND pv.yanked_at < @cutoff
             """,
             new { orgId, cutoff });
 
-        foreach (var (VersionId, BlobKey) in toPurge)
+        foreach (var (VersionId, BlobKey, Ecosystem, Name, Version) in toPurge)
         {
             if (ct.IsCancellationRequested) { break; }
             // xtenant: keyed by a version PK from the p.org_id = @orgId SELECT above.
-            await _blobs.DeleteAsync(BlobKeys.StoreKey(BlobKey), ct);
             await conn.ExecuteAsync("DELETE FROM package_versions WHERE id = @id", new { id = VersionId });
+            await RetireVersionAsync(orgId, Ecosystem, Name, Version, BlobKey, ct);
             _logger.LogDebug("GC: purged unlisted version {Id} (blob {Key})", VersionId, BlobKey);
         }
     }
@@ -413,7 +664,11 @@ public sealed class RetentionService : ScheduledBackgroundService
     private static async Task PruneActivityAsync(
         System.Data.Common.DbConnection conn, string orgId, int retentionDays, DateTimeOffset now, CancellationToken ct)
     {
-        string cutoff = now.AddDays(-retentionDays).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        // activity.created_at is millisecond-precision text (AuditRepository.LogActivityAsync is its
+        // only writer), so the cutoff is formatted at the same precision — a second-precision cutoff
+        // sorts wrong against it on the boundary second, since '.' (0x2E) collates before 'Z' (0x5A),
+        // which would delete rows one second newer than the retention window intends.
+        string cutoff = now.AddDays(-retentionDays).ToUtcIsoMillis();
         await conn.ExecuteAsync(new CommandDefinition(
             "DELETE FROM activity WHERE org_id = @orgId AND created_at < @cutoff",
             new { orgId, cutoff },

@@ -100,7 +100,7 @@ public sealed class TrustAnchorRepository
     {
         string id = Guid.NewGuid().ToString("N");
         var now = _time.GetUtcNow();
-        string nowStr = now.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string nowStr = now.ToUtcIso();
         string ecosystem = req.Ecosystem;
         string anchorKind = req.AnchorKind;
         string material = req.Material;
@@ -129,6 +129,59 @@ public sealed class TrustAnchorRepository
             CreatedBy = createdBy,
         };
     }
+
+    /// <summary>
+    /// Every anchor row across all live tenants whose <c>(ecosystem, anchor_kind)</c> pair is not
+    /// in <see cref="TrustAnchorPairs.Registered"/> — a row whose material was never parsed,
+    /// never strength-checked, and cannot produce a <c>verified</c> verdict. Read by the
+    /// system-admin integrity audit and by the instance health rollup.
+    ///
+    /// The <c>material</c> column is excluded, matching <see cref="ListAsync"/>: anchor material
+    /// is write-only over the API on every surface, including this one.
+    ///
+    /// Soft-deleted tenants are excluded — their rows cascade away on hard delete and are not an
+    /// actionable finding. Pair filtering happens in-process rather than in SQL so the registered
+    /// set stays a single C# constant instead of a generated <c>NOT IN</c> tuple list; the table
+    /// holds a handful of rows per tenant.
+    /// </summary>
+    public async Task<IReadOnlyList<SuspectTrustAnchor>> ListSuspectAsync(CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: system-admin cross-tenant integrity audit — enumerates anchors in every live
+        // tenant to surface rows stored under a pair that has no material validator.
+        var rows = await conn.QueryAsync<RawSuspectRow>(
+            """
+            SELECT a.id AS Id, a.org_id AS OrgId, o.slug AS OrgSlug,
+                   a.ecosystem AS Ecosystem, a.anchor_kind AS AnchorKind,
+                   a.key_id AS KeyId, a.label AS Label,
+                   a.created_at AS CreatedAt, a.created_by AS CreatedBy
+            FROM signature_trust_anchor a
+            JOIN orgs o ON o.id = a.org_id
+            WHERE o.deleted_at IS NULL
+            ORDER BY o.slug, a.ecosystem, a.created_at
+            """);
+
+        return rows
+            .Where(r => !TrustAnchorPairs.IsRegistered(r.Ecosystem, r.AnchorKind))
+            .Select(r => new SuspectTrustAnchor(
+                Id: r.Id ?? "",
+                OrgId: r.OrgId ?? "",
+                OrgSlug: r.OrgSlug ?? "",
+                Ecosystem: r.Ecosystem ?? "",
+                AnchorKind: r.AnchorKind ?? "",
+                KeyId: r.KeyId,
+                Label: r.Label,
+                CreatedAt: r.CreatedAt,
+                CreatedBy: r.CreatedBy))
+            .ToList();
+    }
+
+    /// <summary>
+    /// Count of the rows <see cref="ListSuspectAsync"/> returns. Surfaced on the instance health
+    /// rollup as a latent audit finding; it never promotes the overall health severity.
+    /// </summary>
+    public async Task<int> CountSuspectAsync(CancellationToken ct = default) =>
+        (await ListSuspectAsync(ct)).Count;
 
     /// <summary>Deletes an anchor, scoped to its owning org (BOLA-safe).</summary>
     public async Task DeleteAsync(string orgId, string id, CancellationToken ct = default)
@@ -167,7 +220,41 @@ public sealed class TrustAnchorRepository
         public DateTimeOffset CreatedAt { get; set; }
         public string? CreatedBy { get; set; }
     }
+
+    // Internal DTO for the cross-tenant audit read. Carries the joined org slug and, like
+    // RawAnchorRow, never selects the material column.
+    [SuppressMessage("Minor Code Smell", "S3459:Unassigned members should be removed", Justification = "Dapper sets these props by reflection; not statically visible as assigned.")]
+    [SuppressMessage("Major Code Smell", "S1144:Unused private types or members should be removed", Justification = "Dapper sets these props by reflection; not statically visible as used.")]
+    private sealed class RawSuspectRow
+    {
+        public string? Id { get; set; }
+        public string? OrgId { get; set; }
+        public string? OrgSlug { get; set; }
+        public string? Ecosystem { get; set; }
+        public string? AnchorKind { get; set; }
+        public string? KeyId { get; set; }
+        public string? Label { get; set; }
+        public DateTimeOffset CreatedAt { get; set; }
+        public string? CreatedBy { get; set; }
+    }
 }
+
+/// <summary>
+/// One anchor row whose <c>(ecosystem, anchor_kind)</c> pair has no registered material
+/// validator, projected for the system-admin integrity audit. Carries the owning tenant's id and
+/// slug so an operator can act on it, and deliberately no <c>material</c> — anchor material is
+/// write-only over the API on every surface.
+/// </summary>
+public sealed record SuspectTrustAnchor(
+    string Id,
+    string OrgId,
+    string OrgSlug,
+    string Ecosystem,
+    string AnchorKind,
+    string? KeyId,
+    string? Label,
+    DateTimeOffset CreatedAt,
+    string? CreatedBy);
 
 /// <summary>
 /// Full material row returned by <see cref="TrustAnchorRepository.ListForEcosystemAsync"/>.

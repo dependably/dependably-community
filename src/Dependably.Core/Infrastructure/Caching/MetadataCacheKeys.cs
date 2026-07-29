@@ -25,6 +25,13 @@ public interface IOrgScopedCacheKey
 public static class MetadataCacheKeys
 {
     /// <summary>
+    /// The complete set of locally-rendered RPM repodata document types. Named here, beside the
+    /// key formatter, so the render path and every invalidation site enumerate one list — adding
+    /// a fourth document type cannot leave an un-evicted cache entry behind.
+    /// </summary>
+    public static readonly IReadOnlyList<string> RpmRepodataDocTypes = new[] { "primary", "filelists", "other" };
+
+    /// <summary>
     /// PyPI simple-index key. Normalizes the package name to its PEP 503 form so the
     /// <c>my-package</c> / <c>my_package</c> spellings resolve to one entry. Two variants per
     /// name: the <c>:json</c> suffix distinguishes the PEP 691 JSON representation from the

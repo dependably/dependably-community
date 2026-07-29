@@ -354,6 +354,74 @@ public sealed class QuarantineWorkflowTests : IClassFixture<DependablyFactory>, 
         await tenantAccess.UpsertStateAsync(orgId, artifact.Id, TestTime.KnownNow);
         return artifact.Id;
     }
+
+    /// <summary>
+    /// The list endpoint's paging, filtering, and decider resolution over the wire. The repository
+    /// tests cover the SQL; this covers what only the HTTP layer can get wrong — query-string
+    /// binding, the limit clamp, and the snake_case projection the review queue reads.
+    /// </summary>
+    [Fact]
+    public async Task List_PagesFiltersAndResolvesDecidedByEmail()
+    {
+        string pkg = $"qlist{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string id = await SeedBlockedEntryAsync(pkg);
+        using var admin = await AdminClient();
+
+        // A one-row page of a queue holding at least this entry: `total` counts the queue while
+        // `items` counts the page. A total that tracked the page size would make the pager useless.
+        var paged = await admin.GetAsync("/api/v1/quarantine?state=pending&sort=package&dir=asc&limit=1&offset=0");
+        paged.EnsureSuccessStatusCode();
+        var pagedDoc = await JsonDocument.ParseAsync(await paged.Content.ReadAsStreamAsync());
+        Assert.True(pagedDoc.RootElement.GetProperty("total").GetInt32() >= 1);
+        Assert.Single(pagedDoc.RootElement.GetProperty("items").EnumerateArray());
+
+        // An over-max limit is clamped rather than rejected.
+        (await admin.GetAsync("/api/v1/quarantine?state=pending&limit=100000")).EnsureSuccessStatusCode();
+
+        (await admin.PostAsJsonAsync($"/api/v1/quarantine/{id}/decide", new { decision = "approved" }))
+            .EnsureSuccessStatusCode();
+
+        var approved = await admin.GetAsync("/api/v1/quarantine?state=approved");
+        approved.EnsureSuccessStatusCode();
+        var doc = await JsonDocument.ParseAsync(await approved.Content.ReadAsStreamAsync());
+        var entry = doc.RootElement.GetProperty("items").EnumerateArray()
+            .Single(e => e.GetProperty("purl").GetString()!.Contains(pkg));
+
+        // The queue renders decided_by_email and falls back to decided_by, so both must be
+        // present — and the email must be an address rather than the id echoed back.
+        string? decidedByEmail = entry.GetProperty("decided_by_email").GetString();
+        string? decidedBy = entry.GetProperty("decided_by").GetString();
+        Assert.NotNull(decidedBy);
+        Assert.NotNull(decidedByEmail);
+        Assert.Contains("@", decidedByEmail);
+        Assert.NotEqual(decidedBy, decidedByEmail);
+
+        // The gate filter narrows over the wire; a gate this entry was not blocked by excludes it.
+        var byGate = await admin.GetAsync("/api/v1/quarantine?state=approved&gate=malicious");
+        byGate.EnsureSuccessStatusCode();
+        var gateDoc = await JsonDocument.ParseAsync(await byGate.Content.ReadAsStreamAsync());
+        Assert.Contains(gateDoc.RootElement.GetProperty("items").EnumerateArray(),
+            e => e.GetProperty("purl").GetString()!.Contains(pkg));
+
+        var wrongGate = await admin.GetAsync("/api/v1/quarantine?state=approved&gate=license");
+        wrongGate.EnsureSuccessStatusCode();
+        var wrongDoc = await JsonDocument.ParseAsync(await wrongGate.Content.ReadAsStreamAsync());
+        Assert.DoesNotContain(wrongDoc.RootElement.GetProperty("items").EnumerateArray(),
+            e => e.GetProperty("purl").GetString()!.Contains(pkg));
+
+        // Search reaches the purl, and a term matching nothing returns nothing rather than all.
+        var searched = await admin.GetAsync($"/api/v1/quarantine?state=approved&search={pkg}");
+        searched.EnsureSuccessStatusCode();
+        var searchDoc = await JsonDocument.ParseAsync(await searched.Content.ReadAsStreamAsync());
+        Assert.Contains(searchDoc.RootElement.GetProperty("items").EnumerateArray(),
+            e => e.GetProperty("purl").GetString()!.Contains(pkg));
+
+        var noHits = await admin.GetAsync($"/api/v1/quarantine?state=approved&search=zzz{Guid.NewGuid():N}");
+        noHits.EnsureSuccessStatusCode();
+        var noHitsDoc = await JsonDocument.ParseAsync(await noHits.Content.ReadAsStreamAsync());
+        Assert.Equal(0, noHitsDoc.RootElement.GetProperty("total").GetInt32());
+        Assert.Empty(noHitsDoc.RootElement.GetProperty("items").EnumerateArray());
+    }
 }
 
 /// <summary>
@@ -409,8 +477,8 @@ public sealed class QuarantineReleaseAgePurgeTests : IAsyncLifetime
         await _factory.PushNpmPackage(agedPkg, "1.0.0");
         await _factory.PushNpmPackage(youngPkg, "1.0.0");
 
-        string agedTs = TestTime.KnownNow.AddHours(-50).ToString("o");
-        string youngTs = TestTime.KnownNow.AddHours(-1).ToString("o");
+        string agedTs = TestTime.KnownNow.AddHours(-50).ToUtcIso();
+        string youngTs = TestTime.KnownNow.AddHours(-1).ToUtcIso();
 
         await using (var conn = await store.OpenAsync())
         {

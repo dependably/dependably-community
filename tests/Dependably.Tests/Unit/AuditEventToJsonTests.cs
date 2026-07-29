@@ -172,17 +172,19 @@ public sealed class AuditEventToJsonTests
     }
 
     [Fact]
-    public void AuthEvents_SamlSuccess_EmitsIdpEntityIdAndNameId()
+    public void AuthEvents_SamlSuccess_EmitsIdpEntityIdAndNameIdHash()
     {
+        // NameID is pseudonymized before it reaches this payload (it is commonly the subject's
+        // email); the record carries a nameid_hash, never the plaintext NameID.
         var ev = new AuthEvents.SamlSuccess(
             IdpEntityId: "https://idp.example.com",
-            NameId: "user@example.com",
+            NameIdHash: "0f5a9e...hash",
             Path: "/saml/acs");
 
         var root = Parse(ev.ToJson());
 
         Assert.Equal("https://idp.example.com", root.GetProperty("idp_entity_id").GetString());
-        Assert.Equal("user@example.com", root.GetProperty("name_id").GetString());
+        Assert.Equal("0f5a9e...hash", root.GetProperty("name_id_hash").GetString());
         Assert.Equal("/saml/acs", root.GetProperty("path").GetString());
     }
 
@@ -192,13 +194,13 @@ public sealed class AuditEventToJsonTests
         var ev = new AuthEvents.SamlFailure(
             Reason: "signature_invalid",
             IdpEntityId: null,
-            NameId: null);
+            NameIdHash: null);
 
         var root = Parse(ev.ToJson());
 
         Assert.Equal("signature_invalid", root.GetProperty("reason").GetString());
         Assert.Equal(JsonValueKind.Null, root.GetProperty("idp_entity_id").ValueKind);
-        Assert.Equal(JsonValueKind.Null, root.GetProperty("name_id").ValueKind);
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("name_id_hash").ValueKind);
     }
 
     [Theory]

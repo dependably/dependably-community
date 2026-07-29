@@ -31,7 +31,7 @@ internal static class PyPiHandlerRegistration
                 publish: sp.GetRequiredService<IPackagePublishService>(),
                 claimResolver: sp.GetRequiredService<ClaimResolver>(),
                 licenses: sp.GetRequiredService<LicenseRepository>(),
-                cache: sp.GetRequiredService<RenderedResponseCache<PyPiSimpleIndexKey>>(),
+                invalidation: sp.GetRequiredService<MetadataInvalidationCoordinator>(),
                 logger: sp.GetRequiredService<ILogger<PyPiPublishHandler>>(),
                 uploadLimits: sp.GetRequiredService<IUploadLimitResolver>(),
                 stagingPath: stagingPath);

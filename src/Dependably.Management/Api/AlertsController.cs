@@ -409,11 +409,25 @@ public sealed class AlertsController : OrgScopedControllerBase
             req.EmailSmtpPassword,
             req.EmailSmtpFrom), ct);
 
+        // security=none with credentials attached means the AUTH exchange goes out readable. Not
+        // rejected — an operator may knowingly relay over a trusted segment, and refusing a save
+        // they can already make by other means would only push them around the check — but it is
+        // recorded and surfaced. The response carries EmailSmtpCleartextCredentials, so the warning
+        // persists across every later read rather than living only in this one save's echo.
+        if (updated.EmailSmtpCleartextCredentials)
+        {
+            _logger.LogWarning(
+                "Org SMTP transport saved with security=none and credentials set: AUTH will be sent "
+                + "in cleartext. org={OrgId} host={Host}",
+                orgId, updated.EmailSmtpHost);
+        }
+
         await _audit.LogAsync("alert_email_settings_updated", orgId, GetUserId(),
             detail: JsonSerializer.Serialize(new
             {
                 emailInheritInstance = updated.EmailInheritInstance,
                 emailSmtpHost = updated.EmailSmtpHost,
+                cleartextCredentials = updated.EmailSmtpCleartextCredentials,
             }, WebJson),
             ct: ct);
 

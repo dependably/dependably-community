@@ -162,6 +162,7 @@ public partial class Program
         builder.AddDependablyRateLimiter();
         builder.AddDependablyHttpClients();
         builder.AddDependablyLocalization();
+        builder.AddDependablyTerminalExceptionHandler();
         builder.AddDependablyControllerAggregates();
 
         // Protocol controllers only — registered from Dependably.Core as an application part. The
@@ -215,6 +216,16 @@ public partial class Program
     /// not a mode selection: the operator deployed the edge image but pointed it at a tenancy model
     /// it cannot serve. The master URL/token are always required (an edge has no reason to exist
     /// without its master); the check reuses EdgeMode's parsing.
+    ///
+    /// <para>Multi-replica edge is not a supported topology, and this guard is what enforces that:
+    /// this composition root registers <c>InProcessDistributedLock</c> unconditionally and runs the
+    /// full background-service set, with no leader-aware coordination. Pointing N edge replicas at
+    /// one shared Postgres database would let every replica win every leader-lock acquisition and
+    /// run every scheduled job concurrently — including <c>OrphanBlobReconcilerService</c> deleting
+    /// blobs from N replicas at once, a data-integrity problem rather than a configuration smell.
+    /// <c>DB_PROVIDER=postgres</c> and <c>DEPENDABLY_DEPLOYMENT_MODE=ha</c> are the two signals of
+    /// exactly that shared-state, multi-replica intent, so either one fails startup here rather than
+    /// silently running unsafe.</para>
     /// </summary>
     internal static void ValidateEdgeConfiguration(IConfiguration configuration)
     {
@@ -227,6 +238,28 @@ public partial class Program
                 + "management-plane tenancy value this image cannot serve (it ships no management "
                 + "plane). Unset DEPLOYMENT_MODE (or set it to 'edge'), or deploy the full "
                 + "dependably image for single/multi/header/bound modes.");
+        }
+
+        string dbProvider = (configuration["DB_PROVIDER"] ?? "sqlite").Trim().ToLowerInvariant();
+        if (dbProvider == "postgres")
+        {
+            throw new InvalidOperationException(
+                "The dependably/edge image does not support DB_PROVIDER=postgres. Its in-process "
+                + "leader lock always grants, so N edge replicas sharing one Postgres database would "
+                + "all run every scheduled job concurrently — including destructive blob "
+                + "reconciliation — rather than coordinating a single leader. Unset DB_PROVIDER (or "
+                + "set it to 'sqlite') and run one edge node per local cache volume.");
+        }
+
+        string haMode = (configuration["DEPENDABLY_DEPLOYMENT_MODE"] ?? "standalone").Trim().ToLowerInvariant();
+        if (haMode == "ha")
+        {
+            throw new InvalidOperationException(
+                "The dependably/edge image does not support DEPENDABLY_DEPLOYMENT_MODE=ha. HA mode "
+                + "coordinates multiple management-plane replicas over Redis; an edge node wires up "
+                + "no Redis and no leader-aware background services, so it cannot honour it. Unset "
+                + "DEPENDABLY_DEPLOYMENT_MODE (or set it to 'standalone') and run one edge node per "
+                + "local cache volume.");
         }
 
         string masterUrl = (configuration["EDGE_MASTER_URL"] ?? "").Trim();
@@ -269,6 +302,10 @@ public partial class Program
     public static void ConfigureApp(WebApplication app)
     {
         // ── Middleware pipeline (order matters), trimmed to the protocol surface ──
+
+        // Terminal exception handler, outermost — same contract as the full server: an
+        // unexpected exception becomes localized problem+json with a correlation id.
+        app.UseDependablyTerminalExceptionHandler();
 
         // Forwarded headers first (fail-closed when TRUSTED_PROXIES is unset).
         app.UseForwardedHeaders();

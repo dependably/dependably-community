@@ -91,33 +91,6 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         }
     }
 
-    /// <summary>
-    /// Drives a queue's retry backoff deterministically: advances <paramref name="clock"/> by
-    /// <paramref name="step"/> and yields briefly so the background delivery loop observes each
-    /// fired timer, repeating until <paramref name="condition"/> is met — pumping until a
-    /// DURABLE end state (a persisted row) lands, rather than the queue's in-memory counters
-    /// (see <see cref="WaitAsync(Func{Task{bool}}, TimeSpan?)"/> for why that distinction
-    /// matters). The real-time yield per iteration only gives the scheduler a turn to let the
-    /// background delivery loop observe the fired timer — it does not wait out the backoff
-    /// itself, which is driven entirely by the advancing fake clock. Both the per-iteration
-    /// yield and the iteration cap are generous (not tuned tight) so a loaded box has real
-    /// margin to actually run that turn before the next clock advance.
-    /// </summary>
-    private static async Task PumpUntilAsync(
-        FakeTimeProvider clock, Func<Task<bool>> condition, TimeSpan step, int maxIterations = 1000)
-    {
-        for (int i = 0; i < maxIterations && !await condition(); i++)
-        {
-            clock.Advance(step);
-            await Task.Delay(20);
-        }
-
-        if (!await condition())
-        {
-            throw new TimeoutException("Condition never satisfied while pumping the fake clock.");
-        }
-    }
-
     /// <summary>Routes by URL substring: "good" → 200, "bad" → 502. Captures the last request body,
     /// and every (url, body) pair — the latter lets cross-tenant tests assert exactly which
     /// destination(s) were called, not just an aggregate count.</summary>
@@ -296,7 +269,9 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         var queue = new AlertSlackQueue(settings, alerts, client, slackClock, BuildCfg(), NullLogger<AlertSlackQueue>.Instance);
 
         var deliverTask = queue.DeliverAsync(alert, cts.Token);
-        await PumpUntilAsync(slackClock, () => Task.FromResult(cts.IsCancellationRequested), TimeSpan.FromSeconds(1));
+        await ClockPump.UntilAsync(
+            slackClock, () => Task.FromResult(cts.IsCancellationRequested), TimeSpan.FromSeconds(1),
+            maxAdvances: 1000);
         await deliverTask;
 
         Assert.Equal(1, queue.FailedCount);
@@ -393,12 +368,12 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
 
         // The failing alert burns through the 1s/5s/30s backoff inside the drain itself; pump
         // the fake clock so that finishes in virtual time instead of real time.
-        await PumpUntilAsync(slackClock, async () =>
+        await ClockPump.UntilAsync(slackClock, async () =>
         {
             var good = await alerts.GetByIdAsync("org1", goodAlert.Id);
             var bad = await alerts.GetByIdAsync("org2", badAlert.Id);
             return good?.SlackStatus is not null && bad?.SlackStatus is not null;
-        }, TimeSpan.FromSeconds(1));
+        }, TimeSpan.FromSeconds(1), maxAdvances: 1000);
 
         await executeTask;
 
@@ -481,12 +456,12 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         // in-memory DeliveredCount/FailedCount — the queue increments those counters BEFORE its
         // DB writes complete, so pumping only until the counter changes and then cancelling
         // races the write.
-        await PumpUntilAsync(slackClock, async () =>
+        await ClockPump.UntilAsync(slackClock, async () =>
         {
             var good = await alerts.GetByIdAsync("org1", goodAlert.Id);
             var bad = await alerts.GetByIdAsync("org2", badAlert.Id);
             return good?.SlackStatus is not null && bad?.SlackStatus is not null;
-        }, TimeSpan.FromSeconds(1));
+        }, TimeSpan.FromSeconds(1), maxAdvances: 1000);
 
         // Graceful drain — StopAsync signals ExecuteAsync's stopping token itself, but by the
         // time we get here both durable writes have already landed, so there is nothing
@@ -605,7 +580,7 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         var settings = new AlertSettingsRepository(_db, ep, Clock);
         await EnableSlackAsync(settings, "org1", "https://bad.example.com/hook");
 
-        string staleFailingSince = Clock.GetUtcNow().AddHours(-49).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string staleFailingSince = Clock.GetUtcNow().AddHours(-49).ToUtcIso();
         await using var conn = await _db.OpenAsync();
         await conn.ExecuteAsync(
             "UPDATE alert_settings SET slack_failing_since = @s WHERE org_id = @id",

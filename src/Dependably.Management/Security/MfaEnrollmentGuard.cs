@@ -37,6 +37,7 @@ public sealed class MfaEnrollmentGuard : IAsyncAuthorizationFilter
         "/api/v1/auth/logout",
         "/api/v1/users/me/password",
         "/api/v1/users/me/language",
+        "/api/v1/users/me/timezone",
     ];
 
     // Routes in the system-admin realm that must remain reachable for an unenrolled operator.

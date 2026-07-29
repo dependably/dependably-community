@@ -38,6 +38,8 @@ public sealed class TokenIssuanceCapabilityTests : IClassFixture<DependablyFacto
         // now-ok: mints a JWT the host validates against its (default: real) clock.
         var now = DateTime.UtcNow;
         var token = new JwtSecurityToken(
+            issuer: Dependably.Security.JwtTokenBinding.Issuer,
+            audience: Dependably.Security.JwtTokenBinding.SessionAudience,
             claims:
             [
                 new Claim(JwtRegisteredClaimNames.Sub, userId),

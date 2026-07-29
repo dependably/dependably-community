@@ -154,6 +154,8 @@ export const api = {
   changePassword: (currentPassword, newPassword) =>
     req('POST', '/users/me/password', { currentPassword, newPassword }),
   updateLanguage: (language) => req('POST', '/users/me/language', { language }),
+  // null clears the override, i.e. "use the organization default".
+  updateTimezone: (timezone) => req('POST', '/users/me/timezone', { timezone }),
 
   // MFA enrollment and management. All routes require an authenticated tenant session.
   // mfaStatus: { enabled: bool, recoveryCodesRemaining: int }
@@ -320,11 +322,10 @@ export const api = {
     req('POST', '/install-script-allowlist', { ecosystem, name, versionPattern: versionPattern || null }),
   deleteInstallScriptAllowlist: (id) => req('DELETE', `/install-script-allowlist/${id}`),
 
-  // Quarantine review queue
-  getQuarantine: (state) => {
-    const suffix = state ? `?state=${encodeURIComponent(state)}` : ''
-    return req('GET', `/quarantine${suffix}`)
-  },
+  // Quarantine review queue. Filtering, sorting, and paging are all server-side: the response is
+  // one page of a larger queue, so narrowing it in the browser would narrow the page rather than
+  // the queue and disagree with the `total` the pager is drawn from. Returns { total, items }.
+  getQuarantine: (params = {}) => req('GET', `/quarantine?${qs({ limit: 50, offset: 0, ...params })}`),
   decideQuarantine: (id, decision, note) => req('POST', `/quarantine/${id}/decide`, { decision, note }),
 
   // Upstream proxy registries — per ecosystem, priority-ordered (top = tried first).
@@ -545,14 +546,21 @@ export const systemApi = {
   updateEmailConfig: (cfg) => req('PUT', '/system/email-config', cfg),
   testEmailConfig: () => req('POST', '/system/email-config/test'),
 
-  // Support flows: lock/unlock account + force password reset.
+  // Support flows: lock/unlock account + force password reset. The email travels in the
+  // request body, never the URL path, so it never lands in request logs or trace spans.
   setAccountStatus: (email, tenantSlug, accountStatus) =>
-    req('PATCH', `/system/users/${encodeURIComponent(email)}/account-status`, { tenantSlug, accountStatus }),
+    req('PATCH', '/system/users/account-status', { email, tenantSlug, accountStatus }),
   issuePasswordReset: (email, tenantSlug) =>
-    req('POST', `/system/users/${encodeURIComponent(email)}/password-reset`, { tenantSlug }),
+    req('POST', '/system/users/password-reset', { email, tenantSlug }),
 
-  // Instance health rollup — dependencies, job statuses, staging disk, tenants needing attention.
+  // Instance health rollup — dependencies, job statuses, staging disk, tenants needing attention,
+  // suspect trust-anchor count.
   getHealth: () => req('GET', '/system/health'),
+
+  // Cross-tenant trust-anchor integrity audit: every anchor stored under an (ecosystem,
+  // anchorKind) pair that has no material validator, so its key material was never checked.
+  // Read-only — nothing in the product removes these rows automatically.
+  listSuspectTrustAnchors: () => req('GET', '/system/trust-anchors/suspect'),
 
   // system_admin self
   me: () => req('GET', '/system/me'),

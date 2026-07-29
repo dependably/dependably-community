@@ -100,6 +100,14 @@ public class OrgSettings
     public int? PurgeUnlistedAfterDays { get; set; }
     /// <summary>'off' | 'warn' | 'block'</summary>
     public string LicenseEnforcementMode { get; set; } = "off";
+    /// <summary>
+    /// 'off' | 'warn' | 'block'. Publish-side licence gate, independent of
+    /// <see cref="LicenseEnforcementMode"/> (the serve-path gate): governs whether a hosted
+    /// publish carrying no declared licence is accepted (off/warn) or rejected (block) for the
+    /// <see cref="Protocol.BlockGateService.DeclaredLicenseEcosystems"/> ecosystems. Defaults to
+    /// 'off' so no currently-succeeding publish workflow breaks on upgrade.
+    /// </summary>
+    public string LicensePublishEnforcementMode { get; set; } = "off";
     public bool ProxyPassthroughEnabled { get; set; } = true;
     public double MaxOsvScoreTolerance { get; set; } = 10.0;
     /// <summary>
@@ -112,6 +120,11 @@ public class OrgSettings
     public int? MinReleaseAgeHours { get; set; }
     /// <summary>BCP-47 short code (e.g. "en", "fr"). New users in this tenant inherit this value.</summary>
     public string DefaultLanguage { get; set; } = "en";
+    /// <summary>
+    /// IANA zone name (e.g. "America/Toronto"). Renders stored instants for users in this tenant
+    /// who have not set their own. Display only — instants are stored in UTC regardless.
+    /// </summary>
+    public string DefaultTimezone { get; set; } = "UTC";
     /// <summary>
     /// Legacy boolean; kept for blue-green safety. Superseded by <see cref="VersionOverwritePolicy"/>.
     /// </summary>
@@ -238,13 +251,6 @@ public class OrgSettings
     /// allow override still wins.
     /// </summary>
     public string VerifyMavenSignatures { get; set; } = "off";
-    /// <summary>
-    /// Running tally of hosted-artefact bytes for this tenant. Maintained atomically by the
-    /// publish path (reserve-before-write UPDATE) and decremented on delete. 0 on new rows
-    /// and on rows upgraded from a pre-counter schema version; the publish path backfills from
-    /// the real SUM on first access via a WHERE storage_used_bytes = 0 guard.
-    /// </summary>
-    public long StorageUsedBytes { get; set; }
 
     /// <summary>
     /// Per-tenant RPM hosted-publishing posture override: NULL (unset), 'passthrough', or 'merged'.
@@ -704,6 +710,15 @@ public class InviteRecord
     public DateTimeOffset? AcceptedAt { get; set; }
 }
 
+/// <summary>
+/// Outcome of a successful invite creation: the raw token (shown to the inviter exactly once,
+/// never logged) plus the stored record. A nullable return of this type is how the repository
+/// reports "a pending invite for this address already exists" without throwing.
+/// </summary>
+/// <param name="RawToken">Unhashed invite token; only the SHA-256 of it is persisted.</param>
+/// <param name="Record">The row as written.</param>
+public sealed record InviteCreation(string RawToken, InviteRecord Record);
+
 public class AllowlistEntry
 {
     public string Id { get; set; } = "";
@@ -773,6 +788,14 @@ public class TrustAnchorEntry
     public DateTimeOffset CreatedAt { get; set; }
     /// <summary>User id of the operator who added this anchor.</summary>
     public string? CreatedBy { get; set; }
+
+    /// <summary>
+    /// False when this row's <c>(Ecosystem, AnchorKind)</c> pair has no registered material
+    /// validator (<see cref="TrustAnchorPairs"/>) — meaning its material was never parsed or
+    /// strength-checked and cannot produce a <c>verified</c> verdict. Computed from the shared
+    /// pair set rather than stored, so it can never drift from the insert-time gate.
+    /// </summary>
+    public bool IsRegisteredPair => TrustAnchorPairs.IsRegistered(Ecosystem, AnchorKind);
 }
 
 public class AuditEntry

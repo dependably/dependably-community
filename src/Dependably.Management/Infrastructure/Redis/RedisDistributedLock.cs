@@ -65,7 +65,9 @@ public sealed class RedisDistributedLock : IDistributedLock
                 throw new TimeoutException($"Could not acquire distributed lock '{name}' within {wait}.");
             }
 
-            await Task.Delay(retryInterval, ct);
+            // Same clock as the deadline check above: a retry wait on the real clock while the
+            // deadline reads the injected provider makes the loop unbounded under a fake clock.
+            await Task.Delay(retryInterval, _time, ct);
         }
     }
 
@@ -100,10 +102,14 @@ public sealed class RedisDistributedLock : IDistributedLock
                 return false;
             }
 
+            // StackExchange.Redis takes no cancellation token, so the await is bounded instead:
+            // without this, cancelling a renewal (lease disposal, and behind it lock release and
+            // host shutdown) blocks for the full Redis command timeout on an unreachable server.
             long result = (long)await _db.ScriptEvaluateAsync(
                 _extendScript.Script,
                 new RedisKey[] { _key },
-                new RedisValue[] { _token, (long)additional.TotalMilliseconds });
+                new RedisValue[] { _token, (long)additional.TotalMilliseconds })
+                .WaitAsync(ct);
             return result == 1;
         }
 

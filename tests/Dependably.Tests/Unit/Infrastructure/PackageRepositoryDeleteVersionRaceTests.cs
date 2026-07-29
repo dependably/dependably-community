@@ -9,14 +9,15 @@ using Dependably.Tests.Infrastructure.Seeding;
 namespace Dependably.Tests.Unit.Infrastructure;
 
 /// <summary>
-/// Pins the fix for the storage-quota double-decrement race in
-/// <see cref="PackageRepository.DeleteVersionAsync"/>: two concurrent deletes of the same
-/// version must decrement <c>org_settings.storage_used_bytes</c> exactly once, not once per
-/// caller. A sequential double-delete does not reproduce the bug — the second call's SELECT
-/// would already see the row gone — so this drives a genuine race with a
-/// <see cref="Barrier"/> gate that forces both callers' reads to complete before either's
-/// delete lands, deterministically (no sleeps) reproducing the interleaving the old code got
-/// wrong.
+/// Drives two concurrent <see cref="PackageRepository.DeleteVersionAsync"/> calls against the
+/// same version through a <see cref="Barrier"/> that forces both callers' pre-delete reads to
+/// land before either's DELETE — the interleaving a sequential double-delete cannot reproduce,
+/// because the second call's SELECT would already see the row gone.
+///
+/// Both callers must converge on the same end state (row gone, <c>packages.is_proxy</c>
+/// recomputed to match the surviving version set) and neither may deadlock against the other's
+/// open transaction. Storage bytes need no assertion here: they are derived from the surviving
+/// rows, so a delete has no counter to decrement once, twice, or at all.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class PackageRepositoryDeleteVersionRaceTests : IAsyncLifetime
@@ -28,25 +29,14 @@ public sealed class PackageRepositoryDeleteVersionRaceTests : IAsyncLifetime
     public async Task DisposeAsync() => await _db.DisposeAsync();
 
     [Fact]
-    public async Task DeleteVersionAsync_TwoConcurrentDeletesOfSameVersion_DecrementsCounterExactlyOnce()
+    public async Task DeleteVersionAsync_TwoConcurrentDeletesOfSameVersion_ConvergeOnOneEndState()
     {
         string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
         string pkgId = await PackageSeeder.InsertAsync(_db, orgId, "npm", "raced-delete");
-        const long versionSize = 500;
         string versionId = await PackageSeeder.InsertVersionAsync(
-            _db, pkgId, "1.0.0", $"pkg:npm/raced-delete@1.0.0", sizeBytes: versionSize);
-
-        // Start the counter well clear of the MAX(0, …) clamp floor: 10_000 - 500 = 9_500 on a
-        // correct single decrement vs. 9_000 on a double decrement — both values are positive,
-        // so the clamp can't accidentally mask the bug the way it would if the counter started
-        // at exactly `versionSize`.
-        const long startingCounter = 10_000;
-        await using (var conn = await _db.OpenAsync())
-        {
-            await conn.ExecuteAsync(
-                "UPDATE org_settings SET storage_used_bytes = @v WHERE org_id = @orgId",
-                new { v = startingCounter, orgId });
-        }
+            _db, pkgId, "1.0.0", $"pkg:npm/raced-delete@1.0.0", sizeBytes: 500);
+        var orgs = new OrgRepository(_db);
+        Assert.Equal(500, await orgs.GetLiveStorageBytesAsync(orgId));
 
         // Both racing calls' pre-delete SELECT must complete before either proceeds to its
         // DELETE — this two-party barrier forces exactly that interleaving on every run.
@@ -68,25 +58,28 @@ public sealed class PackageRepositoryDeleteVersionRaceTests : IAsyncLifetime
         await raceTask;
 
         long remainingRows;
-        long finalCounter;
+        long isProxy;
         await using (var conn = await _db.OpenAsync())
         {
             remainingRows = await conn.ExecuteScalarAsync<long>(
                 "SELECT COUNT(*) FROM package_versions WHERE id = @id", new { id = versionId });
-            finalCounter = await conn.ExecuteScalarAsync<long>(
-                "SELECT storage_used_bytes FROM org_settings WHERE org_id = @orgId", new { orgId });
+            isProxy = await conn.ExecuteScalarAsync<long>(
+                "SELECT is_proxy FROM packages WHERE id = @id", new { id = pkgId });
         }
 
         Assert.Equal(0, remainingRows);
-        Assert.Equal(startingCounter - versionSize, finalCounter);
+        // The package's only uploaded version is gone, so it is a proxy-only package now.
+        Assert.Equal(1, isProxy);
+        // The deleted version's bytes leave the derived sum with the row — nothing to decrement.
+        Assert.Equal(0, await orgs.GetLiveStorageBytesAsync(orgId));
     }
 
     // ── Gating IMetadataStore: pauses the version-lookup SELECT on a shared barrier ─────────
 
     /// <summary>
     /// Wraps an inner <see cref="IMetadataStore"/> so that the specific SELECT
-    /// <see cref="PackageRepository.DeleteVersionAsync"/> issues to resolve a version's org/size
-    /// blocks on <paramref name="selectBarrier"/> immediately after it executes (and before
+    /// <see cref="PackageRepository.DeleteVersionAsync"/> issues to resolve a version's parent
+    /// package blocks on <paramref name="selectBarrier"/> immediately after it executes (and before
     /// control returns to the caller). With a two-party barrier and two concurrent callers, this
     /// deterministically forces both reads to land before either caller's subsequent DELETE.
     /// </summary>
@@ -225,7 +218,7 @@ public sealed class PackageRepositoryDeleteVersionRaceTests : IAsyncLifetime
             // a fragment unique to that query. It runs autocommit (before DeleteVersionAsync
             // opens its transaction), so pausing here holds no lock and cannot deadlock against
             // the other racer's later transaction.
-            if (_inner.CommandText.Contains("SELECT p.org_id AS OrgId", StringComparison.Ordinal))
+            if (_inner.CommandText.Contains("SELECT package_id FROM package_versions", StringComparison.Ordinal))
             {
                 _selectBarrier.SignalAndWait(TimeSpan.FromSeconds(10));
             }

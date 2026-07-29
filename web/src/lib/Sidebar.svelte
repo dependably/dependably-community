@@ -1,6 +1,10 @@
 <script>
   import { t } from 'svelte-i18n'
-  import { route, user, bootstrapInfo, navigate, sidebarCollapsed, noticesOpen } from './store.js'
+  import { activeRoute, user, bootstrapInfo, navigate, sidebarCollapsed, noticesOpen } from './store.js'
+
+  // Highlighting follows the route the user asked for, not the one on screen: a deferred
+  // navigation holds the outgoing page while the next one loads, and a link that stays unlit
+  // through that beat reads as a click that did not register.
 
   // Primary nav (all authenticated users). Ported 1:1 from the old top navbar.
   const mainItems = [
@@ -70,7 +74,7 @@
       {#each mainItems as item (item.page)}
         <button
           class="nav-link"
-          class:active={$route.page === item.page}
+          class:active={$activeRoute.page === item.page}
           on:click={() => navigate(item.page)}
           title={$t(item.label)}
         >
@@ -87,7 +91,7 @@
           {#each adminItems as item (item.page)}
             <button
               class="nav-link"
-              class:active={$route.page === item.page}
+              class:active={$activeRoute.page === item.page}
               on:click={() => navigate(item.page)}
               title={$t(item.label)}
             >
@@ -104,7 +108,7 @@
     {#if $user && !$user?.mustChangePassword}
       <button
         class="nav-link"
-        class:active={$route.page === setupItem.page}
+        class:active={$activeRoute.page === setupItem.page}
         on:click={() => navigate(setupItem.page)}
         title={$t(setupItem.label)}
       >

@@ -98,6 +98,41 @@ public sealed class ArtifactInventoryRepository
     }
 
     /// <summary>
+    /// Ecosystems whose proxy first-fetch records <c>cache_artifact</c> rows that are NOT
+    /// distributable artifacts.
+    ///
+    /// This is the property that decides whether a same-version group is safe to collapse, and it
+    /// is deliberately not "does a version span several files". Maven (jar + pom + sources +
+    /// javadoc) and multi-file PyPI (sdist + each wheel) also cast several rows per version, but
+    /// every one of those rows is a real file a client can request, with its own meaningful
+    /// filename, size, and digest — collapsing them would discard artifacts, not noise. NuGet's
+    /// proxy path mirrors the flatcontainer trio verbatim, so a proxied version drags a
+    /// <c>.nuspec</c> and a <c>.sha512</c> along with its <c>.nupkg</c>: metadata sidecars that no
+    /// consumer installs and that no renderer should list as versions.
+    ///
+    /// A new ecosystem joins by its behaviour, in one place, rather than by another arm of an
+    /// <c>ecosystem == "…"</c> test at each call site.
+    /// </summary>
+    private static readonly HashSet<string> SidecarCastingEcosystems =
+        new(StringComparer.Ordinal) { "nuget" };
+
+    /// <summary>
+    /// Applies <see cref="DedupeProxyVersionsByVersion"/> when <paramref name="ecosystem"/> casts
+    /// non-artifact sidecar rows, and passes everything else through untouched.
+    ///
+    /// The generic management package endpoint serves every ecosystem from one code path, so it
+    /// asks this rather than deciding per ecosystem itself. Multi-file ecosystems keep their
+    /// per-file rows: the version table groups them into one row per version for display and
+    /// exposes the files in its expanded panel, so the page still agrees with the packages-list
+    /// version count while keeping per-file size, digest, and origin visible.
+    /// </summary>
+    public static IReadOnlyList<PackageVersion> CollapseSidecarProxyRows(
+        string ecosystem, IReadOnlyList<PackageVersion> versions) =>
+        SidecarCastingEcosystems.Contains(ecosystem)
+            ? DedupeProxyVersionsByVersion(versions)
+            : versions;
+
+    /// <summary>
     /// Collapses proxy-origin entries that share the same version string down to one row.
     ///
     /// <see cref="ListServeableVersionsAsync"/> returns one synthetic entry per <c>cache_artifact</c>
@@ -108,7 +143,8 @@ public sealed class ArtifactInventoryRepository
     /// <c>.nuspec</c>, <c>.sha512</c>) that all share a version string, and a version-level renderer
     /// (registration index, search, the management package page) must show that version exactly once.
     /// Call this only from a renderer that is version-level — never from a file-level one such as the
-    /// PyPI Simple Index.
+    /// PyPI Simple Index, and only for an ecosystem in <see cref="SidecarCastingEcosystems"/>; the
+    /// generic path should go through <see cref="CollapseSidecarProxyRows"/> instead.
     ///
     /// The <c>.nupkg</c> row wins each group: it is the artifact the NuGet client actually installs,
     /// so its size/checksum/blob-key are the metadata a caller should render for the version. Falling

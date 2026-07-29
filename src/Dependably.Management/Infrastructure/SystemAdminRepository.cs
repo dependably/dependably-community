@@ -50,7 +50,7 @@ public sealed class SystemAdminRepository
         string raw = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
         string hash = BCrypt.Net.BCrypt.HashPassword(raw, workFactor: 12);
         var now = _time.GetUtcNow();
-        string nowStr = now.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string nowStr = now.ToUtcIso();
         string stamp = Guid.NewGuid().ToString();
 
         await using var conn = await _db.OpenAsync(ct);
@@ -313,7 +313,7 @@ public sealed class SystemAdminRepository
                 security_stamp = @stamp
             WHERE id = @id
             """,
-            new { id, hash = newPasswordHash, stamp, issuedAt = issuedAt.ToString("yyyy-MM-ddTHH:mm:ssZ") });
+            new { id, hash = newPasswordHash, stamp, issuedAt = issuedAt.ToUtcIso() });
         if (affected == 0)
         {
             return false;
@@ -374,7 +374,7 @@ public sealed class SystemAdminRepository
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             "UPDATE system_admins SET last_login_at = @when WHERE id = @id",
-            new { id, when = when.ToString("yyyy-MM-ddTHH:mm:ssZ") });
+            new { id, when = when.ToUtcIso() });
     }
 
     /// <summary>

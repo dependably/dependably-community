@@ -77,6 +77,9 @@ public sealed class ThreatFeedRefreshService : ScheduledBackgroundService
         }
 
         _logger.LogInformation("Threat-feed refresh pass starting.");
+        // now-ok: measures real elapsed time for a duration log/metric only — no control
+        // flow branches on the value, so a substitutable clock would change the reported
+        // number without changing what the code does.
         var sw = System.Diagnostics.Stopwatch.StartNew();
 
         var rows = await _vulns.ListAliasRowsAsync(ct);

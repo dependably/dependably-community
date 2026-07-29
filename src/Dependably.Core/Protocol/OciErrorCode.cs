@@ -23,6 +23,15 @@ public enum OciErrorCode
     UNAUTHORIZED,
     DENIED,
     UNSUPPORTED,
+
+    /// <summary>
+    /// The registry could not complete the request because a dependency it needed — an upstream
+    /// registry — was unreachable. Not one of the codes the Distribution Spec enumerates, but the
+    /// code Docker's own distribution implementation uses for this condition, so clients that
+    /// inspect the code already recognise it. Paired with 502/503, never with a 4xx: the content
+    /// may well exist, this registry just could not go and look.
+    /// </summary>
+    UNAVAILABLE,
 }
 
 /// <summary>RFC-compliant OCI error response body.</summary>

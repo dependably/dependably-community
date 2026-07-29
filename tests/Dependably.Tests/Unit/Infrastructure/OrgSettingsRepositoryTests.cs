@@ -297,6 +297,67 @@ public sealed class OrgSettingsRepositoryTests : IClassFixture<InMemoryDbFixture
         Assert.Null((await _repo.GetSettingsAsync(orgId))!.MinReleaseAgeHours);
     }
 
+    [Fact]
+    public async Task UpsertProxySettingsAsync_OmittedVerifyFields_LeaveStoredValuesUnchanged()
+    {
+        // A client PUTting a payload shape that predates the verify_* gates (or a CI script
+        // toggling one unrelated knob) must not silently downgrade five signature-verification
+        // controls to 'off'. Absent means "leave as stored", matching air_gapped / require_mfa.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"verify-keep-{Guid.NewGuid():N}");
+
+        await _repo.UpsertProxySettingsAsync(orgId, new ProxyPolicySettings(true, 10.0,
+            VerifyNpmSignatures: "block",
+            VerifyNuGetSignatures: "block",
+            VerifyPyPiAttestations: "warn",
+            VerifyRpmSignatures: "block",
+            VerifyMavenSignatures: "warn"));
+
+        // Second write omits all five entirely.
+        await _repo.UpsertProxySettingsAsync(orgId, new ProxyPolicySettings(true, 6.5));
+
+        var after = (await _repo.GetSettingsAsync(orgId))!;
+        Assert.Equal(6.5, after.MaxOsvScoreTolerance);
+        Assert.Equal("block", after.VerifyNpmSignatures);
+        Assert.Equal("block", after.VerifyNuGetSignatures);
+        Assert.Equal("warn", after.VerifyPyPiAttestations);
+        Assert.Equal("block", after.VerifyRpmSignatures);
+        Assert.Equal("warn", after.VerifyMavenSignatures);
+    }
+
+    [Fact]
+    public async Task UpsertProxySettingsAsync_ExplicitOffVerifyFields_StillTakeEffect()
+    {
+        // Adversarial twin: leave-unchanged-on-absent must not swallow a deliberate disable.
+        // An operator explicitly sending "off" still turns the gate off.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"verify-off-{Guid.NewGuid():N}");
+
+        await _repo.UpsertProxySettingsAsync(orgId, new ProxyPolicySettings(true, 10.0,
+            VerifyNpmSignatures: "block", VerifyNuGetSignatures: "block"));
+        await _repo.UpsertProxySettingsAsync(orgId, new ProxyPolicySettings(true, 10.0,
+            VerifyNpmSignatures: "off", VerifyNuGetSignatures: "off"));
+
+        var after = (await _repo.GetSettingsAsync(orgId))!;
+        Assert.Equal("off", after.VerifyNpmSignatures);
+        Assert.Equal("off", after.VerifyNuGetSignatures);
+    }
+
+    [Fact]
+    public async Task UpsertProxySettingsAsync_NeverWrittenOrgWithOmittedVerifyFields_ReadsOff()
+    {
+        // Adversarial twin: with nothing previously stored, absent resolves to the column
+        // default rather than writing NULL into a NOT NULL column.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"verify-new-{Guid.NewGuid():N}");
+
+        await _repo.UpsertProxySettingsAsync(orgId, new ProxyPolicySettings(true, 10.0));
+
+        var after = (await _repo.GetSettingsAsync(orgId))!;
+        Assert.Equal("off", after.VerifyNpmSignatures);
+        Assert.Equal("off", after.VerifyNuGetSignatures);
+        Assert.Equal("off", after.VerifyPyPiAttestations);
+        Assert.Equal("off", after.VerifyRpmSignatures);
+        Assert.Equal("off", after.VerifyMavenSignatures);
+    }
+
     // ── UpsertLicensePolicyModeAsync ─────────────────────────────────────────
 
     [Fact]

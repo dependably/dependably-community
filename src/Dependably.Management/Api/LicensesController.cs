@@ -11,6 +11,8 @@ namespace Dependably.Api;
 /// returns a stub document so the SPA renders a clear dev-mode hint instead of a 404.
 /// </summary>
 [ApiController]
+// authz-ok: static third-party attribution notices, byte-identical for every tenant and
+// carrying zero tenant data. Rate-limited under the "anon" policy.
 [AllowAnonymous]
 [EnableRateLimiting("anon")]
 public sealed class LicensesController : ControllerBase

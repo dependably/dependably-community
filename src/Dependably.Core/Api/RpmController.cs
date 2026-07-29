@@ -175,6 +175,18 @@ public sealed class RpmController : OrgScopedControllerBase
             return licenseReject;
         }
 
+        // Name-level publish authorization. Keys on the authenticated token principal (never the
+        // RPM header), so a token holding only publish:rpm cannot shadow a package name (e.g.
+        // glibc) a different principal already owns. No-op unless PUBLISH_NAME_BINDING=on.
+        var namePrincipal = Dependably.Infrastructure.NamePrincipal.FromToken(token);
+        if (_svc.NameBinding is { } nameGate
+            && !await nameGate.IsPublishAuthorizedAsync(orgId, "rpm", purlName, namePrincipal, ct))
+        {
+            return StatusCode(StatusCodes.Status403Forbidden,
+                $"Publishing to '{purlName}' is not permitted: the name is owned by a different " +
+                "principal in this org and you hold no publish grant for it.");
+        }
+
         // Store the verified artifact by streaming the staged file into the blob store.
         // staged.Path is under the operator-configured staging root — no user input reaches the path.
         await using (var artifactStream = new FileStream(
@@ -186,6 +198,12 @@ public sealed class RpmController : OrgScopedControllerBase
         var pkg = await _svc.Packages.GetOrCreateAsync(orgId, "rpm", header.Name, purlName, isProxy: false, ct);
         await PersistRpmVersionAsync(new RpmVersionArgs(orgId, pkg, version, purl, blobKey, filename, bytes.Length, staged.Sha256, header,
             HasInstallScript: scriptResult.HasScript, InstallScriptKind: scriptResult.Kind), ct);
+
+        // Record first-publisher ownership now that the artefact and its rows are durably stored.
+        if (_svc.NameBinding is { } ownerGate)
+        {
+            await ownerGate.RecordOwnershipAsync(orgId, "rpm", purlName, namePrincipal, ct);
+        }
 
         await _svc.Audit.LogActivityAsync(orgId, "rpm", purl, "push",
             actorId: token.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
@@ -410,14 +428,12 @@ public sealed class RpmController : OrgScopedControllerBase
             new { orgId, arch });
     }
 
-    // Evicts the merged and local-mode repodata caches so a newly published RPM appears
-    // immediately without waiting out the TTL.
+    // Invalidates the merged and local-mode repodata caches so a newly published RPM appears
+    // immediately without waiting out the TTL. RPM repodata is tenant-wide, so the coordinates
+    // stop at the org and the coordinator expands every local document plus the merged tuple.
     private void EvictRepodataCaches(string orgId)
     {
-        _svc.MergedRepodataCache.Evict(new RpmMergedRepodataKey(orgId));
-        _svc.LocalRepodataCache.Evict(new RpmLocalRepodataKey(orgId, "primary"));
-        _svc.LocalRepodataCache.Evict(new RpmLocalRepodataKey(orgId, "filelists"));
-        _svc.LocalRepodataCache.Evict(new RpmLocalRepodataKey(orgId, "other"));
+        _svc.Invalidation.Invalidate(MetadataInvalidation.ForRpm(orgId));
     }
 
     // ── Download ──────────────────────────────────────────────────────────────
@@ -536,6 +552,19 @@ public sealed class RpmController : OrgScopedControllerBase
         return File(stream, "application/x-rpm", file);
     }
 
+    /// <summary>
+    /// Evaluates the block gate for a proxy RPM against its global-plane (<c>cache_artifact</c>)
+    /// facts. Both the cache-hit serve and the first-fetch serve call this with facts read from the
+    /// same projection, so the two paths cannot drift into asymmetric enforcement: whatever refuses
+    /// the second download refuses the first one too.
+    /// </summary>
+    private Task<BlockDecision> EvaluateGlobalPlaneGateAsync(
+        string orgId, CacheArtifactServeFacts caFacts, TokenRecord? token,
+        OrgSettings? settings, CancellationToken ct)
+        => _svc.BlockGate.EvaluateAsync(
+            BlockGateRequest.ForProxyCacheFacts(
+                orgId, "rpm", caFacts, token, settings, HttpContext.GetNormalizedRemoteIp()), ct);
+
     // Serves a proxy RPM that was recorded in the global plane (cache_artifact) after the P3b flip.
     // The per-tenant download count is bumped via tenant_artifact_access (RecordDownloadHitAsync).
     private async Task<IActionResult> ServeGlobalPlaneRpmAsync(
@@ -544,9 +573,7 @@ public sealed class RpmController : OrgScopedControllerBase
     {
         // Block gate runs before any bytes are served, so a manual block / OSV finding on a
         // proxy-cached RPM takes effect on every subsequent download, not just first-fetch.
-        if (await _svc.BlockGate.EvaluateAsync(
-                BlockGateRequest.ForProxyCacheFacts(
-                    orgId, "rpm", caFacts, token, settings, HttpContext.GetNormalizedRemoteIp()), ct)
+        if (await EvaluateGlobalPlaneGateAsync(orgId, caFacts, token, settings, ct)
             == BlockDecision.Blocked)
         {
             return StatusCode(StatusCodes.Status403Forbidden);
@@ -586,16 +613,19 @@ public sealed class RpmController : OrgScopedControllerBase
         return File(stream, "application/x-rpm", file);
     }
 
-    // Size cap for RPM signature verification: generous (the blob is already staged and
-    // bounded by the upstream size limit), but avoids a second unbounded allocation.
+    // Bound on how much of a staged RPM the signature verifier will read. Generous (the blob is
+    // already staged and bounded by the upstream size limit); the verifier streams the covered
+    // region in fixed-size chunks, so this caps work and not resident memory. A package that runs
+    // past it is reported unverifiable, never verified.
     private const long RpmSignatureVerifyCapBytes = 256L * 1024 * 1024;
 
     private async Task<IActionResult> ProxyDownloadAsync(
         string orgId, string upstreamBase, string file, TokenRecord? token,
         OrgSettings? settings, CancellationToken ct)
     {
-        // 1. Negative cache
-        if (await _svc.Proxy!.IsNegativelyCachedAsync(file, ct))
+        // 1. Negative cache — keyed on the org's resolved upstream base + filename so one org's
+        //    404 cannot answer another org whose upstream host does have the package.
+        if (await _svc.Proxy!.IsNegativelyCachedAsync(upstreamBase, file, ct))
         {
             return NotFound();
         }
@@ -604,7 +634,7 @@ public sealed class RpmController : OrgScopedControllerBase
         var resolution = await TryResolveUpstreamPackageAsync(orgId, upstreamBase, file, ct);
         if (resolution is null)
         {
-            await _svc.Proxy.RecordNegativeAsync(file, ct);
+            await _svc.Proxy.RecordNegativeAsync(upstreamBase, file, ct);
             return NotFound();
         }
 
@@ -690,16 +720,80 @@ public sealed class RpmController : OrgScopedControllerBase
             contentLength = sizeProbe?.TotalLength ?? 0;
         }
 
-        await CacheProxyPackageAsync(
+        string? cacheArtifactId = await CacheProxyPackageAsync(
             new ProxyCachePackage(orgId, file, resolution, nevra.Value, ver, purl, dbBlobKey, contentLength,
                 provResult),
             ct);
+
+        // 7. Block gate — the same gate the cache-hit path runs, evaluated on the facts just
+        // written, before any byte of the artifact reaches the client. Without this the first
+        // requester (the machine actually installing the package) is the one client a 'block'
+        // policy never protects.
+        var gate = await EvaluateFirstFetchGateAsync(
+            orgId, file, resolution.Name, purl, cacheArtifactId, token, settings, ct);
+        if (gate is not null)
+        {
+            // The staged blob is deliberately kept, and RPM is the one proxy ecosystem where that
+            // is right. Go/Cargo/apk discard theirs on a refusal because their blob keys are
+            // org-scoped and their hit path probes the blob store, so a leftover blob would answer
+            // every later request with no row to gate against. RPM keys proxy blobs by content
+            // hash and shares them across tenants — discarding one would break other tenants'
+            // rows — and it does not need to: the serve path above resolves a cache_artifact row
+            // first, so a missing row is already a MISS that re-fetches and re-records. Only the
+            // response is refused.
+            await body.DisposeAsync();
+            return gate;
+        }
 
         Response.Headers["X-Cache"] = isHit ? "HIT" : "MISS";
         await _svc.Audit.LogActivityAsync(orgId, "rpm", purl, "download",
             token?.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         await _svc.Packages.IncrementDownloadCountByPurlAsync(orgId, purl, ct);
         return File(body, "application/x-rpm", file);
+    }
+
+    /// <summary>
+    /// First-fetch enforcement for a proxy RPM: scans the freshly recorded artifact so the
+    /// vulnerability arms have findings to read, then evaluates the block gate against the
+    /// persisted <c>cache_artifact</c> facts. Returns the refusal result to send, or null when the
+    /// artifact is servable.
+    ///
+    /// Fails closed on a missing catalogue row: every gate arm reads that row, so an artifact that
+    /// is not in the cache plane cannot be gated and is refused rather than served ungated. The
+    /// bytes are already staged and have not reached the client, so refusing costs a retry.
+    /// </summary>
+    private async Task<IActionResult?> EvaluateFirstFetchGateAsync(
+        string orgId, string file, string rpmName, string purl,
+        string? cacheArtifactId, TokenRecord? token, OrgSettings? settings, CancellationToken ct)
+    {
+        if (cacheArtifactId is null)
+        {
+            Logger.LogWarning(
+                "RPM proxy: cache plane recorded no row for {Filename}; refusing to serve ungated.",
+                file);
+            return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                "Artifact catalogue unavailable; package not served.");
+        }
+
+        await _svc.Scanner.ScanCacheArtifactAsync(
+            purl, cacheArtifactId, "rpm", rpmName.ToLowerInvariant(), ct);
+
+        // Re-read through the same projection the cache-hit path uses, after the scan, so the gate
+        // sees vuln_checked_at and every fact the second request would see.
+        var caFacts = await _svc.CacheArtifacts.GetServeFactsByIdAsync(orgId, cacheArtifactId, ct);
+        if (caFacts is null)
+        {
+            Logger.LogWarning(
+                "RPM proxy: recorded artifact for {Filename} is not readable from the cache plane; " +
+                "refusing to serve ungated.", file);
+            return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                "Artifact catalogue unavailable; package not served.");
+        }
+
+        return await EvaluateGlobalPlaneGateAsync(orgId, caFacts, token, settings, ct)
+            == BlockDecision.Blocked
+            ? StatusCode(StatusCodes.Status403Forbidden)
+            : null;
     }
 
     private async Task<PackageResolution?> TryResolveUpstreamPackageAsync(string orgId, string upstreamBase, string file, CancellationToken ct)
@@ -1162,13 +1256,33 @@ public sealed class RpmController : OrgScopedControllerBase
     [EnableRateLimiting("download")]
     public async Task<IActionResult> GpgKey(CancellationToken ct)
     {
+        string orgId = CurrentTenantId();
+
+        // Pin: when the org has an RPM PGP trust anchor configured, serve THAT operator-pinned key
+        // rather than a key fetched from the same upstream that served the packages. Relaying the
+        // upstream key unpinned makes a client's gpgcheck=1 self-referential — dnf would verify
+        // package signatures against a key the attacker who served the packages also supplied. This
+        // runs regardless of proxy state: the pinned key is the operator's own, not upstream's.
+        if (_svc.TrustStore is not null)
+        {
+            var anchors = await _svc.TrustStore.ListAsync(orgId, "rpm", ct);
+            string pinned = string.Join('\n', anchors
+                .Where(a => string.Equals(a.AnchorKind, "pgp", StringComparison.Ordinal)
+                            && !string.IsNullOrWhiteSpace(a.Material))
+                .Select(a => a.Material.Trim()));
+            if (pinned.Length > 0)
+            {
+                return File(System.Text.Encoding.UTF8.GetBytes(pinned), "application/pgp-keys");
+            }
+        }
+
+        // No pinned anchor: fall back to relaying the upstream key (only when proxying is enabled).
         if (_svc.Proxy is null)
         {
             return NotFound();
         }
 
         // Per-org upstream: top-priority configured rpm registry. Empty ⇒ proxying disabled.
-        string orgId = CurrentTenantId();
         var bases = await _svc.Registries.ResolveAsync(orgId, "rpm", ct);
         if (bases.Count == 0)
         {
@@ -1268,8 +1382,12 @@ public sealed class RpmController : OrgScopedControllerBase
     /// is inserted for proxy artifacts — the global plane is authoritative for proxy versions.
     /// RPM header metadata (from <c>primary.xml</c>) is written to <c>rpm_metadata</c> keyed
     /// by <c>cache_artifact_id</c> so repodata builders can include it without a PV row.
+    ///
+    /// Returns the <c>cache_artifact</c> id, or null when the cache plane could not record the
+    /// artefact. The caller treats null as ungateable and refuses the serve — every block-gate arm
+    /// reads that row.
     /// </summary>
-    private async Task CacheProxyPackageAsync(ProxyCachePackage p, CancellationToken ct)
+    private async Task<string?> CacheProxyPackageAsync(ProxyCachePackage p, CancellationToken ct)
     {
         // Ensure per-tenant packages row so the RPM appears in this org's listings.
         await _svc.Packages.GetOrCreateAsync(
@@ -1357,6 +1475,8 @@ public sealed class RpmController : OrgScopedControllerBase
 
             await MirrorRpmLicenseAsync(versionId: null, cacheArtifactId, p.Resolution.License, ct);
         }
+
+        return cacheArtifactId;
     }
 
     private sealed record ProxyCachePackage(
@@ -1398,6 +1518,7 @@ public sealed record RpmControllerServices(
     UpstreamRegistryResolver Registries,
     MetadataResponseCache<RpmMergedRepodataKey, MergedRepodataCache> MergedRepodataCache,
     RenderedResponseCache<RpmLocalRepodataKey> LocalRepodataCache,
+    MetadataInvalidationCoordinator Invalidation,
     TimeProvider Time,
     CacheAccessRecorder CacheRecorder,
     CacheArtifactRepository CacheArtifacts,
@@ -1405,7 +1526,10 @@ public sealed record RpmControllerServices(
     Dependably.Protocol.Provenance.RpmProvenanceVerifier RpmProvenance,
     Dependably.Infrastructure.Edge.EdgePublishGuard EdgeGuard,
     Dependably.Protocol.BlockGateService BlockGate,
+    VulnerabilityScanService Scanner,
     Dependably.Infrastructure.StagingOptions Staging,
     LicenseRepository Licenses,
+    Dependably.Security.NameBindingGate? NameBinding = null,
     UpstreamClient? UpstreamClient = null,
-    IRpmUpstreamProxy? Proxy = null);
+    IRpmUpstreamProxy? Proxy = null,
+    Dependably.Infrastructure.IPerOrgTrustAnchorStore? TrustStore = null);

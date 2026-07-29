@@ -7,6 +7,7 @@ using Dependably.Infrastructure.Health;
 using Dependably.Infrastructure.Observability;
 using Dependably.Security;
 using Dependably.Storage;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace Dependably.Infrastructure.Startup;
 
@@ -93,6 +94,19 @@ internal static partial class InfrastructureStartupExtensions
                 sp.GetRequiredService<Microsoft.Extensions.Caching.Memory.IMemoryCache>(),
                 MetadataCacheKeys.MavenMetadata,
                 sp.GetRequiredService<OrgCacheEpochStore>()));
+
+        // Cross-replica invalidation. The coordinator owns the one expansion from package
+        // coordinates to an ecosystem's full cache-key variant matrix, shared by the local
+        // mutation path and the peer-message path so the two can never disagree.
+        //
+        // TryAddSingleton for the bus: standalone deployments keep the in-process path and take
+        // on no broker dependency, while a composition root that configures a fan-out transport
+        // (the management wiring registers the Redis one when REDIS_CONNECTION_STRING is set)
+        // registers first and wins. The edge composition root never reaches that wiring, so it
+        // binds the no-op here.
+        builder.Services.TryAddSingleton<IMetadataInvalidationBus, NullMetadataInvalidationBus>();
+        builder.Services.AddSingleton<MetadataInvalidationCoordinator>();
+        builder.Services.AddSingleton<MetadataInvalidationReceiver>();
     }
 
     internal static void AddDependablyMetrics(this WebApplicationBuilder builder)

@@ -83,7 +83,7 @@ public sealed class LicenseBackfillServiceTests : IAsyncLifetime
         Assert.Empty(await LicensesForAsync(idMavenJar));
 
         // All five candidates stamped at the frozen instant, regardless of outcome.
-        string expected = TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string expected = TestTime.KnownNow.ToUtcIso();
         Assert.Equal(expected, await CheckedAtAsync(idWith));
         Assert.Equal(expected, await CheckedAtAsync(idNone));
         Assert.Equal(expected, await CheckedAtAsync(idMissing));
@@ -110,7 +110,7 @@ public sealed class LicenseBackfillServiceTests : IAsyncLifetime
         await service.RunBackfillPassAsync(CancellationToken.None);
         Assert.Equal(new[] { "MIT" }, await LicensesForAsync(id));
         // Original stamp instant preserved (not re-stamped).
-        Assert.Equal(TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"), await CheckedAtAsync(id));
+        Assert.Equal(TestTime.KnownNow.ToUtcIso(), await CheckedAtAsync(id));
     }
 
     [Fact]
@@ -125,7 +125,7 @@ public sealed class LicenseBackfillServiceTests : IAsyncLifetime
         await service.RunBackfillPassAsync(CancellationToken.None);
 
         Assert.Equal(new[] { "MIT" }, await LicensesForAsync(id));
-        Assert.Equal(TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"), await CheckedAtAsync(id));
+        Assert.Equal(TestTime.KnownNow.ToUtcIso(), await CheckedAtAsync(id));
     }
 
     [Fact]
@@ -139,7 +139,7 @@ public sealed class LicenseBackfillServiceTests : IAsyncLifetime
         await service.RunBackfillPassAsync(CancellationToken.None);
 
         Assert.Empty(await LicensesForAsync(id));
-        Assert.Equal(TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"), await CheckedAtAsync(id));
+        Assert.Equal(TestTime.KnownNow.ToUtcIso(), await CheckedAtAsync(id));
     }
 
     [Fact]
@@ -155,7 +155,7 @@ public sealed class LicenseBackfillServiceTests : IAsyncLifetime
         await service.RunBackfillPassAsync(CancellationToken.None);
 
         Assert.Equal(new[] { "Apache-2.0" }, await LicensesForAsync(id));
-        Assert.Equal(TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"), await CheckedAtAsync(id));
+        Assert.Equal(TestTime.KnownNow.ToUtcIso(), await CheckedAtAsync(id));
     }
 
     [Fact]
@@ -170,7 +170,7 @@ public sealed class LicenseBackfillServiceTests : IAsyncLifetime
         await service.RunBackfillPassAsync(CancellationToken.None);
 
         Assert.Empty(await LicensesForAsync(id));
-        Assert.Equal(TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"), await CheckedAtAsync(id));
+        Assert.Equal(TestTime.KnownNow.ToUtcIso(), await CheckedAtAsync(id));
     }
 
     /// <summary>
@@ -192,7 +192,7 @@ public sealed class LicenseBackfillServiceTests : IAsyncLifetime
         await service.RunBackfillPassAsync(CancellationToken.None);
 
         Assert.Equal(new[] { "MIT OR Apache-2.0" }, await LicensesForAsync(id));
-        Assert.Equal(TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"), await CheckedAtAsync(id));
+        Assert.Equal(TestTime.KnownNow.ToUtcIso(), await CheckedAtAsync(id));
     }
 
     [Fact]
@@ -206,7 +206,7 @@ public sealed class LicenseBackfillServiceTests : IAsyncLifetime
         await service.RunBackfillPassAsync(CancellationToken.None);
 
         Assert.Empty(await LicensesForAsync(id));
-        Assert.Equal(TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"), await CheckedAtAsync(id));
+        Assert.Equal(TestTime.KnownNow.ToUtcIso(), await CheckedAtAsync(id));
     }
 
     [Fact]
@@ -281,7 +281,7 @@ public sealed class LicenseBackfillServiceTests : IAsyncLifetime
 
         // The healthy, newer row was reached and processed within this same tick.
         Assert.Equal(new[] { "Apache-2.0" }, await LicensesForAsync(healthyId));
-        Assert.Equal(TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"), await CheckedAtAsync(healthyId));
+        Assert.Equal(TestTime.KnownNow.ToUtcIso(), await CheckedAtAsync(healthyId));
 
         // None of the 100 failing rows were stamped — they remain in the queue for a later pass.
         var remaining = await new CacheArtifactRepository(_db).ListNeedingLicenseBackfillAsync(limit: 200);

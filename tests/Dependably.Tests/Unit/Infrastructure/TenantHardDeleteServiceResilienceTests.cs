@@ -8,6 +8,7 @@ using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Time.Testing;
 
 namespace Dependably.Tests.Unit.Infrastructure;
 
@@ -134,6 +135,59 @@ public sealed class TenantHardDeleteServiceResilienceTests : IClassFixture<InMem
         }
     }
 
+    // The sweep-lock name RunPassAsync contends on. Mirrored here because the service keeps it
+    // private; the second-acquirer assertion below has to name the same key.
+    private const string SweepLockName = "tenant-hard-delete:sweep";
+
+    // The sweep-lock TTL RunPassAsync acquires with.
+    private static readonly TimeSpan SweepLockTtl = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// The hard-delete sweep is destructive and can run long on a large tenant set. While it runs,
+    /// its sweep lock must be renewed so a second replica cannot acquire the same lock and start a
+    /// concurrent hard-delete pass. Pre-fix the lock was acquired once with a fixed TTL and never
+    /// extended, so a sweep that outran the TTL kept deleting while another replica took the lock;
+    /// this test fails there (no renewal ever lands) and passes on the lease.
+    /// </summary>
+    [Fact]
+    public async Task RunPassAsync_SweepOutrunsLockTtl_LeaseRenewed_SecondReplicaRefused()
+    {
+        var clock = TestTime.Frozen(KnownNow);
+        var locks = new LeasedTestLock(clock);
+        string orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"lease-a-{Guid.NewGuid():N}");
+        string orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"lease-b-{Guid.NewGuid():N}");
+
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "UPDATE orgs SET deleted_at = @dt WHERE id IN (@a, @b)",
+                new { dt = KnownNow.AddDays(-60).ToUtcIso(), a = orgA, b = orgB });
+        }
+
+        // Open 1 lists the expired orgs, open 2 is the batch connection, open 3 is the first
+        // tenant's own read — the sweep is mid-batch by then.
+        var slowStore = new LeaseProbeStore(
+            _fixture.Store, clock, locks, SweepLockName, SweepLockTtl, probeOnOpen: 3);
+        var svc = BuildService(slowStore, locks, clock);
+
+        await svc.RunPassAsync(CancellationToken.None);
+
+        Assert.True(locks.ExtendSuccesses >= 4,
+            $"expected the sweep to renew its lease while running; got {locks.ExtendSuccesses} renewal(s)");
+        Assert.True(slowStore.SecondAcquirerRefusedMidPass,
+            "a second replica must not be able to acquire the sweep lock while the sweep is still running");
+
+        // The sweep still completed its work, and released the lock when it finished.
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            int survivors = await conn.ExecuteScalarAsync<int>(
+                "SELECT COUNT(*) FROM orgs WHERE id IN (@a, @b)", new { a = orgA, b = orgB });
+            Assert.Equal(0, survivors);
+        }
+
+        Assert.False(locks.IsHeld(SweepLockName));
+    }
+
     [Fact]
     public async Task RunPassAsync_LockAcquireThrows_DoesNotPropagate()
     {
@@ -162,7 +216,7 @@ public sealed class TenantHardDeleteServiceResilienceTests : IClassFixture<InMem
         {
             await conn.ExecuteAsync(
                 "UPDATE orgs SET deleted_at = @dt WHERE id = @id",
-                new { dt = KnownNow.AddDays(-60).ToString("yyyy-MM-ddTHH:mm:ssZ"), id = orgId });
+                new { dt = KnownNow.AddDays(-60).ToUtcIso(), id = orgId });
         }
 
         var recoveringLock = new ThrowOnceThenGrantLock(clock);
@@ -206,7 +260,7 @@ public sealed class TenantHardDeleteServiceResilienceTests : IClassFixture<InMem
         {
             await conn.ExecuteAsync(
                 "UPDATE orgs SET deleted_at = @dt WHERE id IN (@a, @b)",
-                new { dt = KnownNow.AddDays(-60).ToString("yyyy-MM-ddTHH:mm:ssZ"), a = orgA, b = orgB });
+                new { dt = KnownNow.AddDays(-60).ToUtcIso(), a = orgA, b = orgB });
         }
 
         var svc = BuildService(_fixture.Store, new InProcessDistributedLock(clock), clock, new ThrowOnFirstNotify());
@@ -237,7 +291,7 @@ public sealed class TenantHardDeleteServiceResilienceTests : IClassFixture<InMem
         {
             await conn.ExecuteAsync(
                 "UPDATE orgs SET deleted_at = @dt WHERE id = @id",
-                new { dt = KnownNow.AddDays(-60).ToString("yyyy-MM-ddTHH:mm:ssZ"), id = orgId });
+                new { dt = KnownNow.AddDays(-60).ToUtcIso(), id = orgId });
         }
 
         // Restore lands on the second open — after the expired-list snapshot, before the DELETE.

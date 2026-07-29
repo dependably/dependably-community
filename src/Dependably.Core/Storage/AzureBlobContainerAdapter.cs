@@ -2,6 +2,7 @@ using System.Runtime.CompilerServices;
 using Azure;
 using Azure.Storage.Blobs;
 using Azure.Storage.Blobs.Models;
+using Azure.Storage.Sas;
 
 namespace Dependably.Storage;
 
@@ -27,6 +28,23 @@ public sealed class AzureBlobContainerAdapter : IAzureBlobContainer
 
     public async Task UploadAsync(string key, Stream data, CancellationToken ct)
         => await _container.GetBlobClient(key).UploadAsync(data, overwrite: true, ct);
+
+    public bool CanGenerateReadSasUri => _container.CanGenerateSasUri;
+
+    public async Task<Uri?> TryGenerateReadSasUriAsync(string key, DateTimeOffset expiresAt, CancellationToken ct)
+    {
+        var blob = _container.GetBlobClient(key);
+        if (!blob.CanGenerateSasUri)
+        {
+            return null;
+        }
+
+        // Existence is probed before signing so an evicted blob keeps the caller's cache-miss
+        // fall-through instead of being handed a URL that 404s at the storage account.
+        return await blob.ExistsAsync(ct)
+            ? blob.GenerateSasUri(BlobSasPermissions.Read, expiresAt)
+            : null;
+    }
 
     public async Task<Stream?> DownloadOrNullAsync(string key, CancellationToken ct)
     {

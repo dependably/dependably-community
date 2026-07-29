@@ -4,7 +4,6 @@ using Dependably.Infrastructure.Caching;
 using Dependably.Protocol;
 using Dependably.Security;
 using Dependably.Storage;
-using Microsoft.Extensions.Caching.Memory;
 
 namespace Dependably.Api;
 
@@ -26,6 +25,8 @@ public sealed record UpdateOrgSettingsRequest(
     long? MaxUploadBytesOci = null,
     long? MaxUploadBytesCargo = null,
     string? DefaultLanguage = null,
+    // IANA zone name for rendering stored instants. null = leave unchanged.
+    string? DefaultTimezone = null,
     bool? AllowVersionOverwrite = null,
     bool? AirGapped = null,
     // Tri-state same-version-push org policy. null = leave unchanged.
@@ -134,9 +135,7 @@ public sealed record OrgControllerServices(
     VulnerabilityRepository Vulns,
     IPublicUrlBuilder Urls,
     IAuditEmitter AuditEmitter,
-    IMemoryCache Cache,
-    MetadataResponseCache<RpmMergedRepodataKey, MergedRepodataCache> RpmMergedCache,
-    RenderedResponseCache<RpmLocalRepodataKey> RpmLocalCache,
+    MetadataInvalidationCoordinator Invalidation,
     CacheArtifactRepository CacheArtifacts,
     TenantArtifactAccessRepository TenantAccess,
     TimeProvider Time);

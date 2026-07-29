@@ -58,20 +58,18 @@ public sealed class PlaneReadSurfaceTests : IAsyncLifetime
             """);
 
         var orgs = new OrgRepository(_db);
-        await orgs.TryReserveStorageAsync("o1", delta: 0, quota: null);
-
-        long counter = await conn.ExecuteScalarAsync<long>(
-            "SELECT storage_used_bytes FROM org_settings WHERE org_id = 'o1'");
+        long enforced = await orgs.GetLiveStorageBytesAsync("o1");
         var (items, _) = await orgs.ListOrgsAsync(limit: 10, offset: 0);
         long reported = items.Single(i => i.Id == "o1").StorageBytes;
 
-        // Tying the enforced counter to the reported number is the assertion that matters — a magic
-        // constant would let the two definitions drift apart again without failing.
-        Assert.Equal(reported, counter);
+        // Tying the number the quota gate enforces against to the number the operator is shown is
+        // the assertion that matters — a magic constant on either side would let the two
+        // definitions drift apart again without failing.
+        Assert.Equal(reported, enforced);
 
         // 1000 hosted + 2000 proxied + 5 manifest + 900000 layer. The layer bytes are the ones a
-        // package_versions-only baseline could never see.
-        Assert.Equal(903005, counter);
+        // package_versions-only reading could never see.
+        Assert.Equal(903005, enforced);
     }
 
     // ── The vuln report keeps a proxied artifact with no packages row ────────────

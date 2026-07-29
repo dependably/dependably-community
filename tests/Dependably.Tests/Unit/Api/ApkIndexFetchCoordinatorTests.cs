@@ -86,7 +86,7 @@ public sealed class ApkIndexFetchCoordinatorTests : IAsyncLifetime
         byte[] apkindex = BuildSignedApkIndex(rsa, "signer@test-deadbeef.rsa.pub");
         StubIndex(apkindex);
 
-        var coordinator = BuildCoordinator(rsaPublicKeyPem: ExportPublicPem(rsa));
+        var coordinator = BuildCoordinator(rsaPublicKeyPem: ExportPublicPem(rsa), acceptSha1: true);
 
         var result = await coordinator.GetAsync(_upstream, Release, Repo, Arch, IndexFile, null, null, TestOrgId, default);
 
@@ -103,7 +103,7 @@ public sealed class ApkIndexFetchCoordinatorTests : IAsyncLifetime
         tampered[^1] ^= 0xFF;
         StubIndex(tampered);
 
-        var coordinator = BuildCoordinator(rsaPublicKeyPem: ExportPublicPem(rsa));
+        var coordinator = BuildCoordinator(rsaPublicKeyPem: ExportPublicPem(rsa), acceptSha1: true);
 
         await Assert.ThrowsAsync<ApkIndexSignatureVerificationFailedException>(
             () => coordinator.GetAsync(_upstream, Release, Repo, Arch, IndexFile, null, null, TestOrgId, default));
@@ -123,10 +123,60 @@ public sealed class ApkIndexFetchCoordinatorTests : IAsyncLifetime
         byte[] apkindex = BuildSignedApkIndex(signer, "signer@test-deadbeef.rsa.pub");
         StubIndex(apkindex);
 
-        var coordinator = BuildCoordinator(rsaPublicKeyPem: ExportPublicPem(unrelated));
+        var coordinator = BuildCoordinator(rsaPublicKeyPem: ExportPublicPem(unrelated), acceptSha1: true);
 
         await Assert.ThrowsAsync<ApkIndexSignatureVerificationFailedException>(
             () => coordinator.GetAsync(_upstream, Release, Repo, Arch, IndexFile, null, null, TestOrgId, default));
+    }
+
+    // ── SHA-1 index-signature acceptance ──────────────────────────────────────
+
+    /// <summary>
+    /// The digest algorithm of an <c>APKINDEX.tar.gz</c> signature is named by the index itself,
+    /// so a SHA-1 <c>.SIGN.RSA.*</c> entry lets untrusted input pick the weak arm. With the
+    /// opt-in off the index is refused — and refusal must reach the caller as a verification
+    /// failure (the index is neither cached nor served), never as a pass.
+    /// </summary>
+    [Fact]
+    public async Task GetAsync_Sha1Signature_OptInOff_FailsClosed()
+    {
+        using var rsa = RSA.Create(2048);
+        byte[] apkindex = BuildSignedApkIndex(rsa, "signer@test-deadbeef.rsa.pub");
+        StubIndex(apkindex);
+
+        // Correct anchor, cryptographically valid signature — refused on algorithm alone.
+        var coordinator = BuildCoordinator(rsaPublicKeyPem: ExportPublicPem(rsa), acceptSha1: false);
+
+        await Assert.ThrowsAsync<ApkIndexSignatureVerificationFailedException>(
+            () => coordinator.GetAsync(_upstream, Release, Repo, Arch, IndexFile, null, null, TestOrgId, default));
+
+        // And the refused bytes are not cached: a second call re-fetches rather than serving them.
+        await Assert.ThrowsAsync<ApkIndexSignatureVerificationFailedException>(
+            () => coordinator.GetAsync(_upstream, Release, Repo, Arch, IndexFile, null, null, TestOrgId, default));
+        Assert.Equal(2, _server.LogEntries.Count(e =>
+            string.Equals(e.RequestMessage?.Path, $"/{Release}/{Repo}/{Arch}/{IndexFile}", StringComparison.OrdinalIgnoreCase)));
+    }
+
+    /// <summary>
+    /// Adversarial twin: a SHA-256 index signature is outside the opt-in and verifies with the
+    /// SHA-1 switch off, so the refusal above is scoped to the weak algorithm rather than
+    /// breaking apk index verification wholesale.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task GetAsync_Sha256Signature_VerifiesInEitherSha1Posture(bool acceptSha1)
+    {
+        using var rsa = RSA.Create(2048);
+        byte[] apkindex = BuildSha256SignedApkIndex(rsa, "signer@test-deadbeef.rsa.pub");
+        StubIndex(apkindex);
+
+        var coordinator = BuildCoordinator(rsaPublicKeyPem: ExportPublicPem(rsa), acceptSha1: acceptSha1);
+
+        var result = await coordinator.GetAsync(_upstream, Release, Repo, Arch, IndexFile, null, null, TestOrgId, default);
+
+        Assert.NotNull(result);
+        Assert.Equal(apkindex, await ReadAllAsync(result!.Body));
     }
 
     [Fact]
@@ -176,7 +226,7 @@ public sealed class ApkIndexFetchCoordinatorTests : IAsyncLifetime
         byte[] apkindex = BuildSignedApkIndex(rsa, "signer@test-deadbeef.rsa.pub");
         StubIndex(apkindex);
 
-        var coordinator = BuildCoordinator(rsaPublicKeyPem: ExportPublicPem(rsa));
+        var coordinator = BuildCoordinator(rsaPublicKeyPem: ExportPublicPem(rsa), acceptSha1: true);
 
         var first = await coordinator.GetAsync(_upstream, Release, Repo, Arch, IndexFile, null, null, TestOrgId, default);
         var second = await coordinator.GetAsync(_upstream, Release, Repo, Arch, IndexFile, null, null, TestOrgId, default);
@@ -239,11 +289,21 @@ public sealed class ApkIndexFetchCoordinatorTests : IAsyncLifetime
 
     private static string ExportPublicPem(RSA rsa) => rsa.ExportSubjectPublicKeyInfoPem();
 
+    // Builds a SHA-1-signed (.SIGN.RSA.<keyname>) index — the variant Alpine ships, and the one
+    // that verifies only under the Apk:AcceptSha1IndexSignatures opt-in.
     private static byte[] BuildSignedApkIndex(RSA signingKey, string keyName)
     {
         byte[] member2 = BuildGzipMember("APKINDEX content"u8.ToArray());
         byte[] sig = signingKey.SignData(member2, HashAlgorithmName.SHA1, RSASignaturePadding.Pkcs1);
         byte[] member1 = BuildGzipTarMember(".SIGN.RSA." + keyName, sig);
+        return [.. member1, .. member2];
+    }
+
+    private static byte[] BuildSha256SignedApkIndex(RSA signingKey, string keyName)
+    {
+        byte[] member2 = BuildGzipMember("APKINDEX content"u8.ToArray());
+        byte[] sig = signingKey.SignData(member2, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        byte[] member1 = BuildGzipTarMember(".SIGN.RSA256." + keyName, sig);
         return [.. member1, .. member2];
     }
 
@@ -269,11 +329,13 @@ public sealed class ApkIndexFetchCoordinatorTests : IAsyncLifetime
     }
 
     private ApkIndexFetchCoordinator BuildCoordinator(
-        string? rsaPublicKeyPem = null, string? verifyFlag = null, HttpMessageHandler? handler = null)
+        string? rsaPublicKeyPem = null, string? verifyFlag = null, HttpMessageHandler? handler = null,
+        bool acceptSha1 = false)
     {
         var settings = new Dictionary<string, string?>
         {
             ["Apk:IndexTtl"] = "00:05:00",
+            [WeakAlgorithmAcceptance.ApkSha1IndexSignatureKey] = acceptSha1 ? "true" : "false",
         };
         if (verifyFlag is not null)
         {
@@ -299,7 +361,8 @@ public sealed class ApkIndexFetchCoordinatorTests : IAsyncLifetime
 
         return new ApkIndexFetchCoordinator(
             httpFactory, memCache, new StubAirGapMode(enabled: false), new AllowAllValidator(),
-            trustStore, config, NullLogger<ApkIndexFetchCoordinator>.Instance);
+            trustStore, config, NullLogger<ApkIndexFetchCoordinator>.Instance,
+            new WeakAlgorithmAcceptance(config, NullLogger<WeakAlgorithmAcceptance>.Instance));
     }
 
     private sealed class StubAirGapMode : IAirGapMode

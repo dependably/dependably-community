@@ -141,17 +141,79 @@ public sealed class UpstreamRegistryControllerAuthTests
     }
 
     [Fact]
-    public async Task Anonymous_PlaintextHttpUrl_Persists201()
+    public async Task Anonymous_PlaintextHttpUrl_RejectedByDefault()
     {
+        // #437 item 1: plaintext http:// upstreams are refused unless the instance opts in.
+        // An http upstream carries both the artifact and its declared checksum in cleartext,
+        // so an on-path attacker substitutes both consistently and content-addressing verifies
+        // bytes it should never have trusted.
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        // Anonymous http upstreams (internal mirrors) stay allowed — no secret transits.
+        var req = new AddUpstreamRegistryRequest(
+            Ecosystem: "npm", Url: "http://mirror.internal/npm", AuthType: null, Username: null, Secret: null);
+        var result = await b.UpstreamRegistryController.Add(req, CancellationToken.None);
+
+        Assert.Equal(StatusCodes.Status422UnprocessableEntity, ((ObjectResult)result).StatusCode);
+
+        await using var conn = await b.Db.OpenAsync();
+        int rows = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM upstream_registry WHERE org_id = @org AND ecosystem = 'npm'",
+            new { org = b.PrimaryOrgId });
+        Assert.Equal(0, rows);
+    }
+
+    [Fact]
+    public async Task Anonymous_PlaintextHttpUrl_AllowedWithOptIn()
+    {
+        // Adversarial twin to the default-reject: with Proxy:AllowInsecureUpstreams the same
+        // anonymous http upstream (internal mirror) persists.
+        await using var s = await ControllerScenario.CreateAsync();
+        s.WithInsecureUpstreams();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
         var req = new AddUpstreamRegistryRequest(
             Ecosystem: "npm", Url: "http://mirror.internal/npm", AuthType: null, Username: null, Secret: null);
         var result = await b.UpstreamRegistryController.Add(req, CancellationToken.None);
 
         Assert.IsType<CreatedAtActionResult>(result);
+    }
+
+    [Fact]
+    public async Task HttpsUrl_AlwaysAllowed()
+    {
+        // Adversarial twin: an https:// upstream saves regardless of the insecure-upstreams flag.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var result = await b.UpstreamRegistryController.Add(Npm(null, null, null), CancellationToken.None);
+
+        Assert.IsType<CreatedAtActionResult>(result);
+    }
+
+    [Fact]
+    public async Task EmbeddedCredentialsInUrl_RejectedAtSaveTime()
+    {
+        // #437 item 2: a user:pass@ userinfo component must be rejected at save time — storing it
+        // plaintext in upstream_registry.url leaks the credential to read:packages callers.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var req = new AddUpstreamRegistryRequest(
+            Ecosystem: "npm", Url: "https://svc:s3cr3t@nexus.corp.example/repository/npm/",
+            AuthType: null, Username: null, Secret: null);
+        var result = await b.UpstreamRegistryController.Add(req, CancellationToken.None);
+
+        Assert.Equal(StatusCodes.Status422UnprocessableEntity, ((ObjectResult)result).StatusCode);
+
+        await using var conn = await b.Db.OpenAsync();
+        int rows = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM upstream_registry WHERE org_id = @org AND ecosystem = 'npm'",
+            new { org = b.PrimaryOrgId });
+        Assert.Equal(0, rows);
     }
 }

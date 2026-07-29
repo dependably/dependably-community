@@ -259,7 +259,12 @@ public sealed partial class MavenController : OrgScopedControllerBase
                    mvf.origin AS Origin,
                    pv.purl AS Purl, pv.manual_block_state AS ManualBlockState,
                    pv.vuln_checked_at AS VulnCheckedAt, pv.published_at AS PublishedAt,
-                   pv.deprecated AS Deprecated
+                   pv.deprecated AS Deprecated,
+                   pv.origin AS VersionOrigin,
+                   pv.has_install_script AS HasInstallScript,
+                   pv.install_script_kind AS InstallScriptKind,
+                   pv.provenance_status AS ProvenanceStatus,
+                   pv.revoked_at AS RevokedAt
             FROM maven_version_files mvf
             JOIN package_versions pv ON pv.id = mvf.package_version_id
             JOIN packages p ON p.id = pv.package_id
@@ -412,23 +417,16 @@ public sealed partial class MavenController : OrgScopedControllerBase
             return Unauthorized();
         }
 
-        // Vulnerability / manual-block gate runs before we serve cached bytes —
-        // including the checksum sidecar, so a blocked artifact's hashes don't leak
-        // either. Mirrors the inline gate PyPI/npm/NuGet run on their cache-hit paths.
+        // The block gate runs before we serve cached bytes — including the checksum sidecar, so a
+        // blocked artifact's hashes don't leak either. The row's projection carries the owning
+        // package_versions row's full gate-fact set (see MavenFileRow.ToPackageVersion), so this
+        // plane goes through the same BlockGateRequest.For factory every other hosted serve path
+        // uses and evaluates the same arms: manual block, vulnerability, deprecation, release age,
+        // revocation, install script, provenance, and licence.
         if (await _svc.BlockGate.EvaluateAsync(
-                new BlockGateRequest(orgId, "maven", row.Purl, row.PackageVersionId,
-                    row.ManualBlockState, row.VulnCheckedAt,
-                    token?.UserId, settings?.MaxOsvScoreTolerance ?? DefaultMaxOsvScoreTolerance,
-                    HttpContext.GetNormalizedRemoteIp(),
-                    MinReleaseAgeHours: settings?.MinReleaseAgeHours,
-                    PublishedAt: row.PublishedAt,
-                    ActorKind: token?.ActorKind,
-                    Deprecated: row.Deprecated,
-                    BlockDeprecatedMode: settings?.BlockDeprecated,
-                    BlockMaliciousMode: settings?.BlockMalicious,
-                    BlockKevMode: settings?.BlockKev,
-                    MaxEpssTolerance: settings?.MaxEpssTolerance,
-                    Origin: row.Origin), ct)
+                BlockGateRequest.For(
+                    orgId, "maven", row.ToPackageVersion(), token, settings,
+                    HttpContext.GetNormalizedRemoteIp()), ct)
             == BlockDecision.Blocked)
         {
             return StatusCode(StatusCodes.Status403Forbidden);
@@ -833,6 +831,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
             BlockDeprecatedMode: settings?.BlockDeprecated,
             BlockMaliciousMode: settings?.BlockMalicious,
             BlockKevMode: settings?.BlockKev,
+            BlockRevokedMode: settings?.BlockRevoked,
             MaxEpssTolerance: settings?.MaxEpssTolerance,
             ProvenanceStatus: provenanceStatus,
             ProvenanceSigner: provenanceSigner,
@@ -909,7 +908,12 @@ public sealed partial class MavenController : OrgScopedControllerBase
                    mvf.origin AS Origin,
                    pv.purl AS Purl, pv.manual_block_state AS ManualBlockState,
                    pv.vuln_checked_at AS VulnCheckedAt, pv.published_at AS PublishedAt,
-                   pv.deprecated AS Deprecated
+                   pv.deprecated AS Deprecated,
+                   pv.origin AS VersionOrigin,
+                   pv.has_install_script AS HasInstallScript,
+                   pv.install_script_kind AS InstallScriptKind,
+                   pv.provenance_status AS ProvenanceStatus,
+                   pv.revoked_at AS RevokedAt
             FROM maven_version_files mvf
             JOIN package_versions pv ON pv.id = mvf.package_version_id
             JOIN packages p ON p.id = pv.package_id
@@ -978,6 +982,18 @@ public sealed partial class MavenController : OrgScopedControllerBase
             return licenseReject;
         }
 
+        // Name-level publish authorization. Keys on the authenticated token principal (never a
+        // request field), so a token holding only publish:maven cannot seize a groupId:artifactId
+        // a different principal already owns. No-op unless PUBLISH_NAME_BINDING=on.
+        var namePrincipal = Dependably.Infrastructure.NamePrincipal.FromToken(token);
+        if (_svc.NameBinding is { } nameGate
+            && !await nameGate.IsPublishAuthorizedAsync(orgId, "maven", coords.PackageName, namePrincipal, ct))
+        {
+            return StatusCode(StatusCodes.Status403Forbidden,
+                $"Publishing to '{coords.PackageName}' is not permitted: the name is owned by a " +
+                "different principal in this org and you hold no publish grant for it.");
+        }
+
         string purl = PurlNormalizer.Maven(coords.GroupId, coords.ArtifactId, coords.Version!);
         // Digests were computed inline while streaming the body to disk — no re-hash of a
         // fully-buffered artifact.
@@ -1024,6 +1040,13 @@ public sealed partial class MavenController : OrgScopedControllerBase
             conn, pkg.Id, coords, purl, blobKey, sha256Hex, sha1Hex, staged.Size);
 
         await UpsertMavenVersionFileAsync(conn, versionId, coords, blobKey, staged.Size, sha256Hex, sha1Hex, md5Hex);
+
+        // Record first-publisher ownership now that the artefact and its rows are durably stored
+        // (the remaining license-extraction step is best-effort and never fails the publish).
+        if (_svc.NameBinding is { } ownerGate)
+        {
+            await ownerGate.RecordOwnershipAsync(orgId, "maven", coords.PackageName, namePrincipal, ct);
+        }
 
         // Licenses live only in the POM. On a .pom publish, parse the staged bytes and attach
         // the resolved SPDX identifiers to the shared package_versions row so hosted Maven
@@ -1105,19 +1128,16 @@ public sealed partial class MavenController : OrgScopedControllerBase
         }
     }
 
-    // A real-artifact publish changed this coordinate's version set; evict the rendered
+    // A real-artifact publish changed this coordinate's version set; invalidate the rendered
     // maven-metadata.xml so a publish-then-resolve sees the new version immediately instead
     // of waiting out the TTL. (The metadata-acknowledge path changes no versions and is
-    // handled before StoreFileAsync, so it never reaches here.) A SNAPSHOT publish also
-    // evicts its version-level document — the new file changes the <snapshot>/
+    // handled before StoreFileAsync, so it never reaches here.) A SNAPSHOT publish also names
+    // its version so the version-level document goes too — the new file changes the <snapshot>/
     // <snapshotVersions> build list that document reports.
     private void EvictMavenMetadataCacheAfterPublish(string orgId, MavenCoordinates coords)
     {
-        _svc.MetadataCache.Evict(new MavenMetadataKey(orgId, coords.GroupId, coords.ArtifactId));
-        if (coords.IsSnapshot)
-        {
-            _svc.MetadataCache.Evict(new MavenMetadataKey(orgId, coords.GroupId, coords.ArtifactId, coords.Version));
-        }
+        _svc.Invalidation.Invalidate(MetadataInvalidation.ForMaven(
+            orgId, coords.GroupId, coords.ArtifactId, coords.IsSnapshot ? coords.Version : null));
     }
 
     /// <summary>
@@ -1346,21 +1366,65 @@ public sealed partial class MavenController : OrgScopedControllerBase
         _ => "application/octet-stream",
     };
 
-    private sealed record MavenFileRow(
-        string Id,
-        string PackageVersionId,
-        string Filename,
-        string Extension,
-        string BlobKey,
-        string? ChecksumSha256,
-        string? ChecksumSha1,
-        string? ChecksumMd5,
-        string Origin,
-        string Purl,
-        string? ManualBlockState,
-        DateTimeOffset? VulnCheckedAt,
-        DateTimeOffset? PublishedAt,
-        string? Deprecated);
+    /// <summary>
+    /// One <c>maven_version_files</c> row joined to the gate facts of its owning
+    /// <c>package_versions</c> row. <c>Origin</c> is the FILE's origin (drives the per-file auth
+    /// branch); <c>VersionOrigin</c> is the VERSION's origin, which is what the block gate reads.
+    ///
+    /// <para>
+    /// Property-mapped rather than a positional record on purpose: Dapper resolves a constructor
+    /// only when every parameter's CLR type equals the reader's field type, and the two providers
+    /// disagree on the boolean columns (SQLite reports INTEGER, PostgreSQL reports boolean). The
+    /// per-property mapper converts, so one row type serves both — the same shape
+    /// <see cref="PackageVersion"/> itself uses.
+    /// </para>
+    /// </summary>
+    private sealed class MavenFileRow
+    {
+        public string Id { get; set; } = "";
+        public string PackageVersionId { get; set; } = "";
+        public string Filename { get; set; } = "";
+        public string Extension { get; set; } = "";
+        public string BlobKey { get; set; } = "";
+        public string? ChecksumSha256 { get; set; }
+        public string? ChecksumSha1 { get; set; }
+        public string? ChecksumMd5 { get; set; }
+        public string Origin { get; set; } = "";
+        public string Purl { get; set; } = "";
+        public string? ManualBlockState { get; set; }
+        public DateTimeOffset? VulnCheckedAt { get; set; }
+        public DateTimeOffset? PublishedAt { get; set; }
+        public string? Deprecated { get; set; }
+        public string VersionOrigin { get; set; } = "proxy";
+        public bool HasInstallScript { get; set; }
+        public string? InstallScriptKind { get; set; }
+        public string? ProvenanceStatus { get; set; }
+        public DateTimeOffset? RevokedAt { get; set; }
+
+        /// <summary>
+        /// Rehydrates the owning <c>package_versions</c> row in the shape
+        /// <see cref="BlockGateRequest.For"/> reads, so this plane's serve gate is built by the
+        /// same factory — and therefore fires the same arms — as every other hosted serve path.
+        /// Only the gate-fact set is carried; fields no block arm reads keep their defaults.
+        /// </summary>
+        public PackageVersion ToPackageVersion() => new()
+        {
+            Id = PackageVersionId,
+            Purl = Purl,
+            BlobKey = BlobKey,
+            ChecksumSha256 = ChecksumSha256,
+            ChecksumSha1 = ChecksumSha1,
+            ManualBlockState = ManualBlockState,
+            VulnCheckedAt = VulnCheckedAt,
+            PublishedAt = PublishedAt,
+            Deprecated = Deprecated,
+            Origin = VersionOrigin,
+            HasInstallScript = HasInstallScript,
+            InstallScriptKind = InstallScriptKind,
+            ProvenanceStatus = ProvenanceStatus,
+            RevokedAt = RevokedAt,
+        };
+    }
 }
 
 /// <summary>Scoped DI bundle for the Maven controller — mirrors the npm/PyPI shape.</summary>
@@ -1378,6 +1442,7 @@ public sealed record MavenControllerServices(
     ReservedNamespaceService ReservedNamespaces,
     UpstreamRegistryResolver Registries,
     RenderedResponseCache<MavenMetadataKey> MetadataCache,
+    MetadataInvalidationCoordinator Invalidation,
     RenderedMetadataCacheOptions CacheOptions,
     ILogger<MavenController> Log,
     CacheArtifactRepository CacheArtifacts,
@@ -1387,4 +1452,5 @@ public sealed record MavenControllerServices(
     Dependably.Protocol.Provenance.MavenProvenanceVerifier MavenProvenance,
     Dependably.Infrastructure.Edge.EdgePublishGuard EdgeGuard,
     Dependably.Infrastructure.StagingOptions Staging,
-    LicenseRepository Licenses);
+    LicenseRepository Licenses,
+    Dependably.Security.NameBindingGate? NameBinding = null);

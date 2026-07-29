@@ -188,6 +188,256 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
         Assert.Equal("upstream", (string)licenseRow.source);
     }
 
+    // ── First-fetch block gate ────────────────────────────────────────────────
+
+    /// <summary>
+    /// Seeds a per-org RPM trust anchor so the signature verifier is active for this org, and
+    /// returns the store to hand to <see cref="BuildController"/>. The key material is a freshly
+    /// generated OpenPGP public key: no fixture RPM in these tests is signed by it, so every
+    /// package verifies as Unsigned or Failed — which is exactly the state a 'block' policy exists
+    /// to refuse.
+    /// </summary>
+    private static StubPerOrgTrustAnchorStore TrustStoreWithAnchor(string orgId)
+    {
+        var gen = Org.BouncyCastle.Security.GeneratorUtilities.GetKeyPairGenerator("RSA");
+        gen.Init(new Org.BouncyCastle.Crypto.Parameters.RsaKeyGenerationParameters(
+            Org.BouncyCastle.Math.BigInteger.ValueOf(0x10001),
+            new Org.BouncyCastle.Security.SecureRandom(), 1024, 12));
+        var pgpPair = new Org.BouncyCastle.Bcpg.OpenPgp.PgpKeyPair(
+            Org.BouncyCastle.Bcpg.PublicKeyAlgorithmTag.RsaGeneral, gen.GenerateKeyPair(),
+            new DateTime(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc));
+
+        using var ms = new MemoryStream();
+        using (var armored = new Org.BouncyCastle.Bcpg.ArmoredOutputStream(ms))
+        {
+            pgpPair.PublicKey.Encode(armored);
+        }
+
+        var store = new StubPerOrgTrustAnchorStore();
+        store.AddAnchor(orgId, "rpm", new TrustAnchorMaterial
+        {
+            Id = "rpm-anchor",
+            AnchorKind = "pgp",
+            Material = System.Text.Encoding.ASCII.GetString(ms.ToArray()),
+        });
+        return store;
+    }
+
+    private async Task SetVerifyRpmSignaturesAsync(string mode)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "UPDATE org_settings SET verify_rpm_signatures = @mode WHERE org_id = @orgId",
+            new { mode, orgId = _orgId });
+    }
+
+    private (StubProxy Proxy, string Filename, byte[] Bytes) SeedUnsignedRpm()
+    {
+        // Random bytes are not a parseable RPM, so the verifier reports Failed. A structurally
+        // valid but unsigned RPM reports Unsigned; the gate refuses both under 'block'.
+        byte[] bytes = RandomBytes(256);
+        string filename = "tree-2.1.1-1.fc40.x86_64.rpm";
+        var resolution = new PackageResolution(
+            PackageUrl: $"https://mirror.example.com/Packages/t/{filename}",
+            Sha256: Sha256Hex(bytes),
+            Name: "tree",
+            Epoch: 0,
+            Version: "2.1.1",
+            Release: "1.fc40",
+            Arch: "x86_64",
+            Summary: "A recursive directory listing command",
+            Description: "tree is a recursive...",
+            License: "GPLv2+");
+        return (new StubProxy(resolution: resolution), filename, bytes);
+    }
+
+    [Fact]
+    public async Task Download_FirstFetch_ProvenanceFailedUnderBlockPolicy_Returns403_NotBytes()
+    {
+        // The request that matters is the FIRST one — it is the machine actually installing the
+        // package. Asserting on the second request would pass even when the first served 200.
+        await EnableAnonPullAsync();
+        await SeedRpmRegistryAsync();
+        await SetVerifyRpmSignaturesAsync("block");
+        var (stubProxy, filename, bytes) = SeedUnsignedRpm();
+        await _blobs.PutAsync(BlobKeys.Proxy(Sha256Hex(bytes)), new MemoryStream(bytes), default);
+
+        var ctl = BuildController(proxy: stubProxy, trustStore: TrustStoreWithAnchor(_orgId));
+
+        var first = await ctl.Download(filename, default);
+
+        var status = Assert.IsType<StatusCodeResult>(first);
+        Assert.Equal(StatusCodes.Status403Forbidden, status.StatusCode);
+    }
+
+    [Fact]
+    public async Task Download_SecondFetch_AfterFirstFetchBlocked_AlsoReturns403()
+    {
+        // Adversarial twin of the test above: proves the fix added enforcement to the first fetch
+        // rather than merely moving the existing cache-hit gate earlier. Both requests must refuse.
+        await EnableAnonPullAsync();
+        await SeedRpmRegistryAsync();
+        await SetVerifyRpmSignaturesAsync("block");
+        var (stubProxy, filename, bytes) = SeedUnsignedRpm();
+        await _blobs.PutAsync(BlobKeys.Proxy(Sha256Hex(bytes)), new MemoryStream(bytes), default);
+
+        var trustStore = TrustStoreWithAnchor(_orgId);
+
+        var first = await DownloadOnFreshControllerAsync(filename, stubProxy, trustStore);
+        var second = await DownloadOnFreshControllerAsync(filename, stubProxy, trustStore);
+
+        Assert.Equal(StatusCodes.Status403Forbidden, Assert.IsType<StatusCodeResult>(first).StatusCode);
+        Assert.Equal(StatusCodes.Status403Forbidden, Assert.IsType<StatusCodeResult>(second).StatusCode);
+
+        // The refusal must not have discarded the shared, content-addressed blob: other tenants'
+        // cache_artifact rows point at it.
+        Assert.NotNull(await _blobs.GetAsync(BlobKeys.Proxy(Sha256Hex(bytes)), default));
+    }
+
+    private async Task<IActionResult> DownloadOnFreshControllerAsync(
+        string filename, IRpmUpstreamProxy proxy, StubPerOrgTrustAnchorStore trustStore)
+    {
+        var ctl = BuildController(proxy: proxy, trustStore: trustStore);
+        return await ctl.Download(filename, default);
+    }
+
+    /// <summary>
+    /// The fail-closed arm of the first-fetch gate. Every gate arm reads the artifact's
+    /// <c>cache_artifact</c> row, so a first fetch the plane could not record is one nothing can
+    /// scan or gate — it is refused (503), never served ungated.
+    ///
+    /// The RPM remedy deliberately differs from the one Go/Cargo/apk use: those discard the staged
+    /// blob on refusal, because their blob keys are org-scoped and their hit path probes the blob
+    /// store, so a leftover blob would answer every later request with no row to gate against. RPM
+    /// keys its proxy blobs by content hash and shares them across tenants, so discarding one
+    /// would break other tenants' rows — and RPM does not need to: its serve path is row-driven, so
+    /// a missing row is already a cache MISS that re-fetches and re-records. This pins both halves:
+    /// the refusal, and the fact that the refusal leaves the shared blob alone.
+    /// </summary>
+    [Fact]
+    public async Task Download_FirstFetch_CachePlaneCannotRecord_Returns503_AndKeepsTheSharedBlob()
+    {
+        await EnableAnonPullAsync();
+        await SeedRpmRegistryAsync();
+        var (stubProxy, filename, bytes) = SeedUnsignedRpm();
+        string blobKey = BlobKeys.Proxy(Sha256Hex(bytes));
+        await _blobs.PutAsync(blobKey, new MemoryStream(bytes), default);
+
+        await BreakCachePlaneAsync();
+
+        var result = await BuildController(proxy: stubProxy).Download(filename, default);
+
+        // 503, not 404 and not the bytes: the package exists upstream, we could not admit it.
+        var status = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, status.StatusCode);
+        Assert.Equal(0, await CacheArtifactCountAsync());
+
+        // The content-addressed blob is shared; another tenant's row may point at it.
+        Assert.NotNull(await _blobs.GetAsync(blobKey, default));
+    }
+
+    /// <summary>
+    /// The recovery half. Once the plane can record again the same package serves normally and
+    /// lands its row — the refusal above was an admission failure, not a poisoned coordinate.
+    /// </summary>
+    [Fact]
+    public async Task Download_AfterCachePlaneRecovers_ServesAndRecords()
+    {
+        await EnableAnonPullAsync();
+        await SeedRpmRegistryAsync();
+        var (stubProxy, filename, bytes) = SeedUnsignedRpm();
+        await _blobs.PutAsync(BlobKeys.Proxy(Sha256Hex(bytes)), new MemoryStream(bytes), default);
+
+        await BreakCachePlaneAsync();
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable,
+            Assert.IsType<ObjectResult>(
+                await BuildController(proxy: stubProxy).Download(filename, default)).StatusCode);
+
+        await RestoreCachePlaneAsync();
+
+        var recovered = await BuildController(proxy: stubProxy).Download(filename, default);
+
+        var fsr = Assert.IsType<FileStreamResult>(recovered);
+        using var ms = new MemoryStream();
+        await fsr.FileStream.CopyToAsync(ms);
+        Assert.Equal(bytes, ms.ToArray());
+        Assert.Equal(1, await CacheArtifactCountAsync());
+    }
+
+    // Aborts every cache_artifact INSERT, leaving reads and existing rows intact — the shape of a
+    // metadata-store blip that stops a new artefact being admitted, and the condition under which
+    // CacheAccessRecorder returns null.
+    private const string OutageTrigger = "rpm_cache_plane_outage";
+
+    private async Task BreakCachePlaneAsync()
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            $"""
+            CREATE TRIGGER {OutageTrigger} BEFORE INSERT ON cache_artifact
+            BEGIN SELECT RAISE(ABORT, 'cache plane unavailable'); END
+            """);
+    }
+
+    private async Task RestoreCachePlaneAsync()
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync($"DROP TRIGGER IF EXISTS {OutageTrigger}");
+    }
+
+    private async Task<long> CacheArtifactCountAsync()
+    {
+        await using var conn = await _db.OpenAsync();
+        return await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM cache_artifact WHERE ecosystem = 'rpm'");
+    }
+
+    [Theory]
+    [InlineData("off")]
+    [InlineData("warn")]
+    public async Task Download_FirstFetch_NonBlockingModes_StillServeTheArtifact(string mode)
+    {
+        // Over-blocking guard: only the 'block' policy refuses. Under 'off' and 'warn' the same
+        // unverifiable package must still be served, with the verdict recorded for reporting.
+        await EnableAnonPullAsync();
+        await SeedRpmRegistryAsync();
+        await SetVerifyRpmSignaturesAsync(mode);
+        var (stubProxy, filename, bytes) = SeedUnsignedRpm();
+        await _blobs.PutAsync(BlobKeys.Proxy(Sha256Hex(bytes)), new MemoryStream(bytes), default);
+
+        var ctl = BuildController(proxy: stubProxy, trustStore: TrustStoreWithAnchor(_orgId));
+
+        var result = await ctl.Download(filename, default);
+
+        var fsr = Assert.IsType<FileStreamResult>(result);
+        using var ms = new MemoryStream();
+        await fsr.FileStream.CopyToAsync(ms);
+        Assert.Equal(bytes, ms.ToArray());
+    }
+
+    [Fact]
+    public async Task Download_FirstFetch_ScansTheArtifact_SoVulnArmsHaveFactsToRead()
+    {
+        // The provenance arm is not the only one that never ran on first fetch: the OSV/malicious/
+        // KEV/EPSS/CVSS arms all fail open while vuln_checked_at is null, so without a synchronous
+        // first-fetch scan they could not fire on the request that installs the package.
+        await EnableAnonPullAsync();
+        await SeedRpmRegistryAsync();
+        var (stubProxy, filename, bytes) = SeedUnsignedRpm();
+        await _blobs.PutAsync(BlobKeys.Proxy(Sha256Hex(bytes)), new MemoryStream(bytes), default);
+
+        var ctl = BuildController(proxy: stubProxy);
+
+        var result = await ctl.Download(filename, default);
+        Assert.IsType<FileStreamResult>(result);
+
+        await using var conn = await _db.OpenAsync();
+        // xtenant: cache_artifact is the global plane, keyed by its own coordinate.
+        string? checkedAt = await conn.ExecuteScalarAsync<string?>(
+            "SELECT vuln_checked_at FROM cache_artifact WHERE ecosystem = 'rpm' AND name = 'tree'");
+        Assert.NotNull(checkedAt);
+    }
+
     [Fact]
     public async Task Download_LocalMiss_NonSeekableCacheStream_RecordsExactSizeNotZero()
     {
@@ -1166,7 +1416,9 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
 
     // ── Controller builder ────────────────────────────────────────────────────
 
-    private RpmController BuildController(IRpmUpstreamProxy? proxy = null, IBlobStore? cacheOverride = null)
+    private RpmController BuildController(
+        IRpmUpstreamProxy? proxy = null, IBlobStore? cacheOverride = null,
+        StubPerOrgTrustAnchorStore? trustStore = null)
     {
         var http = new DefaultHttpContext();
         http.Request.Scheme = "https";
@@ -1210,16 +1462,19 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
                 new MemoryCache(new MemoryCacheOptions()), MetadataCacheKeys.RpmMergedRepodata),
             LocalRepodataCache: new RenderedResponseCache<RpmLocalRepodataKey>(
                 new MemoryCache(new MemoryCacheOptions()), MetadataCacheKeys.RpmLocalRepodata),
+            Invalidation: Dependably.Tests.Infrastructure.TestMetadataInvalidation.Coordinator(),
             Time: TimeProvider.System,
             CacheRecorder: cacheRecorder,
             CacheArtifacts: cacheArtifacts,
             TenantAccess: tenantAccess,
-            // No trust anchors seeded — IsConfiguredForAsync returns false, provenance skipped.
+            // No trust anchors seeded by default — IsConfiguredForAsync returns false and
+            // provenance is skipped; tests that exercise the signature gate pass a seeded store.
             RpmProvenance: new Dependably.Protocol.Provenance.RpmProvenanceVerifier(
-                new StubPerOrgTrustAnchorStore(),
+                trustStore ?? new StubPerOrgTrustAnchorStore(),
                 Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.RpmProvenanceVerifier>.Instance),
             EdgeGuard: Dependably.Tests.Infrastructure.TestEdgeMode.DisabledPublishGuard(),
             BlockGate: Dependably.Tests.Infrastructure.TestBlockGate.Create(_db, TimeProvider.System),
+            Scanner: Dependably.Tests.Infrastructure.TestScanner.NoFindings(_db, TimeProvider.System),
             Staging: new Dependably.Infrastructure.StagingOptions(System.IO.Path.GetTempPath(), 0),
             Licenses: new LicenseRepository(_db, TimeProvider.System, TestNormalizers.License(_db)),
             UpstreamClient: upstreamClient,
@@ -1335,10 +1590,10 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
             return Task.FromResult(_resolution);
         }
 
-        public Task<bool> IsNegativelyCachedAsync(string path, CancellationToken ct)
+        public Task<bool> IsNegativelyCachedAsync(string upstreamBase, string path, CancellationToken ct)
             => Task.FromResult(_negativeCache);
 
-        public Task RecordNegativeAsync(string path, CancellationToken ct)
+        public Task RecordNegativeAsync(string upstreamBase, string path, CancellationToken ct)
         {
             NegativeRecorded = true;
             return Task.CompletedTask;

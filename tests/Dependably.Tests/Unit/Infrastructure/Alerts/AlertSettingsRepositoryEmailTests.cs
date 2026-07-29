@@ -204,4 +204,69 @@ public sealed class AlertSettingsRepositoryEmailTests : IAsyncLifetime
         Assert.Null(updated.EmailLastError);
         Assert.Equal("ok", updated.EmailLastStatus);
     }
+
+    // ── Cleartext-credential reporting ────────────────────────────────────────
+
+    /// <summary>
+    /// The saved settings report the finding on every read, from the real persisted row — the
+    /// operator who inherits a configuration never sees the save that introduced it.
+    /// </summary>
+    [Fact]
+    public async Task Get_ReportsCleartextCredentials_WhenOwnTransportUsesNoneWithCredentials()
+    {
+        using var ep = MakeProtector();
+        var settings = new AlertSettingsRepository(_db, ep, Clock);
+
+        await settings.UpdateEmailAsync("org1", BuildRequest() with { EmailSmtpSecurity = "none" });
+
+        var saved = await settings.GetAsync("org1");
+        Assert.True(saved.EmailSmtpCleartextCredentials);
+    }
+
+    /// <summary>Adversarial twin: an unauthenticated relay on security=none is not a finding.</summary>
+    [Fact]
+    public async Task Get_DoesNotReportCleartextCredentials_ForAnUnauthenticatedRelay()
+    {
+        using var ep = MakeProtector();
+        var settings = new AlertSettingsRepository(_db, ep, Clock);
+
+        await settings.UpdateEmailAsync("org1", BuildRequest(password: null) with
+        {
+            EmailSmtpSecurity = "none",
+            EmailSmtpUsername = null,
+        });
+
+        var saved = await settings.GetAsync("org1");
+        Assert.False(saved.EmailSmtpCleartextCredentials);
+    }
+
+    [Fact]
+    public async Task Get_DoesNotReportCleartextCredentials_WhenTheSessionIsProtected()
+    {
+        using var ep = MakeProtector();
+        var settings = new AlertSettingsRepository(_db, ep, Clock);
+
+        await settings.UpdateEmailAsync("org1", BuildRequest());
+
+        var saved = await settings.GetAsync("org1");
+        Assert.False(saved.EmailSmtpCleartextCredentials);
+    }
+
+    /// <summary>
+    /// While inheriting the instance transport the org's own columns are unused, so they cannot be
+    /// what puts credentials on the wire. Reporting stale columns as a live finding would send the
+    /// operator to fix a form that changes nothing.
+    /// </summary>
+    [Fact]
+    public async Task Get_DoesNotReportCleartextCredentials_WhileInheritingTheInstanceTransport()
+    {
+        using var ep = MakeProtector();
+        var settings = new AlertSettingsRepository(_db, ep, Clock);
+
+        await settings.UpdateEmailAsync("org1", BuildRequest() with { EmailSmtpSecurity = "none" });
+        Assert.True((await settings.GetAsync("org1")).EmailSmtpCleartextCredentials);
+
+        await settings.UpdateEmailAsync("org1", BuildRequest(inherit: true) with { EmailSmtpSecurity = "none" });
+        Assert.False((await settings.GetAsync("org1")).EmailSmtpCleartextCredentials);
+    }
 }

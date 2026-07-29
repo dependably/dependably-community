@@ -17,3 +17,8 @@ web/.vscode/
 docs/
 *.md
 .claude/
+
+# Local credential files — kept out of the build context entirely so a future
+# `COPY . .` cannot bake a registry token into a layer.
+.env
+.env.deploy

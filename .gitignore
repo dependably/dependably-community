@@ -1,12 +1,16 @@
 node_modules/
 **/bin/
 **/obj/
-# Local pre-commit tool cache (nuget-check installed via dotnet tool install --tool-path)
+# Local pre-commit tool cache (nucheck installed via dotnet tool install --tool-path)
 .dependably-tools/
 # Built Svelte output is generated into wwwroot/ — ignore everything except the
 # vendored Swagger UI bundle (checked in to replace the external CDN load).
 src/Dependably.Management/wwwroot/*
 !src/Dependably.Management/wwwroot/swagger/
+# Local registry/deploy credential files. Both are documented as gitignored;
+# keep them here (shared with every clone) rather than in .git/info/exclude,
+# which is machine-local and protects nobody else.
+.env
 .env.deploy
 dotnet-install.sh
 **/.DS_Store

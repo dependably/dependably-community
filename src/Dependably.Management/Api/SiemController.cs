@@ -26,6 +26,10 @@ namespace Dependably.Api;
 ///   GET /api/v1/siem/vulnerabilities/summary — vuln severity totals
 /// </summary>
 [ApiController]
+// authz-ok: no attribute by design, and not anonymous. Every action resolves auth by hand so one
+// surface can accept either a JWT session or an opaque API token carrying read:audit, and returns
+// an explicit Unauthorized otherwise. Omitting [AllowAnonymous] rather than adding it keeps
+// RouteScopeFilter, PasswordRotationGuard, and MfaEnrollmentGuard live for JWT-session callers.
 public sealed class SiemController : ControllerBase
 {
     // Maximum page size for SIEM event stream responses.

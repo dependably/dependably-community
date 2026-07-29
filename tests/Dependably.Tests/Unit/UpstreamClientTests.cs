@@ -396,9 +396,7 @@ public class UpstreamClientTests : IAsyncLifetime
     // content-key sibling StreamHashAndStoreByContentKeyAsync) never bounding the tenant's
     // storage quota, so an authenticated tenant could grow the cache plane without bound.
     // The gate weighs each fill against the tenant's live org_storage_bytes total — the same
-    // per-org ceiling hosted publish and OCI push enforce — rather than reserving onto the
-    // storage_used_bytes counter, which the shared cache plane has no way to pay back on
-    // eviction.
+    // per-org ceiling, read the same way, that hosted publish and OCI push enforce.
 
     private async Task<string> CreateOrgAsync(string slug = "acme")
     {
@@ -410,13 +408,8 @@ public class UpstreamClientTests : IAsyncLifetime
         return orgId;
     }
 
-    private async Task<long> ReadStorageUsedBytesAsync(string orgId)
-    {
-        await using var conn = await _db.OpenAsync();
-        return await conn.ExecuteScalarAsync<long>(
-            "SELECT COALESCE(storage_used_bytes, 0) FROM org_settings WHERE org_id = @orgId",
-            new { orgId });
-    }
+    private Task<long> ReadLiveStorageBytesAsync(string orgId)
+        => new OrgRepository(_db).GetLiveStorageBytesAsync(orgId);
 
     /// <summary>
     /// Records a proxy artefact on the cache plane exactly the way a completed proxy fetch does:
@@ -483,12 +476,12 @@ public class UpstreamClientTests : IAsyncLifetime
         Assert.Equal(1, handler.CallCount);
         Assert.Null(await store.GetAsync("blobs/quota-key"));
 
-        // Rejection must not have inflated the counter.
-        Assert.Equal(0, await ReadStorageUsedBytesAsync(orgId));
+        // A rejected fill attributes no bytes to the tenant.
+        Assert.Equal(0, await ReadLiveStorageBytesAsync(orgId));
     }
 
     [Fact]
-    public async Task GetOrFetchStreamAsync_ProxyMissUnderQuota_Succeeds_AndDoesNotRatchetTheCounter()
+    public async Task GetOrFetchStreamAsync_ProxyMissUnderQuota_Succeeds_AndAttributesNothingUntilRecorded()
     {
         string orgId = await CreateOrgAsync();
         var orgs = new OrgRepository(_db);
@@ -509,12 +502,12 @@ public class UpstreamClientTests : IAsyncLifetime
         Assert.False(isHit);
         Assert.Equal(data, await DrainAsync(stream));
 
-        // A proxy fill must leave storage_used_bytes alone. Charging it here would be an
-        // increment nothing pays back: eviction and retention delete the cache_artifact row the
-        // fill produced, and neither can decrement a counter for bytes a content-addressed,
-        // tenant-shared plane never attributed to one tenant. The fill's bytes are counted by
-        // org_storage_bytes via the cache_artifact + tenant_artifact_access rows instead.
-        Assert.Equal(0, await ReadStorageUsedBytesAsync(orgId));
+        // The fill itself attributes nothing: a tenant holds cache-plane bytes through the
+        // cache_artifact + tenant_artifact_access rows the caller records after this returns, and
+        // org_storage_bytes counts them from there. Charging the tenant at fill time instead would
+        // be an increment nothing pays back — eviction and retention delete those rows, and
+        // neither can reach back to undo a charge for content-addressed, tenant-shared bytes.
+        Assert.Equal(0, await ReadLiveStorageBytesAsync(orgId));
     }
 
     [Fact]
@@ -934,7 +927,7 @@ public class UpstreamClientTests : IAsyncLifetime
         Assert.Equal(orgId, ex.OrgId);
         string blobKey = BlobKeys.Proxy(Sha256Hex(data));
         Assert.Null(await store.GetAsync(blobKey));
-        Assert.Equal(0, await ReadStorageUsedBytesAsync(orgId));
+        Assert.Equal(0, await ReadLiveStorageBytesAsync(orgId));
     }
 
     [Fact]

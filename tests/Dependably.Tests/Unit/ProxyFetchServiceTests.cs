@@ -26,7 +26,9 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
 
     public async Task DisposeAsync() => await _db.DisposeAsync();
 
-    private ProxyFetchService Build(IBlobStore? blobOverride = null, IOsvSource? osvOverride = null, bool sourcePinningEnabled = false)
+    private ProxyFetchService Build(
+        IBlobStore? blobOverride = null, IOsvSource? osvOverride = null, bool sourcePinningEnabled = false,
+        IPerOrgTrustAnchorStore? anchors = null, bool acceptSha1Shasum = false)
     {
         var blobs = blobOverride ?? _blobs;
         var packages = new PackageRepository(_db);
@@ -36,20 +38,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
         var cfg = new ConfigurationBuilder().Build();
         // Default OSV stub: returns no advisories so the block gate has nothing to act on.
         // Tests that need a vulnerable version pass their own stub via osvOverride.
-        IOsvSource osv;
-        if (osvOverride is not null)
-        {
-            osv = osvOverride;
-        }
-        else
-        {
-            osv = Substitute.For<IOsvSource>();
-            osv.QueryAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
-                .Returns(Task.FromResult(new List<OsvAdvisory>()));
-            osv.QueryBatchAsync(Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>())
-                .Returns(call => Task.FromResult(
-                    call.Arg<IReadOnlyList<string>>().Select(_ => new List<OsvAdvisory>()).ToList()));
-        }
+        var osv = osvOverride ?? TestOsvSource.Create();
         var airGap = Substitute.For<IAirGapMode>();
         airGap.IsEnabled.Returns(false);
         airGap.DisabledJobs.Returns(new System.Collections.Generic.HashSet<string>());
@@ -66,14 +55,32 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
         var tenantAccess = new TenantArtifactAccessRepository(_db);
         var proxyVersions = new ProxyVersionRecorder(packages, audit, licenses, cacheArtifact,
             Substitute.For<IUpstreamLatestVersionResolver>(), NullLogger<ProxyVersionRecorder>.Instance);
-        var blockGate = Dependably.Tests.Infrastructure.TestBlockGate.Create(_db, TimeProvider.System);
+        var blockGate = Dependably.Tests.Infrastructure.TestBlockGate.Create(_db, TimeProvider.System, anchors);
         var cacheRecorder = new CacheAccessRecorder(cacheArtifact, tenantAccess,
             NullLogger<CacheAccessRecorder>.Instance, TimeProvider.System);
         return new ProxyFetchService(cacheRecorder, proxyVersions, cacheArtifact, tenantAccess, scanner, blockGate, audit, TimeProvider.System,
             new Dependably.Infrastructure.SourcePinRepository(_db, new Microsoft.Extensions.Configuration.ConfigurationBuilder()
                 .AddInMemoryCollection(new Dictionary<string, string?> { ["PROXY_SOURCE_PINNING"] = sourcePinningEnabled ? "true" : "false" })
-                .Build()));
+                .Build()),
+            new Dependably.Security.WeakAlgorithmAcceptance(
+                npmSha1Shasum: acceptSha1Shasum, apkSha1IndexSignatures: false, NullLogger.Instance));
     }
+
+    private static ProxyFetchRequest ChecksumRequest(BlobHandle blob, ChecksumSpec spec) =>
+        new(
+            OrgId: "o1", Ecosystem: "npm",
+            PackageName: "left-pad", PurlName: "left-pad",
+            Version: "1.0.0", Purl: "pkg:npm/left-pad@1.0.0",
+            File: "left-pad-1.0.0.tgz", Blob: blob,
+            ExtractLicenses: null,
+            UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
+            MaxOsvScoreTolerance: 10.0,
+            CacheAccess: new CacheAccess("o1", "npm", "left-pad", "1.0.0", "left-pad-1.0.0.tgz",
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact"),
+            UpstreamChecksum: spec);
+
+    private static string Sha1Hex(byte[] bytes) =>
+        Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(bytes)).ToLowerInvariant();
 
     private static async Task<BlobHandle> SeedBlobAsync(InMemoryBlobStore blobs, byte[] bytes)
     {
@@ -191,13 +198,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
         // no controller-level upstream harness): the synchronous scan links a high-score
         // advisory and BlockGateService refuses it on the very first fetch. Covers the
         // Blocked branch of RecordAndScanAsync that the clean-version test can't reach.
-        var osv = Substitute.For<IOsvSource>();
-        osv.QueryAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
-            .Returns(Task.FromResult(new List<OsvAdvisory>
-            {
-                new("GHSA-test-0001", ["CVE-2024-0001"], "critical RCE", "CRITICAL",
-                    CvssScore: 9.8, AffectedPackages: [], Published: null, Modified: null, IsHydrated: true),
-            }));
+        var osv = TestOsvSource.WithAdvisory(9.8);
         var svc = Build(osvOverride: osv);
 
         byte[] bytes = "malicious-artifact"u8.ToArray();
@@ -464,7 +465,11 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
     [Fact]
     public async Task RecordAndScanAsync_provenance_verified_records_and_persists_status()
     {
-        var svc = Build();
+        // A 'verified' verdict is only reachable for an org that has an anchor, so the store is
+        // seeded to match — otherwise verify=block is unbacked and refuses everything.
+        var anchors = new StubPerOrgTrustAnchorStore();
+        anchors.AddPresenceAnchor("o1", "npm");
+        var svc = Build(anchors: anchors);
 
         byte[] bytes = "signed-tarball"u8.ToArray();
         var blob = await SeedBlobAsync(_blobs, bytes);
@@ -490,6 +495,68 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             "WHERE ecosystem = 'npm' AND name = 'trusted' AND version = '1.0.0'");
         Assert.Equal("verified", prov.Status);
         Assert.Equal("SHA256:anchor", prov.Signer);
+    }
+
+    [Fact]
+    public async Task RecordAndScanAsync_provenance_block_without_trust_anchors_refuses_first_fetch()
+    {
+        // verify=block with an empty anchor set: the ecosystem handler short-circuits
+        // verification (nothing can verify), so every artifact arrives with a NULL status. That
+        // must refuse the first fetch, not adopt it into the catalogue with the gate inert.
+        var svc = Build(anchors: new StubPerOrgTrustAnchorStore());
+
+        byte[] bytes = "unbacked-policy-tarball"u8.ToArray();
+        var blob = await SeedBlobAsync(_blobs, bytes);
+        var result = await svc.RecordAndScanAsync(new ProxyFetchRequest(
+            OrgId: "o1", Ecosystem: "npm",
+            PackageName: "no-anchor", PurlName: "no-anchor",
+            Version: "1.0.0", Purl: "pkg:npm/no-anchor@1.0.0",
+            File: "no-anchor-1.0.0.tgz", Blob: blob,
+            ExtractLicenses: null,
+            UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
+            MaxOsvScoreTolerance: 10.0,
+            CacheAccess: new CacheAccess("o1", "npm", "no-anchor", "1.0.0", "no-anchor-1.0.0.tgz",
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact"),
+            ProvenanceStatus: null,
+            VerifyProvenanceMode: "block"));
+
+        Assert.Equal(BlockDecision.Blocked, result.Decision);
+
+        await using var conn = await _db.OpenAsync();
+        // Never adopted: the gate runs before the version and cache rows are written.
+        Assert.Equal(0, await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM cache_artifact WHERE name = 'no-anchor'"));
+        Assert.Equal(1, await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM activity WHERE event_type = 'blocked_provenance'"));
+    }
+
+    [Fact]
+    public async Task RecordAndScanAsync_provenance_off_without_trust_anchors_serves_normally()
+    {
+        // Adversarial twin: the unbacked-enforcement refusal is scoped to 'block'. A tenant that
+        // never enabled verification is unaffected by having no anchors.
+        var svc = Build(anchors: new StubPerOrgTrustAnchorStore());
+
+        byte[] bytes = "no-policy-tarball"u8.ToArray();
+        var blob = await SeedBlobAsync(_blobs, bytes);
+        var result = await svc.RecordAndScanAsync(new ProxyFetchRequest(
+            OrgId: "o1", Ecosystem: "npm",
+            PackageName: "no-policy", PurlName: "no-policy",
+            Version: "1.0.0", Purl: "pkg:npm/no-policy@1.0.0",
+            File: "no-policy-1.0.0.tgz", Blob: blob,
+            ExtractLicenses: null,
+            UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
+            MaxOsvScoreTolerance: 10.0,
+            CacheAccess: new CacheAccess("o1", "npm", "no-policy", "1.0.0", "no-policy-1.0.0.tgz",
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact"),
+            ProvenanceStatus: null,
+            VerifyProvenanceMode: "off"));
+
+        Assert.Equal(BlockDecision.Allowed, result.Decision);
+
+        await using var conn = await _db.OpenAsync();
+        Assert.Equal(1, await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM cache_artifact WHERE name = 'no-policy'"));
     }
 
     [Fact]
@@ -532,7 +599,12 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
     [Fact]
     public async Task RecordAndScanAsync_mixed_provenance_outcomes_blocks_only_unverified()
     {
-        var svc = Build();
+        // The org has an npm anchor, so verify=block is backed and the arm judges each version on
+        // its own verdict. (With no anchor the policy is unsatisfiable and every version is
+        // refused — asserted separately.)
+        var anchors = new StubPerOrgTrustAnchorStore();
+        anchors.AddPresenceAnchor("o1", "npm");
+        var svc = Build(anchors: anchors);
 
         var coords = new[]
         {
@@ -726,5 +798,228 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             => _inner.GetTotalSizeAsync(ct);
         public IAsyncEnumerable<BlobInfo> ListAsync(string prefix, CancellationToken ct = default)
             => _inner.ListAsync(prefix, ct);
+    }
+
+    // ── First-fetch / cache-hit gate symmetry ─────────────────────────────────
+
+    /// <summary>
+    /// A tenant that has manually blocked a proxy artifact must stay blocked when the cached blob
+    /// is later evicted and the request re-enters the fetch path.
+    ///
+    /// <para>
+    /// This is not a hypothetical sequence: eviction is routine, and every eviction turns a
+    /// cache-HIT (which reads manual_block_state through the per-tenant serve projection) back into
+    /// a fetch. The first-fetch gate used to read a tenant-blind projection whose ManualBlockState
+    /// was hardcoded to null, so the block silently stopped applying for exactly one request per
+    /// eviction — the one that goes to the machine actually installing the package.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task RecordAndScanAsync_honours_a_tenants_manual_block_when_the_blob_was_evicted()
+    {
+        var svc = Build();
+        byte[] bytes = "evicted-and-refetched"u8.ToArray();
+        var blob = await SeedBlobAsync(_blobs, bytes);
+
+        ProxyFetchRequest Request() => new(
+            OrgId: "o1", Ecosystem: "npm",
+            PackageName: "shady", PurlName: "shady",
+            Version: "1.0.0", Purl: "pkg:npm/shady@1.0.0",
+            File: "shady-1.0.0.tgz", Blob: blob,
+            ExtractLicenses: null,
+            UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
+            MaxOsvScoreTolerance: 10.0,
+            CacheAccess: new CacheAccess("o1", "npm", "shady", "1.0.0", "shady-1.0.0.tgz",
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact"));
+
+        // First fetch: nothing is blocked yet, so it serves and the cache-plane row appears.
+        Assert.Equal(BlockDecision.Allowed, (await svc.RecordAndScanAsync(Request())).Decision);
+
+        // The operator blocks it for their tenant — the same write the admin UI performs.
+        await using (var conn = await _db.OpenAsync())
+        {
+            int updated = await conn.ExecuteAsync(
+                """
+                UPDATE tenant_artifact_access SET manual_block_state = 'blocked'
+                WHERE org_id = 'o1' AND cache_artifact_id = (
+                    SELECT id FROM cache_artifact
+                    WHERE ecosystem = 'npm' AND name = 'shady' AND version = '1.0.0')
+                """);
+            Assert.Equal(1, updated);
+        }
+
+        // Blob evicted → the next request is a MISS and re-enters this path. It must still refuse.
+        var second = await svc.RecordAndScanAsync(Request());
+        Assert.Equal(BlockDecision.Blocked, second.Decision);
+    }
+
+    /// <summary>
+    /// The same argument for upstream withdrawal: an artifact marked revoked must not be re-served
+    /// by a post-eviction fetch under a 'block' policy, when a cache-HIT for it would be refused.
+    /// </summary>
+    [Fact]
+    public async Task RecordAndScanAsync_refuses_a_revoked_artifact_under_a_block_policy()
+    {
+        var svc = Build();
+        byte[] bytes = "withdrawn-upstream"u8.ToArray();
+        var blob = await SeedBlobAsync(_blobs, bytes);
+
+        ProxyFetchRequest Request() => new(
+            OrgId: "o1", Ecosystem: "npm",
+            PackageName: "gone", PurlName: "gone",
+            Version: "2.0.0", Purl: "pkg:npm/gone@2.0.0",
+            File: "gone-2.0.0.tgz", Blob: blob,
+            ExtractLicenses: null,
+            UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
+            MaxOsvScoreTolerance: 10.0,
+            CacheAccess: new CacheAccess("o1", "npm", "gone", "2.0.0", "gone-2.0.0.tgz",
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact"),
+            BlockRevokedMode: "block");
+
+        Assert.Equal(BlockDecision.Allowed, (await svc.RecordAndScanAsync(Request())).Decision);
+
+        await using (var conn = await _db.OpenAsync())
+        {
+            int updated = await conn.ExecuteAsync(
+                """
+                UPDATE cache_artifact SET revoked_at = '2026-01-01T00:00:00Z'
+                WHERE ecosystem = 'npm' AND name = 'gone' AND version = '2.0.0'
+                """);
+            Assert.Equal(1, updated);
+        }
+
+        Assert.Equal(BlockDecision.Blocked, (await svc.RecordAndScanAsync(Request())).Decision);
+    }
+
+    /// <summary>
+    /// Adversarial twin for both tests above: the same re-fetch with no manual block and no
+    /// revocation still serves. Without this, a change that simply refused every second fetch would
+    /// satisfy the two tests above and break the proxy.
+    /// </summary>
+    [Fact]
+    public async Task RecordAndScanAsync_still_serves_a_refetch_with_nothing_against_it()
+    {
+        var svc = Build();
+        byte[] bytes = "ordinary-refetch"u8.ToArray();
+        var blob = await SeedBlobAsync(_blobs, bytes);
+
+        ProxyFetchRequest Request() => new(
+            OrgId: "o1", Ecosystem: "npm",
+            PackageName: "fine", PurlName: "fine",
+            Version: "1.2.3", Purl: "pkg:npm/fine@1.2.3",
+            File: "fine-1.2.3.tgz", Blob: blob,
+            ExtractLicenses: null,
+            UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
+            MaxOsvScoreTolerance: 10.0,
+            CacheAccess: new CacheAccess("o1", "npm", "fine", "1.2.3", "fine-1.2.3.tgz",
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact"),
+            BlockRevokedMode: "block");
+
+        Assert.Equal(BlockDecision.Allowed, (await svc.RecordAndScanAsync(Request())).Decision);
+        Assert.Equal(BlockDecision.Allowed, (await svc.RecordAndScanAsync(Request())).Decision);
+    }
+
+    // ── SHA-1 npm shasum acceptance ──────────────────────────────────────────────
+
+    /// <summary>
+    /// A packument carrying only a hex SHA-1 <c>dist.shasum</c> is not an integrity verification
+    /// the registry is willing to make. With the opt-in off, cache admission ignores the spec
+    /// entirely: the artefact is admitted <b>unverified</b> — the same footing as an upstream
+    /// that publishes no digest at all — rather than the SHA-1 deciding admission.
+    /// </summary>
+    [Fact]
+    public async Task RecordAndScanAsync_sha1_shasum_is_not_a_verification_when_the_optin_is_off()
+    {
+        var svc = Build();
+        byte[] bytes = "sha1-only-tarball"u8.ToArray();
+        var blob = await SeedBlobAsync(_blobs, bytes);
+
+        // Deliberately the WRONG SHA-1. With the opt-in on this rejects; with it off the spec is
+        // never consulted, so admission proceeds.
+        var spec = new ChecksumSpec(ChecksumAlgorithm.Sha1, new string('a', 40));
+
+        var result = await svc.RecordAndScanAsync(ChecksumRequest(blob, spec));
+
+        Assert.Equal(BlockDecision.Allowed, result.Decision);
+    }
+
+    /// <summary>
+    /// Adversarial twin: with the opt-in on, the SHA-1 is the admission decision again and a
+    /// mismatch is refused. Without this, "ignore SHA-1 always" would satisfy the test above.
+    /// </summary>
+    [Fact]
+    public async Task RecordAndScanAsync_sha1_shasum_mismatch_is_refused_when_the_optin_is_on()
+    {
+        var svc = Build(acceptSha1Shasum: true);
+        byte[] bytes = "sha1-only-tarball"u8.ToArray();
+        var blob = await SeedBlobAsync(_blobs, bytes);
+        var spec = new ChecksumSpec(ChecksumAlgorithm.Sha1, new string('a', 40));
+
+        await Assert.ThrowsAsync<ChecksumException>(
+            () => svc.RecordAndScanAsync(ChecksumRequest(blob, spec)));
+    }
+
+    [Fact]
+    public async Task RecordAndScanAsync_sha1_shasum_match_is_admitted_when_the_optin_is_on()
+    {
+        var svc = Build(acceptSha1Shasum: true);
+        byte[] bytes = "sha1-only-tarball"u8.ToArray();
+        var blob = await SeedBlobAsync(_blobs, bytes);
+        var spec = new ChecksumSpec(ChecksumAlgorithm.Sha1, Sha1Hex(bytes));
+
+        var result = await svc.RecordAndScanAsync(ChecksumRequest(blob, spec));
+
+        Assert.Equal(BlockDecision.Allowed, result.Decision);
+    }
+
+    /// <summary>
+    /// The opt-in is scoped to SHA-1 alone. A well-formed sha512 SRI (the form npm publishes
+    /// today) and a SHA-256 spec both still decide admission in either posture — a mismatch is
+    /// refused whether or not the SHA-1 switch is set.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task RecordAndScanAsync_sha512_mismatch_is_refused_in_either_sha1_posture(bool acceptSha1)
+    {
+        var svc = Build(acceptSha1Shasum: acceptSha1);
+        byte[] bytes = "sri-tarball"u8.ToArray();
+        var blob = await SeedBlobAsync(_blobs, bytes);
+        string wrongSri = Convert.ToBase64String(
+            System.Security.Cryptography.SHA512.HashData("other-bytes"u8.ToArray()));
+
+        await Assert.ThrowsAsync<ChecksumException>(
+            () => svc.RecordAndScanAsync(
+                ChecksumRequest(blob, new ChecksumSpec(ChecksumAlgorithm.Sha512, wrongSri))));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task RecordAndScanAsync_sha512_match_is_admitted_in_either_sha1_posture(bool acceptSha1)
+    {
+        var svc = Build(acceptSha1Shasum: acceptSha1);
+        byte[] bytes = "sri-tarball"u8.ToArray();
+        var blob = await SeedBlobAsync(_blobs, bytes);
+        string sri = Convert.ToBase64String(System.Security.Cryptography.SHA512.HashData(bytes));
+
+        var result = await svc.RecordAndScanAsync(
+            ChecksumRequest(blob, new ChecksumSpec(ChecksumAlgorithm.Sha512, sri)));
+
+        Assert.Equal(BlockDecision.Allowed, result.Decision);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task RecordAndScanAsync_sha256_mismatch_is_refused_in_either_sha1_posture(bool acceptSha1)
+    {
+        var svc = Build(acceptSha1Shasum: acceptSha1);
+        byte[] bytes = "pypi-artifact"u8.ToArray();
+        var blob = await SeedBlobAsync(_blobs, bytes);
+
+        await Assert.ThrowsAsync<ChecksumException>(
+            () => svc.RecordAndScanAsync(
+                ChecksumRequest(blob, new ChecksumSpec(ChecksumAlgorithm.Sha256, new string('b', 64)))));
     }
 }

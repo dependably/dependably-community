@@ -110,7 +110,7 @@ public sealed class OrgAuthConfigControllerTests
                 {
                     org = b.PrimaryOrgId,
                     cert = SampleIdpCertBase64,
-                    now = s.Clock.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                    now = s.Clock.GetUtcNow().ToUtcIso(),
                 });
         }
 
@@ -326,7 +326,7 @@ public sealed class OrgAuthConfigControllerTests
 
         // "Recent" relative to the scenario's frozen clock — the controller compares
         // last_test_at against the same injected clock.
-        string recent = s.Clock.GetUtcNow().AddMinutes(-1).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string recent = s.Clock.GetUtcNow().AddMinutes(-1).ToUtcIso();
         await using (var conn = await b.Db.OpenAsync())
         {
             await conn.ExecuteAsync(
@@ -401,6 +401,51 @@ public sealed class OrgAuthConfigControllerTests
             CancellationToken.None);
         var obj = Assert.IsType<ObjectResult>(result);
         Assert.Equal(422, obj.StatusCode);
+    }
+
+    [Fact]
+    public async Task UploadMetadata_MalformedXml_ReturnsGenericKey_NotRawExceptionText()
+    {
+        // Non-well-formed XML makes XmlDocument.Load throw XmlException, whose message embeds
+        // parser detail (line/position, and potentially resolver/type internals). The controller
+        // must map any non-validation exception to the generic localized key rather than echoing
+        // ex.Message. Without the fix (catch (Exception ex) => detail = ex.Message) the Detail
+        // would be the raw XmlException text, so this exact-match assertion fails.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var result = await b.OrgAuthConfigController.UploadMetadata(
+            new UploadSamlMetadataRequest("<<<not-well-formed-xml"),
+            CancellationToken.None);
+        var obj = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(422, obj.StatusCode);
+        var problem = Assert.IsType<ProblemDetails>(obj.Value);
+        // EchoLocalizer returns the key verbatim, so the generic key surfaces as the detail.
+        Assert.Equal("error.saml.metadataInvalid", problem.Detail);
+    }
+
+    [Fact]
+    public async Task UploadMetadata_WellFormedButNotSaml_EchoesServerAuthoredValidationMessage()
+    {
+        // Well-formed XML missing the SAML elements throws InvalidOperationException with a
+        // constant, server-authored message ("Metadata is missing <EntityDescriptor>."), which is
+        // safe to echo — so the InvalidOperationException arm keeps returning the parser message,
+        // not the generic key. This guards that the fix did not over-suppress useful validation.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var result = await b.OrgAuthConfigController.UploadMetadata(
+            new UploadSamlMetadataRequest("<root/>"),
+            CancellationToken.None);
+        var obj = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(422, obj.StatusCode);
+        var problem = Assert.IsType<ProblemDetails>(obj.Value);
+        Assert.Contains("Metadata is missing", problem.Detail);
+        Assert.NotEqual("error.saml.metadataInvalid", problem.Detail);
     }
 
     [Fact]

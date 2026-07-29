@@ -58,6 +58,8 @@ public sealed class AuthController : ControllerBase
     /// On the apex (system_admin login), only forms is ever available.
     /// </summary>
     [HttpGet("methods")]
+    // authz-ok: pre-login probe — the login page must render before any credential exists.
+    // Returns only the resolved tenant's configured auth methods, no tenant-identifying data.
     [AllowAnonymous]
     [EnableRateLimiting("anon")]
     public async Task<IActionResult> Methods([FromServices] SamlConfigRepository samlConfig, CancellationToken ct)
@@ -89,6 +91,7 @@ public sealed class AuthController : ControllerBase
 
     /// <summary>POST /api/v1/auth/login</summary>
     [HttpPost("login")]
+    // authz-ok: first-factor login — the endpoint that mints the session, so it cannot require one.
     [AllowAnonymous]
     [EnableRateLimiting("login")]
     public async Task<IActionResult> Login(
@@ -235,6 +238,8 @@ public sealed class AuthController : ControllerBase
 
     /// <summary>POST /api/v1/auth/login/totp — step-2 TOTP or recovery-code submission</summary>
     [HttpPost("login/totp")]
+    // authz-ok: second-factor step of login. The bearer credential is the short-lived MFA
+    // challenge cookie issued by step 1, validated in the body; there is no session yet.
     [AllowAnonymous]
     [EnableRateLimiting("login")]
     public async Task<IActionResult> LoginTotp(
@@ -429,6 +434,8 @@ public sealed class AuthController : ControllerBase
 
     /// <summary>POST /api/v1/invites/accept — set password and create account from an invite link</summary>
     [HttpPost("/api/v1/invites/accept")]
+    // authz-ok: the invite token is the sole bearer credential — the account being created is
+    // precisely what does not exist yet, so no session can be required.
     [AllowAnonymous]
     [EnableRateLimiting("login")]
     public async Task<IActionResult> AcceptInvite([FromBody] AcceptInviteRequest req,
@@ -493,13 +500,27 @@ public sealed class AuthController : ControllerBase
     /// tenant is audited under <c>user.password_reset_requested</c> — matched and unmatched emails
     /// alike, distinguished by the boolean <c>detail.matched</c> — since an unmatched request is
     /// itself a security-recon signal worth a per-tenant record even though no email is sent.
+    ///
+    /// <para>
+    /// Two independent throttles guard the send. The endpoint's per-IP limiter bounds one caller
+    /// (collapsed to a /64 for IPv6, so a routed prefix is one budget); <see cref="AccountSendThrottle"/>
+    /// bounds sends to one TARGET account regardless of source, which is what stops a distributed
+    /// attacker spread over many prefixes from mail-bombing a single mailbox. The account budget is
+    /// consumed for every requested address, matched or not, so the work per request does not vary
+    /// with whether the address resolves — and a throttled request returns the same 202 as any
+    /// other, since a distinguishable rejection would be the enumeration oracle this whole endpoint
+    /// is shaped to avoid.
+    /// </para>
     /// </summary>
     [HttpPost("forgot-password")]
+    // authz-ok: self-serve reset request — reached by a user who cannot authenticate. Responds
+    // uniformly whether or not the email matched, so anonymity leaks no account existence.
     [AllowAnonymous]
     [EnableRateLimiting("invite")]
     public async Task<IActionResult> ForgotPassword(
         [FromBody] ForgotPasswordRequest req,
         [FromServices] PasswordResetTokenRepository resetTokens,
+        [FromServices] AccountSendThrottle sendThrottle,
         [FromServices] Dependably.Infrastructure.Mail.TransactionalEmailService mailer,
         CancellationToken ct)
     {
@@ -514,14 +535,23 @@ public sealed class AuthController : ControllerBase
             return NotFound();
         }
 
+        // Consumed before the account lookup so every request does the same work in the same order.
+        // The key is per (tenant, address), so one account running out of budget leaves every other
+        // account's budget untouched.
+        bool withinBudget = await sendThrottle.TryConsumeAsync(
+            LoginService.HashLockoutKey("tenant", ctx.TenantId, req.Email),
+            AccountSendThrottle.PurposePasswordReset, ct);
+
         string? userId = await _users.FindIdByEmailAsync(ctx.TenantId, req.Email, ct);
-        if (userId is not null)
+        bool linkIssued = false;
+        if (userId is not null && withinBudget)
         {
             string raw = await resetTokens.IssueAsync(userId, ctx.TenantId, ct);
             string resetLink = _urls.Absolute(HttpContext, $"/reset?token={raw}");
             // 30 minutes — kept in lockstep with PasswordResetTokenRepository's own expiry window.
             var expiresAt = _time.GetUtcNow().AddMinutes(30);
             mailer.EnqueuePasswordReset(req.Email, resetLink, expiresAt);
+            linkIssued = true;
         }
 
         // Single audit pseudonym, computed once, reused for both outcomes so the row stays
@@ -532,6 +562,10 @@ public sealed class AuthController : ControllerBase
             {
                 via = "self_serve_reset_link",
                 matched = userId is not null,
+                throttled = !withinBudget,
+                // Set inside the branch that actually mints and mails the link, so the row records
+                // what happened rather than restating the conditions that led there.
+                link_issued = linkIssued,
                 email_hash = emailHash,
                 realm = "tenant",
             }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
@@ -550,6 +584,8 @@ public sealed class AuthController : ControllerBase
     /// is still enforced on the freshly reset account.
     /// </summary>
     [HttpPost("reset-password")]
+    // authz-ok: the single-use reset token is the sole bearer credential; the caller has no
+    // session by construction. No auto-login, so MFA is still enforced afterwards.
     [AllowAnonymous]
     [EnableRateLimiting("login")]
     public async Task<IActionResult> ResetPassword(
@@ -593,6 +629,67 @@ public sealed class AuthController : ControllerBase
             sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return Ok(new { message = "Password reset." });
+    }
+
+    /// <summary>
+    /// POST /api/v1/auth/confirm-email-change — redeems the link mailed to the NEW address and
+    /// commits the rectification.
+    ///
+    /// The token is the sole credential, like <see cref="ResetPassword"/>: the caller is proving
+    /// possession of the destination mailbox, which is precisely the fact the change turns on, and
+    /// requiring a session as well would break the common case of confirming from a phone. The
+    /// change is a credential-class event, so it bumps token_version and revokes the user's API
+    /// tokens — every session issued to the old identity has to re-authenticate.
+    ///
+    /// The old mailbox is told after the fact. It just lost control of an account, and that is
+    /// exactly the signal that surfaces a hostile change to the person who can still act on it.
+    /// </summary>
+    [HttpPost("confirm-email-change")]
+    // authz-ok: the single-use change token is the sole bearer credential — the caller is proving
+    // control of the new mailbox and has no session by construction.
+    [AllowAnonymous]
+    [EnableRateLimiting("login")]
+    public async Task<IActionResult> ConfirmEmailChange(
+        [FromBody] ConfirmEmailChangeRequest req,
+        [FromServices] EmailChangeTokenRepository changeTokens,
+        [FromServices] Dependably.Infrastructure.Mail.TransactionalEmailService mailer,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(req.Token))
+        {
+            return BadRequest(new { detail = "Confirmation token is required." });
+        }
+
+        var consumed = await changeTokens.ConsumeAsync(req.Token, ct);
+        if (consumed is null)
+        {
+            return StatusCode(StatusCodes.Status410Gone,
+                new { detail = "Confirmation link is invalid, expired, or already used." });
+        }
+
+        long? newVersion = await _users.ApplyVerifiedEmailChangeAsync(consumed.UserId, consumed.NewEmail, ct);
+        if (newVersion is null)
+        {
+            // Claimed by someone else between the request and this redemption. The token is spent
+            // either way — the user asks again, against whatever the roster looks like now.
+            return Conflict(new { detail = "That address is already in use in this organization." });
+        }
+
+        // Notify the address that just lost the account. Uses the user's resolved language; the
+        // verification mail to the new address could not, since that mailbox had no account yet.
+        var userCtx = await _users.GetUserContextAsync(consumed.UserId, consumed.OrgId, ct);
+        string language = LanguageCodes.ResolveEffective(userCtx?.Language, userCtx?.TenantDefaultLanguage);
+        mailer.EnqueueEmailChanged(consumed.CurrentEmail, language, _time.GetUtcNow());
+
+        await _audit.LogAsync(action: "user.email_changed", orgId: consumed.OrgId, actorId: consumed.UserId,
+            detail: System.Text.Json.JsonSerializer.Serialize(new
+            {
+                via = "verified_change_link",
+                new_email = consumed.NewEmail,
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+
+        return Ok(new { message = "Email address updated." });
     }
 
     /// <summary>POST /api/v1/users/me/password — change password for the authenticated user</summary>
@@ -672,6 +769,11 @@ public sealed class AuthController : ControllerBase
 
     /// <summary>POST /api/v1/auth/logout</summary>
     [HttpPost("logout")]
+    // authz-ok: no attribute by design. Acts only on the caller's own session cookie (revoke +
+    // delete) and must still succeed when that cookie is expired, revoked, or corrupt, so
+    // requiring authentication would strand a user holding a dead session. Omitting
+    // [AllowAnonymous] rather than adding it keeps RouteScopeFilter and the rotation/MFA guards
+    // live for callers who DO present a valid session.
     public async Task<IActionResult> Logout(CancellationToken ct)
     {
         // Revoke the current session JWT before deleting the cookie
@@ -774,6 +876,14 @@ public sealed class AuthController : ControllerBase
             mfaEnrollmentRequired = ctx?.MfaEnrollmentRequired ?? false,
             language = resolvedLanguage,
             tenantDefaultLanguage = tenantDefault,
+            // The user's own override (null when inheriting) is reported separately from the
+            // resolved zone, so the profile UI can show "use organization default" as selected
+            // rather than pre-selecting the inherited zone by name and pinning it on next save.
+            timezone = ctx?.Timezone,
+            resolvedTimezone = TimeZoneCodes.ResolveEffective(ctx?.Timezone, ctx?.TenantDefaultTimezone),
+            tenantDefaultTimezone = string.IsNullOrEmpty(ctx?.TenantDefaultTimezone)
+                ? TimeZoneCodes.Default : ctx.TenantDefaultTimezone,
+            // utcformat-ok: session-profile JSON wire field, not a DB write.
             sessionExpiresAt = User.FindFirst("exp")?.Value is string expUnix
                 && long.TryParse(expUnix, out long exp)
                 ? DateTimeOffset.FromUnixTimeSeconds(exp).ToString("O")
@@ -817,6 +927,117 @@ public sealed class AuthController : ControllerBase
 
         return NoContent();
     }
+
+    /// <summary>
+    /// POST /api/v1/users/me/timezone — set (or clear) the authenticated user's display-timezone
+    /// override. An absent/empty value clears it, which is how "use the organization default" is
+    /// expressed: storing the matching zone by name would pin the user and silently ignore a
+    /// later change to that default.
+    /// </summary>
+    [HttpPost("/api/v1/users/me/timezone")]
+    [Authorize]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    public async Task<IActionResult> UpdateTimezone([FromBody] UpdateTimezoneRequest req, CancellationToken ct)
+    {
+        string? requested = string.IsNullOrWhiteSpace(req.Timezone) ? null : req.Timezone;
+        if (requested is not null && !TimeZoneCodes.IsSupported(requested))
+        {
+            return BadRequest(new { detail = $"Unrecognised timezone '{requested}'. Use an IANA zone name, e.g. 'America/Toronto'." });
+        }
+
+        string? sub = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
+            ?? User.FindFirst("sub")?.Value;
+        if (sub is null)
+        {
+            return Unauthorized();
+        }
+
+        string? orgId = User.FindFirst("org_id")?.Value;
+
+        await _users.UpdateTimezoneAsync(sub, requested, ct);
+
+        await _audit.LogAsync(
+            action: "user.timezone_changed",
+            orgId: orgId,
+            actorId: sub,
+            detail: System.Text.Json.JsonSerializer.Serialize(new { timezone = requested }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            ct: ct);
+
+        return NoContent();
+    }
+
+    /// <summary>
+    /// GET /api/v1/users/me/export — GDPR Art. 15 (right of access) / Art. 20 (portability). Returns
+    /// a structured, machine-readable JSON copy of the authenticated caller's own personal data,
+    /// aggregated across every table classified in
+    /// <see cref="Dependably.Infrastructure.Privacy.PersonalDataTables"/>.
+    /// <para>
+    /// Strictly self-scoped and BOLA-safe by construction: there is no user-id route parameter. The
+    /// subject is the principal's own <c>sub</c> and <c>tid</c>, so the endpoint cannot be pointed
+    /// at another user or another tenant. Every underlying query is filtered by that user id AND the
+    /// subject's org where the table is tenant-scoped. The export is audited (counts only, never the
+    /// exported PII) because obtaining a full copy of one's data is a security-relevant action.
+    /// </para>
+    /// </summary>
+    [HttpGet("/api/v1/users/me/export")]
+    [Authorize]
+    [EnableRateLimiting("login")]
+    public async Task<IActionResult> ExportMyData(
+        [FromServices] Dependably.Infrastructure.Privacy.PersonalDataExportRepository export,
+        CancellationToken ct)
+    {
+        string? sub = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
+            ?? User.FindFirst("sub")?.Value;
+        string? orgId = User.FindFirst("tid")?.Value ?? User.FindFirst("org_id")?.Value;
+        if (sub is null || orgId is null)
+        {
+            return Unauthorized();
+        }
+
+        // The subject's email lives on their own row, never in the session JWT — resolve it live.
+        // It anchors the invite-by-recipient rows and the login-attempts lockout pseudonym.
+        string? email = await _users.GetEmailAsync(sub, ct);
+        if (email is null)
+        {
+            // A valid session whose user row is gone (deleted mid-session): nothing to export.
+            return Unauthorized();
+        }
+
+        // login_attempts is keyed by the tenant-scoped lockout pseudonym, whose hash helper lives
+        // here in Management; compute it and hand the opaque key to the Core aggregator.
+        string loginAttemptKey = LoginService.HashLockoutKey("tenant", orgId, email);
+
+        var data = await export.ExportAsync(sub, orgId, email, loginAttemptKey, ct);
+
+        // Audit the export itself, recording only row COUNTS — never the exported personal data, so
+        // the audit trail does not itself become a second copy of the subject's PII in audit_log.detail.
+        await _audit.LogAsync(
+            action: "user.data_exported",
+            orgId: orgId,
+            actorId: sub,
+            actorKind: ActorKinds.User,
+            detail: System.Text.Json.JsonSerializer.Serialize(new
+            {
+                user_tokens = data.UserTokens.Count,
+                password_reset_tokens = data.PasswordResetTokens.Count,
+                email_change_tokens = data.EmailChangeTokens.Count,
+                external_identities = data.ExternalIdentities.Count,
+                mfa_trusted_devices = data.MfaTrustedDevices.Count,
+                banner_dismissals = data.BannerDismissals.Count,
+                invites_created = data.InvitesCreated.Count,
+                invites_received = data.InvitesReceived.Count,
+                audit_log = data.AuditLog.Count,
+                activity = data.Activity.Count,
+                audit_events = data.AuditEvents.Count,
+                login_attempts = data.LoginAttempts is null ? 0 : 1,
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(),
+            ct: ct);
+
+        // MVC's System.Text.Json formatter serializes camelCase (JsonSerializerDefaults.Web), which
+        // is the contract the SPA reads — the export DTO relies on that, no manual serialization.
+        return Ok(data);
+    }
 }
 
 public sealed record LoginRequest(string Email, string Password);
@@ -824,5 +1045,11 @@ public sealed record LoginTotpRequest(string Code, bool RememberDevice = false);
 public sealed record AcceptInviteRequest(string Token, string Password);
 public sealed record ChangePasswordRequest(string CurrentPassword, string NewPassword);
 public sealed record UpdateLanguageRequest(string Language);
+/// <summary>A null/empty Timezone clears the override, meaning "inherit the org default".</summary>
+public sealed record UpdateTimezoneRequest(string? Timezone);
 public sealed record ForgotPasswordRequest(string Email);
 public sealed record ResetPasswordRequest(string Token, string NewPassword);
+
+/// <summary>Body of POST /api/v1/auth/confirm-email-change — the one-shot token mailed to the
+/// address being moved to.</summary>
+public sealed record ConfirmEmailChangeRequest(string Token);

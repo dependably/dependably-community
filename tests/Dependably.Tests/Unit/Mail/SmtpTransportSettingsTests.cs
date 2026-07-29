@@ -157,4 +157,54 @@ public sealed class SmtpTransportSettingsTests
         Assert.Null(field);
         Assert.Null(key);
     }
+
+    // ── Cleartext-credential detection ─────────────────────────────────────────
+
+    [Fact]
+    public void SendsCredentialsInCleartext_True_WhenSecurityIsNoneAndCredentialsAreSet()
+    {
+        var sut = Build(security: "none");
+        Assert.True(sut.SendsCredentialsInCleartext);
+    }
+
+    /// <summary>
+    /// security=none on its own is a legitimate unauthenticated relay, not a finding. Reporting it
+    /// anyway would train operators to ignore the warning, which is how a real one gets missed.
+    /// </summary>
+    [Fact]
+    public void SendsCredentialsInCleartext_False_WhenSecurityIsNoneWithNoCredentials()
+    {
+        Assert.False(Build(security: "none", username: null, password: null).SendsCredentialsInCleartext);
+        Assert.False(Build(security: "none", username: "user", password: null).SendsCredentialsInCleartext);
+        Assert.False(Build(security: "none", username: null, password: "pass").SendsCredentialsInCleartext);
+        Assert.False(Build(security: "none", username: "   ", password: "pass").SendsCredentialsInCleartext);
+    }
+
+    [Theory]
+    [InlineData("starttls")]
+    [InlineData("ssl")]
+    public void SendsCredentialsInCleartext_False_WhenTheSessionIsProtected(string security)
+    {
+        Assert.False(Build(security: security).SendsCredentialsInCleartext);
+    }
+
+    /// <summary>
+    /// The stored security mode is lowercased on write, but nothing stops an older row or a direct
+    /// DB edit from carrying "None" — a case-sensitive check would silently miss those.
+    /// </summary>
+    [Fact]
+    public void SendsCredentialsInCleartext_IsCaseInsensitiveOnTheSecurityMode()
+    {
+        Assert.True(Build(security: "NONE").SendsCredentialsInCleartext);
+        Assert.True(SmtpTransportSettings.SendsCredentialsInCleartextWhen("None", "user", hasPassword: true));
+    }
+
+    [Fact]
+    public void SendsCredentialsInCleartextWhen_MatchesTheInstanceProperty()
+    {
+        Assert.True(SmtpTransportSettings.SendsCredentialsInCleartextWhen("none", "user", hasPassword: true));
+        Assert.False(SmtpTransportSettings.SendsCredentialsInCleartextWhen("none", "user", hasPassword: false));
+        Assert.False(SmtpTransportSettings.SendsCredentialsInCleartextWhen("starttls", "user", hasPassword: true));
+        Assert.False(SmtpTransportSettings.SendsCredentialsInCleartextWhen(null, "user", hasPassword: true));
+    }
 }

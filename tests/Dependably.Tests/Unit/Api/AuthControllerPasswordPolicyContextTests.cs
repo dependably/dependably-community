@@ -80,7 +80,7 @@ public sealed class AuthControllerPasswordPolicyContextTests : IAsyncLifetime
         var controller = BuildController(out var invites);
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, "acme");
         string ownerId = await UserSeeder.InsertAsync(_fixture.Store, orgId, "owner@acme.test", role: "owner");
-        var (rawToken, _) = await invites.CreateAsync(orgId, "invitee@acme.test", ownerId, role: "member");
+        var (rawToken, _) = (await invites.CreateAsync(orgId, "invitee@acme.test", ownerId, role: "member"))!;
 
         // High zxcvbn entropy (score 4/4 in isolation) but contains the org's own slug "acme" —
         // only the context-dictionary check (fed by the tenant slug) can reject this.

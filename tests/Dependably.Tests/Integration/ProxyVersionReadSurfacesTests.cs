@@ -201,8 +201,10 @@ public sealed class ProxyVersionReadSurfacesTests : IClassFixture<DependablyFact
             ? bv.GetString() : null;
         Assert.Equal(uploadedVersion, latestBefore);
 
-        // Seed a global-plane proxy entry for the newer version (seeded after push
-        // so first_cached_at > uploaded version's created_at).
+        // Seed a global-plane proxy entry for the newer version. NpmSharedHelpers.ComputeLazyLatest
+        // resolves "latest" by SemVer precedence first (3.0.0 > 1.0.0), falling back to CreatedAt
+        // only when SemVer parsing ties or fails — so the proxy version wins regardless of which
+        // side of the second boundary its first_cached_at happens to land on.
         await SeedGlobalPlaneEntryAsync(defaultOrgId, "npm", name, newerProxyVersion, filename);
 
         // After seeding: lazy-latest across combined versions must resolve to the proxy version.
@@ -290,8 +292,10 @@ public sealed class ProxyVersionReadSurfacesTests : IClassFixture<DependablyFact
             Assert.Contains(uploadedVersion, allVersions);
             Assert.Contains(proxyVersion, allVersions);
 
-            // The 'version' field reflects the latest (most recently created) version.
-            // The proxy version was seeded after the uploaded one, so it should be latest.
+            // The 'version' field reflects SemVer precedence (VersionPrecedenceResolver,
+            // mirroring npm's NpmSharedHelpers.ComputeLazyLatest), with CreatedAt only a
+            // tie-break: 5.0.0 outranks 1.0.0 regardless of which wall-clock second either
+            // write's CreatedAt/first_cached_at lands in, so no back-dating is needed here.
             Assert.Equal(proxyVersion, afterPackage.GetProperty("version").GetString());
         }
         finally
@@ -457,7 +461,11 @@ public sealed class ProxyVersionReadSurfacesTests : IClassFixture<DependablyFact
             Assert.True(afterCrate.ValueKind != JsonValueKind.Undefined,
                 "Crate should still appear in search after seeding proxy version.");
 
-            // Mixed partial-failure: max_version now reflects the newer global-plane proxy version.
+            // Mixed partial-failure: max_version now reflects the newer global-plane proxy
+            // version. CargoController.ResolveMaxVersionAsync resolves by SemVer precedence
+            // (VersionPrecedenceResolver) — 9.0.0 outranks 0.1.0 regardless of which wall-clock
+            // second either write's CreatedAt/first_cached_at lands in, so no back-dating is
+            // needed here.
             Assert.Equal(newerProxyVersion, afterCrate.GetProperty("max_version").GetString());
         }
         finally

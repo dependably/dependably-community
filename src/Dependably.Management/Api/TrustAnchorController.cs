@@ -17,10 +17,12 @@ namespace Dependably.Api;
 /// over the API: no response — neither the list nor the add-confirmation entry — returns
 /// <c>material</c>; the derived <c>key_id</c> is what surfaces for display.
 ///
-/// Per-ecosystem validators are registered in <see cref="EcosystemValidators"/>. RPM is the
-/// reference implementation: parses the material as an OpenPGP public key ring at insert time
-/// and derives <c>key_id</c> from the first key's fingerprint. Each sibling ecosystem adds
-/// its own arm to that dictionary.
+/// The accepted <c>(ecosystem, anchor_kind)</c> pairs are
+/// <see cref="Dependably.Infrastructure.TrustAnchorPairs.Registered"/>; the material validator
+/// behind each pair is registered in <see cref="EcosystemValidators"/>. RPM is the reference
+/// implementation: parses the material as an OpenPGP public key ring at insert time and derives
+/// <c>key_id</c> from the first key's fingerprint. Each sibling ecosystem adds its own arm to
+/// that dictionary and its pair to the shared set.
 /// </summary>
 [ApiController]
 [Authorize]
@@ -55,10 +57,13 @@ public sealed class TrustAnchorController : OrgScopedControllerBase
     // in the key_id column; callers may also supply a keyId override in the request which
     // takes precedence for display-only purposes.
     //
-    // Keyed by (ecosystem, anchorKind). Add an arm here when a new ecosystem lands its
-    // reference implementation. Ecosystems without a registered validator skip material
-    // validation at insert time (future: tighten this as each ecosystem lands).
-    private static readonly Dictionary<(string Ecosystem, string AnchorKind), Func<string, ILogger, (string? KeyId, string? Error)>>
+    // Keyed by (ecosystem, anchorKind). The accepted pair set itself lives in
+    // TrustAnchorPairs.Registered, which the audit surfaces read too, so the insert gate and the
+    // "this stored row was never validated" report cannot disagree. This dictionary supplies the
+    // validator behind each of those pairs and is pinned to cover exactly that set by
+    // TrustAnchorPairsTests. Add an arm here — and the matching pair there — when a new ecosystem
+    // lands its reference implementation.
+    internal static readonly Dictionary<(string Ecosystem, string AnchorKind), Func<string, ILogger, (string? KeyId, string? Error)>>
         EcosystemValidators = new()
         {
             [("rpm", "pgp")] = ValidateRpmPgpMaterial,
@@ -254,6 +259,20 @@ public sealed class TrustAnchorController : OrgScopedControllerBase
             return _problems.ValidationErrorActionKey("anchorKind", "error.common.mustBeOneOf", string.Join(", ", TrustAnchorRepository.AllowedAnchorKinds));
         }
 
+        // Reject any (ecosystem, anchorKind) combination outside TrustAnchorPairs.Registered
+        // before any material handling. An unregistered pair has no material validator, so
+        // accepting one stores arbitrary bytes as a signature trust root — and, for the five
+        // ecosystems whose IsConfiguredFor check tests only for row presence, makes a
+        // verify_*_signatures='block' policy read as backed while nothing can verify.
+        // Every ecosystem in TrustAnchorRepository.SupportedEcosystems has at least one
+        // registered anchorKind, so the allowed-list below is never empty for a valid ecosystem.
+        if (!TrustAnchorPairs.IsRegistered(ecosystem, anchorKind))
+        {
+            return _problems.ValidationErrorActionKey(
+                "anchorKind", "error.trustAnchor.unsupportedAnchorKindForEcosystem",
+                anchorKind, ecosystem, string.Join(", ", TrustAnchorPairs.AnchorKindsFor(ecosystem)));
+        }
+
         string? material = req.Material?.Trim();
         if (string.IsNullOrEmpty(material))
         {
@@ -277,18 +296,35 @@ public sealed class TrustAnchorController : OrgScopedControllerBase
             material = normalized!;
         }
 
-        // Run per-ecosystem material validation when a validator is registered for this
-        // (ecosystem, anchorKind) pair. The validator parses the material, rejects invalid
-        // content with a 422-style 400, and derives the key_id (e.g. PGP fingerprint).
+        // Run per-ecosystem material validation. The validator parses the material, rejects
+        // invalid content with a 422-style 400, and derives the key_id (e.g. PGP fingerprint).
         // The caller-supplied keyId overrides the derived one when both are present.
-        if (EcosystemValidators.TryGetValue((ecosystem, anchorKind), out var validate))
+        //
+        // A registered pair always has a validator (TrustAnchorPairsTests pins the two sets
+        // equal). An absent one denies rather than falling through, so a pair added to the
+        // shared set without its validator can never store unvalidated material.
+        if (!EcosystemValidators.TryGetValue((ecosystem, anchorKind), out var validate))
         {
-            var (derivedKeyId, validationError) = validate(material, _logger);
-            if (validationError is not null)
-            {
-                return _problems.ValidationErrorAction("material", validationError);
-            }
-            keyId ??= derivedKeyId;
+            return _problems.ValidationErrorActionKey(
+                "anchorKind", "error.trustAnchor.unsupportedAnchorKindForEcosystem",
+                anchorKind, ecosystem, string.Join(", ", TrustAnchorPairs.AnchorKindsFor(ecosystem)));
+        }
+
+        var (derivedKeyId, validationError) = validate(material, _logger);
+        if (validationError is not null)
+        {
+            return _problems.ValidationErrorAction("material", validationError);
+        }
+        keyId ??= derivedKeyId;
+
+        // Minimum-strength floor, applied per anchor_kind once the material is known to parse.
+        // A trust anchor bounds the strength of every signature verdict derived from it, so the
+        // floor is a hard one rather than an opt-in — and it is enforced here, at import, where
+        // the operator is present to act on the rejection. Anchors already stored keep verifying.
+        string? strengthError = TrustAnchorKeyStrength.Validate(anchorKind, material);
+        if (strengthError is not null)
+        {
+            return _problems.ValidationErrorAction("material", strengthError);
         }
 
         var entry = await _anchors.AddAsync(

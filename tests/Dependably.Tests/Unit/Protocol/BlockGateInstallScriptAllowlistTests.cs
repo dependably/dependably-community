@@ -44,6 +44,7 @@ public sealed class BlockGateInstallScriptAllowlistTests : IClassFixture<InMemor
             new AlertService(new AlertRepository(_fixture.Store, _clock), new NoOpAlertNotifier(), NullLogger<AlertService>.Instance),
             _allowlistSvc,
             new LicenseRepository(_fixture.Store, _clock, new LicenseNormalizer(_fixture.Store, NullLogger<LicenseNormalizer>.Instance)),
+            new StubPerOrgTrustAnchorStore(),
             NullLogger<BlockGateService>.Instance,
             _clock);
     }

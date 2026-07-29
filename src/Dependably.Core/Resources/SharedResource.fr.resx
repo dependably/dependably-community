@@ -42,6 +42,12 @@
   <data name="error.serviceUnavailable.title" xml:space="preserve">
     <value>Service indisponible</value>
   </data>
+  <data name="error.internal.title" xml:space="preserve">
+    <value>Erreur interne du serveur</value>
+  </data>
+  <data name="error.internal.detail" xml:space="preserve">
+    <value>La requête n'a pas pu aboutir en raison d'une erreur inattendue du serveur. L'incident a été journalisé ; indiquez l'identifiant de corrélation lors de son signalement.</value>
+  </data>
   <data name="error.org.notFound" xml:space="preserve">
     <value>Organisation introuvable.</value>
   </data>
@@ -68,6 +74,12 @@
   </data>
   <data name="error.invite.emailRequired" xml:space="preserve">
     <value>L'adresse courriel est obligatoire.</value>
+  </data>
+  <data name="error.invite.emailInvalid" xml:space="preserve">
+    <value>Saisissez une adresse courriel valide.</value>
+  </data>
+  <data name="error.invite.duplicatePending" xml:space="preserve">
+    <value>Une invitation pour cette adresse courriel est déjà en attente. Annulez-la avant d'en envoyer une nouvelle.</value>
   </data>
   <data name="error.member.roleInvalid" xml:space="preserve">
     <value>Le rôle doit être « member », « admin », « owner » ou « auditor ».</value>
@@ -126,8 +138,23 @@
   <data name="error.common.mustBeOneOf" xml:space="preserve">
     <value>Doit être l'une des valeurs suivantes : {0}.</value>
   </data>
+  <data name="error.nameGrant.nameRequired" xml:space="preserve">
+    <value>name est obligatoire.</value>
+  </data>
+  <data name="error.nameGrant.granteeIdRequired" xml:space="preserve">
+    <value>granteeId est obligatoire.</value>
+  </data>
+  <data name="error.nameGrant.granteeUnknown" xml:space="preserve">
+    <value>granteeId ne désigne aucun utilisateur ni jeton de service de cette organisation.</value>
+  </data>
+  <data name="error.nameGrant.nameNotBound" xml:space="preserve">
+    <value>Aucun éditeur n'est lié à ce nom de paquet dans cette organisation ; une autorisation de copublication n'aurait donc aucun effet.</value>
+  </data>
   <data name="error.license.modeInvalid" xml:space="preserve">
     <value>Le mode doit être « off », « warn » ou « block ».</value>
+  </data>
+  <data name="error.license.publishModeInvalid" xml:space="preserve">
+    <value>Le mode de publication doit être « off », « warn » ou « block ».</value>
   </data>
   <data name="error.license.spdxRequired" xml:space="preserve">
     <value>L'identifiant SPDX est obligatoire.</value>
@@ -152,6 +179,9 @@
   </data>
   <data name="error.saml.certificateInvalid" xml:space="preserve">
     <value>Le certificat n'est pas un X.509 base64 valide.</value>
+  </data>
+  <data name="error.saml.metadataInvalid" xml:space="preserve">
+    <value>Les métadonnées XML de l'IdP n'ont pas pu être analysées.</value>
   </data>
   <data name="error.saml.formsLoginRequiresSaml" xml:space="preserve">
     <value>La connexion par formulaire ne peut être désactivée que lorsque SAML est activé.</value>
@@ -291,6 +321,9 @@
   <data name="error.trustAnchor.materialEmpty" xml:space="preserve">
     <value>material ne doit pas être vide.</value>
   </data>
+  <data name="error.trustAnchor.unsupportedAnchorKindForEcosystem" xml:space="preserve">
+    <value>anchorKind « {0} » n'est pas pris en charge pour ecosystem « {1} ». Valeurs anchorKind prises en charge pour {1} : {2}.</value>
+  </data>
   <data name="error.upstream.ociOnlyFields" xml:space="preserve">
     <value>Les champs prefixes et tokenEndpoint ne sont valides que pour ecosystem=oci.</value>
   </data>
@@ -299,6 +332,9 @@
   </data>
   <data name="error.upstream.httpsRequiredForAuth" xml:space="preserve">
     <value>Les amonts authentifiés requièrent https:// — une URL http:// en clair divulguerait les identifiants.</value>
+  </data>
+  <data name="error.upstream.httpsRequired" xml:space="preserve">
+    <value>Les amonts http:// en clair ne sont pas autorisés. Utilisez une URL https://, ou définissez Proxy:AllowInsecureUpstreams pour autoriser les amonts non sécurisés.</value>
   </data>
   <data name="error.upstream.masterKeyRequired" xml:space="preserve">
     <value>DEPENDABLY_MASTER_KEY doit être configurée pour stocker un secret d'amont au repos.</value>
@@ -402,6 +438,19 @@ Réinitialisez votre mot de passe à l'aide du lien ci-dessous. Le lien expire l
 {1}
 
 Si vous n'êtes pas à l'origine de cette demande, vous pouvez ignorer ce courriel — votre mot de passe ne sera pas modifié.
+</value>
+  </data>
+  <data name="email.emailChange.subject" xml:space="preserve">
+    <value>Confirmez votre nouvelle adresse courriel Dependably</value>
+  </data>
+  <data name="email.emailChange.body" xml:space="preserve">
+    <value>Une demande a été faite pour remplacer l'adresse courriel d'un compte Dependably par celle-ci.
+
+Confirmez le changement à l'aide du lien ci-dessous. Le lien expire le {0} UTC et ne peut être utilisé qu'une seule fois. D'ici là, le compte conserve son adresse actuelle et rien n'a changé.
+
+{1}
+
+Si vous ne vous attendiez pas à ce message, vous pouvez l'ignorer — aucun compte ne sera déplacé vers cette adresse.
 </value>
   </data>
   <data name="email.security.mfaEnabled.subject" xml:space="preserve">
@@ -523,5 +572,30 @@ Si vous n'êtes pas à l'origine de ce changement, contactez immédiatement votr
 
 Consultez cette alerte dans les paramètres Alertes de Dependably.
 </value>
+  </data>
+  <data name="email.security.emailChanged.subject" xml:space="preserve">
+    <value>Votre compte Dependably a été déplacé vers une autre adresse courriel</value>
+  </data>
+  <data name="email.security.emailChanged.body" xml:space="preserve">
+    <value>Le compte Dependably qui utilisait cette adresse courriel a été déplacé vers une autre adresse le {0} UTC.
+
+Cette adresse ne peut plus servir à se connecter ni recevoir de réinitialisation de mot de passe pour ce compte.
+
+Si vous êtes à l'origine de ce changement, aucune action n'est requise.
+
+Si vous n'êtes pas à l'origine de ce changement, contactez immédiatement votre administrateur — votre compte pourrait être compromis.
+</value>
+  </data>
+  <data name="error.user.emailManagedByIdp" xml:space="preserve">
+    <value>Ce compte se connecte via votre fournisseur d'identité, qui fait autorité sur son adresse courriel. Modifiez-la à cet endroit — une modification locale serait écrasée à la prochaine connexion.</value>
+  </data>
+  <data name="error.user.emailUnchanged" xml:space="preserve">
+    <value>Il s'agit déjà de l'adresse courriel de ce compte.</value>
+  </data>
+  <data name="error.user.emailTaken" xml:space="preserve">
+    <value>Cette adresse courriel est déjà utilisée par un autre membre de cette organisation.</value>
+  </data>
+  <data name="error.user.reauthRequired" xml:space="preserve">
+    <value>Saisissez votre mot de passe actuel pour modifier votre adresse courriel.</value>
   </data>
 </root>

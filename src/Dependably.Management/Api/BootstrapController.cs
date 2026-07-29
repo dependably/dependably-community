@@ -20,6 +20,9 @@ namespace Dependably.Api;
 /// to the frontend — they share the same multi-tenant UI surface.
 /// </summary>
 [ApiController]
+// authz-ok: the SPA's pre-login bootstrap probe — it must answer before any credential
+// exists. Returns deployment mode and apex host only; the tenant slug is withheld on
+// multi-mode tenant hits so it is not an existence oracle.
 [AllowAnonymous]
 [EnableRateLimiting("anon")]
 public sealed class BootstrapController : ControllerBase

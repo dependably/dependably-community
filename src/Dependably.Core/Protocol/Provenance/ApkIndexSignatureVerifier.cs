@@ -3,13 +3,17 @@ using System.Formats.Tar;
 using System.IO.Compression;
 using System.Security.Cryptography;
 using Dependably.Protocol;
+using Dependably.Security;
 
 namespace Dependably.Protocol.Provenance;
 
 /// <summary>Digest algorithm encoded in an apk <c>.SIGN.*</c> tar entry's filename prefix.</summary>
 public enum ApkSignatureAlgorithm
 {
-    /// <summary><c>.SIGN.RSA.&lt;keyname&gt;</c> — SHA-1 (the variant Alpine currently ships).</summary>
+    /// <summary>
+    /// <c>.SIGN.RSA.&lt;keyname&gt;</c> — SHA-1 (the variant Alpine currently ships). Verifies
+    /// only under the <c>Apk:AcceptSha1IndexSignatures</c> opt-in.
+    /// </summary>
     Sha1,
 
     /// <summary><c>.SIGN.RSA256.&lt;keyname&gt;</c> — SHA-256.</summary>
@@ -75,21 +79,38 @@ public static class ApkIndexSignatureVerifier
 
     /// <summary>
     /// Verifies <paramref name="apkindex"/> against the given trust anchors. Returns true iff
-    /// the index parses cleanly, carries at least one <c>.SIGN.*</c> entry, and at least one
-    /// entry verifies against at least one anchor. Never throws — malformed gzip/tar, a missing
-    /// signature member, zero anchors, or a truncated input all resolve to false.
+    /// the index parses cleanly, carries at least one <c>.SIGN.*</c> entry whose digest
+    /// algorithm is accepted, and at least one such entry verifies against at least one anchor.
+    /// Never throws — malformed gzip/tar, a missing signature member, zero anchors, or a
+    /// truncated input all resolve to false.
+    ///
+    /// <paramref name="weakAlgorithms"/> carries the operator's SHA-1 posture; null means the
+    /// default, which refuses SHA-1.
     /// </summary>
-    public static bool Verify(byte[] apkindex, IReadOnlyList<RSA> anchors, ILogger? logger = null)
-        => VerifyWithReason(apkindex, anchors, logger).Verified;
+    public static bool Verify(
+        byte[] apkindex, IReadOnlyList<RSA> anchors, ILogger? logger = null,
+        WeakAlgorithmAcceptance? weakAlgorithms = null)
+        => VerifyWithReason(apkindex, anchors, logger, weakAlgorithms).Verified;
 
     /// <summary>
     /// Same as <see cref="Verify"/> but also returns a machine-readable failure reason
     /// (<c>malformed_index</c> | <c>missing_signature</c> | <c>no_trusted_key</c> |
-    /// <c>bad_signature</c>) suitable for metrics tagging and logging. Reason is empty on success.
+    /// <c>weak_signature_algorithm</c> | <c>bad_signature</c>) suitable for metrics tagging and
+    /// logging. Reason is empty on success.
+    ///
+    /// <para>The digest algorithm of each signature entry is named by the index being verified —
+    /// the one place an untrusted input picks the hash for a security verdict. SHA-1
+    /// (<c>.SIGN.RSA.&lt;keyname&gt;</c>) therefore verifies only under the
+    /// <c>Apk:AcceptSha1IndexSignatures</c> opt-in; otherwise the entry is skipped and, when no
+    /// stronger entry verifies, the result is <c>weak_signature_algorithm</c> — a verification
+    /// failure, never a pass.</para>
     /// </summary>
     public static (bool Verified, string Reason) VerifyWithReason(
-        byte[] apkindex, IReadOnlyList<RSA> anchors, ILogger? logger = null)
+        byte[] apkindex, IReadOnlyList<RSA> anchors, ILogger? logger = null,
+        WeakAlgorithmAcceptance? weakAlgorithms = null)
     {
+        var acceptance = weakAlgorithms ?? WeakAlgorithmAcceptance.RefuseAll;
+
         var parsed = TryParse(apkindex, logger);
         if (parsed is null)
         {
@@ -106,15 +127,33 @@ public static class ApkIndexSignatureVerifier
             return (false, "no_trusted_key");
         }
 
+        bool refusedWeakEntry = false;
         foreach (var sig in parsed.Signatures)
         {
-            if (VerifiesAgainstAnyAnchor(parsed.SignedPayload, sig, anchors))
+            if (sig.Algorithm == ApkSignatureAlgorithm.Sha1 && !acceptance.ApkSha1IndexSignatures)
             {
-                return (true, "");
+                refusedWeakEntry = true;
+                acceptance.NoteApkSha1Refused();
+                continue;
             }
+
+            if (!VerifiesAgainstAnyAnchor(parsed.SignedPayload, sig, anchors))
+            {
+                continue;
+            }
+
+            if (sig.Algorithm == ApkSignatureAlgorithm.Sha1)
+            {
+                acceptance.NoteApkSha1Accepted();
+            }
+
+            return (true, "");
         }
 
-        return (false, "bad_signature");
+        // A refused SHA-1 entry is reported distinctly from a genuine signature mismatch so the
+        // operator sees "this index is signed with an algorithm we do not accept", not "the
+        // signature is wrong".
+        return (false, refusedWeakEntry ? "weak_signature_algorithm" : "bad_signature");
     }
 
     // Tries every trust anchor against one signature entry, returning true on the first that

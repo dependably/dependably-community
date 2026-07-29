@@ -74,7 +74,20 @@ public sealed class NuGetFlatContainerHandler(
             && !await reserved.IsReservedAsync(orgId, "nuget", normalizedId, ct)
             && await claimResolver.IsProxyFetchAllowedAsync(orgId, "nuget", normalizedId, ct))
         {
-            await MergeUpstreamVersionsAsync(httpContext, orgId, id, versionSet, ct);
+            var upstreamFailures = await MergeUpstreamVersionsAsync(httpContext, orgId, id, versionSet, ct);
+
+            // versionSet.Count == 0 already covers "no local row" AND "a local row exists but
+            // every version is yanked/blocked" — CollectLocalVersions only added a version here
+            // when it was servable, so an empty set means nothing servable came from either
+            // side. A genuine "every configured upstream confirmed absent (404/410)" outcome
+            // stays a 404 below (ThrowIfFailed no-ops when nothing failed non-cleanly); a
+            // non-clean failure (timeout, 5xx, refusal, ...) on at least one upstream must
+            // surface as a real upstream failure instead of the silent, non-retryable 404 that
+            // makes `dotnet restore` report NU1101 even when the package genuinely exists.
+            if (versionSet.Count == 0)
+            {
+                upstreamFailures.ThrowIfFailed();
+            }
         }
         else
         {
@@ -99,10 +112,16 @@ public sealed class NuGetFlatContainerHandler(
 
     // Fetch the upstream version list and merge. Short timeout so slow upstream responses don't
     // hang clients after they have what they need. Sets X-Upstream-Status header (ok|error|timeout)
-    // and logs at warning level when the merge fails so operators can see silent fallbacks.
-    private async Task MergeUpstreamVersionsAsync(
+    // and logs at warning level when the merge fails so operators can see silent fallbacks. The
+    // returned tracker distinguishes a genuine "every upstream confirmed absent (404/410)"
+    // outcome from "at least one upstream failed non-cleanly" — the caller decides whether that
+    // failure must surface as an UpstreamFetchFailedException, since only it knows whether any
+    // local version was already merged into versionSet.
+    private async Task<UpstreamMetadataFailureTracker> MergeUpstreamVersionsAsync(
         HttpContext httpContext, string orgId, string id, HashSet<string> versionSet, CancellationToken ct)
     {
+        var failures = new UpstreamMetadataFailureTracker();
+
         // Walk the org's configured upstreams in priority order; the first that returns a usable
         // version list wins and we stop. No configured upstream ⇒ proxying is disabled for nuget,
         // so the loop is skipped and the status reflects the unreachable/empty outcome.
@@ -119,6 +138,7 @@ public sealed class NuGetFlatContainerHandler(
                 var resp = await upstream.GetOrFetchMetadataAsync(url, source.AuthorizationHeader, linkedCts.Token);
                 if (!resp.IsSuccessStatusCode)
                 {
+                    failures.RecordHttpStatus(url, resp.StatusCode, source.AuthorizationHeader);
                     httpContext.Response.Headers["X-Upstream-Status"] = "error";
                     // RenderedCompactJsonFormatter JSON-encodes {Url}.
                     logger.LogWarning("NuGet upstream version-list fetch failed: {Status} for {Url}", resp.StatusCode, url);
@@ -128,6 +148,7 @@ public sealed class NuGetFlatContainerHandler(
                 using var doc = JsonDocument.Parse(resp.Body);
                 if (!doc.RootElement.TryGetProperty("versions", out var versionsElem))
                 {
+                    failures.RecordFailure(url);
                     httpContext.Response.Headers["X-Upstream-Status"] = "error";
                     // RenderedCompactJsonFormatter JSON-encodes {Url}.
                     logger.LogWarning("NuGet upstream version-list response missing 'versions' property for {Url}", url);
@@ -138,21 +159,25 @@ public sealed class NuGetFlatContainerHandler(
                         .Select(v => v.GetString())
                         .OfType<string>());
                 httpContext.Response.Headers["X-Upstream-Status"] = "ok";
-                return;
+                return failures;
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             {
+                failures.RecordFailure(url);
                 httpContext.Response.Headers["X-Upstream-Status"] = "timeout";
                 // RenderedCompactJsonFormatter JSON-encodes {Url}.
                 logger.LogWarning("NuGet upstream version-list fetch timed out for {Url}", url);
             }
             catch (Exception ex)
             {
+                failures.RecordFailure(url);
                 httpContext.Response.Headers["X-Upstream-Status"] = "error";
                 // RenderedCompactJsonFormatter JSON-encodes {Url}.
                 logger.LogWarning(ex, "NuGet upstream version-list fetch threw for {Url}", url);
             }
         }
+
+        return failures;
     }
 
     public async Task<IActionResult> FlatcontainerDownloadAsync(

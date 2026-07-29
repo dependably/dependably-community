@@ -85,6 +85,14 @@ export default defineConfig({
       FIRST_BOOT_ADMIN_PASSWORD: 'E2eTestPassword123!',
       LOGIN_RATE_LIMIT_PERMITS: '100',
       TOKEN_CREATE_RATE_LIMIT_PERMITS: '1000',
+      // The whole suite authenticates as one admin from one IP, so every browser session shares
+      // a single per-principal bucket — the shape RateLimitCeilings calls out as the bounded
+      // internal client (its other example being a DAST scan). At the 300/min default the budget
+      // is spent partway through the run and the next page load 429s, which surfaces as a login
+      // page that never becomes the app rather than as anything resembling a rate limit. High,
+      // not unlimited: a runaway loop in a spec should still be bounded.
+      MANAGEMENT_RATE_LIMIT_PERMITS: '100000',
+      ANON_RATE_LIMIT_PERMITS: '100000',
       DISABLE_BACKGROUND_JOBS: 'vuln-scan,vuln-rescan,deprecation-refresh,threat-feed',
     },
   } : undefined,

@@ -51,14 +51,24 @@ public sealed partial class OciController
         // xtenant: (digest, org_id) PK is tenant-scoped.
         await using var conn = await _svc.Db.OpenAsync(ct);
         // Dapper binds @digest/@orgId as parameters; SQL string is a constant literal.
-        var (MediaType, SizeBytes, BlobKey, Origin) = await conn.QuerySingleOrDefaultAsync<(string? MediaType, long SizeBytes, string? BlobKey, string? Origin)>(
-            "SELECT media_type AS MediaType, size_bytes AS SizeBytes, blob_key AS BlobKey, origin AS Origin " +
+        var (MediaType, SizeBytes, BlobKey, Origin, LicenseSpdx) = await conn.QuerySingleOrDefaultAsync<(string? MediaType, long SizeBytes, string? BlobKey, string? Origin, string? LicenseSpdx)>(
+            "SELECT media_type AS MediaType, size_bytes AS SizeBytes, blob_key AS BlobKey, origin AS Origin, license_spdx AS LicenseSpdx " +
             "FROM oci_blobs WHERE digest = @digest AND org_id = @orgId",
             new { digest, orgId });
 
         if (BlobKey is null)
         {
             return null;
+        }
+
+        string purl = $"pkg:oci/{name}@{digest}";
+
+        // Block gate before any bytes and before any URL. A manifest is reachable by its digest
+        // through this route too, so the license arm runs here on exactly the same terms it runs
+        // on the manifest route.
+        if (await EvaluateLicenseBlockAsync(orgId, purl, LicenseSpdx, token, ct) is { } blocked)
+        {
+            return blocked;
         }
 
         var blob = new ResolvedLocalBlob(BlobTierFor(Origin), BlobKey, SizeBytes, MediaType);
@@ -82,6 +92,16 @@ public sealed partial class OciController
             return ranged;
         }
 
+        // Presigned redirect, when enabled and the tier can sign. Reached only after the pull
+        // authorization, the digest validation, the tenant-scoped row lookup, and the block gate
+        // above have all passed — there is no earlier return that mints a URL, and a refusal on
+        // any of them leaves this code unreached.
+        var redirect = await TryRedirectToPresignedBlobAsync(blob, orgId, purl, token, ct);
+        if (redirect is not null)
+        {
+            return redirect;
+        }
+
         var stream = await blob.Tier.GetAsync(blob.BlobKey, ct);
         if (stream is null)
         {
@@ -97,10 +117,74 @@ public sealed partial class OciController
         Response.Headers.ETag = $"\"{digest}\"";
         Response.Headers.CacheControl = "private, max-age=31536000, immutable";
 
-        await _svc.Audit.LogActivityAsync(orgId, "oci", $"pkg:oci/{name}@{digest}", "download",
-            actorId: token?.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+        await RecordBlobDownloadAsync(orgId, purl, token, ct);
         return File(stream, MediaType!);
     }
+
+    /// <summary>
+    /// Answers a full (non-ranged) digest-addressed blob GET with a <c>307</c> to a short-lived
+    /// presigned URL, so the layer bytes move from the object store straight to the client.
+    /// Returns <c>null</c> whenever the read must be streamed instead — the feature is off, the
+    /// tier cannot sign, or the blob is no longer in the store.
+    ///
+    /// <para>
+    /// The Distribution Spec explicitly permits a registry to redirect a blob GET, and a blob is
+    /// addressed by its own digest, so the content behind the URL cannot change under the client
+    /// and the URL cannot go stale in the way a tag-addressed one would. Nothing mutable and
+    /// nothing not digest-addressed is redirected: manifests (tags move), tag lists, and the
+    /// upstream cache-miss path all keep streaming.
+    /// </para>
+    ///
+    /// <para>
+    /// <c>307</c> rather than <c>302</c> keeps the method and headers intact, which is what makes
+    /// a client's HEAD stay a HEAD. The redirect itself carries <c>no-store</c>: the response body
+    /// is a bearer credential with a minutes-or-less lifetime and must not be cached by a proxy or
+    /// a CDN, even though the blob it points at is immutable.
+    /// </para>
+    ///
+    /// <para>
+    /// The download is recorded before the redirect is written, so the activity row lands on
+    /// exactly the same terms as on the streaming path. What the redirect cannot observe is
+    /// whether the client then completed the transfer — that is true of a streamed response the
+    /// client abandons as well, but a redirect additionally means a replay of the URL inside its
+    /// TTL is invisible here. The short TTL is what bounds that, and it is why the feature is
+    /// opt-in.
+    /// </para>
+    /// </summary>
+    private async Task<IActionResult?> TryRedirectToPresignedBlobAsync(
+        ResolvedLocalBlob blob, string orgId, string purl, TokenRecord? token, CancellationToken ct)
+    {
+        if (_svc.Presign is not { Enabled: true } presign)
+        {
+            return null;
+        }
+
+        var url = await presign.TryCreateAsync(blob.Tier, blob.BlobKey, ct);
+        if (url is null)
+        {
+            return null;
+        }
+
+        // Content-Length was pre-set to the blob size for the streamed response; a 307 carries no
+        // body, so leaving it would put a body-size mismatch on the wire.
+        Response.Headers.Remove("Content-Length");
+        Response.ContentType = null;
+        Response.Headers.CacheControl = "private, no-store";
+
+        await RecordBlobDownloadAsync(orgId, purl, token, ct);
+        return new RedirectResult(url.Value.Url.ToString(), permanent: false, preserveMethod: true);
+    }
+
+    /// <summary>
+    /// The one download-telemetry call the local blob read path makes, so the streamed, ranged,
+    /// and redirected answers cannot drift apart. OCI stays out of the
+    /// <c>package_versions.download_count</c> counter for the reason spelled out on the manifest
+    /// path — one <c>docker pull</c> is a manifest GET plus N layer GETs — so this activity row is
+    /// the whole of it.
+    /// </summary>
+    private Task RecordBlobDownloadAsync(string orgId, string purl, TokenRecord? token, CancellationToken ct)
+        => _svc.Audit.LogActivityAsync(orgId, "oci", purl, "download",
+            actorId: token?.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
     /// <summary>
     /// Attempts a ranged (206) read of a locally stored blob. Returns <c>null</c> when the
@@ -134,8 +218,7 @@ public sealed partial class OciController
                 return StatusCode(StatusCodes.Status416RangeNotSatisfiable);
             }
 
-            await _svc.Audit.LogActivityAsync(orgId, "oci", $"pkg:oci/{name}@{digest}", "download",
-                actorId: token?.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+            await RecordBlobDownloadAsync(orgId, $"pkg:oci/{name}@{digest}", token, ct);
 
             Response.Headers.ContentRange = $"bytes {ranged.From}-{ranged.To}/{ranged.TotalLength}";
             Response.Headers["Content-Length"] = (ranged.To - ranged.From + 1).ToString();
@@ -152,6 +235,11 @@ public sealed partial class OciController
     /// upstream blobs fall back to a full 200 — the upstream fetch stores the blob
     /// locally, so a retry after the cache-miss uses the ranged path.
     /// </summary>
+    /// <remarks>
+    /// Air-gap is answered here rather than by the middleware, for the reason spelled out on
+    /// <c>AirGappedManifestMiss</c>: a 503 tells the client to retry for content that will never
+    /// arrive. A layer blob is pulled once per image, so the retry storm is per-layer.
+    /// </remarks>
     private async Task<IActionResult> ServeUpstreamBlobAsync(
         string orgId, string name, string digest, bool headOnly, TokenRecord? token, CancellationToken ct)
     {
@@ -159,7 +247,20 @@ public sealed partial class OciController
         {
             // HEAD: issue a HEAD request to upstream to confirm existence without
             // downloading the full blob body (which may be gigabytes for large layers).
-            var meta = await _svc.Upstream.FetchBlobMetadataAsync(orgId, name, digest, ct);
+            OciBlobMetadata? meta;
+            try
+            {
+                meta = await _svc.Upstream.FetchBlobMetadataAsync(orgId, name, digest, ct);
+            }
+            catch (AirGappedException)
+            {
+                return AirGappedBlobMiss(name, digest);
+            }
+            catch (Exception ex) when (IsUpstreamTransportFailure(ex, ct))
+            {
+                return UpstreamUnreachable(ex, name, digest);
+            }
+
             if (meta is null)
             {
                 return OciError(StatusCodes.Status404NotFound, OciErrorCode.BLOB_UNKNOWN, $"Blob unknown: {digest}");
@@ -174,7 +275,20 @@ public sealed partial class OciController
             return Ok();
         }
 
-        var upstreamResult = await _svc.Upstream.FetchBlobAsync(orgId, name, digest, ct);
+        OciBlobResult? upstreamResult;
+        try
+        {
+            upstreamResult = await _svc.Upstream.FetchBlobAsync(orgId, name, digest, ct);
+        }
+        catch (AirGappedException)
+        {
+            return AirGappedBlobMiss(name, digest);
+        }
+        catch (Exception ex) when (IsUpstreamTransportFailure(ex, ct))
+        {
+            return UpstreamUnreachable(ex, name, digest);
+        }
+
         if (upstreamResult is null)
         {
             return OciError(StatusCodes.Status404NotFound, OciErrorCode.BLOB_UNKNOWN, $"Blob unknown: {digest}");
@@ -190,6 +304,12 @@ public sealed partial class OciController
             actorId: token?.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         return File(upstreamResult.Content, upstreamResult.MediaType);
     }
+
+    /// <summary>The blob counterpart of <c>AirGappedManifestMiss</c> — see that method for why 404.</summary>
+    private static ObjectResult AirGappedBlobMiss(string name, string digest) =>
+        OciError(StatusCodes.Status404NotFound, OciErrorCode.BLOB_UNKNOWN,
+            $"Blob unknown: {digest}. This instance is air-gapped, so {name} was not fetched from "
+            + "an upstream registry; only locally held content is available.");
 
     /// <summary>
     /// Parses the <c>Range: bytes=from-to</c> header on the current request. Supports the
@@ -336,6 +456,15 @@ public sealed partial class OciController
             return OciError(StatusCodes.Status404NotFound, OciErrorCode.BLOB_UPLOAD_UNKNOWN, "Upload session unknown.");
         }
 
+        // The Distribution Spec makes Content-Range optional on PATCH but requires that, when it
+        // is sent, an out-of-order chunk is refused with 416. Checking it before the append keeps
+        // a client that resumes from the wrong offset from silently producing a blob that only
+        // fails to hash at finalize.
+        if (ValidateContentRange(session) is { } rangeError)
+        {
+            return rangeError;
+        }
+
         var (total, sizeError) = await AppendWithLimitAsync(orgId, session, ct);
         if (sizeError is not null)
         {
@@ -412,13 +541,27 @@ public sealed partial class OciController
     /// Streams the request body into the session and enforces the cumulative per-tenant OCI
     /// upload limit (chunked pushes can exceed it across requests even when each chunk's
     /// Content-Length is small). Aborts the session and returns a 413 on breach.
+    ///
+    /// A staging-continuity violation surfaces here as <see cref="OciUploadRangeException"/> and
+    /// becomes a 416 rather than propagating: the append never happened, so the session is intact
+    /// and resumable.
     /// </summary>
     private async Task<(long Total, IActionResult? Error)> AppendWithLimitAsync(
         string orgId, OciUploadSession session, CancellationToken ct)
     {
         var settings = await _svc.Orgs.GetSettingsAsync(orgId, ct);
         long limit = await _svc.Orgs.GetUploadLimitAsync(settings, "oci", ct);
-        long total = await _svc.Uploads.AppendChunkAsync(orgId, session, Request.Body, ct);
+
+        long total;
+        try
+        {
+            total = await _svc.Uploads.AppendChunkAsync(orgId, session, Request.Body, ct);
+        }
+        catch (OciUploadRangeException ex)
+        {
+            return (session.ReceivedBytes, RangeNotSatisfiable(ex));
+        }
+
         if (total > limit)
         {
             await _svc.Uploads.AbortUploadAsync(orgId, session, ct);
@@ -426,5 +569,64 @@ public sealed partial class OciController
                 $"Upload exceeds the oci upload limit of {limit} bytes."));
         }
         return (total, null);
+    }
+
+    /// <summary>
+    /// Validates a chunked PATCH's <c>Content-Range</c> against the session's recorded progress,
+    /// returning null when the chunk may proceed. That is the case when the header is absent — it
+    /// is optional per the Distribution Spec, and docker/containerd omit it — or when the chunk
+    /// starts exactly where the session left off.
+    ///
+    /// A header that cannot be parsed is passed rather than refused: the staging-continuity check
+    /// in <see cref="OciUploadService.AppendChunkAsync"/> is the authoritative guard, and it reads
+    /// the file the bytes actually land in rather than what the client claims about them.
+    /// </summary>
+    private IActionResult? ValidateContentRange(OciUploadSession session)
+    {
+        string? header = Request.Headers.ContentRange.FirstOrDefault();
+        if (string.IsNullOrWhiteSpace(header))
+        {
+            return null;
+        }
+
+        // OCI sends a bare "<start>-<end>", not RFC 7233's "bytes <start>-<end>/<total>"; accept
+        // the RFC-shaped spelling too rather than refusing a client that is being more correct
+        // than the spec requires.
+        var value = header.AsSpan().Trim();
+        if (value.StartsWith("bytes ", StringComparison.OrdinalIgnoreCase))
+        {
+            value = value["bytes ".Length..].Trim();
+        }
+
+        int slash = value.IndexOf('/');
+        if (slash >= 0)
+        {
+            value = value[..slash];
+        }
+
+        int dash = value.IndexOf('-');
+        return dash <= 0 || !long.TryParse(value[..dash], out long start) || start == session.ReceivedBytes
+            ? null
+            : RangeNotSatisfiable(new OciUploadRangeException(session.UploadId, session.ReceivedBytes, start));
+    }
+
+    /// <summary>
+    /// Renders a chunk-discontinuity refusal as 416 with the <c>Range</c> the session is actually
+    /// at, so a client (or an operator reading the log) can see where to resume instead of
+    /// discovering at finalize that the staged bytes hash to the wrong digest.
+    /// </summary>
+    private IActionResult RangeNotSatisfiable(OciUploadRangeException ex)
+    {
+        _logger.LogWarning(
+            "OCI chunk rejected for upload {UploadId}: session is at {ExpectedOffset} bytes, chunk presented {ActualOffset}. " +
+            "A missing staging file means the request reached a replica that does not own the session — check upload session affinity.",
+            ex.UploadId, ex.ExpectedOffset, ex.ActualOffset);
+
+        Response.Headers["Docker-Upload-UUID"] = ex.UploadId;
+        Response.Headers.Range = $"0-{(ex.ExpectedOffset > 0 ? ex.ExpectedOffset - 1 : 0)}";
+        return OciError(StatusCodes.Status416RangeNotSatisfiable, OciErrorCode.BLOB_UPLOAD_INVALID,
+            ex.ActualOffset is null
+                ? "Upload session has no staged content on this replica; chunked uploads require session affinity."
+                : $"Chunk is not contiguous with the upload; expected it to start at byte {ex.ExpectedOffset}.");
     }
 }

@@ -35,6 +35,25 @@ public sealed class AuditEmitter : IAuditEmitter
     private readonly OrgRepository _orgs;
     private readonly TimeProvider _time;
 
+    /// <summary>
+    /// When true, <c>source_ip</c> records the network rather than the host: <c>/24</c> for IPv4,
+    /// <c>/48</c> for IPv6. Off by default — attribution is what the trail is for, and the
+    /// trade-off against retention is the operator's to make. <c>AUDIT_TRUNCATE_IP</c>.
+    ///
+    /// Deliberately scoped to the audit write path only. Rate-limit partition keys aggregate for
+    /// an unrelated reason (bounding one subscriber's budget) at an unrelated prefix, and abuse
+    /// triage may still want full precision there — see
+    /// <see cref="Dependably.Security.IpAddressExtensions.NormalizeForRateLimit"/>.
+    /// </summary>
+    private readonly bool _truncateSourceIp;
+
+    /// <summary>
+    /// When false, no <c>user_agent</c> is recorded at all. A UA string is a browser/device
+    /// fingerprint with little forensic value beyond "which client", so a deployment that does not
+    /// want to hold one can stop holding it. On by default. <c>AUDIT_DISABLE_USER_AGENT</c>.
+    /// </summary>
+    private readonly bool _captureUserAgent;
+
     public AuditEmitter(
         AuditEventRepository repo,
         IHttpContextAccessor http,
@@ -48,6 +67,12 @@ public sealed class AuditEmitter : IAuditEmitter
         _http = http;
         _logger = logger;
         _resolverMode = (config["DEPLOYMENT_MODE"] ?? "single").Trim().ToLowerInvariant();
+        // Data-minimization knobs for the audit WRITE path. Both default to the attributing
+        // behaviour: an audit trail exists to answer "who, from where", and silently degrading
+        // that for every deployment would trade one compliance posture for another without the
+        // operator choosing. Turning either on is that choice — see the field docs.
+        _truncateSourceIp = ParseBool(config["AUDIT_TRUNCATE_IP"]);
+        _captureUserAgent = !ParseBool(config["AUDIT_DISABLE_USER_AGENT"]);
         _siemQueue = sp.GetService<SiemForwarderQueue>();
         _webhookSink = sp.GetService<IPackageEventSink>();
         _orgs = orgs;
@@ -74,8 +99,10 @@ public sealed class AuditEmitter : IAuditEmitter
             ActorType = actorType,
             ActorId = actorId,
             RequestId = ctx?.TraceIdentifier,
-            SourceIp = ctx.GetNormalizedRemoteIp(),
-            UserAgent = Truncate(ctx?.Request?.Headers.UserAgent.FirstOrDefault(), 512),
+            SourceIp = ResolveSourceIp(ctx),
+            UserAgent = _captureUserAgent
+                ? Truncate(ctx?.Request?.Headers.UserAgent.FirstOrDefault(), 512)
+                : null,
             Outcome = outcome,
             Payload = payloadJson,
             OccurredAt = _time.GetUtcNow()
@@ -170,6 +197,19 @@ public sealed class AuditEmitter : IAuditEmitter
     private static string? GetString(JsonElement root, string propertyName) =>
         root.TryGetProperty(propertyName, out var el) && el.ValueKind == JsonValueKind.String
             ? el.GetString() : null;
+
+    // Resolves the recorded source IP under the configured minimization posture.
+    private string? ResolveSourceIp(HttpContext? ctx) =>
+        _truncateSourceIp
+            ? IpAddressExtensions.NormalizeForAuditMinimization(ctx?.Connection?.RemoteIpAddress)
+            : ctx.GetNormalizedRemoteIp();
+
+    // Accepts the spellings an operator plausibly writes in a compose file.
+    private static bool ParseBool(string? value) =>
+        value is not null
+        && (value.Trim().Equals("true", StringComparison.OrdinalIgnoreCase)
+            || value.Trim() == "1"
+            || value.Trim().Equals("yes", StringComparison.OrdinalIgnoreCase));
 
     private static string? Truncate(string? s, int max)
     {

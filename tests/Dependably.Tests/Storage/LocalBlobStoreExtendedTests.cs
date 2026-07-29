@@ -36,6 +36,48 @@ public sealed class LocalBlobStoreExtendedTests : IDisposable
         }
     }
 
+    // ── Path confinement (#437 item 6) ──────────────────────────────────────────
+
+    [Theory]
+    [Trait("Category", "Unit")]
+    [InlineData("../escape.bin")]
+    [InlineData("../../etc/passwd")]
+    [InlineData("nested/../../escape.bin")]
+    public async Task PutAsync_KeyEscapingRoot_Throws(string key)
+    {
+        var store = new LocalBlobStore(_root);
+        using var data = new MemoryStream(new byte[] { 1, 2, 3 });
+
+        await Assert.ThrowsAsync<ArgumentException>(() => store.PutAsync(key, data));
+
+        // Adversarial confirmation: nothing was written above the root.
+        string parent = Directory.GetParent(_root)!.FullName;
+        Assert.False(File.Exists(Path.Combine(parent, "escape.bin")));
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
+    public async Task GetAsync_KeyEscapingRoot_Throws()
+    {
+        var store = new LocalBlobStore(_root);
+        await Assert.ThrowsAsync<ArgumentException>(() => store.GetAsync("../../../etc/hosts"));
+    }
+
+    [Fact]
+    [Trait("Category", "Unit")]
+    public async Task PutAsync_LegitimateNestedKey_Succeeds()
+    {
+        // Adversarial twin: a normal namespaced key with '/' separators still round-trips —
+        // the confinement check must not reject legitimate blob keys.
+        var store = new LocalBlobStore(_root);
+        using var data = new MemoryStream(new byte[] { 9, 8, 7 });
+
+        await store.PutAsync("proxy/ab/cd/deadbeef", data);
+
+        await using var read = await store.GetAsync("proxy/ab/cd/deadbeef");
+        Assert.NotNull(read);
+    }
+
     [Fact]
     [Trait("Category", "Unit")]
     public async Task GetTotalSizeAsync_WhenRootDirectoryRemovedAfterConstruction_ReturnsZero()

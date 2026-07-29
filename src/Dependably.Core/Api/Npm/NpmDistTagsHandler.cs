@@ -21,7 +21,7 @@ public sealed class NpmDistTagsHandler(
     TokenRepository tokens,
     AuditRepository audit,
     NpmDistTagRepository distTags,
-    RenderedResponseCache<NpmPackumentKey> cache,
+    MetadataInvalidationCoordinator invalidation,
     TimeProvider time,
     EdgePublishGuard edgeGuard)
 {
@@ -153,13 +153,25 @@ public sealed class NpmDistTagsHandler(
             return new NotFoundObjectResult(new ProblemDetails { Detail = $"Version '{version}' does not exist for package '{fullName}'.", Status = StatusCodes.Status404NotFound });
         }
 
+        // Refuse to point a dist-tag at a version that will never be served: a yanked version, or
+        // one an operator manually hard-blocked. Otherwise a publish:npm token could publish a new
+        // version, yank/block it, and still move `latest` to it — steering every `npm install` in
+        // the org at an artifact the download path 403s (or, pre-yank, the attacker's bytes).
+        if (ver.Yanked || string.Equals(ver.ManualBlockState, "blocked", StringComparison.Ordinal))
+        {
+            return new UnprocessableEntityObjectResult(new ProblemDetails
+            {
+                Detail = $"Version '{version}' is yanked or blocked and cannot be a dist-tag target.",
+                Status = StatusCodes.Status422UnprocessableEntity,
+            });
+        }
+
         await distTags.SetTagAsync(orgId, pkg.Id, tag, version, ct);
         await audit.LogActivityAsync(orgId, "npm", pkg.Name, "dist-tag.set", token.UserId,
             actorKind: token.ActorKind, sourceIp: httpContext.GetNormalizedRemoteIp(), ct: ct);
 
-        // Evict the cached packument so the updated dist-tag is visible immediately.
-        cache.Evict(new NpmPackumentKey(orgId, fullName));
-        cache.Evict(new NpmPackumentKey(orgId, fullName) { IsProxy = true });
+        // Invalidate the cached packument so the updated dist-tag is visible immediately.
+        invalidation.Invalidate(MetadataInvalidation.ForNpm(orgId, fullName));
 
         var result = new JsonObject { [tag] = version };
         return new JsonResult(result);
@@ -211,9 +223,8 @@ public sealed class NpmDistTagsHandler(
         await audit.LogActivityAsync(orgId, "npm", pkg.Name, "dist-tag.delete", token.UserId,
             actorKind: token.ActorKind, sourceIp: httpContext.GetNormalizedRemoteIp(), ct: ct);
 
-        // Evict the cached packument so the removed dist-tag is visible immediately.
-        cache.Evict(new NpmPackumentKey(orgId, fullName));
-        cache.Evict(new NpmPackumentKey(orgId, fullName) { IsProxy = true });
+        // Invalidate the cached packument so the removed dist-tag is visible immediately.
+        invalidation.Invalidate(MetadataInvalidation.ForNpm(orgId, fullName));
 
         return new NoContentResult();
     }

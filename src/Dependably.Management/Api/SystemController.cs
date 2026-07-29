@@ -3,6 +3,7 @@ using System.Text.Json;
 using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Health;
+using Dependably.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -427,6 +428,22 @@ public sealed partial class SystemController : ControllerBase
             string.IsNullOrWhiteSpace(email) ? null : email,
             string.IsNullOrWhiteSpace(tenantSlug) ? null : tenantSlug,
             limit, ct);
+
+        // Operator reads of tenant PII are the one class that otherwise leaves no trace: the two
+        // sibling write handlers on this controller audit, but this read did not — so after an
+        // operator-account compromise a tenant could not be told its roster was enumerated. Record
+        // the query parameters and result count (not the returned rows) so the trail exists without
+        // duplicating the PII into audit_log.detail.
+        string? actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+            ?? User.FindFirst("sub")?.Value;
+        var lookupDetail = new { email, tenantSlug, resultCount = items.Count };
+        await _audit.LogSystemAsync(
+            action: "system_admin.user_lookup",
+            actorId: actor,
+            detail: System.Text.Json.JsonSerializer.Serialize(lookupDetail, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(),
+            ct: ct);
+
         return Ok(new { items });
     }
 
@@ -554,7 +571,8 @@ public sealed partial class SystemController : ControllerBase
 
     /// <summary>
     /// GET /api/v1/system/health — instance health rollup. Dependencies (DB · blob store · Redis),
-    /// background-job statuses, staging-disk state, and a count of tenants needing attention.
+    /// background-job statuses, staging-disk state, a count of tenants needing attention, and a
+    /// count of suspect trust anchors (drill down at <c>GET /api/v1/system/trust-anchors/suspect</c>).
     /// System-admin + apex access enforced by <see cref="Dependably.Security.RouteScopeFilter"/>.
     /// </summary>
     [HttpGet("health")]
@@ -590,6 +608,10 @@ public sealed partial class SystemController : ControllerBase
             tenants = new
             {
                 needAttention = report.Tenants.NeedAttention,
+            },
+            trustAnchors = new
+            {
+                suspectCount = report.TrustAnchors.SuspectCount,
             },
             staleSnapshotCount = report.StaleSnapshotCount,
             capturedAt = report.CapturedAt,
@@ -762,15 +784,21 @@ public sealed partial class SystemController : ControllerBase
     }
 
     /// <summary>
-    /// PATCH /api/v1/system/users/{email}/account-status — lock / unlock / disable a tenant
-    /// user account. Body: <c>{ accountStatus, tenantSlug }</c>. Audited.
+    /// PATCH /api/v1/system/users/account-status — lock / unlock / disable a tenant
+    /// user account. Body: <c>{ email, accountStatus, tenantSlug }</c>. The email is carried in
+    /// the body, not the URL path, so it never lands in request logs or trace spans. Audited.
     /// </summary>
-    [HttpPatch("users/{email}/account-status")]
+    [HttpPatch("users/account-status")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> SetAccountStatus(
-        string email, [FromBody] SetAccountStatusRequest req, CancellationToken ct)
+        [FromBody] SetAccountStatusRequest req, CancellationToken ct)
     {
-        if (req is null || string.IsNullOrWhiteSpace(req.TenantSlug))
+        if (req is null || string.IsNullOrWhiteSpace(req.Email))
+        {
+            return _problems.ValidationErrorActionKey("email", "error.admin.emailRequired");
+        }
+
+        if (string.IsNullOrWhiteSpace(req.TenantSlug))
         {
             return _problems.ValidationErrorActionKey("tenantSlug", "error.system.tenantSlugRequired");
         }
@@ -780,6 +808,7 @@ public sealed partial class SystemController : ControllerBase
             return _problems.ValidationErrorActionKey("accountStatus", "error.admin.accountStatusInvalid");
         }
 
+        string email = req.Email;
         bool ok = await _orgs.SetUserAccountStatusAsync(email, req.TenantSlug, req.AccountStatus, ct);
         if (!ok)
         {
@@ -799,23 +828,30 @@ public sealed partial class SystemController : ControllerBase
     }
 
     /// <summary>
-    /// POST /api/v1/system/users/{email}/password-reset — issues a temporary password and
-    /// forces rotation on next login. Body: <c>{ tenantSlug }</c>. The temporary password is
-    /// returned in the response so the operator can hand it to the user out-of-band; it is
-    /// not persisted in plaintext anywhere. Audited.
+    /// POST /api/v1/system/users/password-reset — issues a temporary password and
+    /// forces rotation on next login. Body: <c>{ email, tenantSlug }</c>. The email is carried
+    /// in the body, not the URL path, so it never lands in request logs or trace spans. The
+    /// temporary password is returned in the response so the operator can hand it to the user
+    /// out-of-band; it is not persisted in plaintext anywhere. Audited.
     /// </summary>
-    [HttpPost("users/{email}/password-reset")]
+    [HttpPost("users/password-reset")]
     public async Task<IActionResult> IssuePasswordReset(
-        string email, [FromBody] PasswordResetRequest req,
+        [FromBody] PasswordResetRequest req,
         [FromServices] UserService users,
         [FromServices] Dependably.Infrastructure.Mail.TransactionalEmailService mailer,
         CancellationToken ct)
     {
-        if (req is null || string.IsNullOrWhiteSpace(req.TenantSlug))
+        if (req is null || string.IsNullOrWhiteSpace(req.Email))
+        {
+            return _problems.ValidationErrorActionKey("email", "error.admin.emailRequired");
+        }
+
+        if (string.IsNullOrWhiteSpace(req.TenantSlug))
         {
             return _problems.ValidationErrorActionKey("tenantSlug", "error.system.tenantSlugRequired");
         }
 
+        string email = req.Email;
         var result = await _systemAdmins.IssuePasswordResetAsync(email, req.TenantSlug, ct);
         if (result is null)
         {
@@ -952,6 +988,7 @@ public sealed partial class SystemController : ControllerBase
                 mfaEnrollmentRequired = (_requireMfa?.IsEnabled ?? false) && !sa.MfaEnabled,
                 lastLoginAt = sa.LastLoginAt,
                 language = string.IsNullOrEmpty(sa.Language) ? LanguageCodes.Default : sa.Language,
+                // utcformat-ok: session-profile JSON wire field, not a DB write.
                 sessionExpiresAt = User.FindFirst("exp")?.Value is string expUnix
                     && long.TryParse(expUnix, out long exp)
                     ? DateTimeOffset.FromUnixTimeSeconds(exp).ToString("O")
@@ -1145,8 +1182,8 @@ public sealed partial class SystemController : ControllerBase
 
 }
 
-public sealed record SetAccountStatusRequest(string AccountStatus, string TenantSlug);
-public sealed record PasswordResetRequest(string TenantSlug);
+public sealed record SetAccountStatusRequest(string Email, string AccountStatus, string TenantSlug);
+public sealed record PasswordResetRequest(string Email, string TenantSlug);
 
 public sealed record CreateTenantRequest(string Slug, string OwnerEmail);
 public sealed record SetStorageQuotaRequest(long? QuotaBytes);

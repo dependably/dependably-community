@@ -15,6 +15,35 @@ namespace Dependably.Tests.Unit;
 [Trait("Category", "Unit")]
 public sealed class RpmHeaderParserExtendedTests
 {
+    // ── String-array allocation bound (#437 item 5) ────────────────────────────
+
+    [Fact]
+    public void ReadStringArray_CountAboveCeiling_RejectedBeforeAllocation()
+    {
+        // The store is deliberately large enough that the bytes-available guard (1 byte per
+        // string) would PASS — so it is specifically the absolute ceiling that must reject the
+        // inflated count, before `new string[count]` allocates ~8 bytes per claimed entry. This
+        // asserts the bound is enforced without materialising the multi-GB reference array.
+        int count = RpmHeaderParser.MaxStringArrayCount + 1;
+        byte[] data = new byte[count + 8]; // enough backing bytes to clear the per-byte guard
+
+        var ex = Assert.Throws<RpmParseException>(
+            () => RpmHeaderParser.ReadStringArray(data, offset: 0, count: count));
+        Assert.Contains("maximum permitted", ex.Message);
+    }
+
+    [Fact]
+    public void ReadStringArray_LegitimateCount_ParsesNormally()
+    {
+        // Adversarial twin: a normal-sized string array (well under the ceiling) is parsed
+        // correctly — the new bound must not over-reject a real RPM's arrays.
+        byte[] data = Concat(NullTerm("glibc"), NullTerm("bash"), NullTerm("coreutils"));
+
+        string[] result = RpmHeaderParser.ReadStringArray(data, offset: 0, count: 3);
+
+        Assert.Equal(new[] { "glibc", "bash", "coreutils" }, result);
+    }
+
     // ── Top-level guard clauses ────────────────────────────────────────────────
 
     [Fact]

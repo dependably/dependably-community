@@ -230,8 +230,11 @@ public sealed class PipelineHardeningTests
     // ── /ready response shape ─────────────────────────────────────────────────
 
     [Fact]
-    public async Task Ready_DegradedCheck_DoesNotLeakExceptionDetail()
+    public async Task Ready_DegradedSoftCheck_Stays200AndDoesNotLeakExceptionDetail()
     {
+        // The blob store is a fleet-shared dependency: failing /ready on it would deregister
+        // every replica at once for a condition none of them can route around. It is reported
+        // as degradation instead, and the raw failure text never reaches the anonymous body.
         await using var factory = new PipelineFactory(
             new Dictionary<string, string>(),
             blobStore: new FailingExistsBlobStore());
@@ -240,7 +243,7 @@ public sealed class PipelineHardeningTests
         using var client = factory.CreateClient();
         var resp = await client.GetAsync("/ready");
 
-        Assert.Equal(HttpStatusCode.ServiceUnavailable, resp.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
         string raw = await resp.Content.ReadAsStringAsync();
         Assert.DoesNotContain(FailingExistsBlobStore.SecretDetail, raw);
@@ -251,6 +254,60 @@ public sealed class PipelineHardeningTests
         Assert.Equal("ok", body.RootElement.GetProperty("checks").GetProperty("db").GetString());
         Assert.False(body.RootElement.TryGetProperty("errors", out _),
             "the /ready body must not carry a raw per-check error map");
+
+        // The body distinguishes load-bearing from reported-only: blob_store is degraded but
+        // is not in the required set, so an operator can see the 200 was deliberate.
+        string?[] degraded = body.RootElement.GetProperty("degraded").EnumerateArray()
+            .Select(e => e.GetString()).ToArray();
+        string?[] required = body.RootElement.GetProperty("required").EnumerateArray()
+            .Select(e => e.GetString()).ToArray();
+        Assert.Contains("blob_store", degraded);
+        Assert.Contains("db", required);
+        Assert.DoesNotContain("blob_store", required);
+    }
+
+    [Fact]
+    public async Task Ready_Strict_Is503WhenASoftCheckIsDegraded()
+    {
+        // The strict all-dependencies view stays available for deployment gating and alerting.
+        await using var factory = new PipelineFactory(
+            new Dictionary<string, string>(),
+            blobStore: new FailingExistsBlobStore());
+        await factory.InitializeAsync();
+
+        using var client = factory.CreateClient();
+        var resp = await client.GetAsync("/ready?strict=true");
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, resp.StatusCode);
+
+        string raw = await resp.Content.ReadAsStringAsync();
+        Assert.DoesNotContain(FailingExistsBlobStore.SecretDetail, raw);
+
+        using var body = JsonDocument.Parse(raw);
+        Assert.True(body.RootElement.GetProperty("strict").GetBoolean());
+        Assert.Equal("degraded", body.RootElement.GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task Ready_BlobStoreDeclaredRequired_Is503()
+    {
+        // READINESS_HARD_DEPENDENCIES restores the strict-on-every-probe posture for operators
+        // whose blob store is node-local (and therefore genuinely routable-around).
+        await using var factory = new PipelineFactory(
+            new Dictionary<string, string> { ["READINESS_HARD_DEPENDENCIES"] = "db,blob_store" },
+            blobStore: new FailingExistsBlobStore());
+        await factory.InitializeAsync();
+
+        using var client = factory.CreateClient();
+        var resp = await client.GetAsync("/ready");
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, resp.StatusCode);
+
+        using var body = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        Assert.Equal("unready", body.RootElement.GetProperty("status").GetString());
+        string?[] required = body.RootElement.GetProperty("required").EnumerateArray()
+            .Select(e => e.GetString()).ToArray();
+        Assert.Contains("blob_store", required);
     }
 
     // ── Test scaffolding ──────────────────────────────────────────────────────

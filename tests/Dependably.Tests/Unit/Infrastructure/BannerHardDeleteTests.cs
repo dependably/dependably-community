@@ -27,8 +27,8 @@ public sealed class BannerHardDeleteTests : IClassFixture<InMemoryDbFixture>
 
     private static BannerCreateRequest ActiveReq() =>
         new("info", "Test body", null, null, "all",
-            KnownNow.AddDays(-1).ToString("yyyy-MM-ddTHH:mm:ssZ"),
-            KnownNow.AddDays(+30).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            KnownNow.AddDays(-1).ToUtcIso(),
+            KnownNow.AddDays(+30).ToUtcIso(),
             true);
 
     private static TenantHardDeleteService BuildService(IMetadataStore db)
@@ -63,7 +63,7 @@ public sealed class BannerHardDeleteTests : IClassFixture<InMemoryDbFixture>
         await using var conn0 = await _fixture.Store.OpenAsync();
         await conn0.ExecuteAsync(
             "UPDATE orgs SET deleted_at = @dt WHERE id = @id",
-            new { dt = KnownNow.AddDays(-60).ToString("yyyy-MM-ddTHH:mm:ssZ"), id = orgId });
+            new { dt = KnownNow.AddDays(-60).ToUtcIso(), id = orgId });
 
         // Confirm banner exists before hard-delete.
         var listBefore = await bannerRepo.ListTenantAsync(orgId);
@@ -99,7 +99,7 @@ public sealed class BannerHardDeleteTests : IClassFixture<InMemoryDbFixture>
         await using var conn0 = await _fixture.Store.OpenAsync();
         await conn0.ExecuteAsync(
             "UPDATE orgs SET deleted_at = @dt WHERE id = @id",
-            new { dt = KnownNow.AddDays(-60).ToString("yyyy-MM-ddTHH:mm:ssZ"), id = orgA });
+            new { dt = KnownNow.AddDays(-60).ToUtcIso(), id = orgA });
 
         var svc = BuildService(_fixture.Store);
         await svc.RunPassAsync(CancellationToken.None);

@@ -8,6 +8,8 @@
   import PasswordStrength from '../lib/PasswordStrength.svelte'
   import { qrSvg } from '../lib/qrcode.js'
 
+  const browserTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+
   let currentPassword = '', newPassword = '', confirm = ''
   let modalError = '', loading = false
   let passwordSavedAt = null
@@ -26,6 +28,26 @@
 
   $: tenantDefaultCode = $user?.tenantDefaultLanguage || 'en'
   $: tenantDefaultLabel = locales.find(l => l.code === tenantDefaultCode)?.label || tenantDefaultCode
+
+  // '' is the "use organization default" option and writes null, clearing the override, so a
+  // later change to the org default still reaches this user.
+  $: timezoneOverride = $user?.timezone || ''
+  $: tenantDefaultTimezone = $user?.tenantDefaultTimezone || 'UTC'
+  const timeZoneOptions = typeof Intl.supportedValuesOf === 'function'
+    ? Intl.supportedValuesOf('timeZone')
+    : [browserTimeZone]
+  let timezoneError = ''
+
+  async function changeTimezone(value) {
+    timezoneError = ''
+    const next = value === '' ? null : value
+    try {
+      await api.updateTimezone(next)
+      user.set(await api.me())
+    } catch {
+      timezoneError = $t('profile.rows.timezoneError')
+    }
+  }
 
   function openModal() {
     modalError = ''
@@ -297,6 +319,29 @@
         <select value={$locale} on:change={e => switchLocale(e.currentTarget.value)} aria-label={$t('profile.rows.languageTitle')}>
           {#each locales as l (l.code)}
             <option value={l.code}>{l.label}</option>
+          {/each}
+        </select>
+      </div>
+    </div>
+
+    <!-- Timezone row -->
+    <div class="settings-row">
+      <div class="settings-row-text">
+        <div class="settings-row-title">{$t('profile.rows.timezoneTitle')}</div>
+        <div class="settings-row-help">
+          {$t('profile.rows.timezoneHelp', { values: { timezone: tenantDefaultTimezone } })}
+        </div>
+        {#if timezoneError}<div class="settings-row-help error">{timezoneError}</div>{/if}
+      </div>
+      <div class="settings-row-control">
+        <select
+          value={timezoneOverride}
+          on:change={e => changeTimezone(e.currentTarget.value)}
+          aria-label={$t('profile.rows.timezoneTitle')}
+        >
+          <option value="">{$t('profile.rows.timezoneInherit', { values: { timezone: tenantDefaultTimezone } })}</option>
+          {#each timeZoneOptions as tz (tz)}
+            <option value={tz}>{tz}</option>
           {/each}
         </select>
       </div>

@@ -15,28 +15,6 @@ public class SiemForwarderQueueTests
             ["SIEM_QUEUE_CAPACITY"] = capacity?.ToString()
         }).Build();
 
-    /// <summary>
-    /// Drives a queue's retry backoff deterministically: advances <paramref name="clock"/> by
-    /// <paramref name="step"/> and yields briefly so the background delivery loop observes each
-    /// fired timer, repeating until <paramref name="condition"/> is met. The tiny real-time yield
-    /// only gives the scheduler a turn — it does not wait out the backoff itself, which is driven
-    /// entirely by the advancing fake clock.
-    /// </summary>
-    private static async Task PumpUntilAsync(
-        FakeTimeProvider clock, Func<bool> condition, TimeSpan step, int maxIterations = 200)
-    {
-        for (int i = 0; i < maxIterations && !condition(); i++)
-        {
-            clock.Advance(step);
-            await Task.Delay(5);
-        }
-
-        if (!condition())
-        {
-            throw new TimeoutException("Condition never satisfied while pumping the fake clock.");
-        }
-    }
-
     private sealed class CountingForwarder : ISiemForwarder
     {
         public int Calls { get; private set; }
@@ -115,7 +93,7 @@ public class SiemForwarderQueueTests
         await q.StartAsync(cts.Token);
 
         q.TryEnqueue(Sample());
-        await PumpUntilAsync(clock, () => q.DeliveredCount == 1, TimeSpan.FromSeconds(1));
+        await ClockPump.UntilAsync(clock, () => q.DeliveredCount == 1, TimeSpan.FromSeconds(1));
 
         await cts.CancelAsync();
         try { await q.StopAsync(CancellationToken.None); } catch { }
@@ -181,7 +159,7 @@ public class SiemForwarderQueueTests
 
         // The failing event burns through the 1s/5s/30s backoff inside the drain itself; pump
         // the fake clock so that finishes in virtual time instead of real time.
-        await PumpUntilAsync(clock, () => q.DeliveredCount == 1 && q.FailedCount == 1, TimeSpan.FromSeconds(1));
+        await ClockPump.UntilAsync(clock, () => q.DeliveredCount == 1 && q.FailedCount == 1, TimeSpan.FromSeconds(1));
 
         await executeTask;
 

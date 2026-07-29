@@ -21,18 +21,30 @@ ARG RUNTIME_IMAGE=mcr.microsoft.com/dotnet/runtime-deps:10.0-alpine@sha256:f276c
 # (esbuild's native binary aborts with SIGILL under QEMU).
 FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS frontend
 WORKDIR /web
-COPY web/package*.json ./
+# web/.npmrc is copied alongside the manifests, BEFORE `npm ci` — it carries
+# `ignore-scripts=true`, the control that stops dependency lifecycle scripts
+# (preinstall/install/postinstall) executing during the install that produces the
+# shipped bundle. Copying it with the rest of web/ after `npm ci` would leave the
+# release build as the one place the control is absent.
+COPY web/package*.json web/.npmrc ./
 ARG REGISTRY_URL=
 # .npmrc (containing the auth token) is written, used, and removed within a single
-# RUN so no layer ever contains the credential.
+# RUN so no layer ever contains the credential. The generated /root/.npmrc repeats
+# ignore-scripts so the control survives even if the project file is not present,
+# `npm ci --ignore-scripts` states it on the command line, and the assertion below
+# fails the build loudly rather than silently installing with scripts enabled.
 # hadolint ignore=DL4006
 RUN --mount=type=secret,id=registry_key \
     if [ -n "$REGISTRY_URL" ] && [ -s /run/secrets/registry_key ]; then \
       HOST=$(printf '%s' "$REGISTRY_URL" | sed -E 's|^https?://||; s|/.*||'); \
-      printf 'registry=%s/npm/\n//%s/npm/:_authToken=%s\nfund=false\n' \
+      printf 'registry=%s/npm/\n//%s/npm/:_authToken=%s\nfund=false\nignore-scripts=true\n' \
         "$REGISTRY_URL" "$HOST" "$(cat /run/secrets/registry_key)" > /root/.npmrc; \
     fi && \
-    npm ci && \
+    if [ "$(npm config get ignore-scripts)" != "true" ]; then \
+      echo "ERROR: npm ignore-scripts is not enabled — refusing to run npm ci with dependency lifecycle scripts live." >&2; \
+      exit 1; \
+    fi && \
+    npm ci --ignore-scripts && \
     rm -f /root/.npmrc
 COPY web/ ./
 # hadolint ignore=DL3059
@@ -66,6 +78,19 @@ RUN if [ -n "$REGISTRY_URL" ]; then \
         echo '</configuration>'; \
       } > /src/NuGet.Config; \
     fi
+COPY src/Dependably/packages.lock.json src/Dependably/
+COPY src/Dependably.Core/packages.lock.json src/Dependably.Core/
+COPY src/Dependably.Management/packages.lock.json src/Dependably.Management/
+# Two restores, deliberately. The first is RID-less and LOCKED: it resolves the whole
+# managed graph against the committed packages.lock.json, failing on a version the lock
+# file does not pin (NU1004) or on package bytes whose content hash does not match it
+# (NU1403) — from the same feed the RID restore below uses. NuGet's locked mode requires
+# the lock file's runtime-identifier set to equal the project's, so it cannot be layered
+# onto a `-r <rid>` restore; running it first pins the graph, which the RID restore then
+# reuses out of the already-populated global packages folder. The RID target adds no
+# package identity the RID-less target does not already pin, so coverage is complete.
+# RestoreLockedMode is set explicitly rather than by exporting CI=true, which would also
+# flip TreatWarningsAsErrors for a compilation CI never runs in this shape.
 RUN --mount=type=secret,id=registry_key \
     if [ -s /run/secrets/registry_key ]; then \
       NUGET_CREDS="Username=ci;Password=$(cat /run/secrets/registry_key)"; \
@@ -76,6 +101,7 @@ RUN --mount=type=secret,id=registry_key \
       *) echo linux-musl-arm64 ;; \
     esac > /tmp/rid && \
     RID=$(cat /tmp/rid) && \
+    dotnet restore src/Dependably/Dependably.csproj -p:RestoreLockedMode=true && \
     dotnet restore src/Dependably/Dependably.csproj -r "$RID"
 RUN --mount=type=secret,id=registry_key \
     if [ -s /run/secrets/registry_key ]; then \

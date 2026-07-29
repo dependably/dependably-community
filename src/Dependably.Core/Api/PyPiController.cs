@@ -47,11 +47,13 @@ public class PyPiController : ControllerBase
 
     /// <summary>GET /pypi/{package}/json — PyPI JSON API for a package's latest version</summary>
     [HttpGet("/pypi/{package}/json")]
+    [EnableRateLimiting("metadata")]
     public Task<IActionResult> PackageJson(string package, CancellationToken ct)
         => _jsonApi.PackageJsonAsync(HttpContext, CurrentTenantId(), package, ct);
 
     /// <summary>GET /pypi/{package}/{version}/json — PyPI JSON API for a specific version</summary>
     [HttpGet("/pypi/{package}/{version}/json")]
+    [EnableRateLimiting("metadata")]
     public Task<IActionResult> PackageVersionJson(string package, string version, CancellationToken ct)
         => _jsonApi.PackageVersionJsonAsync(HttpContext, CurrentTenantId(), package, version, ct);
 

@@ -70,6 +70,8 @@ public sealed class JwtSecretRotationTests : IClassFixture<DependablyMultiFactor
         // now-ok: mints a JWT the host validates against its real clock.
         var now = DateTime.UtcNow;
         return new JwtSecurityTokenHandler().WriteToken(new JwtSecurityToken(
+            issuer: Dependably.Security.JwtTokenBinding.Issuer,
+            audience: Dependably.Security.JwtTokenBinding.SessionAudience,
             claims: claims, notBefore: now, expires: now.AddHours(1), signingCredentials: creds));
     }
 

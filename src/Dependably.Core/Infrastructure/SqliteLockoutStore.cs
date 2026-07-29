@@ -33,9 +33,9 @@ public sealed class SqliteLockoutStore : ILockoutStore
         string emailHash, int newCount, DateTimeOffset? lockedUntil, CancellationToken ct)
     {
         await using var conn = await _db.OpenAsync(ct);
-        string? locked = lockedUntil?.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string? locked = lockedUntil?.ToUtcIso();
 
-        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToUtcIso();
         await conn.ExecuteAsync(
             """
             INSERT INTO login_attempts (email_hash, failed_count, locked_until)
@@ -51,7 +51,7 @@ public sealed class SqliteLockoutStore : ILockoutStore
     public async Task ClearAsync(string emailHash, CancellationToken ct)
     {
         await using var conn = await _db.OpenAsync(ct);
-        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToUtcIso();
         await conn.ExecuteAsync(
             """
             INSERT INTO login_attempts (email_hash, failed_count, locked_until) VALUES (@hash, 0, NULL)

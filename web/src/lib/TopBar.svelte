@@ -1,7 +1,7 @@
 <script>
   import { createEventDispatcher } from 'svelte'
   import { t } from 'svelte-i18n'
-  import { route, user, navigate } from './store.js'
+  import { activeRoute, user, navigate } from './store.js'
   import GlobalSearch from './GlobalSearch.svelte'
   import AlertsPanel from './AlertsPanel.svelte'
 
@@ -26,7 +26,7 @@
     {#if $user}
       <button
         class="nav-link"
-        class:active={$route.page === 'profile'}
+        class:active={$activeRoute.page === 'profile'}
         on:click={() => navigate('profile')}
         title={$t('nav.profile')}
       >

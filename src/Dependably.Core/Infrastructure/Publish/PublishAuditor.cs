@@ -96,6 +96,23 @@ public sealed class PublishAuditor
             request.OrgId, actorType, request.ActorUserId, "accepted", replacePayload, ct);
     }
 
+    /// <summary>
+    /// Records the publish-side licence-less warning: <c>license_publish_enforcement_mode=warn</c>
+    /// accepted a hosted publish with no declared licence, but the artifact will be denied by the
+    /// serve-path gate wherever <c>license_enforcement_mode=block</c> applies. A per-version
+    /// operator event — <c>activity</c> only, no <c>audit_log</c> dual-write (mirrors import and
+    /// replace).
+    /// </summary>
+    public Task RecordLicensePublishWarnAsync(PublishRequest request, CancellationToken ct)
+    {
+        string detail = JsonSerializer.Serialize(
+            new { license = Dependably.Protocol.BlockGateService.NoLicenseAssertion },
+            Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
+        return _audit.LogActivityAsync(request.OrgId, request.Ecosystem, request.Purl,
+            "license_publish_warn", request.ActorUserId, actorKind: request.ActorKind,
+            detail: detail, sourceIp: request.SourceIp, ct: ct);
+    }
+
     private static (string BatchId, string ImportMode) ExtractBatchInfo(string? detail)
     {
         if (string.IsNullOrEmpty(detail))

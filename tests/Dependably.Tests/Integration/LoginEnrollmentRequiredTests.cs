@@ -199,7 +199,7 @@ public sealed class LoginEnrollmentRequiredTenantTests : IClassFixture<Dependabl
 
             var invites = _factory.Services.GetRequiredService<InviteRepository>();
             string inviteEmail = $"invite-enroll-{Guid.NewGuid():N}@test.local";
-            var (rawToken, _) = await invites.CreateAsync(orgId, inviteEmail, adminId, "member");
+            var (rawToken, _) = (await invites.CreateAsync(orgId, inviteEmail, adminId, "member"))!;
 
             using var client = CreateLoginClient();
             var resp = await client.PostAsJsonAsync("/api/v1/invites/accept", new
@@ -234,7 +234,7 @@ public sealed class LoginEnrollmentRequiredTenantTests : IClassFixture<Dependabl
 
         var invites = _factory.Services.GetRequiredService<InviteRepository>();
         string inviteEmail = $"invite-noenroll-{Guid.NewGuid():N}@test.local";
-        var (rawToken, _) = await invites.CreateAsync(orgId, inviteEmail, adminId, "member");
+        var (rawToken, _) = (await invites.CreateAsync(orgId, inviteEmail, adminId, "member"))!;
 
         using var client = CreateLoginClient();
         var resp = await client.PostAsJsonAsync("/api/v1/invites/accept", new

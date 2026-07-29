@@ -33,19 +33,30 @@ public partial class NuGetController : ControllerBase
     /// <summary>GET /nuget/v3/index.json and /nuget/index.json — NuGet v3 service index</summary>
     [HttpGet("/nuget/v3/index.json")]
     [HttpGet("/nuget/index.json")]
+    [EnableRateLimiting("metadata")]
     public Task<IActionResult> ServiceIndex(CancellationToken ct) =>
         Task.FromResult(_serviceIndex.Handle(HttpContext));
 
     // ── Search ───────────────────────────────────────────────────────────────
 
-    /// <summary>GET /nuget/query — NuGet search endpoint</summary>
+    /// <summary>
+    /// GET /nuget/query — NuGet Search Query Service endpoint. <c>prerelease</c> (default false,
+    /// per the spec) controls whether a package whose only versions are prerelease is matched
+    /// at all, and whether a prerelease may be reported as a package's 'latest' — mirroring
+    /// nuget.org, not merely "eligible with a fallback". <c>prerelease</c> is <c>bool?</c>
+    /// (null = false) rather than <c>bool</c> so the bare <c>?prerelease=</c> shape (empty
+    /// value, which nuget.org accepts) does not 400 under <c>[ApiController]</c>'s automatic
+    /// model-state validation the way a non-nullable <c>bool</c> would.
+    /// </summary>
     [HttpGet("/nuget/query")]
+    [EnableRateLimiting("metadata")]
     public Task<IActionResult> Search(
         [FromQuery] string? q,
         [FromQuery] int skip = 0,
         [FromQuery] int take = 20,
+        [FromQuery] bool? prerelease = null,
         CancellationToken ct = default) =>
-        _search.SearchAsync(HttpContext, CurrentTenantId(), q, skip, take, ct);
+        _search.SearchAsync(HttpContext, CurrentTenantId(), q, skip, take, prerelease ?? false, ct);
 
     // ── Autocomplete ─────────────────────────────────────────────────────────
 
@@ -60,6 +71,7 @@ public partial class NuGetController : ControllerBase
     /// enumeration takes precedence (matching the NuGet.org behavior).
     /// </summary>
     [HttpGet("/nuget/autocomplete")]
+    [EnableRateLimiting("metadata")]
     public Task<IActionResult> Autocomplete(
         [FromQuery] string? q,
         [FromQuery] string? id,
@@ -124,6 +136,7 @@ public partial class NuGetController : ControllerBase
 
     /// <summary>GET /nuget/flatcontainer/{id}/index.json — version list</summary>
     [HttpGet("/nuget/flatcontainer/{id}/index.json")]
+    [EnableRateLimiting("metadata")]
     public Task<IActionResult> FlatcontainerVersions(string id, CancellationToken ct)
         => _flatContainer.FlatcontainerVersionsAsync(HttpContext, CurrentTenantId(), id, ct);
 
@@ -171,6 +184,7 @@ public partial class NuGetController : ControllerBase
     [HttpDelete("/nuget/publish/{id}/{version}")]
     [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [RequireCapability(Capabilities.YankNuget)]
+    [EnableRateLimiting("push")]
     public Task<IActionResult> Unlist(string id, string version, CancellationToken ct)
         => _publishHandler.UnlistAsync(HttpContext, CurrentTenantId(), id, version, ct);
 
@@ -178,6 +192,7 @@ public partial class NuGetController : ControllerBase
 
     /// <summary>GET /nuget/symbols/{id}/{version}/{file}</summary>
     [HttpGet("/nuget/symbols/{id}/{version}/{file}")]
+    [EnableRateLimiting("download")]
     public Task<IActionResult> GetSymbols(string id, string version, string file, CancellationToken ct)
         => _publishHandler.GetSymbolsAsync(HttpContext, CurrentTenantId(), id, version, file, ct);
 

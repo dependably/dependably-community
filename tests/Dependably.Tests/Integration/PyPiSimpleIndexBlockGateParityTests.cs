@@ -67,8 +67,8 @@ public sealed class PyPiSimpleIndexBlockGateParityTests : IAsyncLifetime
             // Stamp published_at: 1.0.0 = 1 hour before frozen now (within 24h hold).
             //                     2.0.0 = 30 days before frozen now (past the hold).
             var frozenNow = TestTime.KnownNow;
-            string youngTs = frozenNow.AddHours(-1).ToString("o");
-            string oldTs = frozenNow.AddDays(-30).ToString("o");
+            string youngTs = frozenNow.AddHours(-1).ToUtcIso();
+            string oldTs = frozenNow.AddDays(-30).ToUtcIso();
 
             var store = _factory.Services.GetRequiredService<IMetadataStore>();
             await using (var conn = await store.OpenAsync())
@@ -147,8 +147,8 @@ public sealed class PyPiSimpleIndexBlockGateParityTests : IAsyncLifetime
 
         // 1.0.0: 1 hour ago (too young); 2.0.0: 30 days ago (past the hold).
         var frozenNow = TestTime.KnownNow;
-        string youngTs = frozenNow.AddHours(-1).ToString("o");
-        string oldTs = frozenNow.AddDays(-30).ToString("o");
+        string youngTs = frozenNow.AddHours(-1).ToUtcIso();
+        string oldTs = frozenNow.AddDays(-30).ToUtcIso();
 
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
         await using (var conn = await store.OpenAsync())

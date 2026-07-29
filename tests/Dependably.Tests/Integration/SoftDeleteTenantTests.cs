@@ -131,7 +131,7 @@ public sealed class SoftDeleteTenantTests : IClassFixture<DependablyMultiFactory
             // now-ok: seeds relative to the host's real clock so the server-side 30-day
             // grace cutoff lands as intended; 90 days clears it with 3x margin instead of
             // sitting one day past it (leap-year/month-length safe).
-            string ninetyDaysAgo = DateTimeOffset.UtcNow.AddDays(-90).ToString("yyyy-MM-ddTHH:mm:ssZ");
+            string ninetyDaysAgo = DateTimeOffset.UtcNow.AddDays(-90).ToUtcIso();
             await conn.ExecuteAsync(
                 "UPDATE orgs SET deleted_at = @t WHERE id = @id",
                 new { id = orgId, t = ninetyDaysAgo });

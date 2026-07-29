@@ -40,6 +40,7 @@ public class NpmController : ControllerBase
     /// <c>/npm/{package}/{version}</c> by ASP.NET's literal-beats-parameter precedence.
     /// </summary>
     [HttpGet("/npm/-/ping")]
+    [EnableRateLimiting("anon")]
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822:Mark members as static",
         Justification = "MVC route action: ASP.NET Core does not invoke static action methods.")]
     public IActionResult Ping() => NpmDistTagsHandler.Ping();
@@ -54,6 +55,7 @@ public class NpmController : ControllerBase
     /// and fall into the same 401 branch as anonymous callers (no information leak).
     /// </summary>
     [HttpGet("/npm/-/whoami")]
+    [EnableRateLimiting("anon")]
     public Task<IActionResult> WhoAmI(CancellationToken ct)
         => _distTags.WhoAmIAsync(HttpContext, CurrentTenantId(), ct);
 
@@ -73,6 +75,7 @@ public class NpmController : ControllerBase
 
     /// <summary>GET /npm/{package}/{version} — specific version metadata</summary>
     [HttpGet("/npm/{package}/{version}")]
+    [EnableRateLimiting("metadata")]
     public Task<IActionResult> GetVersion(string package, string version, CancellationToken ct)
         => _packument.GetVersionAsync(HttpContext, CurrentTenantId(), package, version, ct);
 
@@ -157,11 +160,13 @@ public class NpmController : ControllerBase
 
     /// <summary>GET /npm/-/package/{pkg}/dist-tags — list all dist-tags</summary>
     [HttpGet("/npm/-/package/{pkg}/dist-tags")]
+    [EnableRateLimiting("metadata")]
     public Task<IActionResult> GetDistTags(string pkg, CancellationToken ct)
         => _distTags.GetDistTagsAsync(HttpContext, CurrentTenantId(), pkg, ct);
 
     /// <summary>GET /npm/-/package/@{scope}/{pkg}/dist-tags — list dist-tags for scoped package</summary>
     [HttpGet("/npm/-/package/@{scope}/{pkg}/dist-tags")]
+    [EnableRateLimiting("metadata")]
     public Task<IActionResult> GetScopedDistTags(string scope, string pkg, CancellationToken ct)
         => _distTags.GetScopedDistTagsAsync(HttpContext, CurrentTenantId(), scope, pkg, ct);
 
@@ -272,6 +277,7 @@ public class NpmController : ControllerBase
     /// Auth: same anonymous-pull gate as packument GET.
     /// </summary>
     [HttpGet("/npm/-/v1/search")]
+    [EnableRateLimiting("metadata")]
     public Task<IActionResult> Search(
         [FromQuery] string? text,
         [FromQuery] int size = 20,
@@ -292,18 +298,6 @@ public class NpmController : ControllerBase
     [EnableRateLimiting("metadata")]
     public Task<IActionResult> AuditAdvisoriesBulk(CancellationToken ct)
         => _audit.BulkAdvisoriesAsync(HttpContext, CurrentTenantId(), ct);
-
-    /// <summary>
-    /// POST /npm/-/npm/v1/security/audits/quick — the npm 6-era quick-audit shape. Deliberate
-    /// 501: every supported npm version audits through the bulk-advisories endpoint above and
-    /// never calls this one. The route stays so an npm 6 client gets an explicit refusal it can
-    /// degrade to a warning on, rather than an unexplained 404.
-    /// </summary>
-    [HttpPost("/npm/-/npm/v1/security/audits/quick")]
-    [EnableRateLimiting("metadata")]
-    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822:Mark members as static",
-        Justification = "MVC route action: ASP.NET Core does not invoke static action methods.")]
-    public IActionResult AuditQuick() => NpmAuditHandler.QuickAuditNotImplemented();
 
     // ── Shared utilities ─────────────────────────────────────────────────────
 

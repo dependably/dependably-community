@@ -15,6 +15,18 @@ using Org.BouncyCastle.Bcpg.OpenPgp;
 
 namespace Dependably.Protocol;
 
+/// <summary>
+/// Which repomd checksum a repodata entry's expected SHA-256 was read from, so the fetch path
+/// verifies the body under exactly the declared interpretation instead of accepting either:
+/// <see cref="Compressed"/> = <c>&lt;checksum&gt;</c> over the on-the-wire (compressed) file;
+/// <see cref="Open"/> = <c>&lt;open-checksum&gt;</c> over the decompressed content.
+/// </summary>
+internal enum RepodataChecksumKind
+{
+    Compressed,
+    Open,
+}
+
 // ── Public result types ───────────────────────────────────────────────────────
 
 /// <summary>
@@ -132,8 +144,8 @@ public interface IRpmUpstreamProxy
     /// </summary>
     Task<IReadOnlyList<System.Xml.Linq.XElement>> GetUpstreamNonPrimaryRepomdEntriesAsync(string orgId, string upstreamBase, CancellationToken ct);
     Task<byte[]?> GetGpgKeyAsync(string upstreamBase, CancellationToken ct);
-    Task<bool> IsNegativelyCachedAsync(string upstreamPath, CancellationToken ct);
-    Task RecordNegativeAsync(string upstreamPath, CancellationToken ct);
+    Task<bool> IsNegativelyCachedAsync(string upstreamBase, string upstreamPath, CancellationToken ct);
+    Task RecordNegativeAsync(string upstreamBase, string upstreamPath, CancellationToken ct);
 }
 
 // S5332 flags the XML namespace identifiers ("http://linux.duke.edu/metadata/...") used
@@ -280,7 +292,7 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
             return null;
         }
 
-        var (primaryFilename, primarySha256) = location.Value;
+        var (primaryFilename, primarySha256, primaryChecksumKind) = location.Value;
         string mapKey = $"rpm:primary-map:{primarySha256}";
         // The parsed map is stored in the dedicated _primaryMapCache, not the shared metadata
         // _memCache: a Fedora/EPEL-scale map's real Size estimate can run tens to 100+ MB, which
@@ -288,7 +300,7 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
         // (never cached) or evict every other tenant's npm/PyPI/NuGet metadata.
         if (!_primaryMapCache.TryGetValue<Dictionary<string, PackageResolution>>(mapKey, out var packageMap) || packageMap is null)
         {
-            byte[]? primaryGzBytes = await GetOrFetchRepodataBlobAsync(upstreamBase, primaryFilename, primarySha256, ct);
+            byte[]? primaryGzBytes = await GetOrFetchRepodataBlobAsync(upstreamBase, primaryFilename, primarySha256, primaryChecksumKind, ct);
             if (primaryGzBytes is null)
             {
                 return null;
@@ -378,10 +390,10 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
             return null;
         }
 
-        var (filelistsFilename, filelistsSha256) = ParseRepodataEntryFromRepomd(repomdBytes, "filelists");
+        var (filelistsFilename, filelistsSha256, filelistsChecksumKind) = ParseRepodataEntryFromRepomd(repomdBytes, "filelists");
         return filelistsFilename is null || filelistsSha256 is null
             ? null
-            : await GetOrFetchRepodataBlobAsync(upstreamBase, filelistsFilename, filelistsSha256, ct);
+            : await GetOrFetchRepodataBlobAsync(upstreamBase, filelistsFilename, filelistsSha256, filelistsChecksumKind, ct);
     }
 
     /// <inheritdoc />
@@ -413,8 +425,8 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
             return null;
         }
 
-        var (primaryFilename, primarySha256) = location.Value;
-        byte[]? primaryGzBytes = await GetOrFetchRepodataBlobAsync(upstreamBase, primaryFilename, primarySha256, ct);
+        var (primaryFilename, primarySha256, primaryChecksumKind) = location.Value;
+        byte[]? primaryGzBytes = await GetOrFetchRepodataBlobAsync(upstreamBase, primaryFilename, primarySha256, primaryChecksumKind, ct);
         return primaryGzBytes is null ? null : (primaryGzBytes, primarySha256);
     }
 
@@ -424,7 +436,7 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     /// only need the sha256 to check a downstream cache (e.g. the parsed package map in
     /// <see cref="ResolvePackageUrlAsync"/>) can then skip the blob load entirely on a cache hit.
     /// </summary>
-    private async Task<(string Filename, string Sha256)?> GetPrimaryLocationAsync(string orgId, string upstreamBase, CancellationToken ct)
+    private async Task<(string Filename, string Sha256, RepodataChecksumKind Kind)?> GetPrimaryLocationAsync(string orgId, string upstreamBase, CancellationToken ct)
     {
         byte[]? repomdBytes = await GetRepomdBodyAsync(orgId, upstreamBase, ct);
         if (repomdBytes is null)
@@ -432,8 +444,8 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
             return null;
         }
 
-        var (primaryFilename, primarySha256) = ParsePrimaryFromRepomd(repomdBytes);
-        return primaryFilename is null || primarySha256 is null ? null : (primaryFilename, primarySha256);
+        var (primaryFilename, primarySha256, primaryChecksumKind) = ParsePrimaryFromRepomd(repomdBytes);
+        return primaryFilename is null || primarySha256 is null ? null : (primaryFilename, primarySha256, primaryChecksumKind);
     }
 
     // ── GPG key ────────────────────────────────────────────────────────────────
@@ -504,12 +516,14 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     /// Returns true when the given upstream path was recorded as a 404 within the
     /// configured TTL.
     /// </summary>
-    public async Task<bool> IsNegativelyCachedAsync(string upstreamPath, CancellationToken ct)
+    public async Task<bool> IsNegativelyCachedAsync(string upstreamBase, string upstreamPath, CancellationToken ct)
     {
-        string urlKey = UrlKey(upstreamPath);
-        string cutoff = _time.GetUtcNow().UtcDateTime.Add(-_negativeCacheTtl).ToString("yyyy-MM-ddTHH:mm:ssZ");
-        // xtenant: upstream_negative_cache is content-addressed (SHA-256 of URL → 404) and
-        // intentionally shared across tenants. A URL either 404s or it doesn't.
+        string urlKey = UrlKey(ResolvedNegativeCacheUrl(upstreamBase, upstreamPath));
+        string cutoff = _time.GetUtcNow().UtcDateTime.Add(-_negativeCacheTtl).ToUtcIso();
+        // xtenant: url_key is SHA-256 of the host-qualified upstream URL (base host + filename), so
+        // the row identifies one upstream resource independent of tenant. Two orgs sharing the same
+        // upstream host intentionally share the entry; two orgs on different upstream hosts get
+        // distinct keys and cannot cross-poison each other's negative-cache lookups.
         await using var conn = await _db.OpenAsync(ct);
         string? hit = await conn.ExecuteScalarAsync<string?>(
             "SELECT url_key FROM upstream_negative_cache WHERE url_key = @key AND ecosystem = 'rpm' AND fetched_at >= @cutoff",
@@ -518,11 +532,11 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     }
 
     /// <summary>Records a 404 response for <paramref name="upstreamPath"/> in the negative cache.</summary>
-    public async Task RecordNegativeAsync(string upstreamPath, CancellationToken ct)
+    public async Task RecordNegativeAsync(string upstreamBase, string upstreamPath, CancellationToken ct)
     {
-        string urlKey = UrlKey(upstreamPath);
-        string now = _time.GetUtcNow().UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ");
-        // xtenant: see IsNegativelyCachedAsync.
+        string urlKey = UrlKey(ResolvedNegativeCacheUrl(upstreamBase, upstreamPath));
+        string now = _time.GetUtcNow().UtcDateTime.ToUtcIso();
+        // xtenant: url_key is SHA-256 of the host-qualified upstream URL — see IsNegativelyCachedAsync.
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             """
@@ -822,7 +836,9 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
         // Fetch from upstream, cache, serve. The checksum verification in
         // GetOrFetchRepodataBlobAsync requires the full body in memory, so this miss path still
         // buffers — only the (far more common, steady-state) cache-hit path above is streamed.
-        byte[]? body = await GetOrFetchRepodataBlobAsync(upstreamBase, filename, sha256, ct);
+        // The sha256 here is the hash-prefix of the client-requested filename, i.e. the file's own
+        // (compressed) content hash — verify the body as served, never a decompressed interpretation.
+        byte[]? body = await GetOrFetchRepodataBlobAsync(upstreamBase, filename, sha256, RepodataChecksumKind.Compressed, ct);
         return body is null ? null : new RepodataResult(new MemoryStream(body), ContentTypeFor(filename), ETag: null, LastModified: null, NotModified: false);
     }
 
@@ -830,7 +846,8 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     /// Gets a hash-prefixed metadata blob from blob store or upstream.
     /// Stores fetched bytes in the Cache tier at <c>BlobKeys.RpmRepodataProxy(sha256)</c>.
     /// </summary>
-    private async Task<byte[]?> GetOrFetchRepodataBlobAsync(string upstreamBase, string filename, string sha256, CancellationToken ct)
+    private async Task<byte[]?> GetOrFetchRepodataBlobAsync(
+        string upstreamBase, string filename, string sha256, RepodataChecksumKind checksumKind, CancellationToken ct)
     {
         string blobKey = BlobKeys.RpmRepodataProxy(sha256);
         var existing = await _cacheStore.GetAsync(blobKey, ct);
@@ -872,7 +889,7 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
         // is content-addressed and cached "forever", and ResolvePackageUrlAsync lifts the
         // per-package download checksums out of this primary.xml.gz — so caching an unverified
         // body from a malicious or MITM'd upstream would poison the package-integrity chain.
-        if (!RepodataBodyMatches(body, sha256))
+        if (!RepodataBodyMatches(body, sha256, checksumKind))
         {
             DependablyMeter.UpstreamChecksumFailures.Add(
                 1, new KeyValuePair<string, object?>("ecosystem", "rpm"));
@@ -884,18 +901,23 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     }
 
     /// <summary>
-    /// True if <paramref name="body"/> hashes to <paramref name="expectedSha256"/>. The
-    /// expected value is either the compressed-file checksum (repomd <c>&lt;checksum&gt;</c>,
-    /// and the hash-prefixed filename DNF derives from it) or the decompressed checksum
-    /// (<c>&lt;open-checksum&gt;</c>), so the body is accepted if it matches under either
-    /// interpretation. An attacker cannot forge a preimage for a hash they do not control
-    /// under either transform, so accepting both does not weaken the check.
+    /// True if <paramref name="body"/> hashes to <paramref name="expectedSha256"/> under the
+    /// single interpretation the repomd entry declared (<paramref name="checksumKind"/>):
+    /// <see cref="RepodataChecksumKind.Compressed"/> hashes the body as served (the
+    /// content-addressing invariant — the blob key equals the served bytes' own hash);
+    /// <see cref="RepodataChecksumKind.Open"/> hashes the gunzipped content.
+    ///
+    /// Accepting <em>either</em> interpretation is unsafe: a hostile/MITM'd upstream can return
+    /// a doubly-gzipped body <c>B = gzip(primary.xml.gz)</c> for which <c>sha256(B) != X</c> but
+    /// <c>sha256(gunzip(B)) == X</c>, passing the open-checksum branch, getting stored forever
+    /// under the content-addressed key, and served to every org — dnf's own checksum check then
+    /// fails and the parser receives gzip bytes instead of XML (persistent cross-tenant denial).
     /// </summary>
-    private static bool RepodataBodyMatches(byte[] body, string expectedSha256)
+    internal static bool RepodataBodyMatches(byte[] body, string expectedSha256, RepodataChecksumKind checksumKind)
     {
-        if (Sha256Hex(body).Equals(expectedSha256, StringComparison.OrdinalIgnoreCase))
+        if (checksumKind == RepodataChecksumKind.Compressed)
         {
-            return true;
+            return Sha256Hex(body).Equals(expectedSha256, StringComparison.OrdinalIgnoreCase);
         }
 
         try
@@ -909,8 +931,8 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
         }
         catch
         {
-            // Not gzip / corrupt / over decompression limit: only the compressed-form check applies,
-            // and it already failed.
+            // Not gzip / corrupt / over decompression limit — the open-checksum interpretation
+            // cannot be satisfied.
             return false;
         }
     }
@@ -924,7 +946,7 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     /// Parses <c>repomd.xml</c> and returns the href and SHA-256 of the <c>primary</c>
     /// data element. Returns <c>(null, null)</c> on any parse failure.
     /// </summary>
-    internal static (string? Filename, string? Sha256) ParsePrimaryFromRepomd(byte[] repomdBytes)
+    internal static (string? Filename, string? Sha256, RepodataChecksumKind Kind) ParsePrimaryFromRepomd(byte[] repomdBytes)
         => ParseRepodataEntryFromRepomd(repomdBytes, "primary");
 
     /// <summary>
@@ -932,7 +954,7 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     /// type="<paramref name="dataType"/>"&gt;</c> entry. Returns <c>(null, null)</c> when
     /// the entry is absent or on any parse failure.
     /// </summary>
-    internal static (string? Filename, string? Sha256) ParseRepodataEntryFromRepomd(byte[] repomdBytes, string dataType)
+    internal static (string? Filename, string? Sha256, RepodataChecksumKind Kind) ParseRepodataEntryFromRepomd(byte[] repomdBytes, string dataType)
     {
         try
         {
@@ -943,27 +965,35 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
                 .FirstOrDefault(e => (string?)e.Attribute("type") == dataType);
             if (dataEl is null)
             {
-                return (null, null);
+                return (null, null, RepodataChecksumKind.Compressed);
             }
 
             string? href = (string?)dataEl.Element(ns + "location")?.Attribute("href");
             if (href is null)
             {
-                return (null, null);
+                return (null, null, RepodataChecksumKind.Compressed);
             }
 
-            // Try both <checksum> (sha256 type) and <open-checksum>
-            var sha256 = dataEl.Elements(ns + "checksum")
-                             .FirstOrDefault(e => (string?)e.Attribute("type") == "sha256")
-                         ?? dataEl.Elements(ns + "open-checksum")
-                             .FirstOrDefault(e => (string?)e.Attribute("type") == "sha256");
+            // Prefer <checksum> (over the compressed file, matching the hash-prefixed href DNF
+            // derives) and fall back to <open-checksum> (over the decompressed content). Record
+            // which one was taken so the fetch path verifies the body under exactly that
+            // interpretation — accepting either would let a doubly-gzipped body pass the
+            // open-checksum branch and poison the content-addressed cache.
+            var compressed = dataEl.Elements(ns + "checksum")
+                .FirstOrDefault(e => (string?)e.Attribute("type") == "sha256");
+            var open = dataEl.Elements(ns + "open-checksum")
+                .FirstOrDefault(e => (string?)e.Attribute("type") == "sha256");
+
+            var (sha256, kind) = compressed is not null
+                ? ((string?)compressed, RepodataChecksumKind.Compressed)
+                : ((string?)open, RepodataChecksumKind.Open);
 
             string filename = href.Contains('/') ? href[(href.LastIndexOf('/') + 1)..] : href;
-            return (filename, (string?)sha256);
+            return (filename, sha256, kind);
         }
         catch
         {
-            return (null, null);
+            return (null, null, RepodataChecksumKind.Compressed);
         }
     }
 
@@ -1092,6 +1122,12 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
         byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(url));
         return Convert.ToHexString(hash).ToLowerInvariant()[..UrlKeyPrefixLength];
     }
+
+    // Host-qualifies the negative-cache identity so the key includes the upstream base. The same
+    // RPM filename resolves against different per-org upstreams, so keying on the filename alone
+    // lets one org's 404 answer another org's lookup against a host that does have the package.
+    internal static string ResolvedNegativeCacheUrl(string upstreamBase, string upstreamPath) =>
+        $"{upstreamBase.TrimEnd('/')}/{upstreamPath.TrimStart('/')}";
 
     private static string ContentTypeFor(string filename)
     {

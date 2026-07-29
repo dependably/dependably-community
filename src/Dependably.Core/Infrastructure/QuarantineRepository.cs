@@ -1,3 +1,5 @@
+using System.Data.Common;
+using System.Diagnostics.CodeAnalysis;
 using Dapper;
 
 namespace Dependably.Infrastructure;
@@ -21,7 +23,7 @@ public sealed class QuarantineRepository
         _time = time;
     }
 
-    private string NowIso() => _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+    private string NowIso() => _time.GetUtcNow().ToUtcIso();
 
     /// <summary>
     /// Records (or refreshes) the pending review row for a blocked purl. A decided row is
@@ -69,34 +71,136 @@ public sealed class QuarantineRepository
         return new QuarantineUpsertResult(existingId ?? candidateId, Inserted: false);
     }
 
+    /// <summary>
+    /// The review queue page, filtered and sorted per <paramref name="query"/>. The decider is
+    /// resolved to an email through <c>users</c> so the queue shows who decided rather than an
+    /// opaque id; the join is tenant-bound, so a decided_by pointing outside the org resolves to
+    /// null rather than leaking a foreign tenant's address. <see cref="QuarantineEntry.DecidedBy"/>
+    /// is kept alongside it for the erased-user case, where the email is gone but the id remains.
+    /// </summary>
     public async Task<(IReadOnlyList<QuarantineEntry> Items, int Total)> ListAsync(
-        string orgId, string? state, string? ecosystem, int limit, int offset,
-        CancellationToken ct = default)
+        QuarantineListQuery query, CancellationToken ct = default)
     {
+        // Substring search over the queue's human-readable columns. The wildcards a package name
+        // can legitimately contain are escaped first: PyPI names routinely carry '_', which LIKE
+        // reads as "any single character", so an unescaped 'my_pkg' also matches 'myXpkg'.
+        string? escapedSearch = query.Search
+            ?.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
+        string? searchPattern = escapedSearch is not null ? $"%{escapedSearch.ToLowerInvariant()}%" : null;
+
+        var sqlParams = new
+        {
+            orgId = query.OrgId,
+            state = query.State,
+            ecosystem = query.Ecosystem,
+            gate = query.Gate,
+            searchPattern,
+            limit = query.Limit,
+            offset = query.Offset,
+        };
+
         await using var conn = await _db.OpenAsync(ct);
-        var rows = await conn.QueryAsync<QuarantineEntry>(
-            """
-            SELECT id, org_id AS OrgId, package_version_id AS PackageVersionId,
-                   ecosystem, purl, gate, detail, state,
-                   decided_by AS DecidedBy, decided_at AS DecidedAt, note,
-                   created_at AS CreatedAt, updated_at AS UpdatedAt
-            FROM quarantine
-            WHERE org_id = @orgId
-              AND (@state IS NULL OR state = @state)
-              AND (@ecosystem IS NULL OR ecosystem = @ecosystem)
-            ORDER BY updated_at DESC
+        // The count carries the same users join as the page: a search that matches only on the
+        // decider's email must be reflected in the total, or the pager offers pages that hold
+        // nothing.
+        int total = await conn.ExecuteScalarAsync<int>(ListCountSql, sqlParams);
+        var rows = await QueryListPageAsync(conn, sqlParams, BuildListOrderBy(query.Sort, query.Dir));
+        return (rows, total);
+    }
+
+    // The FROM/WHERE block is spelled out in both this query and the page query below rather than
+    // hoisted into a shared const fragment. OrgIdFilteringComplianceTests judges each SQL literal
+    // on its own: a literal that interpolates its FROM/WHERE from elsewhere shows the scanner no
+    // table reference and no org_id, so it is skipped rather than checked. Duplicating the block
+    // keeps both statements inside the gate.
+    private const string ListCountSql =
+        """
+        SELECT COUNT(*)
+        FROM quarantine q
+        LEFT JOIN users u ON u.id = q.decided_by AND u.tenant_id = q.org_id
+        WHERE q.org_id = @orgId
+          AND (@state IS NULL OR q.state = @state)
+          AND (@ecosystem IS NULL OR q.ecosystem = @ecosystem)
+          AND (@gate IS NULL OR q.gate = @gate)
+          AND (@searchPattern IS NULL
+               OR LOWER(q.purl) LIKE @searchPattern ESCAPE '\'
+               OR LOWER(q.gate) LIKE @searchPattern ESCAPE '\'
+               OR LOWER(COALESCE(q.detail, '')) LIKE @searchPattern ESCAPE '\'
+               OR LOWER(COALESCE(q.note, '')) LIKE @searchPattern ESCAPE '\'
+               OR LOWER(COALESCE(u.email, '')) LIKE @searchPattern ESCAPE '\')
+        """;
+
+    // The page itself. orderBy is a whitelisted SQL expression built by BuildListOrderBy from
+    // compile-time constants only; every value is a bound parameter.
+    [SuppressMessage("Security", "S2077:Formatting SQL queries is security-sensitive",
+        Justification = "The interpolated ORDER BY fragment is composed exclusively from compile-time-constant SQL " +
+                        "expressions in ListSortColumns plus the literal strings \"ASC\"/\"DESC\". Caller-supplied " +
+                        "sort/dir values only select which constant to use (TryGetValue + case-insensitive equality " +
+                        "against literals); they never reach the SQL string.")]
+    private static async Task<List<QuarantineEntry>> QueryListPageAsync(
+        DbConnection conn, object sqlParams, string orderBy) =>
+        // rawsql: only the whitelisted ORDER BY column/direction are interpolated (see the S2077 justification above).
+        (await conn.QueryAsync<QuarantineEntry>(
+            $"""
+            SELECT q.id, q.org_id AS OrgId, q.package_version_id AS PackageVersionId,
+                   q.ecosystem, q.purl, q.gate, q.detail, q.state,
+                   q.decided_by AS DecidedBy, u.email AS DecidedByEmail,
+                   q.decided_at AS DecidedAt, q.note,
+                   q.created_at AS CreatedAt, q.updated_at AS UpdatedAt
+            FROM quarantine q
+            LEFT JOIN users u ON u.id = q.decided_by AND u.tenant_id = q.org_id
+            WHERE q.org_id = @orgId
+              AND (@state IS NULL OR q.state = @state)
+              AND (@ecosystem IS NULL OR q.ecosystem = @ecosystem)
+              AND (@gate IS NULL OR q.gate = @gate)
+              AND (@searchPattern IS NULL
+                   OR LOWER(q.purl) LIKE @searchPattern ESCAPE '\'
+                   OR LOWER(q.gate) LIKE @searchPattern ESCAPE '\'
+                   OR LOWER(COALESCE(q.detail, '')) LIKE @searchPattern ESCAPE '\'
+                   OR LOWER(COALESCE(q.note, '')) LIKE @searchPattern ESCAPE '\'
+                   OR LOWER(COALESCE(u.email, '')) LIKE @searchPattern ESCAPE '\')
+            -- The id tiebreaker is what makes LIMIT/OFFSET paging stable: gate and second-precision
+            -- updated_at both tie freely, and an unbroken tie lets a row repeat on one page and
+            -- vanish from the next.
+            ORDER BY {orderBy}, q.id DESC
             LIMIT @limit OFFSET @offset
             """,
-            new { orgId, state, ecosystem, limit, offset });
-        int total = await conn.ExecuteScalarAsync<int>(
-            """
-            SELECT COUNT(*) FROM quarantine
-            WHERE org_id = @orgId
-              AND (@state IS NULL OR state = @state)
-              AND (@ecosystem IS NULL OR ecosystem = @ecosystem)
-            """,
-            new { orgId, state, ecosystem });
-        return (rows.ToList(), total);
+            sqlParams)).AsList();
+
+    // Columns the review queue accepts as `sort=`. Values are SQL expressions composed from
+    // compile-time constants only — nothing from the request reaches the SQL string. The key set
+    // is deliberately the set of sortable column headers on the queue page: keeping the two equal
+    // is what makes the accepted surface reviewable.
+    //
+    // Case-insensitive ordering uses LOWER(), not COLLATE NOCASE: NOCASE is a SQLite-only
+    // collation name and Postgres has no collation by that name, so a sort on one of these
+    // columns would error there. LOWER() folds ASCII case identically on both engines.
+    private static readonly Dictionary<string, (string Expr, string DefaultDir)> ListSortColumns =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["package"] = ("LOWER(q.purl)", "asc"),
+            ["gate"] = ("LOWER(q.gate)", "asc"),
+            ["decidedBy"] = ("LOWER(COALESCE(u.email, q.decided_by, ''))", "asc"),
+            ["updated"] = ("q.updated_at", "desc"),
+        };
+
+    private static string BuildListOrderBy(string? sort, string? dir)
+    {
+        if (sort is null || !ListSortColumns.TryGetValue(sort, out var col))
+        {
+            col = ListSortColumns["updated"];
+        }
+
+        return $"{col.Expr} {NormalizeSortDirection(dir, col.DefaultDir)}";
+    }
+
+    private static string NormalizeSortDirection(string? requested, string defaultDir)
+    {
+        return string.Equals(requested, "asc", StringComparison.OrdinalIgnoreCase)
+            ? "ASC"
+            : string.Equals(requested, "desc", StringComparison.OrdinalIgnoreCase)
+            ? "DESC"
+            : defaultDir.Equals("desc", StringComparison.OrdinalIgnoreCase) ? "DESC" : "ASC";
     }
 
     /// <summary>Org-scoped lookup — a cross-tenant id comes back null (BOLA guard).</summary>
@@ -275,6 +379,7 @@ public sealed class QuarantineRepository
         // list as one array parameter instead of expanding the SQL text, which IN never accepts.
         var (idsClause, idsParams) = DapperInClause.Expand("id", ids);
         idsParams.Add("orgId", orgId);
+        // rawsql: idsClause is a DapperInClause-built parameterized IN (@id0, @id1, …) list, not user text.
         return await conn.ExecuteAsync(
             "DELETE FROM quarantine WHERE org_id = @orgId AND id IN " + idsClause,
             idsParams);
@@ -325,6 +430,24 @@ public sealed class QuarantineRepository
 /// </summary>
 public sealed record QuarantineUpsertResult(string RowId, bool Inserted);
 
+/// <summary>
+/// Filter, sort, and pagination inputs for <see cref="QuarantineRepository.ListAsync"/>. Bundled
+/// into a record rather than passed as nine positional parameters, and named so a call site reads
+/// as the query it is. <c>Sort</c> selects a whitelisted column (see the repository's
+/// ListSortColumns); an unknown value falls back to the default rather than erroring, so a stale
+/// bookmark still renders.
+/// </summary>
+public sealed record QuarantineListQuery(
+    string OrgId,
+    string? State = null,
+    string? Ecosystem = null,
+    string? Gate = null,
+    string? Search = null,
+    int Limit = 50,
+    int Offset = 0,
+    string? Sort = null,
+    string? Dir = null);
+
 public sealed class QuarantineEntry
 {
     public string Id { get; init; } = "";
@@ -336,6 +459,12 @@ public sealed class QuarantineEntry
     public string? Detail { get; init; }
     public string State { get; init; } = "pending";
     public string? DecidedBy { get; init; }
+    /// <summary>
+    /// The decider's email, resolved from <see cref="DecidedBy"/> by the list query only. Null on
+    /// the single-row lookups, and null for a decider whose account has since been erased — the
+    /// id survives in <see cref="DecidedBy"/> either way, so the queue can fall back to it.
+    /// </summary>
+    public string? DecidedByEmail { get; init; }
     public DateTimeOffset? DecidedAt { get; init; }
     public string? Note { get; init; }
     public DateTimeOffset CreatedAt { get; init; }

@@ -45,6 +45,8 @@ public sealed class BlockGateRequestFactoryTests
             HasInstallScript: version.HasInstallScript,
             InstallScriptKind: version.InstallScriptKind,
             BlockInstallScriptsMode: settings.BlockInstallScripts,
+            ProvenanceStatus: version.ProvenanceStatus,
+            VerifyProvenanceMode: settings.VerifyProvenanceMode(ecosystem),
             RevokedAt: version.RevokedAt,
             BlockRevokedMode: settings.BlockRevoked,
             LicenseEnforcementMode: settings.LicenseEnforcementMode);
@@ -81,6 +83,8 @@ public sealed class BlockGateRequestFactoryTests
             HasInstallScript: version.HasInstallScript,
             InstallScriptKind: version.InstallScriptKind,
             BlockInstallScriptsMode: settings.BlockInstallScripts,
+            ProvenanceStatus: version.ProvenanceStatus,
+            VerifyProvenanceMode: settings.VerifyProvenanceMode(ecosystem),
             RevokedAt: version.RevokedAt,
             BlockRevokedMode: settings.BlockRevoked,
             LicenseEnforcementMode: settings.LicenseEnforcementMode);
@@ -161,6 +165,8 @@ public sealed class BlockGateRequestFactoryTests
             HasInstallScript: blockedVersion.HasInstallScript,
             InstallScriptKind: blockedVersion.InstallScriptKind,
             BlockInstallScriptsMode: settings.BlockInstallScripts,
+            ProvenanceStatus: blockedVersion.ProvenanceStatus,
+            VerifyProvenanceMode: settings.VerifyProvenanceMode(ecosystem),
             RevokedAt: blockedVersion.RevokedAt,
             BlockRevokedMode: settings.BlockRevoked,
             LicenseEnforcementMode: settings.LicenseEnforcementMode);
@@ -181,6 +187,8 @@ public sealed class BlockGateRequestFactoryTests
             HasInstallScript: allowedVersion.HasInstallScript,
             InstallScriptKind: allowedVersion.InstallScriptKind,
             BlockInstallScriptsMode: settings.BlockInstallScripts,
+            ProvenanceStatus: allowedVersion.ProvenanceStatus,
+            VerifyProvenanceMode: settings.VerifyProvenanceMode(ecosystem),
             RevokedAt: allowedVersion.RevokedAt,
             BlockRevokedMode: settings.BlockRevoked,
             LicenseEnforcementMode: settings.LicenseEnforcementMode);

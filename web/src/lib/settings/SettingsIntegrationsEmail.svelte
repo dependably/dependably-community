@@ -50,6 +50,14 @@
     return !!host && !!from && ((!!username && hasPassword) || security === 'none')
   }
 
+  // Mirrors SmtpTransportSettings.SendsCredentialsInCleartextWhen. Computed from the live form
+  // rather than the saved settings so the warning appears while the operator is choosing "none",
+  // not only after they have already saved credentials into a cleartext session.
+  $: cleartextCredentials = !emailInheritInstance
+    && emailSmtpSecurity === 'none'
+    && !!emailSmtpUsername
+    && (settings.hasEmailSmtpPassword || !!emailSmtpPassword)
+
   $: formOwnConfigured = ownTransportConfigured(
     emailSmtpHost, emailSmtpFrom, emailSmtpUsername,
     settings.hasEmailSmtpPassword || !!emailSmtpPassword, emailSmtpSecurity)
@@ -191,6 +199,10 @@
     </div>
   </div>
 
+  {#if cleartextCredentials}
+    <div class="cleartext-warning" role="status">{$t('settings.integrations.email.cleartextCredentials')}</div>
+  {/if}
+
   {#if disabledReason}
     <div class="effectively-disabled-banner" role="status">
       {#if disabledReason === 'off'}
@@ -254,6 +266,15 @@
     border-radius: var(--radius);
     padding: 8px 10px;
     margin: 12px 0;
+  }
+  .cleartext-warning {
+    background: var(--warning-bg);
+    border: 1px solid var(--warning-border);
+    color: var(--warning-text);
+    border-radius: var(--radius);
+    padding: 8px 10px;
+    margin: 12px 0;
+    font-size: 12px;
   }
   .email-status {
     font-size: 12px;

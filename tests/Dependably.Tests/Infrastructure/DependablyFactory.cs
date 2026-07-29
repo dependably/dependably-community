@@ -121,6 +121,13 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
     public string? RpmUpstreamMode { get; init; }
 
     /// <summary>
+    /// <c>PUBLISH_NAME_BINDING</c> value ('on' | 'off'). Null (default) leaves name-binding
+    /// enforcement off — ownership is still recorded, but no publish is refused. Set to "on" to
+    /// exercise the name-level publish-authorization gate (first-publisher owns the name).
+    /// </summary>
+    public string? PublishNameBinding { get; init; }
+
+    /// <summary>
     /// <c>TRUSTED_PROXIES</c> value. Null (default) leaves forwarded-header processing off — the
     /// test client's TestServer loopback peer is what the <c>/metrics</c>-style IP allowlist gate
     /// sees. Set to declare that loopback peer a trusted proxy, so a test can simulate a real
@@ -178,6 +185,7 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
             // token and disables anonymous pull. Only meaningful in edge mode.
             ["EDGE_ACCESS_TOKEN"] = DeploymentMode == "edge" ? EdgeAccessToken : null,
             ["Rpm:UpstreamMode"] = RpmUpstreamMode,
+            ["PUBLISH_NAME_BINDING"] = PublishNameBinding,
             ["TRUSTED_PROXIES"] = TrustedProxies,
             // Read by both composition roots when registering the OSV source; a null entry is
             // absent, leaving the production default (api.osv.dev) in place.
@@ -448,6 +456,8 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         var now = DateTime.UtcNow;
 
         var token = new JwtSecurityToken(
+            issuer: Dependably.Security.JwtTokenBinding.Issuer,
+            audience: Dependably.Security.JwtTokenBinding.SessionAudience,
             claims: new[]
             {
                 new Claim(JwtRegisteredClaimNames.Sub, adminId),
@@ -493,6 +503,8 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         var now = DateTime.UtcNow;
 
         var token = new JwtSecurityToken(
+            issuer: Dependably.Security.JwtTokenBinding.Issuer,
+            audience: Dependably.Security.JwtTokenBinding.SessionAudience,
             claims: new[]
             {
                 new Claim(JwtRegisteredClaimNames.Sub, userId),
@@ -549,6 +561,8 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         claims.AddRange(capabilities.Select(c => new Claim("cap", c)));
 
         var token = new JwtSecurityToken(
+            issuer: Dependably.Security.JwtTokenBinding.Issuer,
+            audience: Dependably.Security.JwtTokenBinding.SessionAudience,
             claims: claims,
             notBefore: now,
             expires: now.AddHours(8),

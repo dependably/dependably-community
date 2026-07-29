@@ -54,9 +54,12 @@ public sealed class PackageAnalyticsRepository
         //
         // The hour bucket is a substr() of the ISO-8601 TEXT timestamp, not strftime/to_char: both
         // engines support substr() identically, and the cutoff is computed in C# from the injected
-        // clock so the statement stays dialect-neutral.
+        // clock so the statement stays dialect-neutral. activity.created_at is millisecond-precision
+        // text (AuditRepository.LogActivityAsync is its only writer), so the cutoff is formatted at
+        // the same precision — a second-precision bound sorts wrong against it on the boundary
+        // second, since '.' (0x2E) collates before 'Z' (0x5A).
         var now = _time.GetUtcNow();
-        string hourCutoff = now.AddHours(-24).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string hourCutoff = now.AddHours(-24).ToUtcIsoMillis();
         var downloadsByHour = (await conn.QueryAsync<HourCount>(
             """
             SELECT substr(created_at, 1, 13) || ':00:00Z' as Hour, COUNT(*) as Count
@@ -203,17 +206,21 @@ public sealed class PackageAnalyticsRepository
 
     // Const concatenation, not interpolation: these are compile-time constants, so the SQL stays
     // literal and no parameter can be smuggled in through the body.
+    // rawsql: const concatenation of compile-time-constant fragments; no runtime value interpolated.
     private const string OperationalRiskPackageCountSql =
         "SELECT COUNT(*) FROM (SELECT DISTINCT Ecosystem, Name FROM (" + OperationalRiskBody + ") u) d";
 
+    // rawsql: const concatenation of compile-time-constant fragments; no runtime value interpolated.
     private const string OperationalRiskListSql =
         "SELECT * FROM (" + OperationalRiskBody + ") u " +
         "ORDER BY u.VersionsBehind DESC, u.Ecosystem ASC, u.Name ASC, u.Version ASC " +
         "LIMIT @limit OFFSET @offset";
 
+    // rawsql: const concatenation of compile-time-constant fragments; no runtime value interpolated.
     private const string LicenseRiskCountSql =
         "SELECT COUNT(*) FROM (" + LicenseRiskBody + ") u WHERE (@reason IS NULL OR u.Reason = @reason)";
 
+    // rawsql: const concatenation of compile-time-constant fragments; no runtime value interpolated.
     private const string LicenseRiskListSql =
         "SELECT * FROM (" + LicenseRiskBody + ") u WHERE (@reason IS NULL OR u.Reason = @reason) " +
         "ORDER BY u.Reason ASC, u.Ecosystem ASC, u.Name ASC, u.Version ASC " +
@@ -250,6 +257,7 @@ public sealed class PackageAnalyticsRepository
         await using var conn = await _db.OpenAsync(ct);
         var args = new { orgId, threshold = VersionsBehindDashboardThreshold, ecosystem, limit, offset };
 
+        // rawsql: OperationalRiskBody is a compile-time-constant SQL fragment; no runtime value interpolated.
         int total = await conn.ExecuteScalarAsync<int>(
             "SELECT COUNT(*) FROM (" + OperationalRiskBody + ") u", args);
         int packageCount = await conn.ExecuteScalarAsync<int>(OperationalRiskPackageCountSql, args);
@@ -370,9 +378,9 @@ public sealed class PackageAnalyticsRepository
         // per window dedupes a CVE seen on both planes. The three window cutoffs are computed in
         // C# from the injected clock, not strftime/datetime('now'), so the statement stays
         // dialect-neutral.
-        string dayCutoff = now.AddDays(-1).ToString("yyyy-MM-ddTHH:mm:ssZ");
-        string weekCutoff = now.AddDays(-7).ToString("yyyy-MM-ddTHH:mm:ssZ");
-        string monthCutoff = now.AddDays(-30).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string dayCutoff = now.AddDays(-1).ToUtcIso();
+        string weekCutoff = now.AddDays(-7).ToUtcIso();
+        string monthCutoff = now.AddDays(-30).ToUtcIso();
         var vulnPeriods = await conn.QuerySingleOrDefaultAsync<VulnPeriodCounts>(
             """
             SELECT
@@ -406,9 +414,12 @@ public sealed class PackageAnalyticsRepository
             int? minReleaseAgeHours, DateTimeOffset now)
     {
         // Cutoffs computed in C# from the injected clock, not strftime/datetime('now'), so the
-        // statements stay dialect-neutral.
-        string sevenDaysCutoff = now.AddDays(-7).ToString("yyyy-MM-ddTHH:mm:ssZ");
-        string thirtyDaysCutoff = now.AddDays(-30).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        // statements stay dialect-neutral. Both bounds compare against activity.created_at, which
+        // is millisecond-precision text (AuditRepository.LogActivityAsync is its only writer), so
+        // they are formatted at the same precision — a second-precision bound sorts wrong against
+        // it on the boundary second, since '.' (0x2E) collates before 'Z' (0x5A).
+        string sevenDaysCutoff = now.AddDays(-7).ToUtcIsoMillis();
+        string thirtyDaysCutoff = now.AddDays(-30).ToUtcIsoMillis();
 
         int activeUsers = await conn.ExecuteScalarAsync<int>(
             """
@@ -494,8 +505,9 @@ public sealed class PackageAnalyticsRepository
         // 'download' + 'first_fetch' definition the hourly chart uses (see GetOrgStatsAsync above).
         // Blocked attempts are not downloads and are counted separately by blockedPulls. The cutoff
         // is computed in C# from the injected clock, not strftime/datetime('now'), so the statement
-        // stays dialect-neutral.
-        string thirtyDaysCutoff = now.AddDays(-30).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        // stays dialect-neutral. activity.created_at is millisecond-precision text (see the cutoffs
+        // above), so the bound matches that precision rather than the second-precision default.
+        string thirtyDaysCutoff = now.AddDays(-30).ToUtcIsoMillis();
         int totalDownloads30d = await conn.ExecuteScalarAsync<int>(
             """
             SELECT COUNT(*)
@@ -566,7 +578,7 @@ public sealed class PackageAnalyticsRepository
             {
                 Status = status,
                 DaysRemaining = (int)Math.Floor(daysRemaining),
-                NotAfter = notAfter.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                NotAfter = notAfter.ToUtcIso(),
             };
         }
         catch { return null; }

@@ -41,6 +41,9 @@ public static class EmailConfigEditing
     /// currently stored — the raw value is never included. <c>secretsAvailable</c> mirrors the
     /// per-org <c>alert-settings</c> convention (= <c>EnvelopeProtector.IsConfigured</c>) so the
     /// UI can grey out the password field with an explanatory hint when no master key is set.
+    /// <c>cleartextCredentials</c> reports the <c>security=none</c> + credentials combination
+    /// (see <see cref="SmtpTransportSettings.SendsCredentialsInCleartext"/>) so the warning is
+    /// present on every read of the config, not only on the save that introduced it.
     /// </summary>
     public static object BuildView(InstanceSmtpConfig.ResolvedSmtpConfig resolved, bool secretsAvailable)
     {
@@ -56,6 +59,7 @@ public static class EmailConfigEditing
             fromAddress = t.FromAddress,
             configured = resolved.Configured,
             secretsAvailable,
+            cleartextCredentials = t.SendsCredentialsInCleartext,
         };
     }
 

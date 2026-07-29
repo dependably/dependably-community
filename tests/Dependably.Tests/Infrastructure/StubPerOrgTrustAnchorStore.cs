@@ -18,6 +18,20 @@ public sealed class StubPerOrgTrustAnchorStore : IPerOrgTrustAnchorStore
     public void AddAnchor(string orgId, string ecosystem, TrustAnchorMaterial material)
         => _anchors.Add((orgId, ecosystem, material));
 
+    /// <summary>
+    /// Seeds a presence-only anchor: enough to satisfy <see cref="IsConfiguredForAsync"/> and the
+    /// block gate's "enforcement is backed by an anchor" check, with placeholder material no
+    /// verifier can parse. For tests that supply a provenance verdict directly and only need the
+    /// org to look configured.
+    /// </summary>
+    public void AddPresenceAnchor(string orgId, string ecosystem, string anchorKind = "spki")
+        => AddAnchor(orgId, ecosystem, new TrustAnchorMaterial
+        {
+            Id = Guid.NewGuid().ToString("N"),
+            AnchorKind = anchorKind,
+            Material = "presence-only-test-anchor",
+        });
+
     public Task<bool> IsConfiguredForAsync(string orgId, string ecosystem, CancellationToken ct = default)
         => Task.FromResult(_anchors.Any(a =>
             a.OrgId == orgId &&

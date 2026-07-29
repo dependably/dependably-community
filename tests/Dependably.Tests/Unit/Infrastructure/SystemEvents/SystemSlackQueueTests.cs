@@ -66,21 +66,6 @@ public sealed class SystemSlackQueueTests : IAsyncLifetime
         }
     }
 
-    private static async Task PumpUntilAsync(
-        FakeTimeProvider clock, Func<bool> condition, TimeSpan step, int maxIterations = 200)
-    {
-        for (int i = 0; i < maxIterations && !condition(); i++)
-        {
-            clock.Advance(step);
-            await Task.Delay(5);
-        }
-
-        if (!condition())
-        {
-            throw new TimeoutException("Condition never satisfied while pumping the fake clock.");
-        }
-    }
-
     /// <summary>Routes by URL substring: "good" → 200, "bad" → 502. Captures the last request body.</summary>
     private sealed class RoutingHandler : DelegatingHandler
     {
@@ -120,7 +105,10 @@ public sealed class SystemSlackQueueTests : IAsyncLifetime
         _ = queue.StartAsync(cts.Token);
 
         queue.Notify(new SystemEventRecord("tenant.created", "acme", null, "ops@example.com"));
-        await WaitAsync(() => queue.DeliveredCount == 1);
+        // Wait on ProcessedCount, not DeliveredCount: DeliveredCount is bumped mid-delivery, before
+        // the status columns are written, so waiting on it races the very write asserted below.
+        // ProcessedCount is incremented only after the outcome record is durably written.
+        await WaitAsync(() => queue.ProcessedCount == 1);
 
         await cts.CancelAsync();
         try { await queue.StopAsync(CancellationToken.None); } catch { }
@@ -232,7 +220,10 @@ public sealed class SystemSlackQueueTests : IAsyncLifetime
         await orgs.SetInstanceSettingAsync("system_slack_webhook_url", "https://bad.example.com/hook");
         queue.Notify(new SystemEventRecord("tenant.deleted", "acme", null, "ops@example.com"));
 
-        await PumpUntilAsync(slackClock, () => queue.FailedCount == 1, TimeSpan.FromSeconds(1));
+        // Pump until BOTH events are fully processed (ProcessedCount == 2), not merely until
+        // FailedCount == 1: the failure counter is bumped before the "failed" status columns are
+        // written, so waiting on it races the status/error writes asserted below.
+        await ClockPump.UntilAsync(slackClock, () => queue.ProcessedCount == 2, TimeSpan.FromSeconds(1));
 
         await cts.CancelAsync();
         try { await queue.StopAsync(CancellationToken.None); } catch { }
@@ -299,7 +290,7 @@ public sealed class SystemSlackQueueTests : IAsyncLifetime
 
         // The first event burns through the 1s/5s/30s backoff inside the drain itself; pump the
         // fake clock so that finishes in virtual time instead of real time.
-        await PumpUntilAsync(slackClock, () => queue.DeliveredCount == 1 && queue.FailedCount == 1, TimeSpan.FromSeconds(1));
+        await ClockPump.UntilAsync(slackClock, () => queue.DeliveredCount == 1 && queue.FailedCount == 1, TimeSpan.FromSeconds(1));
 
         await executeTask;
 

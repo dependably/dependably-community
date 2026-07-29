@@ -18,7 +18,7 @@ public sealed class InProcessDistributedLock : IDistributedLock
     {
         var sem = _locks.GetOrAdd(name, _ => new SemaphoreSlim(1, 1));
         bool acquired = await sem.WaitAsync(0, ct);
-        return !acquired ? null : (ILockHandle)new LockHandle(name, sem, ttl, _time.GetUtcNow());
+        return !acquired ? null : (ILockHandle)new LockHandle(name, sem, ttl, _time);
     }
 
     public async Task<ILockHandle> AcquireAsync(
@@ -28,44 +28,65 @@ public sealed class InProcessDistributedLock : IDistributedLock
         bool acquired = await sem.WaitAsync(wait, ct);
         return !acquired
             ? throw new TimeoutException($"Could not acquire in-process lock '{name}' within {wait}.")
-            : (ILockHandle)new LockHandle(name, sem, ttl, _time.GetUtcNow());
+            : (ILockHandle)new LockHandle(name, sem, ttl, _time);
     }
 
     private sealed class LockHandle : ILockHandle
     {
         private readonly SemaphoreSlim _sem;
+        private readonly ITimer _expiry;
+        private readonly object _gate = new();
         private bool _released;
 
         public string Name { get; }
         public DateTimeOffset AcquiredAt { get; }
 
-        public LockHandle(string name, SemaphoreSlim sem, TimeSpan ttl, DateTimeOffset acquiredAt)
+        public LockHandle(string name, SemaphoreSlim sem, TimeSpan ttl, TimeProvider time)
         {
             Name = name;
             _sem = sem;
-            AcquiredAt = acquiredAt;
-            // Auto-release after TTL if not explicitly disposed.
-            _ = Task.Delay(ttl).ContinueWith(_ => Release());
+            AcquiredAt = time.GetUtcNow();
+            // Auto-release after TTL if not explicitly disposed, on the injected clock so the
+            // lease behaves the same way the Redis PX expiry does — a holder that stops renewing
+            // loses the lock at its TTL.
+            _expiry = time.CreateTimer(_ => Release(), null, ttl, Timeout.InfiniteTimeSpan);
         }
 
         public Task<bool> ExtendAsync(TimeSpan additional, CancellationToken ct = default)
-            => Task.FromResult(!_released); // In-process: always "succeeds" while held.
+        {
+            lock (_gate)
+            {
+                if (_released)
+                {
+                    return Task.FromResult(false);
+                }
 
-        public ValueTask DisposeAsync()
+                // Push the auto-release out, mirroring the Redis PEXPIRE renewal: a renewed lease
+                // survives past its original TTL and keeps contending acquirers out.
+                _expiry.Change(additional, Timeout.InfiniteTimeSpan);
+                return Task.FromResult(true);
+            }
+        }
+
+        public async ValueTask DisposeAsync()
         {
             Release();
-            return ValueTask.CompletedTask;
+            await _expiry.DisposeAsync();
         }
 
         private void Release()
         {
-            if (_released)
+            lock (_gate)
             {
-                return;
+                if (_released)
+                {
+                    return;
+                }
+
+                _released = true;
             }
 
-            _released = true;
-            try { _sem.Release(); } catch { /* already released */ }
+            try { _sem.Release(); } catch (SemaphoreFullException) { /* already released */ }
         }
     }
 }

@@ -47,7 +47,7 @@ public sealed class ReleaseHoldProxyPlaneTests : IAsyncLifetime
 
         // Published an hour ago, held for 72 — the gate is still holding it, so the queue must too.
         Assert.Equal(0, purged);
-        var (items, total) = await repo.ListAsync("o1", "pending", null, limit: 50, offset: 0);
+        var (items, total) = await repo.ListAsync(new QuarantineListQuery("o1", State: "pending", Limit: 50));
         Assert.Equal(1, total);
         Assert.Equal("release_age", Assert.Single(items).Gate);
     }
@@ -108,7 +108,7 @@ public sealed class ReleaseHoldProxyPlaneTests : IAsyncLifetime
             VALUES ('ca1', 'npm', 'fresh-pkg', '1.0.0', 'fresh-pkg-1.0.0.tgz', 'proxy/ca1', 'ca1',
                     'pkg:npm/fresh-pkg@1.0.0', @publishedAt)
             """,
-            new { publishedAt = publishedAt.ToString("yyyy-MM-ddTHH:mm:ssZ") });
+            new { publishedAt = publishedAt.ToUtcIso() });
         await conn.ExecuteAsync(
             "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES ('o1', 'ca1')");
         await conn.ExecuteAsync(

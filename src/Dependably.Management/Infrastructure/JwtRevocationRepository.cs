@@ -66,7 +66,7 @@ public sealed class JwtRevocationRepository
             VALUES (@jti, @expiresAt)
             ON CONFLICT DO NOTHING
             """,
-            new { jti, expiresAt = expiresAt.ToString("yyyy-MM-ddTHH:mm:ssZ") });
+            new { jti, expiresAt = expiresAt.ToUtcIso() });
         _cache?.Remove(CacheKey(jti));
 
         // Retire the current generation: remove it so the next fill mints a fresh (cacheable)
@@ -94,7 +94,7 @@ public sealed class JwtRevocationRepository
         var guardSource = _cache is null ? null : GuardFor(jti);
 
         await using var conn = await _db.OpenAsync(ct);
-        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToUtcIso();
         int count = await conn.ExecuteScalarAsync<int>(
             "SELECT COUNT(*) FROM jwt_revocations WHERE jti = @jti AND expires_at > @now",
             new { jti, now });
@@ -133,7 +133,7 @@ public sealed class JwtRevocationRepository
     public async Task PruneExpiredAsync(CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToUtcIso();
         await conn.ExecuteAsync("DELETE FROM jwt_revocations WHERE expires_at <= @now", new { now });
     }
 }

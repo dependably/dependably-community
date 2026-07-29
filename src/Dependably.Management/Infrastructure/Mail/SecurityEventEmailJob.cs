@@ -9,6 +9,7 @@ public enum SecurityEventKind
     MfaEnabled,
     MfaDisabled,
     PasswordChanged,
+    EmailChanged,
 }
 
 /// <summary>
@@ -78,6 +79,7 @@ internal sealed class SecurityEventEmailJob : IEmailDeliveryJob
                 SecurityEventKind.MfaEnabled => ("email.security.mfaEnabled.subject", "email.security.mfaEnabled.body"),
                 SecurityEventKind.MfaDisabled => ("email.security.mfaDisabled.subject", "email.security.mfaDisabled.body"),
                 SecurityEventKind.PasswordChanged => ("email.security.passwordChanged.subject", "email.security.passwordChanged.body"),
+                SecurityEventKind.EmailChanged => ("email.security.emailChanged.subject", "email.security.emailChanged.body"),
                 _ => throw new ArgumentOutOfRangeException(nameof(_kind), _kind, "Unknown security event kind."),
             };
             string subject = _localizer[subjectKey];

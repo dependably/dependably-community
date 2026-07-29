@@ -274,10 +274,76 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
             </repomd>
             """;
 
-        var (filename, parsedSha256) = RpmUpstreamProxy.ParsePrimaryFromRepomd(Encoding.UTF8.GetBytes(repomd));
+        var (filename, parsedSha256, kind) = RpmUpstreamProxy.ParsePrimaryFromRepomd(Encoding.UTF8.GetBytes(repomd));
 
         Assert.Equal($"{sha256}-primary.xml.gz", filename);
         Assert.Equal(sha256, parsedSha256);
+        // The checksum was read from <checksum> (compressed form), so the body must be verified
+        // as served — never a decompressed interpretation.
+        Assert.Equal(RepodataChecksumKind.Compressed, kind);
+    }
+
+    [Fact]
+    public void ParsePrimaryFromRepomd_OnlyOpenChecksum_ReportsOpenKind()
+    {
+        string sha256 = new('c', 64);
+        string repomd = $"""
+            <?xml version="1.0" encoding="UTF-8"?>
+            <repomd xmlns="http://linux.duke.edu/metadata/repo">
+              <data type="primary">
+                <location href="repodata/{sha256}-primary.xml.gz"/>
+                <open-checksum type="sha256">{sha256}</open-checksum>
+              </data>
+            </repomd>
+            """;
+
+        var (_, parsedSha256, kind) = RpmUpstreamProxy.ParsePrimaryFromRepomd(Encoding.UTF8.GetBytes(repomd));
+
+        Assert.Equal(sha256, parsedSha256);
+        Assert.Equal(RepodataChecksumKind.Open, kind);
+    }
+
+    // ── RepodataBodyMatches dual-interpretation (#437 item 4) ─────────────────────
+
+    [Fact]
+    public void RepodataBodyMatches_DoublyGzippedBody_RejectedUnderCompressedKind()
+    {
+        // A repomd <checksum> (compressed) declares X over the real primary.xml.gz. A hostile
+        // upstream returns B = gzip(primary.xml.gz): sha256(B) != X, but sha256(gunzip(B)) == X.
+        // Accepting the decompressed interpretation would store B under the content-addressed key
+        // and serve gzip bytes as if they were primary.xml.gz — persistent cross-tenant denial.
+        byte[] realGz = GzipBytes(Encoding.UTF8.GetBytes("<metadata>primary</metadata>"));
+        string x = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(realGz)).ToLowerInvariant();
+        byte[] doublyGzipped = GzipBytes(realGz);
+
+        // Legit body verifies as served.
+        Assert.True(RpmUpstreamProxy.RepodataBodyMatches(realGz, x, RepodataChecksumKind.Compressed));
+        // Doubly-gzipped body is rejected: its own hash != X and the decompressed interpretation
+        // is NOT consulted when the repomd declared a compressed <checksum>.
+        Assert.False(RpmUpstreamProxy.RepodataBodyMatches(doublyGzipped, x, RepodataChecksumKind.Compressed));
+    }
+
+    [Fact]
+    public void RepodataBodyMatches_OpenChecksum_VerifiesDecompressedContent()
+    {
+        // Adversarial twin: when the repomd genuinely declared <open-checksum> (over the
+        // decompressed content), the body is verified after gunzip — this legitimate path is
+        // preserved so the fix does not over-reject.
+        byte[] inner = Encoding.UTF8.GetBytes("<metadata>primary</metadata>");
+        byte[] gz = GzipBytes(inner);
+        string openSha = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(inner)).ToLowerInvariant();
+
+        Assert.True(RpmUpstreamProxy.RepodataBodyMatches(gz, openSha, RepodataChecksumKind.Open));
+    }
+
+    private static byte[] GzipBytes(byte[] data)
+    {
+        using var ms = new MemoryStream();
+        using (var gz = new GZipStream(ms, CompressionLevel.Fastest, leaveOpen: true))
+        {
+            gz.Write(data, 0, data.Length);
+        }
+        return ms.ToArray();
     }
 
     [Fact]
@@ -292,7 +358,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
             </repomd>
             """;
 
-        var (filename, sha256) = RpmUpstreamProxy.ParsePrimaryFromRepomd(Encoding.UTF8.GetBytes(repomd));
+        var (filename, sha256, _) = RpmUpstreamProxy.ParsePrimaryFromRepomd(Encoding.UTF8.GetBytes(repomd));
 
         Assert.Null(filename);
         Assert.Null(sha256);
@@ -515,13 +581,16 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
 
     // ── Negative cache ────────────────────────────────────────────────────────
 
+    private const string UpstreamBaseA = "https://mirror.a.example/fedora/40/x86_64";
+    private const string UpstreamBaseB = "https://mirror.b.example/fedora/40/x86_64";
+
     [Fact]
     public async Task NegativeCache_RecordThenRead_ReturnsTrueWithinTtl()
     {
         var proxy = BuildProxy();
 
-        await proxy.RecordNegativeAsync("nonexistent-1.0-1.fc40.x86_64.rpm", default);
-        bool isCached = await proxy.IsNegativelyCachedAsync("nonexistent-1.0-1.fc40.x86_64.rpm", default);
+        await proxy.RecordNegativeAsync(UpstreamBaseA, "nonexistent-1.0-1.fc40.x86_64.rpm", default);
+        bool isCached = await proxy.IsNegativelyCachedAsync(UpstreamBaseA, "nonexistent-1.0-1.fc40.x86_64.rpm", default);
 
         Assert.True(isCached);
     }
@@ -531,10 +600,37 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
     {
         var proxy = BuildProxy();
 
-        await proxy.RecordNegativeAsync("pkg-a-1.0-1.fc40.x86_64.rpm", default);
-        bool isCached = await proxy.IsNegativelyCachedAsync("pkg-b-1.0-1.fc40.x86_64.rpm", default);
+        await proxy.RecordNegativeAsync(UpstreamBaseA, "pkg-a-1.0-1.fc40.x86_64.rpm", default);
+        bool isCached = await proxy.IsNegativelyCachedAsync(UpstreamBaseA, "pkg-b-1.0-1.fc40.x86_64.rpm", default);
 
         Assert.False(isCached);
+    }
+
+    [Fact]
+    public async Task NegativeCache_DifferentUpstreamHost_DoesNotCrossPoison()
+    {
+        // #435 regression: org A's upstream lacks this NEVRA and records a 404. Org B's upstream
+        // (a different host) DOES have it, so B's lookup must miss the negative cache — the key
+        // is host-qualified, not the bare filename.
+        var proxy = BuildProxy();
+        const string file = "shared-name-1.0-1.fc40.x86_64.rpm";
+
+        await proxy.RecordNegativeAsync(UpstreamBaseA, file, default);
+
+        Assert.True(await proxy.IsNegativelyCachedAsync(UpstreamBaseA, file, default));
+        Assert.False(await proxy.IsNegativelyCachedAsync(UpstreamBaseB, file, default));
+    }
+
+    [Fact]
+    public async Task NegativeCache_SameUpstreamHost_SharesEntry()
+    {
+        // Adversarial twin: two orgs on the same upstream host still share the entry.
+        var proxy = BuildProxy();
+        const string file = "shared-name-1.0-1.fc40.x86_64.rpm";
+
+        await proxy.RecordNegativeAsync(UpstreamBaseA, file, default);
+
+        Assert.True(await proxy.IsNegativelyCachedAsync(UpstreamBaseA, file, default));
     }
 
     // ── Air-gap ────────────────────────────────────────────────────────────────

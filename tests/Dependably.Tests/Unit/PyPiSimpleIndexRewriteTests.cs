@@ -456,6 +456,130 @@ public class PyPiSimpleIndexRewriteTests
         Assert.Contains("demo-0.9.0.tar.gz", filenames);
         Assert.Contains("demo-1.0.0.tar.gz", filenames);
     }
+
+    // ── The two renderers cannot disagree about the merge ────────────────────
+
+    /// <summary>
+    /// The HTML and JSON forms are two spellings of one merge, chosen only by the Accept header,
+    /// so for any input they must advertise the same files with the same digests and the same
+    /// yank state. Only their spelling may differ (a <c>data-yanked</c> attribute vs. PEP 592's
+    /// <c>reason | true | false</c>; a JSON-only <c>size</c>).
+    ///
+    /// Both renderers read one merged entry list, so this holds by construction. The test is what
+    /// makes a future edit that reintroduces a second merge loop go red instead of shipping: the
+    /// fixture drives every branch of the rule at once — a local/upstream filename collision, a
+    /// duplicate upstream anchor, an upstream-only file, a multi-file version, a version with no
+    /// file rows, a yanked version, and a hard-blocked version that must appear in neither form.
+    /// </summary>
+    [Fact]
+    public void MergedIndex_HtmlAndJson_AdvertiseTheSameFilesWithTheSameDigests()
+    {
+        const string collidedLocalSha = "1111111111111111111111111111111111111111111111111111111111111111";
+        const string collidedUpstreamSha = "2222222222222222222222222222222222222222222222222222222222222222";
+        const string upstreamOnlySha = "3333333333333333333333333333333333333333333333333333333333333333";
+        const string wheelSha = "4444444444444444444444444444444444444444444444444444444444444444";
+        const string yankedSha = "5555555555555555555555555555555555555555555555555555555555555555";
+        const string projectedSha = "6666666666666666666666666666666666666666666666666666666666666666";
+        const string blockedSha = "7777777777777777777777777777777777777777777777777777777777777777";
+
+        var upstreamEntries = new List<PyPiSimpleIndexHelper.UpstreamSimpleIndexEntry>
+        {
+            new("demo-1.0.0.tar.gz", collidedUpstreamSha),   // collides with a local file
+            new("demo-9.9.9.tar.gz", upstreamOnlySha),        // upstream only
+            new("demo-9.9.9.tar.gz", upstreamOnlySha),        // duplicate anchor on the same page
+            new("demo-8.0.0.tar.gz", null),                   // upstream entry with no digest
+        };
+
+        var multiFile = Version("v1", "1.0.0", "demo-1.0.0.tar.gz", collidedLocalSha);
+        var yanked = Version("v2", "2.0.0", "demo-2.0.0.tar.gz", yankedSha);
+        yanked.Yanked = true;
+        yanked.YankReason = "broken sdist";
+        var projected = Version("v3", "3.0.0", "demo-3.0.0.tar.gz", projectedSha);   // no file rows
+        var blocked = Version("v4", "4.0.0", "demo-4.0.0.tar.gz", blockedSha);
+        blocked.ManualBlockState = "blocked";
+
+        var files = new[]
+        {
+            File("f1", "v1", "demo-1.0.0.tar.gz", collidedLocalSha, 100),
+            File("f2", "v1", "demo-1.0.0-py3-none-any.whl", wheelSha, 250),
+            File("f3", "v2", "demo-2.0.0.tar.gz", yankedSha, 300),
+            File("f4", "v4", "demo-4.0.0.tar.gz", blockedSha, 400),
+        }.ToLookup(f => f.PackageVersionId);
+
+        Dependably.Infrastructure.PackageVersion[] versions = [multiFile, yanked, projected, blocked];
+
+        string html = PyPiSimpleIndexHelper.RenderMergedSimpleIndex(
+            "demo", upstreamEntries, versions, files,
+            OrgSettingsFixture.Default(), EmptySignals(), DateTimeOffset.UnixEpoch);
+        string json = PyPiSimpleIndexHelper.RenderMergedSimpleIndexJson(
+            "demo", upstreamEntries, versions, files,
+            OrgSettingsFixture.Default(), EmptySignals(), DateTimeOffset.UnixEpoch);
+
+        var htmlAdvertised = ParseHtmlAnchors(html);
+        var jsonAdvertised = ParseJsonFiles(json);
+
+        Assert.Equal(htmlAdvertised, jsonAdvertised);
+
+        // Pin the merge itself too, so "both forms agree" cannot be satisfied by both being wrong.
+        Assert.Equal(
+            new List<(string, string?, bool)>
+            {
+                ("demo-1.0.0.tar.gz", collidedLocalSha, false),          // local wins the collision
+                ("demo-1.0.0-py3-none-any.whl", wheelSha, false),
+                ("demo-2.0.0.tar.gz", yankedSha, true),
+                ("demo-3.0.0.tar.gz", projectedSha, false),              // version-row fallback
+                ("demo-9.9.9.tar.gz", upstreamOnlySha, false),           // upstream only, once
+                ("demo-8.0.0.tar.gz", null, false),
+            },
+            htmlAdvertised);
+        // The hard-blocked version reaches neither form.
+        Assert.DoesNotContain(blockedSha, html);
+        Assert.DoesNotContain(blockedSha, json);
+        // Nor does the upstream digest for the collided filename.
+        Assert.DoesNotContain(collidedUpstreamSha, html);
+        Assert.DoesNotContain(collidedUpstreamSha, json);
+    }
+
+    // (filename, sha256, yanked) as the PEP 503 HTML form advertises it.
+    private static List<(string Filename, string? Sha256, bool Yanked)> ParseHtmlAnchors(string html) =>
+        System.Text.RegularExpressions.Regex.Matches(
+                html, """<a href="/packages/([^"#]+)(?:#sha256=([^"]+))?"( data-yanked="[^"]*")?>""")
+            .Select(m => (m.Groups[1].Value,
+                m.Groups[2].Success ? m.Groups[2].Value : null,
+                m.Groups[3].Success))
+            .ToList();
+
+    // The same triple as the PEP 691 JSON form advertises it: `yanked` is false, a reason string,
+    // or true — every non-false shape means yanked.
+    private static List<(string Filename, string? Sha256, bool Yanked)> ParseJsonFiles(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        return doc.RootElement.GetProperty("files").EnumerateArray()
+            .Select(f => (
+                f.GetProperty("filename").GetString()!,
+                f.GetProperty("hashes").TryGetProperty("sha256", out var sha) ? sha.GetString() : null,
+                f.GetProperty("yanked").ValueKind != JsonValueKind.False))
+            .ToList();
+    }
+
+    private static Dependably.Infrastructure.PackageVersion Version(
+        string id, string version, string filename, string sha256) => new()
+        {
+            Id = id,
+            PackageId = "p1",
+            Version = version,
+            Purl = $"pkg:pypi/demo@{version}",
+            BlobKey = $"hosted/o1/pypi/demo/{version}/{filename}",
+            Filename = filename,
+            ChecksumSha256 = sha256,
+            Origin = "uploaded",
+            CreatedAt = DateTimeOffset.UnixEpoch,
+        };
+
+    private static Dependably.Infrastructure.PackageVersionFile File(
+        string id, string versionId, string filename, string sha256, long sizeBytes)
+        => new(id, versionId, "o1", filename, $"hosted/o1/pypi/demo/{filename}", sizeBytes, sha256,
+            DateTimeOffset.UnixEpoch);
 }
 
 /// <summary>Minimal default <see cref="Dependably.Infrastructure.OrgSettings"/> for renderer tests.</summary>

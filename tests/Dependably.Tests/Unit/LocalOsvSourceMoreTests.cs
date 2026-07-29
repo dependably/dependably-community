@@ -1,4 +1,5 @@
 using Dependably.Protocol;
+using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -40,7 +41,7 @@ public sealed class LocalOsvSourceMoreTests : IDisposable
             .Build();
 
         var ex = Assert.Throws<InvalidOperationException>(
-            () => new LocalOsvSource(config, NullLogger<LocalOsvSource>.Instance));
+            () => new LocalOsvSource(config, NullLogger<LocalOsvSource>.Instance, TestTime.Frozen()));
         Assert.Contains("OSV_LOCAL_PATH", ex.Message);
     }
 
@@ -56,7 +57,7 @@ public sealed class LocalOsvSourceMoreTests : IDisposable
             })
             .Build();
 
-        using var src = new LocalOsvSource(config, NullLogger<LocalOsvSource>.Instance);
+        using var src = new LocalOsvSource(config, NullLogger<LocalOsvSource>.Instance, TestTime.Frozen());
         Assert.NotNull(src); // ctor must succeed
     }
 
@@ -72,7 +73,7 @@ public sealed class LocalOsvSourceMoreTests : IDisposable
             })
             .Build();
 
-        using var src = new LocalOsvSource(config, NullLogger<LocalOsvSource>.Instance);
+        using var src = new LocalOsvSource(config, NullLogger<LocalOsvSource>.Instance, TestTime.Frozen());
         Assert.NotNull(src);
     }
 
@@ -87,7 +88,7 @@ public sealed class LocalOsvSourceMoreTests : IDisposable
             })
             .Build();
 
-        using var src = new LocalOsvSource(config, NullLogger<LocalOsvSource>.Instance);
+        using var src = new LocalOsvSource(config, NullLogger<LocalOsvSource>.Instance, TestTime.Frozen());
         Assert.NotNull(src);
     }
 

@@ -61,7 +61,7 @@ public sealed class TenantHardDeleteServiceSystemEventTests : IClassFixture<InMe
         {
             await conn.ExecuteAsync(
                 "UPDATE orgs SET deleted_at = @dt WHERE id = @id",
-                new { dt = KnownNow.AddDays(-60).ToString("yyyy-MM-ddTHH:mm:ssZ"), id = orgId });
+                new { dt = KnownNow.AddDays(-60).ToUtcIso(), id = orgId });
         }
 
         var notifier = new RecordingSystemEventNotifier();

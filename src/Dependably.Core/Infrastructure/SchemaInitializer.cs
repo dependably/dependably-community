@@ -2,6 +2,7 @@ using System.Data;
 using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using Dapper;
 using Dependably.Protocol;
 using Dependably.Storage;
@@ -18,11 +19,41 @@ public sealed partial class SchemaInitializer
     private readonly ILogger<SchemaInitializer> _logger;
     private readonly SpdxLicenseSeeder _spdxSeeder;
     private readonly IConfiguration? _config;
+    private readonly TimeProvider _time;
 
-    static SchemaInitializer()
+    // [ModuleInitializer], not a static constructor: Dapper caches its compiled "add parameters"
+    // emitter per (SQL text, parameter CLR type) the first time that pair is ever executed, and
+    // that cached emitter is what decides whether a raw DateTimeOffset parameter goes through
+    // DateTimeOffsetHandler.SetValue or the ADO.NET provider's own default serialization — the
+    // decision is baked in at first compilation, not re-checked on every call. A static
+    // constructor only runs the first time SchemaInitializer itself is touched, which nothing
+    // guarantees happens before some OTHER query already bound a DateTimeOffset parameter (a
+    // health check, a lockout-store read, anything reachable before schema init runs) and
+    // permanently cached the wrong emitter for that (SQL, type) pair — silently, for the rest of
+    // the process, with no ordering enforced or tested. A module initializer runs the moment this
+    // assembly's module is loaded, before the first member access anywhere in
+    // Dependably.Core — which every composition root (Dependably, Dependably.Edge) references
+    // and touches immediately on boot — so it always wins the race regardless of what else in
+    // the process happens to run first.
+    [ModuleInitializer]
+    [SuppressMessage("Design", "CA2255:The 'ModuleInitializer' attribute is only intended to be used in application code or advanced source generator scenarios",
+        Justification = "A Dapper global type-handler registration has to win a race against every other query's first execution, in a class library every composition root references — that is exactly what ModuleInitializer is for, application-code framing in the analyzer's own message notwithstanding.")]
+    internal static void RegisterDateTimeOffsetHandler()
     {
-        // SQLite stores dates as TEXT (ISO 8601). Register a type handler so Dapper
-        // can map TEXT columns to DateTimeOffset in record constructors.
+        // SQLite/Postgres both store these columns as TEXT (ISO 8601). Register a type handler
+        // so Dapper can map TEXT columns to DateTimeOffset in record constructors.
+        //
+        // RemoveTypeMap is required, not cosmetic: Dapper's built-in typeMap already recognises
+        // DateTimeOffset and infers DbType.DateTimeOffset for it on the PARAMETER (write) side,
+        // and that inference wins over a registered ITypeHandler unless the type is first
+        // removed from typeMap — so without these two calls, DateTimeOffsetHandler.SetValue
+        // below is never invoked, and every raw-DateTimeOffset parameter falls through to the
+        // ADO.NET provider's own default serialization instead (Microsoft.Data.Sqlite renders
+        // "yyyy-MM-dd HH:mm:ss.fffffffzzz" — space-separated, offset preserved, not the
+        // canonical `Z` form every other writer of these columns uses). The READ (Parse) side is
+        // unaffected by typeMap — it already went through the handler regardless.
+        SqlMapper.RemoveTypeMap(typeof(DateTimeOffset));
+        SqlMapper.RemoveTypeMap(typeof(DateTimeOffset?));
         SqlMapper.AddTypeHandler(new DateTimeOffsetHandler());
     }
 
@@ -30,7 +61,8 @@ public sealed partial class SchemaInitializer
         IMetadataStore db,
         ILogger<SchemaInitializer>? logger = null,
         SpdxLicenseSeeder? spdxSeeder = null,
-        IConfiguration? config = null)
+        IConfiguration? config = null,
+        TimeProvider? time = null)
     {
         _db = db;
         _logger = logger ?? NullLogger<SchemaInitializer>.Instance;
@@ -40,6 +72,9 @@ public sealed partial class SchemaInitializer
         // Optional: drives upstream-registry default URLs from config overrides during the
         // backfill. Null in lightweight test ctors — falls back to the hard-coded public defaults.
         _config = config;
+        // Drives the bounded wait for the Postgres migration lock. Lightweight test ctors that
+        // pass only the store fall back to the system clock.
+        _time = time ?? TimeProvider.System;
     }
 
     public async Task InitializeAsync(CancellationToken ct = default)
@@ -47,14 +82,34 @@ public sealed partial class SchemaInitializer
         string sql = await ReadSchemaAsync(_db.Provider, ct);
         await using var conn = await _db.OpenAsync(ct);
 
+        // Serialize the entire apply across processes so replicas booting together against one
+        // Postgres run the DDL and the one-time migrations exactly once instead of racing them
+        // (SchemaInitializer.MigrationLock.cs). No-op on SQLite.
+        bool locked = await TryAcquireMigrationLockAsync(conn, ct);
+        try
+        {
+            await ApplySchemaAsync(conn, sql, ct);
+        }
+        finally
+        {
+            if (locked)
+            {
+                await ReleaseMigrationLockAsync(conn);
+            }
+        }
+    }
+
+    private async Task ApplySchemaAsync(DbConnection conn, string sql, CancellationToken ct)
+    {
         // Table renames must happen BEFORE the CREATE TABLE IF NOT EXISTS pass — otherwise the
         // schema would create empty sibling tables under the new names alongside the original
         // data. _applied_migrations is ensured up front so RunOnceAsync can record the ledger.
         await EnsureMigrationsTableAsync(conn);
 
-        // Views are dropped before anything reshapes a table they depend on, and recreated at the
-        // very end (see SchemaInitializer.Views.cs). They hold no state, so this costs nothing.
-        await DropViewsAsync(conn);
+        // Views are dropped lazily — RunOnceAsync takes the drop immediately before the first
+        // migration body it actually runs, so a boot with nothing pending never removes an object a
+        // concurrently-serving replica is reading (see SchemaInitializer.Views.cs).
+        _viewsDropped = false;
 
         await RunOnceAsync(conn, "rename_tokens_to_user_tokens", RenameTokensTableAsync);
         await RunOnceAsync(conn, "rename_cicd_tokens_to_service_tokens", RenameCicdTokensTableAsync);
@@ -78,8 +133,12 @@ public sealed partial class SchemaInitializer
         // migration is idempotent (PG drops-then-adds the constraint; SQLite REPLACEs the stored
         // CREATE text), so an un-recorded partial run is harmlessly repeated next boot.
         await RunOnceAsync(conn, "expand_role_check_with_auditor", ExpandRoleCheckWithAuditorAsync, transactional: false);
+        await RunOnceAsync(conn, "convert_legacy_timestamptz_columns", ConvertLegacyTimestamptzColumnsAsync);
         await RunOnceAsync(conn, "collapse_origin_to_uploaded", CollapseOriginToUploadedAsync);
         await RunOnceAsync(conn, "drop_legacy_token_scope_column", DropLegacyTokenScopeColumnAsync);
+        // Ordered after RunAdditiveMigrationsAsync so `capabilities` exists on the databases
+        // predating it — exactly the databases holding the rows this deletes.
+        await RunOnceAsync(conn, "purge_legacy_null_capability_tokens", PurgeLegacyNullCapabilityTokensAsync);
         await RunOnceAsync(conn, "drop_package_versions_sbom_column", DropPackageVersionsSbomColumnAsync);
         await RunOnceAsync(conn, "drop_org_settings_disable_job_columns", DropOrgSettingsDisableJobColumnsAsync);
         await RunOnceAsync(conn, "drop_allowlist_blocklist_ecosystem", DropAllowlistBlocklistEcosystemAsync);
@@ -272,7 +331,23 @@ public sealed partial class SchemaInitializer
 
         // Last, after every migration: the view bodies can only be created once every table and
         // column they reference is guaranteed to exist.
-        await CreateViewsAsync(conn);
+        await EnsureViewsAsync(conn);
+
+        // Deliberately NOT a RunOnceAsync migration — see the class summary on
+        // SchemaInitializer.TimestampNormalization.cs for why a one-shot repair here would let a
+        // blue-green cutover permanently re-poison these columns. Runs after EnsureViewsAsync so
+        // it never needs the views dropped: it is a plain UPDATE against base tables, not a
+        // table reshape.
+        await NormalizeLegacyDateTimeOffsetColumnsAsync(conn);
+
+        // A Postgres retrofit of the canonical-timestamp CHECK (SchemaInitializer.
+        // TemporalColumnNaming.cs) onto existing databases deliberately does NOT run this release:
+        // the previous release tag still writes package_versions.published_at /
+        // packages.upstream_latest_published_at via DateTimeOffset.ToString("o"), which the CHECK
+        // rejects, and AddVersionAsync runs on every hosted publish and proxy first-fetch — a
+        // NOT VALID constraint still enforces new writes, so blue would 500 on both paths for the
+        // whole cutover window. Fresh installs still get the CHECK from CREATE TABLE at zero risk.
+        // The retrofit lands a release after the one that starts writing canonical everywhere.
     }
 
     // Projects oci_blobs.license_spdx onto whichever catalogue row the image cast — the
@@ -331,6 +406,8 @@ public sealed partial class SchemaInitializer
     private static async Task BackfillPackageVersionFilesPypiAsync(DbConnection conn)
     {
         var rows = (await conn.QueryAsync<(string VersionId, string OrgId, string? Filename, string BlobKey, long SizeBytes, string? ChecksumSha256, string CreatedAt)>(
+            // xtenant: one-shot backfill over every tenant's hosted PyPI versions; each projected
+            // row carries its own p.org_id into the package_version_files row it creates.
             """
             SELECT pv.id AS VersionId, p.org_id AS OrgId, pv.filename AS Filename,
                    pv.blob_key AS BlobKey, pv.size_bytes AS SizeBytes,
@@ -374,6 +451,8 @@ public sealed partial class SchemaInitializer
     // now() timestamp expression. Idempotent: already-canonical rows are skipped.
     private async Task NormalizeClaimNamesCanonicalAsync(DbConnection conn)
     {
+        // xtenant: one-shot normalization reads every tenant's claim rows; the UPDATE below rewrites
+        // only the row it read, keyed by that row's own PK id.
         var rows = (await conn.QueryAsync<(string Id, string OrgId, string Ecosystem, string Name)>(
             "SELECT id AS Id, org_id AS OrgId, ecosystem AS Ecosystem, name AS Name FROM claim WHERE deleted_at IS NULL")).ToList();
 
@@ -650,6 +729,13 @@ public sealed partial class SchemaInitializer
             return;
         }
         _logger.LogInformation("Schema migration {Migration} applying…", name);
+
+        // A migration body may recreate or alter a table the read-model views read from, which
+        // SQLite and Postgres both refuse while a dependent view exists. Take the drop here, once,
+        // rather than on every boot: only a run that has real migration work to do pays for it, and
+        // the views are recreated at the end of the same apply.
+        await EnsureViewsDroppedAsync(conn);
+
         if (transactional)
         {
             await RunInTransactionAsync(conn, name, action);
@@ -835,6 +921,8 @@ public sealed partial class SchemaInitializer
                   AND p2.purl_name = packages.name
               )");
         // Step 2: among remaining broken rows, keep only the oldest per (org_id, name).
+        // xtenant: one-shot startup migration — instance-wide by design. org_id is a GROUP BY key
+        // rather than a predicate here precisely so the dedup is per tenant.
         await conn.ExecuteAsync(@"
             DELETE FROM packages
             WHERE ecosystem = 'nuget' AND is_proxy = 1 AND purl_name LIKE 'pkg:%'

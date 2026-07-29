@@ -23,7 +23,7 @@ public sealed class NuGetSearchHandler(
 
     public async Task<IActionResult> SearchAsync(
         HttpContext httpContext, string orgId,
-        string? q, int skip, int take, CancellationToken ct)
+        string? q, int skip, int take, bool prerelease, CancellationToken ct)
     {
         // Clamp paging: bound the page's result payload, and guard a negative skip. 100 covers
         // any legitimate UI page.
@@ -47,15 +47,19 @@ public sealed class NuGetSearchHandler(
 
         // totalHits is the total number of matches disregarding skip/take (NuGet V3 Search
         // Query Service contract) — clients rely on it to decide whether more pages exist. A
-        // "match" excludes name-matching packages with no listed version (same rule the page
-        // loop below applies). This is computed set-based, in one batched query over every
-        // filtered package's version facts, rather than by loading each package's full
-        // combined version list — an empty query matches an org's entire NuGet catalogue, and
-        // fanning the expensive per-package version lookup out across all of it (instead of
-        // just the page below) turns one request into an org-size-scaling DB round-trip storm.
+        // "match" excludes name-matching packages with no version meeting the prerelease
+        // eligibility rule (same rule the page loop below applies, and the same rule
+        // AutocompleteAsync's MatchesFilter already applies) — mirrors the spec and nuget.org:
+        // with prerelease=false a package whose only versions are prerelease does not count as
+        // a match at all. This is computed set-based, in one batched query over every filtered
+        // package's version facts, rather than by loading each package's full combined version
+        // list — an empty query matches an org's entire NuGet catalogue, and fanning the
+        // expensive per-package version lookup out across all of it (instead of just the page
+        // below) turns one request into an org-size-scaling DB round-trip storm.
         var versionFacts = await inventory.ListVersionFactsForPackagesAsync(
             orgId, "nuget", filtered.Select(p => p.Id).ToList(), ct);
-        int totalHits = filtered.Count(p => versionFacts[p.Id].Any(v => !v.IsYanked));
+        int totalHits = filtered.Count(p => versionFacts[p.Id].Any(v =>
+            !v.IsYanked && (prerelease || !IsPrerelease(v.Version))));
 
         // The expensive per-package version fan-out (LoadCombinedVersionsAsync, 2-3 round trips
         // each) stays bounded to the page actually returned.
@@ -63,17 +67,27 @@ public sealed class NuGetSearchHandler(
         foreach (var pkg in filtered.Skip(skip).Take(take))
         {
             var versions = await LoadCombinedVersionsAsync(orgId, pkg.Id, pkg.Name.ToLowerInvariant(), ct);
-            var latestVersion = versions.Where(v => !v.Yanked).MaxBy(v => v.CreatedAt);
-            if (latestVersion is null)
+            // Eligibility (yanked + prerelease) is decided once, up front: it drives both which
+            // versions are considered for "latest" and which versions the response's own
+            // 'versions' array lists. A package with no eligible version does not appear in the
+            // page at all — matching AutocompleteAsync's hasMatchingVersion rule and nuget.org,
+            // which omits a prerelease-only package entirely when the caller has not opted into
+            // prereleases, rather than falling back to its prerelease as "latest".
+            var eligible = versions.Where(v => !v.Yanked && (prerelease || !IsPrerelease(v.Version))).ToList();
+            if (eligible.Count == 0)
             {
                 continue;
             }
+
+            // The Search Query Service resolves "latest" by SemVer 2.0.0 precedence among the
+            // eligible set computed above.
+            var latestVersion = VersionPrecedenceResolver.ResolveLatest(eligible)!;
 
             results.Add(new
             {
                 id = pkg.Name,
                 version = latestVersion.Version,
-                versions = versions.Where(v => !v.Yanked).Select(v => new { version = v.Version }),
+                versions = eligible.Select(v => new { version = v.Version }),
                 registration = $"{baseUrl}/registration/{pkg.Name.ToLowerInvariant()}/"
             });
         }

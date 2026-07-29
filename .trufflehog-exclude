@@ -6,6 +6,12 @@
 # deleted enterprise infra doc. SQLServer detector flags these as unverified.
 ^docs/aws\.md$
 
+# The SQLite-to-Postgres migration procedure documents the --target connection
+# string and the DB_CONNECTION_STRING it maps to, so a Host=...;Password=... form
+# is the thing being explained and cannot be paraphrased away. The SQLServer
+# detector flags the placeholder as unverified, same shape as docs/aws.md.
+^docs/sqlite-to-postgres-migration\.md$
+
 # The secret-scan walks full history across all branches. Exclude this allowlist
 # file from its own scan so placeholder examples in these comments are not
 # re-flagged by the URI detector.
@@ -15,3 +21,11 @@
 # It lives in apk ecosystem commit history, which the full-history scan walks.
 ^src/Dependably\.Core/Api/ApkController\.cs$
 ^tests/Dependably\.Tests/Integration/ApkControllerTests\.cs$
+
+# Fixed URL-userinfo placeholders in the upstream-credential-stripping tests. The
+# [InlineData] cases assert that a scheme://user:pass@host upstream has its
+# credentials redacted, so the placeholder form is the fixture under test — not a
+# real secret. Attribute arguments must be compile-time constants, so the literal
+# cannot be broken up by interpolation the way the integration fixture does.
+^tests/Dependably\.Tests/Unit/SecurityTests\.cs$
+^tests/Dependably\.Tests/Unit/Api/UpstreamRegistryControllerAuthTests\.cs$

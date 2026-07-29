@@ -189,12 +189,17 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
         Assert.Contains("\"6.2.0\"", await resp.Content.ReadAsStringAsync());
     }
 
-    // ── Registration: upstream non-success + no local row → 404 ───────────────
+    // ── Registration: upstream non-success + no local row → 503, not a silent 404 ─────
 
     [Fact]
-    public async Task RegistrationIndex_UpstreamReturns500_NoLocal_Returns404()
+    public async Task RegistrationIndex_UpstreamReturns500_NoLocal_ReturnsServiceUnavailableWithRetryAfter()
     {
-        // Exercises the upstream non-success warning path AND the (pkg is null || count==0) → 404 path.
+        // Exercises the upstream non-success path AND the "no local row" path: a non-clean
+        // upstream failure (5xx) with nothing to fall back on locally must surface as a
+        // retryable 503 (UpstreamFetchFailedExceptionMiddleware), not the silent,
+        // non-retryable 404 that makes `dotnet restore` report NU1101 for a package that
+        // genuinely exists — the failure this test pins is a transient upstream error, not a
+        // confirmed absence.
         string id = $"reg500{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         _factory.MockUpstream.Given(
                 Request.Create()
@@ -206,7 +211,8 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/nuget/registration/{id}/");
 
-        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, resp.StatusCode);
+        Assert.NotNull(resp.Headers.RetryAfter);
     }
 
     // ── Registration: upstream success + local → merged with extra page ───────
@@ -436,6 +442,59 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
         var leafCatalog = leaf.GetProperty("catalogEntry");
         Assert.Equal(id, leafCatalog.GetProperty("id").GetString(), ignoreCase: true);
         Assert.Equal("1.1.0", leafCatalog.GetProperty("version").GetString());
+    }
+
+    // ── Registration: the local-only fallback is observable ──────────────────
+
+    /// <summary>
+    /// A registration index whose upstream does not answer is still served — from local data only,
+    /// as a structurally valid document. That silence is what let a misconfigured upstream run
+    /// unnoticed until clients started crashing on the fallback document (!758). The response now
+    /// says which it is, per request, the way the flatcontainer path already does.
+    ///
+    /// Both outcomes are asserted from one fixture, because a header that always says "error"
+    /// would satisfy half of this and tell an operator nothing.
+    /// </summary>
+    [Fact]
+    public async Task Registration_UpstreamUnreachable_ServesLocalFallback_AndSaysSoInTheHeader()
+    {
+        string id = $"fallback{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        await _factory.PushNuGetPackage(id, "5.0.0");
+        await _factory.SeedMixedClaim("nuget", id);
+
+        // No stub for this id's registration index: the mock upstream 404s it, which is exactly
+        // what a permanently misconfigured base URL produces.
+        string token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(token);
+
+        var resp = await client.GetAsync($"/nuget/registration/{id}/index.json");
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        Assert.Equal("error", resp.Headers.GetValues("X-Upstream-Status").FirstOrDefault());
+        // The fallback is real: the locally-pushed version is what the document advertises.
+        Assert.Contains("5.0.0", await resp.Content.ReadAsStringAsync());
+    }
+
+    /// <summary>
+    /// The other side of the same header: a request answered from the rendered-response cache made
+    /// no upstream call of its own, so it reports neither ok nor error.
+    /// </summary>
+    [Fact]
+    public async Task Registration_SecondRequest_IsServedFromCache_AndSaysSo()
+    {
+        string id = $"fbcached{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        await _factory.PushNuGetPackage(id, "5.0.0");
+        await _factory.SeedMixedClaim("nuget", id);
+
+        string token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(token);
+
+        Assert.Equal("error",
+            (await client.GetAsync($"/nuget/registration/{id}/index.json"))
+                .Headers.GetValues("X-Upstream-Status").FirstOrDefault());
+
+        var second = await client.GetAsync($"/nuget/registration/{id}/index.json");
+        Assert.Equal("cached", second.Headers.GetValues("X-Upstream-Status").FirstOrDefault());
     }
 
     // ── FlatcontainerVersions: upstream malformed JSON → error header ─────────

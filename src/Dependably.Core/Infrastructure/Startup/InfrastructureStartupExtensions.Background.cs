@@ -28,7 +28,12 @@ internal static partial class InfrastructureStartupExtensions
         // ScheduledBackgroundService.RequiresLeaderLock and the management sweep locks). In
         // standalone mode the in-process lock always grants, so every job runs on the single node.
 
-        // Health infrastructure
+        // Health infrastructure. ReadinessOptions carries the required/reported dependency
+        // classification (per-plane defaults, overridable with READINESS_HARD_DEPENDENCIES) and
+        // the blob-probe cache TTL, so /ready can be a load-balancer check without a shared-store
+        // failure deregistering every replica at once.
+        builder.Services.AddSingleton(sp =>
+            ReadinessOptions.Resolve(sp.GetRequiredService<IConfiguration>()));
         builder.Services.AddSingleton<ReadinessAggregator>();
         builder.Services.AddSingleton<Dependably.Infrastructure.Health.HealthService>();
         builder.Services.AddHostedService<HealthcheckPinger>();
@@ -71,6 +76,12 @@ internal static partial class InfrastructureStartupExtensions
         // Feature-flagged claim gate for publish/import paths. Default off; operators
         // flip CLAIM_ENFORCEMENT=on once their initial claim set is in place.
         builder.Services.AddSingleton<PublishGate>();
+
+        // Name-level publish authorization: binds a name to its first hosted publisher and
+        // refuses seizure by other principals when PUBLISH_NAME_BINDING=on. Ownership is
+        // recorded regardless of the flag (populates the resurrection tombstone). The backing
+        // NameBindingRepository is registered with the core infrastructure services.
+        builder.Services.AddSingleton<NameBindingGate>();
 
         // Shared publish-flow tail (path safety, claim gate, dedup, blob put, version create,
         // audit). Used by NpmController/PyPiController/NuGetController publish handlers and

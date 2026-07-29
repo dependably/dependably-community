@@ -521,8 +521,8 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
         string cid = Guid.NewGuid().ToString("N");
         await using (var conn = await _fixture.Store.OpenAsync())
         {
-            string now = _clock.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
-            string expires = _clock.GetUtcNow().AddMinutes(10).ToString("yyyy-MM-ddTHH:mm:ssZ");
+            string now = _clock.GetUtcNow().ToUtcIso();
+            string expires = _clock.GetUtcNow().AddMinutes(10).ToUtcIso();
             await conn.ExecuteAsync(
                 "INSERT INTO saml_test_runs (cid, tenant_id, actor_id, issued_at, expires_at, consumed_at) " +
                 "VALUES (@cid, @tid, @actor, @issued, @expires, @consumed)",
@@ -563,8 +563,8 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
                     cid,
                     tid = orgId,
                     actor = "actor-x",
-                    issued = _clock.GetUtcNow().AddMinutes(-30).ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                    expires = _clock.GetUtcNow().AddMinutes(-1).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                    issued = _clock.GetUtcNow().AddMinutes(-30).ToUtcIso(),
+                    expires = _clock.GetUtcNow().AddMinutes(-1).ToUtcIso(),
                 });
         }
 
@@ -632,8 +632,8 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
                     cid,
                     tid = orgId,
                     actor = "actor",
-                    issued = _clock.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                    expires = _clock.GetUtcNow().AddMinutes(10).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                    issued = _clock.GetUtcNow().ToUtcIso(),
+                    expires = _clock.GetUtcNow().AddMinutes(10).ToUtcIso(),
                 });
         }
 
@@ -660,6 +660,64 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
         // ClearTestCookie was called — Set-Cookie deleting the cookie is in the response.
         string setCookies = sut.ControllerContext.HttpContext.Response.Headers.SetCookie.ToString();
         Assert.Contains("dependably_saml_test=", setCookies);
+    }
+
+    [Fact]
+    public async Task Acs_TestMode_ValidationFailure_RedirectDetailIsFixedReasonNotExceptionText()
+    {
+        // A validation failure in test mode must reflect only a fixed, server-chosen reason code
+        // into the /saml-test-result redirect — never the raw ITfoxtec/base64 exception text
+        // (which embeds response-derived, IdP-controlled values). Without the fix the ACS handler
+        // passed ex.Message as the redirect `detail`, so this exact-match assertion would carry the
+        // parser exception text instead of the fixed reason and fail.
+        string orgId = await SeedTenantAsync("acme");
+        await SeedSamlConfigAsync(orgId, enabled: false, withMetadata: true);
+
+        string cid = TokenGenerator.Generate();
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO saml_test_runs (cid, tenant_id, actor_id, issued_at, expires_at) " +
+                "VALUES (@cid, @tid, @actor, @issued, @expires)",
+                new
+                {
+                    cid,
+                    tid = orgId,
+                    actor = "actor",
+                    issued = _clock.GetUtcNow().ToUtcIso(),
+                    expires = _clock.GetUtcNow().AddMinutes(10).ToUtcIso(),
+                });
+        }
+
+        var sut = NewControllerForTenant(orgId, "acme",
+            queryParams: new() { ["RelayState"] = $"test:{cid}", ["SAMLResponse"] = "garbage" });
+
+        var result = await sut.Acs(CancellationToken.None);
+        var redirect = Assert.IsType<RedirectResult>(result);
+
+        var query = ParseQuery(redirect.Url);
+        Assert.Equal("validation_failed", query["error"]);
+        Assert.Equal("SAML response validation failed.", query["detail"]);
+    }
+
+    private static Dictionary<string, string> ParseQuery(string url)
+    {
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        int q = url.IndexOf('?');
+        if (q < 0)
+        {
+            return result;
+        }
+
+        foreach (string pair in url[(q + 1)..].Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            int eq = pair.IndexOf('=');
+            string key = eq < 0 ? pair : pair[..eq];
+            string value = eq < 0 ? string.Empty : Uri.UnescapeDataString(pair[(eq + 1)..]);
+            result[Uri.UnescapeDataString(key)] = value;
+        }
+
+        return result;
     }
 
     // ── ACS: ValidateSamlConfigured short-circuit ────────────────────────────

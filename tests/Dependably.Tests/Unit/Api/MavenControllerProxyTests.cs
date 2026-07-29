@@ -160,23 +160,10 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
 
     private static IOsvSource CleanOsv()
     {
-        var osv = Substitute.For<IOsvSource>();
-        osv.QueryAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
-           .Returns(Task.FromResult(new List<OsvAdvisory>()));
-        return osv;
+        return TestOsvSource.Create();
     }
 
-    private static IOsvSource VulnOsv(double cvssScore)
-    {
-        var osv = Substitute.For<IOsvSource>();
-        osv.QueryAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
-           .Returns(Task.FromResult(new List<OsvAdvisory>
-           {
-               new("GHSA-test-0001", ["CVE-2024-0001"], "critical RCE", "CRITICAL",
-                   CvssScore: cvssScore, AffectedPackages: [], Published: null, Modified: null, IsHydrated: true),
-           }));
-        return osv;
-    }
+    private static IOsvSource VulnOsv(double cvssScore) => TestOsvSource.WithAdvisory(cvssScore);
 
     private long ArtifactGetCount(string filename)
         => _server.LogEntries.Count(e => e.RequestMessage?.Path?.EndsWith(filename) == true);
@@ -240,6 +227,7 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
                     new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), TimeProvider.System),
             Registries: new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured())),
             MetadataCache: _metadataCache,
+            Invalidation: Dependably.Tests.Infrastructure.TestMetadataInvalidation.ForMaven(_metadataCache),
             CacheOptions: new Dependably.Infrastructure.RenderedMetadataCacheOptions(
                 TimeSpan.FromMinutes(10), TimeSpan.FromMinutes(5)),
             Log: NullLogger<MavenController>.Instance,

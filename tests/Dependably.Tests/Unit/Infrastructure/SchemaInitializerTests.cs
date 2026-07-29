@@ -1285,6 +1285,26 @@ public sealed class SchemaInitializerTests : IAsyncLifetime
     }
 
     /// <summary>
+    /// The cross-process migration lock is Postgres-only: SQLite is single-writer and
+    /// <c>InstanceLock</c> already refuses a second process on the same database file, so a second
+    /// mechanism there would be redundant. Pins the provider branch, which is otherwise invisible
+    /// without a live Postgres — the concurrency behaviour itself is covered by
+    /// <c>Integration.PostgresConcurrentSchemaInitTests</c>.
+    /// </summary>
+    [Fact]
+    public async Task MigrationLock_DoesNotApplyToSqlite_AndInitializeStillApplies()
+    {
+        var initializer = NewInitializer(_db);
+        Assert.False(initializer.MigrationLockAppliesToThisStore);
+
+        await initializer.InitializeAsync();
+
+        await using var conn = await _db.OpenAsync();
+        long ledger = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM _applied_migrations");
+        Assert.True(ledger > 0, "one-time migrations did not record themselves in _applied_migrations");
+    }
+
+    /// <summary>
     /// Captures log records so we can assert on the applied/skipped branches in
     /// <c>RunOnceAsync</c>. Per project memory: "migrations log applied AND skipped".
     /// </summary>

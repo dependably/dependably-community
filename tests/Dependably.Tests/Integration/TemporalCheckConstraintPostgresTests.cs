@@ -1,0 +1,102 @@
+using Dapper;
+using Dependably.Infrastructure;
+using Npgsql;
+
+namespace Dependably.Tests.Integration;
+
+/// <summary>
+/// Proves the Postgres side of the canonical-timestamp CHECK constraint against a LIVE server:
+/// fresh installs reject a bad-shaped INSERT and accept every canonical shape, via the constraint
+/// declared inline in <c>Schema.pg.sql</c>'s <c>CREATE TABLE</c> block.
+///
+/// There is deliberately no existing-database retrofit this release — see
+/// <c>SchemaInitializer.TemporalColumnNaming.cs</c> and the <c>Schema.pg.sql</c> header comment for
+/// why (the previously released version still writes a shape this CHECK rejects on its hottest
+/// write path, so retrofitting now would break blue mid-cutover). That retrofit is a follow-up.
+///
+/// Tagged <c>Category=SchemaPostgres</c> — see <see cref="PostgresSchemaApplyTests"/> for why this
+/// only runs in the dedicated <c>schema-integrity</c> CI job.
+/// </summary>
+[Trait("Category", "SchemaPostgres")]
+[Collection("LivePostgres")]
+public sealed class TemporalCheckConstraintPostgresTests
+{
+    private static string ConnectionString =>
+        Environment.GetEnvironmentVariable("TEST_POSTGRES_CONNECTION")
+        ?? throw new InvalidOperationException(
+            "TEST_POSTGRES_CONNECTION must be set to run Category=SchemaPostgres tests. " +
+            "CI sets it from the postgres service; locally start a docker postgres and export it.");
+
+    public static IEnumerable<object[]> AcceptedShapes()
+    {
+        yield return ["2026-03-04T05:06:07Z"];
+        yield return ["2026-03-04T05:06:07.123Z"];
+        yield return ["2026-03-04T05:06:07.123456Z"];
+    }
+
+    public static IEnumerable<object[]> RejectedShapes()
+    {
+        yield return ["2026-03-04 05:06:07+02:00"];
+        yield return ["2026-03-04T05:06:07.0000000+00:00"];
+        yield return [""];
+        yield return ["not a date"];
+        yield return ["20260304050607"];
+    }
+
+    [Theory]
+    [MemberData(nameof(AcceptedShapes))]
+    public async Task FreshInstall_AcceptsEveryCanonicalShape(string value)
+    {
+        await using var pg = await LivePostgresReset.FreshAsync(ConnectionString);
+        await new SchemaInitializer(pg.Store).InitializeAsync();
+
+        await using var conn = await pg.Store.OpenAsync();
+        await conn.ExecuteAsync(
+            "INSERT INTO orgs (id, slug, deleted_at) VALUES ('o1', 'acme', @value)", new { value });
+
+        string stored = await conn.QuerySingleAsync<string>("SELECT deleted_at FROM orgs WHERE id = 'o1'");
+        Assert.Equal(value, stored);
+    }
+
+    [Theory]
+    [MemberData(nameof(RejectedShapes))]
+    public async Task FreshInstall_RejectsEveryObservedBadShape(string value)
+    {
+        await using var pg = await LivePostgresReset.FreshAsync(ConnectionString);
+        await new SchemaInitializer(pg.Store).InitializeAsync();
+
+        await using var conn = await pg.Store.OpenAsync();
+        var ex = await Assert.ThrowsAsync<PostgresException>(() => conn.ExecuteAsync(
+            "INSERT INTO orgs (id, slug, deleted_at) VALUES ('o1', 'acme', @value)", new { value }));
+
+        Assert.Equal("23514", ex.SqlState); // check_violation
+    }
+
+    [Fact]
+    public async Task FreshInstall_PermitsNull()
+    {
+        await using var pg = await LivePostgresReset.FreshAsync(ConnectionString);
+        await new SchemaInitializer(pg.Store).InitializeAsync();
+
+        await using var conn = await pg.Store.OpenAsync();
+        await conn.ExecuteAsync("INSERT INTO orgs (id, slug, deleted_at) VALUES ('o1', 'acme', NULL)");
+    }
+
+    [Fact]
+    public async Task SecondApply_IsANoOp_AndConstraintStaysValidated()
+    {
+        // No RunOnceAsync retrofit exists this release, but a second InitializeAsync (a replica
+        // boot, a restart) must still be a clean no-op against the fresh-install CHECK.
+        await using var pg = await LivePostgresReset.FreshAsync(ConnectionString);
+        var initializer = new SchemaInitializer(pg.Store);
+        await initializer.InitializeAsync();
+
+        var ex = await Record.ExceptionAsync(() => initializer.InitializeAsync());
+        Assert.Null(ex);
+
+        await using var conn = await pg.Store.OpenAsync();
+        bool validated = await conn.ExecuteScalarAsync<bool>(
+            "SELECT convalidated FROM pg_constraint WHERE conname = 'orgs_deleted_at_check'");
+        Assert.True(validated);
+    }
+}

@@ -696,6 +696,7 @@
         "password": "Mot de passe",
         "passwordSetHint": "Mot de passe du compte SMTP. Nécessite DEPENDABLY_MASTER_KEY pour le stockage.",
         "passwordRotateHint": "Saisissez une nouvelle valeur pour renouveler le mot de passe. Laissez vide pour conserver l'actuel.",
+        "cleartextCredentials": "La sécurité est réglée sur Aucune alors qu'un nom d'utilisateur et un mot de passe sont définis : l'échange SMTP AUTH est transmis en clair et toute personne sur le chemin réseau peut lire ces identifiants. Utilisez STARTTLS ou SSL/TLS, ou effacez le nom d'utilisateur et le mot de passe si le relais n'exige pas d'authentification.",
         "from": "Adresse d'expédition",
         "testSend": "Envoyer un courriel de test",
         "testOk": "Courriel de test envoyé.",
@@ -743,6 +744,7 @@
       "password": "Mot de passe",
       "passwordSetHint": "Définissez un mot de passe pour activer le relais authentifié. Requis sauf si la sécurité est « Aucune ».",
       "passwordRotateHint": "Un mot de passe est enregistré. Entrez une nouvelle valeur pour le remplacer, ou laissez vide pour conserver l'actuel.",
+      "cleartextCredentials": "La sécurité est réglée sur Aucune alors qu'un nom d'utilisateur et un mot de passe sont définis : l'échange SMTP AUTH est transmis en clair et toute personne sur le chemin réseau peut lire ces identifiants. Utilisez STARTTLS ou TLS implicite, ou effacez le nom d'utilisateur et le mot de passe si le relais n'exige pas d'authentification.",
       "from": "Adresse d'expédition",
       "configured": "Configuré",
       "notConfigured": "Non configuré",
@@ -876,6 +878,8 @@
         "colKind": "Type",
         "colLabel": "Étiquette",
         "colAdded": "Ajouté",
+        "unsupportedPair": "non pris en charge — jamais validée",
+        "unsupportedPairTitle": "La combinaison écosystème/type de cette ancre n'a aucun validateur : son matériel de clé n'a jamais été vérifié. Confirmez qu'elle est toujours nécessaire avant de la supprimer — supprimer la seule ancre d'un écosystème dont la vérification des signatures est réglée sur « bloquer » refuse tous les artefacts de cet écosystème.",
         "modal": {
           "title": "Ajouter une ancre de confiance",
           "ecosystem": "Écosystème",
@@ -1328,13 +1332,17 @@
     "title": "Quarantaine",
     "intro": "Chaque blocage automatique de politique (obsolète, âge de publication, malveillant, KEV, EPSS, score de vulnérabilité) arrive ici pour révision pendant que les téléchargements continuent de renvoyer 403. Approuver pose l'autorisation manuelle de la version — elle prime sur toutes les politiques; refuser enregistre un blocage manuel. Les décisions sont consignées dans le journal d'audit.",
     "empty": "Aucune entrée.",
+    "searchPlaceholder": "Rechercher paquet, politique, note ou réviseur…",
     "approve": "Approuver",
     "deny": "Refuser",
     "filters": {
       "pending": "En attente",
       "approved": "Approuvées",
       "denied": "Refusées",
-      "all": "Toutes"
+      "all": "Toutes",
+      "allGates": "Toutes les politiques",
+      "gateLabel": "Filtrer par politique",
+      "stateLabel": "Filtrer par état"
     },
     "states": {
       "pending": "En attente",
@@ -1347,13 +1355,18 @@
       "malicious": "malveillant",
       "kev": "KEV",
       "epss": "EPSS",
-      "vuln_score": "score de vuln."
+      "vuln_score": "score de vuln.",
+      "revoked": "révoquée",
+      "license": "licence",
+      "install_script": "script d'installation",
+      "provenance": "provenance"
     },
     "columns": {
       "package": "Paquet",
       "gate": "Politique",
       "detail": "Détail",
-      "updated": "Mis à jour"
+      "updated": "Mis à jour",
+      "decidedBy": "Décidée par"
     },
     "actions": {
       "menuLabel": "Changer la décision",
@@ -1545,7 +1558,11 @@
       "themeHelp": "Choisissez l'apparence de Dependably.",
       "languageTitle": "Langue",
       "languageHelpTenantDefault": "Langue par défaut du locataire : {language}.",
-      "languageHelpSystemFallback": "Bascule sur {language} par défaut."
+      "languageHelpSystemFallback": "Bascule sur {language} par défaut.",
+      "timezoneTitle": "Fuseau horaire",
+      "timezoneHelp": "Les heures sont affichées dans ce fuseau. Valeur par défaut de l’organisation : {timezone}.",
+      "timezoneInherit": "Utiliser la valeur par défaut de l’organisation ({timezone})",
+      "timezoneError": "Impossible d’enregistrer le fuseau horaire. Réessayez."
     },
     "theme": {
       "light": "Clair",
@@ -1647,6 +1664,11 @@
           "needAttention": "{count} locataire nécessite de l'attention",
           "needAttentionPlural": "{count} locataires nécessitent de l'attention",
           "viewAll": "Voir les locataires →"
+        },
+        "trustAnchors": {
+          "suspect": "{count} ancre de confiance n'a jamais été validée",
+          "suspectPlural": "{count} ancres de confiance n'ont jamais été validées",
+          "detail": "Ces ancres ont été enregistrées sous une combinaison écosystème/type sans validateur : leur matériel de clé n'a jamais été vérifié. Examinez chacune dans Paramètres → Sécurité du locataire concerné avant de la supprimer : supprimer la seule ancre d'un écosystème dont la vérification des signatures est réglée sur « bloquer » refuse tous les artefacts de cet écosystème."
         },
         "overallSummary": {
           "healthy": "Tous les systèmes sont opérationnels",

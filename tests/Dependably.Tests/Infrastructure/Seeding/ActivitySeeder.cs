@@ -38,7 +38,7 @@ public static class ActivitySeeder
                     purl,
                     eventType,
                     actorId,
-                    createdAt = createdAt.Value.ToString("yyyy-MM-ddTHH:mm:ssZ")
+                    createdAt = createdAt.Value.ToUtcIso()
                 });
         }
     }

@@ -17,10 +17,18 @@ public sealed class InviteRepository
     }
 
     /// <summary>
-    /// Creates a new 24-hour invite. Returns (rawToken, record).
+    /// Creates a new 24-hour invite. Returns the raw token and the stored record, or
+    /// <c>null</c> when <paramref name="orgId"/> already holds a pending (unaccepted) invite
+    /// for <paramref name="email"/> — the state the <c>idx_invites_unique_pending</c> partial
+    /// unique index rejects. The INSERT names that index as its conflict target so the
+    /// duplicate resolves to a zero-row no-op instead of a store exception, which makes the
+    /// check race-free: a caller that pre-checks and loses to a concurrent create for the same
+    /// address still gets <c>null</c> rather than an unhandled failure. Any other constraint
+    /// (an id or token_hash collision) is a genuine anomaly and still throws.
+    ///
     /// If instance SMTP delivery is not available, the caller is responsible for logging the link.
     /// </summary>
-    public async Task<(string RawToken, InviteRecord Record)> CreateAsync(
+    public async Task<InviteCreation?> CreateAsync(
         string orgId, string email, string createdByUserId, string role = "member", CancellationToken ct = default)
     {
         string raw = TokenGenerator.Generate();
@@ -28,27 +36,45 @@ public sealed class InviteRepository
         string hash = Convert.ToHexString(hashBytes).ToLowerInvariant();
         string id = Guid.NewGuid().ToString("N");
         var expiresAt = _time.GetUtcNow().AddHours(24);
-        string expiresStr = expiresAt.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string expiresStr = expiresAt.ToUtcIso();
 
         await using var conn = await _db.OpenAsync(ct);
-        await conn.ExecuteAsync(
+        int inserted = await conn.ExecuteAsync(
             """
             INSERT INTO invites (id, org_id, email, role, token_hash, created_by, expires_at)
             VALUES (@id, @orgId, @email, @role, @hash, @createdBy, @expires)
+            ON CONFLICT (org_id, email) WHERE accepted_at IS NULL DO NOTHING
             """,
             new { id, orgId, email, role, hash, createdBy = createdByUserId, expires = expiresStr });
 
-        return (raw, new InviteRecord
-        {
-            Id = id,
-            OrgId = orgId,
-            Email = email,
-            Role = role,
-            CreatedBy = createdByUserId,
-            CreatedAt = _time.GetUtcNow(),
-            ExpiresAt = expiresAt,
-            AcceptedAt = null
-        });
+        return inserted == 0
+            ? null
+            : new InviteCreation(raw, new InviteRecord
+            {
+                Id = id,
+                OrgId = orgId,
+                Email = email,
+                Role = role,
+                CreatedBy = createdByUserId,
+                CreatedAt = _time.GetUtcNow(),
+                ExpiresAt = expiresAt,
+                AcceptedAt = null
+            });
+    }
+
+    /// <summary>
+    /// True when <paramref name="orgId"/> already holds a pending (unaccepted) invite for
+    /// <paramref name="email"/>. Mirrors the <c>idx_invites_unique_pending</c> predicate, so a
+    /// caller can answer a duplicate with a conflict response before minting a token. Expiry is
+    /// deliberately not part of the predicate: the index does not consider it either, so an
+    /// expired-but-unaccepted row still blocks the insert until the retention prune removes it.
+    /// </summary>
+    public async Task<bool> HasPendingAsync(string orgId, string email, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        return await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM invites WHERE org_id = @orgId AND email = @email AND accepted_at IS NULL",
+            new { orgId, email }) > 0;
     }
 
     public async Task<IReadOnlyList<InviteRecord>> ListAsync(string orgId, CancellationToken ct = default)
@@ -98,7 +124,7 @@ public sealed class InviteRepository
     {
         byte[] hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(rawToken));
         string hash = Convert.ToHexString(hashBytes).ToLowerInvariant();
-        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToUtcIso();
 
         await using var conn = await _db.OpenAsync(ct);
         // xtenant: keyed by the SHA-256 of the bearer's invite token, same rationale as AcceptAsync.
@@ -133,7 +159,7 @@ public sealed class InviteRepository
     {
         byte[] hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(rawToken));
         string hash = Convert.ToHexString(hashBytes).ToLowerInvariant();
-        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToUtcIso();
 
         await using var conn = await _db.OpenAsync(ct);
 
@@ -181,7 +207,7 @@ public sealed class InviteRepository
     /// </summary>
     public async Task<int> CountPendingAsync(string orgId, CancellationToken ct = default)
     {
-        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToUtcIso();
         await using var conn = await _db.OpenAsync(ct);
         return await conn.ExecuteScalarAsync<int>(
             "SELECT COUNT(*) FROM invites WHERE org_id = @orgId AND accepted_at IS NULL AND expires_at > @now",
@@ -194,7 +220,7 @@ public sealed class InviteRepository
     /// </summary>
     public async Task<int> PruneExpiredAsync(CancellationToken ct = default)
     {
-        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToUtcIso();
         await using var conn = await _db.OpenAsync(ct);
         // xtenant: instance-wide expired-invite prune; no org_id predicate is correct here
         return await conn.ExecuteAsync(

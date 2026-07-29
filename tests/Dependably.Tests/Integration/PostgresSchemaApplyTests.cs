@@ -274,6 +274,78 @@ public sealed class PostgresSchemaApplyTests
         }
     }
 
+    /// <summary>
+    /// A replica boot must not remove an object a serving replica is querying. On Postgres that is
+    /// <c>CREATE OR REPLACE VIEW</c>, which swaps the body in place and never leaves the name
+    /// unresolvable — so a second apply changes nothing observable, and in particular the view's OID
+    /// survives. A drop+create would mint a new OID; equality here is what proves the replace path
+    /// (not the fallback) is the one a steady-state boot takes.
+    /// </summary>
+    [Fact]
+    public async Task SecondApply_ReplacesViewsInPlace_WithoutDroppingThem()
+    {
+        await using var pg = await LivePostgresReset.FreshAsync(ConnectionString);
+        var initializer = new SchemaInitializer(pg.Store);
+        await initializer.InitializeAsync();
+
+        var before = await ViewOidsAsync(pg.Store);
+        Assert.NotEmpty(before);
+
+        await initializer.InitializeAsync();
+
+        Assert.Equal(before, await ViewOidsAsync(pg.Store));
+    }
+
+    /// <summary>
+    /// The deliberate escape hatch. <c>CREATE OR REPLACE VIEW</c> refuses to remove, rename, or
+    /// retype an output column — which is exactly the blue-green rule for view shape — so a genuine
+    /// shape change has to fall back to a guarded drop+create. Planting a view with the right name
+    /// and a wrong column list forces that refusal and proves the fallback recovers instead of
+    /// crash-looping the boot.
+    /// </summary>
+    [Fact]
+    public async Task ViewWithAnIncompatibleColumnList_FallsBackToDropAndCreate()
+    {
+        await using var pg = await LivePostgresReset.FreshAsync(ConnectionString);
+        var initializer = new SchemaInitializer(pg.Store);
+        await initializer.InitializeAsync();
+
+        await using (var conn = await pg.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync("DROP VIEW org_storage_bytes");
+            // xtenant: stand-in view body for the test; its column list deliberately differs from the
+            // real one so CREATE OR REPLACE VIEW must refuse it.
+            await conn.ExecuteAsync(
+                "CREATE VIEW org_storage_bytes AS SELECT o.id AS a_different_column FROM orgs o");
+        }
+
+        var ex = await Record.ExceptionAsync(() => initializer.InitializeAsync());
+        Assert.Null(ex);
+
+        await using (var conn = await pg.Store.OpenAsync())
+        {
+            var columns = (await conn.QueryAsync<string>(
+                """
+                SELECT column_name FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'org_storage_bytes'
+                """)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            Assert.Contains("total_bytes", columns);
+            Assert.DoesNotContain("a_different_column", columns);
+        }
+    }
+
+    private static async Task<Dictionary<string, long>> ViewOidsAsync(NpgsqlMetadataStore store)
+    {
+        await using var conn = await store.OpenAsync();
+        var rows = await conn.QueryAsync<(string Name, long Oid)>(
+            """
+            SELECT c.relname AS Name, c.oid::bigint AS Oid
+            FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relkind = 'v' AND n.nspname = 'public'
+            """);
+        return rows.ToDictionary(r => r.Name, r => r.Oid, StringComparer.Ordinal);
+    }
+
     private static async Task<Dictionary<string, HashSet<string>>> PostgresViewShapeAsync(NpgsqlMetadataStore store)
     {
         await using var conn = await store.OpenAsync();

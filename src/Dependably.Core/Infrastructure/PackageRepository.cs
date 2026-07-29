@@ -390,7 +390,12 @@ public sealed partial class PackageRepository
                 checksumSha256 = data.ChecksumSha256,
                 firstFetch = data.FirstFetch ? 1 : 0,
                 origin = data.Origin,
-                publishedAt = data.PublishedAt?.ToUniversalTime().ToString("o"),
+                // Microsecond precision, matching CacheArtifactRepository.UpdateGlobalFactsAsync's
+                // writer of the same logical published_at/upstream_latest_published_at column (see
+                // artifact_inventory / QuarantineRepository's cross-plane MAX() aggregation) — this
+                // instant is declared by the upstream registry and re-served to clients, so seconds
+                // would drop information the registry reports.
+                publishedAt = data.PublishedAt.ToUtcIsoPreciseOrNull(),
                 checksumSha1 = data.ChecksumSha1,
                 upstreamIntegrityValue = data.UpstreamIntegrityValue,
                 upstreamIntegrityAlgorithm = data.UpstreamIntegrityAlgorithm,
@@ -423,7 +428,7 @@ public sealed partial class PackageRepository
 
     public async Task TouchLastUsedAsync(string versionId, CancellationToken ct = default)
     {
-        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToUtcIso();
         await using var conn = await _db.OpenAsync(ct);
         // xtenant: keyed by version PK; the id reaches this method from an org-scoped package
         // lookup (GetByPurlNameAsync(orgId, …) → GetVersionAsync(pkg.Id, …)) on the serve path.
@@ -453,7 +458,7 @@ public sealed partial class PackageRepository
             return;
         }
 
-        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToUtcIso();
         await using var conn = await _db.OpenAsync(ct);
         // xtenant: keyed by version PK; every download path resolves the id through an org-scoped
         // package lookup before counting the pull (see PyPiDownloadHandler, NpmTarballHandler,
@@ -481,7 +486,7 @@ public sealed partial class PackageRepository
             return;
         }
 
-        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToUtcIso();
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             """
@@ -557,7 +562,7 @@ public sealed partial class PackageRepository
 #pragma warning restore S107
     {
         await using var conn = await _db.OpenAsync(ct);
-        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToUtcIso();
         // xtenant: UPDATE by version_id; caller obtained the id from an org-scoped lookup.
         // Integrity + manifest follow the new bytes: a stale value from the prior artefact
         // (including a proxy row overwritten by a hosted push) must never survive the overwrite.

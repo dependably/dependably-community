@@ -21,10 +21,10 @@ namespace Dependably.Infrastructure;
 /// </summary>
 public sealed class SamlCertExpiryCheckService : BackgroundService
 {
-    // A sweep is short (one query plus per-org cert parsing), so a generous fixed TTL with no
-    // renewal is sufficient — matching the no-renewal style of the in-process lock used in
-    // standalone mode. The TTL only needs to exceed a realistic sweep duration; if a leader
-    // crashes mid-sweep the lock lapses and the next scheduled tick on any instance retries.
+    // The sweep holds this lock through a LeaderLease, which heartbeats the TTL for as long as
+    // the pass runs, so the TTL bounds how long the lock survives a crashed or wedged leader
+    // rather than how long a sweep may take. If a leader crashes mid-sweep the lock lapses one
+    // TTL later and the next scheduled tick on any instance retries.
     private static readonly TimeSpan SweepLockTtl = TimeSpan.FromMinutes(5);
     private const string SweepLockName = "saml-cert-expiry:sweep";
 
@@ -149,7 +149,7 @@ public sealed class SamlCertExpiryCheckService : BackgroundService
             var chunk = remaining < WaitChunkMax ? remaining : WaitChunkMax;
             try
             {
-                await Task.Delay(chunk, stoppingToken);
+                await Task.Delay(chunk, _time, stoppingToken);
             }
             catch (OperationCanceledException)
             {
@@ -188,12 +188,18 @@ public sealed class SamlCertExpiryCheckService : BackgroundService
         // distributed lock for the duration of the pass: only the instance that wins the lock
         // does the work; the rest skip without touching the database. In standalone mode the
         // in-process lock always grants on first acquire, so the single instance sweeps normally.
-        await using var sweepLock = await _locks.TryAcquireAsync(SweepLockName, SweepLockTtl, ct);
+        var sweepLock = await _locks.TryAcquireAsync(SweepLockName, SweepLockTtl, ct);
         if (sweepLock is null)
         {
             _logger.LogDebug("SAML cert-expiry sweep skipped — another instance holds the sweep lock.");
             return;
         }
+
+        // A sweep over many tenants with slow cert parsing can outrun the lock TTL, at which
+        // point a second replica would acquire the same lock and emit duplicate alerts. Renew the
+        // lease for as long as the sweep runs, and abort the sweep if renewal fails.
+        await using var lease = LeaderLease.Start(sweepLock, SweepLockTtl, _time, _logger, ct);
+        var leaseCt = lease.Token;
 
         int[] warnDays = ParseWarnDays(_config["SAML_CERT_EXPIRY_WARN_DAYS"] ?? "30,14,7,1");
 
@@ -201,8 +207,22 @@ public sealed class SamlCertExpiryCheckService : BackgroundService
             "SAML cert-expiry check pass starting (thresholds: {Thresholds}d).",
             string.Join(",", warnDays));
 
+        // now-ok: measures real elapsed time for a duration log/metric only — no control
+        // flow branches on the value, so a substitutable clock would change the reported
+        // number without changing what the code does.
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        var rows = await _samlConfig.GetAllCertRowsAsync(ct);
+        IReadOnlyList<TenantSamlCertRow> rows;
+        try
+        {
+            rows = await _samlConfig.GetAllCertRowsAsync(leaseCt);
+        }
+        catch (OperationCanceledException) when (lease.LeaseLost)
+        {
+            _logger.LogWarning(
+                "SAML cert-expiry check pass aborted — the {LockName} sweep lease was lost while listing tenants.",
+                SweepLockName);
+            return;
+        }
 
         int alerted = 0;
         int skipped = 0;
@@ -210,14 +230,16 @@ public sealed class SamlCertExpiryCheckService : BackgroundService
 
         foreach (var row in rows)
         {
-            if (ct.IsCancellationRequested)
+            // The per-org guard below swallows failures, so this is the point at which a lost
+            // lease (or a host shutdown) actually stops the sweep.
+            if (leaseCt.IsCancellationRequested)
             {
                 break;
             }
 
             try
             {
-                bool acted = await CheckOrgCertAsync(row, warnDays, ct);
+                bool acted = await CheckOrgCertAsync(row, warnDays, leaseCt);
                 if (acted)
                 {
                     alerted++;
@@ -227,6 +249,10 @@ public sealed class SamlCertExpiryCheckService : BackgroundService
                     skipped++;
                 }
             }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
             catch (Exception ex)
             {
                 errors++;
@@ -235,6 +261,14 @@ public sealed class SamlCertExpiryCheckService : BackgroundService
         }
 
         sw.Stop();
+        if (lease.LeaseLost)
+        {
+            _logger.LogWarning(
+                "SAML cert-expiry check pass aborted — the {LockName} sweep lease was lost mid-pass. Checked {Total} orgs: {Alerted} alerted, {Skipped} already-notified/no-cert, {Errors} error(s), took {ElapsedMs}ms.",
+                SweepLockName, rows.Count, alerted, skipped, errors, sw.ElapsedMilliseconds);
+            return;
+        }
+
         _logger.LogInformation(
             "SAML cert-expiry check pass complete. Checked {Total} orgs: {Alerted} alerted, {Skipped} already-notified/no-cert, {Errors} error(s), took {ElapsedMs}ms.",
             rows.Count, alerted, skipped, errors, sw.ElapsedMilliseconds);
@@ -295,7 +329,7 @@ public sealed class SamlCertExpiryCheckService : BackgroundService
         {
             thumbprint,
             days_remaining = (int)Math.Floor(daysRemaining),
-            not_after = notAfter.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            not_after = notAfter.ToUtcIso(),
             stage = targetStage,
         }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
 
@@ -306,7 +340,7 @@ public sealed class SamlCertExpiryCheckService : BackgroundService
             "SAML signing cert for org {OrgId} is {Stage}: thumbprint={Thumbprint}, " +
             "daysRemaining={Days}, notAfter={NotAfter}.",
             row.OrgId, targetStage, thumbprint, (int)Math.Floor(daysRemaining),
-            notAfter.ToString("yyyy-MM-ddTHH:mm:ssZ"));
+            notAfter.ToUtcIso());
 
         return true;
     }

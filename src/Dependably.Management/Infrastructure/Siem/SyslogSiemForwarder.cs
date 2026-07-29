@@ -3,6 +3,8 @@ using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
 using System.Text;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Dependably.Infrastructure.Siem;
 
@@ -28,12 +30,17 @@ public sealed class SyslogSiemForwarder : ISiemForwarder
     private readonly Transport _transport;
     private readonly Format _format;
 
-    public SyslogSiemForwarder(IConfiguration config)
+    // logger is optional so the many construction sites in tests need not thread one; DI always
+    // supplies the real logger, so the insecure-transport warning is never lost in production.
+    public SyslogSiemForwarder(IConfiguration config, ILogger<SyslogSiemForwarder>? logger = null)
     {
         _host = config["SIEM_SYSLOG_HOST"]
             ?? throw new InvalidOperationException("SIEM_SYSLOG_HOST is required for SyslogSiemForwarder.");
         _port = int.TryParse(config["SIEM_SYSLOG_PORT"], out int p) && p > 0 ? p : DefaultSyslogPort;
-        _transport = (config["SIEM_SYSLOG_PROTO"] ?? "udp").Trim().ToLowerInvariant() switch
+        // Defaults to TLS. What travels here is an audit stream carrying actor ids and the typed
+        // payload — personal data — so the default transport is the one that protects it, and a
+        // plaintext transport is something an operator opts into rather than inherits.
+        _transport = (config["SIEM_SYSLOG_PROTO"] ?? "tls").Trim().ToLowerInvariant() switch
         {
             "udp" => Transport.Udp,
             "tcp" => Transport.Tcp,
@@ -41,6 +48,19 @@ public sealed class SyslogSiemForwarder : ISiemForwarder
             var other => throw new InvalidOperationException(
                 $"SIEM_SYSLOG_PROTO must be udp, tcp, or tls; got '{other}'.")
         };
+
+        // Same warn-on-insecure-choice pattern the codebase uses for TRUSTED_PROXIES and
+        // DEPENDABLY_MASTER_KEY: the deployment still works, but the exposure is named at startup
+        // rather than left for an audit to discover.
+        if (_transport != Transport.Tls)
+        {
+            (logger ?? (ILogger)NullLogger<SyslogSiemForwarder>.Instance).LogWarning(
+                "SIEM_SYSLOG_PROTO={Transport} sends the audit stream to {Host}:{Port} in cleartext. " +
+                "Those events carry actor ids and event payloads (personal data), so anything on the " +
+                "path can read them and — over UDP — forge them. Set SIEM_SYSLOG_PROTO=tls unless the " +
+                "collector is reached over a already-encrypted link.",
+                _transport.ToString().ToLowerInvariant(), _host, _port);
+        }
         _format = (config["SIEM_SYSLOG_FORMAT"] ?? "cef").Trim().ToLowerInvariant() switch
         {
             "cef" => Format.Cef,
@@ -147,6 +167,9 @@ public sealed class SyslogSiemForwarder : ISiemForwarder
     internal static string FormatRfc5424(SiemEvent ev)
     {
         const int prival = 16 * 8 + 6;  // local0.info
+        // utcformat-ok: RFC 5424 TIMESTAMP is an RFC 3339 value carrying a numeric `zzz`
+        // offset field. This is an external wire format read by syslog collectors, not a
+        // stored column, so it keeps the offset rather than the canonical UTC form.
         string ts = ev.CreatedAt.ToString("yyyy-MM-ddTHH:mm:ss.fffzzz");
         string hostname;
         try { hostname = Dns.GetHostName() ?? "dependably"; }

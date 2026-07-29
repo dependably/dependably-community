@@ -398,6 +398,8 @@ internal sealed class SystemScopeAuditFactory : WebApplicationFactory<Program>, 
         // now-ok: mints a JWT the host validates against its real clock.
         var now = DateTime.UtcNow;
         var token = new System.IdentityModel.Tokens.Jwt.JwtSecurityToken(
+            issuer: Dependably.Security.JwtTokenBinding.Issuer,
+            audience: Dependably.Security.JwtTokenBinding.SessionAudience,
             claims: new[]
             {
                 new System.Security.Claims.Claim(
@@ -514,6 +516,8 @@ internal sealed class TenantScopeAuditFactory : WebApplicationFactory<Program>, 
         // now-ok: mints a JWT the host validates against its real clock.
         var now = DateTime.UtcNow;
         var token = new System.IdentityModel.Tokens.Jwt.JwtSecurityToken(
+            issuer: Dependably.Security.JwtTokenBinding.Issuer,
+            audience: Dependably.Security.JwtTokenBinding.SessionAudience,
             claims: new[]
             {
                 new System.Security.Claims.Claim(

@@ -90,9 +90,15 @@ public sealed class CapabilityPolicyProvider : IAuthorizationPolicyProvider
 ///         a narrowed capabilities array), only those caps grant. Token issuance
 ///         already validated they're a subset of the user's role caps, so honouring
 ///         the narrowing is correct.</item>
+///   <item>An API-token principal (authenticated by
+///         <see cref="TokenAuthenticationDefaults.Scheme"/>) carrying zero <c>cap</c>
+///         claims is denied outright — the token's <c>capabilities</c> column was
+///         NULL/empty/malformed, and an empty set must never inherit the owner's role
+///         capabilities. The token is what authenticates; its capability set is the
+///         ceiling regardless of the owner's role.</item>
 ///   <item>Otherwise the role claim drives the cap set —
 ///         <see cref="Capabilities.ForPlatformAdmin"/> for <c>system_admin</c>, else
-///         <see cref="Capabilities.ForRole"/>. JWT-authenticated admins land here.</item>
+///         <see cref="Capabilities.ForRole"/>. Only JWT-session principals land here.</item>
 /// </list>
 /// </summary>
 public sealed class CapabilityHandler : AuthorizationHandler<CapabilityRequirement>
@@ -114,6 +120,16 @@ public sealed class CapabilityHandler : AuthorizationHandler<CapabilityRequireme
                 context.Succeed(requirement);
             }
 
+            return Task.CompletedTask;
+        }
+
+        // An API-token principal reaches here only with zero explicit `cap` claims, which happens
+        // solely when its `capabilities` column is NULL/empty/malformed. That empty set denies —
+        // an API token must never fall through to the owner's role capabilities, which would
+        // silently upgrade a should-be-denied legacy token to its owner's full role grant. The
+        // role fallback below is legitimate only for JWT-session principals.
+        if (context.User.Identities.Any(i => i.AuthenticationType == TokenAuthenticationDefaults.Scheme))
+        {
             return Task.CompletedTask;
         }
 

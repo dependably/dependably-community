@@ -270,10 +270,12 @@ public sealed partial class CargoController : OrgScopedControllerBase
     }
 
     /// <summary>
-    /// Resolves the latest non-yanked version for a crate across both uploaded
-    /// (package_versions) and global-plane proxy (cache_artifact) versions. Falls back to
-    /// the most recently created version when all versions are yanked. Returns null when the
-    /// crate has no versions at all.
+    /// Resolves <c>max_version</c> for a crate across both uploaded (package_versions) and
+    /// global-plane proxy (cache_artifact) versions: the crates.io search API's <c>max_version</c>
+    /// field is the highest SemVer-precedence version, prereleases included — unlike
+    /// <c>max_stable_version</c> (a separate crates.io field this endpoint does not emit), it is
+    /// not restricted to stable releases. Falls back to considering yanked versions too when
+    /// every version is yanked. Returns null when the crate has no versions at all.
     /// </summary>
     private async Task<string?> ResolveMaxVersionAsync(string orgId, string packageId, string name, CancellationToken ct)
     {
@@ -316,9 +318,8 @@ public sealed partial class CargoController : OrgScopedControllerBase
             return null;
         }
 
-        // Sort by creation time descending; Cargo semver ordering is not enforced here
-        // because self-hosted versions may not follow semver strictly.
-        return candidates.OrderByDescending(v => v.CreatedAt).First().Version;
+        // max_version includes prereleases — no eligibility filter needed, see the summary above.
+        return VersionPrecedenceResolver.ResolveLatest(candidates)?.Version;
     }
 
     // ── Owners ────────────────────────────────────────────────────────────────
@@ -528,6 +529,7 @@ public sealed partial class CargoController : OrgScopedControllerBase
             SizeCap = args.UploadCap,
             ActorUserId = args.Token.UserId,
             ActorKind = args.Token.ActorKind,
+            ActorTokenId = args.Token.Id,
             AllowOverwrite = orgSettings?.AllowVersionOverwrite ?? false,
             ClaimState = claim.State,
             SourceIp = HttpContext.GetNormalizedRemoteIp(),

@@ -32,61 +32,20 @@ public sealed partial class OrgIdFilteringComplianceTests
     public OrgIdFilteringComplianceTests(ITestOutputHelper output) => _output = output;
 
     /// <summary>
-    /// Tables whose rows belong to a tenant. Any SQL touching one of these MUST filter on
-    /// <c>org_id</c> (or <c>tenant_id</c> for tables that use that name).
-    ///
-    /// The canonical read-model views belong here too. They carry <c>org_id</c> and span every
-    /// tenant, so a query that selects from one without filtering is exactly as dangerous as one
-    /// against the underlying tables — and this set is what the gate matches on, so a view left out
-    /// of it would read from tenant rows with the gate silently passing.
+    /// Relations whose rows belong to a tenant but that carry no <c>org_id</c>/<c>tenant_id</c>
+    /// column of their own in <c>Schema.sql</c>, so the schema derivation below cannot see them.
+    /// This is the ONLY hand-maintained part of the table set, and every entry is asserted to
+    /// exist by <see cref="NonSchemaTenantScopedRelations_AllExistInTheSchemaSources"/>.
     /// </summary>
-    internal static readonly HashSet<string> TenantScopedTables = new(StringComparer.OrdinalIgnoreCase)
-    {
+    private static readonly string[] NonSchemaTenantScopedRelations =
+    [
+        // The canonical read-model views. Defined in SchemaInitializer.Views.cs rather than the
+        // schema file, they carry org_id and span every tenant — a query selecting from one
+        // without filtering is exactly as dangerous as one against the underlying tables.
         "artifact_inventory",
         "artifact_license",
         "org_storage_bytes",
 
-        // Each table here has an org_id (or tenant_id) column FK'd to orgs(id) — kept in sync with
-        // the schema (every CREATE TABLE that declares org_id/tenant_id belongs here). Tables that
-        // sit at the data plane but carry no tenant column on purpose — cache_artifact,
-        // vulnerabilities (OSV), spdx_license — are NOT listed.
-        "packages",
-        "org_settings",
-        "users",
-        "activity",
-        "audit_log",
-        "audit_event",
-        "user_tokens",
-        "service_tokens",
-        "invites",
-        "password_reset_tokens",
-        "external_identities",
-        "claim",
-        "claim_history",
-        "allowlist",
-        "blocklist",
-        "reserved_namespace",
-        "quarantine",
-        "license_allowlist",
-        "license_blocklist",
-        "upstream_registry",
-        "upstream_source_pin",
-        "nuget_symbol_index",
-        "oci_blobs",
-        "oci_tags",
-        "rpm_repodata_state",
-        "tenant_artifact_access",
-        "tenant_storage",
-        "tenant_provisioning_jobs",
-        "tenant_saml_config",
-        // SAML one-shot tables. Consume/issue queries are tenant-scoped (filter on tenant_id);
-        // the expiry-only global retention sweeps opt out with `// xtenant:`.
-        "saml_pending_requests",
-        "saml_consumed_assertions",
-        "saml_test_runs",
-        // package_version_files declares its own org_id column (denormalized from the owning
-        // package so the download-by-filename lookup is org-filtered without a second join).
-        "package_version_files",
         // Version-scoped child tables: no org_id column of their own, reached via an org-scoped
         // package_versions / packages FK. Listed so unfiltered raw SQL against them must justify
         // the cross-tenant reach with `// xtenant:`.
@@ -94,9 +53,50 @@ public sealed partial class OrgIdFilteringComplianceTests
         "package_version_vulns",
         "package_version_licenses",
         "maven_version_files",
-        // MFA trusted-device rows carry tenant_id and are tenant-scoped.
-        "mfa_trusted_devices",
-    };
+    ];
+
+    /// <summary>
+    /// Tables whose rows belong to a tenant. Any SQL touching one of these MUST filter on
+    /// <c>org_id</c> (or <c>tenant_id</c> for tables that use that name).
+    ///
+    /// <para>
+    /// Derived from <c>Schema.sql</c> at test time — every <c>CREATE TABLE</c> that declares an
+    /// <c>org_id</c> or <c>tenant_id</c> column is tenant-scoped by construction, so a new
+    /// tenant-scoped table is covered by this gate the moment it lands in the schema. A
+    /// hand-maintained list is exactly what rotted here before: nine tenant-scoped tables
+    /// (including the <c>signature_trust_anchor</c> and <c>install_script_allowlist</c>
+    /// supply-chain trust material) were never inspected by the gate at all.
+    /// </para>
+    ///
+    /// <para>
+    /// Tables that sit at the data plane but carry no tenant column on purpose —
+    /// <c>cache_artifact</c>, <c>vulnerabilities</c> (OSV), <c>spdx_license</c> — are excluded
+    /// automatically by the same construction.
+    /// </para>
+    /// </summary>
+    internal static readonly HashSet<string> TenantScopedTables = BuildTenantScopedTables();
+
+    private static HashSet<string> BuildTenantScopedTables()
+    {
+        var set = new HashSet<string>(SchemaDeclaredTenantScopedTables(), StringComparer.OrdinalIgnoreCase);
+        foreach (string relation in NonSchemaTenantScopedRelations)
+        {
+            set.Add(relation);
+        }
+
+        return set;
+    }
+
+    /// <summary>Every <c>CREATE TABLE</c> in <c>Schema.sql</c> that declares org_id / tenant_id.</summary>
+    internal static IEnumerable<string> SchemaDeclaredTenantScopedTables()
+    {
+        string sql = File.ReadAllText(SchemaTestPaths.SqliteSchema(SchemaTestPaths.SourceRoot()));
+        return SchemaSqlParser.ParseTables(sql)
+            .Where(t => t.Value.Any(c =>
+                c.Equals("org_id", StringComparison.OrdinalIgnoreCase)
+                || c.Equals("tenant_id", StringComparison.OrdinalIgnoreCase)))
+            .Select(t => t.Key);
+    }
 
     [GeneratedRegex(@"""""""\s*(?<sql>.*?)\s*""""""", RegexOptions.Singleline)]
     private static partial Regex RawStringRegex();
@@ -201,6 +201,98 @@ public sealed partial class OrgIdFilteringComplianceTests
 
         Assert.Equal(expectViolation, flagged);
     }
+
+    /// <summary>
+    /// Self-test for the filter check. Mentioning the tenant column is not filtering on it: a
+    /// projection, an alias, or an inverted predicate all span every tenant while carrying the
+    /// column name. These cases pin "the column appears in a filtering position", which is the
+    /// property the gate actually claims to enforce.
+    /// </summary>
+    [Theory]
+    // --- Mentions the column, does not filter on it: must be a violation. ---
+    [InlineData("SELECT org_id, name FROM packages", true)]
+    [InlineData("SELECT id, org_id AS tenant FROM packages ORDER BY name", true)]
+    [InlineData("SELECT id FROM packages WHERE org_id != @orgId", true)]
+    [InlineData("SELECT id FROM packages WHERE org_id <> @orgId", true)]
+    [InlineData("SELECT id FROM packages WHERE id NOT IN (SELECT org_id FROM users)", true)]
+    [InlineData("DELETE FROM signature_trust_anchor WHERE id = @id", true)]
+    [InlineData("UPDATE install_script_allowlist SET enabled = 1 WHERE id = @id", true)]
+    // --- Genuinely filtering: must pass. ---
+    [InlineData("SELECT id FROM packages WHERE org_id = @orgId", false)]
+    [InlineData("SELECT id FROM packages p WHERE p.org_id=@orgId AND p.name = @n", false)]
+    [InlineData("SELECT id FROM banners WHERE id = @id AND (scope = 'system' OR org_id = @orgId)", false)]
+    [InlineData("SELECT id FROM packages WHERE org_id IN (SELECT id FROM orgs)", false)]
+    [InlineData("SELECT id FROM mfa_trusted_devices WHERE tenant_id IS NULL", false)]
+    [InlineData("SELECT p.id FROM packages p JOIN users u ON u.org_id = p.org_id WHERE u.id = @id", false)]
+    [InlineData("UPDATE quarantine SET state = @s WHERE org_id = @orgId AND id = @id", false)]
+    // An INSERT binds its row to a tenant through the column list; there is no predicate to find.
+    [InlineData("INSERT INTO packages (org_id, name) VALUES (@orgId, @name)", false)]
+    // …but an INSERT … SELECT reads across tenants unless the SELECT itself is filtered.
+    [InlineData("INSERT INTO packages (org_id, name) SELECT org_id, name FROM packages", true)]
+    [InlineData("INSERT INTO packages (org_id, name) SELECT org_id, name FROM packages WHERE org_id = @o", false)]
+    public void FilterCheck_RequiresTheTenantColumnInAFilteringPosition(string sql, bool expectViolation)
+    {
+        Assert.True(TenantScopedTablesIn(sql).Count > 0, "fixture must touch a tenant-scoped table");
+        Assert.Equal(expectViolation, !HasOrgFilter(sql));
+    }
+
+    /// <summary>
+    /// The table set is derived from <c>Schema.sql</c>, not hand-maintained. This pins the
+    /// derivation: every <c>CREATE TABLE</c> declaring org_id/tenant_id is covered, including the
+    /// supply-chain trust tables a hand-maintained list had silently omitted.
+    /// </summary>
+    [Fact]
+    public void TenantScopedTables_CoverEverySchemaTableDeclaringATenantColumn()
+    {
+        var declared = SchemaDeclaredTenantScopedTables().ToList();
+
+        // A parser regression that returned nothing would make the gate green-but-blind, so pin a
+        // floor well below the real count rather than trusting the set difference alone.
+        Assert.True(declared.Count >= 30, $"schema derivation found only {declared.Count} tenant-scoped tables");
+
+        var missing = declared.Where(t => !TenantScopedTables.Contains(t)).OrderBy(t => t, StringComparer.Ordinal).ToList();
+        Assert.True(missing.Count == 0, $"tenant-scoped schema tables missing from the gate: {string.Join(", ", missing)}");
+
+        // Anchors: supply-chain trust material and the per-tenant surfaces whose omission is what
+        // let an unfiltered write ship. Named explicitly so a derivation that stops seeing them
+        // fails here with a readable reason rather than merely thinning the set.
+        foreach (string anchor in new[]
+                 {
+                     "signature_trust_anchor", "install_script_allowlist", "banners", "alert",
+                     "alert_settings", "webhook_subscription", "npm_dist_tags", "oci_uploads",
+                     "org_stats_snapshot",
+                 })
+        {
+            Assert.Contains(anchor, TenantScopedTables);
+        }
+    }
+
+    /// <summary>
+    /// The one hand-maintained part of the set must still name real relations — a view renamed in
+    /// <c>SchemaInitializer.Views.cs</c> or a table dropped from the schema would otherwise leave a
+    /// dead string here that matches nothing and protects nothing.
+    /// </summary>
+    [Fact]
+    public void NonSchemaTenantScopedRelations_AllExistInTheSchemaSources()
+    {
+        string schema = File.ReadAllText(SchemaTestPaths.SqliteSchema(SchemaTestPaths.SourceRoot()));
+        var known = new HashSet<string>(SchemaSqlParser.CreatedTableNames(schema), StringComparer.OrdinalIgnoreCase);
+        foreach (string file in SchemaTestPaths.SchemaInitializerFiles())
+        {
+            foreach (Match m in CreateViewRegex().Matches(File.ReadAllText(file)))
+            {
+                known.Add(m.Groups["name"].Value);
+            }
+        }
+
+        var unknown = NonSchemaTenantScopedRelations.Where(r => !known.Contains(r)).ToList();
+        Assert.True(
+            unknown.Count == 0,
+            $"NonSchemaTenantScopedRelations names relation(s) that no longer exist: {string.Join(", ", unknown)}");
+    }
+
+    [GeneratedRegex(@"CREATE\s+VIEW\s+(?:IF\s+NOT\s+EXISTS\s+)?(?<name>\w+)", RegexOptions.IgnoreCase)]
+    private static partial Regex CreateViewRegex();
 
     private record struct SqlMatch(string Sql, int StartIndex);
 
@@ -311,14 +403,94 @@ public sealed partial class OrgIdFilteringComplianceTests
         return found;
     }
 
+    /// <summary>
+    /// True when the tenant column appears in a FILTERING position — a <c>WHERE</c> / <c>ON</c> /
+    /// <c>HAVING</c> / <c>USING</c> clause, bound with an equality or membership operator — or, for
+    /// a plain <c>INSERT … VALUES</c>, in the column list that binds the row to its tenant.
+    ///
+    /// <para>
+    /// Mere presence of the column name is not enough: <c>SELECT org_id, name FROM packages</c>
+    /// and <c>WHERE org_id != @orgId</c> both mention the column and both span every tenant.
+    /// This is deliberately a clause-position check rather than a SQL parse — the goal is
+    /// "the column constrains the result set", which the position plus operator shape captures
+    /// for every statement shape this codebase actually writes.
+    /// </para>
+    ///
+    /// <para>
+    /// Known limitation, and the reason the <c>// xtenant:</c> opt-out still carries weight: the
+    /// gate has no data-flow awareness. <c>WHERE org_id = @orgId</c> passes regardless of whether
+    /// <c>@orgId</c> came from the authenticated principal or straight off a route parameter —
+    /// the latter is textbook BOLA and is invisible here. Column-to-column predicates
+    /// (<c>WHERE p.org_id = c.org_id</c>) likewise pass, because they are the correct shape inside
+    /// a correlated subquery whose outer query is bound; only a reviewer can tell the two apart.
+    /// </para>
+    /// </summary>
     private static bool HasOrgFilter(string sql)
     {
-        // Either column name in any position of the SQL is enough — almost every legitimate
-        // query gates on one of them. Cross-tenant queries that legitimately don't (e.g.
-        // system-admin counts) use the opt-out comment.
-        return sql.Contains("org_id", StringComparison.OrdinalIgnoreCase)
-            || sql.Contains("tenant_id", StringComparison.OrdinalIgnoreCase);
+        if (FilteringClausesOf(sql).Any(clause => TenantPredicateRegex().IsMatch(clause)))
+        {
+            return true;
+        }
+
+        // A plain `INSERT INTO t (org_id, …) VALUES (…)` binds the new row to its tenant through
+        // the column list; there is no predicate to find. An INSERT … SELECT does not get this
+        // pass — its SELECT still reads across tenants unless the SELECT itself is filtered, which
+        // the clause scan above is what decides.
+        return InsertColumnListBindsTenant(sql);
     }
+
+    /// <summary>
+    /// Splits the SQL into the regions that can constrain a result set. A region opens at
+    /// <c>WHERE</c>/<c>ON</c>/<c>HAVING</c>/<c>USING</c> and closes at the next clause keyword that
+    /// starts something other than a predicate (<c>SELECT</c>, <c>FROM</c>, <c>GROUP BY</c>,
+    /// <c>SET</c>, <c>VALUES</c>, <c>DO</c>, a set operator, …). <c>AND</c>/<c>OR</c> continue the
+    /// region rather than closing it.
+    /// </summary>
+    private static IEnumerable<string> FilteringClausesOf(string sql)
+    {
+        var opens = ClauseOpenRegex().Matches(sql);
+        foreach (Match open in opens)
+        {
+            int start = open.Index + open.Length;
+            var close = ClauseCloseRegex().Match(sql, start);
+            yield return close.Success ? sql[start..close.Index] : sql[start..];
+        }
+    }
+
+    private static bool InsertColumnListBindsTenant(string sql)
+    {
+        var insert = InsertColumnListRegex().Match(sql);
+        return insert.Success
+            && !SelectKeywordRegex().IsMatch(sql)
+            && TenantColumnRegex().IsMatch(insert.Groups["cols"].Value);
+    }
+
+    // `org_id = …`, `org_id IN (…)`, `org_id IS NULL`, and the reversed `@orgId = org_id`. The
+    // negative lookbehind/lookahead rejects the inverted forms `!=`, `<>` and `NOT IN`, which
+    // mention the column while explicitly widening past the tenant.
+    [GeneratedRegex(
+        @"(?:(?<!\bNOT\s)\b(?:\w+\.)?(?:org_id|tenant_id)\s*(?:=(?!=)|\bIN\b|\bIS\b)"
+        + @"|=\s*(?:\w+\.)?(?:org_id|tenant_id)\b)",
+        RegexOptions.IgnoreCase)]
+    private static partial Regex TenantPredicateRegex();
+
+    [GeneratedRegex(@"\b(?:WHERE|ON|HAVING|USING)\b", RegexOptions.IgnoreCase)]
+    private static partial Regex ClauseOpenRegex();
+
+    [GeneratedRegex(
+        @"\b(?:SELECT|FROM|SET|VALUES|DO|RETURNING|LIMIT|OFFSET|UNION|EXCEPT|INTERSECT"
+        + @"|GROUP\s+BY|ORDER\s+BY|INSERT|UPDATE|DELETE|WITH)\b",
+        RegexOptions.IgnoreCase)]
+    private static partial Regex ClauseCloseRegex();
+
+    [GeneratedRegex(@"\bINSERT\s+(?:OR\s+\w+\s+)?INTO\s+[\w"".]+\s*\((?<cols>[^)]*)\)", RegexOptions.IgnoreCase)]
+    private static partial Regex InsertColumnListRegex();
+
+    [GeneratedRegex(@"\bSELECT\b", RegexOptions.IgnoreCase)]
+    private static partial Regex SelectKeywordRegex();
+
+    [GeneratedRegex(@"\b(?:org_id|tenant_id)\b", RegexOptions.IgnoreCase)]
+    private static partial Regex TenantColumnRegex();
 
     private static int CountLinesUpTo(string source, int index)
     {

@@ -1,4 +1,4 @@
-using System.Runtime.CompilerServices;
+using Dependably.Tests.Compliance;
 
 namespace Dependably.Tests.Unit.Observability;
 
@@ -8,8 +8,12 @@ namespace Dependably.Tests.Unit.Observability;
 /// synonym in a <c>{Token}</c> message-template form fails the build with a
 /// pointer to the canonical replacement.
 ///
-/// Survey at PR 1 time showed zero existing drift; this test is the
-/// defensive lock that keeps future PRs from reintroducing it.
+/// <para>
+/// The scan covers every <c>src/Dependably*</c> source root via
+/// <see cref="SourceRoots.AllCSharpFiles"/>: the logging code lives in
+/// <c>Dependably.Core</c> and <c>Dependably.Management</c>, so a gate anchored on a single
+/// project directory would read as comprehensive while scanning almost nothing.
+/// </para>
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class LogPropertyDriftTests
@@ -38,28 +42,19 @@ public sealed class LogPropertyDriftTests
     [Fact]
     public void NoBannedPropertyNamesInLogTemplates()
     {
-        string srcDir = GetSourceDir();
-        Assert.True(Directory.Exists(srcDir), $"Source directory not found: {srcDir}");
-
         var violations = new List<string>();
 
-        foreach (string file in Directory.EnumerateFiles(srcDir, "*.cs", SearchOption.AllDirectories))
+        var scanned = SourceRoots.AllCSharpFiles().Where(f =>
+            !f.EndsWith(".g.cs", StringComparison.Ordinal)
+            && !f.EndsWith(".AssemblyInfo.cs", StringComparison.Ordinal));
+
+        foreach (string file in scanned)
         {
-            if (file.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            if (file.EndsWith(".g.cs", StringComparison.Ordinal) || file.EndsWith(".AssemblyInfo.cs", StringComparison.Ordinal))
-            {
-                continue;
-            }
-
             string[] lines = File.ReadAllLines(file);
             for (int i = 0; i < lines.Length; i++)
             {
                 string line = lines[i];
-                string rel = Path.GetRelativePath(srcDir, file);
+                string rel = Path.GetRelativePath(SourceRoots.OwningRoot(file), file);
 
                 // Pattern A — message-template tokens like `{tenant_id}` inside a logger call.
                 if (IsLoggerCallLine(line))
@@ -110,13 +105,4 @@ public sealed class LogPropertyDriftTests
         || line.Contains("Log.Trace", StringComparison.Ordinal)
         || line.Contains("Log.Critical", StringComparison.Ordinal)
         || line.Contains("Log.Fatal", StringComparison.Ordinal);
-
-    private static string GetSourceDir([CallerFilePath] string callerFilePath = "")
-    {
-        // tests/Dependably.Tests/Unit/Observability/LogPropertyDriftTests.cs
-        //   → up four → repo root → src/Dependably
-        string dir = Path.GetDirectoryName(callerFilePath)!;
-        string repoRoot = Path.GetFullPath(Path.Combine(dir, "..", "..", "..", ".."));
-        return Path.Combine(repoRoot, "src", "Dependably");
-    }
 }

@@ -1,0 +1,71 @@
+# Staging deployment, consumed only by the deploy-staging CI job on the shell
+# runner tagged `staging`. Deliberately standalone rather than an override of
+# docker-compose.yml: that file carries a `build:` section and a registry_key
+# BuildKit secret, and staging must never build. It pulls the multi-arch image
+# publish-image pushed earlier in the same pipeline, so what staging exercises
+# is the exact artefact a release would ship — same digest, same linux-musl-arm64
+# publish — not a locally rebuilt approximation of it.
+services:
+  dependably:
+    # Set by the deploy job to the immutable version-stamped tag, never a moving
+    # one: `:main` is overwritten by the next main pipeline, so a deploy that
+    # resolved it could race in a different build than the one this pipeline
+    # produced. No default — an unset value must fail the deploy, not silently
+    # pull something else.
+    image: ${STAGING_IMAGE:?STAGING_IMAGE must be set by the deploy job}
+    ports:
+      - "${STAGING_PORT:-8080}:8080"
+    volumes:
+      - dependably-data:/data
+    environment:
+      # Host identity and tenancy mode come from the host's own env file
+      # (STAGING_ENV_FILE, default /etc/dependably/staging.env), which the deploy
+      # job passes as `--env-file`. They describe the machine, not the build, so
+      # they must survive a pipeline change and must not live in CI variables.
+      # The defaults below apply only when that file is absent.
+      BASE_URL: ${BASE_URL:-http://rpi2.northwardlabs.ca:8080}
+      DEFAULT_ORG_SLUG: ${DEFAULT_ORG_SLUG:-default}
+      DEPLOYMENT_MODE: ${DEPLOYMENT_MODE:-single}
+      # No load balancer fronts this single-node host, so the pre-stop drain
+      # buys nothing and would only eat into the stop grace period before the
+      # SQLite instance-lock row is released.
+      SHUTDOWN_PRESTOP_DELAY: "0"
+      # At parity with docker-compose.yml so staging serves the same RPM upstream
+      # as the local appliance. RPM ships no default upstream of its own, so
+      # omitting these would silently change staging's behaviour relative to it.
+      Rpm__Upstream: ${RPM_UPSTREAM:-https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/40/Everything/x86_64/os}
+      Rpm__UpstreamMode: ${RPM_UPSTREAM_MODE:-passthrough}
+      # The staging host is shared with other long-running containers, so the
+      # heap is capped rather than left to size against total host RAM. Set to
+      # ~75 % of mem_limit below; the runtime reads it at process start.
+      DOTNET_GCHeapHardLimit: "0x60000000"
+    # Bounded so a staging deploy can never starve the host's other workloads.
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    # Must cover SHUTDOWN_PRESTOP_DELAY + SHUTDOWN_GRACE_PERIOD (30s in-flight
+    # drain) so graceful shutdown finishes and the SQLite instance-lock row is
+    # deleted. Docker's default 10s SIGKILLs mid-shutdown, orphaning the lock —
+    # the replacement container then waits out the 90s staleness window.
+    stop_grace_period: 45s
+
+volumes:
+  # Pinned by explicit name rather than left to compose's <project>_<volume>
+  # derivation. The database must not silently follow a project rename: compose
+  # would create a fresh empty volume and the deploy would report healthy against
+  # an empty instance, which is the worst failure mode available here — it looks
+  # like success. Overridable per host, but never implicit.
+  dependably-data:
+    name: ${STAGING_DATA_VOLUME:-dependably-community_dependably-data}

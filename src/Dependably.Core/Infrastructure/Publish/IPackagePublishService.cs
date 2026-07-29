@@ -89,6 +89,14 @@ public sealed record PublishRequest
     /// </summary>
     public string? ActorKind { get; init; }
 
+    /// <summary>
+    /// The resolving token's own id (<c>service_tokens.id</c> or <c>user_tokens.id</c>). Used only
+    /// to derive the name-ownership principal for a service token, which carries no
+    /// <see cref="ActorUserId"/> — the token itself is then the stable publisher identity. Null for
+    /// background/import callers, which attribute ownership to their user via <see cref="ActorUserId"/>.
+    /// </summary>
+    public string? ActorTokenId { get; init; }
+
     /// <summary>Audit action verb. Defaults to 'push' for protocol publishes, 'import' for bulk.</summary>
     public string AuditAction { get; init; } = "push";
 

@@ -165,16 +165,23 @@ public sealed class OrgAccessGuard
     // system_admin isn't handled here because RouteScopeFilter already blocks operator tokens
     // from tenant routes before they reach this guard.
     //
-    // Only call this with a real DB role (a users-row principal). A caller with no users row
-    // — a service/CI token — has no role to fall back to; use
-    // <see cref="ResolveExplicitCapClaims"/> instead so an empty claim set denies rather than
-    // silently resolving to <c>Capabilities.ForRole("member")</c>.
+    // The role fallback is legitimate only for a JWT-session principal. A user-owned API token
+    // whose `capabilities` column is legacy-NULL emits zero `cap` claims yet its `sub` resolves
+    // to a real users row (its owner), so the caller here still passes the owner's DB role. An
+    // API-token principal with no explicit caps must therefore be denied outright — otherwise the
+    // zero-capability token silently inherits its owner's full role grant. Service/CI tokens with
+    // no users row never reach this method; they resolve via ResolveExplicitCapClaims instead.
     internal static IReadOnlySet<string> ResolveCallerCapabilities(ClaimsPrincipal principal, string? dbRole)
     {
         var explicitCaps = ResolveExplicitCapClaims(principal);
-        return explicitCaps.Count > 0
-            ? explicitCaps
-            : Capabilities.ForRole(dbRole ?? "member");
+        if (explicitCaps.Count > 0 || IsApiTokenPrincipal(principal))
+        {
+            // Explicit token-narrowed caps win. An API-token principal with none (a legacy
+            // NULL-capabilities token) keeps the empty set — it must never inherit the owner's role.
+            return explicitCaps;
+        }
+
+        return Capabilities.ForRole(dbRole ?? "member");
     }
 
     // The principal's explicit `cap` claims, verbatim, with no role-based fallback. This is
