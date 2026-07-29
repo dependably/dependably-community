@@ -1936,8 +1936,11 @@ publish-image:
       for i in $(seq 30); do docker info >/dev/null 2>&1 && break; echo "waiting for dind ($i)..."; sleep 1; done
       docker info >/dev/null 2>&1 || { echo "dind daemon did not become ready on $DOCKER_HOST"; exit 1; }
     # Register the arm64 QEMU emulator on the amd64 dind daemon so the final-stage
-    # apk layer of the arm64 image can run. The build/publish stages themselves are
-    # cross-compiled (TARGETARCH→RID), so only that layer needs emulation.
+    # apk layer of the arm64 image can run. Only that layer needs emulation: the
+    # frontend, build, and notices stages are all pinned to --platform=$BUILDPLATFORM
+    # in both Dockerfiles and cross-compile via TARGETARCH→RID, so they execute
+    # natively on the amd64 runner. Dropping that pin does not fail the build — it
+    # silently moves the whole SDK restore/publish under QEMU (~15x slower).
     - docker run --privileged --rm ${DEP_IMAGE_REGISTRY}/tonistiigi/binfmt:latest@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 --install arm64 # glsec:ignore GL056 -- binfmt_misc registration needs privileged (cap-add alone cannot mount /proc/sys/fs/binfmt_misc); one-shot container inside this job's isolated, already-privileged dind daemon
     - docker buildx create --use --name dep-builder
     # BuildKit secret for the image build's own npm/NuGet/apk restores — the READ

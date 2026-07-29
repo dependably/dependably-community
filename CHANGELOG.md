@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-07-29
+
+A build- and test-only patch. **No operator action is required** and no runtime behaviour
+changes from 0.4.3.
+
+### Fixed
+
+- **Two tests could fail under load without indicating a product fault.**
+  `DomainTimerTests` listened to the process-wide activity source filtered only by source
+  name, so spans from product code and from observability tests running in parallel landed
+  in its own bag and broke a count-based assertion; activities are now namespaced per test
+  instance. `SchemaViewIdempotencyTests` could have its concurrent reader starved until
+  after cancellation, tripping its own liveness guard before the real assertion ran; the
+  apply now waits for the reader's first poll.
+- **The backend build stage is cross-compiled rather than emulated**, removing the
+  emulation dependency from the image build.
+
 ## [0.4.3] - 2026-07-29
 
 A patch release carrying the 0.4.1 and 0.4.2 cycles, which shipped without their own

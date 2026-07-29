@@ -54,6 +54,11 @@ public sealed class SchemaViewIdempotencyTests : IAsyncLifetime
         var missing = new List<string>();
         using var stop = new CancellationTokenSource();
 
+        // The reader is thread-pool scheduled, so without this gate a loaded machine can let the
+        // apply finish and cancel before the reader's first loop check ever runs — leaving it with
+        // zero polls and the real assertion never exercised.
+        var polling = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
         var reader = Task.Run(async () =>
         {
             await using var conn = await _db.OpenAsync();
@@ -74,11 +79,14 @@ public sealed class SchemaViewIdempotencyTests : IAsyncLifetime
                 }
 
                 polls++;
+                polling.TrySetResult();
                 await Task.Yield();
             }
 
             return polls;
         });
+
+        await polling.Task.WaitAsync(TimeSpan.FromSeconds(30));
 
         await new SchemaInitializer(_db).InitializeAsync();
         await stop.CancelAsync();

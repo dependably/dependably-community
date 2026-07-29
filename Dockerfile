@@ -52,8 +52,13 @@ RUN npm run sbom:prod
 # hadolint ignore=DL3059
 RUN npm run build
 
-# Backend build stage — restore, generate backend SBOM, publish
-FROM ${SDK_IMAGE} AS build
+# Backend build stage — restore, generate backend SBOM, publish.
+# Pinned to the build platform: every step here is a cross-compile driven by the
+# RID derived from TARGETARCH below, so the SDK itself never needs to match the
+# target architecture. Without the pin buildx resolves this stage to
+# TARGETPLATFORM, which runs restore/publish under QEMU on the non-native leg —
+# roughly 15x slower for the same output.
+FROM --platform=$BUILDPLATFORM ${SDK_IMAGE} AS build
 WORKDIR /src
 
 COPY Dependably.sln .

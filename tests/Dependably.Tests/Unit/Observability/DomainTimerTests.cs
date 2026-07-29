@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
+using System.Runtime.CompilerServices;
 using Dependably.Infrastructure.Observability;
 
 namespace Dependably.Tests.Unit.Observability;
@@ -17,6 +18,15 @@ public sealed class DomainTimerTests : IDisposable
     private readonly ActivityListener _activityListener;
     private readonly ConcurrentBag<Activity> _stoppedActivities = new();
 
+    /// <summary>
+    /// Namespace for every activity this test instance starts. <see cref="DependablyActivitySource"/>
+    /// is process-wide, so a listener filtered only by source name also collects spans from product
+    /// code and from the other observability test classes running in parallel. Scoping the bag to
+    /// this namespace is what lets a test assert on the *count* of activities rather than only on a
+    /// name it already knows.
+    /// </summary>
+    private readonly string _ns = $"test.op.{Guid.NewGuid():N}";
+
     public DomainTimerTests()
     {
         _activityListener = new ActivityListener
@@ -24,10 +34,19 @@ public sealed class DomainTimerTests : IDisposable
             ShouldListenTo = src => src.Name == DependablyActivitySource.SourceName,
             Sample = (ref ActivityCreationOptions<ActivityContext> _) =>
                 ActivitySamplingResult.AllDataAndRecorded,
-            ActivityStopped = a => _stoppedActivities.Add(a),
+            ActivityStopped = a =>
+            {
+                if (a.OperationName.StartsWith(_ns, StringComparison.Ordinal))
+                {
+                    _stoppedActivities.Add(a);
+                }
+            },
         };
         ActivitySource.AddActivityListener(_activityListener);
     }
+
+    /// <summary>Distinct activity name inside this instance's namespace.</summary>
+    private string ActivityName([CallerMemberName] string caller = "") => $"{_ns}.{caller}";
 
     public void Dispose() => _activityListener.Dispose();
 
@@ -133,7 +152,7 @@ public sealed class DomainTimerTests : IDisposable
         using var meter = new Meter($"test-{Guid.NewGuid():N}");
         var histogram = meter.CreateHistogram<double>("test.duration", unit: "s");
 
-        string activityName = $"test.op.{Guid.NewGuid():N}";
+        string activityName = ActivityName();
 
         using (var timer = DomainTimer.Start(histogram, activityName: activityName))
         {
@@ -159,13 +178,36 @@ public sealed class DomainTimerTests : IDisposable
         Assert.Equal(countBefore, _stoppedActivities.Count);
     }
 
+    /// <summary>
+    /// Pins the isolation the count assertion above depends on: a span started elsewhere in the
+    /// process on the shared source — product code, or another observability test running in
+    /// parallel — must not land in this instance's bag.
+    /// </summary>
+    [Fact]
+    public void StoppedActivities_ExcludesSpansFromOutsideThisTest()
+    {
+        using var meter = new Meter($"test-{Guid.NewGuid():N}");
+        var histogram = meter.CreateHistogram<double>("test.duration", unit: "s");
+
+        int countBefore = _stoppedActivities.Count;
+
+        using (var timer = DomainTimer.Start(histogram, activityName: null))
+        {
+            using (DependablyActivitySource.Source.StartActivity("foreign.op")) { }
+
+            Assert.Null(timer.Activity);
+        }
+
+        Assert.Equal(countBefore, _stoppedActivities.Count);
+    }
+
     [Fact]
     public void Dispose_SetsActivityOutcomeTag_Success()
     {
         using var meter = new Meter($"test-{Guid.NewGuid():N}");
         var histogram = meter.CreateHistogram<double>("test.duration", unit: "s");
 
-        string activityName = $"test.op.{Guid.NewGuid():N}";
+        string activityName = ActivityName();
 
         using (DomainTimer.Start(histogram, activityName: activityName)) { }
 
@@ -180,7 +222,7 @@ public sealed class DomainTimerTests : IDisposable
         using var meter = new Meter($"test-{Guid.NewGuid():N}");
         var histogram = meter.CreateHistogram<double>("test.duration", unit: "s");
 
-        string activityName = $"test.op.{Guid.NewGuid():N}";
+        string activityName = ActivityName();
 
         using (var timer = DomainTimer.Start(histogram, activityName: activityName))
         {
@@ -200,7 +242,7 @@ public sealed class DomainTimerTests : IDisposable
         using var meter = new Meter($"test-{Guid.NewGuid():N}");
         var histogram = meter.CreateHistogram<double>("test.duration", unit: "s");
 
-        string activityName = $"test.op.{Guid.NewGuid():N}";
+        string activityName = ActivityName();
 
         using (var timer = DomainTimer.Start(histogram, activityName: activityName))
         {

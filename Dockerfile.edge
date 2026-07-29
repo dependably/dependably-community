@@ -25,8 +25,13 @@ ARG NODE_IMAGE=node:26-alpine@sha256:e88a35be04478413b7c71c455cd9865de9b9360e1f4
 ARG SDK_IMAGE=mcr.microsoft.com/dotnet/sdk:10.0-alpine@sha256:5c559aa5d99337e400d39ab4fa1f6979d126c29b20939d53658ed38300571e74
 ARG RUNTIME_IMAGE=mcr.microsoft.com/dotnet/runtime-deps:10.0-alpine@sha256:f276c0256ffca8fe816d48ba261962b54fea1b0e6f870b6a60b3b705c89e78ac
 
-# Backend build stage — restore, generate the edge SBOM, publish
-FROM ${SDK_IMAGE} AS build
+# Backend build stage — restore, generate the edge SBOM, publish.
+# Pinned to the build platform: every step here is a cross-compile driven by the
+# RID derived from TARGETARCH below, so the SDK itself never needs to match the
+# target architecture. Without the pin buildx resolves this stage to
+# TARGETPLATFORM, which runs restore/publish under QEMU on the non-native leg —
+# roughly 15x slower for the same output.
+FROM --platform=$BUILDPLATFORM ${SDK_IMAGE} AS build
 WORKDIR /src
 
 COPY Dependably.sln .
