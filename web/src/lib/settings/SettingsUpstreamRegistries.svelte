@@ -163,6 +163,38 @@
     } catch (e) { error = extract(e) }
   }
 
+  // NuGet symbol server: id of the row whose editor is open, plus its draft value. Editing is
+  // per-row and opt-in so the common case (a nuget.org upstream, seeded automatically) needs no
+  // interaction at all.
+  let symbolEditId = null
+  let symbolDraft = ''
+  let symbolSaving = false
+
+  function openSymbolEditor(entry) {
+    symbolEditId = entry.id
+    symbolDraft = entry.symbolServerUrl || ''
+  }
+
+  function cancelSymbolEditor() { symbolEditId = null; symbolDraft = '' }
+
+  async function saveSymbolServer(eco, entry) {
+    error = ''
+    symbolSaving = true
+    try {
+      // Empty CLEARS, which turns symbol proxying off for this upstream. Send null rather than ''
+      // so the intent is unambiguous on the wire.
+      const value = symbolDraft.trim() || null
+      await api.setUpstreamSymbolServer(entry.id, value)
+      byEco[eco] = byEco[eco].map(e => e.id === entry.id ? { ...e, symbolServerUrl: value } : e)
+      byEco = byEco
+      cancelSymbolEditor()
+    } catch (e) {
+      error = extract(e)
+    } finally {
+      symbolSaving = false
+    }
+  }
+
   function onDragStart(eco, i) { dragEco = eco; dragFrom = i }
 
   function onDrop(eco, to) {
@@ -296,6 +328,39 @@
                     <span class="cred-badge">{$t('settings.proxy.upstreamRegistries.auth.credentialSet')}</span>
                   {/if}
                 </span>
+                {#if eco.key === 'nuget'}
+                  <!-- Symbol server (SSQP). A separate field because a symbol server is a
+                       different host from the v3 index and cannot be derived from it. Empty
+                       means no symbol proxying for this upstream — the fail-closed default. -->
+                  <span class="symbol-row">
+                    {#if symbolEditId === entry.id}
+                      <input
+                        class="symbol-input"
+                        bind:value={symbolDraft}
+                        placeholder="https://symbols.nuget.org/download/symbols"
+                        aria-label={$t('settings.proxy.upstreamRegistries.symbolServer.label')} />
+                      <button class="btn-sm" disabled={symbolSaving} on:click={() => saveSymbolServer(eco.key, entry)}>
+                        {symbolSaving ? $t('common.actions.saving') : $t('common.actions.save')}
+                      </button>
+                      <button class="btn-sm" disabled={symbolSaving} on:click={cancelSymbolEditor}>
+                        {$t('common.actions.cancel')}
+                      </button>
+                    {:else}
+                      <span class="symbol-label">{$t('settings.proxy.upstreamRegistries.symbolServer.label')}</span>
+                      {#if entry.symbolServerUrl}
+                        <span class="symbol-value">{entry.symbolServerUrl}</span>
+                      {:else}
+                        <span class="symbol-off">{$t('settings.proxy.upstreamRegistries.symbolServer.disabled')}</span>
+                      {/if}
+                      <button class="btn-sm" on:click={() => openSymbolEditor(entry)}>
+                        {$t('common.actions.edit')}
+                      </button>
+                    {/if}
+                  </span>
+                  {#if symbolEditId === entry.id}
+                    <span class="symbol-hint">{$t('settings.proxy.upstreamRegistries.symbolServer.hint')}</span>
+                  {/if}
+                {/if}
               {/if}
             </span>
             <div class="row-actions">
@@ -435,6 +500,14 @@
   .reg-url { font-family: var(--mono); font-size: 13px; word-break: break-all; }
   .reg-name { font-size: 12px; color: var(--text2); }
   .reg-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 2px; }
+  /* Symbol server (NuGet only). Sits under the URL as a secondary line so it reads as a
+     property of the upstream rather than another upstream. */
+  .symbol-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 4px; }
+  .symbol-label { font-size: 12px; color: var(--text2); }
+  .symbol-value { font-size: 12px; font-family: var(--mono); color: var(--text2); word-break: break-all; }
+  .symbol-off { font-size: 12px; color: var(--text2); font-style: italic; }
+  .symbol-input { font-size: 12px; font-family: var(--mono); min-width: 280px; flex: 1; }
+  .symbol-hint { display: block; font-size: 12px; color: var(--text2); margin-top: 4px; }
   .reg-prefixes { font-size: 12px; color: var(--text2); font-family: var(--mono); }
   .auth-badge {
     font-size: 11px; padding: 1px 6px; border-radius: 3px;

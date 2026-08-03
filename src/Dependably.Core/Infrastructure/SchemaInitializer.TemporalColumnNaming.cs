@@ -16,12 +16,14 @@ namespace Dependably.Infrastructure;
 ///
 /// Fresh installs on both providers get the CHECK straight from the <c>CREATE TABLE</c> blocks using
 /// this same column set (kept in lockstep by eye, cross-checked against every TEXT column in
-/// <c>Schema.sql</c>). Retrofitting the CHECK onto existing Postgres databases is deliberately not
-/// shipped this release (see the commit message for the expand/migrate/contract sequencing), and
-/// existing SQLite databases are never retrofitted at all — SQLite cannot <c>ALTER ADD CONSTRAINT</c>;
-/// every writer of these columns is already canonical, and the every-boot sweep in
-/// <see cref="SchemaInitializer.TimestampNormalization"/> self-heals any legacy shape a stale binary
-/// still produces.
+/// <c>Schema.sql</c>). Existing Postgres databases are brought up to the same constraint by
+/// <see cref="SchemaInitializer.TemporalCheckRetrofit"/> — which derives its column set from the
+/// CHECK text actually present in <c>Schema.pg.sql</c>, not from this predicate, so a column the
+/// naming convention misses is missed identically by the schema and the retrofit rather than
+/// inconsistently. Existing SQLite databases are never retrofitted: SQLite cannot
+/// <c>ALTER ADD CONSTRAINT</c>; every writer of these columns is already canonical, and the
+/// every-boot sweep in <see cref="SchemaInitializer.TimestampNormalization"/> self-heals any legacy
+/// shape a stale binary still produces.
 /// </summary>
 public sealed partial class SchemaInitializer
 {

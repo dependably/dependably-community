@@ -179,18 +179,19 @@ public sealed class PackagePublishService : IPackagePublishService
             return licenseReject;
         }
 
-        // PyPI stores multiple distribution files per (name, version) — wheel + sdist +
-        // per-platform wheels, the model pypi.org exposes. An upload whose filename is not
-        // yet part of the existing version is a NEW file of the same release, not an
-        // overwrite, so it bypasses the same-version-push policy (which protects artifact
-        // immutability, not release completeness). Re-uploading a filename the version
-        // already holds is a true overwrite and stays policy-gated. Every other ecosystem
-        // keeps the one-artifact-per-version model and its filename-mismatch guard.
-        var (existingFile, pypiAddsNewFile) = await ResolvePypiFileSlotAsync(request, existing, ct);
+        // Multi-file ecosystems store several artefacts under one version row — PyPI's
+        // sdist + per-platform wheels, NuGet's .nupkg + .snupkg (see MultiFileEcosystems).
+        // An upload whose filename is not yet part of the existing version is a NEW file of
+        // the same release, not an overwrite, so it bypasses the same-version-push policy
+        // (which protects artifact immutability, not release completeness). Re-uploading a
+        // filename the version already holds is a true overwrite and stays policy-gated.
+        // Every other ecosystem keeps the one-artifact-per-version model and its
+        // filename-mismatch guard.
+        var (existingFile, addsNewFile) = await ResolveVersionFileSlotAsync(request, existing, ct);
         bool overwriteAllowed = ResolveOverwriteAllowed(
             settings?.VersionOverwritePolicy, pkg.SameVersionPushOverride);
 
-        if (existing is not null && !pypiAddsNewFile && !overwriteAllowed)
+        if (existing is not null && !addsNewFile && !overwriteAllowed)
         {
             return new PublishResult.Rejected(409, "version_exists",
                 $"Tarball parsed as {request.PurlName}@{request.Version}; that version already exists. " +
@@ -205,7 +206,7 @@ public sealed class PackagePublishService : IPackagePublishService
             return tombstoneReject;
         }
 
-        if (request.Ecosystem != "pypi"
+        if (!MultiFileEcosystems.Covers(request.Ecosystem)
             && ArtifactFilenameMismatch(existing, request.Filename) is { } filenameMismatch)
         {
             return filenameMismatch;
@@ -218,10 +219,10 @@ public sealed class PackagePublishService : IPackagePublishService
         // both pass when their combined size would exceed the cap, and neither can a publish
         // racing a proxy fill. Held until the version row is committed — that commit is what makes
         // these bytes visible to the sum — and released by the same `using` on any failure.
-        // PyPI accounts at file granularity: a new file of an existing version replaces
-        // nothing; an overwrite replaces exactly the prior bytes of that filename.
+        // Multi-file ecosystems account at file granularity: a new file of an existing version
+        // replaces nothing; an overwrite replaces exactly the prior bytes of that filename.
         long artifactLength = ArtifactLength(request);
-        long replacedBytes = request.Ecosystem == "pypi"
+        long replacedBytes = MultiFileEcosystems.Covers(request.Ecosystem)
             ? existingFile?.SizeBytes ?? 0
             : existing?.SizeBytes ?? 0;
         long delta = artifactLength - replacedBytes;
@@ -270,14 +271,14 @@ public sealed class PackagePublishService : IPackagePublishService
                 $"Publishing to '{request.PurlName}' is not permitted: the name is owned by a " +
                 "different principal in this org and you hold no publish grant for it.");
 
-    // Probes the per-file slot for a PyPI same-version upload: returns the file record the
+    // Probes the per-file slot for a multi-file same-version upload: returns the file record the
     // incoming filename would overwrite (null when the filename is new to the version), and
-    // whether this upload ADDS a file rather than overwriting one. Non-PyPI ecosystems and
+    // whether this upload ADDS a file rather than overwriting one. Single-artefact ecosystems and
     // first uploads of a version always resolve to (null, false).
-    private async Task<(PackageVersionFile? ExistingFile, bool AddsNewFile)> ResolvePypiFileSlotAsync(
+    private async Task<(PackageVersionFile? ExistingFile, bool AddsNewFile)> ResolveVersionFileSlotAsync(
         PublishRequest request, PackageVersion? existing, CancellationToken ct)
     {
-        if (existing is null || request.Ecosystem != "pypi")
+        if (existing is null || !MultiFileEcosystems.Covers(request.Ecosystem))
         {
             return (null, false);
         }
@@ -463,12 +464,12 @@ public sealed class PackagePublishService : IPackagePublishService
             return await TombstoneRejectionAsync(request, overwriteAllowed, ct);
         }
 
-        var (_, pypiAddsNewFile) = await ResolvePypiFileSlotAsync(request, existing, ct);
-        return !pypiAddsNewFile && !overwriteAllowed
+        var (_, addsNewFile) = await ResolveVersionFileSlotAsync(request, existing, ct);
+        return !addsNewFile && !overwriteAllowed
             ? new PublishResult.Rejected(409, "version_exists",
                 $"Tarball parsed as {request.PurlName}@{request.Version}; that version already exists. " +
                 "Same-version push is blocked by this package's policy.")
-            : request.Ecosystem != "pypi"
+            : !MultiFileEcosystems.Covers(request.Ecosystem)
                 ? ArtifactFilenameMismatch(existing, request.Filename)
                 : null;
     }
@@ -708,8 +709,8 @@ public sealed class PackagePublishService : IPackagePublishService
     // Metadata commit, with compensating blob delete on failure.
     // Blob and DB live in different stores (no shared transaction), so an exception out of the
     // version-row write would otherwise leave an orphan hosted blob. On the INSERT paths (new
-    // version, or a new PyPI file of an existing version) no committed row can name this key
-    // yet, so the just-put blob is deletable to compensate. On the OVERWRITE paths the row
+    // version, or a new file of an existing multi-file version) no committed row can name this
+    // key yet, so the just-put blob is deletable to compensate. On the OVERWRITE paths the row
     // still names the PRIOR artifact's key — the put was non-destructive, so the prior bytes
     // and the row remain mutually consistent and there is nothing to repair; the newly written
     // blob is simply unreferenced and left for the orphan reconciler.
@@ -721,7 +722,8 @@ public sealed class PackagePublishService : IPackagePublishService
         var existing = ctx.Existing;
         // The INSERT shapes: no pre-existing row references this artifact, so a failed metadata
         // write leaves a blob that only the compensating delete can reclaim.
-        bool freshBlob = existing is null || (request.Ecosystem == "pypi" && ctx.ExistingFile is null);
+        bool freshBlob = existing is null
+            || (MultiFileEcosystems.Covers(request.Ecosystem) && ctx.ExistingFile is null);
         try
         {
             if (existing is not null)
@@ -736,9 +738,9 @@ public sealed class PackagePublishService : IPackagePublishService
                     UpstreamIntegrityValue: artifact.IntegritySri,
                     UpstreamIntegrityAlgorithm: artifact.IntegritySri is not null ? "sha512-sri" : null,
                     ManifestJson: request.ManifestJson), ct);
-            if (request.Ecosystem == "pypi")
+            if (MultiFileEcosystems.Covers(request.Ecosystem))
             {
-                await AddFirstPypiFileWithRollbackAsync(request, created, artifact, ct);
+                await AddFirstVersionFileWithRollbackAsync(request, created, artifact, ct);
             }
             return created;
         }
@@ -784,12 +786,12 @@ public sealed class PackagePublishService : IPackagePublishService
         }
     }
 
-    // Records the first file of a new PyPI release. A failed file-row insert must not leave
+    // Records the first file of a new multi-file release. A failed file-row insert must not leave
     // a version row with zero files — delete the ROW before the caller's outer compensation
     // removes the blob. Row-only delete: this publish's own quota reservation is released by
     // HashAndStoreBlobAsync's catch, so the counter-coupled DeleteVersionAsync would decrement
     // the tenant counter a second time.
-    private async Task AddFirstPypiFileWithRollbackAsync(
+    private async Task AddFirstVersionFileWithRollbackAsync(
         PublishRequest request, PackageVersion created, PersistedArtifact artifact, CancellationToken ct)
     {
         try
@@ -810,18 +812,38 @@ public sealed class PackagePublishService : IPackagePublishService
         }
     }
 
-    // Same-version commit: PyPI adds or overwrites one file record of the release; every
-    // other ecosystem overwrites the version row's single artifact.
+    // Same-version commit: a multi-file ecosystem adds or overwrites one file record of the
+    // release; every other ecosystem overwrites the version row's single artifact.
     private async Task<PackageVersion> CommitToExistingVersionAsync(
         PublishRequest request, PublishStorageContext ctx, PackageVersion existing,
         PersistedArtifact artifact, CancellationToken ct)
     {
-        if (request.Ecosystem == "pypi" && ctx.ExistingFile is null)
+        bool multiFile = MultiFileEcosystems.Covers(request.Ecosystem);
+        string currentPrimaryFilename = PackageRepository.DeriveFilename(existing.BlobKey);
+
+        if (multiFile && ctx.ExistingFile is null)
         {
-            // New distribution file of an existing PyPI release (e.g. the sdist joining the
-            // wheel). The version row keeps its identity and primary-artifact columns; the
-            // repository refreshes the row's size sum and resets its scan state so the next
-            // OSV pass covers the new bytes.
+            // New file of an existing release (the sdist joining the wheel; the .snupkg joining
+            // the .nupkg). The version row keeps its identity, and normally its primary-artifact
+            // columns too; the repository refreshes the row's size sum and resets its scan state
+            // so the next OSV pass covers the new bytes.
+            //
+            // The exception is a promotion: a .nupkg arriving at a coordinate whose row still
+            // names a .snupkg (the symbols-first push order) must take over the primary columns,
+            // or every reader that resolves the version without a filename would keep serving
+            // symbol bytes to package clients. Ordered BEFORE the file insert because
+            // UpdateVersionForOverwriteAsync writes size_bytes as this one artifact's size, and
+            // AddAsync's refresh is what restores it to the SUM across the file set.
+            if (MultiFileEcosystems.PromotesToPrimary(
+                    request.Ecosystem, request.Filename, currentPrimaryFilename))
+            {
+                await _packages.UpdateVersionForOverwriteAsync(existing.Id, artifact.BlobKey,
+                    artifact.SizeBytes, artifact.Sha256, request.Origin, artifact.Sha1,
+                    integrityValue: artifact.IntegritySri,
+                    integrityAlgorithm: artifact.IntegritySri is not null ? "sha512-sri" : null,
+                    manifestJson: request.ManifestJson, ct: ct);
+            }
+
             await _versionFiles.AddAsync(existing.Id, request.OrgId, request.Filename,
                 artifact.BlobKey, artifact.SizeBytes, artifact.Sha256, ct);
             return (await _packages.GetVersionAsync(ctx.Pkg.Id, request.Version, ct))!;
@@ -837,11 +859,12 @@ public sealed class PackagePublishService : IPackagePublishService
         // bytes — the prior scan applied to the artifact the row no longer points at.
         // checksum_sha1, the integrity SRI, and the stored manifest all follow the new
         // bytes (npm) — otherwise the packument would emit stale metadata next request.
-        // For PyPI the version row's artifact columns follow only when the overwritten
-        // filename IS the row's primary artifact; a non-primary overwrite touches the
-        // file record alone (which also restores the row's size sum afterwards).
-        bool updateVersionRow = request.Ecosystem != "pypi"
-            || PackageRepository.DeriveFilename(existing.BlobKey).Equals(request.Filename, StringComparison.Ordinal);
+        // For a multi-file ecosystem the version row's artifact columns follow only when the
+        // overwritten filename IS the row's primary artifact; a non-primary overwrite (a
+        // re-pushed .snupkg, a re-pushed non-primary wheel) touches the file record alone
+        // (which also restores the row's size sum afterwards).
+        bool updateVersionRow = !multiFile
+            || currentPrimaryFilename.Equals(request.Filename, StringComparison.Ordinal);
         if (updateVersionRow)
         {
             await _packages.UpdateVersionForOverwriteAsync(existing.Id, artifact.BlobKey,
@@ -851,7 +874,7 @@ public sealed class PackagePublishService : IPackagePublishService
                 manifestJson: request.ManifestJson, ct: ct);
         }
 
-        if (request.Ecosystem == "pypi" && ctx.ExistingFile is not null)
+        if (multiFile && ctx.ExistingFile is not null)
         {
             await _versionFiles.UpdateForOverwriteAsync(ctx.ExistingFile.Id, artifact.BlobKey,
                 artifact.SizeBytes, artifact.Sha256, ct);

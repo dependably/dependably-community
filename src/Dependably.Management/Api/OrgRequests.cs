@@ -104,6 +104,12 @@ public sealed record AddUpstreamRegistryRequest(
 
 public sealed record ReorderUpstreamRegistryRequest(IReadOnlyList<string> Ids);
 
+/// <summary>
+/// Sets or clears a NuGet upstream's symbol-server base URL. Null or empty CLEARS it, which turns
+/// symbol proxying off for that upstream.
+/// </summary>
+public sealed record SetSymbolServerRequest(string? SymbolServerUrl);
+
 // Body for PATCH /api/v1/packages/{eco}/{name}/version-overwrite.
 // null Override clears the per-package setting (inherit org policy).
 public sealed record SetPackageVersionOverwriteRequest(string? Override = null);
@@ -117,6 +123,7 @@ public sealed record OrgControllerServices(
     PackageRepository Packages,
     ArtifactInventoryRepository Inventory,
     PackageVersionFilesRepository VersionFiles,
+    NuGetSymbolIndexRepository SymbolIndex,
     PackageAnalyticsRepository PackageAnalytics,
     StatsSnapshotRepository StatsSnapshots,
     TokenRepository Tokens,

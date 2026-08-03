@@ -9,10 +9,8 @@ namespace Dependably.Tests.Integration;
 /// fresh installs reject a bad-shaped INSERT and accept every canonical shape, via the constraint
 /// declared inline in <c>Schema.pg.sql</c>'s <c>CREATE TABLE</c> block.
 ///
-/// There is deliberately no existing-database retrofit this release — see
-/// <c>SchemaInitializer.TemporalColumnNaming.cs</c> and the <c>Schema.pg.sql</c> header comment for
-/// why (the previously released version still writes a shape this CHECK rejects on its hottest
-/// write path, so retrofitting now would break blue mid-cutover). That retrofit is a follow-up.
+/// The existing-database retrofit is proven separately, by
+/// <see cref="TemporalCheckRetrofitPostgresTests"/>.
 ///
 /// Tagged <c>Category=SchemaPostgres</c> — see <see cref="PostgresSchemaApplyTests"/> for why this
 /// only runs in the dedicated <c>schema-integrity</c> CI job.
@@ -85,8 +83,9 @@ public sealed class TemporalCheckConstraintPostgresTests
     [Fact]
     public async Task SecondApply_IsANoOp_AndConstraintStaysValidated()
     {
-        // No RunOnceAsync retrofit exists this release, but a second InitializeAsync (a replica
-        // boot, a restart) must still be a clean no-op against the fresh-install CHECK.
+        // A second InitializeAsync (a replica boot, a restart) must be a clean no-op against the
+        // fresh-install CHECK: the retrofit's pg_constraint probe sees a validated constraint and
+        // leaves it alone rather than re-adding or re-validating it.
         await using var pg = await LivePostgresReset.FreshAsync(ConnectionString);
         var initializer = new SchemaInitializer(pg.Store);
         await initializer.InitializeAsync();

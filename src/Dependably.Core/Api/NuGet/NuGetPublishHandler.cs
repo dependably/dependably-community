@@ -35,6 +35,11 @@ public sealed class NuGetPublishHandler(
     ClaimResolver claimResolver,
     LicenseRepository licenses,
     NuGetSymbolIndexRepository symbolIndex,
+    NuGetSymbolIndexer symbolIndexer,
+    PackageVersionFilesRepository versionFiles,
+    BlockGateService blockGate,
+    CacheArtifactRepository cacheArtifacts,
+    NuGetSymbolProxyFetcher symbolProxy,
     MetadataInvalidationCoordinator invalidation,
     ILogger<NuGetPublishHandler> logger,
     TimeProvider time,
@@ -195,18 +200,40 @@ public sealed class NuGetPublishHandler(
             return new NotFoundResult();
         }
 
-        var versions = await packages.GetVersionsAsync(pkg.Id, ct);
         // Resolve against the same lowercased canonical form the version is stored under
         // (see PublishNuspecAsync) so a mixed-case route segment (e.g. "1.0.0-Beta1") still
         // matches the stored "1.0.0-beta1" row.
         string normalizedSymbolVersion = NuGetNormalization.NormalizeVersion(version);
-        var match = versions.FirstOrDefault(v => v.Version == normalizedSymbolVersion && v.BlobKey.EndsWith(".snupkg"));
+        var match = await packages.GetVersionAsync(pkg.Id, normalizedSymbolVersion, ct);
         if (match is null)
         {
             return new NotFoundResult();
         }
 
-        var stream = await blobs.GetAsync(BlobKeys.StoreKey(match.BlobKey), ct);
+        // The .snupkg is a file row of the version; the .nupkg holds the version's primary
+        // artifact columns. Scanning version rows for a blob key ending '.snupkg' only ever
+        // matched symbols-only coordinates, which is why symbols were unreachable for every
+        // package that also had a .nupkg.
+        var symbolFile = await versionFiles.GetByExtensionAsync(
+            match.Id, MultiFileEcosystems.NuGetSymbolExtension, ct);
+        if (symbolFile is null)
+        {
+            return new NotFoundResult();
+        }
+
+        // Serving a symbol package is a serve decision like every flatcontainer serve, and it
+        // discloses more than the package does: PDBs embed full source file paths, and with
+        // embedded sources or SourceLink they reference or carry source outright. A version the
+        // operator blocked, license-blocked, flagged malicious/KEV, or revoked must not leak it.
+        if (await blockGate.EvaluateAsync(
+                BlockGateRequest.For(orgId, "nuget", match, token, settings,
+                    httpContext.GetNormalizedRemoteIp()), ct)
+            == BlockDecision.Blocked)
+        {
+            return new StatusCodeResult(StatusCodes.Status403Forbidden);
+        }
+
+        var stream = await blobs.GetAsync(BlobKeys.StoreKey(symbolFile.BlobKey), ct);
         return stream is null
             ? new NotFoundResult()
             : new FileStreamResult(stream, "application/octet-stream") { FileDownloadName = file };
@@ -218,8 +245,9 @@ public sealed class NuGetPublishHandler(
     /// Portable-PDB debug-id (GUID + <c>ffffffff</c> age). Resolves the key through the per-org
     /// symbol index to the stored <c>.snupkg</c>, extracts the single PDB entry, and streams its
     /// raw bytes as <c>application/octet-stream</c>. Filename + key are matched case-insensitively
-    /// (debuggers lowercase them). Honours the same AnonymousPull gate as the <c>.snupkg</c> read
-    /// surface; an unindexed key returns 404, and a key belonging to another tenant is never served.
+    /// (debuggers lowercase them). Honours the same AnonymousPull gate and the same per-version
+    /// block gate as the <c>.snupkg</c> read surface; an unindexed key returns 404, and a key
+    /// belonging to another tenant is never served.
     /// </summary>
     public async Task<IActionResult> GetSymbolFileAsync(
         HttpContext httpContext, string orgId, string pdbName, string key, CancellationToken ct)
@@ -236,13 +264,58 @@ public sealed class NuGetPublishHandler(
         var row = await symbolIndex.ResolveAsync(orgId, pdbName, key, ct);
         if (row is null)
         {
-            return new NotFoundResult();
+            // Not indexed locally — fall through to the org's upstream symbol servers. Returns
+            // null when none is configured, none has the PDB, or the org proxies nothing; an
+            // air-gapped instance refuses before any socket is opened.
+            return await ServeProxiedSymbolAsync(httpContext, orgId, pdbName, key, token, settings, ct);
+        }
+
+        // Same gate as the whole-archive route. Extracting one PDB out of a blocked version's
+        // .snupkg is not a lesser disclosure than serving the archive — it is the disclosure the
+        // debugger actually wanted. A hosted row gates on its package_versions facts, a proxied one
+        // on the cache artifact's; both go through a factory on the record so a newly added policy
+        // mode cannot default to "policy off" on either arm.
+        string? symbolSourceIp = httpContext.GetNormalizedRemoteIp();
+        BlockGateRequest gateRequest;
+        if (row.Version is not null)
+        {
+            gateRequest = BlockGateRequest.For(orgId, "nuget", row.Version, token, settings, symbolSourceIp);
+        }
+        else
+        {
+            // Proxy-owned. Missing serve facts mean the cache plane can no longer describe the
+            // artifact, so there is nothing to evaluate — refuse rather than serve ungated.
+            var proxyFacts = row.CacheArtifactId is null
+                ? null
+                : await cacheArtifacts.GetServeFactsByIdAsync(orgId, row.CacheArtifactId, ct);
+            if (proxyFacts is null)
+            {
+                return new NotFoundResult();
+            }
+
+            gateRequest = BlockGateRequest.ForProxyCacheFacts(
+                orgId, "nuget", proxyFacts, token, settings, symbolSourceIp);
+        }
+
+        if (await blockGate.EvaluateAsync(gateRequest, ct) == BlockDecision.Blocked)
+        {
+            return new StatusCodeResult(StatusCodes.Status403Forbidden);
         }
 
         var blobStream = await blobs.GetAsync(BlobKeys.StoreKey(row.SnupkgBlobKey), ct);
         if (blobStream is null)
         {
             return new NotFoundResult();
+        }
+
+        // A proxied PDB was fetched as a bare file, not inside an archive — its row carries an
+        // empty entry path. Stream the blob straight back rather than trying to open it as a ZIP.
+        if (row.EntryPath.Length == 0)
+        {
+            return new FileStreamResult(blobStream, "application/octet-stream")
+            {
+                FileDownloadName = pdbName,
+            };
         }
 
         // ZipArchive needs a seekable stream to read the central directory. Every in-process blob
@@ -303,6 +376,55 @@ public sealed class NuGetPublishHandler(
         };
     }
 
+
+    /// <summary>
+    /// SSQP forward-on-miss: fetches the PDB from the org's configured upstream symbol servers,
+    /// records it on the cache plane, and serves it only if the block gate allows. Returns 404 when
+    /// no upstream is configured or none has the PDB — a symbol miss is the ordinary case for any
+    /// package whose author published none.
+    /// </summary>
+    private async Task<IActionResult> ServeProxiedSymbolAsync(
+        HttpContext httpContext, string orgId, string pdbName, string key,
+        TokenRecord? token, OrgSettings settings, CancellationToken ct)
+    {
+        SymbolProxyResult? fetched;
+        try
+        {
+            fetched = await symbolProxy.TryFetchAsync(
+                new SymbolProxyRequest(orgId, pdbName.ToLowerInvariant(), key.ToLowerInvariant(),
+                    settings, token?.UserId, token?.ActorKind, httpContext.GetNormalizedRemoteIp()),
+                ct);
+        }
+        catch (AirGappedException)
+        {
+            // Air-gapped instances make no outbound fetch. 404 rather than 503: from the
+            // debugger's side the symbol genuinely is not available here, and there is no
+            // "try again later" for a deliberate posture.
+            return new NotFoundResult();
+        }
+        catch (ProxyCatalogueUnavailableException)
+        {
+            // Fetched but not recorded, so not scanned and not gated — refuse rather than serve
+            // ungated, the same posture every other proxy path takes.
+            return new StatusCodeResult(StatusCodes.Status503ServiceUnavailable);
+        }
+
+        if (fetched is null)
+        {
+            return new NotFoundResult();
+        }
+
+        if (fetched.Decision == BlockDecision.Blocked)
+        {
+            return new StatusCodeResult(StatusCodes.Status403Forbidden);
+        }
+
+        var stream = await blobs.GetAsync(BlobKeys.StoreKey(fetched.BlobKey), ct);
+        return stream is null
+            ? new NotFoundResult()
+            : new FileStreamResult(stream, "application/octet-stream") { FileDownloadName = pdbName };
+    }
+
     /// <summary>
     /// Wraps a ZIP entry's (already decompression-bomb-guarded) read stream together with the
     /// owning <see cref="ZipArchive"/> so both are disposed together once the streamed response
@@ -352,9 +474,10 @@ public sealed class NuGetPublishHandler(
     }
 
     /// <summary>
-    /// Extracts each Portable PDB from the staged <c>.snupkg</c> and records its SSQP key in the
-    /// per-org symbol index. Re-reads the staged archive from disk (symbol-push path only) so the
-    /// PDBs are parsed without materialising them in managed memory on the hot push path.
+    /// Records the staged <c>.snupkg</c>'s Portable PDBs in the per-org symbol index via the
+    /// shared <see cref="NuGetSymbolIndexer"/>, so the push path and the management re-index path
+    /// build the index exactly the same way. Re-reads the staged archive from disk so the PDBs are
+    /// parsed without materialising them in managed memory on the hot push path.
     /// Non-Portable / unreadable PDBs are skipped by the extractor.
     /// <paramref name="blobKey"/> is the key the publish service actually stored the
     /// <c>.snupkg</c> under, carried through from <see cref="PublishResult.Accepted"/>: hosted
@@ -364,24 +487,18 @@ public sealed class NuGetPublishHandler(
         string orgId, string versionId, string filename, string blobKey,
         string stagedPath, CancellationToken ct)
     {
-        IReadOnlyList<PdbSymbol> symbols;
         // stagedPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
-        using (var fs = new FileStream(
+        await using var fs = new FileStream(
             stagedPath, FileMode.Open, FileAccess.Read, FileShare.Read,
-            bufferSize: 81920, useAsync: false))
-        {
-            symbols = NuGetSymbolKey.ExtractPortablePdbs(fs);
-        }
+            bufferSize: 81920, useAsync: true);
 
-        if (symbols.Count == 0)
+        int indexed = await symbolIndexer.ReplaceIndexAsync(orgId, versionId, blobKey, fs, ct);
+        if (indexed == 0)
         {
             logger.LogInformation(
                 "Symbol package {Filename} for org {OrgId} contained no indexable Portable PDBs.",
                 filename, orgId);
-            return;
         }
-
-        await symbolIndex.IndexAsync(orgId, versionId, blobKey, symbols, ct);
     }
 
     /// <summary>

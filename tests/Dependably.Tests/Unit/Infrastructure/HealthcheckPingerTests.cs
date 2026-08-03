@@ -6,14 +6,15 @@ using Dependably.Storage;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Dependably.Tests.Unit.Infrastructure;
 
 /// <summary>
 /// Unit tests for HealthcheckPinger.
-/// Uses a zero-interval so each loop iteration resolves immediately; a short
-/// CancellationTokenSource stops the background task after one iteration.
+/// Most tests configure the smallest interval the pinger accepts so the first iteration comes
+/// round quickly; a CancellationTokenSource stops the background task once its ping has landed.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class HealthcheckPingerTests : IAsyncLifetime
@@ -43,13 +44,17 @@ public sealed class HealthcheckPingerTests : IAsyncLifetime
     }
 
     private HealthcheckPinger BuildPinger(IConfiguration config, IHttpClientFactory factory)
+        => BuildPinger(config, factory, NullLogger<HealthcheckPinger>.Instance);
+
+    private HealthcheckPinger BuildPinger(
+        IConfiguration config, IHttpClientFactory factory, ILogger<HealthcheckPinger> logger)
         => new(
             factory,
             new InProcessDistributedLock(TimeProvider.System),
             _readiness,
             new AirGapMode(config),
             config,
-            NullLogger<HealthcheckPinger>.Instance,
+            logger,
             TimeProvider.System);
 
     /// <summary>
@@ -62,7 +67,13 @@ public sealed class HealthcheckPingerTests : IAsyncLifetime
     /// </summary>
     private static async Task WaitForPingAsync(Task requestReceived)
     {
-        var finished = await Task.WhenAny(requestReceived, Task.Delay(TimeSpan.FromSeconds(10)));
+        // now-ok: bounds a genuine async completion on another thread. Nothing here asserts how
+        // *fast* the ping is, only that one happens, so the bound must be generous rather than
+        // tight. The loop is thread-pool scheduled and does real work before sending, so the gap
+        // between StartAsync returning and the request landing is governed by scheduling on a
+        // loaded runner, not by the code under test. This exists only so a genuine hang fails
+        // instead of blocking forever.
+        var finished = await Task.WhenAny(requestReceived, Task.Delay(TimeSpan.FromSeconds(60)));
         Assert.True(finished == requestReceived,
             "HealthcheckPinger did not send a ping within the safety timeout.");
     }
@@ -249,6 +260,89 @@ public sealed class HealthcheckPingerTests : IAsyncLifetime
 
         Assert.Equal(0, trackingFactory.CreateClientCallCount);
     }
+
+    // ── Interval and timeout floors ───────────────────────────────────────────
+
+    /// <summary>
+    /// A non-positive interval is coerced to the floor rather than left to spin the loop as fast
+    /// as the pool allows, and the coercion is logged rather than applied silently.
+    /// </summary>
+    [Theory]
+    [InlineData("0")]
+    [InlineData("-1")]
+    public void Constructor_NonPositiveInterval_ClampsAndWarns(string configured)
+    {
+        var config = BuildConfig(
+            ("HEALTHCHECK_PING_URL", "http://example.com/ping"),
+            ("HEALTHCHECK_PING_INTERVAL_SECONDS", configured));
+
+        var logger = new CapturingLogger();
+        _ = BuildPinger(config, new TrackingHttpClientFactory(), logger);
+
+        string warning = Assert.Single(logger.Warnings,
+            w => w.Contains("HEALTHCHECK_PING_INTERVAL_SECONDS", StringComparison.Ordinal));
+        Assert.Contains(configured, warning, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Same floor on the request timeout: <see cref="HttpClient.Timeout"/> rejects a non-positive
+    /// value, so an unclamped one would throw on the first send rather than at configuration time.
+    /// </summary>
+    [Theory]
+    [InlineData("0")]
+    [InlineData("-5")]
+    public void Constructor_NonPositiveTimeout_ClampsAndWarns(string configured)
+    {
+        var config = BuildConfig(
+            ("HEALTHCHECK_PING_URL", "http://example.com/ping"),
+            ("HEALTHCHECK_PING_TIMEOUT_SECONDS", configured));
+
+        var logger = new CapturingLogger();
+        _ = BuildPinger(config, new TrackingHttpClientFactory(), logger);
+
+        Assert.Single(logger.Warnings,
+            w => w.Contains("HEALTHCHECK_PING_TIMEOUT_SECONDS", StringComparison.Ordinal));
+    }
+
+    /// <summary>A valid interval is left alone and logs nothing.</summary>
+    [Fact]
+    public void Constructor_ValidIntervalAndTimeout_DoNotWarn()
+    {
+        var config = BuildConfig(
+            ("HEALTHCHECK_PING_URL", "http://example.com/ping"),
+            ("HEALTHCHECK_PING_INTERVAL_SECONDS", "30"),
+            ("HEALTHCHECK_PING_TIMEOUT_SECONDS", "5"));
+
+        var logger = new CapturingLogger();
+        _ = BuildPinger(config, new TrackingHttpClientFactory(), logger);
+
+        Assert.Empty(logger.Warnings);
+    }
+
+    /// <summary>
+    /// A clamped interval must still ping: the floor changes how often the loop runs, not whether
+    /// it runs at all.
+    /// </summary>
+    [Fact]
+    public async Task ExecuteAsync_ClampedInterval_StillSendsPing()
+    {
+        var config = BuildConfig(
+            ("HEALTHCHECK_PING_URL", "http://example.com/ping"),
+            ("HEALTHCHECK_PING_INTERVAL_SECONDS", "0"));
+
+        var handler = new CapturingHttpHandler();
+        var factory = new SingleClientFactory(handler);
+        var pinger = BuildPinger(config, factory);
+
+        using var cts = new CancellationTokenSource();
+        var task = pinger.StartAsync(cts.Token);
+        await WaitForPingAsync(handler.RequestReceived);
+        cts.Cancel();
+        await pinger.StopAsync(default);
+        try { await task; } catch (OperationCanceledException) { }
+
+        Assert.NotNull(handler.LastRequest);
+    }
 }
 
 // ── Test doubles ──────────────────────────────────────────────────────────────
@@ -309,4 +403,29 @@ file sealed class SingleClientFactory : IHttpClientFactory
         => _client = new HttpClient(handler);
 
     public HttpClient CreateClient(string name) => _client;
+}
+
+/// <summary>Collects warning-level messages so a coercion can be asserted on.</summary>
+file sealed class CapturingLogger : ILogger<HealthcheckPinger>
+{
+    private readonly List<string> _warnings = [];
+
+    public IReadOnlyList<string> Warnings => _warnings;
+
+    public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+    public bool IsEnabled(LogLevel logLevel) => true;
+
+    public void Log<TState>(
+        LogLevel logLevel,
+        EventId eventId,
+        TState state,
+        Exception? exception,
+        Func<TState, Exception?, string> formatter)
+    {
+        if (logLevel == LogLevel.Warning)
+        {
+            _warnings.Add(formatter(state, exception));
+        }
+    }
 }

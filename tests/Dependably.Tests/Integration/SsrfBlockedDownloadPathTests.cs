@@ -184,7 +184,7 @@ public sealed class SsrfBlockedDownloadPathTests : IAsyncLifetime
             // for the full rationale).
             builder.WebHost.UseSetting(
                 "DISABLE_BACKGROUND_JOBS",
-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill");
+                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
             builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
             builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
             // UpstreamRegistrySeeder seeds this as the default org's pypi upstream_registry row

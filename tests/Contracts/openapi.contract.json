@@ -766,6 +766,19 @@
         }
       }
     },
+    "/api/v1/packages/nuget/{name}/{version}/reindex-symbols": {
+      "operations": {
+        "post": {
+          "requiredParams": [
+            "name",
+            "version"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/api/v1/packages/{ecosystem}/{name}": {
       "operations": {
         "get": {
@@ -1657,6 +1670,18 @@
     "/api/v1/upstream-registries/{id}": {
       "operations": {
         "delete": {
+          "requiredParams": [
+            "id"
+          ],
+          "responseCodes": [
+            "204"
+          ]
+        }
+      }
+    },
+    "/api/v1/upstream-registries/{id}/symbol-server": {
+      "operations": {
+        "put": {
           "requiredParams": [
             "id"
           ],

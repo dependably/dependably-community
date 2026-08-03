@@ -312,7 +312,7 @@ public sealed class NuGetFlatContainerHandlerVersionListFailureTests : IAsyncLif
             NullLogger<NuGetProvenanceVerifier>.Instance);
 
         return new NuGetFlatContainerHandler(
-            _orgs, _packages, cacheArtifact, tenantAccess, _tokens, _audit,
+            _orgs, _packages, new PackageVersionFilesRepository(_db), cacheArtifact, tenantAccess, _tokens, _audit,
             tiered.Cache, upstreamClient, registries, allowlist, blocklist,
             blockGate, vulns, inventory, claimResolver, reserved, proxyFetch, provenance,
             TimeProvider.System, NullLogger<NuGetFlatContainerHandler>.Instance);

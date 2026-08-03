@@ -27,6 +27,7 @@ public sealed class OrgController : OrgScopedControllerBase
     private readonly OrgRepository _orgs;
     private readonly PackageRepository _packages;
     private readonly PackageVersionFilesRepository _versionFiles;
+    private readonly NuGetSymbolIndexRepository _symbolIndex;
     private readonly PackageAnalyticsRepository _packageAnalytics;
     private readonly StatsSnapshotRepository _statsSnapshots;
     private readonly AuditRepository _audit;
@@ -49,6 +50,7 @@ public sealed class OrgController : OrgScopedControllerBase
         _orgs = svc.Orgs;
         _packages = svc.Packages;
         _versionFiles = svc.VersionFiles;
+        _symbolIndex = svc.SymbolIndex;
         _packageAnalytics = svc.PackageAnalytics;
         _statsSnapshots = svc.StatsSnapshots;
         _audit = svc.Audit;
@@ -148,10 +150,52 @@ public sealed class OrgController : OrgScopedControllerBase
         double tolerance = settings?.MaxOsvScoreTolerance ?? 10.0;
         string blockDeprecatedMode = settings?.BlockDeprecated ?? "off";
 
-        var versionsWithLicenses = versions.Select(v =>
-            ProjectVersionView(v, ecosystem, pkg.Name, scoreMap, tolerance, blockDeprecatedMode, uploadedLicenses, proxyLicenses, ociTagsByDigest));
+        // NuGet symbols: which hosted versions carry a .snupkg, and how many PDBs each has
+        // indexed. Both batched — this view renders every version at once. Null for every other
+        // ecosystem, none of which has a symbol surface.
+        var symbolFacts = ecosystem == "nuget"
+            ? await LoadSymbolFactsAsync(orgId, uploadedIds, ct)
+            : null;
+
+        // Per-file rows for hosted multi-file versions (NuGet .nupkg + .snupkg, PyPI sdist +
+        // wheels). Expanded HERE rather than in artifact_inventory: that view also feeds the NuGet
+        // registration index, the flatcontainer version list and the npm packument, all of which
+        // are version-level and would list a multi-file version twice if it went file-level.
+        // Proxy versions already arrive per-file from cache_artifact, so they carry no rows here
+        // and pass through unchanged.
+        var filesByVersion = await _versionFiles.GetByPackageAsync(pkg.Id, ct);
+
+        var versionsWithLicenses = versions.SelectMany(v =>
+            ExpandToFiles(v, filesByVersion).Select(file =>
+                ProjectVersionView(v, ecosystem, pkg.Name, scoreMap, tolerance, blockDeprecatedMode, uploadedLicenses, proxyLicenses, ociTagsByDigest, symbolFacts, file)));
         return Ok(new { package = pkg, versions = versionsWithLicenses });
     }
+
+    // Symbol presence and indexed-PDB counts for a page of hosted NuGet versions. Two batched
+    // queries rather than per-row lookups. Proxy versions are excluded by construction: the symbol
+    // index and package_version_files are both hosted-only.
+    private async Task<SymbolFacts> LoadSymbolFactsAsync(
+        string orgId, List<string> uploadedIds, CancellationToken ct)
+    {
+        var withPackage = await _versionFiles.GetVersionIdsWithExtensionAsync(
+            orgId, uploadedIds, MultiFileEcosystems.NuGetSymbolExtension, ct);
+        var indexedCounts = await _symbolIndex.CountByVersionsAsync(orgId, uploadedIds, ct);
+        return new SymbolFacts(withPackage, indexedCounts);
+    }
+
+    // One entry per artifact the version should render as. A version with fewer than two file
+    // rows yields a single null — "project the version row itself", exactly as before — so
+    // single-file versions and every ecosystem without a file plane are untouched.
+    private static IEnumerable<PackageVersionFile?> ExpandToFiles(
+        PackageVersion v, ILookup<string, PackageVersionFile> filesByVersion)
+    {
+        var files = filesByVersion[v.Id].ToList();
+        return files.Count < 2 ? new PackageVersionFile?[] { null } : files;
+    }
+
+    // Bundled so ProjectVersionView stays within the parameter-count threshold (S107).
+    private sealed record SymbolFacts(
+        HashSet<string> VersionsWithSymbolPackage, Dictionary<string, int> IndexedPdbCounts);
 
     // Merges per-version OSV scores from uploaded versions (keyed by package_version_id) and proxy
     // versions (keyed by cache_artifact_id) into a single id → max-CVSS map.
@@ -186,7 +230,12 @@ public sealed class OrgController : OrgScopedControllerBase
         string blockDeprecatedMode,
         ILookup<string, string> uploadedLicenses,
         ILookup<string, string> proxyLicenses,
-        ILookup<string, string>? ociTagsByDigest)
+        ILookup<string, string>? ociTagsByDigest,
+        SymbolFacts? symbolFacts,
+        // Non-null when the version renders as one of several files. Overrides only the
+        // artifact-level facts; everything else is a property of the VERSION and is identical
+        // across siblings.
+        PackageVersionFile? file)
     {
         bool hasMax = scoreMap.TryGetValue(v.Id, out double maxScore);
         string status = ComputeVersionStatus(v, hasMax ? maxScore : (double?)null, tolerance, blockDeprecatedMode);
@@ -200,9 +249,9 @@ public sealed class OrgController : OrgScopedControllerBase
             // BlobKey is deliberately omitted: it embeds the object-store layout and the raw org
             // UUID, which members otherwise never see. No route accepts a blob key as input; the
             // frontend downloads via the /download endpoint.
-            v.Filename,
-            v.SizeBytes,
-            v.ChecksumSha256,
+            Filename = file?.Filename ?? v.Filename,
+            SizeBytes = file?.SizeBytes ?? v.SizeBytes,
+            ChecksumSha256 = file?.ChecksumSha256 ?? v.ChecksumSha256,
             v.ChecksumSha1,
             v.Yanked,
             v.YankReason,
@@ -236,7 +285,15 @@ public sealed class OrgController : OrgScopedControllerBase
             Licenses = (v.Origin == "proxy" ? proxyLicenses[v.Id] : uploadedLicenses[v.Id]).ToArray(),
             Tags = ociTagsByDigest != null && ociTagsByDigest.Contains(v.Version)
                 ? ociTagsByDigest[v.Version].ToArray()
-                : Array.Empty<string>()
+                : Array.Empty<string>(),
+            // NuGet symbols. Deliberately two fields rather than one count: a version that carries
+            // a .snupkg but indexed zero PDBs (native-only symbols, or indexing that failed at
+            // push) is the actionable state, and a bare count of 0 cannot be told apart from
+            // "no symbol package at all".
+            HasSymbolPackage = symbolFacts?.VersionsWithSymbolPackage.Contains(v.Id) ?? false,
+            IndexedPdbCount = symbolFacts is null
+                ? (int?)null
+                : symbolFacts.IndexedPdbCounts.GetValueOrDefault(v.Id)
         };
     }
 
@@ -525,9 +582,12 @@ public sealed class OrgController : OrgScopedControllerBase
     }
 
     /// <summary>GET /api/v1/packages/{ecosystem}/{name}/{version}/download — stream one artifact to the UI</summary>
-    // The optional `file` query selects one artifact when a version maps to several files (Maven
-    // ships a .jar + .pom + sidecars under one coordinate; PyPI a wheel + sdist per release). When
-    // omitted, the first cached file for the version is served — preserving the single-file default.
+    // The optional `file` query selects one artifact when a version maps to several files: Maven
+    // ships a .jar + .pom + sidecars under one coordinate, PyPI a wheel + sdist per release, NuGet
+    // a .nupkg + its .snupkg. It is matched against the version's own files on the hosted plane and
+    // against the cached files on the proxy plane. A `file` that matches nothing is a 404 — serving
+    // the primary artifact instead would hand back different bytes than were asked for, and succeed
+    // while doing it. When omitted, the version's primary artifact is served.
     [HttpGet("api/v1/packages/{ecosystem}/{name}/{version}/download")]
     public async Task<IActionResult> DownloadVersion(string ecosystem, string name, string version, CancellationToken ct, [FromQuery] string? file = null)
     {
@@ -547,11 +607,25 @@ public sealed class OrgController : OrgScopedControllerBase
         var ver = await _packages.GetVersionAsync(pkg.Id, version, ct);
         if (ver is not null)
         {
+            // A multi-file version (NuGet .nupkg + .snupkg, PyPI sdist + wheels) is downloadable
+            // per file. An unmatched `file` is a 404, never a fall back to the primary artifact:
+            // substituting a different artifact for the one asked for succeeds silently and hands
+            // back the wrong bytes — the same rule the flatcontainer serve path follows.
+            PackageVersionFile? requested = null;
+            if (!string.IsNullOrEmpty(file))
+            {
+                requested = await _versionFiles.GetByVersionAndFilenameAsync(ver.Id, file, ct);
+                if (requested is null)
+                {
+                    return NotFound();
+                }
+            }
+
             // Route by per-version origin: proxy artifacts live on the eviction-friendly cache
             // tier, uploaded artifacts on the durable registry tier. Under split storage these
             // are distinct backends, so picking the wrong tier would 404 or serve wrong bytes.
             var store = ver.Origin == "proxy" ? _blobStorage.Cache : _blobStorage.Registry;
-            var stream = await store.GetAsync(BlobKeys.StoreKey(ver.BlobKey), ct);
+            var stream = await store.GetAsync(BlobKeys.StoreKey(requested?.BlobKey ?? ver.BlobKey), ct);
             if (stream is null)
             {
                 return NotFound();
@@ -564,7 +638,7 @@ public sealed class OrgController : OrgScopedControllerBase
                 actorKind: ActorKinds.User, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
             await _packages.IncrementDownloadCountAsync(ver.Id, ct);
 
-            string filename = ver.BlobKey.Split('/').Last();
+            string filename = requested?.Filename ?? ver.BlobKey.Split('/').Last();
             return File(stream, "application/octet-stream", filename);
         }
 
@@ -789,6 +863,11 @@ public sealed class OrgController : OrgScopedControllerBase
 
             <!-- Publish (push uses an API key, not the credentials above): -->
             <!-- dotnet nuget push pkg.nupkg --api-key your-token --source dependably -->
+            <!-- An adjacent pkg.snupkg is pushed with it and its Portable PDBs are indexed. -->
+
+            <!-- Symbol server (SSQP). Add as a symbol source in Visual Studio under -->
+            <!-- Options > Debugging > Symbols, or pass to dotnet-symbol --server-path: -->
+            <!-- {baseUrl}/nuget/symbols -->
             """;
     }
 

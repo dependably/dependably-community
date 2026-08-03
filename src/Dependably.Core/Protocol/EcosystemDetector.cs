@@ -29,6 +29,9 @@ public static class EcosystemDetector
 
     public sealed record DetectionFailure(string Code, string Message);
 
+    /// <summary>Extension of a NuGet symbol package, validated under the reduced-manifest rules.</summary>
+    private const string NuGetSymbolPackageExtension = ".snupkg";
+
     public static (DetectionResult? Ok, DetectionFailure? Err) Detect(string filename, byte[] bytes)
     {
         using var stream = new MemoryStream(bytes, writable: false);
@@ -98,7 +101,13 @@ public static class EcosystemDetector
         if (hasRootNuspec)
         {
             stream.Seek(0, SeekOrigin.Begin);
-            var (parseResult, id, version) = NuGetNupkgValidator.ParseFromStream(stream, isSymbol: false);
+            // A .snupkg is validated as a SYMBOL package: `dotnet pack` emits a reduced manifest
+            // for one and strips <authors>, so validating it as a package rejects every real
+            // symbol archive with "authors is required". The upload surfaces (drag-and-drop,
+            // bulk import) carry the filename, which is the only signal available before the
+            // nuspec is parsed — and it is the same signal `dotnet nuget push` routes on.
+            bool isSymbol = filename.EndsWith(NuGetSymbolPackageExtension, StringComparison.OrdinalIgnoreCase);
+            var (parseResult, id, version) = NuGetNupkgValidator.ParseFromStream(stream, isSymbol);
             if (!parseResult.IsValid)
             {
                 return Fail("nupkg_invalid", parseResult.Message ?? "Invalid .nupkg.");

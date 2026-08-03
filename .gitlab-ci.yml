@@ -1619,6 +1619,7 @@ zap-full:
     # check.
     - |
       { if ZAP_AUTH_HEADER=Cookie ZAP_AUTH_HEADER_VALUE="$ZAP_SESSION_COOKIE" \
+             sh ci/zap-scan-retry.sh \
              zap-full-scan.py -t http://localhost:8080 -c .zap/full.conf \
                -j --hook=ci/zap-full-hooks.py \
                -z "$ZAP_FIREFOX_NO_PHONE_HOME" \
@@ -1716,6 +1717,7 @@ zap-api-management:
     # A genuine scan/import error still exits non-zero here and fails the job.
     - >
       ZAP_AUTH_HEADER=Cookie ZAP_AUTH_HEADER_VALUE="$ZAP_SESSION_COOKIE"
+      sh ci/zap-scan-retry.sh
       zap-api-scan.py -t /zap/wrk/management-scan.json
       -f openapi -O http://localhost:8080 -I
       -c .zap/api-management.conf
@@ -1760,6 +1762,7 @@ zap-api-protocol:
     # A genuine scan/import error still exits non-zero here and fails the job.
     - >
       ZAP_AUTH_HEADER_VALUE="Bearer $ZAP_API_TOKEN"
+      sh ci/zap-scan-retry.sh
       zap-api-scan.py -t http://localhost:8080/openapi/protocol.json
       -f openapi -O http://localhost:8080 -I
       -c .zap/api-protocol.conf

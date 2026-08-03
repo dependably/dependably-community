@@ -9,6 +9,7 @@ Every package your team pulls from the internet is a supply chain risk. Dependab
 ## Features
 
 - **Proxy cache** — pull-through cache for npm, PyPI, NuGet, Maven, RPM, OCI, Go, Cargo, and Alpine apk; verified by SHA-256 before storage, served locally on every subsequent request. Go and apk are proxy-only (no hosted push).
+- **NuGet symbol server** — `.snupkg` symbol packages are indexed by debug-id and served over SSQP, so Visual Studio and `dotnet-symbol` resolve PDBs straight from your registry. A distinct capability from storing `.snupkg` files: Portable PDBs only, and source files are not served.
 - **Supply chain tracking** — first-fetch detection, per-version checksum verification, CycloneDX 1.6 SBOM generation
 - **Allowlisting** — per-org PURL pattern allowlists to restrict which packages can be fetched or pushed
 - **Multitenancy** — multiple orgs, scoped tokens, role-based access, full org isolation
@@ -152,7 +153,27 @@ dotnet symbol --symbols --microsoft-symbol-server \
 ```
 
 Symbol reads follow the same auth posture as every other NuGet read: a token is required unless
-the org has AnonymousPull enabled.
+the org has AnonymousPull enabled, and a version you have blocked or revoked serves no symbols.
+
+**Uploading instead of pushing.** A `.snupkg` can also be added from the admin **Upload** page
+(drag-and-drop) or by posting it to `/api/v1/admin/upload`, alongside its `.nupkg` or on its own —
+useful for backfilling symbols from an artifact archive. Its Portable PDBs are indexed exactly as on
+push, and the two files land as siblings of one version, each listed and downloadable separately.
+
+Keep the **`.snupkg` extension**: it is what identifies the archive as a symbol package. Renamed to
+`.nupkg` it is validated as a regular package and rejected, because a symbol manifest omits fields
+(`authors`, `description`) that a package manifest must declare.
+
+**Scope limits.** These match what nuget.org's own symbol server supports, so a package that
+resolves there resolves here:
+
+- **Portable PDBs only.** A `.snupkg` containing native/Windows PDBs is accepted and stays
+  downloadable, but those PDBs are skipped by the indexer and never resolve by debug-id. The push
+  still returns 201 — check the indexed-PDB count on the version to confirm what was indexed.
+- **`.snupkg` only.** The legacy `.symbols.nupkg` format is not accepted as a symbol package.
+- **No source-file serving.** SSQP also defines source retrieval; only the PDB path is
+  implemented, so stepping into code requires your debugger to resolve sources another way
+  (Source Link against your own source host, for example).
 
 ---
 

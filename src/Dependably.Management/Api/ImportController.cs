@@ -70,6 +70,8 @@ public sealed class ImportController : ControllerBase
     private readonly IUploadLimitResolver _limitResolver;
     private readonly string _stagingPath;
     private readonly MetadataInvalidationCoordinator _invalidation;
+    private readonly NuGetSymbolIndexer _symbolIndexer;
+    private readonly ILogger<ImportController> _logger;
 
     // Total batch ceiling: 1 GB. Individual file caps come from the per-tenant
     // upload-limit chain; this constant bounds the whole multipart envelope before
@@ -90,6 +92,8 @@ public sealed class ImportController : ControllerBase
         _publish = svc.Publish;
         _claimResolver = svc.ClaimResolver;
         _licenses = svc.Licenses;
+        _symbolIndexer = svc.SymbolIndexer;
+        _logger = svc.Logger;
         _limitResolver = svc.LimitResolver;
         // PROXY_STAGING_PATH is operator-configured; user input never reaches the path.
         _stagingPath = string.IsNullOrWhiteSpace(svc.StagingPath)
@@ -827,6 +831,12 @@ public sealed class ImportController : ControllerBase
                 await _licenses.SetLicensesAsync(accepted.VersionId, extracted.Spdx, "uploaded", ct);
             }
 
+            // A .snupkg uploaded here must have its PDBs indexed, exactly as the push path does.
+            // Without this the archive stores and downloads fine but no debug-id resolves, which
+            // is the silent "stored but not indexed" state — indistinguishable from success at
+            // upload time and only discovered mid-debugging session.
+            await IndexImportedSymbolsAsync(detection, accepted, file, ctx.OrgId, ct);
+
             // Invalidate cached metadata so the imported version appears immediately — through
             // the coordinator, so every variant the ecosystem renders is covered and peer
             // replicas evict theirs too.
@@ -905,6 +915,48 @@ public sealed class ImportController : ControllerBase
         return resolved ?? BatchSizeLimitBytes;
     }
 
+    // Indexes the Portable PDBs of an imported .snupkg. Best-effort for the same reason as the
+    // push path: the version row is already committed, so a corrupt entry or an I/O error must
+    // not fail an otherwise good import. The re-index endpoint is the remedy.
+    private async Task IndexImportedSymbolsAsync(
+        EcosystemDetector.DetectionResult detection, PublishResult.Accepted accepted,
+        StagedFile file, string orgId, CancellationToken ct)
+    {
+        if (detection.Ecosystem != "nuget"
+            || !file.Filename.EndsWith(MultiFileEcosystems.NuGetSymbolExtension, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        try
+        {
+            // tempPath is "import-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+#pragma warning disable SCS0018
+            await using var fs = new FileStream(
+                file.TempPath, FileMode.Open, FileAccess.Read, FileShare.Read,
+                bufferSize: 81920, useAsync: true);
+#pragma warning restore SCS0018
+            int indexed = await _symbolIndexer.ReplaceIndexAsync(
+                orgId, accepted.VersionId, accepted.BlobKey, fs, ct);
+            if (indexed == 0)
+            {
+                _logger.LogInformation(
+                    "Imported symbol package {Filename} for org {OrgId} contained no indexable Portable PDBs.",
+                    file.Filename, orgId);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to index imported symbol package {Filename} for org {OrgId}: {ExceptionType}",
+                file.Filename, orgId, ex.GetType().Name);
+        }
+    }
+
     private static string AuditDetailFor(string batchId, string ecosystem) =>
         $"{{\"batch_id\":\"{batchId}\",\"import_mode\":\"upload\",\"ecosystem\":\"{ecosystem}\"}}";
 
@@ -968,4 +1020,6 @@ public sealed record ImportControllerServices(
     LicenseRepository Licenses,
     IUploadLimitResolver LimitResolver,
     string StagingPath,
-    MetadataInvalidationCoordinator Invalidation);
+    MetadataInvalidationCoordinator Invalidation,
+    NuGetSymbolIndexer SymbolIndexer,
+    ILogger<ImportController> Logger);

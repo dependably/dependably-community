@@ -760,10 +760,8 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
     [Fact]
     public async Task PushSymbols_ValidSnupkg_Returns201()
     {
-        // Push .snupkg for a fresh id+version with no prior .nupkg so the publish pipeline
-        // doesn't reject as version_exists. Symbols and packages share the version row in
-        // this controller's publish path, so coexistence on the same (id, version) would
-        // produce 409 Conflict — that case is exercised by PushSymbols_SnupkgMissingPdb_*.
+        // Symbols-only coordinate: a .snupkg with no sibling .nupkg is still a valid publish,
+        // and remains so now that the two coexist under one version row.
         string id = $"SymPkg{Guid.NewGuid():N}"[..16];
 
         // .snupkg = ZIP containing a .nuspec + at least one .pdb.
@@ -780,6 +778,172 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
 
         var resp = await client.PutAsync("/nuget/symbols", content);
         Assert.Equal(HttpStatusCode.Created, resp.StatusCode);
+    }
+
+    // ── Push: .nupkg and .snupkg coexisting on one coordinate ─────────────────
+
+    // The flow `dotnet nuget push MyPackage.1.0.0.nupkg` performs: it pushes the adjacent
+    // .snupkg automatically, at the same id+version. Before the multi-file model the symbol
+    // half always came back 409 (version_exists, or artifact_mismatch when overwrite was
+    // allowed), which made the symbol server unusable through the standard toolchain.
+    [Fact]
+    public async Task PushSymbols_AfterNupkgAtSameCoordinate_Returns201()
+    {
+        string id = $"CoexPkg{Guid.NewGuid():N}"[..16];
+        await _factory.PushNuGetPackage(id, "1.0.0");
+
+        var resp = await PushSnupkgAsync(id, "1.0.0", BuildSnupkg(id, "1.0.0"));
+
+        Assert.Equal(HttpStatusCode.Created, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task PushSymbols_AfterNupkg_LeavesPackageBytesAndChecksumUnchanged()
+    {
+        // The .snupkg must not repoint the version row's primary artifact: a package client
+        // asking for the .nupkg has to keep getting the same bytes, under the same ETag.
+        string id = $"CoexKeep{Guid.NewGuid():N}"[..16];
+        await _factory.PushNuGetPackage(id, "1.0.0");
+
+        string lower = id.ToLowerInvariant();
+        string nupkgUrl = $"/nuget/flatcontainer/{lower}/1.0.0/{lower}.1.0.0.nupkg";
+
+        using var client = _factory.CreateClientWithBasic(await _factory.CreateToken("pull"));
+        var before = await client.GetAsync(nupkgUrl);
+        Assert.Equal(HttpStatusCode.OK, before.StatusCode);
+        byte[] beforeBytes = await before.Content.ReadAsByteArrayAsync();
+        string? beforeEtag = before.Headers.ETag?.Tag;
+
+        var push = await PushSnupkgAsync(id, "1.0.0", BuildSnupkg(id, "1.0.0"));
+        Assert.Equal(HttpStatusCode.Created, push.StatusCode);
+
+        var after = await client.GetAsync(nupkgUrl);
+        Assert.Equal(HttpStatusCode.OK, after.StatusCode);
+        byte[] afterBytes = await after.Content.ReadAsByteArrayAsync();
+
+        Assert.Equal(beforeBytes, afterBytes);
+        Assert.Equal(beforeEtag, after.Headers.ETag?.Tag);
+    }
+
+    [Fact]
+    public async Task GetSymbols_WhenNupkgAlsoExists_ServesTheSnupkg()
+    {
+        // The symbol-download surface used to scan version rows for a blob key ending
+        // '.snupkg', which only ever matched symbols-only coordinates.
+        string id = $"CoexGet{Guid.NewGuid():N}"[..16];
+        await _factory.PushNuGetPackage(id, "1.0.0");
+        byte[] snupkg = BuildSnupkg(id, "1.0.0");
+        Assert.Equal(HttpStatusCode.Created, (await PushSnupkgAsync(id, "1.0.0", snupkg)).StatusCode);
+
+        using var client = _factory.CreateClientWithBasic(await _factory.CreateToken("pull"));
+        var resp = await client.GetAsync($"/nuget/symbols/{id}/1.0.0/{id}.1.0.0.snupkg");
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        Assert.Equal(snupkg, await resp.Content.ReadAsByteArrayAsync());
+    }
+
+    [Fact]
+    public async Task GetSymbolFile_SsqpResolves_WhenNupkgAlsoExists()
+    {
+        // End-to-end SSQP: a real Portable PDB inside the .snupkg must be reachable by its
+        // debug-id at a coordinate that also carries a .nupkg — the shape a debugger hits.
+        string id = $"CoexSsqp{Guid.NewGuid():N}"[..16];
+        var signature = Guid.NewGuid();
+        byte[] pdb = NuGetFixtures.BuildPortablePdb(signature);
+        byte[] snupkg = NuGetFixtures.BuildSnupkgWithPdbs(id, "1.0.0", ($"{id}.pdb", pdb));
+
+        await _factory.PushNuGetPackage(id, "1.0.0");
+        Assert.Equal(HttpStatusCode.Created, (await PushSnupkgAsync(id, "1.0.0", snupkg)).StatusCode);
+
+        string key = NuGetSymbolKey.PortableKey(signature);
+        using var client = _factory.CreateClientWithBasic(await _factory.CreateToken("pull"));
+        var resp = await client.GetAsync($"/nuget/symbols/{id}.pdb/{key}/{id}.pdb");
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        Assert.Equal(pdb, await resp.Content.ReadAsByteArrayAsync());
+    }
+
+    [Fact]
+    public async Task PushNupkg_AfterSnupkg_PromotesPackageToPrimaryArtifact()
+    {
+        // Symbols-first push order. The version row initially names the .snupkg; when the
+        // .nupkg arrives it must take over the primary-artifact columns, or flatcontainer
+        // would keep serving symbol bytes to package clients.
+        string id = $"CoexFlip{Guid.NewGuid():N}"[..16];
+        byte[] snupkg = BuildSnupkg(id, "1.0.0");
+        Assert.Equal(HttpStatusCode.Created, (await PushSnupkgAsync(id, "1.0.0", snupkg)).StatusCode);
+
+        await _factory.PushNuGetPackage(id, "1.0.0");
+
+        string lower = id.ToLowerInvariant();
+        using var client = _factory.CreateClientWithBasic(await _factory.CreateToken("pull"));
+        var resp = await client.GetAsync($"/nuget/flatcontainer/{lower}/1.0.0/{lower}.1.0.0.nupkg");
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        byte[] served = await resp.Content.ReadAsByteArrayAsync();
+        Assert.NotEqual(snupkg, served);
+        // A .nupkg is a ZIP holding a .nuspec; assert we got the package, not the symbols.
+        using var zip = new ZipArchive(new MemoryStream(served), ZipArchiveMode.Read);
+        Assert.Contains(zip.Entries, e => e.FullName.EndsWith(".nuspec", StringComparison.Ordinal));
+        Assert.DoesNotContain(zip.Entries, e => e.FullName.EndsWith(".pdb", StringComparison.Ordinal));
+    }
+
+
+    [Fact]
+    public async Task Flatcontainer_SymbolsOnlyCoordinate_DoesNotServeSnupkgAsThePackage()
+    {
+        // A symbols-only version's primary artifact IS its .snupkg, so an unconditional
+        // fallback to the primary served symbol bytes to a client asking for the .nupkg —
+        // the restore succeeds and the "package" is a symbol archive, with nothing reporting
+        // an error. Once a version has file rows they are authoritative: a request naming
+        // none of them is a miss.
+        string id = $"SymOnly{Guid.NewGuid():N}"[..16];
+        byte[] snupkg = BuildSnupkg(id, "1.0.0");
+        Assert.Equal(HttpStatusCode.Created, (await PushSnupkgAsync(id, "1.0.0", snupkg)).StatusCode);
+
+        string lower = id.ToLowerInvariant();
+        using var client = _factory.CreateClientWithBasic(await _factory.CreateToken("pull"));
+        var resp = await client.GetAsync($"/nuget/flatcontainer/{lower}/1.0.0/{lower}.1.0.0.nupkg");
+
+        Assert.NotEqual(HttpStatusCode.OK, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task Flatcontainer_AfterSymbolPush_StillServesThePackageBytes()
+    {
+        // The complement: a coordinate that HAS a .nupkg must keep serving it, byte-for-byte,
+        // across a symbol push — the fallback change must not turn a real package into a 404.
+        string id = $"KeepPkg{Guid.NewGuid():N}"[..16];
+        await _factory.PushNuGetPackage(id, "1.0.0");
+
+        string lower = id.ToLowerInvariant();
+        string url = $"/nuget/flatcontainer/{lower}/1.0.0/{lower}.1.0.0.nupkg";
+        using var client = _factory.CreateClientWithBasic(await _factory.CreateToken("pull"));
+
+        var before = await client.GetAsync(url);
+        Assert.Equal(HttpStatusCode.OK, before.StatusCode);
+        byte[] beforeBytes = await before.Content.ReadAsByteArrayAsync();
+
+        Assert.Equal(HttpStatusCode.Created,
+            (await PushSnupkgAsync(id, "1.0.0", BuildSnupkg(id, "1.0.0"))).StatusCode);
+
+        var after = await client.GetAsync(url);
+        Assert.Equal(HttpStatusCode.OK, after.StatusCode);
+        Assert.Equal(beforeBytes, await after.Content.ReadAsByteArrayAsync());
+    }
+
+    private async Task<HttpResponseMessage> PushSnupkgAsync(string id, string version, byte[] snupkg)
+    {
+        string token = await _factory.CreateToken("push");
+        using var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-NuGet-ApiKey", token);
+
+        using var content = new MultipartFormDataContent();
+        var fc = new ByteArrayContent(snupkg);
+        fc.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+        content.Add(fc, "package", $"{id}.{version}.snupkg");
+
+        return await client.PutAsync("/nuget/symbols", content);
     }
 
     [Fact]

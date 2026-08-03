@@ -5,15 +5,21 @@
 -- UtcTimestamp shapes (second/millisecond/microsecond precision, always UTC 'Z') and NULL —
 -- see TemporalCheckPredicate.ForPostgres. Fresh installs get it here, from CREATE TABLE.
 --
--- An existing Postgres database is NOT retrofitted with this CHECK this release: the
--- previously released version still writes package_versions.published_at and
--- packages.upstream_latest_published_at via DateTimeOffset.ToString("o") (a shape this CHECK
--- rejects) on every hosted publish and proxy first-fetch, so retrofitting now would 500 the
--- previous release's hottest write path for the whole blue-green cutover window. The retrofit
--- (ADD CONSTRAINT ... NOT VALID, then VALIDATE CONSTRAINT only when a pre-flight COUNT finds
--- no non-canonical rows) lands a release after the one whose baseline writes canonical
--- shapes everywhere — see SchemaInitializer.TemporalColumnNaming.cs. SQLite is never
--- retrofitted at all (see Schema.sql).
+-- An existing Postgres database is brought up to the same constraint on every boot by
+-- SchemaInitializer.TemporalCheckRetrofit.cs: per column, ADD CONSTRAINT ... NOT VALID under
+-- the <table>_<column>_check name Postgres itself assigns the inline CHECK below, then
+-- VALIDATE CONSTRAINT, each validation caught on its own so one unfixable legacy row leaves
+-- that single column NOT VALID rather than wedging the boot or costing the other columns
+-- their constraints. The retrofit derives its column set from the CHECK text in this file, so
+-- a temporal column added to a CREATE TABLE block below is retrofitted with no new migration
+-- code. SQLite is never retrofitted at all (see Schema.sql).
+--
+-- That retrofit carries a release-sequencing precondition nothing in the code can enforce: a
+-- NOT VALID constraint still rejects NEW writes, including those the OLD binary makes while
+-- both slots serve one database during a blue-green cutover. It is only safe in a release
+-- whose immediate predecessor already writes canonical shapes on every path — notably
+-- package_versions.published_at, packages.upstream_latest_published_at, and
+-- cache_artifact.published_at, all written on hosted publish or proxy first-fetch.
 --
 -- Every temporal column that participates in a CREATE INDEX below — as an indexed key column,
 -- or referenced in a partial index's WHERE predicate — additionally declares COLLATE "C" on
@@ -767,6 +773,11 @@ CREATE TABLE IF NOT EXISTS upstream_registry (
     secret         TEXT,
     token_endpoint TEXT,                       -- OCI: operator-pinned token-exchange realm URL
     prefixes       TEXT,                       -- OCI: JSON array of repository-name prefix strings
+    -- NuGet: base URL of this upstream's symbol server. A symbol server is a different host from
+    -- the v3 index (nuget.org's lives at https://symbols.nuget.org/download/symbols), so it cannot
+    -- be derived from url. NULL disables symbol proxying for this upstream — the fail-closed
+    -- default for any feed whose symbol host is unknown.
+    symbol_server_url TEXT,
     created_at     TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
         CHECK (created_at IS NULL OR created_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
     UNIQUE (org_id, ecosystem, url)
@@ -794,21 +805,44 @@ CREATE TABLE IF NOT EXISTS upstream_source_pin (
 -- inside a stored .snupkg so a debugger can fetch a single PDB by GUID+age via
 -- GET /nuget/symbols/{pdb}/{key}/{pdb}. Populated on symbol push (one row per contained PDB).
 -- ssqp_key and pdb_filename are stored lowercased and matched case-insensitively per the SSQP
--- protocol. Tenant-scoped on org_id; each row references the owning package_versions row.
+-- protocol. Tenant-scoped on org_id. owner_kind discriminates which FK is authoritative, the
+-- package_version_licenses / package_version_vulns shape: a hosted symbol package indexes against
+-- its package_versions row, a proxied one against the cache_artifact row holding the fetched
+-- .snupkg. Exactly one FK is set per row, enforced by the invariant CHECK.
+-- backcompat-ok: nuget_symbol_index.package_version_id — the added invariant CHECK cannot reject
+-- anything the previous release writes. That writer always supplies package_version_id and omits
+-- both new columns, so owner_kind takes its 'package_version' DEFAULT and cache_artifact_id stays
+-- NULL, which is exactly the first arm. Relaxing NOT NULL only widens what is accepted; the
+-- previous release's reader inner-joins package_versions, so proxy-owned rows are invisible to it
+-- rather than malformed.
 CREATE TABLE IF NOT EXISTS nuget_symbol_index (
     id                 TEXT PRIMARY KEY,
     org_id             TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-    package_version_id TEXT NOT NULL REFERENCES package_versions(id) ON DELETE CASCADE,
+    package_version_id TEXT REFERENCES package_versions(id) ON DELETE CASCADE,
     pdb_filename       TEXT NOT NULL,
     ssqp_key           TEXT NOT NULL,
     snupkg_blob_key    TEXT NOT NULL,
     entry_path         TEXT NOT NULL,
     created_at         TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
         CHECK (created_at IS NULL OR created_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
-    UNIQUE (org_id, ssqp_key, pdb_filename, package_version_id)
+    cache_artifact_id  TEXT REFERENCES cache_artifact(id) ON DELETE CASCADE,
+    owner_kind         TEXT NOT NULL DEFAULT 'package_version'
+                       CHECK (owner_kind IN ('package_version','cache_artifact')),
+    CHECK (
+        (owner_kind = 'package_version' AND package_version_id IS NOT NULL AND cache_artifact_id IS NULL)
+        OR
+        (owner_kind = 'cache_artifact' AND cache_artifact_id IS NOT NULL AND package_version_id IS NULL)
+    )
 );
 CREATE INDEX IF NOT EXISTS idx_nuget_symbol_index_lookup ON nuget_symbol_index(org_id, ssqp_key, pdb_filename);
 CREATE INDEX IF NOT EXISTS idx_nuget_symbol_index_pv ON nuget_symbol_index(package_version_id);
+CREATE INDEX IF NOT EXISTS idx_nuget_symbol_index_ca ON nuget_symbol_index(cache_artifact_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_nuget_symbol_index_pv_key
+    ON nuget_symbol_index (org_id, ssqp_key, pdb_filename, package_version_id)
+    WHERE owner_kind = 'package_version';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_nuget_symbol_index_ca_key
+    ON nuget_symbol_index (org_id, ssqp_key, pdb_filename, cache_artifact_id)
+    WHERE owner_kind = 'cache_artifact';
 
 -- Per-org operator-pinned signature trust anchors. Each row is one trust anchor
 -- (PGP public key, X.509 cert, npm SPKI key, Sigstore root, Rekor key, or publisher

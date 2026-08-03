@@ -461,6 +461,7 @@ public sealed class MetadataRebuildCachingTests : IAsyncLifetime
             Inventory: new ArtifactInventoryRepository(
                 _db, new PackageRepository(_db), new CacheArtifactRepository(_db), new VulnerabilityRepository(_db, TimeProvider.System)),
             VersionFiles: new PackageVersionFilesRepository(_db),
+            SymbolIndex: new NuGetSymbolIndexRepository(_db, TimeProvider.System),
             PackageAnalytics: null!,
             StatsSnapshots: null!,
             Tokens: null!,

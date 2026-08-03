@@ -310,6 +310,10 @@
       "provenanceFailedHelp": "Cette version portait une signature qui n'a pas pu être vérifiée par rapport aux ancres de confiance épinglées.",
       "provenanceUnsigned": "non signée",
       "provenanceUnsignedHelp": "Le registre amont n'a publié aucune signature pour cette version.",
+      "symbols": "symboles ({count})",
+      "symbolsHelp": "Cette version fournit un paquet de symboles ; {count} PDB portable(s) sont indexés et résolubles par debug-id depuis le serveur de symboles.",
+      "symbolsUnindexed": "symboles non indexés",
+      "symbolsUnindexedHelp": "Un paquet de symboles est stocké pour cette version mais aucun PDB portable n'a été indexé ; ses PDB ne sont donc pas résolubles par debug-id. Les PDB natifs/Windows ne sont pas indexables ; si le paquet contient bien des PDB portables, réindexez la version.",
       "licenseBlockedHelp": "Cette licence figure sur la liste de blocage de licences de l'organisation.",
       "licenseUnknown": "inconnue",
       "licenseUnknownHelp": "Aucune licence n'a été extraite pour cette version."
@@ -1025,6 +1029,11 @@
         "emptyDisabled": "Aucun registre en amont — le proxy est désactivé pour {ecosystem}.",
         "dragHint": "Glisser pour réordonner",
         "removeConfirm": "Supprimer ce registre en amont?",
+        "symbolServer": {
+          "label": "Serveur de symboles",
+          "disabled": "non défini — aucun proxy de symboles",
+          "hint": "URL de base SSQP à partir de laquelle cet amont sert les PDB. Un serveur de symboles est un hôte différent de l'index v3 et ne peut donc pas en être déduit — celui de nuget.org est https://symbols.nuget.org/download/symbols, et un amont nuget.org y est associé automatiquement. Laissez vide pour désactiver le proxy de symboles pour cet amont."
+        },
         "modal": {
           "title": "Ajouter un registre en amont",
           "ecosystem": "Écosystème",

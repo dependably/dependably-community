@@ -40,6 +40,7 @@ public static class EdgeSurfaceRegistry
         typeof(Api.OrgAuthConfigController),
         typeof(Api.BannersController),
         typeof(Api.QuarantineController),
+        typeof(Api.NuGetSymbolsController),
         typeof(Api.RiskController),
         typeof(Api.AlertsController),
         typeof(Api.TrustAnchorController),

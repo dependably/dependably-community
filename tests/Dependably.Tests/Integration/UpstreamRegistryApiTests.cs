@@ -367,4 +367,94 @@ public sealed class UpstreamRegistryApiTests : IClassFixture<DependablyFactory>
             .RootElement.GetProperty("id").GetString()!;
         await c.DeleteAsync($"/api/v1/upstream-registries/{id}");
     }
+
+    // ── NuGet symbol server ───────────────────────────────────────────────────
+
+    [Fact]
+    public async Task SymbolServer_SetClearAndList_RoundTrip()
+    {
+        using var c = await AdminClient();
+        string url = $"https://nuget-mirror-{Guid.NewGuid():N}.example.com";
+        var added = await c.PostAsJsonAsync("/api/v1/upstream-registries",
+            new { ecosystem = "nuget", url });
+        Assert.Equal(HttpStatusCode.Created, added.StatusCode);
+        string id = JsonDocument.Parse(await added.Content.ReadAsStringAsync())
+            .RootElement.GetProperty("id").GetString()!;
+
+        // A non-nuget.org upstream starts with no symbol server — fail-closed by omission, so
+        // nothing is proxied for it until an operator says where the symbols live.
+        Assert.Null(await SymbolServerOf(c, id));
+
+        const string symbols = "https://symbols.example.com/download/symbols";
+        var set = await c.PutAsJsonAsync($"/api/v1/upstream-registries/{id}/symbol-server",
+            new { symbolServerUrl = symbols });
+        Assert.Equal(HttpStatusCode.NoContent, set.StatusCode);
+
+        // The LIST projection must expose it, or the Settings UI can never show anything but
+        // "not set" no matter what is stored.
+        Assert.Equal(symbols, await SymbolServerOf(c, id));
+
+        // Empty clears — switching symbol proxying back off is an explicit operator action.
+        var cleared = await c.PutAsJsonAsync($"/api/v1/upstream-registries/{id}/symbol-server",
+            new { symbolServerUrl = "" });
+        Assert.Equal(HttpStatusCode.NoContent, cleared.StatusCode);
+        Assert.Null(await SymbolServerOf(c, id));
+    }
+
+    [Fact]
+    public async Task SymbolServer_RejectsSsrfShapedUrl()
+    {
+        using var c = await AdminClient();
+        string url = $"https://nuget-mirror-{Guid.NewGuid():N}.example.com";
+        var added = await c.PostAsJsonAsync("/api/v1/upstream-registries",
+            new { ecosystem = "nuget", url });
+        string id = JsonDocument.Parse(await added.Content.ReadAsStringAsync())
+            .RootElement.GetProperty("id").GetString()!;
+
+        // A symbol server is fetched server-side, so an operator-supplied value here is the same
+        // SSRF primitive as an upstream base URL and goes through the same validator.
+        var resp = await c.PutAsJsonAsync($"/api/v1/upstream-registries/{id}/symbol-server",
+            new { symbolServerUrl = "http://169.254.169.254/latest/meta-data/" });
+
+        Assert.NotEqual(HttpStatusCode.NoContent, resp.StatusCode);
+        Assert.Null(await SymbolServerOf(c, id));
+    }
+
+    [Fact]
+    public async Task SymbolServer_WithoutTenantConfigure_IsRefused()
+    {
+        using var admin = await AdminClient();
+        string url = $"https://nuget-mirror-{Guid.NewGuid():N}.example.com";
+        var added = await admin.PostAsJsonAsync("/api/v1/upstream-registries",
+            new { ecosystem = "nuget", url });
+        string id = JsonDocument.Parse(await added.Content.ReadAsStringAsync())
+            .RootElement.GetProperty("id").GetString()!;
+
+        using var member = await MemberClient();
+        var resp = await member.PutAsJsonAsync($"/api/v1/upstream-registries/{id}/symbol-server",
+            new { symbolServerUrl = "https://symbols.example.com/download/symbols" });
+
+        Assert.True(
+            resp.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.Unauthorized,
+            $"expected 401/403 without tenant:configure, got {(int)resp.StatusCode}");
+    }
+
+    // Reads one entry's symbolServerUrl back out of the LIST endpoint — the same projection the
+    // Settings UI consumes, so a projection that drops the field fails here too.
+    private static async Task<string?> SymbolServerOf(HttpClient c, string id)
+    {
+        var list = await c.GetAsync("/api/v1/upstream-registries");
+        list.EnsureSuccessStatusCode();
+        using var doc = JsonDocument.Parse(await list.Content.ReadAsStringAsync());
+        foreach (var e in doc.RootElement.EnumerateArray())
+        {
+            if (e.GetProperty("id").GetString() == id)
+            {
+                return e.TryGetProperty("symbolServerUrl", out var v) && v.ValueKind != JsonValueKind.Null
+                    ? v.GetString()
+                    : null;
+            }
+        }
+        return null;
+    }
 }

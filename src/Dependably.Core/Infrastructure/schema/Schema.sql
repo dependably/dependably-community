@@ -9,10 +9,10 @@
 -- table at boot) is a far larger hazard than the invariant is worth given every writer of
 -- these columns is already canonical and the every-boot sweep in
 -- SchemaInitializer.TimestampNormalization.cs repairs any legacy shape a stale binary still
--- produces. Existing Postgres databases are not retrofitted with this CHECK this release
--- either — see SchemaInitializer.TemporalColumnNaming.cs for the expand/migrate/contract
--- sequencing that defers the retrofit to a later release, once the released baseline writes
--- canonical shapes everywhere.
+-- produces. Existing Postgres databases ARE retrofitted, because Postgres can add the
+-- constraint in place — see SchemaInitializer.TemporalCheckRetrofit.cs and the Schema.pg.sql
+-- header. So the two providers converge on the same fresh-install shape but reach an upgraded
+-- database differently: Postgres by constraint, SQLite by the repair sweep alone.
 --
 -- Schema.pg.sql additionally declares COLLATE "C" on its indexed temporal columns, for
 -- byte-exact ordering and immunity to glibc collation-version drift. SQLite needs no
@@ -682,6 +682,11 @@ CREATE TABLE IF NOT EXISTS upstream_registry (
     secret         TEXT,
     token_endpoint TEXT,                       -- OCI: operator-pinned token-exchange realm URL
     prefixes       TEXT,                       -- OCI: JSON array of repository-name prefix strings
+    -- NuGet: base URL of this upstream's symbol server. A symbol server is a different host from
+    -- the v3 index (nuget.org's lives at https://symbols.nuget.org/download/symbols), so it cannot
+    -- be derived from url. NULL disables symbol proxying for this upstream — the fail-closed
+    -- default for any feed whose symbol host is unknown.
+    symbol_server_url TEXT,
     created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     UNIQUE (org_id, ecosystem, url)
@@ -710,22 +715,48 @@ CREATE TABLE IF NOT EXISTS upstream_source_pin (
 -- GET /nuget/symbols/{pdb}/{key}/{pdb}. Populated on symbol push (one row per contained PDB).
 -- ssqp_key and pdb_filename are stored lowercased and matched case-insensitively per the SSQP
 -- protocol. Tenant-scoped on org_id; each row references the owning package_versions row.
+-- owner_kind discriminates which FK is authoritative, the package_version_licenses /
+-- package_version_vulns shape: a hosted symbol package indexes against its package_versions row,
+-- a proxied one against the cache_artifact row holding the fetched .snupkg. Exactly one FK is set
+-- per row, enforced by the invariant CHECK.
+-- backcompat-ok: nuget_symbol_index.package_version_id — the added invariant CHECK cannot reject
+-- anything the previous release writes. That writer always supplies package_version_id and omits
+-- both new columns, so owner_kind takes its 'package_version' DEFAULT and cache_artifact_id stays
+-- NULL, which is exactly the first arm. Relaxing NOT NULL only widens what is accepted; the
+-- previous release's reader inner-joins package_versions, so proxy-owned rows are invisible to it
+-- rather than malformed.
 CREATE TABLE IF NOT EXISTS nuget_symbol_index (
     id                 TEXT PRIMARY KEY,
     org_id             TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-    package_version_id TEXT NOT NULL REFERENCES package_versions(id) ON DELETE CASCADE,
+    package_version_id TEXT REFERENCES package_versions(id) ON DELETE CASCADE,
     pdb_filename       TEXT NOT NULL,   -- lowercased PDB file name (e.g. mylib.pdb)
     ssqp_key           TEXT NOT NULL,   -- lowercased 40-hex key: GUID (N format) + 'ffffffff' age
     snupkg_blob_key    TEXT NOT NULL,   -- blob key of the stored .snupkg holding this PDB
     entry_path         TEXT NOT NULL,   -- path of the PDB entry within the .snupkg ZIP
     created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
-    UNIQUE (org_id, ssqp_key, pdb_filename, package_version_id)
+    cache_artifact_id  TEXT REFERENCES cache_artifact(id) ON DELETE CASCADE,
+    owner_kind         TEXT NOT NULL DEFAULT 'package_version'
+                       CHECK (owner_kind IN ('package_version','cache_artifact')),
+    CHECK (
+        (owner_kind = 'package_version' AND package_version_id IS NOT NULL AND cache_artifact_id IS NULL)
+        OR
+        (owner_kind = 'cache_artifact' AND cache_artifact_id IS NOT NULL AND package_version_id IS NULL)
+    )
 );
 -- Primary SSQP resolution path: (org, key, filename) lookup.
 CREATE INDEX IF NOT EXISTS idx_nuget_symbol_index_lookup ON nuget_symbol_index(org_id, ssqp_key, pdb_filename);
 -- FK-column index so cascade delete on package_versions does not table-scan.
 CREATE INDEX IF NOT EXISTS idx_nuget_symbol_index_pv ON nuget_symbol_index(package_version_id);
+-- Same for the cache_artifact cascade.
+CREATE INDEX IF NOT EXISTS idx_nuget_symbol_index_ca ON nuget_symbol_index(cache_artifact_id);
+-- Per-owner uniqueness, partial so each arm ignores the other's NULL FK.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_nuget_symbol_index_pv_key
+    ON nuget_symbol_index (org_id, ssqp_key, pdb_filename, package_version_id)
+    WHERE owner_kind = 'package_version';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_nuget_symbol_index_ca_key
+    ON nuget_symbol_index (org_id, ssqp_key, pdb_filename, cache_artifact_id)
+    WHERE owner_kind = 'cache_artifact';
 
 -- Per-org operator-pinned signature trust anchors. Each row is one trust anchor
 -- (PGP public key, X.509 cert, npm SPKI key, Sigstore root, Rekor key, or publisher

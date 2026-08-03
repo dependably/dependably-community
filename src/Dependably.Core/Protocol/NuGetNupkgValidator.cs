@@ -118,12 +118,19 @@ public static partial class NuGetNupkgValidator
             return (ValidationResult.Fail("version", $"Invalid NuGet version: {version}"), null, null);
         }
 
-        if (string.IsNullOrEmpty(description))
+        // description/authors are required of a PACKAGE and deliberately not of a SYMBOL package.
+        // `dotnet pack` emits a reduced manifest for a .snupkg — id, version, a
+        // packageType of SymbolsPackage, dependencies — and strips <authors> outright. Requiring
+        // it here rejects every symbol package the real toolchain produces, with a 422 sitting
+        // behind the 409 that used to be the visible failure. The authoritative copy of this
+        // metadata lives on the .nupkg at the same coordinate; a symbol sidecar restating it
+        // would be duplication, not validation.
+        if (!isSymbol && string.IsNullOrEmpty(description))
         {
             return (ValidationResult.Fail("description", "description is required"), null, null);
         }
 
-        if (string.IsNullOrEmpty(authors))
+        if (!isSymbol && string.IsNullOrEmpty(authors))
         {
             return (ValidationResult.Fail("authors", "authors is required"), null, null);
         }

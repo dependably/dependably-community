@@ -110,8 +110,16 @@ public sealed class ProxyVersionRecorder
         // listings, simple index, and UI. The per-VERSION catalogue moves to the global plane
         // (cache_artifact), but the package identity stays per-tenant: packages has no
         // cross-tenant collision (its UNIQUE is per org), so each tenant keeps its own row.
-        var pkg = await _packages.GetOrCreateAsync(
-            req.OrgId, req.Ecosystem, req.PackageName, req.PurlName, isProxy: true, ct);
+        //
+        // Catalogue-hidden ecosystems are the exception and get NO packages row: their artefacts
+        // are not packages and must not surface as one. A proxied PDB is keyed by debug-id, so a
+        // row here lists it as a package named 'mylib.pdb' under an ecosystem the frontend has no
+        // label for. It still lands on the global plane, so it stays gated, storage-accounted, and
+        // resolvable by the surface that fetched it — it is only absent from the catalogue.
+        var pkg = CatalogueHiddenEcosystems.Covers(req.Ecosystem)
+            ? null
+            : await _packages.GetOrCreateAsync(
+                req.OrgId, req.Ecosystem, req.PackageName, req.PurlName, isProxy: true, ct);
 
         // Emit the first_fetch activity row — audit still fires for proxy artifacts so the
         // per-tenant event stream is not silenced. Download-count is on tenant_artifact_access;
@@ -142,8 +150,13 @@ public sealed class ProxyVersionRecorder
             // packages row — the one row that exists on both hosted and proxy paths — rather than
             // the global cache_artifact plane. COALESCE in UpdateMetadataAsync means a manifest
             // that omits a field never clears a previously-captured value.
-            await _packages.UpdateMetadataAsync(
-                pkg.Id, extracted.Homepage, extracted.Repository, extracted.Description, ct);
+            // Null only for a catalogue-hidden ecosystem, which has no packages row to carry
+            // presentation metadata — and no surface that would display it either.
+            if (pkg is not null)
+            {
+                await _packages.UpdateMetadataAsync(
+                    pkg.Id, extracted.Homepage, extracted.Repository, extracted.Description, ct);
+            }
         }
 
         // Install/lifecycle-script detection on the freshly-cached artifact. Best-effort:

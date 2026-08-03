@@ -422,6 +422,7 @@ public sealed class OciBlobKeyLockConcurrencyTests : IAsyncLifetime
             Packages: _packages,
             Inventory: null!,
             VersionFiles: new PackageVersionFilesRepository(_db),
+            SymbolIndex: new NuGetSymbolIndexRepository(_db, TimeProvider.System),
             PackageAnalytics: null!,
             StatsSnapshots: null!,
             Tokens: _tokens,

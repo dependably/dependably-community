@@ -767,8 +767,8 @@ Silent unless `HEALTHCHECK_PING_URL` is set. When configured, the instance sends
 | Variable | Default | Description |
 |---|---|---|
 | `HEALTHCHECK_PING_URL` | — | URL to GET (or POST) on every interval. Required to enable pinging. |
-| `HEALTHCHECK_PING_INTERVAL_SECONDS` | `60` | How often (seconds) to ping. |
-| `HEALTHCHECK_PING_TIMEOUT_SECONDS` | `10` | HTTP request timeout (seconds) for each ping. |
+| `HEALTHCHECK_PING_INTERVAL_SECONDS` | `60` | How often (seconds) to ping. Values below `1` are raised to `1` with a startup warning; omit `HEALTHCHECK_PING_URL` to disable pinging. |
+| `HEALTHCHECK_PING_TIMEOUT_SECONDS` | `10` | HTTP request timeout (seconds) for each ping. Values below `1` are raised to `1` with a startup warning. |
 | `HEALTHCHECK_PING_METHOD` | `GET` | HTTP method: `GET` or `POST`. |
 | `HEALTHCHECK_PING_PAYLOAD` | — | Set `status` to include a JSON readiness payload in POST pings. Has no effect with `GET`. |
 | `HEALTHCHECK_PING_INSTANCE_ID` | hostname | Instance identifier included in `status` payloads. Defaults to `Environment.MachineName`. |
@@ -890,6 +890,14 @@ Registry URLs are ecosystem-path-only: `/simple/`, `/npm/`, `/nuget/v3/index.jso
 On a cache miss, Dependably fetches from the configured upstream, verifies the SHA-256 checksum, stores the blob, and records the package as a proxy entry. Subsequent requests are served from the local blob store. Packages with a checksum mismatch are rejected and never stored.
 
 Upstreams are per-org and DB-backed (the `upstream_registry` table) — the resolver is deliberately DB-only, with no `IConfiguration` fallback. They are managed per org from Settings → Proxy. The `<Eco>__Upstream` environment variables (below) only **seed the initial row** for newly created orgs; changing one on an existing install has no effect on that org's already-seeded upstream — update the row from Settings → Proxy instead.
+
+### NuGet symbol servers
+
+A NuGet upstream can carry a **symbol-server base URL** (`upstream_registry.symbol_server_url`), which is what an SSQP miss falls through to. It is a separate field because a symbol server is a different host from the v3 index and cannot be derived from it: nuget.org's index is `https://api.nuget.org/v3/index.json`, its symbol server `https://symbols.nuget.org/download/symbols`.
+
+- A nuget.org upstream is **seeded with that endpoint automatically**, both at creation and via a one-shot migration for pre-existing rows. Only the canonical nuget.org API hosts match — a private feed that mirrors nuget.org is not nuget.org, and guessing its symbol host would send debug-id lookups, which carry the PDB names of private code, to a third party.
+- Every other upstream starts **empty, which disables symbol proxying for it**. Set it with `PUT /api/v1/upstream-registries/{id}/symbol-server` (requires `tenant:configure`); sending an empty value clears it again. The URL is validated exactly like an upstream base URL, including the plaintext-`http` opt-in.
+- nuget.org publishes **no `.snupkg` download endpoint** — its service index carries `SymbolPackagePublish`, which is push-only. Symbol resolution against it is therefore SSQP-by-debug-id only, which is what the fall-through implements.
 
 ---
 

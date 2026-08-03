@@ -298,7 +298,7 @@ public sealed class ProxyFetchSoakTests
             // for the full rationale).
             builder.WebHost.UseSetting(
                 "DISABLE_BACKGROUND_JOBS",
-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill");
+                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
             builder.WebHost.UseSetting("Npm:Upstream", "http://upstream.invalid");
             builder.WebHost.UseSetting("PROXY_STAGING_PATH", _stagingDir);
             builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");

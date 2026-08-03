@@ -53,7 +53,9 @@ public static class ManagementStartupExtensions
                 Licenses: sp.GetRequiredService<LicenseRepository>(),
                 LimitResolver: sp.GetRequiredService<Dependably.Protocol.IUploadLimitResolver>(),
                 StagingPath: stagingPath,
-                Invalidation: sp.GetRequiredService<Dependably.Infrastructure.Caching.MetadataInvalidationCoordinator>());
+                Invalidation: sp.GetRequiredService<Dependably.Infrastructure.Caching.MetadataInvalidationCoordinator>(),
+                SymbolIndexer: sp.GetRequiredService<Dependably.Infrastructure.NuGetSymbolIndexer>(),
+                Logger: sp.GetRequiredService<ILogger<Dependably.Api.ImportController>>());
         });
 
         // Claim REST surface. State machine + repository are registered by the Core wiring; the

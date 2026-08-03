@@ -255,4 +255,80 @@ public sealed class NuGetNupkgValidatorTests
         }
         return ms.ToArray();
     }
+
+    // ── Symbol packages: the reduced manifest `dotnet pack` really emits ──────
+
+    [Fact]
+    public void Symbol_NuspecWithoutAuthors_IsAccepted()
+    {
+        // `dotnet pack -p:SymbolPackageFormat=snupkg` strips <authors> from the symbol
+        // package's nuspec. Requiring it rejected every symbol package the real toolchain
+        // produces with a 422 — invisible for a long time because it sat behind the 409 that
+        // the same push hit first, and because the test fixtures hand-wrote a FULL package
+        // nuspec that the toolchain never emits.
+        byte[] snupkg = BuildSnupkgRaw("""
+            <?xml version="1.0" encoding="utf-8"?>
+            <package xmlns="http://schemas.microsoft.com/packaging/2012/06/nuspec.xsd">
+              <metadata>
+                <id>Sym.Pkg</id>
+                <version>1.0.0</version>
+                <description>Real pack output</description>
+                <packageTypes>
+                  <packageType name="SymbolsPackage" />
+                </packageTypes>
+              </metadata>
+            </package>
+            """);
+
+        var (result, id, version) = NuGetNupkgValidator.Parse(snupkg, isSymbol: true);
+
+        Assert.True(result.IsValid, result.Message);
+        Assert.Equal("Sym.Pkg", id);
+        Assert.Equal("1.0.0", version);
+    }
+
+    [Fact]
+    public void Package_NuspecWithoutAuthors_IsStillRejected()
+    {
+        // The adversarial twin: relaxing this for symbols must not relax it for packages,
+        // where authors is real metadata the registry surfaces.
+        byte[] nupkg = BuildSnupkgRaw("""
+            <?xml version="1.0" encoding="utf-8"?>
+            <package xmlns="http://schemas.microsoft.com/packaging/2012/06/nuspec.xsd">
+              <metadata>
+                <id>Sym.Pkg</id>
+                <version>1.0.0</version>
+                <description>No authors here</description>
+              </metadata>
+            </package>
+            """);
+
+        var (result, _, _) = NuGetNupkgValidator.Parse(nupkg, isSymbol: false);
+
+        Assert.False(result.IsValid);
+        Assert.Contains("authors", result.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    // Builds a .snupkg-shaped archive around a caller-supplied nuspec, so a test can pin the
+    // EXACT manifest text the toolchain emits rather than a convenient approximation.
+    private static byte[] BuildSnupkgRaw(string nuspecXml)
+    {
+        using var ms = new System.IO.MemoryStream();
+        using (var zip = new System.IO.Compression.ZipArchive(
+            ms, System.IO.Compression.ZipArchiveMode.Create, leaveOpen: true))
+        {
+            var nuspec = zip.CreateEntry("Sym.Pkg.nuspec");
+            using (var w = new System.IO.StreamWriter(nuspec.Open()))
+            {
+                w.Write(nuspecXml);
+            }
+
+            var pdb = zip.CreateEntry("lib/net10.0/Sym.Pkg.pdb");
+            using (var w = new System.IO.StreamWriter(pdb.Open()))
+            {
+                w.Write("pdb");
+            }
+        }
+        return ms.ToArray();
+    }
 }

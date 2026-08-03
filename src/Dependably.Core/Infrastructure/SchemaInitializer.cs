@@ -245,6 +245,12 @@ public sealed partial class SchemaInitializer
         await RunOnceAsync(conn, "add_pvl_owner_invariant_check", AddPvlOwnerInvariantCheckAsync, transactional: false);
         await RunOnceAsync(conn, "add_rpm_metadata_owner_invariant_check", AddRpmMetadataOwnerInvariantCheckAsync, transactional: false);
         await RunOnceAsync(conn, "add_mvf_owner_invariant_check", AddMvfOwnerInvariantCheckAsync, transactional: false);
+        // Same shape for the NuGet symbol index, which additionally needs package_version_id to
+        // lose NOT NULL so a proxied .snupkg (cache_artifact-owned, no version row) can index.
+        await RunOnceAsync(conn, "add_symbol_index_owner_invariant", AddSymbolIndexOwnerInvariantAsync, transactional: false);
+        // Existing nuget.org upstream rows predate symbol_server_url; seed the well-known endpoint
+        // so symbol proxying works on upgrade without the operator knowing the symbol host.
+        await RunOnceAsync(conn, "seed_nuget_org_symbol_server_url", SeedNuGetOrgSymbolServerUrlAsync);
         await RunOnceAsync(conn, "add_cargo_metadata_owner_invariant_check", AddCargoMetadataOwnerInvariantCheckAsync, transactional: false);
 
         // Delete proxy rows from package_versions that were backfilled to the global plane by
@@ -299,6 +305,12 @@ public sealed partial class SchemaInitializer
         // package_version_files for PyPI after this.
         await RunOnceAsync(conn, "backfill_package_version_files_pypi", BackfillPackageVersionFilesPypiAsync);
 
+        // Same seeding for NuGet, which joined the multi-file model so a .nupkg and its .snupkg
+        // can share one version row. Existing hosted versions carry their single artifact on the
+        // version columns alone; without a file row the parent's size_bytes would be recomputed
+        // as the SUM of an empty set the first time a symbol package joined the coordinate.
+        await RunOnceAsync(conn, "backfill_package_version_files_nuget", BackfillPackageVersionFilesNuGetAsync);
+
         // OCI proxy manifests join the shared cache_artifact / tenant_artifact_access plane like
         // every other proxy ecosystem instead of writing package_versions rows. Backfill existing
         // oci_blobs manifest rows onto the plane, then drop the now-orphan package_versions rows
@@ -340,14 +352,13 @@ public sealed partial class SchemaInitializer
         // table reshape.
         await NormalizeLegacyDateTimeOffsetColumnsAsync(conn);
 
-        // A Postgres retrofit of the canonical-timestamp CHECK (SchemaInitializer.
-        // TemporalColumnNaming.cs) onto existing databases deliberately does NOT run this release:
-        // the previous release tag still writes package_versions.published_at /
-        // packages.upstream_latest_published_at via DateTimeOffset.ToString("o"), which the CHECK
-        // rejects, and AddVersionAsync runs on every hosted publish and proxy first-fetch — a
-        // NOT VALID constraint still enforces new writes, so blue would 500 on both paths for the
-        // whole cutover window. Fresh installs still get the CHECK from CREATE TABLE at zero risk.
-        // The retrofit lands a release after the one that starts writing canonical everywhere.
+        // Brings an existing Postgres database up to the canonical-timestamp CHECK a fresh install
+        // gets from CREATE TABLE (SchemaInitializer.TemporalCheckRetrofit.cs). Ordered immediately
+        // after the sweep so the rows it repairs are already canonical when VALIDATE CONSTRAINT
+        // scans them — a legacy shape the sweep reaches never costs the column its validation.
+        // Not ledger-gated: idempotency is the per-column pg_constraint probe, which is also what
+        // makes a temporal column added by a future release get retrofitted with no new code.
+        await RetrofitTemporalChecksAsync(conn, sql);
     }
 
     // Projects oci_blobs.license_spdx onto whichever catalogue row the image cast — the
@@ -400,23 +411,35 @@ public sealed partial class SchemaInitializer
             """);
     }
 
-    // One file row per hosted PyPI version, projected from the version row's own
-    // blob/filename/size/checksum columns. Idempotent under retry: rows whose
+    private static Task BackfillPackageVersionFilesPypiAsync(DbConnection conn)
+        => BackfillPackageVersionFilesAsync(conn, "pypi");
+
+    private static Task BackfillPackageVersionFilesNuGetAsync(DbConnection conn)
+        => BackfillPackageVersionFilesAsync(conn, "nuget");
+
+    // One file row per hosted version of a multi-file ecosystem, projected from the version row's
+    // own blob/filename/size/checksum columns. Idempotent under retry: rows whose
     // (version, filename) slot is already occupied are skipped.
-    private static async Task BackfillPackageVersionFilesPypiAsync(DbConnection conn)
+    //
+    // The parent's size_bytes is deliberately left alone. It already equals this single artifact's
+    // size, which is exactly the SUM the one projected file row produces, so there is nothing to
+    // restore — and recomputing it through the repository would also NULL vuln_checked_at and
+    // throw every backfilled version back into the unscanned bucket on upgrade.
+    private static async Task BackfillPackageVersionFilesAsync(DbConnection conn, string ecosystem)
     {
         var rows = (await conn.QueryAsync<(string VersionId, string OrgId, string? Filename, string BlobKey, long SizeBytes, string? ChecksumSha256, string CreatedAt)>(
-            // xtenant: one-shot backfill over every tenant's hosted PyPI versions; each projected
-            // row carries its own p.org_id into the package_version_files row it creates.
+            // xtenant: one-shot backfill over every tenant's hosted versions of this ecosystem;
+            // each projected row carries its own p.org_id into the package_version_files row it
+            // creates.
             """
             SELECT pv.id AS VersionId, p.org_id AS OrgId, pv.filename AS Filename,
                    pv.blob_key AS BlobKey, pv.size_bytes AS SizeBytes,
                    pv.checksum_sha256 AS ChecksumSha256, pv.created_at AS CreatedAt
             FROM package_versions pv
             JOIN packages p ON p.id = pv.package_id
-            WHERE p.ecosystem = 'pypi' AND pv.origin = 'uploaded'
+            WHERE p.ecosystem = @ecosystem AND pv.origin = 'uploaded'
               AND NOT EXISTS (SELECT 1 FROM package_version_files f WHERE f.package_version_id = pv.id)
-            """)).ToList();
+            """, new { ecosystem })).ToList();
 
         foreach (var (versionId, orgId, rowFilename, blobKey, sizeBytes, checksumSha256, createdAt) in rows)
         {

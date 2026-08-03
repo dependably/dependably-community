@@ -766,6 +766,13 @@ public class UpstreamRegistryEntry
     public IReadOnlyList<string>? Prefixes { get; set; }
     /// <summary>True when a secret/password is stored for this entry (secret is never projected).</summary>
     public bool HasSecret { get; set; }
+
+    /// <summary>
+    /// NuGet-only: base URL of this upstream's symbol server. A symbol server is a different host
+    /// from the v3 index, so it cannot be derived from <see cref="Url"/>. Null disables symbol
+    /// proxying for this upstream.
+    /// </summary>
+    public string? SymbolServerUrl { get; set; }
 }
 
 /// <summary>

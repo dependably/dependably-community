@@ -10,4 +10,11 @@ namespace Dependably.Protocol;
 /// content-addressed and the <c>UNIQUE(org_id, ecosystem, url)</c> constraint guarantees one auth
 /// per URL, so keying dedup on URL alone stays correct.
 /// </summary>
-public sealed record UpstreamSource(string Url, string? AuthorizationHeader);
+public sealed record UpstreamSource(
+    string Url,
+    string? AuthorizationHeader,
+    /// <summary>
+    /// NuGet only: this upstream's symbol-server (SSQP) base URL, or null when it has none —
+    /// in which case no symbol fetch is attempted against it rather than a host being guessed.
+    /// </summary>
+    string? SymbolServerUrl = null);

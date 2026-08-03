@@ -124,7 +124,7 @@ public sealed class EdgeFactory : WebApplicationFactory<EdgeProgram>, IAsyncLife
         // in place even if that allowlist changes.
         builder.WebHost.UseSetting(
             "DISABLE_BACKGROUND_JOBS",
-            "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill");
+            "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
 
         builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
         builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");

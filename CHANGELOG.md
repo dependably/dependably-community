@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-08-02
+
+A feature release completing the NuGet symbol server that 0.4.0 introduced: proxied
+packages now get symbols too, `.snupkg` upload handling matches what `dotnet pack`
+really produces, and symbol packages are visible in the UI. **Postgres blue-green
+operators: upgrade to 0.4.5 from 0.4.4 only** — see "Changed" below.
+
+### Added
+
+- **Proxied NuGet packages resolve symbols.** An SSQP debug-id lookup that misses the
+  local index now falls through to the upstream's symbol server, and the fetched PDB is
+  cached and indexed against the proxy cache plane. Each NuGet upstream carries its own
+  **symbol-server base URL** (a symbol server is a different host from the v3 index, so it
+  cannot be derived): nuget.org upstreams are seeded with
+  `https://symbols.nuget.org/download/symbols` automatically — including pre-existing rows —
+  while every other feed starts empty, which **disables symbol proxying for it** rather than
+  guessing a host and sending private PDB names to a third party. Set it from
+  Settings → Proxy or `PUT /api/v1/upstream-registries/{id}/symbol-server`
+  (requires `tenant:configure`); an empty value clears it.
+- **Symbol packages are visible in the UI.** A version that carries a `.snupkg` shows it,
+  with the count of PDBs indexed from it, and a **re-index action** re-derives the SSQP
+  index from the stored archive — the recovery path for symbol packages stored before
+  indexing existed or after a failed index pass.
+- **A hosted multi-file version lists and serves every file it carries** (e.g. a PyPI
+  release's sdist and each wheel) from the version detail panel, not just the primary
+  artifact.
+
+### Fixed
+
+- **The block gate now runs on both symbol read paths.** A blocked, quarantined, or
+  revoked package could previously still serve its PDBs over SSQP and its `.snupkg`
+  download; both reads now pass through the same gate as every other serve path.
+- **`.snupkg` upload handling matches real `dotnet pack` output.** The upload/import path
+  accepts a `.snupkg` and validates it against the reduced nuspec a genuine symbol package
+  carries (earlier validation assumed the full package nuspec shape); a `.nupkg` and its
+  `.snupkg` share one version row instead of colliding; the flatcontainer package endpoint
+  never serves the `.snupkg` in place of the package; and proxied PDBs no longer leak into
+  the package catalogue.
+- **Healthcheck ping interval and timeout are floored at 1 second.**
+  `HEALTHCHECK_PING_INTERVAL_SECONDS` / `HEALTHCHECK_PING_TIMEOUT_SECONDS` values below `1`
+  are raised to `1` with a startup warning instead of producing a tight ping loop or a
+  zero timeout.
+- **Protocol route metrics use the route templates ASP.NET itself emits**, so the
+  `http.route` attribute matches what tracing middleware reports and stays a closed,
+  low-cardinality set.
+
+### Changed
+
+- **Existing Postgres databases gain the canonical-timestamp CHECK constraints on boot.**
+  Each temporal column's constraint is added `NOT VALID` then validated; a column with
+  unfixable legacy rows is left `NOT VALID` (still enforced for new writes) rather than
+  failing the boot. **Action required only for blue-green Postgres deployments: the old
+  slot must be running 0.4.4** — earlier releases write timestamp shapes the new
+  constraint rejects, so skipping 0.4.4 would 500 the old slot's publish and proxy
+  first-fetch writes during the cutover window. Single-slot deployments and SQLite
+  deployments are unaffected (SQLite is repaired by the existing boot-time sweep, not
+  constrained).
+
 ## [0.4.4] - 2026-07-29
 
 A build- and test-only patch. **No operator action is required** and no runtime behaviour
@@ -253,6 +311,24 @@ behaves, and one (legacy `SMTP_*`) fails silently if ignored.
 
 ### Added
 
+- **NuGet symbol server (SSQP).** Pushing a `.snupkg` to `PUT /nuget/symbols` indexes every
+  Portable PDB it contains by its debug-id, so a debugger can fetch a single PDB from
+  `GET /nuget/symbols/{pdb}/{key}/{pdb}` — the
+  [Simple Symbol Query Protocol](https://github.com/dotnet/symstore/blob/main/docs/specs/Simple_Symbol_Query_Protocol.md)
+  route Visual Studio and `dotnet-symbol` speak. The whole archive stays downloadable at
+  `GET /nuget/symbols/{id}/{version}/{file}`, and the symbol-server endpoint is advertised
+  from the v3 service index so clients discover it. The index is per-org and every lookup is
+  tenant-scoped, so a debug-id belonging to another tenant is never served. Reads follow the
+  same auth posture as every other NuGet read: a token is required unless the org has
+  AnonymousPull enabled. Serving a package feed and serving symbols are separate
+  capabilities — most private registries store `.snupkg` files without indexing what is in
+  them.
+
+  **Known limitations.** Indexing covers **Portable PDBs only**; a `.snupkg` carrying
+  native/Windows PDBs is stored and downloadable but contributes nothing to the index.
+  `.snupkg` is the accepted symbol-package format — the legacy `.symbols.nupkg` shape is
+  not. SSQP source-file retrieval is not served, so a debugger resolves sources elsewhere.
+  These match the limits nuget.org's own symbol server documents.
 - **npm audit works.** `POST /npm/-/npm/v1/security/advisories/bulk` previously refused with
   a deliberate 501; it now answers from the registry's OSV-backed advisory data, projected
   into npm's bulk-advisory wire format. Version ranges are evaluated under npm's native

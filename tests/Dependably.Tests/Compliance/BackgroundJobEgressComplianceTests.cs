@@ -15,7 +15,12 @@ namespace Dependably.Tests.Compliance;
 /// <c>LicenseBackfillService</c> (<c>license-backfill</c>) with <c>RunOnStartup = true</c>; it
 /// makes no outbound call, but mutates the shared <c>cache_artifact.license_checked_at</c> column
 /// under a leader lock on every boot — its own source of cross-test non-determinism independent
-/// of egress. A factory names all five job values in <c>DISABLE_BACKGROUND_JOBS</c>, or sets
+/// of egress. <c>OciBlobSweepService</c> (<c>oci-blob-sweep</c>) is the same category one step
+/// further: it DELETES <c>oci_blobs</c> rows no manifest references, which is exactly what a test
+/// pushing a bare blob creates, so a tick landing mid-test lowers <c>org_storage_bytes</c> and
+/// hands the tenant quota headroom it should not have — a 413 assertion sees 201. Its cron is
+/// hourly at :17, so it surfaces only in whichever run straddles that minute.
+/// A factory names all six job values in <c>DISABLE_BACKGROUND_JOBS</c>, or sets
 /// <c>AIR_GAPPED=true</c> (which subsumes every job), or this gate fails. A factory that boots
 /// without either silently reintroduces the outbound egress (or the shared-state boot mutation)
 /// this gate exists to catch, and a factory that sets <c>DISABLE_BACKGROUND_JOBS</c> to some other
@@ -46,12 +51,15 @@ public sealed partial class BackgroundJobEgressComplianceTests
     // can exclude it — see the comment at that exclusion for why.
     private const string SelfFileName = nameof(BackgroundJobEgressComplianceTests) + ".cs";
 
-    // The five job names every factory in tests/ must disable. vuln-scan/vuln-rescan
+    // The six job names every factory in tests/ must disable. vuln-scan/vuln-rescan
     // (VulnerabilityScanService), threat-feed (ThreatFeedRefreshService), and
     // deprecation-refresh (DeprecationRefreshService) fire a real outbound HTTP request at boot;
     // license-backfill (LicenseBackfillService) makes no outbound call but mutates the shared
     // cache_artifact.license_checked_at column under a leader lock at boot, its own source of
-    // cross-test non-determinism. Kept in sync by hand with the four Infrastructure/*.cs
+    // cross-test non-determinism. oci-blob-sweep (OciBlobSweepService) deletes oci_blobs rows no
+    // manifest references — which is what every test pushing a bare blob creates — so a tick
+    // landing mid-test lowers org_storage_bytes and hands the tenant quota headroom it should not
+    // have. Kept in sync by hand with the four Infrastructure/*.cs
     // factories' DISABLE_BACKGROUND_JOBS value; a job added to that set without updating this
     // list would under-check new violations, so the two are also cross-checked directly in
     // RequiredJobListMatchesTheFourCanonicalFactories below.
@@ -62,6 +70,7 @@ public sealed partial class BackgroundJobEgressComplianceTests
         "threat-feed",
         "deprecation-refresh",
         "license-backfill",
+        "oci-blob-sweep",
     ];
 
     // Matches a class declared directly against WebApplicationFactory<…>, bare or
@@ -187,7 +196,7 @@ public sealed partial class BackgroundJobEgressComplianceTests
             "    {",
             "        builder.WebHost.UseSetting(",
             "            \"DISABLE_BACKGROUND_JOBS\",",
-            "            \"vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill\");",
+            "            \"vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep\");",
             "    }",
             "}");
 
@@ -219,7 +228,7 @@ public sealed partial class BackgroundJobEgressComplianceTests
             "        {",
             "            builder.WebHost.UseSetting(",
             "                \"DISABLE_BACKGROUND_JOBS\",",
-            "                \"vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill\");",
+            "                \"vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep\");",
             "        }",
             "    }",
             "}");

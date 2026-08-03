@@ -129,6 +129,53 @@ public sealed class PackageVersionFilesRepository
     }
 
     /// <summary>
+    /// The file of a version whose filename ends with <paramref name="extension"/>, or
+    /// <see langword="null"/> when the version holds none. The NuGet symbol-download surface uses
+    /// it to reach the <c>.snupkg</c> sitting alongside the <c>.nupkg</c> under one version row.
+    /// Matched in C# over the version's (small, single-digit) file set rather than with a SQL
+    /// suffix predicate, which no index could serve anyway. On a duplicated extension the oldest
+    /// file wins, following <see cref="GetByVersionAsync"/>'s upload ordering.
+    /// </summary>
+    public async Task<PackageVersionFile?> GetByExtensionAsync(
+        string packageVersionId, string extension, CancellationToken ct = default)
+    {
+        var files = await GetByVersionAsync(packageVersionId, ct);
+        return files.FirstOrDefault(f =>
+            f.Filename.EndsWith(extension, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// The subset of <paramref name="packageVersionIds"/> holding at least one file whose name
+    /// ends with <paramref name="extension"/>. Batched for the package-detail view, which needs to
+    /// tell "carries a symbol package" apart from "carries one that indexed nothing" across a
+    /// whole page of versions without going N+1.
+    /// </summary>
+    public async Task<HashSet<string>> GetVersionIdsWithExtensionAsync(
+        string orgId, IReadOnlyList<string> packageVersionIds, string extension,
+        CancellationToken ct = default)
+    {
+        if (packageVersionIds.Count == 0)
+        {
+            return [];
+        }
+
+        await using var conn = await _db.OpenAsync(ct);
+        var rows = await conn.QueryAsync<(string PackageVersionId, string Filename)>(
+            """
+            SELECT package_version_id, filename
+            FROM package_version_files
+            WHERE org_id = @orgId AND package_version_id IN @packageVersionIds
+            """,
+            new { orgId, packageVersionIds });
+        // Suffix-matched in C# rather than with a SQL LIKE '%…' no index could serve; the row set
+        // is already bounded by the page's version ids.
+        return rows
+            .Where(r => r.Filename.EndsWith(extension, StringComparison.OrdinalIgnoreCase))
+            .Select(r => r.PackageVersionId)
+            .ToHashSet(StringComparer.Ordinal);
+    }
+
+    /// <summary>
     /// Resolves a download request: the file record plus its parent version and package for
     /// the block-gate facts. Filename equality rides idx_package_version_files_org_filename.
     /// </summary>

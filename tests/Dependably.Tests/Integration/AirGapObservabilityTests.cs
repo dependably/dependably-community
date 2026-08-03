@@ -228,7 +228,7 @@ public sealed class AirGapObservabilityTests : IAsyncLifetime
             // for the full rationale).
             builder.WebHost.UseSetting(
                 "DISABLE_BACKGROUND_JOBS",
-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill");
+                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
             builder.WebHost.UseSetting("METRICS_ENABLED", "0");
             builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
             builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
@@ -282,7 +282,7 @@ public sealed class AirGapObservabilityTests : IAsyncLifetime
             // for the full rationale).
             builder.WebHost.UseSetting(
                 "DISABLE_BACKGROUND_JOBS",
-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill");
+                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
             builder.WebHost.UseSetting("METRICS_ALLOWED_IPS", "10.0.0.0/8");
             builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
             builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");

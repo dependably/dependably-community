@@ -269,12 +269,22 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         // FIRST.org EPSS, npm/PyPI/NuGet deprecation feeds) against the public internet rather
         // than the in-process WireMock upstream; LicenseBackfillService (license-backfill) makes
         // no outbound call but mutates the shared cache_artifact.license_checked_at column under
-        // a leader lock on every boot, its own source of cross-test non-determinism. Naming all
-        // five job names here keeps the proxy-passthrough path (MockUpstream below) intact — this
-        // disables only these five, not every background job.
+        // a leader lock on every boot, its own source of cross-test non-determinism.
+        //
+        // OciBlobSweepService (oci-blob-sweep) is disabled for a different reason: it DELETES
+        // oci_blobs rows no manifest references, which is what every test pushing a bare blob
+        // creates. A tick landing mid-test lowers org_storage_bytes under the test's feet, and
+        // because the quota gate derives usage from that sum rather than a counter, the tenant
+        // silently regains headroom it should not have — an assertion expecting 413 sees 201. It
+        // runs on the hour at :17, so this surfaces as a test that passes all day and fails in
+        // whichever run happens to straddle that minute. Nothing depends on the scheduled pass:
+        // OciBlobReclaimTests drives OciBlobReclaimer directly.
+        //
+        // Naming these job names here keeps the proxy-passthrough path (MockUpstream below)
+        // intact — this disables only these six, not every background job.
         builder.WebHost.UseSetting(
             "DISABLE_BACKGROUND_JOBS",
-            "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill");
+            "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
 
         builder.WebHost.UseSetting("PyPI:Upstream", MockUpstream.Urls[0]);
         builder.WebHost.UseSetting("Npm:Upstream", MockUpstream.Urls[0]);

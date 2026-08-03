@@ -18,6 +18,7 @@ namespace Dependably.Api.NuGetProtocol;
 public sealed class NuGetFlatContainerHandler(
     OrgRepository orgs,
     PackageRepository packages,
+    PackageVersionFilesRepository versionFiles,
     CacheArtifactRepository cacheArtifacts,
     TenantArtifactAccessRepository tenantAccess,
     TokenRepository tokens,
@@ -478,7 +479,28 @@ public sealed class NuGetFlatContainerHandler(
             return new StatusCodeResult(StatusCodes.Status403Forbidden);
         }
 
-        var stream = await blobs.GetAsync(BlobKeys.StoreKey(pkgVersion.BlobKey), ct);
+        // A NuGet version can hold more than one artifact (.nupkg + .snupkg), so resolve the blob
+        // by the filename actually requested rather than always serving the version row's primary
+        // artifact.
+        //
+        // The fallback to the primary stays — it is what keeps versions predating the multi-file
+        // backfill serving, and what absorbs the case skew between a stored mixed-case filename
+        // and the lowercased name NuGet clients request. What it must NOT do is substitute a
+        // different KIND of artifact: falling back unconditionally served a symbols-only
+        // coordinate's .snupkg to a client asking for the .nupkg, where the restore succeeds, the
+        // "package" is symbol bytes, and nothing anywhere reports an error. So the fallback is
+        // gated on the primary having the same extension the caller asked for.
+        var requestedFile = await versionFiles.GetByVersionAndFilenameAsync(pkgVersion.Id, file, ct);
+        if (requestedFile is null && !MultiFileEcosystems.SameArtifactKind(
+                PackageRepository.DeriveFilename(pkgVersion.BlobKey), file))
+        {
+            return new NotFoundResult();
+        }
+
+        string serveBlobKey = requestedFile?.BlobKey ?? pkgVersion.BlobKey;
+        string? serveChecksum = requestedFile?.ChecksumSha256 ?? pkgVersion.ChecksumSha256;
+
+        var stream = await blobs.GetAsync(BlobKeys.StoreKey(serveBlobKey), ct);
         if (stream is null)
         {
             return new NotFoundResult();
@@ -486,9 +508,9 @@ public sealed class NuGetFlatContainerHandler(
 
         httpContext.Response.Headers["X-Cache"] = "HIT";
         httpContext.Response.Headers["X-Dependably-PURL"] = HeaderSanitizer.Sanitize(pkgVersion.Purl);
-        if (pkgVersion.ChecksumSha256 is not null)
+        if (serveChecksum is not null)
         {
-            httpContext.Response.Headers.ETag = $"\"sha256:{pkgVersion.ChecksumSha256}\"";
+            httpContext.Response.Headers.ETag = $"\"sha256:{serveChecksum}\"";
             httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
         }
         await audit.LogActivityAsync(orgId, "nuget", pkgVersion.Purl, "download", token?.UserId,
@@ -496,6 +518,7 @@ public sealed class NuGetFlatContainerHandler(
         await packages.IncrementDownloadCountAsync(pkgVersion.Id, ct);
         return new FileStreamResult(stream, "application/octet-stream") { FileDownloadName = file };
     }
+
 
     // Serves a proxy NuGet artifact from the global-plane cache. Each NuGet file type
     // (.nupkg, .nuspec, .sha512) is stored as a separate cache_artifact row keyed by

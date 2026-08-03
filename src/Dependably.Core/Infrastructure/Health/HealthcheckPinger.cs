@@ -28,6 +28,14 @@ public sealed class HealthcheckPinger : BackgroundService
     private const int DefaultPingIntervalSeconds = 60;
     private const int DefaultPingTimeoutSeconds = 10;
 
+    // Floors for the same two values. Neither is meaningful at or below zero: a zero interval
+    // turns the loop into a hot spin that pins a thread and hammers the endpoint, and a negative
+    // one makes Task.Delay throw and fault the service. A non-positive timeout is rejected by
+    // HttpClient the same way. Pinging is disabled by omitting HEALTHCHECK_PING_URL, so neither
+    // value carries a "disabled" meaning that a floor would take away.
+    private const int MinPingIntervalSeconds = 1;
+    private const int MinPingTimeoutSeconds = 1;
+
     private readonly IHttpClientFactory _http;
     private readonly IDistributedLock _locks;
     private readonly ReadinessAggregator _readiness;
@@ -64,15 +72,39 @@ public sealed class HealthcheckPinger : BackgroundService
 
         _pingUrl = config["HEALTHCHECK_PING_URL"];
         _failUrl = config["HEALTHCHECK_PING_FAIL_URL"];
-        _interval = TimeSpan.FromSeconds(
-            int.TryParse(config["HEALTHCHECK_PING_INTERVAL_SECONDS"], out int i) ? i : DefaultPingIntervalSeconds);
-        _timeout = TimeSpan.FromSeconds(
-            int.TryParse(config["HEALTHCHECK_PING_TIMEOUT_SECONDS"], out int t) ? t : DefaultPingTimeoutSeconds);
+        _interval = TimeSpan.FromSeconds(ClampToFloor(
+            "HEALTHCHECK_PING_INTERVAL_SECONDS",
+            int.TryParse(config["HEALTHCHECK_PING_INTERVAL_SECONDS"], out int i) ? i : DefaultPingIntervalSeconds,
+            MinPingIntervalSeconds,
+            logger));
+        _timeout = TimeSpan.FromSeconds(ClampToFloor(
+            "HEALTHCHECK_PING_TIMEOUT_SECONDS",
+            int.TryParse(config["HEALTHCHECK_PING_TIMEOUT_SECONDS"], out int t) ? t : DefaultPingTimeoutSeconds,
+            MinPingTimeoutSeconds,
+            logger));
         _usePost = string.Equals(config["HEALTHCHECK_PING_METHOD"], "POST", StringComparison.OrdinalIgnoreCase);
         _sendPayload = string.Equals(config["HEALTHCHECK_PING_PAYLOAD"], "status", StringComparison.OrdinalIgnoreCase);
         _leaderScope = string.Equals(config["HEALTHCHECK_PING_SCOPE"], "leader", StringComparison.OrdinalIgnoreCase);
         _instanceId = config["HEALTHCHECK_PING_INSTANCE_ID"] ?? Environment.MachineName;
         _deploymentMode = (config["DEPENDABLY_DEPLOYMENT_MODE"] ?? "standalone").ToLowerInvariant();
+    }
+
+    /// <summary>
+    /// Returns <paramref name="configured"/>, or <paramref name="floor"/> when it sits below it,
+    /// logging once so a coerced value is visible rather than silently substituted.
+    /// </summary>
+    private static int ClampToFloor(string key, int configured, int floor, ILogger logger)
+    {
+        if (configured >= floor)
+        {
+            return configured;
+        }
+
+        logger.LogWarning(
+            "{Key}={Configured} is below the supported minimum and has been raised to {Floor}s. "
+            + "Omit HEALTHCHECK_PING_URL to disable pinging.",
+            key, configured, floor);
+        return floor;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)

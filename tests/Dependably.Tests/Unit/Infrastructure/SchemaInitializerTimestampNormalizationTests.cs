@@ -37,6 +37,7 @@ public sealed class SchemaInitializerTimestampNormalizationTests : IAsyncLifetim
             ("claim", "created_at"), ("claim", "updated_at"), ("claim", "deleted_at"),
             ("claim_history", "occurred_at"),
             ("packages", "upstream_latest_published_at"), ("package_versions", "published_at"),
+            ("cache_artifact", "published_at"),
         })
         {
             await TemporalCheckTestHelper.StripSqliteCheckAsync(conn, table, column);
@@ -193,6 +194,44 @@ public sealed class SchemaInitializerTimestampNormalizationTests : IAsyncLifetim
 
         Assert.Equal("2026-03-04T05:06:07.123456Z", packagePublishedAt);
         Assert.Equal("2026-03-04T05:06:07.123456Z", versionPublishedAt);
+    }
+
+    [Fact]
+    public async Task CacheArtifact_PublishedAt_LegacyRawDateTimeOffsetBind_NormalizesAtMicrosecondPrecision()
+    {
+        // cache_artifact.published_at is the one column on this table whose writer
+        // (CacheArtifactRepository.UpdateGlobalFactsAsync) bound a raw DateTimeOffset parameter, so
+        // it is exposed to exactly the provider-native serialization the handler fix addresses —
+        // and it was added by a bare ALTER TABLE ADD COLUMN, so no timestamptz conversion covers it
+        // either. Swept row-by-row rather than set-based because the column is microsecond
+        // precision: a set-based strftime pass would truncate the sub-second digits the upstream
+        // registry declared and this artifact re-serves.
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO cache_artifact
+                    (id, ecosystem, name, version, filename, blob_key, content_hash, published_at)
+                VALUES
+                    ('ca-pub', 'pypi', 'requests', '2.31.0', 'requests-2.31.0.tar.gz', 'proxy/stu', 'h',
+                     '2026-03-04 05:06:07.1234560+02:00')
+                """);
+        }
+
+        await ReapplyAsync();
+
+        await using var read = await _db.OpenAsync();
+        string publishedAt = await read.QuerySingleAsync<string>(
+            "SELECT published_at FROM cache_artifact WHERE id = 'ca-pub'");
+
+        // +02:00 shifts back 2h, and all six fractional digits survive.
+        Assert.Equal("2026-03-04T03:06:07.123456Z", publishedAt);
+
+        // Idempotent: a second sweep leaves the now-canonical value byte-identical.
+        await ReapplyAsync();
+        await using var reread = await _db.OpenAsync();
+        Assert.Equal(publishedAt, await reread.QuerySingleAsync<string>(
+            "SELECT published_at FROM cache_artifact WHERE id = 'ca-pub'"));
     }
 
     [Theory]

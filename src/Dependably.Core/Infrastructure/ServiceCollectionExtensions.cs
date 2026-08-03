@@ -30,6 +30,9 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<PackageRepository>();
         services.AddSingleton<PackageVersionFilesRepository>();
         services.AddSingleton<NuGetSymbolIndexRepository>();
+        // Scoped, not singleton: it resolves IBlobStore, which is request-scoped for the
+        // tier-resolving decorator.
+        services.AddScoped<NuGetSymbolIndexer>();
         services.AddSingleton<StatsSnapshotRepository>();
         services.AddSingleton<TokenRepository>();
         // Async batched activity writer. The hosted service drains the channel into

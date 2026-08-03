@@ -13,8 +13,9 @@ namespace Dependably.Tests.Infrastructure;
 /// need in order to exercise the repair sweep against a bad shape.
 ///
 /// Real pre-existing databases get into this state simply by having been created before this
-/// constraint shipped — neither provider retrofits it onto an existing database this release
-/// (see <c>SchemaInitializer.TemporalColumnNaming.cs</c>). A fresh <see cref="TestMetadataStore"/>
+/// constraint shipped; on Postgres these helpers are also what lets a test reproduce that state
+/// so the retrofit in <c>SchemaInitializer.TemporalCheckRetrofit.cs</c> has something to do.
+/// A fresh <see cref="TestMetadataStore"/>
 /// / live-Postgres reset, by contrast, gets the constraint from <c>InitializeAsync()</c>
 /// immediately (both providers declare it inline in their <c>CREATE TABLE</c> block), so a test
 /// that wants to plant a legacy row has to remove the constraint first — these helpers are the

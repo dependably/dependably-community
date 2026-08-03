@@ -37,6 +37,7 @@ public sealed class TimestampNormalizationPostgresTests
             // immediately from InitializeAsync() above, so it has to be dropped first.
             await TemporalCheckTestHelper.DropPostgresCheckAsync(conn, "cache_artifact", "first_cached_at");
             await TemporalCheckTestHelper.DropPostgresCheckAsync(conn, "cache_artifact", "last_accessed_at");
+            await TemporalCheckTestHelper.DropPostgresCheckAsync(conn, "cache_artifact", "published_at");
             await TemporalCheckTestHelper.DropPostgresCheckAsync(conn, "audit_event", "occurred_at");
             await TemporalCheckTestHelper.DropPostgresCheckAsync(conn, "packages", "upstream_latest_published_at");
             await TemporalCheckTestHelper.DropPostgresCheckAsync(conn, "package_versions", "published_at");
@@ -45,10 +46,11 @@ public sealed class TimestampNormalizationPostgresTests
                 """
                 INSERT INTO cache_artifact
                     (id, ecosystem, name, version, filename, blob_key, content_hash,
-                     first_cached_at, last_accessed_at)
+                     first_cached_at, last_accessed_at, published_at)
                 VALUES
                     ('ca1', 'npm', 'lodash', '1.0.0', 'lodash-1.0.0.tgz', 'proxy/abc', 'h',
-                     '2026-03-04 05:06:07.5+02', '2026-03-04 05:06:07+00')
+                     '2026-03-04 05:06:07.5+02', '2026-03-04 05:06:07+00',
+                     '2026-03-04 05:06:07.123456+02')
                 """);
             await conn.ExecuteAsync(
                 """
@@ -77,6 +79,13 @@ public sealed class TimestampNormalizationPostgresTests
             // +02 (Postgres short-form, no colon) shifts 05:06:07.5 back 2h to 03:06:07Z.
             Assert.Equal("2026-03-04T03:06:07Z", first);
             Assert.Equal("2026-03-04T05:06:07Z", last);
+
+            // published_at is the microsecond-precision column on this table, swept row-by-row so
+            // the sub-second digits the upstream registry declared survive the UTC shift.
+            Assert.Equal(
+                "2026-03-04T03:06:07.123456Z",
+                await conn.QuerySingleAsync<string>(
+                    "SELECT published_at FROM cache_artifact WHERE id = 'ca1'"));
 
             string occurredAt = await conn.QuerySingleAsync<string>(
                 "SELECT occurred_at FROM audit_event WHERE event_id = 'ev1'");

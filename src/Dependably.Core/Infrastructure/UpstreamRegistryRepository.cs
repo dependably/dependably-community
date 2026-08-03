@@ -48,6 +48,7 @@ public sealed class UpstreamRegistryRepository
                    url AS Url, position AS Position, created_at AS CreatedAt,
                    auth_type AS AuthType, username AS Username,
                    token_endpoint AS TokenEndpoint, prefixes AS PrefixesJson,
+                   symbol_server_url AS SymbolServerUrl,
                    CASE WHEN secret IS NOT NULL THEN 1 ELSE 0 END AS HasSecret
             FROM upstream_registry
             WHERE org_id = @orgId
@@ -70,7 +71,8 @@ public sealed class UpstreamRegistryRepository
         await using var conn = await _db.OpenAsync(ct);
         var rows = await conn.QueryAsync<RawRegistryRow>(
             """
-            SELECT url AS Url, auth_type AS AuthType, username AS Username, secret AS Secret
+            SELECT url AS Url, auth_type AS AuthType, username AS Username, secret AS Secret,
+                   symbol_server_url AS SymbolServerUrl
             FROM upstream_registry
             WHERE org_id = @orgId AND ecosystem = @ecosystem
             ORDER BY position, created_at
@@ -80,7 +82,8 @@ public sealed class UpstreamRegistryRepository
         return rows.Select(r => new UpstreamSource(
             r.Url ?? "",
             BuildUpstreamAuthHeader(
-                r.AuthType, r.Username, r.Secret is null ? null : _envelope.Unprotect(r.Secret))))
+                r.AuthType, r.Username, r.Secret is null ? null : _envelope.Unprotect(r.Secret)),
+            r.SymbolServerUrl))
             .ToList();
     }
 
@@ -130,11 +133,27 @@ public sealed class UpstreamRegistryRepository
 
         await conn.ExecuteAsync(
             """
-            INSERT INTO upstream_registry (id, org_id, ecosystem, name, url, position, auth_type, username, secret)
-            VALUES (@id, @orgId, @ecosystem, @name, @url, @position, @authType, @username, @secret)
+            INSERT INTO upstream_registry
+                (id, org_id, ecosystem, name, url, position, auth_type, username, secret, symbol_server_url)
+            VALUES
+                (@id, @orgId, @ecosystem, @name, @url, @position, @authType, @username, @secret, @symbolServerUrl)
             ON CONFLICT DO NOTHING
             """,
-            new { id, orgId, ecosystem, name, url, position = nextPosition, authType, username, secret = storedSecret });
+            new
+            {
+                id,
+                orgId,
+                ecosystem,
+                name,
+                url,
+                position = nextPosition,
+                authType,
+                username,
+                secret = storedSecret,
+                // Seeded for a nuget.org upstream so symbol proxying works without the operator
+                // having to know the symbol host; NULL (no symbol proxying) for anything else.
+                symbolServerUrl = req.SymbolServerUrl ?? NuGetSymbolServers.DefaultFor(ecosystem, url),
+            });
 
         return new UpstreamRegistryEntry
         {
@@ -148,7 +167,24 @@ public sealed class UpstreamRegistryRepository
             AuthType = authType,
             Username = username,
             HasSecret = storedSecret is not null,
+            SymbolServerUrl = req.SymbolServerUrl ?? NuGetSymbolServers.DefaultFor(ecosystem, url),
         };
+    }
+
+    /// <summary>
+    /// Sets (or clears, with <see langword="null"/>) the NuGet symbol-server base URL of one
+    /// upstream. Clearing it switches symbol proxying off for that upstream.
+    /// </summary>
+    public async Task SetSymbolServerUrlAsync(
+        string orgId, string entryId, string? symbolServerUrl, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        await conn.ExecuteAsync(
+            """
+            UPDATE upstream_registry SET symbol_server_url = @symbolServerUrl
+            WHERE id = @entryId AND org_id = @orgId
+            """,
+            new { orgId, entryId, symbolServerUrl });
     }
 
     /// <summary>
@@ -271,7 +307,8 @@ public sealed class UpstreamRegistryRepository
         var rows = await conn.QueryAsync<RawRegistryRow>(
             """
             SELECT id, url AS Url, auth_type AS AuthType, username AS Username,
-                   secret AS Secret, token_endpoint AS TokenEndpoint, prefixes AS PrefixesJson
+                   secret AS Secret, token_endpoint AS TokenEndpoint, prefixes AS PrefixesJson,
+                   symbol_server_url AS SymbolServerUrl
             FROM upstream_registry
             WHERE org_id = @orgId AND ecosystem = 'oci'
             ORDER BY position, created_at
@@ -307,6 +344,7 @@ public sealed class UpstreamRegistryRepository
         TokenEndpoint = r.TokenEndpoint,
         Prefixes = ParsePrefixes(r.PrefixesJson),
         HasSecret = r.HasSecret,
+        SymbolServerUrl = r.SymbolServerUrl,
     };
 
     private static List<string> ParsePrefixes(string? json)
@@ -363,6 +401,8 @@ public sealed class UpstreamRegistryRepository
         // Prefixes as raw JSON TEXT (parsed by ParsePrefixes)
         public string? PrefixesJson { get; set; }
         public bool HasSecret { get; set; }
+        // NuGet: symbol-server base URL for this upstream.
+        public string? SymbolServerUrl { get; set; }
     }
 }
 
@@ -383,4 +423,5 @@ public sealed record NewUpstreamRegistry(
     string? Name = null,
     string? AuthType = null,
     string? Username = null,
-    string? Secret = null);
+    string? Secret = null,
+    string? SymbolServerUrl = null);

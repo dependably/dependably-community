@@ -5689,6 +5689,24 @@ dotnet/</target>
         <target>Registres en amont</target>
       </segment>
     </unit>
+    <unit id="settings.proxy.upstreamRegistries.symbolServer.disabled">
+      <segment state="translated">
+        <source>not set — no symbol proxying</source>
+        <target>non défini — aucun proxy de symboles</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.upstreamRegistries.symbolServer.hint">
+      <segment state="translated">
+        <source>SSQP base URL this upstream serves PDBs from. A symbol server is a different host from the v3 index, so it cannot be derived from it — nuget.org&apos;s is https://symbols.nuget.org/download/symbols, and a nuget.org upstream is set to it automatically. Leave empty to turn symbol proxying off for this upstream.</source>
+        <target>URL de base SSQP à partir de laquelle cet amont sert les PDB. Un serveur de symboles est un hôte différent de l&apos;index v3 et ne peut donc pas en être déduit — celui de nuget.org est https://symbols.nuget.org/download/symbols, et un amont nuget.org y est associé automatiquement. Laissez vide pour désactiver le proxy de symboles pour cet amont.</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.upstreamRegistries.symbolServer.label">
+      <segment state="translated">
+        <source>Symbol server</source>
+        <target>Serveur de symboles</target>
+      </segment>
+    </unit>
     <unit id="settings.proxy.verifyMavenSignatures">
       <segment state="translated">
         <source>Maven signature verification</source>
@@ -9491,6 +9509,30 @@ dotnet/</target>
       <segment state="translated">
         <source>signed</source>
         <target>signée</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.badges.symbols">
+      <segment state="translated">
+        <source>symbols ({count})</source>
+        <target>symboles ({count})</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.badges.symbolsHelp">
+      <segment state="translated">
+        <source>This version ships a symbol package; {count} Portable PDB(s) are indexed and resolvable by debug-id from the symbol server.</source>
+        <target>Cette version fournit un paquet de symboles ; {count} PDB portable(s) sont indexés et résolubles par debug-id depuis le serveur de symboles.</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.badges.symbolsUnindexed">
+      <segment state="translated">
+        <source>symbols not indexed</source>
+        <target>symboles non indexés</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.badges.symbolsUnindexedHelp">
+      <segment state="translated">
+        <source>A symbol package is stored for this version but no Portable PDB was indexed, so its PDBs do not resolve by debug-id. Native/Windows PDBs are not indexable; if the package does contain Portable PDBs, re-index the version.</source>
+        <target>Un paquet de symboles est stocké pour cette version mais aucun PDB portable n&apos;a été indexé ; ses PDB ne sont donc pas résolubles par debug-id. Les PDB natifs/Windows ne sont pas indexables ; si le paquet contient bien des PDB portables, réindexez la version.</target>
       </segment>
     </unit>
     <unit id="versionDetail.badges.verified">

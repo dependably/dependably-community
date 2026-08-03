@@ -356,6 +356,55 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
         return NoContent();
     }
 
+    /// <summary>
+    /// PUT /api/v1/orgs/{org}/upstream-registries/{id}/symbol-server
+    ///
+    /// Sets or clears a NuGet upstream's symbol-server base URL. An absent or empty
+    /// <c>symbolServerUrl</c> CLEARS it, switching symbol proxying off for that upstream — the
+    /// fail-closed state. Clearing is an explicit operator action precisely so the nuget.org seed
+    /// cannot silently reinstate it on the next boot.
+    /// </summary>
+    [HttpPut("api/v1/upstream-registries/{id}/symbol-server")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    public async Task<IActionResult> SetSymbolServer(
+        string id, [FromBody] SetSymbolServerRequest req, CancellationToken ct)
+    {
+        var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
+        if (result is not null)
+        {
+            return result;
+        }
+
+        string? url = string.IsNullOrWhiteSpace(req.SymbolServerUrl) ? null : req.SymbolServerUrl.Trim();
+        if (url is not null)
+        {
+            // A symbol server is fetched server-side, so an operator-supplied URL here is an SSRF
+            // primitive exactly like an upstream base URL — same validation, same http opt-in.
+            string? urlProblem = UpstreamUrlValidator.ValidateUrl(url);
+            if (urlProblem is not null)
+            {
+                return _problems.ValidationErrorAction("symbolServerUrl", urlProblem);
+            }
+
+            if (!AllowInsecureUpstreams
+                && Uri.TryCreate(url, UriKind.Absolute, out var schemeCheck)
+                && schemeCheck.Scheme == Uri.UriSchemeHttp)
+            {
+                return _problems.ValidationErrorActionKey("symbolServerUrl", "error.upstream.httpsRequired");
+            }
+        }
+
+        string orgId = CurrentTenantId();
+        await _registries.SetSymbolServerUrlAsync(orgId, id, url, ct);
+
+        await _audit.LogAsync("upstream_registry_symbol_server_set", orgId, GetUserId(),
+            detail: System.Text.Json.JsonSerializer.Serialize(
+                new { id, cleared = url is null },
+                Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+
+        return NoContent();
+    }
+
     /// <summary>PUT /api/v1/orgs/{org}/upstream-registries/{ecosystem}/order</summary>
     [HttpPut("api/v1/upstream-registries/{ecosystem}/order")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]

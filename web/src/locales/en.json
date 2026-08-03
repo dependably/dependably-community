@@ -310,6 +310,10 @@
       "provenanceFailedHelp": "This version carried a signature that did not verify against the pinned trust anchors.",
       "provenanceUnsigned": "unsigned",
       "provenanceUnsignedHelp": "The upstream registry published no signature for this version.",
+      "symbols": "symbols ({count})",
+      "symbolsHelp": "This version ships a symbol package; {count} Portable PDB(s) are indexed and resolvable by debug-id from the symbol server.",
+      "symbolsUnindexed": "symbols not indexed",
+      "symbolsUnindexedHelp": "A symbol package is stored for this version but no Portable PDB was indexed, so its PDBs do not resolve by debug-id. Native/Windows PDBs are not indexable; if the package does contain Portable PDBs, re-index the version.",
       "licenseBlockedHelp": "This license is on the org's license blocklist.",
       "licenseUnknown": "unknown",
       "licenseUnknownHelp": "No license was extracted for this version."
@@ -1025,6 +1029,11 @@
         "emptyDisabled": "No upstream registries — proxying is disabled for {ecosystem}.",
         "dragHint": "Drag to reorder",
         "removeConfirm": "Remove this upstream registry?",
+        "symbolServer": {
+          "label": "Symbol server",
+          "disabled": "not set — no symbol proxying",
+          "hint": "SSQP base URL this upstream serves PDBs from. A symbol server is a different host from the v3 index, so it cannot be derived from it — nuget.org's is https://symbols.nuget.org/download/symbols, and a nuget.org upstream is set to it automatically. Leave empty to turn symbol proxying off for this upstream."
+        },
         "modal": {
           "title": "Add upstream registry",
           "ecosystem": "Ecosystem",

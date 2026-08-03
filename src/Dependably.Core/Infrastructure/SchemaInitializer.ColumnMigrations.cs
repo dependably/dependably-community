@@ -755,6 +755,17 @@ public sealed partial class SchemaInitializer
             // routing list (JSON TEXT array). Both are OCI-only; all other ecosystems leave them NULL.
             "ALTER TABLE upstream_registry ADD COLUMN token_endpoint TEXT",
             "ALTER TABLE upstream_registry ADD COLUMN prefixes TEXT",
+            // NuGet symbol-server base URL for this upstream. A symbol server is a different host
+            // from the v3 index, so it cannot be derived from url; NULL disables symbol proxying
+            // for the upstream, which is the fail-closed default.
+            "ALTER TABLE upstream_registry ADD COLUMN symbol_server_url TEXT",
+            // Polymorphic owner on the symbol index so a PROXIED .snupkg — which has a
+            // cache_artifact row and no package_versions row — can be indexed alongside hosted
+            // ones. package_version_id also has to lose NOT NULL, which SQLite cannot do with
+            // ALTER; the recreate-table reshape handles that provider.
+            "ALTER TABLE nuget_symbol_index ADD COLUMN cache_artifact_id TEXT REFERENCES cache_artifact(id) ON DELETE CASCADE",
+            "ALTER TABLE nuget_symbol_index ADD COLUMN owner_kind TEXT NOT NULL DEFAULT 'package_version'",
+            "CREATE INDEX IF NOT EXISTS idx_nuget_symbol_index_ca ON nuget_symbol_index (cache_artifact_id)",
             // Tri-state same-version-push org policy. 'block' (default) = always reject duplicates;
             // 'exception' = blocked by default but per-package grant allowed;
             // 'allow' = allowed by default but per-package block allowed.

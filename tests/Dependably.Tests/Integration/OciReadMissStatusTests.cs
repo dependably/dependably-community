@@ -240,7 +240,7 @@ public sealed class OciReadMissStatusTests
             builder.WebHost.UseSetting("ANON_RATE_LIMIT_PERMITS", "100000");
             builder.WebHost.UseSetting(
                 "DISABLE_BACKGROUND_JOBS",
-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill");
+                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
 
             var app = builder.Build();
             Program.ConfigureApp(app);

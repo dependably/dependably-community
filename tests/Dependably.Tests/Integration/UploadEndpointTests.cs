@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using Dapper;
 using Dependably.Infrastructure;
+using Dependably.Protocol;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -544,5 +545,78 @@ public sealed class UploadEndpointTests : IClassFixture<DependablyFactory>, IAsy
 
         var resp = await client.PostAsync("/api/v1/admin/import/npm", content);
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task Upload_NupkgAndSnupkg_BothAcceptedAndSymbolsResolve()
+    {
+        // The drag-and-drop path a user actually hits: both artifacts of one build, uploaded
+        // together. The .snupkg used to be rejected with "nupkg_invalid — authors is required"
+        // because EcosystemDetector validated every archive as a PACKAGE, and `dotnet pack`
+        // strips <authors> from a symbol package's reduced manifest. The push path was fixed
+        // for this; the upload path passed isSymbol: false and was not.
+        string id = $"UploadSym{Guid.NewGuid():N}"[..18];
+        const string version = "2.1.0";
+        var signature = Guid.NewGuid();
+        var (nupkgBytes, _) = NuGetFixtures.BuildNupkg(id, version);
+        byte[] snupkgBytes = NuGetFixtures.BuildSnupkgWithPdbs(
+            id, version, ($"{id}.pdb", NuGetFixtures.BuildPortablePdb(signature)));
+
+        using var uploadClient = await AdminClient();
+        using var content = new MultipartFormDataContent();
+        content.Add(File(nupkgBytes), "files", $"{id}.{version}.nupkg");
+        content.Add(File(snupkgBytes), "files", $"{id}.{version}.snupkg");
+        var uploadResp = await uploadClient.PostAsync("/api/v1/admin/upload", content);
+
+        Assert.Equal(HttpStatusCode.OK, uploadResp.StatusCode);
+        var doc = JsonDocument.Parse(await uploadResp.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal(2, doc.GetProperty("accepted").GetInt32());
+
+        string lowerId = id.ToLowerInvariant();
+        using var pullClient = _factory.CreateClientWithBasic(await _factory.CreateToken("pull"));
+
+        // The package still serves its own bytes — the symbol upload must not have repointed
+        // the version row's primary artifact.
+        var pkgResp = await pullClient.GetAsync(
+            $"/nuget/flatcontainer/{lowerId}/{version}/{lowerId}.{version}.nupkg");
+        Assert.Equal(HttpStatusCode.OK, pkgResp.StatusCode);
+        Assert.Equal(nupkgBytes, await pkgResp.Content.ReadAsByteArrayAsync());
+
+        // The symbol archive is served from the symbol surface.
+        var symResp = await pullClient.GetAsync($"/nuget/symbols/{id}/{version}/{id}.{version}.snupkg");
+        Assert.Equal(HttpStatusCode.OK, symResp.StatusCode);
+        Assert.Equal(snupkgBytes, await symResp.Content.ReadAsByteArrayAsync());
+
+        // And its PDBs are INDEXED, so a debugger resolves them by debug-id. Uploading without
+        // indexing would store fine and silently fail mid-debugging session.
+        string key = NuGetSymbolKey.PortableKey(signature);
+        var ssqpResp = await pullClient.GetAsync($"/nuget/symbols/{id}.pdb/{key}/{id}.pdb");
+        Assert.Equal(HttpStatusCode.OK, ssqpResp.StatusCode);
+    }
+
+    [Fact]
+    public async Task Upload_SnupkgAlone_IsAccepted()
+    {
+        // Symbols uploaded on their own, with no package at that coordinate — the other half of
+        // the drag-and-drop case.
+        string id = $"UploadSymOnly{Guid.NewGuid():N}"[..18];
+        const string version = "1.0.0";
+        var signature = Guid.NewGuid();
+        byte[] snupkgBytes = NuGetFixtures.BuildSnupkgWithPdbs(
+            id, version, ($"{id}.pdb", NuGetFixtures.BuildPortablePdb(signature)));
+
+        using var uploadClient = await AdminClient();
+        using var content = new MultipartFormDataContent();
+        content.Add(File(snupkgBytes), "files", $"{id}.{version}.snupkg");
+        var uploadResp = await uploadClient.PostAsync("/api/v1/admin/upload", content);
+
+        Assert.Equal(HttpStatusCode.OK, uploadResp.StatusCode);
+        var doc = JsonDocument.Parse(await uploadResp.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal(1, doc.GetProperty("accepted").GetInt32());
+
+        using var pullClient = _factory.CreateClientWithBasic(await _factory.CreateToken("pull"));
+        string key = NuGetSymbolKey.PortableKey(signature);
+        var ssqpResp = await pullClient.GetAsync($"/nuget/symbols/{id}.pdb/{key}/{id}.pdb");
+        Assert.Equal(HttpStatusCode.OK, ssqpResp.StatusCode);
     }
 }

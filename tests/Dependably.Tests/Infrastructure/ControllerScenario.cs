@@ -400,7 +400,7 @@ public sealed class ControllerScenario : IAsyncDisposable
         var orgSvc = new OrgControllerServices(
             Orgs: orgs, Packages: packages,
             Inventory: new ArtifactInventoryRepository(db, packages, new CacheArtifactRepository(db), vulns),
-            VersionFiles: new PackageVersionFilesRepository(db, Clock), PackageAnalytics: packageAnalytics,
+            VersionFiles: new PackageVersionFilesRepository(db, Clock), SymbolIndex: new NuGetSymbolIndexRepository(db, Clock), PackageAnalytics: packageAnalytics,
             StatsSnapshots: statsSnapshots,
             Tokens: tokens, Invites: invites,
             Allowlist: allowlist, Blocklist: blocklist, Audit: audit, Guard: guard,
@@ -498,7 +498,12 @@ public sealed class ControllerScenario : IAsyncDisposable
             Publish: PublishService, ClaimResolver: claimResolver,
             Licenses: licenses, LimitResolver: uploadLimitResolver,
             StagingPath: Path.GetTempPath(),
-            Invalidation: TestMetadataInvalidation.Coordinator(scenarioCache));
+            Invalidation: TestMetadataInvalidation.Coordinator(scenarioCache),
+            SymbolIndexer: new Dependably.Infrastructure.NuGetSymbolIndexer(
+                new Dependably.Infrastructure.NuGetSymbolIndexRepository(db, Clock),
+                blobs,
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Infrastructure.NuGetSymbolIndexer>.Instance),
+            Logger: Microsoft.Extensions.Logging.Abstractions.NullLogger<ImportController>.Instance);
         var import = new ImportController(importSvc) { ControllerContext = ctx };
         var search = new SearchController(packages, guard) { ControllerContext = ctx };
 

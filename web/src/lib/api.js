@@ -346,6 +346,10 @@ export const api = {
     req('POST', '/upstream-registries', { ecosystem: 'oci', url, name: name || null, authType, username: username || null, secret: secret || null, tokenEndpoint: tokenEndpoint || null, prefixes }),
   deleteUpstreamRegistry: (id) => req('DELETE', `/upstream-registries/${id}`),
   reorderUpstreamRegistries: (ecosystem, ids) => req('PUT', `/upstream-registries/${ecosystem}/order`, { ids }),
+  // NuGet only. An empty/null url CLEARS the field, which switches symbol proxying off for that
+  // upstream — the fail-closed state, so it is an explicit action rather than a side effect.
+  setUpstreamSymbolServer: (id, symbolServerUrl) =>
+    req('PUT', `/upstream-registries/${id}/symbol-server`, { symbolServerUrl }),
 
   // Signature trust anchors — per-org public key material for signature verification.
   getTrustAnchors: () => req('GET', '/trust-anchors'),

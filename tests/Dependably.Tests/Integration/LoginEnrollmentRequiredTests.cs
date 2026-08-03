@@ -401,7 +401,7 @@ public sealed class SystemLoginEnrollmentRequiredTests : IAsyncLifetime
             // for the full rationale).
             builder.WebHost.UseSetting(
                 "DISABLE_BACKGROUND_JOBS",
-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill");
+                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
             builder.WebHost.UseSetting("REQUIRE_MFA", "true");
             builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
             builder.WebHost.UseSetting("LOGIN_RATE_LIMIT_PERMITS", "100000");

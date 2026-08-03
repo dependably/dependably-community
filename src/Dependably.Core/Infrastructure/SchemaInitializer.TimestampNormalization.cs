@@ -35,19 +35,31 @@ namespace Dependably.Infrastructure;
 /// per column per boot, but a cheap one: it matches nothing on a database with no legacy rows,
 /// and is ~100x faster than a per-row round trip on one that has them (see
 /// <c>SchemaInitializerTimestampNormalizationTests</c> for a measured comparison).</item>
-/// <item><c>package_versions.published_at</c> and <c>packages.upstream_latest_published_at</c>
-/// are microsecond precision (<see cref="UtcTimestamp.PreciseFormat"/>), and neither SQLite's
-/// <c>strftime</c> nor a portable cross-provider expression can format a 6-digit fractional
-/// second — SQLite's finest built-in resolution is milliseconds. These two are swept row-by-row
-/// in C# instead, using <see cref="Dapper.SqlMapper.QueryUnbufferedAsync{T}"/> so a legacy
-/// backlog is never buffered in full, and only ever touching rows the same
-/// not-already-canonical filter selects. Both columns are set once per package/version when an
-/// upstream publish date is known — not per download or per proxy fetch — so their row count is
-/// orders of magnitude smaller than the set-based columns above, and neither was reachable
-/// through the DateTimeOffsetHandler in the first place (both were, and remain, written via an
-/// explicit string conversion at the call site), so a legacy row here is bounded by however long
-/// the OLD <c>ToUniversalTime().ToString("o")</c> writer shipped, not by the ongoing blue-green
-/// cutover window the other nine columns are exposed to.</item>
+/// <item><c>package_versions.published_at</c>, <c>packages.upstream_latest_published_at</c>, and
+/// <c>cache_artifact.published_at</c> are microsecond precision
+/// (<see cref="UtcTimestamp.PreciseFormat"/>), and neither SQLite's <c>strftime</c> nor a
+/// portable cross-provider expression can format a 6-digit fractional second — SQLite's finest
+/// built-in resolution is milliseconds. Sweeping them set-based at second precision would not
+/// merely reshape a legacy value, it would truncate sub-second digits the CHECK accepts and the
+/// column is documented to carry (these instants are declared by the upstream registry and
+/// re-served verbatim to clients). So these three are swept row-by-row in C# instead, using
+/// <see cref="Dapper.SqlMapper.QueryUnbufferedAsync{T}"/> so a legacy backlog is never buffered
+/// in full, and only ever touching rows the same not-already-canonical filter selects. All three
+/// are set once per package/version/artifact when an upstream publish date is known — not per
+/// download or per proxy cache hit — so their row count is orders of magnitude smaller than the
+/// set-based columns above.
+///
+/// The two <c>package_versions</c>/<c>packages</c> columns were never reachable through the
+/// DateTimeOffsetHandler (both were, and remain, written via an explicit string conversion at
+/// the call site), so a legacy row there is bounded by however long the old
+/// <c>ToUniversalTime().ToString("o")</c> writer shipped. <c>cache_artifact.published_at</c> is
+/// the opposite case and the reason it belongs here: its writer
+/// (<c>CacheArtifactRepository.UpdateGlobalFactsAsync</c>) bound a raw <see cref="DateTimeOffset"/>
+/// parameter, so it is exposed to exactly the provider-native serialization the handler fix
+/// addresses — and to the ongoing blue-green window, the same as the set-based columns. It was
+/// added by a bare <c>ALTER TABLE … ADD COLUMN</c> and is not covered by
+/// <c>ConvertLegacyTimestamptzColumnsAsync</c> either, so this sweep is its only repair
+/// path.</item>
 /// </list>
 /// </summary>
 public sealed partial class SchemaInitializer
@@ -76,6 +88,7 @@ public sealed partial class SchemaInitializer
 
         await SweepColumnRowByRowAsync(conn, "package_versions", "id", "published_at");
         await SweepColumnRowByRowAsync(conn, "packages", "id", "upstream_latest_published_at");
+        await SweepColumnRowByRowAsync(conn, "cache_artifact", "id", "published_at");
     }
 
     // SQLite: case-sensitive digit-position GLOB (no range validation — strftime returns NULL

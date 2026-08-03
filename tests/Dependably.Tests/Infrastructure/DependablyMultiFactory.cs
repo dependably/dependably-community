@@ -94,7 +94,7 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
         // these five, not every background job.
         builder.WebHost.UseSetting(
             "DISABLE_BACKGROUND_JOBS",
-            "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill");
+            "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
 
         builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
         // TestServer requests share one "unknown" rate-limit partition (no remote IP);

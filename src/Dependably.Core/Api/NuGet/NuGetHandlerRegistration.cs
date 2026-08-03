@@ -23,6 +23,7 @@ internal static class NuGetHandlerRegistration
         services.AddScoped<NuGetSearchHandler>();
         services.AddScoped<NuGetRegistrationHandler>();
         services.AddScoped<NuGetFlatContainerHandler>();
+        services.AddScoped<NuGetSymbolProxyFetcher>();
         services.AddScoped<NuGetPublishHandler>(sp =>
         {
             string stagingPath = sp.GetRequiredService<StagingOptions>().Path;
@@ -37,6 +38,11 @@ internal static class NuGetHandlerRegistration
                 claimResolver: sp.GetRequiredService<ClaimResolver>(),
                 licenses: sp.GetRequiredService<LicenseRepository>(),
                 symbolIndex: sp.GetRequiredService<NuGetSymbolIndexRepository>(),
+                symbolIndexer: sp.GetRequiredService<NuGetSymbolIndexer>(),
+                versionFiles: sp.GetRequiredService<PackageVersionFilesRepository>(),
+                blockGate: sp.GetRequiredService<BlockGateService>(),
+                cacheArtifacts: sp.GetRequiredService<CacheArtifactRepository>(),
+                symbolProxy: sp.GetRequiredService<NuGetSymbolProxyFetcher>(),
                 invalidation: sp.GetRequiredService<MetadataInvalidationCoordinator>(),
                 logger: sp.GetRequiredService<ILogger<NuGetPublishHandler>>(),
                 time: sp.GetRequiredService<TimeProvider>(),

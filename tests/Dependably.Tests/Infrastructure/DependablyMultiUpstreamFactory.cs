@@ -90,7 +90,7 @@ public sealed class DependablyMultiUpstreamFactory : WebApplicationFactory<Progr
         // disables only these five, not every background job.
         builder.WebHost.UseSetting(
             "DISABLE_BACKGROUND_JOBS",
-            "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill");
+            "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
 
         builder.WebHost.UseSetting("PyPI:Upstream", MockUpstream.Urls[0]);
         builder.WebHost.UseSetting("Npm:Upstream", MockUpstream.Urls[0]);

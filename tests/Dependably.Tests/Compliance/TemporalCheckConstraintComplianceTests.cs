@@ -9,8 +9,10 @@ namespace Dependably.Tests.Compliance;
 /// <c>*_at</c> / <c>*_since</c>, plus the small set of established non-suffixed exceptions) must
 /// carry the exact <see cref="TemporalCheckPredicate"/> text in its <c>CREATE TABLE</c> declaration,
 /// in BOTH <c>Schema.sql</c> and <c>Schema.pg.sql</c> — this is what fresh installs on both
-/// providers get the constraint from. Neither provider retrofits it onto an existing database
-/// this release (see <c>SchemaInitializer.TemporalColumnNaming.cs</c> for the sequencing).
+/// providers get the constraint from, and (on Postgres) what
+/// <c>SchemaInitializer.TemporalCheckRetrofit.cs</c> parses to decide which columns to retrofit
+/// onto an existing database. Existing SQLite databases are never retrofitted — see
+/// <c>SchemaInitializer.TemporalColumnNaming.cs</c>.
 ///
 /// The column list is derived structurally from each schema file via
 /// <see cref="SchemaSqlParser.ParseTableDefinitions"/> and the shared naming-convention test, not
@@ -82,6 +84,43 @@ public sealed class TemporalCheckConstraintComplianceTests
 
             Assert.Fail($"{violations.Count} temporal column(s) in {fileName} missing the canonical CHECK. See test output.");
         }
+    }
+
+    /// <summary>
+    /// The Postgres retrofit's column set (<see cref="SchemaInitializer.DeclaredTemporalCheckColumns"/>,
+    /// which looks for the CHECK literal) and this gate's column set (which looks for the naming
+    /// convention) are two independent derivations from the same file. They must agree exactly.
+    /// A column in only the naming set means the schema is missing a CHECK the gate above already
+    /// reports; a column in only the retrofit set would mean the retrofit constrains something the
+    /// fresh install does not — the more dangerous direction, and the one nothing else catches.
+    /// </summary>
+    [Fact]
+    public void RetrofitColumnSet_MatchesTheSchemaDeclaredTemporalColumns()
+    {
+        string sql = File.ReadAllText(SchemaTestPaths.PostgresSchema(SchemaTestPaths.SourceRoot()));
+
+        var byNamingConvention = SchemaSqlParser.ParseTableDefinitions(sql)
+            .SelectMany(t => t.Value.Columns.Select(c => (Table: t.Key, Column: c)))
+            .Where(x => SchemaInitializer.IsTemporalColumnName(x.Column.Name) && IsTextColumn(x.Column.Declaration))
+            .Select(x => $"{x.Table}.{x.Column.Name}")
+            .OrderBy(s => s, StringComparer.Ordinal)
+            .ToList();
+
+        var byCheckLiteral = SchemaInitializer.DeclaredTemporalCheckColumns(sql)
+            .Select(c => $"{c.Table}.{c.Column}")
+            .OrderBy(s => s, StringComparer.Ordinal)
+            .ToList();
+
+        _output.WriteLine($"{byCheckLiteral.Count} temporal columns derived from Schema.pg.sql");
+        Assert.Equal(byNamingConvention, byCheckLiteral);
+        Assert.True(byCheckLiteral.Count > 100,
+            $"expected well over 100 derived temporal columns, found {byCheckLiteral.Count}");
+
+        // _applied_migrations is created by EnsureMigrationsTableAsync, not by Schema.pg.sql, and
+        // carries no CHECK on a fresh install. It is the concrete reason the retrofit derives its
+        // set from the schema text rather than scanning information_schema for *_at TEXT columns:
+        // that scan would sweep this in and constrain a column no fresh install constrains.
+        Assert.DoesNotContain("_applied_migrations.applied_at", byCheckLiteral);
     }
 
     // Column type is the first whitespace-delimited token after the name in the raw declaration

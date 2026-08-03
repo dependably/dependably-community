@@ -41,14 +41,22 @@ public static class NuGetFixtures
     /// </summary>
     public static byte[] BuildSnupkgWithPdbs(string id, string version, params (string PdbName, byte[] PdbBytes)[] pdbs)
     {
+        // Shaped like the manifest `dotnet pack` actually emits for a .snupkg: a REDUCED metadata
+        // set carrying packageType SymbolsPackage and, notably, NO <authors>. The previous fixture
+        // hand-wrote a full package nuspec including authors, so every test built on it validated a
+        // document the real toolchain never produces — which is how a 422 on genuine
+        // `dotnet nuget push` symbol pushes shipped unnoticed, sitting behind the 409 everyone was
+        // watching. Keep this in step with real pack output, not with what is convenient to assert.
         string nuspec = $"""
             <?xml version="1.0" encoding="utf-8"?>
             <package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
               <metadata>
                 <id>{id}</id>
                 <version>{version}</version>
-                <authors>dependably-test</authors>
                 <description>Synthetic symbol package</description>
+                <packageTypes>
+                  <packageType name="SymbolsPackage" />
+                </packageTypes>
               </metadata>
             </package>
             """;

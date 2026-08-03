@@ -248,6 +248,11 @@ tr:hover td { background: var(--bg2); }
 .badge.prov-verified { background: var(--success-soft);     color: var(--success); }
 .badge.prov-failed   { background: var(--badge-red-bg);     color: var(--badge-red-text); }
 .badge.prov-unsigned { background: var(--badge-warning-bg); color: var(--badge-warning-text); }
+/* NuGet symbols. The indexed pill is informational (sky, like other neutral capability badges);
+   the unindexed one is warning-tinted because a stored-but-unindexed symbol package is the state
+   an operator has to act on — re-index, or accept that those PDBs never resolve. */
+.badge.symbols { background: var(--badge-sky-bg); color: var(--badge-sky-text); }
+.badge.symbols-unindexed { background: var(--badge-warning-bg); color: var(--badge-warning-text); }
 .badge.unlisted { background: var(--badge-purple-bg); color: var(--badge-purple-text); }
 .badge.unblock { background: var(--badge-sky-bg);     color: var(--badge-sky-text); }
 .badge.warning { background: var(--badge-warning-bg);   color: var(--badge-warning-text); }

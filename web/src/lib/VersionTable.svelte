@@ -24,6 +24,7 @@
   import { formatDate, formatBytes, formatNumber } from './format.js'
   import { sortIndicator } from './sortIndicator.js'
   import { rememberedRowCount, rememberRowCount } from './tableSize.js'
+  import { fileRowKey } from './versionFiles.js'
 
   /** @type {{ ecosystem: string, isProxy: boolean, name: string, upstreamLatestVersion?: string | null, latestState?: string, abandonedState?: string } | null} */
   export let pkg = null
@@ -115,6 +116,10 @@
       installScriptKind: files.find(f => f.hasInstallScript)?.installScriptKind ?? null,
       provenanceStatus,
       provenanceSigner: files.find(f => f.provenanceStatus === 'verified')?.provenanceSigner ?? null,
+      // NuGet symbols are a property of the version, so every file of a group reports the same
+      // pair; take the max so a group is never shown as unindexed because a sibling row was.
+      hasSymbolPackage: files.some(f => f.hasSymbolPackage),
+      indexedPdbCount: files.reduce((n, f) => Math.max(n, f.indexedPdbCount ?? 0), 0),
       isMalicious: files.some(f => f.isMalicious),
       status: worstStatus,
       // Single-checksum / integrity belong to one file; null them out for multi-file groups
@@ -327,6 +332,8 @@
           {#if g.provenanceStatus === 'verified'}<span class="badge prov-verified ml-1" title={$t('versionDetail.badges.provenanceVerifiedHelp', { values: { signer: g.provenanceSigner || '' } })}>{$t('versionDetail.badges.provenanceVerified')}</span>{/if}
           {#if g.provenanceStatus === 'failed'}<span class="badge prov-failed ml-1" title={$t('versionDetail.badges.provenanceFailedHelp')}>{$t('versionDetail.badges.provenanceFailed')}</span>{/if}
           {#if g.provenanceStatus === 'unsigned'}<span class="badge prov-unsigned ml-1" title={$t('versionDetail.badges.provenanceUnsignedHelp')}>{$t('versionDetail.badges.provenanceUnsigned')}</span>{/if}
+          {#if g.hasSymbolPackage && g.indexedPdbCount > 0}<span class="badge symbols ml-1" title={$t('versionDetail.badges.symbolsHelp', { values: { count: g.indexedPdbCount } })}><svg width="11" height="11" aria-hidden="true"><use href="/icons.svg#icon-bug"/></svg>{$t('versionDetail.badges.symbols', { values: { count: g.indexedPdbCount } })}</span>{/if}
+          {#if g.hasSymbolPackage && g.indexedPdbCount === 0}<span class="badge symbols-unindexed ml-1" title={$t('versionDetail.badges.symbolsUnindexedHelp')}><svg width="11" height="11" aria-hidden="true"><use href="/icons.svg#icon-alert"/></svg>{$t('versionDetail.badges.symbolsUnindexed')}</span>{/if}
           {#if vulns.length > 0}
             {@const critical = vulns.filter(v => v.severity === 'CRITICAL').length}
             {@const high     = vulns.filter(v => v.severity === 'HIGH').length}
@@ -445,7 +452,7 @@
                       </tr>
                     </thead>
                     <tbody>
-                      {#each g.files as f (f.id)}
+                      {#each g.files as f (fileRowKey(f))}
                         <tr>
                           <td class="mono filename-cell">{f.filename ?? '—'}</td>
                           <td><span class="badge file-type">{fileType(f.filename)}</span></td>

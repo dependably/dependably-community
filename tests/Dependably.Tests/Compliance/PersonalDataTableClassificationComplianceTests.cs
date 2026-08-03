@@ -1,3 +1,4 @@
+using Dependably.Infrastructure;
 using Dependably.Infrastructure.Privacy;
 using Xunit.Abstractions;
 
