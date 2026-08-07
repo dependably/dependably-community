@@ -6,8 +6,8 @@ using Dependably.Protocol.Provenance;
 namespace Dependably.Storage;
 
 /// <summary>
-/// Orchestrates the post-fetch half of the proxy cache-miss flow shared by the three
-/// ecosystem controllers (PyPI, npm, NuGet). Each ecosystem still owns its own upstream
+/// Orchestrates the post-fetch half of the proxy cache-miss flow shared by the PyPI, npm, NuGet
+/// (flat-container and symbol) and Maven proxy paths. Each ecosystem still owns its own upstream
 /// URL shape and the per-format extractors; once those produce a verified, blob-cached
 /// artefact (described by a <see cref="BlobHandle"/>), every controller does the same dance:
 ///
@@ -287,9 +287,11 @@ public sealed class ProxyFetchService
         return null;
     }
 
-    // Records access into cache_artifact + tenant_artifact_access (best-effort: a recorder
-    // failure must not fail the proxy fetch). Returns the cache_artifact id when the global
-    // plane path is active, null when the caller passed no CacheAccess record.
+    // Records access into cache_artifact + tenant_artifact_access. Returns the cache_artifact id,
+    // or null when the caller passed no CacheAccess record or the recorder itself could not
+    // produce a row. Null is not tolerated by the caller: RecordAndScanAsync turns it into a
+    // ProxyCatalogueUnavailableException and refuses the fetch, because an artefact with no
+    // cache-plane row cannot be scanned or gated.
     //
     // When PreRecordedCacheArtifactId is set, the cache-access recording was already done by
     // the caller (PyPI records it once in FetchAndCacheUpstreamAsync to cover both hit and miss

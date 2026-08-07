@@ -33,6 +33,66 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
 
     public async Task DisposeAsync() => await _db.DisposeAsync();
 
+    // ── Head-of-line blocking on a failing upstream ────────────────────────────
+
+    [Fact]
+    public async Task GroupWhoseUpstreamFetchThrows_StillStampsCheckedAt_SoItYieldsItsQueueSlot()
+    {
+        // Both refresh enumerations order by their staleness column ascending with NULLs first and
+        // take a fixed batch. A group whose fetch throws and is left unstamped is therefore
+        // re-selected at the head of every subsequent pass; enough of them and no other group is
+        // ever reached again. Stamping the attempt is what moves it to the back of the queue.
+        var (_, _, caId, _) = await SeedVersionAsync(
+            ecosystem: "npm", name: "unreachable-pkg", version: "1.0.0", origin: "proxy",
+            deprecated: "already known", deprecationCheckedAt: null);
+
+        var service = BuildServiceWithHandler(new ThrowingHandler());
+        await service.RunRefreshPassAsync(CancellationToken.None);
+
+        await using var conn = await _db.OpenAsync();
+        var (dep, checkedAt) = await conn.QuerySingleAsync<(string?, string?)>(
+            "SELECT deprecated, deprecation_checked_at FROM cache_artifact WHERE id = @id",
+            new { id = caId });
+
+        Assert.NotNull(checkedAt);
+        // The fetch produced no verdict, so the recorded deprecation must survive untouched — a
+        // transient outage must not read as "no longer deprecated".
+        Assert.Equal("already known", dep);
+    }
+
+    [Fact]
+    public async Task GroupWhoseUpstreamFetchThrows_DoesNotClearRecordedUpstreamLatest()
+    {
+        // The hosted arm's slot is yielded by stamping upstream_latest_checked_at. Doing that via
+        // UpdateUpstreamLatestAsync(null, null) would also erase upstream_latest_version, turning
+        // one outage into lost state (and wrong versions-behind counts), so the touch is separate.
+        var (_, pkgId, _, _) = await SeedVersionAsync(
+            ecosystem: "npm", name: "latest-known", version: "1.0.0", origin: "proxy",
+            deprecated: null, deprecationCheckedAt: null);
+
+        string staleStamp = _clock.GetUtcNow().AddDays(-30).ToUtcIso();
+        await using (var seed = await _db.OpenAsync())
+        {
+            await seed.ExecuteAsync(
+                "UPDATE packages SET upstream_latest_version = '9.9.9', upstream_latest_checked_at = @old WHERE id = @id",
+                new { id = pkgId, old = staleStamp });
+        }
+
+        var service = BuildServiceWithHandler(new ThrowingHandler());
+        await service.RunRefreshPassAsync(CancellationToken.None);
+
+        await using var conn = await _db.OpenAsync();
+        var (latest, checkedAt) = await conn.QuerySingleAsync<(string?, string?)>(
+            "SELECT upstream_latest_version, upstream_latest_checked_at FROM packages WHERE id = @id",
+            new { id = pkgId });
+
+        // The slot is yielded: the attempt stamp advances to now, off the head of the queue.
+        Assert.Equal(_clock.GetUtcNow().ToUtcIso(), checkedAt);
+        Assert.NotEqual(staleStamp, checkedAt);
+        // …but the recorded baseline survives the outage untouched.
+        Assert.Equal("9.9.9", latest);
+    }
+
     // ── npm tests ──────────────────────────────────────────────────────────────
 
     [Fact]
@@ -728,8 +788,13 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     private DeprecationRefreshService BuildService(
         string responseBody,
         bool airGapped = false)
+        => BuildServiceWithHandler(new FixedResponseHandler(responseBody), airGapped);
+
+    /// <summary>Same wiring as <see cref="BuildService"/> but with a caller-supplied handler.</summary>
+    private DeprecationRefreshService BuildServiceWithHandler(
+        HttpMessageHandler handler,
+        bool airGapped = false)
     {
-        var handler = new FixedResponseHandler(responseBody);
         var factory = new SingleHandlerFactory(handler);
         var blobs = new InMemoryBlobStore();
         var tiered = new TieredBlobStorage(blobs, blobs);
@@ -946,6 +1011,13 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
             {
                 Content = new StringContent(_body, Encoding.UTF8, "application/json")
             });
+    }
+
+    /// <summary>Every upstream call throws, standing in for a persistently-unreachable registry.</summary>
+    private sealed class ThrowingHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+            => throw new HttpRequestException("upstream unreachable");
     }
 
     private sealed class SingleHandlerFactory : IHttpClientFactory

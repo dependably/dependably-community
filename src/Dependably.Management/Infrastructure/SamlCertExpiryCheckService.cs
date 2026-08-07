@@ -264,7 +264,9 @@ public sealed class SamlCertExpiryCheckService : BackgroundService
         if (lease.LeaseLost)
         {
             _logger.LogWarning(
-                "SAML cert-expiry check pass aborted — the {LockName} sweep lease was lost mid-pass. Checked {Total} orgs: {Alerted} alerted, {Skipped} already-notified/no-cert, {Errors} error(s), took {ElapsedMs}ms.",
+                "SAML cert-expiry check pass aborted — the {LockName} sweep lease was lost mid-pass. " +
+                "Checked {Total} orgs: {Alerted} alerted, {Skipped} already-notified/no-cert, {Errors} " +
+                "error(s), took {ElapsedMs}ms.",
                 SweepLockName, rows.Count, alerted, skipped, errors, sw.ElapsedMilliseconds);
             return;
         }

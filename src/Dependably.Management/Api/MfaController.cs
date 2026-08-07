@@ -126,8 +126,8 @@ public sealed class MfaController : OrgScopedControllerBase
             sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
 
-        await NotifySecurityEventAsync(userId, mailer, time, ct,
-            (m, addr, lang, now) => m.EnqueueMfaEnabled(addr, lang, now));
+        await NotifySecurityEventAsync(userId, mailer, time,
+            (m, addr, lang, now) => m.EnqueueMfaEnabled(addr, lang, now), ct);
 
         return Ok(new { recoveryCodes = codes });
     }
@@ -200,8 +200,8 @@ public sealed class MfaController : OrgScopedControllerBase
             sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
 
-        await NotifySecurityEventAsync(userId, mailer, time, ct,
-            (m, addr, lang, now) => m.EnqueueMfaDisabled(addr, lang, now));
+        await NotifySecurityEventAsync(userId, mailer, time,
+            (m, addr, lang, now) => m.EnqueueMfaDisabled(addr, lang, now), ct);
 
         // Re-issue the caller's own session at the new token_version so this request stays authenticated.
         if (!string.IsNullOrEmpty(orgId))
@@ -301,8 +301,8 @@ public sealed class MfaController : OrgScopedControllerBase
         string userId,
         Dependably.Infrastructure.Mail.TransactionalEmailService mailer,
         TimeProvider time,
-        CancellationToken ct,
-        Action<Dependably.Infrastructure.Mail.TransactionalEmailService, string, string, DateTimeOffset> enqueue)
+        Action<Dependably.Infrastructure.Mail.TransactionalEmailService, string, string, DateTimeOffset> enqueue,
+        CancellationToken ct)
     {
         string? email = await _mfa.GetEmailAsync(userId, ct);
         if (string.IsNullOrEmpty(email))

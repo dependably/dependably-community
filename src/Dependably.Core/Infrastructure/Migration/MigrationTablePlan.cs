@@ -58,10 +58,25 @@ public sealed class MigrationTablePlan
     /// Reads the table set and the foreign-key graph out of an open SQLite connection and returns
     /// them topologically sorted, parents first.
     /// </summary>
-    public static async Task<MigrationTablePlan> DiscoverAsync(DbConnection sqlite, CancellationToken ct = default)
+    public static Task<MigrationTablePlan> DiscoverAsync(DbConnection sqlite, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(sqlite);
 
+        return DiscoverCoreAsync(sqlite, ct);
+    }
+
+    private static async Task<MigrationTablePlan> DiscoverCoreAsync(DbConnection sqlite, CancellationToken ct)
+    {
+        var tables = await LoadTableNamesAsync(sqlite, ct);
+        var (children, indegree) = await BuildForeignKeyGraphAsync(sqlite, tables, ct);
+        var (ordered, cycle) = TopologicalSort(tables, children, indegree);
+
+        return new MigrationTablePlan(ordered, cycle);
+    }
+
+    /// <summary>The migratable table set, alphabetised with the excluded tables already dropped.</summary>
+    private static async Task<List<string>> LoadTableNamesAsync(DbConnection sqlite, CancellationToken ct)
+    {
         // xtenant: whole-database migration — this reads the SQLite catalogue, which has no tenant column.
         var tables = (await sqlite.QueryAsync<string>(
                 new CommandDefinition(
@@ -71,6 +86,19 @@ public sealed class MigrationTablePlan
             .OrderBy(t => t, StringComparer.Ordinal)
             .ToList();
 
+        return tables;
+    }
+
+    /// <summary>
+    /// Reads each table's foreign keys and returns the parent → children adjacency map plus each
+    /// table's indegree (the count of distinct parents it references), the two structures the
+    /// Kahn's-algorithm sort in <see cref="TopologicalSort"/> consumes.
+    /// </summary>
+    private static async Task<(
+        Dictionary<string, SortedSet<string>> Children,
+        Dictionary<string, int> Indegree)> BuildForeignKeyGraphAsync(
+        DbConnection sqlite, List<string> tables, CancellationToken ct)
+    {
         var known = new HashSet<string>(tables, StringComparer.OrdinalIgnoreCase);
 
         // parent -> children. A self-reference is dropped: it can only be satisfied within the one
@@ -80,21 +108,7 @@ public sealed class MigrationTablePlan
 
         foreach (string table in tables)
         {
-            // The pragma_* table-valued functions declare no column types, and
-            // Microsoft.Data.Sqlite surfaces those untyped columns as byte[] rather than string.
-            // CAST(... AS TEXT) pins the value to text so Dapper materialises a string.
-            // xtenant: catalogue introspection of the foreign-key graph; not a tenant-scoped read.
-            var parents = (await sqlite.QueryAsync<string>(
-                    new CommandDefinition(
-                        "SELECT CAST(\"table\" AS TEXT) FROM pragma_foreign_key_list(@table)",
-                        new { table },
-                        cancellationToken: ct)))
-                .Where(p => p is not null
-                            && known.Contains(p)
-                            && !string.Equals(p, table, StringComparison.OrdinalIgnoreCase))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-
+            var parents = await LoadForeignKeyParentsAsync(sqlite, table, known, ct);
             foreach (string parent in parents)
             {
                 if (!children.TryGetValue(parent, out var set))
@@ -109,6 +123,39 @@ public sealed class MigrationTablePlan
             }
         }
 
+        return (children, indegree);
+    }
+
+    /// <summary>The distinct, known, non-self parent tables one table's foreign keys reference.</summary>
+    private static async Task<List<string>> LoadForeignKeyParentsAsync(
+        DbConnection sqlite, string table, HashSet<string> known, CancellationToken ct)
+    {
+        // The pragma_* table-valued functions declare no column types, and
+        // Microsoft.Data.Sqlite surfaces those untyped columns as byte[] rather than string.
+        // CAST(... AS TEXT) pins the value to text so Dapper materialises a string.
+        // xtenant: catalogue introspection of the foreign-key graph; not a tenant-scoped read.
+        return (await sqlite.QueryAsync<string>(
+                new CommandDefinition(
+                    "SELECT CAST(\"table\" AS TEXT) FROM pragma_foreign_key_list(@table)",
+                    new { table },
+                    cancellationToken: ct)))
+            .Where(p => p is not null
+                        && known.Contains(p)
+                        && !string.Equals(p, table, StringComparison.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    /// <summary>
+    /// Kahn's algorithm over the foreign-key graph, parents first. Ties break in ordinal name order
+    /// so the plan is deterministic. Tables left unplaced when <c>ready</c> runs dry sit on a cycle;
+    /// they are appended in name order and <see cref="HasCycle"/> is reported true.
+    /// </summary>
+    private static (List<string> Ordered, bool Cycle) TopologicalSort(
+        List<string> tables,
+        Dictionary<string, SortedSet<string>> children,
+        Dictionary<string, int> indegree)
+    {
         var ordered = new List<string>(tables.Count);
         var ready = new SortedSet<string>(
             indegree.Where(kv => kv.Value == 0).Select(kv => kv.Key),
@@ -141,6 +188,6 @@ public sealed class MigrationTablePlan
             ordered.AddRange(tables.Where(t => !placed.Contains(t)));
         }
 
-        return new MigrationTablePlan(ordered, cycle);
+        return (ordered, cycle);
     }
 }

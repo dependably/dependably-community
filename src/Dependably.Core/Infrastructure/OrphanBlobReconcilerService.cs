@@ -85,23 +85,13 @@ public sealed class OrphanBlobReconcilerService : ScheduledBackgroundService
             ? g : 30;
         var cutoff = _time.GetUtcNow() - TimeSpan.FromMinutes(graceMinutes);
 
-        // Materialize the referenced-keys set first — the union across every table that can hold
-        // a hosted key, streamed unbuffered from one statement so the DB never materializes it.
-        // The set itself is bounded by metadata size, not blob size; for community scale it's
-        // fine. If this becomes a constraint the approach to swap to is "stream blobs in batches
-        // of N, query EXISTS for each batch."
-        //
-        // Reading the set BEFORE listing the blobs is the safe ordering. A publish that commits
-        // its row after this read is not in the set, but its blob was put moments before the
-        // commit, so the blob's LastModified lands inside the grace window below and it is
+        // Reading the referenced set BEFORE listing the blobs is the safe ordering. A publish that
+        // commits its row after this read is not in the set, but its blob was put moments before
+        // the commit, so the blob's LastModified lands inside the grace window below and it is
         // skipped. The inverse — listing blobs first, then reading the set — would be equally
         // safe, but this way a version DELETE racing the sweep merely defers the (already
         // deleted) blob to the next pass rather than double-deleting.
-        var referenced = new HashSet<string>(StringComparer.Ordinal);
-        await foreach (string key in _packages.StreamAllBlobKeysAsync(ct))
-        {
-            referenced.Add(key);
-        }
+        var referenced = await LoadReferencedKeysAsync(ct);
 
         long orphansDeleted = 0;
         long bytesFreed = 0;
@@ -115,38 +105,27 @@ public sealed class OrphanBlobReconcilerService : ScheduledBackgroundService
                 break;
             }
 
-            if (referenced.Contains(blob.Key))
+            if (referenced.Contains(blob.Key) || blob.LastModified > cutoff)
             {
-                continue;
+                continue; // referenced, or inside the grace window
             }
 
-            if (blob.LastModified > cutoff)
+            var outcome = await TryDeleteOrphanAsync(registry, blob, ct);
+            if (outcome == OrphanDeleteOutcome.Cancelled)
             {
-                continue;  // inside grace window
-            }
-
-            try
-            {
-                await registry.DeleteAsync(blob.Key, ct);
-                orphansDeleted++;
-                bytesFreed += blob.SizeBytes;
-                _logger.LogInformation(
-                    "Orphan reconciled: deleted {Key} ({Bytes} bytes, last modified {LastModified:o}).",
-                    blob.Key, blob.SizeBytes, blob.LastModified);
-            }
-            catch (OperationCanceledException)
-            {
-                // The pass is stopping (host shutdown, or a lost leader lease handing the sweep to
-                // another replica). That is a cancelled delete, not a failed one: end the sweep
-                // instead of counting it toward deletionFailures and warning about a retry.
+                // The pass is stopping (host shutdown, or a lost leader lease handing the sweep
+                // to another replica): end the sweep rather than count a retry.
                 break;
             }
-            catch (Exception ex)
+
+            if (outcome == OrphanDeleteOutcome.Deleted)
+            {
+                orphansDeleted++;
+                bytesFreed += blob.SizeBytes;
+            }
+            else
             {
                 deletionFailures++;
-                _logger.LogWarning(ex,
-                    "Orphan reconciliation: delete failed for {Key}; will retry next pass.",
-                    blob.Key);
             }
         }
 
@@ -157,6 +136,48 @@ public sealed class OrphanBlobReconcilerService : ScheduledBackgroundService
                 orphansDeleted, bytesFreed, deletionFailures, graceMinutes);
         }
         return new ReconcileSummary(orphansDeleted, bytesFreed, deletionFailures);
+    }
+
+    /// <summary>
+    /// Materializes the referenced-keys set — the union across every table that can hold a hosted
+    /// key, streamed unbuffered from one statement so the DB never materializes it. The set itself
+    /// is bounded by metadata size, not blob size; for community scale it's fine. If this becomes
+    /// a constraint the approach to swap to is "stream blobs in batches of N, query EXISTS for
+    /// each batch."
+    /// </summary>
+    private async Task<HashSet<string>> LoadReferencedKeysAsync(CancellationToken ct)
+    {
+        var referenced = new HashSet<string>(StringComparer.Ordinal);
+        await foreach (string key in _packages.StreamAllBlobKeysAsync(ct))
+        {
+            referenced.Add(key);
+        }
+        return referenced;
+    }
+
+    private enum OrphanDeleteOutcome { Deleted, Failed, Cancelled }
+
+    private async Task<OrphanDeleteOutcome> TryDeleteOrphanAsync(IBlobStore registry, BlobInfo blob, CancellationToken ct)
+    {
+        try
+        {
+            await registry.DeleteAsync(blob.Key, ct);
+            _logger.LogInformation(
+                "Orphan reconciled: deleted {Key} ({Bytes} bytes, last modified {LastModified:o}).",
+                blob.Key, blob.SizeBytes, blob.LastModified);
+            return OrphanDeleteOutcome.Deleted;
+        }
+        catch (OperationCanceledException)
+        {
+            return OrphanDeleteOutcome.Cancelled;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Orphan reconciliation: delete failed for {Key}; will retry next pass.",
+                blob.Key);
+            return OrphanDeleteOutcome.Failed;
+        }
     }
 }
 

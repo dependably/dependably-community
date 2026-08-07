@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using Dapper;
 
 namespace Dependably.Infrastructure;
@@ -173,8 +174,10 @@ public sealed partial class PackageRepository
             if (affected == 1 && coordinate is { Origin: "uploaded" })
             {
                 await VersionTombstoneRepository.RecordAsync(
-                    conn, dbTx, coordinate.OrgId, coordinate.Ecosystem, coordinate.PurlName,
-                    coordinate.Version, coordinate.ContentHash,
+                    conn, dbTx,
+                    new VersionTombstoneRepository.VersionCoordinate(
+                        coordinate.OrgId, coordinate.Ecosystem, coordinate.PurlName, coordinate.Version),
+                    coordinate.ContentHash,
                     _time.GetUtcNow().ToUtcIso());
             }
 
@@ -407,6 +410,30 @@ public sealed partial class PackageRepository
     }
 
     /// <summary>
+    /// Stamps <c>upstream_latest_checked_at</c> alone, leaving the recorded latest version and its
+    /// publish timestamp untouched. Called when a group's upstream-metadata fetch threw: the
+    /// hosted refresh enumeration orders by this column ascending, so a group left unstamped is
+    /// re-selected at the head of every subsequent pass and, once enough accumulate to fill the
+    /// batch, starves every other group indefinitely.
+    ///
+    /// Deliberately not <see cref="UpdateUpstreamLatestAsync"/> with nulls: that clears the
+    /// baseline, so one transient upstream outage would erase a known-good latest version and the
+    /// versions-behind counts derived from it. A failed fetch produced no verdict, so it must
+    /// record only that an attempt happened.
+    /// </summary>
+    public async Task TouchUpstreamLatestCheckedAtAsync(string packageId, CancellationToken ct = default)
+    {
+        string now = _time.GetUtcNow().ToUtcIso();
+        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: UPDATE keyed by the package id (already org-scoped via FK); the caller resolves
+        // the package via GetByPurlNameAsync within a single org's refresh pass, so the id is not
+        // caller-supplied.
+        await conn.ExecuteAsync(
+            "UPDATE packages SET upstream_latest_checked_at = @now WHERE id = @id",
+            new { id = packageId, now });
+    }
+
+    /// <summary>
     /// Returns (ecosystem, purl_name, org_id) groups for HOSTED packages whose upstream-latest
     /// tracking has gone stale but that no current <c>cache_artifact</c> group covers. The
     /// deprecation-refresh pass otherwise enumerates only <c>cache_artifact</c> groups, so a
@@ -496,6 +523,8 @@ public sealed partial class PackageRepository
     // for the is_proxy recompute, plus the (org, ecosystem, purl_name, version) coordinate and
     // digest the tombstone is written from. Origin discriminates a hosted publish from a
     // cache-plane row, which is never tombstoned.
+    [SuppressMessage("Minor Code Smell", "S3459:Unassigned members should be removed", Justification = "Dapper sets these props by reflection; not statically visible as assigned.")]
+    [SuppressMessage("Major Code Smell", "S1144:Unused private types or members should be removed", Justification = "Dapper sets these props by reflection; not statically visible as used.")]
     private sealed class DeletedVersionCoordinate
     {
         public string? PackageId { get; init; }

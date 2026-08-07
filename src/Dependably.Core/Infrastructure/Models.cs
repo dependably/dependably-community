@@ -251,6 +251,20 @@ public class OrgSettings
     /// allow override still wins.
     /// </summary>
     public string VerifyMavenSignatures { get; set; } = "off";
+    /// <summary>
+    /// Proxy gate for Terraform provider publisher-signed SHASUMS chain verification of
+    /// proxy-origin archives (<c>cache_artifact.provenance_status</c>). The download response's
+    /// own <c>shasum</c> is self-certified by the same registry that names the archive host; this
+    /// gate instead fetches the registry's <c>shasums_url</c>/<c>shasums_signature_url</c>,
+    /// GPG-verifies the detached signature against the per-org trust anchor ring, and confirms
+    /// the archive's SHA-256 appears in the verified SHASUMS. 'off' (default) = do not verify;
+    /// 'warn' = verify and surface in UI only; 'block' = fail closed (an archive whose chain fails
+    /// verification or carries none is refused, not cached or served). Enabling 'warn'/'block'
+    /// requires at least one per-org Terraform PGP trust anchor in <c>signature_trust_anchor</c>;
+    /// without one the verifier reports not-applicable and nothing blocks. A manual per-version
+    /// allow override still wins.
+    /// </summary>
+    public string VerifyTerraformSignatures { get; set; } = "off";
 
     /// <summary>
     /// Per-tenant RPM hosted-publishing posture override: NULL (unset), 'passthrough', or 'merged'.
@@ -276,6 +290,7 @@ public class OrgSettings
         "pypi" => VerifyPyPiAttestations,
         "rpm" => VerifyRpmSignatures,
         "maven" => VerifyMavenSignatures,
+        "terraform" => VerifyTerraformSignatures,
         _ => "off",
     };
 }
@@ -773,6 +788,13 @@ public class UpstreamRegistryEntry
     /// proxying for this upstream.
     /// </summary>
     public string? SymbolServerUrl { get; set; }
+
+    /// <summary>
+    /// Terraform-only: which server-side protocol this upstream speaks — null for the Provider
+    /// Registry Protocol (the default), <c>"mirror"</c> for the Provider Network Mirror Protocol.
+    /// No other ecosystem reads this field. See <c>docs/adr/0003-terraform-provider-network-mirror.md</c>.
+    /// </summary>
+    public string? Protocol { get; set; }
 }
 
 /// <summary>

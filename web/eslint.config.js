@@ -11,8 +11,12 @@ import prettier from 'eslint-config-prettier'
 // of this range as fast edit-time advice; that copy is not a gate.
 //
 // Ranges: 1F000-1FAFF (emoji + playing cards), 2300-23FF (⌚⏰⏳),
-// 2600-27BF (☀✅✨), 2B00-2BFF (⬆⭐), FE0F (variation selector).
-const EMOJI_RANGES = '[\\u{1F000}-\\u{1FAFF}\\u{2300}-\\u{23FF}\\u{2600}-\\u{27BF}\\u{2B00}-\\u{2BFF}\\u{FE0F}]'
+// 2600-27BF (☀✅✨), 2B00-2BFF (⬆⭐), FE0F (variation selector). FE0F is matched as its own
+// alternative, outside the character class — inside the class its trailing position reads to a
+// Unicode-aware regex engine as a variation selector combining with the preceding range end
+// rather than an independent codepoint to match.
+const EMOJI_RANGES =
+  '(?:[\\u{1F000}-\\u{1FAFF}\\u{2300}-\\u{23FF}\\u{2600}-\\u{27BF}\\u{2B00}-\\u{2BFF}]|\\u{FE0F})'
 
 const dependably = {
   rules: {

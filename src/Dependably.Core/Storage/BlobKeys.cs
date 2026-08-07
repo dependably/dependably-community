@@ -118,6 +118,24 @@ public static partial class BlobKeys
         => $"apk/{orgId}/{release}/{repo}/{arch}/{filename}";
 
     /// <summary>
+    /// Org-scoped key for a Terraform provider archive served over the Provider Network Mirror
+    /// Protocol. Keyed by the provider's fully-qualified source address
+    /// (<paramref name="hostname"/>/<paramref name="namespace"/>/<paramref name="type"/>) plus the
+    /// version and target platform, because a mirror covers providers from any registry host —
+    /// two registries may publish the same namespace/type pair and they are different providers.
+    ///
+    /// Not content-addressed: the archive is keyed by coordinate rather than SHA-256 so a version
+    /// document can name its archives before any of them have been fetched. The upstream registry
+    /// supplies a <c>shasum</c> per platform, which the fetch path verifies as a
+    /// <see cref="Dependably.Protocol.ChecksumSpec"/>, so coordinate keying does not mean unverified
+    /// bytes. Callers validate each segment with
+    /// <see cref="Dependably.Security.PathSafeValidator"/> before passing them here.
+    /// </summary>
+    public static string Terraform(
+        string orgId, string hostname, string @namespace, string type, string version, string platform)
+        => $"terraform/{orgId}/{hostname}/{@namespace}/{type}/{version}/{platform}.zip";
+
+    /// <summary>
     /// Converts a DB blob key to the actual blob store key.
     /// Proxy DB keys include a filename suffix (proxy/{sha256}/{file}) but blobs are stored at proxy/{sha256}.
     /// Hosted keys are returned unchanged.

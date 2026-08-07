@@ -27,7 +27,7 @@ public sealed class TrustAnchorPairsTests
     }
 
     [Fact]
-    public void RegisteredSet_IsTheEightKnownPairs()
+    public void RegisteredSet_IsTheNineKnownPairs()
     {
         // Spelled out rather than derived, so widening the accepted surface is a deliberate edit
         // to a test that names every pair, not a silently-passing list length.
@@ -36,6 +36,7 @@ public sealed class TrustAnchorPairsTests
             {
                 ("rpm", "pgp"),
                 ("maven", "pgp"),
+                ("terraform", "pgp"),
                 ("npm", "spki"),
                 ("nuget", "x509"),
                 ("pypi", "sigstore_root"),
@@ -74,6 +75,7 @@ public sealed class TrustAnchorPairsTests
     [InlineData("apk", "pgp")]
     [InlineData("pypi", "spki")]
     [InlineData("maven", "x509")]
+    [InlineData("terraform", "x509")]
     public void IsRegistered_RejectsAValidEcosystemPairedWithTheWrongKind(string eco, string kind)
         => Assert.False(TrustAnchorPairs.IsRegistered(eco, kind));
 

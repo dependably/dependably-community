@@ -18,7 +18,14 @@ services:
       - otel-collector
 
   otel-collector:
-    image: otel/opentelemetry-collector:0.154.0@sha256:ea527f0f9a220c7b595863a658c262f31d08c07e034a16b502bfb2206aa987ff
+    # Pulled through the mirror like every other image, with the registry host overridable
+    # so a contributor without mirror credentials can fall back to the public registry:
+    # `DEP_IMAGE_REGISTRY=docker.io docker compose …`. Note the difference from the pipeline,
+    # where emptying the variable is the documented way to fall back: compose's `:-` treats an
+    # empty value as absent, so it re-selects the mirror. Name the public host explicitly.
+    # The digest is unchanged either way — a pull-through proxy serves the upstream manifest,
+    # so the pin identifies the same image whichever host resolves it.
+    image: ${DEP_IMAGE_REGISTRY:-dependably.northwardlabs.ca}/otel/opentelemetry-collector:0.154.0@sha256:ea527f0f9a220c7b595863a658c262f31d08c07e034a16b502bfb2206aa987ff
     volumes:
       # Core image's default config path; mounting here needs no command override.
       - ./otel-collector-config.yaml:/etc/otelcol/config.yaml:ro

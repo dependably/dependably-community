@@ -34,7 +34,11 @@ public static partial class PurlNormalizer
     public static string CanonicalName(string ecosystem, string name) => ecosystem switch
     {
         "pypi" => PyPiName(name),
-        "npm" or "nuget" or "rpm" or "oci" => name.ToLowerInvariant(),
+        // Terraform provider source addresses are matched case-insensitively by the CLI, so
+        // hashicorp/random and HashiCorp/Random are the same provider. Lowercasing here keeps them
+        // one identity: two spellings resolving to two rows would mean a block or an advisory
+        // recorded against one spelling silently not applying to the other.
+        "npm" or "nuget" or "rpm" or "oci" or "terraform" => name.ToLowerInvariant(),
         _ => name,
     };
 
@@ -104,6 +108,24 @@ public static partial class PurlNormalizer
     /// </summary>
     public static string Cargo(string name, string version)
         => $"pkg:cargo/{name}@{version}";
+
+    /// <summary>
+    /// Canonical Terraform provider PURL:
+    /// <c>pkg:terraform/{namespace}/{type}@{version}?registry={hostname}</c>.
+    ///
+    /// The registry hostname is a qualifier rather than part of the name because a provider's
+    /// identity in Terraform is its full source address — two registries may publish the same
+    /// namespace/type pair and they are different providers. Carrying the host as a qualifier
+    /// follows the same shape as <see cref="Oci"/>'s <c>repository_url</c>, and keeps the
+    /// name segment equal to what a practitioner writes in <c>required_providers</c>.
+    ///
+    /// The target platform is deliberately not encoded here: one version has one PURL, and the
+    /// per-platform archive is distinguished by the file name the fetch records alongside it —
+    /// the same split npm and PyPI use between a version's PURL and its individual artefacts.
+    /// </summary>
+    public static string Terraform(string hostname, string @namespace, string type, string version)
+        => $"pkg:terraform/{@namespace.ToLowerInvariant()}/{type.ToLowerInvariant()}@{version}"
+           + $"?registry={hostname.ToLowerInvariant()}";
 
     public static string NuGet(string id, string version)
     {

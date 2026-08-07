@@ -105,6 +105,7 @@ public sealed class OrgRepository
                COALESCE(verify_pypi_attestations, 'off') as VerifyPyPiAttestations,
                COALESCE(verify_rpm_signatures, 'off') as VerifyRpmSignatures,
                COALESCE(verify_maven_signatures, 'off') as VerifyMavenSignatures,
+               COALESCE(verify_terraform_signatures, 'off') as VerifyTerraformSignatures,
                rpm_upstream_mode as RpmUpstreamMode
         FROM org_settings WHERE org_id = @orgId
         """;

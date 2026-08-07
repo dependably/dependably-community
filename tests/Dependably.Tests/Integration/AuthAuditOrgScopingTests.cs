@@ -67,7 +67,7 @@ public sealed class AuthAuditOrgScopingTests : IClassFixture<DependablyFactory>,
 
         // 2. ...but it is NOT on the tenant Admin-actions list. A routine login is not a
         //    configuration change; surfacing it here is the regression this guards.
-        var (items, total) = await Audit.ListAuditAsync(orgId, limit: 100, offset: 0);
+        var (items, total, _) = await Audit.ListAuditAsync(orgId, limit: 100, offset: 0);
         Assert.DoesNotContain(items, e => e.Action == "login.success");
         Assert.Equal(items.Count, total <= 100 ? total : items.Count);
 
@@ -127,7 +127,7 @@ public sealed class AuthAuditOrgScopingTests : IClassFixture<DependablyFactory>,
 
         // A credential change IS a security event — unlike login.success it belongs on the
         // tenant's configuration/security audit list.
-        var (items, _) = await Audit.ListAuditAsync(orgId, limit: 100, offset: 0);
+        var (items, _, _) = await Audit.ListAuditAsync(orgId, limit: 100, offset: 0);
         Assert.Contains(items, e => e.Action == "user.password_changed" && e.ActorId == userId);
     }
 
@@ -154,7 +154,7 @@ public sealed class AuthAuditOrgScopingTests : IClassFixture<DependablyFactory>,
             """);
         Assert.Equal(orgId, rowOrgId);
 
-        var (items, _) = await Audit.ListAuditAsync(orgId, limit: 100, offset: 0);
+        var (items, _, _) = await Audit.ListAuditAsync(orgId, limit: 100, offset: 0);
         Assert.Contains(items, e => e.Action == "lockout.triggered");
     }
 }

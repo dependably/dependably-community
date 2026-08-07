@@ -3,7 +3,9 @@ import { ECOSYSTEMS, ECO_LABEL } from './ecosystems.js'
 
 describe('ecosystems vocabulary', () => {
   it('exposes the supported ecosystem keys in priority order', () => {
-    expect(ECOSYSTEMS).toEqual(['pypi', 'npm', 'nuget', 'maven', 'rpm', 'oci', 'golang', 'cargo', 'apk'])
+    expect(ECOSYSTEMS).toEqual([
+      'pypi', 'npm', 'nuget', 'maven', 'rpm', 'oci', 'golang', 'cargo', 'apk', 'terraform',
+    ])
   })
 
   it('has a display label for every ecosystem key', () => {

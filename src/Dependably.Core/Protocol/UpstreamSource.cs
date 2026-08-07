@@ -17,4 +17,11 @@ public sealed record UpstreamSource(
     /// NuGet only: this upstream's symbol-server (SSQP) base URL, or null when it has none —
     /// in which case no symbol fetch is attempted against it rather than a host being guessed.
     /// </summary>
-    string? SymbolServerUrl = null);
+    string? SymbolServerUrl = null,
+    /// <summary>
+    /// Terraform only: <c>"mirror"</c> when this upstream speaks the network mirror protocol
+    /// rather than the provider registry protocol, or null for the ecosystem's default. It selects
+    /// which endpoint shape the fetcher uses, so it cannot be inferred from the URL — the two
+    /// protocols share no path and guessing wrong fails every fetch.
+    /// </summary>
+    string? Protocol = null);

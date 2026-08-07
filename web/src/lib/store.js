@@ -202,6 +202,22 @@ export function currentTransitionToken() {
 }
 
 /**
+ * The query string of the route being mounted ('' when it has none), or null when nothing is in
+ * flight and `window.location.search` is authoritative.
+ *
+ * A held transition mounts the incoming page *before* commitTransition writes the URL, so a list
+ * page reading location.search at init would read the page it is replacing — dropping every
+ * deep-link param it was navigated with (navigate('risk', { tab: 'license' }) landing on the
+ * operational tab). Only the parked page initialises during a transition; the visible one keeps
+ * the instance it already has. Consumed by tableState.readQuery.
+ */
+export function pendingSearch() {
+  if (!transition) return null
+  const q = transition.url.indexOf('?')
+  return q === -1 ? '' : transition.url.slice(q)
+}
+
+/**
  * Declares that the incoming page has an initial fetch in flight, so it must not be committed on
  * the auto-commit frame. Reached through usePageLoad, which passes the host's token.
  */

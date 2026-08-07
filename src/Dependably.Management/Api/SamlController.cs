@@ -736,7 +736,9 @@ public sealed class SamlController : ControllerBase
     // that must fail closed (production login). Caught at the Login initiate and ACS boundaries and
     // turned into a refusal, so an expired trust anchor never mints a session.
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Critical Code Smell", "S3871:Exception types should be \"public\"",
-        Justification = "Private, file-scoped control-flow signal caught only at this controller's own Login initiate and ACS boundaries; it never crosses this type's boundary, so callers have no need to catch it by type.")]
+        Justification = "Private, file-scoped control-flow signal caught only at this controller's own Login " +
+            "initiate and ACS boundaries; it never crosses this type's boundary, so callers have no need to " +
+            "catch it by type.")]
     private sealed class SamlIdpCertificateExpiredException(string message) : Exception(message);
 }
 

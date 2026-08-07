@@ -33,6 +33,10 @@ namespace Dependably.Protocol;
 /// Go module paths are case-significant (the proxy's bang-encoding exists for exactly this).</item>
 /// <item>apk — exact name or trailing-<c>*</c> glob, ordinal on lowercased names (Alpine's
 /// package namespace is flat and conventionally lowercase), the same shape as npm and cargo.</item>
+/// <item>terraform — exact or trailing-<c>*</c> glob, ordinal on lowercased names, the same
+/// shape as npm and cargo; the reserved name is the provider's source address
+/// (<c>registry.terraform.io/acme/internal</c>), which is what a dependency-confusion attempt
+/// would have to collide with.</item>
 /// </list>
 ///
 /// Reads are served from a short-TTL per-org cache (same shape as
@@ -43,7 +47,7 @@ namespace Dependably.Protocol;
 /// </summary>
 public sealed partial class ReservedNamespaceService
 {
-    public static readonly IReadOnlyList<string> SupportedEcosystems = ["npm", "pypi", "nuget", "maven", "cargo", "golang", "apk"];
+    public static readonly IReadOnlyList<string> SupportedEcosystems = ["npm", "pypi", "nuget", "maven", "cargo", "golang", "apk", "terraform"];
 
     private readonly IMetadataStore _db;
     private readonly IMemoryCache _cache;

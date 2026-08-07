@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { readQuery, writeQuery } from './tableState.js'
+import { navigate, cancelTransition } from './store.js'
 
 beforeEach(() => {
   window.history.replaceState(null, '', '/')
@@ -25,6 +26,28 @@ describe('readQuery', () => {
   it('ignores params not present in defaults', () => {
     window.history.replaceState(null, '', '/packages?q=x&unrelated=1')
     expect(readQuery({ q: '' })).toEqual({ q: 'x' })
+  })
+})
+
+// A held transition mounts the incoming page before it writes the URL, so location.search still
+// describes the page being replaced while the arriving one initialises its table state.
+describe('readQuery during a held route transition', () => {
+  afterEach(() => { cancelTransition() })
+
+  it('reads the destination query string, not the page being replaced', () => {
+    window.history.replaceState(null, '', '/')
+    navigate('risk', { tab: 'license' })
+    // The URL is still the outgoing page's — the commit that writes it has not run.
+    expect(window.location.pathname).toBe('/')
+    expect(readQuery({ tab: 'operational', eco: '', page: 1 }))
+      .toEqual({ tab: 'license', eco: '', page: 1 })
+  })
+
+  it('a destination with no params reads as defaults, not the outgoing page state', () => {
+    window.history.replaceState(null, '', '/packages?q=react&page=3')
+    navigate('quarantine', { state: 'pending' })
+    expect(readQuery({ q: '', state: 'all', page: 1 }))
+      .toEqual({ q: '', state: 'pending', page: 1 })
   })
 })
 

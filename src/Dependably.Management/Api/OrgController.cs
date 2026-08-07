@@ -165,9 +165,11 @@ public sealed class OrgController : OrgScopedControllerBase
         // and pass through unchanged.
         var filesByVersion = await _versionFiles.GetByPackageAsync(pkg.Id, ct);
 
+        var viewContext = new PackageVersionViewContext(
+            ecosystem, pkg.Name, scoreMap, tolerance, blockDeprecatedMode,
+            uploadedLicenses, proxyLicenses, ociTagsByDigest, symbolFacts);
         var versionsWithLicenses = versions.SelectMany(v =>
-            ExpandToFiles(v, filesByVersion).Select(file =>
-                ProjectVersionView(v, ecosystem, pkg.Name, scoreMap, tolerance, blockDeprecatedMode, uploadedLicenses, proxyLicenses, ociTagsByDigest, symbolFacts, file)));
+            ExpandToFiles(v, filesByVersion).Select(file => ProjectVersionView(v, file, viewContext)));
         return Ok(new { package = pkg, versions = versionsWithLicenses });
     }
 
@@ -197,6 +199,23 @@ public sealed class OrgController : OrgScopedControllerBase
     private sealed record SymbolFacts(
         HashSet<string> VersionsWithSymbolPackage, Dictionary<string, int> IndexedPdbCounts);
 
+    /// <summary>
+    /// The view-rendering inputs that are constant across every version/file of one package —
+    /// resolved once per <c>GetPackage</c> request and threaded unchanged through the per-version
+    /// <see cref="ProjectVersionView"/> calls in the expansion loop, so the per-call surface is
+    /// just the two things that actually vary: the version and its (optional) file override.
+    /// </summary>
+    private sealed record PackageVersionViewContext(
+        string Ecosystem,
+        string PackageName,
+        Dictionary<string, double> ScoreMap,
+        double Tolerance,
+        string BlockDeprecatedMode,
+        ILookup<string, string> UploadedLicenses,
+        ILookup<string, string> ProxyLicenses,
+        ILookup<string, string>? OciTagsByDigest,
+        SymbolFacts? SymbolFacts);
+
     // Merges per-version OSV scores from uploaded versions (keyed by package_version_id) and proxy
     // versions (keyed by cache_artifact_id) into a single id → max-CVSS map.
     private async Task<Dictionary<string, double>> BuildVersionScoreMapAsync(
@@ -223,22 +242,15 @@ public sealed class OrgController : OrgScopedControllerBase
     // computed gate status, and (for OCI) the tags pointing at its digest.
     private static object ProjectVersionView(
         PackageVersion v,
-        string ecosystem,
-        string packageName,
-        Dictionary<string, double> scoreMap,
-        double tolerance,
-        string blockDeprecatedMode,
-        ILookup<string, string> uploadedLicenses,
-        ILookup<string, string> proxyLicenses,
-        ILookup<string, string>? ociTagsByDigest,
-        SymbolFacts? symbolFacts,
         // Non-null when the version renders as one of several files. Overrides only the
         // artifact-level facts; everything else is a property of the VERSION and is identical
         // across siblings.
-        PackageVersionFile? file)
+        PackageVersionFile? file,
+        PackageVersionViewContext ctx)
     {
-        bool hasMax = scoreMap.TryGetValue(v.Id, out double maxScore);
-        string status = ComputeVersionStatus(v, hasMax ? maxScore : (double?)null, tolerance, blockDeprecatedMode);
+        bool hasMax = ctx.ScoreMap.TryGetValue(v.Id, out double maxScore);
+        string status = ComputeVersionStatus(
+            v, ctx.Ecosystem, hasMax ? maxScore : (double?)null, ctx.Tolerance, ctx.BlockDeprecatedMode);
         string? redactedUpstreamUrl = UpstreamUrlValidator.StripCredentials(v.UpstreamUrl);
         return new
         {
@@ -272,7 +284,7 @@ public sealed class OrgController : OrgScopedControllerBase
             UpstreamUrl = redactedUpstreamUrl,
             // Public registry page (npmjs.com/pypi.org/…) reconstructed only when the recorded
             // upstream host is a known public registry; null (link hidden) for private upstreams.
-            RegistryPageUrl = RegistryPageUrl.ForVersion(ecosystem, v.Purl, packageName, v.Version, redactedUpstreamUrl),
+            RegistryPageUrl = RegistryPageUrl.ForVersion(ctx.Ecosystem, v.Purl, ctx.PackageName, v.Version, redactedUpstreamUrl),
             v.UpstreamIntegrityValue,
             v.UpstreamIntegrityAlgorithm,
             v.IsMalicious,
@@ -282,18 +294,18 @@ public sealed class OrgController : OrgScopedControllerBase
             v.ProvenanceSigner,
             MaxOsvScore = hasMax ? maxScore : (double?)null,
             Status = status,
-            Licenses = (v.Origin == "proxy" ? proxyLicenses[v.Id] : uploadedLicenses[v.Id]).ToArray(),
-            Tags = ociTagsByDigest != null && ociTagsByDigest.Contains(v.Version)
-                ? ociTagsByDigest[v.Version].ToArray()
+            Licenses = (v.Origin == "proxy" ? ctx.ProxyLicenses[v.Id] : ctx.UploadedLicenses[v.Id]).ToArray(),
+            Tags = ctx.OciTagsByDigest != null && ctx.OciTagsByDigest.Contains(v.Version)
+                ? ctx.OciTagsByDigest[v.Version].ToArray()
                 : Array.Empty<string>(),
             // NuGet symbols. Deliberately two fields rather than one count: a version that carries
             // a .snupkg but indexed zero PDBs (native-only symbols, or indexing that failed at
             // push) is the actionable state, and a bare count of 0 cannot be told apart from
             // "no symbol package at all".
-            HasSymbolPackage = symbolFacts?.VersionsWithSymbolPackage.Contains(v.Id) ?? false,
-            IndexedPdbCount = symbolFacts is null
+            HasSymbolPackage = ctx.SymbolFacts?.VersionsWithSymbolPackage.Contains(v.Id) ?? false,
+            IndexedPdbCount = ctx.SymbolFacts is null
                 ? (int?)null
-                : symbolFacts.IndexedPdbCounts.GetValueOrDefault(v.Id)
+                : ctx.SymbolFacts.IndexedPdbCounts.GetValueOrDefault(v.Id)
         };
     }
 
@@ -317,7 +329,8 @@ public sealed class OrgController : OrgScopedControllerBase
         return ArtifactInventoryRepository.CollapseSidecarProxyRows(ecosystem, versions);
     }
 
-    private static string ComputeVersionStatus(PackageVersion v, double? maxScore, double tolerance, string blockDeprecatedMode = "off")
+    private static string ComputeVersionStatus(
+        PackageVersion v, string ecosystem, double? maxScore, double tolerance, string blockDeprecatedMode = "off")
     {
         if (v.ManualBlockState == "blocked")
         {
@@ -338,6 +351,14 @@ public sealed class OrgController : OrgScopedControllerBase
             // Any non-allowed version above tolerance is auto-blocked.
             (_, true) => "blocked",
             _ when v.Deprecated is not null => "deprecated",
+            // OSV publishes no feed this ecosystem's artefacts could match, so neither a stamped
+            // nor an absent vuln_checked_at says anything about them: an empty advisory list is
+            // the only answer a lookup can return. Reported as its own state so the absence of
+            // coverage is visible instead of reading as a clean screening — "nothing to scan
+            // against" and "not scanned yet" call for different operator action. Conditioned on
+            // HasAdvisory so a row that did acquire advisory links keeps its vulnerable label.
+            _ when !v.HasAdvisory && !OsvFeedCoverage.HasAdvisoryFeed(ecosystem)
+                => OsvFeedCoverage.NoFeedStatus,
             _ when v.VulnCheckedAt is null => "unscanned",
             // Scanned and servable, but carries at least one advisory below the block
             // tolerance (or an unscored/MAL advisory the score aggregate never saw). Reported
@@ -605,46 +626,57 @@ public sealed class OrgController : OrgScopedControllerBase
         }
 
         var ver = await _packages.GetVersionAsync(pkg.Id, version, ct);
-        if (ver is not null)
-        {
-            // A multi-file version (NuGet .nupkg + .snupkg, PyPI sdist + wheels) is downloadable
-            // per file. An unmatched `file` is a 404, never a fall back to the primary artifact:
-            // substituting a different artifact for the one asked for succeeds silently and hands
-            // back the wrong bytes — the same rule the flatcontainer serve path follows.
-            PackageVersionFile? requested = null;
-            if (!string.IsNullOrEmpty(file))
-            {
-                requested = await _versionFiles.GetByVersionAndFilenameAsync(ver.Id, file, ct);
-                if (requested is null)
-                {
-                    return NotFound();
-                }
-            }
+        // Hosted versions still have a package_versions row; a proxy version that has aged out of
+        // it falls back to the global-plane cache_artifact lookup.
+        return ver is not null
+            ? await DownloadHostedVersionAsync(orgId, ecosystem, ver, file, ct)
+            : await DownloadProxyVersionAsync(orgId, ecosystem, name, version, file, ct);
+    }
 
-            // Route by per-version origin: proxy artifacts live on the eviction-friendly cache
-            // tier, uploaded artifacts on the durable registry tier. Under split storage these
-            // are distinct backends, so picking the wrong tier would 404 or serve wrong bytes.
-            var store = ver.Origin == "proxy" ? _blobStorage.Cache : _blobStorage.Registry;
-            var stream = await store.GetAsync(BlobKeys.StoreKey(requested?.BlobKey ?? ver.BlobKey), ct);
-            if (stream is null)
+    private async Task<IActionResult> DownloadHostedVersionAsync(
+        string orgId, string ecosystem, PackageVersion ver, string? file, CancellationToken ct)
+    {
+        // A multi-file version (NuGet .nupkg + .snupkg, PyPI sdist + wheels) is downloadable
+        // per file. An unmatched `file` is a 404, never a fall back to the primary artifact:
+        // substituting a different artifact for the one asked for succeeds silently and hands
+        // back the wrong bytes — the same rule the flatcontainer serve path follows.
+        PackageVersionFile? requested = null;
+        if (!string.IsNullOrEmpty(file))
+        {
+            requested = await _versionFiles.GetByVersionAndFilenameAsync(ver.Id, file, ct);
+            if (requested is null)
             {
                 return NotFound();
             }
-
-            // Count the UI download the same way protocol pulls are counted, and log it as a
-            // 'download' activity so it also appears on the dashboard chart — the UI is just
-            // another download surface.
-            await _audit.LogActivityAsync(orgId, ecosystem, ver.Purl, "download", GetUserId(),
-                actorKind: ActorKinds.User, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
-            await _packages.IncrementDownloadCountAsync(ver.Id, ct);
-
-            string filename = requested?.Filename ?? ver.BlobKey.Split('/').Last();
-            return File(stream, "application/octet-stream", filename);
         }
 
-        // Global-plane fallback: proxy versions no longer have a package_versions row.
-        // Look up the artifact in cache_artifact (joined to tenant_artifact_access for org
-        // scoping) and serve from the cache tier.
+        // Route by per-version origin: proxy artifacts live on the eviction-friendly cache
+        // tier, uploaded artifacts on the durable registry tier. Under split storage these
+        // are distinct backends, so picking the wrong tier would 404 or serve wrong bytes.
+        var store = ver.Origin == "proxy" ? _blobStorage.Cache : _blobStorage.Registry;
+        var stream = await store.GetAsync(BlobKeys.StoreKey(requested?.BlobKey ?? ver.BlobKey), ct);
+        if (stream is null)
+        {
+            return NotFound();
+        }
+
+        // Count the UI download the same way protocol pulls are counted, and log it as a
+        // 'download' activity so it also appears on the dashboard chart — the UI is just
+        // another download surface.
+        await _audit.LogActivityAsync(orgId, ecosystem, ver.Purl, "download", GetUserId(),
+            actorKind: ActorKinds.User, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+        await _packages.IncrementDownloadCountAsync(ver.Id, ct);
+
+        string filename = requested?.Filename ?? ver.BlobKey.Split('/').Last();
+        return File(stream, "application/octet-stream", filename);
+    }
+
+    // Global-plane fallback: proxy versions no longer have a package_versions row.
+    // Look up the artifact in cache_artifact (joined to tenant_artifact_access for org
+    // scoping) and serve from the cache tier.
+    private async Task<IActionResult> DownloadProxyVersionAsync(
+        string orgId, string ecosystem, string name, string version, string? file, CancellationToken ct)
+    {
         var proxyEntries = await _cacheArtifacts.ListServeFactsForNameAsync(orgId, ecosystem, AsPurlName(ecosystem, name), ct);
         var facts = proxyEntries.FirstOrDefault(
             e => string.Equals(e.Version, version, StringComparison.OrdinalIgnoreCase)
@@ -803,6 +835,7 @@ public sealed class OrgController : OrgScopedControllerBase
             "golang" => GenerateGoSnippet(baseUrl, slug),
             "cargo" => GenerateCargoSnippet(baseUrl, slug),
             "apk" => GenerateApkSnippet(baseUrl, slug),
+            "terraform" => GenerateTerraformSnippet(baseUrl, slug),
             _ => null
         };
 
@@ -1051,6 +1084,48 @@ public sealed class OrgController : OrgScopedControllerBase
 
             # Publish a crate:
             cargo publish --registry dependably
+            """;
+    }
+
+    // Terraform is proxy-only and is configured in the CLI configuration rather than per-project:
+    // provider_installation applies to every provider a configuration requests, so there is no
+    // per-repository file to edit and no change to required_providers blocks. The mirror URL must
+    // be https — terraform rejects an http: mirror while parsing this file, before any request is
+    // made — so a plain-HTTP deployment cannot serve this ecosystem. Credentials carry in the
+    // URL's userinfo, like the apk snippet: the network mirror client has no separate credentials
+    // field, but url.ResolveReference (used to resolve the relative archive URL from a version
+    // document) preserves userinfo, and Go's net/http emits it as an Authorization: Basic header —
+    // so one userinfo-bearing URL authenticates both the metadata and archive requests.
+    private static string GenerateTerraformSnippet(string baseUrl, string slug)
+    {
+        _ = slug;
+        var uri = new Uri(baseUrl);
+        string userinfoUrl = $"{uri.Scheme}://<user>:<token>@{uri.Authority}/terraform/";
+        // Unlike every other ecosystem, a plain-HTTP mirror URL is not merely discouraged here:
+        // Terraform rejects it while parsing this file, before any request is made, so the snippet
+        // below cannot work as-is. There is no client-side workaround (no equivalent of Docker's
+        // insecure-registries) — TLS must be terminated in front of Dependably. Say so in-product
+        // rather than letting the operator discover it as an opaque CLI config-parse error.
+        string httpWarning = uri.Scheme == "http"
+            ? "# WARNING: Terraform rejects an http:// network-mirror URL at config-parse time.\n"
+              + "# This instance is serving over plain HTTP, so terraform init will fail with\n"
+              + "# \"Cannot use ... as a URL for a network provider mirror\". Terminate TLS in front\n"
+              + "# of Dependably and use an https:// URL below before this snippet will work.\n\n"
+            : "";
+        return httpWarning + $$"""
+            # ~/.terraformrc (Linux/macOS) or %APPDATA%\terraform.rc (Windows)
+            provider_installation {
+              network_mirror {
+                url = "{{userinfoUrl}}"
+              }
+            }
+
+            # Point Terraform at that file from CI, where $HOME may not be the runner's:
+            export TF_CLI_CONFIG_FILE=/path/to/terraformrc
+
+            # Existing .terraform.lock.hcl files keep working: Terraform recomputes each
+            # provider's h1 hash from the archive it downloads and verifies it against the lock.
+            terraform init
             """;
     }
 

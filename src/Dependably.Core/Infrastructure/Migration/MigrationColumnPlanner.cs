@@ -9,11 +9,7 @@ namespace Dependably.Infrastructure.Migration;
 /// Postgres storage class it lands in. The copy and the verification pass both build this from the
 /// live catalogues, so a standalone verification run reads exactly the columns the copy wrote.
 /// </summary>
-public sealed record TableColumnPlan(string Table, IReadOnlyList<PostgresColumn> Columns)
-{
-    /// <summary>Column names in copy order — the order both digests are computed over.</summary>
-    public IReadOnlyList<string> Names => Columns.Select(c => c.Name).ToList();
-}
+public sealed record TableColumnPlan(string Table, IReadOnlyList<PostgresColumn> Columns);
 
 /// <summary>
 /// Resolves, per table, which columns are copied and what they become on the Postgres side.

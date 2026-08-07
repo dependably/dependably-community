@@ -201,6 +201,7 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
             _logger.LogWarning(ex,
                 "Failed to fetch upstream deprecation metadata for {Ecosystem}/{Package}: {ExceptionType}",
                 ecosystem, name, ex.GetType().Name);
+            await YieldGroupSlotAsync(ecosystem, name, orgId, ct);
             return (0, 0);
         }
 
@@ -230,6 +231,32 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
         await LogRefreshSummaryAsync(orgId, ecosystem, name, checked_, updated, ct);
 
         return (checked_, updated);
+    }
+
+    /// <summary>
+    /// Marks a group as attempted after its upstream fetch threw, so it moves to the back of the
+    /// refresh queue instead of holding the head of it.
+    ///
+    /// Both enumerations that feed this pass order by their staleness column ascending and take a
+    /// fixed batch — <c>ListGroupsNeedingDeprecationRefreshAsync</c> by
+    /// <c>MIN(cache_artifact.deprecation_checked_at)</c> (NULLs first), and
+    /// <c>ListHostedGroupsNeedingUpstreamRefreshAsync</c> by <c>packages.upstream_latest_checked_at</c>.
+    /// A group whose fetch throws every pass is therefore re-selected first every pass, and once
+    /// batch-many such groups exist no other group is ever reached again.
+    ///
+    /// Only the attempt timestamps move. The deprecation verdict and the recorded upstream-latest
+    /// are left untouched — the fetch produced neither, and writing a null for either would turn a
+    /// transient upstream outage into erased state.
+    /// </summary>
+    private async Task YieldGroupSlotAsync(string ecosystem, string name, string orgId, CancellationToken ct)
+    {
+        await _cacheArtifacts.TouchDeprecationCheckedAtForNameAsync(ecosystem, name, _time, ct);
+
+        var pkg = await _packages.GetByPurlNameAsync(orgId, ecosystem, name, ct);
+        if (pkg is not null)
+        {
+            await _packages.TouchUpstreamLatestCheckedAtAsync(pkg.Id, ct);
+        }
     }
 
     // Recomputes versions_behind for every hosted (origin='uploaded') version under the package,

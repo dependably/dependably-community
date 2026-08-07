@@ -160,7 +160,9 @@ public abstract class SpdxLicenseExpression
     // Internal-only: signals "give up, fall back to a single opaque leaf" to Parse. Never
     // escapes this file.
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Critical Code Smell", "S3871:Exception types should be \"public\"",
-        Justification = "Private, file-scoped control-flow signal used only within SpdxLicenseExpression's own parser to trigger the opaque-leaf fallback in Parse; it never crosses this type's boundary, so callers have no need to catch it by type.")]
+        Justification = "Private, file-scoped control-flow signal used only within SpdxLicenseExpression's " +
+            "own parser to trigger the opaque-leaf fallback in Parse; it never crosses this type's boundary, " +
+            "so callers have no need to catch it by type.")]
     private sealed class SpdxParseException : Exception
     {
         public SpdxParseException(string message) : base(message)

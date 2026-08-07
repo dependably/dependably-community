@@ -1,3 +1,4 @@
+using System.Data.Common;
 using Dapper;
 
 namespace Dependably.Infrastructure.Privacy;
@@ -39,6 +40,31 @@ public sealed class PersonalDataExportRepository
     {
         await using var conn = await _db.OpenAsync(ct);
 
+        var account = await LoadAccountDataAsync(conn, userId, orgId);
+        var activityLog = await LoadActivityDataAsync(conn, userId, orgId, email);
+        var lockout = await LoadLockoutDataAsync(conn, loginAttemptKey);
+
+        return new PersonalDataExport(
+            User: account.User,
+            UserTokens: account.UserTokens.ToList(),
+            PasswordResetTokens: account.PasswordResetTokens.ToList(),
+            EmailChangeTokens: account.EmailChangeTokens.ToList(),
+            ExternalIdentities: account.ExternalIdentities.ToList(),
+            MfaTrustedDevices: account.TrustedDevices.ToList(),
+            BannerDismissals: activityLog.BannerDismissals.ToList(),
+            InvitesCreated: activityLog.InvitesCreated.ToList(),
+            InvitesReceived: activityLog.InvitesReceived.ToList(),
+            AuditLog: activityLog.AuditLog.ToList(),
+            Activity: activityLog.Activity.ToList(),
+            AuditEvents: activityLog.AuditEvents.ToList(),
+            LoginAttempts: lockout.LoginAttempts,
+            SendThrottles: lockout.SendThrottles.ToList());
+    }
+
+    // The subject's account/credential-adjacent rows: profile, tokens, and MFA/identity records.
+    private static async Task<AccountData> LoadAccountDataAsync(
+        DbConnection conn, string userId, string orgId)
+    {
         var user = await conn.QuerySingleOrDefaultAsync<UserRow>(
             """
             SELECT id AS Id, tenant_id AS TenantId, email AS Email, role AS Role,
@@ -103,6 +129,15 @@ public sealed class PersonalDataExportRepository
             """,
             new { userId, orgId });
 
+        return new AccountData(
+            user, userTokens, passwordResetTokens, emailChangeTokens, externalIdentities, trustedDevices);
+    }
+
+    // The subject's activity/audit trail: dismissals, invites (both sent and received), and the
+    // three audit-adjacent logs (audit_log, activity, audit_event) attributed to the subject.
+    private static async Task<ActivityData> LoadActivityDataAsync(
+        DbConnection conn, string userId, string orgId, string email)
+    {
         var bannerDismissals = await conn.QueryAsync<BannerDismissalRow>(
             """
             SELECT banner_id AS BannerId, dismissed_at AS DismissedAt
@@ -165,6 +200,16 @@ public sealed class PersonalDataExportRepository
             """,
             new { userId, orgId });
 
+        return new ActivityData(
+            bannerDismissals, invitesCreated, invitesReceived, auditLog, activity, auditEvents);
+    }
+
+    // The subject's pseudonymized lockout/throttle state — both tables key on the same
+    // (realm, tenant, email) hash rather than user_id, so tenant scoping comes from the key
+    // itself rather than an org_id column.
+    private static async Task<LockoutData> LoadLockoutDataAsync(
+        DbConnection conn, string loginAttemptKey)
+    {
         // login_attempts has no org_id column; its primary key already encodes (realm, tenant,
         // email), so matching that pseudonym is inherently tenant-scoped.
         var loginAttempts = await conn.QuerySingleOrDefaultAsync<LoginAttemptRow>(
@@ -186,22 +231,26 @@ public sealed class PersonalDataExportRepository
             """,
             new { loginAttemptKey });
 
-        return new PersonalDataExport(
-            User: user,
-            UserTokens: userTokens.ToList(),
-            PasswordResetTokens: passwordResetTokens.ToList(),
-            EmailChangeTokens: emailChangeTokens.ToList(),
-            ExternalIdentities: externalIdentities.ToList(),
-            MfaTrustedDevices: trustedDevices.ToList(),
-            BannerDismissals: bannerDismissals.ToList(),
-            InvitesCreated: invitesCreated.ToList(),
-            InvitesReceived: invitesReceived.ToList(),
-            AuditLog: auditLog.ToList(),
-            Activity: activity.ToList(),
-            AuditEvents: auditEvents.ToList(),
-            LoginAttempts: loginAttempts,
-            SendThrottles: sendThrottles.ToList());
+        return new LockoutData(loginAttempts, sendThrottles);
     }
+
+    private sealed record AccountData(
+        UserRow? User,
+        IEnumerable<TokenRow> UserTokens,
+        IEnumerable<ResetTokenRow> PasswordResetTokens,
+        IEnumerable<EmailChangeRow> EmailChangeTokens,
+        IEnumerable<ExternalIdentityRow> ExternalIdentities,
+        IEnumerable<TrustedDeviceRow> TrustedDevices);
+
+    private sealed record ActivityData(
+        IEnumerable<BannerDismissalRow> BannerDismissals,
+        IEnumerable<InviteCreatedRow> InvitesCreated,
+        IEnumerable<InviteReceivedRow> InvitesReceived,
+        IEnumerable<AuditLogRow> AuditLog,
+        IEnumerable<ActivityRow> Activity,
+        IEnumerable<AuditEventRow> AuditEvents);
+
+    private sealed record LockoutData(LoginAttemptRow? LoginAttempts, IEnumerable<SendThrottleRow> SendThrottles);
 }
 
 /// <summary>

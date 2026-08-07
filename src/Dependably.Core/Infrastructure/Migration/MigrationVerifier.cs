@@ -27,7 +27,9 @@ public sealed record MigrationVerificationReport(IReadOnlyList<TableVerification
     /// </summary>
     public bool Ok => Tables.Count > 0 && Tables.All(t => t.Ok);
 
-    public IReadOnlyList<TableVerification> Failures => Tables.Where(t => !t.Ok).ToList();
+    // Materialised once rather than recomputed on every read — SqliteToPostgresMigrator reads
+    // Failures once to enumerate and again for .Count.
+    public IReadOnlyList<TableVerification> Failures { get; } = Tables.Where(t => !t.Ok).ToList();
 
     public long TotalSourceRows => Tables.Sum(t => t.SourceRows);
 
@@ -59,7 +61,7 @@ public static class MigrationVerifier
     /// Verifies every table in <paramref name="plan"/>. Tables absent from the target (dropped by a
     /// later release) are reported as skipped rather than failed.
     /// </summary>
-    public static async Task<MigrationVerificationReport> VerifyAsync(
+    public static Task<MigrationVerificationReport> VerifyAsync(
         DbConnection sqlite,
         DbConnection pg,
         MigrationTablePlan plan,
@@ -67,6 +69,15 @@ public static class MigrationVerifier
     {
         ArgumentNullException.ThrowIfNull(plan);
 
+        return VerifyCoreAsync(sqlite, pg, plan, ct);
+    }
+
+    private static async Task<MigrationVerificationReport> VerifyCoreAsync(
+        DbConnection sqlite,
+        DbConnection pg,
+        MigrationTablePlan plan,
+        CancellationToken ct)
+    {
         var results = new List<TableVerification>(plan.Tables.Count);
         var skipped = new List<string>();
 

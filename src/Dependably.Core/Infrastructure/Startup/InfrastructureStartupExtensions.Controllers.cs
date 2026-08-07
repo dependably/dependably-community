@@ -29,6 +29,7 @@ internal static partial class InfrastructureStartupExtensions
         builder.Services.AddScoped<OciControllerServices>();
         builder.Services.AddSingleton<GoLatestFetchCoordinator>();
         builder.Services.AddScoped<GoControllerServices>();
+        builder.Services.AddScoped<TerraformControllerServices>();
         builder.Services.AddSingleton<ApkIndexFetchCoordinator>();
         builder.Services.AddScoped(sp =>
         {

@@ -454,7 +454,7 @@ public sealed partial class PackageRepository
     {
         if (_downloadCountWriter is not null)
         {
-            _downloadCountWriter.TryEnqueue(new DownloadCountRecord(VersionId: versionId, Purl: null));
+            _downloadCountWriter.TryEnqueue(new DownloadCountRecord(VersionId: versionId));
             return;
         }
 
@@ -466,39 +466,6 @@ public sealed partial class PackageRepository
         await conn.ExecuteAsync(
             "UPDATE package_versions SET download_count = download_count + 1, last_used = @now WHERE id = @id",
             new { now, id = versionId });
-    }
-
-    /// <summary>
-    /// Same as <see cref="IncrementDownloadCountAsync(string,CancellationToken)"/> but keyed by
-    /// <c>purl</c> and scoped to <paramref name="orgId"/>. Used by download-serve paths (RPM proxy,
-    /// Maven proxy) that hold the purl but not the version id. Increments
-    /// <c>tenant_artifact_access.download_count</c> for the org's cache_artifact rows matching the
-    /// purl. A no-op if no matching row exists yet.
-    ///
-    /// When a <see cref="DownloadCountWriter"/> is wired in, the increment is enqueued off the
-    /// request path; otherwise falls back to a synchronous UPDATE.
-    /// </summary>
-    public async Task IncrementDownloadCountByPurlAsync(string orgId, string purl, CancellationToken ct = default)
-    {
-        if (_downloadCountWriter is not null)
-        {
-            _downloadCountWriter.TryEnqueue(new DownloadCountRecord(VersionId: null, Purl: purl, OrgId: orgId));
-            return;
-        }
-
-        string now = _time.GetUtcNow().ToUtcIso();
-        await using var conn = await _db.OpenAsync(ct);
-        await conn.ExecuteAsync(
-            """
-            UPDATE tenant_artifact_access
-            SET download_count = download_count + 1,
-                last_used = @now
-            WHERE org_id = @orgId
-              AND cache_artifact_id IN (
-                  SELECT id FROM cache_artifact WHERE purl = @purl
-              )
-            """,
-            new { now, orgId, purl });
     }
 
     public async Task UpdateDeprecatedAsync(string versionId, string? message, CancellationToken ct = default)

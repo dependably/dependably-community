@@ -178,7 +178,8 @@ public sealed partial class UpstreamClient
         // Retry loop for transient upstream failures; same contract as FetchAndStageAsync.
         // Non-transient failures (e.g. 404) propagate as HttpRequestException so the
         // controller's multi-base loop can try the next upstream registry.
-        using var response = await FetchWithRetryAsync(client, url, orgId, authorizationHeader, ct);
+        using var response = await FetchWithRetryAsync(
+            client, url, orgId, authorizationHeader, containmentBase: null, ct);
 
         // Phase 2 — dynamic floor based on Content-Length, checked after response headers arrive.
         EnsureStagingDiskFloorForContentLength(response.Content.Headers.ContentLength);
@@ -274,7 +275,8 @@ public sealed partial class UpstreamClient
             SnapshotCounters.IncrementCacheMiss();
             SnapshotCounters.IncrementProxyFetch();
 
-            return new UpstreamFetchResult(sha256Hex, sizeBytes, blobKey);
+            return new UpstreamFetchResult(
+                sha256Hex, sizeBytes, blobKey, LastModified: response.Content.Headers.LastModified);
         }
         finally
         {

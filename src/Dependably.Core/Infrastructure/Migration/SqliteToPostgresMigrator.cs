@@ -81,11 +81,17 @@ public sealed class SqliteToPostgresMigrator
     }
 
     /// <summary>Copies every table, resets identity sequences, and (by default) verifies the result.</summary>
-    public async Task<MetadataMigrationResult> MigrateAsync(
+    public Task<MetadataMigrationResult> MigrateAsync(
         MetadataMigrationOptions options, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(options);
 
+        return MigrateCoreAsync(options, ct);
+    }
+
+    private async Task<MetadataMigrationResult> MigrateCoreAsync(
+        MetadataMigrationOptions options, CancellationToken ct)
+    {
         await using var sqlite = await _source.OpenAsync(ct);
         var plan = await MigrationTablePlan.DiscoverAsync(sqlite, ct);
         _logger.LogInformation(

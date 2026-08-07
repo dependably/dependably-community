@@ -2900,6 +2900,18 @@
         }
       }
     },
+    "/terraform/{path}": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "path"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/v2/{path}": {
       "operations": {
         "delete": {

@@ -43,7 +43,7 @@ public sealed class ActorKindAttributionTests : IAsyncLifetime
         await repo.LogActivityAsync("o1", "npm", "pkg:npm/left-pad@1.0.0", "first_fetch",
             actorId: "st1", actorKind: ActorKinds.Service);
 
-        var (items, _) = await repo.ListActivityAsync("o1", limit: 10, offset: 0);
+        var (items, _, _) = await repo.ListActivityAsync("o1", limit: 10, offset: 0);
         var row = Assert.Single(items);
         Assert.Equal("st1", row.ActorId);
         Assert.Equal("service:ci-pull", row.ActorEmail);
@@ -57,7 +57,7 @@ public sealed class ActorKindAttributionTests : IAsyncLifetime
         await repo.LogActivityAsync("o1", "npm", "pkg:npm/left-pad@1.0.0", "first_fetch",
             actorId: "u1", actorKind: ActorKinds.User);
 
-        var (items, _) = await repo.ListActivityAsync("o1", limit: 10, offset: 0);
+        var (items, _, _) = await repo.ListActivityAsync("o1", limit: 10, offset: 0);
         var row = Assert.Single(items);
         Assert.Equal("u1", row.ActorId);
         Assert.Equal("alice@acme.test", row.ActorEmail);
@@ -74,7 +74,7 @@ public sealed class ActorKindAttributionTests : IAsyncLifetime
         await repo.LogActivityAsync("o1", "npm", "pkg:npm/left-pad@1.0.0", "first_fetch",
             actorId: null, actorKind: null);
 
-        var (items, _) = await repo.ListActivityAsync("o1", limit: 10, offset: 0);
+        var (items, _, _) = await repo.ListActivityAsync("o1", limit: 10, offset: 0);
         var row = Assert.Single(items);
         Assert.Null(row.ActorId);
         Assert.Null(row.ActorEmail);
@@ -94,7 +94,7 @@ public sealed class ActorKindAttributionTests : IAsyncLifetime
             VALUES ('legacy1', 'o1', 'pypi', 'pkg:pypi/legacy@1', 'download', 'u1', NULL, '2025-01-01T00:00:00Z')
             """);
 
-        var (items, _) = await repo.ListActivityAsync("o1", limit: 10, offset: 0);
+        var (items, _, _) = await repo.ListActivityAsync("o1", limit: 10, offset: 0);
         var row = Assert.Single(items);
         Assert.Equal("u1", row.ActorId);
         Assert.Equal("alice@acme.test", row.ActorEmail);
@@ -110,7 +110,7 @@ public sealed class ActorKindAttributionTests : IAsyncLifetime
         await repo.LogAsync("package.push", orgId: "o1", actorId: "st1",
             actorKind: ActorKinds.Service, ecosystem: "npm", purl: "pkg:npm/left-pad@1.0.0");
 
-        var (items, _) = await repo.ListAuditAsync("o1", limit: 10, offset: 0);
+        var (items, _, _) = await repo.ListAuditAsync("o1", limit: 10, offset: 0);
         var row = Assert.Single(items);
         Assert.Equal("st1", row.ActorId);
         Assert.Equal("service:ci-pull", row.ActorEmail);

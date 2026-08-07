@@ -276,28 +276,13 @@ public sealed class NuGetPublishHandler(
         // on the cache artifact's; both go through a factory on the record so a newly added policy
         // mode cannot default to "policy off" on either arm.
         string? symbolSourceIp = httpContext.GetNormalizedRemoteIp();
-        BlockGateRequest gateRequest;
-        if (row.Version is not null)
+        var (gateRequest, gateNotFound) = await ResolveSymbolGateRequestAsync(orgId, row, token, settings, symbolSourceIp, ct);
+        if (gateNotFound is not null)
         {
-            gateRequest = BlockGateRequest.For(orgId, "nuget", row.Version, token, settings, symbolSourceIp);
-        }
-        else
-        {
-            // Proxy-owned. Missing serve facts mean the cache plane can no longer describe the
-            // artifact, so there is nothing to evaluate — refuse rather than serve ungated.
-            var proxyFacts = row.CacheArtifactId is null
-                ? null
-                : await cacheArtifacts.GetServeFactsByIdAsync(orgId, row.CacheArtifactId, ct);
-            if (proxyFacts is null)
-            {
-                return new NotFoundResult();
-            }
-
-            gateRequest = BlockGateRequest.ForProxyCacheFacts(
-                orgId, "nuget", proxyFacts, token, settings, symbolSourceIp);
+            return gateNotFound;
         }
 
-        if (await blockGate.EvaluateAsync(gateRequest, ct) == BlockDecision.Blocked)
+        if (await blockGate.EvaluateAsync(gateRequest!, ct) == BlockDecision.Blocked)
         {
             return new StatusCodeResult(StatusCodes.Status403Forbidden);
         }
@@ -310,19 +295,42 @@ public sealed class NuGetPublishHandler(
 
         // A proxied PDB was fetched as a bare file, not inside an archive — its row carries an
         // empty entry path. Stream the blob straight back rather than trying to open it as a ZIP.
-        if (row.EntryPath.Length == 0)
+        return row.EntryPath.Length == 0
+            ? new FileStreamResult(blobStream, "application/octet-stream") { FileDownloadName = pdbName }
+            : await ExtractSymbolEntryAsync(blobStream, row.EntryPath, pdbName, ct);
+    }
+
+    // Resolves the BlockGateRequest for a symbol-index row: hosted rows gate on their
+    // package_versions facts (BlockGateRequest.For), proxy-owned rows on the cache artifact's
+    // (ForProxyCacheFacts) — missing serve facts on a proxy row mean the cache plane can no longer
+    // describe the artifact, so there is nothing to evaluate and the read is refused rather than
+    // served ungated.
+    private async Task<(BlockGateRequest? Request, IActionResult? NotFound)> ResolveSymbolGateRequestAsync(
+        string orgId, SymbolIndexRow row, TokenRecord? token, OrgSettings settings, string? sourceIp, CancellationToken ct)
+    {
+        if (row.Version is not null)
         {
-            return new FileStreamResult(blobStream, "application/octet-stream")
-            {
-                FileDownloadName = pdbName,
-            };
+            return (BlockGateRequest.For(orgId, "nuget", row.Version, token, settings, sourceIp), null);
         }
 
-        // ZipArchive needs a seekable stream to read the central directory. Every in-process blob
-        // backend (local disk, in-memory) already returns one; only a genuinely non-seekable source
-        // (e.g. a live network response stream) needs buffering first. Buffering the *compressed*
-        // archive here carries no amplification risk on its own — the real decompression-bomb risk
-        // is the entry's *decompressed* read, which LimitedReadStream caps below.
+        var proxyFacts = row.CacheArtifactId is null
+            ? null
+            : await cacheArtifacts.GetServeFactsByIdAsync(orgId, row.CacheArtifactId, ct);
+        if (proxyFacts is null)
+        {
+            return (null, new NotFoundResult());
+        }
+
+        return (BlockGateRequest.ForProxyCacheFacts(orgId, "nuget", proxyFacts, token, settings, sourceIp), null);
+    }
+
+    // Opens the .snupkg as a ZIP and streams the requested entry's decompressed bytes back,
+    // buffering the compressed archive first only when the source stream is not seekable (a live
+    // network response). LimitedReadStream caps the *decompressed* read — the actual
+    // decompression-bomb risk — regardless of which source path was taken.
+    private static async Task<IActionResult> ExtractSymbolEntryAsync(
+        Stream blobStream, string entryPath, string pdbName, CancellationToken ct)
+    {
         var archiveSource = blobStream;
         if (!blobStream.CanSeek)
         {
@@ -340,7 +348,7 @@ public sealed class NuGetPublishHandler(
             // leaveOpen:false — disposing the archive also disposes archiveSource (the buffer, or
             // the original seekable blob stream), so callers only need to track the archive.
             zip = new ZipArchive(archiveSource, ZipArchiveMode.Read, leaveOpen: false);
-            entry = zip.GetEntry(row.EntryPath);
+            entry = zip.GetEntry(entryPath);
         }
         catch (InvalidDataException)
         {

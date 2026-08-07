@@ -43,7 +43,7 @@ public sealed class ReadinessAggregatorTests : IAsyncLifetime
             .AddInMemoryCollection(pairs.ToDictionary(p => p.Key, p => p.Value))
             .Build();
 
-    private static IServiceProvider EmptyServices() => new ServiceCollection().BuildServiceProvider();
+    private static ServiceProvider EmptyServices() => new ServiceCollection().BuildServiceProvider();
 
     private ReadinessAggregator Build(
         IBlobStore blobs,

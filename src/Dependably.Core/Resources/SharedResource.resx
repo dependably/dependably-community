@@ -481,6 +481,14 @@
     <value>authType must be one of: anonymous, basic, dockerhub_token_exchange.</value>
     <comment>422 detail. The field name and values are API literals.</comment>
   </data>
+  <data name="error.upstream.protocolTerraformOnly" xml:space="preserve">
+    <value>protocol is only valid for ecosystem=terraform.</value>
+    <comment>422 detail. Field name and 'ecosystem=terraform' are API literals.</comment>
+  </data>
+  <data name="error.upstream.protocolInvalid" xml:space="preserve">
+    <value>protocol must be omitted or "{0}".</value>
+    <comment>422 detail. {0} = the one supported non-default protocol value (API literal, e.g. "mirror"). The field name is an API literal.</comment>
+  </data>
   <data name="error.webhook.masterKeyRequired" xml:space="preserve">
     <value>DEPENDABLY_MASTER_KEY must be configured to store a webhook signing secret at rest.</value>
     <comment>422 detail. DEPENDABLY_MASTER_KEY is an environment variable name - keep it verbatim.</comment>

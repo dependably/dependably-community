@@ -64,32 +64,42 @@ internal static partial class SchemaSqlParser
                 continue;
             }
 
-            var columns = new List<SchemaColumn>();
-            var constraints = new List<string>();
-            foreach (string item in SplitTopLevel(clean[(openParen + 1)..closeParen]))
-            {
-                string trimmed = item.Trim();
-                if (trimmed.Length == 0)
-                {
-                    continue;
-                }
-
-                if (IsConstraint(trimmed))
-                {
-                    constraints.Add(trimmed);
-                    continue;
-                }
-
-                string name = Unquote(FirstToken(trimmed));
-                if (name.Length > 0)
-                {
-                    columns.Add(new SchemaColumn(name, trimmed));
-                }
-            }
+            var (columns, constraints) = ParseTableBody(clean[(openParen + 1)..closeParen]);
             string table = Unquote(header.Groups["name"].Value);
             tables[table] = new SchemaTable(table, columns, constraints);
         }
         return tables;
+    }
+
+    /// <summary>
+    /// Splits one <c>CREATE TABLE</c> body (already bracket-matched to its opening/closing parens)
+    /// into its column declarations and its table-level constraint items.
+    /// </summary>
+    private static (List<SchemaColumn> Columns, List<string> Constraints) ParseTableBody(string body)
+    {
+        var columns = new List<SchemaColumn>();
+        var constraints = new List<string>();
+        foreach (string item in SplitTopLevel(body))
+        {
+            string trimmed = item.Trim();
+            if (trimmed.Length == 0)
+            {
+                continue;
+            }
+
+            if (IsConstraint(trimmed))
+            {
+                constraints.Add(trimmed);
+                continue;
+            }
+
+            string name = Unquote(FirstToken(trimmed));
+            if (name.Length > 0)
+            {
+                columns.Add(new SchemaColumn(name, trimmed));
+            }
+        }
+        return (columns, constraints);
     }
 
     /// <summary>
@@ -138,35 +148,20 @@ internal static partial class SchemaSqlParser
     public static string StripComments(string sql)
     {
         var sb = new StringBuilder(sql.Length);
-        bool inStr = false;
-        char quote = '\0';
         for (int i = 0; i < sql.Length; i++)
         {
             char c = sql[i];
-            if (inStr)
+            if (c is '\'' or '"')
             {
-                sb.Append(c);
-                if (c == quote)
-                {
-                    if (i + 1 < sql.Length && sql[i + 1] == quote)
-                    {
-                        sb.Append(sql[++i]); // escaped '' / ""
-                    }
-                    else
-                    {
-                        inStr = false;
-                    }
-                }
+                int end = SkipStringLiteral(sql, i);
+                sb.Append(sql, i, end - i + 1);
+                i = end;
                 continue;
             }
-            if (c is '\'' or '"') { inStr = true; quote = c; sb.Append(c); continue; }
+
             if (c == '-' && i + 1 < sql.Length && sql[i + 1] == '-')
             {
-                while (i < sql.Length && sql[i] != '\n')
-                {
-                    i++;
-                }
-
+                i = SkipLineComment(sql, i);
                 if (i < sql.Length)
                 {
                     sb.Append('\n');
@@ -174,49 +169,84 @@ internal static partial class SchemaSqlParser
 
                 continue;
             }
+
             if (c == '/' && i + 1 < sql.Length && sql[i + 1] == '*')
             {
-                i += 2;
-                while (i + 1 < sql.Length && !(sql[i] == '*' && sql[i + 1] == '/'))
-                {
-                    i++;
-                }
-
-                i++; // skip the closing '/', the for-loop ++ skips the '*'
+                i = SkipBlockComment(sql, i);
                 continue;
             }
+
             sb.Append(c);
         }
         return sb.ToString();
+    }
+
+    // Index of the '\n' ending a "-- ..." line comment starting at commentStart (s[commentStart]
+    // is the first '-'), or s.Length when the comment runs to end of file.
+    private static int SkipLineComment(string s, int commentStart)
+    {
+        int i = commentStart;
+        while (i < s.Length && s[i] != '\n')
+        {
+            i++;
+        }
+
+        return i;
+    }
+
+    // Index of the '/' closing a "/* ... */" comment starting at commentStart (s[commentStart] is
+    // '/', s[commentStart + 1] is '*'), or s.Length - 1 when the comment runs to end of file.
+    private static int SkipBlockComment(string s, int commentStart)
+    {
+        int i = commentStart + 2;
+        while (i + 1 < s.Length && !(s[i] == '*' && s[i + 1] == '/'))
+        {
+            i++;
+        }
+
+        return i + 1;
+    }
+
+    // Index of the closing quote matching the opening quote at s[openIndex] (handling the
+    // doubled-quote '' / "" escape), or s.Length - 1 when the literal is unterminated. Shared by
+    // every scan below so "is this character inside a string literal" is answered in one place.
+    private static int SkipStringLiteral(string s, int openIndex)
+    {
+        char quote = s[openIndex];
+        for (int i = openIndex + 1; i < s.Length; i++)
+        {
+            if (s[i] != quote)
+            {
+                continue;
+            }
+
+            if (i + 1 < s.Length && s[i + 1] == quote)
+            {
+                i++; // escaped '' / ""
+                continue;
+            }
+
+            return i;
+        }
+
+        return s.Length - 1;
     }
 
     // Index of the ')' closing the '(' at openIndex, or -1. String-literal aware.
     private static int MatchingParen(string s, int openIndex)
     {
         int depth = 0;
-        bool inStr = false;
-        char quote = '\0';
         for (int i = openIndex; i < s.Length; i++)
         {
             char c = s[i];
-            if (inStr)
+            if (c is '\'' or '"')
             {
-                if (c == quote)
-                {
-                    if (i + 1 < s.Length && s[i + 1] == quote)
-                    {
-                        i++;
-                    }
-                    else
-                    {
-                        inStr = false;
-                    }
-                }
+                i = SkipStringLiteral(s, i);
                 continue;
             }
+
             switch (c)
             {
-                case '\'' or '"': inStr = true; quote = c; break;
                 case '(': depth++; break;
                 case ')':
                     if (--depth == 0)
@@ -234,29 +264,17 @@ internal static partial class SchemaSqlParser
     private static IEnumerable<string> SplitTopLevel(string body)
     {
         int depth = 0, start = 0;
-        bool inStr = false;
-        char quote = '\0';
         for (int i = 0; i < body.Length; i++)
         {
             char c = body[i];
-            if (inStr)
+            if (c is '\'' or '"')
             {
-                if (c == quote)
-                {
-                    if (i + 1 < body.Length && body[i + 1] == quote)
-                    {
-                        i++;
-                    }
-                    else
-                    {
-                        inStr = false;
-                    }
-                }
+                i = SkipStringLiteral(body, i);
                 continue;
             }
+
             switch (c)
             {
-                case '\'' or '"': inStr = true; quote = c; break;
                 case '(': depth++; break;
                 case ')': depth--; break;
                 case ',' when depth == 0:

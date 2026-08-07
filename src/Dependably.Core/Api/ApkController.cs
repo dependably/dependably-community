@@ -576,6 +576,8 @@ public sealed class ApkIndexFetchCoordinator
 
     private sealed record CachedIndexFile(byte[] Body, string? ETag);
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
+        Justification = "DI constructor: each parameter is a distinct injected service/config source; grouping them would be an artificial container, not a cohesive value.")]
     public ApkIndexFetchCoordinator(
         IHttpClientFactory http, IMemoryCache cache, IAirGapMode airGap,
         IUpstreamUrlValidator urlValidator, IPerOrgTrustAnchorStore trustStore, IConfiguration configuration,

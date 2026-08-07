@@ -39,6 +39,7 @@ public static class TrustAnchorPairs
     [
         ("rpm", "pgp"),
         ("maven", "pgp"),
+        ("terraform", "pgp"),
         ("npm", "spki"),
         ("nuget", "x509"),
         ("pypi", "sigstore_root"),

@@ -191,25 +191,9 @@ public sealed class PackagePublishService : IPackagePublishService
         bool overwriteAllowed = ResolveOverwriteAllowed(
             settings?.VersionOverwritePolicy, pkg.SameVersionPushOverride);
 
-        if (existing is not null && !addsNewFile && !overwriteAllowed)
+        if (await CheckVersionAdmissionAsync(request, existing, addsNewFile, overwriteAllowed, ct) is { } admissionReject)
         {
-            return new PublishResult.Rejected(409, "version_exists",
-                $"Tarball parsed as {request.PurlName}@{request.Version}; that version already exists. " +
-                "Same-version push is blocked by this package's policy.");
-        }
-
-        // Same gate, one step further back in time: a coordinate that was published and then
-        // hard-deleted is still spent. Runs before the quota reservation and the blob write.
-        if (existing is null
-            && await TombstoneRejectionAsync(request, overwriteAllowed, ct) is { } tombstoneReject)
-        {
-            return tombstoneReject;
-        }
-
-        if (!MultiFileEcosystems.Covers(request.Ecosystem)
-            && ArtifactFilenameMismatch(existing, request.Filename) is { } filenameMismatch)
-        {
-            return filenameMismatch;
+            return admissionReject;
         }
 
         // Quota reservation: claims the net delta (new size minus replaced size) against the
@@ -248,6 +232,34 @@ public sealed class PackagePublishService : IPackagePublishService
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// The three checks that gate whether this (existing-version, overwrite-policy) combination
+    /// may proceed: same-version-push policy, the tombstone-of-a-hard-deleted-coordinate gate one
+    /// step further back, and the filename-mismatch guard for single-artifact-per-version
+    /// ecosystems. Runs before the quota reservation and the blob write.
+    /// </summary>
+    private async Task<PublishResult.Rejected?> CheckVersionAdmissionAsync(
+        PublishRequest request, PackageVersion? existing, bool addsNewFile, bool overwriteAllowed, CancellationToken ct)
+    {
+        if (existing is not null && !addsNewFile && !overwriteAllowed)
+        {
+            return new PublishResult.Rejected(409, "version_exists",
+                $"Tarball parsed as {request.PurlName}@{request.Version}; that version already exists. " +
+                "Same-version push is blocked by this package's policy.");
+        }
+
+        // Same gate, one step further back in time: a coordinate that was published and then
+        // hard-deleted is still spent.
+        var tombstoneReject = existing is null
+            ? await TombstoneRejectionAsync(request, overwriteAllowed, ct)
+            : null;
+
+        return tombstoneReject ?? (!MultiFileEcosystems.Covers(request.Ecosystem)
+            && ArtifactFilenameMismatch(existing, request.Filename) is { } filenameMismatch
+            ? filenameMismatch
+            : null);
     }
 
     // Projects the publish request's authenticated actor into a name-ownership principal. A

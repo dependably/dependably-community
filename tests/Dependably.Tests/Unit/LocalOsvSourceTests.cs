@@ -278,4 +278,43 @@ public sealed class LocalOsvSourceTests : IDisposable
             "pkg:maven/org.apache.logging.log4j/log4j-core@2.17.1");
         Assert.Empty(hits);
     }
+
+    // ── Go ───────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task Query_Golang_BareOsvVersion_MatchesVPrefixedPurl()
+    {
+        // OSV's Go entries express versions bare; PurlNormalizer.Golang carries the wire-form
+        // "v" prefix into the purl. Stripping it in ParsePurl is what lets the two meet.
+        WriteAdvisory("GHSA-Go-1", "Go", "golang.org/x/net", ["0.10.0"]);
+        var src = Build();
+
+        var hits = await src.QueryAsync("pkg:golang/golang.org/x/net@v0.10.0");
+        Assert.Single(hits);
+        Assert.Equal("GHSA-Go-1", hits[0].Id);
+    }
+
+    [Fact]
+    public async Task Query_Golang_VPrefixedOsvVersion_MatchesVPrefixedPurl()
+    {
+        // The advisory side is stripped too, so a dump that does carry the prefix still matches
+        // rather than silently missing.
+        WriteAdvisory("GHSA-Go-2", "Go", "github.com/gorilla/websocket", ["v1.4.0"]);
+        var src = Build();
+
+        var hits = await src.QueryAsync("pkg:golang/github.com/gorilla/websocket@v1.4.0");
+        Assert.Single(hits);
+        Assert.Equal("GHSA-Go-2", hits[0].Id);
+    }
+
+    [Fact]
+    public async Task Query_Golang_VersionMiss_ReturnsEmpty()
+    {
+        // Stripping the prefix must not collapse distinct versions into a match.
+        WriteAdvisory("GHSA-Go-3", "Go", "golang.org/x/crypto", ["0.16.0"]);
+        var src = Build();
+
+        var hits = await src.QueryAsync("pkg:golang/golang.org/x/crypto@v0.17.0");
+        Assert.Empty(hits);
+    }
 }

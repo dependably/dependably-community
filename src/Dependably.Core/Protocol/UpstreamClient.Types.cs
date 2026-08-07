@@ -8,7 +8,15 @@ namespace Dependably.Protocol;
 /// the (sha, size, blobKey) triple and each independently re-open the cached blob via
 /// <see cref="IBlobStore.GetAsync"/>.
 /// </summary>
-public sealed record UpstreamFetchResult(string Sha256Hex, long SizeBytes, string BlobKey);
+/// <param name="LastModified">
+/// The upstream response's <c>Last-Modified</c> header, captured on the content-addressed fetch
+/// path (<see cref="UpstreamClient.FetchAndCacheByUrlAsync"/>). Null for callers that don't read
+/// it. Maven reads this as an artifact's upstream publish timestamp: the flat repository layout
+/// it proxies carries no per-version metadata document with one, so the HTTP header on the
+/// artifact's own response is the only upstream-agnostic signal available.
+/// </param>
+public sealed record UpstreamFetchResult(
+    string Sha256Hex, long SizeBytes, string BlobKey, DateTimeOffset? LastModified = null);
 
 /// <summary>
 /// Write-only Stream that forwards every write to an inner <see cref="Stream"/> (the

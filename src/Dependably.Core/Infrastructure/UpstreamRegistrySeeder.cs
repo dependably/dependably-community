@@ -33,6 +33,16 @@ public static class UpstreamRegistrySeeder
         // ({release}/{repo}/{arch}/{file}), so a sed host-rewrite of /etc/apk/repositories is
         // the only client-side change needed to point at this proxy.
         ("apk",    "Apk:Upstream",   "https://dl-cdn.alpinelinux.org/alpine"),
+        // Terraform's public provider registry. Unlike every other row here, this host serves
+        // only the registry protocol — it resolves versions and hands back a download_url on a
+        // separate host (releases.hashicorp.com for HashiCorp's own providers), which is where
+        // the archive bytes come from. That second host is discovered per version rather than
+        // configured, so it is deliberately not a seeded row.
+        //
+        // The host of this URL is also what TerraformController matches a requested provider's
+        // source address against: a mirror is addressed by the provider's own registry hostname,
+        // and only hosts configured here are mirrored.
+        ("terraform", "Terraform:Upstream", "https://registry.terraform.io"),
     ];
 
     /// <summary>

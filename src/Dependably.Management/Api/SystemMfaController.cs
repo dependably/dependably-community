@@ -116,8 +116,8 @@ public sealed class SystemMfaController : ControllerBase
             sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
 
-        await NotifySecurityEventAsync(adminId, mailer, time, ct,
-            (m, addr, lang, now) => m.EnqueueMfaEnabled(addr, lang, now));
+        await NotifySecurityEventAsync(adminId, mailer, time,
+            (m, addr, lang, now) => m.EnqueueMfaEnabled(addr, lang, now), ct);
 
         return Ok(new { recoveryCodes = codes });
     }
@@ -185,8 +185,8 @@ public sealed class SystemMfaController : ControllerBase
             sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
 
-        await NotifySecurityEventAsync(adminId, mailer, time, ct,
-            (m, addr, lang, now) => m.EnqueueMfaDisabled(addr, lang, now));
+        await NotifySecurityEventAsync(adminId, mailer, time,
+            (m, addr, lang, now) => m.EnqueueMfaDisabled(addr, lang, now), ct);
 
         // Re-issue the caller's own session at the new token_version so this request stays authenticated.
         string fresh = await _login.IssueSystemSessionAsync(adminId, newVersion, ct);
@@ -275,8 +275,8 @@ public sealed class SystemMfaController : ControllerBase
         string adminId,
         Dependably.Infrastructure.Mail.TransactionalEmailService mailer,
         TimeProvider time,
-        CancellationToken ct,
-        Action<Dependably.Infrastructure.Mail.TransactionalEmailService, string, string, DateTimeOffset> enqueue)
+        Action<Dependably.Infrastructure.Mail.TransactionalEmailService, string, string, DateTimeOffset> enqueue,
+        CancellationToken ct)
     {
         var admin = await _systemAdmins.GetByIdAsync(adminId, ct);
         if (string.IsNullOrEmpty(admin?.Email))

@@ -169,20 +169,9 @@ public static class ApkIndexSignatureVerifier
             ApkSignatureAlgorithm.Sha512 => HashAlgorithmName.SHA512,
             _ => null,
         };
-        if (hashAlgorithm is null)
-        {
-            return false;
-        }
 
-        foreach (var key in anchors)
-        {
-            if (VerifiesWithKey(signedPayload, sig.SignatureBytes, hashAlgorithm.Value, key))
-            {
-                return true;
-            }
-        }
-
-        return false;
+        return hashAlgorithm is not null
+            && anchors.Any(key => VerifiesWithKey(signedPayload, sig.SignatureBytes, hashAlgorithm.Value, key));
     }
 
     // Signature bytes that are not a valid PKCS#1v1.5 encoding for this key fail closed (false)

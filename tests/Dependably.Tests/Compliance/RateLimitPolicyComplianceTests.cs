@@ -267,23 +267,23 @@ public sealed partial class RateLimitPolicyComplianceTests
     {
         [HttpGet("/fixture/action-limited")]
         [EnableRateLimiting("metadata")]
-        public IActionResult Get() => Ok();
+        public OkResult Get() => Ok();
     }
 
     [EnableRateLimiting("metadata")]
     private sealed class FixtureClassLimited : ControllerBase
     {
         [HttpGet("/fixture/class-limited")]
-        public IActionResult Get() => Ok();
+        public OkResult Get() => Ok();
 
         [HttpGet("/fixture/class-limited/opted-out")]
         [DisableRateLimiting]
-        public IActionResult OptedOut() => Ok();
+        public OkResult OptedOut() => Ok();
     }
 
     private sealed class FixtureUnlimited : ControllerBase
     {
         [HttpGet("/fixture/unlimited")]
-        public IActionResult Get() => Ok();
+        public OkResult Get() => Ok();
     }
 }

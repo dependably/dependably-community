@@ -61,7 +61,9 @@
   let popoverPos = { top: 0, left: 0 }
 
   // Worst-first rank for collapsing several files' statuses into the version's overall status.
-  const STATUS_RANK = { blocked: 0, vulnerable: 1, deprecated: 2, unscanned: 3, allowed: 4, clean: 5 }
+  // no_feed outranks unscanned: an unscanned artefact is waiting for the next pass, one whose
+  // ecosystem has no advisory feed will never be covered at all.
+  const STATUS_RANK = { blocked: 0, vulnerable: 1, deprecated: 2, no_feed: 3, unscanned: 4, allowed: 5, clean: 6 }
 
   // Collapse the flat per-file list into one display group per version. A single-file group
   // renders exactly like the old flat row; a multi-file group aggregates the file-level columns
@@ -416,7 +418,10 @@
             </span>
           {/if}
           {#if g.status}
-            <span class="status-badge status-{g.status}">{$t(`versionDetail.status.${g.status}`)}</span>
+            <span
+              class="status-badge status-{g.status}"
+              title={g.status === 'no_feed' ? $t('versionDetail.status.noFeedHelp') : ''}
+            >{$t(`versionDetail.status.${g.status}`)}</span>
           {/if}
         </td>
         <td>
@@ -713,6 +718,7 @@
   .status-deprecated { background: var(--badge-warning-bg); color: var(--badge-warning-text); }
   .status-clean      { background: var(--badge-hosted-bg); color: var(--badge-hosted-text); }
   .status-unscanned  { background: var(--badge-warning-bg);  color: var(--badge-warning-text); }
+  .status-no_feed    { background: var(--badge-warning-bg);  color: var(--badge-warning-text); }
   /* Known-malicious: the strongest danger signal in the table. A filled red pill (not the
      muted --badge-red-bg tint) so it dominates whatever gate status sits beside it. */
   .status-malicious {

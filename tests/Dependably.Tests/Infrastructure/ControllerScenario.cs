@@ -438,6 +438,9 @@ public sealed class ControllerScenario : IAsyncDisposable
             new Dependably.Protocol.Provenance.MavenProvenanceVerifier(
                 scenarioTrustStore,
                 Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.MavenProvenanceVerifier>.Instance),
+            new Dependably.Protocol.Provenance.TerraformProvenanceVerifier(
+                scenarioTrustStore,
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.TerraformProvenanceVerifier>.Instance),
             new Dependably.Infrastructure.Caching.OrgCacheEpochStore())
         { ControllerContext = ctx };
         var orgTokens = new OrgTokensController(

@@ -34,6 +34,9 @@ public sealed class VersionTombstoneRepository
         SET content_hash = excluded.content_hash, deleted_at = excluded.deleted_at
         """;
 
+    /// <summary>The (org, ecosystem, purl_name, version) coordinate a tombstone row keys on.</summary>
+    internal readonly record struct VersionCoordinate(string OrgId, string Ecosystem, string PurlName, string Version);
+
     private readonly IMetadataStore _db;
 
     public VersionTombstoneRepository(IMetadataStore db) { _db = db; }
@@ -80,17 +83,16 @@ public sealed class VersionTombstoneRepository
     /// version-delete transaction so the tombstone commits with the delete.
     /// </summary>
     internal static Task RecordAsync(
-        IDbConnection conn, IDbTransaction tx, string orgId, string ecosystem, string purlName,
-        string version, string? contentHash, string deletedAt)
+        IDbConnection conn, IDbTransaction tx, VersionCoordinate coordinate, string? contentHash, string deletedAt)
         => conn.ExecuteAsync(
             RecordSql,
             new
             {
                 id = Guid.NewGuid().ToString("N"),
-                orgId,
-                ecosystem,
-                purlName,
-                version,
+                orgId = coordinate.OrgId,
+                ecosystem = coordinate.Ecosystem,
+                purlName = coordinate.PurlName,
+                version = coordinate.Version,
                 contentHash,
                 deletedAt,
             },

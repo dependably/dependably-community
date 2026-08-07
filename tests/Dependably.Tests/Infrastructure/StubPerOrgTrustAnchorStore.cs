@@ -54,6 +54,9 @@ public sealed class StubPerOrgTrustAnchorStore : IPerOrgTrustAnchorStore
     public Task<PgpPublicKeyRingBundle?> GetMavenKeyRingAsync(string orgId, CancellationToken ct = default)
         => GetPgpKeyRingAsync(orgId, "maven");
 
+    public Task<PgpPublicKeyRingBundle?> GetTerraformKeyRingAsync(string orgId, CancellationToken ct = default)
+        => GetPgpKeyRingAsync(orgId, "terraform");
+
     // Shared PGP ring builder for stub: filters by (orgId, ecosystem) and assembles via PgpKeyRingBuilder.
     private Task<PgpPublicKeyRingBundle?> GetPgpKeyRingAsync(string orgId, string ecosystem)
     {

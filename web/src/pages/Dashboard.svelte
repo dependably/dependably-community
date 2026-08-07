@@ -310,11 +310,13 @@
         <div class="eyebrow">{$t('dashboard.licenseRisk')}</div>
         <div class="stat-value" class:warn={licenseRiskVersionCount > 0}>{#if stats}{licenseRiskVersionCount.toLocaleString()}{:else}<Skeleton width="72px" height="28px" />{/if}</div>
       </button>
+      <!-- The queue's own default is `pending`, but the tile names it anyway: the count is
+           pending-only, so the link that carries it should say so rather than inherit it. -->
       {#if isAdmin}
         <button
           class="stat-card stat-link"
           class:hot={quarantinePending > 0}
-          on:click={() => navigate('quarantine')}
+          on:click={() => navigate('quarantine', { state: 'pending' })}
           aria-label={$t('dashboard.quarantinePending')}
         >
           <div class="eyebrow">{$t('dashboard.quarantinePending')}</div>
@@ -552,6 +554,7 @@
   .slice-golang { fill: var(--eco-golang); }
   .slice-cargo { fill: var(--eco-cargo); }
   .slice-apk   { fill: var(--eco-apk); }
+  .slice-terraform { fill: var(--eco-terraform); }
 
   .zero {
     color: var(--text2);

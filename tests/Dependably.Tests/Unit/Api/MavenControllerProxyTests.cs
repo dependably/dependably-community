@@ -106,6 +106,26 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
         => _server.Given(Request.Create().WithPath("/" + path + ".sha256").UsingGet())
                   .RespondWith(Response.Create().WithStatusCode(200).WithBody(sha256 + "  some-file.jar\n"));
 
+    /// <summary>
+    /// Stubs the artifact GET with a <c>Last-Modified</c> response header — the signal the
+    /// fetch-then-hash path (no <c>.sha256</c> sidecar stubbed) reads as the artifact's upstream
+    /// publish timestamp. No <c>.sha256</c>/<c>.sha1</c>/<c>.md5</c> sidecar is stubbed alongside
+    /// this, so <see cref="MavenUpstreamFetcher"/> falls back to fetch-then-hash and caches the
+    /// artifact unverified — mirroring the real Maven Central case this fix targets.
+    /// </summary>
+    private void StubArtifactWithLastModified(string path, byte[] body, DateTimeOffset lastModified)
+        => _server.Given(Request.Create().WithPath("/" + path).UsingGet())
+                  .RespondWith(Response.Create().WithStatusCode(200).WithBody(body)
+                      .WithHeader("Last-Modified", lastModified.UtcDateTime.ToString("R", System.Globalization.CultureInfo.InvariantCulture)));
+
+    private async Task SetMinReleaseAgeAsync(int hours)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "UPDATE org_settings SET min_release_age_hours = @h WHERE org_id = @org",
+            new { h = hours, org = _orgId });
+    }
+
     private void StubUpstreamMetadata(string artifactPath, params string[] versions)
     {
         string versionXml = string.Concat(versions.Select(v => $"<version>{v}</version>"));
@@ -168,8 +188,10 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
     private long ArtifactGetCount(string filename)
         => _server.LogEntries.Count(e => e.RequestMessage?.Path?.EndsWith(filename) == true);
 
-    private MavenController BuildController(IOsvSource osv)
+    private MavenController BuildController(
+        IOsvSource osv, TimeProvider? clock = null, bool verifyWithUpstreamSha256 = true)
     {
+        var time = clock ?? TimeProvider.System;
         var http = new DefaultHttpContext();
         http.Request.Scheme = "https";
         http.Request.Host = new HostString("acme.example.test");
@@ -179,7 +201,7 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["Maven:Upstream"] = _upstream,
-                ["Maven:VerifyWithUpstreamSha256"] = "true",
+                ["Maven:VerifyWithUpstreamSha256"] = verifyWithUpstreamSha256 ? "true" : "false",
                 ["PROXY_STAGING_PATH"] = Path.Combine(Path.GetTempPath(),
                     $"dependably-maven-proxytest-{Guid.NewGuid():N}"),
             })
@@ -194,28 +216,28 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
             new Dependably.Infrastructure.DriveInfoStagingDiskInfo(Path.GetTempPath()),
             Dependably.Infrastructure.StagingOptions.Resolve(config), NullLogger<UpstreamClient>.Instance);
         var upstream = new MavenUpstreamFetcher(
-            upstreamClient, tiered, _db, config, NullLogger<MavenUpstreamFetcher>.Instance, TimeProvider.System);
+            upstreamClient, tiered, _db, config, NullLogger<MavenUpstreamFetcher>.Instance, time);
 
-        var vulns = new VulnerabilityRepository(_db, TimeProvider.System);
-        var licenses = new LicenseRepository(_db, TimeProvider.System, TestNormalizers.License(_db));
+        var vulns = new VulnerabilityRepository(_db, time);
+        var licenses = new LicenseRepository(_db, time, TestNormalizers.License(_db));
         var scanner = new VulnerabilityScanService(new VulnerabilityScanService.Dependencies(
             _db, osv, vulns, _audit, config,
             new StubAirGapMode(false),
             NullLogger<VulnerabilityScanService>.Instance,
-            TimeProvider.System,
+            time,
             new OrgRepository(_db),
-            Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(TimeProvider.System),
-            Dependably.Tests.Infrastructure.TestAlerts.NoOp(_db, TimeProvider.System)));
+            Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(time),
+            Dependably.Tests.Infrastructure.TestAlerts.NoOp(_db, time)));
         var cacheArtifact = new CacheArtifactRepository(_db);
         var tenantAccess = new TenantArtifactAccessRepository(_db);
         var proxyVersions = new ProxyVersionRecorder(_packages, _audit, licenses, cacheArtifact,
             Substitute.For<IUpstreamLatestVersionResolver>(), NullLogger<ProxyVersionRecorder>.Instance);
-        var blockGate = Dependably.Tests.Infrastructure.TestBlockGate.Create(_db, TimeProvider.System);
+        var blockGate = Dependably.Tests.Infrastructure.TestBlockGate.Create(_db, time);
         var cacheRecorder = new CacheAccessRecorder(
             cacheArtifact, tenantAccess,
-            NullLogger<CacheAccessRecorder>.Instance, TimeProvider.System);
+            NullLogger<CacheAccessRecorder>.Instance, time);
         var proxyFetch = new ProxyFetchService(
-            cacheRecorder, proxyVersions, cacheArtifact, tenantAccess, scanner, blockGate, _audit, TimeProvider.System,
+            cacheRecorder, proxyVersions, cacheArtifact, tenantAccess, scanner, blockGate, _audit, time,
             new Dependably.Infrastructure.SourcePinRepository(_db, new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build()));
 
         var svc = new MavenControllerServices(
@@ -224,8 +246,8 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
             ProxyFetch: proxyFetch, BlockGate: blockGate,
             ReservedNamespaces: new ReservedNamespaceService(
                 _db, new Microsoft.Extensions.Caching.Memory.MemoryCache(
-                    new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), TimeProvider.System),
-            Registries: new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured())),
+                    new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), time),
+            Registries: new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, time, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured())),
             MetadataCache: _metadataCache,
             Invalidation: Dependably.Tests.Infrastructure.TestMetadataInvalidation.ForMaven(_metadataCache),
             CacheOptions: new Dependably.Infrastructure.RenderedMetadataCacheOptions(
@@ -233,7 +255,7 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
             Log: NullLogger<MavenController>.Instance,
             CacheArtifacts: cacheArtifact,
             TenantAccess: tenantAccess,
-            Time: TimeProvider.System,
+            Time: time,
             CacheRecorder: cacheRecorder,
             // No Maven trust anchors configured — IsConfiguredForAsync returns false, provenance skipped.
             MavenProvenance: new Dependably.Protocol.Provenance.MavenProvenanceVerifier(
@@ -278,6 +300,71 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
             """,
             new { org = _orgId });
         Assert.Equal(0, fileRows);
+    }
+
+    // ── Release-age cooldown (min_release_age_hours) ─────────────────────────
+    //
+    // Maven's proxy fetch path has no per-version metadata document carrying an upstream publish
+    // date (unlike, say, the terraform registry protocol), so the fetch-then-hash path — the norm
+    // for Maven Central, which serves no .sha256 sidecar for most artifacts — reads the upstream
+    // response's Last-Modified header instead. These tests never stub a .sha256/.sha1/.md5
+    // sidecar, so MavenUpstreamFetcher takes that fallback and the captured header is what the
+    // cooldown gate evaluates.
+
+    [Fact]
+    public async Task ProxyMiss_RecentlyPublishedArtifact_IsBlockedByTheReleaseAgeCooldown()
+    {
+        var clock = TestTime.Frozen();
+        byte[] bytes = Encoding.UTF8.GetBytes("freshly-published-jar");
+        string path = "com/example/fresh/1.0/fresh-1.0.jar";
+        StubArtifactWithLastModified(path, bytes, clock.GetUtcNow().AddHours(-1));
+        await SetMinReleaseAgeAsync(72);
+
+        var ctl = BuildController(CleanOsv(), clock: clock);
+        var result = await ctl.Download(path, CancellationToken.None);
+
+        Assert.Equal(403, Assert.IsType<StatusCodeResult>(result).StatusCode);
+    }
+
+    [Fact]
+    public async Task ProxyMiss_ArtifactOlderThanTheCooldownWindow_IsServed()
+    {
+        // Adversarial twin: the gate keys on age, not a blanket block. A version published 100h
+        // ago clears the same 72h hold and serves — proving the block above is the cooldown
+        // firing on a real captured timestamp, not the fetch path breaking every request.
+        var clock = TestTime.Frozen();
+        byte[] bytes = Encoding.UTF8.GetBytes("long-settled-jar");
+        string path = "com/example/settled/1.0/settled-1.0.jar";
+        StubArtifactWithLastModified(path, bytes, clock.GetUtcNow().AddHours(-100));
+        await SetMinReleaseAgeAsync(72);
+
+        var ctl = BuildController(CleanOsv(), clock: clock);
+        var result = await ctl.Download(path, CancellationToken.None);
+
+        var file = Dependably.Tests.Infrastructure.MavenServe.File(result);
+        Assert.Equal(bytes, file.FileContents);
+    }
+
+    [Fact]
+    public async Task ProxyMiss_Sha256SidecarKnownPath_CapturesNoTimestamp_CooldownFailsOpen()
+    {
+        // The adversarial twin at the OTHER seam: when the upstream serves a .sha256 sidecar, the
+        // streaming (known-checksum) fetch path is taken instead of fetch-then-hash, and it never
+        // reads response headers — PublishedAt stays null and the cooldown fails open rather than
+        // blocking every artifact from a sidecar-serving upstream. Documents the fix's known gap
+        // rather than letting it silently regress into looking fully covered.
+        var clock = TestTime.Frozen();
+        byte[] bytes = Encoding.UTF8.GetBytes("sha256-sidecar-path-jar");
+        string path = "com/example/sidecar/1.0/sidecar-1.0.jar";
+        StubArtifactWithLastModified(path, bytes, clock.GetUtcNow().AddHours(-1));
+        StubSidecar(path, Sha256Hex(bytes));
+        await SetMinReleaseAgeAsync(72);
+
+        var ctl = BuildController(CleanOsv(), clock: clock);
+        var result = await ctl.Download(path, CancellationToken.None);
+
+        var file = Dependably.Tests.Infrastructure.MavenServe.File(result);
+        Assert.Equal(bytes, file.FileContents);
     }
 
     // A percent-encoded traversal survives the {**path} catch-all undecoded (ASP.NET does not

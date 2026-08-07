@@ -157,7 +157,15 @@ public sealed record ReadinessCheck(string Name, bool Required, string? Error)
 /// </summary>
 public sealed class ReadinessReport
 {
-    public ReadinessReport(IReadOnlyList<ReadinessCheck> checks) => Checks = checks;
+    public ReadinessReport(IReadOnlyList<ReadinessCheck> checks)
+    {
+        Checks = checks;
+        // Materialised once here rather than recomputed on every property read — FailingChecks
+        // and RequiredChecks are each read by multiple callers (HealthEndpoints,
+        // HealthcheckPinger) per report instance.
+        FailingChecks = checks.Where(c => !c.Ok).Select(c => c.Name).ToArray();
+        RequiredChecks = checks.Where(c => c.Required).Select(c => c.Name).ToArray();
+    }
 
     /// <summary>Every probed dependency, in probe order.</summary>
     public IReadOnlyList<ReadinessCheck> Checks { get; }
@@ -169,12 +177,10 @@ public sealed class ReadinessReport
     public bool RequiredOk => Checks.All(c => !c.Required || c.Ok);
 
     /// <summary>Names of the dependencies whose probe failed.</summary>
-    public IReadOnlyList<string> FailingChecks =>
-        Checks.Where(c => !c.Ok).Select(c => c.Name).ToArray();
+    public IReadOnlyList<string> FailingChecks { get; }
 
     /// <summary>Names of the dependencies classified as required.</summary>
-    public IReadOnlyList<string> RequiredChecks =>
-        Checks.Where(c => c.Required).Select(c => c.Name).ToArray();
+    public IReadOnlyList<string> RequiredChecks { get; }
 
     /// <summary>Per-check <c>ok</c>/<c>error</c> map, safe to return to anonymous callers.</summary>
     public Dictionary<string, string> ToStatusMap() =>

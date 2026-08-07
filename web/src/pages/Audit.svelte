@@ -12,7 +12,10 @@
 
   // Tab + filter state lives in the URL query string so it survives route changes,
   // reloads, and copied links. Lifecycle keys: type/q/page/limit; admin keys: action/aq/apage/alimit.
-  const DEFAULTS = { tab: 'lifecycle', type: '', q: '', since: '', page: 1, limit: 50, action: '', aq: '', apage: 1, alimit: 50 }
+  // since defaults to 30d, not all-time: the lifecycle feed's default load (and its search)
+  // scans the whole window on the server, and an unbounded window is what made big instances
+  // time out. "All time" stays available in the window select.
+  const DEFAULTS = { tab: 'lifecycle', type: '', q: '', since: '30d', page: 1, limit: 50, action: '', aq: '', apage: 1, alimit: 50 }
   const init = readQuery(DEFAULTS)
 
   function sync() {
@@ -39,7 +42,7 @@
   // Time window (''|24h|7d|30d|90d). The dashboard's blocked-pull tiles deep-link here with
   // since=30d so the feed shows exactly the events they counted.
   let lcSince = init.since
-  let lcPage = init.page, lcLimit = init.limit, lcTotal = 0
+  let lcPage = init.page, lcLimit = init.limit, lcTotal = 0, lcTotalCapped = false
 
   $: lcColumns = [
     { key: 'createdAt',  label: $t('activity.columns.time'),   sortable: true, defaultDir: 'desc', width: '150px' },
@@ -60,6 +63,7 @@
       const data = await api.getActivity(p)
       lcItems = data.items
       lcTotal = data.total
+      lcTotalCapped = data.totalCapped ?? false
     } catch (e) { lcError = e.message }
     finally { lcLoading = false }
   }
@@ -113,7 +117,7 @@
   let adItems = [], adLoading = false, adError = ''
   let adFilterAction = init.action
   let adSearch = init.aq
-  let adPage = init.apage, adLimit = init.alimit, adTotal = 0
+  let adPage = init.apage, adLimit = init.alimit, adTotal = 0, adTotalCapped = false
 
   // Tenant audit actions, grouped for the filter dropdown. Backend uses exact-match
   // filtering on the action column at scope='tenant'; system-scope actions
@@ -156,6 +160,7 @@
       const data = await api.getAudit(p)
       adItems = data.items
       adTotal = data.total
+      adTotalCapped = data.totalCapped ?? false
     } catch (e) { adError = e.message }
     finally { adLoading = false }
   }
@@ -261,7 +266,7 @@
       </tr>
     </DataTable>
 
-    <Pagination total={lcTotal} page={lcPage} limit={lcLimit}
+    <Pagination total={lcTotal} totalCapped={lcTotalCapped} page={lcPage} limit={lcLimit}
       on:pagechange={lcOnPageChange}
       on:limitchange={lcOnLimitChange} />
   {:else}
@@ -301,7 +306,7 @@
       </tr>
     </DataTable>
 
-    <Pagination total={adTotal} page={adPage} limit={adLimit}
+    <Pagination total={adTotal} totalCapped={adTotalCapped} page={adPage} limit={adLimit}
       on:pagechange={adOnPageChange}
       on:limitchange={adOnLimitChange} />
   {/if}

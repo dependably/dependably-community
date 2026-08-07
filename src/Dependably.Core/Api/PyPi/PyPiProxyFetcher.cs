@@ -11,9 +11,11 @@ namespace Dependably.Api.PyPiProtocol;
 
 /// <summary>
 /// Proxy-fetch infrastructure for the PyPI download path: resolves upstream URLs via the
-/// simple-index, fetches and caches blobs, records first-fetch metadata, and runs the
-/// block gate after recording. Extracted from <see cref="PyPiDownloadHandler"/> so each
-/// class stays under the S1200 coupling limit.
+/// simple-index, fetches and caches blobs, and delegates the post-fetch half to
+/// <see cref="ProxyFetchService"/>, which records first-fetch metadata and runs the block gate
+/// both before recording (the first-fetch arms, so a refused artefact never enters the
+/// catalogue) and after (the arms that read the recorded facts). Extracted from
+/// <see cref="PyPiDownloadHandler"/> so each class stays under the S1200 coupling limit.
 /// </summary>
 public sealed class PyPiProxyFetcher(
     AuditRepository audit,

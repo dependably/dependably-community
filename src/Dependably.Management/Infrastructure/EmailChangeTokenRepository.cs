@@ -34,7 +34,7 @@ public sealed class EmailChangeTokenRepository
     }
 
     /// <summary>How long an issued link stays redeemable. Callers surface this to the recipient.</summary>
-    public DateTimeOffset ExpiryFor(DateTimeOffset issuedAt) => issuedAt.AddMinutes(ExpiryMinutes);
+    public static DateTimeOffset ExpiryFor(DateTimeOffset issuedAt) => issuedAt.AddMinutes(ExpiryMinutes);
 
     /// <summary>
     /// Issues a link that, when redeemed, moves <paramref name="userId"/> to

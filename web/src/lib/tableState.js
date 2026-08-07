@@ -6,8 +6,15 @@
 // via `navigate()` produce a clean URL, which reads back as the page's defaults — so a
 // nav-link click intentionally resets the table.
 
+import { pendingSearch } from './store.js'
+
 /**
- * Reads the current location.search into a state object shaped by `defaults`.
+ * Reads the query string of the route this page is being mounted for into a state object shaped
+ * by `defaults`. That is `location.search` outside a route transition, and the destination's
+ * query string while one is in flight — a held transition mounts the incoming page before it
+ * writes the URL, so location.search still describes the page being replaced (see
+ * store.pendingSearch).
+ *
  * Only keys present in `defaults` are read; unknown params are ignored. A default
  * whose value is a number coerces the param with parseInt, falling back to the
  * default when the param is missing, non-numeric, or < 1.
@@ -20,7 +27,7 @@ export function readQuery(defaults) {
   if (typeof window === 'undefined') return /** @type {T} */ ({ ...defaults })
   /** @type {Record<string, string | number>} */
   const out = { ...defaults }
-  const params = new URLSearchParams(window.location.search)
+  const params = new URLSearchParams(pendingSearch() ?? window.location.search)
   for (const [key, fallback] of Object.entries(defaults)) {
     const raw = params.get(key)
     if (raw === null) continue

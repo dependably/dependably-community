@@ -6,14 +6,15 @@ namespace Dependably.Infrastructure;
 /// <summary>
 /// Bounded channel-backed download-count writer. Every
 /// <see cref="PackageRepository.IncrementDownloadCountAsync"/> and
-/// <see cref="PackageRepository.IncrementDownloadCountByPurlAsync"/> call on the download
+/// <see cref="TenantArtifactAccessRepository.RecordDownloadHitAsync"/> call on the download
 /// hot path previously awaited a fresh SQLite connection open and a synchronous UPDATE before
 /// the response could continue. SQLite WAL serialises writers, so at sustained download
 /// throughput the writer queue grows and busy_timeout trips spike across every ecosystem.
 ///
 /// This writer accepts a record via <see cref="TryEnqueue"/> (lock-free, microseconds) and
 /// the companion <see cref="DownloadCountWriterHostedService"/> drains the channel in batched
-/// UPDATEs (one UPDATE per unique versionId or purl per batch, with an aggregated count).
+/// UPDATEs (one UPDATE per unique versionId or cache_artifact id per batch, with an aggregated
+/// count).
 ///
 /// Overflow policy: drop on full. A lost increment means the durable counter is slightly
 /// understated — acceptable under extreme load; a blocked download is not.
@@ -91,11 +92,17 @@ public sealed class DownloadCountWriter
 
 /// <summary>
 /// One download-count increment queued for async aggregation and write.
-/// Exactly one of <see cref="VersionId"/>, <see cref="Purl"/>, or <see cref="CacheArtifactId"/>
-/// is non-null, matching the three keying strategies used by the download-serve paths.
-/// When <see cref="Purl"/> or <see cref="CacheArtifactId"/> is set, <see cref="OrgId"/> must
-/// also be set — both target <c>tenant_artifact_access.download_count</c>, which is scoped
-/// per tenant, so the org identity is load-bearing.
+/// Exactly one of <see cref="VersionId"/> or <see cref="CacheArtifactId"/> is non-null, matching
+/// the two planes a download can be served from: <see cref="VersionId"/> targets the hosted
+/// plane's <c>package_versions.download_count</c>, <see cref="CacheArtifactId"/> the cache plane's
+/// <c>tenant_artifact_access.download_count</c>. When <see cref="CacheArtifactId"/> is set,
+/// <see cref="OrgId"/> must also be set — that counter is scoped per tenant, so the org identity
+/// is load-bearing.
+///
+/// Both keys are row identities on purpose. A purl is not unique on either plane — Maven and RPM
+/// map one purl to several filenames — so keying a counter by purl counts a single file's
+/// download against every sibling file and refreshes their <c>last_used</c>, which also perturbs
+/// LRU eviction order.
 /// </summary>
 public sealed record DownloadCountRecord(
-    string? VersionId, string? Purl, string? OrgId = null, string? CacheArtifactId = null);
+    string? VersionId, string? OrgId = null, string? CacheArtifactId = null);

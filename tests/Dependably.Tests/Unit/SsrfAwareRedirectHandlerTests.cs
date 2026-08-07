@@ -360,6 +360,108 @@ public class SsrfAwareRedirectHandlerTests
         Assert.False(results[2].Blocked);
         Assert.Equal(2, results[2].CallsWhenResolved);
     }
+    // ── per-hop base containment ─────────────────────────────────────────────────
+
+    [Fact]
+    public async Task SendAsync_ContainmentBaseSet_RedirectOffBase_IsBlockedEvenWhenSsrfClean()
+    {
+        // The validator allows the target (a public host, not an internal range), so the block can
+        // only come from base containment — this is the gap the SSRF-range check alone leaves: a
+        // compliant mirror URL that 302s to an arbitrary public host.
+        var validator = new StubValidator();
+        var inner = new StubInnerHandler();
+        var client = new HttpClient(new SsrfAwareRedirectHandler(validator) { InnerHandler = inner });
+
+        inner.Responses.Enqueue(new HttpResponseMessage(HttpStatusCode.Found)
+        {
+            Headers = { Location = new Uri("https://attacker.test/payload.zip") }
+        });
+
+        var request = new HttpRequestMessage(
+            HttpMethod.Get, "https://mirror.test/terraform/hashicorp/random/1.0.0/linux_amd64.zip");
+        request.Options.Set(SsrfAwareRedirectHandler.ContainmentBaseOption, "https://mirror.test/terraform");
+
+        await Assert.ThrowsAsync<SsrfBlockedException>(() => client.SendAsync(request));
+
+        // Refused before the second hop, and the SSRF validator permitted the target — so
+        // containment is what blocked it.
+        Assert.Equal(1, inner.CallCount);
+        Assert.DoesNotContain("https://attacker.test/payload.zip", validator.BlockedUrls);
+    }
+
+    [Fact]
+    public async Task SendAsync_ContainmentBaseSet_RedirectWithinBase_IsFollowed()
+    {
+        var validator = new StubValidator();
+        var inner = new StubInnerHandler();
+        var client = new HttpClient(new SsrfAwareRedirectHandler(validator) { InnerHandler = inner });
+
+        inner.Responses.Enqueue(new HttpResponseMessage(HttpStatusCode.Found)
+        {
+            Headers = { Location = new Uri("https://mirror.test/terraform/hashicorp/random/1.0.0/blob.zip") }
+        });
+        inner.Responses.Enqueue(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent([1, 2, 3])
+        });
+
+        var request = new HttpRequestMessage(
+            HttpMethod.Get, "https://mirror.test/terraform/hashicorp/random/1.0.0/linux_amd64.zip");
+        request.Options.Set(SsrfAwareRedirectHandler.ContainmentBaseOption, "https://mirror.test/terraform");
+
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(2, inner.CallCount);
+    }
+
+    [Fact]
+    public async Task SendAsync_NoContainmentBase_RedirectOffToPublicHost_IsFollowed()
+    {
+        // Without a containment base (the registry-protocol path), an off-authority redirect to a
+        // public host is followed as before — a release CDN the upstream chose is the design there.
+        var validator = new StubValidator();
+        var inner = new StubInnerHandler();
+        var client = new HttpClient(new SsrfAwareRedirectHandler(validator) { InnerHandler = inner });
+
+        inner.Responses.Enqueue(new HttpResponseMessage(HttpStatusCode.Found)
+        {
+            Headers = { Location = new Uri("https://releases.example.com/foo.zip") }
+        });
+        inner.Responses.Enqueue(new HttpResponseMessage(HttpStatusCode.OK));
+
+        var response = await client.GetAsync("https://registry.test/v1/providers/acme/x/1.0.0/download/linux/amd64");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(2, inner.CallCount);
+    }
+
+    [Fact]
+    public async Task SendAsync_ContainmentBaseSet_OffBaseOnSecondHop_IsBlocked()
+    {
+        // Containment must hold on every hop, not just the first: a mirror could pass hop 1 within
+        // base then jump off on hop 2. This pins that the option propagates across hops.
+        var validator = new StubValidator();
+        var inner = new StubInnerHandler();
+        var client = new HttpClient(new SsrfAwareRedirectHandler(validator) { InnerHandler = inner });
+
+        inner.Responses.Enqueue(new HttpResponseMessage(HttpStatusCode.Found)
+        {
+            Headers = { Location = new Uri("https://mirror.test/terraform/inner/redirect") }
+        });
+        inner.Responses.Enqueue(new HttpResponseMessage(HttpStatusCode.Found)
+        {
+            Headers = { Location = new Uri("https://attacker.test/payload.zip") }
+        });
+
+        var request = new HttpRequestMessage(HttpMethod.Get, "https://mirror.test/terraform/a/b/c.zip");
+        request.Options.Set(SsrfAwareRedirectHandler.ContainmentBaseOption, "https://mirror.test/terraform");
+
+        await Assert.ThrowsAsync<SsrfBlockedException>(() => client.SendAsync(request));
+
+        // Hop 1 (within base) followed; hop 2 (off base) refused.
+        Assert.Equal(2, inner.CallCount);
+    }
 }
 
 // ── Test doubles ──────────────────────────────────────────────────────────────

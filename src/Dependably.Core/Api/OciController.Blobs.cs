@@ -615,7 +615,7 @@ public sealed partial class OciController
     /// at, so a client (or an operator reading the log) can see where to resume instead of
     /// discovering at finalize that the staged bytes hash to the wrong digest.
     /// </summary>
-    private IActionResult RangeNotSatisfiable(OciUploadRangeException ex)
+    private ObjectResult RangeNotSatisfiable(OciUploadRangeException ex)
     {
         _logger.LogWarning(
             "OCI chunk rejected for upload {UploadId}: session is at {ExpectedOffset} bytes, chunk presented {ActualOffset}. " +

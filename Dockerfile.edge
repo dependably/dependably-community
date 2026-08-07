@@ -1,4 +1,9 @@
 # syntax=docker/dockerfile:1
+# image-registry-ok: RUN --mount=type=secret needs the external frontend, and this directive
+# must keep resolving from docker.io for local and GitHub builds that have no mirror. The
+# GitLab publish-image job overrides it with --build-arg BUILDKIT_SYNTAX at the mirrored
+# digest. The marker sits below the directive because a parser directive is only honoured on
+# line 1 — a comment above it silently disables it.
 # Edge image build. The edge root (src/Dependably.Edge) references Dependably.Core
 # only — the management-plane closure (SAML/IdentityModel/JWT stack, Redis pair,
 # BCrypt, zxcvbn, OpenApi) is excluded by assembly reference graph, not runtime
@@ -21,6 +26,8 @@
 # lines below can reference them; the defaults are the current public refs,
 # digest-pinned, so a plain `docker build` with no build-args (local compose, a
 # fork build with no mirror access, the GitHub Actions workflow) is unaffected.
+# image-registry-ok: these defaults are the public refs a mirrorless build needs; the GitLab
+# pipeline overrides all three with --build-arg pointing at the mirror.
 ARG NODE_IMAGE=node:26-alpine@sha256:e88a35be04478413b7c71c455cd9865de9b9360e1f43456be5951032d7ac1a66
 ARG SDK_IMAGE=mcr.microsoft.com/dotnet/sdk:10.0-alpine@sha256:5c559aa5d99337e400d39ab4fa1f6979d126c29b20939d53658ed38300571e74
 ARG RUNTIME_IMAGE=mcr.microsoft.com/dotnet/runtime-deps:10.0-alpine@sha256:f276c0256ffca8fe816d48ba261962b54fea1b0e6f870b6a60b3b705c89e78ac

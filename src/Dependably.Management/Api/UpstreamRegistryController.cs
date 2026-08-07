@@ -100,60 +100,30 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
         }
 
         string? url = NormalizeUpstreamBaseUrl(ecosystem, req.Url?.Trim());
-        string? urlProblem = UpstreamUrlValidator.ValidateUrl(url);
-        if (urlProblem is not null)
-        {
-            return _problems.ValidationErrorAction("url", urlProblem);
-        }
-
-        // Reject plaintext http:// upstreams unless the instance opts in. An http upstream lets an
-        // on-path attacker rewrite the artifact and its declared checksum together, defeating the
-        // proxy's content-addressing integrity story.
-        if (!AllowInsecureUpstreams
-            && Uri.TryCreate(url, UriKind.Absolute, out var schemeCheck)
-            && schemeCheck.Scheme == Uri.UriSchemeHttp)
-        {
-            return _problems.ValidationErrorActionKey("url", "error.upstream.httpsRequired");
-        }
-
-        // RPM upstreams are anonymous-only for now (RPM mirrors are public distro repos and the
-        // RPM proxy does not thread per-upstream credentials).
-        if (ecosystem == "rpm" && (req.AuthType is not null || req.Username is not null || req.Secret is not null))
-        {
-            return _problems.ValidationErrorActionKey("authType", "error.upstream.rpmAnonymousOnly");
-        }
-
+        // upstream_protocol is Terraform-only: every other ecosystem serves the same protocol it
+        // fetches, so the field has nothing to discriminate and a stray value would silently do
+        // nothing (ADR 0003).
+        string? protocol = string.IsNullOrWhiteSpace(req.Protocol) ? null : req.Protocol.Trim().ToLowerInvariant();
         // Parse auth_type. Non-OCI supports anonymous (default), bearer (Authorization: Bearer
         // <secret>), and basic (Authorization: Basic base64(user:secret)).
         string authType = (req.AuthType ?? "anonymous").Trim().ToLowerInvariant();
         string? username = string.IsNullOrWhiteSpace(req.Username) ? null : req.Username.Trim();
         string? secret = string.IsNullOrWhiteSpace(req.Secret) ? null : req.Secret;
 
-        var authFieldsProblem = ValidateNonOciAuthFields(authType, username, secret);
-        if (authFieldsProblem is not null)
+        var validationProblem = ValidateNonOciUrl(url)
+            ?? ValidateNonOciRpmAuth(ecosystem, req)
+            ?? ValidateNonOciProtocol(ecosystem, protocol)
+            ?? ValidateNonOciAuthFields(authType, username, secret)
+            ?? ValidateNonOciCredentialTransport(url, authType)
+            ?? ValidateNonOciSecretPrecondition(secret);
+        if (validationProblem is not null)
         {
-            return authFieldsProblem;
-        }
-
-        // Refuse to pair a credential with a plaintext http:// upstream — the envelope-encrypted
-        // secret would transit the network in cleartext on every proxy miss. Anonymous http
-        // upstreams (internal mirrors) stay allowed.
-        if (authType != "anonymous"
-            && Uri.TryCreate(url, UriKind.Absolute, out var parsedUrl)
-            && parsedUrl.Scheme == Uri.UriSchemeHttp)
-        {
-            return _problems.ValidationErrorActionKey("url", "error.upstream.httpsRequiredForAuth");
-        }
-
-        // Fail closed: a secret can only be stored when the master key is configured (D275-1).
-        if (secret is not null && !_envelope.IsConfigured)
-        {
-            return _problems.ValidationErrorActionKey("secret", "error.upstream.masterKeyRequired");
+            return validationProblem;
         }
 
         string? name = string.IsNullOrWhiteSpace(req.Name) ? null : req.Name.Trim();
         var entry = await _registries.AddAsync(
-            orgId, new NewUpstreamRegistry(ecosystem, url!, name, authType, username, secret), ct);
+            orgId, new NewUpstreamRegistry(ecosystem, url!, name, authType, username, secret, Protocol: protocol), ct);
 
         // secret is write-only: log authType/hasSecret only, never the value.
         await _audit.LogAsync("upstream_registry_added", orgId, GetUserId(),
@@ -165,10 +135,57 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
                 name = entry.Name,
                 authType,
                 hasSecret = entry.HasSecret,
+                protocol = entry.Protocol,
             }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
 
         return CreatedAtAction(nameof(List), null, entry);
     }
+
+    // Basic URL shape, plus: reject plaintext http:// upstreams unless the instance opts in. An
+    // http upstream lets an on-path attacker rewrite the artifact and its declared checksum
+    // together, defeating the proxy's content-addressing integrity story.
+    private IActionResult? ValidateNonOciUrl(string? url)
+    {
+        string? urlProblem = UpstreamUrlValidator.ValidateUrl(url);
+        return urlProblem is not null
+            ? _problems.ValidationErrorAction("url", urlProblem)
+            : !AllowInsecureUpstreams
+                && Uri.TryCreate(url, UriKind.Absolute, out var schemeCheck)
+                && schemeCheck.Scheme == Uri.UriSchemeHttp
+                ? _problems.ValidationErrorActionKey("url", "error.upstream.httpsRequired")
+                : null;
+    }
+
+    // RPM upstreams are anonymous-only for now (RPM mirrors are public distro repos and the
+    // RPM proxy does not thread per-upstream credentials).
+    private IActionResult? ValidateNonOciRpmAuth(string ecosystem, AddUpstreamRegistryRequest req) =>
+        ecosystem == "rpm" && (req.AuthType is not null || req.Username is not null || req.Secret is not null)
+            ? _problems.ValidationErrorActionKey("authType", "error.upstream.rpmAnonymousOnly")
+            : null;
+
+    private IActionResult? ValidateNonOciProtocol(string ecosystem, string? protocol) =>
+        protocol is not null && ecosystem != "terraform"
+            ? _problems.ValidationErrorActionKey("protocol", "error.upstream.protocolTerraformOnly")
+            : !UpstreamRegistryRepository.IsSupportedProtocol(protocol)
+                ? _problems.ValidationErrorActionKey(
+                    "protocol", "error.upstream.protocolInvalid", UpstreamRegistryRepository.MirrorProtocol)
+                : null;
+
+    // Refuse to pair a credential with a plaintext http:// upstream — the envelope-encrypted
+    // secret would transit the network in cleartext on every proxy miss. Anonymous http
+    // upstreams (internal mirrors) stay allowed.
+    private IActionResult? ValidateNonOciCredentialTransport(string? url, string authType) =>
+        authType != "anonymous"
+            && Uri.TryCreate(url, UriKind.Absolute, out var parsedUrl)
+            && parsedUrl.Scheme == Uri.UriSchemeHttp
+            ? _problems.ValidationErrorActionKey("url", "error.upstream.httpsRequiredForAuth")
+            : null;
+
+    // Fail closed: a secret can only be stored when the master key is configured (D275-1).
+    private IActionResult? ValidateNonOciSecretPrecondition(string? secret) =>
+        secret is not null && !_envelope.IsConfigured
+            ? _problems.ValidationErrorActionKey("secret", "error.upstream.masterKeyRequired")
+            : null;
 
     /// <summary>
     /// Normalizes an upstream base URL to the shape the proxy paths append onto.

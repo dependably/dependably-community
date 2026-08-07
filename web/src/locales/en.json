@@ -71,6 +71,7 @@
     "loadMore": "Load more",
     "pagination": {
       "summary": "{from}–{to} of {total}",
+      "summaryCapped": "{from}–{to} of {total}+",
       "prev": "Previous page",
       "next": "Next page",
       "perPage": "Per page:"
@@ -325,6 +326,8 @@
       "deprecated": "Deprecated",
       "clean": "No advisories",
       "unscanned": "Unscanned",
+      "no_feed": "No advisory feed",
+      "noFeedHelp": "OSV publishes no advisory feed for this ecosystem, so this artifact has never been screened against one. It is not known to be clean.",
       "malicious": "Malicious",
       "maliciousHelp": "Linked to a known-malicious package advisory (OSV MAL-)."
     },
@@ -1082,6 +1085,14 @@
           "passthrough": "Passthrough (refuse hosted publish)",
           "merged": "Merged (allow hosted publish)",
           "effective": "Currently in effect: {mode}"
+        },
+        "terraform": {
+          "protocolLabel": "Protocol",
+          "protocolHint": "Provider registry resolves versions and hands out download URLs on another host. Network mirror serves both from this one upstream — pick it for a Dependably or other network-mirror upstream.",
+          "protocol": {
+            "registry": "Provider registry",
+            "mirror": "Network mirror"
+          }
         }
       }
     },

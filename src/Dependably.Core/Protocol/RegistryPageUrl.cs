@@ -51,12 +51,31 @@ public static class RegistryPageUrl
             // repo1.maven.org / repo.maven.apache.org → Maven Central's artifact page.
             "maven" when HostIs(host, "repo1.maven.org") || HostIs(host, "repo.maven.apache.org")
                 => MavenCentralUrl(purl, version),
+            // A provider's display name is its full source address
+            // ({hostname}/{namespace}/{type}), so the page derives from the name rather than the
+            // upstream host — that host is a release CDN (releases.hashicorp.com), not the
+            // registry that owns the page. Deriving from the name also means a provider from a
+            // third-party registry links to that registry rather than to HashiCorp's.
+            "terraform" => TerraformRegistryUrl(displayName, version),
             _ => null,
         };
     }
 
     private static bool HostIs(string host, string expected)
         => string.Equals(host, expected, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Builds <c>https://{hostname}/providers/{namespace}/{type}/{version}</c> from a provider's
+    /// fully-qualified source address. Returns null for a name that is not exactly three non-empty
+    /// segments — the caller renders no link rather than a guessed one.
+    /// </summary>
+    private static string? TerraformRegistryUrl(string displayName, string version)
+    {
+        string[] parts = displayName.Split('/');
+        return parts.Length == 3 && Array.TrueForAll(parts, p => !string.IsNullOrEmpty(p))
+            ? $"https://{parts[0]}/providers/{parts[1]}/{parts[2]}/{version}"
+            : null;
+    }
 
     // Maven's group/artifact coordinate lives in the PURL (pkg:maven/{group}/{artifact}@{version}),
     // not in a single display name, so recover both from there.

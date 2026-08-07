@@ -134,6 +134,7 @@ variables:
 .release-required-jobs: &release-required-jobs
   - { job: validate-release-tag,   artifacts: false }
   - { job: lockfile-registry-guard, artifacts: false }
+  - { job: image-registry-guard,   artifacts: false }
   - { job: build,                  artifacts: false }
   - { job: lint,                   artifacts: false }
   - { job: dotnet-format,          artifacts: false }
@@ -612,6 +613,20 @@ lockfile-registry-guard:
       done
       [ "$rc" -eq 0 ] || exit 1
       echo "lockfile-registry-guard: npm lockfile clean; NuGet lock files present; nuget.config sources allowlisted."
+
+# Companion to lockfile-registry-guard, one layer down: that one keeps package restores on
+# the private feed, this one keeps container image pulls on the DEP_IMAGE_REGISTRY mirror.
+# The runners cannot reach public registry CDNs, and the pulls that break are the ones no
+# `FROM` line shows — buildx booting its own BuildKit image, BuildKit resolving a `# syntax=`
+# frontend. Rationale and the `# image-registry-ok:` opt-out live in the script header.
+image-registry-guard:
+  stage: validate
+  extends: [.runs-on-ci, .release-required]
+  image: ${DEP_IMAGE_REGISTRY}/library/alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
+  script:
+    - !reference [.apk-mirror-setup, script]
+    - apk add --no-cache grep
+    - sh ci/image-registry-guard.sh .
 
 # Fails the pipeline early when the private registry isn't actually in effect, so a
 # misconfigured pipeline can't silently restore from public registries. Not release-gating
@@ -1909,6 +1924,16 @@ publish-image:
     # bridge network, which is never reachable outside the job.
     DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: "" # glsec:ignore GL031 -- TLS on 2376 needs the runner to share dind's /certs/client volume into the job, which these self-hosted runners do not; the docker executor isolates the dind daemon on this job's per-build service network, so 2375 is not reachable by other jobs
+    # BuildKit image for the docker-container driver, mirrored and digest-pinned like
+    # every other image this pipeline pulls. The digest is the buildx-stable-1 OCI
+    # index; the tag is kept alongside it because buildx logs the reference verbatim.
+    BUILDKIT_IMAGE: ${DEP_IMAGE_REGISTRY}/moby/buildkit:buildx-stable-1@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec
+    # Dockerfile frontend for the `# syntax=docker/dockerfile:1` directive both
+    # Dockerfiles carry. BuildKit resolves that reference from docker.io, so it is
+    # the last Hub dependency in the build; BUILDKIT_SYNTAX overrides it here rather
+    # than in the Dockerfiles, which must keep resolving normally for local and
+    # GitHub builds that have no mirror.
+    BUILDKIT_SYNTAX_IMAGE: ${DEP_IMAGE_REGISTRY}/docker/dockerfile:1@sha256:87999aa3d42bdc6bea60565083ee17e86d1f3339802f543c0d03998580f9cb89
   # Registry auth is split by capability: the push authenticates with
   # REGISTRY_PUBLISH_KEY (protected + masked), while build-time dependency routing
   # reuses the unprotected read-only REGISTRY_URL / REGISTRY_KEY pair the build job
@@ -1945,7 +1970,14 @@ publish-image:
     # natively on the amd64 runner. Dropping that pin does not fail the build — it
     # silently moves the whole SDK restore/publish under QEMU (~15x slower).
     - docker run --privileged --rm ${DEP_IMAGE_REGISTRY}/tonistiigi/binfmt:latest@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 --install arm64 # glsec:ignore GL056 -- binfmt_misc registration needs privileged (cap-add alone cannot mount /proc/sys/fs/binfmt_misc); one-shot container inside this job's isolated, already-privileged dind daemon
-    - docker buildx create --use --name dep-builder
+    # The docker-container driver boots BuildKit from its own image, which buildx
+    # defaults to moby/buildkit on Docker Hub — the one pull in this job that would
+    # bypass the DEP_IMAGE_REGISTRY mirror and hit an unauthenticated, rate-limited
+    # upstream. Pull it explicitly first: buildx marks the driver's internal pull
+    # "done" even when it failed, so a Hub refusal surfaces only as the container
+    # create's misleading "No such image: moby/buildkit:buildx-stable-1".
+    - docker pull ${BUILDKIT_IMAGE}
+    - docker buildx create --use --name dep-builder --driver-opt image=${BUILDKIT_IMAGE}
     # BuildKit secret for the image build's own npm/NuGet/apk restores — the READ
     # token, deliberately not the publish one.
     - printf '%s' "$REGISTRY_KEY" > /tmp/registry_key
@@ -1994,6 +2026,7 @@ publish-image:
       -f "$DOCKERFILE"
       --platform linux/amd64,linux/arm64
       --provenance=false
+      --build-arg BUILDKIT_SYNTAX="$BUILDKIT_SYNTAX_IMAGE"
       --build-arg VERSION="$VERSION"
       --build-arg REGISTRY_URL="$REGISTRY_URL"
       --build-arg NODE_IMAGE="$NODE_IMAGE"

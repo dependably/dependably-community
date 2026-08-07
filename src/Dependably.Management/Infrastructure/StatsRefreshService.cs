@@ -32,13 +32,6 @@ public sealed class StatsRefreshService : BackgroundService
     private readonly ILogger<StatsRefreshService> _logger;
     private readonly TimeProvider _time;
 
-    // Set precisely when RunRefreshPassInnerAsync's own lease-lost catch fires, so
-    // RunRefreshPassAsync can tell a lease abort apart from host shutdown by the same
-    // LeaderLease.LeaseLost predicate ScheduledBackgroundService.IsLeaseAbort uses, rather than by
-    // inferring it from the caller token's cancellation state. ExecuteAsync runs passes
-    // sequentially (one RunRefreshPassAsync at a time), so a plain field is safe here.
-    private bool _leaseAbortedLastPass;
-
     public StatsRefreshService(
         StatsSnapshotRepository snapshots,
         PackageAnalyticsRepository analytics,
@@ -85,7 +78,6 @@ public sealed class StatsRefreshService : BackgroundService
     // the whole replica down. Genuine shutdown cancellation still propagates for a clean stop.
     internal async Task RunRefreshPassAsync(CancellationToken ct)
     {
-        _leaseAbortedLastPass = false;
         try
         {
             await RunRefreshPassScopedAsync(ct);
@@ -94,7 +86,7 @@ public sealed class StatsRefreshService : BackgroundService
         {
             throw;
         }
-        catch (OperationCanceledException) when (_leaseAbortedLastPass)
+        catch (LeaseAbortedException)
         {
             // The sweep lease was lost mid-pass, not a host shutdown. RunRefreshPassInnerAsync has
             // already logged the abort; the pass is over and the next tick re-contends for the lock.
@@ -102,9 +94,8 @@ public sealed class StatsRefreshService : BackgroundService
         catch (OperationCanceledException ex)
         {
             // Neither host shutdown nor a recorded lease loss: an unrecognized cancellation source.
-            // The old `!ct.IsCancellationRequested` check would have swallowed this silently by
-            // inference; log it so an unexpected cancellation cannot vanish unnoticed, and still
-            // treat the pass as skipped rather than fatal.
+            // Logged rather than swallowed so an unexpected cancellation cannot vanish unnoticed,
+            // and still treated as a skipped pass rather than a fatal one.
             _logger.LogWarning(ex, "Stats refresh pass cancelled for an unrecognized reason; skipping this pass.");
         }
         catch (Exception ex)
@@ -221,16 +212,16 @@ public sealed class StatsRefreshService : BackgroundService
         }
         catch (OperationCanceledException) when (lease.LeaseLost)
         {
-            // Log the abort with the lock name here, where the lease is in scope, then rethrow so
-            // the scope wrapper records the pass as cancelled rather than completed. RunRefreshPassAsync
-            // absorbs it — a lost lease is a leadership handover, not a pass to retry immediately.
-            // The flag lets RunRefreshPassAsync recognize this precisely (LeaderLease.LeaseLost)
-            // rather than by inferring it from the caller token's cancellation state.
-            _leaseAbortedLastPass = true;
+            // Log the abort with the lock name here, where the lease is in scope, then throw the
+            // dedicated exception type so RunRefreshPassAsync can recognize a lease abort apart
+            // from host shutdown (LeaderLease.LeaseLost) without a field shared across the call
+            // chain — the exception type is the signal, and the scope wrapper still records the
+            // pass as cancelled rather than completed since LeaseAbortedException derives from
+            // OperationCanceledException.
             _logger.LogWarning(
                 "Stats refresh pass aborted — the {LockName} sweep lease was lost mid-pass.",
                 RefreshLockName);
-            throw;
+            throw new LeaseAbortedException();
         }
         finally
         {
@@ -238,4 +229,14 @@ public sealed class StatsRefreshService : BackgroundService
             await lease.DisposeAsync();
         }
     }
+
+    // Signals "the sweep lease was lost mid-pass" from RunRefreshPassInnerAsync up to
+    // RunRefreshPassAsync's catch, replacing a field that would otherwise have to be shared
+    // mutable state across that call chain. Private and file-scoped: never crosses this type's
+    // boundary, so callers have no need to catch it by type.
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Critical Code Smell", "S3871:Exception types should be \"public\"",
+        Justification = "Private, file-scoped control-flow signal used only within RunRefreshPassAsync's " +
+            "own catch of RunRefreshPassInnerAsync; it never crosses this type's boundary, so callers have " +
+            "no need to catch it by type.")]
+    private sealed class LeaseAbortedException() : OperationCanceledException("Sweep lease lost mid-pass.");
 }

@@ -275,22 +275,19 @@ public sealed partial class AuthorizationDecisionComplianceTests
     private static string? ViolationFor(Type controller, MethodInfo action, string[] source)
     {
         string where = $"{controller.Name}.{action.Name}";
-        switch (DecisionFor(action))
+        return DecisionFor(action) switch
         {
-            case AttributeDecision.Authorize:
-                return null;
+            AttributeDecision.Authorize => null,
 
-            case AttributeDecision.Anonymous:
-                return SourceCarriesMarker(source)
-                    ? null
-                    : $"{where}: [AllowAnonymous] with no `// {Marker} <reason>` justification.";
+            AttributeDecision.Anonymous => SourceCarriesMarker(source)
+                ? null
+                : $"{where}: [AllowAnonymous] with no `// {Marker} <reason>` justification.",
 
-            default:
-                return SourceCarriesMarkerFor(source, action.Name)
-                    ? null
-                    : $"{where}: no [Authorize]/[RequireCapability], no [AllowAnonymous], and no "
-                      + $"`// {Marker} <reason>` marker documenting a hand-rolled check.";
-        }
+            _ => SourceCarriesMarkerFor(source, action.Name)
+                ? null
+                : $"{where}: no [Authorize]/[RequireCapability], no [AllowAnonymous], and no "
+                  + $"`// {Marker} <reason>` marker documenting a hand-rolled check.",
+        };
     }
 
     private static bool SourceCarriesMarker(string[] source) =>
@@ -377,26 +374,26 @@ public sealed partial class AuthorizationDecisionComplianceTests
     [Authorize]
     private sealed class FixtureAuthorized : ControllerBase
     {
-        public IActionResult Get() => Ok();
+        public OkResult Get() => Ok();
 
         [AllowAnonymous]
-        public IActionResult OpenAction() => Ok();
+        public OkResult OpenAction() => Ok();
     }
 
     [Dependably.Security.RequireCapability("read:audit")]
     private sealed class FixtureCapability : ControllerBase
     {
-        public IActionResult Get() => Ok();
+        public OkResult Get() => Ok();
     }
 
     [AllowAnonymous]
     private sealed class FixtureAnonymousClass : ControllerBase
     {
-        public IActionResult Get() => Ok();
+        public OkResult Get() => Ok();
     }
 
     private sealed class FixtureUndecided : ControllerBase
     {
-        public IActionResult Get() => Ok();
+        public OkResult Get() => Ok();
     }
 }

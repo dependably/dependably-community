@@ -1157,7 +1157,9 @@ public sealed record BlockGateRequest(
     /// </para>
     /// </summary>
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
-        Justification = "Single-source factory for the proxy first-fetch gate request: the parameter list IS the threaded field set, and grouping it would reintroduce the field-by-field indirection this factory exists to remove.")]
+        Justification = "Single-source factory for the proxy first-fetch gate request: the parameter list IS " +
+            "the threaded field set, and grouping it would reintroduce the field-by-field indirection this " +
+            "factory exists to remove.")]
     public static BlockGateRequest ForProxyFirstFetch(
         string orgId,
         string ecosystem,
@@ -1203,6 +1205,11 @@ public sealed record BlockGateRequest(
     /// the deprecation arm reads. Kept here beside the others so every <see cref="BlockGateRequest"/>
     /// in the codebase is built in this file.
     /// </summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
+        Justification = "A BlockGateRequest factory: BlockGateRequestConstructionComplianceTests requires the request " +
+            "be built here rather than field-by-field at a call site, precisely because a dropped field defaults to " +
+            "null and reads as \"policy off\". Collapsing this parameter list into a wrapper type is the same silent-hole " +
+            "shape the factory exists to prevent.")]
     public static BlockGateRequest ForFirstFetchDeprecation(
         string orgId, string ecosystem, string purl, string? userId, string? actorKind,
         double maxOsvScoreTolerance, string? sourceIp, string? deprecated, string? blockDeprecatedMode) =>
@@ -1218,6 +1225,11 @@ public sealed record BlockGateRequest(
     /// Like the deprecation twin it precedes the facts row, so the verdict is the one the ecosystem
     /// handler just computed rather than one read back from storage.
     /// </summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
+        Justification = "A BlockGateRequest factory: BlockGateRequestConstructionComplianceTests requires the request " +
+            "be built here rather than field-by-field at a call site, precisely because a dropped field defaults to " +
+            "null and reads as \"policy off\". Collapsing this parameter list into a wrapper type is the same silent-hole " +
+            "shape the factory exists to prevent.")]
     public static BlockGateRequest ForFirstFetchProvenance(
         string orgId, string ecosystem, string purl, string? userId, string? actorKind,
         double maxOsvScoreTolerance, string? sourceIp, string provenanceStatus, string? verifyProvenanceMode) =>

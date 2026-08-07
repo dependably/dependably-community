@@ -35,21 +35,17 @@ public sealed class NuGetSymbolProxyFetcher(
     /// Ecosystem discriminator for proxied symbol artefacts. Deliberately distinct from
     /// <c>nuget</c>: a PDB is not a package, and cataloguing it as one would put it in every
     /// surface that enumerates NuGet packages.
+    ///
+    /// <para>
+    /// The discriminator only keeps PDBs out of the catalogue because
+    /// <see cref="CatalogueHiddenEcosystems"/> covers it — if the two ever drift, a proxied PDB
+    /// starts appearing as a package named <c>mylib.pdb</c>. Asserted by
+    /// <c>NuGetSymbolProxyFetcherTests.SymbolEcosystem_IsCoveredByCatalogueHiddenEcosystems</c>
+    /// rather than a static-constructor guard here, so a drift fails a test run instead of
+    /// permanently poisoning this type for the rest of the process the first time it is touched.
+    /// </para>
     /// </summary>
     public const string SymbolEcosystem = "nuget-symbols";
-
-    // Belt-and-braces: the discriminator only keeps PDBs out of the catalogue because
-    // CatalogueHiddenEcosystems covers it. If the two ever drift, a proxied PDB starts appearing
-    // as a package named 'mylib.pdb' — a silent regression with no test of its own to fail.
-    static NuGetSymbolProxyFetcher()
-    {
-        if (!CatalogueHiddenEcosystems.Covers(SymbolEcosystem))
-        {
-            throw new InvalidOperationException(
-                $"'{SymbolEcosystem}' must be listed in {nameof(CatalogueHiddenEcosystems)}; " +
-                "without it, proxied PDBs are catalogued as packages.");
-        }
-    }
 
     /// <summary>
     /// Attempts to fetch <paramref name="pdbName"/>/<paramref name="key"/> from each configured

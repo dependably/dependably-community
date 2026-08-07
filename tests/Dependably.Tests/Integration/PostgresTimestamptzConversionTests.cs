@@ -98,7 +98,7 @@ public sealed class PostgresTimestamptzConversionTests
 
     // ALTER DATABASE … SET TimeZone applies to sessions opened afterwards, so the pools are
     // cleared to force new physical connections.
-    private static async Task SetDatabaseTimeZoneAsync(IMetadataStore store, string value)
+    private static async Task SetDatabaseTimeZoneAsync(NpgsqlMetadataStore store, string value)
     {
         await using (var conn = await store.OpenAsync())
         {

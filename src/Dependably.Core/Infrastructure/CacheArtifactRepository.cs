@@ -364,6 +364,27 @@ public sealed class CacheArtifactRepository
     }
 
     /// <summary>
+    /// Stamps <c>deprecation_checked_at</c> on every <c>cache_artifact</c> row for an
+    /// (ecosystem, name) pair without touching <c>deprecated</c>. Called when the group's upstream
+    /// metadata fetch threw: the refresh enumeration orders by this column ascending with NULLs
+    /// first, so a group left unstamped is re-selected at the head of every subsequent pass and —
+    /// once enough of them accumulate to fill the batch — starves every other group indefinitely.
+    /// Stamping records "an upstream pass was attempted", which is what the ordering needs; the
+    /// <c>deprecated</c> value is deliberately left as-is because the fetch produced no verdict.
+    /// </summary>
+    // xtenant: cache_artifact is global (no org_id); scoped by (ecosystem, name) coordinate, the
+    // same set ProcessVersionsAsync stamps row-by-row on the success path.
+    public async Task<int> TouchDeprecationCheckedAtForNameAsync(
+        string ecosystem, string name, TimeProvider time, CancellationToken ct = default)
+    {
+        string now = time.GetUtcNow().ToUtcIso();
+        await using var conn = await _db.OpenAsync(ct);
+        return await conn.ExecuteAsync(
+            "UPDATE cache_artifact SET deprecation_checked_at = @now WHERE ecosystem = @ecosystem AND name = @name",
+            new { ecosystem, name, now });
+    }
+
+    /// <summary>
     /// Stamps <c>deprecation_checked_at</c> without changing <c>deprecated</c>. Called when
     /// an upstream metadata fetch confirms no state change.
     /// </summary>

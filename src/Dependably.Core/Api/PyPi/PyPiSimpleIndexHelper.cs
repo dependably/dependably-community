@@ -308,7 +308,8 @@ public static class PyPiSimpleIndexHelper
     // dotnet_style_prefer_conditional_expression_over_return (IDE0046, warning-as-error), the same
     // conflict class documented in .editorconfig for the S3358/IDE0046 nested-ternary case.
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Minor Code Smell", "S1125:Boolean literals should not be redundant",
-        Justification = "false/true here are PEP 592 wire values the JSON payload requires, not redundant control-flow booleans; de-ternarying to satisfy this rule re-trips IDE0046 (warning-as-error).")]
+        Justification = "false/true here are PEP 592 wire values the JSON payload requires, not redundant " +
+            "control-flow booleans; de-ternarying to satisfy this rule re-trips IDE0046 (warning-as-error).")]
     private static object YankedValue(bool yanked, string? yankReason) =>
         !yanked ? false : yankReason is { Length: > 0 } reason ? reason : true;
 

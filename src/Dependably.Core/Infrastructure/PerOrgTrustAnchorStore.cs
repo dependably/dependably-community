@@ -46,6 +46,14 @@ public interface IPerOrgTrustAnchorStore
     Task<PgpPublicKeyRingBundle?> GetMavenKeyRingAsync(string orgId, CancellationToken ct = default);
 
     /// <summary>
+    /// Builds a <see cref="PgpPublicKeyRingBundle"/> from the org's Terraform PGP trust anchors
+    /// (<c>ecosystem='terraform', anchor_kind='pgp'</c>). Returns null when no anchors are
+    /// configured or when all anchors fail to parse. Cached through the same hot cache as
+    /// <see cref="ListAsync"/>; invalidated by <see cref="InvalidateTrustAnchorCache"/>.
+    /// </summary>
+    Task<PgpPublicKeyRingBundle?> GetTerraformKeyRingAsync(string orgId, CancellationToken ct = default);
+
+    /// <summary>
     /// Builds a keyid-to-SPKI-bytes map from the org's npm SPKI trust anchors
     /// (<c>ecosystem='npm', anchor_kind='spki'</c>). Returns an empty dictionary when no
     /// anchors are configured or all anchors fail to parse. Cached through the same hot cache
@@ -145,6 +153,10 @@ public sealed class PerOrgTrustAnchorStore : IPerOrgTrustAnchorStore
     public async Task<PgpPublicKeyRingBundle?> GetMavenKeyRingAsync(
         string orgId, CancellationToken ct = default)
         => await GetPgpKeyRingAsync(orgId, "maven", ct);
+
+    public async Task<PgpPublicKeyRingBundle?> GetTerraformKeyRingAsync(
+        string orgId, CancellationToken ct = default)
+        => await GetPgpKeyRingAsync(orgId, "terraform", ct);
 
     // Shared PGP key-ring builder: loads per-org anchors for the given ecosystem and
     // assembles them into a single PgpPublicKeyRingBundle via PgpKeyRingBuilder.

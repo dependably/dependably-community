@@ -230,11 +230,9 @@ public sealed class DownloadCountWriterHostedService : BackgroundService
 
         // Aggregate: sum increments per unique key within this batch.
         var byVersionId = new Dictionary<string, int>(StringComparer.Ordinal);
-        // Key is (orgId, purl) so each tenant's counter advances independently.
-        var byOrgPurl = new Dictionary<(string OrgId, string Purl), int>();
-        // Key is (orgId, cacheArtifactId) — the direct-id analog of byOrgPurl, used by
-        // cache-hit serve paths that already hold the cache_artifact id and would otherwise
-        // need an extra purl lookup just to enqueue the counter.
+        // Key is (orgId, cacheArtifactId) so each tenant's counter advances independently, and so
+        // one file's download is counted against that file alone — a purl is not unique on the
+        // cache plane (Maven and RPM both map one purl to several filenames).
         var byOrgCacheArtifactId = new Dictionary<(string OrgId, string CacheArtifactId), int>();
         foreach (var rec in records)
         {
@@ -242,12 +240,6 @@ public sealed class DownloadCountWriterHostedService : BackgroundService
             {
                 byVersionId.TryGetValue(rec.VersionId, out int current);
                 byVersionId[rec.VersionId] = current + 1;
-            }
-            else if (rec.Purl is not null && rec.OrgId is not null)
-            {
-                var key = (rec.OrgId, rec.Purl);
-                byOrgPurl.TryGetValue(key, out int current);
-                byOrgPurl[key] = current + 1;
             }
             else if (rec.CacheArtifactId is not null && rec.OrgId is not null)
             {
@@ -271,26 +263,6 @@ public sealed class DownloadCountWriterHostedService : BackgroundService
             await conn.ExecuteAsync(
                 "UPDATE package_versions SET download_count = download_count + @n, last_used = @now WHERE id = @id",
                 new { n = kv.Value, now, id = kv.Key },
-                transaction: tx);
-        }
-
-        foreach (var kv in byOrgPurl)
-        {
-            string orgId = kv.Key.OrgId;
-            string purl = kv.Key.Purl;
-            // Increment the per-tenant download counter for all cache_artifact rows that
-            // match the purl (Maven maps one purl to multiple filenames) scoped to the tenant.
-            await conn.ExecuteAsync(
-                """
-                UPDATE tenant_artifact_access
-                SET download_count = download_count + @n,
-                    last_used = @now
-                WHERE org_id = @orgId
-                  AND cache_artifact_id IN (
-                      SELECT id FROM cache_artifact WHERE purl = @purl
-                  )
-                """,
-                new { n = kv.Value, now, orgId, purl },
                 transaction: tx);
         }
 

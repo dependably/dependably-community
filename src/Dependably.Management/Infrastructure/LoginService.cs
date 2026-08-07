@@ -1103,7 +1103,9 @@ public sealed class LoginService
     {
         await _audit.LogAsync("auth.saml.test.success",
             orgId: tenantId, actorId: actorId,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { idp_entity_id = idpEntityId, nameid_hash = HashNameId(nameId), email }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            detail: System.Text.Json.JsonSerializer.Serialize(
+                new { idp_entity_id = idpEntityId, nameid_hash = HashNameId(nameId), email },
+                Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             ct: ct);
     }
 

@@ -41,26 +41,36 @@ public static class EdgeUpstreamSeeder
     //            because the base is not index.crates.io.
     //   apk    — fetcher appends "/{release}/{repo}/{arch}/{file}" verbatim (1:1 with dl-cdn's
     //            layout); master apk surface is under /apk.
-    private static readonly (string Ecosystem, string PathSuffix)[] NonOciPrefixes =
+    //   terraform — the one row that also pins a protocol. Every other ecosystem works because the
+    //            master serves the same protocol its fetcher speaks, so an edge can point at the
+    //            master exactly as it would point at the public upstream. Terraform is the one
+    //            place those differ: the master serves the *network mirror* protocol at /terraform,
+    //            while the fetcher's default is the *registry* protocol ({base}/v1/providers/...).
+    //            The row therefore carries upstream_protocol='mirror', which switches the fetcher
+    //            to the endpoint shape the master actually serves. Without it every provider fetch
+    //            would 404 against a master that is working correctly.
+    private static readonly (string Ecosystem, string PathSuffix, string? Protocol)[] NonOciPrefixes =
     [
-        ("pypi",   ""),
-        ("npm",    "/npm"),
-        ("nuget",  "/nuget"),
-        ("maven",  "/maven"),
-        ("rpm",    "/rpm"),
-        ("golang", "/go"),
-        ("cargo",  "/cargo"),
-        ("apk",    "/apk"),
+        ("pypi",      "",           null),
+        ("npm",       "/npm",       null),
+        ("nuget",     "/nuget",     null),
+        ("maven",     "/maven",     null),
+        ("rpm",       "/rpm",       null),
+        ("golang",    "/go",        null),
+        ("cargo",     "/cargo",     null),
+        ("apk",       "/apk",       null),
+        ("terraform", "/terraform", UpstreamRegistryRepository.MirrorProtocol),
     ];
 
     /// <summary>
-    /// The (ecosystem, url) pairs seeded for an edge node given a master base URL, in the order
-    /// they are inserted. Exposed for tests to assert the exact prefix table without a DB.
+    /// The (ecosystem, url, protocol) rows seeded for an edge node given a master base URL, in the
+    /// order they are inserted. Protocol is null for every ecosystem whose serve and fetch
+    /// protocols coincide. Exposed for tests to assert the exact prefix table without a DB.
     /// </summary>
-    public static IReadOnlyList<(string Ecosystem, string Url)> ResolveRows(string masterUrl)
+    public static IReadOnlyList<(string Ecosystem, string Url, string? Protocol)> ResolveRows(string masterUrl)
     {
         string baseUrl = masterUrl.TrimEnd('/');
-        return NonOciPrefixes.Select(p => (p.Ecosystem, baseUrl + p.PathSuffix)).ToList();
+        return NonOciPrefixes.Select(p => (p.Ecosystem, baseUrl + p.PathSuffix, p.Protocol)).ToList();
     }
 
     /// <summary>
@@ -93,12 +103,13 @@ public static class EdgeUpstreamSeeder
             "DELETE FROM upstream_registry WHERE org_id = @orgId",
             new { orgId }, transaction: tx, cancellationToken: ct));
 
-        foreach (var (ecosystem, url) in ResolveRows(masterUrl))
+        foreach (var (ecosystem, url, protocol) in ResolveRows(masterUrl))
         {
             await conn.ExecuteAsync(new CommandDefinition(
                 """
-                INSERT INTO upstream_registry (id, org_id, ecosystem, url, position, auth_type, username, secret)
-                VALUES (@id, @orgId, @eco, @url, 0, @authType, NULL, @secret)
+                INSERT INTO upstream_registry
+                    (id, org_id, ecosystem, url, position, auth_type, username, secret, upstream_protocol)
+                VALUES (@id, @orgId, @eco, @url, 0, @authType, NULL, @secret, @protocol)
                 """,
                 new
                 {
@@ -108,6 +119,7 @@ public static class EdgeUpstreamSeeder
                     url,
                     authType = nonOciSecret is null ? "anonymous" : "bearer",
                     secret = nonOciSecret,
+                    protocol,
                 },
                 transaction: tx, cancellationToken: ct));
         }

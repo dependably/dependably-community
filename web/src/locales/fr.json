@@ -71,6 +71,7 @@
     "loadMore": "Charger plus",
     "pagination": {
       "summary": "{from}–{to} sur {total}",
+      "summaryCapped": "{from}–{to} sur {total}+",
       "prev": "Page précédente",
       "next": "Page suivante",
       "perPage": "Par page :"
@@ -325,6 +326,8 @@
       "deprecated": "Obsolète",
       "clean": "Aucun avis",
       "unscanned": "Non analysé",
+      "no_feed": "Aucun flux d'avis",
+      "noFeedHelp": "OSV ne publie aucun flux d'avis pour cet écosystème ; cet artefact n'a donc jamais été confronté à un tel flux. Il n'est pas réputé sain.",
       "malicious": "Malveillant",
       "maliciousHelp": "Lié à un avis de paquet malveillant connu (OSV MAL-)."
     },
@@ -1082,6 +1085,14 @@
           "passthrough": "Passthrough (refuser la publication hébergée)",
           "merged": "Merged (autoriser la publication hébergée)",
           "effective": "Actuellement en vigueur : {mode}"
+        },
+        "terraform": {
+          "protocolLabel": "Protocole",
+          "protocolHint": "Le registre de fournisseurs résout les versions et fournit des URL de téléchargement sur un autre hôte. Le miroir réseau sert les deux depuis cet amont — choisissez-le pour un amont Dependably ou un autre miroir réseau.",
+          "protocol": {
+            "registry": "Registre de fournisseurs",
+            "mirror": "Miroir réseau"
+          }
         }
       }
     },

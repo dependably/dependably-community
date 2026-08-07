@@ -120,6 +120,9 @@ CREATE TABLE IF NOT EXISTS org_settings (
     verify_rpm_signatures     TEXT    NOT NULL DEFAULT 'off' CHECK (verify_rpm_signatures IN ('off', 'warn', 'block')),
     -- Maven proxy-origin detached .asc OpenPGP signature-verification gate: 'off' (default) / 'warn' / 'block'. See Schema.sql.
     verify_maven_signatures   TEXT    NOT NULL DEFAULT 'off' CHECK (verify_maven_signatures IN ('off', 'warn', 'block')),
+    -- Terraform proxy-origin publisher-signed SHASUMS chain verification gate: 'off' (default) /
+    -- 'warn' / 'block'. See Schema.sql.
+    verify_terraform_signatures TEXT  NOT NULL DEFAULT 'off' CHECK (verify_terraform_signatures IN ('off', 'warn', 'block')),
     -- Dormant hosted-bytes counter, retained for one release of blue-green compatibility with the
     -- preceding release, which still increments it. Nothing in this release reads or writes it.
     -- See Schema.sql.
@@ -778,6 +781,13 @@ CREATE TABLE IF NOT EXISTS upstream_registry (
     -- be derived from url. NULL disables symbol proxying for this upstream — the fail-closed
     -- default for any feed whose symbol host is unknown.
     symbol_server_url TEXT,
+    -- Terraform: which protocol this upstream speaks. NULL is the ecosystem's own default, which
+    -- for Terraform is the provider *registry* protocol a public registry serves. 'mirror' marks an
+    -- upstream speaking the *network mirror* protocol instead — the one Dependably itself serves,
+    -- which is how an edge node chains its master. The two are not interchangeable: their endpoint
+    -- shapes differ, so a wrong value fails every fetch rather than degrading. Ignored by every
+    -- other ecosystem, whose serve and fetch protocols are the same.
+    upstream_protocol TEXT CHECK (upstream_protocol IS NULL OR upstream_protocol IN ('mirror')),
     created_at     TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
         CHECK (created_at IS NULL OR created_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
     UNIQUE (org_id, ecosystem, url)
@@ -858,7 +868,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_nuget_symbol_index_ca_key
 CREATE TABLE IF NOT EXISTS signature_trust_anchor (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-    ecosystem   TEXT NOT NULL,   -- 'rpm' | 'npm' | 'nuget' | 'pypi' | 'maven' | 'apk'
+    ecosystem   TEXT NOT NULL,   -- 'rpm' | 'npm' | 'nuget' | 'pypi' | 'maven' | 'apk' | 'terraform'
     anchor_kind TEXT NOT NULL,   -- 'pgp' | 'spki' | 'x509' | 'sigstore_root' | 'trusted_publisher' | 'rekor_key' | 'rsa'
     key_id      TEXT,            -- optional key fingerprint / subject for display
     material    TEXT NOT NULL,   -- public key material: armored PGP / base64 DER / PEM / JSON

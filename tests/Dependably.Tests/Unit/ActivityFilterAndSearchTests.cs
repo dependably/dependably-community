@@ -41,7 +41,7 @@ public sealed class ActivityFilterAndSearchTests : IAsyncLifetime
     {
         var repo = new AuditRepository(_db);
 
-        var (items, total) = await repo.ListActivityAsync("o1", limit: 50, offset: 0, eventType: "blocked");
+        var (items, total, _) = await repo.ListActivityAsync("o1", limit: 50, offset: 0, eventType: "blocked");
 
         // bare 'blocked' + the four gate variants = 5; the 'download' row is excluded.
         Assert.Equal(5, total);
@@ -54,7 +54,7 @@ public sealed class ActivityFilterAndSearchTests : IAsyncLifetime
     {
         var repo = new AuditRepository(_db);
 
-        var (items, total) = await repo.ListActivityAsync("o1", limit: 50, offset: 0, eventType: "blocked_malicious");
+        var (items, total, _) = await repo.ListActivityAsync("o1", limit: 50, offset: 0, eventType: "blocked_malicious");
 
         Assert.Equal(1, total);
         Assert.Equal("blocked_malicious", Assert.Single(items).EventType);
@@ -66,17 +66,17 @@ public sealed class ActivityFilterAndSearchTests : IAsyncLifetime
         var repo = new AuditRepository(_db);
 
         // Matches the 'download' row by detail substring and nothing else.
-        var (byDetail, detailTotal) = await repo.ListActivityAsync("o1", limit: 50, offset: 0, search: "from cache");
+        var (byDetail, detailTotal, _) = await repo.ListActivityAsync("o1", limit: 50, offset: 0, search: "from cache");
         Assert.Equal(1, detailTotal);
         Assert.Equal("download", Assert.Single(byDetail).EventType);
 
         // Matches by purl substring (only the 'b' package).
-        var (byPurl, purlTotal) = await repo.ListActivityAsync("o1", limit: 50, offset: 0, search: "npm/b@");
+        var (byPurl, purlTotal, _) = await repo.ListActivityAsync("o1", limit: 50, offset: 0, search: "npm/b@");
         Assert.Equal(1, purlTotal);
         Assert.Equal("blocked_release_age", Assert.Single(byPurl).EventType);
 
         // Matches by actor email — total must include the joined-actor row (no paging drift).
-        var (byActor, actorTotal) = await repo.ListActivityAsync("o1", limit: 50, offset: 0, search: "dev@acme");
+        var (byActor, actorTotal, _) = await repo.ListActivityAsync("o1", limit: 50, offset: 0, search: "dev@acme");
         Assert.Equal(1, actorTotal);
         Assert.Single(byActor);
     }
@@ -87,7 +87,7 @@ public sealed class ActivityFilterAndSearchTests : IAsyncLifetime
         var repo = new AuditRepository(_db);
 
         // 'blocked' group narrowed by a purl search that only the malicious row satisfies.
-        var (items, total) = await repo.ListActivityAsync(
+        var (items, total, _) = await repo.ListActivityAsync(
             "o1", limit: 50, offset: 0, eventType: "blocked", search: "npm/c@");
 
         Assert.Equal(1, total);

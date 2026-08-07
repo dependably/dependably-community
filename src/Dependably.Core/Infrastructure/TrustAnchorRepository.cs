@@ -22,7 +22,7 @@ public sealed class TrustAnchorRepository
 
     /// <summary>The set of ecosystems that support per-org trust anchors.</summary>
     public static readonly IReadOnlyList<string> SupportedEcosystems =
-        ["rpm", "npm", "nuget", "pypi", "maven", "apk"];
+        ["rpm", "npm", "nuget", "pypi", "maven", "apk", "terraform"];
 
     /// <summary>Allowed anchor_kind discriminator values.</summary>
     public static readonly IReadOnlyList<string> AllowedAnchorKinds =

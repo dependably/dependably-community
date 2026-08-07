@@ -223,7 +223,8 @@ public static class DependablyMeter
     public static readonly Counter<long> RateLimitBackendUnavailable =
         Meter.CreateCounter<long>(
             "dependably.rate_limit.backend_unavailable",
-            description: "Rate-limit decisions taken without the Redis backend, resolved by the configured failure posture. Attributes: policy, decision (allowed|denied), cause (connection|malformed_reply).");
+            description: "Rate-limit decisions taken without the Redis backend, resolved by the configured " +
+                "failure posture. Attributes: policy, decision (allowed|denied), cause (connection|malformed_reply).");
 
     /// <summary>
     /// Package versions whose deprecation status changed during a refresh pass.

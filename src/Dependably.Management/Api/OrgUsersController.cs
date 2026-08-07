@@ -243,13 +243,11 @@ public sealed class OrgUsersController : OrgScopedControllerBase
         // Self-service requires re-entering the current password. An admin does not supply the
         // subject's password (they do not have it) — their authority is the capability, and the
         // audit row below is what makes the action accountable.
-        if (isSelf)
+        if (isSelf
+            && (string.IsNullOrEmpty(req.CurrentPassword)
+                || !await users.VerifyCurrentPasswordAsync(userId, req.CurrentPassword, ct)))
         {
-            if (string.IsNullOrEmpty(req.CurrentPassword)
-                || !await users.VerifyCurrentPasswordAsync(userId, req.CurrentPassword, ct))
-            {
-                return _problems.ValidationErrorActionKey("currentPassword", "error.user.reauthRequired");
-            }
+            return _problems.ValidationErrorActionKey("currentPassword", "error.user.reauthRequired");
         }
 
         // A no-op request still consumes a link and mails the same address; refuse it rather than
@@ -271,7 +269,7 @@ public sealed class OrgUsersController : OrgScopedControllerBase
         }
 
         string raw = await changeTokens.IssueAsync(userId, orgId, email, ct);
-        var expiresAt = changeTokens.ExpiryFor(time.GetUtcNow());
+        var expiresAt = EmailChangeTokenRepository.ExpiryFor(time.GetUtcNow());
         mailer.EnqueueEmailChangeVerification(email, _urls.Absolute(HttpContext, $"/confirm-email?token={raw}"), expiresAt);
 
         // The NEW address is recorded in the audit detail deliberately: this is an account-identity

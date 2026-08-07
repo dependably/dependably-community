@@ -147,6 +147,12 @@ public sealed partial class SchemaInitializer
     /// this artifact), not the artifact's — a license attached by a later backfill can postdate the
     /// artifact's own <c>artifact_inventory.created_at</c>. The license review queue's first-seen
     /// column depends on this distinction.
+    ///
+    /// The hosted arm filters <c>pv.origin = 'uploaded'</c> to match
+    /// <see cref="ArtifactInventoryView"/>'s hosted arm exactly. Without it a licence row hanging
+    /// off a non-uploaded <c>package_versions</c> row would project a licence fact whose
+    /// (org_id, owner_kind, owner_id) key has no <c>artifact_inventory</c> counterpart, so every
+    /// consumer that joins the two would drop it.
     /// </summary>
     // xtenant: view DDL. The view projects org_id as its own column so that every consumer can
     // filter on it; the definition itself necessarily spans all tenants.
@@ -163,6 +169,7 @@ public sealed partial class SchemaInitializer
         JOIN package_versions pv ON pv.id = pvl.package_version_id
         JOIN packages         p  ON p.id  = pv.package_id
         WHERE pvl.owner_kind = 'package_version'
+          AND pv.origin = 'uploaded'
         UNION ALL
         SELECT taa.org_id             AS org_id,
                'cache_artifact'       AS owner_kind,

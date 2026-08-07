@@ -54,13 +54,6 @@ public static class UtcTimestamp
         instant.ToUniversalTime().ToString(Format, CultureInfo.InvariantCulture);
 
     /// <summary>
-    /// Formats an instant at millisecond precision, converting from any offset. Use only for
-    /// the columns documented on <see cref="MillisecondFormat"/>.
-    /// </summary>
-    public static string ToUtcIsoMillis(this DateTimeOffset instant) =>
-        instant.ToUniversalTime().ToString(MillisecondFormat, CultureInfo.InvariantCulture);
-
-    /// <summary>
     /// Formats a <see cref="DateTime"/> as canonical UTC ISO-8601. A <see cref="DateTimeKind.Local"/>
     /// or <see cref="DateTimeKind.Unspecified"/> value is interpreted per
     /// <see cref="DateTime.ToUniversalTime"/> — prefer <see cref="DateTimeOffset"/> at call sites
@@ -68,6 +61,13 @@ public static class UtcTimestamp
     /// </summary>
     public static string ToUtcIso(this DateTime instant) =>
         instant.ToUniversalTime().ToString(Format, CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// Formats an instant at millisecond precision, converting from any offset. Use only for
+    /// the columns documented on <see cref="MillisecondFormat"/>.
+    /// </summary>
+    public static string ToUtcIsoMillis(this DateTimeOffset instant) =>
+        instant.ToUniversalTime().ToString(MillisecondFormat, CultureInfo.InvariantCulture);
 
     /// <summary>
     /// Microsecond precision, for columns holding an instant that was declared by an upstream

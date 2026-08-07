@@ -89,6 +89,10 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
             return [];
         }
 
+        // ParsePurl has already stripped the Go "v" prefix from the queried version; strip it from
+        // the advisory side too so a dump using the prefixed form still matches.
+        bool isGo = string.Equals(ecosystem, "Go", StringComparison.OrdinalIgnoreCase);
+
         // Match version against each advisory's affected versions. An advisory with no
         // version list (range-only) is reported — the scan service's downstream handling
         // decides what to do with range advisories.
@@ -96,7 +100,8 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
             .Where(a => a.AffectedPackages.Any(ap =>
                 MatchesEcosystemAndName(ap, ecosystem, name) &&
                 (ap.Versions.Length == 0 || ap.Versions.Any(v =>
-                    v.Equals(version, StringComparison.OrdinalIgnoreCase)))))
+                    (isGo ? StripGoVersionPrefix(v) : v)
+                        .Equals(version, StringComparison.OrdinalIgnoreCase)))))
             .ToList();
     }
 
@@ -321,8 +326,26 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
             }
         }
 
+        // Go module versions carry a leading "v" on the wire (v1.2.3) and PurlNormalizer.Golang
+        // preserves it, while OSV's Go entries express versions bare (1.2.3). Strip it so an
+        // advisory that enumerates affected[].versions matches. Range-only advisories are
+        // unaffected either way — QueryAsync short-circuits on an empty version list.
+        if (string.Equals(ecosystem, "golang", StringComparison.OrdinalIgnoreCase))
+        {
+            version = StripGoVersionPrefix(version);
+        }
+
         return (NormalizeEcosystem(ecosystem), name.ToLowerInvariant(), version);
     }
+
+    /// <summary>
+    /// Strips the leading <c>v</c> from a Go module version. Applied to both sides of the version
+    /// comparison: purls carry the prefix and OSV's Go entries do not, so normalising only the
+    /// purl would leave a dump that does use the prefixed form silently unmatched. Go's module
+    /// spec mandates the lower-case <c>v</c>, so the check is ordinal.
+    /// </summary>
+    private static string StripGoVersionPrefix(string version) =>
+        version.StartsWith('v') ? version[1..] : version;
 
     private static string NormalizeEcosystem(string ecosystem) => ecosystem.ToLowerInvariant() switch
     {
@@ -342,10 +365,13 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
         // normalises to the bare "Alpine" and MatchesEcosystemAndName does a release-qualified
         // prefix match against the indexed advisories (see the dual-bucket indexing above).
         "apk" => "Alpine",
-        // RPM and OCI are intentionally not normalised here: OSV has no single "RPM" ecosystem
-        // (vulnerabilities live under distro-specific names like "Rocky Linux", "AlmaLinux",
-        // "Red Hat"), and OCI image vulns are image-scan territory (Trivy), not OSV. Falling
-        // through with the lower-cased key yields no matches, which is the safe outcome.
+        // RPM, OCI, and Terraform are intentionally not normalised here: OSV has no single "RPM"
+        // ecosystem (vulnerabilities live under distro-specific names like "Rocky Linux",
+        // "AlmaLinux", "Red Hat"), OCI image vulns are image-scan territory (Trivy), not OSV, and
+        // OSV publishes no Terraform provider ecosystem at all. Falling through with the
+        // lower-cased key yields no matches, which is the safe outcome — for Terraform it is also
+        // the honest one: a provider archive has no advisory feed to consult, while the rest of
+        // the block gate (operator blocks, revocation, source pinning) still applies.
         var other => other
     };
 

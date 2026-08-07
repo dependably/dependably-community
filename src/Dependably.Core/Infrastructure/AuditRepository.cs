@@ -1,3 +1,4 @@
+using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
 using Dapper;
 
@@ -128,6 +129,16 @@ public sealed class AuditRepository
     }
 
     /// <summary>
+    /// Upper bound on the exact total reported by the paged tenant lists
+    /// (<see cref="ListAuditAsync"/>, <see cref="ListActivityAsync"/>). Counting an org's
+    /// entire history on every page view is what made the audit page time out on large
+    /// instances, so the count stops probing past this bound and the caller reports
+    /// "10,000+" instead of an exact figure. The list queries themselves are unaffected —
+    /// rows past the cap are still pageable.
+    /// </summary>
+    public const int ListTotalCap = 10_000;
+
+    /// <summary>
     /// Tenant-facing audit list: filters strictly to <c>scope='tenant'</c> so a sloppy join
     /// can never surface operator events to a tenant user.
     /// <para>
@@ -138,37 +149,69 @@ public sealed class AuditRepository
     /// to a SIEM — a security feed blind to successful logins would be worthless. Failures,
     /// lockouts, and credential changes are security events and DO belong on this list.
     /// </para>
+    /// <para>
+    /// The total is capped at <see cref="ListTotalCap"/> (probe one past the cap, report
+    /// <c>TotalCapped</c>) and, when no search is active, counted without the actor joins:
+    /// the joins exist only so a search can match <c>u.email</c>/<c>st.name</c>, but their mere
+    /// presence in the statement defeats LEFT-JOIN elimination, costing two B-tree probes per
+    /// audited row across the org's whole history. Callers that discard the total (CSV export)
+    /// pass <paramref name="includeTotal"/>=false to skip the count entirely.
+    /// </para>
     /// </summary>
-    public async Task<(IReadOnlyList<AuditEntry> Items, int Total)> ListAuditAsync(
+    public async Task<(IReadOnlyList<AuditEntry> Items, int Total, bool TotalCapped)> ListAuditAsync(
         string orgId, int limit, int offset, string? action = null, string? search = null,
-        CancellationToken ct = default)
+        bool includeTotal = true, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
         string? searchPattern = string.IsNullOrWhiteSpace(search) ? null : $"%{search.Trim().ToLowerInvariant()}%";
-        // The COUNT carries the same actor joins as the list so a search on actor email keeps
-        // the total in step with the rows returned (no paging drift).
-        int total = await conn.ExecuteScalarAsync<int>(
-            """
-            SELECT COUNT(*)
-            FROM audit_log a
-            LEFT JOIN users u
-                ON u.id = a.actor_id
-                AND (a.actor_kind IS NULL OR a.actor_kind = 'user')
-            LEFT JOIN service_tokens st
-                ON st.id = a.actor_id
-                AND a.actor_kind = 'service'
-            WHERE a.org_id = @orgId AND a.scope = 'tenant'
-              AND a.action <> 'login.success'
-              AND (@action IS NULL OR a.action = @action)
-              AND (@searchPattern IS NULL
-                   OR lower(a.action) LIKE @searchPattern
-                   OR lower(COALESCE(a.purl, '')) LIKE @searchPattern
-                   OR lower(COALESCE(a.ecosystem, '')) LIKE @searchPattern
-                   OR lower(COALESCE(a.detail, '')) LIKE @searchPattern
-                   OR lower(COALESCE(u.email, '')) LIKE @searchPattern
-                   OR lower(COALESCE(st.name, '')) LIKE @searchPattern)
-            """,
-            new { orgId, action, searchPattern });
+        int total = 0;
+        bool totalCapped = false;
+        if (includeTotal && searchPattern is null)
+        {
+            int probed = await conn.ExecuteScalarAsync<int>(
+                """
+                SELECT COUNT(*)
+                FROM (SELECT 1
+                      FROM audit_log a
+                      WHERE a.org_id = @orgId AND a.scope = 'tenant'
+                        AND a.action <> 'login.success'
+                        AND (@action IS NULL OR a.action = @action)
+                      LIMIT @countProbe)
+                """,
+                new { orgId, action, countProbe = ListTotalCap + 1 });
+            totalCapped = probed > ListTotalCap;
+            total = totalCapped ? ListTotalCap : probed;
+        }
+        else if (includeTotal)
+        {
+            // A search must count through the same actor joins the list matches against
+            // (u.email / st.name), or the total drifts from the rows returned.
+            int probed = await conn.ExecuteScalarAsync<int>(
+                """
+                SELECT COUNT(*)
+                FROM (SELECT 1
+                      FROM audit_log a
+                      LEFT JOIN users u
+                          ON u.id = a.actor_id
+                          AND (a.actor_kind IS NULL OR a.actor_kind = 'user')
+                      LEFT JOIN service_tokens st
+                          ON st.id = a.actor_id
+                          AND a.actor_kind = 'service'
+                      WHERE a.org_id = @orgId AND a.scope = 'tenant'
+                        AND a.action <> 'login.success'
+                        AND (@action IS NULL OR a.action = @action)
+                        AND (lower(a.action) LIKE @searchPattern
+                             OR lower(COALESCE(a.purl, '')) LIKE @searchPattern
+                             OR lower(COALESCE(a.ecosystem, '')) LIKE @searchPattern
+                             OR lower(COALESCE(a.detail, '')) LIKE @searchPattern
+                             OR lower(COALESCE(u.email, '')) LIKE @searchPattern
+                             OR lower(COALESCE(st.name, '')) LIKE @searchPattern)
+                      LIMIT @countProbe)
+                """,
+                new { orgId, action, searchPattern, countProbe = ListTotalCap + 1 });
+            totalCapped = probed > ListTotalCap;
+            total = totalCapped ? ListTotalCap : probed;
+        }
         // Service-token actors live in a different table than users; resolve both and pick
         // by actor_kind. NULL actor_kind = legacy row (pre-migration) — fall back to the
         // users join for back-compat. The 'service:<name>' prefix matches the npm whoami
@@ -203,7 +246,7 @@ public sealed class AuditRepository
             ORDER BY a.created_at DESC, a.id DESC LIMIT @limit OFFSET @offset
             """,
             new { orgId, limit, offset, action, searchPattern });
-        return (rows.ToList(), total);
+        return (rows.ToList(), total, totalCapped);
     }
 
     /// <summary>
@@ -399,41 +442,25 @@ public sealed class AuditRepository
     /// is a chronological one — the same form <see cref="ListAuditRangeAsync"/> uses. It is what
     /// scopes the feed to the dashboard's 30-day blocked-pull window; the caller resolves the
     /// instant from the injected clock.
+    /// <para>
+    /// The total follows the same strategy as <see cref="ListAuditAsync"/>: capped at
+    /// <see cref="ListTotalCap"/>, counted join-free when no search is active, and skipped
+    /// entirely when <paramref name="includeTotal"/> is false (CSV export).
+    /// </para>
     /// </summary>
-    public async Task<(IReadOnlyList<ActivityEntry> Items, int Total)> ListActivityAsync(
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
+        Justification = "Optional named-arg filter/paging surface read at ~20 call sites; a wrapper type would force every caller to allocate to skip a single field, for no cohesion gain over the current named-argument reads.")]
+    public async Task<(IReadOnlyList<ActivityEntry> Items, int Total, bool TotalCapped)> ListActivityAsync(
         string orgId, int limit, int offset, string? eventType = null, string? search = null,
-        string? since = null, CancellationToken ct = default)
+        string? since = null, bool includeTotal = true, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
         string? searchPattern = string.IsNullOrWhiteSpace(search) ? null : $"%{search.Trim().ToLowerInvariant()}%";
-        // The 'blocked' token selects the whole block-gate family (blocked, blocked_release_age,
-        // blocked_malicious, …) so the filter agrees with the dashboard's 'blocked%' tally; any
-        // specific 'blocked_<gate>' value still matches exactly. The COUNT carries the same actor
-        // joins and the same since bound as the list so the total stays in step (no paging drift).
-        int total = await conn.ExecuteScalarAsync<int>(
-            """
-            SELECT COUNT(*)
-            FROM activity a
-            LEFT JOIN users u
-                ON u.id = a.actor_id
-                AND (a.actor_kind IS NULL OR a.actor_kind = 'user')
-            LEFT JOIN service_tokens st
-                ON st.id = a.actor_id
-                AND a.actor_kind = 'service'
-            WHERE a.org_id = @orgId
-              AND (@eventType IS NULL
-                   OR (@eventType = 'blocked' AND a.event_type LIKE 'blocked%')
-                   OR (@eventType <> 'blocked' AND a.event_type = @eventType))
-              AND (@since IS NULL OR a.created_at >= @since)
-              AND (@searchPattern IS NULL
-                   OR lower(COALESCE(a.purl, '')) LIKE @searchPattern
-                   OR lower(a.event_type) LIKE @searchPattern
-                   OR lower(COALESCE(a.ecosystem, '')) LIKE @searchPattern
-                   OR lower(COALESCE(a.detail, '')) LIKE @searchPattern
-                   OR lower(COALESCE(u.email, '')) LIKE @searchPattern
-                   OR lower(COALESCE(st.name, '')) LIKE @searchPattern)
-            """,
-            new { orgId, eventType, searchPattern, since });
+
+        var (total, totalCapped) = includeTotal
+            ? await ComputeActivityTotalAsync(conn, orgId, eventType, since, searchPattern)
+            : (0, false);
+
         // See ListAuditAsync for the actor_kind branching rationale.
         var rows = await conn.QueryAsync<ActivityEntry>(
             """
@@ -466,6 +493,61 @@ public sealed class AuditRepository
             LIMIT @limit OFFSET @offset
             """,
             new { orgId, limit, offset, eventType, searchPattern, since });
-        return (rows.ToList(), total);
+        return (rows.ToList(), total, totalCapped);
+    }
+
+    /// <summary>
+    /// The row count backing <see cref="ListActivityAsync"/>'s <c>Total</c>, capped at
+    /// <see cref="ListTotalCap"/>. The 'blocked' token selects the whole block-gate family
+    /// (blocked, blocked_release_age, blocked_malicious, …) so the filter agrees with the
+    /// dashboard's 'blocked%' tally; any specific 'blocked_&lt;gate&gt;' value still matches
+    /// exactly. A search count carries the same actor joins and the same since bound as the list
+    /// so the total stays in step (no paging drift); an inactive search skips those joins entirely.
+    /// </summary>
+    private static async Task<(int Total, bool Capped)> ComputeActivityTotalAsync(
+        DbConnection conn, string orgId, string? eventType, string? since, string? searchPattern)
+    {
+        int probed = searchPattern is null
+            ? await conn.ExecuteScalarAsync<int>(
+                """
+                SELECT COUNT(*)
+                FROM (SELECT 1
+                      FROM activity a
+                      WHERE a.org_id = @orgId
+                        AND (@eventType IS NULL
+                             OR (@eventType = 'blocked' AND a.event_type LIKE 'blocked%')
+                             OR (@eventType <> 'blocked' AND a.event_type = @eventType))
+                        AND (@since IS NULL OR a.created_at >= @since)
+                      LIMIT @countProbe)
+                """,
+                new { orgId, eventType, since, countProbe = ListTotalCap + 1 })
+            : await conn.ExecuteScalarAsync<int>(
+                """
+                SELECT COUNT(*)
+                FROM (SELECT 1
+                      FROM activity a
+                      LEFT JOIN users u
+                          ON u.id = a.actor_id
+                          AND (a.actor_kind IS NULL OR a.actor_kind = 'user')
+                      LEFT JOIN service_tokens st
+                          ON st.id = a.actor_id
+                          AND a.actor_kind = 'service'
+                      WHERE a.org_id = @orgId
+                        AND (@eventType IS NULL
+                             OR (@eventType = 'blocked' AND a.event_type LIKE 'blocked%')
+                             OR (@eventType <> 'blocked' AND a.event_type = @eventType))
+                        AND (@since IS NULL OR a.created_at >= @since)
+                        AND (lower(COALESCE(a.purl, '')) LIKE @searchPattern
+                             OR lower(a.event_type) LIKE @searchPattern
+                             OR lower(COALESCE(a.ecosystem, '')) LIKE @searchPattern
+                             OR lower(COALESCE(a.detail, '')) LIKE @searchPattern
+                             OR lower(COALESCE(u.email, '')) LIKE @searchPattern
+                             OR lower(COALESCE(st.name, '')) LIKE @searchPattern)
+                      LIMIT @countProbe)
+                """,
+                new { orgId, eventType, searchPattern, since, countProbe = ListTotalCap + 1 });
+
+        bool totalCapped = probed > ListTotalCap;
+        return (totalCapped ? ListTotalCap : probed, totalCapped);
     }
 }

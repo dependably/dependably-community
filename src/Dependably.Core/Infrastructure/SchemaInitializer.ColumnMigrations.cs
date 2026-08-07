@@ -53,18 +53,38 @@ public sealed partial class SchemaInitializer
     // Targeted backfill for the golang and cargo upstreams. These two ecosystems were added to the
     // default sources after the original seed_default_upstream_registries backfill already ran, so
     // existing orgs never received their default rows and silently had Go/Cargo proxying disabled.
-    // This seeds ONLY golang and cargo — not the full default set — because an operator may have
+    // Config overrides (Go:Upstream / Cargo:Upstream) are honoured via ResolveDefaults.
+    private Task SeedGoCargoUpstreamRegistriesAsync(DbConnection conn) =>
+        SeedUpstreamRegistriesForAsync(conn, "Go/Cargo", e => e is "golang" or "cargo");
+
+    // Targeted backfill for the apk upstream. apk was added to the default sources after
+    // seed_default_upstream_registries already ran for existing orgs, so those orgs never received
+    // the default dl-cdn.alpinelinux.org row and silently had apk proxying disabled. Config
+    // overrides (Apk:Upstream) are honoured via ResolveDefaults.
+    private Task SeedApkUpstreamRegistriesAsync(DbConnection conn) =>
+        SeedUpstreamRegistriesForAsync(conn, "apk", e => e is "apk");
+
+    // Targeted backfill for the Terraform upstream, added to the default sources after the
+    // preceding backfills had already run. Without the row an existing org has no configured
+    // upstream for the ecosystem, and TerraformController resolves a provider's registry host
+    // against exactly that list — so the network mirror answers nothing at all rather than merely
+    // losing a fallback. Config overrides (Terraform:Upstream) are honoured via ResolveDefaults.
+    private Task SeedTerraformUpstreamRegistriesAsync(DbConnection conn) =>
+        SeedUpstreamRegistriesForAsync(conn, "Terraform", e => e is "terraform");
+
+    // Shared body of the targeted per-ecosystem upstream backfills above. Each seeds ONLY the
+    // ecosystems its predicate selects — never the full default set — because an operator may have
     // deliberately deleted an upstream row (e.g. removed npm to disable npm proxying) since
-    // configurable upstreams shipped; re-running the full backfill would resurrect such a removal.
-    // golang and cargo are safe to seed unconditionally: no existing org could have deliberately
-    // removed a row it never had. Config overrides (Go:Upstream / Cargo:Upstream) are honoured via
-    // ResolveDefaults. Idempotent via the per-(org, ecosystem) existence check and the
-    // (org_id, ecosystem, url) unique constraint.
+    // configurable upstreams shipped, and re-running the full backfill would resurrect such a
+    // removal. A newly added ecosystem is safe to seed unconditionally: no existing org could have
+    // deliberately removed a row it never had. Idempotent via the per-(org, ecosystem) existence
+    // check and the (org_id, ecosystem, url) unique constraint.
     // xtenant: one-shot backfill across every tenant on the instance.
-    private async Task SeedGoCargoUpstreamRegistriesAsync(DbConnection conn)
+    private async Task SeedUpstreamRegistriesForAsync(
+        DbConnection conn, string label, Func<string, bool> selector)
     {
         var defaults = UpstreamRegistrySeeder.ResolveDefaults(_config)
-            .Where(d => d.Ecosystem is "golang" or "cargo")
+            .Where(d => selector(d.Ecosystem))
             .ToList();
         if (defaults.Count == 0)
         {
@@ -94,55 +114,8 @@ public sealed partial class SchemaInitializer
             }
         }
         _logger.LogInformation(
-            "Backfilled Go/Cargo upstream registries: {Seeded} seeded, {Skipped} already-configured across {Orgs} orgs.",
-            seeded, skipped, orgIds.Count);
-    }
-
-    // Targeted backfill for the apk upstream. apk was added to UpstreamRegistrySeeder.DefaultSources
-    // after seed_default_upstream_registries already ran for existing orgs, so those orgs never
-    // received the default dl-cdn.alpinelinux.org row and silently had apk proxying disabled. Seeds
-    // ONLY apk — not the full default set — for the same reason SeedGoCargoUpstreamRegistriesAsync
-    // is scoped: an operator may have deliberately removed a different ecosystem's row since
-    // configurable upstreams shipped, and re-running the full backfill would resurrect it. apk is
-    // safe to seed unconditionally: no existing org could have deliberately removed a row it never
-    // had. Config overrides (Apk:Upstream) are honoured via ResolveDefaults. Idempotent via the
-    // per-(org, ecosystem) existence check and the (org_id, ecosystem, url) unique constraint.
-    // xtenant: one-shot backfill across every tenant on the instance.
-    private async Task SeedApkUpstreamRegistriesAsync(DbConnection conn)
-    {
-        var defaults = UpstreamRegistrySeeder.ResolveDefaults(_config)
-            .Where(d => d.Ecosystem is "apk")
-            .ToList();
-        if (defaults.Count == 0)
-        {
-            return;
-        }
-
-        var orgIds = (await conn.QueryAsync<string>("SELECT id FROM orgs")).ToList();
-        int seeded = 0;
-        int skipped = 0;
-        foreach (string? orgId in orgIds)
-        {
-            foreach (var (eco, url) in defaults)
-            {
-                int existing = await conn.ExecuteScalarAsync<int>(
-                    "SELECT COUNT(*) FROM upstream_registry WHERE org_id = @orgId AND ecosystem = @eco",
-                    new { orgId, eco });
-                if (existing > 0) { skipped++; continue; }
-
-                await conn.ExecuteAsync(
-                    """
-                    INSERT INTO upstream_registry (id, org_id, ecosystem, url, position)
-                    VALUES (@id, @orgId, @eco, @url, 0)
-                    ON CONFLICT (org_id, ecosystem, url) DO NOTHING
-                    """,
-                    new { id = Guid.NewGuid().ToString("N"), orgId, eco, url });
-                seeded++;
-            }
-        }
-        _logger.LogInformation(
-            "Backfilled apk upstream registries: {Seeded} seeded, {Skipped} already-configured across {Orgs} orgs.",
-            seeded, skipped, orgIds.Count);
+            "Backfilled {Label} upstream registries: {Seeded} seeded, {Skipped} already-configured across {Orgs} orgs.",
+            label, seeded, skipped, orgIds.Count);
     }
 
     // Seeds the two default OCI upstream registries (MCR at position 0, Docker Hub at position 1)
@@ -706,6 +679,12 @@ public sealed partial class SchemaInitializer
             // blocks. Added without a CHECK (SQLite ALTER can't add one); upgraded DBs rely on
             // controller validation, fresh installs get the CHECK.
             "ALTER TABLE org_settings ADD COLUMN verify_maven_signatures TEXT NOT NULL DEFAULT 'off'",
+            // Per-tenant Terraform publisher-signed SHASUMS chain verification gate: 'off' (default) /
+            // 'warn' / 'block'. Enabling requires at least one per-org Terraform PGP anchor in
+            // signature_trust_anchor; without one the verifier reports not-applicable and nothing
+            // blocks. Added without a CHECK (SQLite ALTER can't add one); upgraded DBs rely on
+            // controller validation, fresh installs get the CHECK.
+            "ALTER TABLE org_settings ADD COLUMN verify_terraform_signatures TEXT NOT NULL DEFAULT 'off'",
             // Global proxy-cache artifact enrichment. These columns extend cache_artifact with the
             // same supply-chain signals package_versions already carries so ingest can populate them
             // before a package_versions row exists. All are nullable/defaulted; existing rows stay
@@ -759,6 +738,11 @@ public sealed partial class SchemaInitializer
             // from the v3 index, so it cannot be derived from url; NULL disables symbol proxying
             // for the upstream, which is the fail-closed default.
             "ALTER TABLE upstream_registry ADD COLUMN symbol_server_url TEXT",
+            // Terraform: which protocol this upstream speaks ('mirror', or NULL for the ecosystem
+            // default). Fresh installs carry a CHECK from the CREATE TABLE block; SQLite cannot add
+            // one via ALTER, so on an upgraded database the value set is held by
+            // UpstreamRegistryRepository.IsSupportedProtocol at every write instead.
+            "ALTER TABLE upstream_registry ADD COLUMN upstream_protocol TEXT",
             // Polymorphic owner on the symbol index so a PROXIED .snupkg — which has a
             // cache_artifact row and no package_versions row — can be indexed alongside hosted
             // ones. package_version_id also has to lose NOT NULL, which SQLite cannot do with

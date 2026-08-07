@@ -14,37 +14,41 @@ namespace Dependably.Tests.Unit;
 /// interpreter against <see cref="TemporalCheckPredicate.ForSqlite"/>'s three arms, so this test
 /// fails without either predicate rather than only failing once the schema files ship it.
 /// </summary>
-public sealed class TemporalCheckPredicateTests
+public sealed partial class TemporalCheckPredicateTests
 {
-    private static readonly Regex Compiled = new(UtcTimestamp.TemporalCheckRegex, RegexOptions.None);
+    [GeneratedRegex(UtcTimestamp.TemporalCheckRegex)]
+    private static partial Regex CompiledRegex();
 
-    public static IEnumerable<object[]> AcceptedShapes()
-    {
-        yield return ["2026-03-04T05:06:07Z"];       // UtcTimestamp.Format (second precision)
-        yield return ["2026-03-04T05:06:07.123Z"];   // UtcTimestamp.MillisecondFormat
-        yield return ["2026-03-04T05:06:07.123456Z"]; // UtcTimestamp.PreciseFormat
-    }
+    [GeneratedRegex("'([^']*)'")]
+    private static partial Regex GlobLiteralRegex();
 
-    public static IEnumerable<object[]> RejectedShapes()
+    public static TheoryData<string> AcceptedShapes() => new()
     {
-        yield return ["2026-03-04 05:06:07+02:00"];             // the dead-handler shape (space + offset)
-        yield return ["2026-03-04T05:06:07.0000000+00:00"];     // the ToString("o") shape
-        yield return [""];
-        yield return ["not a date"];
-        yield return ["20260304050607"];                        // bare integer-looking text
-        yield return ["2026-03-04T05:06:07.12Z"];               // wrong fractional digit count (2)
-        yield return ["2026-03-04T05:06:07"];                   // missing trailing Z
-    }
+        "2026-03-04T05:06:07Z",       // UtcTimestamp.Format (second precision)
+        "2026-03-04T05:06:07.123Z",   // UtcTimestamp.MillisecondFormat
+        "2026-03-04T05:06:07.123456Z", // UtcTimestamp.PreciseFormat
+    };
+
+    public static TheoryData<string> RejectedShapes() => new()
+    {
+        "2026-03-04 05:06:07+02:00",             // the dead-handler shape (space + offset)
+        "2026-03-04T05:06:07.0000000+00:00",     // the ToString("o") shape
+        "",
+        "not a date",
+        "20260304050607",                        // bare integer-looking text
+        "2026-03-04T05:06:07.12Z",               // wrong fractional digit count (2)
+        "2026-03-04T05:06:07",                   // missing trailing Z
+    };
 
     [Theory]
     [MemberData(nameof(AcceptedShapes))]
     public void Regex_AcceptsEveryCanonicalShape(string value) =>
-        Assert.Matches(Compiled, value);
+        Assert.Matches(CompiledRegex(), value);
 
     [Theory]
     [MemberData(nameof(RejectedShapes))]
     public void Regex_RejectsEveryObservedBadShape(string value) =>
-        Assert.False(Compiled.IsMatch(value), $"expected `{value}` to be rejected");
+        Assert.False(CompiledRegex().IsMatch(value), $"expected `{value}` to be rejected");
 
     [Theory]
     [MemberData(nameof(AcceptedShapes))]
@@ -63,7 +67,7 @@ public sealed class TemporalCheckPredicateTests
     private static bool MatchesAnySqliteArm(string value)
     {
         string check = TemporalCheckPredicate.ForSqlite("col");
-        var globLiterals = Regex.Matches(check, "'([^']*)'").Select(m => m.Groups[1].Value);
+        var globLiterals = GlobLiteralRegex().Matches(check).Select(m => m.Groups[1].Value);
         return globLiterals.Any(glob => Regex.IsMatch(value, GlobToAnchoredRegex(glob)));
     }
 

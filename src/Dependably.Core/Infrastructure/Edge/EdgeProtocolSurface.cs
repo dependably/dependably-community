@@ -44,6 +44,11 @@ public static class EdgeProtocolSurface
         typeof(Api.GoController),
         typeof(Api.OciController),
         typeof(Api.ApkController),
+        // Chains through the master like every other surface here, and is the one that needs the
+        // master's protocol named rather than implied by the URL: EdgeUpstreamSeeder seeds its row
+        // with upstream_protocol='mirror' because the master serves the network mirror protocol,
+        // while this controller's own default is the registry protocol. See the comment there.
+        typeof(Api.TerraformController),
     };
 
     /// <summary>True when the controller is a kept protocol surface on an edge node.</summary>

@@ -243,7 +243,7 @@ public sealed partial class DockerBaseImageMirrorComplianceTests
     /// <see cref="Regex.Matches(string)"/> (not <see cref="Regex.Match(string)"/>) is used so every
     /// <c>--build-arg</c> flag on that line is counted, not just the first.
     /// </summary>
-    private static HashSet<string> ExtractWiredBuildArgNames(IReadOnlyList<string> publishImageLines)
+    private static HashSet<string> ExtractWiredBuildArgNames(List<string> publishImageLines)
     {
         var result = new HashSet<string>(StringComparer.Ordinal);
 

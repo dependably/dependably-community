@@ -294,7 +294,7 @@ public sealed class SecurityEventEmailFireSiteTests
 
     // ── System-admin MFA enable/disable (SystemMfaController) ──────────────
 
-    private async Task<(string AdminId, string ManualKey)> SeedAndEnrollSystemAdminAsync(
+    private static async Task<(string AdminId, string ManualKey)> SeedAndEnrollSystemAdminAsync(
         DependablyMultiFactory factory, HttpClient apexClient, string? email = null)
     {
         email ??= $"sys-sec-mail-{Guid.NewGuid():N}@test.local";

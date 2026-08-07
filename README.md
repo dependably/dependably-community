@@ -1,6 +1,6 @@
 # Dependably
 
-Self-hosted private artifact repository for **npm**, **PyPI**, **NuGet**, **Maven**, **RPM**, **OCI** images, **Go** modules, **Cargo** crates, and **Alpine (apk)** packages.
+Self-hosted private artifact repository for **npm**, **PyPI**, **NuGet**, **Maven**, **RPM**, **OCI** images, **Go** modules, **Cargo** crates, **Alpine (apk)** packages, and **Terraform** providers.
 
 Every package your team pulls from the internet is a supply chain risk. Dependably sits between your developers and the public registries, caching what they pull, verifying checksums, blocking packages that don't belong, and giving you a full audit trail — without requiring a cloud account or a per-seat licence.
 
@@ -8,7 +8,7 @@ Every package your team pulls from the internet is a supply chain risk. Dependab
 
 ## Features
 
-- **Proxy cache** — pull-through cache for npm, PyPI, NuGet, Maven, RPM, OCI, Go, Cargo, and Alpine apk; verified by SHA-256 before storage, served locally on every subsequent request. Go and apk are proxy-only (no hosted push).
+- **Proxy cache** — pull-through cache for npm, PyPI, NuGet, Maven, RPM, OCI, Go, Cargo, Alpine apk, and Terraform providers; verified by SHA-256 before storage, served locally on every subsequent request. Go, apk, and Terraform are proxy-only (no hosted push).
 - **NuGet symbol server** — `.snupkg` symbol packages are indexed by debug-id and served over SSQP, so Visual Studio and `dotnet-symbol` resolve PDBs straight from your registry. A distinct capability from storing `.snupkg` files: Portable PDBs only, and source files are not served.
 - **Supply chain tracking** — first-fetch detection, per-version checksum verification, CycloneDX 1.6 SBOM generation
 - **Allowlisting** — per-org PURL pattern allowlists to restrict which packages can be fetched or pushed
@@ -206,7 +206,7 @@ is configurable — see
 
 Both API surfaces are documented as live OpenAPI documents served by the running instance:
 
-- `/docs/` — protocol surfaces (PyPI `/simple/`, npm, NuGet v3, Maven, RPM, OCI `/v2/`, Go `/go/`, Cargo `/cargo/`, apk `/apk/`); spec at `/openapi/protocol.json`
+- `/docs/` — protocol surfaces (PyPI `/simple/`, npm, NuGet v3, Maven, RPM, OCI `/v2/`, Go `/go/`, Cargo `/cargo/`, apk `/apk/`, Terraform `/terraform/`); spec at `/openapi/protocol.json`
 - `/api/v1/docs/` — management API; spec at `/openapi/management.json`
 
 The full route surface is contract-tested against [`tests/Contracts/openapi.contract.json`](tests/Contracts/openapi.contract.json) — any route change fails CI until the contract is regenerated.
@@ -214,6 +214,8 @@ The full route surface is contract-tested against [`tests/Contracts/openapi.cont
 Per-ecosystem client guides, where a protocol's behaviour differs from the public registry it
 mirrors:
 
+- [docs/terraform.md](docs/terraform.md) — Terraform provider mirror: `.terraformrc` setup, why it
+  is a network mirror rather than a registry, and what it does not cover (modules)
 - [docs/cargo.md](docs/cargo.md) — Cargo sparse registry: config, publish, yank, and why crate
   ownership is org membership rather than `cargo owner`
 

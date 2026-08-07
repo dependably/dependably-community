@@ -603,7 +603,11 @@ public sealed partial class MavenController : OrgScopedControllerBase
             "download", actorId,
             sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
-        await _svc.Packages.IncrementDownloadCountByPurlAsync(orgId, purl, ct);
+        // Hosted plane: the row came from maven_version_files, so the counter lives on the owning
+        // package_versions row. Keyed by that id rather than the purl — a Maven purl maps to every
+        // file of the version (.jar/.pom/.sources), so a purl-keyed bump would count one download
+        // against all of them.
+        await _svc.Packages.IncrementDownloadCountAsync(row.PackageVersionId, ct);
 
         return File(stream, ContentTypeFor(coords.Extension), coords.Filename);
     }
@@ -826,6 +830,12 @@ public sealed partial class MavenController : OrgScopedControllerBase
             CacheAccess: new CacheAccess(orgId, "maven", resolvedCoords.PackageName,
                 resolvedCoords.Version!, resolvedCoords.Filename,
                 Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: result.UpstreamUrl ?? upstreamPath),
+            // The upstream publish timestamp, so the release-age cooldown (min_release_age_hours)
+            // can fire on this fetch and on every later serve — the cache-plane row persists it.
+            // Populated only on the fetch-then-hash path (result.PublishedAt from the upstream
+            // response's Last-Modified header); null on the sha256-sidecar-known path fails the
+            // cooldown open rather than blocking every fetch, per MavenArtifactFetchResult.PublishedAt.
+            PublishedAt: result.PublishedAt,
             MinReleaseAgeHours: settings?.MinReleaseAgeHours,
             Sha1Hex: result.Sha1,
             BlockDeprecatedMode: settings?.BlockDeprecated,
@@ -999,7 +1009,6 @@ public sealed partial class MavenController : OrgScopedControllerBase
         // fully-buffered artifact.
         string sha256Hex = staged.Sha256;
         string sha1Hex = staged.Sha1!;
-        string md5Hex = staged.Md5!;
 
         // Content-addressed hosted key: the artefact's SHA-256 (computed inline while the body
         // streamed to the staging file) is a key segment, so the bytes under a key always hash
@@ -1039,7 +1048,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
         string versionId = await GetOrCreateVersionRowAsync(
             conn, pkg.Id, coords, purl, blobKey, sha256Hex, sha1Hex, staged.Size);
 
-        await UpsertMavenVersionFileAsync(conn, versionId, coords, blobKey, staged.Size, sha256Hex, sha1Hex, md5Hex);
+        await UpsertMavenVersionFileAsync(conn, versionId, coords, blobKey, staged);
 
         // Record first-publisher ownership now that the artefact and its rows are durably stored
         // (the remaining license-extraction step is best-effort and never fails the publish).
@@ -1070,7 +1079,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
     // WHERE owner_kind='package_version' overwrites so a republished file gets the new hash.
     private static async Task UpsertMavenVersionFileAsync(
         System.Data.Common.DbConnection conn, string versionId, MavenCoordinates coords, string blobKey,
-        long sizeBytes, string sha256Hex, string sha1Hex, string md5Hex)
+        RequestBodyStager.StagedBody staged)
     {
         // xtenant: keyed by versionId from GetOrCreateVersionRowAsync(pkg.Id, …), and pkg came from
         // GetOrCreateAsync(orgId, …) — the FK chain package_versions → packages carries the org_id.
@@ -1096,10 +1105,10 @@ public sealed partial class MavenController : OrgScopedControllerBase
                 classifier = coords.Classifier,
                 extension = coords.Extension ?? "",
                 blobKey,
-                sizeBytes,
-                sha256 = sha256Hex,
-                sha1 = sha1Hex,
-                md5 = md5Hex,
+                sizeBytes = staged.Size,
+                sha256 = staged.Sha256,
+                sha1 = staged.Sha1,
+                md5 = staged.Md5,
             });
     }
 
@@ -1379,6 +1388,8 @@ public sealed partial class MavenController : OrgScopedControllerBase
     /// <see cref="PackageVersion"/> itself uses.
     /// </para>
     /// </summary>
+    [SuppressMessage("Minor Code Smell", "S3459:Unassigned members should be removed", Justification = "Dapper sets these props by reflection; not statically visible as assigned.")]
+    [SuppressMessage("Major Code Smell", "S1144:Unused private types or members should be removed", Justification = "Dapper sets these props by reflection; not statically visible as used.")]
     private sealed class MavenFileRow
     {
         public string Id { get; set; } = "";

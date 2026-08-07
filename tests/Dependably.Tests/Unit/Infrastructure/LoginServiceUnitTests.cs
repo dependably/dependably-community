@@ -255,12 +255,12 @@ public sealed class LoginServiceUnitTests : IClassFixture<InMemoryDbFixture>
         var audit = new AuditRepository(_fixture.Store);
 
         // Visible to the owning tenant.
-        var (ownItems, _) = await audit.ListAuditAsync(tenantOrg, limit: 50, offset: 0, action: "login.failure");
+        var (ownItems, _, _) = await audit.ListAuditAsync(tenantOrg, limit: 50, offset: 0, action: "login.failure");
         Assert.Single(ownItems);
         Assert.All(ownItems, e => Assert.Equal(tenantOrg, e.OrgId));
 
         // Not visible to a different tenant.
-        var (otherItems, otherTotal) = await audit.ListAuditAsync(otherOrg, limit: 50, offset: 0, action: "login.failure");
+        var (otherItems, otherTotal, _) = await audit.ListAuditAsync(otherOrg, limit: 50, offset: 0, action: "login.failure");
         Assert.Empty(otherItems);
         Assert.Equal(0, otherTotal);
 
@@ -296,7 +296,7 @@ public sealed class LoginServiceUnitTests : IClassFixture<InMemoryDbFixture>
         Assert.All(sysItems, e => Assert.Null(e.OrgId));
 
         // Not visible to any tenant's audit list.
-        var (tenantItems, tenantTotal) = await audit.ListAuditAsync(tenantOrg, limit: 50, offset: 0, action: "login.failure");
+        var (tenantItems, tenantTotal, _) = await audit.ListAuditAsync(tenantOrg, limit: 50, offset: 0, action: "login.failure");
         Assert.Empty(tenantItems);
         Assert.Equal(0, tenantTotal);
     }

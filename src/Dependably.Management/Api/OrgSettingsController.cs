@@ -35,6 +35,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
     private readonly Dependably.Protocol.Provenance.PyPiProvenanceVerifier _pypiProvenance;
     private readonly Dependably.Protocol.Provenance.RpmProvenanceVerifier _rpmProvenance;
     private readonly Dependably.Protocol.Provenance.MavenProvenanceVerifier _mavenProvenance;
+    private readonly Dependably.Protocol.Provenance.TerraformProvenanceVerifier _terraformProvenance;
     private readonly OrgCacheEpochStore _cacheEpoch;
 
     // Dependency-injection constructor; the parameter list is the controller's declared
@@ -55,6 +56,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         Dependably.Protocol.Provenance.PyPiProvenanceVerifier pypiProvenance,
         Dependably.Protocol.Provenance.RpmProvenanceVerifier rpmProvenance,
         Dependably.Protocol.Provenance.MavenProvenanceVerifier mavenProvenance,
+        Dependably.Protocol.Provenance.TerraformProvenanceVerifier terraformProvenance,
         OrgCacheEpochStore cacheEpoch)
 #pragma warning restore S107
     {
@@ -71,6 +73,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         _pypiProvenance = pypiProvenance;
         _rpmProvenance = rpmProvenance;
         _mavenProvenance = mavenProvenance;
+        _terraformProvenance = terraformProvenance;
         _cacheEpoch = cacheEpoch;
     }
 
@@ -122,19 +125,10 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
             return result;
         }
 
-        if (req.DefaultLanguage is { } lang && !LanguageCodes.IsSupported(lang))
+        var validationProblem = ValidateOrgSettingsRequest(req);
+        if (validationProblem is not null)
         {
-            return BadRequest(new { detail = $"Unsupported language code '{lang}'. Allowed: {string.Join(", ", LanguageCodes.Supported)}." });
-        }
-
-        if (req.DefaultTimezone is { } tz && !TimeZoneCodes.IsSupported(tz))
-        {
-            return BadRequest(new { detail = $"Unrecognised timezone '{tz}'. Use an IANA zone name, e.g. 'America/Toronto'." });
-        }
-
-        if (req.VersionOverwritePolicy is { } pol && pol is not ("block" or "exception" or "allow"))
-        {
-            return _problems.ValidationErrorActionKey("version_overwrite_policy", "error.settings.overwritePolicyInvalid");
+            return validationProblem;
         }
 
         string orgId = CurrentTenantId();
@@ -142,9 +136,6 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
 
         // Capture prior values so the targeted tenant.setting.change events can carry before/after.
         var prior = await _settings.GetSettingsAsync(orgId, ct);
-        bool priorAirGapped = prior?.AirGapped ?? false;
-        bool priorRequireMfa = prior?.RequireMfa ?? false;
-        string priorPolicy = prior?.VersionOverwritePolicy ?? "block";
 
         await _settings.UpsertSettingsAsync(new OrgSettingsUpdate(
             orgId,
@@ -185,6 +176,29 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                 require_mfa = req.RequireMfa,
             }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
 
+        await EmitOrgSettingsChangeEventsAsync(orgId, req, prior, ct);
+
+        return NoContent();
+    }
+
+    private IActionResult? ValidateOrgSettingsRequest(UpdateOrgSettingsRequest req) =>
+        req.DefaultLanguage is { } lang && !LanguageCodes.IsSupported(lang)
+            ? BadRequest(new { detail = $"Unsupported language code '{lang}'. Allowed: {string.Join(", ", LanguageCodes.Supported)}." })
+            : req.DefaultTimezone is { } tz && !TimeZoneCodes.IsSupported(tz)
+                ? BadRequest(new { detail = $"Unrecognised timezone '{tz}'. Use an IANA zone name, e.g. 'America/Toronto'." })
+                : req.VersionOverwritePolicy is { } pol && pol is not ("block" or "exception" or "allow")
+                    ? _problems.ValidationErrorActionKey("version_overwrite_policy", "error.settings.overwritePolicyInvalid")
+                    : null;
+
+    // Emits a tenant.setting.change event for each of the three toggleable settings that actually
+    // changed in this update, comparing the request against the pre-update snapshot.
+    private async Task EmitOrgSettingsChangeEventsAsync(
+        string orgId, UpdateOrgSettingsRequest req, OrgSettings? prior, CancellationToken ct)
+    {
+        bool priorAirGapped = prior?.AirGapped ?? false;
+        bool priorRequireMfa = prior?.RequireMfa ?? false;
+        string priorPolicy = prior?.VersionOverwritePolicy ?? "block";
+
         if (req.VersionOverwritePolicy is { } newPolicy && newPolicy != priorPolicy)
         {
             await EmitSettingChangeAsync(orgId, "version_overwrite_policy", priorPolicy, newPolicy, ct);
@@ -199,8 +213,6 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         {
             await EmitSettingChangeAsync(orgId, "require_mfa", priorRequireMfa, newRequireMfa, ct);
         }
-
-        return NoContent();
     }
 
     // Records a single tenant setting change to both the audit log and the audit-event emitter,
@@ -324,6 +336,11 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
             // UI can disable the verify control and explain why when enabling it would be a
             // fail-closed error.
             maven_signature_keys_configured = await _mavenProvenance.IsConfiguredForAsync(orgId, ct),
+            verify_terraform_signatures = settings?.VerifyTerraformSignatures ?? "off",
+            // Surfaces whether this org has at least one Terraform PGP trust anchor configured, so
+            // the UI can disable the verify control and explain why when enabling it would be a
+            // fail-closed error.
+            terraform_signature_keys_configured = await _terraformProvenance.IsConfiguredForAsync(orgId, ct),
         });
     }
 
@@ -375,7 +392,8 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                 req.ProxyPassthroughEnabled, req.MaxOsvScoreTolerance, req.MinReleaseAgeHours,
                 blockDeprecated, blockMalicious, blockKev, req.MaxEpssTolerance, blockInstallScripts,
                 sigVerify.VerifyNpmSignatures, sigVerify.VerifyNuGetSignatures, sigVerify.VerifyPyPiAttestations,
-                sigVerify.VerifyRpmSignatures, sigVerify.VerifyMavenSignatures, blockRevoked),
+                sigVerify.VerifyRpmSignatures, sigVerify.VerifyMavenSignatures, blockRevoked,
+                sigVerify.VerifyTerraformSignatures),
             ct);
 
         // The block/verify gates and thresholds just persisted can flip the advertised state of
@@ -403,6 +421,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                 verify_pypi_attestations = sigVerify.VerifyPyPiAttestations,
                 verify_rpm_signatures = sigVerify.VerifyRpmSignatures,
                 verify_maven_signatures = sigVerify.VerifyMavenSignatures,
+                verify_terraform_signatures = sigVerify.VerifyTerraformSignatures,
             }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
 
         return NoContent();
@@ -531,12 +550,14 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         string? verifyPyPiAttestations = req.VerifyPyPiAttestations;
         string? verifyRpmSignatures = req.VerifyRpmSignatures;
         string? verifyMavenSignatures = req.VerifyMavenSignatures;
+        string? verifyTerraformSignatures = req.VerifyTerraformSignatures;
 
         bool npmConfigured = await _npmProvenance.IsConfiguredForAsync(orgId, ct);
         bool nugetConfigured = await _nugetProvenance.IsConfiguredForAsync(orgId, ct);
         bool pypiConfigured = await _pypiProvenance.IsConfiguredForAsync(orgId, ct);
         bool rpmConfigured = await _rpmProvenance.IsConfiguredForAsync(orgId, ct);
         bool mavenConfigured = await _mavenProvenance.IsConfiguredForAsync(orgId, ct);
+        bool terraformConfigured = await _terraformProvenance.IsConfiguredForAsync(orgId, ct);
 
         var error = ValidateOneSigVerifyField(verifyNpmSignatures, "verify_npm_signatures",
                         npmConfigured,
@@ -557,11 +578,15 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                     ?? ValidateOneSigVerifyField(verifyMavenSignatures, "verify_maven_signatures",
                         mavenConfigured,
                         "Cannot enable Maven signature verification: no trust anchors are configured. "
-                        + "Add a Maven PGP trust anchor for this org first.");
+                        + "Add a Maven PGP trust anchor for this org first.")
+                    ?? ValidateOneSigVerifyField(verifyTerraformSignatures, "verify_terraform_signatures",
+                        terraformConfigured,
+                        "Cannot enable Terraform signature verification: no trust anchors are configured. "
+                        + "Add a Terraform PGP trust anchor for this org first.");
 
         return new SigVerifyResult(
             error, verifyNpmSignatures, verifyNuGetSignatures,
-            verifyPyPiAttestations, verifyRpmSignatures, verifyMavenSignatures);
+            verifyPyPiAttestations, verifyRpmSignatures, verifyMavenSignatures, verifyTerraformSignatures);
     }
 
     // Return type for ValidateSignatureVerificationFieldsAsync. Bundles the validation error
@@ -573,7 +598,8 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         string? VerifyNuGetSignatures,
         string? VerifyPyPiAttestations,
         string? VerifyRpmSignatures,
-        string? VerifyMavenSignatures);
+        string? VerifyMavenSignatures,
+        string? VerifyTerraformSignatures);
 
     // Validates one sig-verify field: rejects values outside the allowed enum and, when
     // the value is non-off, rejects if the operator trust anchor is not configured. An omitted

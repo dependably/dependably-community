@@ -49,11 +49,17 @@ public sealed class EdgeModeTests
         Assert.Equal(1, await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM orgs"));
 
         string masterHost = new Uri(f.MockUpstream.Urls[0]).Host;
-        var rows = (await conn.QueryAsync<(string Ecosystem, string Url, string AuthType, string? Secret)>(
-            "SELECT ecosystem AS Ecosystem, url AS Url, auth_type AS AuthType, secret AS Secret FROM upstream_registry ORDER BY ecosystem")).ToList();
+        var rows = (await conn.QueryAsync<(string Ecosystem, string Url, string AuthType, string? Secret, string? UpstreamProtocol)>(
+            """
+            SELECT ecosystem AS Ecosystem, url AS Url, auth_type AS AuthType, secret AS Secret,
+                   upstream_protocol AS UpstreamProtocol
+            FROM upstream_registry ORDER BY ecosystem
+            """)).ToList();
 
         var ecosystems = rows.Select(r => r.Ecosystem).OrderBy(e => e, StringComparer.Ordinal).ToList();
-        Assert.Equal(new[] { "apk", "cargo", "golang", "maven", "npm", "nuget", "oci", "pypi", "rpm" }, ecosystems);
+        Assert.Equal(
+            new[] { "apk", "cargo", "golang", "maven", "npm", "nuget", "oci", "pypi", "rpm", "terraform" },
+            ecosystems);
         Assert.All(rows, r =>
         {
             Assert.Contains(masterHost, r.Url);
@@ -63,6 +69,12 @@ public sealed class EdgeModeTests
         });
         Assert.Equal("bearer", rows.Single(r => r.Ecosystem == "npm").AuthType);
         Assert.Equal("basic", rows.Single(r => r.Ecosystem == "oci").AuthType);
+
+        // Terraform is the only row that must name a protocol: the master serves the network mirror
+        // protocol while the fetcher's default is the registry protocol, and the two share no path,
+        // so an unset value here would 404 every provider fetch against a healthy master.
+        Assert.Equal("mirror", rows.Single(r => r.Ecosystem == "terraform").UpstreamProtocol);
+        Assert.All(rows.Where(r => r.Ecosystem != "terraform"), r => Assert.Null(r.UpstreamProtocol));
     }
 
     [Fact]

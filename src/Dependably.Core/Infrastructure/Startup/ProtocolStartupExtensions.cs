@@ -78,6 +78,7 @@ internal static class ProtocolStartupExtensions
         builder.Services.AddSingleton<Dependably.Protocol.Provenance.PyPiProvenanceVerifier>();
         builder.Services.AddSingleton<Dependably.Protocol.Provenance.RpmProvenanceVerifier>();
         builder.Services.AddSingleton<Dependably.Protocol.Provenance.MavenProvenanceVerifier>();
+        builder.Services.AddSingleton<Dependably.Protocol.Provenance.TerraformProvenanceVerifier>();
 
         // Maven upstream proxy
         builder.Services.AddSingleton<MavenUpstreamFetcher>();

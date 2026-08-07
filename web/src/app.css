@@ -61,6 +61,7 @@
   --eco-rpm:   #14b8a6;                        --eco-oci:   #0ea5e9;
   --eco-golang: light-dark(#0093b8, #38c5e8);  --eco-cargo: light-dark(#b5703f, #dea584);
   --eco-apk:   light-dark(#4f46e5, #818cf8);
+  --eco-terraform: light-dark(#7b42bc, #a970d8);
 
   /* Badge palettes */
   --badge-pypi-bg:    light-dark(#fef9c3, #3b2a00);  --badge-pypi-text:    light-dark(#854d0e, #fde68a);
@@ -72,6 +73,7 @@
   --badge-golang-bg:  light-dark(#cffafe, #052e36);  --badge-golang-text:  light-dark(#155e75, #67e8f9);
   --badge-cargo-bg:   light-dark(#fde8d7, #2e1a0c);  --badge-cargo-text:   light-dark(#9a4a1b, #f5b98a);
   --badge-apk-bg:     light-dark(#e0e7ff, #1e1b4b);  --badge-apk-text:     light-dark(#3730a3, #a5b4fc);
+  --badge-terraform-bg: light-dark(#ede4f8, #1e1030);  --badge-terraform-text: light-dark(#5c2d91, #c4a2e8);
   --badge-hosted-bg:  light-dark(#dcfce7, #0a2e18);  --badge-hosted-text:  light-dark(#166534, #86efac);
   --badge-warning-bg:   light-dark(#fef3c7, #2d1a00);  --badge-warning-text:   light-dark(#92400e, #fcd34d);
   --badge-red-bg:     light-dark(#fee2e2, #3b0c0c);  --badge-red-text:     light-dark(#991b1b, #fca5a5);
@@ -196,6 +198,7 @@ tr:hover td { background: var(--bg2); }
 .badge.golang  { background: var(--badge-golang-bg);  color: var(--badge-golang-text); }
 .badge.cargo   { background: var(--badge-cargo-bg);   color: var(--badge-cargo-text); }
 .badge.apk     { background: var(--badge-apk-bg);     color: var(--badge-apk-text); }
+.badge.terraform { background: var(--badge-terraform-bg); color: var(--badge-terraform-text); }
 
 /* Ecosystem name cell — thin chart-color bar + badge.
    The bar makes the eco table double as the donut's legend.
@@ -223,6 +226,7 @@ tr:hover td { background: var(--bg2); }
 .eco-bar.golang { background: var(--eco-golang); }
 .eco-bar.cargo { background: var(--eco-cargo); }
 .eco-bar.apk   { background: var(--eco-apk); }
+.eco-bar.terraform { background: var(--eco-terraform); }
 .badge.hosted  { background: var(--badge-hosted-bg);  color: var(--badge-hosted-text); }
 .badge.proxy   { background: var(--bg3);              color: var(--text2); }
 .badge.first-fetch { background: var(--badge-warning-bg); color: var(--badge-warning-text); }

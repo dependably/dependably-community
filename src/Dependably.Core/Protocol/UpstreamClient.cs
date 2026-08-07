@@ -260,6 +260,7 @@ public sealed partial class UpstreamClient
         string? orgId = null,
         string? purl = null,
         string? authorizationHeader = null,
+        string? containmentBase = null,
         CancellationToken ct = default)
     {
         var cached = await _blobs.GetAsync(blobKey, ct);
@@ -289,7 +290,9 @@ public sealed partial class UpstreamClient
 
         var lazy = _inflight.GetOrAdd(blobKey, _ => new Lazy<Task<UpstreamFetchResult>>(
             () => FetchAndStageAsync(
-                new UpstreamFetchRequest(upstreamUrl, checksumSpec, blobKey, ecosystem, orgId, purl, authorizationHeader),
+                new UpstreamFetchRequest(
+                    upstreamUrl, checksumSpec, blobKey, ecosystem, orgId, purl, authorizationHeader,
+                    containmentBase),
                 CancellationToken.None)));
         ScheduleInflightRemoval(_inflight, blobKey, lazy);
 
@@ -491,7 +494,7 @@ public sealed partial class UpstreamClient
     // it within the parameter-count threshold (S107).
     private sealed record UpstreamFetchRequest(
         string Url, ChecksumSpec? Spec, string BlobKey, string Ecosystem,
-        string? OrgId, string? Purl, string? AuthorizationHeader);
+        string? OrgId, string? Purl, string? AuthorizationHeader, string? ContainmentBase = null);
 
     // The shared single-flight work item behind _inflight — runs exactly once per blobKey
     // regardless of caller fan-in. Owns the UpstreamInflightFetches gauge and
@@ -547,7 +550,8 @@ public sealed partial class UpstreamClient
 
         var client = _httpClientFactory.CreateClient("upstream");
         // Retry loop for transient upstream failures; exits on first success or throws.
-        using var successResponse = await FetchWithRetryAsync(client, url, orgId, authorizationHeader, fetchCt);
+        using var successResponse = await FetchWithRetryAsync(
+            client, url, orgId, authorizationHeader, req.ContainmentBase, fetchCt);
 
         // Phase 2 — dynamic floor based on Content-Length, checked after response headers arrive.
         EnsureStagingDiskFloorForContentLength(successResponse.Content.Headers.ContentLength);
@@ -622,11 +626,12 @@ public sealed partial class UpstreamClient
     // HttpRequestException on other non-transient failures (404/410/…) so the caller's
     // multi-base loop can try the next upstream registry.
     private async Task<HttpResponseMessage> FetchWithRetryAsync(
-        HttpClient client, string url, string? orgId, string? authorizationHeader, CancellationToken ct)
+        HttpClient client, string url, string? orgId, string? authorizationHeader,
+        string? containmentBase, CancellationToken ct)
     {
         for (int attempt = 0; attempt < MaxUpstreamFetchAttempts; attempt++)
         {
-            using var fetchRequest = BuildFetchRequest(url, orgId, authorizationHeader);
+            using var fetchRequest = BuildFetchRequest(url, orgId, authorizationHeader, containmentBase);
 
             var response = await UnwrapSsrfAsync(
                 () => client.SendAsync(fetchRequest, HttpCompletionOption.ResponseHeadersRead, ct));
@@ -694,12 +699,18 @@ public sealed partial class UpstreamClient
     // tenant, and attach the per-upstream Authorization header (Bearer/Basic) when configured —
     // built once at resolve time, null for anonymous upstreams. TryAddWithoutValidation mirrors
     // the OCI attach path and avoids HttpClient's header-format validation.
-    private static HttpRequestMessage BuildFetchRequest(string url, string? orgId, string? authorizationHeader)
+    private static HttpRequestMessage BuildFetchRequest(
+        string url, string? orgId, string? authorizationHeader, string? containmentBase)
     {
         var fetchRequest = new HttpRequestMessage(HttpMethod.Get, url);
         if (orgId is not null)
         {
             fetchRequest.Options.Set(SsrfAwareRedirectHandler.OrgIdOption, orgId);
+        }
+
+        if (containmentBase is not null)
+        {
+            fetchRequest.Options.Set(SsrfAwareRedirectHandler.ContainmentBaseOption, containmentBase);
         }
 
         if (authorizationHeader is not null)

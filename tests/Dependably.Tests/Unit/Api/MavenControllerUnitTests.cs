@@ -497,6 +497,29 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Download_HostedArtifact_BumpsPackageVersionsDownloadCount()
+    {
+        // The hosted serve path reads maven_version_files, so its counter lives on the owning
+        // package_versions row. Counting it against tenant_artifact_access instead is a silent
+        // no-op — a hosted artifact has no row on that plane at all — so the number never moves
+        // and nothing fails.
+        await SetAnonymousPullAsync(true);
+        byte[] bytes = Encoding.UTF8.GetBytes("jar-content");
+        var (_, verId, _) = await SeedMavenArtifactAsync("com.example", "hostedlib", "1.0", bytes);
+
+        string raw = await IssueReadArtifactTokenAsync(_orgId, _userId);
+        var ctl = BuildController(authHeader: $"Bearer {raw}");
+        var result = await ctl.Download(
+            "com/example/hostedlib/1.0/hostedlib-1.0.jar", CancellationToken.None);
+        Assert.IsType<FileStreamResult>(result).FileStream.Dispose();
+
+        await using var conn = await _db.OpenAsync();
+        int count = await conn.ExecuteScalarAsync<int>(
+            "SELECT download_count FROM package_versions WHERE id = @id", new { id = verId });
+        Assert.Equal(1, count);
+    }
+
+    [Fact]
     public async Task Download_EmptyPath_Returns404()
     {
         await SetAnonymousPullAsync(true);

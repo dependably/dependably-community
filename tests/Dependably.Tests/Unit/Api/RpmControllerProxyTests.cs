@@ -231,7 +231,7 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
             new { mode, orgId = _orgId });
     }
 
-    private (StubProxy Proxy, string Filename, byte[] Bytes) SeedUnsignedRpm()
+    private static (StubProxy Proxy, string Filename, byte[] Bytes) SeedUnsignedRpm()
     {
         // Random bytes are not a parseable RPM, so the verifier reports Failed. A structurally
         // valid but unsigned RPM reports Unsigned; the gate refuses both under 'block'.

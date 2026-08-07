@@ -26,7 +26,7 @@ public sealed partial class SqliteToPostgresMigrationPlanComplianceTests
         RegexOptions.IgnoreCase)]
     private static partial Regex CreateTableRegex();
 
-    private static IReadOnlyList<string> SchemaTableNames()
+    private static List<string> SchemaTableNames()
     {
         // Resolved by discovery (the root that owns Infrastructure/schema/) rather than by a
         // hard-coded project directory, so moving the schema between source roots cannot leave

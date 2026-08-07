@@ -82,7 +82,7 @@ public sealed class TenantArtifactAccessRepository
         if (_downloadCountWriter is not null)
         {
             _downloadCountWriter.TryEnqueue(
-                new DownloadCountRecord(VersionId: null, Purl: null, OrgId: orgId, CacheArtifactId: cacheArtifactId));
+                new DownloadCountRecord(VersionId: null, OrgId: orgId, CacheArtifactId: cacheArtifactId));
             return;
         }
 

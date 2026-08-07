@@ -370,10 +370,10 @@ public sealed class GoController : OrgScopedControllerBase
         string encodedVersion = EncodeBangEncoding(version);
         string upstreamPath = $"{encodedModule}/@v/{encodedVersion}.{ext}";
 
+        var attempt = new GoFetchAttempt(orgId, module, version, ext, blobKey, upstreamPath);
         foreach (var source in upstreamBases)
         {
-            var result = await TryFetchFromSourceAsync(
-                orgId, module, version, ext, token, blobKey, upstreamPath, source, ct);
+            var result = await TryFetchFromSourceAsync(attempt, token, source, ct);
             if (result is not null)
             {
                 return result;
@@ -384,14 +384,22 @@ public sealed class GoController : OrgScopedControllerBase
     }
 
     /// <summary>
+    /// One resolved fetch coordinate — the raw artifact identity plus the blob key and upstream
+    /// path path already derived from it — threaded unchanged through the upstream-source retry
+    /// loop in <see cref="ServeArtifactFromUpstreamsAsync"/>.
+    /// </summary>
+    private readonly record struct GoFetchAttempt(
+        string OrgId, string Module, string Version, string Ext, string BlobKey, string UpstreamPath);
+
+    /// <summary>
     /// Attempts the fetch against a single upstream source. Returns the response to serve to the
     /// client (success or a mapped failure status), or <c>null</c> when this source 404'd and the
     /// caller should fall through to the next one.
     /// </summary>
     private async Task<IActionResult?> TryFetchFromSourceAsync(
-        string orgId, string module, string version, string ext, TokenRecord? token,
-        string blobKey, string upstreamPath, UpstreamSource source, CancellationToken ct)
+        GoFetchAttempt attempt, TokenRecord? token, UpstreamSource source, CancellationToken ct)
     {
+        var (orgId, module, version, ext, blobKey, upstreamPath) = attempt;
         string upstreamUrl = $"{source.Url}/{upstreamPath}";
         try
         {

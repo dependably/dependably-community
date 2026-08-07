@@ -43,6 +43,19 @@ public sealed class SsrfAwareRedirectHandler : DelegatingHandler
         new("SsrfAwareRedirectHandler.OrgId");
 
     /// <summary>
+    /// Request option key for per-hop base containment. When set, every redirect target must sit
+    /// beneath this base URL (<see cref="UriContainment.IsBeneath"/>) or the redirect is refused —
+    /// on top of the SSRF-range check every hop already gets. Callers set it when the fetch must not
+    /// leave a configured authority even across a redirect: the Terraform mirror archive fetch does,
+    /// because a mirror serves its own bytes and any redirect elsewhere is a host it chose rather
+    /// than one the operator configured. Absent (the default), only the SSRF-range check applies,
+    /// which is correct for protocols that legitimately redirect to an arbitrary host (the Terraform
+    /// registry protocol's release CDN, most artifact CDNs).
+    /// </summary>
+    public static readonly HttpRequestOptionsKey<string?> ContainmentBaseOption =
+        new("SsrfAwareRedirectHandler.ContainmentBase");
+
+    /// <summary>
     /// Status codes that carry a <c>Location</c> header this handler will follow.
     /// 307 and 308 preserve the original method; all others are followed as GET.
     /// </summary>
@@ -63,8 +76,9 @@ public sealed class SsrfAwareRedirectHandler : DelegatingHandler
     protected override async Task<HttpResponseMessage> SendAsync(
         HttpRequestMessage request, CancellationToken cancellationToken)
     {
-        // Read org context from request options (set by the caller when available).
+        // Read org context and any base-containment constraint from request options.
         request.Options.TryGetValue(OrgIdOption, out string? orgId);
+        request.Options.TryGetValue(ContainmentBaseOption, out string? containmentBase);
 
         var response = await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
 
@@ -95,9 +109,21 @@ public sealed class SsrfAwareRedirectHandler : DelegatingHandler
                 throw new SsrfBlockedException(redirectUri.AbsoluteUri);
             }
 
+            // Per-hop base containment. When the caller pinned the fetch to a base authority, a
+            // redirect that leaves it is refused — this is what makes the "a mirror cannot redirect
+            // the fetch at a host of its choosing" invariant true rather than merely claimed: without
+            // it, a compliant published URL could 302 to an arbitrary (public, so SSRF-clean) host.
+            if (containmentBase is not null && !UriContainment.IsBeneath(redirectUri, containmentBase))
+            {
+                response.Dispose();
+                DependablyMeter.UpstreamUrlBlocks.Add(1,
+                    new KeyValuePair<string, object?>("reason", "redirect_off_base"));
+                throw new SsrfBlockedException(redirectUri.AbsoluteUri);
+            }
+
             response.Dispose();
 
-            var next = BuildRedirectRequest(request, response.StatusCode, redirectUri, orgId);
+            var next = BuildRedirectRequest(request, response.StatusCode, redirectUri, orgId, containmentBase);
             response = await base.SendAsync(next, cancellationToken).ConfigureAwait(false);
             request = next;
         }
@@ -109,7 +135,8 @@ public sealed class SsrfAwareRedirectHandler : DelegatingHandler
     // 307/308 (method-preserving redirects); uses GET for all other 3xx codes. Propagates
     // org context and safe headers from the original request, excluding Authorization.
     private static HttpRequestMessage BuildRedirectRequest(
-        HttpRequestMessage original, HttpStatusCode statusCode, Uri redirectUri, string? orgId)
+        HttpRequestMessage original, HttpStatusCode statusCode, Uri redirectUri, string? orgId,
+        string? containmentBase)
     {
         // 307 Temporary Redirect and 308 Permanent Redirect preserve the original
         // method and body; all other redirect codes (301, 302, 303) switch to GET.
@@ -120,10 +147,16 @@ public sealed class SsrfAwareRedirectHandler : DelegatingHandler
 
         var next = new HttpRequestMessage(method, redirectUri);
 
-        // Propagate org context to the next hop's request options.
+        // Propagate org context and the containment constraint to the next hop's request options —
+        // containment must hold for every hop, not just the first.
         if (orgId is not null)
         {
             next.Options.Set(OrgIdOption, orgId);
+        }
+
+        if (containmentBase is not null)
+        {
+            next.Options.Set(ContainmentBaseOption, containmentBase);
         }
 
         // Copy headers that are safe to forward across redirects, excluding

@@ -40,9 +40,17 @@ public static class VersionPrecedenceResolver
             ? null
             : candidates
                 .Select(v => (Version: v, Parsed: NuGetVersion.TryParse(v.Version, out var sv) ? sv : null))
-                .OrderByDescending(x => x.Parsed, Comparer<NuGetVersion?>.Create((a, b) =>
-                    a is null && b is null ? 0 : a is null ? -1 : b is null ? 1 : a.CompareTo(b)))
+                .OrderByDescending(x => x.Parsed, Comparer<NuGetVersion?>.Create(CompareParsedVersions))
                 .ThenByDescending(x => x.Version.CreatedAt)
                 .ThenByDescending(x => x.Version.Origin == "uploaded")
                 .First().Version;
+
+    // A version that fails to parse sorts behind every version that does (never null-reference,
+    // never dropped from consideration) — see the class doc for why one malformed version must
+    // not hide every other version of the same package.
+    private static int CompareParsedVersions(NuGetVersion? a, NuGetVersion? b) =>
+        a is null && b is null ? 0
+        : a is null ? -1
+        : b is null ? 1
+        : a.CompareTo(b);
 }

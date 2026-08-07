@@ -1591,6 +1591,12 @@
         <target>{from}–{to} sur {total}</target>
       </segment>
     </unit>
+    <unit id="common.pagination.summaryCapped">
+      <segment state="translated">
+        <source>{from}–{to} of {total}+</source>
+        <target>{from}–{to} sur {total}+</target>
+      </segment>
+    </unit>
     <unit id="dashboard.activeUsers">
       <segment state="translated">
         <source>Active users (7d)</source>
@@ -5705,6 +5711,30 @@ dotnet/</target>
       <segment state="translated">
         <source>Symbol server</source>
         <target>Serveur de symboles</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.upstreamRegistries.terraform.protocol.mirror">
+      <segment state="translated">
+        <source>Network mirror</source>
+        <target>Miroir réseau</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.upstreamRegistries.terraform.protocol.registry">
+      <segment state="translated">
+        <source>Provider registry</source>
+        <target>Registre de fournisseurs</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.upstreamRegistries.terraform.protocolHint">
+      <segment state="translated">
+        <source>Provider registry resolves versions and hands out download URLs on another host. Network mirror serves both from this one upstream — pick it for a Dependably or other network-mirror upstream.</source>
+        <target>Le registre de fournisseurs résout les versions et fournit des URL de téléchargement sur un autre hôte. Le miroir réseau sert les deux depuis cet amont — choisissez-le pour un amont Dependably ou un autre miroir réseau.</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.upstreamRegistries.terraform.protocolLabel">
+      <segment state="translated">
+        <source>Protocol</source>
+        <target>Protocole</target>
       </segment>
     </unit>
     <unit id="settings.proxy.verifyMavenSignatures">
@@ -9923,6 +9953,18 @@ dotnet/</target>
       <segment state="translated">
         <source>Linked to a known-malicious package advisory (OSV MAL-).</source>
         <target>Lié à un avis de paquet malveillant connu (OSV MAL-).</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.status.no_feed">
+      <segment state="translated">
+        <source>No advisory feed</source>
+        <target>Aucun flux d&apos;avis</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.status.noFeedHelp">
+      <segment state="translated">
+        <source>OSV publishes no advisory feed for this ecosystem, so this artifact has never been screened against one. It is not known to be clean.</source>
+        <target>OSV ne publie aucun flux d&apos;avis pour cet écosystème ; cet artefact n&apos;a donc jamais été confronté à un tel flux. Il n&apos;est pas réputé sain.</target>
       </segment>
     </unit>
     <unit id="versionDetail.status.unscanned">

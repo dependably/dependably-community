@@ -1,4 +1,5 @@
 using Dapper;
+using Dependably.Protocol;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
 using Microsoft.AspNetCore.Http;
@@ -234,6 +235,49 @@ public sealed class OrgControllerExtendedTests
 
         // The anonymous projection exposes `versions` as IEnumerable<anon>. Reflect on
         // the first version's Status field to assert.
+        var versions = (System.Collections.IEnumerable)ok.Value!.GetType().GetProperty("versions")!.GetValue(ok.Value)!;
+        object? first = null;
+        foreach (object? v in versions) { first = v; break; }
+        Assert.NotNull(first);
+        string status = (string)first!.GetType().GetProperty("Status")!.GetValue(first)!;
+        Assert.Equal(expectedStatus, status);
+    }
+
+    /// <summary>
+    /// OSV publishes no feed for some ecosystems (Terraform providers, OCI images), so an empty
+    /// advisory list is the only answer a lookup can return for them. Reporting that as "clean"
+    /// makes an artefact with zero advisory coverage read exactly like an npm package genuinely
+    /// screened against a live feed, so those versions get their own state instead. The stamped
+    /// case is covered too: a row carrying a stale vuln_checked_at from an earlier build must not
+    /// fall back to "clean" — the label is derived from the ecosystem's coverage, not from the
+    /// stamp.
+    /// </summary>
+    [Theory]
+    [InlineData("terraform", null, OsvFeedCoverage.NoFeedStatus)]
+    [InlineData("terraform", "2026-01-01T00:00:00Z", OsvFeedCoverage.NoFeedStatus)]
+    [InlineData("oci", null, OsvFeedCoverage.NoFeedStatus)]
+    [InlineData("npm", null, "unscanned")]
+    [InlineData("npm", "2026-01-01T00:00:00Z", "clean")]
+    public async Task GetPackage_VersionStatus_NoFeedEcosystemIsNeverReportedClean(
+        string ecosystem, string? vulnCheckedAt, string expectedStatus)
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "member");
+        await s.WithPackageAsync("feedpkg", ecosystem: ecosystem);
+        await s.WithPackageVersionAsync("feedpkg", "1.0.0", ecosystem: ecosystem);
+        var b = await s.BuildAsync();
+
+        if (vulnCheckedAt is not null)
+        {
+            await using var conn = await b.Db.OpenAsync();
+            await conn.ExecuteAsync(
+                "UPDATE package_versions SET vuln_checked_at = @ts WHERE version = '1.0.0'",
+                new { ts = vulnCheckedAt });
+        }
+
+        var result = await b.OrgController.GetPackage(ecosystem, "feedpkg", CancellationToken.None);
+        var ok = Assert.IsType<OkObjectResult>(result);
+
         var versions = (System.Collections.IEnumerable)ok.Value!.GetType().GetProperty("versions")!.GetValue(ok.Value)!;
         object? first = null;
         foreach (object? v in versions) { first = v; break; }
@@ -1084,6 +1128,22 @@ public sealed class OrgControllerExtendedTests
         var ok = Assert.IsType<OkObjectResult>(await b.OrgController.GetSetup("oci", CancellationToken.None));
         string snippet = (string)ok.Value!.GetType().GetProperty("snippet")!.GetValue(ok.Value)!;
         Assert.DoesNotContain("insecure-registries", snippet);
+    }
+
+    [Fact]
+    public async Task GetSetup_Terraform_IncludesUserinfoAuth()
+    {
+        // anonymous_pull defaults off, so a fresh org's mirror requires auth. The snippet must
+        // carry a userinfo placeholder — the network mirror client has no separate credentials
+        // field — like every other ecosystem's setup snippet does.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var ok = Assert.IsType<OkObjectResult>(await b.OrgController.GetSetup("terraform", CancellationToken.None));
+        string snippet = (string)ok.Value!.GetType().GetProperty("snippet")!.GetValue(ok.Value)!;
+        Assert.Contains("<user>:<token>@", snippet);
+        Assert.Contains("/terraform/", snippet);
     }
 
     [Fact]

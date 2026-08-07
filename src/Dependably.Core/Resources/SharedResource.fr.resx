@@ -366,6 +366,12 @@
   <data name="error.upstream.ociAuthTypeInvalid" xml:space="preserve">
     <value>authType doit être l'une des valeurs suivantes : anonymous, basic, dockerhub_token_exchange.</value>
   </data>
+  <data name="error.upstream.protocolTerraformOnly" xml:space="preserve">
+    <value>protocol n’est valide que pour ecosystem=terraform.</value>
+  </data>
+  <data name="error.upstream.protocolInvalid" xml:space="preserve">
+    <value>protocol doit être omis ou « {0} ».</value>
+  </data>
   <data name="error.webhook.masterKeyRequired" xml:space="preserve">
     <value>DEPENDABLY_MASTER_KEY doit être configurée pour stocker un secret de signature de webhook au repos.</value>
   </data>

@@ -521,15 +521,7 @@ public sealed partial class OciController
             return OciError(StatusCodes.Status400BadRequest, OciErrorCode.NAME_INVALID, "Invalid repository or reference.");
         }
 
-        string? mediaType = Request.ContentType;
-        if (mediaType is not null)
-        {
-            int semi = mediaType.IndexOf(';');
-            if (semi >= 0)
-            {
-                mediaType = mediaType[..semi].Trim();
-            }
-        }
+        string? mediaType = NormalizeManifestMediaType(Request.ContentType);
         if (!OciManifestParser.IsAcceptedMediaType(mediaType))
         {
             return OciError(StatusCodes.Status400BadRequest, OciErrorCode.MANIFEST_INVALID,
@@ -543,20 +535,62 @@ public sealed partial class OciController
         // principal already owns. Enforced at manifest PUT — the point a tag/name is published.
         // No-op unless PUBLISH_NAME_BINDING=on.
         var namePrincipal = Dependably.Infrastructure.NamePrincipal.FromToken(Token);
-        if (_svc.NameBinding is { } nameGate
-            && !await nameGate.IsPublishAuthorizedAsync(orgId, "oci", name, namePrincipal, ct))
+        var nameError = await AuthorizeManifestNameAsync(orgId, name, namePrincipal, ct);
+        if (nameError is not null)
         {
-            return OciError(StatusCodes.Status403Forbidden, OciErrorCode.DENIED,
-                $"Publishing to '{name}' is not permitted: the repository is owned by a different " +
-                "principal in this org and you hold no publish grant for it.");
+            return nameError;
         }
 
-        // Cap the manifest body BEFORE buffering it. Wrapping Request.Body in a LimitedReadStream
-        // means a hostile chunked (or over-large declared) body is aborted at 4 MiB instead of
-        // being copied into a growing MemoryStream that could reach ~2 GiB (plus the ToArray
-        // copy) before any size check ran. Pre-size the buffer from Content-Length when it is
-        // present and within the cap so a well-formed manifest allocates exactly once.
-        byte[] bytes;
+        var (bytes, bufferError) = await BufferManifestBodyAsync(ct);
+        if (bufferError is not null)
+        {
+            return bufferError;
+        }
+
+        // Defence in depth: a tenant OCI limit tighter than 4 MiB still rejects here.
+        var settings = await _svc.Orgs.GetSettingsAsync(orgId, ct);
+        long limit = await _svc.Orgs.GetUploadLimitAsync(settings, "oci", ct);
+        if (bytes!.Length > limit)
+        {
+            return OciError(StatusCodes.Status413RequestEntityTooLarge, OciErrorCode.SIZE_INVALID,
+                $"Manifest exceeds the oci upload limit of {limit} bytes.");
+        }
+
+        var result = await _svc.Uploads.StoreManifestAsync(orgId, name, reference, bytes, mediaType!, ct);
+        return await RespondToManifestPutAsync(orgId, name, Token, namePrincipal, result, ct);
+    }
+
+    // Strips any trailing ";charset=..." (or similar) parameter suffix from a Content-Type value.
+    private static string? NormalizeManifestMediaType(string? contentType)
+    {
+        if (contentType is null)
+        {
+            return null;
+        }
+
+        int semi = contentType.IndexOf(';');
+        return semi >= 0 ? contentType[..semi].Trim() : contentType;
+    }
+
+    private async Task<IActionResult?> AuthorizeManifestNameAsync(
+        string orgId, string name, Dependably.Infrastructure.NamePrincipal? namePrincipal, CancellationToken ct) =>
+        _svc.NameBinding is { } nameGate
+            && !await nameGate.IsPublishAuthorizedAsync(orgId, "oci", name, namePrincipal, ct)
+            ? OciError(StatusCodes.Status403Forbidden, OciErrorCode.DENIED,
+                $"Publishing to '{name}' is not permitted: the repository is owned by a different " +
+                "principal in this org and you hold no publish grant for it.")
+            : null;
+
+    /// <summary>
+    /// Caps the manifest body BEFORE buffering it. Wrapping <c>Request.Body</c> in a
+    /// <see cref="LimitedReadStream"/> means a hostile chunked (or over-large declared) body is
+    /// aborted at 4 MiB instead of being copied into a growing <see cref="MemoryStream"/> that
+    /// could reach ~2 GiB (plus the <c>ToArray</c> copy) before any size check ran. Pre-sizes the
+    /// buffer from Content-Length when it is present and within the cap so a well-formed manifest
+    /// allocates exactly once.
+    /// </summary>
+    private async Task<(byte[]? Bytes, IActionResult? Error)> BufferManifestBodyAsync(CancellationToken ct)
+    {
         long? declared = Request.ContentLength;
         int initialCapacity = declared is > 0 and <= OciManifestMaxBytes ? (int)declared.Value : 0;
         try
@@ -564,24 +598,19 @@ public sealed partial class OciController
             await using var ms = initialCapacity > 0 ? new MemoryStream(initialCapacity) : new MemoryStream();
             await using var limited = new LimitedReadStream(Request.Body, OciManifestMaxBytes, "OCI manifest body");
             await limited.CopyToAsync(ms, ct);
-            bytes = ms.ToArray();
+            return (ms.ToArray(), null);
         }
         catch (InvalidDataException)
         {
-            return OciError(StatusCodes.Status413RequestEntityTooLarge, OciErrorCode.MANIFEST_INVALID,
-                $"Manifest exceeds the {OciManifestMaxBytes}-byte limit.");
+            return (null, OciError(StatusCodes.Status413RequestEntityTooLarge, OciErrorCode.MANIFEST_INVALID,
+                $"Manifest exceeds the {OciManifestMaxBytes}-byte limit."));
         }
+    }
 
-        // Defence in depth: a tenant OCI limit tighter than 4 MiB still rejects here.
-        var settings = await _svc.Orgs.GetSettingsAsync(orgId, ct);
-        long limit = await _svc.Orgs.GetUploadLimitAsync(settings, "oci", ct);
-        if (bytes.Length > limit)
-        {
-            return OciError(StatusCodes.Status413RequestEntityTooLarge, OciErrorCode.SIZE_INVALID,
-                $"Manifest exceeds the oci upload limit of {limit} bytes.");
-        }
-
-        var result = await _svc.Uploads.StoreManifestAsync(orgId, name, reference, bytes, mediaType!, ct);
+    private async Task<IActionResult> RespondToManifestPutAsync(
+        string orgId, string name, TokenRecord? token, Dependably.Infrastructure.NamePrincipal? namePrincipal,
+        OciManifestStoreResult result, CancellationToken ct)
+    {
         switch (result.Status)
         {
             case OciManifestStatus.Ok:
@@ -591,7 +620,7 @@ public sealed partial class OciController
                     await ownerGate.RecordOwnershipAsync(orgId, "oci", name, namePrincipal, ct);
                 }
                 await _svc.Audit.LogActivityAsync(orgId, "oci", $"pkg:oci/{name}@{result.Digest}", "push",
-                    actorId: Token?.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+                    actorId: token?.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
                 Response.Headers.Location = $"/v2/{name}/manifests/{result.Digest}";
                 Response.Headers["Docker-Content-Digest"] = result.Digest!;
                 return StatusCode(StatusCodes.Status201Created);

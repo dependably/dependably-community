@@ -293,29 +293,40 @@ public sealed class NpmAuditHandler(
                     continue;
                 }
 
-                var detail = NpmAdvisoryProjection.TryParseDetail(advisory.RawJson);
-                if (!NpmAdvisoryProjection.Affects(detail, name, version))
-                {
-                    continue;
-                }
-
-                if (!byPackage.TryGetValue(name, out var perAdvisory))
-                {
-                    perAdvisory = new Dictionary<string, AdvisoryAccumulator>(StringComparer.Ordinal);
-                    byPackage[name] = perAdvisory;
-                }
-
-                if (!perAdvisory.TryGetValue(advisory.Id, out var acc))
-                {
-                    acc = new AdvisoryAccumulator(advisory, detail, []);
-                    perAdvisory[advisory.Id] = acc;
-                }
-
-                acc.AffectedVersions.Add(version);
+                AccumulateAdvisory(byPackage, name, version, advisory);
             }
         }
 
         return (byPackage, unprojectable);
+    }
+
+    // Projects one hydrated advisory into the (package -> advisory id -> accumulator) map when it
+    // actually affects this (name, version), folding the version into an existing accumulator or
+    // creating a fresh one — the per-advisory de-dup that lets one CVE affecting several versions
+    // of a package report once with an AffectedVersions list, instead of once per version queried.
+    private static void AccumulateAdvisory(
+        Dictionary<string, Dictionary<string, AdvisoryAccumulator>> byPackage,
+        string name, string version, OsvAdvisory advisory)
+    {
+        var detail = NpmAdvisoryProjection.TryParseDetail(advisory.RawJson);
+        if (!NpmAdvisoryProjection.Affects(detail, name, version))
+        {
+            return;
+        }
+
+        if (!byPackage.TryGetValue(name, out var perAdvisory))
+        {
+            perAdvisory = new Dictionary<string, AdvisoryAccumulator>(StringComparer.Ordinal);
+            byPackage[name] = perAdvisory;
+        }
+
+        if (!perAdvisory.TryGetValue(advisory.Id, out var acc))
+        {
+            acc = new AdvisoryAccumulator(advisory, detail, []);
+            perAdvisory[advisory.Id] = acc;
+        }
+
+        acc.AffectedVersions.Add(version);
     }
 
     /// <summary>
@@ -389,13 +400,13 @@ public sealed class NpmAuditHandler(
         && version.Length <= MaxVersionLength
         && !version.Any(char.IsControl);
 
-    private static IActionResult TooLarge(string detail) =>
+    private static ObjectResult TooLarge(string detail) =>
         Problem(StatusCodes.Status413PayloadTooLarge, detail);
 
     // Every path where the registry cannot vouch for a complete answer. npm treats a non-2xx audit
     // response as a soft warning and continues the install, so this degrades to "audit
     // unavailable" — never to "found 0 vulnerabilities".
-    private static IActionResult Unavailable(string detail) =>
+    private static ObjectResult Unavailable(string detail) =>
         Problem(StatusCodes.Status503ServiceUnavailable, detail);
 
     // ObjectResult + ProblemDetails so NpmErrorEnvelopeAttribute adds npm's `error` key.

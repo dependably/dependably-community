@@ -68,6 +68,7 @@ public sealed class TrustAnchorController : OrgScopedControllerBase
         {
             [("rpm", "pgp")] = ValidateRpmPgpMaterial,
             [("maven", "pgp")] = ValidateMavenPgpMaterial,
+            [("terraform", "pgp")] = ValidateTerraformPgpMaterial,
             [("npm", "spki")] = ValidateNpmSpkiMaterial,
             [("nuget", "x509")] = ValidateNuGetX509Material,
             [("pypi", "sigstore_root")] = ValidatePyPiSigstoreRootMaterial,
@@ -105,6 +106,13 @@ public sealed class TrustAnchorController : OrgScopedControllerBase
     // key_id derived from the first key's fingerprint.
     private static (string? KeyId, string? Error) ValidateMavenPgpMaterial(string material, ILogger logger)
         => ValidatePgpMaterial(material, logger, "maven");
+
+    // Terraform validator: same PGP public key ring validation as RPM/Maven — armored PGP block,
+    // key_id derived from the first key's fingerprint. Pins the publisher key that signs a
+    // provider registry's SHASUMS file, not the upstream-supplied signing_keys from the download
+    // response.
+    private static (string? KeyId, string? Error) ValidateTerraformPgpMaterial(string material, ILogger logger)
+        => ValidatePgpMaterial(material, logger, "terraform");
 
     // Shared PGP material validator used by both RPM and Maven. Parses the material as an
     // ASCII-armored OpenPGP public key ring and derives the key_id from the first fingerprint.

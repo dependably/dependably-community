@@ -181,7 +181,7 @@ public sealed class PersonalDataTableClassificationComplianceTests
     }
 
     private static IEnumerable<string> AnnotationProblems(
-        IReadOnlyDictionary<string, string> annotations, string table, string expected)
+        Dictionary<string, string> annotations, string table, string expected)
     {
         if (!annotations.TryGetValue(table, out string? actual))
         {

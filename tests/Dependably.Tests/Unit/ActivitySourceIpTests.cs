@@ -28,7 +28,7 @@ public sealed class ActivitySourceIpTests : IAsyncLifetime
         await repo.LogActivityAsync("o1", "auth", null, "login.failure",
             actorId: null, detail: null /* background path */, sourceIp: null);
 
-        var (items, total) = await repo.ListActivityAsync("o1", limit: 50, offset: 0);
+        var (items, total, _) = await repo.ListActivityAsync("o1", limit: 50, offset: 0);
 
         Assert.Equal(2, total);
         var download = items.Single(i => i.EventType == "download");

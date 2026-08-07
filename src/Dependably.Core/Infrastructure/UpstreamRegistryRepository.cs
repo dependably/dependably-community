@@ -30,13 +30,31 @@ public sealed class UpstreamRegistryRepository
     /// <summary>
     /// All ecosystems whose upstream lists are user-configurable through this table.
     /// OCI upstreams are DB-backed per-org (same table); the legacy config-file approach
-    /// (<c>Oci:Upstreams</c>) is no longer used.
+    /// (<c>Oci:Upstreams</c>) is no longer used. For Terraform the configured URL's host is
+    /// additionally the admission check: a provider is addressed by its own source address, and
+    /// <c>TerraformController</c> mirrors only providers whose hostname matches a row here.
     /// </summary>
     public static readonly IReadOnlyList<string> SupportedEcosystems =
-        ["pypi", "npm", "nuget", "maven", "rpm", "cargo", "golang", "oci", "apk"];
+        ["pypi", "npm", "nuget", "maven", "rpm", "cargo", "golang", "oci", "apk", "terraform"];
 
     public static bool IsSupportedEcosystem(string? ecosystem) =>
         ecosystem is not null && SupportedEcosystems.Contains(ecosystem);
+
+    /// <summary>
+    /// The non-default upstream protocols a row may declare. Only Terraform reads the value: every
+    /// other ecosystem serves the same protocol it fetches, so an upstream can point at Dependably
+    /// or at the public registry interchangeably and has nothing to discriminate.
+    /// </summary>
+    public const string MirrorProtocol = "mirror";
+
+    /// <summary>
+    /// Validates <c>upstream_protocol</c> on the write path — checked in <see cref="AddAsync"/>
+    /// before the insert. Fresh installs also carry a CHECK from the <c>CREATE TABLE</c> block,
+    /// but SQLite cannot add one through <c>ALTER</c>, so on a database upgraded into the column
+    /// this method is the only thing holding the value set.
+    /// </summary>
+    public static bool IsSupportedProtocol(string? protocol) =>
+        protocol is null or MirrorProtocol;
 
     /// <summary>All entries for an org, ordered by ecosystem then priority.</summary>
     public async Task<IReadOnlyList<UpstreamRegistryEntry>> ListAsync(string orgId, CancellationToken ct = default)
@@ -49,6 +67,7 @@ public sealed class UpstreamRegistryRepository
                    auth_type AS AuthType, username AS Username,
                    token_endpoint AS TokenEndpoint, prefixes AS PrefixesJson,
                    symbol_server_url AS SymbolServerUrl,
+                   upstream_protocol AS UpstreamProtocol,
                    CASE WHEN secret IS NOT NULL THEN 1 ELSE 0 END AS HasSecret
             FROM upstream_registry
             WHERE org_id = @orgId
@@ -72,7 +91,7 @@ public sealed class UpstreamRegistryRepository
         var rows = await conn.QueryAsync<RawRegistryRow>(
             """
             SELECT url AS Url, auth_type AS AuthType, username AS Username, secret AS Secret,
-                   symbol_server_url AS SymbolServerUrl
+                   symbol_server_url AS SymbolServerUrl, upstream_protocol AS UpstreamProtocol
             FROM upstream_registry
             WHERE org_id = @orgId AND ecosystem = @ecosystem
             ORDER BY position, created_at
@@ -83,7 +102,8 @@ public sealed class UpstreamRegistryRepository
             r.Url ?? "",
             BuildUpstreamAuthHeader(
                 r.AuthType, r.Username, r.Secret is null ? null : _envelope.Unprotect(r.Secret)),
-            r.SymbolServerUrl))
+            r.SymbolServerUrl,
+            r.UpstreamProtocol))
             .ToList();
     }
 
@@ -108,8 +128,20 @@ public sealed class UpstreamRegistryRepository
     /// The new <c>position</c> is one past the current max so the entry is tried last.
     /// For OCI registries use <see cref="AddOciAsync"/>.
     /// </summary>
-    public async Task<UpstreamRegistryEntry> AddAsync(
+    public Task<UpstreamRegistryEntry> AddAsync(
         string orgId, NewUpstreamRegistry req, CancellationToken ct = default)
+    {
+        // Backstop against an unsupported upstream_protocol reaching the row regardless of
+        // caller — see IsSupportedProtocol. The controller validates first for a friendly 422;
+        // this is the guard that holds on a database upgraded into the column, where the
+        // CREATE TABLE CHECK never applied.
+        return IsSupportedProtocol(req.Protocol)
+            ? AddCoreAsync(orgId, req, ct)
+            : throw new ArgumentException($"Unsupported upstream_protocol '{req.Protocol}'.", nameof(req));
+    }
+
+    private async Task<UpstreamRegistryEntry> AddCoreAsync(
+        string orgId, NewUpstreamRegistry req, CancellationToken ct)
     {
         string id = Guid.NewGuid().ToString("N");
         string ecosystem = req.Ecosystem;
@@ -117,6 +149,7 @@ public sealed class UpstreamRegistryRepository
         string? name = req.Name;
         string authType = req.AuthType ?? "anonymous";
         string? username = req.Username;
+
         // Encrypt the secret at rest. This is fail-closed because the encryptor throws when no
         // master key is configured, so the controller pre-checks IsConfigured and returns 422
         // before reaching here. Legacy rows stay plaintext and pass through the discriminator
@@ -134,9 +167,9 @@ public sealed class UpstreamRegistryRepository
         await conn.ExecuteAsync(
             """
             INSERT INTO upstream_registry
-                (id, org_id, ecosystem, name, url, position, auth_type, username, secret, symbol_server_url)
+                (id, org_id, ecosystem, name, url, position, auth_type, username, secret, symbol_server_url, upstream_protocol)
             VALUES
-                (@id, @orgId, @ecosystem, @name, @url, @position, @authType, @username, @secret, @symbolServerUrl)
+                (@id, @orgId, @ecosystem, @name, @url, @position, @authType, @username, @secret, @symbolServerUrl, @protocol)
             ON CONFLICT DO NOTHING
             """,
             new
@@ -153,6 +186,7 @@ public sealed class UpstreamRegistryRepository
                 // Seeded for a nuget.org upstream so symbol proxying works without the operator
                 // having to know the symbol host; NULL (no symbol proxying) for anything else.
                 symbolServerUrl = req.SymbolServerUrl ?? NuGetSymbolServers.DefaultFor(ecosystem, url),
+                protocol = req.Protocol,
             });
 
         return new UpstreamRegistryEntry
@@ -168,6 +202,7 @@ public sealed class UpstreamRegistryRepository
             Username = username,
             HasSecret = storedSecret is not null,
             SymbolServerUrl = req.SymbolServerUrl ?? NuGetSymbolServers.DefaultFor(ecosystem, url),
+            Protocol = req.Protocol,
         };
     }
 
@@ -345,6 +380,7 @@ public sealed class UpstreamRegistryRepository
         Prefixes = ParsePrefixes(r.PrefixesJson),
         HasSecret = r.HasSecret,
         SymbolServerUrl = r.SymbolServerUrl,
+        Protocol = r.UpstreamProtocol,
     };
 
     private static List<string> ParsePrefixes(string? json)
@@ -403,6 +439,8 @@ public sealed class UpstreamRegistryRepository
         public bool HasSecret { get; set; }
         // NuGet: symbol-server base URL for this upstream.
         public string? SymbolServerUrl { get; set; }
+        // Terraform: 'mirror' when this upstream speaks the network mirror protocol.
+        public string? UpstreamProtocol { get; set; }
     }
 }
 
@@ -416,7 +454,10 @@ public sealed record NewOciUpstreamRegistry(
     string? Secret = null,
     string? TokenEndpoint = null);
 
-/// <summary>Input record for adding a new non-OCI upstream registry.</summary>
+/// <summary>
+/// Input record for adding a new non-OCI upstream registry. <paramref name="Protocol"/> is
+/// Terraform-only — see <see cref="UpstreamRegistryRepository.IsSupportedProtocol"/>.
+/// </summary>
 public sealed record NewUpstreamRegistry(
     string Ecosystem,
     string Url,
@@ -424,4 +465,5 @@ public sealed record NewUpstreamRegistry(
     string? AuthType = null,
     string? Username = null,
     string? Secret = null,
-    string? SymbolServerUrl = null);
+    string? SymbolServerUrl = null,
+    string? Protocol = null);

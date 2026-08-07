@@ -59,7 +59,8 @@ public sealed record UpdateProxySettingsRequest(
     string? VerifyPyPiAttestations = null,
     string? VerifyRpmSignatures = null,
     string? VerifyMavenSignatures = null,
-    string? BlockRevoked = null);
+    string? BlockRevoked = null,
+    string? VerifyTerraformSignatures = null);
 
 // Scope is retained as a nullable field purely so the controller can detect callers still
 // sending the retired field and return a clear 400. The repository never sees it.
@@ -100,7 +101,11 @@ public sealed record AddUpstreamRegistryRequest(
     string? TokenEndpoint = null,
     IReadOnlyList<string>? Prefixes = null,
     // Non-OCI field — the registry URL for non-OCI ecosystems.
-    string? Host = null);
+    string? Host = null,
+    // Terraform-only field — which server-side protocol this upstream speaks. Null (the Provider
+    // Registry Protocol) or "mirror" (the Provider Network Mirror Protocol); rejected for every
+    // other ecosystem.
+    string? Protocol = null);
 
 public sealed record ReorderUpstreamRegistryRequest(IReadOnlyList<string> Ids);
 

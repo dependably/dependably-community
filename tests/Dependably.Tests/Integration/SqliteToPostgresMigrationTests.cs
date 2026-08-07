@@ -143,7 +143,7 @@ public sealed class SqliteToPostgresMigrationTests
             string.Join("; ", result.Verification.Failures.Select(f =>
                 $"{f.Table} {f.SourceRows}/{f.TargetRows} {f.SourceDigest} vs {f.TargetDigest}")));
         Assert.Empty(result.SkippedTables);
-        Assert.False(result.Verification.Tables.Count == 0);
+        Assert.NotEmpty(result.Verification.Tables);
 
         await using var conn = await pg.Store.OpenAsync();
 

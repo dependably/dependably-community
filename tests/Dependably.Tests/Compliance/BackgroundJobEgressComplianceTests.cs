@@ -266,7 +266,7 @@ public sealed partial class BackgroundJobEgressComplianceTests
             // count) and absorbed a sibling class. Treat that the same as an unresolved
             // extraction rather than silently accepting a body that could satisfy this
             // requirement using a DIFFERENT class's DISABLE_BACKGROUND_JOBS setting.
-            if (body is not null && FactoryClassRegex().Matches(body).Count > 1)
+            if (body is not null && FactoryClassRegex().Count(body) > 1)
             {
                 body = null;
             }

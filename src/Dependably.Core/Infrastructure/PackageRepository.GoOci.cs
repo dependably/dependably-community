@@ -151,42 +151,6 @@ public sealed partial class PackageRepository
     }
 
     /// <summary>
-    /// Gets or creates a <c>packages</c> row for the Go module, then inserts a
-    /// <c>package_versions</c> row for the given version. Idempotent via ON CONFLICT DO NOTHING
-    /// so concurrent first-fetches of the same version are safe.
-    /// </summary>
-    public async Task GetOrCreateGoVersionAsync(
-        string orgId, string module, string version, string purl, string blobKey,
-        string? userId, CancellationToken ct = default)
-    {
-        var pkg = await GetOrCreateAsync(
-            orgId, "golang", module, module, isProxy: true, ct);
-
-        string now = _time.GetUtcNow().ToUtcIso();
-        string filename = DeriveFilename(blobKey);
-        await using var conn = await _db.OpenAsync(ct);
-        // xtenant: INSERT pinned to package_id resolved by GetOrCreateAsync under the caller's org.
-        await conn.ExecuteAsync(
-            """
-            INSERT INTO package_versions
-                (id, package_id, version, purl, blob_key, filename, size_bytes, first_fetch, origin, created_at)
-            VALUES
-                (@id, @packageId, @version, @purl, @blobKey, @filename, 0, 1, 'proxy', @now)
-            ON CONFLICT DO NOTHING
-            """,
-            new
-            {
-                id = Guid.NewGuid().ToString("N"),
-                packageId = pkg.Id,
-                version,
-                purl,
-                blobKey,
-                filename,
-                now,
-            });
-    }
-
-    /// <summary>
     /// Returns all tags in <c>oci_tags</c> for the given org and repository, grouped by
     /// digest. Callers join the result against <c>package_versions.version</c> (which equals
     /// the digest for OCI) to surface tag names alongside each image version row.

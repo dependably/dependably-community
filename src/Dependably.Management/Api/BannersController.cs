@@ -56,9 +56,7 @@ public sealed class BannersController : OrgScopedControllerBase
             return authResult;
         }
 
-        var validationResult = ValidateRequest(
-            req.Severity, req.Body, req.LinkUrl, req.LinkLabel, req.TargetRole, req.StartsAt, req.EndsAt,
-            out string startsAtUtc, out string endsAtUtc);
+        var validationResult = ValidateRequest(req, out string startsAtUtc, out string endsAtUtc);
         if (validationResult is not null)
         {
             return validationResult;
@@ -97,9 +95,7 @@ public sealed class BannersController : OrgScopedControllerBase
             return authResult;
         }
 
-        var validationResult = ValidateRequest(
-            req.Severity, req.Body, req.LinkUrl, req.LinkLabel, req.TargetRole, req.StartsAt, req.EndsAt,
-            out string startsAtUtc, out string endsAtUtc);
+        var validationResult = ValidateRequest(req, out string startsAtUtc, out string endsAtUtc);
         if (validationResult is not null)
         {
             return validationResult;
@@ -208,17 +204,15 @@ public sealed class BannersController : OrgScopedControllerBase
     // text: banners are selected by a lexicographic `starts_at <= @now` comparison against a
     // UTC `Z` string, which a stored `+02:00` (or offset-less) value does not order against.
     private IActionResult? ValidateRequest(
-        string severity, string body, string? linkUrl, string? linkLabel,
-        string targetRole, string startsAt, string endsAt,
-        out string normalizedStartsAt, out string normalizedEndsAt)
+        IBannerContentRequest req, out string normalizedStartsAt, out string normalizedEndsAt)
     {
         normalizedStartsAt = string.Empty;
         normalizedEndsAt = string.Empty;
 
-        return ValidateBody(body)
-            ?? ValidateLink(linkUrl, linkLabel)
-            ?? ValidateWindow(startsAt, endsAt, out normalizedStartsAt, out normalizedEndsAt)
-            ?? ValidateSeverityAndRole(severity, targetRole);
+        return ValidateBody(req.Body)
+            ?? ValidateLink(req.LinkUrl, req.LinkLabel)
+            ?? ValidateWindow(req.StartsAt, req.EndsAt, out normalizedStartsAt, out normalizedEndsAt)
+            ?? ValidateSeverityAndRole(req.Severity, req.TargetRole);
     }
 
     private IActionResult? ValidateBody(string body)

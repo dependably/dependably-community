@@ -1512,6 +1512,24 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
         <target>Au moins un préfixe est obligatoire pour les amonts OCI.</target>
       </segment>
     </unit>
+    <unit id="error.upstream.protocolInvalid">
+      <notes>
+        <note category="translator">422 detail. {0} = the one supported non-default protocol value (API literal, e.g. &quot;mirror&quot;). The field name is an API literal.</note>
+      </notes>
+      <segment state="translated">
+        <source>protocol must be omitted or &quot;{0}&quot;.</source>
+        <target>protocol doit être omis ou « {0} ».</target>
+      </segment>
+    </unit>
+    <unit id="error.upstream.protocolTerraformOnly">
+      <notes>
+        <note category="translator">422 detail. Field name and &apos;ecosystem=terraform&apos; are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>protocol is only valid for ecosystem=terraform.</source>
+        <target>protocol n’est valide que pour ecosystem=terraform.</target>
+      </segment>
+    </unit>
     <unit id="error.upstream.rpmAnonymousOnly">
       <notes>
         <note category="translator">422 detail. &apos;ecosystem=rpm&apos; is an API literal.</note>

@@ -145,14 +145,14 @@ public sealed class OrgSettingsRepository
                 block_deprecated, block_malicious, block_kev, max_epss_tolerance,
                 block_install_scripts, verify_npm_signatures, verify_nuget_signatures,
                 verify_pypi_attestations, verify_rpm_signatures, verify_maven_signatures,
-                block_revoked)
+                verify_terraform_signatures, block_revoked)
             VALUES (
                 @orgId, @proxyEnabled, @maxScore, @minAgeHours,
                 @blockDeprecated, @blockMalicious, @blockKev, @maxEpss,
                 @blockInstallScripts,
                 COALESCE(@verifyNpmSignatures, 'off'), COALESCE(@verifyNuGetSignatures, 'off'),
                 COALESCE(@verifyPyPiAttestations, 'off'), COALESCE(@verifyRpmSignatures, 'off'),
-                COALESCE(@verifyMavenSignatures, 'off'),
+                COALESCE(@verifyMavenSignatures, 'off'), COALESCE(@verifyTerraformSignatures, 'off'),
                 @blockRevoked)
             ON CONFLICT(org_id) DO UPDATE SET
                 proxy_passthrough_enabled = @proxyEnabled,
@@ -168,7 +168,8 @@ public sealed class OrgSettingsRepository
                 verify_nuget_signatures   = COALESCE(@verifyNuGetSignatures, verify_nuget_signatures),
                 verify_pypi_attestations  = COALESCE(@verifyPyPiAttestations, verify_pypi_attestations),
                 verify_rpm_signatures     = COALESCE(@verifyRpmSignatures, verify_rpm_signatures),
-                verify_maven_signatures   = COALESCE(@verifyMavenSignatures, verify_maven_signatures)
+                verify_maven_signatures   = COALESCE(@verifyMavenSignatures, verify_maven_signatures),
+                verify_terraform_signatures = COALESCE(@verifyTerraformSignatures, verify_terraform_signatures)
             """,
             new
             {
@@ -187,6 +188,7 @@ public sealed class OrgSettingsRepository
                 verifyPyPiAttestations = policy.VerifyPyPiAttestations,
                 verifyRpmSignatures = policy.VerifyRpmSignatures,
                 verifyMavenSignatures = policy.VerifyMavenSignatures,
+                verifyTerraformSignatures = policy.VerifyTerraformSignatures,
             });
         _orgs?.InvalidateSettingsCache(orgId);
     }
@@ -251,4 +253,5 @@ public sealed record ProxyPolicySettings(
     string? VerifyPyPiAttestations = null,
     string? VerifyRpmSignatures = null,
     string? VerifyMavenSignatures = null,
-    string BlockRevoked = "warn");
+    string BlockRevoked = "warn",
+    string? VerifyTerraformSignatures = null);

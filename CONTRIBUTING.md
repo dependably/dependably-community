@@ -48,6 +48,31 @@ when a solution project is missing its committed `packages.lock.json`, or when
 `.dependably`. Vulnerability screening in CI is the `sca-backend` / `sca-frontend`
 gates, not these tools.
 
+One layer below package restores sit container image pulls, guarded by
+`image-registry-guard`. Every image the pipeline pulls must resolve through
+`${DEP_IMAGE_REGISTRY}` — the CI runners cannot reach public registry CDNs. The guard scans
+`.gitlab-ci.yml`, every Dockerfile, the compose files, and tracked shell scripts, and it
+deliberately looks past `FROM` lines at the pulls the build tooling makes on its own:
+`docker buildx create` boots BuildKit from its own image (so the guard also fails a
+`buildx create` that omits `--driver-opt image=`), BuildKit resolves a `# syntax=` directive
+from `docker.io` before reading the first instruction, and an `ARG *IMAGE*=` default is the
+public fallback a mirrorless build silently uses. None of those appear in any `FROM`.
+
+Two rules are worth knowing before you add an image reference:
+
+- **Name any variable holding an image `*IMAGE*`.** A bare `$VAR` in a `docker pull` passes
+  only when the guard can find that variable's declaration and check its value; an
+  unrecognized name fails. "It starts with a dollar" is not evidence of anything.
+- **The mirror host is matched as a prefix, never a substring**, so
+  `dependably.northwardlabs.ca.example.com/x` is not the mirror.
+
+Mark a deliberate public pull `# image-registry-ok: <reason>` on the line or within the five
+lines above it. The reason is required — a bare marker is rejected as malformed, same as
+`backcompat-ok`. For a `# syntax=` directive the marker goes *below*, because a parser
+directive is only honoured on line 1 and a comment above it silently disables it.
+`.github/workflows/` is not scanned: it runs on GitHub-hosted runners with no route to the
+private registry.
+
 Those two gates, plus `secret-scan`, additionally run on **scheduled pipelines** (they extend
 `.runs-on-ci-or-schedule` rather than `.runs-on-ci`). Their subject changes without anyone
 touching the repository — a CVE disclosed against an already-pinned transitive dependency, or a
@@ -584,6 +609,7 @@ Instance-wide defaults for per-tenant caps.
 | `Rpm__PrimaryMapCacheSizeLimitBytes` | `314572800` (300 MiB) | Size bound, in bytes, for the dedicated in-memory cache of parsed `primary.xml.gz` package maps. Kept separate from the shared metadata cache because a Fedora/EPEL-scale primary map (tens to 100+ MB) would otherwise evict the rest of that cache, or silently fail to insert if it exceeds the shared budget. Size up for a deployment mirroring several large distro repos at once. |
 | `Oci__ManifestTagTtl` / `Oci__TokenCacheDuration` / `Oci__UpstreamHttpTimeout` / `Oci__CatalogEnabled` | 5m / 55m / 30m / off | Instance-level OCI proxy tunings. **Upstream OCI registries are no longer configured here** — they are per-org and managed in Settings → Proxy → Upstream registries (host + repository-prefix routing + auth type), like every other ecosystem. Every org is seeded with Docker Hub and `mcr.microsoft.com` defaults. |
 | `Apk__Upstream` | `https://dl-cdn.alpinelinux.org/alpine` | Upstream Alpine apk mirror seeded for new orgs. The route is 1:1 with dl-cdn's `{release}/{repo}/{arch}/{file}` layout, so a sed rewrite of `/etc/apk/repositories` is the only client-side change. Per-org registries are managed from Settings → Proxy; this value seeds the initial row. apk is proxy-only (no hosted push, like Go). |
+| `Terraform__Upstream` | `https://registry.terraform.io` | Upstream Terraform provider registry seeded for new orgs. Its **host** is also what admits a provider to the mirror: a provider is addressed by its own source address (`{hostname}/{namespace}/{type}`), and only providers whose hostname matches a configured upstream are served — the request path never becomes the fetch host. Note this registry serves metadata only; archives come from whatever host it names in `download_url` (`releases.hashicorp.com` for HashiCorp's own providers), discovered per version rather than configured. Terraform is proxy-only (no hosted push, like Go and apk), and the client must reach the mirror over **https** — terraform rejects an `http:` mirror while parsing its CLI config. |
 | `Apk__IndexTtl` | `00:01:00` (60s) | TTL (`TimeSpan` format) for the memory-cached passthrough of `APKINDEX.tar.gz` and other index-adjacent files (`.SIGN.RSA.*`, etc). `.apk` package blobs stay TOFU-only (see `Apk__NegativeCacheTtl` note); `APKINDEX.tar.gz` itself is signature-verified server-side — see `Apk__VerifyIndexSignature`. |
 | `Apk__VerifyIndexSignature` | derived | Instance-level override for `APKINDEX.tar.gz` embedded RSA signature verification. When unset, verification is enabled iff the org has at least one apk `rsa` trust anchor in `signature_trust_anchor`. Setting `true` with no per-org anchor configured fails every resolution closed. `APKINDEX.tar.gz` is two concatenated gzip members — the first decompresses to a tiny tar of `.SIGN.RSA[256\|512].<keyname>` entries (raw PKCS#1v1.5 signatures over the raw compressed bytes of the second member); a failed check refuses to cache or serve the index (502). `.apk` package fetches remain TOFU regardless of this setting — only the index is verified. SHA-1 (`.SIGN.RSA.<keyname>`) signatures verify only under `Apk__AcceptSha1IndexSignatures`. Trust anchors are per-org and managed via Settings → Trust Anchors (or `POST /api/v1/trust-anchors`), not via an env key; anchor keys must clear the minimum-strength floor (RSA ≥ 2048 bits, elliptic curves ≥ 255-bit field) at import. |
 | `Apk__AcceptSha1IndexSignatures` | `false` | Set `true` to let a SHA-1 `.SIGN.RSA.<keyname>` entry satisfy `APKINDEX.tar.gz` signature verification. The digest algorithm is named by the `.SIGN.*` entry inside the **upstream-supplied index**, so leaving SHA-1 acceptable lets the artefact under verification choose the broken arm — the reason it is **off by default**. With it off, only `.SIGN.RSA256.*` / `.SIGN.RSA512.*` entries can verify; an index that carries nothing else fails the check (reason `weak_signature_algorithm`, `dependably.apk.index_signature_failures`), and a failed check refuses to cache or serve the index. **Alpine's own mirrors still sign with SHA-1**, so an org that has pinned an apk trust anchor (or set `Apk__VerifyIndexSignature=true`) needs this opt-in to verify a stock Alpine index. Orgs with no apk trust anchor are unaffected — verification does not run at all. A warning is logged once per process the first time a SHA-1 index signature is accepted, and once the first time one is refused. |
@@ -608,6 +634,17 @@ docker compose -f docker-compose.yml -f docker-compose.observability.yml logs -f
 ```
 
 The overlay sets `OTEL_EXPORTER_OTLP_ENDPOINT` for you and runs a collector whose `debug` exporter prints every received signal to its own stdout. Swap that exporter (in `otel-collector-config.yaml`) for a real backend to retain or query the telemetry.
+
+The collector image resolves through `${DEP_IMAGE_REGISTRY}` like everything else, defaulting to
+`dependably.northwardlabs.ca`. Without mirror credentials, name the public registry explicitly:
+
+```bash
+DEP_IMAGE_REGISTRY=docker.io docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d --build
+```
+
+Emptying the variable does **not** fall back the way it does in `.gitlab-ci.yml` — compose's
+`${VAR:-default}` treats an empty value as absent and re-selects the mirror. The pinned digest is
+the same on either host, since a pull-through proxy serves the upstream manifest unchanged.
 
 ### Vulnerability scanning and stats
 

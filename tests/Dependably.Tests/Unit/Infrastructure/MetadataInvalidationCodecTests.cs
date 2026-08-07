@@ -12,20 +12,36 @@ namespace Dependably.Tests.Unit.Infrastructure;
 [Trait("Category", "Unit")]
 public sealed class MetadataInvalidationCodecTests
 {
-    public static TheoryData<MetadataInvalidation> AllEcosystems() =>
-    [
-        MetadataInvalidation.ForNpm("org-a", "@scope/pkg"),
-        MetadataInvalidation.ForPyPi("org-a", "My_Package"),
-        MetadataInvalidation.ForNuGet("org-a", "Contoso.Utils"),
-        MetadataInvalidation.ForMaven("org-a", "com.example", "widget"),
-        MetadataInvalidation.ForMaven("org-a", "com.example", "widget", "1.0-SNAPSHOT"),
-        MetadataInvalidation.ForRpm("org-a"),
-    ];
+    // Keyed by a plain string rather than TheoryData<MetadataInvalidation> directly: xUnit's
+    // VSTest adapter needs a serializable type argument to enumerate theory rows individually in
+    // Test Explorer, and MetadataInvalidation is a production wire-format record with no reason
+    // to carry that test-runner concern.
+    public static TheoryData<string> AllEcosystems() => new()
+    {
+        MetadataInvalidationEcosystems.Npm,
+        MetadataInvalidationEcosystems.PyPi,
+        MetadataInvalidationEcosystems.NuGet,
+        MetadataInvalidationEcosystems.Maven,
+        "maven-snapshot",
+        MetadataInvalidationEcosystems.Rpm,
+    };
+
+    private static MetadataInvalidation BuildInvalidation(string ecosystemKey) => ecosystemKey switch
+    {
+        MetadataInvalidationEcosystems.Npm => MetadataInvalidation.ForNpm("org-a", "@scope/pkg"),
+        MetadataInvalidationEcosystems.PyPi => MetadataInvalidation.ForPyPi("org-a", "My_Package"),
+        MetadataInvalidationEcosystems.NuGet => MetadataInvalidation.ForNuGet("org-a", "Contoso.Utils"),
+        MetadataInvalidationEcosystems.Maven => MetadataInvalidation.ForMaven("org-a", "com.example", "widget"),
+        "maven-snapshot" => MetadataInvalidation.ForMaven("org-a", "com.example", "widget", "1.0-SNAPSHOT"),
+        MetadataInvalidationEcosystems.Rpm => MetadataInvalidation.ForRpm("org-a"),
+        _ => throw new ArgumentOutOfRangeException(nameof(ecosystemKey), ecosystemKey, "Unknown test ecosystem key."),
+    };
 
     [Theory]
     [MemberData(nameof(AllEcosystems))]
-    public void RoundTripsEveryCoordinate(MetadataInvalidation original)
+    public void RoundTripsEveryCoordinate(string ecosystemKey)
     {
+        var original = BuildInvalidation(ecosystemKey);
         string payload = MetadataInvalidationCodec.Encode(original, origin: "replica-1");
 
         Assert.True(MetadataInvalidationCodec.TryDecode(payload, out var decoded, out string origin));

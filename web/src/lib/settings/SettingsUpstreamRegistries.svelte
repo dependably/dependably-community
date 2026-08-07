@@ -15,7 +15,9 @@
 
   // The subset of the shared ecosystem vocabulary whose upstreams are configurable through the
   // per-org `upstream_registry` table — mirrors UpstreamRegistryRepository.SupportedEcosystems.
-  const DB_UPSTREAM_ECOSYSTEMS = new Set(['pypi', 'npm', 'nuget', 'maven', 'rpm', 'cargo', 'golang', 'oci', 'apk'])
+  const DB_UPSTREAM_ECOSYSTEMS = new Set([
+    'pypi', 'npm', 'nuget', 'maven', 'rpm', 'cargo', 'golang', 'oci', 'apk', 'terraform',
+  ])
   const ECOSYSTEMS = ECO_VOCAB
     .filter(key => DB_UPSTREAM_ECOSYSTEMS.has(key))
     .map(key => ({ key, label: ECO_LABEL[key] }))
@@ -49,6 +51,11 @@
   let nonOciAuthType = 'anonymous'
   let nonOciUsername = ''
   let nonOciSecret = ''
+
+  // Terraform-only: which server-side protocol the upstream speaks. '' is the UI sentinel for
+  // the default (Provider Registry Protocol, sent as null); 'mirror' selects the Provider
+  // Network Mirror Protocol. No other ecosystem reads this field.
+  let terraformProtocol = ''
 
   // Drag state
   let dragEco = null, dragFrom = -1
@@ -102,6 +109,7 @@
     nonOciAuthType = 'anonymous'
     nonOciUsername = ''
     nonOciSecret = ''
+    terraformProtocol = ''
     error = ''
     showAdd = true
   }
@@ -144,7 +152,8 @@
         const authType = (addEco !== 'rpm' && nonOciAuthType !== 'anonymous') ? nonOciAuthType : undefined
         const username = (addEco !== 'rpm' && nonOciAuthType === 'basic' && nonOciUsername.trim()) ? nonOciUsername.trim() : undefined
         const secret = (addEco !== 'rpm' && nonOciAuthType !== 'anonymous' && nonOciSecret) ? nonOciSecret : undefined
-        entry = await api.addUpstreamRegistry(addEco, newUrl.trim(), newName.trim() || null, authType, username, secret)
+        const protocol = (addEco === 'terraform' && terraformProtocol) ? terraformProtocol : undefined
+        entry = await api.addUpstreamRegistry(addEco, newUrl.trim(), newName.trim() || null, authType, username, secret, protocol)
       }
       byEco[addEco] = [...byEco[addEco], entry]
       byEco = byEco
@@ -327,6 +336,15 @@
                   {#if entry.hasSecret}
                     <span class="cred-badge">{$t('settings.proxy.upstreamRegistries.auth.credentialSet')}</span>
                   {/if}
+                  {#if eco.key === 'terraform'}
+                    <!-- Only terraform reads upstream_protocol (ADR 0003) — no other ecosystem
+                         card shows this badge. -->
+                    <span class="protocol-badge">
+                      {entry.protocol === 'mirror'
+                        ? $t('settings.proxy.upstreamRegistries.terraform.protocol.mirror')
+                        : $t('settings.proxy.upstreamRegistries.terraform.protocol.registry')}
+                    </span>
+                  {/if}
                 </span>
                 {#if eco.key === 'nuget'}
                   <!-- Symbol server (SSQP). A separate field because a symbol server is a
@@ -445,6 +463,16 @@
           <label for="ur-name">{$t('settings.proxy.upstreamRegistries.modal.name')}</label>
           <input id="ur-name" bind:value={newName} placeholder={$t('settings.proxy.upstreamRegistries.modal.namePlaceholder')} />
         </div>
+        {#if addEco === 'terraform'}
+          <div class="form-row">
+            <label for="ur-tf-protocol">{$t('settings.proxy.upstreamRegistries.terraform.protocolLabel')}</label>
+            <select id="ur-tf-protocol" bind:value={terraformProtocol}>
+              <option value="">{$t('settings.proxy.upstreamRegistries.terraform.protocol.registry')}</option>
+              <option value="mirror">{$t('settings.proxy.upstreamRegistries.terraform.protocol.mirror')}</option>
+            </select>
+            <div class="form-hint">{$t('settings.proxy.upstreamRegistries.terraform.protocolHint')}</div>
+          </div>
+        {/if}
         {#if addEco !== 'rpm'}
           <div class="form-row">
             <label for="ur-auth">{$t('settings.proxy.upstreamRegistries.auth.authTypeLabel')}</label>
@@ -519,6 +547,10 @@
   .cred-badge {
     font-size: 11px; padding: 1px 6px; border-radius: 3px;
     background: var(--badge-hosted-bg); color: var(--badge-hosted-text);
+  }
+  .protocol-badge {
+    font-size: 11px; padding: 1px 6px; border-radius: 3px;
+    background: var(--surface2); color: var(--text2);
   }
   .catch-all-warn {
     font-size: 12px; color: var(--badge-warning-text);

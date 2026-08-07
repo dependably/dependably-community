@@ -7,6 +7,194 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-06
+
+A feature release adding **Terraform providers** as a new ecosystem, served over the Provider
+Network Mirror Protocol at `/terraform/` with the full supply-chain control set. Alongside it,
+two read surfaces stop reporting signals they never had: artefacts in an ecosystem OSV publishes
+no feed for are labelled **No advisory feed** instead of unscanned, and paged audit/activity
+totals are capped rather than timing out. **Operators consuming the version-status field or the
+audit list API: see "Changed — action required" below.**
+
+### Added
+
+- **Terraform provider mirror.** A new ecosystem at `/terraform/`, speaking the **Provider Network
+  Mirror Protocol** — so `terraform init` resolves *and* downloads every provider through
+  Dependably instead of reaching `registry.terraform.io` and `releases.hashicorp.com`. Configure it
+  in Terraform's CLI configuration (`~/.terraformrc` / `%APPDATA%\terraform.rc`), not per project:
+  a `provider_installation { network_mirror { url = "https://…/terraform/" } }` block, with no
+  change to any `required_providers`. Existing `.terraform.lock.hcl` files keep working with no
+  `-upgrade` run — Terraform recomputes each `h1:` hash from the archive it downloads, and the
+  bytes are identical.
+
+  Three constraints are worth knowing before you point a client at it:
+
+  - **HTTPS is mandatory.** Terraform rejects an `http://` mirror URL while *parsing* the CLI
+    configuration, before any request. Unlike every other ecosystem, a plain-HTTP deployment cannot
+    serve this one — terminate TLS in front of Dependably first.
+  - **Providers are mirrored; modules are not.** Terraform's module registry is a separate protocol
+    with no network-mirror equivalent, so `module` blocks sourced from a registry still reach it.
+  - **Only configured registry hosts are mirrored.** A provider is addressed by its own source
+    address (`{hostname}/{namespace}/{type}`), so the request path always names a host the *client*
+    chose. That hostname is matched against the org's configured upstreams rather than fetched
+    from, so a caller cannot steer a server-side request at an arbitrary host. Add private
+    registries under **Settings → Proxy → Upstream registries**.
+
+  Terraform is proxy-only (no hosted push), like Go and apk. Provider fetches run the same
+  record → scan → gate sequence as npm and PyPI: source pinning, checksum verification against the
+  registry's reported `shasum` before storage, the block gate on first fetch *and* on every cache
+  hit, and `local_only` reserved-namespace semantics. See `docs/terraform.md`.
+
+- **Publisher-signed SHASUMS chain verification for Terraform providers.** A new per-org
+  `verify_terraform_signatures` policy — `off` (default) / `warn` / `block` — verifies the
+  registry-published SHASUMS file against the publisher's PGP signature on provider fetch.
+  Enabling `warn` or `block` requires at least one per-org Terraform PGP anchor under
+  **Settings → Trust Anchors**; consistent with the other `verify_*` gates, `block` with an empty
+  anchor set denies every Terraform artefact rather than degrading to a no-op.
+
+- **Edge nodes chain the Terraform mirror through their master.** Point a client at the edge's
+  `/terraform/` and it serves from its own cache, filling from the master on a miss. Terraform is
+  the one ecosystem whose edge upstream row must record *which protocol the master speaks* — the
+  master serves the network mirror protocol while the fetcher's default is the registry protocol —
+  so the seeded row carries `upstream_protocol = 'mirror'`. This is automatic (`EdgeUpstreamSeeder`
+  writes it on every boot) and needs no operator action. The archive is fetched through the edge's
+  own proxy pipeline, so the block gate, reserved namespaces, source pinning, and `cache_artifact`
+  recording all apply at the edge, not only at the master.
+
+- **Version documents publish the protocol's optional `hashes` field.** For every platform this
+  instance has cached, a `zh:` entry carries the archive's SHA-256 — the hash already held on the
+  cache-plane row; otherwise the hashes an upstream mirror published are passed through. This is
+  what gives a chained node something to verify: a downstream edge takes its fetch-time checksum
+  from exactly this field, and the client-side `.terraform.lock.hcl` anchor does not protect an
+  intermediate cache. Terraform's own `h1:` dirhash is still not emitted — it is a different
+  computation over the extracted contents, and the lock file remains the client's anchor for it.
+
+- **`upstream_protocol` on upstream registries.** A Terraform upstream speaking the mirror protocol
+  can be configured by hand as well as seeded: `POST /api/v1/upstream-registries` accepts a
+  `protocol` field (`mirror`, or omitted for the ecosystem default), and **Settings → Proxy**
+  exposes it. It is Terraform-only — supplying it for any other ecosystem is rejected, since
+  everywhere else the upstream serves the same protocol the fetcher speaks.
+
+- **Existing orgs are backfilled with the default Terraform upstream.** A one-shot migration seeds
+  the `registry.terraform.io` row for orgs created before the ecosystem existed. Without it an
+  existing org has no configured Terraform upstream at all, and since a provider's hostname is
+  matched against exactly that list, the mirror would answer nothing rather than merely losing a
+  fallback. Honours a `Terraform__Upstream` override. Only Terraform is seeded — the full default
+  set is never re-run, so a deliberately deleted upstream is not resurrected.
+
+### Changed — action required
+
+- **Artefacts in an ecosystem with no OSV feed now report `no_feed`, not `unscanned`.** OSV
+  publishes no advisory feed for **OCI** images (container vulnerabilities are image-scan
+  territory) or **Terraform** providers, so every lookup returns an empty advisory list whatever
+  the artefact contains. Those artefacts were already left unscanned rather than stamped — what
+  changes is the read surface: the version-status field returned by `/api/v1` and rendered in the
+  UI now carries a distinct **`no_feed`** value ("No advisory feed") instead of folding them in
+  with `unscanned`, and it sorts ahead of `unscanned` because an unscanned artefact is waiting for
+  the next pass while one with no feed will never be covered at all.
+
+  **If you consume the version-status field, add `no_feed` to your handling** — a consumer that
+  switches on the known set will see an unrecognised value. RPM is deliberately *not* in this set:
+  OSV has no single "RPM" ecosystem but does publish distro feeds (Rocky, AlmaLinux, Red Hat) that
+  a `pkg:rpm` query resolves against, so RPM keeps scanning and stamping.
+
+- **Paged audit and activity totals are capped at 10,000.** On large instances the exact `COUNT`
+  behind `GET /api/v1/orgs/{org}/audit` and `…/activity` joined the actor tables and timed out with
+  a 504. The count now probes one past the cap and skips the actor joins when no search is active.
+  Both responses gain a **`totalCapped`** boolean; when it is true, `total` is the cap rather than
+  an exact count and the UI renders "of 10000+". CSV export is unaffected — it never computed a
+  total. **If you read `total` from these endpoints, read `totalCapped` alongside it**, or a
+  history past the cap will read as exactly 10,000 rows.
+
+### Security
+
+- **Stale frontend dev-dependency pins holding vulnerable versions are unpinned.** The `overrides`
+  block in `web/package.json` had gone stale and was pinning four packages to versions that later
+  advisories marked vulnerable — the pins were *blocking* the patched releases from resolving
+  rather than protecting against them. Clears 21 advisories across `fast-uri`, `undici`, `js-yaml`,
+  `tar` (including critical `GHSA-w8wr-v893-vjvp`), `postcss`, `ip-address`, and `brace-expansion`.
+  Build-time dependencies only — no shipped runtime code is affected.
+
+The remainder are in the Terraform provider mirror, found while hardening it before release. None
+affects a previously shipped ecosystem.
+
+- **The org's upstream credential is no longer sent to the archive host.** Under the registry
+  protocol the `download_url` names a host the *upstream* chose (`releases.hashicorp.com` for
+  HashiCorp's own providers), not one the operator configured. The `Authorization` credential is
+  now attached only to requests against the configured upstream base authority — the mirror surface
+  and the registry's own metadata endpoints — so a registry cannot harvest an org's upstream
+  credential by pointing `download_url` at itself.
+- **Reserved namespaces are enforced on all three protocol documents, not just the archive.**
+  Forwarding a reserved private provider source address to a public registry to build a version
+  list discloses the name and serves that registry's answer for it — the exact opposite of
+  `local_only`. Every document for a reserved address is now a 404.
+- **A registry-protocol archive with no published `shasum` is refused rather than stored.** The
+  shasum is the only thing binding third-party bytes on a foreign authority to the registry that
+  vouched for them; without one there is nothing to verify, so the bytes are no longer accepted
+  trust-on-first-use from a host the operator never configured. The mirror protocol's hash-less
+  TOFU remains a deliberate, documented exception — a mirror serves its own bytes from beneath the
+  configured base.
+- **One tenant can no longer dictate the integrity anchor another advertises.** `cache_artifact` is
+  a global plane row with no `org_id`, so its `content_hash` belongs to whichever tenant fetched
+  the coordinate first. The `zh:` hash is now emitted only when the row's `blob_key` is this org's
+  own, proving the hash describes bytes this org holds. A chained edge takes `zh:` as its only
+  fetch-time checksum, so a mismatched anchor would have denied the provider to every downstream.
+  Single-tenant deployments are unaffected — every row is already this org's.
+- **Malformed platform tokens are rejected before any fetch.** A trailing-underscore token such as
+  `linux_` passed the segment check and yielded an empty arch, composing a malformed upstream
+  `/download/{os}/` URL; an interior underscore is now required.
+- **The blob stream is disposed when the block gate refuses a cached provider.** On an S3 or Azure
+  backend that stream is a live HTTP response, so a client retry loop against a blocked provider
+  stranded one connection per request until the pool drained.
+- **A checksum mismatch on the archive host answers 502, not an opaque 500** — matching every peer
+  proxy. The staged file is discarded before the throw, so nothing enters the blob store.
+
+### Fixed
+
+- **Redirects on the mirror archive fetch are contained to the fetch base.** `SsrfAwareRedirectHandler`
+  gains an opt-in per-hop containment base: when set, every redirect target must sit beneath it or
+  the hop is refused, on top of the SSRF-range check each hop already gets. Without it a compliant
+  published URL could `302` to an arbitrary — and therefore SSRF-clean — host of the mirror's
+  choosing. The constraint propagates across hops, so it holds for the whole chain, not just the
+  first. Protocols that legitimately redirect to an arbitrary CDN are unaffected: the option is
+  absent by default.
+- **Cached provider metadata is served when the upstream cannot answer.** A version-list or
+  version document already in cache is served on an upstream outage instead of failing the
+  `terraform init`.
+- **Terraform and Maven capture the upstream publish timestamp**, so the release-age cooldown gate
+  measures against the real upstream publication time rather than first-fetch time.
+- **Terraform is present in the reserved-namespace vocabulary**, the dashboard ecosystem donut, and
+  the SPA-fallback path list — a `/terraform/` request no longer falls through to the SPA, and a
+  reserved Terraform namespace is enforced rather than silently accepted.
+- **Go advisories that enumerate `v`-prefixed versions now match.** OSV records some Go advisories
+  with explicit `v1.2.3` version lists rather than ranges; those were previously missed against the
+  unprefixed module version.
+- **Download counts are keyed by row identity, not purl.** A purl is not unique on either plane —
+  Maven and RPM map one purl to several filenames — so a purl-keyed counter credited a single
+  file's download to every sibling file and refreshed their `last_used`, which also perturbed LRU
+  eviction order.
+- **A repeatedly failing upstream no longer blocks the deprecation-refresh queue.** Both feeder
+  queries order by staleness ascending and take a fixed batch, so a group whose fetch threw was
+  re-selected first every pass; once batch-many such groups existed, no other group was ever
+  reached. A failed fetch now moves the group to the back of the queue. Only the attempt timestamps
+  advance — the deprecation verdict and recorded upstream-latest are left untouched, so a transient
+  outage does not erase state.
+- **A request for the bare mirror base URL answers 404, not 400.** A client probing the base
+  matched the catch-all with nothing bound and tripped implicit model validation ("The path field
+  is required"); 404 is the protocol's own answer for "not mirrored here".
+- **Dashboard deep-link parameters survive the held route transition** — filters carried in a
+  deep link are no longer dropped when the target page defers its render.
+
+### Internal
+
+- **Every CI image pull resolves through the mirror**, enforced by a new `image-registry-guard`
+  that looks past `FROM` lines at the pulls the build tooling makes on its own: `docker buildx
+  create` booting BuildKit from its own image, BuildKit resolving a `# syntax=` directive before
+  reading the first instruction, and `ARG *IMAGE*=` defaults. Mark a deliberate public pull with
+  `# image-registry-ok: <reason>`. Four working bypasses in the guard were closed, and it now scans
+  the repo's own files rather than nested checkouts. The OpenTelemetry collector image routes
+  through the mirror like everything else.
+
 ## [0.4.5] - 2026-08-02
 
 A feature release completing the NuGet symbol server that 0.4.0 introduced: proxied

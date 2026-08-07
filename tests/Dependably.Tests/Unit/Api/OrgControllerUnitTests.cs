@@ -879,4 +879,43 @@ public sealed class OrgControllerUnitTests
 
         Assert.IsType<NoContentResult>(result);
     }
+
+    // ── UpdateProxySettings: Terraform signature gate requires per-org trust anchor ─
+
+    [Theory]
+    [InlineData("warn")]
+    [InlineData("block")]
+    public async Task UpdateProxySettings_VerifyTerraformSignatures_NonOff_WithoutAnchor_Returns422(string mode)
+    {
+        // ControllerScenario wires TerraformProvenanceVerifier with an empty StubPerOrgTrustAnchorStore,
+        // so IsConfiguredForAsync returns false. Enabling verification without a per-org Terraform PGP
+        // anchor must be rejected with a 422 to prevent a permanently non-functional setting.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var result = await b.OrgSettingsController.UpdateProxySettings(
+            new UpdateProxySettingsRequest(ProxyPassthroughEnabled: true,
+                MaxOsvScoreTolerance: 10.0, VerifyTerraformSignatures: mode),
+            CancellationToken.None);
+
+        var obj = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
+    }
+
+    [Fact]
+    public async Task UpdateProxySettings_VerifyTerraformSignatures_Off_WithoutAnchor_Succeeds()
+    {
+        // Turning Terraform verification off is always allowed even with no per-org anchor.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var result = await b.OrgSettingsController.UpdateProxySettings(
+            new UpdateProxySettingsRequest(ProxyPassthroughEnabled: true,
+                MaxOsvScoreTolerance: 10.0, VerifyTerraformSignatures: "off"),
+            CancellationToken.None);
+
+        Assert.IsType<NoContentResult>(result);
+    }
 }

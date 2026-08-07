@@ -26,21 +26,21 @@ public sealed class TemporalCheckConstraintSqliteTests : IAsyncLifetime
 
     public async Task DisposeAsync() => await _db.DisposeAsync();
 
-    public static IEnumerable<object[]> AcceptedShapes()
+    public static TheoryData<string> AcceptedShapes() => new()
     {
-        yield return ["2026-03-04T05:06:07Z"];
-        yield return ["2026-03-04T05:06:07.123Z"];
-        yield return ["2026-03-04T05:06:07.123456Z"];
-    }
+        "2026-03-04T05:06:07Z",
+        "2026-03-04T05:06:07.123Z",
+        "2026-03-04T05:06:07.123456Z",
+    };
 
-    public static IEnumerable<object[]> RejectedShapes()
+    public static TheoryData<string> RejectedShapes() => new()
     {
-        yield return ["2026-03-04 05:06:07+02:00"];
-        yield return ["2026-03-04T05:06:07.0000000+00:00"];
-        yield return [""];
-        yield return ["not a date"];
-        yield return ["20260304050607"];
-    }
+        "2026-03-04 05:06:07+02:00",
+        "2026-03-04T05:06:07.0000000+00:00",
+        "",
+        "not a date",
+        "20260304050607",
+    };
 
     [Theory]
     [MemberData(nameof(AcceptedShapes))]
@@ -74,10 +74,15 @@ public sealed class TemporalCheckConstraintSqliteTests : IAsyncLifetime
     public async Task NullableColumn_PermitsNull()
     {
         await using var conn = await _db.OpenAsync();
+        string id = Guid.NewGuid().ToString("N");
         await conn.ExecuteAsync(
             "INSERT INTO users (id, tenant_id, email, password_hash, last_login_at) " +
             "VALUES (@id, 'o1', @email, 'h', NULL)",
-            new { id = Guid.NewGuid().ToString("N"), email = $"{Guid.NewGuid():N}@x.com" });
+            new { id, email = $"{Guid.NewGuid():N}@x.com" });
+
+        string? stored = await conn.QuerySingleAsync<string?>(
+            "SELECT last_login_at FROM users WHERE id = @id", new { id });
+        Assert.Null(stored);
     }
 
     [Theory]

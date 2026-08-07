@@ -25,21 +25,21 @@ public sealed class TemporalCheckConstraintPostgresTests
             "TEST_POSTGRES_CONNECTION must be set to run Category=SchemaPostgres tests. " +
             "CI sets it from the postgres service; locally start a docker postgres and export it.");
 
-    public static IEnumerable<object[]> AcceptedShapes()
+    public static TheoryData<string> AcceptedShapes() => new()
     {
-        yield return ["2026-03-04T05:06:07Z"];
-        yield return ["2026-03-04T05:06:07.123Z"];
-        yield return ["2026-03-04T05:06:07.123456Z"];
-    }
+        "2026-03-04T05:06:07Z",
+        "2026-03-04T05:06:07.123Z",
+        "2026-03-04T05:06:07.123456Z",
+    };
 
-    public static IEnumerable<object[]> RejectedShapes()
+    public static TheoryData<string> RejectedShapes() => new()
     {
-        yield return ["2026-03-04 05:06:07+02:00"];
-        yield return ["2026-03-04T05:06:07.0000000+00:00"];
-        yield return [""];
-        yield return ["not a date"];
-        yield return ["20260304050607"];
-    }
+        "2026-03-04 05:06:07+02:00",
+        "2026-03-04T05:06:07.0000000+00:00",
+        "",
+        "not a date",
+        "20260304050607",
+    };
 
     [Theory]
     [MemberData(nameof(AcceptedShapes))]
@@ -78,6 +78,10 @@ public sealed class TemporalCheckConstraintPostgresTests
 
         await using var conn = await pg.Store.OpenAsync();
         await conn.ExecuteAsync("INSERT INTO orgs (id, slug, deleted_at) VALUES ('o1', 'acme', NULL)");
+
+        string? stored = await conn.QuerySingleAsync<string?>(
+            "SELECT deleted_at FROM orgs WHERE id = 'o1'");
+        Assert.Null(stored);
     }
 
     [Fact]

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Dependably.Api.PyPiProtocol;
 
 namespace Dependably.Tests.Unit;
@@ -13,8 +14,11 @@ namespace Dependably.Tests.Unit;
 /// never by copying upstream HTML.
 /// </summary>
 [Trait("Category", "Unit")]
-public class PyPiSimpleIndexRewriteTests
+public partial class PyPiSimpleIndexRewriteTests
 {
+    [GeneratedRegex("""<a href="/packages/([^"#]+)(?:#sha256=([^"]+))?"( data-yanked="[^"]*")?>""")]
+    private static partial Regex HtmlAnchorRegex();
+
     // Shaped like a real pypi.org simple page for the mypy-extensions fixture package
     // (tests/Dependably.Tests/Fixtures/packages/pypi): sha256 fragments, requires-python
     // and metadata-sidecar attributes, multiple files per release.
@@ -542,8 +546,7 @@ public class PyPiSimpleIndexRewriteTests
 
     // (filename, sha256, yanked) as the PEP 503 HTML form advertises it.
     private static List<(string Filename, string? Sha256, bool Yanked)> ParseHtmlAnchors(string html) =>
-        System.Text.RegularExpressions.Regex.Matches(
-                html, """<a href="/packages/([^"#]+)(?:#sha256=([^"]+))?"( data-yanked="[^"]*")?>""")
+        HtmlAnchorRegex().Matches(html)
             .Select(m => (m.Groups[1].Value,
                 m.Groups[2].Success ? m.Groups[2].Value : null,
                 m.Groups[3].Success))

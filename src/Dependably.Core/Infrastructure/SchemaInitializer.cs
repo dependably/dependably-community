@@ -37,7 +37,10 @@ public sealed partial class SchemaInitializer
     // the process happens to run first.
     [ModuleInitializer]
     [SuppressMessage("Design", "CA2255:The 'ModuleInitializer' attribute is only intended to be used in application code or advanced source generator scenarios",
-        Justification = "A Dapper global type-handler registration has to win a race against every other query's first execution, in a class library every composition root references — that is exactly what ModuleInitializer is for, application-code framing in the analyzer's own message notwithstanding.")]
+        Justification = "A Dapper global type-handler registration has to win a race against every other " +
+            "query's first execution, in a class library every composition root references — that is " +
+            "exactly what ModuleInitializer is for, application-code framing in the analyzer's own message " +
+            "notwithstanding.")]
     internal static void RegisterDateTimeOffsetHandler()
     {
         // SQLite/Postgres both store these columns as TEXT (ISO 8601). Register a type handler
@@ -150,6 +153,10 @@ public sealed partial class SchemaInitializer
         // above: apk was added to the default sources after seed_default_upstream_registries
         // already ran for existing orgs, so it needs its own one-shot pass.
         await RunOnceAsync(conn, "seed_apk_upstream_registries", SeedApkUpstreamRegistriesAsync);
+        // Same footing again for Terraform. Its absence is harsher than a missing fallback: the
+        // mirror matches a requested provider's registry hostname against the org's configured
+        // upstreams, so an org with no 'terraform' row mirrors no provider at all.
+        await RunOnceAsync(conn, "seed_terraform_upstream_registries", SeedTerraformUpstreamRegistriesAsync);
         // Seed the two default OCI upstream rows (MCR + Docker Hub) for every org that has no
         // 'oci' upstream_registry rows yet. Hardcoded defaults; does not read Oci:Upstreams config
         // (that config key is no longer used). Idempotent via the per-(org, ecosystem) existence

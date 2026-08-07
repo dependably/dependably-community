@@ -458,18 +458,21 @@ public sealed class TrustAnchorControllerTests : IClassFixture<DependablyFactory
     private static readonly HashSet<(string Ecosystem, string AnchorKind)> RegisteredPairs =
         [.. TrustAnchorPairs.Registered];
 
-    public static IEnumerable<object[]> UnregisteredEcosystemAnchorKindPairs()
+    public static TheoryData<string, string> UnregisteredEcosystemAnchorKindPairs()
     {
+        var data = new TheoryData<string, string>();
         foreach (string ecosystem in TrustAnchorRepository.SupportedEcosystems)
         {
             foreach (string anchorKind in TrustAnchorRepository.AllowedAnchorKinds)
             {
                 if (!RegisteredPairs.Contains((ecosystem, anchorKind)))
                 {
-                    yield return [ecosystem, anchorKind];
+                    data.Add(ecosystem, anchorKind);
                 }
             }
         }
+
+        return data;
     }
 
     [Theory]

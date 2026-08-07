@@ -159,36 +159,49 @@ public sealed class PackageRepositoryExtendedTests : IClassFixture<InMemoryDbFix
     }
 
     [Fact]
-    public async Task IncrementDownloadCountByPurlAsync_BumpsGlobalPlaneTenantRow()
+    public async Task RecordDownloadHitAsync_BumpsOnlyTheServedCacheArtifactRow()
     {
-        // By-purl increments now target tenant_artifact_access.download_count (global plane).
-        // Seed a cache_artifact + tenant_artifact_access row for the target org.
+        // Cache-plane increments target tenant_artifact_access.download_count keyed by the
+        // cache_artifact id. Seed two rows for one org that share a purl — the RPM/Maven shape,
+        // where a version spans several files — and assert only the served one moves.
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
         string purl = Purl();
-        string caId = Guid.NewGuid().ToString("N");
+        string servedId = Guid.NewGuid().ToString("N");
+        string siblingId = Guid.NewGuid().ToString("N");
 
         await using (var conn = await _fixture.Store.OpenAsync())
         {
             await conn.ExecuteAsync(
                 "INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash, purl) " +
                 "VALUES (@id, 'rpm', 'acme', '1.0.0', 'acme-1.0.0.rpm', @bk, 'h', @purl)",
-                new { id = caId, bk = $"proxy/h/acme-1.0.0.rpm", purl });
+                new { id = servedId, bk = "proxy/h/acme-1.0.0.rpm", purl });
+            await conn.ExecuteAsync(
+                "INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash, purl) " +
+                "VALUES (@id, 'rpm', 'acme', '1.0.0', 'acme-1.0.0.src.rpm', @bk, 'h2', @purl)",
+                new { id = siblingId, bk = "proxy/h2/acme-1.0.0.src.rpm", purl });
             await conn.ExecuteAsync(
                 "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id, download_count) VALUES (@orgId, @caId, 0)",
-                new { orgId, caId });
+                new { orgId, caId = servedId });
+            await conn.ExecuteAsync(
+                "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id, download_count) VALUES (@orgId, @caId, 0)",
+                new { orgId, caId = siblingId });
         }
 
-        await _repo.IncrementDownloadCountByPurlAsync(orgId, purl);
-        await _repo.IncrementDownloadCountByPurlAsync(orgId, purl);
+        var access = new TenantArtifactAccessRepository(_fixture.Store);
+        var at = TestTime.Frozen().GetUtcNow();
+        await access.RecordDownloadHitAsync(orgId, servedId, at);
+        await access.RecordDownloadHitAsync(orgId, servedId, at);
 
         await using var conn2 = await _fixture.Store.OpenAsync();
-        int count = await conn2.ExecuteScalarAsync<int>(
+        int served = await conn2.ExecuteScalarAsync<int>(
             "SELECT download_count FROM tenant_artifact_access WHERE org_id = @orgId AND cache_artifact_id = @caId",
-            new { orgId, caId });
-        Assert.Equal(2, count);
+            new { orgId, caId = servedId });
+        int sibling = await conn2.ExecuteScalarAsync<int>(
+            "SELECT download_count FROM tenant_artifact_access WHERE org_id = @orgId AND cache_artifact_id = @caId",
+            new { orgId, caId = siblingId });
 
-        // Unknown purl is a harmless no-op.
-        await _repo.IncrementDownloadCountByPurlAsync(orgId, "pkg:rpm/nope@9.9.9");
+        Assert.Equal(2, served);
+        Assert.Equal(0, sibling);
     }
 
     // ── DeleteVersionAsync ───────────────────────────────────────────────────

@@ -1,4 +1,7 @@
-# syntax=docker/dockerfile:1
+# Deliberately carries no `# syntax=` directive: BuildKit fetches an external
+# frontend from docker.io to honour one, and nothing here needs it — no
+# RUN --mount, no heredocs, and an ARG ahead of FROM is built-in behaviour.
+# The built-in frontend keeps this build free of any Docker Hub pull.
 # Prebaked CI tool image for the two jobs that need small OS-level utilities on
 # top of the .NET SDK: sca-backend (jq, for parsing `dotnet list package
 # --vulnerable` output) and sonarqube-check (a JRE for the SonarScanner engine,

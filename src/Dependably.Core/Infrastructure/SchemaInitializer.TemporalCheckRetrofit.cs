@@ -88,23 +88,13 @@ public sealed partial class SchemaInitializer
     /// a naming convention.
     /// internal so a test can assert the derived set against the schema file directly.
     /// </summary>
-    internal static List<(string Table, string Column)> DeclaredTemporalCheckColumns(string schemaSql)
-    {
-        var declared = new List<(string Table, string Column)>();
-        foreach (var (table, definition) in SchemaSqlParser.ParseTableDefinitions(schemaSql))
-        {
-            foreach (var column in definition.Columns)
-            {
-                if (column.Declaration.Contains(
-                        TemporalCheckPredicate.ForPostgres(column.Name), StringComparison.Ordinal))
-                {
-                    declared.Add((table, column.Name));
-                }
-            }
-        }
-
-        return declared;
-    }
+    internal static List<(string Table, string Column)> DeclaredTemporalCheckColumns(string schemaSql) =>
+        SchemaSqlParser.ParseTableDefinitions(schemaSql)
+            .SelectMany(entry => entry.Value.Columns
+                .Where(column => column.Declaration.Contains(
+                    TemporalCheckPredicate.ForPostgres(column.Name), StringComparison.Ordinal))
+                .Select(column => (Table: entry.Key, column.Name)))
+            .ToList();
 
     private async Task EnsureTemporalCheckAsync(DbConnection conn, string table, string column)
     {
@@ -136,6 +126,10 @@ public sealed partial class SchemaInitializer
             return;
         }
 
+        // Sonar's engine mis-models Dapper's nullable scalar return and reads this branch as
+        // dead; `validated` is `null` exactly when ExecuteScalarAsync<bool?> found no matching
+        // row, which is the constraint-absent path this branch exists to handle.
+#pragma warning disable S2583
         if (validated is null)
         {
             // rawsql: table, column, and constraintName are all structurally derived from the fixed
@@ -146,6 +140,7 @@ public sealed partial class SchemaInitializer
                 $"ALTER TABLE {table} ADD CONSTRAINT {constraintName} " +
                 $"{TemporalCheckPredicate.ForPostgres(column)} NOT VALID");
         }
+#pragma warning restore S2583
 
         try
         {

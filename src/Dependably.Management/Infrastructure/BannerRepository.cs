@@ -367,6 +367,22 @@ public sealed class BannerRepository
 
 // ── Request DTOs ──────────────────────────────────────────────────────────────────────────────
 
+/// <summary>
+/// The banner content fields shared by create and update requests — what
+/// <c>BannersController</c>/<c>SystemBannersController</c>'s <c>ValidateRequest</c> validates,
+/// independent of which operation (or scope) is calling it.
+/// </summary>
+public interface IBannerContentRequest
+{
+    string Severity { get; }
+    string Body { get; }
+    string? LinkUrl { get; }
+    string? LinkLabel { get; }
+    string TargetRole { get; }
+    string StartsAt { get; }
+    string EndsAt { get; }
+}
+
 /// <summary>Payload for creating a banner (tenant or system scope).</summary>
 public record BannerCreateRequest(
     string Severity,
@@ -376,7 +392,7 @@ public record BannerCreateRequest(
     string TargetRole,
     string StartsAt,
     string EndsAt,
-    bool Enabled = true);
+    bool Enabled = true) : IBannerContentRequest;
 
 /// <summary>Payload for updating a banner (tenant or system scope).</summary>
 public record BannerUpdateRequest(
@@ -387,4 +403,4 @@ public record BannerUpdateRequest(
     string TargetRole,
     string StartsAt,
     string EndsAt,
-    bool Enabled = true);
+    bool Enabled = true) : IBannerContentRequest;

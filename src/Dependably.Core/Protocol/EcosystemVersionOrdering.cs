@@ -23,8 +23,9 @@ public static partial class EcosystemVersionOrdering
     public static IReadOnlyList<string> OrderStableDescending(string ecosystem, IEnumerable<string> rawVersions) =>
         ecosystem switch
         {
-            // Cargo versions are SemVer 2.0, the same grammar npm uses.
-            "npm" or "cargo" => OrderNpm(rawVersions),
+            // Cargo versions are SemVer 2.0, the same grammar npm uses. Terraform provider
+            // versions are SemVer 2.0 as well — the registry rejects a release that is not.
+            "npm" or "cargo" or "terraform" => OrderNpm(rawVersions),
             "pypi" => OrderPyPi(rawVersions),
             "nuget" => OrderNuGet(rawVersions),
             "maven" => OrderMaven(rawVersions),
@@ -43,7 +44,7 @@ public static partial class EcosystemVersionOrdering
             ? null
             : ecosystem switch
             {
-                "npm" or "cargo" => CountNewer<NpmSemver>(stableVersionsDescending, heldVersion, TryParseNpm, CompareNpm),
+                "npm" or "cargo" or "terraform" => CountNewer<NpmSemver>(stableVersionsDescending, heldVersion, TryParseNpm, CompareNpm),
                 "pypi" => CountNewer<Pep440>(stableVersionsDescending, heldVersion, TryParsePep440, ComparePep440),
                 "nuget" => CountNewer<NuGetVersion>(stableVersionsDescending, heldVersion,
                     (string s, out NuGetVersion? v) => NuGetVersion.TryParse(s, out v),
@@ -62,7 +63,7 @@ public static partial class EcosystemVersionOrdering
     public static int? Compare(string ecosystem, string left, string right) =>
         ecosystem switch
         {
-            "npm" or "cargo" => TryParseNpm(left, out var ln) && TryParseNpm(right, out var rn)
+            "npm" or "cargo" or "terraform" => TryParseNpm(left, out var ln) && TryParseNpm(right, out var rn)
                 ? CompareNpm(ln, rn) : null,
             "pypi" => TryParsePep440(left, out var lp) && lp is not null
                       && TryParsePep440(right, out var rp) && rp is not null

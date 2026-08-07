@@ -32,6 +32,8 @@ public enum PostgresKind
 public sealed record PostgresColumn(string Name, PostgresKind Kind, bool IsNullable);
 
 /// <summary>Raised when a value or a column type cannot be migrated faithfully.</summary>
+[System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S3925:\"ISerializable\" should be implemented correctly",
+    Justification = "Binary serialization ctor on Exception is obsolete in .NET 10 (SYSLIB0051); this exception is never serialized across an AppDomain or binary boundary.")]
 public sealed class MetadataMigrationException : Exception
 {
     public MetadataMigrationException(string message) : base(message) { }

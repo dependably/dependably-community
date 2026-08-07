@@ -305,50 +305,65 @@ public abstract class ScheduledBackgroundService : BackgroundService
     {
         if (ScopeJobName is { } jobName && ScopeMetricName is { } metricName)
         {
-            using var scope = BackgroundJobScope.Begin(jobName, metricName, _time);
-            try
-            {
-                await RunTickAsync(ct);
-                scope.Complete();
-            }
-            catch (OperationCanceledException) when (IsLeaseAbort(lease))
-            {
-                // Neither Complete nor Fail: the scope's default outcome is "cancelled", which is
-                // what a leadership handover is. Recording Fail here would put a server_error
-                // job-run row and an error-status span on every handover. RunTickGuardedAsync
-                // logs the abort once, with the lock name.
-            }
-            catch (Exception ex)
-            {
-                scope.Fail(ex);
-                if (ContinueOnTickError)
-                {
-                    _logger.LogError(ex, "{ServiceType} tick failed.", GetType().Name);
-                }
-                else
-                {
-                    throw;
-                }
-            }
+            await RunScopedTickAsync(jobName, metricName, ct, lease);
         }
         else if (ContinueOnTickError)
         {
-            try
-            {
-                await RunTickAsync(ct);
-            }
-            catch (OperationCanceledException) when (IsLeaseAbort(lease))
-            {
-                // Coordinated stop; RunTickGuardedAsync logs it as an abort, not a tick failure.
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "{ServiceType} tick failed.", GetType().Name);
-            }
+            await RunContinuingTickAsync(ct, lease);
         }
         else
         {
             await RunTickAsync(ct);
+        }
+    }
+
+    // The scoped shape (job-run row + span via BackgroundJobScope): runs the tick, records the
+    // outcome, and — for a genuine failure rather than a lease abort — either logs it (when the
+    // job continues on error) or lets it propagate.
+    private async Task RunScopedTickAsync(string jobName, string metricName, CancellationToken ct, LeaderLease? lease)
+    {
+        using var scope = BackgroundJobScope.Begin(jobName, metricName, _time);
+        try
+        {
+            await RunTickAsync(ct);
+            scope.Complete();
+        }
+        catch (OperationCanceledException) when (IsLeaseAbort(lease))
+        {
+            // Neither Complete nor Fail: the scope's default outcome is "cancelled", which is
+            // what a leadership handover is. Recording Fail here would put a server_error
+            // job-run row and an error-status span on every handover. RunTickGuardedAsync
+            // logs the abort once, with the lock name.
+        }
+        catch (Exception ex)
+        {
+            scope.Fail(ex);
+            if (ContinueOnTickError)
+            {
+                _logger.LogError(ex, "{ServiceType} tick failed.", GetType().Name);
+            }
+            else
+            {
+                throw;
+            }
+        }
+    }
+
+    // The unscoped, continue-on-error shape: runs the tick and logs a genuine failure rather than
+    // letting it fault ExecuteAsync; a lease abort is a coordinated stop, not a tick failure.
+    private async Task RunContinuingTickAsync(CancellationToken ct, LeaderLease? lease)
+    {
+        try
+        {
+            await RunTickAsync(ct);
+        }
+        catch (OperationCanceledException) when (IsLeaseAbort(lease))
+        {
+            // Coordinated stop; RunTickGuardedAsync logs it as an abort, not a tick failure.
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "{ServiceType} tick failed.", GetType().Name);
         }
     }
 }

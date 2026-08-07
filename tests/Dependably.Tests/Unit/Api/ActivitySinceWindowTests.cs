@@ -31,7 +31,7 @@ public sealed class ActivitySinceWindowTests
         await SeedBlockedEventsAsync(b.Db, b.PrimaryOrgId);
 
         var repo = new AuditRepository(b.Db);
-        var (items, total) = await repo.ListActivityAsync(
+        var (items, total, _) = await repo.ListActivityAsync(
             b.PrimaryOrgId, limit: 50, offset: 0, eventType: "blocked", since: "2026-05-16T12:00:00Z");
 
         // A COUNT that forgot the bound would report 2 against a single row and mis-size the pager.

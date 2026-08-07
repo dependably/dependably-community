@@ -323,7 +323,8 @@ public sealed class MavenUpstreamFetcher
 
         return new MavenArtifactFetchResult(
             BlobKey: fetched.BlobKey, Sha256: fetched.Sha256Hex, Sha1: sha1, Md5: md5,
-            SizeBytes: fetched.SizeBytes, IsFromCache: false, UpstreamUrl: upstreamUrl);
+            SizeBytes: fetched.SizeBytes, IsFromCache: false, UpstreamUrl: upstreamUrl,
+            PublishedAt: fetched.LastModified);
     }
 
     /// <summary>
@@ -630,7 +631,17 @@ public sealed record MavenArtifactFetchResult(
     /// ecosystem and the column's contract — a repository-relative path cannot identify the
     /// upstream host. Null only when no fetch occurred.
     /// </summary>
-    string? UpstreamUrl = null);
+    string? UpstreamUrl = null,
+    /// <summary>
+    /// The artifact's upstream publish timestamp, feeding the release-age cooldown gate
+    /// (<c>min_release_age_hours</c>). Sourced from the upstream response's <c>Last-Modified</c>
+    /// header on the fetch-then-hash path (<see cref="FetchThenHashAsync"/>) — the norm for Maven
+    /// Central, which serves no per-version metadata document with a publish date. Null on the
+    /// sha256-sidecar-known path (<see cref="FetchArtifactAsync"/>'s streaming branch), which does
+    /// not read response headers; the cooldown fails open there rather than blocking every fetch,
+    /// same posture <see cref="Api.MavenController"/> already takes for a missing signal.
+    /// </summary>
+    DateTimeOffset? PublishedAt = null);
 
 /// <summary>
 /// Parsed representation of a SNAPSHOT version-level <c>maven-metadata.xml</c> document.

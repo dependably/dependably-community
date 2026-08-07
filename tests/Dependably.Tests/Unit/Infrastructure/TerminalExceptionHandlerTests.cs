@@ -27,7 +27,7 @@ public sealed class TerminalExceptionHandlerTests
 
     private const string InnerSecretMessage = "SqliteException: no such column secret_column";
 
-    private static Exception BuildRealisticException()
+    private static DependablyProbeException BuildRealisticException()
     {
         try
         {

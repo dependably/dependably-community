@@ -332,13 +332,16 @@ export const api = {
   getUpstreamRegistries: () => req('GET', '/upstream-registries'),
   // Non-OCI: supply ecosystem, url, name and optional auth fields (authType, username, secret).
   // authType ∈ { 'anonymous' (default), 'bearer', 'basic' }; omit auth fields for rpm.
+  // protocol is terraform-only: null (Provider Registry Protocol, the default) or 'mirror'
+  // (Provider Network Mirror Protocol); rejected by the API for every other ecosystem.
   // Only non-null/non-anonymous values are sent so the body stays minimal.
-  addUpstreamRegistry: (ecosystem, url, name, authType, username, secret) => {
+  addUpstreamRegistry: (ecosystem, url, name, authType, username, secret, protocol) => {
     /** @type {Record<string, any>} */
     const body = { ecosystem, url, name }
     if (authType && authType !== 'anonymous') body.authType = authType
     if (username) body.username = username
     if (secret) body.secret = secret
+    if (protocol) body.protocol = protocol
     return req('POST', '/upstream-registries', body)
   },
   // OCI-specific add: carries host (in url), authType, prefixes, optional username/secret/tokenEndpoint.

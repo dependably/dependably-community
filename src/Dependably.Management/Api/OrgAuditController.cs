@@ -93,7 +93,7 @@ public sealed class OrgAuditController : OrgScopedControllerBase
 
         if (string.Equals(format, "csv", StringComparison.OrdinalIgnoreCase))
         {
-            var (csvItems, _) = await _audit.ListActivityAsync(orgId, CsvExportRowCap, 0, eventType, search, sinceIso, ct);
+            var (csvItems, _, _) = await _audit.ListActivityAsync(orgId, CsvExportRowCap, 0, eventType, search, sinceIso, includeTotal: false, ct);
             var sb = new System.Text.StringBuilder();
             CsvWriter.WriteRow(sb, "created_at", "event_type", "ecosystem", "purl", "actor_email", "source_ip", "detail");
             foreach (var item in csvItems)
@@ -112,8 +112,8 @@ public sealed class OrgAuditController : OrgScopedControllerBase
 
         limit = Math.Clamp(limit, 1, MaxAuditPageSize);
         int offset = PaginationHelper.ComputeOffset(page, limit);
-        var (items, total) = await _audit.ListActivityAsync(orgId, limit, offset, eventType, search, sinceIso, ct);
-        return Ok(new { items, total, limit, offset });
+        var (items, total, totalCapped) = await _audit.ListActivityAsync(orgId, limit, offset, eventType, search, sinceIso, ct: ct);
+        return Ok(new { items, total, totalCapped, limit, offset });
     }
 
     /// <summary>GET /api/v1/orgs/{org}/audit</summary>
@@ -142,7 +142,7 @@ public sealed class OrgAuditController : OrgScopedControllerBase
 
         if (string.Equals(format, "csv", StringComparison.OrdinalIgnoreCase))
         {
-            var (csvItems, _) = await _audit.ListAuditAsync(orgId, CsvExportRowCap, 0, action, search, ct);
+            var (csvItems, _, _) = await _audit.ListAuditAsync(orgId, CsvExportRowCap, 0, action, search, includeTotal: false, ct);
             var sb = new System.Text.StringBuilder();
             CsvWriter.WriteRow(sb, "created_at", "action", "actor_email", "ecosystem", "purl", "detail");
             foreach (var item in csvItems)
@@ -160,7 +160,7 @@ public sealed class OrgAuditController : OrgScopedControllerBase
 
         limit = Math.Clamp(limit, 1, MaxAuditPageSize);
         int offset = PaginationHelper.ComputeOffset(page, limit);
-        var (items, total) = await _audit.ListAuditAsync(orgId, limit, offset, action, search, ct);
-        return Ok(new { items, total, limit, offset });
+        var (items, total, totalCapped) = await _audit.ListAuditAsync(orgId, limit, offset, action, search, ct: ct);
+        return Ok(new { items, total, totalCapped, limit, offset });
     }
 }

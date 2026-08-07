@@ -42,7 +42,7 @@ public static class DatabaseMigrationCommand
             || string.Equals(args[0], VerifyVerb, StringComparison.Ordinal));
 
     /// <summary>Runs the selected mode and returns the process exit code.</summary>
-    public static async Task<int> RunAsync(
+    public static Task<int> RunAsync(
         string[] args,
         IConfiguration configuration,
         ILoggerFactory loggerFactory,
@@ -54,6 +54,16 @@ public static class DatabaseMigrationCommand
         ArgumentNullException.ThrowIfNull(loggerFactory);
         ArgumentNullException.ThrowIfNull(time);
 
+        return RunCoreAsync(args, configuration, loggerFactory, time, ct);
+    }
+
+    private static async Task<int> RunCoreAsync(
+        string[] args,
+        IConfiguration configuration,
+        ILoggerFactory loggerFactory,
+        TimeProvider time,
+        CancellationToken ct)
+    {
         var logger = loggerFactory.CreateLogger("Dependably.Migration");
 
         MigrationCommandArguments parsed;
@@ -134,7 +144,7 @@ public static class DatabaseMigrationCommand
     /// window means a live node, and a migration taken from underneath one is a torn snapshot.
     /// </summary>
     private static async Task WarnOnLiveWriterAsync(
-        IMetadataStore source, TimeProvider time, ILogger logger, CancellationToken ct)
+        SqliteMetadataStore source, TimeProvider time, ILogger logger, CancellationToken ct)
     {
         await using var conn = await source.OpenAsync(ct);
 

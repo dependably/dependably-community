@@ -3,6 +3,9 @@
   import { createEventDispatcher } from 'svelte'
 
   export let total = 0
+  // True when `total` is a server-side cap, not an exact count (large audit/activity
+  // histories stop counting at the cap). The summary renders "of N+" instead of "of N".
+  export let totalCapped = false
   export let page = 1
   export let limit = 50
 
@@ -43,7 +46,7 @@
 {#if total > 0}
 <div class="pagination">
   <div class="pagination-summary">
-    {$t('common.pagination.summary', { values: { from, to, total } })}
+    {$t(totalCapped ? 'common.pagination.summaryCapped' : 'common.pagination.summary', { values: { from, to, total } })}
   </div>
 
   <div class="pagination-controls">
