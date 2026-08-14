@@ -18,6 +18,14 @@ namespace Dependably.Background;
 /// transient DB failure on one tenant is logged and skipped so it cannot escape and, under
 /// BackgroundService's default StopHost behavior, take the whole replica down.
 ///
+/// One tenant's whole erasure — the guarded DELETE, the three non-cascading relations below, the
+/// <c>audit_event</c> pseudonymization, and the <c>tenant.hard_deleted</c> audit row — runs in a
+/// single transaction, so that skip is genuinely a retry rather than a partial erasure left behind
+/// forever: the next pass's worklist is a <c>SELECT</c> over <c>orgs</c>, so an org row committed
+/// away ahead of its dependent rows could never be listed again, and whatever was left behind
+/// would be unreachable. Rolling the org row back with everything else is what keeps the tenant in
+/// the worklist for the next pass.
+///
 /// Three relations carry no FK to <c>orgs</c>, so they do not cascade and are erased explicitly for
 /// the org: <c>banners</c>; the tenant-scoped (<c>scope='tenant'</c>) <c>audit_log</c> rows — to
 /// discharge Art. 17 erasure, since the forensic-retention design deliberately omits that FK
@@ -26,6 +34,14 @@ namespace Dependably.Background;
 /// <see cref="Dependably.Infrastructure.LoginService.HashLockoutKey"/> over (realm, tenantId,
 /// email) rather than a user id, so the member emails are snapshotted before the guarded DELETE
 /// cascades the <c>users</c> rows away, or there is nothing left to derive the keys from.
+///
+/// <c>audit_event.org_id</c> is the opposite shape: it carries an FK, but one that says
+/// <c>ON DELETE SET NULL</c> rather than restrict/cascade, so the org's typed audit rows survive
+/// deletion by design. Rather than erase them, the personal identifiers (<c>source_ip</c>,
+/// <c>user_agent</c>) are pseudonymized — the same treatment as <c>audit_log</c>'s age-based
+/// horizon, applied at the org's grain. The affected ids are snapshotted before the DELETE for the
+/// same reason the member emails are: once the cascade fires, <c>org_id</c> is NULL on every one
+/// of them, indistinguishable from any other org's already-orphaned rows.
 ///
 /// Schedule: <c>TENANT_HARD_DELETE_SCHEDULE</c> cron (default <c>0 4 * * *</c> — once daily,
 /// staggered 1h after the standard retention sweep).
@@ -39,6 +55,11 @@ public sealed class TenantHardDeleteService : BackgroundService
     // bounds how long the lock survives a crashed leader, not how long a sweep may take.
     private static readonly TimeSpan SweepLockTtl = TimeSpan.FromMinutes(5);
     private const string SweepLockName = "tenant-hard-delete:sweep";
+
+    // Chunk size for the audit_event pseudonymization UPDATE below. Keeps one tenant's IN clause
+    // well under SQLite's bound-parameter ceiling regardless of how large that tenant's audit
+    // history is.
+    private const int AuditEventPseudonymizeChunkSize = 500;
 
     private readonly OrgRepository _orgs;
     private readonly AuditRepository _audit;
@@ -195,35 +216,62 @@ public sealed class TenantHardDeleteService : BackgroundService
         }
     }
 
-    // Hard-deletes one tenant past its grace window, re-asserting the soft-deleted-past-grace
-    // predicate in the DELETE itself to close the race against a concurrent system_admin restore.
-    // A transient failure on this one tenant is logged and swallowed rather than escaping
-    // RunPassAsync — see the catch below for why the whole sweep must not abort on it.
+    // Hard-deletes one tenant past its grace window as a single transaction, re-asserting the
+    // soft-deleted-past-grace predicate in the DELETE itself to close the race against a concurrent
+    // system_admin restore. A transient failure on this one tenant is logged and swallowed rather
+    // than escaping RunPassAsync — see the catch below for why the whole sweep must not abort on it.
+    //
+    // The transaction is what makes that swallow safe. The erasure spans six relations, and only
+    // the org row is what the next pass's worklist query (ListExpiredSoftDeletedOrgIdsAsync, a
+    // SELECT over orgs) can see: an un-transacted sequence that deleted the org row first and then
+    // failed would strand the banners, login_attempts/account_send_throttle, audit_log and
+    // audit_event rows permanently, because the id can never be selected again. Committing all of
+    // it or none of it is what makes "the next pass retries this tenant" true rather than
+    // aspirational. Every statement is also idempotent on its own (deletes by key, UPDATE … SET
+    // NULL), so a retry after a rollback re-runs cleanly.
     private async Task HardDeleteOneTenantAsync(
         System.Data.Common.DbConnection conn, string orgId, string cutoff, CancellationToken ct)
     {
         try
         {
             // Read the slug before the row is gone — it's the only identity the operator
-            // Slack notification below can carry.
+            // Slack notification below can carry. Outside the transaction: it opens its own
+            // connection, which under a single-writer provider would contend with a write
+            // transaction already held on conn.
             string? slug = (await _orgs.GetByIdAsync(orgId, ct))?.Slug;
+
+            await using var tx = await conn.BeginTransactionAsync(ct);
 
             // Snapshot member emails before the guarded DELETE cascades the users table away.
             // login_attempts/account_send_throttle are keyed by LoginService.HashLockoutKey over
             // (realm, tenantId, email), not by user id, so once the user rows are gone there is no
             // way to recover which pseudonyms belonged to this tenant.
-            var memberEmails = (await conn.QueryAsync<string>(
-                "SELECT email FROM users WHERE tenant_id = @orgId", new { orgId })).ToList();
+            var memberEmails = (await conn.QueryAsync<string>(new CommandDefinition(
+                "SELECT email FROM users WHERE tenant_id = @orgId",
+                new { orgId }, transaction: tx, cancellationToken: ct))).ToList();
+
+            // Snapshot this org's audit_event ids before the guarded DELETE fires the table's own
+            // ON DELETE SET NULL cascade (org_id REFERENCES orgs(id) ON DELETE SET NULL — the
+            // schema deliberately retains the row past org deletion for forensic purposes). Once
+            // that cascade runs, org_id is NULL on every one of them, indistinguishable from any
+            // other org's already-orphaned rows, so there would be no way to find just this org's
+            // rows again afterward. A plain SELECT, so it carries none of the DELETE's race risk
+            // against a concurrent restore below — it is only ever acted on once that DELETE has
+            // actually won.
+            var auditEventIds = (await conn.QueryAsync<string>(new CommandDefinition(
+                "SELECT event_id FROM audit_event WHERE org_id = @orgId",
+                new { orgId }, transaction: tx, cancellationToken: ct))).ToList();
 
             // Re-assert soft-deleted-past-grace in the DELETE itself: a system_admin restore
             // (RestoreOrgAsync clears deleted_at) can land between the expired-list snapshot
             // and this iteration. The guarded statement then matches no row, and the just-
             // restored tenant is left untouched instead of irrecoverably hard-deleted.
-            int deleted = await conn.ExecuteAsync(
+            int deleted = await conn.ExecuteAsync(new CommandDefinition(
                 "DELETE FROM orgs WHERE id = @id AND deleted_at IS NOT NULL AND deleted_at < @cutoff",
-                new { id = orgId, cutoff });
+                new { id = orgId, cutoff }, transaction: tx, cancellationToken: ct));
             if (deleted == 0)
             {
+                await tx.RollbackAsync(ct);
                 _logger.LogInformation(
                     "TenantHardDelete: tenant {OrgId} skipped — restored within its grace window since the pass began.",
                     orgId);
@@ -232,7 +280,7 @@ public sealed class TenantHardDeleteService : BackgroundService
 
             // The org row is gone; FK cascade removed its per-tenant data. Banners carry no
             // FK to orgs, so delete them explicitly. Only reached when the DELETE won the race.
-            await _banners.DeleteForOrgAsync(orgId, ct);
+            await _banners.DeleteForOrgAsync(conn, tx, orgId, ct);
 
             // login_attempts/account_send_throttle carry no FK to orgs either — the tenant is
             // folded into the pseudonym key, not held as a column — so the cascade above never
@@ -243,10 +291,12 @@ public sealed class TenantHardDeleteService : BackgroundService
             foreach (string email in memberEmails)
             {
                 string lockoutKey = LoginService.HashLockoutKey("tenant", orgId, email);
-                await conn.ExecuteAsync(
-                    "DELETE FROM login_attempts WHERE email_hash = @lockoutKey", new { lockoutKey });
-                await conn.ExecuteAsync(
-                    "DELETE FROM account_send_throttle WHERE email_hash = @lockoutKey", new { lockoutKey });
+                await conn.ExecuteAsync(new CommandDefinition(
+                    "DELETE FROM login_attempts WHERE email_hash = @lockoutKey",
+                    new { lockoutKey }, transaction: tx, cancellationToken: ct));
+                await conn.ExecuteAsync(new CommandDefinition(
+                    "DELETE FROM account_send_throttle WHERE email_hash = @lockoutKey",
+                    new { lockoutKey }, transaction: tx, cancellationToken: ct));
             }
 
             // audit_log.org_id carries no FK to orgs (forensic-retention design), so tenant-scoped
@@ -254,17 +304,42 @@ public sealed class TenantHardDeleteService : BackgroundService
             // not cascade. On permanent erasure past grace, delete them to actually discharge Art.
             // 17. scope='system' operator lifecycle rows (incl. the tenant.hard_deleted row written
             // just below) are retained: this filters on scope='tenant'.
-            await conn.ExecuteAsync(
+            await conn.ExecuteAsync(new CommandDefinition(
                 "DELETE FROM audit_log WHERE org_id = @orgId AND scope = 'tenant'",
-                new { orgId });
+                new { orgId }, transaction: tx, cancellationToken: ct));
 
-            // Audit on the same connection — the DELETE doesn't take a write lock past the
-            // statement, so a fresh INSERT here doesn't risk the BEGIN IMMEDIATE deadlock.
+            // audit_event takes the pseudonymization treatment, not deletion — unlike audit_log's
+            // tenant-scoped rows, the schema's ON DELETE SET NULL on org_id says these rows are
+            // meant to survive their org. Drop the personal identifiers (source_ip, user_agent)
+            // while keeping actor_id/payload as the forensic skeleton, consistent with the
+            // instance-wide two-horizon policy RetentionService.PruneAuditEventsAsync enforces by
+            // age. Chunked so a tenant with a large audit_event history never builds one IN clause
+            // past SQLite's bound-parameter ceiling. A chunk loop that fails partway rolls back
+            // with the rest of the transaction, so the retry restarts from a re-snapshotted id
+            // list rather than from a half-pseudonymized set no query could find again.
+            foreach (string[] chunk in auditEventIds.Chunk(AuditEventPseudonymizeChunkSize))
+            {
+                // xtenant: keyed by event_id PKs captured from the org_id = @orgId snapshot taken
+                // above, before the ON DELETE SET NULL cascade fired.
+                await conn.ExecuteAsync(new CommandDefinition(
+                    "UPDATE audit_event SET source_ip = NULL, user_agent = NULL WHERE event_id IN @ids",
+                    new { ids = chunk }, transaction: tx, cancellationToken: ct));
+            }
+
+            // In the same transaction as the erasure it records: a row claiming a deletion that
+            // then rolled back would be worse than no row at all, and a row lost while the erasure
+            // committed leaves the operator audit list silent about a permanent deletion.
+            // No actor: this is a background sweep, not an operator action.
             await _audit.LogSystemAsync(
+                conn, tx,
                 action: "tenant.hard_deleted",
                 orgId: orgId,
                 ct: ct);
-            // No actor: this is a background sweep, not an operator action.
+
+            await tx.CommitAsync(ct);
+
+            // After the commit: the notification describes a deletion that has actually landed,
+            // and a notifier failure can no longer roll one back.
             _systemEvents?.Notify(new Dependably.Infrastructure.SystemEvents.SystemEventRecord(
                 "tenant.hard_deleted", slug, null, null));
         }
@@ -281,7 +356,11 @@ public sealed class TenantHardDeleteService : BackgroundService
             // import holds the single writer) on one tenant must not abort the batch or
             // escape RunPassAsync — an unhandled throw here faults the hosted
             // BackgroundService and, under the default StopHost behavior, takes the whole
-            // replica down. Log and continue; the next scheduled pass retries this tenant.
+            // replica down. The transaction above is what makes that swallow survivable: it is
+            // rolled back on the way out, so the org row is still present and still soft-deleted
+            // past grace, and the next scheduled pass lists this tenant again and retries the
+            // whole erasure. The one step outside the transaction is the post-commit operator
+            // notification, whose failure leaves a completed, audited deletion unannounced.
             _logger.LogError(ex,
                 "TenantHardDelete: hard-delete of tenant {OrgId} failed — skipping; the next pass retries.",
                 orgId);

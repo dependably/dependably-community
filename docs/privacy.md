@@ -49,6 +49,32 @@ the annotations are how the schema tells you the same thing.
 | `login_attempts` | Pseudonymized account key, failure count, lock state | Keyed by a SHA-256 over (realm, tenant, email). Pseudonymized, **not** anonymous: someone holding a candidate address can confirm it by recomputing the hash. |
 | `account_send_throttle` | Same pseudonymized account key, send count, window | Bounds account-targeted transactional mail per target account. Same pseudonymity caveat. |
 
+An operator reads these rows back through the audit and activity surfaces, including a CSV export.
+A search term there runs as a leading-wildcard match, which no index can serve, so the export
+bounds how far back it scans rather than walking the whole history. When that bound is reached the
+response carries **`X-Export-Truncated: true`** and the CSV holds only the rows found within it. An
+export with **no** search term is deliberately left unbounded, so a complete extract is always
+available through the indexed `action` and `since` filters — a compliance export must not be
+quietly short, and a client that ignores the header would not know that it was.
+
+### Outbound mail waiting to be sent
+
+| Table | Personal data | Notes |
+| --- | --- | --- |
+| `email_outbox` | Recipient addresses, rendered subject and body | The durable queue behind alert email. A row holds the org's configured alert recipients, snapshotted when the alert was raised, plus the message text, and it exists until delivery succeeds or a ceiling retires it. |
+
+Two properties bound what this table can hold. It carries **alert mail only** — password-reset links
+and email-change verification links stay on an in-memory path and are never persisted, because those
+bodies are live credentials and an outbox would put them at rest in the database. And it is bounded
+in three directions at once: a message stops being retried after `EMAIL_OUTBOX_MAX_RETRY_HOURS`, a
+row stops existing in a non-terminal state after `EMAIL_OUTBOX_RETENTION_HOURS`, and the queue as a
+whole refuses new messages past `EMAIL_OUTBOX_MAX_DEPTH` rather than growing without limit.
+
+A row is excluded from the subject export deliberately: one message is addressed to several
+recipients at once, so returning it to one of them would disclose the others, and its content is the
+org's alert rather than the recipient's own data. Storage limitation is discharged by the retention
+sweep below and by the tenant cascade instead.
+
 Emails never reach the log stream in plaintext: `LoginService.HashEmail` hashes them before any
 audit or log call, and SAML NameIDs go through `HashNameId` for the same reason.
 
@@ -71,11 +97,14 @@ default 03:00 daily) enforces these horizons; every one is an environment variab
 | --- | --- | --- |
 | `audit_log` identifiers (`source_ip`, `detail`) | Cleared at 90 days, keeping the forensic skeleton | `AUDIT_LOG_PII_DAYS` |
 | `audit_log` rows | Deleted at 365 days | `AUDIT_LOG_RETENTION_DAYS` |
+| `audit_event` identifiers (`source_ip`, `user_agent`) | Cleared at 90 days, keeping the forensic skeleton | `AUDIT_EVENT_PII_DAYS` |
 | `audit_event` rows | Deleted at 365 days | `AUDIT_EVENT_RETENTION_DAYS` |
 | `activity` rows | Deleted at 90 days | `ACTIVITY_RETENTION_DAYS` (per-org override available) |
 | `login_attempts` idle rows | Deleted at 30 days | `LOGIN_ATTEMPTS_RETENTION_DAYS` |
 | `account_send_throttle` rolled-over rows | Deleted at 7 days | `ACCOUNT_SEND_THROTTLE_RETENTION_DAYS` |
 | `mfa_trusted_devices` | Deleted at expiry | Device TTL |
+| `email_outbox` non-terminal rows | Retired to `expired` at 72 hours (or at 6 hours of retrying) | `EMAIL_OUTBOX_RETENTION_HOURS`, `EMAIL_OUTBOX_MAX_RETRY_HOURS` |
+| `email_outbox` terminal rows | Deleted at 30 days | `EMAIL_OUTBOX_TERMINAL_RETENTION_DAYS` |
 | Invites, SAML one-shots, JWT revocations | Deleted at expiry | — |
 
 Two knobs reduce what is written in the first place, which is stronger than deleting it later:
@@ -101,9 +130,28 @@ authoritative there, and a local edit would be overwritten on the next login.
 
 **Erasure (Art. 17).** Deleting a user removes their account row and cascading personal rows, drops
 their remembered devices, and pseudonymizes the forensic rows that are retained (`activity` and
-`audit_log` keep `actor_id` and lose `source_ip`/`detail`). Deleting a tenant marks it for deletion
-and hard-deletes after `TENANT_HARD_DELETE_GRACE_DAYS` (default 30), including the tenant's
-`audit_log` rows, which no foreign key cascade covers.
+`audit_log` keep `actor_id` and lose `source_ip`/`detail`; `audit_event` keeps `actor_id` and
+`payload` and loses `source_ip`/`user_agent`). Deleting a tenant marks it for deletion and
+hard-deletes after `TENANT_HARD_DELETE_GRACE_DAYS` (default 30): the tenant's `audit_log` rows are
+deleted outright, since no foreign key cascade covers them, while its `audit_event` rows are
+pseudonymized rather than deleted — `audit_event.org_id` carries an `ON DELETE SET NULL` foreign
+key, so the schema already intends those rows to outlive the tenant. The tenant's entire
+`email_outbox` backlog goes with it, cascaded by the `org_id` foreign key whether the mail was ever
+delivered or not.
+
+The whole per-tenant erasure commits as one transaction. This is what makes the guarantee hold
+under failure: the sweep finds its work by selecting tenants out of `orgs`, so a partial pass that
+removed the `orgs` row and then failed would strand the remaining personal rows where no later pass
+could ever find them again. Wrapping the sequence means a failure anywhere rolls the `orgs` row
+back with everything else, the tenant is still listed on the next pass, and every step is
+idempotent so the retry runs cleanly over whatever the previous attempt left. Only the operator
+notification is sent after the commit, so a failure there leaves a completed, audited deletion
+unannounced rather than an incomplete one.
+
+Removing one member does not clear that member's address from an org's queued alert mail, and that is
+correct rather than an omission: the recipient list is the org's alert-delivery configuration, edited
+by an admin on Settings → Integrations, not a per-account subscription. Clearing the setting stops
+future mail; the rows already queued retire on the horizons above.
 
 Retained-for-security rows are a deliberate limit on erasure, not an oversight: an audit trail that
 any subject could erase on request would not be an audit trail. The horizons above are what bounds

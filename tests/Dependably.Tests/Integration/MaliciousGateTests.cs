@@ -122,13 +122,50 @@ public sealed class MaliciousGateTests : IClassFixture<DependablyFactory>, IAsyn
         await SetProxySettingsAsync(blockMalicious: "block");
     }
 
+    // The endpoint's contract is leave-unchanged-on-absent for every mode column, matching the
+    // verify_* family: the six verify_* signature gates are already leave-unchanged-on-absent,
+    // and that posture already preserves a weaker stored mode ('off' stays 'off') for controls of
+    // equal criticality — one absent-field semantic per endpoint, not a per-column floor enforced
+    // as a side effect of unrelated writes. The SPA always sends the full settings object
+    // (OrgSettings.svelte's buildProxyPayload), so a partial PUT is only reachable from a script
+    // or a payload shape that predates a field. The property that matters — an org that never
+    // configured the gate lands on the secure 'block' default — survives via the INSERT arm and
+    // is pinned precisely by its own test below.
     [Fact]
-    public async Task ProxySettings_Put_AbsentBlockMalicious_ResetsToSecureDefault()
+    public async Task ProxySettings_Put_AbsentBlockMalicious_LeavesStoredModeUnchanged()
     {
         using var c = await AdminClient();
         await SetProxySettingsAsync(blockMalicious: "warn");
 
-        // A payload without the field (pre-gate automation) must not preserve a weaker mode.
+        // A payload without the field (e.g. a partial PUT only touching an unrelated setting)
+        // must not silently mutate configuration nobody addressed.
+        var put = await c.PutAsJsonAsync("/api/v1/proxy-settings", new
+        {
+            proxyPassthroughEnabled = true,
+            maxOsvScoreTolerance = 10.0,
+        });
+        Assert.Equal(HttpStatusCode.NoContent, put.StatusCode);
+
+        var resp = await c.GetAsync("/api/v1/proxy-settings");
+        var doc = await JsonDocument.ParseAsync(await resp.Content.ReadAsStreamAsync());
+        Assert.Equal("warn", doc.RootElement.GetProperty("block_malicious").GetString());
+    }
+
+    [Fact]
+    public async Task ProxySettings_Put_AbsentBlockMalicious_FirstWrite_DefaultsToBlock()
+    {
+        // The true form of "pre-gate automation must not weaken the malware gate": an org with
+        // no org_settings row at all (the pre-first-save state — automation predating this
+        // gate cannot have written anything) gets the secure INSERT-arm default, 'block', not
+        // NULL and not an arbitrary CLR default.
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using (var conn = await store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "DELETE FROM org_settings WHERE org_id = (SELECT id FROM orgs WHERE slug = 'default')");
+        }
+
+        using var c = await AdminClient();
         var put = await c.PutAsJsonAsync("/api/v1/proxy-settings", new
         {
             proxyPassthroughEnabled = true,

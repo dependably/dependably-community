@@ -59,7 +59,7 @@ public sealed class UpstreamUrlCredentialLeakTests : IClassFixture<DependablyFac
         await _factory.Services.GetRequiredService<CacheAccessRecorder>().RecordAccessAsync(
             new CacheAccess(orgId, "npm", name, version, filename,
                 Sha256: sha256, SizeBytes: bytes.Length,
-                BlobKey: $"{blobKey}/{filename}", UpstreamUrl: leakyUrl));
+                BlobKey: $"{blobKey}/{filename}", UpstreamUrl: leakyUrl, Origin: CacheAccessOrigin.FirstFetch));
         await _factory.Services.GetRequiredService<PackageRepository>()
             .GetOrCreateAsync(orgId, "npm", name, name, isProxy: true, CancellationToken.None);
         return name;

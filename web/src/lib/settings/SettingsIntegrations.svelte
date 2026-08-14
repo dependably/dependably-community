@@ -1,9 +1,9 @@
 <!--
   Settings → Integrations: the per-org delivery channels for admin alerts. An inner sub-tab bar
-  (SystemSettings.svelte's role=tablist pattern) switches between Webhooks, Slack, and Email. The
-  alert-settings projection (gates + Slack + email) is loaded once here and handed down to the
-  Slack/Email children so all three subsections share one GET; Webhooks loads its own data as it
-  always has.
+  (SystemSettings.svelte's role=tablist pattern) switches between Webhooks and Slack. Email has no
+  per-org channel config — SMTP is an instance-level transport, and the tenant-facing half (gate,
+  recipients, health, test send) lives on the Alerts tab. The alert-settings projection is loaded
+  once here for the Slack child; Webhooks loads its own data as it always has.
 -->
 <script>
   import { onMount } from 'svelte'
@@ -13,10 +13,10 @@
   import ErrorBanner from '../ErrorBanner.svelte'
   import InfoTip from '../InfoTip.svelte'
   import SettingsWebhooks from './SettingsWebhooks.svelte'
-  import SettingsIntegrationsSlack from './SettingsIntegrationsSlack.svelte'
   import SettingsIntegrationsEmail from './SettingsIntegrationsEmail.svelte'
+  import SettingsIntegrationsSlack from './SettingsIntegrationsSlack.svelte'
 
-  let subTab = 'webhooks' // 'webhooks' | 'slack' | 'email'
+  let subTab = 'webhooks' // 'webhooks' | 'email' | 'slack'
   let alertSettings = null
   let loaded = false
   let error = ''
@@ -44,12 +44,12 @@
   <button class="tab" class:active={subTab === 'webhooks'}
           role="tab" aria-selected={subTab === 'webhooks'}
           on:click={() => subTab = 'webhooks'}>{$t('settings.integrations.tabs.webhooks')}</button>
-  <button class="tab" class:active={subTab === 'slack'}
-          role="tab" aria-selected={subTab === 'slack'}
-          on:click={() => subTab = 'slack'}>{$t('settings.integrations.tabs.slack')}</button>
   <button class="tab" class:active={subTab === 'email'}
           role="tab" aria-selected={subTab === 'email'}
           on:click={() => subTab = 'email'}>{$t('settings.integrations.tabs.email')}</button>
+  <button class="tab" class:active={subTab === 'slack'}
+          role="tab" aria-selected={subTab === 'slack'}
+          on:click={() => subTab = 'slack'}>{$t('settings.integrations.tabs.slack')}</button>
 </div>
 
 {#if subTab === 'webhooks'}
@@ -58,9 +58,9 @@
   <ErrorBanner message={error} />
   {#if !loaded}
     <span class="spinner"></span>
-  {:else if subTab === 'slack'}
-    <SettingsIntegrationsSlack settings={alertSettings} onUpdated={onAlertSettingsUpdated} />
-  {:else}
+  {:else if subTab === 'email'}
     <SettingsIntegrationsEmail settings={alertSettings} onUpdated={onAlertSettingsUpdated} />
+  {:else}
+    <SettingsIntegrationsSlack settings={alertSettings} onUpdated={onAlertSettingsUpdated} />
   {/if}
 {/if}

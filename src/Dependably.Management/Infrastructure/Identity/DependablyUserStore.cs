@@ -121,6 +121,10 @@ internal sealed class DependablyUserStore :
                    token_version AS TokenVersion
             FROM users
             WHERE lower(email) = lower(@email) AND tenant_id = @tenantId
+            -- Election is deterministic: a legacy database can still hold two case-variant rows
+            -- for one address (they predate the canonical write form), and the oldest row is the
+            -- original account rather than whichever one the query engine happens to return.
+            ORDER BY created_at, id
             LIMIT 1
             """,
             new { email = normalizedUserName, tenantId }));
@@ -222,6 +226,10 @@ internal sealed class DependablyUserStore :
                    token_version AS TokenVersion
             FROM users
             WHERE lower(email) = lower(@email) AND tenant_id = @tenantId
+            -- Election is deterministic: a legacy database can still hold two case-variant rows
+            -- for one address (they predate the canonical write form), and the oldest row is the
+            -- original account rather than whichever one the query engine happens to return.
+            ORDER BY created_at, id
             LIMIT 1
             """,
             new { email = normalizedEmail, tenantId }));

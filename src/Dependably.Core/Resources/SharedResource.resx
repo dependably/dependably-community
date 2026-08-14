@@ -317,6 +317,10 @@
     <value>Must be between 0.0 and 1.0 (EPSS probability), or null to disable.</value>
     <comment>422 detail for max_epss_tolerance.</comment>
   </data>
+  <data name="error.settings.retentionRange" xml:space="preserve">
+    <value>Must be zero or greater, or null to disable.</value>
+    <comment>422 detail for keep_versions, keep_days, activity_retention_days, and purge_unlisted_after_days.</comment>
+  </data>
   <data name="error.settings.deprecatedPolicyInvalid" xml:space="preserve">
     <value>Must be 'off', 'warn', 'block_new', or 'block_all'.</value>
     <comment>422 detail for block_deprecated. The quoted values are API literals.</comment>
@@ -408,6 +412,10 @@
   <data name="error.system.unsupportedLanguage" xml:space="preserve">
     <value>Unsupported language code. Allowed: {0}.</value>
     <comment>422 detail. {0} = comma-joined supported locale codes.</comment>
+  </data>
+  <data name="error.system.unsupportedTimezone" xml:space="preserve">
+    <value>Unrecognised timezone '{0}'. Use an IANA zone name, for example America/Toronto.</value>
+    <comment>422 detail. {0} = the rejected timezone identifier.</comment>
   </data>
   <data name="error.password.currentRequired" xml:space="preserve">
     <value>Current password is required.</value>
@@ -505,6 +513,10 @@
     <value>Unknown event types: {0}. Valid types: {1}.</value>
     <comment>422 detail. {0} = rejected entries, {1} = the full valid set (API literals).</comment>
   </data>
+  <data name="error.webhook.maxPerOrg" xml:space="preserve">
+    <value>Maximum of {0} webhook subscriptions per organization reached. Delete an existing subscription first.</value>
+    <comment>422 detail when creating a webhook subscription past the per-org cap. {0} = the cap.</comment>
+  </data>
   <data name="error.alert.stateInvalid" xml:space="preserve">
     <value>Must be 'active' or 'dismissed'.</value>
     <comment>422 detail for the alert state filter. The quoted values are API literals.</comment>
@@ -559,15 +571,15 @@
   </data>
   <data name="error.email.invalidRecipient" xml:space="preserve">
     <value>All recipients must be valid email addresses.</value>
-    <comment>422 detail for the emailRecipients field on the org alert-settings/email PUT when any entry fails to parse.</comment>
+    <comment>422 detail for the emailRecipients field on the org alert-settings PUT when any entry fails to parse.</comment>
   </data>
   <data name="error.email.tooManyRecipients" xml:space="preserve">
     <value>At most 20 recipients are allowed.</value>
-    <comment>422 detail for the emailRecipients field on the org alert-settings/email PUT. 20 is the API-enforced cap.</comment>
+    <comment>422 detail for the emailRecipients field on the org alert-settings PUT. 20 is the API-enforced cap.</comment>
   </data>
   <data name="error.email.hostBlocked" xml:space="preserve">
     <value>SMTP host resolves to a blocked IP range.</value>
-    <comment>422 detail for the emailSmtpHost field on the org alert-settings/email PUT when the host is an IP literal in a blocked SSRF range.</comment>
+    <comment>422 detail for the smtpHost field on the instance and system email-config PUTs when the host is an IP literal in a blocked SSRF range.</comment>
   </data>
   <data name="email.test.subject" xml:space="preserve">
     <value>Dependably SMTP test</value>
@@ -642,6 +654,21 @@
 View this alert in the Dependably Alerts settings.
 </value>
     <comment>Plain-text body of an alert-delivery email. {0} = the alert title, {1} = the alert detail (empty when the alert carries no additional detail). Keep the blank lines and the trailing newline.</comment>
+  </data>
+  <data name="email.alert.digest.subject" xml:space="preserve">
+    <value>Dependably alert: {0} ({1} occurrences)</value>
+    <comment>Subject line of a coalesced burst-digest alert-delivery email. {0} = the alert title, stripped of CR/LF by the caller before formatting. {1} = the number of raw alerts folded into this one email.</comment>
+  </data>
+  <data name="email.alert.digest.body" xml:space="preserve">
+    <value>{0}
+
+This alert occurred {1} times. Showing the most recent occurrence below.
+
+{2}
+
+View this alert in the Dependably Alerts settings.
+</value>
+    <comment>Plain-text body of a coalesced burst-digest alert-delivery email. {0} = the alert title, {1} = the number of raw alerts folded into this one email, {2} = the most recent occurrence's detail (empty when it carries none). Keep the blank lines and the trailing newline.</comment>
   </data>
   <data name="error.lookup.nameRequired" xml:space="preserve">
     <value>name is required.</value>
@@ -781,5 +808,13 @@ If you did not make this change, contact your administrator immediately — your
   <data name="error.user.reauthRequired" xml:space="preserve">
     <value>Enter your current password to change your email address.</value>
     <comment>Validation error returned when a self-service email change omits or fails the password re-entry.</comment>
+  </data>
+  <data name="error.tooManyRequests.title" xml:space="preserve">
+    <value>Too Many Requests</value>
+    <comment>Title of the HTTP 429 problem response (a per-account or per-resource send budget is exhausted).</comment>
+  </data>
+  <data name="error.user.emailChangeThrottled" xml:space="preserve">
+    <value>Too many verification emails have been sent to that address recently. Try again later.</value>
+    <comment>Returned when the per-address send budget for account email-change verification is exhausted.</comment>
   </data>
 </root>

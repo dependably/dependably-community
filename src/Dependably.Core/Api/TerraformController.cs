@@ -47,10 +47,13 @@ namespace Dependably.Api;
 ///
 /// Version documents publish the optional <c>hashes</c> field as a <c>zh:</c> entry — the archive's
 /// SHA-256, which this instance already holds on the cache-plane row — for every platform it has
-/// cached, and otherwise pass through the hashes an upstream mirror published. That is what gives a
-/// chained node something to verify: a downstream edge takes its fetch-time checksum from exactly
-/// this field, and the client-side <c>.terraform.lock.hcl</c> anchor that
-/// <c>docs/adr/0003-terraform-provider-network-mirror.md</c> relies on does not protect an
+/// cached. For a platform it has not cached, a registry-protocol upstream still yields one: the
+/// per-platform <c>shasum</c> the registry publishes on its download document, fetched at
+/// version-document time. Only a mirror-protocol upstream that publishes no <c>zh:</c> of its own
+/// leaves a platform with no hash to pass through. That is what gives a chained node something to
+/// verify even on its first fetch of an archive: a downstream edge takes its fetch-time checksum
+/// from exactly this field, and the client-side <c>.terraform.lock.hcl</c> anchor that
+/// <c>ADR-terraform-provider-network-mirror</c> relies on does not protect an
 /// intermediate cache. Terraform's own <c>h1:</c> dirhash is still not emitted: it is a different
 /// computation over the extracted contents, and the lock file remains the client's anchor for it.
 ///
@@ -432,18 +435,30 @@ public sealed class TerraformController : OrgScopedControllerBase
     /// advertises for that version. Archive URLs are relative to this document.
     ///
     /// Each archive carries a <c>hashes</c> entry when one is available: the <c>zh:</c> form of the
-    /// SHA-256 this instance recorded when it cached the archive, falling back to whatever an
-    /// upstream mirror published for that platform. A chained node takes its fetch-time checksum
-    /// from this field and has no other source for one, so omitting it leaves the downstream cache
-    /// verifying nothing.
+    /// SHA-256 this instance recorded when it cached the archive, falling back to whatever the
+    /// upstream published for that platform — a registry protocol upstream's per-platform
+    /// <c>shasum</c> (see <see cref="FetchUpstreamPlatformsAsync"/>), or an upstream mirror's own
+    /// <c>zh:</c> hash. A chained node takes its fetch-time checksum from this field and has no
+    /// other source for one, so omitting it leaves the downstream cache verifying nothing.
     /// </summary>
     private async Task<IActionResult> ServeVersionDocumentAsync(
         string orgId, ProviderAddress provider, string version, OrgSettings? settings,
         CancellationToken ct)
     {
-        var platforms = await FetchUpstreamPlatformsAsync(orgId, provider, version, settings, ct);
-
         var cachedHashes = await CachedZipHashesAsync(orgId, provider, version, ct);
+
+        // Platforms this instance already holds a verified hash for never need the registry's
+        // shasum: ServeVersionDocumentAsync below prefers cachedHashes over whatever
+        // FetchUpstreamPlatformsAsync returns, so fetching a shasum this call would just discard is
+        // a wasted upstream round trip. Passing the set forward lets it skip exactly those.
+        var cachedPlatformKeys = new HashSet<string>(StringComparer.Ordinal);
+        foreach (string file in cachedHashes.Keys)
+        {
+            cachedPlatformKeys.Add(file[..^".zip".Length]);
+        }
+
+        var platforms = await FetchUpstreamPlatformsAsync(
+            orgId, provider, version, settings, cachedPlatformKeys, ct);
 
         if (platforms.Value is null)
         {
@@ -625,77 +640,17 @@ public sealed class TerraformController : OrgScopedControllerBase
         // registry, write the cache_artifact row, scan OSV, and evaluate the block gate before any
         // byte reaches the client. Without this a vulnerable or operator-blocked provider would be
         // refused only on a later download, never on the fetch that introduced it.
-        BlockDecision decision;
-        try
+        var facts = new TerraformArchiveFacts(
+            blob, fetched.BlobKey, purl, checksum, download.DownloadUrl, upstream.Value.BaseUrl,
+            publishedAt, terraformProvenanceStatus, terraformProvenanceSigner, terraformVerifyMode);
+
+        var (decision, recordError) = await RecordAndGateArchiveAsync(coordinate, facts, settings, token, ct);
+        if (recordError is not null)
         {
-            decision = (await _svc.ProxyFetch.RecordAndScanAsync(new ProxyFetchRequest(
-            OrgId: orgId, Ecosystem: Ecosystem,
-            PackageName: providerName, PurlName: providerName,
-            Version: version, Purl: purl, File: filename, Blob: blob,
-            // Provider archives carry no licence manifest — no LICENSE metadata file is mandated
-            // by the protocol and the registry does not report one — so there is nothing to
-            // extract. Under license_enforcement_mode=block terraform is correspondingly absent
-            // from BlockGateService.DeclaredLicenseEcosystems: recording zero licences here is the
-            // normal case, not an unknown-licence signal.
-            ExtractLicenses: null,
-            UserId: token?.UserId,
-            ActorKind: token?.ActorKind,
-            SourceIp: HttpContext.GetNormalizedRemoteIp(),
-            MaxOsvScoreTolerance: settings?.MaxOsvScoreTolerance ?? DefaultMaxOsvScoreTolerance,
-            // The cache-plane row keeps the archive's own URL, which is the audit-useful fact:
-            // which host actually served these bytes.
-            CacheAccess: new CacheAccess(orgId, Ecosystem, providerName, version, filename,
-                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: download.DownloadUrl),
-            PublishedAt: publishedAt,
-            MinReleaseAgeHours: settings?.MinReleaseAgeHours,
-            BlockDeprecatedMode: settings?.BlockDeprecated,
-            BlockMaliciousMode: settings?.BlockMalicious,
-            BlockKevMode: settings?.BlockKev,
-            BlockRevokedMode: settings?.BlockRevoked,
-            MaxEpssTolerance: settings?.MaxEpssTolerance,
-            // The upstream-supplied digest re-verified at the trust boundary: the registry
-            // protocol's per-platform shasum, or a chained mirror's zh: hash. Null when the upstream
-            // published neither, in which case the recorded SHA-256 is an observed fact rather than
-            // a check.
-            UpstreamChecksum: checksum,
-            // Source pinning binds the provider to the REGISTRY authority that resolved it, not to
-            // the archive host. A registry-protocol download_url points at a shared release CDN
-            // (releases.hashicorp.com serves every HashiCorp provider), so pinning on it would bind
-            // unrelated providers to one authority — no dependency-confusion signal, and a false
-            // block the day a legitimate registry rotates its release host. The registry that
-            // answered is the authority a provider's source address actually names. On the mirror
-            // path the base is already that authority.
-            UpstreamUrl: upstream.Value.BaseUrl,
-            LicenseEnforcementMode: settings?.LicenseEnforcementMode,
-            ProvenanceStatus: terraformProvenanceStatus,
-            ProvenanceSigner: terraformProvenanceSigner,
-            VerifyProvenanceMode: terraformVerifyMode), ct)).Decision;
-        }
-        catch (ProxyCatalogueUnavailableException)
-        {
-            // The archive could not be recorded on the cache plane, so it could not be gated. The
-            // blob is already staged under the org-scoped coordinate key; leaving it there would
-            // answer every later request from the cache with no cache_artifact row to gate against
-            // — a permanent bypass, not a deferred one. Discard it so the next request re-fetches
-            // and re-gates. 503, never 404: the provider exists upstream, we just could not admit it.
-            await _svc.Blobs.DeleteAsync(BlobKeys.StoreKey(fetched.BlobKey), ct);
-            _svc.Logger.LogWarning(
-                "Cache plane unavailable recording terraform {Provider} {Version} {Platform} for org "
-                + "{OrgId}; refusing the fetch.", providerName, version, platform, orgId);
-            return StatusCode(StatusCodes.Status503ServiceUnavailable,
-                "Provider archive could not be recorded on the cache plane; retry.");
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            // Any other failure recording or scanning the fetch leaves the staged blob with no
-            // cache_artifact row to gate against — the same permanent bypass the Blocked path
-            // guards, since the Terraform cache-hit lookup probes the blob store by coordinate.
-            // Discard the blob, then let the exception surface to its dedicated middleware.
-            await _svc.Blobs.DeleteAsync(BlobKeys.StoreKey(fetched.BlobKey), ct);
-            throw;
+            return recordError;
         }
 
-        if (decision == BlockDecision.Blocked)
+        if (decision is BlockDecision.Blocked)
         {
             // Discard the staged blob along with the refusal — the load-bearing half. The Terraform
             // cache-hit lookup probes the blob store by org-scoped coordinate, and
@@ -791,7 +746,110 @@ public sealed class TerraformController : OrgScopedControllerBase
     /// list at each call site is the coordinate, not its six constituent fields.
     /// </summary>
     private readonly record struct TerraformArchiveCoordinate(
-        string OrgId, string ProviderName, string Version, string Platform, string Filename, string BlobKey);
+        string OrgId, string Provider, string Version, string Platform, string Filename, string BlobKey);
+
+    /// <summary>
+    /// Everything the record -> scan -> gate step needs about a freshly-fetched archive that the
+    /// coordinate does not already carry. Grouped so <see cref="BuildArchiveFetchRequest"/> takes a
+    /// coordinate and a facts pair rather than a dozen positional fields.
+    /// </summary>
+    private readonly record struct TerraformArchiveFacts(
+        BlobHandle Blob, string BlobKey, string Purl, ChecksumSpec? Checksum, string DownloadUrl,
+        string UpstreamBaseUrl, DateTimeOffset? PublishedAt, string? ProvenanceStatus,
+        string? ProvenanceSigner, string? VerifyMode);
+
+    /// <summary>
+    /// Assembles the <see cref="ProxyFetchRequest"/> for a fetched provider archive. Construction
+    /// only — the caller owns the call and its failure handling, so the staged-blob discard on a
+    /// recording failure stays visible at the serve path rather than hiding behind a builder.
+    /// </summary>
+    /// <summary>
+    /// The shared record -> scan -> gate step for a fetched provider archive. Both failure arms
+    /// discard the staged blob first: it sits under the org-scoped coordinate key that the
+    /// cache-hit path probes, so a staged-but-unrecorded blob would answer every later request with
+    /// no cache_artifact row to gate against — a permanent bypass rather than a deferred one.
+    /// Returns the gate decision, or the refusal to return in its place.
+    /// </summary>
+    private async Task<(BlockDecision? Decision, IActionResult? Error)> RecordAndGateArchiveAsync(
+        TerraformArchiveCoordinate coordinate, TerraformArchiveFacts facts,
+        OrgSettings? settings, TokenRecord? token, CancellationToken ct)
+    {
+        var (orgId, providerName, version, platform, _, _) = coordinate;
+        try
+        {
+            var result = await _svc.ProxyFetch.RecordAndScanAsync(
+                BuildArchiveFetchRequest(coordinate, facts, settings, token), ct);
+            return (result.Decision, null);
+        }
+        catch (ProxyCatalogueUnavailableException)
+        {
+            // 503, never 404: the provider exists upstream, we just could not admit it.
+            await _svc.Blobs.DeleteAsync(BlobKeys.StoreKey(facts.BlobKey), ct);
+            _svc.Logger.LogWarning(
+                "Cache plane unavailable recording terraform {Provider} {Version} {Platform} for org "
+                + "{OrgId}; refusing the fetch.", providerName, version, platform, orgId);
+            return (null, StatusCode(StatusCodes.Status503ServiceUnavailable,
+                "Provider archive could not be recorded on the cache plane; retry."));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Discard the blob, then let the exception surface to its dedicated middleware.
+            await _svc.Blobs.DeleteAsync(BlobKeys.StoreKey(facts.BlobKey), ct);
+            throw;
+        }
+    }
+
+    private ProxyFetchRequest BuildArchiveFetchRequest(
+        TerraformArchiveCoordinate coordinate, TerraformArchiveFacts facts,
+        OrgSettings? settings, TokenRecord? token)
+    {
+        var (orgId, providerName, version, _, filename, _) = coordinate;
+        return new ProxyFetchRequest(
+            OrgId: orgId, Ecosystem: Ecosystem,
+            PackageName: providerName, PurlName: providerName,
+            Version: version, Purl: facts.Purl, File: filename, Blob: facts.Blob,
+            // Provider archives carry no licence manifest — no LICENSE metadata file is mandated
+            // by the protocol and the registry does not report one — so there is nothing to
+            // extract. Under license_enforcement_mode=block terraform is correspondingly absent
+            // from BlockGateService.DeclaredLicenseEcosystems: recording zero licences here is the
+            // normal case, not an unknown-licence signal.
+            ExtractLicenses: null,
+            UserId: token?.UserId,
+            ActorKind: token?.ActorKind,
+            SourceIp: HttpContext.GetNormalizedRemoteIp(),
+            MaxOsvScoreTolerance: settings?.MaxOsvScoreTolerance ?? DefaultMaxOsvScoreTolerance,
+            // The cache-plane row keeps the archive's own URL, which is the audit-useful fact:
+            // which host actually served these bytes.
+            CacheAccess: new CacheAccess(orgId, Ecosystem, providerName, version, filename,
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: facts.DownloadUrl,
+                // ProxyFetchService overwrites the three bytes fields with the values it computed
+                // over the archive it just staged before handing this to the recorder.
+                Origin: CacheAccessOrigin.FirstFetch),
+            PublishedAt: facts.PublishedAt,
+            MinReleaseAgeHours: settings?.MinReleaseAgeHours,
+            BlockDeprecatedMode: settings?.BlockDeprecated,
+            BlockMaliciousMode: settings?.BlockMalicious,
+            BlockKevMode: settings?.BlockKev,
+            BlockRevokedMode: settings?.BlockRevoked,
+            MaxEpssTolerance: settings?.MaxEpssTolerance,
+            // The upstream-supplied digest re-verified at the trust boundary: the registry
+            // protocol's per-platform shasum, or a chained mirror's zh: hash. Null when the upstream
+            // published neither, in which case the recorded SHA-256 is an observed fact rather than
+            // a check.
+            UpstreamChecksum: facts.Checksum,
+            // Source pinning binds the provider to the REGISTRY authority that resolved it, not to
+            // the archive host. A registry-protocol download_url points at a shared release CDN
+            // (releases.hashicorp.com serves every HashiCorp provider), so pinning on it would bind
+            // unrelated providers to one authority — no dependency-confusion signal, and a false
+            // block the day a legitimate registry rotates its release host. The registry that
+            // answered is the authority a provider's source address actually names. On the mirror
+            // path the base is already that authority.
+            UpstreamUrl: facts.UpstreamBaseUrl,
+            LicenseEnforcementMode: settings?.LicenseEnforcementMode,
+            ProvenanceStatus: facts.ProvenanceStatus,
+            ProvenanceSigner: facts.ProvenanceSigner,
+            VerifyProvenanceMode: facts.VerifyMode);
+    }
 
     /// <summary>
     /// The cache-hit path for <see cref="ServeArchiveAsync"/>: serves the already-staged archive
@@ -838,7 +896,7 @@ public sealed class TerraformController : OrgScopedControllerBase
     /// returns no shasum for an archive on a foreign authority leaves nothing to verify — refuse
     /// rather than store trust-on-first-use bytes fetched from a host the operator never
     /// configured. The mirror protocol's hash-less TOFU is a deliberate, documented exception
-    /// (ADR 0003) because a mirror serves its own bytes from beneath the configured base; this
+    /// (ADR-terraform-provider-network-mirror) because a mirror serves its own bytes from beneath the configured base; this
     /// guard is registry-only.
     /// </summary>
     private (ChecksumSpec? Checksum, IActionResult? Refusal) ValidateArchiveChecksum(
@@ -948,7 +1006,11 @@ public sealed class TerraformController : OrgScopedControllerBase
     {
         string? cacheArtifactId = await _svc.CacheRecorder.RecordAccessAsync(
             new CacheAccess(orgId, Ecosystem, providerName, version, filename,
-                facts?.ContentHash ?? "", facts?.SizeBytes ?? 0, blobKey, UpstreamUrl: null), ct);
+                facts?.ContentHash ?? "", facts?.SizeBytes ?? 0, blobKey, UpstreamUrl: null,
+                // A tick against bytes already admitted for this org: the hash here is read back
+                // off the org's own serve facts, so it is not evidence of a fetch and never
+                // rewrites the tenant content binding.
+                CacheAccessOrigin.CacheHit), ct);
         if (cacheArtifactId is not null)
         {
             await _svc.TenantAccess.RecordDownloadHitAsync(
@@ -1082,10 +1144,37 @@ public sealed class TerraformController : OrgScopedControllerBase
     /// the two protocols carry it in different documents: the registry protocol embeds it in the
     /// versions list, the mirror protocol keys it by platform in the per-version document — where
     /// each platform may also carry the hashes this controller re-emits downstream.
+    ///
+    /// The registry protocol's versions list carries no hash at all — the per-platform
+    /// <c>shasum</c> lives only in the download document
+    /// (<c>/v1/providers/{namespace}/{type}/{version}/download/{os}/{arch}</c>), a separate
+    /// upstream round trip <see cref="FetchUpstreamDownloadAsync"/> also makes when the archive is
+    /// actually fetched. This method makes that same call, bounded by
+    /// <see cref="RegistryShasumFetchConcurrency"/> concurrent requests, for every platform in
+    /// <paramref name="alreadyCachedPlatforms"/>'s complement — i.e. every platform this instance
+    /// has not already cached and so has no verified hash for. That is a genuine N-platform
+    /// amplification on a cold provider version's first view, but it is bounded and gets cheaper
+    /// over time: <see cref="ServeVersionDocumentAsync"/> excludes platforms it already holds a
+    /// cached hash for, the calls run through <see cref="UpstreamClient.GetOrFetchMetadataAsync"/>
+    /// (single-flighted, and TTL-cached where <c>Proxy:MetadataCacheTtlSeconds</c> is configured —
+    /// on by default in edge mode), and a genuine archive download of the same platform within that
+    /// window reuses the identical fetch rather than paying for it twice. The concurrency bound
+    /// exists because an unbounded fan-out is exactly the burst shape
+    /// <see cref="UpstreamQueueThrottleHandler"/>'s shared process-wide queue sheds under load —
+    /// this instance's own throttling must not be what turns a hash off.
+    ///
+    /// A platform whose shasum fetch genuinely fails (<see cref="UpstreamOutcome.BadGateway"/> or
+    /// <see cref="UpstreamOutcome.Unavailable"/>) is dropped from the returned list rather than kept
+    /// with no hash: publishing it with no hash would be indistinguishable from the registry
+    /// legitimately having none, silently reproducing the trust-on-first-use hole this method
+    /// exists to close, and doing so precisely when the upstream is unhealthy. Terraform then
+    /// reports no package for that platform on this attempt rather than an unverifiable one; the
+    /// other platforms in the document are unaffected, which matters for a provider that advertises
+    /// a dozen or more of them.
     /// </summary>
     private async Task<UpstreamResult<List<PlatformArchive>>> FetchUpstreamPlatformsAsync(
         string orgId, ProviderAddress provider, string version, OrgSettings? settings,
-        CancellationToken ct)
+        IReadOnlyCollection<string> alreadyCachedPlatforms, CancellationToken ct)
     {
         if (settings is not null && !settings.ProxyPassthroughEffective)
         {
@@ -1100,37 +1189,148 @@ public sealed class TerraformController : OrgScopedControllerBase
 
         if (!upstream.Value.IsMirror)
         {
-            var versions = await FetchUpstreamVersionsAsync(orgId, provider, settings, ct);
-            return versions.Map(list => list
-                .Find(v => string.Equals(v.Version, version, StringComparison.Ordinal))
-                ?.Platforms
-                ?.Where(p => !string.IsNullOrWhiteSpace(p.Os) && !string.IsNullOrWhiteSpace(p.Arch))
-                .Select(p => new PlatformArchive(p.Os!, p.Arch!, UpstreamHashes: null))
-                .ToList());
+            return await FetchRegistryPlatformsAsync(
+                orgId, provider, version, settings, upstream.Value, alreadyCachedPlatforms, ct);
         }
 
         var document = await GetJsonAsync<MirrorVersionDocument>(
             upstream.Value, MirrorVersionDocumentUrl(upstream.Value, provider, version), ct);
-        return document.Map(d =>
+        return document.Map(d => d.Archives is null ? null : MapMirrorArchives(d.Archives));
+    }
+
+    /// <summary>
+    /// The registry-protocol half of <see cref="FetchUpstreamPlatformsAsync"/>: resolves the
+    /// version's advertised platforms from the versions list, then sources each uncached
+    /// platform's <c>zh:</c> hash from its own download document under
+    /// <see cref="RegistryShasumFetchConcurrency"/>. A platform whose hash fetch fails is dropped
+    /// rather than published hashless — see the caller's remarks for why that fails closed.
+    /// </summary>
+    private async Task<UpstreamResult<List<PlatformArchive>>> FetchRegistryPlatformsAsync(
+        string orgId, ProviderAddress provider, string version, OrgSettings? settings,
+        ResolvedUpstream upstream, IReadOnlyCollection<string> alreadyCachedPlatforms,
+        CancellationToken ct)
+    {
+        var versions = await FetchUpstreamVersionsAsync(orgId, provider, settings, ct);
+        if (versions.Value is null)
         {
-            if (d.Archives is null)
-            {
-                return null;
-            }
+            return UpstreamResult<List<PlatformArchive>>.From(versions.Outcome);
+        }
 
-            var platforms = new List<PlatformArchive>();
-            foreach (var (key, archive) in d.Archives)
-            {
-                int underscore = key.IndexOf('_', StringComparison.Ordinal);
-                if (underscore > 0 && underscore < key.Length - 1)
-                {
-                    platforms.Add(new PlatformArchive(
-                        key[..underscore], key[(underscore + 1)..], archive.Hashes));
-                }
-            }
+        var matchedPlatforms = versions.Value
+            .Find(v => string.Equals(v.Version, version, StringComparison.Ordinal))
+            ?.Platforms
+            ?.Where(p => !string.IsNullOrWhiteSpace(p.Os) && !string.IsNullOrWhiteSpace(p.Arch))
+            .ToList();
 
-            return platforms;
-        });
+        if (matchedPlatforms is null)
+        {
+            return UpstreamResult<List<PlatformArchive>>.Absent;
+        }
+
+        var cachedKeys = new HashSet<string>(alreadyCachedPlatforms, StringComparer.Ordinal);
+        using var shasumFetchGate = new SemaphoreSlim(RegistryShasumFetchConcurrency);
+        var built = await Task.WhenAll(matchedPlatforms.Select(p =>
+            cachedKeys.Contains($"{p.Os}_{p.Arch}")
+                ? Task.FromResult<PlatformArchive?>(new PlatformArchive(p.Os!, p.Arch!, UpstreamHashes: null))
+                : FetchRegistryPlatformHashGatedAsync(
+                    shasumFetchGate, upstream, provider, version, p.Os!, p.Arch!, ct)));
+
+        return UpstreamResult<List<PlatformArchive>>.Ok(
+            built.Where(p => p is not null).Select(p => p!).ToList());
+    }
+
+    /// <summary>
+    /// One <see cref="FetchRegistryPlatformHashAsync"/> call held behind the per-view concurrency
+    /// gate, so the fan-out cannot exceed <see cref="RegistryShasumFetchConcurrency"/> in flight.
+    /// </summary>
+    private async Task<PlatformArchive?> FetchRegistryPlatformHashGatedAsync(
+        SemaphoreSlim gate, ResolvedUpstream upstream, ProviderAddress provider,
+        string version, string os, string arch, CancellationToken ct)
+    {
+        await gate.WaitAsync(ct);
+        try
+        {
+            return await FetchRegistryPlatformHashAsync(upstream, provider, version, os, arch, ct);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Splits a mirror version document's <c>os_arch</c> archive keys into platform entries,
+    /// skipping any key without an interior underscore to split on.
+    /// </summary>
+    private static List<PlatformArchive> MapMirrorArchives(
+        IReadOnlyDictionary<string, MirrorArchive> archives)
+    {
+        var platforms = new List<PlatformArchive>();
+        foreach (var (key, archive) in archives)
+        {
+            int underscore = key.IndexOf('_', StringComparison.Ordinal);
+            if (underscore > 0 && underscore < key.Length - 1)
+            {
+                platforms.Add(new PlatformArchive(
+                    key[..underscore], key[(underscore + 1)..], archive.Hashes));
+            }
+        }
+
+        return platforms;
+    }
+
+    /// <summary>
+    /// Upper bound on concurrent registry download-document fetches per version-document view.
+    /// <see cref="UpstreamQueueThrottleHandler"/>'s process-shared queue sheds with a 503 rather
+    /// than enqueueing once exhausted, so an unbounded per-platform fan-out from this instance is
+    /// exactly the burst that starves every other concurrent upstream caller — and, worse, turns a
+    /// shed 503 for one of these fetches into a platform this method must fail closed on. Sized
+    /// like <c>OsvClient</c>'s hydration concurrency: modest, not tuned to a particular upstream.
+    /// </summary>
+    private const int RegistryShasumFetchConcurrency = 8;
+
+    /// <summary>
+    /// One registry-protocol platform's <c>zh:</c> hash, sourced from the download document's
+    /// <c>shasum</c> — the only place the registry protocol publishes one; the versions list this
+    /// platform came from carries none. Reuses <see cref="FetchUpstreamDownloadAsync"/> rather than
+    /// a bespoke fetch, so this shares the same URL, cache key, and containment rules as the real
+    /// archive fetch.
+    ///
+    /// A genuine "no shasum" answer — <see cref="UpstreamOutcome.Absent"/>, or a parsed document
+    /// whose <c>shasum</c> field is missing or not well-formed hex — still returns the platform with
+    /// no <c>hashes</c> entry: the pre-existing, honest "nothing to verify against" shape, not a
+    /// fabricated digest this instance never checked bytes against.
+    /// <see cref="ExtractZipHash"/>'s validity rule does not apply here (that method reads a
+    /// <c>zh:</c>-prefixed lock-file hash; this reads the registry's raw <c>shasum</c> field), so
+    /// the hex-form check is inlined.
+    ///
+    /// A FAILURE to reach the registry (<see cref="UpstreamOutcome.BadGateway"/> or
+    /// <see cref="UpstreamOutcome.Unavailable"/>) must not collapse into that same "no hashes"
+    /// shape: a downstream edge cannot tell "the registry publishes nothing for this platform" apart
+    /// from "the master could not ask", and treating a transient failure as the former silently
+    /// reopens trust-on-first-use exactly when the upstream is unhealthy. This returns null instead,
+    /// so <see cref="FetchUpstreamPlatformsAsync"/> drops the platform from the document rather than
+    /// listing it unverified, and logs at Warning — this controller's convention is Debug only for
+    /// <see cref="UpstreamOutcome.Absent"/>, so a broken chain does not read as a missing platform.
+    /// </summary>
+    private async Task<PlatformArchive?> FetchRegistryPlatformHashAsync(
+        ResolvedUpstream upstream, ProviderAddress provider, string version, string os, string arch,
+        CancellationToken ct)
+    {
+        var download = await FetchUpstreamDownloadAsync(upstream, provider, version, os, arch, ct);
+        if (download.Outcome is UpstreamOutcome.BadGateway or UpstreamOutcome.Unavailable)
+        {
+            _svc.Logger.LogWarning(
+                "Terraform registry shasum fetch for {Provider} {Version} {Os}_{Arch} failed "
+                + "({Outcome}); omitting the platform from the version document rather than "
+                + "publishing it unverified.",
+                ProviderName(provider), version, os, arch, download.Outcome);
+            return null;
+        }
+
+        string? sha256 = download.Value?.Shasum;
+        List<string>? hashes = IsSha256Hex(sha256) ? [$"zh:{sha256}"] : null;
+        return new PlatformArchive(os, arch, hashes);
     }
 
     /// <summary>

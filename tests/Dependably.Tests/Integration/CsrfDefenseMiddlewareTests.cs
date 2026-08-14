@@ -17,7 +17,8 @@ namespace Dependably.Tests.Integration;
 ///   - SAML ACS POST (no Authorization, Sec-Fetch-Site: cross-site) → exempted, passes through
 ///   - Cookie-authed POST with Origin mismatch → 403
 ///   - Cookie-authed POST with Origin match → passes through
-///   - Cookie-authed POST with no CSRF header → passes through (SameSite=Strict is primary)
+///   - Cookie-authed POST with no CSRF header and no form body → passes through
+///   - Cookie-authed POST with no CSRF header and a form-encoded/multipart body → 403
 /// </summary>
 [Trait("Category", "Integration")]
 public sealed class CsrfDefenseMiddlewareTests : IClassFixture<DependablyFactory>, IAsyncLifetime
@@ -179,12 +180,88 @@ public sealed class CsrfDefenseMiddlewareTests : IClassFixture<DependablyFactory
     [Fact]
     public async Task CookieAuthed_Post_NoCsrfHeader_PassesThrough()
     {
-        // When neither Sec-Fetch-Site nor Origin is present, the middleware is a no-op.
-        // SameSite=Strict on the session cookie is the primary guard for this path.
+        // Neither Sec-Fetch-Site nor Origin, and no form body: a browser cannot produce this
+        // request cross-site (it would need a CORS preflight the management policy refuses), so
+        // the scripted clients that do send it keep working.
         string jwt = await _factory.CreateAdminJwt();
         using var client = _factory.CreateClient();
         var req = new HttpRequestMessage(HttpMethod.Post, "/api/v1/auth/logout");
         req.Headers.Add("Cookie", $"dependably_session={jwt}");
+
+        var resp = await client.SendAsync(req);
+
+        Assert.NotEqual(HttpStatusCode.Forbidden, resp.StatusCode);
+    }
+
+    /// <summary>
+    /// The gap a blanket "neither header → allow" leaves open. SameSite is scoped to the
+    /// registrable domain, so a page on a sibling tenant subdomain is same-site and its form POST
+    /// carries the victim's SameSite=Strict session cookie; a browser old enough to send no Fetch
+    /// Metadata and no Origin on a form submission then reaches the API with no cross-origin
+    /// signal at all. A form-encoded body with neither header is exactly that shape.
+    /// </summary>
+    [Fact]
+    public async Task CookieAuthed_Post_NoCsrfHeader_FormEncodedBody_Returns403()
+    {
+        string jwt = await _factory.CreateAdminJwt();
+        using var client = _factory.CreateClient();
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/v1/auth/logout")
+        {
+            Content = new FormUrlEncodedContent(new[] { new KeyValuePair<string, string>("x", "y") }),
+        };
+        req.Headers.Add("Cookie", $"dependably_session={jwt}");
+
+        var resp = await client.SendAsync(req);
+
+        Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task CookieAuthed_Post_NoCsrfHeader_MultipartBody_Returns403()
+    {
+        // multipart/form-data is the other form-producible encoding, and the one the bulk-import
+        // upload accepts — the content-type parameter (boundary) must not defeat the match.
+        string jwt = await _factory.CreateAdminJwt();
+        using var client = _factory.CreateClient();
+        var content = new MultipartFormDataContent { { new ByteArrayContent([1, 2, 3]), "file", "a.tgz" } };
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/v1/admin/import/upload") { Content = content };
+        req.Headers.Add("Cookie", $"dependably_session={jwt}");
+
+        var resp = await client.SendAsync(req);
+
+        Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
+    }
+
+    /// <summary>
+    /// The rule is scoped to requests that actually carry the credential a cross-site page would
+    /// spend. An anonymous form POST — a mis-targeted <c>twine upload</c> at the bare host, say —
+    /// has no session cookie to confuse the deputy with, so it must still get its real answer
+    /// (405 here) rather than a CSRF refusal that hides what went wrong.
+    /// </summary>
+    [Fact]
+    public async Task Anonymous_Post_NoCsrfHeader_FormBody_IsNotACsrfRejection()
+    {
+        using var client = _factory.CreateClient();
+        var content = new MultipartFormDataContent { { new ByteArrayContent([1, 2, 3]), "content", "anything.whl" } };
+
+        var resp = await client.PostAsync("/", content);
+
+        Assert.NotEqual(HttpStatusCode.Forbidden, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task CookieAuthed_Post_OriginMatch_FormEncodedBody_PassesThrough()
+    {
+        // The browser path for a legitimate form/multipart submission still carries Origin, so
+        // the tightened rule costs the SPA nothing.
+        string jwt = await _factory.CreateAdminJwt();
+        using var client = _factory.CreateClient();
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/v1/auth/logout")
+        {
+            Content = new FormUrlEncodedContent(new[] { new KeyValuePair<string, string>("x", "y") }),
+        };
+        req.Headers.Add("Cookie", $"dependably_session={jwt}");
+        req.Headers.Add("Origin", "http://localhost");
 
         var resp = await client.SendAsync(req);
 

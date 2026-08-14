@@ -189,6 +189,9 @@ public sealed partial class UpstreamClient
         {
             if (response.Content.Headers.ContentLength > MaxUpstreamResponseBytes)
             {
+                // audit-attribution-ok: single-flight dedup — this fetch may be shared by several
+                // concurrent inbound requests for the same URL (see the class docs), so there is
+                // no one caller's IP to attribute the shared upstream outcome to.
                 await _audit.LogAsync("upstream_response_too_large", orgId: orgId, ecosystem: ecosystem,
                     detail: JsonSerializer.Serialize(
                         new { url, content_length = response.Content.Headers.ContentLength }, EventJsonOptions.Detail),
@@ -230,6 +233,9 @@ public sealed partial class UpstreamClient
                 }
                 catch (UpstreamResponseTooLargeException)
                 {
+                    // audit-attribution-ok: single-flight dedup — this fetch may be shared by
+                    // several concurrent inbound requests for the same URL (see the class docs),
+                    // so there is no one caller's IP to attribute the shared upstream outcome to.
                     await _audit.LogAsync(
                         "upstream_response_too_large", orgId: orgId, ecosystem: ecosystem,
                         detail: JsonSerializer.Serialize(

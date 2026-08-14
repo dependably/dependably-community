@@ -421,6 +421,114 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
         Assert.False(updated!.Enabled);
     }
 
+    /// <summary>
+    /// The lost-update this counter used to permit, made deterministic. A competing writer lands
+    /// its own failures in the window a read-then-write leaves open — the window a second dispatch
+    /// worker or a second replica occupies in production — and the counter must still end up
+    /// holding every failure that happened.
+    ///
+    /// The interleave is driven from the injected clock rather than from real threads on purpose:
+    /// <c>Microsoft.Data.Sqlite</c> executes its async API synchronously, so parallel tasks against
+    /// this store cannot interleave at all and a thread-race test here would pass over a broken
+    /// counter. The repository reads the clock once for the timestamp and once for the
+    /// auto-disable window; firing the competing write on that second read places it exactly in
+    /// the gap a read-then-write has and an atomic increment does not.
+    /// </summary>
+    [Fact]
+    public async Task RecordFailureAsync_CompetingWriterLandsMidCall_NoFailureIsLost()
+    {
+        using var ep = MakeProtector();
+        var sub = await new WebhookSubscriptionRepository(_db, ep, Clock).AddAsync(
+            "org1",
+            new NewWebhookSubscription(
+                "https://raced.example.com/hook", ["package.publish"], Secret: null, Description: null));
+
+        // Seven other failures for the same subscription land while this call is in flight.
+        var racingClock = new HookOnSecondReadTimeProvider(() =>
+        {
+            using var conn = _db.OpenAsync().GetAwaiter().GetResult();
+            conn.Execute(
+                // xtenant: a test's competing writer, keyed by the subscription id under test
+                "UPDATE webhook_subscription SET consecutive_failures = consecutive_failures + 7 WHERE id = @id",
+                new { id = sub.Id });
+        });
+
+        var repo = new WebhookSubscriptionRepository(_db, ep, racingClock);
+        await repo.RecordFailureAsync("org1", sub.Id, "502 Bad Gateway",
+            WebhookDispatchQueue.AutoDisableAfterFailures, WebhookDispatchQueue.AutoDisableAfterDuration);
+
+        var afterRace = await repo.GetAsync("org1", sub.Id);
+        Assert.Equal(8, afterRace!.ConsecutiveFailures);
+
+        // And the next failure counts from the true total, not from what this call thought it wrote.
+        var plain = new WebhookSubscriptionRepository(_db, ep, Clock);
+        await plain.RecordFailureAsync("org1", sub.Id, "502 Bad Gateway",
+            WebhookDispatchQueue.AutoDisableAfterFailures, WebhookDispatchQueue.AutoDisableAfterDuration);
+        Assert.Equal(9, (await plain.GetAsync("org1", sub.Id))!.ConsecutiveFailures);
+    }
+
+    /// <summary>
+    /// A <see cref="TimeProvider"/> that runs a callback on its second <c>GetUtcNow</c>, used to
+    /// land a competing write in the middle of a repository call deterministically.
+    /// </summary>
+    private sealed class HookOnSecondReadTimeProvider : TimeProvider
+    {
+        private readonly Action _onSecondRead;
+        private int _reads;
+
+        public HookOnSecondReadTimeProvider(Action onSecondRead) => _onSecondRead = onSecondRead;
+
+        public override DateTimeOffset GetUtcNow()
+        {
+            if (Interlocked.Increment(ref _reads) == 2)
+            {
+                _onSecondRead();
+            }
+
+            return TestTime.KnownNow;
+        }
+    }
+
+    /// <summary>
+    /// Exactly one failure — the one that lands on the threshold — reports the auto-disable, and
+    /// the subscription ends up disabled. This is an invariant that must survive the change to an
+    /// atomic increment, not evidence for it: four sequential failures behave the same either way,
+    /// so it passes on a read-then-write counter too. The distinguishing case is concurrent, and
+    /// <see cref="RecordFailureAsync_CompetingWriterLandsMidCall_NoFailureIsLost"/> is what pins it.
+    /// </summary>
+    [Fact]
+    public async Task RecordFailureAsync_FailureLandingOnTheThreshold_IsTheOneThatReportsAutoDisable()
+    {
+        using var ep = MakeProtector();
+        var repo = new WebhookSubscriptionRepository(_db, ep, Clock);
+
+        var sub = await repo.AddAsync("org1", new NewWebhookSubscription(
+            "https://threshold.example.com/hook",
+            ["package.publish"],
+            Secret: null, Description: null));
+
+        const int remaining = 4;
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "UPDATE webhook_subscription SET consecutive_failures = @n WHERE id = @id",
+                new { n = WebhookDispatchQueue.AutoDisableAfterFailures - remaining, id = sub.Id });
+        }
+
+        var disabled = new List<bool>();
+        for (int i = 0; i < remaining; i++)
+        {
+            disabled.Add(await repo.RecordFailureAsync("org1", sub.Id, "502 Bad Gateway",
+                WebhookDispatchQueue.AutoDisableAfterFailures,
+                WebhookDispatchQueue.AutoDisableAfterDuration));
+        }
+
+        var reread = await repo.GetAsync("org1", sub.Id);
+        Assert.Equal(WebhookDispatchQueue.AutoDisableAfterFailures, reread!.ConsecutiveFailures);
+        Assert.False(reread.Enabled);
+        Assert.Equal(1, disabled.Count(d => d));
+    }
+
     [Fact]
     public async Task RecordSuccessAsync_ResetsFailureCounters()
     {
@@ -887,6 +995,358 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
         Assert.Equal("failed", badReread!.LastStatus);
     }
 
+    // ── Cross-tenant fairness ────────────────────────────────────────────────
+
+    /// <summary>
+    /// The cross-tenant property this queue exists to keep: org1's subscriber endpoint accepts
+    /// the connection and never answers — the trivial slow-loris a tenant is free to point a
+    /// subscription at, since it is a public address the SSRF guard has no reason to block — and
+    /// org2's event must still be delivered while org1's delivery is still hanging.
+    ///
+    /// The wait is gated, not timed: org1's handler parks on a <see cref="TaskCompletionSource"/>
+    /// the test controls, and the assertion is that org2's durable row reached "ok" while that
+    /// gate is provably still closed. No clock is advanced, so nothing about the pass depends on
+    /// timeouts or scheduling luck. A single process-wide reader cannot satisfy this at all:
+    /// org2's envelope stays behind org1's for as long as org1's endpoint chooses.
+    /// </summary>
+    [Fact]
+    public async Task Dispatch_OneOrgsEndpointHangs_AnotherOrgsEventIsStillDelivered()
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('org2', 'beta')");
+
+        using var ep = MakeProtector();
+        var repo = new WebhookSubscriptionRepository(_db, ep, Clock);
+
+        await repo.AddAsync("org1", new NewWebhookSubscription(
+            "https://hang.example.com/hook", ["package.publish"], Secret: null, Description: null));
+        var subOrg2 = await repo.AddAsync("org2", new NewWebhookSubscription(
+            "https://good.example.com/hook", ["package.publish"], Secret: null, Description: null));
+
+        var handler = new HangingDelegatingHandler();
+        var client = new WebhookDeliveryClient(new HttpClient(handler));
+        var queue = new WebhookDispatchQueue(
+            repo, client, Clock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance);
+
+        using var cts = new CancellationTokenSource();
+        _ = queue.StartAsync(cts.Token);
+
+        queue.Dispatch(SampleEnvelope(orgId: "org1", orgSlug: "acme"));
+        await handler.HangEntered.Task;
+
+        queue.Dispatch(SampleEnvelope(orgId: "org2", orgSlug: "beta"));
+        await WaitAsync(async () => (await repo.GetAsync("org2", subOrg2.Id))?.LastStatus is not null);
+
+        Assert.Equal("ok", (await repo.GetAsync("org2", subOrg2.Id))!.LastStatus);
+        Assert.False(handler.HangReleased.Task.IsCompleted,
+            "org1's delivery must still be in flight — otherwise the test proved nothing.");
+
+        handler.HangReleased.TrySetResult();
+        await cts.CancelAsync();
+        try { await queue.StopAsync(CancellationToken.None); } catch { }
+    }
+
+    /// <summary>
+    /// The mixed partial-failure form of the same scenario, and the shape a real instance is in
+    /// during an incident: one tenant's endpoint is hung while another tenant's fan-out has one
+    /// endpoint answering and one failing. The healthy delivery lands, the failing one exhausts
+    /// its retry budget and is durably recorded as failed, and the two are accounted
+    /// independently — all while the first tenant's delivery is still hanging.
+    /// </summary>
+    [Fact]
+    public async Task Dispatch_OneOrgsEndpointHangs_AnotherOrgsMixedFanOutStillCompletes()
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('org2', 'beta')");
+
+        using var ep = MakeProtector();
+        var repo = new WebhookSubscriptionRepository(_db, ep, Clock);
+        var webhookClock = new FakeTimeProvider(Clock.GetUtcNow());
+
+        await repo.AddAsync("org1", new NewWebhookSubscription(
+            "https://hang.example.com/hook", ["package.publish"], Secret: null, Description: null));
+        var subGood = await repo.AddAsync("org2", new NewWebhookSubscription(
+            "https://good.example.com/hook", ["package.publish"], Secret: null, Description: null));
+        var subBad = await repo.AddAsync("org2", new NewWebhookSubscription(
+            "https://bad.example.com/hook", ["package.publish"], Secret: null, Description: null));
+
+        var handler = new HangingDelegatingHandler();
+        var client = new WebhookDeliveryClient(new HttpClient(handler));
+        var queue = new WebhookDispatchQueue(
+            repo, client, webhookClock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance);
+
+        using var cts = new CancellationTokenSource();
+        _ = queue.StartAsync(cts.Token);
+
+        queue.Dispatch(SampleEnvelope(orgId: "org1", orgSlug: "acme"));
+        await handler.HangEntered.Task;
+
+        queue.Dispatch(SampleEnvelope(orgId: "org2", orgSlug: "beta"));
+
+        // The failing subscription burns the 1s/5s/30s backoff in virtual time. The advance budget
+        // stays well inside the 120s per-envelope fair-share budget, so org1's hung delivery is
+        // still hanging for its own reasons rather than having been cut off by its deadline.
+        await ClockPump.UntilAsync(webhookClock, async () =>
+        {
+            var good = await repo.GetAsync("org2", subGood.Id);
+            var bad = await repo.GetAsync("org2", subBad.Id);
+            return good?.LastStatus is not null && bad?.LastStatus is not null;
+        }, TimeSpan.FromSeconds(1), maxAdvances: 60);
+
+        Assert.Equal("ok", (await repo.GetAsync("org2", subGood.Id))!.LastStatus);
+        Assert.Equal("failed", (await repo.GetAsync("org2", subBad.Id))!.LastStatus);
+        Assert.Equal(1, (await repo.GetAsync("org2", subBad.Id))!.ConsecutiveFailures);
+        Assert.False(handler.HangReleased.Task.IsCompleted,
+            "org1's delivery must still be in flight — otherwise the test proved nothing.");
+
+        handler.HangReleased.TrySetResult();
+        await cts.CancelAsync();
+        try { await queue.StopAsync(CancellationToken.None); } catch { }
+    }
+
+    /// <summary>
+    /// A fan-out handed an already-cancelled token stops at its pre-flight guard: no subscription
+    /// is contacted, nothing is recorded, and it reports that it did not carry the envelope to a
+    /// conclusion — which is what makes the envelope eligible to be drained rather than counted as
+    /// delivered. This exercises the guard only; the fan-out never reaches the concurrency gate,
+    /// so the gate's own cancellation contract is pinned by
+    /// <see cref="FanOut_CancelledMidFanOut_ReturnsWithoutThrowing"/> instead.
+    /// </summary>
+    [Fact]
+    public async Task FanOut_AlreadyCancelledToken_AttemptsNothing()
+    {
+        using var ep = MakeProtector();
+        var repo = new WebhookSubscriptionRepository(_db, ep, Clock);
+
+        var sub = await repo.AddAsync("org1", new NewWebhookSubscription(
+            "https://good.example.com/hook", ["package.publish"], Secret: null, Description: null));
+
+        var queue = new WebhookDispatchQueue(
+            repo, BuildPartialFailureClient(), Clock, BuildCfg(),
+            NullLogger<WebhookDispatchQueue>.Instance);
+
+        bool completed = await queue.FanOutAsyncForTests(SampleEnvelope(), new CancellationToken(canceled: true));
+
+        Assert.False(completed);
+        Assert.Equal(0, queue.DeliveredCount);
+        Assert.Equal(0, queue.FailedCount);
+        Assert.Null((await repo.GetAsync("org1", sub.Id))!.LastStatus);
+    }
+
+    /// <summary>
+    /// The same contract at the moment it actually bites: cancellation arriving <em>during</em> a
+    /// fan-out, with more subscriptions than the concurrency bound so some are still queued behind
+    /// the gate when it fires. Both of <see cref="SemaphoreSlim.WaitAsync(CancellationToken)"/>'s
+    /// cancellation paths raise — including the one where a slot is free — so the waiters fault,
+    /// and an unguarded <c>Task.WhenAll</c> rethrows out of the fan-out. That is the shutdown path:
+    /// the drain calls the fan-out with a token that fires when the drain window closes, and has no
+    /// handler of its own, so the exception escapes the whole <see cref="BackgroundService"/>.
+    /// </summary>
+    [Fact]
+    public async Task FanOut_CancelledMidFanOut_ReturnsWithoutThrowing()
+    {
+        using var ep = MakeProtector();
+        var repo = new WebhookSubscriptionRepository(_db, ep, Clock);
+
+        for (int i = 0; i < 3; i++)
+        {
+            await repo.AddAsync("org1", new NewWebhookSubscription(
+                $"https://good-{i}.example.com/hook", ["package.publish"],
+                Secret: null, Description: null));
+        }
+
+        using var cts = new CancellationTokenSource();
+        var client = new WebhookDeliveryClient(new HttpClient(new CancelOnSendHandler(cts)));
+
+        // Concurrency 1, so the second and third subscriptions are still waiting on the gate when
+        // the first delivery cancels the token.
+        var cfg = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["WEBHOOK_QUEUE_CAPACITY"] = "1024",
+                ["WEBHOOK_FANOUT_CONCURRENCY"] = "1"
+            })
+            .Build();
+
+        var queue = new WebhookDispatchQueue(
+            repo, client, Clock, cfg, NullLogger<WebhookDispatchQueue>.Instance);
+
+        await queue.FanOutAsyncForTests(SampleEnvelope(), cts.Token);
+
+        Assert.True(cts.IsCancellationRequested);
+    }
+
+    /// <summary>Parks any request whose URL contains "hang" until the test releases it; 502 for
+    /// "bad", 200 otherwise. The gate is what makes the fairness assertions deterministic — the
+    /// hung delivery is provably still in flight at the moment the other org's outcome is
+    /// asserted.</summary>
+    private sealed class HangingDelegatingHandler : DelegatingHandler
+    {
+        private readonly bool _parkOnlyFirstRequest;
+        private int _requests;
+
+        public TaskCompletionSource HangEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource HangReleased { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public HangingDelegatingHandler(bool parkOnlyFirstRequest = false) : base(new HttpClientHandler())
+        {
+            _parkOnlyFirstRequest = parkOnlyFirstRequest;
+        }
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            string url = request.RequestUri?.ToString() ?? "";
+            bool park = url.Contains("hang")
+                && (!_parkOnlyFirstRequest || Interlocked.Increment(ref _requests) == 1);
+            if (park)
+            {
+                HangEntered.TrySetResult();
+                await HangReleased.Task.WaitAsync(cancellationToken);
+            }
+
+            return new HttpResponseMessage(
+                url.Contains("bad") ? HttpStatusCode.BadGateway : HttpStatusCode.OK);
+        }
+    }
+
+    // ── Stopping path ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The fairness bound has to hold on the way down too. The shutdown drain has a bounded
+    /// window, and if the first org drained can hold it open — a slow-loris endpoint is a tenant's
+    /// own choice — then every other org's queued events are silently abandoned on every deploy
+    /// and every restart. Running each drained envelope under the same per-envelope budget as
+    /// normal service is what stops that: org1's hung endpoint costs its own budget and no more,
+    /// and org2's envelope is still delivered.
+    ///
+    /// The budget runs on the injected clock, so the abandonment is reached by advancing virtual
+    /// time rather than by waiting out a real deadline.
+    /// </summary>
+    [Fact]
+    public async Task Drain_OneOrgsHungEndpoint_DoesNotConsumeAnotherOrgsShareOfTheWindow()
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('org2', 'beta')");
+
+        using var ep = MakeProtector();
+        var repo = new WebhookSubscriptionRepository(_db, ep, Clock);
+        var webhookClock = new FakeTimeProvider(Clock.GetUtcNow());
+
+        var subHang = await repo.AddAsync("org1", new NewWebhookSubscription(
+            "https://hang.example.com/hook", ["package.publish"], Secret: null, Description: null));
+        var subGood = await repo.AddAsync("org2", new NewWebhookSubscription(
+            "https://good.example.com/hook", ["package.publish"], Secret: null, Description: null));
+
+        var handler = new HangingDelegatingHandler();
+        var client = new WebhookDeliveryClient(new HttpClient(handler));
+
+        var cfg = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["WEBHOOK_QUEUE_CAPACITY"] = "1024",
+                ["WEBHOOK_ENVELOPE_BUDGET_SECONDS"] = "30"
+            })
+            .Build();
+
+        var queue = new WebhookDispatchQueue(
+            repo, client, webhookClock, cfg, NullLogger<WebhookDispatchQueue>.Instance);
+
+        // Both envelopes are queued before any worker runs, so both are drained rather than served.
+        queue.Dispatch(SampleEnvelope(orgId: "org1", orgSlug: "acme"));
+        queue.Dispatch(SampleEnvelope(orgId: "org2", orgSlug: "beta"));
+
+        var executeTask = queue.ExecuteAsyncForTests(new CancellationToken(canceled: true));
+
+        await ClockPump.UntilAsync(webhookClock, async () =>
+            (await repo.GetAsync("org2", subGood.Id))?.LastStatus is not null,
+            TimeSpan.FromSeconds(5), maxAdvances: 60);
+
+        handler.HangReleased.TrySetResult();
+        await executeTask;
+
+        Assert.Equal("ok", (await repo.GetAsync("org2", subGood.Id))!.LastStatus);
+        Assert.Equal(1, queue.DeliveredCount);
+
+        // org1's envelope was abandoned on its own budget, so nothing terminal was recorded for it.
+        Assert.Null((await repo.GetAsync("org1", subHang.Id))!.LastStatus);
+    }
+
+    /// <summary>
+    /// An envelope a worker had already taken off its lane when the host began stopping is not
+    /// lost: it goes back to the head of its lane and the drain delivers it. Dropping it instead
+    /// costs one envelope per worker on every deploy, and the worker count is operator-configured,
+    /// so the loss scales with the tuning knob.
+    /// </summary>
+    [Fact]
+    public async Task InFlightEnvelopeInterruptedByShutdown_IsDeliveredByTheDrain()
+    {
+        using var ep = MakeProtector();
+        var repo = new WebhookSubscriptionRepository(_db, ep, Clock);
+
+        var sub = await repo.AddAsync("org1", new NewWebhookSubscription(
+            "https://hang.example.com/hook", ["package.publish"], Secret: null, Description: null));
+
+        // Parks the first attempt only: the retry the drain makes answers normally, so the
+        // envelope's delivery is observable rather than merely re-queued.
+        var handler = new HangingDelegatingHandler(parkOnlyFirstRequest: true);
+        var client = new WebhookDeliveryClient(new HttpClient(handler));
+        var queue = new WebhookDispatchQueue(
+            repo, client, Clock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance);
+
+        using var cts = new CancellationTokenSource();
+        var executeTask = queue.ExecuteAsyncForTests(cts.Token);
+
+        queue.Dispatch(SampleEnvelope(orgId: "org1", orgSlug: "acme"));
+        await handler.HangEntered.Task;
+
+        await cts.CancelAsync();
+        await executeTask;
+
+        Assert.Equal("ok", (await repo.GetAsync("org1", sub.Id))!.LastStatus);
+        Assert.Equal(1, queue.DeliveredCount);
+    }
+
+    /// <summary>
+    /// A per-envelope budget configured past the platform's maximum timer duration must not reach
+    /// the workers. The budget becomes a timer, and constructing that timer throws — once per
+    /// envelope, inside a worker, where the pool's <see cref="Task.WhenAll(Task[])"/> leaves the
+    /// fault unobserved while any sibling survives. The queue keeps delivering on the documented
+    /// default instead, and the refusal is a startup warning rather than a silent loss of workers.
+    /// </summary>
+    [Fact]
+    public async Task Dispatch_EnvelopeBudgetConfiguredBeyondTheTimerCeiling_StillDelivers()
+    {
+        using var ep = MakeProtector();
+        var repo = new WebhookSubscriptionRepository(_db, ep, Clock);
+
+        var sub = await repo.AddAsync("org1", new NewWebhookSubscription(
+            "https://good.example.com/hook", ["package.publish"], Secret: null, Description: null));
+
+        var cfg = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["WEBHOOK_QUEUE_CAPACITY"] = "1024",
+                ["WEBHOOK_ENVELOPE_BUDGET_SECONDS"] = "2000000000"
+            })
+            .Build();
+
+        var queue = new WebhookDispatchQueue(
+            repo, BuildPartialFailureClient(), Clock, cfg, NullLogger<WebhookDispatchQueue>.Instance);
+
+        using var cts = new CancellationTokenSource();
+        _ = queue.StartAsync(cts.Token);
+
+        queue.Dispatch(SampleEnvelope(orgId: "org1", orgSlug: "acme"));
+        await WaitAsync(async () => (await repo.GetAsync("org1", sub.Id))?.LastStatus is not null);
+
+        Assert.Equal("ok", (await repo.GetAsync("org1", sub.Id))!.LastStatus);
+
+        await cts.CancelAsync();
+        try { await queue.StopAsync(CancellationToken.None); } catch { }
+    }
+
     // ── Overflow / drop path ──────────────────────────────────────────────────
 
     [Fact]
@@ -905,13 +1365,49 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
         var queue = new WebhookDispatchQueue(repo, client, Clock, cfg,
             NullLogger<WebhookDispatchQueue>.Instance);
 
-        // Enqueue 5 without starting the consumer (channel capacity = 1)
+        // Enqueue 5 without starting the consumer (queue depth = 1 per org)
         for (int i = 0; i < 5; i++)
         {
             queue.Dispatch(SampleEnvelope());
         }
 
-        // 1 slot fits in the channel; the remaining 4 must be dropped.
+        // 1 slot fits in the org's lane; the remaining 4 must be dropped.
+        Assert.Equal(4, queue.DroppedCount);
+    }
+
+    /// <summary>
+    /// Overflow is charged to the org that caused it. One org filling its lane must not cost
+    /// another org its event — on a single shared buffer, a tenant publishing in a loop evicts
+    /// every other tenant's notifications, which is the drop half of the same cross-tenant defect
+    /// as the stall.
+    /// </summary>
+    [Fact]
+    public async Task Dispatch_OneOrgFillsItsQueue_AnotherOrgsEventIsStillAccepted()
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('org2', 'beta')");
+
+        using var ep = MakeProtector();
+        var repo = new WebhookSubscriptionRepository(_db, ep, Clock);
+        var client = BuildPartialFailureClient();
+
+        var cfg = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["WEBHOOK_QUEUE_CAPACITY"] = "1" })
+            .Build();
+
+        // Never started: nothing is dequeued, so org1's single slot stays occupied.
+        var queue = new WebhookDispatchQueue(repo, client, Clock, cfg,
+            NullLogger<WebhookDispatchQueue>.Instance);
+
+        for (int i = 0; i < 5; i++)
+        {
+            queue.Dispatch(SampleEnvelope(orgId: "org1", orgSlug: "acme"));
+        }
+
+        Assert.Equal(4, queue.DroppedCount);
+
+        queue.Dispatch(SampleEnvelope(orgId: "org2", orgSlug: "beta"));
+
         Assert.Equal(4, queue.DroppedCount);
     }
 

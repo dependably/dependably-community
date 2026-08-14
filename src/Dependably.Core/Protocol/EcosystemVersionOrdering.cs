@@ -227,7 +227,7 @@ public static partial class EcosystemVersionOrdering
         @"^\s*(?:(?<epoch>[0-9]+)!)?(?<release>[0-9]+(?:\.[0-9]+)*)" +
         @"(?:[-_.]?(?<preL>a|b|c|rc|alpha|beta|pre|preview)[-_.]?(?<preN>[0-9]+)?)?" +
         @"(?:(?:-(?<postImplicit>[0-9]+))|(?:[-_.]?(?:post|rev|r)[-_.]?(?<postN>[0-9]+)?))?" +
-        @"(?:[-_.]?dev[-_.]?(?<devN>[0-9]+)?)?" +
+        @"(?:[-_.]?(?<devL>dev)[-_.]?(?<devN>[0-9]+)?)?" +
         @"(?:\+[a-zA-Z0-9]+(?:[-_.][a-zA-Z0-9]+)*)?\s*$",
         RegexOptions.IgnoreCase)]
     private static partial Regex Pep440Regex();
@@ -263,24 +263,31 @@ public static partial class EcosystemVersionOrdering
             .Select(p => int.Parse(p, CultureInfo.InvariantCulture))
             .ToList();
 
-        version = BuildPep440Phase(m, raw, epoch, release);
+        version = BuildPep440Phase(m, epoch, release);
         return true;
     }
 
     // Resolves the dev/pre/post/final phase rank from the regex match groups, per PEP 440's
-    // precedence ordering: dev < pre < final < post at the same release segment.
-    private static Pep440 BuildPep440Phase(Match m, string raw, int epoch, List<int> release)
+    // precedence ordering: dev < pre < final < post at the same release segment. Dev presence is
+    // read only from the regex's own dev-segment group (devL) — never from a whole-string
+    // substring scan, which would misclassify a final release whose LOCAL version identifier
+    // happens to contain "dev" (e.g. "1.0+ubuntu.dev1") as a dev-release. A combined
+    // pre-release-and-dev version (e.g. "2.0.0b1.dev1") keeps its alpha/beta SubRank rather than
+    // collapsing to a bare dev rank, so ComparePep440 still orders beta-dev above alpha-dev.
+    private static Pep440 BuildPep440Phase(Match m, int epoch, List<int> release)
     {
-        bool isDev = m.Groups["devN"].Success || raw.Contains("dev", StringComparison.OrdinalIgnoreCase);
-        if (isDev)
-        {
-            int devN = m.Groups["devN"].Success ? int.Parse(m.Groups["devN"].Value, CultureInfo.InvariantCulture) : 0;
-            return new Pep440(epoch, release, PhaseDev, 0, devN);
-        }
+        bool isDev = m.Groups["devL"].Success;
+        int devN = m.Groups["devN"].Success ? int.Parse(m.Groups["devN"].Value, CultureInfo.InvariantCulture) : 0;
 
         if (m.Groups["preL"].Success)
         {
-            return BuildPep440Pre(m, epoch, release);
+            var pre = BuildPep440Pre(m, epoch, release);
+            return isDev ? pre with { Phase = PhaseDev, Number = devN } : pre;
+        }
+
+        if (isDev)
+        {
+            return new Pep440(epoch, release, PhaseDev, 0, devN);
         }
 
         bool isPost = m.Groups["postN"].Success || m.Groups["postImplicit"].Success;

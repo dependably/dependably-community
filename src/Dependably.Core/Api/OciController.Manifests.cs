@@ -15,7 +15,11 @@ public sealed partial class OciController
     private async Task<IActionResult> ServeManifestAsync(
         string name, string reference, bool headOnly, CancellationToken ct)
     {
-        var auth = await AuthorizePullAsync(ct);
+        // allowPushProbe: docker/BuildKit resolve a manifest reference (HEAD, falling back to
+        // GET on registries that don't answer HEAD reliably) both to decide whether a tag
+        // already points at the digest being pushed and to read back a just-pushed manifest —
+        // a normal part of the push protocol that a publish-only token must still be able to do.
+        var auth = await AuthorizePullAsync(ct, allowPushProbe: true);
         if (auth.Unauthorized is not null)
         {
             return auth.Unauthorized;
@@ -118,7 +122,7 @@ public sealed partial class OciController
         // match the version row's canonical PURL (which carries ?repository_url=…&tag=…).
         // OCI download volume is still tracked org-wide via these activity rows.
         await _svc.Audit.LogActivityAsync(orgId, "oci", $"pkg:oci/{name}@{resolved}", "download",
-            actorId: token?.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+            actorId: token?.UserId, actorKind: token?.ActorKind, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         return File(stream, MediaType!);
     }
 
@@ -182,7 +186,7 @@ public sealed partial class OciController
 
         SetManifestHeaders(upstreamResult.Digest, upstreamResult.SizeBytes, upstreamResult.MediaType, "MISS", isDigest);
         await _svc.Audit.LogActivityAsync(orgId, "oci", $"pkg:oci/{name}@{upstreamResult.Digest}", "download",
-            actorId: token?.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+            actorId: token?.UserId, actorKind: token?.ActorKind, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         return File(upstreamResult.Content, upstreamResult.MediaType);
     }
 
@@ -480,7 +484,7 @@ public sealed partial class OciController
             }
 
             await _svc.Audit.LogActivityAsync(orgId, "oci", $"pkg:oci/{name}@{reference}", "delete",
-                actorId: token?.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+                actorId: token?.UserId, actorKind: token?.ActorKind, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
             return NoContent();
         }
@@ -501,7 +505,7 @@ public sealed partial class OciController
             }
 
             await _svc.Audit.LogActivityAsync(orgId, "oci", $"pkg:oci/{name}:{reference}", "delete",
-                actorId: token?.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+                actorId: token?.UserId, actorKind: token?.ActorKind, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
             return NoContent();
         }
@@ -620,7 +624,7 @@ public sealed partial class OciController
                     await ownerGate.RecordOwnershipAsync(orgId, "oci", name, namePrincipal, ct);
                 }
                 await _svc.Audit.LogActivityAsync(orgId, "oci", $"pkg:oci/{name}@{result.Digest}", "push",
-                    actorId: token?.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+                    actorId: token?.UserId, actorKind: token?.ActorKind, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
                 Response.Headers.Location = $"/v2/{name}/manifests/{result.Digest}";
                 Response.Headers["Docker-Content-Digest"] = result.Digest!;
                 return StatusCode(StatusCodes.Status201Created);

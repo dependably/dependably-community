@@ -7,6 +7,7 @@
   import { user, navigate, takePendingRoute } from '../lib/store.js'
   import ThemeToggle from '../lib/ThemeToggle.svelte'
   import { locales, switchLocale } from '../lib/locale.js'
+  import { applyUserContext } from '../lib/userContext.js'
   import PasswordStrength from '../lib/PasswordStrength.svelte'
   import { qrSvg } from '../lib/qrcode.js'
 
@@ -33,6 +34,31 @@
 
   // System area has no tenant default — fall back to 'en'.
   const systemFallbackLabel = locales.find(l => l.code === 'en')?.label || 'English'
+
+  // Same shape as the tenant Profile picker: '' clears the override back to the instance
+  // default rather than pinning the operator to whatever that default happens to be today.
+  $: timezoneOverride = me?.timezone || ''
+  const timeZoneOptions = typeof Intl.supportedValuesOf === 'function'
+    ? Intl.supportedValuesOf('timeZone')
+    : [Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC']
+  let timezoneError = ''
+
+  async function changeTimezone(event) {
+    const select = event.currentTarget
+    timezoneError = ''
+    try {
+      await systemApi.updateTimezone(select.value === '' ? null : select.value)
+      me = await systemApi.me()
+      // Seeds the shared user store, which is what $formatDate derives its zone from — without
+      // it the operator's own change would not reach a single rendered timestamp until reload.
+      await applyUserContext(me)
+    } catch {
+      timezoneError = $t('profile.rows.timezoneError')
+      // The server refused the zone, so the persisted value is unchanged; put the control back
+      // on it rather than leaving a selection that was never stored.
+      select.value = timezoneOverride
+    }
+  }
 
   onMount(async () => {
     try {
@@ -305,6 +331,27 @@
         </div>
         <div class="settings-row-control">
           <ThemeToggle />
+        </div>
+      </div>
+
+      <!-- Timezone row -->
+      <div class="settings-row">
+        <div class="settings-row-text">
+          <div class="settings-row-title">{$t('profile.rows.timezoneTitle')}</div>
+          <div class="settings-row-help">{$t('profile.rows.timezoneHelpSystemFallback')}</div>
+          {#if timezoneError}<div class="settings-row-help error">{timezoneError}</div>{/if}
+        </div>
+        <div class="settings-row-control">
+          <select
+            value={timezoneOverride}
+            on:change={changeTimezone}
+            aria-label={$t('profile.rows.timezoneTitle')}
+          >
+            <option value="">{$t('profile.rows.timezoneInheritSystem')}</option>
+            {#each timeZoneOptions as tz (tz)}
+              <option value={tz}>{tz}</option>
+            {/each}
+          </select>
         </div>
       </div>
 

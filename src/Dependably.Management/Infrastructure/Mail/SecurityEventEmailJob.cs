@@ -80,7 +80,7 @@ internal sealed class SecurityEventEmailJob : IEmailDeliveryJob
                 SecurityEventKind.MfaDisabled => ("email.security.mfaDisabled.subject", "email.security.mfaDisabled.body"),
                 SecurityEventKind.PasswordChanged => ("email.security.passwordChanged.subject", "email.security.passwordChanged.body"),
                 SecurityEventKind.EmailChanged => ("email.security.emailChanged.subject", "email.security.emailChanged.body"),
-                _ => throw new ArgumentOutOfRangeException("kind", _kind, "Unknown security event kind."),
+                _ => throw new InvalidOperationException($"Unknown security event kind: {_kind}."),
             };
             string subject = _localizer[subjectKey];
             string body = _localizer[bodyKey, occurred];

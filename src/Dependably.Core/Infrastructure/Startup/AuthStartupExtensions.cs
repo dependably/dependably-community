@@ -145,6 +145,15 @@ internal static class AuthStartupExtensions
             // shedding sustained floods with 429.
             AddMetadataLimiter(builder.Configuration, o, ipv6Prefix);
 
+            // On-demand vulnerability rescan is per-caller (not just per-IP): each call is one
+            // outbound OSV advisory query plus a DB write, and the endpoint's own cooldown is
+            // per-package, so it does nothing to bound a caller fanning out across many distinct
+            // packages. In-process in both modes for the same reason as the management default —
+            // a tight per-principal budget, not a distributed one; the CLAUDE.md-documented HA
+            // caveat (fleet budget is N x configured) applies here exactly as it does to every
+            // other in-process limiter.
+            AddRescanLimiter(builder.Configuration, o, ipv6Prefix);
+
             // Global default covers authenticated management endpoints (/api/v1/*) that
             // carry no endpoint-specific policy. The SPA and CI tooling hit /api/v1 at
             // human-interactive rates; 300 requests/min per principal handles normal bursts
@@ -191,7 +200,17 @@ internal static class AuthStartupExtensions
 
         // Push is rarer; a much lower ceiling protects the writer queue from a malformed
         // publish loop. 20 req/s burst per token.
-        int pushLimit = int.TryParse(cfg["PUSH_RATE_LIMIT_PERMITS"], out int pp) ? pp : 20;
+        //
+        // Push queues for the same reason download does, and the burst here is structural
+        // rather than incidental: an OCI push spends three push-policy requests per layer
+        // (POST to open the upload session, PATCH the chunk, PUT to finalize) and runs several
+        // layers concurrently, so a routine multi-layer image crosses a 20/s ceiling without
+        // any client misbehaviour. A zero queue turns that into a hard failure — the OCI
+        // clients do not honour Retry-After on a write, so a single rejected request aborts
+        // the whole push rather than slowing it. The permit ceiling still bounds sustained
+        // abuse: once the queue fills, further requests get 429 with Retry-After.
+        int pushLimit = RateLimitCeilings.ResolvePushPermitLimit(cfg);
+        int pushQueue = RateLimitCeilings.ResolvePushQueueLimit(cfg);
         o.AddPolicy("push", httpContext =>
         {
             string key = RateLimitPartitions.GetPartitionKey(httpContext, ipv6Prefix);
@@ -201,7 +220,8 @@ internal static class AuthStartupExtensions
                     PermitLimit = pushLimit,
                     Window = TimeSpan.FromSeconds(1),
                     SegmentsPerWindow = RateLimitWindowSegments,
-                    QueueLimit = 0,
+                    QueueLimit = pushQueue,
+                    QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
                 });
         });
 
@@ -251,6 +271,33 @@ internal static class AuthStartupExtensions
                     SegmentsPerWindow = RateLimitWindowSegments,
                     QueueLimit = metadataQueue,
                     QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                });
+        });
+    }
+
+    // On-demand vulnerability rescan (POST /api/v1/packages/{eco}/{name}/{version}/rescan).
+    // Partitioned like the management GlobalLimiter (token hash → user sub → IP) rather than a
+    // flat per-IP bucket: the endpoint requires an authenticated admin-capable caller, so the
+    // ceiling should follow the caller, not the source address a shared office egress hides
+    // behind. Default 20 requests/min per caller is well above any legitimate operator workflow
+    // (rescanning a handful of flagged packages after a triage pass) while bounding the
+    // aggregate outbound OSV query volume a fanned-out rescan loop across many distinct
+    // packages could otherwise drive — the per-package cooldown does not help there, since each
+    // call targets a different package. This stacks under the per-principal management default
+    // (300/min) the same way import/download/push do; both budgets apply.
+    private static void AddRescanLimiter(ConfigurationManager cfg, RateLimiterOptions o, int ipv6Prefix)
+    {
+        int rescanLimit = int.TryParse(cfg["RESCAN_RATE_LIMIT_PERMITS"], out int rp) ? rp : 20;
+        o.AddPolicy("rescan", httpContext =>
+        {
+            string key = RateLimitPartitions.GetManagementPartitionKey(httpContext, ipv6Prefix);
+            return RateLimitPartition.GetSlidingWindowLimiter(key,
+                _ => new SlidingWindowRateLimiterOptions
+                {
+                    PermitLimit = rescanLimit,
+                    Window = TimeSpan.FromMinutes(1),
+                    SegmentsPerWindow = RateLimitWindowSegments,
+                    QueueLimit = 0,
                 });
         });
     }

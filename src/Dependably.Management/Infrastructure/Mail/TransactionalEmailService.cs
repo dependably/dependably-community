@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Localization;
 
 namespace Dependably.Infrastructure.Mail;
@@ -13,39 +14,47 @@ public sealed class TransactionalEmailService
 {
     private readonly EmailDeliveryQueue _queue;
     private readonly InstanceSmtpConfig _instanceConfig;
+    private readonly bool _allowInsecureCredentialMail;
     private readonly IStringLocalizer<SharedResource> _localizer;
     private readonly ILogger<TransactionalEmailService> _logger;
 
     public TransactionalEmailService(
         EmailDeliveryQueue queue,
         InstanceSmtpConfig instanceConfig,
+        IConfiguration config,
         IStringLocalizer<SharedResource> localizer,
         ILogger<TransactionalEmailService> logger)
     {
         _queue = queue;
         _instanceConfig = instanceConfig;
+        // Resolved once, like WebhookSiemForwarder resolves its own insecure-override env var
+        // once at construction — env vars do not change for the lifetime of the process.
+        _allowInsecureCredentialMail = CredentialMailPolicy.AllowsInsecure(config);
         _localizer = localizer;
         _logger = logger;
     }
 
     /// <summary>
     /// Non-blocking: enqueues a password-reset email for delivery. A no-op (nothing sent, no
-    /// exception) when the instance SMTP transport is not enabled/configured — the caller
-    /// (<c>AuthController</c>) still returns 202 either way, since the response must never
-    /// reveal whether delivery is even possible for a given account.
+    /// exception) when the instance SMTP transport is not enabled/configured, or when it is
+    /// configured but unencrypted and <see cref="CredentialMailPolicy"/> has not been overridden
+    /// — the caller (<c>AuthController</c>) still returns 202 either way, since the response must
+    /// never reveal whether delivery is even possible for a given account.
     /// </summary>
     public void EnqueuePasswordReset(string toAddress, string resetLink, DateTimeOffset expiresAt) =>
-        _queue.Enqueue(new PasswordResetEmailJob(toAddress, resetLink, expiresAt, _instanceConfig, _localizer, _logger));
+        _queue.Enqueue(new PasswordResetEmailJob(
+            toAddress, resetLink, expiresAt, _instanceConfig, _allowInsecureCredentialMail, _localizer, _logger));
 
     /// <summary>
     /// Non-blocking: enqueues the verification link for a pending email change to the address
     /// being moved TO — possession of that mailbox is what authorizes the move. A no-op when the
-    /// instance SMTP transport is not enabled/configured, in which case the pending request simply
+    /// instance SMTP transport is not enabled/configured, or configured but unencrypted and not
+    /// overridden per <see cref="CredentialMailPolicy"/>; either way the pending request simply
     /// expires unredeemed and the account keeps its current address.
     /// </summary>
     public void EnqueueEmailChangeVerification(string toAddress, string verifyLink, DateTimeOffset expiresAt) =>
         _queue.Enqueue(new EmailChangeVerificationJob(
-            toAddress, verifyLink, expiresAt, _instanceConfig, _localizer, _logger));
+            toAddress, verifyLink, expiresAt, _instanceConfig, _allowInsecureCredentialMail, _localizer, _logger));
 
     /// <summary>
     /// Non-blocking: enqueues an "MFA enabled" notification to the acting user's own address, in

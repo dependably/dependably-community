@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text.Json;
 using Dependably.Infrastructure;
+using Microsoft.AspNetCore.Http;
 
 namespace Dependably.Security;
 
@@ -15,13 +16,20 @@ public sealed class UpstreamUrlValidator : IUpstreamUrlValidator
 {
     private readonly AuditRepository _audit;
     private readonly string? _allowedHost;
+    // Registered singleton-safe (IHttpContextAccessor wraps an AsyncLocal, not per-request
+    // state) so the DNS-rebinding recheck can attribute its audit row to the request that
+    // triggered the fetch, even though this class has no per-request lifetime of its own.
+    // Null outside a request (there is currently no such caller, but the class has no way to
+    // enforce that at compile time).
+    private readonly IHttpContextAccessor? _httpContextAccessor;
 
-    public UpstreamUrlValidator(AuditRepository audit, IEdgeMode edge)
+    public UpstreamUrlValidator(AuditRepository audit, IEdgeMode edge, IHttpContextAccessor? httpContextAccessor = null)
     {
         _audit = audit;
         // Edge mode admits exactly the master host at the request-time DNS check so an internal
         // master resolves through; null (non-edge) leaves the block check fully in force.
         _allowedHost = edge.IsEdge && !string.IsNullOrEmpty(edge.MasterHost) ? edge.MasterHost : null;
+        _httpContextAccessor = httpContextAccessor;
     }
 
     /// <summary>
@@ -116,6 +124,7 @@ public sealed class UpstreamUrlValidator : IUpstreamUrlValidator
                 "ssrf_blocked",
                 orgId: orgId,
                 detail: JsonSerializer.Serialize(new { url = uri.Host, resolved = blocked.ToString() }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+                sourceIp: _httpContextAccessor?.HttpContext.GetNormalizedRemoteIp(),
                 ct: ct);
             return UpstreamUrlBlock.BlockedRange;
         }

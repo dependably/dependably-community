@@ -35,6 +35,10 @@ export class NavPage {
     await this.navLink('Activity').click()
   }
 
+  async goToAudit() {
+    await this.navLink('Audit').click()
+  }
+
   async goToTokens() {
     await this.navLink('Tokens').click()
   }

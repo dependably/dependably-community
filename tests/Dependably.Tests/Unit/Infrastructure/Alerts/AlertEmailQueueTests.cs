@@ -14,16 +14,16 @@ using Microsoft.Extensions.Time.Testing;
 namespace Dependably.Tests.Unit.Infrastructure.Alerts;
 
 /// <summary>
-/// Unit tests for alert email delivery over a recording <see cref="FakeMailSender"/>: success,
-/// terminal failure, resolver-null no-op, auto-disable, mixed partial-failure fan-out, and the
-/// overflow drop path. <see cref="AlertEmailQueue"/> is now a thin <c>IAlertNotifier</c> adapter
-/// over the shared <see cref="EmailDeliveryQueue"/> (the generic worker/retry/drain core extracted
-/// so every outbound-email channel shares one delivery engine), so these tests drive the shared
-/// queue's background service directly (<c>StartAsync</c>/<c>StopAsync</c>/counters) while using
-/// <see cref="AlertEmailQueue.Notify"/> (or a directly-constructed <see cref="AlertEmailJob"/> for
-/// the tests that used to call the old <c>DeliverAsync(AlertRecord, ct)</c> overload) to exercise
-/// the alert-specific wrapping. Mirrors <c>AlertSlackQueueTests</c>'s construction style (real
-/// repositories over an in-memory SQLite store, a fake send seam routed by transport host substring).
+/// <see cref="AlertEmailQueue"/> is the write side of the durable email outbox: it resolves the
+/// org's channel, renders the message, and persists it to <c>email_outbox</c> before returning.
+/// These tests cover that write side and the seam it hands to
+/// <see cref="EmailOutboxDeliveryService"/> — what gets persisted, what deliberately does not, the
+/// cross-tenant recipient guarantee, the depth-cap shed policy, and mixed per-org outcomes.
+///
+/// <para>
+/// The lifecycle, retry classification, and the four bounds are driven separately, against the real
+/// delivery worker, in <c>EmailOutboxDeliveryServiceTests</c>.
+/// </para>
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class AlertEmailQueueTests : IAsyncLifetime
@@ -63,62 +63,58 @@ public sealed class AlertEmailQueueTests : IAsyncLifetime
         return services.BuildServiceProvider().GetRequiredService<IStringLocalizer<SharedResource>>();
     }
 
-    /// <summary>Not inheriting the instance transport in any of these tests — the reader never
-    /// resolves any key, so an all-null stub is a faithful "instance not configured" double.</summary>
+    /// <summary>The reader never resolves any key, so an all-null stub is a faithful
+    /// "instance not configured" double.</summary>
     private static InstanceSmtpConfig BuildUnconfiguredInstance() =>
         new((_, _) => Task.FromResult<string?>(null), Clock);
 
-    private static async Task<AlertRecord> SeedActiveAlertAsync(AlertRepository alerts, string orgId, string sourceRef)
+    /// <summary>The one transport every org sends over. <paramref name="host"/> containing "bad"
+    /// simulates an instance-wide relay outage.</summary>
+    private static InstanceSmtpConfig BuildInstance(string host = "instance.example.com")
+    {
+        var rows = new Dictionary<string, string?>
+        {
+            ["smtp_enabled"] = "1",
+            ["smtp_host"] = host,
+            ["smtp_from_address"] = "alerts@example.com",
+            ["smtp_security"] = "none",
+        };
+        return new InstanceSmtpConfig(
+            (key, _) => Task.FromResult(rows.TryGetValue(key, out string? v) ? v : null), Clock);
+    }
+
+    private static EmailOutboxPolicy BuildPolicy(params (string Key, string Value)[] overrides) =>
+        new(new ConfigurationBuilder()
+            .AddInMemoryCollection(overrides.ToDictionary(o => o.Key, o => (string?)o.Value))
+            .Build());
+
+    private static EmailTransportBreaker BuildBreaker(
+        FakeTimeProvider clock, params (string Key, string Value)[] overrides) =>
+        new(
+            new ConfigurationBuilder()
+                .AddInMemoryCollection(overrides.ToDictionary(o => o.Key, o => (string?)o.Value))
+                .Build(),
+            clock,
+            NullLogger<EmailTransportBreaker>.Instance);
+
+    private static async Task<AlertRecord> SeedActiveAlertAsync(
+        AlertRepository alerts, string orgId, string sourceRef, string purl = "pkg:npm/email-test@1.0.0")
     {
         var alert = await alerts.TryInsertAsync(new NewAlert(
             orgId, AlertTypes.QuarantineNew, Severity: null, SourceRef: sourceRef,
-            Ecosystem: "npm", Purl: "pkg:npm/email-test@1.0.0",
+            Ecosystem: "npm", Purl: purl,
             Title: "New quarantine item: pkg:npm/email-test@1.0.0", Detail: "Held pending review."));
         return alert!;
     }
 
-    private static async Task EnableEmailAsync(
-        AlertSettingsRepository settings, string orgId, string host, string[] recipients)
-    {
-        // The delivery gate (email_enabled + recipients) lives on the gates upsert; the
-        // transport columns on the email upsert.
-        await settings.UpdateGatesAsync(orgId, new UpdateAlertGates(
-            QuarantineAlertsEnabled: true, VulnAlertsEnabled: true, VulnMinSeverity: "HIGH",
+    /// <summary>An org owns only the delivery gate and its recipient list.</summary>
+    private static Task EnableEmailAsync(
+        AlertSettingsRepository settings, string orgId, string[] recipients) =>
+        settings.UpdateEmailChannelAsync(orgId, new UpdateAlertEmailChannel(
             EmailEnabled: true, EmailRecipients: string.Join(",", recipients)));
-        await settings.UpdateEmailAsync(orgId, new UpdateAlertEmail(
-            EmailInheritInstance: false,
-            EmailSmtpHost: host,
-            EmailSmtpPort: 587,
-            EmailSmtpSecurity: "none",
-            EmailSmtpUsername: null,
-            EmailSmtpPassword: null,
-            EmailSmtpFrom: "alerts@example.com"));
-    }
 
-    /// <summary>
-    /// Polls the DURABLE end state (the persisted alert/settings row) rather than the queue's
-    /// in-memory counters — see <c>AlertSlackQueueTests.WaitAsync</c> for why that distinction
-    /// matters (the queue bumps its counters before the DB writes land).
-    /// </summary>
-    private static async Task WaitAsync(Func<Task<bool>> condition, TimeSpan? timeout = null)
-    {
-        // now-ok: polling deadline awaiting real async completion of the durable write path
-        var deadline = DateTimeOffset.UtcNow + (timeout ?? TimeSpan.FromSeconds(10));
-        while (!await condition() && DateTimeOffset.UtcNow < deadline)
-        {
-            await Task.Delay(20);
-        }
-
-        if (!await condition())
-        {
-            throw new TimeoutException("Condition never satisfied.");
-        }
-    }
-
-    /// <summary>Records every send and routes success/failure by a "good"/"bad" substring in the
-    /// transport host — the SMTP-send analog of <c>AlertSlackQueueTests.RoutingHandler</c>. Since
-    /// the queue's channel has a single reader, alerts are delivered one at a time, so the shared
-    /// Last* fields are never written concurrently.</summary>
+    /// <summary>Records every send and routes success/failure by a "bad" substring in the transport
+    /// host or in any recipient.</summary>
     private sealed class FakeMailSender : SmtpMailSender
     {
         // The connect guard is never exercised — SendAsync is fully overridden below — so a
@@ -127,371 +123,540 @@ public sealed class AlertEmailQueueTests : IAsyncLifetime
         {
         }
 
-        public int Calls { get; private set; }
-        public IReadOnlyList<string>? LastTo { get; private set; }
-        public string? LastSubject { get; private set; }
-        public string? LastBody { get; private set; }
+        private readonly List<SentMessage> _sent = [];
+
+        public sealed record SentMessage(IReadOnlyList<string> To, string Subject, string Body);
+
+        public IReadOnlyList<SentMessage> Sent => _sent;
+        public int Calls => _sent.Count;
+        public IReadOnlyList<string>? LastTo => _sent.Count == 0 ? null : _sent[^1].To;
+        public string? LastSubject => _sent.Count == 0 ? null : _sent[^1].Subject;
+        public string? LastBody => _sent.Count == 0 ? null : _sent[^1].Body;
 
         public override Task SendAsync(
             SmtpTransportSettings transport, IReadOnlyList<string> to, string subject, string body,
             CancellationToken ct = default)
         {
-            Calls++;
-            LastTo = to;
-            LastSubject = subject;
-            LastBody = body;
+            _sent.Add(new SentMessage(to, subject, body));
 
-            return transport.Host?.Contains("bad", StringComparison.Ordinal) == true
+            // The transport is instance-level and identical for every org, so a per-org outcome can
+            // only come from the recipient — a relay that accepts one address and rejects another.
+            // Host is still honoured so an instance-wide outage stays expressible.
+            bool fails = transport.Host?.Contains("bad", StringComparison.Ordinal) == true
+                || to.Any(r => r.Contains("bad", StringComparison.Ordinal));
+            return fails
                 ? Task.FromException(new InvalidOperationException("simulated SMTP failure"))
                 : Task.CompletedTask;
         }
     }
 
-    private static (EmailDeliveryQueue Queue, AlertEmailQueue Alerts) BuildQueue(
-        AlertSettingsRepository settings, AlertRepository alerts, SmtpMailSender sender,
-        FakeTimeProvider clock, int? capacity = null)
+    private sealed record Harness(
+        AlertEmailQueue Writer,
+        EmailOutboxDeliveryService Worker,
+        EmailOutboxRepository Outbox,
+        FakeMailSender Sender,
+        AlertRepository Alerts,
+        AlertSettingsRepository Settings);
+
+    private Harness BuildHarness(
+        EnvelopeProtector protector,
+        FakeTimeProvider clock,
+        InstanceSmtpConfig? instance = null,
+        EmailOutboxPolicy? policy = null,
+        EmailTransportBreaker? breaker = null)
     {
-        var deliveryQueue = capacity is int c
-            ? new EmailDeliveryQueue(sender, clock, NullLogger<EmailDeliveryQueue>.Instance, c)
-            : new EmailDeliveryQueue(sender, clock, NullLogger<EmailDeliveryQueue>.Instance);
-        var alertQueue = new AlertEmailQueue(
-            deliveryQueue, new EffectiveEmailConfigResolver(settings, BuildUnconfiguredInstance()),
-            settings, alerts, RealLocalizer(), NullLogger<AlertEmailQueue>.Instance);
-        return (deliveryQueue, alertQueue);
+        var settings = new AlertSettingsRepository(_db, protector, clock);
+        var alerts = new AlertRepository(_db, clock);
+        var sender = new FakeMailSender();
+        var outbox = new EmailOutboxRepository(_db, clock);
+        var resolvedPolicy = policy ?? BuildPolicy();
+        var resolvedInstance = instance ?? BuildInstance();
+        var resolvedBreaker = breaker ?? BuildBreaker(clock);
+
+        var worker = new EmailOutboxDeliveryService(
+            outbox, resolvedPolicy, resolvedBreaker, resolvedInstance, sender, alerts, settings, clock,
+            NullLogger<EmailOutboxDeliveryService>.Instance);
+
+        var writer = new AlertEmailQueue(
+            outbox, resolvedPolicy, worker, settings, alerts, RealLocalizer(),
+            NullLogger<AlertEmailQueue>.Instance);
+
+        return new Harness(writer, worker, outbox, sender, alerts, settings);
     }
 
-    // ── Success path ─────────────────────────────────────────────────────────
+    // Attempts/OccurrenceCount are long, not int: SQLite materialises INTEGER as Int64 and Dapper's
+    // positional-record constructor match is exact.
+    private sealed record OutboxRow(
+        string State, long Attempts, string? LastError, string? FailureClass,
+        string? CoalesceKey, string? Recipients, string? MessageKind, string? OrgId,
+        long OccurrenceCount, string Subject, string Body);
 
+    private async Task<OutboxRow> ReadOutboxRowAsync(string correlationId)
+    {
+        await using var conn = await _db.OpenAsync();
+        return await conn.QuerySingleAsync<OutboxRow>(
+            """
+            SELECT state AS State, attempts AS Attempts, last_error AS LastError,
+                   failure_class AS FailureClass, coalesce_key AS CoalesceKey,
+                   recipients AS Recipients, message_kind AS MessageKind, org_id AS OrgId,
+                   occurrence_count AS OccurrenceCount, subject AS Subject, body AS Body
+            FROM email_outbox WHERE correlation_id = @correlationId
+            """,
+            new { correlationId });
+    }
+
+    private async Task<int> CountOutboxAsync()
+    {
+        await using var conn = await _db.OpenAsync();
+        return await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM email_outbox");
+    }
+
+    // ── The write side persists before anything is attempted ─────────────────
+
+    /// <summary>
+    /// The durability guarantee starts here: the row exists, complete and deliverable, before any
+    /// relay is dialed. This is the assertion the old in-memory channel could not make at all.
+    /// </summary>
     [Fact]
-    public async Task Notify_EmailConfigured_DeliversAndRecordsSuccess()
+    public async Task NotifyAsync_PersistsTheMessageBeforeAnyDeliveryAttempt()
     {
         using var ep = MakeProtector();
-        var settings = new AlertSettingsRepository(_db, ep, Clock);
-        var alerts = new AlertRepository(_db, Clock);
-        var sender = new FakeMailSender();
+        var h = BuildHarness(ep, Clock);
 
-        await EnableEmailAsync(settings, "org1", "good.example.com", ["a@example.com", "b@example.com"]);
-        var alert = await SeedActiveAlertAsync(alerts, "org1", Guid.NewGuid().ToString("N"));
+        await EnableEmailAsync(h.Settings, "org1", ["a@example.com", "b@example.com"]);
+        var alert = await SeedActiveAlertAsync(h.Alerts, "org1", Guid.NewGuid().ToString("N"));
 
-        var (deliveryQueue, alertQueue) = BuildQueue(settings, alerts, sender, Clock);
-        using var cts = new CancellationTokenSource();
-        _ = deliveryQueue.StartAsync(cts.Token);
+        await h.Writer.NotifyAsync(alert);
 
-        alertQueue.Notify(alert);
-        await WaitAsync(async () => (await alerts.GetByIdAsync("org1", alert.Id))?.EmailStatus is not null);
+        // Nothing was sent — no delivery pass has run yet — but the message is already durable.
+        Assert.Equal(0, h.Sender.Calls);
 
-        try { await deliveryQueue.StopAsync(CancellationToken.None); } catch { }
+        var row = await ReadOutboxRowAsync(alert.Id);
+        Assert.Equal(EmailOutboxStates.Pending, row.State);
+        Assert.Equal(0L, row.Attempts);
+        Assert.Equal("a@example.com,b@example.com", row.Recipients);
+        Assert.Equal(EmailOutboxMessageKinds.Alert, row.MessageKind);
+        Assert.Equal("org1", row.OrgId);
 
-        var reread = await alerts.GetByIdAsync("org1", alert.Id);
+        // The alert row carries no outcome yet: queued is not delivered.
+        Assert.Null((await h.Alerts.GetByIdAsync("org1", alert.Id))!.EmailStatus);
+    }
+
+    /// <summary>
+    /// The coalescing key is written from the first release, keyed on the alert kind plus the package
+    /// coordinate, so a later burst-coalescing pass needs a query rather than a backfill.
+    /// </summary>
+    [Fact]
+    public async Task NotifyAsync_RecordsTheCoalescingKeyFromTheAlertKindAndCoordinate()
+    {
+        using var ep = MakeProtector();
+        var h = BuildHarness(ep, Clock);
+
+        await EnableEmailAsync(h.Settings, "org1", ["a@example.com"]);
+        var alert = await SeedActiveAlertAsync(h.Alerts, "org1", Guid.NewGuid().ToString("N"));
+
+        await h.Writer.NotifyAsync(alert);
+
+        var row = await ReadOutboxRowAsync(alert.Id);
+        Assert.Equal($"{AlertTypes.QuarantineNew}:pkg:npm/email-test@1.0.0", row.CoalesceKey);
+    }
+
+    /// <summary>A coordinate-less alert still gets a non-empty key, from its dedup source ref.</summary>
+    [Fact]
+    public void CoalescingKey_WithNoPurl_FallsBackToTheSourceRef()
+    {
+        Assert.Equal(
+            "quarantine_new:quarantine-row-7",
+            EmailOutboxCoalescing.ForAlert(AlertTypes.QuarantineNew, null, "quarantine-row-7"));
+    }
+
+    // ── Burst coalescing: N identical alerts collapse to one digest ──────────
+
+    /// <summary>
+    /// The headline coalescing case. 50 identical alerts (same org, same alert kind, same package
+    /// coordinate) raised while nothing has been delivered yet collapse into exactly one outbox row
+    /// whose <c>occurrence_count</c> is 50 — not 50 rows, and not 49 silently discarded. Every
+    /// occurrence is accounted for: the first alert owns the surviving digest row, and every other
+    /// one is stamped <c>"coalesced"</c> on its own row rather than left with no outcome at all.
+    /// </summary>
+    [Fact]
+    public async Task NotifyAsync_BurstOfIdenticalAlerts_CollapsesToOneDigest_AccountingForEveryOccurrence()
+    {
+        const int burstSize = 50;
+        using var ep = MakeProtector();
+        var h = BuildHarness(ep, Clock);
+        await EnableEmailAsync(h.Settings, "org1", ["ops@example.com"]);
+
+        var alerts = new List<AlertRecord>();
+        for (int i = 0; i < burstSize; i++)
+        {
+            var alert = await SeedActiveAlertAsync(h.Alerts, "org1", Guid.NewGuid().ToString("N"));
+            alerts.Add(alert);
+            await h.Writer.NotifyAsync(alert);
+        }
+
+        // Exactly one row, not fifty.
+        Assert.Equal(1, await CountOutboxAsync());
+
+        var digestRow = await ReadOutboxRowAsync(alerts[0].Id);
+        Assert.Equal(burstSize, digestRow.OccurrenceCount);
+        Assert.Contains(burstSize.ToString(), digestRow.Subject);
+
+        // The alert that opened the burst is still awaiting delivery; every other one already
+        // carries its own "coalesced" accounting — each recording the running occurrence count at
+        // the moment it was folded in — rather than sitting at no outcome at all.
+        Assert.Null((await h.Alerts.GetByIdAsync("org1", alerts[0].Id))!.EmailStatus);
+        for (int i = 1; i < burstSize; i++)
+        {
+            var reread = await h.Alerts.GetByIdAsync("org1", alerts[i].Id);
+            Assert.Equal("coalesced", reread!.EmailStatus);
+            Assert.Contains((i + 1).ToString(), reread.EmailError);
+        }
+
+        // On recovery, exactly one email goes out for the whole burst — never fifty.
+        await h.Worker.RunPassAsync(CancellationToken.None);
+        Assert.Equal(1, h.Sender.Calls);
+        Assert.Equal("sent", (await h.Alerts.GetByIdAsync("org1", alerts[0].Id))!.EmailStatus);
+    }
+
+    /// <summary>The must-NOT twin of the burst test: the same alert kind and package coordinate for
+    /// two different orgs must never collapse into one email — the coalescing key is always grouped
+    /// with org_id.</summary>
+    [Fact]
+    public async Task NotifyAsync_SameAlertAcrossTwoOrgs_NeverCoalescesAcrossTheTenantBoundary()
+    {
+        using var ep = MakeProtector();
+        var h = BuildHarness(ep, Clock);
+        await EnableEmailAsync(h.Settings, "org1", ["org1-ops@example.com"]);
+        await EnableEmailAsync(h.Settings, "org2", ["org2-ops@example.com"]);
+
+        var org1Alert = await SeedActiveAlertAsync(h.Alerts, "org1", Guid.NewGuid().ToString("N"));
+        var org2Alert = await SeedActiveAlertAsync(h.Alerts, "org2", Guid.NewGuid().ToString("N"));
+
+        await h.Writer.NotifyAsync(org1Alert);
+        await h.Writer.NotifyAsync(org2Alert);
+
+        Assert.Equal(2, await CountOutboxAsync());
+        var org1Row = await ReadOutboxRowAsync(org1Alert.Id);
+        var org2Row = await ReadOutboxRowAsync(org2Alert.Id);
+        Assert.Equal(1, org1Row.OccurrenceCount);
+        Assert.Equal(1, org2Row.OccurrenceCount);
+
+        // Neither alert's own status was touched by the other org's burst — there was no burst.
+        Assert.Null((await h.Alerts.GetByIdAsync("org1", org1Alert.Id))!.EmailStatus);
+        Assert.Null((await h.Alerts.GetByIdAsync("org2", org2Alert.Id))!.EmailStatus);
+    }
+
+    /// <summary>
+    /// A digest already claimed for delivery is not a valid coalesce target: the race is resolved
+    /// toward never losing the occurrence, by falling through to a fresh row rather than the alert
+    /// vanishing.
+    /// </summary>
+    [Fact]
+    public async Task NotifyAsync_BurstArrivingAfterTheDigestWasClaimed_EnqueuesAFreshRowInstead()
+    {
+        using var ep = MakeProtector();
+        var h = BuildHarness(ep, Clock);
+        await EnableEmailAsync(h.Settings, "org1", ["ops@example.com"]);
+
+        var first = await SeedActiveAlertAsync(h.Alerts, "org1", Guid.NewGuid().ToString("N"));
+        await h.Writer.NotifyAsync(first);
+
+        // The delivery worker claims the row — it is no longer a valid coalesce target.
+        var claimed = await h.Outbox.ClaimDueAsync(batchSize: 10);
+        Assert.Single(claimed);
+
+        var second = await SeedActiveAlertAsync(h.Alerts, "org1", Guid.NewGuid().ToString("N"));
+        await h.Writer.NotifyAsync(second);
+
+        // Two rows: the claimed one, untouched, and a fresh one for the second occurrence — never a
+        // silently dropped alert.
+        Assert.Equal(2, await CountOutboxAsync());
+        var secondRow = await ReadOutboxRowAsync(second.Id);
+        Assert.Equal(1, secondRow.OccurrenceCount);
+        Assert.Equal(EmailOutboxStates.Pending, secondRow.State);
+    }
+
+    // ── Success path through the real worker ─────────────────────────────────
+
+    [Fact]
+    public async Task Pass_EmailConfigured_DeliversAndRecordsSuccess()
+    {
+        using var ep = MakeProtector();
+        var h = BuildHarness(ep, Clock);
+
+        await EnableEmailAsync(h.Settings, "org1", ["a@example.com", "b@example.com"]);
+        var alert = await SeedActiveAlertAsync(h.Alerts, "org1", Guid.NewGuid().ToString("N"));
+
+        await h.Writer.NotifyAsync(alert);
+        await h.Worker.RunPassAsync(CancellationToken.None);
+
+        var reread = await h.Alerts.GetByIdAsync("org1", alert.Id);
         Assert.Equal("sent", reread!.EmailStatus);
         Assert.Null(reread.EmailError);
 
-        var orgSettings = await settings.GetAsync("org1");
+        var orgSettings = await h.Settings.GetAsync("org1");
         Assert.Equal("ok", orgSettings.EmailLastStatus);
         Assert.Equal(0, orgSettings.EmailConsecutiveFailures);
 
         // All recipients land on the one message.
-        Assert.Equal(1, sender.Calls);
-        Assert.NotNull(sender.LastTo);
-        Assert.Equal(["a@example.com", "b@example.com"], sender.LastTo);
-        Assert.Contains(alert.Title, sender.LastSubject);
+        Assert.Equal(1, h.Sender.Calls);
+        Assert.Equal(["a@example.com", "b@example.com"], h.Sender.LastTo);
+        Assert.Contains(alert.Title, h.Sender.LastSubject);
+
+        var row = await ReadOutboxRowAsync(alert.Id);
+        Assert.Equal(EmailOutboxStates.Delivered, row.State);
+        Assert.Equal(1L, row.Attempts);
     }
 
-    // ── Terminal failure + mixed partial-failure fan-out ────────────────────────
+    // ── Mixed partial failure across orgs ────────────────────────────────────
 
     /// <summary>
-    /// End-to-end through the running queue: one org's transport always succeeds, another's
-    /// always throws. The failing org goes through the full 1s/5s/30s backoff before the terminal
-    /// failure is recorded — outcomes are independent per org (mixed partial-failure).
+    /// One org's recipient always succeeds, another's always fails, in the same pass over the same
+    /// shared transport. The outcomes are independent: one row terminal-delivered, the other back in
+    /// <c>pending</c> with a scheduled retry — and no <c>failed</c> stamp on the alert, because a
+    /// transient failure is no longer terminal.
     /// </summary>
     [Fact]
-    public async Task Notify_MixedOrgs_OneSucceedsOneFails_IndependentOutcomes()
+    public async Task Pass_MixedOrgs_OneSucceedsOneFails_IndependentOutcomes()
     {
         using var ep = MakeProtector();
-        var settings = new AlertSettingsRepository(_db, ep, Clock);
-        var alerts = new AlertRepository(_db, Clock);
-        var sender = new FakeMailSender();
-        var emailClock = new FakeTimeProvider(Clock.GetUtcNow());
+        var h = BuildHarness(ep, Clock);
 
-        await EnableEmailAsync(settings, "org1", "good.example.com", ["a@example.com"]);
-        await EnableEmailAsync(settings, "org2", "bad.example.com", ["b@example.com"]);
-        var goodAlert = await SeedActiveAlertAsync(alerts, "org1", Guid.NewGuid().ToString("N"));
-        var badAlert = await SeedActiveAlertAsync(alerts, "org2", Guid.NewGuid().ToString("N"));
+        await EnableEmailAsync(h.Settings, "org1", ["a@example.com"]);
+        await EnableEmailAsync(h.Settings, "org2", ["bad-b@example.com"]);
+        var goodAlert = await SeedActiveAlertAsync(h.Alerts, "org1", Guid.NewGuid().ToString("N"));
+        var badAlert = await SeedActiveAlertAsync(h.Alerts, "org2", Guid.NewGuid().ToString("N"));
 
-        var (deliveryQueue, alertQueue) = BuildQueue(settings, alerts, sender, emailClock);
-        using var cts = new CancellationTokenSource();
-        _ = deliveryQueue.StartAsync(cts.Token);
+        await h.Writer.NotifyAsync(goodAlert);
+        await h.Writer.NotifyAsync(badAlert);
+        await h.Worker.RunPassAsync(CancellationToken.None);
 
-        alertQueue.Notify(goodAlert);
-        alertQueue.Notify(badAlert);
+        Assert.Equal(2, h.Sender.Calls);
+        Assert.Equal(1, h.Worker.DeliveredCount);
+        Assert.Equal(1, h.Worker.RetriedCount);
 
-        await ClockPump.UntilAsync(emailClock, async () =>
-        {
-            var good = await alerts.GetByIdAsync("org1", goodAlert.Id);
-            var bad = await alerts.GetByIdAsync("org2", badAlert.Id);
-            return good?.EmailStatus is not null && bad?.EmailStatus is not null;
-        }, TimeSpan.FromSeconds(1), maxAdvances: 1000);
+        var good = await ReadOutboxRowAsync(goodAlert.Id);
+        var bad = await ReadOutboxRowAsync(badAlert.Id);
+        Assert.Equal(EmailOutboxStates.Delivered, good.State);
+        Assert.Equal(EmailOutboxStates.Pending, bad.State);
+        Assert.Equal(1L, bad.Attempts);
+        Assert.Contains("simulated SMTP failure", bad.LastError);
 
-        try { await deliveryQueue.StopAsync(CancellationToken.None); } catch { }
+        // org1's alert is terminal; org2's is still in flight, so no outcome is stamped on it.
+        Assert.Equal("sent", (await h.Alerts.GetByIdAsync("org1", goodAlert.Id))!.EmailStatus);
+        Assert.Null((await h.Alerts.GetByIdAsync("org2", badAlert.Id))!.EmailStatus);
 
-        Assert.Equal(1, deliveryQueue.DeliveredCount);
-        Assert.Equal(1, deliveryQueue.FailedCount);
-
-        var goodReread = await alerts.GetByIdAsync("org1", goodAlert.Id);
-        var badReread = await alerts.GetByIdAsync("org2", badAlert.Id);
-        Assert.Equal("sent", goodReread!.EmailStatus);
-        Assert.Equal("failed", badReread!.EmailStatus);
-        Assert.NotNull(badReread.EmailError);
-
-        var goodSettings = await settings.GetAsync("org1");
-        var badSettings = await settings.GetAsync("org2");
+        var goodSettings = await h.Settings.GetAsync("org1");
+        var badSettings = await h.Settings.GetAsync("org2");
         Assert.Equal(0, goodSettings.EmailConsecutiveFailures);
-        Assert.Equal(1, badSettings.EmailConsecutiveFailures);
-        // A single failure does not yet auto-disable (threshold is 20).
+        // Health records terminal outcomes only — a retryable failure has not failed yet.
+        Assert.Equal(0, badSettings.EmailConsecutiveFailures);
         Assert.True(badSettings.EmailEnabled);
     }
 
     // ── Cross-tenant non-delivery ────────────────────────────────────────────
 
     /// <summary>
-    /// Both orgs configure email recipients and enable delivery, each with its own recipient
-    /// list. Notifying an alert whose <c>OrgId</c> is org1 must never reach org2's recipients —
-    /// <see cref="Notify_MixedOrgs_OneSucceedsOneFails_IndependentOutcomes"/> proves independent
-    /// per-org *outcomes* but never asserts that the wrong tenant's recipients never appear in
-    /// any send. This is the "must-NOT" twin: the mail sender is invoked with org1's recipients
-    /// only, and the one rendered body carries only org1's alert content.
+    /// Both orgs enable delivery with their own recipient lists. An alert whose <c>OrgId</c> is org1
+    /// must never reach org2's recipients, and the one rendered body must carry only org1's content.
+    /// The "must-NOT" twin of the mixed-outcome test above, which proves independence but never that
+    /// the wrong tenant's addresses stay out of every send.
     /// </summary>
     [Fact]
-    public async Task Notify_AlertForOrg1_NeverDeliveredToOrg2Recipients()
+    public async Task Pass_AlertForOrg1_NeverDeliveredToOrg2Recipients()
     {
         using var ep = MakeProtector();
-        var settings = new AlertSettingsRepository(_db, ep, Clock);
-        var alerts = new AlertRepository(_db, Clock);
-        var sender = new FakeMailSender();
+        var h = BuildHarness(ep, Clock);
 
-        await EnableEmailAsync(settings, "org1", "good.example.com", ["org1-a@example.com", "org1-b@example.com"]);
-        await EnableEmailAsync(settings, "org2", "good.example.com", ["org2-a@example.com"]);
+        await EnableEmailAsync(h.Settings, "org1", ["org1-a@example.com", "org1-b@example.com"]);
+        await EnableEmailAsync(h.Settings, "org2", ["org2-a@example.com"]);
 
-        var org1Alert = await alerts.TryInsertAsync(new NewAlert(
+        var org1Alert = await h.Alerts.TryInsertAsync(new NewAlert(
             "org1", AlertTypes.QuarantineNew, Severity: null, SourceRef: Guid.NewGuid().ToString("N"),
             Ecosystem: "npm", Purl: "pkg:npm/org1-secret@1.0.0",
             Title: "ORG1-ONLY quarantine item", Detail: "org1 detail payload"));
 
-        var org2Alert = await alerts.TryInsertAsync(new NewAlert(
+        var org2Alert = await h.Alerts.TryInsertAsync(new NewAlert(
             "org2", AlertTypes.QuarantineNew, Severity: null, SourceRef: Guid.NewGuid().ToString("N"),
             Ecosystem: "npm", Purl: "pkg:npm/org2-secret@1.0.0",
             Title: "ORG2-ONLY quarantine item", Detail: "org2 detail payload"));
 
-        var (deliveryQueue, alertQueue) = BuildQueue(settings, alerts, sender, Clock);
-        using var cts = new CancellationTokenSource();
-        _ = deliveryQueue.StartAsync(cts.Token);
+        await h.Writer.NotifyAsync(org1Alert!);
+        await h.Worker.RunPassAsync(CancellationToken.None);
 
-        alertQueue.Notify(org1Alert!);
-        await WaitAsync(async () => (await alerts.GetByIdAsync("org1", org1Alert!.Id))?.EmailStatus is not null);
+        Assert.Equal(1, h.Sender.Calls);
+        Assert.Equal(["org1-a@example.com", "org1-b@example.com"], h.Sender.LastTo);
+        Assert.DoesNotContain("org2-a@example.com", h.Sender.LastTo!);
 
-        try { await deliveryQueue.StopAsync(CancellationToken.None); } catch { }
+        Assert.Contains("ORG1-ONLY", h.Sender.LastBody);
+        Assert.DoesNotContain("ORG2-ONLY", h.Sender.LastBody);
 
-        // The mail sender was invoked exactly once, and only with org1's recipients — org2's
-        // recipients never appear in any send.
-        Assert.Equal(1, sender.Calls);
-        Assert.NotNull(sender.LastTo);
-        Assert.Equal(["org1-a@example.com", "org1-b@example.com"], sender.LastTo);
-        Assert.DoesNotContain("org2-a@example.com", sender.LastTo!);
-
-        // The rendered body carries org1's alert content and no trace of org2's.
-        Assert.Contains("ORG1-ONLY", sender.LastBody);
-        Assert.DoesNotContain("ORG2-ONLY", sender.LastBody);
-
-        // org2's alert was never touched: no email delivery attempted, no outcome recorded.
-        var org2Reread = await alerts.GetByIdAsync("org2", org2Alert!.Id);
-        Assert.NotNull(org2Reread);
+        // Only org1's message was ever persisted, and org2's alert was never touched.
+        Assert.Equal(1, await CountOutboxAsync());
+        var org2Reread = await h.Alerts.GetByIdAsync("org2", org2Alert!.Id);
         Assert.Null(org2Reread!.EmailStatus);
         Assert.Null(org2Reread.EmailError);
     }
 
-    /// <summary>Drives the retry path directly (no queue loop) against a directly-constructed
-    /// <see cref="AlertEmailJob"/> and asserts the exact backoff schedule: 1 initial attempt at
-    /// t=0, then retries at +1s, +5s, +30s (4 attempts total) before the terminal failure is
-    /// recorded.</summary>
-    [Fact]
-    public async Task DeliverAsync_TransientFailure_RetriesAtExactBackoffThenRecordsTerminalFailure()
-    {
-        using var ep = MakeProtector();
-        var settings = new AlertSettingsRepository(_db, ep, Clock);
-        var alerts = new AlertRepository(_db, Clock);
-        var sender = new FakeMailSender();
-        var emailClock = new FakeTimeProvider(Clock.GetUtcNow());
-
-        await EnableEmailAsync(settings, "org1", "bad.example.com", ["a@example.com"]);
-        var alert = await SeedActiveAlertAsync(alerts, "org1", Guid.NewGuid().ToString("N"));
-
-        var (deliveryQueue, _) = BuildQueue(settings, alerts, sender, emailClock);
-        var job = new AlertEmailJob(
-            alert, new EffectiveEmailConfigResolver(settings, BuildUnconfiguredInstance()),
-            alerts, settings, RealLocalizer(), NullLogger<AlertEmailQueue>.Instance);
-
-        var deliverTask = deliveryQueue.DeliverAsync(job, CancellationToken.None);
-
-        // 1 initial attempt fires immediately.
-        await WaitAsync(() => Task.FromResult(sender.Calls >= 1));
-        Assert.Equal(1, sender.Calls);
-
-        // +1s → attempt 2.
-        emailClock.Advance(TimeSpan.FromSeconds(1));
-        await WaitAsync(() => Task.FromResult(sender.Calls >= 2));
-        Assert.Equal(2, sender.Calls);
-
-        // +5s → attempt 3.
-        emailClock.Advance(TimeSpan.FromSeconds(5));
-        await WaitAsync(() => Task.FromResult(sender.Calls >= 3));
-        Assert.Equal(3, sender.Calls);
-
-        // +30s → attempt 4 (final).
-        emailClock.Advance(TimeSpan.FromSeconds(30));
-        await WaitAsync(() => Task.FromResult(sender.Calls >= 4));
-        Assert.Equal(4, sender.Calls);
-
-        await deliverTask;
-
-        Assert.Equal(1, deliveryQueue.FailedCount);
-        var reread = await alerts.GetByIdAsync("org1", alert.Id);
-        Assert.Equal("failed", reread!.EmailStatus);
-        Assert.Contains("simulated SMTP failure", reread.EmailError);
-
-        var orgSettings = await settings.GetAsync("org1");
-        Assert.Equal("failed", orgSettings.EmailLastStatus);
-        Assert.Equal(1, orgSettings.EmailConsecutiveFailures);
-    }
-
-    // ── Shutdown drain (channel still buffered when the stopping token is cancelled) ──
-
-    /// <summary>
-    /// Reproduces the shutdown-drop defect deterministically by invoking <c>ExecuteAsync</c>
-    /// directly (via the <see cref="EmailDeliveryQueue.ExecuteAsyncForTests"/> test hook) with an
-    /// already-cancelled token — <see cref="BackgroundService.StartAsync"/> itself short-circuits
-    /// and never calls <c>ExecuteAsync</c> at all in that case, so it cannot exercise the real
-    /// race being tested (a stopping token cancelled while the read loop is genuinely running,
-    /// mid-shutdown, with a job still buffered). Two alerts are buffered before the drain runs,
-    /// one routed to a succeeding transport and one to a failing one — the drain must deliver the
-    /// first and durably record the second's failure, independently.
-    /// </summary>
-    [Fact]
-    public async Task ExecuteAsync_CancelledMidRun_DrainsMixedSuccessAndFailure()
-    {
-        using var ep = MakeProtector();
-        var settings = new AlertSettingsRepository(_db, ep, Clock);
-        var alerts = new AlertRepository(_db, Clock);
-        var sender = new FakeMailSender();
-        var emailClock = new FakeTimeProvider(Clock.GetUtcNow());
-
-        await EnableEmailAsync(settings, "org1", "good.example.com", ["a@example.com"]);
-        await EnableEmailAsync(settings, "org2", "bad.example.com", ["b@example.com"]);
-        var goodAlert = await SeedActiveAlertAsync(alerts, "org1", Guid.NewGuid().ToString("N"));
-        var badAlert = await SeedActiveAlertAsync(alerts, "org2", Guid.NewGuid().ToString("N"));
-
-        var (deliveryQueue, alertQueue) = BuildQueue(settings, alerts, sender, emailClock);
-
-        // Buffer both alerts before the worker ever starts reading.
-        alertQueue.Notify(goodAlert);
-        alertQueue.Notify(badAlert);
-
-        // Drives ExecuteAsync directly with an already-cancelled token — the exact state the
-        // stopping token is in by the time BackgroundService.StopAsync signals cancellation.
-        var executeTask = deliveryQueue.ExecuteAsyncForTests(new CancellationToken(canceled: true));
-
-        // The failing alert burns through the 1s/5s/30s backoff inside the drain itself; pump
-        // the fake clock so that finishes in virtual time instead of real time.
-        await ClockPump.UntilAsync(emailClock, async () =>
-        {
-            var good = await alerts.GetByIdAsync("org1", goodAlert.Id);
-            var bad = await alerts.GetByIdAsync("org2", badAlert.Id);
-            return good?.EmailStatus is not null && bad?.EmailStatus is not null;
-        }, TimeSpan.FromSeconds(1), maxAdvances: 1000);
-
-        await executeTask;
-
-        Assert.Equal(1, deliveryQueue.DeliveredCount);
-        Assert.Equal(1, deliveryQueue.FailedCount);
-
-        var goodReread = await alerts.GetByIdAsync("org1", goodAlert.Id);
-        var badReread = await alerts.GetByIdAsync("org2", badAlert.Id);
-        Assert.Equal("sent", goodReread!.EmailStatus);
-        Assert.Equal("failed", badReread!.EmailStatus);
-    }
-
-    // ── Resolver-null: silent no-op ─────────────────────────────────────────────
+    // ── Nothing to send: no row, no record ───────────────────────────────────
 
     [Fact]
-    public async Task Notify_ResolverNull_NoSendAttempted_NothingRecorded()
+    public async Task NotifyAsync_ChannelDisabled_PersistsNothing()
     {
         using var ep = MakeProtector();
-        var settings = new AlertSettingsRepository(_db, ep, Clock);
-        var alerts = new AlertRepository(_db, Clock);
-        var sender = new FakeMailSender();
+        var h = BuildHarness(ep, Clock);
 
         // No EnableEmailAsync call — org1 has no settings row at all (email off by default).
-        var alert = await SeedActiveAlertAsync(alerts, "org1", Guid.NewGuid().ToString("N"));
+        var alert = await SeedActiveAlertAsync(h.Alerts, "org1", Guid.NewGuid().ToString("N"));
 
-        var (deliveryQueue, alertQueue) = BuildQueue(settings, alerts, sender, Clock);
-        using var cts = new CancellationTokenSource();
-        _ = deliveryQueue.StartAsync(cts.Token);
+        await h.Writer.NotifyAsync(alert);
+        await h.Worker.RunPassAsync(CancellationToken.None);
 
-        alertQueue.Notify(alert);
-        // Give the consumer a moment to process the (no-op) item.
-        await Task.Delay(200);
+        Assert.Equal(0, await CountOutboxAsync());
+        Assert.Equal(0, h.Sender.Calls);
+        Assert.Null((await h.Alerts.GetByIdAsync("org1", alert.Id))!.EmailStatus);
 
-        await cts.CancelAsync();
-        try { await deliveryQueue.StopAsync(CancellationToken.None); } catch { }
-
-        Assert.Equal(0, sender.Calls);
-        Assert.Equal(0, deliveryQueue.DeliveredCount);
-        Assert.Equal(0, deliveryQueue.FailedCount);
-        var reread = await alerts.GetByIdAsync("org1", alert.Id);
-        Assert.Null(reread!.EmailStatus);
-
-        var orgSettings = await settings.GetAsync("org1");
+        var orgSettings = await h.Settings.GetAsync("org1");
         Assert.Null(orgSettings.EmailLastStatus);
         Assert.Equal(0, orgSettings.EmailConsecutiveFailures);
     }
 
-    /// <summary>Enabled but with no usable transport at all (no recipients) is the "channel
-    /// effectively disabled" case the resolver treats identically to fully-off.</summary>
+    /// <summary>Gate on but no recipients: the channel resolves to nothing, identically to off.</summary>
     [Fact]
-    public async Task Notify_EnabledButNoRecipients_NoSendAttempted_NothingRecorded()
+    public async Task NotifyAsync_EnabledButNoRecipients_PersistsNothing()
     {
         using var ep = MakeProtector();
-        var settings = new AlertSettingsRepository(_db, ep, Clock);
-        var alerts = new AlertRepository(_db, Clock);
-        var sender = new FakeMailSender();
+        var h = BuildHarness(ep, Clock);
 
-        await settings.UpdateGatesAsync("org1", new UpdateAlertGates(
-            QuarantineAlertsEnabled: true, VulnAlertsEnabled: true, VulnMinSeverity: "HIGH",
+        await h.Settings.UpdateEmailChannelAsync("org1", new UpdateAlertEmailChannel(
             EmailEnabled: true, EmailRecipients: null));
-        await settings.UpdateEmailAsync("org1", new UpdateAlertEmail(
-            EmailInheritInstance: false,
-            EmailSmtpHost: "good.example.com", EmailSmtpPort: 587, EmailSmtpSecurity: "none",
-            EmailSmtpUsername: null, EmailSmtpPassword: null, EmailSmtpFrom: "alerts@example.com"));
-        var alert = await SeedActiveAlertAsync(alerts, "org1", Guid.NewGuid().ToString("N"));
+        var alert = await SeedActiveAlertAsync(h.Alerts, "org1", Guid.NewGuid().ToString("N"));
 
-        var (deliveryQueue, _) = BuildQueue(settings, alerts, sender, Clock);
-        var job = new AlertEmailJob(
-            alert, new EffectiveEmailConfigResolver(settings, BuildUnconfiguredInstance()),
-            alerts, settings, RealLocalizer(), NullLogger<AlertEmailQueue>.Instance);
-        await deliveryQueue.DeliverAsync(job, CancellationToken.None);
+        await h.Writer.NotifyAsync(alert);
 
-        Assert.Equal(0, sender.Calls);
-        var reread = await alerts.GetByIdAsync("org1", alert.Id);
-        Assert.Null(reread!.EmailStatus);
+        Assert.Equal(0, await CountOutboxAsync());
+        Assert.Null((await h.Alerts.GetByIdAsync("org1", alert.Id))!.EmailStatus);
     }
 
-    // ── Auto-disable (exercised directly against the repository, same as the Slack suite) ──────
+    // ── The behaviour change: an unconfigured relay no longer loses the mail ──
 
+    /// <summary>
+    /// The org's channel is on; the operator's relay is not configured. The message is still
+    /// persisted, no attempt is charged against it, and it waits — which is the whole point. Under
+    /// the in-memory path this combination sent nothing and recorded nothing, and the message was
+    /// gone the instant the worker dequeued it.
+    /// </summary>
     [Fact]
-    public async Task RecordEmailFailure_AutoDisablesWhenDurationWindowExceeded()
+    public async Task Pass_InstanceTransportUnconfigured_MessageStaysQueuedAndUnattempted()
+    {
+        using var ep = MakeProtector();
+        var h = BuildHarness(ep, Clock, instance: BuildUnconfiguredInstance());
+
+        await EnableEmailAsync(h.Settings, "org1", ["a@example.com"]);
+        var alert = await SeedActiveAlertAsync(h.Alerts, "org1", Guid.NewGuid().ToString("N"));
+
+        await h.Writer.NotifyAsync(alert);
+        await h.Worker.RunPassAsync(CancellationToken.None);
+        await h.Worker.RunPassAsync(CancellationToken.None);
+
+        Assert.Equal(0, h.Sender.Calls);
+
+        var row = await ReadOutboxRowAsync(alert.Id);
+        Assert.Equal(EmailOutboxStates.Pending, row.State);
+        // No attempt was consumed: an unresolvable transport is not a failed delivery.
+        Assert.Equal(0L, row.Attempts);
+
+        // Tenant intent is untouched and no failure is recorded — the relay is the operator's.
+        var orgSettings = await h.Settings.GetAsync("org1");
+        Assert.True(orgSettings.EmailEnabled);
+        Assert.Null(orgSettings.EmailLastStatus);
+    }
+
+    // ── Depth cap: shed the newest, and record the shed ──────────────────────
+
+    /// <summary>
+    /// At the depth cap the newest message is refused. The refusal is recorded where it is visible —
+    /// the alert row and the org's delivery health — and the already-queued message is untouched,
+    /// which is what makes "persisted until delivered or expired" true of every row that got in.
+    /// The two alerts carry different purls (and so different coalesce keys) so the cap is exercised
+    /// on two genuinely distinct messages rather than being absorbed by coalescing.
+    /// </summary>
+    [Fact]
+    public async Task NotifyAsync_AtDepthCap_RefusesTheNewestAndRecordsTheDrop()
+    {
+        using var ep = MakeProtector();
+        var h = BuildHarness(ep, Clock, policy: BuildPolicy(("EMAIL_OUTBOX_MAX_DEPTH", "1")));
+
+        await EnableEmailAsync(h.Settings, "org1", ["a@example.com"]);
+        var first = await SeedActiveAlertAsync(
+            h.Alerts, "org1", Guid.NewGuid().ToString("N"), purl: "pkg:npm/depth-cap-first@1.0.0");
+        var second = await SeedActiveAlertAsync(
+            h.Alerts, "org1", Guid.NewGuid().ToString("N"), purl: "pkg:npm/depth-cap-second@1.0.0");
+
+        await h.Writer.NotifyAsync(first);
+        await h.Writer.NotifyAsync(second);
+
+        // Exactly one row got in, and it is the first — the cap sheds the newest, never evicts.
+        Assert.Equal(1, await CountOutboxAsync());
+        var firstRow = await ReadOutboxRowAsync(first.Id);
+        Assert.Equal(EmailOutboxStates.Pending, firstRow.State);
+
+        // The shed message is recorded on its own alert row and on the org's delivery health, so the
+        // drop is visible to the tenant rather than living only in a log line.
+        var secondReread = await h.Alerts.GetByIdAsync("org1", second.Id);
+        Assert.Equal("failed", secondReread!.EmailStatus);
+        Assert.Contains("depth cap", secondReread.EmailError);
+
+        var orgSettings = await h.Settings.GetAsync("org1");
+        Assert.Equal("failed", orgSettings.EmailLastStatus);
+        Assert.Equal(1, orgSettings.EmailConsecutiveFailures);
+        // A full shared queue is an operator condition; the tenant's channel stays enabled.
+        Assert.True(orgSettings.EmailEnabled);
+    }
+
+    /// <summary>
+    /// The depth cap is enforced at enqueue time, in <see cref="EmailOutboxRepository.TryEnqueueAsync"/>
+    /// — it has nothing to do with the transport breaker, which only ever gates what the delivery
+    /// worker CLAIMS. An open breaker changes nothing about the shed policy: the cap still sheds the
+    /// newest message exactly as it does with the breaker closed.
+    /// </summary>
+    [Fact]
+    public async Task NotifyAsync_AtDepthCap_StillShedsTheNewest_EvenWithTheBreakerOpen()
+    {
+        using var ep = MakeProtector();
+        var breaker = BuildBreaker(Clock, ("EMAIL_TRANSPORT_BREAKER_FAILURE_THRESHOLD", "1"));
+        breaker.RecordTransportFailure(); // opens it before any message exists
+        Assert.Equal(EmailTransportState.Open, breaker.Snapshot().State);
+
+        var h = BuildHarness(
+            ep, Clock, policy: BuildPolicy(("EMAIL_OUTBOX_MAX_DEPTH", "1")), breaker: breaker);
+
+        await EnableEmailAsync(h.Settings, "org1", ["a@example.com"]);
+        var first = await SeedActiveAlertAsync(
+            h.Alerts, "org1", Guid.NewGuid().ToString("N"), purl: "pkg:npm/breaker-depth-first@1.0.0");
+        var second = await SeedActiveAlertAsync(
+            h.Alerts, "org1", Guid.NewGuid().ToString("N"), purl: "pkg:npm/breaker-depth-second@1.0.0");
+
+        await h.Writer.NotifyAsync(first);
+        await h.Writer.NotifyAsync(second);
+
+        Assert.Equal(1, await CountOutboxAsync());
+        var secondReread = await h.Alerts.GetByIdAsync("org1", second.Id);
+        Assert.Equal("failed", secondReread!.EmailStatus);
+        Assert.Contains("depth cap", secondReread.EmailError);
+    }
+
+    // ── Failure health never rewrites tenant intent ───────────────────────────
+
+    /// <summary>The Slack arm auto-disables after a sustained failure window; the email arm
+    /// deliberately does not, because the failing component is the operator's shared relay.</summary>
+    [Fact]
+    public async Task RecordEmailFailure_SustainedWindow_StillDoesNotDisableTheChannel()
     {
         using var ep = MakeProtector();
         var settings = new AlertSettingsRepository(_db, ep, Clock);
-        await EnableEmailAsync(settings, "org1", "bad.example.com", ["a@example.com"]);
+        await EnableEmailAsync(settings, "org1", ["bad-a@example.com"]);
 
         string staleFailingSince = Clock.GetUtcNow().AddHours(-49).ToUtcIso();
         await using var conn = await _db.OpenAsync();
@@ -499,36 +664,11 @@ public sealed class AlertEmailQueueTests : IAsyncLifetime
             "UPDATE alert_settings SET email_failing_since = @s WHERE org_id = @id",
             new { s = staleFailingSince, id = "org1" });
 
-        bool disabled = await settings.RecordEmailFailureAsync(
-            "org1", "timeout", AlertDeliveryPolicy.AutoDisableAfterFailures, AlertDeliveryPolicy.AutoDisableAfterDuration);
-        Assert.True(disabled);
+        await settings.RecordEmailFailureAsync("org1", "timeout");
 
         var updated = await settings.GetAsync("org1");
-        Assert.False(updated.EmailEnabled);
-    }
-
-    // ── Overflow / drop path ──────────────────────────────────────────────────
-
-    [Fact]
-    public async Task Notify_WhenChannelFull_DropsAndIncrementsCounter()
-    {
-        using var ep = MakeProtector();
-        var settings = new AlertSettingsRepository(_db, ep, Clock);
-        var alerts = new AlertRepository(_db, Clock);
-        var sender = new FakeMailSender();
-
-        await EnableEmailAsync(settings, "org1", "good.example.com", ["a@example.com"]);
-        var alert = await SeedActiveAlertAsync(alerts, "org1", Guid.NewGuid().ToString("N"));
-
-        // Never started — nothing is dequeued, so the channel fills and drops.
-        var (deliveryQueue, alertQueue) = BuildQueue(settings, alerts, sender, Clock, capacity: 1);
-
-        for (int i = 0; i < 5; i++)
-        {
-            alertQueue.Notify(alert);
-        }
-
-        Assert.Equal(4, deliveryQueue.DroppedCount);
+        Assert.True(updated.EmailEnabled);
+        Assert.Equal("failed", updated.EmailLastStatus);
     }
 
     // ── Subject/body rendering ───────────────────────────────────────────────

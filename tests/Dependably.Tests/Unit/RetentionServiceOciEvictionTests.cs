@@ -49,7 +49,9 @@ public sealed class RetentionServiceOciEvictionTests : IAsyncLifetime
             new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock),
             new Dependably.Protocol.OciOrphanBlobDeleter(
                 _db, new Dependably.Storage.TieredBlobStorage(_blobs, _blobs),
-                new Dependably.Protocol.OciBlobKeyLock())));
+                new Dependably.Protocol.OciBlobKeyLock()),
+            new Dependably.Infrastructure.Mail.EmailOutboxRepository(_db, _clock),
+            new Dependably.Infrastructure.Mail.EmailOutboxPolicy(cfg)));
     }
 
     // ── Cache plane ──────────────────────────────────────────────────────────────
@@ -229,7 +231,7 @@ public sealed class RetentionServiceOciEvictionTests : IAsyncLifetime
         });
 
         var access = new TenantArtifactAccessRepository(_db);
-        await access.UpsertAsync("o1", inserted.Id, accessed);
+        await access.UpsertAsync("o1", inserted.Id, accessed, TenantContentBinding.None);
         await using var conn = await _db.OpenAsync();
         await conn.ExecuteAsync(
             "UPDATE tenant_artifact_access SET last_used = @accessed WHERE org_id = 'o1' AND cache_artifact_id = @id",

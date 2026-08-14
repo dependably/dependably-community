@@ -1,14 +1,13 @@
 <script>
   import { onMount } from 'svelte'
-  import { t, locale } from 'svelte-i18n'
-  import { get } from 'svelte/store'
+  import { t } from 'svelte-i18n'
   import { api, systemApi } from '../lib/api.js'
   import { user, route, activeRoute, navigate, restoreScroll, pendingRoute,
            cancelTransition, transitionPending } from '../lib/store.js'
   import RouteView from '../lib/RouteView.svelte'
   import { armSessionWatch, disarmSessionWatch } from '../lib/session.js'
   import { useRouter, routeFor } from '../lib/routes.js'
-  import { applyLocale } from '../lib/locale.js'
+  import { applyUserContext } from '../lib/userContext.js'
   import SystemLogin from './SystemLogin.svelte'
   import SystemDashboard from './SystemDashboard.svelte'
   import SystemTenants from './SystemTenants.svelte'
@@ -37,10 +36,7 @@
     let me = null
     try { me = await systemApi.me() } catch { /* unauthenticated */ }
     if (me) {
-      user.set(me)
-      // Awaited so the shell's first paint is already in the user's language — without it a
-      // non-English user gets a frame of English before the dictionary flushes.
-      if (me.language && me.language !== get(locale)) await applyLocale(me.language)
+      await applyUserContext(me)
       // Arm the proactive session-expiry watcher with the exp claim surfaced by me().
       armSessionWatch(me.sessionExpiresAt, systemApi.me)
     }

@@ -1,5 +1,6 @@
 <script>
   import { reportPageLoad } from '../lib/pageLoad.js'
+  import { formatDate } from '../lib/format.js'
   import { onMount } from 'svelte'
   import { t } from 'svelte-i18n'
   import { systemApi } from '../lib/api.js'
@@ -218,11 +219,6 @@
     ]
   }
 
-  function fmtDate(iso) {
-    if (!iso) return '—'
-    return new Date(iso).toLocaleString()
-  }
-
   // ── Table wiring ─────────────────────────────────────────────────────────
   $: filteredAdmins = (() => {
     const q = searchQuery.trim().toLowerCase()
@@ -316,9 +312,9 @@
           <span class="text-muted" aria-hidden="true">—</span>
         {/if}
       </td>
-      <td>{fmtDate(admin.lastLoginAt)}</td>
-      <td>{fmtDate(admin.passwordResetIssuedAt)}</td>
-      <td>{fmtDate(admin.createdAt)}</td>
+      <td>{$formatDate(admin.lastLoginAt)}</td>
+      <td>{$formatDate(admin.passwordResetIssuedAt)}</td>
+      <td>{$formatDate(admin.createdAt)}</td>
       <td>
         <div class="row-actions">
           {#if isSelf}

@@ -444,7 +444,7 @@ public sealed class ControllerScenario : IAsyncDisposable
             new Dependably.Infrastructure.Caching.OrgCacheEpochStore())
         { ControllerContext = ctx };
         var orgTokens = new OrgTokensController(
-            tokens, orgs, guard, audit, orgAuditEmitter, problems)
+            tokens, guard, audit, orgAuditEmitter, problems)
         { ControllerContext = ctx };
         var orgInvites = new OrgInvitesController(
             invites, orgs, guard, audit,
@@ -459,7 +459,7 @@ public sealed class ControllerScenario : IAsyncDisposable
         { ControllerContext = ctx };
         var orgAudit = new OrgAuditController(audit, guard, Clock, problems) { ControllerContext = ctx };
         var orgAuthConfig = new OrgAuthConfigController(
-            guard, samlConfig, audit, publicUrl, problems, Clock)
+            guard, samlConfig, orgs, audit, publicUrl, problems, Clock)
         { ControllerContext = ctx };
         var risk = new RiskController(packageAnalytics, licenses, guard, problems) { ControllerContext = ctx };
 

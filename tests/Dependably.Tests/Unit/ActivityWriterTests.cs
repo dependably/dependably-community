@@ -221,6 +221,63 @@ public sealed class ActivityWriterTests : IAsyncLifetime
         Assert.Equal(250, count);
     }
 
+    // ── Flush-failure bookkeeping (mirrors DownloadCountWriterHostedService) ──
+
+    [Fact]
+    public async Task ExecuteAsync_FlushFailure_StillAdvancesFlushedCount()
+    {
+        var writer = new ActivityWriter();
+        var failingDb = new FlushOnceFailingMetadataStore(_db);
+        var service = new ActivityWriterHostedService(writer, failingDb,
+            NullLogger<ActivityWriterHostedService>.Instance);
+
+        for (int i = 0; i < 5; i++)
+        {
+            Assert.True(writer.TryEnqueue(Record($"event-{i}")));
+        }
+
+        await service.StartAsync(CancellationToken.None);
+
+        // Blocks until the drainer has actually attempted (and failed) its first flush,
+        // so the subsequent StopAsync is guaranteed to observe the post-failure state
+        // rather than racing a loop iteration that hasn't reached the flush yet.
+        await failingDb.FailedOnce;
+
+        await service.StopAsync(CancellationToken.None);
+
+        // Regression for the bug where the flush-failure catch block dropped the batch
+        // without advancing _flushed: FlushedCount must stay in lockstep with
+        // EnqueuedCount (best-effort semantics — a dropped batch still counts as
+        // "handled") so WaitForIdleAsync can observe idle again after a transient
+        // flush failure instead of timing out forever.
+        Assert.Equal(writer.EnqueuedCount, service.FlushedCount);
+    }
+
+    /// <summary>
+    /// Wraps a real store but throws on the FIRST <see cref="OpenAsync"/> call to
+    /// simulate a transient flush failure (e.g. SQLITE_BUSY), then delegates to the
+    /// inner store for every subsequent call.
+    /// </summary>
+    private sealed class FlushOnceFailingMetadataStore(IMetadataStore inner) : IMetadataStore
+    {
+        private int _openCalls;
+        private readonly TaskCompletionSource _failed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public DbProvider Provider => inner.Provider;
+
+        public Task FailedOnce => _failed.Task;
+
+        public Task<System.Data.Common.DbConnection> OpenAsync(CancellationToken ct = default)
+        {
+            if (Interlocked.Increment(ref _openCalls) == 1)
+            {
+                _failed.TrySetResult();
+                throw new InvalidOperationException("simulated transient flush failure");
+            }
+            return inner.OpenAsync(ct);
+        }
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private static ActivityRecord Record(string eventType) => new(

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using Dependably.Infrastructure.Observability;
 using Dependably.Infrastructure.Redis;
@@ -44,6 +45,7 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
     private readonly AuditRepository _audit;
     private readonly UpstreamClient _upstream;
     private readonly IUpstreamLatestVersionResolver _latestResolver;
+    private readonly UpstreamRegistryResolver _registries;
     private readonly IAirGapMode _airGap;
     private readonly IConfiguration _config;
     private readonly ILogger<DeprecationRefreshService> _logger;
@@ -65,6 +67,7 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
         AuditRepository audit,
         UpstreamClient upstream,
         IUpstreamLatestVersionResolver latestResolver,
+        UpstreamRegistryResolver registries,
         IAirGapMode airGap,
         IConfiguration config,
         ILogger<DeprecationRefreshService> logger,
@@ -77,6 +80,7 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
         _audit = audit;
         _upstream = upstream;
         _latestResolver = latestResolver;
+        _registries = registries;
         _airGap = airGap;
         _config = config;
         _logger = logger;
@@ -190,11 +194,35 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
             return (0, 0);
         }
 
+        // Resolving the org's configured upstream sources decrypts every authenticated row's
+        // stored secret (EnvelopeProtector.Unprotect), which throws on a missing/rotated master
+        // key. That resolve — and the zero-rows "proxying deliberately disabled" check that
+        // depends on it — must stay inside this try alongside the fetch, so a decrypt failure for
+        // this one org lands in the same catch as any other upstream-fetch failure rather than
+        // escaping ProcessGroupAsync uncaught and taking the whole refresh pass (and, via
+        // ContinueOnTickError=false + RunOnStartup=true, the replica) down with it.
         Dictionary<string, string?> upstreamDeprecated;
         UpstreamLatestVersion upstreamLatest;
         try
         {
-            (upstreamDeprecated, upstreamLatest) = await FetchUpstreamMetadataAsync(ecosystem, orgId, name, ct);
+            var sources = await _registries.ResolveAsync(orgId, ecosystem, ct);
+
+            // Zero configured upstream sources for this (org, ecosystem) means proxying is
+            // deliberately disabled — the empty=disabled contract UpstreamRegistryResolver
+            // documents. Skip the fetch entirely rather than resolving an ambiguous "no data"
+            // that would overwrite the recorded deprecation/upstream-latest state: yielding the
+            // slot (touch-only, no write) means a later re-enable resumes cleanly instead of the
+            // pass having read a disabled ecosystem as "unknown" upstream.
+            if (sources.Count == 0)
+            {
+                _logger.LogInformation(
+                    "Deprecation refresh skipped for {Ecosystem}/{Package}: no upstream configured for this org.",
+                    ecosystem, name);
+                await YieldGroupSlotAsync(ecosystem, name, orgId, ct);
+                return (0, 0);
+            }
+
+            (upstreamDeprecated, upstreamLatest) = await FetchUpstreamMetadataAsync(ecosystem, orgId, name, sources, ct);
         }
         catch (Exception ex)
         {
@@ -383,6 +411,8 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
             {
                 string detail = System.Text.Json.JsonSerializer.Serialize(
                     new { version, revoked_at = _time.GetUtcNow().ToUtcIso() }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
+                // audit-attribution-ok: scheduled deprecation-refresh sweep — runs off a
+                // background timer with no inbound request, so there is no source IP to record.
                 await _audit.LogActivityAsync(
                     orgId,
                     ecosystem: ecosystem,
@@ -414,12 +444,15 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
 
         try
         {
+            // audit-attribution-ok: scheduled deprecation-refresh sweep — runs off a background
+            // timer with no inbound request, so there is no source IP to record.
             await _audit.LogActivityAsync(
                 orgId,
                 ecosystem: ecosystem,
                 purl: null,
                 eventType: "deprecation_refresh",
                 actorId: null,
+                actorKind: "system",
                 detail: $"Checked {checked_} version(s) for {name}, {updated} updated",
                 ct: ct);
         }
@@ -440,12 +473,12 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
     // signal, so the deprecation map is empty (their cache_artifact rows never set deprecated, so
     // the empty map clears nothing) and only the latest is resolved.
     private async Task<(Dictionary<string, string?> Deprecated, UpstreamLatestVersion Latest)> FetchUpstreamMetadataAsync(
-        string ecosystem, string orgId, string purlName, CancellationToken ct)
+        string ecosystem, string orgId, string purlName, IReadOnlyList<UpstreamSource> sources, CancellationToken ct)
     {
         return ecosystem switch
         {
-            "npm" => await FetchNpmMetadataAsync(purlName, ct),
-            "pypi" => await FetchPyPiMetadataAsync(purlName, ct),
+            "npm" => await FetchNpmMetadataAsync(sources, purlName, ct),
+            "pypi" => await FetchPyPiMetadataAsync(sources, purlName, ct),
             "nuget" or "maven" =>
                 (new Dictionary<string, string?>(), await _latestResolver.ResolveAsync(ecosystem, orgId, purlName, ct)),
             _ => (new Dictionary<string, string?>(), UpstreamLatestVersion.None)
@@ -457,121 +490,107 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
     // "versions" property mapping version string → metadata. Within each version object,
     // "deprecated" is a string (or absent) per npm spec; the package's newest published version is
     // "dist-tags".latest.
-    private async Task<(Dictionary<string, string?> Deprecated, UpstreamLatestVersion Latest)> FetchNpmMetadataAsync(string purlName, CancellationToken ct)
+    //
+    // The upstream sources are resolved once by the caller (ProcessGroupAsync) through
+    // UpstreamRegistryResolver — the same DB-backed, priority-ordered source the hosted proxy
+    // handlers and UpstreamLatestVersionResolver use — so a private mirror and the
+    // empty=disabled contract are honoured identically here rather than a hardcoded
+    // public-registry default bypassing both, without a second decrypt pass over the same rows.
+    private async Task<(Dictionary<string, string?> Deprecated, UpstreamLatestVersion Latest)> FetchNpmMetadataAsync(
+        IReadOnlyList<UpstreamSource> sources, string purlName, CancellationToken ct)
     {
-        string upstream = _config["Npm:Upstream"] ?? "https://registry.npmjs.org";
         // npm scoped packages have purlName encoded as %40scope%2Fpkg; the packument URL uses @scope/pkg.
         string packageName = Uri.UnescapeDataString(purlName).Replace("%40", "@").Replace("%2F", "/");
-        string url = $"{upstream.TrimEnd('/')}/{packageName}";
 
-        // Abbreviated-document fallback for packuments past the metadata byte cap; the
-        // abbreviated document still carries per-version "deprecated" and dist-tags, which is
-        // all this method reads (the missing time[] map only nulls publishedAt).
-        var response = await NpmPackumentFetcher.FetchAsync(_upstream, url, authorizationHeader: null, _logger, ct);
-        if (!response.IsSuccessStatusCode)
+        foreach (var source in sources)
         {
-            _logger.LogWarning("npm packument fetch returned {StatusCode} for {Package}.", response.StatusCode, packageName);
-            return (new Dictionary<string, string?>(), UpstreamLatestVersion.None);
-        }
-
-        using var doc = JsonDocument.Parse(response.Body);
-        var result = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-
-        string? latest = null;
-        if (doc.RootElement.TryGetProperty("dist-tags", out var distTags)
-            && distTags.TryGetProperty("latest", out var latestEl)
-            && latestEl.ValueKind == JsonValueKind.String)
-        {
-            latest = latestEl.GetString();
-            if (string.IsNullOrWhiteSpace(latest))
+            // Abbreviated-document fallback for packuments past the metadata byte cap; the
+            // abbreviated document still carries per-version "deprecated" and dist-tags, which is
+            // all this method reads (the missing time[] map only nulls publishedAt).
+            var response = await NpmPackumentFetcher.FetchAsync(
+                _upstream, $"{source.Url}/{packageName}", source.AuthorizationHeader, _logger, ct);
+            if (!response.IsSuccessStatusCode)
             {
-                latest = null;
+                _logger.LogWarning("npm packument fetch returned {StatusCode} for {Package}.", response.StatusCode, packageName);
+                continue;
             }
+
+            using var doc = JsonDocument.Parse(response.Body);
+            return ParseNpmPackument(doc.RootElement);
         }
 
-        DateTimeOffset? publishedAt = null;
-        if (latest is not null
-            && doc.RootElement.TryGetProperty("time", out var time)
-            && time.ValueKind == JsonValueKind.Object
-            && time.TryGetProperty(latest, out var timeEl)
-            && timeEl.ValueKind == JsonValueKind.String
-            && DateTimeOffset.TryParse(timeEl.GetString(), System.Globalization.CultureInfo.InvariantCulture,
-                System.Globalization.DateTimeStyles.RoundtripKind, out var ts))
-        {
-            publishedAt = ts;
-        }
-
-        if (!doc.RootElement.TryGetProperty("versions", out var versionsEl))
-        {
-            return (result, new UpstreamLatestVersion(latest, publishedAt));
-        }
-
-        foreach (var entry in versionsEl.EnumerateObject())
-        {
-            string? deprecated = null;
-            if (entry.Value.TryGetProperty("deprecated", out var depEl)
-                && depEl.ValueKind == JsonValueKind.String)
-            {
-                deprecated = depEl.GetString();
-                if (string.IsNullOrWhiteSpace(deprecated))
-                {
-                    deprecated = null;
-                }
-            }
-            result[entry.Name] = deprecated;
-        }
-        var stableVersions = EcosystemVersionOrdering.OrderStableDescending("npm", result.Keys);
-        return (result, new UpstreamLatestVersion(latest, publishedAt, stableVersions));
+        // Every configured source was unreachable — never fall back to a hardcoded public
+        // registry. (Zero configured sources is filtered out by the caller before this method is
+        // ever invoked.)
+        return (new Dictionary<string, string?>(), UpstreamLatestVersion.None);
     }
 
     // Fetches the PyPI project JSON and extracts yanked status per release plus info.version (and
     // its publish time from the top-level urls[] array, which lists the latest release's own
     // distribution files). A release is yanked if any of its distribution files has yanked=true;
     // we map yanked releases to a deprecation message (yanked_reason or a default).
-    private async Task<(Dictionary<string, string?> Deprecated, UpstreamLatestVersion Latest)> FetchPyPiMetadataAsync(string purlName, CancellationToken ct)
+    //
+    // The upstream sources are resolved once by the caller (ProcessGroupAsync) through
+    // UpstreamRegistryResolver — the same DB-backed, priority-ordered source the hosted proxy
+    // handlers and UpstreamLatestVersionResolver use — so a private mirror and the
+    // empty=disabled contract are honoured identically here rather than a hardcoded
+    // public-registry default bypassing both, without a second decrypt pass over the same rows.
+    private async Task<(Dictionary<string, string?> Deprecated, UpstreamLatestVersion Latest)> FetchPyPiMetadataAsync(
+        IReadOnlyList<UpstreamSource> sources, string purlName, CancellationToken ct)
     {
-        string upstream = _config["PyPI:Upstream"] ?? "https://pypi.org";
-        string url = $"{upstream.TrimEnd('/')}/pypi/{purlName}/json";
-
-        var response = await _upstream.GetOrFetchMetadataAsync(url, ct: ct);
-        if (!response.IsSuccessStatusCode)
+        foreach (var source in sources)
         {
-            _logger.LogWarning("PyPI project JSON fetch returned {StatusCode} for {Package}.", response.StatusCode, purlName);
-            return (new Dictionary<string, string?>(), UpstreamLatestVersion.None);
+            var response = await _upstream.GetOrFetchMetadataAsync($"{source.Url}/pypi/{purlName}/json", source.AuthorizationHeader, ct);
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("PyPI project JSON fetch returned {StatusCode} for {Package}.", response.StatusCode, purlName);
+                continue;
+            }
+
+            using var doc = JsonDocument.Parse(response.Body);
+            return ParsePyPiProject(doc.RootElement);
         }
 
-        using var doc = JsonDocument.Parse(response.Body);
+        // Every configured source was unreachable — never fall back to a hardcoded public
+        // registry. (Zero configured sources is filtered out by the caller before this method is
+        // ever invoked.)
+        return (new Dictionary<string, string?>(), UpstreamLatestVersion.None);
+    }
+
+    // Reads one already-fetched npm packument: per-version "deprecated" strings, dist-tags.latest,
+    // and that version's publish time from the time[] map. An abbreviated packument carries no
+    // time[] map, which only nulls publishedAt.
+    private static (Dictionary<string, string?> Deprecated, UpstreamLatestVersion Latest) ParseNpmPackument(
+        JsonElement root)
+    {
+        string? latest = ReadNonEmptyString(root, "dist-tags", "latest");
+        var publishedAt = ReadNpmPublishTime(root, latest);
         var result = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
 
-        string? latest = null;
-        if (doc.RootElement.TryGetProperty("info", out var info)
-            && info.TryGetProperty("version", out var versionEl)
-            && versionEl.ValueKind == JsonValueKind.String)
+        if (!root.TryGetProperty("versions", out var versionsEl))
         {
-            latest = versionEl.GetString();
-            if (string.IsNullOrWhiteSpace(latest))
-            {
-                latest = null;
-            }
+            return (result, new UpstreamLatestVersion(latest, publishedAt));
         }
 
-        DateTimeOffset? publishedAt = null;
-        if (doc.RootElement.TryGetProperty("urls", out var urls) && urls.ValueKind == JsonValueKind.Array)
+        foreach (var entry in versionsEl.EnumerateObject())
         {
-            foreach (var file in urls.EnumerateArray())
-            {
-                if (file.TryGetProperty("upload_time_iso_8601", out var uploadEl)
-                    && uploadEl.ValueKind == JsonValueKind.String
-                    && DateTimeOffset.TryParse(uploadEl.GetString(), System.Globalization.CultureInfo.InvariantCulture,
-                        System.Globalization.DateTimeStyles.RoundtripKind, out var ts))
-                {
-                    publishedAt = ts;
-                    break;
-                }
-            }
+            result[entry.Name] = ReadNonEmptyString(entry.Value, "deprecated");
         }
 
-        if (!doc.RootElement.TryGetProperty("releases", out var releasesEl))
+        var stableVersions = EcosystemVersionOrdering.OrderStableDescending("npm", result.Keys);
+        return (result, new UpstreamLatestVersion(latest, publishedAt, stableVersions));
+    }
+
+    // Reads one already-fetched PyPI project document: per-release yank status, info.version, and
+    // the latest release's publish time from the top-level urls[] array.
+    private static (Dictionary<string, string?> Deprecated, UpstreamLatestVersion Latest) ParsePyPiProject(
+        JsonElement root)
+    {
+        string? latest = ReadNonEmptyString(root, "info", "version");
+        var publishedAt = ReadPyPiUploadTime(root);
+        var result = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+
+        if (!root.TryGetProperty("releases", out var releasesEl))
         {
             return (result, new UpstreamLatestVersion(latest, publishedAt));
         }
@@ -583,6 +602,68 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
 
         var stableVersions = EcosystemVersionOrdering.OrderStableDescending("pypi", result.Keys);
         return (result, new UpstreamLatestVersion(latest, publishedAt, stableVersions));
+    }
+
+    // The publish time of the packument's dist-tags.latest, read from the time[] map. Null when
+    // there is no latest tag, no time[] map, no entry for that version, or an unparseable stamp.
+    private static DateTimeOffset? ReadNpmPublishTime(JsonElement root, string? latest)
+    {
+        return latest is not null
+            && root.TryGetProperty("time", out var time)
+            && time.ValueKind == JsonValueKind.Object
+            && time.TryGetProperty(latest, out var timeEl)
+            && timeEl.ValueKind == JsonValueKind.String
+            && DateTimeOffset.TryParse(timeEl.GetString(), CultureInfo.InvariantCulture,
+                DateTimeStyles.RoundtripKind, out var ts)
+            ? ts
+            : null;
+    }
+
+    // The first parseable upload_time_iso_8601 in the project document's top-level urls[] array,
+    // which lists the latest release's own distribution files.
+    private static DateTimeOffset? ReadPyPiUploadTime(JsonElement root)
+    {
+        if (!root.TryGetProperty("urls", out var urls) || urls.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        foreach (var file in urls.EnumerateArray())
+        {
+            if (file.TryGetProperty("upload_time_iso_8601", out var uploadEl)
+                && uploadEl.ValueKind == JsonValueKind.String
+                && DateTimeOffset.TryParse(uploadEl.GetString(), CultureInfo.InvariantCulture,
+                    DateTimeStyles.RoundtripKind, out var ts))
+            {
+                return ts;
+            }
+        }
+
+        return null;
+    }
+
+    // Reads a JSON string property, collapsing absent/wrong-kind/blank to null so a whitespace-only
+    // upstream value never reads as a real version or deprecation message. The object-kind guard is
+    // what keeps a malformed upstream document from throwing out of TryGetProperty.
+    private static string? ReadNonEmptyString(JsonElement owner, string name)
+    {
+        if (owner.ValueKind != JsonValueKind.Object
+            || !owner.TryGetProperty(name, out var element)
+            || element.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+
+        string? value = element.GetString();
+        return string.IsNullOrWhiteSpace(value) ? null : value;
+    }
+
+    // The nested form: owner.parent.name, with the same absent/wrong-kind/blank collapse.
+    private static string? ReadNonEmptyString(JsonElement owner, string parent, string name)
+    {
+        return owner.ValueKind == JsonValueKind.Object && owner.TryGetProperty(parent, out var element)
+            ? ReadNonEmptyString(element, name)
+            : null;
     }
 
     // A release is yanked if any of its distribution files has yanked=true; maps to the

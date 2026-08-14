@@ -100,6 +100,35 @@ public sealed class AuditEmitterTests : IClassFixture<InMemoryDbFixture>
     }
 
     [Fact]
+    public async Task EmitAsync_UserAgentSurrogatePairStraddlesTruncationBoundary_NeverPersistsLoneSurrogate()
+    {
+        // 511 ASCII chars + one astral-plane emoji (a 2-char UTF-16 surrogate pair) straddles the
+        // 512-char truncation boundary exactly: the high surrogate lands at index 511 and the low
+        // surrogate would land at index 512, which char-index truncation drops on its own. A
+        // naive s[..512] keeps the ASCII prefix plus the lone high surrogate — corrupt UTF-16
+        // that does not round-trip through UTF-8 storage.
+        var http = new DefaultHttpContext();
+        http.Request.Headers.UserAgent = new string('x', 511) + "\U0001F600"; // 😀, 2 UTF-16 code units
+
+        var sut = NewSut(http);
+        await sut.EmitAsync($"ua-surrogate-{Guid.NewGuid():N}", null, "system", null, "accepted", "{}");
+
+        await using var conn = await _fixture.Store.OpenAsync();
+        string? ua = await conn.ExecuteScalarAsync<string>(
+            "SELECT user_agent FROM audit_event ORDER BY occurred_at DESC LIMIT 1");
+
+        // A char-index cut at exactly 512 keeps the lone high surrogate; SQLite's own UTF-8
+        // marshalling then replaces that invalid code unit with U+FFFD on the way to storage —
+        // still corruption, just surfacing one layer later than the in-process string. The fix
+        // backs the cut off to 511 so the emoji is dropped whole and no replacement character
+        // is ever produced.
+        Assert.NotNull(ua);
+        Assert.Equal(511, ua!.Length);
+        Assert.Equal(new string('x', 511), ua);
+        Assert.DoesNotContain('\uFFFD', ua);
+    }
+
+    [Fact]
     public async Task EmitAsync_RepoThrows_SwallowsException_NeverPropagates()
     {
         // Audit gap contract: failure must not break the caller — log + counter + continue.

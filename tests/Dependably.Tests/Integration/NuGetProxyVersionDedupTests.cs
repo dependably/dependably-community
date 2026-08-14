@@ -62,7 +62,7 @@ public sealed class NuGetProxyVersionDedupTests : IClassFixture<DependablyFactor
             orgId, "nuget", name, version, filename,
             Sha256: sha256, SizeBytes: sizeBytes,
             BlobKey: $"{blobKey}/{filename}",
-            UpstreamUrl: $"https://upstream.example/{filename}"));
+            UpstreamUrl: $"https://upstream.example/{filename}", Origin: CacheAccessOrigin.FirstFetch));
         Assert.NotNull(caId);
 
         // Real proxy first-fetch also creates the per-tenant packages row; mirror that here

@@ -9,7 +9,7 @@ namespace Dependably.Tests.Unit.Api;
 /// <summary>
 /// Covers the <c>protocol</c> field on <see cref="UpstreamRegistryController.Add"/> — the
 /// management-plane write/read path for <c>upstream_registry.upstream_protocol</c>, which is
-/// Terraform-only (see <c>docs/adr/0003-terraform-provider-network-mirror.md</c>).
+/// Terraform-only (see <c>ADR-terraform-provider-network-mirror</c>).
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class UpstreamRegistryControllerProtocolTests

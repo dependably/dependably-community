@@ -941,6 +941,116 @@ public sealed class SystemControllerUnitTests
         Assert.True(auditCount >= 1);
     }
 
+    // ── UpdateMyTimezone ───────────────────────────────────────────────────
+
+    [Fact]
+    public async Task UpdateMyTimezone_UnrecognisedZone_Returns422()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var result = await b.SystemController.UpdateMyTimezone(
+            new UpdateTimezoneRequest("Not/AZone"), CancellationToken.None);
+        var obj = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
+    }
+
+    [Fact]
+    public async Task UpdateMyTimezone_NoSubClaim_ReturnsUnauthorized()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        b.SystemController.HttpContext.User = new System.Security.Claims.ClaimsPrincipal(
+            new System.Security.Claims.ClaimsIdentity(
+                [new System.Security.Claims.Claim("scope", "system")],
+                authenticationType: "test"));
+
+        var result = await b.SystemController.UpdateMyTimezone(
+            new UpdateTimezoneRequest("America/Toronto"), CancellationToken.None);
+        Assert.IsType<UnauthorizedResult>(result);
+    }
+
+    [Fact]
+    public async Task UpdateMyTimezone_Valid_PersistsAndAudits()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        string adminId = await SystemAdminSeeder.InsertAsync(s.Store, $"ops-{Guid.NewGuid():N}@example.test");
+        var b = await s.BuildAsync();
+        SetSystemActor(b, adminId);
+
+        var result = await b.SystemController.UpdateMyTimezone(
+            new UpdateTimezoneRequest("America/Toronto"), CancellationToken.None);
+        Assert.IsType<NoContentResult>(result);
+
+        await using var verify = await b.Db.OpenAsync();
+        string? stored = await verify.ExecuteScalarAsync<string?>(
+            "SELECT timezone FROM system_admins WHERE id = @id", new { id = adminId });
+        Assert.Equal("America/Toronto", stored);
+        long auditCount = await verify.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM audit_log WHERE action = 'system_admin.timezone_changed' AND actor_id = @id",
+            new { id = adminId });
+        Assert.True(auditCount >= 1);
+    }
+
+    [Fact]
+    public async Task UpdateMyTimezone_BlankValue_ClearsTheOverride()
+    {
+        // "" is how the picker expresses "use the instance default". Storing "UTC" by name
+        // instead would be indistinguishable from a deliberate choice of UTC.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        string adminId = await SystemAdminSeeder.InsertAsync(s.Store, $"ops-{Guid.NewGuid():N}@example.test");
+        var b = await s.BuildAsync();
+        SetSystemActor(b, adminId);
+
+        await b.SystemController.UpdateMyTimezone(
+            new UpdateTimezoneRequest("Asia/Tokyo"), CancellationToken.None);
+        var cleared = await b.SystemController.UpdateMyTimezone(
+            new UpdateTimezoneRequest("   "), CancellationToken.None);
+        Assert.IsType<NoContentResult>(cleared);
+
+        await using var verify = await b.Db.OpenAsync();
+        string? stored = await verify.ExecuteScalarAsync<string?>(
+            "SELECT timezone FROM system_admins WHERE id = @id", new { id = adminId });
+        Assert.Null(stored);
+    }
+
+    [Fact]
+    public async Task Me_EchoesTheStoredZoneAndItsResolvedForm()
+    {
+        // The apex payload has to carry the same two fields as the tenant one, or the shared
+        // formatter has nothing to read and every operator timestamp silently renders UTC.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        string adminId = await SystemAdminSeeder.InsertAsync(s.Store, $"ops-{Guid.NewGuid():N}@example.test");
+        var b = await s.BuildAsync();
+        SetSystemActor(b, adminId);
+
+        var before = Assert.IsType<OkObjectResult>(await b.SystemController.Me(CancellationToken.None));
+        Assert.Null(before.Value!.GetType().GetProperty("timezone")!.GetValue(before.Value));
+        Assert.Equal(
+            TimeZoneCodes.Default,
+            before.Value!.GetType().GetProperty("resolvedTimezone")!.GetValue(before.Value));
+
+        await b.SystemController.UpdateMyTimezone(
+            new UpdateTimezoneRequest("Europe/Paris"), CancellationToken.None);
+
+        var after = Assert.IsType<OkObjectResult>(await b.SystemController.Me(CancellationToken.None));
+        Assert.Equal("Europe/Paris", after.Value!.GetType().GetProperty("timezone")!.GetValue(after.Value));
+        Assert.Equal(
+            "Europe/Paris",
+            after.Value!.GetType().GetProperty("resolvedTimezone")!.GetValue(after.Value));
+    }
+
     // ── ChangeMyPassword: sub-claim fallback ───────────────────────────────
 
     [Fact]

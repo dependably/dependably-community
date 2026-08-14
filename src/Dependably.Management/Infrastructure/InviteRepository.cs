@@ -31,6 +31,10 @@ public sealed class InviteRepository
     public async Task<InviteCreation?> CreateAsync(
         string orgId, string email, string createdByUserId, string role = "member", CancellationToken ct = default)
     {
+        // Canonical form before storage and before the pending-invite conflict check: the invite
+        // is what mints the users row, so an invite stored in a different case than an existing
+        // account's address would create a second account for the same mailbox.
+        email = EmailNormalizer.Normalize(email);
         string raw = TokenGenerator.Generate();
         byte[] hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(raw));
         string hash = Convert.ToHexString(hashBytes).ToLowerInvariant();
@@ -74,7 +78,7 @@ public sealed class InviteRepository
         await using var conn = await _db.OpenAsync(ct);
         return await conn.ExecuteScalarAsync<int>(
             "SELECT COUNT(*) FROM invites WHERE org_id = @orgId AND email = @email AND accepted_at IS NULL",
-            new { orgId, email }) > 0;
+            new { orgId, email = EmailNormalizer.Normalize(email) }) > 0;
     }
 
     public async Task<IReadOnlyList<InviteRecord>> ListAsync(string orgId, CancellationToken ct = default)

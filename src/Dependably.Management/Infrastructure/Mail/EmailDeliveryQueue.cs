@@ -4,19 +4,30 @@ using Dependably.Infrastructure.Alerts;
 namespace Dependably.Infrastructure.Mail;
 
 /// <summary>
-/// Bounded in-memory queue + background worker shared by every outbound-email delivery channel
-/// (per-org alert email via <see cref="Alerts.AlertEmailQueue"/>, transactional account email via
-/// <see cref="TransactionalEmailService"/>, …). Each channel wraps its own domain object in an
-/// <see cref="IEmailDeliveryJob"/> and calls <see cref="Enqueue"/>; this class owns the one
-/// channel, worker loop, retry backoff, shutdown drain, and delivery counters — no delivery
-/// channel implements any of that machinery itself.
+/// Bounded in-memory queue + background worker for <b>security-token mail</b>: the self-serve
+/// password-reset link, the email-change verification link, and the account-security notices, all
+/// enqueued through <see cref="TransactionalEmailService"/>. Each caller wraps its own domain object
+/// in an <see cref="IEmailDeliveryJob"/> and calls <see cref="Enqueue"/>; this class owns the one
+/// channel, worker loop, retry backoff, shutdown drain, and delivery counters.
 ///
+/// <para>
+/// This path is deliberately <b>not</b> durable, and alert email deliberately no longer uses it —
+/// alert email goes through <see cref="EmailOutboxRepository"/> and
+/// <see cref="EmailOutboxDeliveryService"/> instead. The bodies queued here contain live
+/// credentials: a reset link and a verification link are bearer tokens, and persisting a rendered
+/// body would put them at rest in the database. Losing one is recoverable — the user requests
+/// another — which is exactly why this queue is allowed to drop, and exactly why alert mail, which
+/// carries no credential and which nobody can re-request, is not.
+/// </para>
+///
+/// <para>
 /// A job resolving to null (channel disabled, unconfigured, or unresolvable) is a silent no-op —
 /// nothing sent, nothing recorded. A resolvable job gets 1 initial attempt + 3 retries at
-/// 1s / 5s / 30s (<see cref="AlertDeliveryPolicy.BackoffSchedule"/>), the schedule every delivery
-/// queue in this codebase shares. Terminal success/failure bookkeeping is the job's own
-/// responsibility (<see cref="IEmailDeliveryJob.RecordSuccessAsync"/> /
+/// 1s / 5s / 30s (<see cref="AlertDeliveryPolicy.BackoffSchedule"/>). Terminal success/failure
+/// bookkeeping is the job's own responsibility
+/// (<see cref="IEmailDeliveryJob.RecordSuccessAsync"/> /
 /// <see cref="IEmailDeliveryJob.RecordFailureAsync"/>) — this queue only decides when to call them.
+/// </para>
 /// </summary>
 public sealed class EmailDeliveryQueue : BackgroundService
 {

@@ -359,7 +359,8 @@ public sealed class PackageAnalyticsRepository
                   AND pv.origin = 'uploaded'
                 GROUP BY p.ecosystem
                 UNION ALL
-                SELECT ca.ecosystem as Ecosystem, COALESCE(SUM(ca.size_bytes), 0) as TotalBytes
+                SELECT ca.ecosystem as Ecosystem,
+                       COALESCE(SUM(COALESCE(taa.size_bytes, ca.size_bytes)), 0) as TotalBytes
                 FROM cache_artifact ca
                 JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id
                 WHERE taa.org_id = @orgId AND ca.ecosystem != 'oci'

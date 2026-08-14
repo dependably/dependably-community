@@ -60,7 +60,8 @@ public sealed class GlobalPlaneDualWriteTests : IAsyncLifetime
         Sha256: "abc123def456",
         SizeBytes: 2048,
         BlobKey: $"proxy/npm/{name}/{version}/{name}-{version}.tgz",
-        UpstreamUrl: $"https://registry.npmjs.org/{name}/-/{name}-{version}.tgz");
+        UpstreamUrl: $"https://registry.npmjs.org/{name}/-/{name}-{version}.tgz",
+        Origin: CacheAccessOrigin.FirstFetch);
 
     // ── PyPI first-fetch via ProxyVersionRecorder (shared proxy path) ────────
 
@@ -132,7 +133,7 @@ public sealed class GlobalPlaneDualWriteTests : IAsyncLifetime
             Sha256: sha256Hex,
             SizeBytes: sizeBytes,
             BlobKey: blobKey,
-            UpstreamUrl: downloadUrl));
+            UpstreamUrl: downloadUrl, Origin: CacheAccessOrigin.FirstFetch));
         Assert.NotNull(cacheArtifactId);
 
         await tenantAccess.UpsertStateAsync(_orgId1, cacheArtifactId!, _clock.GetUtcNow());

@@ -1,6 +1,6 @@
 <!--
-  General tab of OrgSettings — anonymous pull, default language, Air-gapped
-  environment toggle, and Require MFA.
+  General tab of OrgSettings — anonymous pull, default language, default
+  timezone, Air-gapped environment toggle, and Require MFA.
 
   Parent owns the `settings` object and the save handler so all the cross-tab
   state lives in one place; this component is a thin form binding + markup view.
@@ -14,6 +14,17 @@
   export let settings
   export let saving = false
   export let onSave = () => {}
+
+  // Zones come from the browser, like the profile picker; the server validates whatever is
+  // sent against its own tz database. UTC is prepended because it is the fallback the
+  // resolution chain ends on, and a runtime whose Intl omits it would otherwise leave the
+  // tenant unable to select it.
+  const timeZoneOptions = [
+    'UTC',
+    ...(typeof Intl.supportedValuesOf === 'function'
+      ? Intl.supportedValuesOf('timeZone').filter(tz => tz !== 'UTC')
+      : []),
+  ]
 </script>
 
 <div class="card card-narrow">
@@ -26,6 +37,15 @@
     <select bind:value={settings.defaultLanguage} class="w-auto">
       <option value="en">English</option>
       <option value="fr">Français</option>
+    </select>
+  </div>
+
+  <div class="form-row form-row-inline">
+    <label class="flex-1 label-row">{$t('settings.general.defaultTimezone')} <InfoTip text={$t('settings.general.defaultTimezoneHint')} /></label>
+    <select bind:value={settings.defaultTimezone} class="w-auto">
+      {#each timeZoneOptions as tz (tz)}
+        <option value={tz}>{tz}</option>
+      {/each}
     </select>
   </div>
 

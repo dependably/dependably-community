@@ -239,6 +239,23 @@ public class PackageMetadataExtractionTests
         Assert.Equal(2048, m.Description!.Length);
     }
 
+    [Fact]
+    public void Description_SurrogatePairStraddlesCapBoundary_DropsWholePairInsteadOfSplitting()
+    {
+        // 2047 ASCII chars + one astral-plane emoji (a 2-char UTF-16 surrogate pair) straddles
+        // the 2048-char cap exactly: the high surrogate lands at index 2047 and the low surrogate
+        // would land at 2048. A naive char-index cut keeps the lone high surrogate; a hostile
+        // manifest can engineer this deliberately since the description is unvalidated free text
+        // re-served verbatim in package metadata.
+        string huge = new string('x', 2047) + "\U0001F600"; // 😀
+        var m = LicenseExtractor.PresentationOnly(null, null, huge);
+
+        Assert.NotNull(m.Description);
+        Assert.Equal(2047, m.Description!.Length);
+        Assert.Equal(new string('x', 2047), m.Description);
+        Assert.False(char.IsSurrogate(m.Description[^1]));
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────
 
     private static byte[] BuildWheel(string metadata)

@@ -162,8 +162,31 @@ public sealed class BlockGateService
         }
     }
 
+    // A tenant's proxy content binding diverging from the shared cache_artifact row is only ever
+    // reported through CacheAccessRecorder's log line and the CacheContentDivergences meter today —
+    // both operational, neither operator-actionable per divergence. Every gate evaluation that sees
+    // ContentDiverges routes it through the same review-queue/alert path every blocking arm already
+    // uses, so a divergence surfaces as a reviewable item regardless of whether anything else on
+    // this request actually blocked. Best-effort like every other QueueForReviewAsync call: losing
+    // one upsert is recoverable on the next diverging request, and must never turn a servable
+    // download into a 500.
+    private async Task QueueDivergenceReviewAsync(BlockGateRequest request, CancellationToken ct)
+    {
+        string detail = System.Text.Json.JsonSerializer.Serialize(
+            new { reason = "tenant_content_binding_diverges_from_shared_row" },
+            Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
+        await QueueForReviewAsync(request, "content_divergence", detail, ct);
+    }
+
     public async Task<BlockDecision> EvaluateAsync(BlockGateRequest request, CancellationToken ct = default)
     {
+        // Surfaced regardless of the eventual Allowed/Blocked verdict below — divergence itself,
+        // not any one gate's reaction to it, is the actionable signal.
+        if (request.ContentDiverges)
+        {
+            await QueueDivergenceReviewAsync(request, ct);
+        }
+
         // Load vuln signals when the artifact has been scanned. Route to the global-plane arm
         // when CacheArtifactId is set (proxy path, P3+), otherwise use the per-version arm.
         VulnGateSignals? signals = null;
@@ -283,12 +306,26 @@ public sealed class BlockGateService
     // pass through. See <see cref="DeclaredLicenseEcosystems"/>.
     private async Task<BlockDecision> EvaluateLicenseArmAsync(BlockGateRequest request, CancellationToken ct)
     {
-        var lookup = request.CacheArtifactId is not null
-            ? await _licenses.GetSpdxForCacheArtifactsAsync([request.CacheArtifactId], ct)
-            : await _licenses.GetSpdxForVersionsAsync([request.VersionId], ct);
+        // package_version_licenses is keyed by cache_artifact_id — a single global row — so a
+        // tenant whose content binding diverges from that row has no license evidence of its own
+        // to read. Skip the lookup entirely rather than reading the shared row's entries: the
+        // empty-entries branch below already resolves to the correct posture per ecosystem
+        // (unknown-license block for DeclaredLicenseEcosystems, pass-through otherwise), the same
+        // treatment as a coordinate that has never been license-scanned at all.
+        List<string> entries;
+        if (request.ContentDiverges)
+        {
+            entries = [];
+        }
+        else
+        {
+            var lookup = request.CacheArtifactId is not null
+                ? await _licenses.GetSpdxForCacheArtifactsAsync([request.CacheArtifactId], ct)
+                : await _licenses.GetSpdxForVersionsAsync([request.VersionId], ct);
+            string ownerId = request.CacheArtifactId ?? request.VersionId;
+            entries = lookup[ownerId].ToList();
+        }
 
-        string ownerId = request.CacheArtifactId ?? request.VersionId;
-        var entries = lookup[ownerId].ToList();
         if (entries.Count == 0)
         {
             if (!DeclaredLicenseEcosystems.Contains(request.Ecosystem))
@@ -699,14 +736,17 @@ public sealed class BlockGateService
             ManualState: entry.ManualBlockState,
             Deprecated: entry.Deprecated,
             PublishedAt: entry.PublishedAt,
+            // OSV findings are coordinate-keyed (ecosystem/name/version), not byte-keyed — see
+            // CacheArtifactIndexFacts.ToPackageVersionSynthetic — so vuln_checked_at and the
+            // malicious/KEV/EPSS/CVSS signals are read unmasked here regardless of divergence.
             Scanned: entry.VulnCheckedAt is not null,
             HasMalicious: signals?.HasMalicious ?? false,
             HasKev: signals?.HasKev ?? false,
             MaxEpss: signals?.MaxEpss,
             MaxCvss: signals?.MaxCvss,
             Origin: "proxy",
-            HasInstallScript: entry.HasInstallScript,
-            ProvenanceStatus: entry.ProvenanceStatus,
+            HasInstallScript: entry.EffectiveHasInstallScript,
+            ProvenanceStatus: entry.EffectiveProvenanceStatus,
             InstallScriptAllowlisted: installScriptAllowlisted,
             RevokedAt: entry.RevokedAt);
 
@@ -1047,7 +1087,18 @@ public sealed record BlockGateRequest(
     /// Only 'block' engages the license arm (the lowest-priority hard-block gate); 'warn'/'off'/null
     /// keep the license signal advisory and never deny the download.
     /// </summary>
-    string? LicenseEnforcementMode = null)
+    string? LicenseEnforcementMode = null,
+    /// <summary>
+    /// True when this tenant's proxy content binding differs from the shared <c>cache_artifact</c>
+    /// row's bytes (<see cref="Infrastructure.CacheArtifactServeFacts.ContentDivergesFromSharedFacts"/>).
+    /// Every other byte-derived field on this record is already the divergence-adjusted
+    /// <c>Effective*</c> value read off that projection; this flag exists for the one byte-derived
+    /// fact that is not carried on the record at all — <c>package_version_licenses</c>, read by a
+    /// separate keyed lookup in <see cref="EvaluateLicenseArmAsync"/> — so that arm can apply the
+    /// same "no evidence about this tenant's own bytes" treatment without reading the shared row's
+    /// license entries. Always <see langword="false"/> for the hosted (non-proxy) path.
+    /// </summary>
+    bool ContentDiverges = false)
 {
     /// <summary>
     /// Constructs a <see cref="BlockGateRequest"/> from the standard download-path inputs shared
@@ -1107,6 +1158,9 @@ public sealed record BlockGateRequest(
         OrgSettings? settings,
         string? sourceIp) =>
         new(orgId, ecosystem, caFacts.Purl ?? string.Empty, string.Empty,
+            // OSV findings (this and the signals GetGateSignalsAsync loads below) are keyed by
+            // package coordinate, not by bytes — see EvaluateAsync's remark on VulnCheckedAt —
+            // so this is the shared row's real stamp, unmasked by divergence.
             caFacts.ManualBlockState, caFacts.VulnCheckedAt,
             token?.UserId, settings?.MaxOsvScoreTolerance ?? DefaultMaxOsvScore, sourceIp,
             MinReleaseAgeHours: settings?.MinReleaseAgeHours,
@@ -1118,10 +1172,10 @@ public sealed record BlockGateRequest(
             BlockKevMode: settings?.BlockKev,
             MaxEpssTolerance: settings?.MaxEpssTolerance,
             Origin: "proxy",
-            HasInstallScript: caFacts.HasInstallScript,
-            InstallScriptKind: caFacts.InstallScriptKind,
+            HasInstallScript: caFacts.EffectiveHasInstallScript,
+            InstallScriptKind: caFacts.EffectiveInstallScriptKind,
             BlockInstallScriptsMode: settings?.BlockInstallScripts,
-            ProvenanceStatus: caFacts.ProvenanceStatus,
+            ProvenanceStatus: caFacts.EffectiveProvenanceStatus,
             // The stored provenance_status column is ecosystem-agnostic; the toggle that interprets
             // it is per-ecosystem. Without the mode the persisted verdict is inert on the serve
             // path and a 'block' policy would only ever be enforced by the index filters.
@@ -1129,7 +1183,8 @@ public sealed record BlockGateRequest(
             RevokedAt: caFacts.RevokedAt,
             BlockRevokedMode: settings?.BlockRevoked,
             LicenseEnforcementMode: settings?.LicenseEnforcementMode,
-            CacheArtifactId: caFacts.Id);
+            CacheArtifactId: caFacts.Id,
+            ContentDiverges: caFacts.ContentDivergesFromSharedFacts);
 
     /// <summary>
     /// Constructs a <see cref="BlockGateRequest"/> for the proxy FIRST-FETCH serve gate — the
@@ -1156,6 +1211,17 @@ public sealed record BlockGateRequest(
     /// instance.
     /// </para>
     /// </summary>
+    /// <param name="ownProvenanceStatus">
+    /// This request's own just-computed provenance verdict, over the bytes this fetch staged —
+    /// <c>ProxyFetchRequest.ProvenanceStatus</c> at the call site. Preferred over
+    /// <see cref="Infrastructure.CacheArtifactServeFacts.EffectiveProvenanceStatus"/> when supplied:
+    /// <c>UpdateGlobalFactsAsync</c>'s COALESCE keep-existing semantics mean the shared row can
+    /// carry an earlier tenant's verdict rather than this one's, and <c>EffectiveProvenanceStatus</c>
+    /// additionally masks that stored value to <c>Unverifiable</c> on divergence — discarding, in
+    /// either case, strictly better evidence this call already has in hand for the tenant it is
+    /// actually gating. NULL when the caller has none (no provenance verification configured for
+    /// this ecosystem), in which case the masked shared-row value is used exactly as before.
+    /// </param>
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
         Justification = "Single-source factory for the proxy first-fetch gate request: the parameter list IS " +
             "the threaded field set, and grouping it would reintroduce the field-by-field indirection this " +
@@ -1176,8 +1242,11 @@ public sealed record BlockGateRequest(
         string? blockInstallScriptsMode,
         string? verifyProvenanceMode,
         string? blockRevokedMode,
-        string? licenseEnforcementMode) =>
+        string? licenseEnforcementMode,
+        string? ownProvenanceStatus = null) =>
         new(orgId, ecosystem, caFacts.Purl ?? string.Empty, string.Empty,
+            // OSV findings are keyed by package coordinate, not by bytes — see EvaluateAsync's
+            // remark on VulnCheckedAt — so this is the shared row's real stamp, unmasked.
             caFacts.ManualBlockState, caFacts.VulnCheckedAt,
             userId, maxOsvScoreTolerance, sourceIp,
             MinReleaseAgeHours: minReleaseAgeHours,
@@ -1189,15 +1258,16 @@ public sealed record BlockGateRequest(
             BlockKevMode: blockKevMode,
             MaxEpssTolerance: maxEpssTolerance,
             Origin: "proxy",
-            HasInstallScript: caFacts.HasInstallScript,
-            InstallScriptKind: caFacts.InstallScriptKind,
+            HasInstallScript: caFacts.EffectiveHasInstallScript,
+            InstallScriptKind: caFacts.EffectiveInstallScriptKind,
             BlockInstallScriptsMode: blockInstallScriptsMode,
-            ProvenanceStatus: caFacts.ProvenanceStatus,
+            ProvenanceStatus: ownProvenanceStatus ?? caFacts.EffectiveProvenanceStatus,
             VerifyProvenanceMode: verifyProvenanceMode,
             RevokedAt: caFacts.RevokedAt,
             BlockRevokedMode: blockRevokedMode,
             LicenseEnforcementMode: licenseEnforcementMode,
-            CacheArtifactId: caFacts.Id);
+            CacheArtifactId: caFacts.Id,
+            ContentDiverges: caFacts.ContentDivergesFromSharedFacts);
 
     /// <summary>
     /// Constructs the request for the pre-record first-fetch DEPRECATION gate. This one runs before

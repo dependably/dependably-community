@@ -559,6 +559,313 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
         Assert.Equal(404, obj.StatusCode);
     }
 
+    // ── Pull authorization: capability gate ────────────────────────────────────
+    //
+    // AuthorizePullAsync is the sole gate for manifest, blob, and tag-list reads. A
+    // presented token must carry pull:oci or read:artifact; a token active in the org
+    // but scoped to something unrelated (e.g. publish:npm) must be forbidden rather
+    // than silently treated the same as an unauthenticated request.
+
+    [Fact]
+    public async Task GetManifest_TokenWithUnrelatedCapability_ReturnsForbidden()
+    {
+        byte[] manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"gated\":true}");
+        _ = await SeedManifestAsync(manifestBytes, tag: "latest");
+
+        var (rawToken, _) = await _tokens.CreateServiceTokenAsync(
+            _orgId, "npm-only", """["publish:npm"]""", expiresAt: null);
+
+        var ctl = BuildControllerForOrgWithAuth(_orgId, rawToken, BuildResolver());
+        var result = await ctl.Get("library/ubuntu/manifests/latest", default);
+
+        var obj = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status403Forbidden, obj.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetManifest_TokenWithReadArtifact_Succeeds()
+    {
+        byte[] manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"read-artifact\":true}");
+        _ = await SeedManifestAsync(manifestBytes, tag: "latest");
+
+        var (rawToken, _) = await _tokens.CreateServiceTokenAsync(
+            _orgId, "reader", """["read:artifact"]""", expiresAt: null);
+
+        var ctl = BuildControllerForOrgWithAuth(_orgId, rawToken, BuildResolver());
+        var result = await ctl.Get("library/ubuntu/manifests/latest", default);
+
+        Assert.IsType<FileStreamResult>(result);
+        Assert.Equal("HIT", ctl.Response.Headers["X-Cache"].ToString());
+    }
+
+    [Fact]
+    public async Task GetBlob_TokenWithPullOciCapability_Succeeds()
+    {
+        byte[] blobBytes = RandomBytes(64);
+        string digest = await SeedBlobAsync(blobBytes);
+
+        var (rawToken, _) = await _tokens.CreateServiceTokenAsync(
+            _orgId, "pull-oci-only", """["pull:oci"]""", expiresAt: null);
+
+        var ctl = BuildControllerForOrgWithAuth(_orgId, rawToken, BuildResolver());
+        var result = await ctl.Get($"library/ubuntu/blobs/{digest}", default);
+
+        Assert.IsType<FileStreamResult>(result);
+        Assert.Equal("HIT", ctl.Response.Headers["X-Cache"].ToString());
+    }
+
+    [Fact]
+    public async Task ListTags_TokenWithUnrelatedCapability_ReturnsForbidden()
+    {
+        byte[] manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"tags-gated\":true}");
+        _ = await SeedManifestAsync(manifestBytes, tag: "v1");
+
+        var (rawToken, _) = await _tokens.CreateServiceTokenAsync(
+            _orgId, "npm-only-tags", """["publish:npm"]""", expiresAt: null);
+
+        var ctl = BuildControllerForOrgWithAuth(_orgId, rawToken, BuildResolver());
+        var result = await ctl.Get("library/ubuntu/tags/list", default);
+
+        var obj = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status403Forbidden, obj.StatusCode);
+    }
+
+    /// <summary>
+    /// Mixed partial-failure coverage: the same org grants two tokens, one properly scoped
+    /// for OCI reads and one scoped to an unrelated ecosystem. Both are exercised across all
+    /// three read surfaces (manifest, blob, tags) in a single test — the capable token must
+    /// succeed on every surface and the incapable token must be forbidden on every surface,
+    /// with neither outcome masking the other.
+    /// </summary>
+    [Fact]
+    public async Task PullAuthorization_MixedCapabilityTokens_CapableSucceedsIncapableForbiddenAcrossSurfaces()
+    {
+        byte[] manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"mixed\":true}");
+        _ = await SeedManifestAsync(manifestBytes, tag: "mixed");
+        byte[] blobBytes = RandomBytes(32);
+        string blobDigest = await SeedBlobAsync(blobBytes);
+
+        var (capableToken, _) = await _tokens.CreateServiceTokenAsync(
+            _orgId, "mixed-capable", """["read:artifact"]""", expiresAt: null);
+        var (incapableToken, _) = await _tokens.CreateServiceTokenAsync(
+            _orgId, "mixed-incapable", """["publish:pypi"]""", expiresAt: null);
+
+        // Capable token: every surface succeeds.
+        var capableCtl = BuildControllerForOrgWithAuth(_orgId, capableToken, BuildResolver());
+        Assert.IsType<FileStreamResult>(
+            await capableCtl.Get("library/ubuntu/manifests/mixed", default));
+        var capableBlobCtl = BuildControllerForOrgWithAuth(_orgId, capableToken, BuildResolver());
+        Assert.IsType<FileStreamResult>(
+            await capableBlobCtl.Get($"library/ubuntu/blobs/{blobDigest}", default));
+        var capableTagsCtl = BuildControllerForOrgWithAuth(_orgId, capableToken, BuildResolver());
+        Assert.IsType<JsonResult>(
+            await capableTagsCtl.Get("library/ubuntu/tags/list", default));
+
+        // Incapable token: every surface is forbidden, not silently allowed.
+        var incapableCtl = BuildControllerForOrgWithAuth(_orgId, incapableToken, BuildResolver());
+        var manifestResult = Assert.IsType<ObjectResult>(
+            await incapableCtl.Get("library/ubuntu/manifests/mixed", default));
+        Assert.Equal(StatusCodes.Status403Forbidden, manifestResult.StatusCode);
+
+        var incapableBlobCtl = BuildControllerForOrgWithAuth(_orgId, incapableToken, BuildResolver());
+        var blobResult = Assert.IsType<ObjectResult>(
+            await incapableBlobCtl.Get($"library/ubuntu/blobs/{blobDigest}", default));
+        Assert.Equal(StatusCodes.Status403Forbidden, blobResult.StatusCode);
+
+        var incapableTagsCtl = BuildControllerForOrgWithAuth(_orgId, incapableToken, BuildResolver());
+        var tagsResult = Assert.IsType<ObjectResult>(
+            await incapableTagsCtl.Get("library/ubuntu/tags/list", default));
+        Assert.Equal(StatusCodes.Status403Forbidden, tagsResult.StatusCode);
+    }
+
+    // ── Push-probe authorization: publish:oci's narrow read exception ─────────
+    //
+    // The OCI push protocol itself reads through AuthorizePullAsync: docker/BuildKit HEAD a
+    // blob's digest before uploading it (skip-if-present), and HEAD or GET a manifest
+    // reference to resolve a tag or read back what was just pushed. dependably ships
+    // publish-only OCI tokens (the web token modal's "push" preset mints exactly
+    // publish:*) with no read capability, so AuthorizePullAsync admits publish:oci (and the
+    // publish:* wildcard that grants it) on exactly those two probes — manifest GET/HEAD and
+    // blob HEAD — and nowhere else: blob GET (the actual layer bytes), tags list, and the
+    // referrers list stay gated behind pull:oci/read:artifact, so a publish-only token cannot
+    // use the exception as a general pull/enumerate licence.
+
+    [Fact]
+    public async Task HeadBlob_PublishOciOnlyToken_Succeeds()
+    {
+        byte[] blobBytes = RandomBytes(64);
+        string digest = await SeedBlobAsync(blobBytes);
+
+        var (rawToken, _) = await _tokens.CreateServiceTokenAsync(
+            _orgId, "publish-oci-only", """["publish:oci"]""", expiresAt: null);
+
+        var ctl = BuildControllerForOrgWithAuth(_orgId, rawToken, BuildResolver());
+        var result = await ctl.Head($"library/ubuntu/blobs/{digest}", default);
+
+        Assert.IsType<OkResult>(result);
+        Assert.Equal(digest, ctl.Response.Headers["Docker-Content-Digest"].ToString());
+    }
+
+    [Fact]
+    public async Task HeadBlob_PublishWildcardToken_Succeeds()
+    {
+        byte[] blobBytes = RandomBytes(64);
+        string digest = await SeedBlobAsync(blobBytes);
+
+        var (rawToken, _) = await _tokens.CreateServiceTokenAsync(
+            _orgId, "publish-wildcard", """["publish:*"]""", expiresAt: null);
+
+        var ctl = BuildControllerForOrgWithAuth(_orgId, rawToken, BuildResolver());
+        var result = await ctl.Head($"library/ubuntu/blobs/{digest}", default);
+
+        Assert.IsType<OkResult>(result);
+        Assert.Equal(digest, ctl.Response.Headers["Docker-Content-Digest"].ToString());
+    }
+
+    [Fact]
+    public async Task GetBlob_PublishOciOnlyToken_ReturnsForbidden()
+    {
+        // A publish-only token may probe existence (HEAD, above) but must not gain a general
+        // licence to download the actual layer bytes (GET) — push never reads them back.
+        byte[] blobBytes = RandomBytes(64);
+        string digest = await SeedBlobAsync(blobBytes);
+
+        var (rawToken, _) = await _tokens.CreateServiceTokenAsync(
+            _orgId, "publish-oci-only-getblob", """["publish:oci"]""", expiresAt: null);
+
+        var ctl = BuildControllerForOrgWithAuth(_orgId, rawToken, BuildResolver());
+        var result = await ctl.Get($"library/ubuntu/blobs/{digest}", default);
+
+        var obj = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status403Forbidden, obj.StatusCode);
+    }
+
+    [Fact]
+    public async Task HeadManifest_PublishOciOnlyToken_Succeeds()
+    {
+        byte[] manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"push-probe-head\":true}");
+        string digest = await SeedManifestAsync(manifestBytes, tag: "push-probe-head");
+
+        var (rawToken, _) = await _tokens.CreateServiceTokenAsync(
+            _orgId, "publish-oci-only-headmanifest", """["publish:oci"]""", expiresAt: null);
+
+        var ctl = BuildControllerForOrgWithAuth(_orgId, rawToken, BuildResolver());
+        var result = await ctl.Head("library/ubuntu/manifests/push-probe-head", default);
+
+        Assert.IsType<OkResult>(result);
+        Assert.Equal(digest, ctl.Response.Headers["Docker-Content-Digest"].ToString());
+    }
+
+    [Fact]
+    public async Task GetManifest_PublishOciOnlyToken_Succeeds()
+    {
+        // A publish-only token must be able to GET a manifest too: docker/BuildKit fall back
+        // to GET on registries that answer HEAD unreliably when resolving a tag before push.
+        byte[] manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"push-probe-get\":true}");
+        _ = await SeedManifestAsync(manifestBytes, tag: "push-probe-get");
+
+        var (rawToken, _) = await _tokens.CreateServiceTokenAsync(
+            _orgId, "publish-oci-only-getmanifest", """["publish:oci"]""", expiresAt: null);
+
+        var ctl = BuildControllerForOrgWithAuth(_orgId, rawToken, BuildResolver());
+        var result = await ctl.Get("library/ubuntu/manifests/push-probe-get", default);
+
+        Assert.IsType<FileStreamResult>(result);
+        Assert.Equal("HIT", ctl.Response.Headers["X-Cache"].ToString());
+    }
+
+    [Fact]
+    public async Task GetManifest_PublishWildcardToken_Succeeds()
+    {
+        byte[] manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"push-probe-wildcard\":true}");
+        _ = await SeedManifestAsync(manifestBytes, tag: "push-probe-wildcard");
+
+        var (rawToken, _) = await _tokens.CreateServiceTokenAsync(
+            _orgId, "publish-wildcard-getmanifest", """["publish:*"]""", expiresAt: null);
+
+        var ctl = BuildControllerForOrgWithAuth(_orgId, rawToken, BuildResolver());
+        var result = await ctl.Get("library/ubuntu/manifests/push-probe-wildcard", default);
+
+        Assert.IsType<FileStreamResult>(result);
+        Assert.Equal("HIT", ctl.Response.Headers["X-Cache"].ToString());
+    }
+
+    [Fact]
+    public async Task ListTags_PublishOciOnlyToken_ReturnsForbidden()
+    {
+        // Tag-list enumeration is not a step the push protocol performs; a publish-only token
+        // must not gain it as a side effect of the manifest/blob push-probe exception.
+        byte[] manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"push-probe-tags\":true}");
+        _ = await SeedManifestAsync(manifestBytes, tag: "v1");
+
+        var (rawToken, _) = await _tokens.CreateServiceTokenAsync(
+            _orgId, "publish-oci-only-tags", """["publish:oci"]""", expiresAt: null);
+
+        var ctl = BuildControllerForOrgWithAuth(_orgId, rawToken, BuildResolver());
+        var result = await ctl.Get("library/ubuntu/tags/list", default);
+
+        var obj = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status403Forbidden, obj.StatusCode);
+    }
+
+    /// <summary>
+    /// Mixed partial-failure coverage for the push-probe exception: in one org, a publish-only
+    /// token completes exactly the read probes a push performs (manifest HEAD, manifest GET,
+    /// blob HEAD) while a token with neither read nor publish capability is forbidden on those
+    /// same surfaces plus tags list — proving the exception is scoped to the presented token's
+    /// own capability, not to the route.
+    /// </summary>
+    [Fact]
+    public async Task PushProbeAuthorization_MixedTokens_PublishCapableProbesSucceedIncapableForbiddenAcrossSurfaces()
+    {
+        byte[] manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"push-probe-mixed\":true}");
+        string manifestDigest = await SeedManifestAsync(manifestBytes, tag: "push-probe-mixed");
+        byte[] blobBytes = RandomBytes(32);
+        string blobDigest = await SeedBlobAsync(blobBytes);
+
+        var (publishToken, _) = await _tokens.CreateServiceTokenAsync(
+            _orgId, "push-probe-mixed-capable", """["publish:oci"]""", expiresAt: null);
+        var (incapableToken, _) = await _tokens.CreateServiceTokenAsync(
+            _orgId, "push-probe-mixed-incapable", """["publish:pypi"]""", expiresAt: null);
+
+        // Publish-capable token: manifest HEAD, manifest GET, and blob HEAD all succeed.
+        var publishHeadManifestCtl = BuildControllerForOrgWithAuth(_orgId, publishToken, BuildResolver());
+        var headManifestResult = await publishHeadManifestCtl.Head("library/ubuntu/manifests/push-probe-mixed", default);
+        Assert.IsType<OkResult>(headManifestResult);
+        Assert.Equal(manifestDigest, publishHeadManifestCtl.Response.Headers["Docker-Content-Digest"].ToString());
+
+        var publishGetManifestCtl = BuildControllerForOrgWithAuth(_orgId, publishToken, BuildResolver());
+        Assert.IsType<FileStreamResult>(
+            await publishGetManifestCtl.Get("library/ubuntu/manifests/push-probe-mixed", default));
+
+        var publishHeadBlobCtl = BuildControllerForOrgWithAuth(_orgId, publishToken, BuildResolver());
+        var headBlobResult = await publishHeadBlobCtl.Head($"library/ubuntu/blobs/{blobDigest}", default);
+        Assert.IsType<OkResult>(headBlobResult);
+        Assert.Equal(blobDigest, publishHeadBlobCtl.Response.Headers["Docker-Content-Digest"].ToString());
+
+        // Incapable token (unrelated ecosystem, no read/publish OCI capability): every one of
+        // the same surfaces, plus tags list, is forbidden rather than silently allowed.
+        var incapableHeadManifestCtl = BuildControllerForOrgWithAuth(_orgId, incapableToken, BuildResolver());
+        var incapableHeadManifest = Assert.IsType<ObjectResult>(
+            await incapableHeadManifestCtl.Head("library/ubuntu/manifests/push-probe-mixed", default));
+        Assert.Equal(StatusCodes.Status403Forbidden, incapableHeadManifest.StatusCode);
+
+        var incapableGetManifestCtl = BuildControllerForOrgWithAuth(_orgId, incapableToken, BuildResolver());
+        var incapableGetManifest = Assert.IsType<ObjectResult>(
+            await incapableGetManifestCtl.Get("library/ubuntu/manifests/push-probe-mixed", default));
+        Assert.Equal(StatusCodes.Status403Forbidden, incapableGetManifest.StatusCode);
+
+        var incapableHeadBlobCtl = BuildControllerForOrgWithAuth(_orgId, incapableToken, BuildResolver());
+        var incapableHeadBlob = Assert.IsType<ObjectResult>(
+            await incapableHeadBlobCtl.Head($"library/ubuntu/blobs/{blobDigest}", default));
+        Assert.Equal(StatusCodes.Status403Forbidden, incapableHeadBlob.StatusCode);
+
+        var incapableTagsCtl = BuildControllerForOrgWithAuth(_orgId, incapableToken, BuildResolver());
+        var incapableTags = Assert.IsType<ObjectResult>(
+            await incapableTagsCtl.Get("library/ubuntu/tags/list", default));
+        Assert.Equal(StatusCodes.Status403Forbidden, incapableTags.StatusCode);
+    }
+
     // ── HEAD requests ─────────────────────────────────────────────────────────
 
     [Fact]

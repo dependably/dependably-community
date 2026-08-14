@@ -137,4 +137,50 @@ public sealed class CrossTenantIsolationTests : IClassFixture<DependablyFactory>
             resp.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.NotFound,
             $"Cross-org GET should be 401 or 404; got {(int)resp.StatusCode}.");
     }
+
+    // ── PyPI read: CDN-shaped download, token from a different org ───────────────
+
+    [Fact]
+    public async Task PyPi_GetCdnShapedPackage_TokenFromOtherOrg_DoesNotReturn200()
+    {
+        // The multi-segment /packages/{h1}/{h2}/{sha256}/{file} alias runs the exact same
+        // auth/block-gate path as the flat route it delegates to — a token bound to a different
+        // org must not be able to use the new alias to pull the default org's artifact any more
+        // than it could through the flat route.
+        string name = $"cross-pypi-cdn-{Guid.NewGuid():N}"[..20].ToLowerInvariant();
+        var (bytes, sha256) = PyPiFixtures.BuildWheel(name, "1.0.0");
+        string underscored = name.Replace('-', '_');
+        string filename = $"{underscored}-1.0.0-py3-none-any.whl";
+
+        string pushToken = await _factory.CreateToken("push");
+        using (var pushClient = _factory.CreateClientWithBasic(pushToken))
+        using (var content = new MultipartFormDataContent
+               {
+                   { new StringContent("file_upload"), ":action" },
+                   { new StringContent("2.1"), "metadata_version" },
+                   { new StringContent(name), "name" },
+                   { new StringContent("1.0.0"), "version" },
+                   { new StringContent(sha256), "sha256_digest" },
+               })
+        {
+            var fileContent = new ByteArrayContent(bytes);
+            fileContent.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+            content.Add(fileContent, "content", filename);
+            var pushResp = await pushClient.PostAsync("/pypi/legacy/", content);
+            Assert.Equal(HttpStatusCode.OK, pushResp.StatusCode);
+        }
+
+        string crossToken = await CreateOtherOrgPushTokenAsync();
+        using var client = _factory.CreateClient();
+        string credentials = Convert.ToBase64String(Encoding.UTF8.GetBytes($"user:{crossToken}"));
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", credentials);
+
+        string cdnPath = $"/packages/{sha256[..2]}/{sha256[2..4]}/{sha256}/{filename}";
+        var resp = await client.GetAsync(cdnPath);
+
+        Assert.NotEqual(HttpStatusCode.OK, resp.StatusCode);
+        Assert.True(
+            resp.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.NotFound,
+            $"Cross-org GET should be 401 or 404; got {(int)resp.StatusCode}.");
+    }
 }

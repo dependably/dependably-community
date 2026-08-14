@@ -21,6 +21,16 @@ public sealed class OrgAuditController : OrgScopedControllerBase
     /// </summary>
     private const int CsvExportRowCap = 50_000;
 
+    /// <summary>
+    /// Set on a CSV export whose <em>search</em> was bounded to the newest
+    /// <see cref="AuditRepository.SearchScanCap"/> rows of the filtered window, so older matches
+    /// may exist that the export never examined. The bound is what keeps a repeatable
+    /// <c>?format=csv&amp;search=…</c> from being an unindexable full-history scan on demand; the
+    /// header is what keeps the resulting truncation from being silent, which is the property a
+    /// compliance export actually needs. A search that fits inside the window sets no header.
+    /// </summary>
+    private const string ExportTruncatedHeader = "X-Export-Truncated";
+
     // Maximum page size for paged audit/activity list responses.
     private const int MaxAuditPageSize = 200;
 
@@ -93,7 +103,12 @@ public sealed class OrgAuditController : OrgScopedControllerBase
 
         if (string.Equals(format, "csv", StringComparison.OrdinalIgnoreCase))
         {
-            var (csvItems, _, _) = await _audit.ListActivityAsync(orgId, CsvExportRowCap, 0, eventType, search, sinceIso, includeTotal: false, ct);
+            var (csvItems, _, csvTruncated) = await _audit.ListActivityAsync(orgId, CsvExportRowCap, 0, eventType, search, sinceIso, includeTotal: false, ct);
+            if (csvTruncated)
+            {
+                Response.Headers[ExportTruncatedHeader] = "true";
+            }
+
             var sb = new System.Text.StringBuilder();
             CsvWriter.WriteRow(sb, "created_at", "event_type", "ecosystem", "purl", "actor_email", "source_ip", "detail");
             foreach (var item in csvItems)
@@ -142,16 +157,21 @@ public sealed class OrgAuditController : OrgScopedControllerBase
 
         if (string.Equals(format, "csv", StringComparison.OrdinalIgnoreCase))
         {
-            var (csvItems, _, _) = await _audit.ListAuditAsync(orgId, CsvExportRowCap, 0, action, search, includeTotal: false, ct);
+            var (csvItems, _, csvTruncated) = await _audit.ListAuditAsync(orgId, CsvExportRowCap, 0, action, search, includeTotal: false, ct);
+            if (csvTruncated)
+            {
+                Response.Headers[ExportTruncatedHeader] = "true";
+            }
+
             var sb = new System.Text.StringBuilder();
-            CsvWriter.WriteRow(sb, "created_at", "action", "actor_email", "ecosystem", "purl", "detail");
+            CsvWriter.WriteRow(sb, "created_at", "action", "actor_email", "ecosystem", "purl", "source_ip", "detail");
             foreach (var item in csvItems)
             {
                 // utcformat-ok: CSV export wire format, not a DB write — preserves the millisecond
                 // precision audit_log.created_at actually carries rather than truncating it away.
                 CsvWriter.WriteRow(sb,
                     item.CreatedAt.ToString("o", System.Globalization.CultureInfo.InvariantCulture),
-                    item.Action, item.ActorEmail, item.Ecosystem, item.Purl, item.Detail);
+                    item.Action, item.ActorEmail, item.Ecosystem, item.Purl, item.SourceIp, item.Detail);
             }
             byte[] bytes = System.Text.Encoding.UTF8.GetBytes(sb.ToString());
             string filename = $"audit-{_time.GetUtcNow():yyyyMMddTHHmmssZ}.csv";

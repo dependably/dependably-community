@@ -566,6 +566,9 @@ public sealed partial class UpstreamClient
             // The HashingFileStream below still enforces the cap for chunked transfers.
             if (successResponse.Content.Headers.ContentLength > MaxUpstreamResponseBytes)
             {
+                // audit-attribution-ok: single-flight dedup — this fetch may be shared by several
+                // concurrent inbound requests for the same URL (see the class docs), so there is
+                // no one caller's IP to attribute the shared upstream outcome to.
                 await _audit.LogAsync("upstream_response_too_large", orgId: orgId, ecosystem: req.Ecosystem, purl: req.Purl,
                     detail: JsonSerializer.Serialize(
                         new { url, content_length = successResponse.Content.Headers.ContentLength }, EventJsonOptions.Detail),
@@ -806,6 +809,9 @@ public sealed partial class UpstreamClient
                 }
                 catch (UpstreamResponseTooLargeException)
                 {
+                    // audit-attribution-ok: single-flight dedup — this fetch may be shared by
+                    // several concurrent inbound requests for the same URL (see the class docs),
+                    // so there is no one caller's IP to attribute the shared upstream outcome to.
                     await _audit.LogAsync(
                         "upstream_response_too_large", orgId: ctx.OrgId, ecosystem: ctx.Ecosystem, purl: ctx.Purl,
                         detail: JsonSerializer.Serialize(
@@ -986,6 +992,9 @@ public sealed partial class UpstreamClient
             req.Url, req.Spec.ExpectedValue, actualForAudit);
 
         DependablyMeter.UpstreamChecksumFailures.Add(1, new KeyValuePair<string, object?>("ecosystem", req.Ecosystem));
+        // audit-attribution-ok: single-flight dedup — this fetch may be shared by several
+        // concurrent inbound requests for the same URL (see the class docs), so there is no one
+        // caller's IP to attribute the shared upstream outcome to.
         await _audit.LogAsync(
             "checksum_failure",
             orgId: req.OrgId,

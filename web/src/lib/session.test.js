@@ -67,6 +67,11 @@ beforeEach(async () => {
 })
 
 afterEach(() => {
+  // Each test's armSessionWatch() attaches real listeners to the shared jsdom `window`/`document`;
+  // vi.resetModules() gives the next test a fresh session.js instance but does not detach a prior
+  // instance's listeners from those shared globals. Without this, a later test's dispatched
+  // 'focus'/'visibilitychange' event also re-invokes every earlier test's stale _onResume closure.
+  disarmSessionWatch?.()
   vi.useRealTimers()
   vi.restoreAllMocks()
 })
@@ -193,5 +198,39 @@ describe('focus/visibility re-validation', () => {
     // User remains set — me() succeeded.
     expect(mockUser.get()).not.toBeNull()
     expect(mockSessionExpired.get()).toBe(false)
+  })
+
+  it('does not resurrect the watcher when logout lands while a resume re-validation is in flight', async () => {
+    // Deferred me() call — resolved manually after disarmSessionWatch() runs, simulating a
+    // logout that completes while the focus-triggered GET /me is still on the wire.
+    /** Assigned synchronously by the executor below. @type {(value: unknown) => void} */
+    let resolveMe = () => {}
+    const pendingMe = new Promise((resolve) => { resolveMe = resolve })
+    const fakeMeFn = vi.fn().mockReturnValue(pendingMe)
+    const futureStr = futureIso(30000)
+    armSessionWatch(futureStr, fakeMeFn)
+
+    // Tab resumes — _onResume calls meFn and starts awaiting the still-pending promise.
+    window.dispatchEvent(new Event('focus'))
+    await Promise.resolve()
+    expect(fakeMeFn).toHaveBeenCalledTimes(1)
+
+    // Logout completes before the in-flight me() resolves.
+    disarmSessionWatch()
+    expect(vi.getTimerCount()).toBe(0)
+
+    // The stale me() call now resolves with a fresh expiry.
+    resolveMe({ sessionExpiresAt: futureIso(60000) })
+    await Promise.resolve()
+    await Promise.resolve()
+
+    // A resurrected watcher would have re-armed a timer here. It must not have.
+    expect(vi.getTimerCount()).toBe(0)
+
+    // Confirm no watcher is live: advancing well past both the original and the "fresh"
+    // expiry never fires expiry handling for a logged-out session.
+    vi.advanceTimersByTime(120000)
+    await Promise.resolve()
+    expect(mockNavigate).not.toHaveBeenCalled()
   })
 })

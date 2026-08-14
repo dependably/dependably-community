@@ -16,10 +16,14 @@ namespace Dependably.Infrastructure;
 /// Plus instance-wide personal-data sweeps that run once per pass, not per org:
 ///   - audit_log: pseudonymize source_ip/detail past AUDIT_LOG_PII_DAYS (90), then delete past
 ///     AUDIT_LOG_RETENTION_DAYS (365) — a storage-limit for the highest-fidelity PII table.
+///   - audit_event: same two-horizon shape as audit_log — pseudonymize source_ip/user_agent past
+///     AUDIT_EVENT_PII_DAYS (90), then delete past AUDIT_EVENT_RETENTION_DAYS (365).
 ///   - login_attempts: delete idle, unlocked rows past LOGIN_ATTEMPTS_RETENTION_DAYS (30).
 ///   - account_send_throttle: delete rolled-over windows past ACCOUNT_SEND_THROTTLE_RETENTION_DAYS (7).
 ///   - mfa_trusted_devices: delete expired remembered-device rows.
-///   - audit_event / JWT revocations / invites / SAML one-shots: expiry prunes.
+///   - email_outbox: delete terminal rows past EMAIL_OUTBOX_TERMINAL_RETENTION_DAYS (30) — the only
+///     delete path on the outbox, and the storage limit on the recipient addresses it holds.
+///   - JWT revocations / invites / SAML one-shots: expiry prunes.
 /// Respects the shutdown CancellationToken — stops at the next checkpoint.
 /// </summary>
 public sealed class RetentionService : ScheduledBackgroundService
@@ -40,7 +44,9 @@ public sealed class RetentionService : ScheduledBackgroundService
         ILogger<RetentionService> Logger,
         TimeProvider Time,
         IDistributedLock Locks,
-        Dependably.Protocol.OciOrphanBlobDeleter OciOrphanBlobs);
+        Dependably.Protocol.OciOrphanBlobDeleter OciOrphanBlobs,
+        Mail.EmailOutboxRepository EmailOutbox,
+        Mail.EmailOutboxPolicy EmailOutboxPolicy);
 
     private readonly IMetadataStore _db;
     private readonly IBlobStore _blobs;
@@ -54,6 +60,8 @@ public sealed class RetentionService : ScheduledBackgroundService
     private readonly TimeProvider _time;
     private readonly PackageRepository _packages;
     private readonly Dependably.Protocol.OciOrphanBlobDeleter _ociOrphanBlobs;
+    private readonly Mail.EmailOutboxRepository _emailOutbox;
+    private readonly Mail.EmailOutboxPolicy _emailOutboxPolicy;
 
     protected override string CronEnvKey => "GC_SCHEDULE";
     protected override string DefaultCron => "0 3 * * *";
@@ -80,6 +88,8 @@ public sealed class RetentionService : ScheduledBackgroundService
         // this singleton does not capture a scoped repository.
         _packages = new PackageRepository(deps.Db, time: deps.Time);
         _ociOrphanBlobs = deps.OciOrphanBlobs;
+        _emailOutbox = deps.EmailOutbox;
+        _emailOutboxPolicy = deps.EmailOutboxPolicy;
     }
 
     protected override Task RunTickAsync(CancellationToken ct) => RunGcPassAsync(ct);
@@ -153,10 +163,11 @@ public sealed class RetentionService : ScheduledBackgroundService
             _logger.LogInformation("Retention GC: pruned {Count} expired invite rows.", prunedInvites);
         }
 
-        // Prune typed audit_event rows past the retention window. Default window is 365
-        // days, set in cross-cutting-decisions.md section 4 (audit_event is append-only and
-        // archived after one year). Hard delete for now; once archive support lands, the
-        // reaper will write to cold storage first.
+        // Pseudonymize then delete personal data in typed audit_event rows by age — the same
+        // two-horizon shape as PruneAuditLogAsync below. Default delete window is 365 days, set in
+        // cross-cutting-decisions.md section 4 (audit_event is append-only and archived after one
+        // year). Hard delete for now; once archive support lands, the reaper will write to cold
+        // storage first.
         await PruneAuditEventsAsync(conn, ct);
 
         // Reclaim expired SAML one-shot rows (pending requests, consumed assertions, test runs).
@@ -180,6 +191,12 @@ public sealed class RetentionService : ScheduledBackgroundService
         // Delete expired remembered-device rows. The service exposes this prune; nothing else calls
         // it, so an unbounded user_agent/last_seen_at device history accrued before this wiring.
         await _trustedDevices.PruneExpiredAsync(ct);
+
+        // Delete long-terminal email_outbox rows. The outbox stores recipient addresses and rendered
+        // bodies, and nothing in the delivery path ever deletes a row — terminal states are kept for
+        // inspection on purpose. This is the only delete path, and the storage-limitation bound on
+        // that data.
+        await PruneEmailOutboxAsync(ct);
 
         _logger.LogInformation("Retention GC pass complete.");
     }
@@ -303,17 +320,65 @@ public sealed class RetentionService : ScheduledBackgroundService
         }
     }
 
+    // Delete email_outbox rows that reached a terminal state (delivered, dead-lettered, or expired)
+    // more than EMAIL_OUTBOX_TERMINAL_RETENTION_DAYS (30) ago. Terminal rows are deliberately not
+    // removed by the delivery worker — a dead letter an operator cannot inspect is no better than a
+    // dropped message — so this sweep is what keeps the recipient addresses and rendered bodies in
+    // them from being retained indefinitely, and it logs what it removed so the removal is never
+    // silent. Non-terminal rows are not touched here: they retire through the outbox's own retention
+    // ceiling, which moves them to 'expired' rather than deleting them outright.
+    internal async Task PruneEmailOutboxAsync(CancellationToken ct)
+    {
+        int retentionDays = _emailOutboxPolicy.TerminalRetentionDays;
+        var cutoff = _time.GetUtcNow().AddDays(-retentionDays);
+
+        int deleted = await _emailOutbox.PruneTerminalAsync(cutoff, ct);
+        if (deleted > 0)
+        {
+            _logger.LogInformation(
+                "Retention GC: pruned {Count} terminal email_outbox row(s) older than {Days} days.",
+                deleted, retentionDays);
+        }
+    }
+
     // Chunk size for the batched audit_event delete below. Small enough that each chunk's
     // DELETE releases the writer lock quickly, large enough that a year-scale backlog drains
     // in a bounded number of round-trips. Internal (not private) so tests can seed a multi-chunk
     // backlog scaled to this exact size rather than hardcoding a copy of the production value.
     internal const int AuditEventPruneBatchSize = 5000;
 
+    // Two-horizon personal-data policy for audit_event, mirroring PruneAuditLogAsync above:
+    //   * pseudonymize (drop source_ip + user_agent) past AUDIT_EVENT_PII_DAYS (90) — the forensic
+    //     skeleton (actor_id, event_type, payload, timestamp) survives, the identifiers do not;
+    //   * delete the row entirely past AUDIT_EVENT_RETENTION_DAYS (365), unchanged from before.
+    // Both horizons span every org; per-tenant erasure on tenant hard-delete is a separate
+    // org-scoped path in TenantHardDeleteService (which pseudonymizes rather than deletes, since
+    // audit_event.org_id's ON DELETE SET NULL means the schema already intends these rows to
+    // outlive their org). payload is never scrubbed: unlike audit_log's freeform detail, every
+    // typed event's payload is built from hashed/structural fields (AuditEmitter's callers hash
+    // emails and NameIDs before they ever reach a payload), so it carries no raw identifier to drop.
     internal async Task PruneAuditEventsAsync(System.Data.Common.DbConnection conn, CancellationToken ct)
     {
+        int piiDays = int.TryParse(_config["AUDIT_EVENT_PII_DAYS"], out int p) && p > 0 ? p : 90;
         int retentionDays = int.TryParse(_config["AUDIT_EVENT_RETENTION_DAYS"], out int d) && d > 0
             ? d : 365;
-        string cutoff = _time.GetUtcNow().AddDays(-retentionDays).ToUtcIso();
+        var now = _time.GetUtcNow();
+        // audit_event.occurred_at is millisecond-precision text (AuditEventRepository.InsertAsync
+        // is its only writer), so both cutoffs are formatted at the same precision — see
+        // PruneAuditLogAsync's comment for why a second-precision cutoff sorts wrong against it on
+        // the boundary second.
+        string piiCutoff = now.AddDays(-piiDays).ToUtcIsoMillis();
+        string deleteCutoff = now.AddDays(-retentionDays).ToUtcIsoMillis();
+
+        // xtenant: instance-wide pseudonymization by age, same posture as PruneAuditLogAsync —
+        // every org's aged rows lose their identifiers together.
+        int scrubbed = await conn.ExecuteAsync(new CommandDefinition(
+            """
+            UPDATE audit_event SET source_ip = NULL, user_agent = NULL
+            WHERE occurred_at < @piiCutoff AND (source_ip IS NOT NULL OR user_agent IS NOT NULL)
+            """,
+            new { piiCutoff },
+            cancellationToken: ct));
 
         // Hard-delete is the right shape today: there's no archive destination yet (decision
         // deferred per cross-cutting-decisions.md). When archive lands, this becomes a copy
@@ -333,19 +398,20 @@ public sealed class RetentionService : ScheduledBackgroundService
                 """
                 DELETE FROM audit_event
                 WHERE event_id IN (
-                    SELECT event_id FROM audit_event WHERE occurred_at < @cutoff LIMIT @batchSize
+                    SELECT event_id FROM audit_event WHERE occurred_at < @deleteCutoff LIMIT @batchSize
                 )
                 """,
-                new { cutoff, batchSize = AuditEventPruneBatchSize },
+                new { deleteCutoff, batchSize = AuditEventPruneBatchSize },
                 cancellationToken: ct));
             totalDeleted += deletedInChunk;
         }
         while (deletedInChunk >= AuditEventPruneBatchSize && !ct.IsCancellationRequested);
 
-        if (totalDeleted > 0)
+        if (scrubbed > 0 || totalDeleted > 0)
         {
-            _logger.LogInformation("Audit reaper: pruned {Count} audit_event rows older than {Days} days.",
-                totalDeleted, retentionDays);
+            _logger.LogInformation(
+                "Audit reaper: pseudonymized {Scrubbed} audit_event rows older than {PiiDays} days, deleted {Deleted} older than {RetentionDays} days.",
+                scrubbed, piiDays, totalDeleted, retentionDays);
         }
     }
 
@@ -440,10 +506,10 @@ public sealed class RetentionService : ScheduledBackgroundService
         // OCI participates; its rows are retired through RetireProxyVersionAsync rather than the
         // direct blob delete, for the reason spelled out on RetireVersionAsync.
         // xtenant: cache_artifact is global; org_id filter is in tenant_artifact_access.
-        var proxyToEvict = await conn.QueryAsync<(string CacheArtifactId, string Ecosystem, string Name, string Version, string BlobKey)>(
+        var proxyToEvict = await conn.QueryAsync<(string CacheArtifactId, string Ecosystem, string Name, string Version, string BlobKey, string? TenantBlobKey)>(
             """
             SELECT ca.id AS CacheArtifactId, ca.ecosystem AS Ecosystem, ca.name AS Name,
-                   ca.version AS Version, ca.blob_key AS BlobKey
+                   ca.version AS Version, ca.blob_key AS BlobKey, taa.blob_key AS TenantBlobKey
             FROM tenant_artifact_access taa
             JOIN cache_artifact ca ON ca.id = taa.cache_artifact_id
             WHERE taa.org_id = @orgId
@@ -468,13 +534,18 @@ public sealed class RetentionService : ScheduledBackgroundService
         {
             if (ct.IsCancellationRequested) { break; }
 
-            foreach (var (CacheArtifactId, Ecosystem, Name, Version, BlobKey) in versionGroup)
+            foreach (var (CacheArtifactId, Ecosystem, Name, Version, BlobKey, TenantBlobKey) in versionGroup)
             {
                 await conn.ExecuteAsync(
                     "DELETE FROM tenant_artifact_access WHERE org_id = @orgId AND cache_artifact_id = @id",
                     new { orgId, id = CacheArtifactId });
 
                 bool isOci = string.Equals(Ecosystem, "oci", StringComparison.Ordinal);
+
+                if (!isOci)
+                {
+                    await ReclaimTenantBoundBlobAsync(conn, TenantBlobKey, BlobKey);
+                }
 
                 // Delete the global cache_artifact and its blob when no tenant retains access.
                 // xtenant: deliberately cross-tenant — this counts whether ANY OTHER tenant still
@@ -513,6 +584,44 @@ public sealed class RetentionService : ScheduledBackgroundService
                     CacheArtifactId, Name, Version, BlobKey);
             }
         }
+    }
+
+    /// <summary>
+    /// Reclaims the bytes an org fetched for a coordinate when its own upstream served content
+    /// other than the shared <c>cache_artifact</c> row's. Called once the org's
+    /// <c>tenant_artifact_access</c> row is gone, on the proxy arms only.
+    ///
+    /// A divergent binding is the only record that its blob exists — no <c>cache_artifact.blob_key</c>
+    /// anywhere names it — so a purge that reclaims only the shared key strands those bytes on the
+    /// cache tier for good. The refcount before the delete is what keeps a second tenant that
+    /// resolved the same divergent bytes serving: content-addressed proxy keys are shared by
+    /// construction, so "this org no longer needs it" is not "nobody needs it".
+    /// </summary>
+    private async Task ReclaimTenantBoundBlobAsync(
+        System.Data.Common.DbConnection conn, string? tenantBlobKey, string sharedBlobKey)
+    {
+        if (tenantBlobKey is null || string.Equals(tenantBlobKey, sharedBlobKey, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        // xtenant: a physical blob is shared across tenants, so whether it is still referenced is
+        // deliberately asked of every org's rows and bindings — scoping to one tenant would strand
+        // another tenant's bytes.
+        long referenced = await conn.ExecuteScalarAsync<long>(
+            """
+            SELECT (SELECT COUNT(*) FROM cache_artifact WHERE blob_key = @tenantBlobKey)
+                 + (SELECT COUNT(*) FROM tenant_artifact_access WHERE blob_key = @tenantBlobKey)
+            """,
+            new { tenantBlobKey });
+        if (referenced > 0)
+        {
+            return;
+        }
+
+        // CancellationToken.None for the same reason the shared-key delete below uses it: the
+        // version boundary is the checkpoint, and aborting mid-version leaves a partial version.
+        await _blobs.DeleteAsync(BlobKeys.StoreKey(tenantBlobKey), CancellationToken.None);
     }
 
     // internal (not private) so RetentionServiceCacheExclusionTests can drive it directly — see
@@ -562,10 +671,10 @@ public sealed class RetentionService : ScheduledBackgroundService
         // version the newest-file rule would drop, never the reverse.
         // OCI participates — retired through RetireVersionAsync, see EnforceVersionLimitAsync.
         // xtenant: cache_artifact is global; org_id filter is in tenant_artifact_access.
-        var proxyStale = await conn.QueryAsync<(string CacheArtifactId, string Ecosystem, string Name, string Version, string BlobKey)>(
+        var proxyStale = await conn.QueryAsync<(string CacheArtifactId, string Ecosystem, string Name, string Version, string BlobKey, string? TenantBlobKey)>(
             """
             SELECT ca.id AS CacheArtifactId, ca.ecosystem AS Ecosystem, ca.name AS Name,
-                   ca.version AS Version, ca.blob_key AS BlobKey
+                   ca.version AS Version, ca.blob_key AS BlobKey, taa.blob_key AS TenantBlobKey
             FROM tenant_artifact_access taa
             JOIN cache_artifact ca ON ca.id = taa.cache_artifact_id
             WHERE taa.org_id = @orgId
@@ -590,11 +699,16 @@ public sealed class RetentionService : ScheduledBackgroundService
         {
             if (ct.IsCancellationRequested) { break; }
 
-            foreach (var (CacheArtifactId, Ecosystem, Name, VersionId, BlobKey) in versionGroup)
+            foreach (var (CacheArtifactId, Ecosystem, Name, VersionId, BlobKey, TenantBlobKey) in versionGroup)
             {
                 await conn.ExecuteAsync(
                     "DELETE FROM tenant_artifact_access WHERE org_id = @orgId AND cache_artifact_id = @id",
                     new { orgId, id = CacheArtifactId });
+
+                if (!string.Equals(Ecosystem, "oci", StringComparison.Ordinal))
+                {
+                    await ReclaimTenantBoundBlobAsync(conn, TenantBlobKey, BlobKey);
+                }
 
                 // xtenant: deliberately cross-tenant — this counts whether ANY OTHER tenant still
                 // retains access to the shared cache_artifact before its blob is deleted. Filtering

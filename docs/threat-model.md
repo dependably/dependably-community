@@ -3,7 +3,8 @@
 A one-page orientation for contributors: who the adversaries are, where the trust
 boundaries sit, and what dependably deliberately does **not** try to defend. Detailed
 per-mechanism reasoning lives next to the code (search the source for the named services)
-and in the ADRs under [`docs/adr/`](adr/); this page ties those decisions to the boundaries
+and in the ADRs in the [spec repo](https://gitlab.northwardlabs.ca/moonlitlabs/dependably-community.spec)
+under `specs/adr/`; this page ties those decisions to the boundaries
 they defend so a new contributor knows which invariants are load-bearing.
 
 dependably is a self-hosted, multi-tenant artifact registry and upstream-proxy. Three of its
@@ -46,7 +47,7 @@ Each boundary names its adversary, the primary defence, and the code that enforc
   tenant's configuration.
 - **Defence:** control-plane surfaces (apex host, `scope=system`) are separate from tenant
   data-plane surfaces; a token scoped to a tenant cannot act on system routes. Secrets at rest
-  can be envelope-encrypted under an operator-held KEK (`DEPENDABLY_MASTER_KEY`, ADR 0002).
+  can be envelope-encrypted under an operator-held KEK (`DEPENDABLY_MASTER_KEY`, ADR-envelope-encryption-db-secrets).
 - **Non-goal:** defending the operator from themselves — an operator with host/DB access is
   inside the TCB.
 
@@ -94,8 +95,8 @@ Each boundary names its adversary, the primary defence, and the code that enforc
 
 ## Where the detail lives
 
-- Auth hybrid rationale: [`docs/adr/0001-auth-identity-hybrid.md`](adr/0001-auth-identity-hybrid.md).
-- Secrets-at-rest envelope encryption: [`docs/adr/0002-envelope-encryption-db-secrets.md`](adr/0002-envelope-encryption-db-secrets.md).
+- Auth hybrid rationale: [`ADR-auth-identity-hybrid`](https://gitlab.northwardlabs.ca/moonlitlabs/dependably-community.spec/-/blob/main/specs/adr/ADR-auth-identity-hybrid.md).
+- Secrets-at-rest envelope encryption: [`ADR-envelope-encryption-db-secrets`](https://gitlab.northwardlabs.ca/moonlitlabs/dependably-community.spec/-/blob/main/specs/adr/ADR-envelope-encryption-db-secrets.md).
 - The `Category=Compliance` static-scan gates (in `tests/Dependably.Tests/Compliance/`) are the
   machine-checked half of these invariants; this page is the human-readable map of what they
   defend.

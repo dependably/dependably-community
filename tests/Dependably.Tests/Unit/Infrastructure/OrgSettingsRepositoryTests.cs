@@ -1,4 +1,5 @@
 using Dapper;
+using Dependably.Api;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
@@ -284,17 +285,41 @@ public sealed class OrgSettingsRepositoryTests : IClassFixture<InMemoryDbFixture
     [Fact]
     public async Task UpsertProxySettingsAsync_MinReleaseAge_NullSetClear_RoundTrips()
     {
-        // Three-state lifecycle: a fresh org starts with the policy off (NULL), the operator
-        // sets a positive value, then clears it back to NULL. All three writes must survive
-        // a re-read so the UI never shows stale state after a clear.
+        // Tri-state lifecycle (Optional<int?>): a fresh org starts with the policy off (NULL),
+        // the operator sets a positive value (present, non-null), then explicitly clears it back
+        // to NULL (present, null) — a deliberate clear-to-off, not an omitted field. All three
+        // writes must survive a re-read so the UI never shows stale state after a clear.
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"minage-{Guid.NewGuid():N}");
         Assert.Null((await _repo.GetSettingsAsync(orgId))!.MinReleaseAgeHours);
 
-        await _repo.UpsertProxySettingsAsync(orgId, new ProxyPolicySettings(true, 10.0, MinReleaseAgeHours: 48));
+        await _repo.UpsertProxySettingsAsync(orgId,
+            new ProxyPolicySettings(true, 10.0, MinReleaseAgeHours: Optional<int?>.Of(48)));
         Assert.Equal(48, (await _repo.GetSettingsAsync(orgId))!.MinReleaseAgeHours);
 
-        await _repo.UpsertProxySettingsAsync(orgId, new ProxyPolicySettings(true, 10.0));
+        await _repo.UpsertProxySettingsAsync(orgId,
+            new ProxyPolicySettings(true, 10.0, MinReleaseAgeHours: Optional<int?>.Of(null)));
         Assert.Null((await _repo.GetSettingsAsync(orgId))!.MinReleaseAgeHours);
+    }
+
+    [Fact]
+    public async Task UpsertProxySettingsAsync_OmittedMinReleaseAgeHours_LeavesStoredValueUnchanged()
+    {
+        // min_release_age_hours is an enforcing release-age hold, not just a preference. A
+        // partial PUT that never mentions it (Optional<int?>.Absent, i.e. the field genuinely
+        // absent from the JSON body) must not silently disable it — the tri-state Optional<T>
+        // binding is what makes "absent" distinguishable from "explicitly cleared" here, since a
+        // plain nullable can only represent one of those two states.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"minage-keep-{Guid.NewGuid():N}");
+
+        await _repo.UpsertProxySettingsAsync(orgId,
+            new ProxyPolicySettings(true, 10.0, MinReleaseAgeHours: Optional<int?>.Of(72)));
+
+        // Second write omits MinReleaseAgeHours entirely (Optional<int?>.Absent, the default).
+        await _repo.UpsertProxySettingsAsync(orgId, new ProxyPolicySettings(true, 6.5));
+
+        var after = (await _repo.GetSettingsAsync(orgId))!;
+        Assert.Equal(72, after.MinReleaseAgeHours);
+        Assert.Equal(6.5, after.MaxOsvScoreTolerance);
     }
 
     [Fact]
@@ -356,6 +381,173 @@ public sealed class OrgSettingsRepositoryTests : IClassFixture<InMemoryDbFixture
         Assert.Equal("off", after.VerifyPyPiAttestations);
         Assert.Equal("off", after.VerifyRpmSignatures);
         Assert.Equal("off", after.VerifyMavenSignatures);
+    }
+
+    // ── Absent-field contract: block-gate / passthrough / OSV-tolerance fields ──────────────
+
+    [Fact]
+    public async Task UpsertProxySettingsAsync_OmittedBlockKev_LeavesStoredValueUnchanged()
+    {
+        // A partial PUT that never mentions block_kev (e.g. one only touching
+        // max_osv_score_tolerance) must leave a previously-enforcing 'block' untouched, matching
+        // COALESCE(@blockKev, block_kev) in the ON CONFLICT UPDATE.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"block-kev-keep-{Guid.NewGuid():N}");
+
+        await _repo.UpsertProxySettingsAsync(orgId, new ProxyPolicySettings(true, 10.0, BlockKev: "block"));
+
+        // Second write omits BlockKev entirely — models a client PUTting only an unrelated field.
+        await _repo.UpsertProxySettingsAsync(orgId, new ProxyPolicySettings(true, 6.5));
+
+        var after = (await _repo.GetSettingsAsync(orgId))!;
+        Assert.Equal("block", after.BlockKev);
+        Assert.Equal(6.5, after.MaxOsvScoreTolerance);
+    }
+
+    [Fact]
+    public async Task UpsertProxySettingsAsync_OmittedBlockGateFields_LeaveStoredValuesUnchanged()
+    {
+        // Same coverage as the block_kev case above for every peer column in the block-gate
+        // family: block_deprecated, block_revoked, block_malicious, block_install_scripts.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"block-gates-keep-{Guid.NewGuid():N}");
+
+        await _repo.UpsertProxySettingsAsync(orgId, new ProxyPolicySettings(true, 10.0,
+            BlockDeprecated: "block_all",
+            BlockMalicious: "warn",
+            BlockInstallScripts: "block",
+            BlockRevoked: "block"));
+
+        // Second write omits all four entirely.
+        await _repo.UpsertProxySettingsAsync(orgId, new ProxyPolicySettings(true, 10.0));
+
+        var after = (await _repo.GetSettingsAsync(orgId))!;
+        Assert.Equal("block_all", after.BlockDeprecated);
+        Assert.Equal("warn", after.BlockMalicious);
+        Assert.Equal("block", after.BlockInstallScripts);
+        Assert.Equal("block", after.BlockRevoked);
+    }
+
+    [Fact]
+    public async Task UpsertProxySettingsAsync_ExplicitOffBlockGateFields_StillTakeEffect()
+    {
+        // Adversarial twin: leave-unchanged-on-absent must not swallow a deliberate disable —
+        // an operator explicitly turning a gate off still writes 'off'.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"block-gates-off-{Guid.NewGuid():N}");
+
+        await _repo.UpsertProxySettingsAsync(orgId, new ProxyPolicySettings(true, 10.0,
+            BlockKev: "block", BlockMalicious: "block", BlockInstallScripts: "block", BlockRevoked: "block"));
+        await _repo.UpsertProxySettingsAsync(orgId, new ProxyPolicySettings(true, 10.0,
+            BlockKev: "off", BlockMalicious: "off", BlockInstallScripts: "off", BlockRevoked: "off"));
+
+        var after = (await _repo.GetSettingsAsync(orgId))!;
+        Assert.Equal("off", after.BlockKev);
+        Assert.Equal("off", after.BlockMalicious);
+        Assert.Equal("off", after.BlockInstallScripts);
+        Assert.Equal("off", after.BlockRevoked);
+    }
+
+    [Fact]
+    public async Task UpsertProxySettingsAsync_NeverWrittenOrgWithOmittedBlockGateFields_ReadsColumnDefaults()
+    {
+        // Adversarial twin: with nothing previously stored, absent resolves to each column's own
+        // default rather than writing NULL into a NOT NULL column.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"block-gates-new-{Guid.NewGuid():N}");
+
+        await _repo.UpsertProxySettingsAsync(orgId, new ProxyPolicySettings());
+
+        var after = (await _repo.GetSettingsAsync(orgId))!;
+        Assert.True(after.ProxyPassthroughEnabled);
+        Assert.Equal(10.0, after.MaxOsvScoreTolerance);
+        Assert.Equal("off", after.BlockDeprecated);
+        Assert.Equal("warn", after.BlockRevoked);
+        Assert.Equal("block", after.BlockMalicious);
+        Assert.Equal("off", after.BlockKev);
+        Assert.Equal("off", after.BlockInstallScripts);
+    }
+
+    [Fact]
+    public async Task UpsertProxySettingsAsync_OmittedProxyPassthroughEnabled_LeavesStoredValueUnchanged()
+    {
+        // A partial PUT that omits proxy_passthrough_enabled must not flip an operator's
+        // disabled passthrough back on: ProxyPassthroughEnabled is nullable (bool?) precisely so
+        // an absent field is distinguishable from an explicit false on the wire.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"passthrough-keep-{Guid.NewGuid():N}");
+
+        await _repo.UpsertProxySettingsAsync(orgId, new ProxyPolicySettings(false, 10.0));
+        await _repo.UpsertProxySettingsAsync(orgId, new ProxyPolicySettings(MaxOsvScoreTolerance: 7.0));
+
+        var after = (await _repo.GetSettingsAsync(orgId))!;
+        Assert.False(after.ProxyPassthroughEnabled);
+        Assert.Equal(7.0, after.MaxOsvScoreTolerance);
+    }
+
+    [Fact]
+    public async Task UpsertProxySettingsAsync_ExplicitFalseProxyPassthroughEnabled_StillTakesEffect()
+    {
+        // Adversarial twin: explicit false must still disable passthrough, not be swallowed by
+        // the leave-unchanged-on-absent fix.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"passthrough-off-{Guid.NewGuid():N}");
+
+        await _repo.UpsertProxySettingsAsync(orgId, new ProxyPolicySettings(true, 10.0));
+        await _repo.UpsertProxySettingsAsync(orgId, new ProxyPolicySettings(false, 10.0));
+
+        Assert.False((await _repo.GetSettingsAsync(orgId))!.ProxyPassthroughEnabled);
+    }
+
+    [Fact]
+    public async Task UpsertProxySettingsAsync_OmittedMaxOsvScoreTolerance_LeavesStoredValueUnchanged()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"osv-keep-{Guid.NewGuid():N}");
+
+        await _repo.UpsertProxySettingsAsync(orgId, new ProxyPolicySettings(true, 4.2));
+        await _repo.UpsertProxySettingsAsync(orgId, new ProxyPolicySettings(BlockKev: "block"));
+
+        var after = (await _repo.GetSettingsAsync(orgId))!;
+        Assert.Equal(4.2, after.MaxOsvScoreTolerance);
+        Assert.Equal("block", after.BlockKev);
+    }
+
+    // ── MinReleaseAgeHours / MaxEpssTolerance: tri-state (Optional<T>) matrix ────────────────
+    // Both columns' own "gate disabled" domain state is SQL NULL, so a plain nullable can't tell
+    // "the caller omitted this field" apart from "the caller explicitly cleared it". Optional<T>
+    // keeps all three states distinguishable: absent (leave unchanged), present + null
+    // (deliberate clear-to-off), present + a value (set it). MinReleaseAgeHours' absent
+    // and explicit-value/explicit-null coverage lives in the two tests above; this covers the
+    // same three states for MaxEpssTolerance.
+
+    [Fact]
+    public async Task UpsertProxySettingsAsync_OmittedMaxEpssTolerance_LeavesStoredValueUnchanged()
+    {
+        // max_epss_tolerance is an enforcing EPSS-ceiling gate. A partial PUT that never
+        // mentions it (Optional<double?>.Absent) must not silently disable it — same contract as
+        // the min-release-age absent test above.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"epss-keep-{Guid.NewGuid():N}");
+
+        await _repo.UpsertProxySettingsAsync(orgId,
+            new ProxyPolicySettings(true, 10.0, MaxEpssTolerance: Optional<double?>.Of(0.3)));
+
+        // Second write omits MaxEpssTolerance entirely (Optional<double?>.Absent, the default).
+        await _repo.UpsertProxySettingsAsync(orgId, new ProxyPolicySettings(true, 6.5));
+
+        var after = (await _repo.GetSettingsAsync(orgId))!;
+        Assert.Equal(0.3, after.MaxEpssTolerance);
+        Assert.Equal(6.5, after.MaxOsvScoreTolerance);
+    }
+
+    [Fact]
+    public async Task UpsertProxySettingsAsync_ExplicitNullMaxEpssTolerance_ClearsToNull()
+    {
+        // Adversarial twin: leave-unchanged-on-absent must not swallow a deliberate clear — an
+        // operator explicitly sending null (present, null — not an omitted key) still disables
+        // the gate. Also exercises the explicit-value branch on the way in.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"epss-clear-{Guid.NewGuid():N}");
+
+        await _repo.UpsertProxySettingsAsync(orgId,
+            new ProxyPolicySettings(true, 10.0, MaxEpssTolerance: Optional<double?>.Of(0.3)));
+        Assert.Equal(0.3, (await _repo.GetSettingsAsync(orgId))!.MaxEpssTolerance);
+
+        await _repo.UpsertProxySettingsAsync(orgId,
+            new ProxyPolicySettings(true, 10.0, MaxEpssTolerance: Optional<double?>.Of(null)));
+        Assert.Null((await _repo.GetSettingsAsync(orgId))!.MaxEpssTolerance);
     }
 
     // ── UpsertLicensePolicyModeAsync ─────────────────────────────────────────

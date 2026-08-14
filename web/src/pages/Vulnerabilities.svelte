@@ -59,10 +59,14 @@
   // Deliberately a plain Map — reactivity is driven by `expandedDetail`, not this cache.
   // eslint-disable-next-line svelte/prefer-svelte-reactivity
   const detailCache = new Map()  // `${osvId}::${version}` -> loaded { loading, error, detail }
+  // Request sequence — page/filter/sort changes can fire overlapping loads; a response whose
+  // token no longer matches the latest issued request is stale and must not overwrite newer state.
+  let seq = 0
 
   $: org = $currentOrg
 
   async function load() {
+    const mine = ++seq
     if (!org) { loading = false; return }
     loading = true; error = ''
     expandedKey = null
@@ -71,10 +75,15 @@
       const params = { page, limit, sort: sortCol, dir: sortDir }
       if (ecosystem) params.ecosystem = ecosystem
       const data = await api.getVulnReport( params)
+      if (mine !== seq) return
       items = data.items || []
       total = data.total
-    } catch (e) { error = e.message; console.error(e) }
-    finally { loading = false }
+    } catch (e) {
+      if (mine !== seq) return
+      error = e.message; console.error(e)
+    } finally {
+      if (mine === seq) loading = false
+    }
   }
 
   $: if (org !== undefined) load()

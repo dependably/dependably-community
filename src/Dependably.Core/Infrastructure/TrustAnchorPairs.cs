@@ -3,8 +3,10 @@ namespace Dependably.Infrastructure;
 /// <summary>
 /// The canonical set of <c>(ecosystem, anchor_kind)</c> pairs a signature trust anchor may be
 /// stored under. A pair outside this set has no material validator behind it, so the bytes in
-/// <c>signature_trust_anchor.material</c> were never parsed, never checked for minimum key
-/// strength, and can never produce a <c>verified</c> provenance verdict.
+/// <c>signature_trust_anchor.material</c> were never validated at import time — never parsed by
+/// the insert gate, never checked for minimum key strength. For the kind-filtering ecosystems
+/// (rpm, maven) such a row can never produce a <c>verified</c> verdict; for npm, nuget and apk it
+/// can — see consequence 2 below — which is exactly why the row is surfaced rather than trusted.
 ///
 /// This set is the single source of truth for three consumers that must not drift apart:
 /// <list type="bullet">

@@ -84,17 +84,55 @@ public class TransparentInterceptMiddlewareTests
     }
 
     [Fact]
-    public async Task PyPiSplitsAcrossHosts_BothRouteToPyPi()
+    public async Task PyPiSplitsAcrossHosts_BothPassThroughUnprefixed()
     {
+        // PyPI's protocol surface (PEP 503 /simple/, download host /packages/{file}) is served
+        // unprefixed already, so an intercepted pip request must reach the route that actually
+        // exists — not get rewritten onto a nonexistent /pypi/simple/... or /pypi/packages/...
+        // path. The /packages/{file} route is single-segment (PyPiController.DownloadPackage),
+        // matching the flat root-relative hrefs PyPiSimpleIndexHelper renders — not the
+        // multi-segment CDN shape files.pythonhosted.org itself serves lockfile-pinned URLs
+        // under (that shape isn't reachable through this intercept; tracked separately).
         var (mw, _, seen) = Build(new Dictionary<string, string>
         {
             ["pypi.org"] = "pypi",
             ["files.pythonhosted.org"] = "pypi"
         });
         await mw.InvokeAsync(Request("pypi.org", "/simple/lodash/"));
-        await mw.InvokeAsync(Request("files.pythonhosted.org", "/packages/abc/lodash-1.0.0.tgz"));
-        Assert.Equal("/pypi/simple/lodash/", seen[0]);
-        Assert.Equal("/pypi/packages/abc/lodash-1.0.0.tgz", seen[1]);
+        await mw.InvokeAsync(Request("files.pythonhosted.org", "/packages/lodash-1.0.0.tgz"));
+        Assert.Equal("/simple/lodash/", seen[0]);
+        Assert.Equal("/packages/lodash-1.0.0.tgz", seen[1]);
+    }
+
+    [Fact]
+    public async Task PyPiJsonApiHost_StillReachesPrefixedRoute()
+    {
+        // The legacy JSON API genuinely lives under /pypi/; a bare-host request to it already
+        // carries the segment, so the resolved PyPI prefix must leave it alone rather than
+        // needing (or performing) a rewrite. This exercises the middleware's idempotency
+        // branch (prefix "/pypi" already present in the path) rather than pinning
+        // HostEcosystemMap's path-dependent prefix selection itself.
+        var (mw, _, seen) = Build(new Dictionary<string, string>
+        {
+            ["pypi.org"] = "pypi"
+        });
+        await mw.InvokeAsync(Request("pypi.org", "/pypi/lodash/json"));
+        Assert.Equal("/pypi/lodash/json", seen[0]);
+    }
+
+    [Fact]
+    public async Task PyPiUploadHost_UnprefixedLegacyPath_GetsPypiPrefixPrepended()
+    {
+        // twine's stock upload endpoint is bare-host "/legacy/" (upload.pypi.org/legacy/) —
+        // no "/pypi" segment, unlike the JSON API. Only "POST /pypi/legacy/" is a routed
+        // endpoint (PyPiController.Upload), so an intercepted upload must still get /pypi
+        // prepended even though PyPI's /simple/ and /packages/ paths do not.
+        var (mw, _, seen) = Build(new Dictionary<string, string>
+        {
+            ["upload.pypi.org"] = "pypi"
+        });
+        await mw.InvokeAsync(Request("upload.pypi.org", "/legacy/"));
+        Assert.Equal("/pypi/legacy/", seen[0]);
     }
 
     [Fact]

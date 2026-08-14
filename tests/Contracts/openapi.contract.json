@@ -144,6 +144,16 @@
         }
       }
     },
+    "/api/v1/alerts/dismiss-all": {
+      "operations": {
+        "post": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/api/v1/alerts/summary": {
       "operations": {
         "get": {
@@ -485,6 +495,16 @@
     "/api/v1/instance/email-config/test": {
       "operations": {
         "post": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/instance/email-health": {
+      "operations": {
+        "get": {
           "requiredParams": [],
           "responseCodes": [
             "200"
@@ -1311,6 +1331,16 @@
         }
       }
     },
+    "/api/v1/system/email-health": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/api/v1/system/health": {
       "operations": {
         "get": {
@@ -1357,6 +1387,16 @@
           "requiredParams": [],
           "responseCodes": [
             "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/system/me/timezone": {
+      "operations": {
+        "post": {
+          "requiredParams": [],
+          "responseCodes": [
+            "204"
           ]
         }
       }
@@ -2696,6 +2736,32 @@
         }
       }
     },
+    "/packages/{h1}/{h2}/{sha256}/{file}": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "file",
+            "h1",
+            "h2",
+            "sha256"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "head": {
+          "requiredParams": [
+            "file",
+            "h1",
+            "h2",
+            "sha256"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/pypi/legacy": {
       "operations": {
         "post": {
@@ -2958,16 +3024,6 @@
           "requiredParams": [
             "path"
           ],
-          "responseCodes": [
-            "200"
-          ]
-        }
-      }
-    },
-    "/version": {
-      "operations": {
-        "get": {
-          "requiredParams": [],
           "responseCodes": [
             "200"
           ]

@@ -49,10 +49,10 @@ public sealed partial class SchemaInitializer
     // Postgres) carries no proof either way.
     //
     // The reason is the same for all of them, and it is the whole justification: the CHECK is
-    // declared only in the CREATE TABLE blocks, so it reaches fresh installs and nothing else. No
-    // RunOnceAsync retrofits it onto an existing database — SQLite cannot ALTER ADD CONSTRAINT, and
-    // the Postgres retrofit is deliberately not shipped — so the previous release's slot keeps
-    // writing to a table that carries no such constraint. On a fresh install both slots write
+    // declared in the CREATE TABLE blocks, so it reaches fresh installs directly; existing SQLite
+    // databases never gain it (SQLite cannot ALTER ADD CONSTRAINT), and existing Postgres
+    // databases gain it only when SchemaInitializer.TemporalCheckRetrofit runs — so a previous
+    // release's slot can still be writing to a table that carries no such constraint. On a fresh install both slots write
     // through UtcTimestamp, whose output is canonical by construction, and the every-boot sweep in
     // TimestampNormalization rewrites any legacy shape a stale binary produced. The full-schema
     // audit of that claim is TemporalCheckConstraintSqliteTests / -PostgresTests.

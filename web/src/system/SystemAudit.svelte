@@ -1,5 +1,6 @@
 <script>
   import { reportPageLoad } from '../lib/pageLoad.js'
+  import { formatDate } from '../lib/format.js'
   import { onMount } from 'svelte'
   import { t } from 'svelte-i18n'
   import { systemApi } from '../lib/api.js'
@@ -246,7 +247,7 @@
       let:row={e}
     >
       <tr>
-        <td>{new Date(e.createdAt).toLocaleString()}</td>
+        <td>{$formatDate(e.createdAt)}</td>
         <td><code>{e.action}</code></td>
         <td>{e.actorEmail ?? e.actorId ?? '—'}</td>
         <td>{e.orgSlug ?? (e.orgId ?? $t('system.audit.apexTenant'))}</td>
@@ -299,7 +300,7 @@
     >
       <tr>
         <td><code>{j.jobName}</code></td>
-        <td>{new Date(j.startedAt).toLocaleString()}</td>
+        <td>{$formatDate(j.startedAt)}</td>
         <td class="num">{fmtDuration(j.durationMs)}</td>
         <td><span class="outcome outcome-{j.outcome}">{$t(`system.backgroundJobs.outcome.${j.outcome}`, { default: j.outcome })}</span></td>
         <td>

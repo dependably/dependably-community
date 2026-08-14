@@ -1,4 +1,5 @@
 using Dependably.Infrastructure.Redis;
+using StackExchange.Redis;
 
 namespace Dependably.Infrastructure;
 
@@ -12,6 +13,23 @@ namespace Dependably.Infrastructure;
 public sealed class RedisLockoutStore : ILockoutStore
 {
     private const int LockoutSeconds = 15 * 60;
+
+    // Increments the attempts counter and, in the same Lua invocation, sets the lock key once
+    // the threshold is reached. Redis executes a script as a single atomic unit — no other
+    // command from another caller can interleave between the INCR and the threshold check — so
+    // N concurrent failures for the same key always advance the counter by exactly N, unlike a
+    // caller-computed StringSetAsync(newCount) which can lose an update under a race.
+    private const string RecordFailureScript =
+        """
+        local count = redis.call('INCR', KEYS[1])
+        redis.call('EXPIRE', KEYS[1], ARGV[2])
+        local locked = 0
+        if count >= tonumber(ARGV[1]) then
+            redis.call('SET', KEYS[2], '1', 'EX', ARGV[2])
+            locked = 1
+        end
+        return {count, locked}
+        """;
 
     private readonly IRedisClient _redis;
     private readonly TimeProvider _time;
@@ -40,33 +58,24 @@ public sealed class RedisLockoutStore : ILockoutStore
         return (count.HasValue ? (int)count : 0, null);
     }
 
-    public async Task RecordFailureAsync(
-        string emailHash, int newCount, DateTimeOffset? lockedUntil, CancellationToken ct)
+    public async Task<(int NewCount, DateTimeOffset? LockedUntil)> RecordFailureAsync(
+        string emailHash, int maxFailedAttempts, TimeSpan lockoutDuration, CancellationToken ct)
     {
         var db = _redis.GetDatabase();
         string attemptsKey = _redis.ApplyPrefix($"lockout:attempts:{emailHash}");
         string lockedKey = _redis.ApplyPrefix($"lockout:locked:{emailHash}");
+        int lockoutSeconds = Math.Max(1, (int)lockoutDuration.TotalSeconds);
 
-        // Pipeline the writes to minimize round trips, but await their completion: a dropped
-        // lockout write must surface, not vanish as an unobserved task. Silently losing the
-        // attempt count would under-count failures (a lockout-bypass risk under Redis trouble).
-        var batch = db.CreateBatch();
-        var writes = new List<Task>
-        {
-            batch.StringSetAsync(attemptsKey, newCount, TimeSpan.FromSeconds(LockoutSeconds)),
-        };
+        var reply = (RedisResult[])(await db.ScriptEvaluateAsync(
+            RecordFailureScript,
+            new RedisKey[] { attemptsKey, lockedKey },
+            new RedisValue[] { maxFailedAttempts, lockoutSeconds }))!;
 
-        if (lockedUntil.HasValue)
-        {
-            var ttl = lockedUntil.Value - _time.GetUtcNow();
-            if (ttl > TimeSpan.Zero)
-            {
-                writes.Add(batch.StringSetAsync(lockedKey, "1", ttl));
-            }
-        }
+        long newCount = (long)reply[0];
+        bool locked = (long)reply[1] == 1;
+        DateTimeOffset? lockedUntil = locked ? _time.GetUtcNow().Add(lockoutDuration) : null;
 
-        batch.Execute();
-        await Task.WhenAll(writes);
+        return ((int)newCount, lockedUntil);
     }
 
     public async Task ClearAsync(string emailHash, CancellationToken ct)

@@ -5,10 +5,10 @@ using Dependably.Storage;
 namespace Dependably.Protocol;
 
 /// <summary>
-/// The one place a physical OCI blob is deleted from the Registry tier. OCI blob keys
+/// The one place a physical OCI blob is deleted. OCI blob keys
 /// (<see cref="BlobKeys.OciBlob"/>) are content-addressed with no org segment, so every org that
-/// pushed a given digest shares one physical blob and the file may only be removed once the last
-/// <c>oci_blobs</c> row referencing it is gone.
+/// pushed or pulled a given digest shares one physical blob and the file may only be removed once
+/// the last <c>oci_blobs</c> row referencing it is gone.
 ///
 /// The reference count and the physical delete are one critical section under
 /// <see cref="OciBlobKeyLock"/>, held for the same key an in-flight finalize holds. Splitting them
@@ -37,13 +37,20 @@ public sealed class OciOrphanBlobDeleter
     }
 
     /// <summary>
-    /// Physically deletes <paramref name="blobKey"/> from the Registry tier when no <c>oci_blobs</c>
-    /// row in any org still references it. Callers delete their own org's shadow rows first, so a
-    /// zero count means the last reference is gone. Returns true when the blob was deleted, false
-    /// when another org still references it.
+    /// Physically deletes <paramref name="blobKey"/> when no <c>oci_blobs</c> row in any org still
+    /// references it. Callers delete their own org's shadow rows first, so a zero count means the
+    /// last reference is gone. Returns true when the delete ran, false when another org still
+    /// references the key.
     ///
-    /// Only ever called for uploaded (Registry-tier) blobs: proxy blobs live in the Cache tier and
-    /// are reclaimed by cache GC, never deleted here.
+    /// <para><b>Both tiers.</b> An OCI blob key is content-addressed and identical whichever way the
+    /// bytes arrived — a push writes them to the Registry tier, a proxy pull to the Cache tier — and
+    /// the same digest can have arrived both ways in different orgs. The refcount is over
+    /// <c>oci_blobs</c> rows, not over tiers, so once it reaches zero no org references the content
+    /// by either route and both copies are orphaned. Deleting from only one tier is what left proxy
+    /// OCI bytes unreclaimable: the row went, and with it the last pointer to bytes nothing would
+    /// ever look for again. <see cref="IBlobStore.DeleteAsync"/> is a no-op on a key the tier does
+    /// not hold, and in single-tier deployments both properties resolve to the same store, so the
+    /// second delete is harmless in every configuration.</para>
     /// </summary>
     public async Task<bool> DeleteIfUnreferencedAsync(string blobKey, CancellationToken ct = default)
     {
@@ -62,7 +69,9 @@ public sealed class OciOrphanBlobDeleter
                 return false;
             }
 
-            await _blobs.Registry.DeleteAsync(BlobKeys.StoreKey(blobKey), ct);
+            string storeKey = BlobKeys.StoreKey(blobKey);
+            await _blobs.Registry.DeleteAsync(storeKey, ct);
+            await _blobs.Cache.DeleteAsync(storeKey, ct);
             return true;
         }
     }

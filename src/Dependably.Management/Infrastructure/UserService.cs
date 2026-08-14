@@ -34,25 +34,40 @@ public sealed class UserService
     /// Creates a tenant user from an accepted invite. Caller is responsible for invite
     /// consumption (<see cref="InviteRepository.AcceptAsync"/>) before calling this so the
     /// invite is single-use even if user creation later fails.
+    ///
+    /// <para>Returns null when the tenant already holds an account for that address. The address
+    /// is stored canonically, so an invite addressed to a different casing of an existing member's
+    /// email resolves to the same account rather than minting a second one: two rows satisfying
+    /// every <c>lower(email)</c> lookup is what lets an invite silently take over the login of an
+    /// address that already belongs to someone. The uniqueness constraint is the arbiter, not a
+    /// prior SELECT — an invite can be accepted concurrently with any other account creation.</para>
     /// </summary>
-    public async Task<string> CreateFromInviteAsync(InviteRecord invite, string password, CancellationToken ct = default)
+    public async Task<string?> CreateFromInviteAsync(InviteRecord invite, string password, CancellationToken ct = default)
     {
         string passwordHash = BCrypt.Net.BCrypt.HashPassword(password, workFactor: 12);
         string userId = Guid.NewGuid().ToString("N");
         await using var conn = await _db.OpenAsync(ct);
-        await conn.ExecuteAsync(
-            """
-            INSERT INTO users (id, tenant_id, email, password_hash, role)
-            VALUES (@id, @tenantId, @email, @hash, @role)
-            """,
-            new
-            {
-                id = userId,
-                tenantId = invite.OrgId,
-                email = invite.Email,
-                hash = passwordHash,
-                role = invite.Role ?? "member",
-            });
+        try
+        {
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO users (id, tenant_id, email, password_hash, role)
+                VALUES (@id, @tenantId, @email, @hash, @role)
+                """,
+                new
+                {
+                    id = userId,
+                    tenantId = invite.OrgId,
+                    email = EmailNormalizer.Normalize(invite.Email),
+                    hash = passwordHash,
+                    role = invite.Role ?? "member",
+                });
+        }
+        catch (Exception ex) when (IsUniqueViolation(ex))
+        {
+            return null;
+        }
+
         return userId;
     }
 
@@ -157,7 +172,7 @@ public sealed class UserService
     public async Task<long?> ApplyVerifiedEmailChangeAsync(
         string userId, string newEmail, CancellationToken ct = default)
     {
-        string normalized = newEmail.Trim().ToLowerInvariant();
+        string normalized = EmailNormalizer.Normalize(newEmail);
         // Rotating the Identity security_stamp alongside token_version keeps the Identity model
         // consistent; token_version remains the canonical per-request invalidation signal.
         string stamp = Guid.NewGuid().ToString();
@@ -305,8 +320,16 @@ public sealed class UserService
     public async Task<string?> FindIdByEmailAsync(string tenantId, string email, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+        // Same deterministic election as the login lookup, and deliberately the same order: a
+        // legacy database can still hold two case-variant rows for one address, and a reset link
+        // must bind to the account that address actually logs in as.
         return await conn.ExecuteScalarAsync<string?>(
-            "SELECT id FROM users WHERE tenant_id = @tenantId AND lower(email) = lower(@email)",
+            """
+            SELECT id FROM users
+            WHERE tenant_id = @tenantId AND lower(email) = lower(@email)
+            ORDER BY created_at, id
+            LIMIT 1
+            """,
             new { tenantId, email });
     }
 
@@ -403,8 +426,11 @@ public sealed class UserService
         return newVersion;
     }
 
-    // SQLite stores INTEGER as Int64; Dapper requires the positional record signature to
-    // match exactly, so MustChangePassword is long here and converted to bool at the call site.
+    // Integer columns bind as long, and [ExplicitConstructor] is what lets one signature serve
+    // both providers — SQLite reports INTEGER as Int64, Postgres as Int32, and Dapper's default
+    // positional-record binding demands an exact CLR match. See
+    // DapperPositionalRecordComplianceTests. Converted to bool at the call site.
+    [method: ExplicitConstructor]
     private sealed record UserRow(long MustChangePassword, string? Language, string? Timezone, long MfaEnabled);
 }
 

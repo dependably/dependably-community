@@ -155,7 +155,21 @@ public static class LicenseExtractor
         }
 
         string trimmed = value.Trim();
-        return trimmed.Length <= MaxMetaLength ? trimmed : trimmed[..MaxMetaLength];
+        if (trimmed.Length <= MaxMetaLength)
+        {
+            return trimmed;
+        }
+
+        // A hostile manifest's description is otherwise-unvalidated free text: a char-index cut
+        // can land inside a UTF-16 surrogate pair (an astral-plane character straddling the
+        // boundary), leaving a lone surrogate in the persisted, later re-served metadata. Back
+        // the cut off by one code unit rather than split the pair.
+        int cut = MaxMetaLength;
+        if (cut > 0 && char.IsHighSurrogate(trimmed[cut - 1]))
+        {
+            cut--;
+        }
+        return trimmed[..cut];
     }
 
     // A homepage/repository link is only surfaced when it is an http(s) URL — the UI renders it as

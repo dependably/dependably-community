@@ -102,7 +102,7 @@ There is also no OCI route. Terraform's `provider_installation` accepts only `di
 unknown installation method — so serving providers as OCI artifacts from the existing `/v2/`
 surface is not possible.
 
-Full reasoning: [`docs/adr/0003-terraform-provider-network-mirror.md`](adr/0003-terraform-provider-network-mirror.md).
+Full reasoning: [`ADR-terraform-provider-network-mirror`](https://gitlab.northwardlabs.ca/moonlitlabs/dependably-community.spec/-/blob/main/specs/adr/ADR-terraform-provider-network-mirror.md).
 
 ## Edge nodes
 

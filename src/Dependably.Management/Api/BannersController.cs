@@ -80,6 +80,7 @@ public sealed class BannersController : OrgScopedControllerBase
             actorId: userId,
             actorKind: ActorKinds.User,
             detail: $"{{\"bannerId\":\"{banner.Id}\",\"severity\":\"{req.Severity}\"}}",
+            sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
 
         return Created($"/api/v1/banners/{banner.Id}", banner);
@@ -117,6 +118,7 @@ public sealed class BannersController : OrgScopedControllerBase
             actorId: userId,
             actorKind: ActorKinds.User,
             detail: $"{{\"bannerId\":\"{id}\"}}",
+            sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
 
         return NoContent();
@@ -146,6 +148,7 @@ public sealed class BannersController : OrgScopedControllerBase
             actorId: userId,
             actorKind: ActorKinds.User,
             detail: $"{{\"bannerId\":\"{id}\"}}",
+            sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
 
         return NoContent();

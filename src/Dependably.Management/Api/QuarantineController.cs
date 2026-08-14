@@ -184,6 +184,7 @@ public sealed class QuarantineController : OrgScopedControllerBase
         await ApplyManualBlockOverrideAsync(orgId, entry, manualState, ct);
 
         await _audit.LogAsync("quarantine_decision", orgId, userId,
+            actorKind: ActorKinds.User,
             detail: System.Text.Json.JsonSerializer.Serialize(new
             {
                 id = entry.Id,
@@ -192,7 +193,8 @@ public sealed class QuarantineController : OrgScopedControllerBase
                 from = entry.State,
                 decision = req.Decision,
                 note = req.Note,
-            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return Ok(new { id = entry.Id, state = req.Decision });
     }

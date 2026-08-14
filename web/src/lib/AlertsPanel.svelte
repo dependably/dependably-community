@@ -16,8 +16,11 @@
   let loaded = false
   let loading = false
   let error = ''
+  let dismissingAll = false
   /** @type {HTMLElement} */
   let wrapEl
+  /** @type {HTMLElement} */
+  let bellEl
 
   onMount(loadSummary)
 
@@ -61,6 +64,27 @@
     }
   }
 
+  /**
+   * Clears the whole active set in one request. Not a loop over `alerts`: that list is one page
+   * of a paged endpoint, so iterating what is rendered would leave the rest active and would
+   * race anything raised mid-loop. The server dismisses every active row for the org, so the
+   * badge goes to zero rather than being decremented by what happened to be on screen.
+   */
+  async function dismissAll() {
+    if (dismissingAll || alerts.length === 0) return
+    dismissingAll = true
+    error = ''
+    try {
+      await api.dismissAllAlerts()
+      alerts = []
+      activeCount = 0
+    } catch (e) {
+      error = e?.body?.detail || e?.message || String(e)
+    } finally {
+      dismissingAll = false
+    }
+  }
+
   function close() {
     open = false
   }
@@ -73,13 +97,24 @@
       close()
     }
   }
+
+  // Escape is the keyboard equivalent of clicking outside. It is load-bearing rather than a
+  // nicety: the header button dismisses alerts instead of closing the dropdown, so without this
+  // a keyboard user has no way out. Focus goes back to the bell, which is where it came from.
+  function onWindowKeydown(e) {
+    if (open && e.key === 'Escape') {
+      close()
+      bellEl?.focus()
+    }
+  }
 </script>
 
-<svelte:window on:click={onWindowClick} />
+<svelte:window on:click={onWindowClick} on:keydown={onWindowKeydown} />
 
 <div class="alerts-panel-wrap" bind:this={wrapEl}>
   <button
     class="icon-btn"
+    bind:this={bellEl}
     aria-label={$t('nav.notifications')}
     title={$t('nav.notifications')}
     aria-expanded={open}
@@ -95,8 +130,12 @@
     <div class="alerts-dropdown">
       <div class="alerts-dropdown-header">
         <h3>{$t('alerts.panel.title')}</h3>
-        <button class="icon-btn close-btn" aria-label={$t('alerts.panel.close')} on:click={close}>
-          <svg width="14" height="14" aria-hidden="true"><use href="/icons.svg#icon-x"/></svg>
+        <button
+          class="btn-sm dismiss-all-btn"
+          on:click={dismissAll}
+          disabled={dismissingAll || alerts.length === 0}
+        >
+          {dismissingAll ? $t('alerts.panel.dismissingAll') : $t('alerts.panel.dismissAll')}
         </button>
       </div>
 
@@ -117,7 +156,7 @@
                 <span class="alerts-item-meta">{$formatRelativeTime(alert.createdAt)}</span>
               </div>
               <button class="btn-sm alerts-dismiss" on:click={() => dismiss(alert)}>
-                {$t('common.actions.dismiss')}
+                {$t('alerts.panel.dismiss')}
               </button>
             </li>
           {/each}
@@ -183,9 +222,8 @@
     font-size: 13px;
     font-weight: 600;
   }
-  .close-btn {
-    width: 22px;
-    height: 22px;
+  .dismiss-all-btn {
+    flex-shrink: 0;
     min-height: 0;
   }
   .alerts-status,

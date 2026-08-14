@@ -253,6 +253,158 @@ public sealed class TerraformControllerProxyTests : IAsyncLifetime
         Assert.Equal($"zh:{sha}", Assert.Single(hashes.EnumerateArray()).GetString());
     }
 
+    [Fact]
+    public async Task VersionDocument_PublishesTheRegistrysShasumForAnArchiveNotYetCached()
+    {
+        // The registry protocol's versions list — what a cold master's version document was built
+        // from — carries no hash at all; the shasum lives only in the per-platform download
+        // document. A cold master (nothing of this archive cached) must still fetch that shasum
+        // and publish it as zh:, or a downstream edge chained through it has nothing to verify
+        // fetched bytes against.
+        await SeedUpstreamAsync(RegistryBase, mirror: false, secret: null);
+        RouteRegistryVersionsList();
+        _http.Route(
+            $"{RegistryBase}/v1/providers/acme/internal/{Version}/download/linux/amd64",
+            Json($$"""
+                {"download_url":"{{ReleaseHost}}/acme/internal_{{Version}}_{{Platform}}.zip",
+                 "shasum":"{{ArchiveShasum}}"}
+                """));
+
+        var result = await BuildController().HandleMirrorRequest($"{Provider}/{Version}.json", default);
+
+        var archives = ArchivesOf(Assert.IsType<ContentResult>(result));
+        var hashes = archives.GetProperty(Platform).GetProperty("hashes");
+        Assert.Equal($"zh:{ArchiveShasum}", Assert.Single(hashes.EnumerateArray()).GetString());
+    }
+
+    [Fact]
+    public async Task VersionDocument_DoesNotFabricateAHashWhenTheRegistryPublishesNone()
+    {
+        // The adversarial twin of the above, and the crux of the fix: a master that genuinely
+        // cannot obtain a hash for a platform (the registry's download document carries no shasum
+        // field at all — a real, if unusual, upstream shape) must keep serving no hashes for it
+        // rather than invent one. A fabricated digest would be strictly worse than the pre-existing
+        // trust-on-first-use, because a downstream edge treats zh: as verified truth.
+        await SeedUpstreamAsync(RegistryBase, mirror: false, secret: null);
+        RouteRegistryVersionsList();
+        _http.Route(
+            $"{RegistryBase}/v1/providers/acme/internal/{Version}/download/linux/amd64",
+            Json($$"""{"download_url":"{{ReleaseHost}}/acme/internal_{{Version}}_{{Platform}}.zip"}"""));
+
+        var result = await BuildController().HandleMirrorRequest($"{Provider}/{Version}.json", default);
+
+        var archives = ArchivesOf(Assert.IsType<ContentResult>(result));
+        var platform = archives.GetProperty(Platform);
+        Assert.False(platform.TryGetProperty("hashes", out _));
+        Assert.Equal($"{Version}/{Platform}.zip", platform.GetProperty("url").GetString());
+    }
+
+    [Fact]
+    public async Task VersionDocument_OmitsAPlatformWhoseShasumFetchFails_RatherThanPublishingItWithNoHash()
+    {
+        // The security-critical adversarial twin of VersionDocument_DoesNotFabricateAHashWhenThe
+        // RegistryPublishesNone: a REGISTRY OUTAGE, not a legitimate "no shasum" answer. Collapsing
+        // a fetch failure into the same "no hashes" shape would let a busy or unreachable registry
+        // silently reopen trust-on-first-use for a downstream edge, precisely when the upstream is
+        // least healthy. The failing platform must be dropped from the document entirely, and a
+        // healthy sibling platform in the same document must be unaffected.
+        await SeedUpstreamAsync(RegistryBase, mirror: false, secret: null);
+        _http.Route(
+            $"{RegistryBase}/v1/providers/acme/internal/versions",
+            Json($$"""
+                {"versions":[{"version":"{{Version}}","platforms":[
+                    {"os":"linux","arch":"amd64"},{"os":"darwin","arch":"arm64"}]}]}
+                """));
+        _http.Route(
+            $"{RegistryBase}/v1/providers/acme/internal/{Version}/download/linux/amd64",
+            () => new HttpResponseMessage(HttpStatusCode.InternalServerError));
+        _http.Route(
+            $"{RegistryBase}/v1/providers/acme/internal/{Version}/download/darwin/arm64",
+            Json($$"""
+                {"download_url":"{{ReleaseHost}}/acme/internal_{{Version}}_darwin_arm64.zip",
+                 "shasum":"{{ArchiveShasum}}"}
+                """));
+
+        var result = await BuildController().HandleMirrorRequest($"{Provider}/{Version}.json", default);
+
+        var archives = ArchivesOf(Assert.IsType<ContentResult>(result));
+        Assert.False(archives.TryGetProperty(Platform, out _));
+        var darwinHashes = archives.GetProperty("darwin_arm64").GetProperty("hashes");
+        Assert.Equal($"zh:{ArchiveShasum}", Assert.Single(darwinHashes.EnumerateArray()).GetString());
+    }
+
+    [Fact]
+    public async Task VersionDocument_DoesNotRefetchTheRegistrysShasumForAPlatformAlreadyCached()
+    {
+        // A platform this instance already holds a verified hash for never needs the registry's
+        // shasum — ServeVersionDocumentAsync prefers the cached hash over whatever the registry
+        // fetch would return, so making that call anyway would be a wasted upstream round trip on
+        // every version-document view. The registry's shasum here deliberately differs from the
+        // cached hash, so a wrongly-preferred value would be caught by the assertion, not just the
+        // unmade request.
+        await SeedUpstreamAsync(RegistryBase, mirror: false, secret: null);
+        RouteRegistryVersionsList();
+        string registryShasum = new('e', 64);
+        string downloadUrl = $"{RegistryBase}/v1/providers/acme/internal/{Version}/download/linux/amd64";
+        _http.Route(downloadUrl, Json($$"""
+            {"download_url":"{{ReleaseHost}}/acme/internal_{{Version}}_{{Platform}}.zip",
+             "shasum":"{{registryShasum}}"}
+            """));
+        string cachedSha = new('c', 64);
+        await SeedCachedArchiveAsync(cachedSha);
+
+        var result = await BuildController().HandleMirrorRequest($"{Provider}/{Version}.json", default);
+
+        var archives = ArchivesOf(Assert.IsType<ContentResult>(result));
+        var hashes = archives.GetProperty(Platform).GetProperty("hashes");
+        Assert.Equal($"zh:{cachedSha}", Assert.Single(hashes.EnumerateArray()).GetString());
+        Assert.DoesNotContain(_http.Urls, u => u == downloadUrl);
+    }
+
+    [Fact]
+    public async Task ChainedEdge_RejectsATamperedArchive_WhenTheColdMastersVersionDocumentCarriesTheRegistrysShasum()
+    {
+        // The full loop the defect broke: a cold master (nothing of this archive cached) talking a
+        // registry-protocol upstream must still publish a zh: hash sourced from the registry's
+        // shasum, and a downstream edge chained to that master must use the hash to catch
+        // tampering. Before the fix the master's registry-protocol branch hardcoded
+        // UpstreamHashes: null, so the document captured from a real master invocation below
+        // carried no hashes entry, and the edge had nothing to verify fetched bytes against — it
+        // would trust-on-first-use the tampered bytes and answer 200, not 502.
+        await SeedUpstreamAsync(RegistryBase, mirror: false, secret: null);
+        RouteRegistryVersionsList();
+        _http.Route(
+            $"{RegistryBase}/v1/providers/acme/internal/{Version}/download/linux/amd64",
+            Json($$"""
+                {"download_url":"{{ReleaseHost}}/acme/internal_{{Version}}_{{Platform}}.zip",
+                 "shasum":"{{ArchiveShasum}}"}
+                """));
+
+        var masterResult = await BuildController().HandleMirrorRequest($"{Provider}/{Version}.json", default);
+        var masterContent = Assert.IsType<ContentResult>(masterResult);
+        var masterHashes = ArchivesOf(masterContent).GetProperty(Platform).GetProperty("hashes");
+        Assert.Equal($"zh:{ArchiveShasum}", Assert.Single(masterHashes.EnumerateArray()).GetString());
+
+        // Chain a downstream edge to exactly that captured document — not a reconstructed one —
+        // and hand it bytes that do not match the shasum it advertises.
+        await ReplaceUpstreamAsync(MasterBase, mirror: true, secret: null);
+        _http.Route($"{MasterBase}/{Provider}/{Version}.json", () => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(masterContent.Content!, Encoding.UTF8, "application/json"),
+        });
+        _http.Route(
+            $"{MasterBase}/{Provider}/{Version}/{Platform}.zip",
+            Bytes(Encoding.UTF8.GetBytes("tampered-bytes-that-do-not-match-the-shasum")));
+
+        var edgeResult = await BuildController().HandleMirrorRequest(ArchivePath, default);
+
+        Assert.Equal(StatusCodes.Status502BadGateway, Assert.IsType<ObjectResult>(edgeResult).StatusCode);
+    }
+
+    private void RouteRegistryVersionsList() => _http.Route(
+        $"{RegistryBase}/v1/providers/acme/internal/versions",
+        Json($$"""{"versions":[{"version":"{{Version}}","platforms":[{"os":"linux","arch":"amd64"}]}]}"""));
+
     // ── Case canonicalization ────────────────────────────────────────────────
 
     [Fact]
@@ -639,6 +791,20 @@ public sealed class TerraformControllerProxyTests : IAsyncLifetime
             });
     }
 
+    /// <summary>
+    /// Swaps this org's terraform upstream row for a different one — used to move the same test
+    /// org from acting as a chained edge's downstream master to acting as the edge itself, without
+    /// two upstream_registry rows racing for priority.
+    /// </summary>
+    private async Task ReplaceUpstreamAsync(string url, bool mirror, string? secret)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "DELETE FROM upstream_registry WHERE org_id = @orgId AND ecosystem = 'terraform'",
+            new { orgId = _orgId });
+        await SeedUpstreamAsync(url, mirror, secret);
+    }
+
     private async Task SeedReservedNamespaceAsync(string pattern)
     {
         await using var conn = await _db.OpenAsync();
@@ -671,7 +837,7 @@ public sealed class TerraformControllerProxyTests : IAsyncLifetime
             NullLogger<CacheAccessRecorder>.Instance, TimeProvider.System);
         await recorder.RecordAccessAsync(
             new CacheAccess(_orgId, "terraform", Provider, Version, $"{Platform}.zip",
-                sha256, SizeBytes: 14, blobKey, UpstreamUrl: null), default);
+                sha256, SizeBytes: 14, blobKey, UpstreamUrl: null, Origin: CacheAccessOrigin.FirstFetch), default);
     }
 
     /// <summary>
@@ -688,7 +854,7 @@ public sealed class TerraformControllerProxyTests : IAsyncLifetime
             NullLogger<CacheAccessRecorder>.Instance, TimeProvider.System);
         await recorder.RecordAccessAsync(
             new CacheAccess(_orgId, "terraform", Provider, Version, $"{Platform}.zip",
-                sha256, SizeBytes: 14, blobKey, UpstreamUrl: null), default);
+                sha256, SizeBytes: 14, blobKey, UpstreamUrl: null, Origin: CacheAccessOrigin.FirstFetch), default);
     }
 
     // ── Terraform signature verification (provenance) ────────────────────────

@@ -6,7 +6,7 @@ namespace Dependably.Configuration;
 /// Strongly typed configuration for the OCI proxy layer.
 /// Bound from the <c>Oci</c> section in appsettings.json / env vars.
 /// Upstream registry entries are stored per-org in the <c>upstream_registry</c> DB table,
-/// not in this config object. The scalars here (timeouts, CatalogEnabled) remain config-driven.
+/// not in this config object. The scalars here (timeouts) remain config-driven.
 /// </summary>
 public sealed class OciOptions
 {
@@ -19,8 +19,6 @@ public sealed class OciOptions
     /// <summary>Total HTTP timeout for upstream calls (default 30 minutes for large layers).</summary>
     public TimeSpan UpstreamHttpTimeout { get; set; } = TimeSpan.FromMinutes(30);
 
-    /// <summary>Whether the /v2/_catalog endpoint is enabled (default false — admin only).</summary>
-    public bool CatalogEnabled { get; set; }
 }
 
 /// <summary>

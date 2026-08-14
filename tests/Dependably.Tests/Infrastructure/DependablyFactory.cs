@@ -323,6 +323,11 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         builder.WebHost.UseSetting("DOWNLOAD_RATE_LIMIT_PERMITS", "1000000");
         builder.WebHost.UseSetting("PUSH_RATE_LIMIT_PERMITS", "1000000");
         builder.WebHost.UseSetting("IMPORT_RATE_LIMIT_PERMITS", "1000000");
+        // Rescan partitions the same way (token/user/IP); the shared admin principal calls
+        // POST .../rescan across many unrelated test classes, so the default 20/min would
+        // self-throttle the fixture. Tests that explicitly exercise the 429 behaviour create
+        // a dedicated factory instance with a tight limit.
+        builder.WebHost.UseSetting("RESCAN_RATE_LIMIT_PERMITS", "1000000");
 
         var app = builder.Build();
         Program.ConfigureApp(app);
@@ -451,6 +456,14 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         await conn.ExecuteAsync(
             "UPDATE users SET must_change_password = 0 WHERE id = @adminId", new { adminId });
 
+        // The bootstrap owner is shared across every test in a fixture-scoped class; a prior test
+        // in the same class may have legitimately bumped its token_version (e.g. disabling forms
+        // login revokes every password-backed session in the tenant, including this one). Reading
+        // the live value and embedding it as `tver` keeps the minted session valid regardless of
+        // what earlier tests in the class did, instead of relying on the column's default.
+        long tokenVersion = await conn.ExecuteScalarAsync<long>(
+            "SELECT token_version FROM users WHERE id = @adminId", new { adminId });
+
         string jwtSecretStored = await conn.ExecuteScalarAsync<string>(
             "SELECT value FROM instance_settings WHERE key = 'jwt_secret' LIMIT 1")
             ?? throw new InvalidOperationException("JWT secret not found.");
@@ -476,6 +489,7 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
                 new Claim("tid", orgId),
                 new Claim("role", "owner"),
                 new Claim("scope", "tenant"),
+                new Claim("tver", tokenVersion.ToString(System.Globalization.CultureInfo.InvariantCulture)),
             },
             notBefore: now,
             expires: now.AddHours(8),
@@ -497,6 +511,12 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
             "SELECT tenant_id FROM users WHERE id = @userId",
             new { userId })
             ?? throw new InvalidOperationException($"User '{userId}' not found.");
+
+        // Embed the live token_version as `tver` rather than relying on the column default: a
+        // caller that reuses a userId across multiple calls in the same test (or a userId whose
+        // token_version some other action already bumped) still gets a session the host accepts.
+        long tokenVersion = await conn.ExecuteScalarAsync<long>(
+            "SELECT token_version FROM users WHERE id = @userId", new { userId });
 
         string jwtSecretStored = await conn.ExecuteScalarAsync<string>(
             "SELECT value FROM instance_settings WHERE key = 'jwt_secret' LIMIT 1")
@@ -523,6 +543,7 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
                 new Claim("tid", orgId),
                 new Claim("role", role),
                 new Claim("scope", "tenant"),
+                new Claim("tver", tokenVersion.ToString(System.Globalization.CultureInfo.InvariantCulture)),
             },
             notBefore: now,
             expires: now.AddHours(8),

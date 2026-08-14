@@ -240,6 +240,8 @@ public sealed class AuthController : ControllerBase
     [HttpPost("login/totp")]
     // authz-ok: second-factor step of login. The bearer credential is the short-lived MFA
     // challenge cookie issued by step 1, validated in the body; there is no session yet.
+    // input-validation-ok: req.Code is verified against the stored TOTP/recovery secret two calls
+    // deep (CompleteSystemTotpAsync/CompleteTenantTotpAsync → LoginService), rejecting with 401/429.
     [AllowAnonymous]
     [EnableRateLimiting("login")]
     public async Task<IActionResult> LoginTotp(
@@ -402,6 +404,7 @@ public sealed class AuthController : ControllerBase
                 action: MfaEvents.TypeTrustedDeviceAdded,
                 orgId: ch.Tid,
                 actorId: ch.Sub,
+                actorKind: ActorKinds.User,
                 detail: new MfaEvents.TrustedDeviceAdded("tenant").ToJson(),
                 sourceIp: ch.SourceIp, ct: ct);
         }
@@ -464,8 +467,14 @@ public sealed class AuthController : ControllerBase
         }
 
         // 1:1 user:tenant — invite carries the tenant the user is joining; UserService inserts
-        // directly with that tenant_id and the invite's stored role.
-        await _users.CreateFromInviteAsync(invite, req.Password, ct);
+        // directly with that tenant_id and the invite's stored role. A null result means the
+        // tenant already holds an account for that address (in any casing): the invite is spent,
+        // and the answer is "sign in", not a second account resolving to the same login.
+        string? createdUserId = await _users.CreateFromInviteAsync(invite, req.Password, ct);
+        if (createdUserId is null)
+        {
+            return Conflict(new { detail = "An account already exists for this email address. Sign in instead." });
+        }
 
         // Auto-login. Invite is tenant-scoped, so we know which tenant to authenticate against.
         // invite.Email is hashed by
@@ -558,6 +567,9 @@ public sealed class AuthController : ControllerBase
         // realm-joinable with login-failure rows without ever persisting the raw email.
         string emailHash = LoginService.HashEmail(req.Email);
         await _audit.LogAsync(action: "user.password_reset_requested", orgId: ctx.TenantId, actorId: userId,
+            // The caller is unauthenticated (this is the pre-auth reset request); actorKind is only
+            // meaningful once the email has resolved to a real account (actorId non-null).
+            actorKind: userId is not null ? ActorKinds.User : null,
             detail: System.Text.Json.JsonSerializer.Serialize(new
             {
                 via = "self_serve_reset_link",
@@ -624,6 +636,7 @@ public sealed class AuthController : ControllerBase
         mailer.EnqueuePasswordChanged(consumed.Email, resetLanguage, _time.GetUtcNow());
 
         await _audit.LogAsync(action: "user.password_reset", orgId: consumed.OrgId, actorId: consumed.UserId,
+            actorKind: ActorKinds.User,
             detail: System.Text.Json.JsonSerializer.Serialize(new { via = "self_serve_reset_link" },
                 Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
@@ -682,6 +695,7 @@ public sealed class AuthController : ControllerBase
         mailer.EnqueueEmailChanged(consumed.CurrentEmail, language, _time.GetUtcNow());
 
         await _audit.LogAsync(action: "user.email_changed", orgId: consumed.OrgId, actorId: consumed.UserId,
+            actorKind: ActorKinds.User,
             detail: System.Text.Json.JsonSerializer.Serialize(new
             {
                 via = "verified_change_link",
@@ -758,6 +772,7 @@ public sealed class AuthController : ControllerBase
         }
 
         await _audit.LogAsync(action: "user.password_changed", orgId: tenantId, actorId: sub,
+            actorKind: ActorKinds.User,
             detail: System.Text.Json.JsonSerializer.Serialize(new
             {
                 sessions_invalidated = true,
@@ -922,8 +937,9 @@ public sealed class AuthController : ControllerBase
             action: "user.language_changed",
             orgId: orgId,
             actorId: sub,
+            actorKind: ActorKinds.User,
             detail: System.Text.Json.JsonSerializer.Serialize(new { language = req.Language }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
-            ct: ct);
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return NoContent();
     }
@@ -960,8 +976,9 @@ public sealed class AuthController : ControllerBase
             action: "user.timezone_changed",
             orgId: orgId,
             actorId: sub,
+            actorKind: ActorKinds.User,
             detail: System.Text.Json.JsonSerializer.Serialize(new { timezone = requested }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
-            ct: ct);
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return NoContent();
     }

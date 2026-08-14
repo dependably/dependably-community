@@ -40,7 +40,7 @@ public sealed class QuarantineControllerProxyResolutionTests
             FirstCachedAt = now,
             LastAccessedAt = now,
         });
-        await b.TenantAccess.UpsertAsync(orgId, artifact.Id, now);
+        await b.TenantAccess.UpsertAsync(orgId, artifact.Id, now, TenantContentBinding.None);
         return artifact;
     }
 

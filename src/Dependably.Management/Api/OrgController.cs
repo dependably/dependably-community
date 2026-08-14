@@ -514,6 +514,13 @@ public sealed class OrgController : OrgScopedControllerBase
             return NotFound();
         }
 
+        // Read before the access row goes: facts.BlobKey is this org's own binding resolved
+        // binding-first, and the shared key is what the coordinate itself points at. They differ
+        // when this org's upstream served other content, and each is reclaimed on its own
+        // condition — the org's bytes as soon as its access row is gone, the coordinate's only
+        // when no tenant retains access at all.
+        string? sharedBlobKey = await _cacheArtifacts.GetSharedBlobKeyAsync(facts.Id, ct);
+
         await _tenantAccess.DeleteAsync(orgId, facts.Id, ct);
 
         if (ecosystem == "oci")
@@ -541,10 +548,24 @@ public sealed class OrgController : OrgScopedControllerBase
             // ReleaseOciDigestClaimAsync exists to prevent.
             if (ecosystem != "oci")
             {
-                await _blobStorage.Cache.DeleteAsync(BlobKeys.StoreKey(facts.BlobKey), ct);
+                await _blobStorage.Cache.DeleteAsync(
+                    BlobKeys.StoreKey(sharedBlobKey ?? facts.BlobKey), ct);
             }
 
             await _cacheArtifacts.DeleteAsync(facts.Id, ct);
+        }
+
+        // This org's own bytes, when its upstream served content other than the coordinate's. No
+        // cache_artifact row anywhere names that key, so the access row just deleted was its last
+        // reference from here and no reclamation path would ever find it again. Excluding nothing
+        // from the refcount is deliberate: another tenant with a binding on this same row that
+        // resolved the same divergent bytes must keep its blob.
+        if (ecosystem != "oci"
+            && sharedBlobKey is not null
+            && !string.Equals(facts.BlobKey, sharedBlobKey, StringComparison.Ordinal)
+            && !await _cacheArtifacts.BlobKeyReferencedElsewhereAsync(facts.BlobKey, string.Empty, ct))
+        {
+            await _blobStorage.Cache.DeleteAsync(BlobKeys.StoreKey(facts.BlobKey), ct);
         }
 
         await _packages.DeletePackageIfEmptyAsync(pkg.Id, ct);

@@ -76,7 +76,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
             MaxOsvScoreTolerance: 10.0,
             CacheAccess: new CacheAccess("o1", "npm", "left-pad", "1.0.0", "left-pad-1.0.0.tgz",
-                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact"),
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact", Origin: CacheAccessOrigin.FirstFetch),
             UpstreamChecksum: spec);
 
     private static string Sha1Hex(byte[] bytes) =>
@@ -108,7 +108,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
             MaxOsvScoreTolerance: 10.0,
             CacheAccess: new CacheAccess("o1", "npm", "left-pad", "1.0.0", "left-pad-1.0.0.tgz",
-                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact")));
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact", Origin: CacheAccessOrigin.FirstFetch)));
 
         Assert.Equal(BlockDecision.Allowed, result.Decision);
         Assert.True(await _blobs.ExistsAsync(result.BlobKey));
@@ -147,7 +147,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
             MaxOsvScoreTolerance: 10.0,
             CacheAccess: new CacheAccess("o1", "npm", "left-pad", "1.0.0", "left-pad-1.0.0.tgz",
-                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact"),
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact", Origin: CacheAccessOrigin.FirstFetch),
             UpstreamUrl: "https://private.registry.example/left-pad/-/left-pad-1.0.0.tgz"));
         Assert.Equal(BlockDecision.Allowed, first.Decision);
 
@@ -163,7 +163,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
             MaxOsvScoreTolerance: 10.0,
             CacheAccess: new CacheAccess("o1", "npm", "left-pad", "1.0.1", "left-pad-1.0.1.tgz",
-                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact"),
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact", Origin: CacheAccessOrigin.FirstFetch),
             UpstreamUrl: "https://registry.npmjs.org/left-pad/-/left-pad-1.0.1.tgz"));
         Assert.Equal(BlockDecision.Blocked, second.Decision);
         // The source-pin gate refuses before the artefact is catalogued, so the diverging version
@@ -186,7 +186,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
             MaxOsvScoreTolerance: 10.0,
             CacheAccess: new CacheAccess("o1", "npm", "left-pad", "1.0.2", "left-pad-1.0.2.tgz",
-                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact"),
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact", Origin: CacheAccessOrigin.FirstFetch),
             UpstreamUrl: "https://private.registry.example/left-pad/-/left-pad-1.0.2.tgz"));
         Assert.Equal(BlockDecision.Allowed, third.Decision);
     }
@@ -212,7 +212,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
             MaxOsvScoreTolerance: 4.0,
             CacheAccess: new CacheAccess("o1", "maven", "com.example:lib", "1.0.0", "lib-1.0.0.jar",
-                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact")));
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact", Origin: CacheAccessOrigin.FirstFetch)));
 
         Assert.Equal(BlockDecision.Blocked, result.Decision);
     }
@@ -238,7 +238,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
             MaxOsvScoreTolerance: 10.0,
             CacheAccess: new CacheAccess("o1", "npm", "abandoned", "1.0.0", "abandoned-1.0.0.tgz",
-                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact"),
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact", Origin: CacheAccessOrigin.FirstFetch),
             Deprecated: "use successor@2 instead",
             BlockDeprecatedMode: mode));
 
@@ -271,7 +271,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
             MaxOsvScoreTolerance: 10.0,
             CacheAccess: new CacheAccess("o1", "npm", "warned", "1.0.0", "warned-1.0.0.tgz",
-                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact"),
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact", Origin: CacheAccessOrigin.FirstFetch),
             Deprecated: "deprecated upstream",
             BlockDeprecatedMode: "warn"));
 
@@ -299,7 +299,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             MaxOsvScoreTolerance: 10.0,
             CacheAccess: new CacheAccess("o1", "nuget", "foo", "1.0.0", "foo.1.0.0.nupkg",
                 Sha256: "", SizeBytes: 0, BlobKey: "",
-                UpstreamUrl: "https://api.nuget.org/v3/flatcontainer/foo/1.0.0/foo.1.0.0.nupkg")));
+                UpstreamUrl: "https://api.nuget.org/v3/flatcontainer/foo/1.0.0/foo.1.0.0.nupkg", Origin: CacheAccessOrigin.FirstFetch)));
 
         await using var conn = await _db.OpenAsync();
         long count = await conn.ExecuteScalarAsync<long>(
@@ -375,7 +375,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
                 CacheAccess: new CacheAccess("o1", "npm", coord.PackageName, coord.Version,
                     $"{coord.PackageName}-{coord.Version}.tgz",
                     Sha256: "", SizeBytes: 0, BlobKey: "",
-                    UpstreamUrl: $"https://registry.npmjs.org/{coord.PackageName}"));
+                    UpstreamUrl: $"https://registry.npmjs.org/{coord.PackageName}", Origin: CacheAccessOrigin.FirstFetch));
             results[idx] = await svc.RecordAndScanAsync(req, ct);
         });
 
@@ -443,7 +443,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
             MaxOsvScoreTolerance: 10.0,
             CacheAccess: new CacheAccess("o1", "npm", "spoofed", "1.0.0", "spoofed-1.0.0.tgz",
-                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact"),
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact", Origin: CacheAccessOrigin.FirstFetch),
             ProvenanceStatus: status,
             VerifyProvenanceMode: "block"));
 
@@ -482,7 +482,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
             MaxOsvScoreTolerance: 10.0,
             CacheAccess: new CacheAccess("o1", "npm", "trusted", "1.0.0", "trusted-1.0.0.tgz",
-                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact"),
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact", Origin: CacheAccessOrigin.FirstFetch),
             ProvenanceStatus: "verified",
             ProvenanceSigner: "SHA256:anchor",
             VerifyProvenanceMode: "block"));
@@ -516,7 +516,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
             MaxOsvScoreTolerance: 10.0,
             CacheAccess: new CacheAccess("o1", "npm", "no-anchor", "1.0.0", "no-anchor-1.0.0.tgz",
-                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact"),
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact", Origin: CacheAccessOrigin.FirstFetch),
             ProvenanceStatus: null,
             VerifyProvenanceMode: "block"));
 
@@ -548,7 +548,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
             MaxOsvScoreTolerance: 10.0,
             CacheAccess: new CacheAccess("o1", "npm", "no-policy", "1.0.0", "no-policy-1.0.0.tgz",
-                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact"),
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact", Origin: CacheAccessOrigin.FirstFetch),
             ProvenanceStatus: null,
             VerifyProvenanceMode: "off"));
 
@@ -577,7 +577,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
             MaxOsvScoreTolerance: 10.0,
             CacheAccess: new CacheAccess("o1", "npm", "warned-prov", "1.0.0", "warned-prov-1.0.0.tgz",
-                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact"),
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact", Origin: CacheAccessOrigin.FirstFetch),
             ProvenanceStatus: "failed",
             VerifyProvenanceMode: "warn"));
 
@@ -629,7 +629,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
                 MaxOsvScoreTolerance: 10.0,
                 CacheAccess: new CacheAccess("o1", "npm", c.Name, "1.0.0", $"{c.Name}-1.0.0.tgz",
                     Sha256: "", SizeBytes: 0, BlobKey: "",
-                    UpstreamUrl: $"https://registry.npmjs.org/{c.Name}"),
+                    UpstreamUrl: $"https://registry.npmjs.org/{c.Name}", Origin: CacheAccessOrigin.FirstFetch),
                 ProvenanceStatus: c.Status,
                 ProvenanceSigner: c.Signer,
                 VerifyProvenanceMode: "block"), ct);
@@ -694,7 +694,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
                 Version: "5.74-502.fc41",
                 Filename: "perl-AutoLoader-5.74-502.fc41.noarch.rpm",
                 Sha256: "", SizeBytes: 0, BlobKey: "",
-                UpstreamUrl: "https://dl.fedoraproject.org/perl-AutoLoader-5.74-502.fc41.noarch.rpm")));
+                UpstreamUrl: "https://dl.fedoraproject.org/perl-AutoLoader-5.74-502.fc41.noarch.rpm", Origin: CacheAccessOrigin.FirstFetch)));
 
         await using var conn = await _db.OpenAsync();
 
@@ -751,7 +751,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
                 UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
                 MaxOsvScoreTolerance: 10.0,
                 CacheAccess: new CacheAccess("o1", "npm", "ungatable", "1.0.0", "ungatable-1.0.0.tgz",
-                    Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact"))));
+                    Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact", Origin: CacheAccessOrigin.FirstFetch))));
 
         // The refused fetch left no trace on the hosted plane either — no zombie stand-in row.
         await using var conn = await _db.OpenAsync();
@@ -830,7 +830,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
             MaxOsvScoreTolerance: 10.0,
             CacheAccess: new CacheAccess("o1", "npm", "shady", "1.0.0", "shady-1.0.0.tgz",
-                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact"));
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact", Origin: CacheAccessOrigin.FirstFetch));
 
         // First fetch: nothing is blocked yet, so it serves and the cache-plane row appears.
         Assert.Equal(BlockDecision.Allowed, (await svc.RecordAndScanAsync(Request())).Decision);
@@ -873,7 +873,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
             MaxOsvScoreTolerance: 10.0,
             CacheAccess: new CacheAccess("o1", "npm", "gone", "2.0.0", "gone-2.0.0.tgz",
-                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact"),
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact", Origin: CacheAccessOrigin.FirstFetch),
             BlockRevokedMode: "block");
 
         Assert.Equal(BlockDecision.Allowed, (await svc.RecordAndScanAsync(Request())).Decision);
@@ -912,7 +912,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
             MaxOsvScoreTolerance: 10.0,
             CacheAccess: new CacheAccess("o1", "npm", "fine", "1.2.3", "fine-1.2.3.tgz",
-                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact"),
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact", Origin: CacheAccessOrigin.FirstFetch),
             BlockRevokedMode: "block");
 
         Assert.Equal(BlockDecision.Allowed, (await svc.RecordAndScanAsync(Request())).Decision);
@@ -1021,5 +1021,40 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
         await Assert.ThrowsAsync<ChecksumException>(
             () => svc.RecordAndScanAsync(
                 ChecksumRequest(blob, new ChecksumSpec(ChecksumAlgorithm.Sha256, new string('b', 64)))));
+    }
+
+    /// <summary>
+    /// The <c>checksum_failure</c> audit detail carries the upstream's own integrity string, which
+    /// a malicious or hijacked upstream fully controls. Built by hand as a JSON string, a value
+    /// closing its quote injects sibling keys into a structurally valid detail that the audit UI
+    /// and the SIEM export both parse — a forged <c>actor</c> in the security feed. Serializing the
+    /// payload escapes the quotes instead, so the whole hostile string stays one value.
+    /// </summary>
+    [Fact]
+    public async Task RecordAndScanAsync_checksum_failure_detail_cannot_be_forged_by_the_upstream_integrity_string()
+    {
+        var svc = Build();
+        byte[] bytes = "injection-artifact"u8.ToArray();
+        var blob = await SeedBlobAsync(_blobs, bytes);
+        const string hostile = """"sha512-x","actor":"admin","x":"be"""";
+
+        await Assert.ThrowsAsync<ChecksumException>(
+            () => svc.RecordAndScanAsync(
+                ChecksumRequest(blob, new ChecksumSpec(ChecksumAlgorithm.Sha512, hostile))));
+
+        await using var conn = await _db.OpenAsync();
+        string? detail = await conn.ExecuteScalarAsync<string?>(
+            "SELECT detail FROM audit_log WHERE action = 'checksum_failure' AND org_id = 'o1'");
+        Assert.NotNull(detail);
+
+        using var parsed = System.Text.Json.JsonDocument.Parse(detail);
+        var root = parsed.RootElement;
+
+        // The hostile string round-trips as one value, and forges no siblings.
+        Assert.Equal(hostile, root.GetProperty("expected").GetString());
+        Assert.False(root.TryGetProperty("actor", out _));
+        Assert.Equal(
+            new[] { "actual_sha256", "algorithm", "expected", "file", "version" },
+            root.EnumerateObject().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray());
     }
 }

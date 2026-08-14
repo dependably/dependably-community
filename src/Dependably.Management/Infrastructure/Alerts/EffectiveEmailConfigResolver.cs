@@ -3,10 +3,12 @@ using Dependably.Infrastructure.Mail;
 namespace Dependably.Infrastructure.Alerts;
 
 /// <summary>
-/// Resolves the transport an org's alert email channel actually delivers through: the org's own
-/// SMTP config when it opted out of inheritance, or the instance-level transport when it didn't
-/// — genuinely evaluating the same inherit path the delivery queue and the test-send endpoint use,
-/// rather than re-deriving it ad hoc at each call site.
+/// Resolves whether an org's alert email channel can actually deliver, and to whom: the channel
+/// gate and recipient list from <c>alert_settings</c>, carried over the one instance-level SMTP
+/// transport. SMTP is an instance-level transport — an org configures how Dependably uses it (on or
+/// off, and to which recipients), never how mail is carried — so the only per-org inputs are the
+/// gate and the list. Kept as one seam rather than re-derived at each call site so the delivery
+/// queue and the test-send endpoint cannot drift apart on what "deliverable" means.
 /// </summary>
 public sealed class EffectiveEmailConfigResolver
 {
@@ -23,10 +25,9 @@ public sealed class EffectiveEmailConfigResolver
     public sealed record ResolvedEmailConfig(SmtpTransportSettings Transport, string[] Recipients);
 
     /// <summary>
-    /// Returns null when the channel is disabled, has no recipients, or resolves to no usable
-    /// transport (inheriting instance email that isn't enabled/configured, or an own transport
-    /// that isn't fully configured) — the caller (delivery queue, test-send endpoint) treats null
-    /// as "nothing to send", never a fallback to some other transport.
+    /// Returns null when the channel is disabled, has no recipients, or the instance transport is
+    /// not enabled/configured — the caller (delivery queue, test-send endpoint) treats null as
+    /// "nothing to send", never a fallback to some other transport.
     /// </summary>
     public async Task<ResolvedEmailConfig?> ResolveAsync(string orgId, CancellationToken ct = default)
     {
@@ -36,16 +37,9 @@ public sealed class EffectiveEmailConfigResolver
             return null;
         }
 
-        if (delivery.InheritInstance)
-        {
-            var instance = await _instanceConfig.ResolveAsync(ct);
-            return instance.Enabled && instance.Configured
-                ? new ResolvedEmailConfig(instance.Transport, delivery.Recipients)
-                : null;
-        }
-
-        return delivery.OwnTransport.IsConfigured
-            ? new ResolvedEmailConfig(delivery.OwnTransport, delivery.Recipients)
+        var instance = await _instanceConfig.ResolveAsync(ct);
+        return instance.Enabled && instance.Configured
+            ? new ResolvedEmailConfig(instance.Transport, delivery.Recipients)
             : null;
     }
 }

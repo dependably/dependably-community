@@ -1,5 +1,6 @@
 using System.Xml.Linq;
 using Dapper;
+using Dependably.Infrastructure;
 using Dependably.Storage;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
@@ -109,6 +110,69 @@ public sealed class RpmRepodataServicePrimaryTests : IClassFixture<InMemoryDbFix
         string xmlB = await svc.BuildPrimaryAsync(orgB, CancellationToken.None);
         var docB = XDocument.Parse(xmlB);
         Assert.Equal("1", docB.Root!.Attribute("packages")!.Value);
+    }
+
+    /// <summary>
+    /// A tenant whose own upstream served a different <c>.rpm</c> than the shared
+    /// <c>cache_artifact</c> row's must see its own checksum in <c>primary.xml</c>'s
+    /// <c>&lt;checksum pkgid="YES"&gt;</c> — never the shared row's, which would describe another
+    /// tenant's package bytes. Pins that <see cref="RpmRepodataService.LoadLocalRowsAsync"/>'s
+    /// proxy-plane arm resolves <c>Sha256</c> through <c>COALESCE(taa.content_hash,
+    /// ca.content_hash)</c> rather than reading the shared row directly.
+    /// </summary>
+    [Fact]
+    public async Task BuildPrimaryAsync_ForADivergingProxyTenant_RendersTheTenantsOwnChecksum()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        const string sharedHash = "1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa";
+        const string ownHash = "2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb";
+
+        var cacheArtifacts = new CacheArtifactRepository(_fixture.Store);
+        var cacheArtifact = new CacheArtifact
+        {
+            Id = Guid.NewGuid().ToString("D"),
+            Ecosystem = "rpm",
+            Name = "curl",
+            Version = "8.0-1.el9",
+            Filename = "curl-8.0-1.el9.x86_64.rpm",
+            BlobKey = $"proxy/{sharedHash}/curl-8.0-1.el9.x86_64.rpm",
+            ContentHash = sharedHash,
+            SizeBytes = 500,
+            FirstCachedAt = TestTime.KnownNow,
+            LastAccessedAt = TestTime.KnownNow,
+        };
+        await cacheArtifacts.InsertAsync(cacheArtifact);
+
+        await new TenantArtifactAccessRepository(_fixture.Store).UpsertAsync(
+            orgId, cacheArtifact.Id, TestTime.KnownNow,
+            new TenantContentBinding(ownHash, $"proxy/{ownHash}/curl-8.0-1.el9.x86_64.rpm", 500));
+
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync("""
+                INSERT INTO rpm_metadata
+                    (id, cache_artifact_id, owner_kind,
+                     rpm_name, epoch, rpm_version, rpm_release, arch,
+                     summary, description, rpm_license)
+                VALUES
+                    (lower(hex(randomblob(16))), @caId, 'cache_artifact',
+                     'curl', 0, '8.0', '1.el9', 'x86_64',
+                     'A tool for transferring data', 'curl is a tool for transferring data.',
+                     'MIT')
+                """,
+                new { caId = cacheArtifact.Id });
+        }
+
+        var svc = new RpmRepodataService(_fixture.Store, NullLogger<RpmRepodataService>.Instance, TimeProvider.System);
+
+        string xml = await svc.BuildPrimaryAsync(orgId, CancellationToken.None);
+
+        XNamespace common = "http://linux.duke.edu/metadata/common";
+        var doc = XDocument.Parse(xml);
+        var pkg = Assert.Single(doc.Root!.Elements(common + "package"));
+        string checksum = pkg.Element(common + "checksum")!.Value;
+        Assert.Equal(ownHash, checksum);
+        Assert.NotEqual(sharedHash, checksum);
     }
 
     private async Task InsertRpmMetadataAsync(

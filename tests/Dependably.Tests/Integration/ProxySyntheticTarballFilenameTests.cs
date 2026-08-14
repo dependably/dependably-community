@@ -70,7 +70,7 @@ public sealed class ProxySyntheticTarballFilenameTests : IClassFixture<Dependabl
             orgId, ecosystem, name, version, filename,
             Sha256: sha256, SizeBytes: fakeBytes.Length,
             BlobKey: blobKey,
-            UpstreamUrl: $"https://upstream.example/{filename}"));
+            UpstreamUrl: $"https://upstream.example/{filename}", Origin: CacheAccessOrigin.FirstFetch));
 
         await _factory.Services.GetRequiredService<PackageRepository>()
             .GetOrCreateAsync(orgId, ecosystem, name, name, isProxy: true, CancellationToken.None);

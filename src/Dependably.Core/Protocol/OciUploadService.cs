@@ -594,7 +594,13 @@ public sealed class OciUploadService
     }
 }
 
-/// <summary>An open OCI upload session.</summary>
+/// <summary>
+/// An open OCI upload session. The constructor is explicit because <c>received_bytes</c> is an
+/// INTEGER column: SQLite reports it as Int64 and Postgres as Int32, and Dapper's default
+/// positional-record binding demands an exact CLR match. See
+/// <c>DapperPositionalRecordComplianceTests</c>.
+/// </summary>
+[method: ExplicitConstructor]
 public sealed record OciUploadSession(string UploadId, string Repository, string StagingPath, long ReceivedBytes);
 
 /// <summary>Outcome of a blob-upload finalize.</summary>

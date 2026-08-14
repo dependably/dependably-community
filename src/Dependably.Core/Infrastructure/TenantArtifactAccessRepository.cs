@@ -24,19 +24,39 @@ public sealed class TenantArtifactAccessRepository
     /// Idempotent: first call inserts, subsequent calls bump <c>access_count</c> and
     /// <c>last_accessed_at</c>. Implemented with provider-agnostic upsert SQL because both
     /// SQLite and Postgres support <c>ON CONFLICT DO UPDATE</c>.
+    ///
+    /// <paramref name="binding"/> carries the bytes this tenant itself resolved for the
+    /// coordinate. Each field is written only when supplied — <c>COALESCE</c> keeps the stored
+    /// value when a field is null — so an access that is not evidence of a fetch
+    /// (<see cref="CacheAccessOrigin.CacheHit"/> passes <see cref="TenantContentBinding.None"/>)
+    /// can never overwrite a binding with values read back off the shared row.
     /// </summary>
     public async Task UpsertAsync(
-        string orgId, string cacheArtifactId, DateTimeOffset at, CancellationToken ct = default)
+        string orgId, string cacheArtifactId, DateTimeOffset at,
+        TenantContentBinding binding, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync("""
             INSERT INTO tenant_artifact_access (
-                org_id, cache_artifact_id, first_accessed_at, last_accessed_at, access_count)
-            VALUES (@orgId, @cacheArtifactId, @at, @at, 1)
+                org_id, cache_artifact_id, first_accessed_at, last_accessed_at, access_count,
+                content_hash, blob_key, size_bytes)
+            VALUES (@orgId, @cacheArtifactId, @at, @at, 1, @contentHash, @blobKey, @sizeBytes)
             ON CONFLICT (org_id, cache_artifact_id) DO UPDATE SET
                 last_accessed_at = excluded.last_accessed_at,
-                access_count = tenant_artifact_access.access_count + 1
-            """, new { orgId, cacheArtifactId, at });
+                access_count = tenant_artifact_access.access_count + 1,
+                content_hash = COALESCE(excluded.content_hash, tenant_artifact_access.content_hash),
+                blob_key     = COALESCE(excluded.blob_key, tenant_artifact_access.blob_key),
+                size_bytes   = COALESCE(excluded.size_bytes, tenant_artifact_access.size_bytes)
+            """,
+            new
+            {
+                orgId,
+                cacheArtifactId,
+                at,
+                contentHash = binding.ContentHash,
+                blobKey = binding.BlobKey,
+                sizeBytes = binding.SizeBytes,
+            });
     }
 
     /// <summary>
@@ -122,12 +142,14 @@ public sealed class TenantArtifactAccessRepository
     /// proxy-origin digest this org deleted stops appearing in its
     /// <c>ArtifactInventoryRepository.ListServeableVersionsAsync</c> / <c>artifact_inventory</c> —
     /// both read through an inner join on this table, so dropping the row alone closes the serve
-    /// path for this org. The shared row (and the manifest blob it references) is left alone: OCI
-    /// <c>cache_artifact</c> rows are excluded from reclamation everywhere else in the cache plane
-    /// (see <see cref="CacheArtifactRepository.EvictTenantProxyVersionsForNameAsync"/>) because
-    /// dropping one would strand the still-live <c>oci_blobs</c> row and layer blobs another org
-    /// (or this org's own re-pull) may still depend on. A no-op when no such row exists (e.g. the
-    /// digest was pushed, never proxied).
+    /// path for this org. The shared row (and the manifest blob it references) is left alone,
+    /// because dropping it from here would strand the still-live <c>oci_blobs</c> rows and layer
+    /// blobs another org — or this org's own re-pull — may still depend on. Reclaiming the shared
+    /// row is <c>CacheEvictionService</c>'s job, and it does so only after releasing the digest
+    /// claim of every org holding access; the per-name proxy purge
+    /// (<see cref="CacheArtifactRepository.EvictTenantProxyVersionsForNameAsync"/>) still skips OCI
+    /// for the same reason this method does. A no-op when no such row exists (e.g. the digest was
+    /// pushed, never proxied).
     /// </summary>
     public async Task RemoveAccessForCoordinateAsync(
         string orgId, string ecosystem, string name, string version, CancellationToken ct = default)
@@ -176,6 +198,25 @@ public sealed class TenantArtifactAccessRepository
     }
 
     /// <summary>
+    /// The orgs holding a claim on one cache artifact, by row id. The list form of
+    /// <see cref="CountRemainingAsync"/>, for callers that must act once per holder rather than
+    /// only know how many there are — the global cache sweep releases each holder's OCI digest
+    /// claim before the shared row goes, and <c>oci_blobs</c> is keyed <c>(digest, org_id)</c>, so
+    /// one row comes off per holder.
+    /// </summary>
+    public async Task<IReadOnlyList<string>> ListOrgsHoldingAsync(
+        string cacheArtifactId, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: deliberately cross-tenant — enumerating every org's claim IS the answer, and
+        // the caller is an org-agnostic background sweep with no tenant context to filter by.
+        var rows = await conn.QueryAsync<string>(
+            "SELECT org_id FROM tenant_artifact_access WHERE cache_artifact_id = @cacheArtifactId",
+            new { cacheArtifactId });
+        return rows.AsList();
+    }
+
+    /// <summary>
     /// Cross-tenant query for vulnerability response. Returns the orgs that have
     /// accessed any artifact matching the coordinate. Platform-admin scope only — callers
     /// must enforce.
@@ -196,4 +237,24 @@ public sealed class TenantArtifactAccessRepository
             """, new { ecosystem, name, version });
         return rows.AsList();
     }
+}
+
+/// <summary>
+/// The bytes one tenant itself resolved for a proxy coordinate: the SHA-256 it computed over
+/// them, the blob key they were stored under (DB form), and their length. Written onto
+/// <c>tenant_artifact_access</c> and read back first by every per-tenant serve projection, so a
+/// tenant is served the artefact it fetched rather than whatever the shared, upstream-blind
+/// <c>cache_artifact</c> row for the coordinate happens to hold.
+///
+/// Every field is optional and a null one leaves the stored value untouched: a path that knows
+/// where it put the bytes but not their hash still binds the half it knows, and an access that
+/// is no evidence at all passes <see cref="None"/>.
+/// </summary>
+public readonly record struct TenantContentBinding(
+    string? ContentHash,
+    string? BlobKey,
+    long? SizeBytes)
+{
+    /// <summary>No new evidence about this tenant's bytes; leaves any stored binding as it is.</summary>
+    public static TenantContentBinding None => new(null, null, null);
 }

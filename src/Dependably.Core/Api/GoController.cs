@@ -436,6 +436,7 @@ public sealed class GoController : OrgScopedControllerBase
                 orgId, "golang", PurlNormalizer.Golang(module, version),
                 ext == "zip" ? "first_fetch" : "download",
                 token?.UserId,
+                actorKind: token?.ActorKind,
                 sourceIp: HttpContext.GetNormalizedRemoteIp(),
                 ct: ct);
 
@@ -709,7 +710,15 @@ public sealed class GoController : OrgScopedControllerBase
         string filename = $"{version}.zip";
         string? cacheArtifactId = await _svc.CacheRecorder.RecordAccessAsync(
             new CacheAccess(orgId, "golang", module, version, filename,
-                contentHash, sizeBytes, blobKey, upstreamUrl), ct);
+                contentHash, sizeBytes, blobKey, upstreamUrl,
+                // A .zip first fetch is Unidentified because this path never hashes the bytes it
+                // staged — ResolveZipContentMetadataAsync reads an index, and on a genuine first
+                // fetch there is nothing to read. That is safe here and only here: BlobKeys.Go
+                // embeds the org, so the bytes behind this key are reachable by no other tenant
+                // whatever the shared coordinate row says. A hit carries no new evidence at all.
+                upstreamUrl is not null
+                    ? CacheAccessOrigin.FirstFetchUnidentified
+                    : CacheAccessOrigin.CacheHit), ct);
         if (cacheArtifactId is not null)
         {
             // Increment per-tenant download counter and write global supply-chain facts.
@@ -880,9 +889,15 @@ public sealed class GoController : OrgScopedControllerBase
                 == BlockDecision.Blocked;
     }
 
+    // Integer columns bind as long, and [ExplicitConstructor] is what lets one signature serve
+    // both providers — SQLite reports INTEGER as Int64, Postgres as Int32, and Dapper's default
+    // positional-record binding demands an exact CLR match. See
+    // DapperPositionalRecordComplianceTests.
+    [method: Dapper.ExplicitConstructor]
     private sealed record GoVersionBytesRow(string? ChecksumSha256, long SizeBytes);
 
     // Holds content hash and size resolved from the global cache plane for proxy .zip metadata.
+    [method: Dapper.ExplicitConstructor]
     private sealed record GoZipCacheRow(string? ContentHash, long SizeBytes);
 
     // ── Helpers ──────────────────────────────────────────────────────────────

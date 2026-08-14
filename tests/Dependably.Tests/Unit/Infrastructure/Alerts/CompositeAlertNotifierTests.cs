@@ -7,8 +7,8 @@ namespace Dependably.Tests.Unit.Infrastructure.Alerts;
 /// <summary>
 /// <see cref="CompositeAlertNotifier"/> fans a raised alert out to every registered channel. The
 /// partial-failure case — one channel throwing — must never suppress delivery to the others,
-/// since <see cref="IAlertNotifier.Notify"/> is meant to be a fire-and-forget enqueue and a bug in
-/// one channel's queue must not silently swallow Slack (or vice versa) alongside it.
+/// since <see cref="IAlertNotifier.NotifyAsync"/> is meant to queue rather than deliver, and a bug
+/// (or a database failure in the durable email outbox) must not silently swallow Slack alongside it.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class CompositeAlertNotifierTests
@@ -23,54 +23,62 @@ public sealed class CompositeAlertNotifierTests
     private sealed class RecordingNotifier : IAlertNotifier
     {
         public int Calls { get; private set; }
-        public void Notify(AlertRecord alert) => Calls++;
+
+        public Task NotifyAsync(AlertRecord alert, CancellationToken ct = default)
+        {
+            Calls++;
+            return Task.CompletedTask;
+        }
     }
 
+    /// <summary>Throws from the awaited body, the shape a failed durable outbox write takes.</summary>
     private sealed class ThrowingNotifier : IAlertNotifier
     {
         public int Calls { get; private set; }
-        public void Notify(AlertRecord alert)
+
+        public async Task NotifyAsync(AlertRecord alert, CancellationToken ct = default)
         {
             Calls++;
+            await Task.Yield();
             throw new InvalidOperationException("channel exploded");
         }
     }
 
     [Fact]
-    public void Notify_FansToEachChildExactlyOnce()
+    public async Task NotifyAsync_FansToEachChildExactlyOnce()
     {
         var slack = new RecordingNotifier();
         var email = new RecordingNotifier();
         var composite = new CompositeAlertNotifier([slack, email], NullLogger<CompositeAlertNotifier>.Instance);
 
-        composite.Notify(SampleAlert());
+        await composite.NotifyAsync(SampleAlert());
 
         Assert.Equal(1, slack.Calls);
         Assert.Equal(1, email.Calls);
     }
 
     [Fact]
-    public void Notify_OneChildThrows_OtherChannelStillNotified()
+    public async Task NotifyAsync_OneChildThrows_OtherChannelStillNotified()
     {
         var throwing = new ThrowingNotifier();
         var recording = new RecordingNotifier();
         var composite = new CompositeAlertNotifier([throwing, recording], NullLogger<CompositeAlertNotifier>.Instance);
 
-        // Must not throw back to the caller — AlertService treats Notify as fire-and-forget.
-        composite.Notify(SampleAlert());
+        // Must not throw back to the caller — AlertService treats notification as best-effort.
+        await composite.NotifyAsync(SampleAlert());
 
         Assert.Equal(1, throwing.Calls);
         Assert.Equal(1, recording.Calls);
     }
 
     [Fact]
-    public void Notify_OrderReversed_ThrowingChannelSecond_FirstChannelStillNotified()
+    public async Task NotifyAsync_OrderReversed_ThrowingChannelSecond_FirstChannelStillNotified()
     {
         var recording = new RecordingNotifier();
         var throwing = new ThrowingNotifier();
         var composite = new CompositeAlertNotifier([recording, throwing], NullLogger<CompositeAlertNotifier>.Instance);
 
-        composite.Notify(SampleAlert());
+        await composite.NotifyAsync(SampleAlert());
 
         Assert.Equal(1, recording.Calls);
         Assert.Equal(1, throwing.Calls);

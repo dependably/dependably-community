@@ -229,6 +229,93 @@ public sealed partial class SamlAcsHardeningTests : IClassFixture<DependablyFact
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
     }
 
+    // ── Signature enforcement ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// An assertion with its signature stripped mints no session. Signature enforcement is the
+    /// property the whole SAML trust model rests on — accepting an unsigned assertion is account
+    /// takeover for every account in the tenant, since the response body is entirely
+    /// attacker-authored. Nothing in <c>Saml2Configuration</c> declares the requirement, so this
+    /// test (with <see cref="SamlSignaturePolicy"/>, the SP-side precondition it exercises) is
+    /// what stops a dependency bump or a config refactor from relaxing it silently.
+    /// </summary>
+    [Fact]
+    public async Task Acs_UnsignedResponse_Returns401_AndIssuesNoSession()
+    {
+        string requestId = "_" + Guid.NewGuid().ToString("N");
+        await IssuePendingRequestAsync(requestId);
+
+        // Identical to the response the happy-path test posts, minus the ds:Signature element —
+        // so a 200/redirect here would mean the signature was the only thing being relied on.
+        string samlResponse = StripSignatures(
+            BuildSignedSamlResponse(inResponseTo: requestId, nameId: UniqueNameId()));
+
+        using var client = CreateNoRedirectClient();
+        var resp = await PostAcsAsync(client, samlResponse);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
+        AssertNoSessionCookie(resp);
+    }
+
+    /// <summary>
+    /// A fully-formed, correctly-signed assertion signed by a key the tenant has not pinned is
+    /// refused. This is the other half of signature enforcement: a signature that is merely
+    /// present and internally consistent proves nothing, because an attacker can always sign
+    /// their own forgery.
+    /// </summary>
+    [Fact]
+    public async Task Acs_ResponseSignedByUnpinnedKey_Returns401_AndIssuesNoSession()
+    {
+        string requestId = "_" + Guid.NewGuid().ToString("N");
+        await IssuePendingRequestAsync(requestId);
+
+        using var rsa = RSA.Create(2048);
+        var req = new CertificateRequest("CN=acs-test-rogue-idp", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        // now-ok: ITfoxtec validates the signing-cert window against the real clock inside the
+        // host, so the rogue cert must be inside its validity period — the point of the test is
+        // that the KEY is not the pinned one, not that the cert has expired.
+        using var rogueCert = req.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365));
+
+        string samlResponse = BuildSignedSamlResponse(
+            inResponseTo: requestId, nameId: UniqueNameId(), signingCert: rogueCert);
+
+        using var client = CreateNoRedirectClient();
+        var resp = await PostAcsAsync(client, samlResponse);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
+        AssertNoSessionCookie(resp);
+    }
+
+    private static void AssertNoSessionCookie(HttpResponseMessage resp)
+    {
+        var setCookies = resp.Headers
+            .Where(h => h.Key.Equals("Set-Cookie", StringComparison.OrdinalIgnoreCase))
+            .SelectMany(h => h.Value)
+            .ToList();
+        Assert.DoesNotContain(setCookies, c => c.Contains("dependably_session"));
+    }
+
+    /// <summary>
+    /// Removes every XML-DSig Signature element from a base64 SAML response, leaving the rest of
+    /// the document byte-for-byte as the IdP built it.
+    /// </summary>
+    private static string StripSignatures(string base64SamlResponse)
+    {
+        var doc = new System.Xml.XmlDocument { PreserveWhitespace = true };
+        doc.LoadXml(System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(base64SamlResponse)));
+
+        var signatures = doc.DocumentElement!.GetElementsByTagName(
+            "Signature", "http://www.w3.org/2000/09/xmldsig#");
+        foreach (var node in signatures.Cast<System.Xml.XmlNode>().ToList())
+        {
+            node.ParentNode!.RemoveChild(node);
+        }
+
+        Assert.Empty(doc.DocumentElement.GetElementsByTagName(
+            "Signature", "http://www.w3.org/2000/09/xmldsig#").Cast<System.Xml.XmlNode>());
+        return Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(doc.OuterXml));
+    }
+
     // ── IdP-side signed-response construction ──────────────────────────────────
 
     /// <summary>
@@ -237,12 +324,13 @@ public sealed partial class SamlAcsHardeningTests : IClassFixture<DependablyFact
     /// Success, NameID in email format. When <paramref name="inResponseTo"/> is null the response
     /// carries no InResponseTo (unsolicited).
     /// </summary>
-    private string BuildSignedSamlResponse(string? inResponseTo, string nameId)
+    private string BuildSignedSamlResponse(
+        string? inResponseTo, string nameId, X509Certificate2? signingCert = null)
     {
         var idpConfig = new Saml2Configuration
         {
             Issuer = IdpEntityId,
-            SigningCertificate = _idpCert,
+            SigningCertificate = signingCert ?? _idpCert,
         };
 
         var response = new Saml2AuthnResponse(idpConfig)

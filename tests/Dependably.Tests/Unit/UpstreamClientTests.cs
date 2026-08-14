@@ -441,7 +441,7 @@ public class UpstreamClientTests : IAsyncLifetime
             LastAccessedAt = TestTime.Frozen().GetUtcNow().AddDays(-30)
         });
         await new TenantArtifactAccessRepository(_db).UpsertAsync(
-            orgId, artifact.Id, TestTime.Frozen().GetUtcNow());
+            orgId, artifact.Id, TestTime.Frozen().GetUtcNow(), TenantContentBinding.None);
         return artifact.Id;
     }
 
@@ -835,11 +835,17 @@ public class UpstreamClientTests : IAsyncLifetime
         var clock = TestTime.Frozen();
         var evictionStore = new SelectiveFailingDeleteBlobStore(store, failKey: keptBlobKey);
         var evictionCacheArtifacts = new CacheArtifactRepository(_db);
+        var evictionTiered = new TieredBlobStorage(evictionStore, store);
         var eviction = new CacheEvictionService(
-            evictionCacheArtifacts,
-            new TieredBlobStorage(evictionStore, store),
-            new Dependably.Infrastructure.CacheOrphanBlobDeleter(
-                evictionCacheArtifacts, new Dependably.Infrastructure.CacheBlobKeyLock()),
+            new CacheEvictionService.Dependencies(
+                evictionCacheArtifacts,
+                evictionTiered,
+                new Dependably.Infrastructure.CacheOrphanBlobDeleter(
+                    evictionCacheArtifacts, new Dependably.Infrastructure.CacheBlobKeyLock()),
+                new Dependably.Infrastructure.TenantArtifactAccessRepository(_db),
+                new Dependably.Infrastructure.PackageRepository(_db, time: clock),
+                new Dependably.Protocol.OciOrphanBlobDeleter(
+                    _db, evictionTiered, new Dependably.Protocol.OciBlobKeyLock())),
             new ConfigurationBuilder()
                 .AddInMemoryCollection(new Dictionary<string, string?> { ["CACHE_MAX_AGE_DAYS"] = "7" })
                 .Build(),

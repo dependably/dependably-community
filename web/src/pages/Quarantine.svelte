@@ -48,6 +48,9 @@
   // Id of the row whose detail is expanded, and of the row whose "…" menu is open.
   let expandedId = null
   let openActionsId = null
+  // Request sequence — page/filter/search changes can fire overlapping loads; a response whose
+  // token no longer matches the latest issued request is stale and must not overwrite newer state.
+  let seq = 0
 
   function sync() {
     writeQuery(
@@ -56,6 +59,7 @@
   }
 
   async function load() {
+    const mine = ++seq
     loading = true; error = ''
     // An expansion and an open row menu are both anchored to a row of the page being replaced.
     expandedId = null; openActionsId = null
@@ -66,10 +70,15 @@
       if (filterGate) params.gate = filterGate
       if (search) params.search = search
       const resp = await api.getQuarantine(params)
+      if (mine !== seq) return
       items = resp.items
       total = resp.total
-    } catch (e) { error = extractErrorMessage(e) }
-    finally { loading = false }
+    } catch (e) {
+      if (mine !== seq) return
+      error = extractErrorMessage(e)
+    } finally {
+      if (mine === seq) loading = false
+    }
   }
 
   function onPageChange(e) { page = e.detail.page; sync(); load() }

@@ -67,6 +67,13 @@ describe('format — store-pattern proof', () => {
     expect(fmt(1.5 * 1024 * 1024)).toBe('1.5 MB')
   })
 
+  it('formatBytes renders TB and PB for sizes at and above 1024 GB instead of clamping to GB', () => {
+    const fmt = get(formatBytes)
+    expect(fmt(1024 * 1024 * 1024 * 1024)).toBe('1 TB')
+    expect(fmt(2 * 1024 * 1024 * 1024 * 1024)).toBe('2 TB')
+    expect(fmt(1024 * 1024 * 1024 * 1024 * 1024)).toBe('1 PB')
+  })
+
   it('formatNumber renders 0 for null/undefined and groups thousands', () => {
     const fmt = get(formatNumber)
     expect(fmt(null)).toBe('0')

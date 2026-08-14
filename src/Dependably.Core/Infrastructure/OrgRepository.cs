@@ -573,14 +573,61 @@ public sealed class OrgRepository
     }
 
     /// <summary>
+    /// Bumps <c>token_version</c> and rotates <c>security_stamp</c> for every password-backed
+    /// user in a tenant — the session-invalidation counterpart to flipping the tenant to
+    /// SSO-only (<c>forms_login_enabled</c> true→false). Scoped to a non-empty
+    /// <c>password_hash</c> rather than every member: JIT-provisioned SAML users are seeded with
+    /// <c>password_hash = ''</c> (see <c>LoginService.ProvisionJitUserAsync</c>), not NULL, and
+    /// that empty-vs-populated distinction is the same one <c>TryLoginViaEmailLinkAsync</c> uses
+    /// to tell a password-backed account from an SSO-only one — so passwordless members are
+    /// never touched here and their outstanding SSO sessions are left alone. Only sessions that
+    /// were minted from the credential the flip is closing are cut off. Returns the number of
+    /// affected users so the caller can record how many sessions it revoked. A no-op write (flag
+    /// left unchanged) never reaches this method, so an unrelated settings save never churns
+    /// <c>token_version</c>.
+    /// </summary>
+    public async Task<int> RevokePasswordSessionsAsync(string orgId, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+
+        var affectedIds = (await conn.QueryAsync<string>(
+            "SELECT id FROM users WHERE tenant_id = @orgId AND password_hash IS NOT NULL AND password_hash != ''",
+            new { orgId })).ToList();
+
+        if (affectedIds.Count == 0)
+        {
+            return 0;
+        }
+
+        string stamp = Guid.NewGuid().ToString();
+        int rows = await conn.ExecuteAsync(
+            """
+            UPDATE users SET token_version = token_version + 1, security_stamp = @stamp
+            WHERE tenant_id = @orgId AND password_hash IS NOT NULL AND password_hash != ''
+            """,
+            new { orgId, stamp });
+
+        if (_tokenVersions is not null)
+        {
+            foreach (string userId in affectedIds)
+            {
+                _tokenVersions.Invalidate(userId);
+            }
+        }
+
+        return rows;
+    }
+
+    /// <summary>
     /// Erases a user from a tenant. With 1:1 user:tenant, "remove member" is a full account erasure.
     /// A bare <c>DELETE FROM users</c> is neither complete nor reliable: seven columns across other
     /// tables carry a restrict FK to <c>users(id)</c>, so deleting a user who ever invited a
     /// colleague, reserved a namespace, decided a quarantine, dismissed an alert, created a claim,
     /// or allowlisted an install script would throw a foreign-key violation (an unhandled 500 during
-    /// routine offboarding); and several tables with no FK (audit_log, activity, mfa_trusted_devices,
-    /// login_attempts) would otherwise retain the person's IPs, device fingerprints, a still-valid
-    /// trusted-device credential, and email-derived hashes after the account is gone.
+    /// routine offboarding); and several tables with no FK (audit_log, audit_event, activity,
+    /// mfa_trusted_devices, login_attempts) would otherwise retain the person's IPs, device
+    /// fingerprints, a still-valid trusted-device credential, and email-derived hashes after the
+    /// account is gone.
     ///
     /// This runs the whole erasure in one transaction:
     ///   * deletes invites the user created (created_by is NOT NULL + restrict, so it cannot be
@@ -591,7 +638,8 @@ public sealed class OrgRepository
     ///   * revokes the user's trusted-device rows (a remembered-device cookie is a separate live
     ///     credential that must not outlive the account — Art. 32);
     ///   * pseudonymizes retained forensic rows (drops source_ip / detail linking to the actor in
-    ///     activity and the tenant's audit_log);
+    ///     activity and the tenant's audit_log, and source_ip / user_agent in the tenant's
+    ///     audit_event rows);
     ///   * clears the login_attempts and account_send_throttle rows keyed by
     ///     <paramref name="loginAttemptKey"/>;
     ///   * deletes the user row (cascading user_tokens, password_reset_tokens, external_identities,
@@ -648,6 +696,14 @@ public sealed class OrgRepository
             new { orgId, userId }, transaction: tx, cancellationToken: ct));
         await conn.ExecuteAsync(new CommandDefinition(
             "UPDATE audit_log SET source_ip = NULL, detail = NULL WHERE org_id = @orgId AND actor_id = @userId",
+            new { orgId, userId }, transaction: tx, cancellationToken: ct));
+        // audit_event's structured counterpart to audit_log: same pseudonymization, adapted to its
+        // own columns (source_ip/user_agent, no detail/payload equivalent worth dropping — payload
+        // is never given raw email/IP, only hashed or structural fields). actor_type = 'user'
+        // scopes the match to this subject: actor_id is not FK-bound to users, so an api_token or
+        // system row could in principle carry the same id string.
+        await conn.ExecuteAsync(new CommandDefinition(
+            "UPDATE audit_event SET source_ip = NULL, user_agent = NULL WHERE org_id = @orgId AND actor_id = @userId AND actor_type = 'user'",
             new { orgId, userId }, transaction: tx, cancellationToken: ct));
 
         // Clear the lockout throttle and send-throttle rows. loginAttemptKey is
@@ -752,8 +808,12 @@ public sealed class OrgRepository
 
     /// <summary>
     /// Counts active (non-expired, non-revoked) tokens for the given org across both
-    /// <c>user_tokens</c> and <c>service_tokens</c>. Used by the token-cap enforcement in
-    /// <see cref="TokenRepository"/> before issuing a new token.
+    /// <c>user_tokens</c> and <c>service_tokens</c> — a point-in-time read for reporting.
+    ///
+    /// <para>It is <em>not</em> how the cap is enforced, and must not become that: a count read
+    /// here and an insert issued afterwards is a check-then-act that concurrent creates all pass.
+    /// <see cref="TokenRepository"/> counts and inserts inside one per-tenant serialized
+    /// transaction, which is the only place the ceiling actually holds.</para>
     /// </summary>
     public async Task<int> CountActiveTokensAsync(string orgId, CancellationToken ct = default)
     {
@@ -773,14 +833,14 @@ public sealed class OrgRepository
     /// <summary>
     /// Returns the maximum number of active tokens allowed per tenant. Reads
     /// <c>instance_settings.max_active_tokens_per_tenant</c>, falling back to
-    /// <see cref="InstanceSettingDefaults.MaxActiveTokensPerTenant"/> when not set.
+    /// <see cref="InstanceSettingDefaults.MaxActiveTokensPerTenant"/> when not set. Shares its
+    /// parsing with the enforcing read in <see cref="TokenRepository"/> so the number reported
+    /// and the number enforced cannot drift.
     /// </summary>
     public async Task<int> GetMaxActiveTokensPerTenantAsync(CancellationToken ct = default)
     {
         string? raw = await GetInstanceSettingAsync("max_active_tokens_per_tenant", ct);
-        return raw is not null && int.TryParse(raw, out int cap) && cap > 0
-            ? cap
-            : int.Parse(InstanceSettingDefaults.MaxActiveTokensPerTenant);
+        return InstanceSettingDefaults.ParseMaxActiveTokensPerTenant(raw);
     }
 
     /// <summary>
@@ -825,8 +885,12 @@ public sealed class OrgRepository
 
 public sealed record OrgSettingsUpdate(
     string OrgId,
-    bool AnonymousPull,
-    bool AllowlistMode,
+    // Both gates are tri-state at the wire and two-state in storage: null = leave the stored
+    // value unchanged (falling back to the column default, 0, when there is no stored row yet),
+    // matching AirGapped / RequireMfa below. A partial PUT that omits allowlist_mode must not
+    // reset an enforcing allowlist to off as a side effect of writing an unrelated field.
+    bool? AnonymousPull,
+    bool? AllowlistMode,
     long? MaxUploadBytes,
     long? MaxUploadBytesPyPi,
     long? MaxUploadBytesNpm,

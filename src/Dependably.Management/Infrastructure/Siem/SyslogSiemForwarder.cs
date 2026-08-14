@@ -97,27 +97,42 @@ public sealed class SyslogSiemForwarder : ISiemForwarder
         await udp.SendAsync(bytes, _host, _port, ct);
     }
 
+    // Test seam (InternalsVisibleTo Dependably.Tests): the most recently constructed TLS
+    // stream, so a test can confirm SendTcpAsync disposes it even when the handshake or the
+    // write/flush after it fails — the instance is only useful for asserting disposed state
+    // (e.g. that a further operation on it throws ObjectDisposedException).
+    internal SslStream? LastSslStreamForTest { get; private set; }
+
     private async Task SendTcpAsync(byte[] bytes, bool useTls, CancellationToken ct)
     {
         using var tcp = new TcpClient();
         await tcp.ConnectAsync(_host, _port, ct);
-        Stream stream = tcp.GetStream();
-        if (useTls)
+        // Owns the socket for the rest of this method — disposed exactly once here regardless
+        // of how far the send gets, TLS or not.
+        await using var networkStream = tcp.GetStream();
+
+        if (!useTls)
         {
-            var ssl = new SslStream(stream, leaveInnerStreamOpen: false);
-            await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
-            {
-                TargetHost = _host,
-                EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13
-            }, ct);
-            stream = ssl;
+            await networkStream.WriteAsync(bytes, ct);
+            await networkStream.FlushAsync(ct);
+            return;
         }
-        await stream.WriteAsync(bytes, ct);
-        await stream.FlushAsync(ct);
-        if (stream is SslStream tlsStream)
+
+        // leaveInnerStreamOpen: true — networkStream's own `await using` above is what closes
+        // the socket; disposing the SslStream only needs to release its TLS session state, not
+        // race or double-close the inner stream. `await using` here guarantees that release runs
+        // even when AuthenticateAsClientAsync/WriteAsync/FlushAsync throws (bad/expired
+        // collector cert, TLS version mismatch, a peer reset mid-handshake or mid-write), where
+        // the previous unconditional end-of-method dispose was never reached.
+        await using var ssl = new SslStream(networkStream, leaveInnerStreamOpen: true);
+        LastSslStreamForTest = ssl;
+        await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
         {
-            await tlsStream.DisposeAsync();
-        }
+            TargetHost = _host,
+            EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13
+        }, ct);
+        await ssl.WriteAsync(bytes, ct);
+        await ssl.FlushAsync(ct);
     }
 
     /// <summary>

@@ -207,4 +207,43 @@ public sealed class SmtpTransportSettingsTests
         Assert.False(SmtpTransportSettings.SendsCredentialsInCleartextWhen("starttls", "user", hasPassword: true));
         Assert.False(SmtpTransportSettings.SendsCredentialsInCleartextWhen(null, "user", hasPassword: true));
     }
+
+    // ── IsEncrypted (#539: message-content cleartext gate) ──────────────────
+
+    [Theory]
+    [InlineData("starttls")]
+    [InlineData("STARTTLS")]
+    [InlineData("ssl")]
+    [InlineData("SSL")]
+    public void IsEncrypted_True_ForStartTlsOrSsl(string security)
+    {
+        Assert.True(Build(security: security).IsEncrypted);
+    }
+
+    [Fact]
+    public void IsEncrypted_False_ForNone()
+    {
+        Assert.False(Build(security: "none").IsEncrypted);
+    }
+
+    /// <summary>Fail-closed on an unrecognized value: <see cref="SmtpTransportSettings.IsEncrypted"/>
+    /// is a positive allowlist, not "anything that isn't none".</summary>
+    [Theory]
+    [InlineData("tls-magic")]
+    [InlineData("")]
+    [InlineData(null)]
+    public void IsEncrypted_False_ForUnrecognizedOrMissingValue(string? security)
+    {
+        Assert.False(Build(security: security!).IsEncrypted);
+    }
+
+    [Fact]
+    public void IsEncryptedSecurity_MatchesTheInstanceProperty()
+    {
+        Assert.True(SmtpTransportSettings.IsEncryptedSecurity("starttls"));
+        Assert.True(SmtpTransportSettings.IsEncryptedSecurity("ssl"));
+        Assert.False(SmtpTransportSettings.IsEncryptedSecurity("none"));
+        Assert.False(SmtpTransportSettings.IsEncryptedSecurity("bogus"));
+        Assert.False(SmtpTransportSettings.IsEncryptedSecurity(null));
+    }
 }

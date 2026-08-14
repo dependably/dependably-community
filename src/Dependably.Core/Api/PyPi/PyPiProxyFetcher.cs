@@ -82,7 +82,11 @@ public sealed class PyPiProxyFetcher(
             string version = pkgVersions?.Version.Version ?? parsed.Version;
             var cacheAccess = new CacheAccess(
                 gate.OrgId, "pypi", purlName, version, file,
-                fetched.Blob.Sha256Hex, fetched.Blob.SizeBytes, fetched.Blob.BlobKey, upstreamUrl);
+                fetched.Blob.Sha256Hex, fetched.Blob.SizeBytes, fetched.Blob.BlobKey, upstreamUrl,
+                // The hash is this request's own over the bytes it just staged and verified,
+                // whether or not the content-addressed blob store already held them, so this is a
+                // fetch for binding purposes on both the hit and miss branches below.
+                CacheAccessOrigin.FirstFetch);
 
             if (pkgVersions is null)
             {
@@ -252,8 +256,10 @@ public sealed class PyPiProxyFetcher(
             // (license extraction, response body) open a fresh blob-store stream via
             // the BlobHandle. SizeBytes is read from the seekable stream's Length when
             // available (LocalBlobStore → FileStream); remote backends that hand back
-            // a non-seekable network stream leave SizeBytes at 0, which the cache_artifact
-            // recorder tolerates (best-effort, not load-bearing for the proxy fetch).
+            // a non-seekable network stream leave SizeBytes at 0. That 0 means "not measured",
+            // not "zero bytes": CacheAccessRecorder.BindingFor declines to bind a non-positive
+            // size for exactly that reason, so it cannot shadow the coordinate's recorded size
+            // and be served as this tenant's HEAD Content-Length.
             string blobKey = BlobKeys.Proxy(knownSha256);
             // blobKey is BlobKeys.Proxy of a 64-char hex SHA-256 (no user input); upstreamUrl is operator-configured; Serilog structured rendering prevents log injection.
             var (stream, isHit) = await upstream.GetOrFetchStreamAsync(

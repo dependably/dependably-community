@@ -15,6 +15,7 @@ internal static class PyPiConstants
     internal const int CdnPrefixLength = 2;
     internal const int CdnSecondSegmentStart = 2;
     internal const int CdnSecondSegmentEnd = 4;
+    internal const int CdnSha256Length = 64;
 
     // SHA-256 hex digest prefix length used for ETags (16 hex chars = 64 bits of entropy).
     internal const int ETagHexPrefixLength = 16;

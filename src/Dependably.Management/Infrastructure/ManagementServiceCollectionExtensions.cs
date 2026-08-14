@@ -26,7 +26,12 @@ public static class ManagementServiceCollectionExtensions
     /// </summary>
     public static IServiceCollection AddDependablyManagementRepositories(this IServiceCollection services)
     {
-        services.AddSingleton<JwtRevocationRepository>();
+        // Negative-result cache dropped when this deployment has peer replicas, so a
+        // logout binds on every replica's next request — see SessionRevocationCachePolicy.
+        services.AddSingleton(sp => new JwtRevocationRepository(
+            sp.GetRequiredService<IMetadataStore>(),
+            SessionRevocationCachePolicy.SessionCacheOrNull(sp),
+            sp.GetRequiredService<TimeProvider>()));
         services.AddSingleton<OrgSettingsRepository>();
         services.AddSingleton<SystemAdminRepository>();
         services.AddSingleton<PackageAnalyticsRepository>();
@@ -162,13 +167,32 @@ public static class ManagementServiceCollectionExtensions
             return new InstanceSmtpConfig(orgs.GetInstanceSettingAsync, time);
         });
 
-        // Resolves an org's effective alert-email transport (own SMTP or instance inheritance);
-        // depends on both the per-org settings repository and the instance resolver above.
+        // Resolves whether an org's alert-email channel can deliver and to whom: its gate and
+        // recipient list, carried over the one instance-level transport resolved above.
         services.AddSingleton<EffectiveEmailConfigResolver>();
 
         services.AddSingleton<EmailDeliveryQueue>();
         services.AddHostedService(sp => sp.GetRequiredService<EmailDeliveryQueue>());
         services.AddSingleton<TransactionalEmailService>();
+
+        // The durable outbox behind alert email: the bounds, the store, and the delivery worker
+        // (registered as both the hosted service and the singleton AlertEmailQueue nudges after a
+        // successful enqueue). Deliberately separate from EmailDeliveryQueue above, which keeps
+        // carrying credential-bearing mail on its in-memory, fail-silent path.
+        //
+        // EmailTransportBreaker is process-local, in-memory state over the ONE shared SMTP transport
+        // (see its own doc comment for why that is the deliberate choice for a Postgres multi-replica
+        // deployment too). A singleton, not scoped: it is exactly one fact per process, read and
+        // written only by EmailOutboxDeliveryService's single background loop.
+        services.AddSingleton<EmailTransportBreaker>();
+        services.AddSingleton<EmailOutboxPolicy>();
+        services.AddSingleton<EmailOutboxRepository>();
+        services.AddSingleton<EmailOutboxDeliveryService>();
+        services.AddHostedService(sp => sp.GetRequiredService<EmailOutboxDeliveryService>());
+
+        // The operator's aggregate relay-health surface: per-tenant alert_settings health rows plus
+        // the outbox backlog, read together so a single request answers "is the shared relay okay".
+        services.AddSingleton<RelayHealthAggregator>();
         return services;
     }
 
@@ -202,9 +226,29 @@ public static class ManagementServiceCollectionExtensions
             : null;
 
     /// <summary>
+    /// Per-attempt HTTP timeout for outbound webhook deliveries. Left unset, the typed client
+    /// takes <see cref="HttpClient"/>'s own default of 100 seconds, so a subscriber endpoint that
+    /// accepts the connection and never answers holds each of the four delivery attempts for that
+    /// long — a trivial slow-loris listener on a public IP, which the SSRF guard has no reason to
+    /// block. The bound is what makes the dispatch queue's per-envelope fair-share budget
+    /// meaningful: without it a single attempt can outlast the whole budget.
+    /// </summary>
+    private const int WebhookHttpTimeoutSeconds = 15;
+
+    /// <summary>
+    /// Per-attempt HTTP timeout for the Slack incoming-webhook client, bounded well below the
+    /// 1s/5s/30s retry-backoff budget it runs inside, for the same reason as
+    /// <see cref="WebhookHttpTimeoutSeconds"/>. Shared by <see cref="AlertSlackQueue"/> and
+    /// <see cref="Dependably.Infrastructure.SystemEvents.SystemSlackQueue"/>, which use the same
+    /// typed client.
+    /// </summary>
+    private const int SlackHttpTimeoutSeconds = 10;
+
+    /// <summary>
     /// Registers the per-org webhook dispatcher: <see cref="WebhookDeliveryClient"/> (typed
-    /// HTTP client with SSRF connect-time guard), <see cref="WebhookDispatchQueue"/> as both
-    /// the <see cref="IPackageEventSink"/> singleton and a hosted background service.
+    /// HTTP client with SSRF connect-time guard and an explicit
+    /// <see cref="WebhookHttpTimeoutSeconds"/> per-attempt timeout), <see cref="WebhookDispatchQueue"/>
+    /// as both the <see cref="IPackageEventSink"/> singleton and a hosted background service.
     ///
     /// <c>WEBHOOK_ALLOW_PRIVATE</c> defaults to <c>false</c> — tenant-user-supplied URLs are
     /// higher risk than operator SIEM URLs. Loopback, link-local, and cloud-metadata ranges
@@ -221,7 +265,8 @@ public static class ManagementServiceCollectionExtensions
             : SsrfGuard.IsBlockedIp;
 
         var webhookCallback = new SsrfConnectCallback(ssrfPredicate);
-        services.AddHttpClient<WebhookDeliveryClient>()
+        services.AddHttpClient<WebhookDeliveryClient>(
+                client => client.Timeout = TimeSpan.FromSeconds(WebhookHttpTimeoutSeconds))
             .ConfigurePrimaryHttpMessageHandler(_ => new SocketsHttpHandler
             {
                 AllowAutoRedirect = false,
@@ -248,6 +293,9 @@ public static class ManagementServiceCollectionExtensions
     ///
     /// Reuses <c>WEBHOOK_ALLOW_PRIVATE</c> (default <c>false</c>) — a Slack webhook URL is a
     /// tenant-user-supplied value with the same SSRF risk profile as a generic outbound webhook.
+    /// The typed client carries an explicit <see cref="SlackHttpTimeoutSeconds"/> per-attempt
+    /// timeout so an org-configured URL pointing at an unresponsive endpoint cannot hold a
+    /// delivery worker for the <see cref="HttpClient"/> default of 100 seconds per attempt.
     /// </summary>
     public static IServiceCollection AddDependablyAlertNotifier(
         this IServiceCollection services, IConfiguration config)
@@ -260,7 +308,8 @@ public static class ManagementServiceCollectionExtensions
             : SsrfGuard.IsBlockedIp;
 
         var slackCallback = new SsrfConnectCallback(ssrfPredicate);
-        services.AddHttpClient<SlackWebhookClient>()
+        services.AddHttpClient<SlackWebhookClient>(
+                client => client.Timeout = TimeSpan.FromSeconds(SlackHttpTimeoutSeconds))
             .ConfigurePrimaryHttpMessageHandler(_ => new SocketsHttpHandler
             {
                 AllowAutoRedirect = false,

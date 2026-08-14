@@ -1,5 +1,6 @@
 using Dependably.Infrastructure.Mail;
 using Dependably.Tests.Infrastructure;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.Logging;
@@ -220,6 +221,16 @@ public sealed class EmailDeliveryQueueTests
         return new InstanceSmtpConfig(Reader, clock);
     }
 
+    private static IConfiguration Cfg(params (string Key, string? Value)[] entries) =>
+        new ConfigurationBuilder()
+            .AddInMemoryCollection(entries.Select(e => new KeyValuePair<string, string?>(e.Key, e.Value)))
+            .Build();
+
+    private static IConfiguration NoOverride() => Cfg();
+
+    private static IConfiguration AllowInsecureOverride() =>
+        Cfg((CredentialMailPolicy.AllowInsecureEnvVar, "true"));
+
     [Fact]
     public async Task PasswordResetEmailJob_InstanceNotConfigured_ResolveReturnsNull()
     {
@@ -227,7 +238,7 @@ public sealed class EmailDeliveryQueueTests
         var instance = BuildInstance([], clock);
         var job = new PasswordResetEmailJob(
             "user@example.com", "https://example.com/reset?token=abc", clock.GetUtcNow().AddMinutes(30),
-            instance, RealLocalizer(), NullLogger.Instance);
+            instance, allowInsecureCredentialMail: false, RealLocalizer(), NullLogger.Instance);
 
         var resolved = await job.ResolveAsync(CancellationToken.None);
 
@@ -243,11 +254,13 @@ public sealed class EmailDeliveryQueueTests
             ["smtp_enabled"] = "0",
             ["smtp_host"] = "smtp.example.com",
             ["smtp_from_address"] = "noreply@example.com",
-            ["smtp_security"] = "none",
+            ["smtp_security"] = "starttls",
+            ["smtp_username"] = "user",
+            ["smtp_password"] = "pass",
         }, clock);
         var job = new PasswordResetEmailJob(
             "user@example.com", "https://example.com/reset?token=abc", clock.GetUtcNow().AddMinutes(30),
-            instance, RealLocalizer(), NullLogger.Instance);
+            instance, allowInsecureCredentialMail: false, RealLocalizer(), NullLogger.Instance);
 
         var resolved = await job.ResolveAsync(CancellationToken.None);
 
@@ -263,17 +276,122 @@ public sealed class EmailDeliveryQueueTests
             ["smtp_enabled"] = "1",
             ["smtp_host"] = "smtp.example.com",
             ["smtp_from_address"] = "noreply@example.com",
-            ["smtp_security"] = "none",
+            ["smtp_security"] = "starttls",
+            ["smtp_username"] = "user",
+            ["smtp_password"] = "pass",
         }, clock);
         var job = new PasswordResetEmailJob(
             "user@example.com", "https://example.com/reset?token=abc", clock.GetUtcNow().AddMinutes(30),
-            instance, RealLocalizer(), NullLogger.Instance);
+            instance, allowInsecureCredentialMail: false, RealLocalizer(), NullLogger.Instance);
 
         var resolved = await job.ResolveAsync(CancellationToken.None);
 
         Assert.NotNull(resolved);
         Assert.Equal("smtp.example.com", resolved.Value.Transport.Host);
         Assert.Equal(["user@example.com"], resolved.Value.Recipients);
+    }
+
+    // ── PasswordResetEmailJob: credential-mail cleartext refusal (#539) ─────
+
+    /// <summary>
+    /// The core regression: a reset link is a live credential, so an instance configured with
+    /// <c>security=none</c> must not deliver it, absent the explicit override. This is the case
+    /// that fails on the pre-fix code (which resolved successfully for any enabled+configured
+    /// transport regardless of encryption).
+    /// </summary>
+    [Fact]
+    public async Task PasswordResetEmailJob_CleartextTransport_NoOverride_ResolveReturnsNull()
+    {
+        var clock = TestTime.Frozen();
+        var instance = BuildInstance(new Dictionary<string, string?>
+        {
+            ["smtp_enabled"] = "1",
+            ["smtp_host"] = "smtp.example.com",
+            ["smtp_from_address"] = "noreply@example.com",
+            ["smtp_security"] = "none",
+        }, clock);
+        var job = new PasswordResetEmailJob(
+            "user@example.com", "https://example.com/reset?token=abc", clock.GetUtcNow().AddMinutes(30),
+            instance, allowInsecureCredentialMail: CredentialMailPolicy.AllowsInsecure(NoOverride()),
+            RealLocalizer(), NullLogger.Instance);
+
+        var resolved = await job.ResolveAsync(CancellationToken.None);
+
+        Assert.Null(resolved);
+    }
+
+    /// <summary>Adversarial twin of the refusal test: with the override set, the same cleartext
+    /// transport IS used — the gate is opt-in-able, not an unconditional block.</summary>
+    [Fact]
+    public async Task PasswordResetEmailJob_CleartextTransport_WithOverride_ResolveSucceeds()
+    {
+        var clock = TestTime.Frozen();
+        var instance = BuildInstance(new Dictionary<string, string?>
+        {
+            ["smtp_enabled"] = "1",
+            ["smtp_host"] = "smtp.example.com",
+            ["smtp_from_address"] = "noreply@example.com",
+            ["smtp_security"] = "none",
+        }, clock);
+        var job = new PasswordResetEmailJob(
+            "user@example.com", "https://example.com/reset?token=abc", clock.GetUtcNow().AddMinutes(30),
+            instance, allowInsecureCredentialMail: CredentialMailPolicy.AllowsInsecure(AllowInsecureOverride()),
+            RealLocalizer(), NullLogger.Instance);
+
+        var resolved = await job.ResolveAsync(CancellationToken.None);
+
+        Assert.NotNull(resolved);
+        Assert.Equal("smtp.example.com", resolved.Value.Transport.Host);
+    }
+
+    /// <summary>Second adversarial twin: an encrypted transport (<c>starttls</c>) needs no
+    /// override at all — the gate does not over-refuse.</summary>
+    [Theory]
+    [InlineData("starttls")]
+    [InlineData("ssl")]
+    public async Task PasswordResetEmailJob_EncryptedTransport_NoOverrideNeeded_ResolveSucceeds(string security)
+    {
+        var clock = TestTime.Frozen();
+        var instance = BuildInstance(new Dictionary<string, string?>
+        {
+            ["smtp_enabled"] = "1",
+            ["smtp_host"] = "smtp.example.com",
+            ["smtp_from_address"] = "noreply@example.com",
+            ["smtp_security"] = security,
+            ["smtp_username"] = "user",
+            ["smtp_password"] = "pass",
+        }, clock);
+        var job = new PasswordResetEmailJob(
+            "user@example.com", "https://example.com/reset?token=abc", clock.GetUtcNow().AddMinutes(30),
+            instance, allowInsecureCredentialMail: CredentialMailPolicy.AllowsInsecure(NoOverride()),
+            RealLocalizer(), NullLogger.Instance);
+
+        var resolved = await job.ResolveAsync(CancellationToken.None);
+
+        Assert.NotNull(resolved);
+    }
+
+    /// <summary>An unrecognized security value fails closed exactly like <c>none</c> — the gate
+    /// is a positive allowlist, not "anything that isn't none".</summary>
+    [Fact]
+    public async Task PasswordResetEmailJob_UnrecognizedSecurity_NoOverride_ResolveReturnsNull()
+    {
+        var clock = TestTime.Frozen();
+        var instance = BuildInstance(new Dictionary<string, string?>
+        {
+            ["smtp_enabled"] = "1",
+            ["smtp_host"] = "smtp.example.com",
+            ["smtp_from_address"] = "noreply@example.com",
+            ["smtp_security"] = "tls-magic",
+        }, clock);
+        var job = new PasswordResetEmailJob(
+            "user@example.com", "https://example.com/reset?token=abc", clock.GetUtcNow().AddMinutes(30),
+            instance, allowInsecureCredentialMail: CredentialMailPolicy.AllowsInsecure(NoOverride()),
+            RealLocalizer(), NullLogger.Instance);
+
+        var resolved = await job.ResolveAsync(CancellationToken.None);
+
+        Assert.Null(resolved);
     }
 
     [Fact]
@@ -283,13 +401,80 @@ public sealed class EmailDeliveryQueueTests
         var expiresAt = clock.GetUtcNow().AddMinutes(30);
         var job = new PasswordResetEmailJob(
             "user@example.com", "https://example.com/reset?token=abc123", expiresAt,
-            BuildInstance([], clock), RealLocalizer(), NullLogger.Instance);
+            BuildInstance([], clock), allowInsecureCredentialMail: false, RealLocalizer(), NullLogger.Instance);
 
         (string subject, string body) = job.Render();
 
         Assert.Contains("password", subject, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("https://example.com/reset?token=abc123", body);
         Assert.Contains(expiresAt.ToString("yyyy-MM-dd HH:mm"), body);
+    }
+
+    // ── EmailChangeVerificationJob: credential-mail cleartext refusal (#539) ─
+
+    [Fact]
+    public async Task EmailChangeVerificationJob_CleartextTransport_NoOverride_ResolveReturnsNull()
+    {
+        var clock = TestTime.Frozen();
+        var instance = BuildInstance(new Dictionary<string, string?>
+        {
+            ["smtp_enabled"] = "1",
+            ["smtp_host"] = "smtp.example.com",
+            ["smtp_from_address"] = "noreply@example.com",
+            ["smtp_security"] = "none",
+        }, clock);
+        var job = new EmailChangeVerificationJob(
+            "newaddress@example.com", "https://example.com/verify?token=abc", clock.GetUtcNow().AddMinutes(30),
+            instance, allowInsecureCredentialMail: CredentialMailPolicy.AllowsInsecure(NoOverride()),
+            RealLocalizer(), NullLogger.Instance);
+
+        var resolved = await job.ResolveAsync(CancellationToken.None);
+
+        Assert.Null(resolved);
+    }
+
+    [Fact]
+    public async Task EmailChangeVerificationJob_CleartextTransport_WithOverride_ResolveSucceeds()
+    {
+        var clock = TestTime.Frozen();
+        var instance = BuildInstance(new Dictionary<string, string?>
+        {
+            ["smtp_enabled"] = "1",
+            ["smtp_host"] = "smtp.example.com",
+            ["smtp_from_address"] = "noreply@example.com",
+            ["smtp_security"] = "none",
+        }, clock);
+        var job = new EmailChangeVerificationJob(
+            "newaddress@example.com", "https://example.com/verify?token=abc", clock.GetUtcNow().AddMinutes(30),
+            instance, allowInsecureCredentialMail: CredentialMailPolicy.AllowsInsecure(AllowInsecureOverride()),
+            RealLocalizer(), NullLogger.Instance);
+
+        var resolved = await job.ResolveAsync(CancellationToken.None);
+
+        Assert.NotNull(resolved);
+    }
+
+    [Fact]
+    public async Task EmailChangeVerificationJob_EncryptedTransport_NoOverrideNeeded_ResolveSucceeds()
+    {
+        var clock = TestTime.Frozen();
+        var instance = BuildInstance(new Dictionary<string, string?>
+        {
+            ["smtp_enabled"] = "1",
+            ["smtp_host"] = "smtp.example.com",
+            ["smtp_from_address"] = "noreply@example.com",
+            ["smtp_security"] = "starttls",
+            ["smtp_username"] = "user",
+            ["smtp_password"] = "pass",
+        }, clock);
+        var job = new EmailChangeVerificationJob(
+            "newaddress@example.com", "https://example.com/verify?token=abc", clock.GetUtcNow().AddMinutes(30),
+            instance, allowInsecureCredentialMail: CredentialMailPolicy.AllowsInsecure(NoOverride()),
+            RealLocalizer(), NullLogger.Instance);
+
+        var resolved = await job.ResolveAsync(CancellationToken.None);
+
+        Assert.NotNull(resolved);
     }
 
     // ── TransactionalEmailService: end-to-end through the shared queue ──────
@@ -301,7 +486,8 @@ public sealed class EmailDeliveryQueueTests
         var sender = new FakeMailSender();
         var queue = new EmailDeliveryQueue(sender, clock, NullLogger<EmailDeliveryQueue>.Instance);
         var instance = BuildInstance([], clock);
-        var service = new TransactionalEmailService(queue, instance, RealLocalizer(), NullLogger<TransactionalEmailService>.Instance);
+        var service = new TransactionalEmailService(
+            queue, instance, NoOverride(), RealLocalizer(), NullLogger<TransactionalEmailService>.Instance);
 
         using var cts = new CancellationTokenSource();
         _ = queue.StartAsync(cts.Token);
@@ -328,9 +514,81 @@ public sealed class EmailDeliveryQueueTests
             ["smtp_enabled"] = "1",
             ["smtp_host"] = "good.example.com",
             ["smtp_from_address"] = "noreply@example.com",
+            ["smtp_security"] = "starttls",
+            ["smtp_username"] = "user",
+            ["smtp_password"] = "pass",
+        }, clock);
+        var service = new TransactionalEmailService(
+            queue, instance, NoOverride(), RealLocalizer(), NullLogger<TransactionalEmailService>.Instance);
+
+        using var cts = new CancellationTokenSource();
+        _ = queue.StartAsync(cts.Token);
+
+        service.EnqueuePasswordReset("user@example.com", "https://example.com/reset?token=abc", clock.GetUtcNow().AddMinutes(30));
+
+        // now-ok: polling deadline awaiting real async completion of the queued delivery.
+        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(5);
+        while (sender.Calls < 1 && DateTimeOffset.UtcNow < deadline)
+        {
+            await Task.Delay(10);
+        }
+
+        try { await queue.StopAsync(CancellationToken.None); } catch { }
+
+        Assert.Equal(1, sender.Calls);
+        Assert.Equal(1, queue.DeliveredCount);
+    }
+
+    /// <summary>End-to-end proof through the real DI-shaped construction path (not just the job
+    /// in isolation): a cleartext instance transport with no override never reaches the sender,
+    /// exactly like an unconfigured instance does today.</summary>
+    [Fact]
+    public async Task TransactionalEmailService_CleartextTransport_NoOverride_NoSendAttempted()
+    {
+        var clock = TestTime.Frozen();
+        var sender = new FakeMailSender();
+        var queue = new EmailDeliveryQueue(sender, clock, NullLogger<EmailDeliveryQueue>.Instance);
+        var instance = BuildInstance(new Dictionary<string, string?>
+        {
+            ["smtp_enabled"] = "1",
+            ["smtp_host"] = "good.example.com",
+            ["smtp_from_address"] = "noreply@example.com",
             ["smtp_security"] = "none",
         }, clock);
-        var service = new TransactionalEmailService(queue, instance, RealLocalizer(), NullLogger<TransactionalEmailService>.Instance);
+        var service = new TransactionalEmailService(
+            queue, instance, NoOverride(), RealLocalizer(), NullLogger<TransactionalEmailService>.Instance);
+
+        using var cts = new CancellationTokenSource();
+        _ = queue.StartAsync(cts.Token);
+
+        service.EnqueuePasswordReset("user@example.com", "https://example.com/reset?token=abc", clock.GetUtcNow().AddMinutes(30));
+        await Task.Delay(200);
+
+        await cts.CancelAsync();
+        try { await queue.StopAsync(CancellationToken.None); } catch { }
+
+        Assert.Equal(0, sender.Calls);
+        Assert.Equal(0, queue.DeliveredCount);
+        Assert.Equal(0, queue.FailedCount);
+    }
+
+    /// <summary>Adversarial twin at the service level: with the override env var set, the same
+    /// cleartext instance transport delivers through the real shared queue.</summary>
+    [Fact]
+    public async Task TransactionalEmailService_CleartextTransport_WithOverride_DeliversViaSharedQueue()
+    {
+        var clock = TestTime.Frozen();
+        var sender = new FakeMailSender();
+        var queue = new EmailDeliveryQueue(sender, clock, NullLogger<EmailDeliveryQueue>.Instance);
+        var instance = BuildInstance(new Dictionary<string, string?>
+        {
+            ["smtp_enabled"] = "1",
+            ["smtp_host"] = "good.example.com",
+            ["smtp_from_address"] = "noreply@example.com",
+            ["smtp_security"] = "none",
+        }, clock);
+        var service = new TransactionalEmailService(
+            queue, instance, AllowInsecureOverride(), RealLocalizer(), NullLogger<TransactionalEmailService>.Instance);
 
         using var cts = new CancellationTokenSource();
         _ = queue.StartAsync(cts.Token);

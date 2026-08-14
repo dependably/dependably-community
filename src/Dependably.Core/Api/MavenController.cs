@@ -436,7 +436,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
 
         return coords.IsChecksumSidecar
             ? await ServeChecksumSidecarAsync(coords, row, ct)
-            : await ServePrimaryFromCacheAsync(orgId, coords, token?.UserId, row, ct);
+            : await ServePrimaryFromCacheAsync(orgId, coords, token?.UserId, token?.ActorKind, row, ct);
     }
 
     // Serves a Maven proxy artifact that was cached in the global plane (cache_artifact) rather
@@ -572,7 +572,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
     }
 
     private async Task<IActionResult> ServePrimaryFromCacheAsync(
-        string orgId, MavenCoordinates coords, string? actorId, MavenFileRow row, CancellationToken ct)
+        string orgId, MavenCoordinates coords, string? actorId, string? actorKind, MavenFileRow row, CancellationToken ct)
     {
         // 304 short-circuit: check the client's cached copy before opening the blob stream.
         string? uploadedEtag = row.ChecksumSha256 is not null ? $"\"sha256:{row.ChecksumSha256}\"" : null;
@@ -601,6 +601,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
         await _svc.Audit.LogActivityAsync(
             orgId, "maven", purl,
             "download", actorId,
+            actorKind: actorKind,
             sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
         // Hosted plane: the row came from maven_version_files, so the counter lives on the owning
@@ -829,7 +830,26 @@ public sealed partial class MavenController : OrgScopedControllerBase
             // never resolve it. Falls back to the relative path only if the fetcher supplied none.
             CacheAccess: new CacheAccess(orgId, "maven", resolvedCoords.PackageName,
                 resolvedCoords.Version!, resolvedCoords.Filename,
-                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: result.UpstreamUrl ?? upstreamPath),
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: result.UpstreamUrl ?? upstreamPath,
+                // ProxyFetchService overwrites the three bytes fields with the values it computed
+                // over the artefact it just staged before handing this to the recorder.
+                Origin: CacheAccessOrigin.FirstFetch),
+            // Source pinning reads this field and nothing else, so the coordinate is bound to the
+            // authority of the upstream repository that resolved it and a later serve of the same
+            // groupId:artifactId from a different upstream is refused — the dependency-confusion
+            // guard for an org whose repository list puts a public repository alongside a private
+            // one. Unlike a registry protocol that hands out a third-party download host, the Maven
+            // fetch URL is built as configured-base + repository-path, so its authority already IS
+            // the resolved repository's; no separate "pin the authority, not the artifact host"
+            // resolution is needed. Authority granularity is also deliberately forgiving of the
+            // normal multi-repository shape: several repositories on one Nexus/Artifactory host
+            // (releases + snapshots + a central proxy) share an authority, so a coordinate moving
+            // between them is not shadowing and raises nothing.
+            //
+            // The CacheAccess fallback to the repository-relative path is deliberately NOT reused
+            // here: a relative path names no authority, and pinning must key off an absolute URL or
+            // not run at all rather than pin something meaningless.
+            UpstreamUrl: result.UpstreamUrl,
             // The upstream publish timestamp, so the release-age cooldown (min_release_age_hours)
             // can fire on this fetch and on every later serve — the cache-plane row persists it.
             // Populated only on the fetch-then-hash path (result.PublishedAt from the upstream
@@ -870,7 +890,11 @@ public sealed partial class MavenController : OrgScopedControllerBase
                 Sha256: result.Sha256,
                 SizeBytes: result.SizeBytes,
                 BlobKey: result.BlobKey,
-                UpstreamUrl: null), ct);
+                UpstreamUrl: null,
+                // The alias names the same bytes this request fetched and hashed, under the
+                // literal filename the client asked for, so it binds the tenant exactly as the
+                // primary row does.
+                Origin: CacheAccessOrigin.FirstFetch), ct);
         }
 
         // Serve by streaming the cached blob straight to the response — the artifact never
@@ -1067,7 +1091,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
         }
 
         await _svc.Audit.LogActivityAsync(orgId, "maven", purl, "push",
-            actorId: token.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+            actorId: token.UserId, actorKind: token.ActorKind, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         EvictMavenMetadataCacheAfterPublish(orgId, coords);
 

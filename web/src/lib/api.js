@@ -197,6 +197,11 @@ export const api = {
   updateInstanceEmailConfig: (cfg) => req('PUT', '/instance/email-config', cfg),
   testInstanceEmail: () => req('POST', '/instance/email-config/test'),
 
+  // Operator aggregate relay health: how many tenants are currently failing delivery over the
+  // shared SMTP relay, the worst consecutive-failure streak, when it started, and the durable
+  // outbox's backlog. Counts and aggregate timestamps only — never a tenant identifier.
+  getInstanceEmailHealth: () => req('GET', '/instance/email-health'),
+
   // Tenant settings (per-org config)
   getOrgSettings: () => req('GET', '/settings'),
   updateOrgSettings: (s) => req('PUT', '/settings', {
@@ -210,6 +215,7 @@ export const api = {
     maxUploadBytesRpm: s.maxUploadBytesRpm,
     maxUploadBytesOci: s.maxUploadBytesOci,
     defaultLanguage: s.defaultLanguage,
+    defaultTimezone: s.defaultTimezone,
     allowVersionOverwrite: s.allowVersionOverwrite,
     versionOverwritePolicy: s.versionOverwritePolicy,
     airGapped: s.airGapped,
@@ -391,17 +397,23 @@ export const api = {
     req('GET', `/alerts?${qs({ state, limit, offset })}`),
   getAlertsSummary: () => req('GET', '/alerts/summary'),
   dismissAlert: (id) => req('POST', `/alerts/${id}/dismiss`),
+  // Server-side bulk clear rather than a loop over the rendered page — the list is paged, so
+  // the client only ever sees part of what it is asking to dismiss.
+  dismissAllAlerts: () => req('POST', '/alerts/dismiss-all'),
   getAlertSettings: () => req('GET', '/alert-settings'),
-  // Alerts-tab columns: the gates plus the email delivery toggle and recipient list — payload
-  // carries the exact camelCase fields AlertSettingsRequest accepts.
+  // Alerts-tab gates only — payload carries the exact camelCase fields AlertSettingsRequest
+  // accepts. The delivery channels each own their own endpoint below, so a gates save can never
+  // clobber one of them.
   updateAlertSettings: (payload) => req('PUT', '/alert-settings', payload),
+  // Email delivery channel: the gate and the recipient list. There is no per-org SMTP transport
+  // to write — SMTP is instance-level.
+  updateAlertEmail: (emailEnabled, emailRecipients) =>
+    req('PUT', '/alert-settings/email', { emailEnabled, emailRecipients }),
   updateAlertSlack: (slackEnabled, slackWebhookUrl) =>
     req('PUT', '/alert-settings/slack', { slackEnabled, slackWebhookUrl }),
   testAlertSlack: () => req('POST', '/alert-settings/slack/test'),
-  // Email SMTP transport only (the delivery toggle + recipients live on the base PUT):
-  // emailSmtpPassword is write-only — payload carries the exact camelCase fields
-  // AlertEmailSettingsRequest accepts, so callers assemble the whole object themselves.
-  updateAlertEmail: (payload) => req('PUT', '/alert-settings/email', payload),
+  // Sends a test message over the instance transport to the org's saved recipients, the only
+  // email check a tenant admin can run.
   testAlertEmail: () => req('POST', '/alert-settings/email/test'),
 
   // Invites
@@ -553,6 +565,10 @@ export const systemApi = {
   updateEmailConfig: (cfg) => req('PUT', '/system/email-config', cfg),
   testEmailConfig: () => req('POST', '/system/email-config/test'),
 
+  // Operator aggregate relay health — same shape as api.getInstanceEmailHealth. Counts and
+  // aggregate timestamps only; the system_admin SPA never renders a tenant identifier here.
+  getEmailHealth: () => req('GET', '/system/email-health'),
+
   // Support flows: lock/unlock account + force password reset. The email travels in the
   // request body, never the URL path, so it never lands in request logs or trace spans.
   setAccountStatus: (email, tenantSlug, accountStatus) =>
@@ -574,6 +590,7 @@ export const systemApi = {
   changePassword: (currentPassword, newPassword) =>
     req('POST', '/system/me/password', { currentPassword, newPassword }),
   updateLanguage: (language) => req('POST', '/system/me/language', { language }),
+  updateTimezone: (timezone) => req('POST', '/system/me/timezone', { timezone }),
 
   // System-admin MFA enrollment and management. Routes mirror the tenant /mfa/* surface.
   // mfaStatus: { enabled: bool, recoveryCodesRemaining: int }

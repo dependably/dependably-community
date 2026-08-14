@@ -944,7 +944,8 @@ public sealed class PackagePublishService : IPackagePublishService
         try
         {
             await _scanner.ScanVersionAsync(request.Purl, newVersion.Id, request.Ecosystem,
-                request.PurlName, request.OrgId, request.ActorUserId, ct);
+                request.PurlName, request.OrgId, request.ActorUserId,
+                actorKind: request.ActorKind, sourceIp: request.SourceIp, ct: ct);
         }
         catch (Exception ex)
         {

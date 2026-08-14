@@ -176,10 +176,24 @@ public sealed class ProxyFetchService
         await _audit.LogAsync(
             "checksum_failure",
             orgId: request.OrgId,
+            actorId: request.UserId,
+            actorKind: request.ActorKind,
             ecosystem: request.Ecosystem,
             purl: request.Purl,
-            detail: $"{{\"version\":\"{request.Version}\",\"file\":\"{request.File}\",\"algorithm\":\"{spec.Algorithm}\",\"expected\":\"{spec.ExpectedValue}\",\"actual_sha256\":\"{sha256}\"}}",
-            ct: ct);
+            // Serialized, never interpolated: `expected` is the upstream packument's own integrity
+            // string and `file` is client-supplied, so a hand-built JSON string lets either close
+            // the quote and forge sibling keys in a detail the SIEM export parses.
+            detail: System.Text.Json.JsonSerializer.Serialize(
+                new
+                {
+                    version = request.Version,
+                    file = request.File,
+                    algorithm = spec.Algorithm.ToString(),
+                    expected = spec.ExpectedValue,
+                    actual_sha256 = sha256,
+                },
+                Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: request.SourceIp, ct: ct);
         throw new ChecksumException(
             $"Upstream-supplied {spec.Algorithm} hash for {request.Purl} did not match the downloaded bytes.");
     }
@@ -215,10 +229,21 @@ public sealed class ProxyFetchService
         await _audit.LogAsync(
             "upstream_source_pin_violation",
             orgId: request.OrgId,
+            actorId: request.UserId,
+            actorKind: request.ActorKind,
             ecosystem: request.Ecosystem,
             purl: request.Purl,
-            detail: $"{{\"name\":\"{request.PurlName}\",\"pinned_host\":\"{pinnedHost}\",\"serving_host\":\"{servingHost}\"}}",
-            ct: ct);
+            // Serialized for the same reason as the checksum-failure detail above: the package name
+            // is client-supplied and both hosts derive from upstream-registry configuration.
+            detail: System.Text.Json.JsonSerializer.Serialize(
+                new
+                {
+                    name = request.PurlName,
+                    pinned_host = pinnedHost,
+                    serving_host = servingHost,
+                },
+                Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: request.SourceIp, ct: ct);
 
         return new ProxyFetchResult(BlockDecision.Blocked, sha256, blobKey);
     }
@@ -385,7 +410,11 @@ public sealed class ProxyFetchService
                 request.BlockInstallScriptsMode,
                 request.VerifyProvenanceMode,
                 request.BlockRevokedMode,
-                request.LicenseEnforcementMode), ct);
+                request.LicenseEnforcementMode,
+                // This request's own verdict over the bytes it just staged — strictly better
+                // evidence than the shared row's (possibly another tenant's, possibly masked)
+                // stored value when this ecosystem computes one at all.
+                ownProvenanceStatus: request.ProvenanceStatus), ct);
 
         return new ProxyFetchResult(caDecision, sha256, blobKey);
     }

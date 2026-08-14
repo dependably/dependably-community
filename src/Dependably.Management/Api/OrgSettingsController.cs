@@ -156,6 +156,10 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
             RequireMfa: req.RequireMfa,
             DefaultTimezone: req.DefaultTimezone), ct);
 
+        // Every leave-unchanged-on-absent field below is logged as the raw request value, so a
+        // field the caller didn't address in this write is recorded as null — chosen, not leaked:
+        // "null = not addressed by this PUT" is the truthful reading of what was sent, and none of
+        // these columns has a domain-null for it to collide with.
         await _audit.LogAsync("org_settings_updated", orgId, GetUserId(),
             detail: System.Text.Json.JsonSerializer.Serialize(new
             {
@@ -174,7 +178,8 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                 version_overwrite_policy = req.VersionOverwritePolicy,
                 air_gapped = req.AirGapped,
                 require_mfa = req.RequireMfa,
-            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            actorKind: ActorKinds.User, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         await EmitOrgSettingsChangeEventsAsync(orgId, req, prior, ct);
 
@@ -224,12 +229,14 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
     {
         string? userId = GetUserId();
         await _audit.LogAsync("tenant.setting.change", orgId, userId,
+            actorKind: ActorKinds.User,
             detail: System.Text.Json.JsonSerializer.Serialize(new
             {
                 key,
                 prior_value = priorValue,
                 new_value = newValue,
-            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         await _auditEmitter.EmitAsync(
             Dependably.Infrastructure.Audit.Events.TenantEvents.TypeSettingChange,
             orgId, "user", userId, "accepted",
@@ -270,6 +277,12 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
             return result;
         }
 
+        var validationError = ValidateRetentionFields(req);
+        if (validationError is not null)
+        {
+            return validationError;
+        }
+
         string orgId = CurrentTenantId();
         await _settings.UpsertRetentionAsync(orgId, req.KeepVersions, req.KeepDays, req.ActivityRetentionDays,
             req.PurgeUnlistedAfterDays, ct);
@@ -281,10 +294,24 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                 keep_days = req.KeepDays,
                 activity_retention_days = req.ActivityRetentionDays,
                 purge_unlisted_after_days = req.PurgeUnlistedAfterDays,
-            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            actorKind: ActorKinds.User, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return NoContent();
     }
+
+    // Every field is a day/version count fed straight into a retention purge job; a negative value
+    // has no meaning here and would either no-op the purge or underflow it, depending on the reader.
+    private IActionResult? ValidateRetentionFields(UpdateRetentionRequest req)
+        => req.KeepVersions is < 0
+            ? _problems.ValidationErrorActionKey("keep_versions", "error.settings.retentionRange")
+            : req.KeepDays is < 0
+                ? _problems.ValidationErrorActionKey("keep_days", "error.settings.retentionRange")
+                : req.ActivityRetentionDays is < 0
+                    ? _problems.ValidationErrorActionKey("activity_retention_days", "error.settings.retentionRange")
+                    : req.PurgeUnlistedAfterDays is < 0
+                        ? _problems.ValidationErrorActionKey("purge_unlisted_after_days", "error.settings.retentionRange")
+                        : null;
 
     /// <summary>GET /api/v1/orgs/{org}/proxy-settings</summary>
     // Read-only: accepts a PAT/service token carrying read:tenant.
@@ -365,15 +392,15 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
             return numericError;
         }
 
-        var blockDeprecatedError = NormalizeAndValidateBlockDeprecated(req.BlockDeprecated, out string blockDeprecated);
+        var blockDeprecatedError = NormalizeAndValidateBlockDeprecated(req.BlockDeprecated, out string? blockDeprecated);
         if (blockDeprecatedError is not null)
         {
             return blockDeprecatedError;
         }
 
         var blockPolicyError = ValidateBlockPolicyFields(req,
-            out string blockMalicious, out string blockKev, out string blockInstallScripts,
-            out string blockRevoked);
+            out string? blockMalicious, out string? blockKev, out string? blockInstallScripts,
+            out string? blockRevoked);
         if (blockPolicyError is not null)
         {
             return blockPolicyError;
@@ -404,17 +431,24 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         // immediately rather than serving the pre-flip gate state until its TTL.
         _cacheEpoch.Invalidate(orgId);
 
+        // Every leave-unchanged-on-absent field below (all but the six verify_* fields, which
+        // sigVerify already normalizes the same way) is logged as the raw request value, so a
+        // field the caller didn't address in this write is recorded as null here — chosen, not
+        // leaked: "null = not addressed by this PUT" is the truthful reading of what was sent,
+        // distinct from "null = turned off" (AuditProxySettingValue's "unchanged" sentinel makes
+        // that distinction explicit for the two Optional<T> fields; the plain-nullable fields
+        // below don't have a domain-null to collide with, so a bare null is unambiguous).
         await _audit.LogAsync("proxy_settings_updated", orgId, GetUserId(),
             detail: System.Text.Json.JsonSerializer.Serialize(new
             {
                 proxy_passthrough_enabled = req.ProxyPassthroughEnabled,
                 max_osv_score_tolerance = req.MaxOsvScoreTolerance,
-                min_release_age_hours = req.MinReleaseAgeHours,
+                min_release_age_hours = AuditProxySettingValue(req.MinReleaseAgeHours),
                 block_deprecated = blockDeprecated,
                 block_revoked = blockRevoked,
                 block_malicious = blockMalicious,
                 block_kev = blockKev,
-                max_epss_tolerance = req.MaxEpssTolerance,
+                max_epss_tolerance = AuditProxySettingValue(req.MaxEpssTolerance),
                 block_install_scripts = blockInstallScripts,
                 verify_npm_signatures = sigVerify.VerifyNpmSignatures,
                 verify_nuget_signatures = sigVerify.VerifyNuGetSignatures,
@@ -422,7 +456,8 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                 verify_rpm_signatures = sigVerify.VerifyRpmSignatures,
                 verify_maven_signatures = sigVerify.VerifyMavenSignatures,
                 verify_terraform_signatures = sigVerify.VerifyTerraformSignatures,
-            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            actorKind: ActorKinds.User, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return NoContent();
     }
@@ -464,74 +499,84 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
     }
 
     // Validates numeric range fields on the proxy settings request. Returns a validation error
-    // result when any field is out of range, or null when all pass.
+    // result when any field is out of range, or null when all pass. MinReleaseAgeHours and
+    // MaxEpssTolerance are Optional<T>: a field the caller didn't mention (IsPresent = false)
+    // is not being changed, so it's exempt from range validation the same as an absent
+    // block_kev is exempt from enum validation.
     private IActionResult? ValidateProxyNumericFields(UpdateProxySettingsRequest req)
         => req.MaxOsvScoreTolerance is < 0.0 or > MaxOsvScore
             ? _problems.ValidationErrorActionKey("max_osv_score_tolerance", "error.settings.osvScoreRange")
-            : req.MinReleaseAgeHours is { } age && (age < 0 || age > MaxReleaseAgeHours)
+            : req.MinReleaseAgeHours.IsPresent && req.MinReleaseAgeHours.Value is { } age && (age < 0 || age > MaxReleaseAgeHours)
                 ? _problems.ValidationErrorActionKey("min_release_age_hours", "error.settings.releaseAgeRange", MaxReleaseAgeHours)
-                : req.MaxEpssTolerance is < 0.0 or > 1.0
+                : req.MaxEpssTolerance.IsPresent && req.MaxEpssTolerance.Value is < 0.0 or > 1.0
                     ? _problems.ValidationErrorActionKey("max_epss_tolerance", "error.settings.epssRange")
                     : null;
 
+    // Projects an Optional<T> proxy-settings field for the audit-log detail blob: "unchanged"
+    // when the caller didn't mention the field, otherwise the value that was written (which may
+    // itself be null — an explicit clear-to-off is a real, auditable state change).
+    private static object? AuditProxySettingValue<T>(Optional<T> field) =>
+        field.IsPresent ? field.Value : "unchanged";
+
     // Normalizes the block_deprecated field (maps retired 'block' alias to 'block_all') and
-    // validates the final value. Returns a validation error when invalid, or null when the value
-    // is accepted, writing the normalized value into the out parameter.
-    private IActionResult? NormalizeAndValidateBlockDeprecated(string? raw, out string normalized)
+    // validates the final value. An omitted field means "leave the stored value unchanged" — it
+    // is not validated and flows through as null (matching air_gapped / require_mfa / verify_*).
+    // Returns a validation error when a present value is invalid, or null otherwise.
+    private IActionResult? NormalizeAndValidateBlockDeprecated(string? raw, out string? normalized)
     {
+        if (raw is null)
+        {
+            normalized = null;
+            return null;
+        }
+
         // Normalize the retired 'block' value (deny-everything) to its successor 'block_all' so
         // existing automation keeps working after the new/all split.
-        normalized = raw ?? "off";
-        if (normalized == "block")
-        {
-            normalized = "block_all";
-        }
+        normalized = raw == "block" ? "block_all" : raw;
 
         return normalized is not ("off" or "warn" or "block_new" or "block_all")
             ? _problems.ValidationErrorActionKey("block_deprecated", "error.settings.deprecatedPolicyInvalid")
             : null;
     }
 
-    // Validates the block-policy enum fields (malicious, KEV, install-scripts). Returns a
-    // validation error on the first invalid field, or null when all pass. Writes normalized
-    // values into the out parameters.
+    // Validates the block-policy enum fields (malicious, KEV, install-scripts, revoked). An
+    // omitted field means "leave the stored value unchanged" — a client still sending the
+    // pre-gate payload shape (or a partial PUT touching an unrelated field) must not silently
+    // reset an enforcing gate to its default. Returns a validation error on the first invalid
+    // (present-but-out-of-range) field, or null when all pass. Writes the normalized values
+    // (null = unchanged) into the out parameters.
     private IActionResult? ValidateBlockPolicyFields(
         UpdateProxySettingsRequest req,
-        out string blockMalicious, out string blockKev, out string blockInstallScripts,
-        out string blockRevoked)
+        out string? blockMalicious, out string? blockKev, out string? blockInstallScripts,
+        out string? blockRevoked)
     {
-        // Absent field keeps the secure default — a client still sending the pre-gate payload
-        // shape must not silently disable malware blocking.
-        blockMalicious = req.BlockMalicious ?? "block";
-        blockKev = req.BlockKev ?? "off";
-        blockInstallScripts = req.BlockInstallScripts ?? "off";
-        // Absent = 'warn', matching the column default (observe-before-enforce): a client sending
-        // the pre-gate payload keeps surfacing revoked versions rather than silently going to 'off'.
-        blockRevoked = req.BlockRevoked ?? "warn";
+        blockMalicious = req.BlockMalicious;
+        blockKev = req.BlockKev;
+        blockInstallScripts = req.BlockInstallScripts;
+        blockRevoked = req.BlockRevoked;
 
-        if (blockMalicious is not ("off" or "warn" or "block"))
+        if (blockMalicious is not (null or "off" or "warn" or "block"))
         {
             return _problems.ValidationErrorActionKey("block_malicious", "error.settings.offWarnBlock");
         }
 
-        // Absent = off, matching the column default — both KEV and EPSS are opt-in policies.
-        if (blockKev is not ("off" or "warn" or "block"))
+        if (blockKev is not (null or "off" or "warn" or "block"))
         {
             return _problems.ValidationErrorActionKey("block_kev", "error.settings.offWarnBlock");
         }
 
-        if (blockInstallScripts is not ("off" or "warn" or "block"))
+        if (blockInstallScripts is not (null or "off" or "warn" or "block"))
         {
             return _problems.ValidationErrorActionKey("block_install_scripts", "error.settings.offWarnBlock");
         }
 
         // Three values (no block_new analog — revocation is always a full upstream removal).
-        return blockRevoked is not ("off" or "warn" or "block")
+        return blockRevoked is not (null or "off" or "warn" or "block")
             ? _problems.ValidationErrorActionKey("block_revoked", "error.settings.offWarnBlock")
             : null;
     }
 
-    // Validates all five per-ecosystem signature verification fields. Returns a SigVerifyResult
+    // Validates all six per-ecosystem signature verification fields. Returns a SigVerifyResult
     // whose Error is non-null on the first invalid or unconfigured field, or null when all pass.
     // The normalized field values are always present in the result regardless of error state.
     private async Task<SigVerifyResult> ValidateSignatureVerificationFieldsAsync(
@@ -539,12 +584,12 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         string orgId,
         CancellationToken ct)
     {
-        // An absent verification field means "leave as stored", not "off" — the opposite of the
-        // block-policy fields above, which carry a secure default. These five are security
-        // controls whose stored value may already be 'block'; defaulting an omitted field to
-        // 'off' would let a client sending a payload shape that predates them silently disable
-        // signature and attestation verification tenant-wide. Null flows through to the repository,
-        // which COALESCEs it against the stored column (falling back to 'off' on first insert).
+        // An absent verification field means "leave as stored", not "off" — same posture as the
+        // block-policy fields above. These six are security controls whose stored value may
+        // already be 'block'; defaulting an omitted field to 'off' would let a client sending a
+        // payload shape that predates them silently disable signature and attestation
+        // verification tenant-wide. Null flows through to the repository, which COALESCEs it
+        // against the stored column (falling back to 'off' on first insert).
         string? verifyNpmSignatures = req.VerifyNpmSignatures;
         string? verifyNuGetSignatures = req.VerifyNuGetSignatures;
         string? verifyPyPiAttestations = req.VerifyPyPiAttestations;

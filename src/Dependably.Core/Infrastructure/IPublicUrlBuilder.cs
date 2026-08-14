@@ -25,14 +25,17 @@ public interface IPublicUrlBuilder
     bool IsHttpsDeployment { get; }
 
     /// <summary>
-    /// Returns CookieOptions for a session cookie. Secure is set when either the runtime
-    /// request is HTTPS or the operator declared BASE_URL as https — blending both signals
-    /// so neither proxy misconfiguration nor stale config causes a silent regression. When
-    /// <c>REQUIRE_SECURE_COOKIES</c> is set, Secure is forced true unconditionally, so a
-    /// credential-serving deployment that has declared itself HTTPS-only never ships a
-    /// session/MFA/device cookie without Secure. SameSite defaults to Strict; pass Lax for
-    /// SAML flows where the IdP redirect must deliver the cookie on the first cross-site
-    /// request.
+    /// Returns CookieOptions for a session cookie. Secure is set when the runtime request is
+    /// HTTPS, when the operator declared BASE_URL as https, or when the request carries
+    /// <c>X-Forwarded-Proto: https</c> — blending the signals so neither proxy misconfiguration
+    /// nor stale config causes a silent regression. The forwarded header is read even when
+    /// <c>TRUSTED_PROXIES</c> left it untrusted (and so discarded from <c>Request.Scheme</c>),
+    /// because for this one decision a forged value only ever restricts the forger's own cookie;
+    /// URL building still ignores it. When <c>REQUIRE_SECURE_COOKIES</c> is set, Secure is forced
+    /// true unconditionally, so a credential-serving deployment that has declared itself
+    /// HTTPS-only never ships a session/MFA/device cookie without Secure. SameSite defaults to
+    /// Strict; pass Lax for SAML flows where the IdP redirect must deliver the cookie on the
+    /// first cross-site request.
     /// </summary>
     CookieOptions SessionCookieOptions(HttpContext ctx, SameSiteMode sameSite = SameSiteMode.Strict);
 }

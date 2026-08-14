@@ -199,6 +199,7 @@ public sealed class NameGrantsController : OrgScopedControllerBase
 
         await _audit.LogAsync(
             "name_grant_added", orgId, GetUserId(),
+            actorKind: ActorKinds.User,
             ecosystem: ecosystem,
             detail: System.Text.Json.JsonSerializer.Serialize(new
             {
@@ -208,7 +209,7 @@ public sealed class NameGrantsController : OrgScopedControllerBase
                 grantee_kind = granteeKind,
                 grantee_id = granteeId,
             }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
-            ct: ct);
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return CreatedAtAction(nameof(ListGrants), null, Project(created));
     }
@@ -240,6 +241,7 @@ public sealed class NameGrantsController : OrgScopedControllerBase
 
         await _audit.LogAsync(
             "name_grant_revoked", orgId, GetUserId(),
+            actorKind: ActorKinds.User,
             ecosystem: existing.Ecosystem,
             detail: System.Text.Json.JsonSerializer.Serialize(new
             {
@@ -249,7 +251,7 @@ public sealed class NameGrantsController : OrgScopedControllerBase
                 grantee_kind = existing.GranteeKind,
                 grantee_id = existing.GranteeId,
             }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
-            ct: ct);
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return NoContent();
     }

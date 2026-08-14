@@ -42,9 +42,10 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         // take a fixed batch. A group whose fetch throws and is left unstamped is therefore
         // re-selected at the head of every subsequent pass; enough of them and no other group is
         // ever reached again. Stamping the attempt is what moves it to the back of the queue.
-        var (_, _, caId, _) = await SeedVersionAsync(
+        var (orgId, _, caId, _) = await SeedVersionAsync(
             ecosystem: "npm", name: "unreachable-pkg", version: "1.0.0", origin: "proxy",
             deprecated: "already known", deprecationCheckedAt: null);
+        await SeedUpstreamRegistryAsync(orgId, "npm", "http://npm.test");
 
         var service = BuildServiceWithHandler(new ThrowingHandler());
         await service.RunRefreshPassAsync(CancellationToken.None);
@@ -66,9 +67,10 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         // The hosted arm's slot is yielded by stamping upstream_latest_checked_at. Doing that via
         // UpdateUpstreamLatestAsync(null, null) would also erase upstream_latest_version, turning
         // one outage into lost state (and wrong versions-behind counts), so the touch is separate.
-        var (_, pkgId, _, _) = await SeedVersionAsync(
+        var (orgId, pkgId, _, _) = await SeedVersionAsync(
             ecosystem: "npm", name: "latest-known", version: "1.0.0", origin: "proxy",
             deprecated: null, deprecationCheckedAt: null);
+        await SeedUpstreamRegistryAsync(orgId, "npm", "http://npm.test");
 
         string staleStamp = _clock.GetUtcNow().AddDays(-30).ToUtcIso();
         await using (var seed = await _db.OpenAsync())
@@ -98,8 +100,9 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     [Fact]
     public async Task NpmPackage_VersionBecomesDeprecated_UpdatesBothColumns()
     {
-        var (_, _, caId, _) = await SeedVersionAsync(
+        var (orgId, _, caId, _) = await SeedVersionAsync(
             ecosystem: "npm", name: "left-pad", version: "1.0.0", origin: "proxy", deprecated: null);
+        await SeedUpstreamRegistryAsync(orgId, "npm", "http://npm.test");
 
         string packument = NpmPackument("left-pad", new Dictionary<string, string?>
         {
@@ -119,9 +122,10 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     [Fact]
     public async Task NpmPackage_DeprecationCleared_UpdatesBothColumns()
     {
-        var (_, _, caId, _) = await SeedVersionAsync(
+        var (orgId, _, caId, _) = await SeedVersionAsync(
             ecosystem: "npm", name: "old-pkg", version: "2.0.0", origin: "proxy",
             deprecated: "was deprecated");
+        await SeedUpstreamRegistryAsync(orgId, "npm", "http://npm.test");
 
         string packument = NpmPackument("old-pkg", new Dictionary<string, string?>
         {
@@ -141,9 +145,10 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     [Fact]
     public async Task NpmPackage_UnchangedDeprecation_OnlyStampsCheckedAt()
     {
-        var (_, _, caId, _) = await SeedVersionAsync(
+        var (orgId, _, caId, _) = await SeedVersionAsync(
             ecosystem: "npm", name: "stable-pkg", version: "3.0.0", origin: "proxy",
             deprecated: "still deprecated");
+        await SeedUpstreamRegistryAsync(orgId, "npm", "http://npm.test");
 
         string packument = NpmPackument("stable-pkg", new Dictionary<string, string?>
         {
@@ -194,8 +199,9 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         // A package that was proxied (so upstream_latest_checked_at was seeded) then had its proxy
         // rows evicted, leaving only a hosted (origin='uploaded') version and no cache_artifact row.
         // The cache-plane enumeration can't see it; the hosted-only pass must still refresh it.
-        var (_, packageId, versionId, _) = await SeedVersionAsync(
+        var (orgId, packageId, versionId, _) = await SeedVersionAsync(
             ecosystem: "npm", name: "hosted-shadow", version: "1.0.0", origin: "uploaded", deprecated: null);
+        await SeedUpstreamRegistryAsync(orgId, "npm", "http://npm.test");
         await using (var seed = await _db.OpenAsync())
         {
             await seed.ExecuteAsync(
@@ -247,8 +253,9 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     {
         // The service looks up the packages row (if any) to record upstream's declared latest
         // version; SeedVersionAsync always creates a packages row for the org.
-        var (_, packageId, _, _) = await SeedVersionAsync(
+        var (orgId, packageId, _, _) = await SeedVersionAsync(
             ecosystem: "npm", name: "left-pad", version: "1.0.0", origin: "proxy", deprecated: null);
+        await SeedUpstreamRegistryAsync(orgId, "npm", "http://npm.test");
 
         string packument = NpmPackument("left-pad",
             new Dictionary<string, string?> { ["1.0.0"] = null }, latest: "2.5.0");
@@ -266,6 +273,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     {
         var (orgId, packageId, _, _) = await SeedVersionAsync(
             ecosystem: "npm", name: "left-pad", version: "1.0.0", origin: "proxy", deprecated: null);
+        await SeedUpstreamRegistryAsync(orgId, "npm", "http://npm.test");
 
         string packument = NpmPackument("left-pad",
             new Dictionary<string, string?> { ["1.0.0"] = null },
@@ -337,8 +345,9 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     [Fact]
     public async Task PyPiPackage_VersionYanked_SetsDeprecatedField()
     {
-        var (_, _, caId, _) = await SeedVersionAsync(
+        var (orgId, _, caId, _) = await SeedVersionAsync(
             ecosystem: "pypi", name: "evil-lib", version: "0.1.0", origin: "proxy", deprecated: null);
+        await SeedUpstreamRegistryAsync(orgId, "pypi", "http://pypi.test");
 
         string pypiJson = PyPiJson("evil-lib", new Dictionary<string, (bool Yanked, string? Reason)>
         {
@@ -358,8 +367,9 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     [Fact]
     public async Task PyPiPackage_VersionYankedNoReason_UsesDefaultMessage()
     {
-        var (_, _, caId, _) = await SeedVersionAsync(
+        var (orgId, _, caId, _) = await SeedVersionAsync(
             ecosystem: "pypi", name: "bad-lib", version: "1.0.0", origin: "proxy", deprecated: null);
+        await SeedUpstreamRegistryAsync(orgId, "pypi", "http://pypi.test");
 
         string pypiJson = PyPiJson("bad-lib", new Dictionary<string, (bool Yanked, string? Reason)>
         {
@@ -377,8 +387,9 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     [Fact]
     public async Task PyPiPackage_NotYanked_LeavesDeprecatedNull()
     {
-        var (_, _, caId, _) = await SeedVersionAsync(
+        var (orgId, _, caId, _) = await SeedVersionAsync(
             ecosystem: "pypi", name: "good-lib", version: "2.0.0", origin: "proxy", deprecated: null);
+        await SeedUpstreamRegistryAsync(orgId, "pypi", "http://pypi.test");
 
         string pypiJson = PyPiJson("good-lib", new Dictionary<string, (bool Yanked, string? Reason)>
         {
@@ -398,8 +409,9 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     [Fact]
     public async Task PyPiPackage_RefreshPass_RecordsUpstreamLatestVersion()
     {
-        var (_, packageId, _, _) = await SeedVersionAsync(
+        var (orgId, packageId, _, _) = await SeedVersionAsync(
             ecosystem: "pypi", name: "good-lib", version: "1.0.0", origin: "proxy", deprecated: null);
+        await SeedUpstreamRegistryAsync(orgId, "pypi", "http://pypi.test");
 
         string pypiJson = PyPiJson("good-lib",
             new Dictionary<string, (bool Yanked, string? Reason)> { ["1.0.0"] = (false, null) },
@@ -418,6 +430,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     {
         var (orgId, packageId, _, _) = await SeedVersionAsync(
             ecosystem: "pypi", name: "good-lib", version: "1.0.0", origin: "proxy", deprecated: null);
+        await SeedUpstreamRegistryAsync(orgId, "pypi", "http://pypi.test");
 
         string pypiJson = PyPiJson("good-lib",
             new Dictionary<string, (bool Yanked, string? Reason)> { ["1.0.0"] = (false, null) },
@@ -438,6 +451,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     {
         var (orgId, _, caId, _) = await SeedVersionAsync(
             ecosystem: "npm", name: "gone-pkg", version: "1.0.0", origin: "proxy", deprecated: null);
+        await SeedUpstreamRegistryAsync(orgId, "npm", "http://npm.test");
 
         // Upstream still publishes the package, but no longer lists 1.0.0 (only 2.0.0).
         string packument = NpmPackument("gone-pkg", new Dictionary<string, string?> { ["2.0.0"] = null });
@@ -459,8 +473,9 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     [Fact]
     public async Task NpmPackage_VersionPresentUpstream_LeavesRevokedNull()
     {
-        var (_, _, caId, _) = await SeedVersionAsync(
+        var (orgId, _, caId, _) = await SeedVersionAsync(
             ecosystem: "npm", name: "live-pkg", version: "1.0.0", origin: "proxy", deprecated: null);
+        await SeedUpstreamRegistryAsync(orgId, "npm", "http://npm.test");
 
         string packument = NpmPackument("live-pkg", new Dictionary<string, string?> { ["1.0.0"] = null });
         var service = BuildService(packument);
@@ -479,6 +494,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         // The false-positive guard must NOT revoke any locally-cached version in that case.
         var (orgId, _, caId, _) = await SeedVersionAsync(
             ecosystem: "npm", name: "flaky-pkg", version: "1.0.0", origin: "proxy", deprecated: null);
+        await SeedUpstreamRegistryAsync(orgId, "npm", "http://npm.test");
 
         string packument = NpmPackument("flaky-pkg", new Dictionary<string, string?>());
         var service = BuildService(packument);
@@ -497,8 +513,9 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     [Fact]
     public async Task NpmPackage_RevokedVersionReappears_ClearsRevokedAt()
     {
-        var (_, _, caId, _) = await SeedVersionAsync(
+        var (orgId, _, caId, _) = await SeedVersionAsync(
             ecosystem: "npm", name: "back-pkg", version: "1.0.0", origin: "proxy", deprecated: null);
+        await SeedUpstreamRegistryAsync(orgId, "npm", "http://npm.test");
         await SetRevokedAtAsync(caId, "2020-01-01T00:00:00Z");
 
         string packument = NpmPackument("back-pkg", new Dictionary<string, string?> { ["1.0.0"] = null });
@@ -518,6 +535,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         // second version_revoked event — the activity row records first-observation only.
         var (orgId, _, caId, _) = await SeedVersionAsync(
             ecosystem: "npm", name: "stale-gone", version: "1.0.0", origin: "proxy", deprecated: null);
+        await SeedUpstreamRegistryAsync(orgId, "npm", "http://npm.test");
         await SetRevokedAtAsync(caId, "2020-01-01T00:00:00Z");
 
         string packument = NpmPackument("stale-gone", new Dictionary<string, string?> { ["2.0.0"] = null });
@@ -537,6 +555,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         // One refresh group, two cached versions: 1.0.0 is gone upstream, 2.0.0 still listed.
         var (orgId, _, caV1, _) = await SeedVersionAsync(
             ecosystem: "npm", name: "multi-pkg", version: "1.0.0", origin: "proxy", deprecated: null);
+        await SeedUpstreamRegistryAsync(orgId, "npm", "http://npm.test");
         string caV2 = await SeedCacheVersionAsync(orgId, "npm", "multi-pkg", "2.0.0");
 
         string packument = NpmPackument("multi-pkg", new Dictionary<string, string?> { ["2.0.0"] = null });
@@ -560,8 +579,9 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     [Fact]
     public async Task PyPiPackage_VersionRemovedUpstream_SetsRevokedAt()
     {
-        var (_, _, caId, _) = await SeedVersionAsync(
+        var (orgId, _, caId, _) = await SeedVersionAsync(
             ecosystem: "pypi", name: "removed-lib", version: "0.1.0", origin: "proxy", deprecated: null);
+        await SeedUpstreamRegistryAsync(orgId, "pypi", "http://pypi.test");
 
         // Upstream lists 0.2.0 only — 0.1.0 has been deleted.
         string pypiJson = PyPiJson("removed-lib",
@@ -649,8 +669,9 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         // tenant A's group, so only tenant B's cache_artifact row is refreshed.
         var (orgA, _, caIdA, _) = await SeedVersionAsync(
             ecosystem: "npm", name: "airgap-pkg-a", version: "1.0.0", origin: "proxy", deprecated: null);
-        var (_, _, caIdB, _) = await SeedVersionAsync(
+        var (orgB, _, caIdB, _) = await SeedVersionAsync(
             ecosystem: "npm", name: "airgap-pkg-b", version: "1.0.0", origin: "proxy", deprecated: null);
+        await SeedUpstreamRegistryAsync(orgB, "npm", "http://npm.test");
         await SetAirGappedAsync(orgA, true);
 
         string packument = NpmPackument("airgap-pkg", new Dictionary<string, string?>
@@ -674,6 +695,193 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         // Connected tenant B: refreshed.
         Assert.Equal("use something else", depB);
         Assert.NotNull(checkedB);
+    }
+
+    // ── Org-scoped upstream resolution (empty=disabled contract) ────────────────
+
+    [Fact]
+    public async Task NpmPackage_NoUpstreamConfigured_SkipsRefreshWithoutContactingAnyRegistry()
+    {
+        // The org has configured zero upstream rows for npm — proxying is deliberately
+        // disabled for this ecosystem. The pass must skip the fetch entirely rather than
+        // falling back to a hardcoded public-registry default, so it must never contact the
+        // network for this group at all.
+        var (_, packageId, caId, _) = await SeedVersionAsync(
+            ecosystem: "npm", name: "no-upstream-pkg", version: "1.0.0", origin: "proxy",
+            deprecated: "already known", deprecationCheckedAt: null);
+
+        var handler = new RecordingHandler();
+        var service = BuildServiceWithHandler(handler);
+        await service.RunRefreshPassAsync(CancellationToken.None);
+
+        Assert.False(handler.Invoked,
+            "no upstream is configured for this org/ecosystem — the pass must never reach a registry, config-default or otherwise.");
+
+        await using var conn = await _db.OpenAsync();
+        var (dep, checkedAt) = await conn.QuerySingleAsync<(string?, string?)>(
+            "SELECT deprecated, deprecation_checked_at FROM cache_artifact WHERE id = @id",
+            new { id = caId });
+        // The slot is still yielded (moves off the head of the staleness queue)…
+        Assert.NotNull(checkedAt);
+        // …but the recorded verdict and upstream-latest baseline are left untouched, not read
+        // as "unknown" just because the ecosystem is disabled for this org.
+        Assert.Equal("already known", dep);
+        string? latest = await conn.QuerySingleAsync<string?>(
+            "SELECT upstream_latest_version FROM packages WHERE id = @id", new { id = packageId });
+        Assert.Null(latest);
+    }
+
+    [Fact]
+    public async Task PyPiPackage_NoUpstreamConfigured_SkipsRefreshWithoutContactingAnyRegistry()
+    {
+        var (_, _, caId, _) = await SeedVersionAsync(
+            ecosystem: "pypi", name: "no-upstream-lib", version: "1.0.0", origin: "proxy",
+            deprecated: "already known", deprecationCheckedAt: null);
+
+        var handler = new RecordingHandler();
+        var service = BuildServiceWithHandler(handler);
+        await service.RunRefreshPassAsync(CancellationToken.None);
+
+        Assert.False(handler.Invoked,
+            "no upstream is configured for this org/ecosystem — the pass must never reach a registry, config-default or otherwise.");
+
+        await using var conn = await _db.OpenAsync();
+        var (dep, checkedAt) = await conn.QuerySingleAsync<(string?, string?)>(
+            "SELECT deprecated, deprecation_checked_at FROM cache_artifact WHERE id = @id",
+            new { id = caId });
+        Assert.NotNull(checkedAt);
+        Assert.Equal("already known", dep);
+    }
+
+    [Fact]
+    public async Task NuGetPackage_NoUpstreamConfigured_SkipsRefreshWithoutOverwritingRecordedLatest()
+    {
+        // Zero configured upstream rows for nuget must skip the fetch the same way npm/pypi do.
+        // Before the zero-rows pre-check existed, this group fell through to
+        // _latestResolver.ResolveAsync, which resolves its own (empty) source list, loops zero
+        // times, and returns UpstreamLatestVersion.None — silently overwriting a previously
+        // recorded upstream_latest_version with NULL even though proxying is deliberately
+        // disabled for this org/ecosystem, not merely "unknown this pass".
+        var (_, packageId, caId, _) = await SeedVersionAsync(
+            ecosystem: "nuget", name: "no-upstream-nuget-pkg", version: "1.0.0", origin: "proxy",
+            deprecated: null, deprecationCheckedAt: null);
+        await using (var seed = await _db.OpenAsync())
+        {
+            await seed.ExecuteAsync(
+                "UPDATE packages SET upstream_latest_version = '9.9.9' WHERE id = @id", new { id = packageId });
+        }
+
+        var handler = new RecordingHandler();
+        var service = BuildServiceWithHandler(handler);
+        await service.RunRefreshPassAsync(CancellationToken.None);
+
+        Assert.False(handler.Invoked,
+            "no upstream is configured for this org/ecosystem — the pass must never reach a registry, config-default or otherwise.");
+
+        await using var conn = await _db.OpenAsync();
+        string? latest = await conn.QuerySingleAsync<string?>(
+            "SELECT upstream_latest_version FROM packages WHERE id = @id", new { id = packageId });
+        Assert.Equal("9.9.9", latest);
+        string? checkedAt = await conn.QuerySingleAsync<string?>(
+            "SELECT deprecation_checked_at FROM cache_artifact WHERE id = @id", new { id = caId });
+        Assert.NotNull(checkedAt);
+    }
+
+    [Fact]
+    public async Task MavenPackage_NoUpstreamConfigured_SkipsRefreshWithoutOverwritingRecordedLatest()
+    {
+        var (_, packageId, caId, _) = await SeedVersionAsync(
+            ecosystem: "maven", name: "org.example:no-upstream-widget", version: "1.0.0", origin: "proxy",
+            deprecated: null, deprecationCheckedAt: null);
+        await using (var seed = await _db.OpenAsync())
+        {
+            await seed.ExecuteAsync(
+                "UPDATE packages SET upstream_latest_version = '9.9.9' WHERE id = @id", new { id = packageId });
+        }
+
+        var handler = new RecordingHandler();
+        var service = BuildServiceWithHandler(handler);
+        await service.RunRefreshPassAsync(CancellationToken.None);
+
+        Assert.False(handler.Invoked,
+            "no upstream is configured for this org/ecosystem — the pass must never reach a registry, config-default or otherwise.");
+
+        await using var conn = await _db.OpenAsync();
+        string? latest = await conn.QuerySingleAsync<string?>(
+            "SELECT upstream_latest_version FROM packages WHERE id = @id", new { id = packageId });
+        Assert.Equal("9.9.9", latest);
+        string? checkedAt = await conn.QuerySingleAsync<string?>(
+            "SELECT deprecation_checked_at FROM cache_artifact WHERE id = @id", new { id = caId });
+        Assert.NotNull(checkedAt);
+    }
+
+    // ── Upstream-resolve failure (decrypt error) doesn't crash the pass ─────────
+
+    [Fact]
+    public async Task GroupWhoseUpstreamSourceResolutionThrows_DoesNotCrashTheRefreshPass_AndYieldsSlot()
+    {
+        // A configured upstream row carries the enc:v1: encrypted-at-rest prefix, but the
+        // resolver's envelope has no master key configured (the same TestEnvelope.Unconfigured()
+        // BuildServiceWithHandler wires) — EnvelopeProtector.Unprotect throws
+        // InvalidOperationException resolving this org's upstream sources. That resolve must fail
+        // exactly like an unreachable/failed upstream fetch: caught, logged, and the group's slot
+        // yielded — never an unhandled exception escaping the pass. An unhandled exception here
+        // propagates through ProcessGroupsAsync/RunRefreshPassInnerAsync/RunRefreshPassAsync
+        // uncaught, and in production (ContinueOnTickError=false, RunOnStartup=true) that takes
+        // the whole replica down in a boot crash loop over one org's undecryptable secret.
+        var (orgId, _, caId, _) = await SeedVersionAsync(
+            ecosystem: "npm", name: "undecryptable-secret-pkg", version: "1.0.0", origin: "proxy",
+            deprecated: "already known", deprecationCheckedAt: null);
+        await SeedUndecryptableUpstreamRegistryAsync(orgId, "npm", "http://npm.test");
+
+        var handler = new RecordingHandler();
+        var service = BuildServiceWithHandler(handler);
+
+        var thrown = await Record.ExceptionAsync(() => service.RunRefreshPassAsync(CancellationToken.None));
+        Assert.Null(thrown);
+
+        Assert.False(handler.Invoked,
+            "the decrypt failure happens resolving the upstream source list, before any HTTP call is made.");
+
+        await using var conn = await _db.OpenAsync();
+        var (dep, checkedAt) = await conn.QuerySingleAsync<(string?, string?)>(
+            "SELECT deprecated, deprecation_checked_at FROM cache_artifact WHERE id = @id",
+            new { id = caId });
+        // The slot is yielded (moves off the head of the staleness queue)…
+        Assert.NotNull(checkedAt);
+        // …but the recorded verdict survives the failed resolve untouched, same as any other
+        // upstream-fetch failure.
+        Assert.Equal("already known", dep);
+    }
+
+    [Fact]
+    public async Task NpmPackage_PrivateMirrorConfigured_FetchesFromMirrorNotPublicRegistry()
+    {
+        // A private mirror is configured for this org's npm upstream; the pass must resolve
+        // through it rather than the hardcoded registry.npmjs.org default. RoutingHandler
+        // fails the assertion if the request lands on the public host.
+        var (orgId, packageId, caId, _) = await SeedVersionAsync(
+            ecosystem: "npm", name: "mirrored-pkg", version: "1.0.0", origin: "proxy", deprecated: null);
+        await SeedUpstreamRegistryAsync(orgId, "npm", "http://private-mirror.internal/npm");
+
+        string packument = NpmPackument("mirrored-pkg",
+            new Dictionary<string, string?> { ["1.0.0"] = null }, latest: "1.5.0");
+        var handler = new RoutingHandler(url =>
+        {
+            Assert.DoesNotContain("registry.npmjs.org", url, StringComparison.Ordinal);
+            Assert.Contains("private-mirror.internal", url, StringComparison.Ordinal);
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(packument, Encoding.UTF8, "application/json")
+            };
+        });
+        var service = BuildServiceWithHandler(handler);
+        await service.RunRefreshPassAsync(CancellationToken.None);
+
+        await using var conn = await _db.OpenAsync();
+        string? latest = await conn.QuerySingleAsync<string?>(
+            "SELECT upstream_latest_version FROM packages WHERE id = @id", new { id = packageId });
+        Assert.Equal("1.5.0", latest);
     }
 
     // ── Repository method tests ────────────────────────────────────────────────
@@ -808,8 +1016,6 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
                 ["DEPRECATION_REFRESH_BATCH_DELAY_MS"] = "0",
                 ["DEPRECATION_REFRESH_AGE_HOURS"] = "24",
                 ["DEPRECATION_REFRESH_BATCH_SIZE"] = "100",
-                ["Npm:Upstream"] = "http://npm.test",
-                ["PyPI:Upstream"] = "http://pypi.test",
             })
             .Build();
         var airGap = new StubAirGap(airGapped);
@@ -823,7 +1029,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         var registries = new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, _clock, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured()));
         var latestResolver = new UpstreamLatestVersionResolver(upstream, registries);
         return new DeprecationRefreshService(
-            packages, cacheArtifacts, audit, upstream, latestResolver, airGap, config,
+            packages, cacheArtifacts, audit, upstream, latestResolver, registries, airGap, config,
             NullLogger<DeprecationRefreshService>.Instance,
             _clock,
             new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock));
@@ -931,6 +1137,34 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         await repo.AddAsync(orgId, new NewUpstreamRegistry(ecosystem, url));
     }
 
+    /// <summary>
+    /// Seeds an upstream_registry row whose <c>secret</c> column already carries the
+    /// <c>enc:v1:</c> encrypted-at-rest discriminator, inserted directly (bypassing
+    /// <see cref="UpstreamRegistryRepository.AddAsync"/>, whose <c>Protect</c> call would itself
+    /// throw against an unconfigured envelope). Reading it back through
+    /// <see cref="UpstreamRegistryRepository.ListSourcesForEcosystemAsync"/> with the same
+    /// unconfigured envelope <see cref="BuildServiceWithHandler"/> wires reproduces
+    /// <c>EnvelopeProtector.Unprotect</c>'s lost-key fail-closed throw — a rotated or corrupt
+    /// master key, or one that was never configured, for a row an operator previously encrypted.
+    /// </summary>
+    private async Task SeedUndecryptableUpstreamRegistryAsync(string orgId, string ecosystem, string url)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO upstream_registry (id, org_id, ecosystem, url, auth_type, username, secret)
+            VALUES (@id, @orgId, @ecosystem, @url, 'bearer', NULL, @secret)
+            """,
+            new
+            {
+                id = Guid.NewGuid().ToString("N"),
+                orgId,
+                ecosystem,
+                url,
+                secret = "enc:v1:not-a-real-ciphertext",
+            });
+    }
+
     private async Task SetAirGappedAsync(string orgId, bool airGapped)
     {
         await using var conn = await _db.OpenAsync();
@@ -1018,6 +1252,34 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
             => throw new HttpRequestException("upstream unreachable");
+    }
+
+    /// <summary>Routes each request's URL through a caller-supplied function, so a test can
+    /// assert which host was actually contacted (or branch per-package like the fixed-response
+    /// handlers cannot).</summary>
+    private sealed class RoutingHandler : HttpMessageHandler
+    {
+        private readonly Func<string, HttpResponseMessage> _router;
+        public RoutingHandler(Func<string, HttpResponseMessage> router) => _router = router;
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+            => Task.FromResult(_router(request.RequestUri!.ToString()));
+    }
+
+    /// <summary>Records whether any upstream HTTP call was made, so a test can assert a group
+    /// with no configured upstream never reaches the network at all (not even a hardcoded
+    /// public-registry default).</summary>
+    private sealed class RecordingHandler : HttpMessageHandler
+    {
+        public bool Invoked { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            Invoked = true;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{}", Encoding.UTF8, "application/json")
+            });
+        }
     }
 
     private sealed class SingleHandlerFactory : IHttpClientFactory

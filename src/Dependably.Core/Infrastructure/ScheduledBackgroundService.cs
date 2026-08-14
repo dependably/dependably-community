@@ -305,11 +305,11 @@ public abstract class ScheduledBackgroundService : BackgroundService
     {
         if (ScopeJobName is { } jobName && ScopeMetricName is { } metricName)
         {
-            await RunScopedTickAsync(jobName, metricName, ct, lease);
+            await RunScopedTickAsync(jobName, metricName, lease, ct);
         }
         else if (ContinueOnTickError)
         {
-            await RunContinuingTickAsync(ct, lease);
+            await RunContinuingTickAsync(lease, ct);
         }
         else
         {
@@ -320,7 +320,7 @@ public abstract class ScheduledBackgroundService : BackgroundService
     // The scoped shape (job-run row + span via BackgroundJobScope): runs the tick, records the
     // outcome, and — for a genuine failure rather than a lease abort — either logs it (when the
     // job continues on error) or lets it propagate.
-    private async Task RunScopedTickAsync(string jobName, string metricName, CancellationToken ct, LeaderLease? lease)
+    private async Task RunScopedTickAsync(string jobName, string metricName, LeaderLease? lease, CancellationToken ct)
     {
         using var scope = BackgroundJobScope.Begin(jobName, metricName, _time);
         try
@@ -351,7 +351,7 @@ public abstract class ScheduledBackgroundService : BackgroundService
 
     // The unscoped, continue-on-error shape: runs the tick and logs a genuine failure rather than
     // letting it fault ExecuteAsync; a lease abort is a coordinated stop, not a tick failure.
-    private async Task RunContinuingTickAsync(CancellationToken ct, LeaderLease? lease)
+    private async Task RunContinuingTickAsync(LeaderLease? lease, CancellationToken ct)
     {
         try
         {

@@ -49,9 +49,15 @@ CURL_MAX_TIME="${AI_REVIEW_CURL_MAX_TIME:-1000}"
 # diff, so it reaches MAX_DIFF_BYTES / num_ctx sooner on large MRs. Full
 # changed-file bodies would blow the context window, so -U10 is the middle.
 DIFF_CONTEXT="${AI_REVIEW_DIFF_CONTEXT:-10}"
-# Self-verify: a second model pass that filters the first pass's findings,
-# keeping only those grounded in a quoted diff line. Cuts false positives from
-# a weak model. On by default; set AI_REVIEW_SELF_VERIFY=0 to disable. The
+# Self-verify: a second model pass that either (a) filters the first pass's
+# findings, keeping only those grounded in a quoted diff line, or (b) when the
+# first pass claims there is nothing material, independently re-reviews the
+# diff itself rather than taking that claim on faith — the diff is
+# attacker-influenceable text, so a "no findings" line is not evidence of
+# anything until a second, independently-prompted pass has looked. Cuts false
+# positives from a weak model AND closes the one-pass "just say there's
+# nothing" shortcut. On by default; set AI_REVIEW_SELF_VERIFY=0 to disable
+# (a claimed-clean result then stands on the exact-sentinel match alone). The
 # verify persona is shared across all four lenses.
 SELF_VERIFY="${AI_REVIEW_SELF_VERIFY:-1}"
 VERIFY_PERSONA_FILE="${AI_REVIEW_VERIFY_PERSONA_FILE:-ci/prompts/verify.md}"
@@ -162,6 +168,20 @@ build_verify_user() {  # <candidates_file> <out_file>
   { printf '## Candidate findings (from a first-pass reviewer)\n\n';
     cat "$1";
     printf '\n\n## The unified diff under review\n\n```diff\n';
+    cat /tmp/ai-capped.txt;
+    printf '\n```\n'; } > "$2"
+}
+
+# Compose the verify-pass user turn for confirming (or refuting) a first pass's
+# "no material findings" claim — Case B of the verify persona. Distinct from
+# build_verify_user (Case A, filtering real candidates): there is nothing to
+# filter here, so the verify persona is told to independently re-review the
+# diff rather than judge the claim's plausibility.
+build_confirm_clean_user() {  # <clean_claim_file> <out_file>
+  { printf '## First-pass reviewer'"'"'s conclusion\n\n';
+    cat "$1";
+    printf '\n\nThe first pass concluded there is nothing material. This is Case B: independently confirm or refute that conclusion per your instructions — do not agree just because it was claimed.\n\n';
+    printf '## The unified diff under review\n\n```diff\n';
     cat /tmp/ai-capped.txt;
     printf '\n```\n'; } > "$2"
 }
@@ -288,6 +308,88 @@ has_findings() {  # <file>; exit 0 if the output contains >=1 finding
   grep -qiE '^[[:space:]]*([-*+] |#{1,6} |[0-9]+[.)] |(finding|problem|issue|bug)[ :0-9])' "$1"
 }
 
+# The exact "no material findings" line a lens persona is instructed to emit,
+# read out of the persona file itself (single source of truth: the prompt each
+# lens prompt states "output exactly \`<sentinel>\`"). Empty output means the
+# pattern wasn't found — callers must not treat that as licence to trust an
+# unmatched claim; classify_response below fails closed in that case.
+extract_clean_sentinel() {  # <persona_file>
+  # shellcheck disable=SC2016
+  grep -oE 'output exactly `[^`]+`' "$1" | head -1 | sed -E 's/^output exactly `//; s/`$//'
+}
+
+# Collapse a model response to a single trimmed line for exact comparison
+# against a sentinel. Any genuine second line of content (a real finding
+# alongside stray sentinel-like prose, for instance) breaks the match, which
+# is the intended fail-closed behaviour — only a response that IS the sentinel
+# and nothing else counts as clean.
+normalize_response() {  # <file>
+  tr -d '\n' < "$1" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
+}
+
+# Classifies one model turn's raw output: "clean" (byte-exact sentinel match,
+# still subject to independent confirmation before being trusted — see
+# confirm_clean), "findings" (format markers present — the existing
+# self-verify + deterministic-filter pipeline applies), or "ambiguous"
+# (neither — marker-free prose that is not the exact sentinel). Ambiguous
+# output is never treated as clean: marker-absence alone used to be read as
+# "nothing found," which let a diff instruct the model to reply with
+# unformatted "no findings" prose and skip verification entirely.
+classify_response() {  # <content_file> <sentinel>
+  if [ -n "$2" ] && [ "$(normalize_response "$1")" = "$2" ]; then
+    echo "clean"
+  elif has_findings "$1"; then
+    echo "findings"
+  else
+    echo "ambiguous"
+  fi
+}
+
+# Independently confirms or refutes a pass-1 "no material findings" claim via
+# a second, separately-prompted model call — the sentinel classify_response
+# matched is disclosed in the persona file, so a crafted diff can instruct the
+# model to echo it back verbatim; an exact-match claim is therefore
+# well-formed, not verified, until this runs. Echoes one of:
+#   clean              — the second pass independently agrees nothing survives.
+#   clean-unconfirmed   — self-verify is off or the verify persona is missing;
+#                         no independent check ran, the sentinel match stands
+#                         alone (a deliberate, documented weaker mode).
+#   findings            — the second pass found something the first missed;
+#                         its content is left in /tmp/ai-confirm.txt.
+#   degraded            — verification ran but produced neither confirmation
+#                         nor a groundable finding (infra failure, degenerate
+#                         output, or an unrecognised reply).
+confirm_clean() {  # <clean_claim_file>
+  if [ "$SELF_VERIFY" != "1" ]; then
+    echo "clean-unconfirmed"; return 0
+  fi
+  if [ ! -f "$VERIFY_PERSONA_FILE" ]; then
+    echo "WARN: verify persona '$VERIFY_PERSONA_FILE' not found; cannot independently confirm a clean result — trusting the exact-sentinel match alone." >&2
+    echo "clean-unconfirmed"; return 0
+  fi
+  local verify_sentinel
+  verify_sentinel=$(awk '
+    /output exactly this single line and nothing else:/ { capture=1; next }
+    capture && NF > 0 { print; exit }
+  ' "$VERIFY_PERSONA_FILE" 2>/dev/null || true)
+
+  build_confirm_clean_user "$1" /tmp/ai-user2.txt
+  local vrc=0
+  run_turn "$VERIFY_PERSONA_FILE" /tmp/ai-user2.txt /tmp/ai-confirm.txt || vrc=$?
+  if [ "$vrc" -ne 0 ] || ! [ -s /tmp/ai-confirm.txt ] || looks_degenerate /tmp/ai-confirm.txt "$LAST_DONE_REASON"; then
+    echo "WARN: independent confirmation pass unavailable/empty/degenerate; cannot confirm the clean claim." >&2
+    echo "degraded"; return 0
+  fi
+  if [ -n "$verify_sentinel" ] && [ "$(normalize_response /tmp/ai-confirm.txt)" = "$verify_sentinel" ]; then
+    echo "clean"; return 0
+  fi
+  if has_findings /tmp/ai-confirm.txt; then
+    echo "findings"; return 0
+  fi
+  echo "WARN: independent confirmation pass returned neither the expected sentinel nor a recognised finding." >&2
+  echo "degraded"
+}
+
 # Deterministic finding filter (busybox-awk compatible — no gawk extensions).
 # Segments the output into finding blocks, robust to the formats the model
 # actually emits ("- bullet", "Finding N:", numbered, header, or a quote-led
@@ -377,41 +479,91 @@ main() {
   local content; content=$(cat /tmp/ai-content1.txt)
   [ -n "$content" ] || { content="_The model returned no content._"; emit_report "" "$content"; post_or_update_note; exit 0; }
 
-  # No quoted findings => a clean "nothing material" result (or prose). Nothing to
-  # verify or filter; post it as-is, with no misleading footer.
-  if ! has_findings /tmp/ai-content1.txt; then
-    emit_report "" "$content"
-    post_or_update_note
-    echo "AI review report written to $REPORT_FILE (no findings)"
-    return 0
-  fi
+  # Classify pass-1's output: a byte-exact match of the persona's declared
+  # sentinel ("clean", still unconfirmed), format markers present ("findings"),
+  # or neither ("ambiguous" — marker-free prose that is NOT the sentinel).
+  # Marker-absence alone is no longer read as "nothing found": that read let a
+  # diff instruct the model to reply with unformatted "no findings" prose and
+  # skip verification entirely.
+  local sentinel; sentinel=$(extract_clean_sentinel "$PERSONA_FILE")
+  [ -n "$sentinel" ] || echo "WARN: could not extract the expected clean-report sentinel from '$PERSONA_FILE'; a claimed-clean result cannot be trusted by exact match." >&2
+  local classification; classification=$(classify_response /tmp/ai-content1.txt "$sentinel")
 
-  # ── Pass 2: self-verify — filter pass-1 findings against the diff ───────────
-  # The verify output (or pass-1 if verify is unavailable) becomes the working
-  # set; the deterministic filter below is the real backstop either way.
   local verified="no"
-  cp /tmp/ai-content1.txt /tmp/ai-working.txt
-  if [ "$SELF_VERIFY" = "1" ] && [ -f "$VERIFY_PERSONA_FILE" ]; then
-    build_verify_user /tmp/ai-content1.txt /tmp/ai-user2.txt
-    local vrc=0
-    run_turn "$VERIFY_PERSONA_FILE" /tmp/ai-user2.txt /tmp/ai-content2.txt || vrc=$?
-    if [ "$vrc" -eq 0 ] && ! looks_degenerate /tmp/ai-content2.txt "$LAST_DONE_REASON" \
-       && [ -s /tmp/ai-content2.txt ]; then
-      cp /tmp/ai-content2.txt /tmp/ai-working.txt; verified="yes"
-    else
-      echo "WARN: verify pass unavailable/empty/degenerate; relying on the deterministic filter." >&2
-    fi
-  elif [ "$SELF_VERIFY" = "1" ]; then
-    echo "WARN: verify persona '$VERIFY_PERSONA_FILE' not found; relying on the deterministic filter." >&2
+  local working_from_confirm="no"
+
+  if [ "$classification" = "ambiguous" ]; then
+    emit_report " (unverifiable response)" \
+      "The model's response was marker-free prose that did not exactly match the expected \"no material findings\" phrasing (see job log for the raw output). Treated as no-signal rather than a clean pass. This check is advisory and does not block the merge."
+    post_or_update_note
+    echo "AI review report written to $REPORT_FILE (unverifiable response)"
+    return 0
   fi
 
-  # If verification reduced the set to a no-findings / prose result (no quotes),
-  # post it clean — no speculation-filter footer on a "nothing found" message.
-  if ! has_findings /tmp/ai-working.txt; then
-    emit_report "" "$(cat /tmp/ai-working.txt)"
-    post_or_update_note
-    echo "AI review report written to $REPORT_FILE (no findings after verify)"
-    return 0
+  if [ "$classification" = "clean" ]; then
+    # A "no material findings" claim is exactly the sentinel a diff could also
+    # produce simply by instructing the model to echo it back — so it is
+    # confirmed by an independent second pass rather than posted on pass-1's
+    # word alone.
+    local clean_result; clean_result=$(confirm_clean /tmp/ai-content1.txt)
+    case "$clean_result" in
+      clean)
+        emit_report "" "$content"
+        post_or_update_note
+        echo "AI review report written to $REPORT_FILE (confirmed clean)"
+        return 0
+        ;;
+      clean-unconfirmed)
+        emit_report "" "${content}"$'\n\n_(exact-sentinel match; independent confirmation unavailable — see job log.)_'
+        post_or_update_note
+        echo "AI review report written to $REPORT_FILE (clean, unconfirmed)"
+        return 0
+        ;;
+      findings)
+        cp /tmp/ai-confirm.txt /tmp/ai-working.txt
+        verified="yes"
+        working_from_confirm="yes"
+        ;;
+      *)
+        emit_report " (unverifiable response)" \
+          "The first-pass reviewer reported no material findings, but independent verification could not confirm this (see job log). Treated as no-signal rather than a clean pass. This check is advisory and does not block the merge."
+        post_or_update_note
+        echo "AI review report written to $REPORT_FILE (clean claim unconfirmed)"
+        return 0
+        ;;
+    esac
+  fi
+
+  if [ "$working_from_confirm" != "yes" ]; then
+    # classification = "findings" — the existing self-verify + deterministic-
+    # filter pipeline, unchanged. The verify output (or pass-1 if verify is
+    # unavailable) becomes the working set; the deterministic filter below is
+    # the real backstop either way.
+    cp /tmp/ai-content1.txt /tmp/ai-working.txt
+    if [ "$SELF_VERIFY" = "1" ] && [ -f "$VERIFY_PERSONA_FILE" ]; then
+      build_verify_user /tmp/ai-content1.txt /tmp/ai-user2.txt
+      local vrc=0
+      run_turn "$VERIFY_PERSONA_FILE" /tmp/ai-user2.txt /tmp/ai-content2.txt || vrc=$?
+      if [ "$vrc" -eq 0 ] && ! looks_degenerate /tmp/ai-content2.txt "$LAST_DONE_REASON" \
+         && [ -s /tmp/ai-content2.txt ]; then
+        cp /tmp/ai-content2.txt /tmp/ai-working.txt; verified="yes"
+      else
+        echo "WARN: verify pass unavailable/empty/degenerate; relying on the deterministic filter." >&2
+      fi
+    elif [ "$SELF_VERIFY" = "1" ]; then
+      echo "WARN: verify persona '$VERIFY_PERSONA_FILE' not found; relying on the deterministic filter." >&2
+    fi
+
+    # If verification reduced the set to a no-findings / prose result (no
+    # quotes), post it clean — no speculation-filter footer on a "nothing
+    # found" message. This is a verified negative (the verify pass ran
+    # against real candidate findings), unlike pass-1's own unverified claim.
+    if ! has_findings /tmp/ai-working.txt; then
+      emit_report "" "$(cat /tmp/ai-working.txt)"
+      post_or_update_note
+      echo "AI review report written to $REPORT_FILE (no findings after verify)"
+      return 0
+    fi
   fi
 
   # ── Deterministic filter: drop speculation, cap count ──────────────────────
@@ -441,4 +593,10 @@ main() {
   echo "AI review report written to $REPORT_FILE"
 }
 
-main "$@"
+# Guarded so the test suite can `source` this file to unit-test its functions
+# (has_findings, classify_response, filter_findings, …) without triggering a
+# real Ollama call; direct invocation (`bash ci/ai-review.sh …`, how every CI
+# job and human run it) is unaffected.
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  main "$@"
+fi

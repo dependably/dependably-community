@@ -20,6 +20,7 @@ public sealed class OrgAuthConfigController : ControllerBase
 {
     private readonly OrgAccessGuard _guard;
     private readonly SamlConfigRepository _samlConfig;
+    private readonly OrgRepository _orgs;
     private readonly AuditRepository _audit;
     private readonly IPublicUrlBuilder _urls;
     private readonly ProblemResults _problems;
@@ -28,6 +29,7 @@ public sealed class OrgAuthConfigController : ControllerBase
     public OrgAuthConfigController(
         OrgAccessGuard guard,
         SamlConfigRepository samlConfig,
+        OrgRepository orgs,
         AuditRepository audit,
         IPublicUrlBuilder urls,
         ProblemResults problems,
@@ -35,6 +37,7 @@ public sealed class OrgAuthConfigController : ControllerBase
     {
         _guard = guard;
         _samlConfig = samlConfig;
+        _orgs = orgs;
         _audit = audit;
         _urls = urls;
         _problems = problems;
@@ -137,7 +140,20 @@ public sealed class OrgAuthConfigController : ControllerBase
             string.IsNullOrWhiteSpace(req.DefaultRole) ? "member" : req.DefaultRole,
             req.IdpCanAssignAdmin), ct);
 
+        // The disable transition closes the grant (no new password login) but a JWT already
+        // minted from a password stays valid on its own for up to its remaining 8h lifetime
+        // unless something also moves token_version forward. Scoped to password-backed users
+        // only — SAML JIT-provisioned members were never in question and keep their sessions.
+        // disablingForms is already false for a same-value save, so an unrelated PUT that leaves
+        // forms_login_enabled false never reaches this and never churns token_version.
+        int? sessionsRevoked = null;
+        if (disablingForms)
+        {
+            sessionsRevoked = await _orgs.RevokePasswordSessionsAsync(orgId, ct);
+        }
+
         await _audit.LogAsync("saml.config_updated", orgId, GetUserId(),
+            actorKind: ActorKinds.User,
             detail: System.Text.Json.JsonSerializer.Serialize(new
             {
                 enabled = req.Enabled,
@@ -149,7 +165,9 @@ public sealed class OrgAuthConfigController : ControllerBase
                 role_attribute = req.RoleAttribute,
                 default_role = req.DefaultRole,
                 idp_can_assign_admin = req.IdpCanAssignAdmin,
-            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+                sessions_revoked = sessionsRevoked,
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return NoContent();
     }
@@ -188,12 +206,14 @@ public sealed class OrgAuthConfigController : ControllerBase
         await _samlConfig.ResetCertExpiryAlertStageAsync(orgId, ct);
 
         await _audit.LogAsync("saml.metadata_uploaded", orgId, GetUserId(),
+            actorKind: ActorKinds.User,
             detail: System.Text.Json.JsonSerializer.Serialize(new
             {
                 idp_entity_id = parsed.EntityId,
                 idp_sso_url = parsed.SsoUrl,
                 cert_thumbprint = ThumbprintOrNull(parsed.SigningCertBase64),
-            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return Ok(new
         {
@@ -216,7 +236,8 @@ public sealed class OrgAuthConfigController : ControllerBase
 
         string orgId = CurrentTenantId();
         await _samlConfig.DeleteAsync(orgId, ct);
-        await _audit.LogAsync("saml.config_deleted", orgId, GetUserId(), ct: ct);
+        await _audit.LogAsync("saml.config_deleted", orgId, GetUserId(),
+            actorKind: ActorKinds.User, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         return NoContent();
     }
 
@@ -258,12 +279,14 @@ public sealed class OrgAuthConfigController : ControllerBase
         // Cert override changed — reset alert stage so the sweep re-evaluates against the new cert.
         await _samlConfig.ResetCertExpiryAlertStageAsync(orgId, ct);
         await _audit.LogAsync("saml.signing_cert_set", orgId, GetUserId(),
+            actorKind: ActorKinds.User,
             detail: System.Text.Json.JsonSerializer.Serialize(new
             {
                 fingerprint = summary.Fingerprint,
                 subject = summary.Subject,
                 not_after = summary.NotAfter,
-            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return Ok(summary);
     }
@@ -289,7 +312,8 @@ public sealed class OrgAuthConfigController : ControllerBase
         await _samlConfig.ClearSigningCertOverrideAsync(orgId, ct);
         // Override cleared — reset alert stage so the sweep re-evaluates against the metadata cert.
         await _samlConfig.ResetCertExpiryAlertStageAsync(orgId, ct);
-        await _audit.LogAsync("saml.signing_cert_cleared", orgId, GetUserId(), ct: ct);
+        await _audit.LogAsync("saml.signing_cert_cleared", orgId, GetUserId(),
+            actorKind: ActorKinds.User, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         return NoContent();
     }
 

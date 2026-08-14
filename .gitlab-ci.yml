@@ -140,6 +140,7 @@ variables:
   - { job: dotnet-format,          artifacts: false }
   - { job: csp-inline-style-guard, artifacts: false }
   - { job: sql-interp-guard,       artifacts: false }
+  - { job: ai-review-script-test,  artifacts: false }
   - { job: i18n-validate,          artifacts: false }
   - { job: secret-scan,            artifacts: false }
   - { job: unit-tests,             artifacts: false }
@@ -148,6 +149,7 @@ variables:
   - { job: schema-integrity,       artifacts: false }
   - { job: frontend-tests,         artifacts: false }
   - { job: e2e,                    artifacts: false }
+  - { job: e2e-api,                artifacts: false }
   - { job: sbom-backend,           artifacts: false }
   - { job: sbom-frontend,          artifacts: false }
   - { job: dt-publish,             artifacts: false }
@@ -160,15 +162,21 @@ variables:
 # Registry credentials are split by capability, because an MR pipeline runs code authored in
 # the merge request and therefore sees every unprotected variable:
 #
-#   REGISTRY_KEY         — READ/restore only. Unprotected on purpose, so MR pipelines can
+#   REGISTRY_KEY         — READ/restore only, and scoped read-only ON THE REGISTRY — not just
+#                          by convention here. Unprotected on purpose, so MR pipelines can
 #                          resolve dependencies through the private feed instead of falling
 #                          back to public registries. Restoring is read-only, so an MR that
 #                          exfiltrates this token gains read access to the mirror, not the
 #                          ability to overwrite a published image or package.
-#   REGISTRY_PUBLISH_KEY — PUBLISH (publish:oci). Protected + masked, so it is exposed only on
-#                          protected refs (`main`, `v*` tags) and is invisible to a
-#                          feature-branch MR pipeline even when the MR fully controls the job
-#                          script. Referenced only by the jobs that push images.
+#   REGISTRY_PUBLISH_KEY — PUBLISH (publish:oci for the image push, publish:nuget for the
+#                          paired NuGet symbol push — a single Dependably token carries both
+#                          leaf capabilities, requested together at mint time; see
+#                          CONTRIBUTING > Registry credentials in CI). Protected + masked, so
+#                          it is exposed only on protected refs (`main`, `v*` tags) and is
+#                          invisible to a feature-branch MR pipeline even when the MR fully
+#                          controls the job script. Referenced by every job that pushes:
+#                          image pushes (`publish-image`, `build-ci-tools`) and the NuGet
+#                          symbol push (`publish-symbols`).
 #
 # Only the read key is wired into npm/NuGet below. HARD-FAILS when either REGISTRY_URL or
 # REGISTRY_KEY is empty rather than silently falling back to public — the GitLab pipeline must
@@ -573,6 +581,80 @@ mirror-glsec:
 # (b) the committed nuget.config names only public or `.dependably`-allowlisted
 # hosts, which is the allowlist the pre-commit `Dependably.NuCheck` applies and
 # which nothing else in CI enforces.
+# Do the specs still describe code that exists?
+#
+# The spec repo's own CI cannot answer this: it has no source checkout. A
+# periodic audit can, but only after the MR that broke the ref has merged. This
+# is the same check as sdd-housekeeping's 7 and 10, moved to the one place that
+# has both halves at once — the MR that changes the code.
+#
+# Grading is the CLI's, and it is deliberate: a missing path is an error, while a
+# missing `path#Symbol` anchor and a vanished `enforced_by` gate are warnings,
+# because a legitimate rename is indistinguishable from a deletion and a gate
+# that blocks an MR on a rename gets switched off. This job therefore does NOT
+# pass --strict: it blocks on specs describing code that is gone, and reports
+# renames without failing. Promote it once the corpus has lived with it.
+#
+# CI_JOB_TOKEN rather than a new secret: both projects are in the same group, so
+# the spec repo need only list this project in its CI/CD job-token allowlist.
+# There is no fallback if that clone fails — a spec-alignment gate that silently
+# skips when it cannot read the specs is worse than no gate, because it reports
+# clean.
+spec-code-alignment:
+  stage: validate
+  extends: [.runs-on-ci, .private-registry-setup]
+  image: ${DEP_IMAGE_REGISTRY}/library/node:26-slim@sha256:ffc78385a788964bb3cbab5e434ff79a10bdc25b8ae6db03fe5fe6cb14053c09
+  variables:
+    SDD_VERSION: "0.6.1"
+    SPEC_REPO: "dependably-community.spec"
+    # The target-branch merge below needs a common ancestor in the local history,
+    # which the default shallow fetch does not reliably carry.
+    GIT_DEPTH: 0
+  script:
+    - |
+      set -eu
+      # ca-certificates is not in node:*-slim, and without it both the clone and
+      # the `npm i -g` below fail TLS verification against the private host.
+      apt-get update -qq && apt-get install -y --no-install-recommends git ca-certificates >/dev/null
+    # Same shape as the integration-tests clone below: CI_JOB_TOKEN as an
+    # Authorization header rather than embedded in the remote URL, so it never
+    # lands in .git/config, and handed to git via GIT_CONFIG_COUNT/KEY/VALUE
+    # rather than `git -c …` because /proc/<pid>/cmdline is world-readable on the
+    # runner host while /proc/<pid>/environ is not.
+    - | # glsec:ignore GL004 -- gitlab.northwardlabs.ca is this project's own self-hosted GitLab; CI_JOB_TOKEN is a first-party credential
+      set -eu
+      AUTH_B64=$(printf 'gitlab-ci-token:%s' "$CI_JOB_TOKEN" | base64 | tr -d '\n')
+      GIT_CONFIG_COUNT=1 \
+      GIT_CONFIG_KEY_0=http.extraHeader \
+      GIT_CONFIG_VALUE_0="Authorization: Basic ${AUTH_B64}" \
+      git clone --depth 1 --quiet \
+        "https://${CI_SERVER_HOST}/${CI_PROJECT_NAMESPACE}/${SPEC_REPO}.git" .spec-checkout
+    - npm i -g "@dependably/sdd@${SDD_VERSION}"
+    # Validate the merge result, not the branch head. The corpus is always read at
+    # its own tip, so a spec amendment that lands on the target branch describes
+    # code an in-flight branch does not carry yet — and every open MR fails on a
+    # ref it has no way to satisfy until it rebases. Merging the target in first
+    # asks the question the gate means to ask: does the corpus still describe the
+    # code that merging this branch produces? Outside an MR (a main or tag
+    # pipeline) the checkout already is the result, so the merge is skipped.
+    - |
+      set -eu
+      if [ -n "${CI_MERGE_REQUEST_TARGET_BRANCH_NAME:-}" ]; then
+        git config user.email "ci@dependably.invalid"
+        git config user.name "spec-code-alignment"
+        git fetch --quiet --no-tags origin "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+        if ! git merge --no-edit --quiet FETCH_HEAD; then
+          echo "ERROR: this branch conflicts with ${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} and the spec gate cannot" >&2
+          echo "build the merge result. Rebase onto ${CI_MERGE_REQUEST_TARGET_BRANCH_NAME} and push again." >&2
+          exit 1
+        fi
+      fi
+    # Errors block; warnings are printed and do not fail. The trailing counts in
+    # the output are what prove it examined the corpus rather than an empty dir.
+    - sdd validate .spec-checkout --refs --source .
+  after_script:
+    - rm -rf .spec-checkout
+
 lockfile-registry-guard:
   stage: validate
   extends: [.runs-on-ci, .release-required]
@@ -778,10 +860,22 @@ build-ci-tools:
       # only a push pipeline on the protected default branch reaches the push. The
       # publish credential is re-logged-in here (see .private-registry-setup for the
       # read/publish split) so the write-capable token is used for the write only.
+      #
+      # No fallback to REGISTRY_KEY: that token is unprotected (an MR pipeline can
+      # read it) and is now scoped read-only on the registry, so falling back would
+      # trade this legible failure for an opaque 401 partway through a layer upload.
+      #
+      # The `:?` guard is its OWN simple command, deliberately not folded into the
+      # `echo ... | docker login` pipeline below. A parameter expansion that fails
+      # inside a pipeline component exits only that component's SUBSHELL — the
+      # script carries on and reaches the push. As a standalone `:` command it
+      # exits the job shell, which is the whole point. (Verified under BusyBox ash,
+      # this image's shell, plus dash and bash.)
       if [ "${CI_COMMIT_BRANCH:-}" != "main" ]; then
         echo "Ref '${CI_COMMIT_REF_NAME:-unknown}' is not main: ci-tools image build validated, shared tag NOT overwritten."
       else
-        echo "${REGISTRY_PUBLISH_KEY:-$REGISTRY_KEY}" | docker login "$DEP_IMAGE_REGISTRY" -u api --password-stdin
+        : "${REGISTRY_PUBLISH_KEY:?must be set as a Protected + Masked CI/CD variable (CONTRIBUTING > Registry credentials in CI)}"
+        echo "$REGISTRY_PUBLISH_KEY" | docker login "$DEP_IMAGE_REGISTRY" -u api --password-stdin
         docker push "$DEP_IMAGE_REGISTRY/ci/ci-tools:latest"
       fi
 
@@ -848,6 +942,23 @@ sql-interp-guard:
     - !reference [.apk-mirror-setup, script]
     - apk add --no-cache grep
     - sh ci/check-sql-interp.sh src
+
+# Regression suite for ci/ai-review.sh's own finding-classification and
+# clean-review-verification state machine (has_findings, classify_response,
+# confirm_clean, the emit_report paths). Self-contained bash, no bats/shunit
+# dependency — asserts against a real `source` of the script under test, not
+# a reimplementation, so a change to the script that breaks the invariant this
+# pins (a marker-free, non-sentinel model reply must never post as a clean
+# review) fails here before it ever reaches an MR. Gates the MR like any other
+# unit test; the advisory ai-review-* lens jobs it tests stay allow_failure.
+ai-review-script-test:
+  stage: test
+  extends: [.runs-on-ci, .release-required]
+  image: ${DEP_IMAGE_REGISTRY}/library/alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
+  script:
+    - !reference [.apk-mirror-setup, script]
+    - apk add --no-cache bash grep
+    - bash ci/ai-review-test.sh
 
 # Locale completeness gate: every key in the source locale (web en.json, backend
 # SharedResource.resx) must exist in every translated locale. Missing keys fail;
@@ -1084,6 +1195,36 @@ e2e:
     - npm install -g npm@12.0.1
     - npm ci
     - npm run e2e -- --project=chromium
+  artifacts:
+    when: always
+    expire_in: 7 days
+    paths:
+      - web/playwright-report/
+      - web/test-results/
+    reports:
+      junit: web/test-results/junit.xml
+
+# API-level protocol/auth specs (token capability minting, npm/PyPI/NuGet push-pull, SIEM,
+# auth boundaries) — a sibling of `e2e` rather than a shared invocation because these specs
+# mutate one shared org's settings (`PUT /api/v1/settings` is a full-replace write) and race
+# against each other under the default multi-worker runner; `--workers=1` serializes them
+# instead of widening the shared-mutable-state surface each spec has to defend against.
+# Gating (not allow_failure): these specs assert real authorization boundaries — a capability-
+# scoped token cannot push/unlist/read-SIEM outside its grant — and the entire reason this
+# project existed unrun for a long stretch (never wired into any CI invocation) is that a
+# skipped or advisory-only signal on exactly this kind of surface reads as clean when it is
+# actually unverified.
+e2e-api:
+  stage: test
+  extends: [.private-registry-setup, .runs-on-ci, .release-required]
+  image: ${DEP_IMAGE_REGISTRY}/playwright:v1.61.1-noble@sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48
+  needs: [build]
+  tags: [amd64]
+  script:
+    - cd web
+    - npm install -g npm@12.0.1
+    - npm ci
+    - npm run e2e -- --project=api --workers=1
   artifacts:
     when: always
     expire_in: 7 days
@@ -1879,13 +2020,12 @@ release-to-github:
 # final-stage apk layer runs under QEMU, installed via the binfmt image below.
 #
 # Prereqs (set as CI/CD variables):
-#   REGISTRY_PUBLISH_KEY — publish:oci token for $DEP_IMAGE_REGISTRY, set PROTECTED +
-#                   MASKED so it is exposed only on protected refs (`main`, `v*`) and
-#                   never to a feature-branch MR pipeline. This job is the only image
-#                   push besides build-ci-tools. Falls back to REGISTRY_KEY when unset
-#                   so the publish path keeps working until the variable is created;
-#                   delete the fallback once it exists (see CONTRIBUTING > Registry
-#                   credentials in CI).
+#   REGISTRY_PUBLISH_KEY — carries publish:oci for $DEP_IMAGE_REGISTRY (plus publish:nuget,
+#                   which only publish-symbols exercises — see that job's own prereqs
+#                   comment), set PROTECTED + MASKED so it is exposed only on protected
+#                   refs (`main`, `v*`) and never to a feature-branch MR pipeline. This
+#                   job is the only image push besides build-ci-tools. REQUIRED — there is
+#                   no fallback to REGISTRY_KEY (see CONTRIBUTING > Registry credentials in CI).
 #   REGISTRY_KEY  — read-only token, unprotected. Used here ONLY as the BuildKit
 #                   secret that routes the image build's own dependency restores
 #                   through the private feed. It is not the push credential.
@@ -1947,15 +2087,18 @@ publish-image:
       esac
     - echo "Publishing $IMAGE_FLAVOR image from $DOCKERFILE to $IMAGE_REPO"
     - |
-      # The publish credential, with a fallback to the read key so the push keeps
-      # working until REGISTRY_PUBLISH_KEY is created as a protected + masked
-      # variable. Removing the fallback is the one manual cutover step: once the
-      # variable exists, `${REGISTRY_PUBLISH_KEY:?...}` should replace it so an
-      # unprotected pipeline can never reach a write-capable token.
-      if [ -z "${REGISTRY_PUBLISH_KEY:-}" ]; then
-        echo "WARNING: REGISTRY_PUBLISH_KEY is unset — falling back to the unprotected read token for the push. Create it as a Protected + Masked CI/CD variable and drop the fallback (CONTRIBUTING > Registry credentials in CI)." >&2
-      fi
-      echo "${REGISTRY_PUBLISH_KEY:-$REGISTRY_KEY}" | docker login "$DEP_IMAGE_REGISTRY" -u api --password-stdin
+      # The publish credential. No fallback to REGISTRY_KEY: that token is
+      # unprotected (every MR pipeline can read it) and is now scoped read-only on
+      # the registry, so a fallback could not publish anyway — it would only turn
+      # this legible failure into an opaque 401 partway through a layer upload.
+      #
+      # The `:?` guard is its OWN simple command, deliberately not folded into the
+      # `echo ... | docker login` pipeline. A parameter expansion that fails inside
+      # a pipeline component exits only that component's SUBSHELL, leaving the job
+      # to carry on to the push; as a standalone `:` command it exits the job shell.
+      # (Verified under BusyBox ash, this image's shell, plus dash and bash.)
+      : "${REGISTRY_PUBLISH_KEY:?must be set as a Protected + Masked CI/CD variable; if it is set and still empty here, this ref is not protected (CONTRIBUTING > Registry credentials in CI)}"
+      echo "$REGISTRY_PUBLISH_KEY" | docker login "$DEP_IMAGE_REGISTRY" -u api --password-stdin
     # The dind service daemon comes up a few seconds after the job container, so the
     # first command that talks to it races startup ("Cannot connect to the Docker
     # daemon at tcp://docker:2375"). docker login above is a local config write and
@@ -2035,7 +2178,194 @@ publish-image:
       --secret id=registry_key,src=/tmp/registry_key
       $VERSION_TAGS
       --push .
+    # Exports the portable PDBs publish-symbols packs into the .snupkg, from the SAME
+    # `dep-builder` builder instance and therefore the SAME BuildKit cache the `--push`
+    # build above just populated. Identical Dockerfile/build-args make this a cache hit
+    # on the `build` stage rather than a second compilation, so the exported PDBs are
+    # byte-identical to the ones already baked into the image just pushed — the
+    # guarantee a fresh `dotnet publish` on the runner could not make (deterministic
+    # builds do not cover every source of drift, e.g. the NuGet global-packages path).
+    # `--target symbols` selects the `FROM scratch` stage that holds only the PDBs;
+    # local multi-platform output lands one subdirectory per platform
+    # (symbols-export/$IMAGE_FLAVOR/linux_amd64, .../linux_arm64), which is what lets
+    # publish-symbols ship both platforms' SSQP keys even if they ever diverge.
+    - >-
+      docker buildx build
+      -f "$DOCKERFILE"
+      --platform linux/amd64,linux/arm64
+      --target symbols
+      --build-arg BUILDKIT_SYNTAX="$BUILDKIT_SYNTAX_IMAGE"
+      --build-arg VERSION="$VERSION"
+      --build-arg REGISTRY_URL="$REGISTRY_URL"
+      --build-arg NODE_IMAGE="$NODE_IMAGE"
+      --build-arg SDK_IMAGE="$SDK_IMAGE"
+      --build-arg RUNTIME_IMAGE="$RUNTIME_IMAGE"
+      --secret id=registry_key,src=/tmp/registry_key
+      --output type=local,dest=symbols-export/$IMAGE_FLAVOR
+      .
     - rm -f /tmp/registry_key
+  # Short-lived: publish-symbols (release stage, needs: this job) consumes it within the
+  # same pipeline and packs it into the .snupkg immediately after.
+  artifacts:
+    paths:
+      - symbols-export/$IMAGE_FLAVOR/
+    expire_in: 1 hour
+
+# === publish (nuget symbols) ===
+#
+# Packs and pushes a `.snupkg` per composition root, from the exact PDBs publish-image
+# just exported (symbols-export/, see the comment on its second buildx invocation for
+# the same-compilation provenance guarantee) — never a fresh `dotnet publish` on this
+# runner, which would mint different PDB GUIDs and leave every symbol permanently
+# unresolvable with no visible failure at push time.
+#
+# One coordinate per composition root, mirroring the two images: `Dependably` carries
+# Dependably.pdb + Dependably.Core.pdb + Dependably.Management.pdb; `Dependably.Edge`
+# carries Dependably.Edge.pdb + Dependably.Core.pdb. Both platforms' PDBs are packed
+# into the one archive under lib/net10.0/<buildkit-platform>/ so an amd64/arm64 PDB-GUID
+# mismatch — Portable PDBs are RID-agnostic IL metadata, so there should not be one, but
+# this does not assume it — still ships both SSQP keys; NuGetSymbolIndexer indexes every
+# `.pdb` entry in the archive independently and keys strictly off the PDB's own embedded
+# id, so two same-named entries with different bytes coexist and index cleanly, and a
+# genuinely identical pair reindexes the same (packageVersionId, key) row idempotently.
+#
+# A hand-assembled ZIP (root .nuspec + PackageType=SymbolsPackage, no `dotnet pack`)
+# rather than a stub-project pack: `dotnet pack` mints a companion `.nupkg`, which this
+# feed does not need — NuGetPublishHandler's PUT /nuget/symbols indexes a standalone
+# symbols-only push with no requirement that a `.nupkg` exists at the coordinate
+# (MultiFileEcosystems: "a symbols-only version's primary IS its .snupkg"), and a
+# companion would put a fake installable app package on the feed. The nuspec needs only
+# a known namespace + id + version — NuGetNupkgValidator does not require
+# description/authors for a symbol package, matching what `dotnet pack` itself emits.
+#
+# NOT .release-required: a side-effect publish, like publish-image, not a release gate.
+#
+# Prereqs (set as CI/CD variables):
+#   REGISTRY_PUBLISH_KEY — the same protected + masked publish credential publish-image and
+#                   build-ci-tools use for the image push (CONTRIBUTING > Registry
+#                   credentials in CI), reused here for the paired NuGet symbol push rather
+#                   than minting a third registry credential. Its underlying Dependably
+#                   token must carry publish:nuget in addition to publish:oci — NuGetController
+#                   gates PUT /nuget/symbols on Capabilities.PublishNuget ("publish:nuget"),
+#                   a distinct leaf capability from the image push's publish:oci (see
+#                   Capabilities.Grants — a token scoped to publish:oci alone does not
+#                   satisfy a publish:nuget check; only an exact match or the publish:*
+#                   family wildcard does). It must not reuse the unprotected read-only
+#                   REGISTRY_KEY (an MR pipeline sees every unprotected variable, and
+#                   REGISTRY_KEY is intentionally scoped read-only on the registry itself —
+#                   reusing it here would either fail every push or, if ever widened for
+#                   this job's sake, hand every MR pipeline a publish credential).
+#   REGISTRY_URL  — already unprotected/non-secret; the dogfood instance's own address is
+#                   both the private feed every other job restores from and this job's
+#                   push target, so pushing here dogfoods the symbol-server feature on
+#                   the same instance.
+publish-symbols:
+  stage: release
+  extends: .runs-on-ci-main
+  image: ${DEP_IMAGE_REGISTRY}/library/alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
+  # Matches publish-image and every other publish/deploy job in this file: pin to a
+  # trusted runner class rather than letting it land on any available (including
+  # untrusted self-hosted) runner.
+  tags: [amd64]
+  needs:
+    - job: publish-image
+      parallel:
+        matrix:
+          - IMAGE_FLAVOR: [community, edge]
+      artifacts: true
+  resource_group: publish-symbols
+  # Cancellation must not race a partial symbol push.
+  interruptible: false
+  script:
+    - !reference [.apk-mirror-setup, script]
+    - apk add --no-cache zip curl
+    # Version derivation only — deliberately its own script item, isolated from the
+    # curl push below (glsec flags a curl call textually co-occurring with
+    # CI_COMMIT_TAG as GL025, "curl target may be attacker-controlled"; here
+    # CI_COMMIT_TAG never reaches a curl argument, only $VERSION, which is embedded in
+    # the pushed package's version metadata — the curl target is always the fixed
+    # $REGISTRY_URL — but keeping the reference out of the push item entirely is a
+    # cleaner fix than an inline suppression for a false match).
+    - |
+      set -eu
+      : "${REGISTRY_PUBLISH_KEY:?must be set as a Protected + Masked CI/CD variable (CONTRIBUTING > Registry credentials in CI)}"
+      : "${REGISTRY_URL:?REGISTRY_URL is empty — refusing to push symbols to an unset target feed.}"
+      # Same version derivation as publish-image and deploy-staging: the durable
+      # X.Y.Z on a release tag, the main-prerelease stamp otherwise. Symbols for a
+      # coordinate this job has not yet pushed a package for are fine — NuGet
+      # symbols-only versions are first-class here (see header comment).
+      if echo "$CI_COMMIT_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+        VERSION="${CI_COMMIT_TAG#v}"
+      else
+        FILE_VERSION=$(grep -oE '<Version>[^<]+</Version>' Directory.Build.props \
+          | sed -E 's|<Version>(.*)</Version>|\1|')
+        VERSION="${FILE_VERSION}-main.g${CI_COMMIT_SHORT_SHA}"
+      fi
+      echo "Packing symbols for version $VERSION"
+    - |
+      # $VERSION carries over from the script item above — GitLab concatenates every
+      # `script:` item into one shell invocation, so a variable one item sets is live
+      # in the next (the same mechanism publish-image relies on for $DOCKERFILE/
+      # $IMAGE_REPO across its own script items).
+      #
+      # $1 = NuGet package id, $2 = symbols-export/ subdirectory (the IMAGE_FLAVOR that
+      # produced it), remaining args = PDB basenames this coordinate carries.
+      pack_snupkg() {
+        pkg_id="$1"; flavor_dir="$2"; shift 2
+        workdir=$(mktemp -d)
+        found=0
+        for platform_dir in symbols-export/"$flavor_dir"/*/; do
+          [ -d "$platform_dir" ] || continue
+          platform=$(basename "$platform_dir")
+          mkdir -p "$workdir/lib/net10.0/$platform"
+          for pdb in "$@"; do
+            if [ -f "$platform_dir$pdb" ]; then
+              cp "$platform_dir$pdb" "$workdir/lib/net10.0/$platform/$pdb"
+              found=$((found + 1))
+            fi
+          done
+        done
+        if [ "$found" -eq 0 ]; then
+          echo "ERROR: no PDBs found under symbols-export/$flavor_dir for $pkg_id — refusing to push an empty symbol package." >&2
+          exit 1
+        fi
+        {
+          echo '<?xml version="1.0" encoding="utf-8"?>'
+          echo '<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">'
+          echo '  <metadata>'
+          echo "    <id>${pkg_id}</id>"
+          echo "    <version>${VERSION}</version>"
+          echo '    <packageTypes>'
+          echo '      <packageType name="SymbolsPackage" />'
+          echo '    </packageTypes>'
+          echo '  </metadata>'
+          echo '</package>'
+        } > "$workdir/$pkg_id.nuspec"
+        ( cd "$workdir" && zip -q -r "$CI_PROJECT_DIR/$pkg_id.$VERSION.snupkg" . )
+        rm -rf "$workdir"
+        echo "Packed $pkg_id.$VERSION.snupkg ($found PDB(s) across $(find symbols-export/"$flavor_dir" -mindepth 1 -maxdepth 1 -type d | wc -l) platform(s))"
+      }
+
+      pack_snupkg Dependably community Dependably.pdb Dependably.Core.pdb Dependably.Management.pdb
+      pack_snupkg Dependably.Edge edge Dependably.Edge.pdb Dependably.Core.pdb
+    - | # glsec:ignore GL020 -- curl PUSHes a locally-assembled .snupkg; -o only captures the JSON response body for the error-diagnostic branch below, nothing downloaded is executed or trusted.
+      for pkg in Dependably."$VERSION".snupkg Dependably.Edge."$VERSION".snupkg; do
+        echo "Pushing $pkg to $REGISTRY_URL/nuget/symbols"
+        code=$(curl -sS -o /tmp/push-response.json -w '%{http_code}' \
+          -X PUT "$REGISTRY_URL/nuget/symbols" \
+          -H "X-NuGet-ApiKey: $REGISTRY_PUBLISH_KEY" \
+          -F "package=@$pkg")
+        if [ "$code" -ge 300 ]; then
+          echo "ERROR: pushing $pkg failed (HTTP $code):" >&2
+          cat /tmp/push-response.json >&2 || true
+          exit 1
+        fi
+        echo "$pkg pushed (HTTP $code)"
+      done
+  artifacts:
+    paths:
+      - "*.snupkg"
+    expire_in: 30 days
 
 # === staging ===
 #

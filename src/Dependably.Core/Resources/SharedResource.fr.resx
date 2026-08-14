@@ -243,6 +243,9 @@
   <data name="error.settings.epssRange" xml:space="preserve">
     <value>Doit être compris entre 0,0 et 1,0 (probabilité EPSS), ou null pour désactiver.</value>
   </data>
+  <data name="error.settings.retentionRange" xml:space="preserve">
+    <value>Doit être zéro ou plus, ou null pour désactiver.</value>
+  </data>
   <data name="error.settings.deprecatedPolicyInvalid" xml:space="preserve">
     <value>Doit être « off », « warn », « block_new » ou « block_all ».</value>
   </data>
@@ -311,6 +314,9 @@
   </data>
   <data name="error.system.unsupportedLanguage" xml:space="preserve">
     <value>Code de langue non pris en charge. Autorisés : {0}.</value>
+  </data>
+  <data name="error.system.unsupportedTimezone" xml:space="preserve">
+    <value>Fuseau horaire non reconnu « {0} ». Utilisez un nom de zone IANA, par exemple America/Toronto.</value>
   </data>
   <data name="error.password.currentRequired" xml:space="preserve">
     <value>Le mot de passe actuel est obligatoire.</value>
@@ -383,6 +389,9 @@
   </data>
   <data name="error.webhook.unknownEventTypes" xml:space="preserve">
     <value>Types d'événements inconnus : {0}. Types valides : {1}.</value>
+  </data>
+  <data name="error.webhook.maxPerOrg" xml:space="preserve">
+    <value>Le maximum de {0} abonnements webhook par organisation est atteint. Supprimez un abonnement existant d'abord.</value>
   </data>
   <data name="error.alert.stateInvalid" xml:space="preserve">
     <value>Doit être « active » ou « dismissed ».</value>
@@ -579,6 +588,19 @@ Si vous n'êtes pas à l'origine de ce changement, contactez immédiatement votr
 Consultez cette alerte dans les paramètres Alertes de Dependably.
 </value>
   </data>
+  <data name="email.alert.digest.subject" xml:space="preserve">
+    <value>Alerte Dependably : {0} ({1} occurrences)</value>
+  </data>
+  <data name="email.alert.digest.body" xml:space="preserve">
+    <value>{0}
+
+Cette alerte s'est produite {1} fois. Occurrence la plus récente ci-dessous.
+
+{2}
+
+Consultez cette alerte dans les paramètres Alertes de Dependably.
+</value>
+  </data>
   <data name="email.security.emailChanged.subject" xml:space="preserve">
     <value>Votre compte Dependably a été déplacé vers une autre adresse courriel</value>
   </data>
@@ -603,5 +625,11 @@ Si vous n'êtes pas à l'origine de ce changement, contactez immédiatement votr
   </data>
   <data name="error.user.reauthRequired" xml:space="preserve">
     <value>Saisissez votre mot de passe actuel pour modifier votre adresse courriel.</value>
+  </data>
+  <data name="error.tooManyRequests.title" xml:space="preserve">
+    <value>Trop de requêtes</value>
+  </data>
+  <data name="error.user.emailChangeThrottled" xml:space="preserve">
+    <value>Trop de courriels de vérification ont été envoyés à cette adresse récemment. Réessayez plus tard.</value>
   </data>
 </root>

@@ -128,4 +128,133 @@ public sealed class CargoMetadataRepositoryTests : IClassFixture<InMemoryDbFixtu
 
         Assert.Empty(lines);
     }
+
+    // Seeds a global-plane (cache_artifact) crate: the shared row plus this tenant's own
+    // content binding on tenant_artifact_access, and the sparse-index line stored against the
+    // cache_artifact_id (owner_kind='cache_artifact') the way ProxyCrateFromUpstreamAsync writes
+    // it on first fetch — with cksum equal to sharedHash, exactly as BuildProxyIndexLine
+    // computes it from whichever tenant's fetch created the row.
+    private async Task<string> SeedGlobalIndexLineAsync(
+        string orgId, string name, string version, string sharedHash, string ownHash)
+    {
+        var cacheArtifacts = new CacheArtifactRepository(_fixture.Store);
+        var cacheArtifact = new CacheArtifact
+        {
+            Id = Guid.NewGuid().ToString("D"),
+            Ecosystem = "cargo",
+            Name = name,
+            Version = version,
+            Filename = $"{name}-{version}.crate",
+            BlobKey = $"proxy/{sharedHash}/{name}-{version}.crate",
+            ContentHash = sharedHash,
+            SizeBytes = 10,
+            FirstCachedAt = TestTime.KnownNow,
+            LastAccessedAt = TestTime.KnownNow,
+        };
+        await cacheArtifacts.InsertAsync(cacheArtifact);
+
+        await new TenantArtifactAccessRepository(_fixture.Store).UpsertAsync(
+            orgId, cacheArtifact.Id, TestTime.KnownNow,
+            new TenantContentBinding(ownHash, $"proxy/{ownHash}/{name}-{version}.crate", 10));
+
+        string indexLine =
+            $$"""{"name":"{{name}}","vers":"{{version}}","deps":[],"cksum":"{{sharedHash}}","features":{},"yanked":false}""";
+        await NewRepo().UpsertIndexLineForCacheArtifactAsync(cacheArtifact.Id, indexLine);
+
+        return cacheArtifact.Id;
+    }
+
+    /// <summary>
+    /// A tenant whose own upstream served different bytes than the shared row's must not be
+    /// advertised the shared row's <c>cksum</c> — it describes another tenant's <c>.crate</c>
+    /// file. Unlike npm's <c>dist.integrity</c>, Cargo's sparse-index format has no "absent"
+    /// form for <c>cksum</c>, so the line is rewritten to this tenant's own bound content hash
+    /// (the same SHA-256-of-the-.crate-file digest) rather than omitted.
+    /// </summary>
+    [Fact]
+    public async Task GetIndexLinesAsync_ForADivergingTenant_RewritesCksumToTheTenantsOwnHash()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        string name = $"left-pad-{Guid.NewGuid():N}"[..20];
+        const string sharedHash = "1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa";
+        const string ownHash = "2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb";
+
+        await SeedGlobalIndexLineAsync(orgId, name, "1.3.0", sharedHash, ownHash);
+
+        var repo = NewRepo();
+        var lines = await repo.GetIndexLinesAsync(orgId, name);
+
+        string line = Assert.Single(lines);
+        using var doc = System.Text.Json.JsonDocument.Parse(line);
+        Assert.Equal(ownHash, doc.RootElement.GetProperty("cksum").GetString());
+        Assert.DoesNotContain(sharedHash, line);
+    }
+
+    /// <summary>
+    /// Adversarial twin: the non-diverging tenant — every tenant, on every coordinate, in
+    /// normal operation — keeps the shared row's own <c>cksum</c> verbatim. Rewriting it
+    /// unconditionally would also pass the test above while corrupting every crate this tenant
+    /// resolved from the same bytes as the shared row.
+    /// </summary>
+    [Fact]
+    public async Task GetIndexLinesAsync_ForANonDivergingTenant_KeepsTheSharedCksum()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        string name = $"right-pad-{Guid.NewGuid():N}"[..20];
+        const string hash = "1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa";
+
+        await SeedGlobalIndexLineAsync(orgId, name, "1.3.0", hash, hash);
+
+        var repo = NewRepo();
+        var lines = await repo.GetIndexLinesAsync(orgId, name);
+
+        string line = Assert.Single(lines);
+        using var doc = System.Text.Json.JsonDocument.Parse(line);
+        Assert.Equal(hash, doc.RootElement.GetProperty("cksum").GetString());
+    }
+
+    /// <summary>
+    /// A tenant with no binding at all is being served the shared blob, so the shared row's
+    /// <c>cksum</c> describes exactly those bytes and must be kept verbatim. This is the
+    /// legacy/blue-green row shape, and it is the case where treating "hashes are not equal" as
+    /// the test rather than "both hashes are known and unequal" would rewrite (or blank) the
+    /// cksum of every un-backfilled proxy crate.
+    /// </summary>
+    [Fact]
+    public async Task GetIndexLinesAsync_WithNoTenantBinding_KeepsTheSharedCksum()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        string name = $"no-pad-{Guid.NewGuid():N}"[..20];
+        const string hash = "1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa";
+
+        var cacheArtifacts = new CacheArtifactRepository(_fixture.Store);
+        var cacheArtifact = new CacheArtifact
+        {
+            Id = Guid.NewGuid().ToString("D"),
+            Ecosystem = "cargo",
+            Name = name,
+            Version = "1.3.0",
+            Filename = $"{name}-1.3.0.crate",
+            BlobKey = $"proxy/{hash}/{name}-1.3.0.crate",
+            ContentHash = hash,
+            SizeBytes = 10,
+            FirstCachedAt = TestTime.KnownNow,
+            LastAccessedAt = TestTime.KnownNow,
+        };
+        await cacheArtifacts.InsertAsync(cacheArtifact);
+
+        await new TenantArtifactAccessRepository(_fixture.Store).UpsertAsync(
+            orgId, cacheArtifact.Id, TestTime.KnownNow, TenantContentBinding.None);
+
+        string indexLine =
+            $$"""{"name":"{{name}}","vers":"1.3.0","deps":[],"cksum":"{{hash}}","features":{},"yanked":false}""";
+        await NewRepo().UpsertIndexLineForCacheArtifactAsync(cacheArtifact.Id, indexLine);
+
+        var repo = NewRepo();
+        var lines = await repo.GetIndexLinesAsync(orgId, name);
+
+        string line = Assert.Single(lines);
+        using var doc = System.Text.Json.JsonDocument.Parse(line);
+        Assert.Equal(hash, doc.RootElement.GetProperty("cksum").GetString());
+    }
 }

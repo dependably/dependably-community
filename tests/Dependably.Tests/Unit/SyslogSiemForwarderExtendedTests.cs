@@ -233,4 +233,49 @@ public sealed class SyslogSiemForwarderExtendedTests
             listener.Stop();
         }
     }
+
+    [Fact]
+    public async Task SendAsync_Tls_HandshakeFailure_DisposesTheSslStream()
+    {
+        // Regression: a handshake failure must not leak the SslStream. LastSslStreamForTest
+        // (a test seam) captures the instance SendTcpAsync constructed so we can assert it was
+        // actually disposed — Write()ing to a disposed stream throws ObjectDisposedException,
+        // the same disposed-stream contract the caller would trip over on a genuine leak (the
+        // symptom the finding describes is a lingering managed object, not a hung connection).
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        try
+        {
+            int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    using var s = await listener.AcceptTcpClientAsync();
+                    s.Close();
+                }
+                catch { /* listener stopped */ }
+            });
+
+            var sut = new SyslogSiemForwarder(Cfg(new Dictionary<string, string?>
+            {
+                ["SIEM_SYSLOG_HOST"] = "127.0.0.1",
+                ["SIEM_SYSLOG_PORT"] = port.ToString(),
+                ["SIEM_SYSLOG_PROTO"] = "tls",
+                ["SIEM_SYSLOG_FORMAT"] = "cef",
+            }));
+
+            await Assert.ThrowsAnyAsync<Exception>(async () =>
+                await sut.SendAsync(Sample()).WaitAsync(TimeSpan.FromSeconds(10)));
+
+            var ssl = sut.LastSslStreamForTest;
+            Assert.NotNull(ssl);
+            Assert.Throws<ObjectDisposedException>(() => ssl!.Write([1], 0, 1));
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
 }

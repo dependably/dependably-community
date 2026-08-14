@@ -177,6 +177,27 @@ public static class DependablyMeter
             "dependably.download_count_writer.dropped",
             description: "Download-count increments dropped because the async writer channel was full.");
 
+    /// <summary>
+    /// SIEM events dropped because the outbound forwarder queue's bounded channel was full.
+    /// A compliance-relevant delivery, discarded before ever being attempted — the same shape
+    /// as <see cref="DownloadCountWriterDropped"/>, but for a sink operators are more likely to
+    /// alert on going quiet.
+    /// </summary>
+    public static readonly Counter<long> SiemForwarderDropped =
+        Meter.CreateCounter<long>(
+            "dependably.siem_forwarder.dropped",
+            description: "SIEM events dropped because the outbound forwarder queue was full.");
+
+    /// <summary>
+    /// SIEM events that exhausted the forwarder's retry/backoff schedule without a successful
+    /// delivery to the configured collector. Distinct from <see cref="SiemForwarderDropped"/>:
+    /// this event was attempted (and retried) but the collector never accepted it.
+    /// </summary>
+    public static readonly Counter<long> SiemForwarderFailed =
+        Meter.CreateCounter<long>(
+            "dependably.siem_forwarder.failed",
+            description: "SIEM events that exhausted delivery retries without reaching the collector.");
+
     public static readonly Counter<long> ScanFindings =
         Meter.CreateCounter<long>(
             "dependably.scan.findings",
@@ -358,6 +379,19 @@ public static class DependablyMeter
         Meter.CreateCounter<long>(
             "dependably.cache.content_divergences",
             description: "First-fetch content divergences on the shared cache plane: a tenant's fetched SHA-256 differs from the cached global row. Attributes: ecosystem.");
+
+    /// <summary>
+    /// First fetches refused because they could not identify the bytes they asked to admit: no
+    /// SHA-256 or no blob key reached <see cref="Infrastructure.CacheAccessRecorder"/>, so no
+    /// tenant content binding could be written and the tenant would have been left reading the
+    /// shared coordinate row — whichever upstream's bytes that row happens to hold. A non-zero
+    /// rate is a call site handing the cache plane an empty hash, not an attack in itself.
+    /// Attributes: <c>ecosystem</c>. No per-tenant or per-package labels (cardinality budget).
+    /// </summary>
+    public static readonly Counter<long> CacheUnidentifiedFetchRefusals =
+        Meter.CreateCounter<long>(
+            "dependably.cache.unidentified_fetch_refusals",
+            description: "Proxy first fetches refused because no content hash or blob key identified the bytes being admitted. Attributes: ecosystem.");
 
     /// <summary>
     /// Rendered-metadata invalidations this replica broadcast to its peers after a mutation.

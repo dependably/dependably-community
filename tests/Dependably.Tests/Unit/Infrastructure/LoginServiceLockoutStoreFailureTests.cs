@@ -95,8 +95,8 @@ public sealed class LoginServiceLockoutStoreFailureTests : IClassFixture<InMemor
         _lockout.GetAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(Task.FromResult<(int, DateTimeOffset?)>((0, null)));
         _lockout.RecordFailureAsync(
-                Arg.Any<string>(), Arg.Any<int>(), Arg.Any<DateTimeOffset?>(), Arg.Any<CancellationToken>())
-            .Returns<Task>(_ => throw Down());
+                Arg.Any<string>(), Arg.Any<int>(), Arg.Any<TimeSpan>(), Arg.Any<CancellationToken>())
+            .Returns<Task<(int, DateTimeOffset?)>>(_ => throw Down());
 
         await Assert.ThrowsAsync<RedisConnectionException>(
             () => NewSut().LoginTenantAsync(email, "wrong-password", orgId));

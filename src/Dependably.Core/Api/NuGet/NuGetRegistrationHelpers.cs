@@ -25,7 +25,7 @@ internal static class NuGetRegistrationHelpers
     // verify the splice without spinning up the controller.
     internal static string MergeLocalIntoUpstreamRegistration(
         string upstreamJson, IReadOnlyList<PackageVersion> localVersions, Package pkg, string id,
-        string? baseUrl = null)
+        string? baseUrl = null, IReadOnlyCollection<string>? upstreamBaseUrls = null)
     {
         string normalizedId = id.ToLowerInvariant();
         JsonObject? root;
@@ -43,7 +43,7 @@ internal static class NuGetRegistrationHelpers
 
         if (baseUrl is not null)
         {
-            RewriteAllLeafUrls(root, normalizedId, baseUrl);
+            RewriteAllLeafUrls(root, normalizedId, baseUrl, upstreamBaseUrls);
         }
 
         if (localOnly.Count == 0)
@@ -59,7 +59,12 @@ internal static class NuGetRegistrationHelpers
     // Rewrites packageContent and leaf @id fields in a full upstream registration index document
     // (all pages, all leaves) to local flatcontainer and registration routes. Tolerates absent
     // or non-string fields — upstream JSON is untrusted input.
-    internal static string RewriteRegistrationIndexUrls(string indexJson, string normalizedId, string baseUrl)
+    //
+    // upstreamBaseUrls carries the org's configured upstream URLs so any URL that survives the
+    // rewrite can be host-pinned to one of them; see RewriteAllLeafUrls.
+    internal static string RewriteRegistrationIndexUrls(
+        string indexJson, string normalizedId, string baseUrl,
+        IReadOnlyCollection<string>? upstreamBaseUrls = null)
     {
         JsonObject? root;
         try { root = JsonNode.Parse(indexJson) as JsonObject; }
@@ -69,25 +74,27 @@ internal static class NuGetRegistrationHelpers
             return indexJson;
         }
 
-        RewriteAllLeafUrls(root, normalizedId, baseUrl);
+        RewriteAllLeafUrls(root, normalizedId, baseUrl, upstreamBaseUrls);
         return root.ToJsonString(RelaxedJsonOptions);
     }
 
     // Rewrites packageContent and @id in an upstream registration leaf JSON document so that
     // all download and leaf URLs resolve to this instance rather than the upstream registry.
     // Tolerates absent or non-string fields — upstream JSON is untrusted input.
-    internal static string RewriteRegistrationLeafUrls(string leafJson, string normalizedId, string baseUrl)
+    //
+    // Returns null when the leaf carries no usable version and therefore cannot be expressed as a
+    // local route: the download URL on such a leaf is upstream-controlled, so serving it would
+    // point the client straight past the proxy's checksum verification, scan, and block gate. The
+    // caller turns that into a 404 rather than a passthrough. Malformed JSON is still returned
+    // unchanged — nothing in it parses as a URL a client would follow.
+    internal static string? RewriteRegistrationLeafUrls(string leafJson, string normalizedId, string baseUrl)
     {
         JsonObject? leaf;
         try { leaf = JsonNode.Parse(leafJson) as JsonObject; }
         catch (JsonException) { return leafJson; }
-        if (leaf is null)
-        {
-            return leafJson;
-        }
-
-        RewriteLeafNode(leaf, normalizedId, baseUrl);
-        return leaf.ToJsonString(RelaxedJsonOptions);
+        return leaf is null
+            ? leafJson
+            : RewriteLeafNode(leaf, normalizedId, baseUrl) ? leaf.ToJsonString(RelaxedJsonOptions) : null;
     }
 
     // Walks the pages and leaf entries inside a parsed registration index and rewrites each
@@ -97,31 +104,78 @@ internal static class NuGetRegistrationHelpers
     // dereferences an inline page, so the upstream URL there is pure leakage. A page WITHOUT items
     // is externalized — its @id is the only way a client can reach those leaves, so it is left
     // pointing upstream. InlineExternalizedPagesAsync runs first and normally leaves none of those
-    // behind; one that survives (unfetchable, or hosted off the configured upstream) keeps a
-    // working document rather than a local URL this instance cannot serve.
+    // behind; one that survives (unfetchable) keeps a working document rather than a local URL
+    // this instance cannot serve.
+    //
+    // A leaf that cannot be rewritten (no usable version string) is REMOVED from its page rather
+    // than emitted with its upstream-controlled @id and packageContent: those fields name the
+    // bytes the client downloads, and leaving them intact hands a hostile upstream a download URL
+    // that bypasses checksum verification, the OSV scan, the block gate, and the first-fetch
+    // audit. Likewise, an externalized page whose @id is not host-pinned to one of the org's
+    // configured upstreams (upstreamBaseUrls) is removed — a client dereferencing it would fetch
+    // leaves, and therefore download URLs, from a host the operator never configured. Dropping it
+    // hides the versions it holds, which is the fail-closed side of the trade and is diagnosable:
+    // InlineExternalizedPagesAsync's fetch already refused the same page on the same host-pin and
+    // logged it by URL. A null upstreamBaseUrls means no pin information was supplied (test seams
+    // and local-only callers that never reach a client) and skips only the page-host check.
     //
     // Absent or non-object nodes are silently skipped — upstream JSON is untrusted input.
-    internal static void RewriteAllLeafUrls(JsonObject root, string normalizedId, string baseUrl)
+    internal static void RewriteAllLeafUrls(
+        JsonObject root, string normalizedId, string baseUrl,
+        IReadOnlyCollection<string>? upstreamBaseUrls = null)
     {
         if (root["items"] is not JsonArray pages)
         {
             return;
         }
 
-        foreach (var pageNode in pages.OfType<JsonObject>())
+        // Reverse order: unusable pages are removed in place.
+        for (int p = pages.Count - 1; p >= 0; p--)
         {
+            if (pages[p] is not JsonObject pageNode)
+            {
+                continue;
+            }
+
             if (pageNode["items"] is not JsonArray leaves)
             {
+                if (!IsPinnedToConfiguredUpstream(TryGetString(pageNode["@id"]), upstreamBaseUrls))
+                {
+                    pages.RemoveAt(p);
+                }
+
                 continue;
             }
 
             pageNode["@id"] = LocalPageId(pageNode, normalizedId, baseUrl);
 
-            foreach (var leafNode in leaves.OfType<JsonObject>())
+            for (int i = leaves.Count - 1; i >= 0; i--)
             {
-                RewriteLeafNode(leafNode, normalizedId, baseUrl);
+                if (leaves[i] is JsonObject leafNode && !RewriteLeafNode(leafNode, normalizedId, baseUrl))
+                {
+                    leaves.RemoveAt(i);
+                }
+            }
+
+            // `count` states how many leaves the page carries; dropping one without updating it
+            // leaves a document that contradicts itself.
+            if (pageNode["count"] is not null)
+            {
+                pageNode["count"] = leaves.Count;
             }
         }
+    }
+
+    // True when candidateUrl is absolute and its host matches one of the org's configured upstream
+    // URLs. A null configuredUpstreams means the caller supplied no pin information, which only
+    // happens on paths that never emit to a client. A supplied-but-empty set pins nothing, so
+    // every absolute URL fails the check — fail-closed by construction.
+    private static bool IsPinnedToConfiguredUpstream(
+        string? candidateUrl, IReadOnlyCollection<string>? configuredUpstreams)
+    {
+        return configuredUpstreams is null
+            || (candidateUrl is { Length: > 0 }
+                && configuredUpstreams.Any(u => Dependably.Security.UpstreamHostPin.IsSameHost(u, candidateUrl)));
     }
 
     // A local anchor for an inline page, shaped like the one BuildLocalPage mints. The lower/upper
@@ -208,30 +262,41 @@ internal static class NuGetRegistrationHelpers
     // Rewrites the leaf @id and packageContent fields (at the leaf root and inside catalogEntry)
     // to local registration and flatcontainer routes. catalogEntry @id is intentionally left
     // unchanged — it is an upstream catalog resource URI, not a download path.
-    internal static void RewriteLeafNode(JsonObject leaf, string normalizedId, string baseUrl)
+    //
+    // Returns false when catalogEntry.version is absent, null, empty, or not a JSON string (a
+    // number, say), because there is then no version to build a local route from. The leaf is
+    // unusable rather than passthrough: its @id and both packageContent fields are stripped so no
+    // upstream-controlled download URL survives, and callers drop the leaf entirely. A leaf whose
+    // download URL is chosen by the upstream is a full bypass of checksum verification, the OSV
+    // scan, the block gate, and the first-fetch audit, so a missing version fails closed.
+    internal static bool RewriteLeafNode(JsonObject leaf, string normalizedId, string baseUrl)
     {
         // Leaf @id: `{registrationBase}/{id}/{version}.json` — rewrite to local registration route.
         string? version = TryGetString(leaf["catalogEntry"]?["version"]);
-        if (!string.IsNullOrEmpty(version))
+        var catalogEntry = leaf["catalogEntry"] as JsonObject;
+        if (string.IsNullOrEmpty(version))
         {
-            leaf["@id"] = $"{baseUrl}/registration/{normalizedId}/{version}.json";
+            leaf.Remove("@id");
+            leaf.Remove("packageContent");
+            catalogEntry?.Remove("packageContent");
+            return false;
         }
 
+        leaf["@id"] = $"{baseUrl}/registration/{normalizedId}/{version}.json";
+
         // packageContent at leaf root and inside catalogEntry both point at a flatcontainer .nupkg.
-        string? localPackageContent = !string.IsNullOrEmpty(version)
-            ? $"{baseUrl}/flatcontainer/{normalizedId}/{version}/{normalizedId}.{version}.nupkg"
-            : null;
-        if (localPackageContent is not null)
+        string localPackageContent =
+            $"{baseUrl}/flatcontainer/{normalizedId}/{version}/{normalizedId}.{version}.nupkg";
+        if (leaf["packageContent"] is not null)
         {
-            if (leaf["packageContent"] is not null)
-            {
-                leaf["packageContent"] = localPackageContent;
-            }
-            if (leaf["catalogEntry"] is JsonObject catalogEntry && catalogEntry["packageContent"] is not null)
-            {
-                catalogEntry["packageContent"] = localPackageContent;
-            }
+            leaf["packageContent"] = localPackageContent;
         }
+        if (catalogEntry?["packageContent"] is not null)
+        {
+            catalogEntry["packageContent"] = localPackageContent;
+        }
+
+        return true;
     }
 
     internal static HashSet<string> CollectUpstreamVersions(JsonObject root)

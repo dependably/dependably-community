@@ -1,4 +1,5 @@
 using System.Threading.Channels;
+using Dependably.Infrastructure.Observability;
 
 namespace Dependably.Infrastructure.Siem;
 
@@ -69,6 +70,7 @@ public sealed class SiemForwarderQueue : BackgroundService
         }
 
         Interlocked.Increment(ref _droppedCount);
+        DependablyMeter.SiemForwarderDropped.Add(1);
         return false;
     }
 
@@ -171,6 +173,7 @@ public sealed class SiemForwarderQueue : BackgroundService
                 if (attempt == BackoffSchedule.Length)
                 {
                     Interlocked.Increment(ref _failedCount);
+                    DependablyMeter.SiemForwarderFailed.Add(1);
                     _logger.LogWarning(ex,
                         "SIEM forward failed after {Attempts} attempts; dropping event {EventId}.",
                         attempt + 1, ev.Id);

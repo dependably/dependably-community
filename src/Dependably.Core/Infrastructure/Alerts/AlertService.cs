@@ -55,7 +55,7 @@ public sealed class AlertService
 
             if (alert is not null)
             {
-                _notifier.Notify(alert);
+                await _notifier.NotifyAsync(alert, ct);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -103,7 +103,7 @@ public sealed class AlertService
 
             if (alert is not null)
             {
-                _notifier.Notify(alert);
+                await _notifier.NotifyAsync(alert, ct);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

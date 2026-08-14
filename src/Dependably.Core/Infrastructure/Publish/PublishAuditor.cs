@@ -32,7 +32,8 @@ public sealed class PublishAuditor
         if (request.AuditAction != "import")
         {
             await _audit.LogAsync(request.AuditAction, request.OrgId, request.ActorUserId,
-                request.ActorKind, request.Ecosystem, request.Purl, detail: request.AuditDetail, ct: ct);
+                request.ActorKind, request.Ecosystem, request.Purl, detail: request.AuditDetail,
+                sourceIp: request.SourceIp, ct: ct);
         }
         await _audit.LogActivityAsync(request.OrgId, request.Ecosystem, request.Purl,
             request.AuditAction, request.ActorUserId, actorKind: request.ActorKind,

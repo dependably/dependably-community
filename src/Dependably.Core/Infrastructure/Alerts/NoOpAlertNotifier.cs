@@ -11,8 +11,7 @@ namespace Dependably.Infrastructure.Alerts;
 /// </summary>
 public sealed class NoOpAlertNotifier : IAlertNotifier
 {
-    public void Notify(AlertRecord alert)
-    {
-        // Intentionally empty: no Slack delivery plane is wired in this composition root.
-    }
+    public Task NotifyAsync(AlertRecord alert, CancellationToken ct = default) =>
+        // Intentionally empty: no outbound delivery plane is wired in this composition root.
+        Task.CompletedTask;
 }

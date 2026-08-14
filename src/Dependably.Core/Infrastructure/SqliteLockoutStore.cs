@@ -29,23 +29,35 @@ public sealed class SqliteLockoutStore : ILockoutStore
         return (FailedCount, lockedUntil);
     }
 
-    public async Task RecordFailureAsync(
-        string emailHash, int newCount, DateTimeOffset? lockedUntil, CancellationToken ct)
+    public async Task<(int NewCount, DateTimeOffset? LockedUntil)> RecordFailureAsync(
+        string emailHash, int maxFailedAttempts, TimeSpan lockoutDuration, CancellationToken ct)
     {
         await using var conn = await _db.OpenAsync(ct);
-        string? locked = lockedUntil?.ToUtcIso();
-
         string now = _time.GetUtcNow().ToUtcIso();
-        await conn.ExecuteAsync(
+        string lockedIfTripped = _time.GetUtcNow().Add(lockoutDuration).ToUtcIso();
+
+        // A single UPSERT so the increment and the threshold-and-lock decision commit as one
+        // atomic statement: two concurrent failures for the same email_hash each see their own
+        // distinct post-increment failed_count (the row serializes on write), so neither can
+        // overwrite the other's increment the way a caller-computed absolute SET could.
+        var (FailedCount, LockedUntil) = await conn.QuerySingleAsync<(int FailedCount, string? LockedUntil)>(
             """
-            INSERT INTO login_attempts (email_hash, failed_count, locked_until)
-            VALUES (@hash, @count, @locked)
+            INSERT INTO login_attempts (email_hash, failed_count, locked_until, last_attempt)
+            VALUES (@hash, 1, CASE WHEN 1 >= @maxAttempts THEN @lockedIfTripped ELSE NULL END, @now)
             ON CONFLICT(email_hash) DO UPDATE SET
-                failed_count = @count,
-                locked_until = @locked,
+                failed_count = login_attempts.failed_count + 1,
+                locked_until = CASE WHEN login_attempts.failed_count + 1 >= @maxAttempts
+                                    THEN @lockedIfTripped ELSE NULL END,
                 last_attempt = @now
+            RETURNING failed_count, locked_until
             """,
-            new { hash = emailHash, count = newCount, locked, now });
+            new { hash = emailHash, maxAttempts = maxFailedAttempts, lockedIfTripped, now });
+
+        DateTimeOffset? lockedUntil = LockedUntil is not null
+            ? DateTimeOffset.Parse(LockedUntil)
+            : null;
+
+        return (FailedCount, lockedUntil);
     }
 
     public async Task ClearAsync(string emailHash, CancellationToken ct)

@@ -77,6 +77,27 @@ public class PyPiController : ControllerBase
     public Task<IActionResult> DownloadPackage(string file, CancellationToken ct)
         => _download.DownloadPackageAsync(HttpContext, CurrentTenantId(), file, ct);
 
+    /// <summary>
+    /// HEAD /packages/{h1}/{h2}/{sha256}/{file} — CDN-shaped alias of HEAD /packages/{file}.
+    /// files.pythonhosted.org serves artifacts at this exact
+    /// <c>sha256[..2]/sha256[2..4]/sha256/filename</c> shape — the same shape
+    /// <see cref="PyPiProxyFetcher.ResolveProxyUpstreamUrlAsync"/> builds when it fetches from
+    /// that CDN directly — and pip-tools and poetry pin it into lockfiles. The route constraints
+    /// require h1/h2/sha256 to be exactly 2/2/64 hex characters — nothing else matches this route
+    /// at all, so a traversal-shaped value in any of the three segments is a 404 before the
+    /// handler ever runs.
+    /// </summary>
+    [HttpHead("/packages/{h1:regex(^[[0-9a-fA-F]]{{2}}$)}/{h2:regex(^[[0-9a-fA-F]]{{2}}$)}/{sha256:regex(^[[0-9a-fA-F]]{{64}}$)}/{file}")]
+    [EnableRateLimiting("download")]
+    public Task<IActionResult> HeadPackageCdnShaped(string h1, string h2, string sha256, string file, CancellationToken ct)
+        => _download.HeadPackageByDigestAsync(HttpContext, CurrentTenantId(), h1, h2, sha256, file, ct);
+
+    /// <summary>GET /packages/{h1}/{h2}/{sha256}/{file} — see <see cref="HeadPackageCdnShaped"/>.</summary>
+    [HttpGet("/packages/{h1:regex(^[[0-9a-fA-F]]{{2}}$)}/{h2:regex(^[[0-9a-fA-F]]{{2}}$)}/{sha256:regex(^[[0-9a-fA-F]]{{64}}$)}/{file}")]
+    [EnableRateLimiting("download")]
+    public Task<IActionResult> DownloadPackageCdnShaped(string h1, string h2, string sha256, string file, CancellationToken ct)
+        => _download.DownloadPackageByDigestAsync(HttpContext, CurrentTenantId(), h1, h2, sha256, file, ct);
+
     // ── Upload endpoint ────────────────────────────────────────────────
 
     /// <summary>POST /pypi/legacy/ — twine-compatible upload (tenant-implicit from host)</summary>

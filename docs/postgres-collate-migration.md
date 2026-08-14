@@ -104,6 +104,8 @@ ALTER TABLE banners                    ALTER COLUMN ends_at           TYPE text 
 ALTER TABLE password_reset_tokens      ALTER COLUMN consumed_at       TYPE text COLLATE "C";
 ALTER TABLE email_change_tokens        ALTER COLUMN consumed_at       TYPE text COLLATE "C";
 ALTER TABLE invites                    ALTER COLUMN accepted_at       TYPE text COLLATE "C";
+ALTER TABLE email_outbox               ALTER COLUMN next_attempt_at   TYPE text COLLATE "C";
+ALTER TABLE email_outbox               ALTER COLUMN completed_at      TYPE text COLLATE "C";
 ```
 
 Run them one at a time, largest tables (`audit_log`, `activity`) first or last per your own

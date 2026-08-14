@@ -122,6 +122,12 @@ public sealed partial class SchemaInitializer
         await RunAdditiveMigrationsAsync(conn);
         await _spdxSeeder.RunAsync(conn, ct);
 
+        // Canonicalize stored account emails and install the case-insensitive unique indexes.
+        // Deliberately not a ledgered one-shot and deliberately not part of the base schema file:
+        // a database already holding case-variant duplicate accounts cannot take the index, and it
+        // must be retried on a later boot rather than recorded as done or aborting the apply.
+        await EnsureEmailCaseInsensitiveUniquenessAsync(conn);
+
         await RunOnceAsync(conn, "reset_nuget_vuln_checked_at", ResetNuGetVulnCheckedAtAsync);
         await RunOnceAsync(conn, "fix_npm_purl_encoding", FixNpmPurlEncodingAsync);
         await RunOnceAsync(conn, "fix_npm_purl_name_unencoded", FixNpmPurlNameUnencodedAsync);
@@ -344,9 +350,28 @@ public sealed partial class SchemaInitializer
         await RunOnceAsync(conn, "migrate_proxy_versions_to_cache_plane_2", MigrateProxyVersionsToCachePlaneAsync, transactional: false);
         await RunOnceAsync(conn, "delete_migrated_proxy_package_versions_2", DeleteMigratedProxyPackageVersionsAsync);
 
+        // Seeds every tenant_artifact_access row's content binding from the cache_artifact row that
+        // tenant is being served today, so the change is a no-op for existing data. Ordered here,
+        // after RunAdditiveMigrationsAsync has added the columns AND after every migration that
+        // inserts tenant_artifact_access rows — the proxy-plane sweeps above and the OCI catalogue
+        // backfill. A ledger entry runs once and never revisits rows that appear after it, so a
+        // backfill placed ahead of those would leave the rows they mint permanently unbound. That
+        // is not a serving difference — an unbound row falls back to the same shared values the
+        // backfill would have copied — but it would leave the schema comments claiming a coverage
+        // the ledger does not give.
+        await RunOnceAsync(
+            conn, "backfill_tenant_artifact_access_binding", BackfillTenantArtifactAccessBindingAsync);
+
         // metadata_cache was never wired to a reader or writer (upstream-metadata caching lives
         // in memory instead); drop it so the schema doesn't advertise a TTL sweep that doesn't exist.
         await RunOnceAsync(conn, "drop_metadata_cache_table", DropMetadataCacheTableAsync);
+
+        // Retires the per-org SMTP transport by clearing its stored values — every row forced to
+        // email_inherit_instance = 1 with the six transport/credential columns NULL — while leaving
+        // the columns declared for the releases still in the field that read them. See
+        // ScrubAlertSettingsRetiredSmtpTransportAsync for why the values go and the columns stay.
+        await RunOnceAsync(
+            conn, "scrub_alert_settings_retired_smtp_transport", ScrubAlertSettingsRetiredSmtpTransportAsync);
 
         // Last, after every migration: the view bodies can only be created once every table and
         // column they reference is guaranteed to exist.

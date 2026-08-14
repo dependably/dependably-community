@@ -20,6 +20,10 @@ let _timer = null
 let _meFn = null
 /** @type {number | null} */
 let _expiresAt = null
+// Bumped on every arm/disarm/expiry. A resume-triggered re-validation captures this before its
+// await and drops its result if a logout (or a newer login) advanced it in the meantime — an
+// in-flight continuation from a torn-down watcher can otherwise resurrect it after logout.
+let _generation = 0
 
 /**
  * Re-arm the watcher with a new expiry instant. Called after every successful
@@ -35,6 +39,7 @@ export function armSessionWatch(expiresAtIso, meFn) {
   const expiresMs = Date.parse(expiresAtIso)
   if (isNaN(expiresMs)) return
 
+  _generation++
   _meFn = meFn
   _expiresAt = expiresMs
 
@@ -55,6 +60,7 @@ export function armSessionWatch(expiresAtIso, meFn) {
  * so the watcher does not fire after the user has already signed out.
  */
 export function disarmSessionWatch() {
+  _generation++
   _disarmTimer()
   _meFn = null
   _expiresAt = null
@@ -71,6 +77,7 @@ function _disarmTimer() {
 }
 
 function _handleExpiry() {
+  _generation++
   _timer = null
   _disarmTimer()
   _detachListeners()
@@ -98,14 +105,21 @@ async function _onResume() {
     return
   }
 
+  // Capture both the function and the current generation before the await below. Logout (or a
+  // fresh login) can advance _generation and swap/clear _meFn while this call is in flight; the
+  // continuation must not act on the mutable singleton, only on what was true when it started.
+  const generation = _generation
+  const meFn = _meFn
+
   // Re-validate with the server. A 401 flows through req() in api.js which
   // already calls the global redirect. A successful response re-arms with a
   // fresh expiry (the same JWT, so the same exp — but re-arms the local timer).
-  if (_meFn) {
+  if (meFn) {
     try {
-      const me = await _meFn()
+      const me = await meFn()
+      if (generation !== _generation) return // torn down or re-armed while this was in flight
       if (me?.sessionExpiresAt) {
-        armSessionWatch(me.sessionExpiresAt, _meFn)
+        armSessionWatch(me.sessionExpiresAt, meFn)
       }
     } catch {
       // A 401 from _meFn is handled inside req() (global redirect). Other errors

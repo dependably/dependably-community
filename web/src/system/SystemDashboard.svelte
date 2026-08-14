@@ -4,7 +4,7 @@
   import { t } from 'svelte-i18n'
   import { systemApi } from '../lib/api.js'
   import { navigate } from '../lib/store.js'
-  import { formatBytes } from '../lib/format.js'
+  import { formatBytes, formatDate } from '../lib/format.js'
 
   let data = null
   let loading = true
@@ -311,7 +311,7 @@
             {#each data.recentJobs as j (j.id)}
               <tr>
                 <td><code>{j.jobName}</code></td>
-                <td>{new Date(j.startedAt).toLocaleString()}</td>
+                <td>{$formatDate(j.startedAt)}</td>
                 <td class="num">{fmtDuration(j.durationMs)}</td>
                 <td><span class="outcome outcome-{j.outcome}">{$t(`system.backgroundJobs.outcome.${j.outcome}`, { default: j.outcome })}</span></td>
               </tr>

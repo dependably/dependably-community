@@ -30,3 +30,6 @@ cov-out/
 # Roslyn / .NET build cache files emitted by analyzers — never artefacts of source code.
 *.lscache
 .sonarqube/
+
+# Spec-driven development working state (spec lives in dependably-community.spec)
+.sdd/

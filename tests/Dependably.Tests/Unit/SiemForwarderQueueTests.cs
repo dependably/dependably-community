@@ -1,3 +1,5 @@
+using System.Diagnostics.Metrics;
+using Dependably.Infrastructure.Observability;
 using Dependably.Infrastructure.Siem;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Configuration;
@@ -6,7 +8,11 @@ using Microsoft.Extensions.Time.Testing;
 
 namespace Dependably.Tests.Unit;
 
+// Attaches a MeterListener filtered only by DependablyMeter.MeterName + instrument name and
+// asserts exact counts — must run alone against the process-wide static meter.
+// See MeterSensitiveCollection.
 [Trait("Category", "Unit")]
+[Collection("MeterSensitive")]
 public class SiemForwarderQueueTests
 {
     private static IConfiguration Cfg(int? capacity = null) =>
@@ -58,6 +64,9 @@ public class SiemForwarderQueueTests
         var q = new SiemForwarderQueue(
             fwd, new FakeTimeProvider(TestTime.KnownNow), Cfg(capacity: 2), NullLogger<SiemForwarderQueue>.Instance);
 
+        long meterDrops = 0;
+        using var listener = MeterListenerFor("dependably.siem_forwarder.dropped", delta => meterDrops += delta);
+
         int accepted = 0;
         for (int i = 0; i < 5; i++)
         {
@@ -69,6 +78,9 @@ public class SiemForwarderQueueTests
 
         Assert.Equal(2, accepted);
         Assert.Equal(3, q.DroppedCount);
+        // The DroppedCount field alone is invisible to an operator — the OTel counter is what a
+        // dashboard/alert actually reads, so a drop must be observable on the meter too.
+        Assert.Equal(3, meterDrops);
     }
 
     // A dedicated FakeTimeProvider drives the queue's retry backoff so the test advances virtual
@@ -152,6 +164,9 @@ public class SiemForwarderQueueTests
         var clock = new FakeTimeProvider(TestTime.KnownNow);
         var q = new SiemForwarderQueue(fwd, clock, Cfg(), NullLogger<SiemForwarderQueue>.Instance);
 
+        long meterFailed = 0;
+        using var listener = MeterListenerFor("dependably.siem_forwarder.failed", delta => meterFailed += delta);
+
         Assert.True(q.TryEnqueue(Sample("good")));
         Assert.True(q.TryEnqueue(Sample("bad")));
 
@@ -165,6 +180,9 @@ public class SiemForwarderQueueTests
 
         Assert.Equal(1, q.DeliveredCount);
         Assert.Equal(1, q.FailedCount);
+        // Mixed partial-failure batch: the successful delivery must not itself register as a
+        // failure on the meter, and the one genuine failure must be visible on it.
+        Assert.Equal(1, meterFailed);
     }
 
     private static async Task WaitAsync(Func<bool> condition, TimeSpan? timeout = null)
@@ -182,5 +200,27 @@ public class SiemForwarderQueueTests
         {
             throw new TimeoutException("Condition never satisfied.");
         }
+    }
+
+    /// <summary>
+    /// Returns an active <see cref="MeterListener"/> that invokes <paramref name="onMeasurement"/>
+    /// with each measurement delta emitted by the named instrument on <see cref="DependablyMeter"/>.
+    /// Must be disposed after the assertion.
+    /// </summary>
+    private static MeterListener MeterListenerFor(string instrumentName, Action<long> onMeasurement)
+    {
+        var listener = new MeterListener
+        {
+            InstrumentPublished = (instrument, l) =>
+            {
+                if (instrument.Meter.Name == DependablyMeter.MeterName && instrument.Name == instrumentName)
+                {
+                    l.EnableMeasurementEvents(instrument);
+                }
+            }
+        };
+        listener.SetMeasurementEventCallback<long>((_, measurement, _, _) => onMeasurement(measurement));
+        listener.Start();
+        return listener;
     }
 }

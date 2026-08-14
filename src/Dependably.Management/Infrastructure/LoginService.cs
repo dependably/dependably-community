@@ -186,7 +186,9 @@ public sealed class LoginService
         // realms without coupling them to the lockout key structure.
         string emailHash = HashEmail(email);
 
-        var (failedCount, lockedUntil) = await _lockout.GetAsync(lockoutKey, ct);
+        // failedCount is not consumed here: RecordFailureAsync now increments atomically at
+        // the store, so this read is only for the "already locked" check below.
+        var (_, lockedUntil) = await _lockout.GetAsync(lockoutKey, ct);
         if (lockedUntil.HasValue && _time.GetUtcNow() < lockedUntil.Value)
         {
             int retryAfter = (int)(lockedUntil.Value - _time.GetUtcNow()).TotalSeconds + 1;
@@ -213,6 +215,10 @@ public sealed class LoginService
                    mfa_enabled AS MfaEnabled
             FROM users
             WHERE lower(email) = lower(@email) AND tenant_id = @tenantId
+            -- Election is deterministic: a legacy database can still hold two case-variant rows
+            -- for one address (they predate the canonical write form), and the oldest row is the
+            -- original account rather than whichever one the query engine happens to return.
+            ORDER BY created_at, id
             LIMIT 1
             """,
             new { email, tenantId });
@@ -224,7 +230,7 @@ public sealed class LoginService
 
         if (!valid)
         {
-            await RecordFailureAsync(new LoginFailureTarget(lockoutKey, emailHash, "tenant", tenantId), failedCount, sourceIp, "invalid_credentials", ct);
+            await RecordFailureAsync(new LoginFailureTarget(lockoutKey, emailHash, "tenant", tenantId), sourceIp, "invalid_credentials", ct);
             return new TenantFirstFactorResult(null, null, null, 0, false, null, "Invalid credentials.", null);
         }
 
@@ -256,8 +262,10 @@ public sealed class LoginService
         // Admin-actions tab, because a routine login is not a configuration change — that view of
         // the login lives in the activity feed written on the next line.
         await _audit.LogAsync("login.success", orgId: tenantId, actorId: userId,
+            actorKind: ActorKinds.User,
             detail: loginDetail, sourceIp: sourceIp, ct: ct);
         await _audit.LogActivityAsync(tenantId, "auth", purl: null, "login.success", actorId: userId,
+            actorKind: ActorKinds.User,
             detail: loginDetail,
             sourceIp: sourceIp, ct: ct);
         await _auditEmitter.EmitAsync(
@@ -292,7 +300,9 @@ public sealed class LoginService
         var (lockoutKey, emailHash, code, sourceIp) = context;
         // Re-check the lockout at the top of step 2 so a burst of second-factor attempts cannot
         // exceed MaxFailedAttempts regardless of how they are interleaved with first-factor attempts.
-        var (failedCount, lockedUntil) = await _lockout.GetAsync(lockoutKey, ct);
+        // failedCount is not consumed here: RecordFailureAsync now increments atomically at
+        // the store, so this read is only for the "already locked" check below.
+        var (_, lockedUntil) = await _lockout.GetAsync(lockoutKey, ct);
         if (lockedUntil.HasValue && _time.GetUtcNow() < lockedUntil.Value)
         {
             int retryAfter = (int)(lockedUntil.Value - _time.GetUtcNow()).TotalSeconds + 1;
@@ -315,7 +325,7 @@ public sealed class LoginService
 
         if (!totpOk && !recoveryOk)
         {
-            await RecordFailureAsync(new LoginFailureTarget(lockoutKey, emailHash, "tenant", tenantId), failedCount, sourceIp, "mfa_invalid", ct);
+            await RecordFailureAsync(new LoginFailureTarget(lockoutKey, emailHash, "tenant", tenantId), sourceIp, "mfa_invalid", ct);
             await _audit.LogAsync(
                 Dependably.Infrastructure.Audit.Events.AuthEvents.TypeLoginFailure,
                 orgId: tenantId, sourceIp: sourceIp, ct: ct);
@@ -498,7 +508,9 @@ public sealed class LoginService
         string lockoutKey = HashLockoutKey("system", null, email);
         string emailHash = HashEmail(email);
 
-        var (failedCount, lockedUntil) = await _lockout.GetAsync(lockoutKey, ct);
+        // failedCount is not consumed here: RecordFailureAsync now increments atomically at
+        // the store, so this read is only for the "already locked" check below.
+        var (_, lockedUntil) = await _lockout.GetAsync(lockoutKey, ct);
         if (lockedUntil.HasValue && _time.GetUtcNow() < lockedUntil.Value)
         {
             int retryAfter = (int)(lockedUntil.Value - _time.GetUtcNow()).TotalSeconds + 1;
@@ -520,7 +532,7 @@ public sealed class LoginService
 
         if (!valid)
         {
-            await RecordFailureAsync(new LoginFailureTarget(lockoutKey, emailHash, "system", null), failedCount, sourceIp, "invalid_credentials", ct);
+            await RecordFailureAsync(new LoginFailureTarget(lockoutKey, emailHash, "system", null), sourceIp, "invalid_credentials", ct);
             return new SystemFirstFactorResult(null, null, 0, false, null, "Invalid credentials.", null);
         }
 
@@ -596,7 +608,9 @@ public sealed class LoginService
         SecondFactorContext context, CancellationToken ct = default)
     {
         var (lockoutKey, emailHash, code, sourceIp) = context;
-        var (failedCount, lockedUntil) = await _lockout.GetAsync(lockoutKey, ct);
+        // failedCount is not consumed here: RecordFailureAsync now increments atomically at
+        // the store, so this read is only for the "already locked" check below.
+        var (_, lockedUntil) = await _lockout.GetAsync(lockoutKey, ct);
         if (lockedUntil.HasValue && _time.GetUtcNow() < lockedUntil.Value)
         {
             int retryAfter = (int)(lockedUntil.Value - _time.GetUtcNow()).TotalSeconds + 1;
@@ -619,7 +633,7 @@ public sealed class LoginService
 
         if (!totpOk && !recoveryOk)
         {
-            await RecordFailureAsync(new LoginFailureTarget(lockoutKey, emailHash, "system", null), failedCount, sourceIp, "mfa_invalid", ct);
+            await RecordFailureAsync(new LoginFailureTarget(lockoutKey, emailHash, "system", null), sourceIp, "mfa_invalid", ct);
             await _audit.LogSystemAsync(
                 Dependably.Infrastructure.Audit.Events.AuthEvents.TypeLoginFailure,
                 sourceIp: sourceIp, ct: ct);
@@ -785,6 +799,7 @@ public sealed class LoginService
     private Task AuditRoleMappingBlockedAsync(
         SamlLoginContext ctx, string? userId, string attemptedRole, string effectiveRole, CancellationToken ct) =>
         _audit.LogAsync("auth.saml.role_mapping_blocked", orgId: ctx.TenantId, actorId: userId,
+            actorKind: userId is not null ? ActorKinds.User : null,
             detail: System.Text.Json.JsonSerializer.Serialize(new
             {
                 attempted_role = attemptedRole,
@@ -845,6 +860,10 @@ public sealed class LoginService
             SELECT id AS Id, role AS Role, account_status AS AccountStatus, token_version AS TokenVersion, password_hash AS PasswordHash
             FROM users
             WHERE lower(email) = lower(@email) AND tenant_id = @tenantId
+            -- Election is deterministic: a legacy database can still hold two case-variant rows
+            -- for one address (they predate the canonical write form), and the oldest row is the
+            -- original account rather than whichever one the query engine happens to return.
+            ORDER BY created_at, id
             LIMIT 1
             """,
             new { email = ctx.AssertionEmail, tenantId = ctx.TenantId });
@@ -867,6 +886,7 @@ public sealed class LoginService
         {
             await _audit.LogAsync("auth.saml.login.failure",
                 orgId: ctx.TenantId, actorId: Id,
+                actorKind: ActorKinds.User,
                 detail: System.Text.Json.JsonSerializer.Serialize(new
                 {
                     reason = "email_link_password_account_blocked",
@@ -888,6 +908,7 @@ public sealed class LoginService
         {
             await _audit.LogAsync("auth.saml.login.failure",
                 orgId: ctx.TenantId, actorId: Id,
+                actorKind: ActorKinds.User,
                 detail: System.Text.Json.JsonSerializer.Serialize(new
                 {
                     reason = "email_link_privileged_account_blocked",
@@ -917,6 +938,7 @@ public sealed class LoginService
         var userLinkedDetail = new { idp_entity_id = ctx.IdpEntityId, nameid_hash = HashNameId(ctx.NameId), email = ctx.AssertionEmail };
         await _audit.LogAsync("auth.saml.user_linked",
             orgId: ctx.TenantId, actorId: Id,
+            actorKind: ActorKinds.User,
             detail: System.Text.Json.JsonSerializer.Serialize(userLinkedDetail, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             sourceIp: ctx.SourceIp, ct: ct);
         await LogSamlSuccessAsync(ctx.TenantId, Id, ctx.IdpEntityId, ctx.NameId, "email_link", ctx.SourceIp, ct);
@@ -954,7 +976,13 @@ public sealed class LoginService
             INSERT INTO users (id, tenant_id, email, password_hash, role, account_type)
             VALUES (@id, @tenantId, @email, '', @role, 'saml')
             """,
-            new { id = newUserId, tenantId = ctx.TenantId, email = ctx.AssertionEmail, role = jitRole });
+            new
+            {
+                id = newUserId,
+                tenantId = ctx.TenantId,
+                email = EmailNormalizer.Normalize(ctx.AssertionEmail),
+                role = jitRole
+            });
         await _externalIdentities.LinkAsync(ctx.TenantId, newUserId, ctx.IdpEntityId, ctx.NameId, ctx.AssertionEmail, ct);
         await StampUserLoginAsync(conn, newUserId, ctx.AssertionEmail, currentEmail: ctx.AssertionEmail);
 
@@ -966,12 +994,14 @@ public sealed class LoginService
         var userProvisionedDetail = new { idp_entity_id = ctx.IdpEntityId, nameid_hash = HashNameId(ctx.NameId), email = ctx.AssertionEmail, role = jitRole };
         await _audit.LogAsync("auth.saml.user_provisioned",
             orgId: ctx.TenantId, actorId: newUserId,
+            actorKind: ActorKinds.User,
             detail: System.Text.Json.JsonSerializer.Serialize(userProvisionedDetail, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             sourceIp: ctx.SourceIp, ct: ct);
 
         if (ctx.MappedRole is not null)
         {
             await _audit.LogAsync("auth.saml.role_assigned", orgId: ctx.TenantId, actorId: newUserId,
+                actorKind: ActorKinds.User,
                 detail: System.Text.Json.JsonSerializer.Serialize(new { role = jitRole, idp_entity_id = ctx.IdpEntityId }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
                 sourceIp: ctx.SourceIp, ct: ct);
         }
@@ -1012,6 +1042,7 @@ public sealed class LoginService
             long newTokenVersion = await _orgs.UpdateMemberRoleAsync(ctx.TenantId, userId, ctx.MappedRole, ct);
             var roleChangedDetail = new { old_role = currentRole, new_role = ctx.MappedRole, idp_entity_id = ctx.IdpEntityId };
             await _audit.LogAsync("auth.saml.role_changed", orgId: ctx.TenantId, actorId: userId,
+                actorKind: ActorKinds.User,
                 detail: System.Text.Json.JsonSerializer.Serialize(roleChangedDetail, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
                 sourceIp: ctx.SourceIp, ct: ct);
             return (ctx.MappedRole, newTokenVersion);
@@ -1021,6 +1052,7 @@ public sealed class LoginService
         {
             var roleChangeRefusedDetail = new { reason = "last_owner_protection", attempted_role = ctx.MappedRole };
             await _audit.LogAsync("auth.saml.role_change_refused", orgId: ctx.TenantId, actorId: userId,
+                actorKind: ActorKinds.User,
                 detail: System.Text.Json.JsonSerializer.Serialize(roleChangeRefusedDetail, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
                 sourceIp: ctx.SourceIp, ct: ct);
         }
@@ -1048,7 +1080,7 @@ public sealed class LoginService
             // xtenant: keyed by the users PK of the SAML-linked account resolved above.
             await conn.ExecuteAsync(
                 "UPDATE users SET last_login_at = @now, email = @email WHERE id = @id",
-                new { id = userId, now = nowStr, email = assertionEmail });
+                new { id = userId, now = nowStr, email = EmailNormalizer.Normalize(assertionEmail) });
         }
         else
         {
@@ -1065,9 +1097,11 @@ public sealed class LoginService
         string? nameIdHash = HashNameId(nameId);
         await _audit.LogAsync("auth.saml.login.success",
             orgId: tenantId, actorId: userId,
+            actorKind: ActorKinds.User,
             detail: System.Text.Json.JsonSerializer.Serialize(new { idp_entity_id = idpEntityId, nameid_hash = nameIdHash, path }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             sourceIp: sourceIp, ct: ct);
         await _audit.LogActivityAsync(tenantId, "auth", purl: null, "login.success", actorId: userId,
+            actorKind: ActorKinds.User,
             detail: System.Text.Json.JsonSerializer.Serialize(new { method = "saml" }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             sourceIp: sourceIp, ct: ct);
         await _auditEmitter.EmitAsync(
@@ -1084,6 +1118,7 @@ public sealed class LoginService
     {
         await _audit.LogAsync("auth.saml.login.failure",
             orgId: ctx.TenantId, actorId: userId,
+            actorKind: ActorKinds.User,
             detail: System.Text.Json.JsonSerializer.Serialize(new { reason = "account_status", account_status = accountStatus }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             sourceIp: ctx.SourceIp, ct: ct);
         await EmitSamlFailureAsync(ctx.TenantId, userId, "account_status_" + accountStatus, ctx.IdpEntityId, ctx.NameId, ct);
@@ -1099,14 +1134,16 @@ public sealed class LoginService
 
     /// <summary>Test-mode SAML run: writes audit record but does not provision a user or issue a JWT.</summary>
     public async Task RecordSamlTestAsync(
-        string tenantId, string idpEntityId, string nameId, string? email, string? actorId, CancellationToken ct = default)
+        string tenantId, string idpEntityId, string nameId, string? email, string? actorId,
+        string? sourceIp = null, CancellationToken ct = default)
     {
         await _audit.LogAsync("auth.saml.test.success",
             orgId: tenantId, actorId: actorId,
+            actorKind: actorId is not null ? ActorKinds.User : null,
             detail: System.Text.Json.JsonSerializer.Serialize(
                 new { idp_entity_id = idpEntityId, nameid_hash = HashNameId(nameId), email },
                 Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
-            ct: ct);
+            sourceIp: sourceIp, ct: ct);
     }
 
     /// <summary>Issues a tenant JWT for a user that has already been authenticated by SAML.</summary>
@@ -1143,15 +1180,14 @@ public sealed class LoginService
     /// contract, including the one call site outside this service where the abort is not clean.
     /// </summary>
     private async Task RecordFailureAsync(
-        LoginFailureTarget target, int currentFailedCount, string? sourceIp, string reason, CancellationToken ct)
+        LoginFailureTarget target, string? sourceIp, string reason, CancellationToken ct)
     {
         var (lockoutKey, emailHash, realm, orgIdForActivity) = target;
-        int newCount = currentFailedCount + 1;
-        DateTimeOffset? lockExpiry = newCount >= MaxFailedAttempts
-            ? _time.GetUtcNow().AddMinutes(LockoutMinutes)
-            : null;
-        // lockoutKey is realm+tenant scoped; emailHash is the unsalted audit pseudonym.
-        await _lockout.RecordFailureAsync(lockoutKey, newCount, lockExpiry, ct);
+        // lockoutKey is realm+tenant scoped; emailHash is the unsalted audit pseudonym. The
+        // store computes the increment and the lock decision atomically, so this call is safe
+        // under concurrent failures for the same account — it never reads a stale count.
+        await _lockout.RecordFailureAsync(
+            lockoutKey, MaxFailedAttempts, TimeSpan.FromMinutes(LockoutMinutes), ct);
         string failureDetail = System.Text.Json.JsonSerializer.Serialize(new { reason, realm }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
         // Scope the audit row to the realm that rejected the login: a system/master failure is
         // visible only on the operator audit list (scope='system'); a tenant failure is pinned to

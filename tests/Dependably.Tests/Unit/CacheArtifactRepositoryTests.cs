@@ -343,4 +343,371 @@ public class CacheArtifactRepositoryTests : IAsyncLifetime
         Assert.Equal(upstreamUrl,
             fact.ToPackageVersionSynthetic(new Dictionary<string, VulnGateSignals>()).UpstreamUrl);
     }
+
+    /// <summary>
+    /// Every ecosystem's cache-hit lookup runs through the same two per-tenant projections, so the
+    /// tenant content binding has to win in both for all of them — the fix cannot be npm-shaped.
+    /// The theory walks the ecosystems that reach these projections, seeding a shared row holding
+    /// one tenant's bytes plus a binding holding another's, and asserting the serving tenant reads
+    /// its own hash, blob key and size back from each.
+    /// </summary>
+    [Theory]
+    [InlineData("npm", "lodash", "4.17.21", "lodash-4.17.21.tgz")]
+    [InlineData("pypi", "requests", "2.31.0", "requests-2.31.0-py3-none-any.whl")]
+    [InlineData("nuget", "newtonsoft.json", "13.0.3", "newtonsoft.json.13.0.3.nupkg")]
+    [InlineData("nuget-symbols", "app.pdb", "ssqp-key", "app.pdb")]
+    [InlineData("maven", "com.example:lib", "1.0.0", "lib-1.0.0.jar")]
+    [InlineData("terraform", "registry.terraform.io/hashicorp/aws", "5.0.0", "linux_amd64.zip")]
+    [InlineData("cargo", "serde", "1.0.0", "serde-1.0.0.crate")]
+    [InlineData("rpm", "bash", "5.2.15-1.el9", "bash-5.2.15-1.el9.x86_64.rpm")]
+    [InlineData("apk", "busybox", "1.36.1-r5", "main/x86_64/busybox-1.36.1-r5.apk")]
+    [InlineData("golang", "github.com/pkg/errors", "v0.9.1", "v0.9.1.zip")]
+    public async Task ServeFacts_PreferTenantBinding_ForEveryProxyEcosystem(
+        string ecosystem, string name, string version, string filename)
+    {
+        var repo = new CacheArtifactRepository(_db);
+        const string sharedHash = "1111aaaa";
+        const string ownHash = "2222bbbb";
+
+        var shared = new CacheArtifact
+        {
+            Id = Guid.NewGuid().ToString("D"),
+            Ecosystem = ecosystem,
+            Name = name,
+            Version = version,
+            Filename = filename,
+            BlobKey = $"proxy/{sharedHash}/{filename}",
+            ContentHash = sharedHash,
+            SizeBytes = 10,
+            FirstCachedAt = TestTime.KnownNow,
+            LastAccessedAt = TestTime.KnownNow,
+        };
+        await repo.InsertAsync(shared);
+
+        await new TenantArtifactAccessRepository(_db).UpsertAsync(
+            "o1", shared.Id, TestTime.KnownNow,
+            new TenantContentBinding($"{ownHash}", $"proxy/{ownHash}/{filename}", 20));
+
+        var byCoordinate = await repo.GetServeFactsByCoordinateAsync("o1", ecosystem, name, version, filename);
+        var byId = await repo.GetServeFactsByIdAsync("o1", shared.Id);
+        foreach (var facts in new[] { byCoordinate, byId })
+        {
+            Assert.NotNull(facts);
+            Assert.Equal(ownHash, facts!.ContentHash);
+            Assert.Equal($"proxy/{ownHash}/{filename}", facts.BlobKey);
+            Assert.Equal(20, facts.SizeBytes);
+        }
+
+        // The index/metadata renderers publish the same values as the integrity a client checks
+        // against, so they must agree with what the download path will actually stream.
+        var indexFacts = Assert.Single(await repo.ListServeFactsForNameAsync("o1", ecosystem, name));
+        Assert.Equal(ownHash, indexFacts.ContentHash);
+        Assert.Equal($"proxy/{ownHash}/{filename}", indexFacts.BlobKey);
+        Assert.Equal(20, indexFacts.SizeBytes);
+    }
+
+    /// <summary>
+    /// Adversarial twin: a tenant with no binding — a row written before the binding columns
+    /// existed, or by a preceding release during a blue-green cutover — still resolves to the
+    /// shared row rather than to nothing. Failing that access closed would 503 every legacy
+    /// coordinate on the first boot after an upgrade.
+    /// </summary>
+    [Fact]
+    public async Task ServeFacts_WithNoTenantBinding_FallBackToTheSharedRow()
+    {
+        var repo = new CacheArtifactRepository(_db);
+        var shared = Sample("9.9.9", TestTime.KnownNow);
+        await repo.InsertAsync(shared);
+
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES ('o1', @id)",
+                new { id = shared.Id });
+        }
+
+        var facts = await repo.GetServeFactsByCoordinateAsync("o1", "npm", "lodash", "9.9.9", "lodash-9.9.9.tgz");
+        Assert.NotNull(facts);
+        Assert.Equal(shared.ContentHash, facts!.ContentHash);
+        Assert.Equal(shared.BlobKey, facts.BlobKey);
+        Assert.Equal(shared.SizeBytes, facts.SizeBytes);
+    }
+
+    /// <summary>
+    /// A blob a tenant is bound to must survive the eviction of an unrelated coordinate that
+    /// happens to share the content-addressed key. The refcount behind
+    /// <c>CacheOrphanBlobDeleter</c> counts tenant bindings as references for exactly this:
+    /// a divergent tenant's bytes have no <c>cache_artifact</c> row of their own, so counting rows
+    /// alone would let a sibling eviction delete bytes that are still being served.
+    /// </summary>
+    [Fact]
+    public async Task BlobKeyReferencedElsewhere_CountsTenantBindings()
+    {
+        var repo = new CacheArtifactRepository(_db);
+        var evicting = Sample("1.2.3", TestTime.KnownNow);
+        var other = Sample("4.5.6", TestTime.KnownNow);
+        await repo.InsertAsync(evicting);
+        await repo.InsertAsync(other);
+
+        const string boundKey = "proxy/deadbeef/lodash-1.2.3.tgz";
+
+        // No row and no binding names the key yet.
+        Assert.False(await repo.BlobKeyReferencedElsewhereAsync(boundKey, evicting.Id));
+
+        // A tenant bound to those bytes through a DIFFERENT row keeps them alive.
+        await new TenantArtifactAccessRepository(_db).UpsertAsync(
+            "o1", other.Id, TestTime.KnownNow, new TenantContentBinding("deadbeef", boundKey, 10));
+        Assert.True(await repo.BlobKeyReferencedElsewhereAsync(boundKey, evicting.Id));
+
+        // A binding on the row being evicted is not a reference — it cascades away with it.
+        Assert.False(await repo.BlobKeyReferencedElsewhereAsync(boundKey, other.Id));
+    }
+    /// <summary>
+    /// A tenant whose own upstream served other bytes must not be advertised the shared row's
+    /// byte-derived claims. <c>checksum_sha1</c>, <c>upstream_integrity_value</c> and
+    /// <c>manifest_json</c> live only on the shared <c>cache_artifact</c> row, so for a diverging
+    /// tenant they describe another tenant's artefact — and <c>NpmPackumentHandler</c> replaces the
+    /// upstream version object with this projection precisely so the advertised integrity matches
+    /// the bytes the tarball route streams. Advertising a foreign SRI beside this tenant's own
+    /// SHA-256 therefore turns every install of the coordinate into EINTEGRITY: a refusal the
+    /// tenant cannot clear, caused by a coordinate another tenant reached first. That is the same
+    /// un-remediable cross-tenant denial the binding exists to avoid, arriving through the metadata
+    /// instead of the bytes. The claims are omitted rather than guessed; the tenant's own SHA-256
+    /// still stands, because that one describes the bytes it holds.
+    /// </summary>
+    [Fact]
+    public async Task IndexFacts_ForADivergingTenant_OmitTheSharedRowsByteDerivedClaims()
+    {
+        var repo = new CacheArtifactRepository(_db);
+        const string sharedHash = "1111aaaa";
+        const string ownHash = "2222bbbb";
+
+        var shared = new CacheArtifact
+        {
+            Id = Guid.NewGuid().ToString("D"),
+            Ecosystem = "npm",
+            Name = "left-pad",
+            Version = "1.3.0",
+            Filename = "left-pad-1.3.0.tgz",
+            BlobKey = $"proxy/{sharedHash}/left-pad-1.3.0.tgz",
+            ContentHash = sharedHash,
+            SizeBytes = 10,
+            FirstCachedAt = TestTime.KnownNow,
+            LastAccessedAt = TestTime.KnownNow,
+        };
+        await repo.InsertAsync(shared);
+        await repo.UpdateGlobalFactsAsync(
+            shared.Id,
+            purl: "pkg:npm/left-pad@1.3.0",
+            checksumSha1: "5150dead",
+            publishedAt: null,
+            deprecated: null,
+            hasInstallScript: false,
+            installScriptKind: null,
+            provenanceStatus: null,
+            provenanceSigner: null,
+            upstreamIntegrityValue: "sha512-sharedRowIntegrityOverOtherBytes==",
+            upstreamIntegrityAlgorithm: "sha512-sri",
+            manifestJson: """{"dependencies":{"from-the-other-tenants-tarball":"1.0.0"}}""");
+
+        await new TenantArtifactAccessRepository(_db).UpsertAsync(
+            "o1", shared.Id, TestTime.KnownNow,
+            new TenantContentBinding(ownHash, $"proxy/{ownHash}/left-pad-1.3.0.tgz", 20));
+
+        var facts = Assert.Single(await repo.ListServeFactsForNameAsync("o1", "npm", "left-pad"));
+        Assert.True(facts.ContentDivergesFromSharedFacts);
+
+        var synthetic = facts.ToPackageVersionSynthetic(new Dictionary<string, VulnGateSignals>());
+        Assert.Equal(ownHash, synthetic.ChecksumSha256);
+        Assert.Null(synthetic.ChecksumSha1);
+        Assert.Null(synthetic.UpstreamIntegrityValue);
+        Assert.Null(synthetic.UpstreamIntegrityAlgorithm);
+        Assert.Null(synthetic.ManifestJson);
+    }
+
+    /// <summary>
+    /// Adversarial twin: the non-diverging tenant — every tenant, on every coordinate, in normal
+    /// operation — keeps every one of those claims. Suppressing them unconditionally would also
+    /// pass the test above while stripping <c>dist.integrity</c> from the whole proxy cache and
+    /// dropping every install manifest the packument renders.
+    /// </summary>
+    [Fact]
+    public async Task IndexFacts_ForANonDivergingTenant_KeepTheSharedRowsByteDerivedClaims()
+    {
+        var repo = new CacheArtifactRepository(_db);
+        const string hash = "1111aaaa";
+
+        var shared = new CacheArtifact
+        {
+            Id = Guid.NewGuid().ToString("D"),
+            Ecosystem = "npm",
+            Name = "right-pad",
+            Version = "1.3.0",
+            Filename = "right-pad-1.3.0.tgz",
+            BlobKey = $"proxy/{hash}/right-pad-1.3.0.tgz",
+            ContentHash = hash,
+            SizeBytes = 10,
+            FirstCachedAt = TestTime.KnownNow,
+            LastAccessedAt = TestTime.KnownNow,
+        };
+        await repo.InsertAsync(shared);
+        await repo.UpdateGlobalFactsAsync(
+            shared.Id,
+            purl: "pkg:npm/right-pad@1.3.0",
+            checksumSha1: "5150beef",
+            publishedAt: null,
+            deprecated: null,
+            hasInstallScript: false,
+            installScriptKind: null,
+            provenanceStatus: null,
+            provenanceSigner: null,
+            upstreamIntegrityValue: "sha512-integrityOverTheseVeryBytes==",
+            upstreamIntegrityAlgorithm: "sha512-sri",
+            manifestJson: """{"dependencies":{"leftpad":"1.0.0"}}""");
+
+        await new TenantArtifactAccessRepository(_db).UpsertAsync(
+            "o1", shared.Id, TestTime.KnownNow,
+            new TenantContentBinding(hash, $"proxy/{hash}/right-pad-1.3.0.tgz", 10));
+
+        var facts = Assert.Single(await repo.ListServeFactsForNameAsync("o1", "npm", "right-pad"));
+        Assert.False(facts.ContentDivergesFromSharedFacts);
+
+        var synthetic = facts.ToPackageVersionSynthetic(new Dictionary<string, VulnGateSignals>());
+        Assert.Equal("5150beef", synthetic.ChecksumSha1);
+        Assert.Equal("sha512-integrityOverTheseVeryBytes==", synthetic.UpstreamIntegrityValue);
+        Assert.Equal("sha512-sri", synthetic.UpstreamIntegrityAlgorithm);
+        Assert.Equal("""{"dependencies":{"leftpad":"1.0.0"}}""", synthetic.ManifestJson);
+    }
+
+    /// <summary>
+    /// A tenant with no binding at all is being served the shared blob, so the shared row's claims
+    /// describe exactly those bytes and must be kept. This is the legacy/blue-green row, and it is
+    /// the case where treating "hashes are not equal" as the test rather than "both hashes are
+    /// known and unequal" would strip integrity from every un-backfilled coordinate.
+    /// </summary>
+    [Fact]
+    public async Task IndexFacts_WithNoTenantBinding_KeepTheSharedRowsByteDerivedClaims()
+    {
+        var repo = new CacheArtifactRepository(_db);
+        var shared = new CacheArtifact
+        {
+            Id = Guid.NewGuid().ToString("D"),
+            Ecosystem = "npm",
+            Name = "no-pad",
+            Version = "1.3.0",
+            Filename = "no-pad-1.3.0.tgz",
+            BlobKey = "proxy/1111aaaa/no-pad-1.3.0.tgz",
+            ContentHash = "1111aaaa",
+            SizeBytes = 10,
+            FirstCachedAt = TestTime.KnownNow,
+            LastAccessedAt = TestTime.KnownNow,
+        };
+        await repo.InsertAsync(shared);
+        await repo.UpdateGlobalFactsAsync(
+            shared.Id,
+            purl: "pkg:npm/no-pad@1.3.0",
+            checksumSha1: "5150cafe",
+            publishedAt: null,
+            deprecated: null,
+            hasInstallScript: false,
+            installScriptKind: null,
+            provenanceStatus: null,
+            provenanceSigner: null,
+            upstreamIntegrityValue: "sha512-legacyRowIntegrity==",
+            upstreamIntegrityAlgorithm: "sha512-sri",
+            manifestJson: null);
+
+        await new TenantArtifactAccessRepository(_db).UpsertAsync(
+            "o1", shared.Id, TestTime.KnownNow, TenantContentBinding.None);
+
+        var facts = Assert.Single(await repo.ListServeFactsForNameAsync("o1", "npm", "no-pad"));
+        Assert.False(facts.ContentDivergesFromSharedFacts);
+
+        var synthetic = facts.ToPackageVersionSynthetic(new Dictionary<string, VulnGateSignals>());
+        Assert.Equal("5150cafe", synthetic.ChecksumSha1);
+        Assert.Equal("sha512-legacyRowIntegrity==", synthetic.UpstreamIntegrityValue);
+    }
+
+    /// <summary>
+    /// Go modules are recorded via <c>CacheAccessOrigin.FirstFetchUnidentified</c>: the fetch path
+    /// never hashes the <c>.zip</c> it stages, so the tenant binds its own (tenant-scoped)
+    /// <c>blob_key</c> but no <c>content_hash</c> at all. Before the fix this bound-but-unhashed
+    /// shape read as non-divergent — <c>ContentHash</c> (the COALESCEd value) fell back to the
+    /// shared row's hash on both sides of the comparison, so it always equalled
+    /// <c>SharedContentHash</c> regardless of whether this tenant's own bytes actually matched.
+    /// <see cref="CacheArtifactIndexFacts.ContentDivergesFromSharedFacts"/> must read this as
+    /// diverging: a real blob key with no hash to verify it against is exactly the "unknown, and
+    /// unknown must not read as safe" case the binding exists to catch.
+    /// </summary>
+    [Fact]
+    public async Task IndexFacts_GoShapedBoundButUnhashedBinding_IsDetectedAsDiverging()
+    {
+        var repo = new CacheArtifactRepository(_db);
+        var shared = new CacheArtifact
+        {
+            Id = Guid.NewGuid().ToString("D"),
+            Ecosystem = "go",
+            Name = "example.com/mod",
+            Version = "v1.0.0",
+            Filename = "v1.0.0.zip",
+            BlobKey = "proxy/shared-hash/v1.0.0.zip",
+            ContentHash = "shared-hash",
+            SizeBytes = 10,
+            FirstCachedAt = TestTime.KnownNow,
+            LastAccessedAt = TestTime.KnownNow,
+        };
+        await repo.InsertAsync(shared);
+        await repo.UpdateGlobalFactsAsync(
+            shared.Id, purl: "pkg:golang/example.com/mod@v1.0.0", checksumSha1: null,
+            publishedAt: null, deprecated: null, hasInstallScript: false, installScriptKind: null,
+            provenanceStatus: null, provenanceSigner: null,
+            upstreamIntegrityValue: null, upstreamIntegrityAlgorithm: null);
+
+        // CacheAccessRecorder.BindingFor's FirstFetchUnidentified shape: a real, tenant-scoped
+        // blob key, and deliberately no hash (the fetch path never computes one for Go).
+        await new TenantArtifactAccessRepository(_db).UpsertAsync(
+            "o1", shared.Id, TestTime.KnownNow,
+            new TenantContentBinding(ContentHash: null, BlobKey: "go/o1/example.com/mod@v1.0.0.zip", SizeBytes: null));
+
+        var indexFacts = Assert.Single(await repo.ListServeFactsForNameAsync("o1", "go", "example.com/mod"));
+        Assert.True(indexFacts.ContentDivergesFromSharedFacts);
+
+        var serveFacts = await repo.GetServeFactsByCoordinateAsync("o1", "go", "example.com/mod", "v1.0.0", "v1.0.0.zip");
+        Assert.NotNull(serveFacts);
+        Assert.True(serveFacts!.ContentDivergesFromSharedFacts);
+    }
+
+    /// <summary>
+    /// Adversarial twin at the same coordinate shape: a real hash binding that happens to match
+    /// the shared row (the ordinary, non-divergent case for a hashing ecosystem) must not be swept
+    /// into "diverging" by an overly broad bound-but-unhashed check.
+    /// </summary>
+    [Fact]
+    public async Task ServeFacts_BoundWithMatchingHash_IsNotDiverging()
+    {
+        var repo = new CacheArtifactRepository(_db);
+        const string hash = "same-hash-both-sides";
+        var shared = new CacheArtifact
+        {
+            Id = Guid.NewGuid().ToString("D"),
+            Ecosystem = "npm",
+            Name = "same-bytes",
+            Version = "1.0.0",
+            Filename = "same-bytes-1.0.0.tgz",
+            BlobKey = $"proxy/{hash}/same-bytes-1.0.0.tgz",
+            ContentHash = hash,
+            SizeBytes = 10,
+            FirstCachedAt = TestTime.KnownNow,
+            LastAccessedAt = TestTime.KnownNow,
+        };
+        await repo.InsertAsync(shared);
+
+        await new TenantArtifactAccessRepository(_db).UpsertAsync(
+            "o1", shared.Id, TestTime.KnownNow,
+            new TenantContentBinding(hash, $"proxy/{hash}/same-bytes-1.0.0.tgz", 10));
+
+        var serveFacts = await repo.GetServeFactsByCoordinateAsync("o1", "npm", "same-bytes", "1.0.0", "same-bytes-1.0.0.tgz");
+        Assert.NotNull(serveFacts);
+        Assert.False(serveFacts!.ContentDivergesFromSharedFacts);
+    }
 }

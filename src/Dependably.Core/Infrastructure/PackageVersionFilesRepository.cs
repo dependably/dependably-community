@@ -297,7 +297,12 @@ public sealed class PackageVersionFilesRepository
     }
 }
 
-/// <summary>One hosted distribution file of a PyPI package version.</summary>
+/// <summary>
+/// One hosted distribution file of a PyPI package version. The constructor is explicit so the
+/// numeric member binds through Dapper's converting path on both providers — SQLite and Postgres
+/// report integer columns as different CLR types. See <c>DapperPositionalRecordComplianceTests</c>.
+/// </summary>
+[method: ExplicitConstructor]
 public sealed record PackageVersionFile(
     string Id,
     string PackageVersionId,

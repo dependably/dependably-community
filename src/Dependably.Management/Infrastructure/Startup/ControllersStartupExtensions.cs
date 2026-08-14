@@ -72,6 +72,7 @@ internal static class ControllersStartupExtensions
             options.AddDocumentTransformer<SecuritySchemeDocumentTransformer>();
             options.AddDocumentTransformer<DocumentMetadataTransformer>();
             options.AddOperationTransformer<SecuritySchemeOperationTransformer>();
+            options.AddSchemaTransformer<OptionalSchemaTransformer>();
         }
 
         builder.Services.AddOpenApi("management", options =>

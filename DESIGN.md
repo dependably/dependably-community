@@ -812,15 +812,36 @@ round-trip the same string.
 ### 11.2 The display rule
 
 **Every rendered timestamp carries an explicit zone.** A bare
-`14:32` is never shipped. The zone is resolved once, in this order:
+`14:32` is never shipped. The zone is resolved once, server-side, in
+this order:
 
 1. The user's profile timezone preference (`users.timezone`)
-2. The org default (`org_settings.default_timezone`)
-3. The browser's IANA zone, via
-   `Intl.DateTimeFormat().resolvedOptions().timeZone`
+2. The org default (`org_settings.default_timezone`), set by an admin in
+   Settings → General
+3. `UTC`
 
-This mirrors the language preference exactly (`users.language` → `org_settings.default_language` → browser locale): a nullable per-user
-column whose `NULL` means *inherit*, never a duplicated default.
+The chain ends on `UTC`, not on the browser's zone: `default_timezone`
+is `NOT NULL DEFAULT 'UTC'`, so a tenant that never chose one is
+indistinguishable from a tenant that deliberately chose UTC, and
+guessing the viewer's zone for a forensic timestamp is the wrong default
+to guess. A tenant that wants something else sets it once, for everyone.
+
+The user half mirrors the language preference exactly (`users.language`
+→ `org_settings.default_language`): a nullable per-user column whose
+`NULL` means *inherit*, never a duplicated default, so a later change to
+the org default reaches every user who never chose a zone.
+
+Both preferences are **display only**. Every instant is stored in UTC
+regardless of either (§11.1); this decides how a stored instant is
+rendered, never what is written.
+
+A step of this chain that the runtime cannot honour is dropped, not
+approximated: an identifier the tz database does not recognise falls
+through to the next step. The runtime image must therefore ship
+`tzdata` — without it every IANA zone is unrecognised and the whole
+chain collapses to `UTC` while the browser-built picker still lists
+every zone. Both Dockerfiles install it and probe
+`/usr/share/zoneinfo` at build time so the image cannot regress.
 
 Formatting rules:
 

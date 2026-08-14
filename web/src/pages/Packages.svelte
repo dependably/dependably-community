@@ -27,6 +27,9 @@
   let sortCol = init.sort, sortDir = init.dir
   let versionOverwritePolicy = 'block'
   let openActionsId = null
+  // Request sequence — page/filter/search changes can fire overlapping loads; a response whose
+  // token no longer matches the latest issued request is stale and must not overwrite newer state.
+  let seq = 0
 
   function sync() {
     writeQuery({ q: search, eco: filterEco, page, limit, sort: sortCol, dir: sortDir }, DEFAULTS)
@@ -35,6 +38,7 @@
   $: org = $currentOrg
 
   async function load() {
+    const mine = ++seq
     loading = true
     error = ''
     try {
@@ -42,11 +46,16 @@
       if (filterEco) params.ecosystem = filterEco
       if (search) params.search = search
       const data = await api.listPackages( params)
+      if (mine !== seq) return
       items = data.items
       total = data.total
       versionOverwritePolicy = data.versionOverwritePolicy ?? 'block'
-    } catch (e) { error = e.message }
-    finally { loading = false }
+    } catch (e) {
+      if (mine !== seq) return
+      error = e.message
+    } finally {
+      if (mine === seq) loading = false
+    }
   }
 
   $: if (org) load()

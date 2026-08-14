@@ -62,7 +62,7 @@ public sealed class EmailChangeTokenRepository
             INSERT INTO email_change_tokens (id, user_id, org_id, new_email, token_hash, expires_at)
             VALUES (@id, @userId, @orgId, @newEmail, @hash, @expires)
             """,
-            new { id, userId, orgId, newEmail = newEmail.Trim().ToLowerInvariant(), hash, expires });
+            new { id, userId, orgId, newEmail = EmailNormalizer.Normalize(newEmail), hash, expires });
 
         return raw;
     }

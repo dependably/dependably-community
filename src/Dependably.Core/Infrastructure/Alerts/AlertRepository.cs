@@ -137,6 +137,27 @@ public sealed class AlertRepository
     }
 
     /// <summary>
+    /// Dismisses every active alert in the org in one statement and returns how many rows changed.
+    /// Server-side rather than a client loop over the listed page: the alert list is paged, so a
+    /// caller iterating what it can see would leave the rest active and would race any alert
+    /// raised between two of its requests. The <c>state = 'active'</c> predicate keeps it
+    /// idempotent — a second call changes nothing and returns 0.
+    /// </summary>
+    public async Task<int> DismissAllActiveAsync(
+        string orgId, string? dismissedBy, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        string now = NowIso();
+        return await conn.ExecuteAsync(
+            """
+            UPDATE alert
+            SET state = 'dismissed', dismissed_by = @dismissedBy, dismissed_at = @now, updated_at = @now
+            WHERE org_id = @orgId AND state = 'active'
+            """,
+            new { orgId, dismissedBy, now });
+    }
+
+    /// <summary>
     /// Records the terminal outcome of an async Slack delivery attempt on the alert row. Called by
     /// the management-plane Slack delivery queue after a success or exhausted-retry failure.
     /// </summary>
@@ -193,8 +214,11 @@ public sealed class AlertRepository
                 row.QuarantineAlertsEnabled != 0, row.VulnAlertsEnabled != 0, row.VulnMinSeverity);
     }
 
-    // SQLite returns INTEGER columns as Int64; use long here to avoid Dapper constructor-matching
-    // errors, then convert to bool in GetRaiseSettingsAsync.
+    // Integer columns bind as long, and [ExplicitConstructor] is what lets one signature serve
+    // both providers — SQLite reports INTEGER as Int64, Postgres as Int32, and Dapper's default
+    // positional-record binding demands an exact CLR match. See
+    // DapperPositionalRecordComplianceTests. Converted to bool in GetRaiseSettingsAsync.
+    [method: ExplicitConstructor]
     private sealed record RawRaiseSettings(
         long QuarantineAlertsEnabled, long VulnAlertsEnabled, string VulnMinSeverity);
 }

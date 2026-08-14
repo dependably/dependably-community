@@ -7,14 +7,22 @@ using Microsoft.AspNetCore.Mvc;
 namespace Dependably.Api;
 
 /// <summary>
-/// Instance-admin endpoints: settings and background-job status.
-/// All routes require the <c>tenant:admin</c> capability (owner role on the tenant).
+/// Instance-admin endpoints: settings, metrics access, the SMTP transport, and background-job
+/// status. All routes require <c>tenant:configure</c> — the capability both <c>admin</c> and
+/// <c>owner</c> hold.
+///
+/// These routes only exist in single-tenant mode, where the org *is* the deployment: there is one
+/// tenant, and its admins are the people running the instance. Gating them on <c>tenant:admin</c>
+/// (owner-only) made an admin who already configures the registry's security posture — block gates,
+/// licence enforcement, trust anchors, proxy upstreams — unable to point the mail relay at a host or
+/// raise an upload limit, which is a distinction without a difference at that scope.
 ///
 /// In multi-tenant deployments (<c>DEPLOYMENT_MODE=multi</c> or <c>header</c>), instance-wide
 /// settings and background-job status are control-plane concerns owned by the operator. Those
 /// actions return 404 in those modes; operators use the system realm at
-/// <c>/api/v1/system/settings</c> and <c>/api/v1/system/background-jobs</c> instead.
-/// Single-tenant and bound deployments keep the existing behavior (owner == operator).
+/// <c>/api/v1/system/settings</c> and <c>/api/v1/system/background-jobs</c> instead, behind the
+/// separate <c>system_admin</c> identity. So this widening is scoped to single mode by
+/// construction — it grants a multi-mode tenant admin nothing.
 /// </summary>
 [ApiController]
 [Authorize]
@@ -59,7 +67,7 @@ public sealed class InstanceController : ControllerBase
             return NotFound();
         }
 
-        var deny = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantAdmin, ct);
+        var deny = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
         if (deny is not null)
         {
             return deny;
@@ -78,7 +86,7 @@ public sealed class InstanceController : ControllerBase
             return NotFound();
         }
 
-        var deny = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantAdmin, ct);
+        var deny = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
         if (deny is not null)
         {
             return deny;
@@ -116,9 +124,15 @@ public sealed class InstanceController : ControllerBase
     //
     // Single-mode counterpart of the system-realm /api/v1/system/metrics-access. The /metrics
     // gate (MetricsAccessConfig + MetricsAccessMiddleware) reads instance_settings regardless of
-    // deployment mode, so the single-tenant owner-operator needs an editing surface too. The
+    // deployment mode, so the single-tenant admin-operator needs an editing surface too. The
     // request/response shapes and validation match the system surface (shared via
     // MetricsAccessEditing) so the same Svelte form drives both.
+    //
+    // This is the widest of the instance routes: the allowlist it edits is what stands between the
+    // public and /metrics, /version, and the management docs/OpenAPI. It is gated on
+    // tenant:configure like its siblings rather than being carved out, because in single mode an
+    // admin already holds the capabilities that shape the registry's security posture, and a split
+    // gate here would be a boundary nobody could state from the role name alone.
 
     /// <summary>GET /api/v1/instance/metrics-access — resolved /metrics access config + sources.</summary>
     [HttpGet("api/v1/instance/metrics-access")]
@@ -132,7 +146,7 @@ public sealed class InstanceController : ControllerBase
             return NotFound();
         }
 
-        var deny = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantAdmin, ct);
+        var deny = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
         if (deny is not null)
         {
             return deny;
@@ -159,7 +173,7 @@ public sealed class InstanceController : ControllerBase
             return NotFound();
         }
 
-        var deny = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantAdmin, ct);
+        var deny = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
         if (deny is not null)
         {
             return deny;
@@ -240,7 +254,7 @@ public sealed class InstanceController : ControllerBase
             return NotFound();
         }
 
-        var deny = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantAdmin, ct);
+        var deny = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
         if (deny is not null)
         {
             return deny;
@@ -272,7 +286,7 @@ public sealed class InstanceController : ControllerBase
             return NotFound();
         }
 
-        var deny = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantAdmin, ct);
+        var deny = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
         if (deny is not null)
         {
             return deny;
@@ -359,7 +373,7 @@ public sealed class InstanceController : ControllerBase
             return NotFound();
         }
 
-        var deny = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantAdmin, ct);
+        var deny = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
         if (deny is not null)
         {
             return deny;
@@ -395,6 +409,34 @@ public sealed class InstanceController : ControllerBase
         return NoContent();
     }
 
+    /// <summary>
+    /// GET /api/v1/instance/email-health — the operator's aggregate view of the shared SMTP
+    /// relay: how many tenants are currently failing to deliver, the worst consecutive-failure
+    /// streak, when it started, and the durable outbox's backlog. Single-mode counterpart of the
+    /// system-realm <c>/api/v1/system/email-health</c>; both read the same
+    /// <c>RelayHealthAggregator</c> so the two surfaces can't drift. No tenant identifier is ever
+    /// included.
+    /// </summary>
+    [HttpGet("api/v1/instance/email-health")]
+    public async Task<IActionResult> GetEmailHealth(
+        [FromServices] Dependably.Infrastructure.Mail.RelayHealthAggregator relayHealth,
+        CancellationToken ct)
+    {
+        if (_isMultiMode)
+        {
+            return NotFound();
+        }
+
+        var deny = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
+        if (deny is not null)
+        {
+            return deny;
+        }
+
+        var health = await relayHealth.GetAsync(ct);
+        return Ok(health);
+    }
+
     // ── Background Jobs ──────────────────────────────────────────────────────────
 
     private static readonly string[] AllJobNames =
@@ -420,7 +462,7 @@ public sealed class InstanceController : ControllerBase
             return NotFound();
         }
 
-        var deny = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantAdmin, ct);
+        var deny = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
         if (deny is not null)
         {
             return deny;

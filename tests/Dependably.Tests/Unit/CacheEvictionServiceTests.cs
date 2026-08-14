@@ -95,17 +95,21 @@ public class CacheEvictionServiceTests : IAsyncLifetime
         });
     }
 
-    // OCI manifests carry a fixed "manifest" filename and a digest as their version — never
-    // evicted regardless of age or size cap (see ListLruCandidatesAsync / GetTotalSizeBytesAsync).
-    private async Task SeedOciAsync(string digestHex, DateTimeOffset accessed, long size = 100)
+    // OCI manifests carry a fixed "manifest" filename and a digest as their version. Seeds the
+    // full shape a proxy manifest pull leaves behind — the shared cache_artifact row plus one
+    // oci_blobs row and one tenant_artifact_access claim per holding org — so eviction exercises
+    // the per-holder claim release rather than a bare row delete. Returns the cache_artifact id.
+    private async Task<string> SeedOciAsync(
+        string digestHex, DateTimeOffset accessed, long size = 100, params string[] holderOrgs)
     {
         string blobKey = BlobKeys.OciBlob("sha256", digestHex);
         await _blobs.PutAsync(blobKey, new MemoryStream(new byte[size]));
 
+        string id = Guid.NewGuid().ToString("D");
         var repo = new CacheArtifactRepository(_db);
         await repo.InsertAsync(new CacheArtifact
         {
-            Id = Guid.NewGuid().ToString("D"),
+            Id = id,
             Ecosystem = "oci",
             Name = "library/ubuntu",
             Version = "sha256:" + digestHex,
@@ -116,6 +120,35 @@ public class CacheEvictionServiceTests : IAsyncLifetime
             FirstCachedAt = accessed,
             LastAccessedAt = accessed
         });
+
+        string[] orgs = holderOrgs.Length > 0 ? holderOrgs : ["o1"];
+        await using var conn = await _db.OpenAsync();
+        foreach (string orgId in orgs)
+        {
+            await conn.ExecuteAsync(
+                "INSERT OR IGNORE INTO orgs (id, slug) VALUES (@id, @id)", new { id = orgId });
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO tenant_artifact_access (org_id, cache_artifact_id, last_accessed_at, last_used)
+                VALUES (@orgId, @caId, @at, @at)
+                """,
+                new { orgId, caId = id, at = accessed.ToUtcIso() });
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO oci_blobs (digest, org_id, media_type, size_bytes, blob_key, origin)
+                VALUES (@digest, @orgId, 'application/vnd.oci.image.manifest.v1+json', @size, @blobKey, 'proxy')
+                """,
+                new { digest = "sha256:" + digestHex, orgId, size, blobKey });
+        }
+
+        return id;
+    }
+
+    private async Task<long> OciBlobRowCountAsync(string digestHex)
+    {
+        await using var conn = await _db.OpenAsync();
+        return await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM oci_blobs WHERE digest = @d", new { d = "sha256:" + digestHex });
     }
 
     private CacheEvictionService Build(IDictionary<string, string?> cfg)
@@ -130,7 +163,15 @@ public class CacheEvictionServiceTests : IAsyncLifetime
         var repo = new CacheArtifactRepository(_db);
         var tiered = new TieredBlobStorage(cacheTier, _blobs);
         var orphanBlobs = new CacheOrphanBlobDeleter(repo, new CacheBlobKeyLock());
-        return new CacheEvictionService(repo, tiered, orphanBlobs, Config(cfg), NullLogger<CacheEvictionService>.Instance, _clock,
+        var deps = new CacheEvictionService.Dependencies(
+            repo,
+            tiered,
+            orphanBlobs,
+            new TenantArtifactAccessRepository(_db),
+            new PackageRepository(_db, time: _clock),
+            new Dependably.Protocol.OciOrphanBlobDeleter(
+                _db, tiered, new Dependably.Protocol.OciBlobKeyLock()));
+        return new CacheEvictionService(deps, Config(cfg), NullLogger<CacheEvictionService>.Instance, _clock,
             new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock));
     }
 
@@ -273,23 +314,89 @@ public class CacheEvictionServiceTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task CountCap_ExcludesOciFromTotalAndNeverEvictsIt()
+    public async Task CountCap_CountsOciAndEvictsItWhenOverBudget()
     {
-        // An OCI row alone would push the count over the cap, but the count total (and the
-        // eviction candidate list) excludes ecosystem='oci' entirely, mirroring the size cap's
-        // OCI exclusion.
+        // OCI rows count toward the artifact cap and are evictable like any other row. Two rows
+        // against a cap of 1 must leave exactly one behind.
         var t = _clock.GetUtcNow();
-        await SeedOciAsync(new string('d', 64), t.AddDays(-1));
+        string digest = new('d', 64);
+        await SeedOciAsync(digest, t.AddDays(-2));
         await SeedAsync("small-npm", t.AddDays(-1));
 
-        var svc = Build(new Dictionary<string, string?> { ["CACHE_MAX_ARTIFACTS"] = "5" });
+        var svc = Build(new Dictionary<string, string?> { ["CACHE_MAX_ARTIFACTS"] = "1" });
         var result = await svc.RunOnceAsync();
 
-        Assert.Equal(0, result.ArtifactsEvicted);
+        Assert.Equal(1, result.ArtifactsEvicted);
         var repo = new CacheArtifactRepository(_db);
-        Assert.NotNull(await repo.GetByCoordinateAsync(
-            "oci", "library/ubuntu", "sha256:" + new string('d', 64), "manifest"));
+        // The OCI row is the least-recently-accessed, so it is the one that goes.
+        Assert.Null(await repo.GetByCoordinateAsync(
+            "oci", "library/ubuntu", "sha256:" + digest, "manifest"));
         Assert.NotNull(await repo.GetByCoordinateAsync("npm", "lodash", "small-npm", "lodash-small-npm.tgz"));
+        // Its holder's claim came off with it.
+        Assert.Equal(0, await OciBlobRowCountAsync(digest));
+    }
+
+    [Fact]
+    public async Task OciEviction_TwoOrgsHoldOneManifest_SecondOrgCanStillPull()
+    {
+        // The acceptance case. cache_artifact is shared and oci_blobs is keyed (digest, org_id),
+        // so evicting the shared row must release BOTH holders' claims — and must not delete the
+        // manifest bytes while either still points at them. Releasing only the sweep's "own" org
+        // (it has none) or deleting the blob through the cache-plane guard would corrupt org two.
+        var t = _clock.GetUtcNow();
+        string digest = new('e', 64);
+        await SeedOciAsync(digest, t.AddDays(-100), size: 100, holderOrgs: ["o1", "o2"]);
+
+        Assert.Equal(2, await OciBlobRowCountAsync(digest));
+
+        var svc = Build(new Dictionary<string, string?> { ["CACHE_MAX_AGE_DAYS"] = "7" });
+        var result = await svc.RunOnceAsync();
+
+        Assert.Equal(1, result.ArtifactsEvicted);
+
+        // Both claims released — one oci_blobs row per holder, both gone.
+        Assert.Equal(0, await OciBlobRowCountAsync(digest));
+
+        // The catalogue row is gone, and so is every tenant_artifact_access claim on it.
+        var repo = new CacheArtifactRepository(_db);
+        Assert.Null(await repo.GetByCoordinateAsync(
+            "oci", "library/ubuntu", "sha256:" + digest, "manifest"));
+        await using var conn = await _db.OpenAsync();
+        Assert.Equal(0, await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM tenant_artifact_access WHERE cache_artifact_id IN " +
+            "(SELECT id FROM cache_artifact WHERE ecosystem = 'oci')"));
+    }
+
+    [Fact]
+    public async Task OciEviction_NeverDeletesBytesThroughTheCachePlaneGuard()
+    {
+        // The cache-plane blob delete is guarded only against sibling cache_artifact rows and
+        // cannot see an oci_blobs row, so the OCI arm must not call it at all. Physical reclaim is
+        // OciBlobReclaimer's job, on a later pass, once all four claims are gone. Here a second org
+        // still holds the digest via a hosted push, so the bytes must survive this sweep.
+        var t = _clock.GetUtcNow();
+        string digest = new('f', 64);
+        string blobKey = BlobKeys.OciBlob("sha256", digest);
+        await SeedOciAsync(digest, t.AddDays(-100), size: 100, holderOrgs: ["o1"]);
+
+        await using (var seed = await _db.OpenAsync())
+        {
+            await seed.ExecuteAsync("INSERT OR IGNORE INTO orgs (id, slug) VALUES ('o3', 'o3')");
+            await seed.ExecuteAsync(
+                """
+                INSERT INTO oci_blobs (digest, org_id, media_type, size_bytes, blob_key, origin)
+                VALUES (@digest, 'o3', 'application/vnd.oci.image.manifest.v1+json', 100, @blobKey, 'uploaded')
+                """,
+                new { digest = "sha256:" + digest, blobKey });
+        }
+
+        var svc = Build(new Dictionary<string, string?> { ["CACHE_MAX_AGE_DAYS"] = "7" });
+        await svc.RunOnceAsync();
+
+        // o3's row survives (it was never a cache-plane holder), and so must the bytes.
+        Assert.Equal(1, await OciBlobRowCountAsync(digest));
+        Assert.True(await _blobs.ExistsAsync(blobKey),
+            "manifest bytes were deleted while another org's oci_blobs row still referenced them");
     }
 
     // ── Shared content-addressed blob_key across distinct coordinates ────────
@@ -381,7 +488,7 @@ public class CacheEvictionServiceTests : IAsyncLifetime
         var repo = new CacheArtifactRepository(_db);
         var a = await repo.GetByCoordinateAsync("npm", "lodash", "v1", "lodash-v1.tgz");
         var access = new TenantArtifactAccessRepository(_db);
-        await access.UpsertAsync("o1", a!.Id, t);
+        await access.UpsertAsync("o1", a!.Id, t, TenantContentBinding.None);
 
         var svc = Build(new Dictionary<string, string?> { ["CACHE_MAX_AGE_DAYS"] = "7" });
         await svc.RunOnceAsync();
@@ -393,47 +500,55 @@ public class CacheEvictionServiceTests : IAsyncLifetime
         Assert.Equal(0, count);
     }
 
-    // ── OCI is excluded from cache-plane eviction ─────────────────────────────
+    // ── OCI participates in cache-plane eviction ──────────────────────────────
+    // An OCI row is evicted by releasing every holding org's digest claim before the shared
+    // cache_artifact row goes. The physical bytes are never deleted here — that is
+    // OciBlobReclaimer's sweep, which also collects the layer closure the manifest was holding up.
 
     [Fact]
-    public async Task AgeCap_MixedOciAndNpm_OnlyNpmEvicted()
+    public async Task AgeCap_MixedOciAndNpm_BothEvicted()
     {
-        // Both rows are far older than the cap. Evicting the OCI manifest would delete its blob
-        // while the oci_blobs row and layer blobs survive (broken serve + orphaned layers), so it
-        // must never be swept even when clearly stale by age.
+        // Both rows are far older than the cap, and the age arm no longer skips OCI: the manifest
+        // is evicted by releasing its holder's digest claim, leaving the bytes to OciBlobReclaimer.
         var t = _clock.GetUtcNow();
-        await SeedOciAsync(new string('b', 64), t.AddDays(-100));
+        string digest = new('b', 64);
+        await SeedOciAsync(digest, t.AddDays(-100));
         await SeedAsync("old-npm", t.AddDays(-100));
 
         var svc = Build(new Dictionary<string, string?> { ["CACHE_MAX_AGE_DAYS"] = "7" });
         var result = await svc.RunOnceAsync();
 
-        Assert.Equal(1, result.ArtifactsEvicted);
+        Assert.Equal(2, result.ArtifactsEvicted);
         var repo = new CacheArtifactRepository(_db);
         Assert.Null(await repo.GetByCoordinateAsync("npm", "lodash", "old-npm", "lodash-old-npm.tgz"));
-        Assert.NotNull(await repo.GetByCoordinateAsync(
-            "oci", "library/ubuntu", "sha256:" + new string('b', 64), "manifest"));
+        Assert.Null(await repo.GetByCoordinateAsync(
+            "oci", "library/ubuntu", "sha256:" + digest, "manifest"));
+        Assert.Equal(0, await OciBlobRowCountAsync(digest));
     }
 
     [Fact]
-    public async Task SizeCap_ExcludesOciFromTotalAndNeverEvictsIt()
+    public async Task SizeCap_CountsOciBytesAndEvictsItToRelieveTheCap()
     {
-        // A huge OCI row alone would exceed the cap many times over, but the size total (and the
-        // eviction candidate list) excludes ecosystem='oci' entirely, so it neither counts toward
-        // the cap nor gets evicted to relieve it.
+        // The whole point of the issue: a huge OCI row now counts toward CACHE_MAX_SIZE_BYTES and
+        // is evicted to get back under it. Previously the total omitted it, so the cap read as
+        // satisfied at 50 bytes while 100 KB of manifest sat uncounted and unreclaimable.
         var t = _clock.GetUtcNow();
-        await SeedOciAsync(new string('c', 64), t.AddDays(-1), size: 100_000);
+        string digest = new('c', 64);
+        await SeedOciAsync(digest, t.AddDays(-2), size: 100_000);
         await SeedAsync("small-npm", t.AddDays(-1), size: 50);
 
         var svc = Build(new Dictionary<string, string?> { ["CACHE_MAX_SIZE_BYTES"] = "1000" });
         var result = await svc.RunOnceAsync();
 
-        // The npm-only total (50 bytes) is well under the cap, so nothing is evicted.
-        Assert.Equal(0, result.ArtifactsEvicted);
+        // 100_050 bytes against a 1000-byte cap: the OCI row is both the largest and the
+        // least-recently-accessed, and evicting it alone brings the total to 50.
+        Assert.Equal(1, result.ArtifactsEvicted);
+        Assert.Equal(100_000, result.BytesFreed);
         var repo = new CacheArtifactRepository(_db);
-        Assert.NotNull(await repo.GetByCoordinateAsync(
-            "oci", "library/ubuntu", "sha256:" + new string('c', 64), "manifest"));
+        Assert.Null(await repo.GetByCoordinateAsync(
+            "oci", "library/ubuntu", "sha256:" + digest, "manifest"));
         Assert.NotNull(await repo.GetByCoordinateAsync("npm", "lodash", "small-npm", "lodash-small-npm.tgz"));
+        Assert.Equal(0, await OciBlobRowCountAsync(digest));
     }
 
     // ── A persistently failing blob delete must not livelock the pass ─────────

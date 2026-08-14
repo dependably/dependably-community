@@ -35,7 +35,11 @@ namespace Dependably.Api;
 ///   <item>Both routes carry [EnableRateLimiting("import")] — 5 requests/min per token (IP
 ///   fallback). Conservative by design: a bulk-import batch already contains N files and a
 ///   well-behaved operator never needs more than a handful of batch calls per minute.</item>
-///   <item>The route [RequestSizeLimit] is capped at 1 GB total batch size.</item>
+///   <item>The route [RequestSizeLimit] is capped at 1 GB total batch size, and the file
+///   COUNT is separately capped at <see cref="MaxBatchFileCount"/> — an aggregate byte cap
+///   alone does not bound a batch of many tiny files, whose per-file work (staging, detection,
+///   a claim-resolution DB call, an audit row) scales with count rather than bytes. Both
+///   routes reject an over-count batch with a 413 before any staging begins.</item>
 ///   <item>Each artefact is streamed to a disk staging file under PROXY_STAGING_PATH before
 ///   its bytes enter managed memory. On the upload path files are processed one at a time
 ///   (staged, imported, temp file deleted). On the manifest path, staging and hash/detection
@@ -77,6 +81,13 @@ public sealed class ImportController : ControllerBase
     // upload-limit chain; this constant bounds the whole multipart envelope before
     // any bytes are read so a single oversized request never buffers unbounded data.
     private const long BatchSizeLimitBytes = 1L * 1024 * 1024 * 1024;
+
+    // Per-request ceiling on the number of individual artefact files, independent of the
+    // aggregate byte cap above: a batch of many near-empty files can pass BatchSizeLimitBytes
+    // while still driving per-file work (disk staging, magic-byte detection, a claim-resolution
+    // DB call, license extraction, an audit row) that scales with file count rather than bytes.
+    // Rejected before any staging begins, same posture as the byte cap.
+    private const int MaxBatchFileCount = 5000;
 
     // The "manifest" and "sha256sums" multipart parts are text documents (a lockfile or a
     // checksum listing) that are fully buffered into managed memory for parsing, unlike the
@@ -147,6 +158,13 @@ public sealed class ImportController : ControllerBase
         if (artefactFiles.Count == 0)
         {
             return BadRequest("No files in request.");
+        }
+        if (artefactFiles.Count > MaxBatchFileCount)
+        {
+            return Problem(
+                statusCode: StatusCodes.Status413PayloadTooLarge,
+                title: "Payload Too Large",
+                detail: $"The batch contains {artefactFiles.Count} files, exceeding the {MaxBatchFileCount}-file-per-request limit.");
         }
 
         // Optional sha256sums sidecar: when present, every artefact's actual digest must match
@@ -336,8 +354,16 @@ public sealed class ImportController : ControllerBase
             return manifestError;
         }
 
-        long preStageCap = await ResolveGlobalCapAsync(orgId, ct);
         var artefactFiles = form!.Files.Where(f => f.Name is not "manifest" and not "sha256sums").ToList();
+        if (artefactFiles.Count > MaxBatchFileCount)
+        {
+            return Problem(
+                statusCode: StatusCodes.Status413PayloadTooLarge,
+                title: "Payload Too Large",
+                detail: $"The batch contains {artefactFiles.Count} files, exceeding the {MaxBatchFileCount}-file-per-request limit.");
+        }
+
+        long preStageCap = await ResolveGlobalCapAsync(orgId, ct);
 
         List<LoadedArtefact>? loaded = null;
         try

@@ -1,4 +1,5 @@
 using Dapper;
+using Dependably.Protocol;
 
 namespace Dependably.Infrastructure;
 
@@ -21,6 +22,15 @@ public sealed class CargoMetadataRepository
     /// global-plane path (<c>cache_artifact</c> + <c>tenant_artifact_access</c>).
     /// Lines are deduplicated by version when a version appears in both planes
     /// (local wins over global-plane for the same version).
+    ///
+    /// A global-plane line's <c>cksum</c> is stored once, against the shared
+    /// <c>cache_artifact</c> row, from whichever tenant reached the coordinate first — while
+    /// <c>cksum</c> is a required field the sparse-index spec has no "absent" form for, so it
+    /// cannot simply be omitted the way npm's optional <c>dist.integrity</c> is. Cargo's
+    /// <c>cksum</c> and this tenant's own bound <c>content_hash</c> are the same digest (SHA-256
+    /// hex of the <c>.crate</c> file), so a tenant whose own fetch diverged from the shared row is
+    /// served a line rewritten to carry its own hash — the value the <c>GetCrateAsync</c> download
+    /// route actually verifies and streams against — rather than the other tenant's.
     /// </summary>
     public async Task<IReadOnlyList<string>> GetIndexLinesAsync(
         string orgId, string name, CancellationToken ct = default)
@@ -42,10 +52,18 @@ public sealed class CargoMetadataRepository
             new { orgId, name });
 
         // Also fetch global-plane index lines for proxy versions cached after the P3b flip.
+        // Alongside each line, the tenant's own bound content hash (TenantContentHash, from
+        // tenant_artifact_access — null when this tenant has no binding) and the shared row's
+        // content hash so a diverging tenant's line can be rewritten to its own cksum below.
+        // Bare column selects, not COALESCE — an expression column has no declared SQLite type
+        // affinity, which Microsoft.Data.Sqlite reports to Dapper as byte[] and breaks buffered
+        // multi-row materialization; the fallback to the shared hash is resolved in C# instead.
         // xtenant: cache_artifact is global; org_id filter is on tenant_artifact_access.
-        var globalRows = await conn.QueryAsync<string>(
+        var globalRows = await conn.QueryAsync<GlobalIndexLineRow>(
             """
-            SELECT cm.index_line
+            SELECT cm.index_line     AS IndexLine,
+                   taa.content_hash  AS TenantContentHash,
+                   ca.content_hash   AS SharedContentHash
             FROM cargo_metadata cm
             JOIN cache_artifact ca ON ca.id = cm.cache_artifact_id
             JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id AND taa.org_id = @orgId
@@ -57,7 +75,7 @@ public sealed class CargoMetadataRepository
             new { orgId, name });
 
         var localList = rows.ToList();
-        var globalList = globalRows.ToList();
+        var globalList = globalRows.Select(RewriteCksumForTenant).ToList();
         if (globalList.Count == 0)
         {
             return localList;
@@ -67,6 +85,51 @@ public sealed class CargoMetadataRepository
         return localList.Count == 0
             ? globalList
             : MergeIndexLines(localList, globalList);
+    }
+
+    private sealed class GlobalIndexLineRow
+    {
+        public string IndexLine { get; init; } = "";
+        public string? TenantContentHash { get; init; }
+        public string? SharedContentHash { get; init; }
+    }
+
+    /// <summary>
+    /// Rewrites a global-plane index line's <c>cksum</c> to this tenant's own bound content hash
+    /// when it diverges from the shared <c>cache_artifact</c> row's hash the stored line was
+    /// originally built from. Both hashes must be known for the comparison to mean anything: a
+    /// tenant with no binding is being served the shared blob (nothing to rewrite), and an
+    /// un-backfilled row with no shared hash yet leaves the stored line alone. A line that fails
+    /// to parse as JSON (should not happen — every stored line is written by
+    /// <see cref="CargoPublishMetadata.ToIndexLine"/> or <c>BuildProxyIndexLine</c>) is returned
+    /// unchanged rather than dropped, so an unexpected shape degrades to the pre-fix behaviour
+    /// instead of vanishing from the index.
+    /// </summary>
+    private static string RewriteCksumForTenant(GlobalIndexLineRow row)
+    {
+        string? ownHash = row.TenantContentHash ?? row.SharedContentHash;
+        bool diverges = !string.IsNullOrEmpty(row.TenantContentHash)
+            && !string.IsNullOrEmpty(row.SharedContentHash)
+            && !string.Equals(row.TenantContentHash, row.SharedContentHash, StringComparison.OrdinalIgnoreCase);
+        if (!diverges)
+        {
+            return row.IndexLine;
+        }
+
+        try
+        {
+            if (System.Text.Json.Nodes.JsonNode.Parse(row.IndexLine) is System.Text.Json.Nodes.JsonObject obj)
+            {
+                obj["cksum"] = ownHash;
+                return obj.ToJsonString(CargoPublishJsonContext.CompactOptions);
+            }
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            // Fall through — return the stored line verbatim.
+        }
+
+        return row.IndexLine;
     }
 
     // Merges local and global-plane index lines: local rows shadow any global-plane row

@@ -35,7 +35,9 @@ public sealed class RetentionPurgeUnlistedTests : IAsyncLifetime
             new Dependably.Infrastructure.Redis.InProcessDistributedLock(clock),
             new Dependably.Protocol.OciOrphanBlobDeleter(
                 _db, new Dependably.Storage.TieredBlobStorage(_blobs, _blobs),
-                new Dependably.Protocol.OciBlobKeyLock())));
+                new Dependably.Protocol.OciBlobKeyLock()),
+            new Dependably.Infrastructure.Mail.EmailOutboxRepository(_db, clock),
+            new Dependably.Infrastructure.Mail.EmailOutboxPolicy(cfg)));
     }
 
     // Seeds a package + version (one package per version so purl_name stays unique), puts a

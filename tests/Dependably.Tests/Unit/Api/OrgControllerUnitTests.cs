@@ -116,6 +116,39 @@ public sealed class OrgControllerUnitTests
         Assert.Equal(5, keep);
     }
 
+    [Theory]
+    [InlineData(-1, null, null, null)]
+    [InlineData(null, -30, null, null)]
+    [InlineData(null, null, -90, null)]
+    [InlineData(null, null, null, -1)]
+    public async Task UpdateRetention_NegativeField_Returns422_AndDoesNotPersist(
+        int? keepVersions, int? keepDays, int? activityRetentionDays, int? purgeUnlistedAfterDays)
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var result = await b.OrgSettingsController.UpdateRetention(
+            new UpdateRetentionRequest(keepVersions, keepDays, activityRetentionDays, purgeUnlistedAfterDays),
+            CancellationToken.None);
+
+        var obj = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
+
+        // The rejected field must not have reached the write path — every column a valid call
+        // would touch still carries its untouched-org default (null, except activity_retention_days
+        // which schema-defaults to 90), not the out-of-range value from this request.
+        await using var conn = await b.Db.OpenAsync();
+        var row = await conn.QuerySingleOrDefaultAsync(
+            "SELECT keep_versions, keep_days, activity_retention_days, purge_unlisted_after_days "
+            + "FROM org_settings WHERE org_id = @org",
+            new { org = b.PrimaryOrgId });
+        Assert.True(row is null
+            || (row.keep_versions is null && row.keep_days is null
+                && (row.activity_retention_days is null || row.activity_retention_days == 90)
+                && row.purge_unlisted_after_days is null));
+    }
+
     [Fact]
     public async Task GetProxySettings_Owner_Returns200()
     {

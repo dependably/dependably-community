@@ -20,6 +20,38 @@ Consultez cette alerte dans les paramètres Alertes de Dependably.
 </target>
       </segment>
     </unit>
+    <unit id="email.alert.digest.body">
+      <notes>
+        <note category="translator">Plain-text body of a coalesced burst-digest alert-delivery email. {0} = the alert title, {1} = the number of raw alerts folded into this one email, {2} = the most recent occurrence&apos;s detail (empty when it carries none). Keep the blank lines and the trailing newline.</note>
+      </notes>
+      <segment state="translated">
+        <source>{0}
+
+This alert occurred {1} times. Showing the most recent occurrence below.
+
+{2}
+
+View this alert in the Dependably Alerts settings.
+</source>
+        <target>{0}
+
+Cette alerte s&apos;est produite {1} fois. Occurrence la plus récente ci-dessous.
+
+{2}
+
+Consultez cette alerte dans les paramètres Alertes de Dependably.
+</target>
+      </segment>
+    </unit>
+    <unit id="email.alert.digest.subject">
+      <notes>
+        <note category="translator">Subject line of a coalesced burst-digest alert-delivery email. {0} = the alert title, stripped of CR/LF by the caller before formatting. {1} = the number of raw alerts folded into this one email.</note>
+      </notes>
+      <segment state="translated">
+        <source>Dependably alert: {0} ({1} occurrences)</source>
+        <target>Alerte Dependably : {0} ({1} occurrences)</target>
+      </segment>
+    </unit>
     <unit id="email.alert.subject">
       <notes>
         <note category="translator">Subject line of an alert-delivery email sent by the email delivery queue. {0} = the alert title, stripped of CR/LF by the caller before formatting.</note>
@@ -578,7 +610,7 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
     </unit>
     <unit id="error.email.hostBlocked">
       <notes>
-        <note category="translator">422 detail for the emailSmtpHost field on the org alert-settings/email PUT when the host is an IP literal in a blocked SSRF range.</note>
+        <note category="translator">422 detail for the smtpHost field on the instance and system email-config PUTs when the host is an IP literal in a blocked SSRF range.</note>
       </notes>
       <segment state="translated">
         <source>SMTP host resolves to a blocked IP range.</source>
@@ -605,7 +637,7 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
     </unit>
     <unit id="error.email.invalidRecipient">
       <notes>
-        <note category="translator">422 detail for the emailRecipients field on the org alert-settings/email PUT when any entry fails to parse.</note>
+        <note category="translator">422 detail for the emailRecipients field on the org alert-settings PUT when any entry fails to parse.</note>
       </notes>
       <segment state="translated">
         <source>All recipients must be valid email addresses.</source>
@@ -659,7 +691,7 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
     </unit>
     <unit id="error.email.tooManyRecipients">
       <notes>
-        <note category="translator">422 detail for the emailRecipients field on the org alert-settings/email PUT. 20 is the API-enforced cap.</note>
+        <note category="translator">422 detail for the emailRecipients field on the org alert-settings PUT. 20 is the API-enforced cap.</note>
       </notes>
       <segment state="translated">
         <source>At most 20 recipients are allowed.</source>
@@ -1224,6 +1256,15 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
         <target>Doit être compris entre 0 et {0} heures (1 an), ou null pour désactiver.</target>
       </segment>
     </unit>
+    <unit id="error.settings.retentionRange">
+      <notes>
+        <note category="translator">422 detail for keep_versions, keep_days, activity_retention_days, and purge_unlisted_after_days.</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be zero or greater, or null to disable.</source>
+        <target>Doit être zéro ou plus, ou null pour désactiver.</target>
+      </segment>
+    </unit>
     <unit id="error.settings.rpmUpstreamModeInvalid">
       <notes>
         <note category="translator">422 detail for rpm_upstream_mode. The quoted values are API literals.</note>
@@ -1341,6 +1382,15 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
         <target>Code de langue non pris en charge. Autorisés : {0}.</target>
       </segment>
     </unit>
+    <unit id="error.system.unsupportedTimezone">
+      <notes>
+        <note category="translator">422 detail. {0} = the rejected timezone identifier.</note>
+      </notes>
+      <segment state="translated">
+        <source>Unrecognised timezone &apos;{0}&apos;. Use an IANA zone name, for example America/Toronto.</source>
+        <target>Fuseau horaire non reconnu « {0} ». Utilisez un nom de zone IANA, par exemple America/Toronto.</target>
+      </segment>
+    </unit>
     <unit id="error.token.limitReached">
       <notes>
         <note category="translator">422 detail. {0} = the per-tenant active-token cap.</note>
@@ -1366,6 +1416,15 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       <segment state="translated">
         <source>The &apos;scope&apos; field is no longer accepted. Send &apos;capabilities&apos; instead.</source>
         <target>Le champ « scope » n&apos;est plus accepté. Envoyez « capabilities » à la place.</target>
+      </segment>
+    </unit>
+    <unit id="error.tooManyRequests.title">
+      <notes>
+        <note category="translator">Title of the HTTP 429 problem response (a per-account or per-resource send budget is exhausted).</note>
+      </notes>
+      <segment state="translated">
+        <source>Too Many Requests</source>
+        <target>Trop de requêtes</target>
       </segment>
     </unit>
     <unit id="error.trustAnchor.materialEmpty">
@@ -1539,6 +1598,15 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
         <target>Les amonts authentifiés ne sont pas pris en charge pour ecosystem=rpm.</target>
       </segment>
     </unit>
+    <unit id="error.user.emailChangeThrottled">
+      <notes>
+        <note category="translator">Returned when the per-address send budget for account email-change verification is exhausted.</note>
+      </notes>
+      <segment state="translated">
+        <source>Too many verification emails have been sent to that address recently. Try again later.</source>
+        <target>Trop de courriels de vérification ont été envoyés à cette adresse récemment. Réessayez plus tard.</target>
+      </segment>
+    </unit>
     <unit id="error.user.emailManagedByIdp">
       <notes>
         <note category="translator">Conflict returned when an email change is requested for a SAML-backed account.</note>
@@ -1600,6 +1668,15 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       <segment state="translated">
         <source>DEPENDABLY_MASTER_KEY must be configured to store a webhook signing secret at rest.</source>
         <target>DEPENDABLY_MASTER_KEY doit être configurée pour stocker un secret de signature de webhook au repos.</target>
+      </segment>
+    </unit>
+    <unit id="error.webhook.maxPerOrg">
+      <notes>
+        <note category="translator">422 detail when creating a webhook subscription past the per-org cap. {0} = the cap.</note>
+      </notes>
+      <segment state="translated">
+        <source>Maximum of {0} webhook subscriptions per organization reached. Delete an existing subscription first.</source>
+        <target>Le maximum de {0} abonnements webhook par organisation est atteint. Supprimez un abonnement existant d&apos;abord.</target>
       </segment>
     </unit>
     <unit id="error.webhook.unknownEventTypes">

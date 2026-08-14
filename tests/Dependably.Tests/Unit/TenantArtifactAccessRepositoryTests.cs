@@ -37,8 +37,8 @@ public class TenantArtifactAccessRepositoryTests : IAsyncLifetime
         var repo = new TenantArtifactAccessRepository(_db);
         var t = TestTime.KnownNow;
 
-        await repo.UpsertAsync("o1", caId, t);
-        await repo.UpsertAsync("o1", caId, t.AddMinutes(1));
+        await repo.UpsertAsync("o1", caId, t, TenantContentBinding.None);
+        await repo.UpsertAsync("o1", caId, t.AddMinutes(1), TenantContentBinding.None);
 
         await using var conn = await _db.OpenAsync();
         var (Count, FirstAt, LastAt) = await conn.QuerySingleAsync<(int Count, string FirstAt, string LastAt)>(
@@ -64,7 +64,7 @@ public class TenantArtifactAccessRepositoryTests : IAsyncLifetime
         var repo = new TenantArtifactAccessRepository(_db);
         var instant = new DateTimeOffset(2026, 5, 1, 8, 9, 10, TimeSpan.Zero);
 
-        await repo.UpsertAsync("o1", caId, instant);
+        await repo.UpsertAsync("o1", caId, instant, TenantContentBinding.None);
 
         await using var conn = await _db.OpenAsync();
         var (firstAt, lastAt) = await conn.QuerySingleAsync<(string FirstAt, string LastAt)>(
@@ -87,7 +87,7 @@ public class TenantArtifactAccessRepositoryTests : IAsyncLifetime
         var repo = new TenantArtifactAccessRepository(_db);
         var instant = new DateTimeOffset(2026, 5, 1, 8, 9, 10, TimeSpan.FromHours(2));
 
-        await repo.UpsertAsync("o1", caId, instant);
+        await repo.UpsertAsync("o1", caId, instant, TenantContentBinding.None);
 
         await using var conn = await _db.OpenAsync();
         string stored = await conn.QuerySingleAsync<string>(
@@ -104,9 +104,9 @@ public class TenantArtifactAccessRepositoryTests : IAsyncLifetime
         var repo = new TenantArtifactAccessRepository(_db);
         var t = TestTime.KnownNow;
 
-        await repo.UpsertAsync("o1", caId, t);
-        await repo.UpsertAsync("o2", caId, t);
-        await repo.UpsertAsync("o1", caId, t.AddMinutes(1));  // duplicate org → still one entry
+        await repo.UpsertAsync("o1", caId, t, TenantContentBinding.None);
+        await repo.UpsertAsync("o2", caId, t, TenantContentBinding.None);
+        await repo.UpsertAsync("o1", caId, t.AddMinutes(1), TenantContentBinding.None);  // duplicate org → still one entry
 
         var tenants = await repo.ListAffectedTenantsAsync("npm", "lodash", "4.17.21");
         Assert.Equal(2, tenants.Count);

@@ -10,12 +10,14 @@ test.describe('API: token CRUD + scope enforcement', () => {
   test('user token: create → list → revoke', async ({ baseURL }) => {
     const authed = await loginAsAdmin(baseURL!)
     try {
-      const create = await authed.post('/api/v1/tokens', { data: { scope: 'pull' } })
+      const create = await authed.post('/api/v1/tokens', {
+        data: { capabilities: ['read:metadata', 'read:artifact'] },
+      })
       expect(create.status()).toBe(200)
       const { token, record } = await create.json()
       expect(typeof token).toBe('string')
       expect(record.id).toBeTruthy()
-      expect(record.scope).toBe('pull')
+      expect(JSON.parse(record.capabilities)).toEqual(['read:artifact', 'read:metadata'])
 
       const list = await authed.get('/api/v1/tokens')
       expect(list.status()).toBe(200)
@@ -35,13 +37,13 @@ test.describe('API: token CRUD + scope enforcement', () => {
     try {
       const name = `e2e-svc-${Date.now()}`
       const create = await authed.post('/api/v1/service-tokens', {
-        data: { name, scope: 'push' },
+        data: { name, capabilities: ['publish:*'] },
       })
       expect(create.status()).toBe(200)
       const { token, record } = await create.json()
       expect(typeof token).toBe('string')
       expect(record.name).toBe(name)
-      expect(record.scope).toBe('push')
+      expect(JSON.parse(record.capabilities)).toEqual(['publish:*'])
 
       const list = await authed.get('/api/v1/service-tokens')
       expect(list.status()).toBe(200)
@@ -55,12 +57,24 @@ test.describe('API: token CRUD + scope enforcement', () => {
     }
   })
 
-  test('rejects invalid scope on create', async ({ baseURL }) => {
+  test('rejects unknown capability on create', async ({ baseURL }) => {
     const authed = await loginAsAdmin(baseURL!)
     try {
-      const res = await authed.post('/api/v1/tokens', { data: { scope: 'admin' } })
+      const res = await authed.post('/api/v1/tokens', { data: { capabilities: ['made:up'] } })
       // RFC 7807 ProblemDetails: 422 for semantic validation; 400 also acceptable.
       expect([400, 422]).toContain(res.status())
+    } finally {
+      await authed.dispose()
+    }
+  })
+
+  test('rejects the retired scope field on create', async ({ baseURL }) => {
+    const authed = await loginAsAdmin(baseURL!)
+    try {
+      const res = await authed.post('/api/v1/tokens', { data: { scope: 'pull' } })
+      expect(res.status()).toBe(422)
+      const body = await res.json()
+      expect(JSON.stringify(body)).toMatch(/capabilities/i)
     } finally {
       await authed.dispose()
     }

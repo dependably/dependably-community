@@ -36,6 +36,14 @@ public sealed class WebhookController : OrgScopedControllerBase
         Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
     };
 
+    /// <summary>
+    /// Upper bound on webhook subscriptions per org. Deliberately generous — it is a blast-radius
+    /// bound, not a product limit: one event fans out to every matching subscription, and the
+    /// dispatch queue gives each org's envelope a bounded time budget, so an unbounded list would
+    /// let an org queue more delivery work per event than any single envelope can attempt.
+    /// </summary>
+    internal const int MaxSubscriptionsPerOrg = 50;
+
     private static readonly HashSet<string> ValidEventTypes = new(StringComparer.Ordinal)
     {
         PackageEvents.TypePublish,
@@ -138,11 +146,30 @@ public sealed class WebhookController : OrgScopedControllerBase
         }
 
         string orgId = CurrentTenantId();
+
+        // Every subscription multiplies the delivery work one event creates, and the delivery
+        // queue serves each org one envelope at a time — so an unbounded subscription list is an
+        // org's own delivery latency, not an instance-wide one, but it is still unbounded. The cap
+        // keeps a single event's fan-out to a size the per-envelope budget can actually attempt.
+        // Counting and then inserting is not atomic: N creates that read the count before any of
+        // them inserts all pass, so the stored total can exceed the cap by up to N-1 and those
+        // extra rows stay until someone deletes them — every later create is refused, which stops
+        // the overshoot growing but does not undo it. That is an accepted bound for a
+        // blast-radius limit, whose job is to keep the fan-out the same order of magnitude as the
+        // budget, not to hold an exact number.
+        if (await _webhooks.CountAsync(orgId, ct) >= MaxSubscriptionsPerOrg)
+        {
+            return _problems.ValidationErrorActionKey(
+                "url", "error.webhook.maxPerOrg", MaxSubscriptionsPerOrg);
+        }
+
         var sub = await _webhooks.AddAsync(orgId, new NewWebhookSubscription(
             req.Url!, req.EventTypes!, req.Secret, req.Description), ct);
 
         await _audit.LogAsync("webhook_subscription_added", orgId, GetUserId(),
-            detail: JsonSerializer.Serialize(new { id = sub.Id, url = sub.Url }, WebJson), ct: ct);
+            actorKind: ActorKinds.User,
+            detail: JsonSerializer.Serialize(new { id = sub.Id, url = sub.Url }, WebJson),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return CreatedAtAction(nameof(Get), new { id = sub.Id }, sub);
     }
@@ -187,7 +214,9 @@ public sealed class WebhookController : OrgScopedControllerBase
         }
 
         await _audit.LogAsync("webhook_subscription_updated", orgId, GetUserId(),
-            detail: JsonSerializer.Serialize(new { id, url = req.Url }, WebJson), ct: ct);
+            actorKind: ActorKinds.User,
+            detail: JsonSerializer.Serialize(new { id, url = req.Url }, WebJson),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return Ok(updated);
     }
@@ -207,7 +236,9 @@ public sealed class WebhookController : OrgScopedControllerBase
         await _webhooks.DeleteAsync(orgId, id, ct);
 
         await _audit.LogAsync("webhook_subscription_deleted", orgId, GetUserId(),
-            detail: JsonSerializer.Serialize(new { id }, WebJson), ct: ct);
+            actorKind: ActorKinds.User,
+            detail: JsonSerializer.Serialize(new { id }, WebJson),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return NoContent();
     }
@@ -249,7 +280,9 @@ public sealed class WebhookController : OrgScopedControllerBase
             DataJson: """{"triggered_by":"test"}"""));
 
         await _audit.LogAsync("webhook_test_sent", orgId, GetUserId(),
-            detail: JsonSerializer.Serialize(new { id, url = sub.Url }, WebJson), ct: ct);
+            actorKind: ActorKinds.User,
+            detail: JsonSerializer.Serialize(new { id, url = sub.Url }, WebJson),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return NoContent();
     }

@@ -37,7 +37,8 @@ public sealed class VersionsBehindRefreshTests : IAsyncLifetime
     [Fact]
     public async Task Npm_ComputesCountAgainstStableUpstreamVersions()
     {
-        var (_, _, ca1, _) = await SeedProxyVersionAsync("npm", "multi-pkg", "1.0.0");
+        var (orgId, _, ca1, _) = await SeedProxyVersionAsync("npm", "multi-pkg", "1.0.0");
+        await SeedUpstreamRegistryAsync(orgId, "npm", "http://npm.test");
         string ca2 = await SeedAdditionalCacheVersionAsync("npm", "multi-pkg", "2.0.0");
 
         string packument = NpmPackument("multi-pkg", new[] { "1.0.0", "2.0.0", "3.0.0" });
@@ -57,7 +58,8 @@ public sealed class VersionsBehindRefreshTests : IAsyncLifetime
     [Fact]
     public async Task Npm_UpToDateVersionCountsAsZero_NotUnknown()
     {
-        var (_, _, ca, _) = await SeedProxyVersionAsync("npm", "current-pkg", "3.0.0");
+        var (orgId, _, ca, _) = await SeedProxyVersionAsync("npm", "current-pkg", "3.0.0");
+        await SeedUpstreamRegistryAsync(orgId, "npm", "http://npm.test");
         string packument = NpmPackument("current-pkg", new[] { "1.0.0", "2.0.0", "3.0.0" });
         var service = BuildService(new FixedResponseHandler(packument));
         await service.RunRefreshPassAsync(CancellationToken.None);
@@ -74,7 +76,8 @@ public sealed class VersionsBehindRefreshTests : IAsyncLifetime
         // A package that is both proxied (cache_artifact, org auto-discovers the group) and
         // carries a hosted override (package_versions, origin='uploaded') under the same
         // package_id — the refresh pass must recompute both planes from the one upstream fetch.
-        var (_, packageId, caId, _) = await SeedProxyVersionAsync("npm", "mixed-plane-pkg", "1.0.0");
+        var (orgId, packageId, caId, _) = await SeedProxyVersionAsync("npm", "mixed-plane-pkg", "1.0.0");
+        await SeedUpstreamRegistryAsync(orgId, "npm", "http://npm.test");
         string hostedVersionId = await SeedHostedVersionAsync(packageId, "npm", "mixed-plane-pkg", "1.5.0");
 
         string packument = NpmPackument("mixed-plane-pkg", new[] { "1.0.0", "1.5.0", "2.0.0" });
@@ -121,8 +124,10 @@ public sealed class VersionsBehindRefreshTests : IAsyncLifetime
         // packument; "bad-pkg" gets a 500 from upstream. The failing group must not prevent the
         // healthy group from updating, and must itself reset to unknown rather than being skipped
         // silently with a stale value left behind.
-        var (_, _, caGood, _) = await SeedProxyVersionAsync("npm", "good-pkg", "1.0.0");
-        var (_, _, caBad, _) = await SeedProxyVersionAsync("npm", "bad-pkg", "1.0.0");
+        var (orgGood, _, caGood, _) = await SeedProxyVersionAsync("npm", "good-pkg", "1.0.0");
+        await SeedUpstreamRegistryAsync(orgGood, "npm", "http://npm.test");
+        var (orgBad, _, caBad, _) = await SeedProxyVersionAsync("npm", "bad-pkg", "1.0.0");
+        await SeedUpstreamRegistryAsync(orgBad, "npm", "http://npm.test");
         await using (var seedConn = await _db.OpenAsync())
         {
             await seedConn.ExecuteAsync(
@@ -274,7 +279,7 @@ public sealed class VersionsBehindRefreshTests : IAsyncLifetime
         var registries = new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, _clock, TestEnvelope.Unconfigured()));
         var latestResolver = new UpstreamLatestVersionResolver(upstream, registries);
         return new DeprecationRefreshService(
-            packages, cacheArtifacts, audit, upstream, latestResolver, airGap, config,
+            packages, cacheArtifacts, audit, upstream, latestResolver, registries, airGap, config,
             NullLogger<DeprecationRefreshService>.Instance,
             _clock,
             new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock));

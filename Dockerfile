@@ -143,6 +143,21 @@ RUN --mount=type=secret,id=registry_key \
     -p:Version="${VERSION}" \
     -o /app/publish
 
+# Symbols export stage — a filesystem holding only the portable PDBs this compilation
+# produced, extracted via `docker buildx build --target symbols --output
+# type=local,dest=<dir>`. Derived from the `build` stage's own layer rather than a fresh
+# `dotnet publish`, so the PDB signatures it exports are the exact ones baked into the
+# assemblies the runtime image ships below — a second publish invocation would mint new
+# PDB GUIDs and leave every symbol permanently unresolvable with no visible failure.
+FROM scratch AS symbols
+COPY --from=build /app/publish/*.pdb /
+
+# Publish output with the PDBs stripped, derived from the same `build` stage layer as
+# the `symbols` export above rather than a second publish, so the assemblies this image
+# ships and the PDBs `symbols` exports come from one compilation.
+FROM build AS publish-no-symbols
+RUN rm -f /app/publish/*.pdb
+
 # Notices stage — combines both CycloneDX SBOMs into a curated attribution file.
 # Pinned to the build platform for the same reason as the frontend stage: it runs
 # node over architecture-independent JSON, so emulation buys nothing and risks SIGILL.
@@ -170,6 +185,12 @@ ARG REGISTRY_URL=
 # the original repositories are restored and the packages are fetched from
 # dl-cdn. This keeps the image build from hard-depending on the registry running
 # ahead of it — the apk proxy is itself shipped in this image.
+# tzdata is not optional cosmetics: .NET resolves IANA zones by reading
+# /usr/share/zoneinfo, and the runtime-deps base ships none. Without it
+# TimeZoneInfo.TryFindSystemTimeZoneById rejects every zone, so the per-user and
+# per-org display-timezone preferences validate to 400 and every timestamp renders
+# UTC. The zone probe after the install is what keeps that from regressing: dropping
+# the package leaves apk exiting 0, so only an explicit check fails the build.
 # hadolint ignore=DL3018,DL4006
 RUN --mount=type=secret,id=registry_key \
     if [ -n "$REGISTRY_URL" ] && [ -s /run/secrets/registry_key ]; then \
@@ -177,15 +198,21 @@ RUN --mount=type=secret,id=registry_key \
       SCHEME=$(printf '%s' "$REGISTRY_URL" | sed -E 's|^(https?)://.*|\1|') && \
       HOST=$(printf '%s' "$REGISTRY_URL" | sed -E 's|^https?://||; s|/.*||') && \
       sed -E -i "s|https://dl-cdn\.alpinelinux\.org/alpine|${SCHEME}://ci:$(cat /run/secrets/registry_key)@${HOST}/apk|" /etc/apk/repositories; \
-      if ! apk add --no-cache sqlite-libs icu-libs; then \
+      if ! apk add --no-cache sqlite-libs icu-libs tzdata; then \
         echo "apk proxy unreachable at ${REGISTRY_URL}; falling back to dl-cdn.alpinelinux.org" >&2; \
         cp /etc/apk/repositories.orig /etc/apk/repositories && \
-        apk add --no-cache sqlite-libs icu-libs; \
+        apk add --no-cache sqlite-libs icu-libs tzdata; \
       fi; \
       mv /etc/apk/repositories.orig /etc/apk/repositories; \
     else \
-      apk add --no-cache sqlite-libs icu-libs; \
+      apk add --no-cache sqlite-libs icu-libs tzdata; \
     fi && \
+    for zone in UTC America/Toronto Europe/Paris; do \
+      [ -f "/usr/share/zoneinfo/$zone" ] || { \
+        echo "ERROR: the tz database does not provide $zone. Without it .NET resolves only UTC, every IANA zone is rejected as unrecognised, and the display-timezone preference is silently inert. Refusing to build a UTC-only image." >&2; \
+        exit 1; \
+      }; \
+    done && \
     addgroup -S dependably && adduser -S dependably -G dependably && \
     mkdir -p /data && chown dependably:dependably /data
 
@@ -199,7 +226,7 @@ LABEL org.opencontainers.image.source="https://github.com/dependably/dependably-
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.version="${VERSION}"
 
-COPY --from=build --chown=dependably:dependably /app/publish/ .
+COPY --from=publish-no-symbols --chown=dependably:dependably /app/publish/ .
 COPY --from=notices --chown=dependably:dependably /work/notices.json ./notices.json
 
 EXPOSE 8080

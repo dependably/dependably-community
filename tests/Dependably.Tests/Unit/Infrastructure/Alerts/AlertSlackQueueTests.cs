@@ -139,7 +139,7 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         using var cts = new CancellationTokenSource();
         _ = queue.StartAsync(cts.Token);
 
-        queue.Notify(alert);
+        await queue.NotifyAsync(alert);
         // Waits on the DURABLE end state (the persisted alert row), not the queue's in-memory
         // DeliveredCount — the queue increments that counter BEFORE its DB writes complete, so
         // waiting on the counter and then cancelling races the write.
@@ -176,7 +176,7 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         using var cts = new CancellationTokenSource();
         _ = queue.StartAsync(cts.Token);
 
-        queue.Notify(alert);
+        await queue.NotifyAsync(alert);
         // Waits on the DURABLE end state (the persisted alert row), not the queue's in-memory
         // DeliveredCount — the queue increments that counter BEFORE its DB writes complete, so
         // waiting on the counter and then cancelling races the write.
@@ -359,8 +359,8 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         var queue = new AlertSlackQueue(settings, alerts, client, slackClock, BuildCfg(), NullLogger<AlertSlackQueue>.Instance);
 
         // Buffer both alerts before the worker ever starts reading.
-        queue.Notify(goodAlert);
-        queue.Notify(badAlert);
+        await queue.NotifyAsync(goodAlert);
+        await queue.NotifyAsync(badAlert);
 
         // Drives ExecuteAsync directly with an already-cancelled token — the exact state the
         // stopping token is in by the time BackgroundService.StopAsync signals cancellation.
@@ -404,7 +404,7 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         using var cts = new CancellationTokenSource();
         _ = queue.StartAsync(cts.Token);
 
-        queue.Notify(alert);
+        await queue.NotifyAsync(alert);
         // Give the consumer a moment to process the (no-op) item.
         await Task.Delay(200);
 
@@ -446,8 +446,8 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         using var cts = new CancellationTokenSource();
         _ = queue.StartAsync(cts.Token);
 
-        queue.Notify(goodAlert);
-        queue.Notify(badAlert);
+        await queue.NotifyAsync(goodAlert);
+        await queue.NotifyAsync(badAlert);
 
         // Advance the fake clock through the 1s + 5s + 30s backoff schedule; each iteration only
         // yields a few real milliseconds so the background delivery loop can observe the fired
@@ -485,6 +485,129 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         Assert.True(badSettings.SlackEnabled);
     }
 
+    // ── Cross-tenant fairness ────────────────────────────────────────────────
+
+    /// <summary>
+    /// The cross-tenant property, on the alerting path where it matters most: org1's Slack webhook
+    /// URL points at an endpoint that accepts the connection and never answers, and org2's
+    /// security alert must still be delivered while org1's delivery is still hanging. Alerts are
+    /// raised by supply-chain blocks and vuln findings, so a shared single-reader queue lets one
+    /// tenant's unreachable endpoint delay every other tenant's security notifications.
+    ///
+    /// The wait is gated on a <see cref="TaskCompletionSource"/> the test controls, and no clock
+    /// is advanced, so the pass means org2 was served concurrently rather than eventually.
+    /// </summary>
+    [Fact]
+    public async Task Notify_OneOrgsWebhookHangs_AnotherOrgsAlertIsStillDelivered()
+    {
+        using var ep = MakeProtector();
+        var settings = new AlertSettingsRepository(_db, ep, Clock);
+        var alerts = new AlertRepository(_db, Clock);
+        var handler = new HangingHandler();
+        var client = BuildClient(handler);
+
+        await EnableSlackAsync(settings, "org1", "https://hang.example.com/hook");
+        await EnableSlackAsync(settings, "org2", "https://good.example.com/hook");
+        var hangingAlert = await SeedActiveAlertAsync(alerts, "org1", Guid.NewGuid().ToString("N"));
+        var otherAlert = await SeedActiveAlertAsync(alerts, "org2", Guid.NewGuid().ToString("N"));
+
+        var queue = new AlertSlackQueue(
+            settings, alerts, client, Clock, BuildCfg(), NullLogger<AlertSlackQueue>.Instance);
+        using var cts = new CancellationTokenSource();
+        _ = queue.StartAsync(cts.Token);
+
+        await queue.NotifyAsync(hangingAlert);
+        await handler.HangEntered.Task;
+
+        await queue.NotifyAsync(otherAlert);
+        await WaitAsync(async () => (await alerts.GetByIdAsync("org2", otherAlert.Id))?.SlackStatus is not null);
+
+        Assert.Equal("sent", (await alerts.GetByIdAsync("org2", otherAlert.Id))!.SlackStatus);
+        Assert.False(handler.HangReleased.Task.IsCompleted,
+            "org1's delivery must still be in flight — otherwise the test proved nothing.");
+
+        handler.HangReleased.TrySetResult();
+        await cts.CancelAsync();
+        try { await queue.StopAsync(CancellationToken.None); } catch { }
+    }
+
+    /// <summary>
+    /// The fairness bound holds on the stopping path too. The shutdown drain has a bounded window,
+    /// and an org whose Slack endpoint accepts the connection and never answers would otherwise
+    /// hold that whole window — abandoning every other org's queued security alerts on every
+    /// deploy and restart. Each drained alert runs under the same per-alert budget as normal
+    /// service, so org1's hung endpoint costs its own budget and org2's alert still goes out.
+    /// </summary>
+    [Fact]
+    public async Task Drain_OneOrgsHungWebhook_DoesNotConsumeAnotherOrgsShareOfTheWindow()
+    {
+        using var ep = MakeProtector();
+        var settings = new AlertSettingsRepository(_db, ep, Clock);
+        var alerts = new AlertRepository(_db, Clock);
+        var handler = new HangingHandler();
+        var client = BuildClient(handler);
+        var slackClock = new FakeTimeProvider(Clock.GetUtcNow());
+
+        await EnableSlackAsync(settings, "org1", "https://hang.example.com/hook");
+        await EnableSlackAsync(settings, "org2", "https://good.example.com/hook");
+        var hangingAlert = await SeedActiveAlertAsync(alerts, "org1", Guid.NewGuid().ToString("N"));
+        var otherAlert = await SeedActiveAlertAsync(alerts, "org2", Guid.NewGuid().ToString("N"));
+
+        var cfg = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["ALERT_SLACK_QUEUE_CAPACITY"] = "1024",
+                ["ALERT_SLACK_BUDGET_SECONDS"] = "30"
+            })
+            .Build();
+
+        var queue = new AlertSlackQueue(
+            settings, alerts, client, slackClock, cfg, NullLogger<AlertSlackQueue>.Instance);
+
+        // Both alerts are queued before any worker runs, so both go through the drain.
+        await queue.NotifyAsync(hangingAlert);
+        await queue.NotifyAsync(otherAlert);
+
+        var executeTask = queue.ExecuteAsyncForTests(new CancellationToken(canceled: true));
+
+        await ClockPump.UntilAsync(slackClock, async () =>
+            (await alerts.GetByIdAsync("org2", otherAlert.Id))?.SlackStatus is not null,
+            TimeSpan.FromSeconds(5), maxAdvances: 60);
+
+        handler.HangReleased.TrySetResult();
+        await executeTask;
+
+        Assert.Equal("sent", (await alerts.GetByIdAsync("org2", otherAlert.Id))!.SlackStatus);
+        Assert.Equal(1, queue.DeliveredCount);
+
+        // org1's alert was abandoned on its own budget, so nothing terminal was recorded for it.
+        Assert.Null((await alerts.GetByIdAsync("org1", hangingAlert.Id))!.SlackStatus);
+    }
+
+    /// <summary>Parks any request whose URL contains "hang" until the test releases it; 200
+    /// otherwise. The gate makes the fairness assertion deterministic — the hung delivery is
+    /// provably still in flight when the other org's outcome is asserted.</summary>
+    private sealed class HangingHandler : DelegatingHandler
+    {
+        public TaskCompletionSource HangEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource HangReleased { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public HangingHandler() : base(new HttpClientHandler()) { }
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if ((request.RequestUri?.ToString() ?? "").Contains("hang"))
+            {
+                HangEntered.TrySetResult();
+                await HangReleased.Task.WaitAsync(cancellationToken);
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK);
+        }
+    }
+
     // ── Cross-tenant non-delivery ────────────────────────────────────────────
 
     /// <summary>
@@ -520,7 +643,7 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         using var cts = new CancellationTokenSource();
         _ = queue.StartAsync(cts.Token);
 
-        queue.Notify(org1Alert!);
+        await queue.NotifyAsync(org1Alert!);
         // Waits on the DURABLE end state (the persisted alert row), not the queue's in-memory
         // DeliveredCount — the queue increments that counter BEFORE its DB writes complete, so
         // waiting on the counter and then cancelling races the write.
@@ -594,6 +717,134 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         Assert.False(updated.SlackEnabled);
     }
 
+    /// <summary>
+    /// The Slack counter's lost-update, made deterministic. A competing writer lands its own
+    /// failures in the window a read-then-write leaves open — the window a second replica occupies
+    /// in production — and the counter must still hold every failure that happened.
+    ///
+    /// The interleave is driven from the injected clock rather than from real threads because
+    /// <c>Microsoft.Data.Sqlite</c> executes its async API synchronously: parallel tasks against
+    /// this store cannot interleave, so a thread-race test would pass over a broken counter. The
+    /// repository reads the clock once for the timestamp and once for the auto-disable window, so
+    /// firing the competing write on the second read lands it exactly in the gap a read-then-write
+    /// has and an atomic increment does not.
+    /// </summary>
+    [Fact]
+    public async Task RecordSlackFailure_CompetingWriterLandsMidCall_NoFailureIsLost()
+    {
+        using var ep = MakeProtector();
+        await EnableSlackAsync(new AlertSettingsRepository(_db, ep, Clock), "org1", "https://bad.example.com/hook");
+
+        var racingClock = new HookOnSecondReadTimeProvider(() =>
+        {
+            using var conn = _db.OpenAsync().GetAwaiter().GetResult();
+            conn.Execute(
+                """
+                UPDATE alert_settings
+                SET slack_consecutive_failures = slack_consecutive_failures + 7
+                WHERE org_id = @orgId
+                """,
+                new { orgId = "org1" });
+        });
+
+        var raced = new AlertSettingsRepository(_db, ep, racingClock);
+        await raced.RecordSlackFailureAsync(
+            "org1", "err", AlertSlackQueue.AutoDisableAfterFailures, AlertSlackQueue.AutoDisableAfterDuration);
+
+        var settings = new AlertSettingsRepository(_db, ep, Clock);
+        Assert.Equal(8, (await settings.GetAsync("org1")).SlackConsecutiveFailures);
+
+        await settings.RecordSlackFailureAsync(
+            "org1", "err", AlertSlackQueue.AutoDisableAfterFailures, AlertSlackQueue.AutoDisableAfterDuration);
+        Assert.Equal(9, (await settings.GetAsync("org1")).SlackConsecutiveFailures);
+    }
+
+    /// <summary>
+    /// A <see cref="TimeProvider"/> that runs a callback on its second <c>GetUtcNow</c>, used to
+    /// land a competing write in the middle of a repository call deterministically.
+    /// </summary>
+    private sealed class HookOnSecondReadTimeProvider : TimeProvider
+    {
+        private readonly Action _onSecondRead;
+        private int _reads;
+
+        public HookOnSecondReadTimeProvider(Action onSecondRead) => _onSecondRead = onSecondRead;
+
+        public override DateTimeOffset GetUtcNow()
+        {
+            if (Interlocked.Increment(ref _reads) == 2)
+            {
+                _onSecondRead();
+            }
+
+            return TestTime.KnownNow;
+        }
+    }
+
+    /// <summary>
+    /// The email arm has no second clock read, so the interleaving technique the Slack and webhook
+    /// counters are pinned with cannot reach it. This distinguishes the two implementations a
+    /// different way: from a stored count above <see cref="int.MaxValue"/>, a counter that reloads
+    /// the value and recomputes it in C# — <c>(int)stored + 1</c> — wraps to a negative number,
+    /// while one the database increments in place does not. The seeded value is synthetic; what it
+    /// demonstrates is not, and it is the same property the other two counters need: the new value
+    /// is derived from the stored one by the database, never from a copy the caller read earlier.
+    /// </summary>
+    [Fact]
+    public async Task RecordEmailFailure_CountIsDerivedFromTheStoredValueByTheDatabase()
+    {
+        using var ep = MakeProtector();
+        var settings = new AlertSettingsRepository(_db, ep, Clock);
+        await settings.UpdateEmailChannelAsync("org1", new UpdateAlertEmailChannel(
+            EmailEnabled: true, EmailRecipients: "ops@example.com"));
+
+        const long seeded = (long)int.MaxValue + 10;
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "UPDATE alert_settings SET email_consecutive_failures = @n WHERE org_id = @orgId",
+                new { n = seeded, orgId = "org1" });
+        }
+
+        await settings.RecordEmailFailureAsync("org1", "relay refused");
+
+        await using (var conn = await _db.OpenAsync())
+        {
+            long stored = await conn.ExecuteScalarAsync<long>(
+                "SELECT email_consecutive_failures FROM alert_settings WHERE org_id = @orgId",
+                new { orgId = "org1" });
+            Assert.Equal(seeded + 1, stored);
+        }
+    }
+
+    /// <summary>
+    /// The email counter is incremented in SQL for the same reason — and stays health-only. Alert email rides
+    /// the operator's shared instance relay, so a delivery failure is an infrastructure fact, not
+    /// a fault in this tenant's configuration: the count and the failure timestamps move,
+    /// <c>email_enabled</c> never does. The asymmetry with the Slack arm above is deliberate, and
+    /// making the increment atomic must not quietly acquire an auto-disable along the way.
+    /// </summary>
+    [Fact]
+    public async Task RecordEmailFailure_RepeatedFailures_CountUp_AndEmailStaysEnabled()
+    {
+        using var ep = MakeProtector();
+        var settings = new AlertSettingsRepository(_db, ep, Clock);
+        await settings.UpdateEmailChannelAsync("org1", new UpdateAlertEmailChannel(
+            EmailEnabled: true, EmailRecipients: "ops@example.com"));
+
+        const int failures = 12;
+        for (int i = 0; i < failures; i++)
+        {
+            await settings.RecordEmailFailureAsync("org1", "relay refused");
+        }
+
+        var updated = await settings.GetAsync("org1");
+        Assert.Equal(failures, updated.EmailConsecutiveFailures);
+        Assert.Equal("failed", updated.EmailLastStatus);
+        Assert.NotNull(updated.EmailFailingSince);
+        Assert.True(updated.EmailEnabled, "A shared-relay outage must never disable a tenant's channel.");
+    }
+
     [Fact]
     public async Task RecordSlackSuccess_ResetsFailureCounters()
     {
@@ -634,7 +885,7 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
 
         for (int i = 0; i < 5; i++)
         {
-            queue.Notify(alert);
+            await queue.NotifyAsync(alert);
         }
 
         Assert.Equal(4, queue.DroppedCount);

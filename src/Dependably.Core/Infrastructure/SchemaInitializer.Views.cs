@@ -67,6 +67,12 @@ public sealed partial class SchemaInitializer
     /// <c>size_bytes</c> is the bytes of THIS row's blob. For an OCI image that is the manifest — a
     /// few KB — never the layers. Never SUM it for storage; that is what <c>org_storage_bytes</c> is
     /// for.
+    ///
+    /// The proxy arm's <c>blob_key</c> and <c>size_bytes</c> resolve to this org's own content
+    /// binding on <c>tenant_artifact_access</c> before the shared <c>cache_artifact</c> values, so
+    /// the inventory names the bytes this org is actually served. <c>cache_artifact</c> is keyed by
+    /// coordinate alone while upstream registries are per-org, so its blob_key is whichever
+    /// upstream's content reached the coordinate first, not necessarily this org's.
     /// </summary>
     private const string ArtifactInventoryView =
         """
@@ -112,8 +118,8 @@ public sealed partial class SchemaInitializer
                ca.version                      AS version,
                ca.filename                     AS filename,
                ca.purl                         AS purl,
-               ca.blob_key                     AS blob_key,
-               ca.size_bytes                   AS size_bytes,
+               COALESCE(taa.blob_key, ca.blob_key)     AS blob_key,
+               COALESCE(taa.size_bytes, ca.size_bytes) AS size_bytes,
                'proxy'                         AS origin,
                ca.first_cached_at              AS created_at,
                ca.published_at                 AS published_at,
@@ -187,6 +193,14 @@ public sealed partial class SchemaInitializer
     /// a catalogue row for an OCI image sizes its manifest, never its layers, and an image pushed by
     /// digest casts no catalogue row at all. So OCI is excluded from both catalogue arms and summed
     /// whole from <c>oci_blobs</c>, which is the only table that sees an image's real bytes.
+    ///
+    /// The proxy arm's <c>size_bytes</c> resolves to this org's own content binding on
+    /// <c>tenant_artifact_access</c> before the shared <c>cache_artifact</c> value, for the same
+    /// reason <see cref="ArtifactInventoryView"/>'s proxy arm does: <c>cache_artifact</c> is keyed
+    /// by coordinate alone while upstream registries are per-org, so its size is whichever
+    /// upstream's content reached the coordinate first. This view is the authoritative quota read,
+    /// so reading the shared value would charge a tenant whose upstream served different bytes for
+    /// another tenant's byte count — and the two canonical views would disagree about the same row.
     /// </summary>
     // xtenant: view DDL. The view groups by org_id and projects it as its own column so that every
     // consumer can filter on it; the definition itself necessarily spans all tenants.
@@ -200,7 +214,7 @@ public sealed partial class SchemaInitializer
             JOIN packages p ON p.id = pv.package_id
             WHERE p.ecosystem != 'oci' AND pv.origin = 'uploaded'
             UNION ALL
-            SELECT taa.org_id AS org_id, ca.size_bytes AS bytes
+            SELECT taa.org_id AS org_id, COALESCE(taa.size_bytes, ca.size_bytes) AS bytes
             FROM cache_artifact ca
             JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id
             WHERE ca.ecosystem != 'oci'

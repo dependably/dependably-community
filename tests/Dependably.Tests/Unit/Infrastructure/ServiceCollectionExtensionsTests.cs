@@ -328,4 +328,38 @@ public sealed class ServiceCollectionExtensionsTests
         Assert.True(HasSingleton<LocalOsvSource>(services));
         Assert.DoesNotContain(services, d => d.ServiceType == typeof(OsvClient));
     }
+
+    // ── Outbound notification HTTP timeouts ─────────────────────────────────
+
+    /// <summary>
+    /// Both outbound-delivery typed clients must carry an explicit per-attempt timeout well below
+    /// the <see cref="HttpClient"/> default of 100 seconds. The destination URL is tenant-supplied
+    /// in both cases, so without a bound one endpoint that accepts a connection and never answers
+    /// holds a delivery worker for 100 seconds per attempt across four attempts — long enough to
+    /// outlast the queues' per-item fair-share budgets, which is what makes those budgets
+    /// meaningful rather than nominal.
+    /// </summary>
+    [Theory]
+    [InlineData("WebhookDeliveryClient")]
+    [InlineData("SlackWebhookClient")]
+    public void OutboundDeliveryHttpClients_CarryAnExplicitPerAttemptTimeout(string clientName)
+    {
+        var services = new ServiceCollection();
+        var config = BuildConfig();
+
+        services.AddDependablyWebhookDispatcher(config);
+        services.AddDependablyAlertNotifier(config);
+
+        using var sp = services.BuildServiceProvider();
+        var factory = sp.GetRequiredService<IHttpClientFactory>();
+        using var client = factory.CreateClient(clientName);
+
+        Assert.NotEqual(Timeout.InfiniteTimeSpan, client.Timeout);
+        // The retry schedule alone (1s + 5s + 30s) is 36 seconds, so a per-attempt bound at or
+        // above 30s would still let one hung attempt dominate the retry budget. Anything under
+        // that proves a deliberate bound is set rather than the framework default surviving.
+        Assert.True(client.Timeout < TimeSpan.FromSeconds(30),
+            $"{clientName} timeout was {client.Timeout}; expected a bound well under the 30s "
+            + "single-backoff-step and far under the 100s HttpClient default.");
+    }
 }

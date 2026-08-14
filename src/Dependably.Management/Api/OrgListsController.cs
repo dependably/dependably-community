@@ -89,11 +89,13 @@ public sealed class OrgListsController : OrgScopedControllerBase
         var entry = await _allowlist.AddAsync(orgId, req.PurlPattern, ct);
 
         await _audit.LogAsync("allowlist_added", orgId, GetUserId(),
+            actorKind: ActorKinds.User,
             detail: System.Text.Json.JsonSerializer.Serialize(new
             {
                 id = entry.Id,
                 purl_pattern = entry.PurlPattern,
-            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return CreatedAtAction(nameof(GetAllowlist), null, entry);
     }
@@ -115,7 +117,9 @@ public sealed class OrgListsController : OrgScopedControllerBase
         if (await _allowlist.DeleteAsync(orgId, id, ct) > 0)
         {
             await _audit.LogAsync("allowlist_removed", orgId, GetUserId(),
-                detail: System.Text.Json.JsonSerializer.Serialize(new { id }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+                actorKind: ActorKinds.User,
+                detail: System.Text.Json.JsonSerializer.Serialize(new { id }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+                sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         }
 
         return NoContent();
@@ -175,11 +179,13 @@ public sealed class OrgListsController : OrgScopedControllerBase
         var entry = await _blocklist.AddAsync(orgId, req.Pattern, ct);
 
         await _audit.LogAsync("blocklist_added", orgId, GetUserId(),
+            actorKind: ActorKinds.User,
             detail: System.Text.Json.JsonSerializer.Serialize(new
             {
                 id = entry.Id,
                 pattern = entry.Pattern,
-            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return CreatedAtAction(nameof(GetBlocklist), null, entry);
     }
@@ -201,7 +207,9 @@ public sealed class OrgListsController : OrgScopedControllerBase
         if (await _blocklist.DeleteAsync(orgId, id, ct) > 0)
         {
             await _audit.LogAsync("blocklist_removed", orgId, GetUserId(),
-                detail: System.Text.Json.JsonSerializer.Serialize(new { id }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+                actorKind: ActorKinds.User,
+                detail: System.Text.Json.JsonSerializer.Serialize(new { id }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+                sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         }
 
         return NoContent();
@@ -265,12 +273,14 @@ public sealed class OrgListsController : OrgScopedControllerBase
         var entry = await _reserved.AddAsync(orgId, ecosystem, pattern, GetUserId(), ct);
 
         await _audit.LogAsync("reserved_namespace_added", orgId, GetUserId(),
+            actorKind: ActorKinds.User,
             detail: System.Text.Json.JsonSerializer.Serialize(new
             {
                 id = entry.Id,
                 ecosystem = entry.Ecosystem,
                 pattern = entry.Pattern,
-            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return CreatedAtAction(nameof(GetReservedNamespaces), null, entry);
     }
@@ -291,7 +301,9 @@ public sealed class OrgListsController : OrgScopedControllerBase
         if (await _reserved.DeleteAsync(orgId, id, ct) > 0)
         {
             await _audit.LogAsync("reserved_namespace_removed", orgId, GetUserId(),
-                detail: System.Text.Json.JsonSerializer.Serialize(new { id }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+                actorKind: ActorKinds.User,
+                detail: System.Text.Json.JsonSerializer.Serialize(new { id }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+                sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         }
 
         return NoContent();
@@ -370,13 +382,15 @@ public sealed class OrgListsController : OrgScopedControllerBase
             orgId, ecosystem, name, versionPattern, GetUserId(), ct);
 
         await _audit.LogAsync("install_script_allowlist_added", orgId, GetUserId(),
+            actorKind: ActorKinds.User,
             detail: System.Text.Json.JsonSerializer.Serialize(new
             {
                 id = entry.Id,
                 ecosystem = entry.Ecosystem,
                 name = entry.Name,
                 version_pattern = entry.VersionPattern,
-            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return CreatedAtAction(nameof(GetInstallScriptAllowlist), null, entry);
     }
@@ -398,7 +412,9 @@ public sealed class OrgListsController : OrgScopedControllerBase
         if (await _installScriptAllowlist.DeleteAsync(orgId, id, ct) > 0)
         {
             await _audit.LogAsync("install_script_allowlist_removed", orgId, GetUserId(),
-                detail: System.Text.Json.JsonSerializer.Serialize(new { id }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+                actorKind: ActorKinds.User,
+                detail: System.Text.Json.JsonSerializer.Serialize(new { id }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+                sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         }
 
         return NoContent();

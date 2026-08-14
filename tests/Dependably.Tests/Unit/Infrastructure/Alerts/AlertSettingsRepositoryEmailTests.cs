@@ -10,10 +10,14 @@ using Microsoft.Extensions.Time.Testing;
 namespace Dependably.Tests.Unit.Infrastructure.Alerts;
 
 /// <summary>
-/// <see cref="AlertSettingsRepository"/>'s email-channel surface: the column-scoped
-/// <c>UpdateEmailAsync</c> upsert (password preservation/rotation, no clobbering of gates/Slack),
-/// the decrypted delivery-config read, and the success/failure health-column pair mirroring the
-/// Slack auto-disable arithmetic.
+/// <see cref="AlertSettingsRepository"/>'s email-channel surface. There is no per-org SMTP
+/// transport — SMTP is an instance-level transport and an org owns only the gate and the recipient
+/// list — so what remains here is the delivery-config read and the health-column pair.
+///
+/// The load-bearing test is <c>RecordEmailFailure_NeverDisablesTheChannel</c>: failure updates
+/// health and never rewrites the tenant's intent, which is what stops one operator relay outage
+/// from turning into a per-org configuration failure across the whole deployment. The Slack arm
+/// deliberately keeps auto-disabling; that is pinned in <see cref="AlertSettingsRepositoryTests"/>.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class AlertSettingsRepositoryEmailTests : IAsyncLifetime
@@ -42,115 +46,23 @@ public sealed class AlertSettingsRepositoryEmailTests : IAsyncLifetime
         return new EnvelopeProtector(new EnvFileMasterKeyProvider(config));
     }
 
-    private static UpdateAlertEmail BuildRequest(
-        bool inherit = false,
-        string? host = "smtp.example.com", string? password = "hunter2", string? from = "noreply@example.com") =>
-        new(
-            EmailInheritInstance: inherit,
-            EmailSmtpHost: host,
-            EmailSmtpPort: 587,
-            EmailSmtpSecurity: "starttls",
-            EmailSmtpUsername: "user",
-            EmailSmtpPassword: password,
-            EmailSmtpFrom: from);
-
     /// <summary>The delivery gate (email_enabled + email_recipients) lives on the gates upsert.</summary>
     private static Task<AlertSettings> EnableEmailAsync(
         AlertSettingsRepository settings, string? recipients = "a@example.com") =>
-        settings.UpdateGatesAsync("org1", new UpdateAlertGates(
-            QuarantineAlertsEnabled: true, VulnAlertsEnabled: true, VulnMinSeverity: "HIGH",
+        settings.UpdateEmailChannelAsync("org1", new UpdateAlertEmailChannel(
             EmailEnabled: true, EmailRecipients: recipients));
 
     [Fact]
-    public async Task UpdateEmail_NonEmptyPassword_EncryptsAtRest()
+    public async Task GetDecryptedEmailDeliveryConfig_Enabled_ReturnsParsedRecipients()
     {
         using var ep = MakeProtector();
         var settings = new AlertSettingsRepository(_db, ep, Clock);
-
-        await settings.UpdateEmailAsync("org1", BuildRequest(password: "hunter2"));
-
-        await using var conn = await _db.OpenAsync();
-        string? raw = await conn.ExecuteScalarAsync<string>(
-            "SELECT email_smtp_password FROM alert_settings WHERE org_id = 'org1'");
-        Assert.NotNull(raw);
-        Assert.StartsWith("enc:v1:", raw);
-
-        var updated = await settings.GetAsync("org1");
-        Assert.True(updated.HasEmailSmtpPassword);
-    }
-
-    [Fact]
-    public async Task UpdateEmail_NullPassword_PreservesPreviouslyStoredValue()
-    {
-        using var ep = MakeProtector();
-        var settings = new AlertSettingsRepository(_db, ep, Clock);
-
-        await EnableEmailAsync(settings);
-        await settings.UpdateEmailAsync("org1", BuildRequest(password: "original-secret"));
-        await settings.UpdateEmailAsync("org1", BuildRequest(password: null, host: "smtp2.example.com"));
-
-        var updated = await settings.GetAsync("org1");
-        Assert.True(updated.HasEmailSmtpPassword);
-        Assert.Equal("smtp2.example.com", updated.EmailSmtpHost);
+        await EnableEmailAsync(settings, recipients: "a@example.com, b@example.com");
 
         var delivery = await settings.GetDecryptedEmailDeliveryConfigAsync("org1");
+
         Assert.NotNull(delivery);
-        Assert.Equal("original-secret", delivery!.OwnTransport.Password);
-    }
-
-    [Fact]
-    public async Task UpdateEmail_EmptyStringPassword_PreservesPreviouslyStoredValue()
-    {
-        using var ep = MakeProtector();
-        var settings = new AlertSettingsRepository(_db, ep, Clock);
-
-        await EnableEmailAsync(settings);
-        await settings.UpdateEmailAsync("org1", BuildRequest(password: "original-secret"));
-        await settings.UpdateEmailAsync("org1", BuildRequest(password: ""));
-
-        var delivery = await settings.GetDecryptedEmailDeliveryConfigAsync("org1");
-        Assert.Equal("original-secret", delivery!.OwnTransport.Password);
-    }
-
-    [Fact]
-    public async Task UpdateEmail_DoesNotClobberGatesOrSlack()
-    {
-        using var ep = MakeProtector();
-        var settings = new AlertSettingsRepository(_db, ep, Clock);
-
-        await settings.UpdateGatesAsync("org1", new UpdateAlertGates(
-            QuarantineAlertsEnabled: false, VulnAlertsEnabled: false, VulnMinSeverity: "CRITICAL",
-            EmailEnabled: true, EmailRecipients: "a@example.com"));
-        await settings.UpdateSlackAsync("org1", new UpdateAlertSlack(
-            SlackEnabled: true, SlackWebhookUrl: "https://hooks.slack.com/services/T/B/x"));
-
-        await settings.UpdateEmailAsync("org1", BuildRequest());
-
-        var updated = await settings.GetAsync("org1");
-        Assert.False(updated.QuarantineAlertsEnabled);
-        Assert.False(updated.VulnAlertsEnabled);
-        Assert.Equal("CRITICAL", updated.VulnMinSeverity);
-        Assert.True(updated.SlackEnabled);
-        Assert.True(updated.HasSlackWebhook);
-        Assert.True(updated.EmailEnabled);
-        Assert.Equal("a@example.com", updated.EmailRecipients);
-    }
-
-    [Fact]
-    public async Task UpdateGates_DoesNotClobberEmailTransport()
-    {
-        using var ep = MakeProtector();
-        var settings = new AlertSettingsRepository(_db, ep, Clock);
-
-        await settings.UpdateEmailAsync("org1", BuildRequest(password: "hunter2"));
-        await EnableEmailAsync(settings, recipients: "b@example.com");
-
-        var updated = await settings.GetAsync("org1");
-        Assert.Equal("smtp.example.com", updated.EmailSmtpHost);
-        Assert.True(updated.HasEmailSmtpPassword);
-        Assert.Equal("noreply@example.com", updated.EmailSmtpFrom);
-        Assert.True(updated.EmailEnabled);
-        Assert.Equal("b@example.com", updated.EmailRecipients);
+        Assert.Equal(["a@example.com", "b@example.com"], delivery!.Recipients);
     }
 
     [Fact]
@@ -158,33 +70,92 @@ public sealed class AlertSettingsRepositoryEmailTests : IAsyncLifetime
     {
         using var ep = MakeProtector();
         var settings = new AlertSettingsRepository(_db, ep, Clock);
-        // Transport configured, but the delivery gate (email_enabled) was never turned on.
-        await settings.UpdateEmailAsync("org1", BuildRequest());
+        // Recipients present, but the delivery gate (email_enabled) was never turned on.
+        await settings.UpdateEmailChannelAsync("org1", new UpdateAlertEmailChannel(
+            EmailEnabled: false, EmailRecipients: "a@example.com"));
 
         Assert.Null(await settings.GetDecryptedEmailDeliveryConfigAsync("org1"));
     }
 
     [Fact]
-    public async Task RecordEmailFailure_AutoDisablesAfterConsecutiveThreshold()
+    public async Task GetDecryptedEmailDeliveryConfig_NoRecipients_ReturnsNull()
+    {
+        using var ep = MakeProtector();
+        var settings = new AlertSettingsRepository(_db, ep, Clock);
+        await EnableEmailAsync(settings, recipients: null);
+
+        Assert.Null(await settings.GetDecryptedEmailDeliveryConfigAsync("org1"));
+    }
+
+    [Fact]
+    public async Task UpdateGates_DoesNotClobberSlack()
+    {
+        using var ep = MakeProtector();
+        var settings = new AlertSettingsRepository(_db, ep, Clock);
+
+        await settings.UpdateSlackAsync("org1", new UpdateAlertSlack(
+            SlackEnabled: true, SlackWebhookUrl: "https://hooks.slack.com/services/T/B/x"));
+        await EnableEmailAsync(settings, recipients: "b@example.com");
+
+        var updated = await settings.GetAsync("org1");
+        Assert.True(updated.SlackEnabled);
+        Assert.True(updated.HasSlackWebhook);
+        Assert.True(updated.EmailEnabled);
+        Assert.Equal("b@example.com", updated.EmailRecipients);
+    }
+
+    /// <summary>
+    /// The whole point of the failure-domain rule: alert email rides the instance transport, so a
+    /// delivery failure is an operator infrastructure failure shared by every org. Recording it
+    /// must never rewrite this org's configuration — otherwise one relay outage silently turns
+    /// email alerting off fleet-wide and every tenant has to re-enable by hand.
+    /// </summary>
+    [Fact]
+    public async Task RecordEmailFailure_NeverDisablesTheChannel()
     {
         using var ep = MakeProtector();
         var settings = new AlertSettingsRepository(_db, ep, Clock);
         await EnableEmailAsync(settings);
-        await settings.UpdateEmailAsync("org1", BuildRequest());
 
-        for (int i = 0; i < AlertDeliveryPolicy.AutoDisableAfterFailures - 1; i++)
+        // Well past any threshold the Slack arm would have auto-disabled at.
+        for (int i = 0; i < (AlertDeliveryPolicy.AutoDisableAfterFailures * 2) + 1; i++)
         {
-            bool disabled = await settings.RecordEmailFailureAsync(
-                "org1", "err", AlertDeliveryPolicy.AutoDisableAfterFailures, AlertDeliveryPolicy.AutoDisableAfterDuration);
-            Assert.False(disabled, $"Should not disable at failure {i + 1}");
+            await settings.RecordEmailFailureAsync("org1", "err");
         }
 
-        bool finalDisabled = await settings.RecordEmailFailureAsync(
-            "org1", "err", AlertDeliveryPolicy.AutoDisableAfterFailures, AlertDeliveryPolicy.AutoDisableAfterDuration);
-        Assert.True(finalDisabled);
+        var updated = await settings.GetAsync("org1");
+        Assert.True(updated.EmailEnabled);
+        Assert.Equal("a@example.com", updated.EmailRecipients);
+    }
+
+    [Fact]
+    public async Task RecordEmailFailure_StillClimbsTheHealthCounters()
+    {
+        using var ep = MakeProtector();
+        var settings = new AlertSettingsRepository(_db, ep, Clock);
+        await EnableEmailAsync(settings);
+
+        await settings.RecordEmailFailureAsync("org1", "relay refused the connection");
+        await settings.RecordEmailFailureAsync("org1", "relay refused the connection");
 
         var updated = await settings.GetAsync("org1");
-        Assert.False(updated.EmailEnabled);
+        Assert.Equal("failed", updated.EmailLastStatus);
+        Assert.Equal(2, updated.EmailConsecutiveFailures);
+        Assert.NotNull(updated.EmailFailingSince);
+        Assert.Equal("relay refused the connection", updated.EmailLastError);
+    }
+
+    [Fact]
+    public async Task RecordEmailFailure_TruncatesAnOverlongError()
+    {
+        using var ep = MakeProtector();
+        var settings = new AlertSettingsRepository(_db, ep, Clock);
+        await EnableEmailAsync(settings);
+
+        await settings.RecordEmailFailureAsync("org1", new string('x', 900));
+
+        var updated = await settings.GetAsync("org1");
+        Assert.Equal(500, updated.EmailLastError!.Length);
     }
 
     [Fact]
@@ -192,10 +163,9 @@ public sealed class AlertSettingsRepositoryEmailTests : IAsyncLifetime
     {
         using var ep = MakeProtector();
         var settings = new AlertSettingsRepository(_db, ep, Clock);
-        await settings.UpdateEmailAsync("org1", BuildRequest());
+        await EnableEmailAsync(settings);
 
-        await settings.RecordEmailFailureAsync(
-            "org1", "err", AlertDeliveryPolicy.AutoDisableAfterFailures, AlertDeliveryPolicy.AutoDisableAfterDuration);
+        await settings.RecordEmailFailureAsync("org1", "err");
         await settings.RecordEmailSuccessAsync("org1");
 
         var updated = await settings.GetAsync("org1");
@@ -205,68 +175,37 @@ public sealed class AlertSettingsRepositoryEmailTests : IAsyncLifetime
         Assert.Equal("ok", updated.EmailLastStatus);
     }
 
-    // ── Cleartext-credential reporting ────────────────────────────────────────
-
     /// <summary>
-    /// The saved settings report the finding on every read, from the real persisted row — the
-    /// operator who inherits a configuration never sees the save that introduced it.
+    /// A row upgraded from a release that had a per-org transport still carries
+    /// <c>email_inherit_instance = 0</c> and its own SMTP columns. Nothing reads them: the delivery
+    /// config resolves from the gate and recipients alone, so the org sends over the instance
+    /// transport like every other.
     /// </summary>
     [Fact]
-    public async Task Get_ReportsCleartextCredentials_WhenOwnTransportUsesNoneWithCredentials()
+    public async Task GetDecryptedEmailDeliveryConfig_RowWithRetiredOwnTransport_StillResolvesRecipients()
     {
         using var ep = MakeProtector();
         var settings = new AlertSettingsRepository(_db, ep, Clock);
+        await EnableEmailAsync(settings, recipients: "a@example.com");
 
-        await settings.UpdateEmailAsync("org1", BuildRequest() with { EmailSmtpSecurity = "none" });
-
-        var saved = await settings.GetAsync("org1");
-        Assert.True(saved.EmailSmtpCleartextCredentials);
-    }
-
-    /// <summary>Adversarial twin: an unauthenticated relay on security=none is not a finding.</summary>
-    [Fact]
-    public async Task Get_DoesNotReportCleartextCredentials_ForAnUnauthenticatedRelay()
-    {
-        using var ep = MakeProtector();
-        var settings = new AlertSettingsRepository(_db, ep, Clock);
-
-        await settings.UpdateEmailAsync("org1", BuildRequest(password: null) with
+        await using (var conn = await _db.OpenAsync())
         {
-            EmailSmtpSecurity = "none",
-            EmailSmtpUsername = null,
-        });
+            await conn.ExecuteAsync(
+                """
+                UPDATE alert_settings
+                SET email_inherit_instance = 0,
+                    email_smtp_host = 'legacy.example.com',
+                    email_smtp_port = 2525,
+                    email_smtp_security = 'ssl',
+                    email_smtp_username = 'legacy',
+                    email_smtp_from = 'legacy@example.com'
+                WHERE org_id = 'org1'
+                """);
+        }
 
-        var saved = await settings.GetAsync("org1");
-        Assert.False(saved.EmailSmtpCleartextCredentials);
-    }
+        var delivery = await settings.GetDecryptedEmailDeliveryConfigAsync("org1");
 
-    [Fact]
-    public async Task Get_DoesNotReportCleartextCredentials_WhenTheSessionIsProtected()
-    {
-        using var ep = MakeProtector();
-        var settings = new AlertSettingsRepository(_db, ep, Clock);
-
-        await settings.UpdateEmailAsync("org1", BuildRequest());
-
-        var saved = await settings.GetAsync("org1");
-        Assert.False(saved.EmailSmtpCleartextCredentials);
-    }
-
-    /// <summary>
-    /// While inheriting the instance transport the org's own columns are unused, so they cannot be
-    /// what puts credentials on the wire. Reporting stale columns as a live finding would send the
-    /// operator to fix a form that changes nothing.
-    /// </summary>
-    [Fact]
-    public async Task Get_DoesNotReportCleartextCredentials_WhileInheritingTheInstanceTransport()
-    {
-        using var ep = MakeProtector();
-        var settings = new AlertSettingsRepository(_db, ep, Clock);
-
-        await settings.UpdateEmailAsync("org1", BuildRequest() with { EmailSmtpSecurity = "none" });
-        Assert.True((await settings.GetAsync("org1")).EmailSmtpCleartextCredentials);
-
-        await settings.UpdateEmailAsync("org1", BuildRequest(inherit: true) with { EmailSmtpSecurity = "none" });
-        Assert.False((await settings.GetAsync("org1")).EmailSmtpCleartextCredentials);
+        Assert.NotNull(delivery);
+        Assert.Equal(["a@example.com"], delivery!.Recipients);
     }
 }

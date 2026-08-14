@@ -37,6 +37,13 @@ public sealed class AccountSendThrottle
     /// <summary>Purpose discriminator for the self-serve password-reset send.</summary>
     public const string PurposePasswordReset = "password_reset";
 
+    /// <summary>
+    /// Purpose discriminator for the account email-change verification send. Separate from
+    /// <see cref="PurposePasswordReset"/> so the two flows hold independent budgets: mail aimed
+    /// at an address through one of them must not lock the other out for that address.
+    /// </summary>
+    public const string PurposeEmailChange = "email_change";
+
     private const int DefaultMaxPerWindow = 5;
     private const int DefaultWindowMinutes = 60;
 

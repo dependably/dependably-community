@@ -5,7 +5,10 @@ namespace Dependably.Tests.Infrastructure;
 
 /// <summary>
 /// Test double for <see cref="SmtpMailSender"/> that never touches the network — it records every
-/// send (transport, recipients, subject, body) and completes immediately. Opt in via
+/// send (transport, recipients, subject, body) and, by default, completes immediately. Set
+/// <see cref="Failure"/> to make every send throw a chosen exception instead: that is how a test
+/// pins how a SPECIFIC failure is classified without depending on what a real socket happens to do
+/// on the host it runs on. Opt in via
 /// <see cref="DependablyFactory.MailSenderOverride"/> / <see cref="DependablyMultiFactory.MailSenderOverride"/>
 /// so a test can assert exactly which address a fire site enqueued a notification to, the same
 /// way <c>EmailDeliveryQueueTests.FakeMailSender</c> does for the hand-wired unit-test queue, but
@@ -22,6 +25,14 @@ public sealed class CapturingMailSender : SmtpMailSender
     public CapturingMailSender() : base(new SsrfConnectCallback(_ => false))
     {
     }
+
+    /// <summary>
+    /// When non-null, every send records the message and then throws the returned exception. A
+    /// factory rather than a single instance so each attempt of a retrying delivery throws its own
+    /// exception, the way a real transport does. Null (the default) leaves every send succeeding, so
+    /// existing callers are unaffected.
+    /// </summary>
+    public Func<Exception>? Failure { get; set; }
 
     /// <summary>Snapshot of every send recorded so far, in call order.</summary>
     public IReadOnlyList<SentMessage> Sent
@@ -44,6 +55,8 @@ public sealed class CapturingMailSender : SmtpMailSender
             _sent.Add(new SentMessage(transport, to, subject, body));
         }
 
-        return Task.CompletedTask;
+        // Recorded before throwing, so a test asserting a failure can still assert which recipients
+        // and body the attempt carried.
+        return Failure is null ? Task.CompletedTask : Task.FromException(Failure());
     }
 }

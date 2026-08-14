@@ -21,7 +21,6 @@ namespace Dependably.Api;
 public sealed class OrgTokensController : OrgScopedControllerBase
 {
     private readonly TokenRepository _tokens;
-    private readonly OrgRepository _orgs;
     private readonly OrgAccessGuard _guard;
     private readonly AuditRepository _audit;
     private readonly IAuditEmitter _auditEmitter;
@@ -29,14 +28,12 @@ public sealed class OrgTokensController : OrgScopedControllerBase
 
     public OrgTokensController(
         TokenRepository tokens,
-        OrgRepository orgs,
         OrgAccessGuard guard,
         AuditRepository audit,
         IAuditEmitter auditEmitter,
         ProblemResults problems)
     {
         _tokens = tokens;
-        _orgs = orgs;
         _guard = guard;
         _audit = audit;
         _auditEmitter = auditEmitter;
@@ -97,20 +94,23 @@ public sealed class OrgTokensController : OrgScopedControllerBase
             return normalizeError;
         }
 
-        // Token cap. Count+insert is intentionally non-transactional: a small race overshoot
-        // (two concurrent creates both reading the same count just below the cap) is acceptable
-        // and bounded — the DB grows by at most one row past the cap in a concurrent burst.
-        int activeCount = await _orgs.CountActiveTokensAsync(orgId, ct);
-        int cap = await _orgs.GetMaxActiveTokensPerTenantAsync(ct);
-        if (activeCount >= cap)
+        // Token cap. Counted and enforced inside the repository's per-tenant serialized
+        // transaction, so concurrent creates cannot all observe the same under-cap count and all
+        // insert. The ceiling is refused at the insert, never merely checked before it.
+        string raw;
+        TokenRecord record;
+        try
         {
-            return _problems.ValidationErrorActionKey("tokens", "error.token.limitReached", cap);
+            (raw, record) = await _tokens.CreateUserTokenAsync(
+                orgId, userId, canonicalJson!, req.ExpiresAt, description, ct);
+        }
+        catch (TokenCapExceededException ex)
+        {
+            return _problems.ValidationErrorActionKey("tokens", "error.token.limitReached", ex.Cap);
         }
 
-        var (raw, record) = await _tokens.CreateUserTokenAsync(
-            orgId, userId, canonicalJson!, req.ExpiresAt, description, ct);
-
         await _audit.LogAsync("token_created", orgId, userId,
+            actorKind: ActorKinds.User,
             detail: System.Text.Json.JsonSerializer.Serialize(new
             {
                 token_id = record.Id,
@@ -118,7 +118,8 @@ public sealed class OrgTokensController : OrgScopedControllerBase
                 capabilities = caps,
                 expires_at = record.ExpiresAt,
                 description,
-            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         await _auditEmitter.EmitAsync(
             TenantEvents.TypeTokenCreate,
             orgId, "user", userId, "accepted",
@@ -162,7 +163,9 @@ public sealed class OrgTokensController : OrgScopedControllerBase
         }
 
         await _audit.LogAsync("token_revoked", orgId, userId,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { token_id = id }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+            actorKind: ActorKinds.User,
+            detail: System.Text.Json.JsonSerializer.Serialize(new { token_id = id }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         await _auditEmitter.EmitAsync(
             TenantEvents.TypeTokenRevoke,
             orgId, "user", userId, "accepted",
@@ -219,17 +222,22 @@ public sealed class OrgTokensController : OrgScopedControllerBase
 
         string orgId = CurrentTenantId();
 
-        // Token cap — same non-transactional count+insert pattern as user-token creation.
-        int activeCountSvc = await _orgs.CountActiveTokensAsync(orgId, ct);
-        int capSvc = await _orgs.GetMaxActiveTokensPerTenantAsync(ct);
-        if (activeCountSvc >= capSvc)
+        // Token cap — enforced inside the repository transaction, as for user tokens. Both token
+        // kinds count against the one per-tenant ceiling.
+        string raw;
+        ServiceTokenRecord record;
+        try
         {
-            return _problems.ValidationErrorActionKey("tokens", "error.token.limitReached", capSvc);
+            (raw, record) = await _tokens.CreateServiceTokenAsync(
+                orgId, req.Name, canonicalJson!, req.ExpiresAt, description, ct);
+        }
+        catch (TokenCapExceededException ex)
+        {
+            return _problems.ValidationErrorActionKey("tokens", "error.token.limitReached", ex.Cap);
         }
 
-        var (raw, record) = await _tokens.CreateServiceTokenAsync(orgId, req.Name, canonicalJson!, req.ExpiresAt, description, ct);
-
         await _audit.LogAsync("service_token_created", orgId, GetUserId(),
+            actorKind: ActorKinds.User,
             detail: System.Text.Json.JsonSerializer.Serialize(new
             {
                 token_id = record.Id,
@@ -238,7 +246,8 @@ public sealed class OrgTokensController : OrgScopedControllerBase
                 capabilities = caps,
                 expires_at = record.ExpiresAt,
                 description,
-            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         await _auditEmitter.EmitAsync(
             TenantEvents.TypeTokenCreate,
             orgId, "user", GetUserId(), "accepted",
@@ -268,7 +277,9 @@ public sealed class OrgTokensController : OrgScopedControllerBase
         }
 
         await _audit.LogAsync("service_token_revoked", orgId, GetUserId(),
-            detail: System.Text.Json.JsonSerializer.Serialize(new { token_id = id }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+            actorKind: ActorKinds.User,
+            detail: System.Text.Json.JsonSerializer.Serialize(new { token_id = id }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         await _auditEmitter.EmitAsync(
             TenantEvents.TypeTokenRevoke,
             orgId, "user", GetUserId(), "accepted",

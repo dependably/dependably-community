@@ -188,6 +188,10 @@ public sealed class SystemAdminRepository
                    mfa_enabled, token_version
             FROM system_admins
             WHERE lower(email) = lower(@email)
+            -- Election is deterministic: a legacy database can still hold two case-variant rows
+            -- for one address (they predate the canonical write form), and the oldest row is the
+            -- original account rather than whichever one the query engine happens to return.
+            ORDER BY created_at, id
             LIMIT 1
             """,
             new { email });
@@ -228,6 +232,7 @@ public sealed class SystemAdminRepository
                    account_status AS AccountStatus,
                    password_reset_issued_at AS PasswordResetIssuedAt,
                    language AS Language,
+                   timezone AS Timezone,
                    created_at AS CreatedAt,
                    mfa_enabled AS MfaEnabled
             FROM system_admins WHERE id = @id
@@ -353,6 +358,19 @@ public sealed class SystemAdminRepository
     }
 
     /// <summary>
+    /// Sets or clears the operator's display-timezone override. A null value clears it, which
+    /// is how "use the instance default" is expressed — storing "UTC" by name would be
+    /// indistinguishable from a deliberate choice of UTC.
+    /// </summary>
+    public async Task UpdateTimezoneAsync(string id, string? timezone, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        await conn.ExecuteAsync(
+            "UPDATE system_admins SET timezone = @timezone WHERE id = @id",
+            new { id, timezone });
+    }
+
+    /// <summary>
     /// Creates a system_admin row. Used by FirstBootService (multi mode) and by migrate-flip CLI.
     /// </summary>
     public async Task<string> CreateAsync(
@@ -365,7 +383,7 @@ public sealed class SystemAdminRepository
             INSERT INTO system_admins (id, email, password_hash, must_change_password)
             VALUES (@id, @email, @hash, @mcp)
             """,
-            new { id, email, hash = passwordHash, mcp = mustChangePassword ? 1 : 0 });
+            new { id, email = EmailNormalizer.Normalize(email), hash = passwordHash, mcp = mustChangePassword ? 1 : 0 });
         return id;
     }
 

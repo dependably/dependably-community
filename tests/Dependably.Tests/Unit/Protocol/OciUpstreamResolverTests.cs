@@ -152,33 +152,60 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
     }
 
     /// <summary>
-    /// Deterministically waits until <paramref name="count"/> callers have registered against
-    /// the shared in-flight entry for <paramref name="sha256"/>, observed via
+    /// Deterministically waits until <paramref name="count"/> callers from
+    /// <paramref name="orgId"/> have registered against the shared in-flight entry for
+    /// <paramref name="sha256"/>, observed via
     /// <see cref="OciUpstreamResolver.BlobInflightArrivalCount"/> — a test-only internal seam
     /// (InternalsVisibleTo) that exposes the exact production invariant a concurrency test needs
-    /// (winner + joiners have registered) rather than a proxy for it. FetchBlobAsync does one
+    /// (winner + joiners have registered) rather than a proxy for it. The entry is keyed on
+    /// (org, blob key), so the org is part of what a test waits on. FetchBlobAsync does one
     /// real async DB read (MatchUpstreamAsync) before registering, so — unlike the pure-in-memory
     /// single-flight paths on UpstreamClient — neither a "task started" signal nor a direct
     /// sequential call can observe registration directly; this polls the real counter instead of
     /// guessing how long that DB round-trip takes.
     /// </summary>
     private static async Task WaitForBlobArrivalsAsync(
-        OciUpstreamResolver resolver, string sha256, int count, TimeSpan? timeout = null)
+        OciUpstreamResolver resolver, string orgId, string sha256, int count, TimeSpan? timeout = null)
     {
         string blobKey = BlobKeys.OciBlob("sha256", sha256);
         // now-ok: polling deadline awaiting a real, observable production invariant (arrival
         // count), not a proxy for it — see the method doc above.
         var deadline = DateTimeOffset.UtcNow + (timeout ?? TimeSpan.FromSeconds(10));
-        while (resolver.BlobInflightArrivalCount(blobKey) < count && DateTimeOffset.UtcNow < deadline)
+        while (resolver.BlobInflightArrivalCount(orgId, blobKey) < count && DateTimeOffset.UtcNow < deadline)
         {
             await Task.Delay(5);
         }
 
-        if (resolver.BlobInflightArrivalCount(blobKey) < count)
+        if (resolver.BlobInflightArrivalCount(orgId, blobKey) < count)
         {
             throw new TimeoutException(
-                $"Expected {count} arrivals on blob key {blobKey}, saw {resolver.BlobInflightArrivalCount(blobKey)} " +
-                "within the safety timeout.");
+                $"Expected {count} arrivals on blob key {blobKey} for org {orgId}, saw " +
+                $"{resolver.BlobInflightArrivalCount(orgId, blobKey)} within the safety timeout.");
+        }
+    }
+
+    /// <summary>
+    /// Deterministically waits until <paramref name="observed"/> reports at least
+    /// <paramref name="count"/> upstream HTTP requests on the arm named by
+    /// <paramref name="what"/>. Used where the invariant under test is that a caller made its
+    /// OWN upstream request rather than awaiting someone else's — a wait that must fail loudly
+    /// (rather than hang) on the shape where that request is never made.
+    /// </summary>
+    private static async Task WaitForUpstreamCallsAsync(
+        Func<int> observed, int count, string what, TimeSpan? timeout = null)
+    {
+        // now-ok: polling deadline awaiting a real cross-thread HTTP arrival on the gate, not a
+        // proxy for it.
+        var deadline = DateTimeOffset.UtcNow + (timeout ?? TimeSpan.FromSeconds(10));
+        while (observed() < count && DateTimeOffset.UtcNow < deadline)
+        {
+            await Task.Delay(5);
+        }
+
+        if (observed() < count)
+        {
+            throw new TimeoutException(
+                $"Expected {count} upstream request(s) on {what}, saw {observed()} within the safety timeout.");
         }
     }
 
@@ -615,12 +642,10 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         string blobKey = BlobKeys.OciBlob("sha256", sha256);
         await _cacheBlobs.PutAsync(blobKey, new MemoryStream(blobBytes), default);
 
-        // A bare content-addressed store hit is served across orgs only for proxy-derived bytes
-        // to a caller that has a matching upstream. Seed a proxy-origin row owned by a different
-        // org (proving upstream provenance); _orgId carries the catch-all upstream seeded in
-        // InitializeAsync, so it is entitled to the shared dedup hit.
-        string primingOrg = await OrgSeeder.InsertAsync(_db, "cache-hit-priming-org");
-        await SeedOciBlobRowAsync(primingOrg, digest, blobKey, "proxy", blobBytes.Length);
+        // A bare content-addressed store hit is served only when the CALLER'S OWN org already
+        // holds an oci_blobs row for the digest (its own prior upload or proxy fetch) — seed the
+        // row for _orgId itself, not a different org, so no upstream round-trip is needed.
+        await SeedOciBlobRowAsync(_orgId, digest, blobKey, "proxy", blobBytes.Length);
 
         var resolver = Build(); // NeverCallFactory
 
@@ -671,6 +696,88 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task FetchBlobAsync_OtherOrgProxyCachedBlob_NotCrossServedViaWildcardUpstream()
+    {
+        // Regression: a repository name is caller-supplied and an upstream with an empty prefix
+        // matches EVERY repository, so "the caller has some configured upstream" proved nothing
+        // about whether that upstream's credentials can reach this digest. Org A pulls a private
+        // image through its own authenticated upstream, leaving an origin='proxy' oci_blobs row —
+        // proxy origin is not proof the bytes are public. Before the fix, org B — merely by having
+        // a catch-all ("") upstream configured, which matches any repository name it chooses —
+        // was served A's bytes straight from the shared content-addressed store with no upstream
+        // round-trip and no authentication against A's registry.
+        var shared = new InMemoryBlobStore();
+
+        byte[] privateLayerBytes = RandomBytes(256);
+        string sha256 = Sha256Hex(privateLayerBytes);
+        string digest = "sha256:" + sha256;
+        string blobKey = BlobKeys.OciBlob("sha256", sha256);
+        await shared.PutAsync(blobKey, new MemoryStream(privateLayerBytes), default);
+
+        string orgA = await OrgSeeder.InsertAsync(_db, "proxy-owner-org");
+        await SeedOciBlobRowAsync(orgA, digest, blobKey, "proxy", privateLayerBytes.Length);
+
+        // Org B never fetched this digest itself, but DOES carry the same catch-all upstream
+        // shape the old code treated as entitlement — a matching upstream for ANY repository name.
+        string orgB = await OrgSeeder.InsertAsync(_db, "cross-tenant-proxy-reader-org");
+        await SeedOciUpstreamAsync(orgB, "registry-1.docker.io", [""], position: 0);
+
+        // Org B's own upstream fetch — forced because the bare-store hit is now refused — returns
+        // 404, proving A's bytes never reach B through any legitimate channel either.
+        var resolver = BuildOverSharedStore(shared, new StatusFactory(HttpStatusCode.NotFound));
+
+        var result = await resolver.FetchBlobAsync(orgB, "library/whatever-name-b-chooses", digest, default);
+
+        Assert.Null(result);
+
+        // B must not have been granted a piggybacked oci_blobs row either.
+        await using var conn = await _db.OpenAsync(default);
+        int bRows = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM oci_blobs WHERE org_id = @orgB", new { orgB });
+        Assert.Equal(0, bRows);
+    }
+
+    [Fact]
+    public async Task FetchBlobAsync_OtherOrgProxyBlob_NotCrossServed_ToAttackerControlledUpstream()
+    {
+        // Second exploit narrative for the same gate: the attacker's "matching upstream" need not
+        // even be a real registry. Adding an OCI upstream is an ordinary tenant:configure action,
+        // so the attacker points one at a host it controls, with the empty prefix that matches
+        // every repository name, and asks for a digest it learned elsewhere (SBOM, CI log, pinned
+        // reference). The old gate read that self-declared upstream as proof of entitlement to any
+        // digest some other tenant had proxied. Entitlement now comes from the caller's own
+        // oci_blobs row, so the attacker's own upstream is the only thing that can serve it — and
+        // that host does not have the layer.
+        var shared = new InMemoryBlobStore();
+
+        byte[] privateLayerBytes = RandomBytes(256);
+        string sha256 = Sha256Hex(privateLayerBytes);
+        string digest = "sha256:" + sha256;
+        string blobKey = BlobKeys.OciBlob("sha256", sha256);
+        await shared.PutAsync(blobKey, new MemoryStream(privateLayerBytes), default);
+
+        // Victim fetched this layer through its own private, authenticated upstream; the row
+        // records proxy provenance exactly as any proxied blob does — origin alone says nothing
+        // about which upstream served it or how reachable that upstream is to anyone else.
+        string victimOrg = await OrgSeeder.InsertAsync(_db, "victim-private-proxy-org");
+        await SeedOciBlobRowAsync(victimOrg, digest, blobKey, "proxy", privateLayerBytes.Length);
+
+        string attackerOrg = await OrgSeeder.InsertAsync(_db, "attacker-catchall-upstream-org");
+        await SeedOciUpstreamAsync(attackerOrg, "attacker-configured-registry.example", [""], position: 0);
+
+        var resolver = BuildOverSharedStore(shared, new StatusFactory(HttpStatusCode.NotFound));
+
+        var result = await resolver.FetchBlobAsync(attackerOrg, "anything/repo", digest, default);
+
+        Assert.Null(result);
+
+        await using var conn = await _db.OpenAsync(default);
+        int attackerRows = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM oci_blobs WHERE org_id = @attackerOrg", new { attackerOrg });
+        Assert.Equal(0, attackerRows);
+    }
+
+    [Fact]
     public async Task FetchBlobMetadataAsync_OtherOrgUploadedBlob_NotReportedAsHit()
     {
         // HEAD counterpart: a bare store ExistsAsync hit must not report another tenant's private
@@ -697,54 +804,71 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task FetchBlob_Mixed_UploadedCrossOrgRefused_ProxyDedupServed()
+    public async Task FetchBlob_Mixed_OtherOrgUploadedAndProxiedRefused_OwnCachedBlobServed()
     {
         // House rule (mixed partial-failure): in ONE resolver over ONE shared content-addressed
-        // store, the caller is REFUSED another org's private uploaded blob but is SERVED a
-        // proxy-origin blob it is entitled to (a matching upstream proves the bytes are
-        // upstream-derived public content). One request is denied, the other succeeds, in the
-        // same process — proving the gate distinguishes private uploads from public proxy cache.
+        // store, one caller is REFUSED two other-org blobs it does not own — one 'uploaded', one
+        // 'proxy' — proving the gate closed for BOTH origins rather than only for private uploads,
+        // while a third blob the caller's own org holds a row for is SERVED straight from the
+        // store with no upstream round-trip. Three requests, two denied and one served, in the
+        // same process — ownership, not "any configured upstream", is what the gate keys on.
         var shared = new InMemoryBlobStore();
 
-        // Private upload owned by another org — must never cross-serve.
-        byte[] privateBytes = RandomBytes(200);
-        string privateSha = Sha256Hex(privateBytes);
-        string privateDigest = "sha256:" + privateSha;
-        string privateKey = BlobKeys.OciBlob("sha256", privateSha);
-        await shared.PutAsync(privateKey, new MemoryStream(privateBytes), default);
+        // Private upload owned by another org.
+        byte[] uploadedBytes = RandomBytes(200);
+        string uploadedSha = Sha256Hex(uploadedBytes);
+        string uploadedDigest = "sha256:" + uploadedSha;
+        string uploadedKey = BlobKeys.OciBlob("sha256", uploadedSha);
+        await shared.PutAsync(uploadedKey, new MemoryStream(uploadedBytes), default);
         string orgA = await OrgSeeder.InsertAsync(_db, "mixed-private-uploader-org");
-        await SeedOciBlobRowAsync(orgA, privateDigest, privateKey, "uploaded", privateBytes.Length);
+        await SeedOciBlobRowAsync(orgA, uploadedDigest, uploadedKey, "uploaded", uploadedBytes.Length);
 
-        // Proxy-cached public blob owned by yet another org — dedup-servable to an org with a
-        // matching upstream.
-        byte[] publicBytes = RandomBytes(200);
-        string publicSha = Sha256Hex(publicBytes);
-        string publicDigest = "sha256:" + publicSha;
-        string publicKey = BlobKeys.OciBlob("sha256", publicSha);
-        await shared.PutAsync(publicKey, new MemoryStream(publicBytes), default);
+        // Proxy-cached blob owned by yet another org — no longer dedup-servable to a caller with
+        // no row of its own, whatever upstream that caller has configured.
+        byte[] proxiedBytes = RandomBytes(200);
+        string proxiedSha = Sha256Hex(proxiedBytes);
+        string proxiedDigest = "sha256:" + proxiedSha;
+        string proxiedKey = BlobKeys.OciBlob("sha256", proxiedSha);
+        await shared.PutAsync(proxiedKey, new MemoryStream(proxiedBytes), default);
         string orgC = await OrgSeeder.InsertAsync(_db, "mixed-proxy-cacher-org");
-        await SeedOciBlobRowAsync(orgC, publicDigest, publicKey, "proxy", publicBytes.Length);
+        await SeedOciBlobRowAsync(orgC, proxiedDigest, proxiedKey, "proxy", proxiedBytes.Length);
 
-        // Caller B has a catch-all upstream. Any upstream fetch it is forced into returns 404, so
-        // the refused private-blob request resolves to a clean miss and never leaks A's bytes.
-        string orgB = await OrgSeeder.InsertAsync(_db, "mixed-reader-org");
+        // Caller org B, with a catch-all upstream and its own prior proxy fetch recorded for a
+        // DIFFERENT digest — genuinely its own, so that bare-store hit is legitimately reused.
+        string orgB = await OrgSeeder.InsertAsync(_db, "mixed-caller-org");
         await SeedOciUpstreamAsync(orgB, "registry-1.docker.io", [""], position: 0);
 
+        byte[] ownBytes = RandomBytes(200);
+        string ownSha = Sha256Hex(ownBytes);
+        string ownDigest = "sha256:" + ownSha;
+        string ownKey = BlobKeys.OciBlob("sha256", ownSha);
+        await shared.PutAsync(ownKey, new MemoryStream(ownBytes), default);
+        await SeedOciBlobRowAsync(orgB, ownDigest, ownKey, "proxy", ownBytes.Length);
+
+        // Every upstream call B is forced into (both refused requests) returns 404, so neither
+        // other org's bytes reach B through any channel.
         var resolver = BuildOverSharedStore(shared, new StatusFactory(HttpStatusCode.NotFound));
 
-        var refused = await resolver.FetchBlobAsync(orgB, "library/private", privateDigest, default);
-        var served = await resolver.FetchBlobAsync(orgB, "library/public", publicDigest, default);
+        var refusedUpload = await resolver.FetchBlobAsync(orgB, "library/private", uploadedDigest, default);
+        var refusedProxy = await resolver.FetchBlobAsync(orgB, "library/proxied", proxiedDigest, default);
+        var served = await resolver.FetchBlobAsync(orgB, "library/own", ownDigest, default);
 
-        // Private upload: refused the shared hit, resolves to upstream 404 → null. A's bytes
-        // never reach B.
-        Assert.Null(refused);
+        Assert.Null(refusedUpload);
+        Assert.Null(refusedProxy);
 
-        // Proxy dedup: served straight from the shared store with the full bytes, no upstream
-        // round-trip needed.
+        // B's own previously-cached blob: served straight from the shared store with the full
+        // bytes, no upstream round-trip needed.
         Assert.NotNull(served);
         using var ms = new MemoryStream();
         await served!.Content.CopyToAsync(ms);
-        Assert.Equal(publicBytes, ms.ToArray());
+        Assert.Equal(ownBytes, ms.ToArray());
+
+        // Neither refusal minted a piggybacked row for B; only its own digest is recorded.
+        await using var conn = await _db.OpenAsync(default);
+        int bRows = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM oci_blobs WHERE org_id = @orgB AND digest <> @ownDigest",
+            new { orgB, ownDigest });
+        Assert.Equal(0, bRows);
     }
 
     // ── FetchBlobAsync — cache miss → upstream ────────────────────────────────
@@ -855,6 +979,143 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         var allKeys = await cacheBlobs.ListAsync("oci/_staging/", default)
             .ToListAsync();
         Assert.Empty(allKeys);
+    }
+
+    // ── FetchBlobAsync — declared Content-Length above the upstream cap refuses the fetch ──
+    //
+    // Every other ecosystem's binary download path (UpstreamClient.FetchAndStageCoreAsync)
+    // fails fast on a declared Content-Length over the 600 MB cap before streaming a byte. The
+    // OCI blob path is exercised here with a response whose ACTUAL body is tiny and hashes
+    // correctly to the requested digest, but whose declared Content-Length lies far above the
+    // cap: on the broken version the header was never read, so the small real body streamed
+    // through, verified, and was cached as a success. The fix must refuse the fetch on the
+    // declared size alone — an attacker-controlled upstream is not entitled to have its
+    // Content-Length trusted, and the body itself may never terminate on a genuinely oversized
+    // response (chunked transfer), so streaming first and checking after is not a safe
+    // alternative.
+
+    [Fact]
+    public async Task FetchBlobAsync_DeclaredContentLengthExceedsCap_ReturnsNull_NothingCached()
+    {
+        byte[] blobBytes = RandomBytes(64);
+        string sha256 = Sha256Hex(blobBytes);
+        string digest = "sha256:" + sha256;
+        string contentAddressedKey = BlobKeys.OciBlob("sha256", sha256);
+
+        var upstreamResp = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(blobBytes),
+        };
+        upstreamResp.Content.Headers.ContentType =
+            new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+        // Lies: the real body above is 64 bytes, but the declared length is over the cap.
+        upstreamResp.Content.Headers.ContentLength = 601L * 1024 * 1024;
+
+        var http = new SingleResponseFactory(upstreamResp);
+        var opts = Options.Create(DefaultOptions());
+        var authSvc = new OciUpstreamAuthService(http, opts, new StubAirGap(false),
+            NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
+        var cacheBlobs = new InMemoryBlobStore();
+        var blobs = new TieredBlobStorage(cacheBlobs, new InMemoryBlobStore());
+        var resolver = new OciUpstreamResolver(http, authSvc, opts, blobs, _db, new StubAirGap(false),
+            NewRecorder(), _cacheRecorder, _cacheArtifacts, NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+
+        var result = await resolver.FetchBlobAsync(_orgId, "library/ubuntu", digest, default);
+
+        Assert.Null(result);
+        Assert.False(await cacheBlobs.ExistsAsync(contentAddressedKey, default));
+        var stagingKeys = await cacheBlobs.ListAsync("oci/_staging/", default).ToListAsync();
+        Assert.Empty(stagingKeys);
+
+        // No oci_blobs row written for the refused digest either.
+        await using var conn = await _db.OpenAsync(default);
+        long count = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM oci_blobs WHERE org_id = @orgId AND digest = @digest",
+            new { orgId = _orgId, digest });
+        Assert.Equal(0, count);
+    }
+
+    /// <summary>
+    /// Mixed scenario (house rule: tests must cover the partial-failure case). One digest
+    /// resolves normally; a concurrent, distinct digest declares a Content-Length over the
+    /// upstream cap. The two never collapse (distinct digests), so the oversized refusal must
+    /// not affect the legitimate fetch racing alongside it.
+    /// </summary>
+    [Fact]
+    public async Task FetchBlobAsync_Mixed_OneDigestOversized_OtherDigestStillSucceeds()
+    {
+        byte[] goodBytes = RandomBytes(64);
+        byte[] hugeDeclaredBytes = RandomBytes(64); // real body stays tiny; only the header lies
+        string goodDigest = "sha256:" + Sha256Hex(goodBytes);
+        string hugeDigest = "sha256:" + Sha256Hex(hugeDeclaredBytes);
+
+        var routing = new DigestRoutingFactory(
+            (goodDigest, BuildOkResponse(goodBytes, declaredContentLength: null)),
+            (hugeDigest, BuildOkResponse(hugeDeclaredBytes, declaredContentLength: 601L * 1024 * 1024)));
+
+        var opts = Options.Create(DefaultOptions());
+        var authSvc = new OciUpstreamAuthService(routing, opts, new StubAirGap(false),
+            NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
+        var cacheBlobs = new InMemoryBlobStore();
+        var blobs = new TieredBlobStorage(cacheBlobs, new InMemoryBlobStore());
+        var resolver = new OciUpstreamResolver(routing, authSvc, opts, blobs, _db, new StubAirGap(false),
+            NewRecorder(), _cacheRecorder, _cacheArtifacts, NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+
+        string orgId = await OrgSeeder.InsertAsync(_db, "blob-mixed-oversize-org");
+        await SeedOciUpstreamAsync(orgId, "registry-1.docker.io", [""], position: 0);
+
+        var goodTask = resolver.FetchBlobAsync(orgId, "library/ubuntu", goodDigest, default);
+        var hugeTask = resolver.FetchBlobAsync(orgId, "library/ubuntu", hugeDigest, default);
+        var results = await Task.WhenAll(goodTask, hugeTask);
+
+        Assert.NotNull(results[0]);
+        Assert.Null(results[1]);
+        Assert.True(await cacheBlobs.ExistsAsync(BlobKeys.OciBlob("sha256", Sha256Hex(goodBytes)), default));
+        Assert.False(await cacheBlobs.ExistsAsync(BlobKeys.OciBlob("sha256", Sha256Hex(hugeDeclaredBytes)), default));
+    }
+
+    private static HttpResponseMessage BuildOkResponse(byte[] bytes, long? declaredContentLength)
+    {
+        var resp = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(bytes),
+        };
+        resp.Content.Headers.ContentType =
+            new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+        if (declaredContentLength is { } len)
+        {
+            resp.Content.Headers.ContentLength = len;
+        }
+        return resp;
+    }
+
+    // Routes each request to the fixed response registered for the digest found in its request
+    // URI (the blob URL is .../blobs/{digest}), so concurrent distinct-digest fetches each see
+    // their own upstream behavior within a single test.
+    private sealed class DigestRoutingFactory : IHttpClientFactory
+    {
+        private readonly (string Digest, HttpResponseMessage Response)[] _routes;
+        public DigestRoutingFactory(params (string, HttpResponseMessage)[] routes) => _routes = routes;
+        public HttpClient CreateClient(string name) => new(new Handler(_routes));
+
+        private sealed class Handler(
+            (string Digest, HttpResponseMessage Response)[] routes) : HttpMessageHandler
+        {
+            protected override Task<HttpResponseMessage> SendAsync(
+                HttpRequestMessage request, CancellationToken cancellationToken)
+            {
+                string url = request.RequestUri!.ToString();
+                foreach (var (digest, response) in routes)
+                {
+                    if (url.Contains(digest, StringComparison.Ordinal))
+                    {
+                        return Task.FromResult(response);
+                    }
+                }
+
+                throw new InvalidOperationException($"No route registered for {url}");
+            }
+        }
     }
 
     // ── FetchManifestAsync — by-digest mismatch rejects and caches nothing ─────
@@ -1774,7 +2035,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
             .Select(_ => Task.Run(() => resolver.FetchBlobAsync(orgId, "library/ubuntu", digest, default)))
             .ToArray();
 
-        await WaitForBlobArrivalsAsync(resolver, sha256, concurrency);
+        await WaitForBlobArrivalsAsync(resolver, orgId, sha256, concurrency);
         gate.Release();
 
         var results = await Task.WhenAll(tasks);
@@ -1835,7 +2096,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         // registration lands would let the second caller find the entry already gone and mint a
         // second fetch.
         var secondTask = Task.Run(() => resolver.FetchBlobAsync(orgId, "library/ubuntu", digest, default));
-        await WaitForBlobArrivalsAsync(resolver, sha256, 2);
+        await WaitForBlobArrivalsAsync(resolver, orgId, sha256, 2);
         gate.Release();
         var result = await secondTask;
 
@@ -1945,9 +2206,9 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
             Task.Run(() => resolver.FetchBlobAsync(orgId, "library/ubuntu", digestC, default)),
         };
         await Task.WhenAll(
-            WaitForBlobArrivalsAsync(resolver, sha256Shared, 2),
-            WaitForBlobArrivalsAsync(resolver, sha256B, 1),
-            WaitForBlobArrivalsAsync(resolver, sha256C, 1));
+            WaitForBlobArrivalsAsync(resolver, orgId, sha256Shared, 2),
+            WaitForBlobArrivalsAsync(resolver, orgId, sha256B, 1),
+            WaitForBlobArrivalsAsync(resolver, orgId, sha256C, 1));
         gateShared.Release(); gateB.Release(); gateC.Release();
         var results = await Task.WhenAll(tasks);
 
@@ -1981,20 +2242,18 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
     }
 
     /// <summary>
-    /// Regression: the blob single-flight entry is keyed by the content-addressed blob key only,
-    /// but the shared work item (<c>FetchAndCacheBlobAsync</c>) captures the WINNER's org — it
-    /// writes the <c>oci_blobs</c> row (and fires the config-blob arrival hook on first insert)
-    /// for that org alone. A joiner from a DIFFERENT org shares the cached bytes but, before the
-    /// fix, returned the stream with NO per-org DB row of its own: its dashboards, license
-    /// projection, and quota accounting never saw the blob.
+    /// Two orgs miss on the same digest at the same instant. The in-flight entry is keyed on
+    /// (org, blob key), so neither org awaits the other's fetch: each makes its OWN upstream
+    /// request through its OWN upstream, and each ends up with its own <c>oci_blobs</c> row
+    /// carrying the real size (the row a joiner would otherwise never get, leaving its
+    /// dashboards, license projection, and quota accounting blind to the blob).
     ///
-    /// Two orgs miss on the same digest concurrently and collapse to one upstream pull. Whichever
-    /// org loses the single-flight race is the joiner. This test FAILS on the broken version —
-    /// the joiner org has zero <c>oci_blobs</c> rows — and PASSES on the fix, where each waiter
-    /// ensures its own org's row (with the real media type and size) after the shared fetch.
+    /// This pins the deliberate throughput trade: cross-org concurrent misses no longer collapse
+    /// to one pull. The bytes still dedup in the store — the write targets the content-addressed
+    /// key and is idempotent — so only the upstream request is duplicated.
     /// </summary>
     [Fact]
-    public async Task FetchBlobAsync_SecondOrgJoinsSingleFlight_GetsOwnBlobRow()
+    public async Task FetchBlobAsync_TwoOrgsRaceSameDigest_EachMakesOwnUpstreamPull_AndOwnBlobRow()
     {
         byte[] blobBytes = RandomBytes(384);
         string sha256 = Sha256Hex(blobBytes);
@@ -2015,23 +2274,30 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         await SeedOciUpstreamAsync(orgA, "registry-1.docker.io", [""], position: 0);
         await SeedOciUpstreamAsync(orgB, "registry-1.docker.io", [""], position: 0);
 
-        // Start both callers before releasing the gate so they both queue behind the shared Lazy
-        // (one wins the fetch, the other joins as a waiter), then release once both have arrived.
+        // Start both callers before releasing the gate so both are genuinely in flight at once,
+        // then release once each has registered against its own org-scoped in-flight entry.
         var taskA = Task.Run(() => resolver.FetchBlobAsync(orgA, "library/ubuntu", digest, default));
         var taskB = Task.Run(() => resolver.FetchBlobAsync(orgB, "library/ubuntu", digest, default));
-        await WaitForBlobArrivalsAsync(resolver, sha256, 2);
+        await WaitForBlobArrivalsAsync(resolver, orgA, sha256, 1);
+        await WaitForBlobArrivalsAsync(resolver, orgB, sha256, 1);
         gate.Release();
 
         var resultA = await taskA;
         var resultB = await taskB;
 
-        // Exactly one upstream pull served both orgs.
-        Assert.Equal(1, gate.CallCount);
+        // One upstream pull per org — no org rides the other's authenticated request.
+        Assert.Equal(2, gate.CallCount);
         Assert.NotNull(resultA);
         Assert.NotNull(resultB);
 
-        // Each org — winner AND joiner — must own its per-org oci_blobs row with the real size,
-        // not just the single-flight winner. On the broken version the joiner org has zero rows.
+        using var msA = new MemoryStream();
+        await resultA!.Content.CopyToAsync(msA);
+        Assert.Equal(blobBytes, msA.ToArray());
+        using var msB = new MemoryStream();
+        await resultB!.Content.CopyToAsync(msB);
+        Assert.Equal(blobBytes, msB.ToArray());
+
+        // Each org owns its per-org oci_blobs row with the real size.
         await using var conn = await _db.OpenAsync(default);
         var (countA, sizeA) = await conn.QuerySingleAsync<(int Count, long Size)>(
             "SELECT COUNT(*) AS Count, COALESCE(MAX(size_bytes), 0) AS Size FROM oci_blobs WHERE org_id = @orgA AND digest = @digest",
@@ -2044,6 +2310,153 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         Assert.Equal(1, countB);
         Assert.Equal(blobBytes.Length, sizeA);
         Assert.Equal(blobBytes.Length, sizeB);
+    }
+
+    /// <summary>
+    /// Cross-tenant regression on the in-flight window. Org A pulls a private layer through its
+    /// own authenticated upstream and parks inside the HTTP handler. While that fetch is live,
+    /// org B — holding only the seeded catch-all Docker Hub upstream, which matches any
+    /// repository name B cares to type — asks for the same digest.
+    ///
+    /// B must not receive A's bytes. Keying the in-flight entry on the content-addressed blob
+    /// key alone makes B a joiner on A's fetch: B gets the private layer verbatim, on one
+    /// upstream request made with A's credentials against A's private registry, and is left with
+    /// a durable <c>oci_blobs</c> row that makes every later deterministic GET succeed straight
+    /// from the shared store. Keying it on (org, blob key) forces B to present its own
+    /// credentials to its own upstream, which does not have the layer — so B gets nothing, then
+    /// and later.
+    ///
+    /// Fails on the vulnerable shape: B never issues an upstream request of its own, so the wait
+    /// for the second (Docker Hub) request times out; were it reached, B would also hold bytes
+    /// and a row it is not entitled to.
+    /// </summary>
+    [Fact]
+    public async Task FetchBlobAsync_OtherOrgFetchInFlight_CallerDoesNotInheritThatFetchOrItsBytes()
+    {
+        byte[] privateBytes = RandomBytes(512);
+        string sha256 = Sha256Hex(privateBytes);
+        string digest = "sha256:" + sha256;
+        string blobKey = BlobKeys.OciBlob("sha256", sha256);
+
+        // Only private.registry.internal carries the layer; every other host 404s.
+        var gate = new HostArmedGateFactory("private.registry.internal", privateBytes);
+        var shared = new InMemoryBlobStore();
+        var resolver = BuildOverSharedStore(shared, gate);
+
+        string orgA = await OrgSeeder.InsertAsync(_db, "inflight-private-org");
+        await SeedOciUpstreamAsync(orgA, "private.registry.internal", [""], position: 0);
+        string orgB = await OrgSeeder.InsertAsync(_db, "inflight-probing-org");
+        await SeedOciUpstreamAsync(orgB, "registry-1.docker.io", [""], position: 0);
+
+        // A's authenticated private pull is parked inside the HTTP handler.
+        var taskA = resolver.FetchBlobAsync(orgA, "private/secret-image", digest, default);
+        await WaitForUpstreamCallsAsync(() => gate.PrivateCallCount, 1, "the private registry");
+
+        // B asks for the same digest while A's fetch is still in flight.
+        var taskB = Task.Run(() => resolver.FetchBlobAsync(orgB, "library/anything-b-picks", digest, default));
+
+        // B must reach its OWN upstream. On the vulnerable shape B silently joins A's fetch and
+        // this request never happens.
+        await WaitForUpstreamCallsAsync(() => gate.OtherCallCount, 1, "org B's own upstream");
+
+        var resultB = await taskB;
+        Assert.Null(resultB);
+
+        // A's fetch was still in flight throughout — B's miss is a genuine in-flight-window race,
+        // not a post-completion cache miss.
+        Assert.Equal(1, resolver.BlobInflightArrivalCount(orgA, blobKey));
+
+        gate.Release();
+        var resultA = await taskA;
+        Assert.NotNull(resultA);
+        using var msA = new MemoryStream();
+        await resultA!.Content.CopyToAsync(msA);
+        Assert.Equal(privateBytes, msA.ToArray());
+
+        // Two upstream requests: A's to its private registry, B's to its own.
+        Assert.Equal(2, gate.CallCount);
+        Assert.Equal(1, gate.PrivateCallCount);
+        Assert.Equal(1, gate.OtherCallCount);
+
+        // B holds no row for A's digest, so nothing durable was granted by winning the race.
+        await using var conn = await _db.OpenAsync(default);
+        int rowsB = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM oci_blobs WHERE org_id = @orgB AND digest = @digest",
+            new { orgB, digest });
+        Assert.Equal(0, rowsB);
+
+        // And the deterministic GET after A's bytes landed in the shared store still misses for
+        // B: it falls through to its own upstream again rather than serving the store hit.
+        var again = await resolver.FetchBlobAsync(orgB, "library/anything-b-picks", digest, default);
+        Assert.Null(again);
+        Assert.Equal(2, gate.OtherCallCount);
+    }
+
+    /// <summary>
+    /// Mixed scenario (house rule: tests must cover the partial-failure case). Three callers race
+    /// on one digest: two from the entitled org and one from a probing org. The two same-org
+    /// callers collapse to a single upstream pull and both succeed; the cross-org caller neither
+    /// joins that pull nor inherits its result — it makes its own request to its own upstream,
+    /// which 404s, and comes back empty with no <c>oci_blobs</c> row.
+    /// </summary>
+    [Fact]
+    public async Task FetchBlobAsync_Mixed_SameOrgCallersCollapse_CrossOrgCallerFetchesItsOwnUpstreamAndFails()
+    {
+        byte[] privateBytes = RandomBytes(256);
+        string sha256 = Sha256Hex(privateBytes);
+        string digest = "sha256:" + sha256;
+
+        var gate = new HostArmedGateFactory("private.registry.internal", privateBytes);
+        var shared = new InMemoryBlobStore();
+        var resolver = BuildOverSharedStore(shared, gate);
+
+        string orgA = await OrgSeeder.InsertAsync(_db, "mixed-private-org");
+        await SeedOciUpstreamAsync(orgA, "private.registry.internal", [""], position: 0);
+        string orgB = await OrgSeeder.InsertAsync(_db, "mixed-probing-org");
+        await SeedOciUpstreamAsync(orgB, "registry-1.docker.io", [""], position: 0);
+
+        // Park org A's pull in the HTTP handler FIRST, so the entry the later two callers meet is
+        // unambiguously A's — otherwise whichever caller happens to register first decides what
+        // the other two join, and the cross-org case under test may never be exercised.
+        var taskA1 = Task.Run(() => resolver.FetchBlobAsync(orgA, "private/secret-image", digest, default));
+        await WaitForUpstreamCallsAsync(() => gate.PrivateCallCount, 1, "the private registry");
+
+        var taskA2 = Task.Run(() => resolver.FetchBlobAsync(orgA, "private/secret-image", digest, default));
+        var taskB = Task.Run(() => resolver.FetchBlobAsync(orgB, "library/anything-b-picks", digest, default));
+
+        // Both org-A callers registered on the one shared entry; org B made its own request.
+        await WaitForBlobArrivalsAsync(resolver, orgA, sha256, 2);
+        await WaitForUpstreamCallsAsync(() => gate.OtherCallCount, 1, "org B's own upstream");
+        gate.Release();
+
+        var resultA1 = await taskA1;
+        var resultA2 = await taskA2;
+        var resultB = await taskB;
+
+        // Org A: two callers, one upstream pull, both reading the full bytes from their own
+        // independent streams. Org B: its own pull, which fails — no bytes.
+        Assert.Equal(1, gate.PrivateCallCount);
+        Assert.Equal(1, gate.OtherCallCount);
+        Assert.NotNull(resultA1);
+        Assert.NotNull(resultA2);
+        Assert.Null(resultB);
+
+        using var ms1 = new MemoryStream();
+        await resultA1!.Content.CopyToAsync(ms1);
+        Assert.Equal(privateBytes, ms1.ToArray());
+        using var ms2 = new MemoryStream();
+        await resultA2!.Content.CopyToAsync(ms2);
+        Assert.Equal(privateBytes, ms2.ToArray());
+
+        await using var conn = await _db.OpenAsync(default);
+        int rowsA = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM oci_blobs WHERE org_id = @orgA AND digest = @digest",
+            new { orgA, digest });
+        int rowsB = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM oci_blobs WHERE org_id = @orgB AND digest = @digest",
+            new { orgB, digest });
+        Assert.Equal(1, rowsA);
+        Assert.Equal(0, rowsB);
     }
 
     // ── Gate factories for single-flight concurrency tests ─────────────────────
@@ -2168,6 +2581,66 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
                 }
                 return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.NotFound));
             }
+        }
+    }
+
+    /// <summary>
+    /// Two-armed gate keyed on the upstream HOST, standing in for tenants whose upstreams differ:
+    /// a request to <c>privateHost</c> parks until <see cref="Release"/> and then returns
+    /// <c>privateBody</c>; a request to any other host 404s immediately, as an upstream that does
+    /// not carry the artifact would. Each arm is counted separately so a test can assert WHOSE
+    /// upstream a set of bytes actually came from.
+    /// </summary>
+    private sealed class HostArmedGateFactory : IHttpClientFactory
+    {
+        private readonly TaskCompletionSource _gate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly string _privateHost;
+        private readonly byte[] _privateBody;
+        private int _privateCalls;
+        private int _otherCalls;
+
+        public HostArmedGateFactory(string privateHost, byte[] privateBody)
+        {
+            _privateHost = privateHost;
+            _privateBody = privateBody;
+        }
+
+        public int PrivateCallCount => Volatile.Read(ref _privateCalls);
+        public int OtherCallCount => Volatile.Read(ref _otherCalls);
+        public int CallCount => PrivateCallCount + OtherCallCount;
+
+        public void Release() => _gate.TrySetResult();
+
+        public HttpClient CreateClient(string name) => new(new HostArmedHandler(this));
+
+        private async Task<HttpResponseMessage> HandleAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            string host = request.RequestUri?.Host ?? string.Empty;
+            if (!string.Equals(host, _privateHost, StringComparison.OrdinalIgnoreCase))
+            {
+                Interlocked.Increment(ref _otherCalls);
+                return new HttpResponseMessage(System.Net.HttpStatusCode.NotFound);
+            }
+
+            Interlocked.Increment(ref _privateCalls);
+            await _gate.Task.WaitAsync(ct);
+            var resp = new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new MemoryStream(_privateBody)),
+            };
+            resp.Content.Headers.ContentType =
+                new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+            return resp;
+        }
+
+        private sealed class HostArmedHandler : HttpMessageHandler
+        {
+            private readonly HostArmedGateFactory _owner;
+            public HostArmedHandler(HostArmedGateFactory owner) => _owner = owner;
+
+            protected override Task<HttpResponseMessage> SendAsync(
+                HttpRequestMessage request, CancellationToken cancellationToken)
+                => _owner.HandleAsync(request, cancellationToken);
         }
     }
 }

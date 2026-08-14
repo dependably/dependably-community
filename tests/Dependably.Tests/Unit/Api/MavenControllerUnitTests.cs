@@ -357,7 +357,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
             _orgId, "maven", purlName, version, filename,
             Sha256: sha256, SizeBytes: bytes.Length,
             BlobKey: $"{blobKey}/{filename}",
-            UpstreamUrl: $"https://repo.example/{filename}"));
+            UpstreamUrl: $"https://repo.example/{filename}", Origin: CacheAccessOrigin.FirstFetch));
         Assert.NotNull(id);
 
         await _packages.GetOrCreateAsync(_orgId, "maven", purlName, purlName, isProxy: true, CancellationToken.None);

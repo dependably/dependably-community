@@ -63,11 +63,14 @@ public sealed class ProxyServePostureComplianceTests
         new("pypi", "Api/PyPi/PyPiProxyFetcher.cs", true, true, "Same single-upstream shape as npm."),
         new("nuget", "Api/NuGet/NuGetFlatContainerHandler.cs", true, true, "Same single-upstream shape as npm.",
             RequestBuilder: "Api/NuGet/NuGetNupkgProxyHelper.cs"),
-        new("maven", "Api/MavenController.cs", true, false,
+        new("maven", "Api/MavenController.cs", true, true,
             "Multiple upstream repositories are normal, but a given coordinate still resolves from one of "
-            + "them; pinning catches the same shadowing — which is why the false in the pin column is a "
-            + "recorded GAP, not a decision: the request omits the top-level UpstreamUrl, so the pin the "
-            + "rationale describes does not run. Closing it flips this entry to true."),
+            + "them; pinning catches the same shadowing. The pinned authority needs no separate "
+            + "resolution step: the Maven fetch URL is built as configured-base + repository-path, so its "
+            + "authority is already the repository that answered, never a third-party artifact host. "
+            + "Authority granularity also absorbs the normal enterprise shape — releases, snapshots and a "
+            + "central proxy on one Nexus/Artifactory host are one authority, so a coordinate moving "
+            + "between them raises nothing."),
         new("rpm", "Api/RpmController.cs", false, false,
             "Distro- and release-specific repositories with no default upstream: the same package name "
             + "legitimately serves from many hosts across releases, so pinning a name to its first host "

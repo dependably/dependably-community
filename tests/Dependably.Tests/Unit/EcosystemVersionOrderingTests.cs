@@ -54,6 +54,38 @@ public sealed class EcosystemVersionOrderingTests
         Assert.Equal(0, EcosystemVersionOrdering.CountNewerStable("pypi", stable, "1.0.0.post1"));
     }
 
+    [Fact]
+    public void OrderStableDescending_PyPi_LocalVersionIdentifierContainingDev_IsStillFinal()
+    {
+        // "+ubuntu.dev1" is a local version identifier, not a dev-release segment — a whole-string
+        // "dev" substring scan would wrongly classify this as PhaseDev and drop it from the stable
+        // list, even though it is a final release per PEP 440.
+        var stable = EcosystemVersionOrdering.OrderStableDescending(
+            "pypi", new[] { "1.0.0", "1.2.3+ubuntu.dev1" });
+
+        Assert.Contains("1.2.3+ubuntu.dev1", stable);
+        Assert.Equal(new[] { "1.2.3+ubuntu.dev1", "1.0.0" }, stable);
+    }
+
+    [Fact]
+    public void CountNewerStable_PyPi_LocalVersionIdentifierContainingDev_CountsAsNewer()
+    {
+        var stable = EcosystemVersionOrdering.OrderStableDescending(
+            "pypi", new[] { "1.0.0", "1.2.3+dev" });
+
+        Assert.Equal(1, EcosystemVersionOrdering.CountNewerStable("pypi", stable, "1.0.0"));
+    }
+
+    [Fact]
+    public void Compare_PyPi_PreReleaseDev_KeepsPreReleaseSubRankInsteadOfCollapsing()
+    {
+        // A dev-release OF a pre-release (e.g. "2.0.0b1.dev1") must still order the alpha/beta
+        // distinction correctly — collapsing both to a bare "dev" rank would report them equal.
+        int? alphaVsBetaDev = EcosystemVersionOrdering.Compare("pypi", "2.0.0a1.dev1", "2.0.0b1.dev1");
+        Assert.NotNull(alphaVsBetaDev);
+        Assert.True(alphaVsBetaDev < 0, "alpha-dev must sort below beta-dev, not compare equal.");
+    }
+
     // ── NuGet (NuGet.Versioning) ──────────────────────────────────────────────
 
     [Fact]

@@ -4,9 +4,12 @@ using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
 using Dapper;
+using Dependably.Api.PyPiProtocol;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Caching;
 using Dependably.Tests.Infrastructure;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection;
 using WireMock.RequestBuilders;
 using WireMock.ResponseBuilders;
@@ -403,6 +406,262 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         Assert.Equal("HIT", resp.Headers.GetValues("X-Cache").FirstOrDefault());
         Assert.NotNull(resp.Headers.GetValues("X-Dependably-PURL").FirstOrDefault());
+    }
+
+    // ── DownloadPackage — CDN-shaped alias (/packages/{h1}/{h2}/{sha256}/{file}) ───────────────
+
+    [Fact]
+    public async Task DownloadPackage_CdnShaped_ResolvesSameArtifactAsFlatRoute()
+    {
+        // The regression this pins: before the fix, the 4-segment CDN shape had no matching
+        // route at all (404 from routing itself, not from the handler) even though the exact
+        // same artifact was already resolvable via the flat /packages/{file} route.
+        string name = $"cdnshape{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        var (bytes, sha256) = PyPiFixtures.BuildWheel(name, "1.0.0");
+        string underscored = name.Replace('-', '_');
+        string filename = $"{underscored}-1.0.0-py3-none-any.whl";
+
+        string pushToken = await _factory.CreateToken("push");
+        using (var pushClient = _factory.CreateClientWithBasic(pushToken))
+        using (var content = BuildUploadForm(name, "1.0.0", bytes, sha256, filename))
+        {
+            var pushResp = await pushClient.PostAsync("/pypi/legacy/", content);
+            Assert.Equal(HttpStatusCode.OK, pushResp.StatusCode);
+        }
+
+        string token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(token);
+
+        var flatResp = await client.GetAsync($"/packages/{filename}");
+        Assert.Equal(HttpStatusCode.OK, flatResp.StatusCode);
+        byte[] flatBytes = await flatResp.Content.ReadAsByteArrayAsync();
+
+        string cdnPath = $"/packages/{sha256[..2]}/{sha256[2..4]}/{sha256}/{filename}";
+        var cdnResp = await client.GetAsync(cdnPath);
+        Assert.Equal(HttpStatusCode.OK, cdnResp.StatusCode);
+        byte[] cdnBytes = await cdnResp.Content.ReadAsByteArrayAsync();
+
+        Assert.Equal(flatBytes, cdnBytes);
+        Assert.Equal("HIT", cdnResp.Headers.GetValues("X-Cache").FirstOrDefault());
+    }
+
+    [Fact]
+    public async Task HeadPackage_CdnShaped_ResolvesSameArtifact()
+    {
+        // HEAD parity with the flat route's HeadPackage — same CDN shape, same 200 + HIT.
+        string name = $"cdnhead{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        var (bytes, sha256) = PyPiFixtures.BuildWheel(name, "1.0.0");
+        string underscored = name.Replace('-', '_');
+        string filename = $"{underscored}-1.0.0-py3-none-any.whl";
+
+        string pushToken = await _factory.CreateToken("push");
+        using (var pushClient = _factory.CreateClientWithBasic(pushToken))
+        using (var content = BuildUploadForm(name, "1.0.0", bytes, sha256, filename))
+        {
+            var pushResp = await pushClient.PostAsync("/pypi/legacy/", content);
+            Assert.Equal(HttpStatusCode.OK, pushResp.StatusCode);
+        }
+
+        string token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(token);
+        string cdnPath = $"/packages/{sha256[..2]}/{sha256[2..4]}/{sha256}/{filename}";
+        var headResp = await client.SendAsync(new HttpRequestMessage(HttpMethod.Head, cdnPath));
+        Assert.Equal(HttpStatusCode.OK, headResp.StatusCode);
+        Assert.Equal("HIT", headResp.Headers.GetValues("X-Cache").FirstOrDefault());
+    }
+
+    [Fact]
+    public async Task DownloadPackage_CdnShaped_DigestMismatch_AuthenticatedCaller_Returns404()
+    {
+        // Design-decision twin: the digest segment is VALIDATED against the artifact's real
+        // recorded checksum, not merely decorative — a well-formed but WRONG digest for a real
+        // filename must not resolve, or a client that pinned a digest in its lockfile could
+        // silently be served different bytes under the same filename. Authenticated caller —
+        // see DownloadPackage_CdnShaped_Unauthenticated_DigestMatchAndMismatch_BothReturn401
+        // for the anonymous-caller pin, where match/mismatch must NOT be distinguishable.
+        string name = $"cdnmismatch{Guid.NewGuid():N}"[..16].ToLowerInvariant();
+        var (bytes, sha256) = PyPiFixtures.BuildWheel(name, "1.0.0");
+        string underscored = name.Replace('-', '_');
+        string filename = $"{underscored}-1.0.0-py3-none-any.whl";
+
+        string pushToken = await _factory.CreateToken("push");
+        using (var pushClient = _factory.CreateClientWithBasic(pushToken))
+        using (var content = BuildUploadForm(name, "1.0.0", bytes, sha256, filename))
+        {
+            var pushResp = await pushClient.PostAsync("/pypi/legacy/", content);
+            Assert.Equal(HttpStatusCode.OK, pushResp.StatusCode);
+        }
+
+        // Well-formed 64-hex digest that is deliberately NOT the file's real checksum.
+        string wrongSha256 = new(sha256[0] == 'a' ? 'b' : 'a', 64);
+
+        string token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(token);
+        string cdnPath = $"/packages/{wrongSha256[..2]}/{wrongSha256[2..4]}/{wrongSha256}/{filename}";
+        var resp = await client.GetAsync(cdnPath);
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task DownloadPackage_CdnShaped_Unauthenticated_DigestMatchAndMismatch_BothReturn401()
+    {
+        // Regression pin for a pre-auth oracle: on an AnonymousPull=false instance (the org
+        // default), an unauthenticated CDN-shaped request must be indistinguishable whether the
+        // requested digest matches the artifact's real recorded checksum or not — both must 401,
+        // never one 401 and the other 404. A digest comparison run before the auth gate would let
+        // an unauthenticated caller learn "does this org hold filename F under digest D" without
+        // ever proving who they are.
+        await SetAnonymousPull(false);
+        string name = $"cdnoracle{Guid.NewGuid():N}"[..16].ToLowerInvariant();
+        var (bytes, sha256) = PyPiFixtures.BuildWheel(name, "1.0.0");
+        string underscored = name.Replace('-', '_');
+        string filename = $"{underscored}-1.0.0-py3-none-any.whl";
+
+        string pushToken = await _factory.CreateToken("push");
+        using (var pushClient = _factory.CreateClientWithBasic(pushToken))
+        using (var content = BuildUploadForm(name, "1.0.0", bytes, sha256, filename))
+        {
+            var pushResp = await pushClient.PostAsync("/pypi/legacy/", content);
+            Assert.Equal(HttpStatusCode.OK, pushResp.StatusCode);
+        }
+
+        string wrongSha256 = new(sha256[0] == 'a' ? 'b' : 'a', 64);
+
+        using var anonClient = _factory.CreateClient();
+
+        string matchingPath = $"/packages/{sha256[..2]}/{sha256[2..4]}/{sha256}/{filename}";
+        var matchingResp = await anonClient.GetAsync(matchingPath);
+
+        string mismatchedPath = $"/packages/{wrongSha256[..2]}/{wrongSha256[2..4]}/{wrongSha256}/{filename}";
+        var mismatchedResp = await anonClient.GetAsync(mismatchedPath);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, matchingResp.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, mismatchedResp.StatusCode);
+    }
+
+    [Fact]
+    public async Task DownloadPackage_CdnShaped_ShardPrefixInconsistentWithDigest_Returns404()
+    {
+        // h1/h2 must actually be sha256's own leading four characters — the same decomposition
+        // PyPiProxyFetcher.ResolveProxyUpstreamUrlAsync uses to build the outbound CDN URL. A
+        // garbled shard prefix isn't a real CDN URL and must not silently fall through to
+        // whatever the digest segment alone names.
+        string name = $"cdnshard{Guid.NewGuid():N}"[..16].ToLowerInvariant();
+        var (bytes, sha256) = PyPiFixtures.BuildWheel(name, "1.0.0");
+        string underscored = name.Replace('-', '_');
+        string filename = $"{underscored}-1.0.0-py3-none-any.whl";
+
+        string pushToken = await _factory.CreateToken("push");
+        using (var pushClient = _factory.CreateClientWithBasic(pushToken))
+        using (var content = BuildUploadForm(name, "1.0.0", bytes, sha256, filename))
+        {
+            var pushResp = await pushClient.PostAsync("/pypi/legacy/", content);
+            Assert.Equal(HttpStatusCode.OK, pushResp.StatusCode);
+        }
+
+        string wrongPrefix = sha256.StartsWith("ff", StringComparison.OrdinalIgnoreCase) ? "00" : "ff";
+
+        string token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(token);
+        string cdnPath = $"/packages/{wrongPrefix}/{sha256[2..4]}/{sha256}/{filename}";
+        var resp = await client.GetAsync(cdnPath);
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task DownloadPackage_CdnShaped_PercentEncodedTraversalInFileSegment_Returns404()
+    {
+        // The file segment reuses the flat route's existing PathSafeValidator ban on '%' — this
+        // pins that the reuse still applies when the request arrives through the CDN alias
+        // rather than the flat route. h1/h2/digest are self-consistent so the request reaches
+        // the file-level check rather than being rejected earlier for an unrelated reason.
+        string digest = new('a', 64);
+        string token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(token);
+        var resp = await client.GetAsync($"/packages/aa/aa/{digest}/..%2f..%2fetc%2fpasswd");
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task DownloadPackage_CdnShaped_NonHexShardSegment_Returns404()
+    {
+        // The route's regex constraint requires h1/h2 to be exactly 2 hex characters — plain
+        // non-hex ASCII (no encoding involved, so no client-side normalization ambiguity)
+        // confirms the constraint itself rejects the request before the handler ever runs.
+        string digest = new('a', 64);
+        string token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(token);
+        var resp = await client.GetAsync($"/packages/zz/aa/{digest}/somefile-1.0.0-py3-none-any.whl");
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+    }
+
+    // ASP.NET's TestServer refuses to translate an HttpRequestMessage whose Uri was built with
+    // DangerousDisablePathAndQueryCanonicalization (PathString.FromUriComponent throws), and a
+    // plain HttpClient.GetAsync(string) unescapes-then-collapses dot segments — including
+    // percent-encoded ones, since '.' is an RFC 3986 unreserved character — before the request
+    // is ever sent, so neither can genuinely deliver a raw or percent-encoded traversal probe
+    // to the server through this test host. The two direct-call probes below instead exercise
+    // exactly the string ASP.NET routing would hand the handler after its own single decode
+    // pass: a raw ".." and a single-encoded "%2e%2e" both decode to the literal string "..",
+    // and a double-encoded "%252e%252e" single-decodes to the literal "%2e%2e" (six characters,
+    // including '%'). This calls PyPiDownloadHandler directly, bypassing routing's regex
+    // constraint entirely, so it pins IsConsistentCdnDigest's independent, routing-agnostic
+    // rejection rather than the constraint (which the .NET route-testing tooling used here
+    // cannot exercise with genuinely malformed input).
+
+    [Fact]
+    public async Task DownloadPackageByDigest_LiteralDotDotShardSegment_Returns404()
+    {
+        using var scope = _factory.Services.CreateScope();
+        var handler = scope.ServiceProvider.GetRequiredService<PyPiDownloadHandler>();
+        string digest = new('a', 64);
+
+        var result = await handler.DownloadPackageByDigestAsync(
+            new DefaultHttpContext(), "default", "..", "aa", digest, "somefile-1.0.0-py3-none-any.whl", default);
+
+        Assert.IsType<NotFoundResult>(result);
+    }
+
+    [Fact]
+    public async Task DownloadPackageByDigest_DoubleEncodedDotDotShardSegment_Returns404()
+    {
+        using var scope = _factory.Services.CreateScope();
+        var handler = scope.ServiceProvider.GetRequiredService<PyPiDownloadHandler>();
+        string digest = new('a', 64);
+
+        var result = await handler.DownloadPackageByDigestAsync(
+            new DefaultHttpContext(), "default", "%2e%2e", "aa", digest, "somefile-1.0.0-py3-none-any.whl", default);
+
+        Assert.IsType<NotFoundResult>(result);
+    }
+
+    [Fact]
+    public async Task HeadPackageByDigest_LiteralDotDotShardSegment_Returns404()
+    {
+        using var scope = _factory.Services.CreateScope();
+        var handler = scope.ServiceProvider.GetRequiredService<PyPiDownloadHandler>();
+        string digest = new('a', 64);
+
+        var result = await handler.HeadPackageByDigestAsync(
+            new DefaultHttpContext(), "default", "..", "aa", digest, "somefile-1.0.0-py3-none-any.whl", default);
+
+        Assert.IsType<NotFoundResult>(result);
+    }
+
+    [Fact]
+    public async Task DownloadPackage_FlatRoute_StillWorks_AfterCdnRouteAdded()
+    {
+        // Guards against a regression in the flat /packages/{file} route now that a second,
+        // more specific-looking route pattern shares the same prefix.
+        string name = $"flatstill{Guid.NewGuid():N}"[..16].ToLowerInvariant();
+        await _factory.PushPyPiPackage(name, "1.0.0");
+        string underscored = name.Replace('-', '_');
+        string filename = $"{underscored}-1.0.0-py3-none-any.whl";
+
+        string token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(token);
+        var resp = await client.GetAsync($"/packages/{filename}");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
     }
 
     [Fact]

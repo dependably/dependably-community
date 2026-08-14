@@ -3,6 +3,7 @@
   import { user, navigate, takePendingRoute } from '../lib/store.js'
   import ThemeToggle from '../lib/ThemeToggle.svelte'
   import { api } from '../lib/api.js'
+  import { applyUserContext } from '../lib/userContext.js'
   import { submitForm } from '../lib/form.js'
   import { locales, switchLocale } from '../lib/locale.js'
   import PasswordStrength from '../lib/PasswordStrength.svelte'
@@ -38,14 +39,19 @@
     : [browserTimeZone]
   let timezoneError = ''
 
-  async function changeTimezone(value) {
+  async function changeTimezone(event) {
+    const select = event.currentTarget
     timezoneError = ''
-    const next = value === '' ? null : value
+    const next = select.value === '' ? null : select.value
     try {
       await api.updateTimezone(next)
-      user.set(await api.me())
+      await applyUserContext(await api.me())
     } catch {
       timezoneError = $t('profile.rows.timezoneError')
+      // Put the control back on the persisted value. Nothing else does: timezoneOverride is
+      // derived from $user, which a rejected save leaves untouched, so Svelte sees no change
+      // and the <select> would keep showing a zone the server refused to store.
+      select.value = timezoneOverride
     }
   }
 
@@ -336,7 +342,7 @@
       <div class="settings-row-control">
         <select
           value={timezoneOverride}
-          on:change={e => changeTimezone(e.currentTarget.value)}
+          on:change={changeTimezone}
           aria-label={$t('profile.rows.timezoneTitle')}
         >
           <option value="">{$t('profile.rows.timezoneInherit', { values: { timezone: tenantDefaultTimezone } })}</option>

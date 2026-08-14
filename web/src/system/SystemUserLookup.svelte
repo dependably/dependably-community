@@ -1,5 +1,6 @@
 <script>
   import { t } from 'svelte-i18n'
+  import { formatDate } from '../lib/format.js'
   import { systemApi } from '../lib/api.js'
 
   let email = '', tenantSlug = ''
@@ -122,8 +123,8 @@
                 —
               {/if}
             </td>
-            <td>{r.lastLoginAt ? new Date(r.lastLoginAt).toLocaleString() : '—'}</td>
-            <td>{r.passwordResetIssuedAt ? new Date(r.passwordResetIssuedAt).toLocaleString() : '—'}</td>
+            <td>{$formatDate(r.lastLoginAt)}</td>
+            <td>{$formatDate(r.passwordResetIssuedAt)}</td>
             <td class="actions">
               {#if r.accountStatus === 'active'}
                 <button on:click={() => setStatus(r, 'locked')} disabled={actionBusyKey === statusKey}>{$t('system.userLookup.lock')}</button>

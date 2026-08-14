@@ -7,6 +7,662 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-13
+
+### Added
+
+- **Alert email is delivered through a durable outbox.** Every alert message is persisted to a new
+  `email_outbox` table before any delivery attempt, so an SMTP outage longer than one retry pass —
+  or than one process lifetime — no longer loses the message. Delivery retries on an exponential
+  backoff until an explicit terminal policy retires the row: `delivered`; `dead_letter`, meaning the
+  message or the configuration is bad (a permanent SMTP rejection, an invalid recipient) and
+  retrying cannot help; or `expired`, meaning the retry or retention ceiling passed and the relay
+  needed fixing sooner. Terminal rows are pruned after `EMAIL_OUTBOX_TERMINAL_RETENTION_DAYS`.
+  Claims take a per-row lease, so a multi-replica Postgres deployment never attempts a message
+  twice. Credential-bearing mail — password-reset links, email-change verification, invites — stays
+  deliberately off the outbox: a rendered body would put a live credential at rest in the database,
+  so those keep the synchronous fail-silent path, where the recovery is requesting another one.
+
+- **The shared SMTP transport is circuit-broken, and alert bursts coalesce into digests.** Repeated
+  transport-level failures — connection refused, timeouts, the classes that indict the relay rather
+  than any one message — trip a breaker that stops the outbox claiming work until a cooldown
+  elapses, then sends a single probe before reopening the flow, so a relay outage is not met with
+  the whole backlog stampeding it the moment it recovers. A permanent per-message failure never
+  trips it: a relay that answers with a definitive verdict has proven itself reachable. The breaker
+  never reads or writes any org's `email_enabled` — configuration is intent, the breaker is health.
+  Thresholds and cooldowns are tunable (`EMAIL_TRANSPORT_BREAKER_FAILURE_THRESHOLD`,
+  `EMAIL_TRANSPORT_BREAKER_INITIAL_COOLDOWN_SECONDS`, `EMAIL_TRANSPORT_BREAKER_MAX_COOLDOWN_MINUTES`).
+  Alongside it, a burst of the same alert — same org, alert kind, and package coordinate — folds
+  into one pending digest row carrying an occurrence count instead of sending one email per
+  occurrence. A coalesced occurrence still records its own outcome on its own alert row, and a race
+  with the delivery worker resolves toward a fresh enqueue rather than a lost alert.
+
+- **Operators get an aggregate relay-health surface.** `GET /api/v1/instance/email-health` (single
+  mode) and `GET /api/v1/system/email-health` (the apex console in multi mode) report the shared
+  relay's health across every tenant: how many orgs are currently failing to deliver, the worst
+  consecutive-failure streak and when it started, and the outbox backlog — queue depth, oldest
+  pending message age, dead-lettered and expired counts. Both routes read the same aggregator so
+  the two surfaces cannot drift; every field is a count or an aggregate timestamp, and no tenant
+  identifier is ever included. Rendered as a relay-health panel on the corresponding settings page.
+
+- **Each release ships its debug symbols as a `.snupkg`; the container images ship none.** The
+  portable PDBs are exported from the same compilation that produced the shipped assemblies — a
+  second build would mint new PDB signatures and leave every symbol permanently unresolvable — and
+  published as a symbols package alongside the release, while the runtime images strip them. A stack
+  trace from a production container carries no source file/line detail on its own; load the
+  release's symbols package to resolve it.
+
+- **System admins choose a display timezone for the apex console.** A per-admin preference on the
+  apex profile page; the timestamps the console renders — tenant lists, audit views, the dashboard —
+  display in it. The zone is validated server-side against the runtime's tz database.
+
+- **The alert bell can clear the whole active set.** A clear-all action on the bell panel dismisses
+  every active alert for the org in one call instead of one row at a time. Dismissal stays a shared
+  flag, so every admin in the org sees the same cleared set.
+
+### Security
+
+- **OCI pulls require a read capability; any active token was enough before.** The pull path
+  resolved the presented token and checked only that it was active and belonged to the org — never
+  what it was scoped for — so a token with no read grant at all could pull every hosted and proxied
+  image in the org. That includes tokens minted by a role that itself holds no artifact read, so a
+  role barred from reading artifacts could reach them anyway by minting a token. Pulls now require
+  `pull:oci` or `read:artifact`. The push protocol's own read probes — the manifest GET/HEAD and
+  blob HEAD a push performs before writing — still admit a publish-only token; blob GET, the tag
+  list, and the referrers list do not, so a push token never gains a general pull licence.
+
+- **Flipping a tenant to SSO-only now revokes its password-backed sessions.** Disabling forms login
+  closed the door on new password logins but left already-minted JWTs valid on their own for up to
+  their remaining eight-hour lifetime. The disable transition now moves `token_version` forward for
+  the org's password-backed users, invalidating those sessions on their next request.
+  SAML-provisioned members keep their sessions, and a save that leaves forms login unchanged never
+  churns anyone's.
+
+- **Percent-encoded traversal is rejected in RPM proxied path segments.** ASP.NET decodes a route
+  value once, so a double-encoded traversal arrived at the handler as the literal `%2e%2e%2f` — no
+  `..`, no `/`, clearing every existing rule — and was carried intact into the composed upstream
+  URL, where the upstream's own decode turns it back into `../`. Path segments that are composed
+  into an upstream fetch URL now reject `%` outright before any fetch; no legitimate RPM package or
+  repodata filename contains one.
+
+- **Source pinning actually runs for Maven proxy fetches.** The Maven serve path never threaded the
+  resolved fetch URL into the cache-plane record, and pinning keys off an absolute URL or does not
+  run at all — so the dependency-confusion guard, which refuses serving a coordinate from a
+  different upstream than the one that first resolved it, was silently inert for the one ecosystem
+  where a public repository routinely sits beside a private one in the same list. The URL is now
+  threaded, binding each coordinate to the authority of the repository that resolved it. Several
+  repositories on one host — releases, snapshots, a central proxy — share an authority, so the
+  normal multi-repository shape raises nothing.
+
+- **Credential-bearing mail refuses an unencrypted SMTP transport.** A password-reset link, an
+  email-change verification link, or an invite token grants what a stolen password would, and the
+  relay connection carrying it was allowed to be cleartext. Sending those over an unencrypted
+  transport is now refused per-send and treated exactly like an unconfigured relay: nothing is
+  sent, and each flow's existing no-relay fallback applies unchanged — a 202 with no email for
+  reset and email-change, the invite link returned in the API response (which already reaches the
+  inviting admin over an authenticated HTTPS session). Alert email and security-event notices carry
+  no bearer secret and are unaffected. An operator who accepts the risk opts in with
+  `SMTP_ALLOW_INSECURE_CREDENTIAL_MAIL`; loopback and private-range relay hosts are not exempt.
+
+- **Retargeting an owner's email address requires `tenant:admin`.** An admin holding only
+  `tenant:configure` could repoint an owner's email to an address they control, confirm the change
+  themselves, and ride the password-reset flow into the owner's account. Changing an owner's email
+  now takes the same tier-2 `tenant:admin` gate that touching an owner's role or membership already
+  does. Self-service changes still re-enter the password, and SAML-managed accounts remain refused
+  — the IdP is authoritative for those.
+
+- **Cross-tenant proxy cache poisoning: a tenant admin could decide what bytes another tenant is
+  served.** `cache_artifact` is keyed by `(ecosystem, name, version, filename)` alone — no org, no
+  upstream — while upstream registries are per-org and tenant-admin configurable, so one row stood
+  for "the bytes for this coordinate" across every tenant. An admin pointing an upstream at a host
+  they control could publish a tarball together with the matching `dist.integrity`, pass checksum
+  verification (both came from the same host), and create the shared row with their blob key. Every
+  other org that later proxied the same coordinate from its own genuine upstream was served its own
+  bytes exactly once, off the miss path, and the attacker's bytes from the next request on — with
+  the attacker's hash echoed as the ETag and in the rewritten packument, so the client's own
+  integrity check passed against the poisoned value.
+
+  `tenant_artifact_access` now carries each tenant's own content binding — `content_hash`,
+  `blob_key`, `size_bytes` — written only from a fetch that tenant actually performed, and every
+  per-tenant projection resolves the bytes fields through it before the shared row. Two tenants that
+  resolve the same bytes still share one row and one blob; a tenant whose upstream served something
+  else reads its own. No coordinate is ever refused, so a hostile tenant reaching one first cannot
+  deny it to anybody.
+
+  **A tenant poisoned BEFORE this release stays poisoned.** The one-time backfill binds every
+  existing tenant to the row it is being served today, which for a victim is the attacker's bytes —
+  so it keeps hitting cache and never re-fetches. The binding stops the substitution happening
+  again; it cannot undo one that already happened, because nothing recorded what that tenant's own
+  upstream would have served. **Repair it by deleting the cached version** (Packages → the version →
+  Delete, or `DELETE /api/v1/packages/{ecosystem}/{name}/{version}`), which drops the
+  tenant's access row and makes the next request a fresh fetch from that org's own upstream. Letting
+  the cache-eviction sweep age the coordinate out has the same effect on a longer timescale. Orgs
+  worth checking first are any that share a proxied coordinate with an org whose upstream registries
+  you do not control; `Cache-plane content divergence detected` warnings in the logs name the
+  coordinate and the requesting org whenever two upstreams disagree.
+
+  A tenant whose bytes diverge is also no longer advertised the shared row's claims *about* bytes.
+  `dist.shasum`, `dist.integrity` and the stored install manifest live only on the shared row, and
+  the npm packument replaces the upstream version object with the locally rendered one so the
+  advertised integrity matches what the tarball route streams — so publishing a foreign SRI beside
+  the tenant's own SHA-256 turned every install of that coordinate into `EINTEGRITY`, a refusal the
+  tenant could not clear and another tenant caused. Those three claims are now omitted for a
+  diverging tenant rather than guessed, which is the shape the renderers already handle; the
+  tenant's own SHA-256 still stands, because it describes the bytes it holds. Non-diverging
+  tenants — every tenant in normal operation — keep all three.
+
+  The Cargo sparse-index line's `cksum` is now covered too: it is stored once against the shared
+  catalogue row, and the sparse-index spec has no absent form for it the way npm's `dist.integrity`
+  has, so a diverging tenant is served a line rewritten to its own bound `content_hash` rather than
+  omitted or left describing the other tenant's `.crate` bytes — `cksum` and `content_hash` are the
+  same SHA-256-of-the-file digest, so the rewritten value is exactly what the download route
+  verifies against. RPM's proxy checksum resolves through the same tenant binding as the blob key
+  and size (`COALESCE(taa.content_hash, ca.content_hash)` in `RpmRepodataService`), so it never
+  described another tenant's bytes to begin with; its `header-range` offsets are not currently
+  populated for proxy packages (always `0`) and so cannot diverge either.
+
+  The block gate is divergence-aware too: byte-derived findings recorded against the shared row no
+  longer speak for a tenant whose bytes differ from it. For that tenant, install-script detection
+  reads as unknown — which the gate treats as script-present, the cautious arm — provenance reads
+  as unverifiable, and licence evidence reads as absent, resolving to each ecosystem's
+  unknown-licence posture under `license_enforcement_mode=block`. OSV advisories still apply
+  unmasked, deliberately: they are keyed by package coordinate, not by bytes, so they describe the
+  diverging tenant's artifact as much as anyone's. Every gate evaluation that sees a divergence
+  also queues it into the review queue as its own reviewable item, whether or not anything on that
+  request blocked — divergence itself, not any one gate's reaction to it, is the actionable
+  signal. Giving a divergent coordinate a genuinely separate row with its own scan state remains
+  the contract-release step below.
+
+  **Deferred to a later release:** `cache_artifact`'s uniqueness key stays
+  `(ecosystem, name, version, filename)`. Re-keying it to include `content_hash` — so a divergent
+  coordinate resolves to a genuinely separate row carrying its own scan state, provenance verdict
+  and index metadata — requires dropping that constraint, which a preceding release's
+  `ON CONFLICT (ecosystem, name, version, filename)` still needs during a blue-green cutover. The
+  per-tenant binding is what closes the serve path in the meantime, and it needs no such drop.
+
+- **One org could obtain another org's proxy-cached private OCI layers by digest.**
+  `GET /v2/{name}/blobs/{digest}` resolved against the content-addressed blob store, whose key
+  (`oci/{algo}/{hex}`) carries no org segment, so in the default single-store deployment every
+  tenant's layers share one key space. Entitlement was proved by nothing stronger than the caller
+  having *some* configured upstream matching the caller-supplied repository name — and every org is
+  seeded with a catch-all Docker Hub upstream whose empty prefix matches every repository. A tenant
+  that learned a digest (they leak routinely through SBOMs, CI logs, and pinned references) could
+  therefore read layers pulled from a private registry it holds no credential for, with no upstream
+  call and no authorization against the owning org's registry. Serving a shared-store hit now
+  requires the caller's own org to already hold an `oci_blobs` row for the digest — its own prior
+  upload or its own prior proxy fetch.
+
+- **The same bytes were reachable through the concurrent-fetch window, and that path also minted a
+  standing grant.** The single-flight coordinator that collapses concurrent blob misses was keyed
+  on the content-addressed blob key alone, while the work item behind that key captured one
+  caller's org, upstream, and credentials. A caller from another org arriving inside the window
+  joined that fetch and received the bytes verbatim, then had its own `oci_blobs` row written — so
+  every later request passed the entitlement check above and served the layer from the shared store
+  for good. The coordinator is now keyed on `(org id, blob key)`, so the only callers that can
+  share a fetch are callers of the org whose credentials it uses, and no row is granted to a caller
+  the fetch did not run for. Single-tenant deployments are unaffected: every row is already the one
+  org's.
+
+- **A `local_only` claim transition could delete a proxy blob another tenant still referenced.**
+  The purge deletes the blobs its evicted rows dereferenced. On the legacy uploaded plane —
+  `package_versions` rows carrying `origin = 'proxy'`, written before proxy fetches moved to the
+  cache plane — the key is the content-addressed `proxy/{sha256}`, which every tenant whose
+  upstream served byte-identical content records identically, and the delete was unconditional.
+  One org claiming a name could therefore strand another org's cached artifact as a serve-time
+  404. Content-addressed keys on that plane now go through the same locked refcount guard the
+  cache-plane loop uses; org-namespaced (`hosted/{orgId}/…`) keys are still reclaimed outright.
+
+- **A caller reaching the app port directly could name any tenant under `DEPLOYMENT_MODE=header`.**
+  The header-routed tenancy mode exists for transparent-intercept deployments, where the request
+  host belongs to an impersonated public registry and cannot carry the org slug, so the edge proxy
+  names the tenant in a header (`TENANT_HEADER_NAME`, default `X-Dependably-Tenant`). That header
+  was honoured from any socket peer — and on the anonymous protocol surfaces (`/simple/`, `/npm/`,
+  `/v2/`) there is no JWT for `RouteScopeFilter` to cross-check it against, so wherever anonymous
+  pull is on, any client that could reach the application directly could read another org's
+  artifacts just by naming that org. The header is now honoured only when the request's raw socket
+  peer is listed in `TRUSTED_PROXIES` — the same fail-closed rule forwarded headers already follow,
+  matched by the same matcher, against the peer address recorded *before* forwarded-header
+  processing rewrites it to a client address the proxy chose. `TRUSTED_PROXIES` unset means no peer
+  qualifies and every request resolves to no tenant; a startup warning names the requirement when
+  the mode is selected without it.
+
+- **Two accounts differing only in email case can no longer coexist.** Every account lookup folds
+  case (`lower(email) = lower(@email)`) while the uniqueness constraint compared bytes, so
+  `Owner@corp.com` and `owner@corp.com` could exist as two rows that both satisfy every lookup —
+  and which one authenticates for that address is whichever row the query engine returns first,
+  which is how an accepted invite could mint a second login for an address that already belongs to
+  someone. Emails are now stored canonically (trimmed, lowercased) at every write, accepting an
+  invite for an address the tenant already holds answers 409 instead of creating a duplicate, and
+  a boot-time pass canonicalizes what is already stored and installs a case-insensitive unique
+  index so a future writer that forgets to fold cannot regress it. A database that already holds
+  case-variant duplicates keeps serving: the collision is reported in the log together with the
+  query that finds the rows, the index is deferred to a later boot, and nothing new can be created
+  in that shape in the meantime because the write path already canonicalizes.
+
+- **A NuGet registration leaf can no longer hand the client an upstream-controlled download URL.**
+  When an upstream registration leaf carried no usable version, the URL rewrite left its
+  `packageContent` download URL pointing at the upstream verbatim — routing the client's actual
+  package download straight past the proxy's checksum verification, scan, and block gate. Such a
+  leaf is now removed from its page (and refused rather than forwarded when requested alone), and
+  an externalized registration page whose address is not host-pinned to one of the org's
+  configured upstreams is dropped for the same reason: a client dereferencing it would fetch
+  download URLs from a host the operator never configured.
+
+- **A SAML response without a signature is refused by Dependably's own check, not only the
+  library's.** Rejecting an unsigned response was behaviour of the SAML library's unbind path,
+  asserted nowhere in this repository — a dependency bump that relaxed it would have shipped
+  green, and the failure mode is a forged assertion minting a session for any account in any
+  SSO tenant. The ACS endpoints now state the precondition themselves: a response carrying no XML
+  signature anywhere is refused outright, while whether a present signature is *valid* and chains
+  to the tenant's pinned certificate stays with the library check that runs immediately after, so
+  the two fail closed independently.
+
+- **Logging out takes effect on every replica immediately.** The per-request session-validity
+  reads — user and system-admin token versions, and the JWT revocation list — sat behind a
+  60-second per-process cache whose eviction reached only the replica that performed the logout,
+  password change, or MFA disable; a sibling replica kept honouring the killed session until its
+  own TTL rolled, so a stolen cookie could outlive the logout that was supposed to end it by up to
+  a minute per replica. Under `DEPENDABLY_DEPLOYMENT_MODE=ha` those stores now read through to the
+  database on every request, making revocation exact on the next request anywhere; single-replica
+  deployments keep the cache, where the local eviction is already the whole invalidation.
+
+- **The per-tenant active-token cap is enforced atomically.** The count and the insert ran as
+  separate statements, so N concurrent creates could all read the same pre-cap total and all
+  insert — eight concurrent creates landed eight rows past a cap of five, and the overshoot was
+  bounded only by the caller's concurrency. The count and the insert now commit in one per-tenant
+  serialized transaction, for user and service tokens alike, so the create that would cross the
+  ceiling is the one refused.
+
+- **The session cookie is marked `Secure` behind a TLS-terminating proxy the app does not trust.**
+  With `TRUSTED_PROXIES` unset — the documented fail-closed default — `X-Forwarded-Proto` is
+  discarded, so a deployment whose browser-facing hop is HTTPS but whose proxy-to-app hop is
+  plaintext issued the session cookie without `Secure`, and the browser would attach it to any
+  plaintext request an attacker could provoke at the same host. The cookie decision now also
+  honours a raw `X-Forwarded-Proto: https`, trusted or not, which is safe for this decision
+  specifically: a forged value can only add `Secure` to the forger's own cookie, restricting it.
+  URL building keeps ignoring the untrusted header, where a forged value would be reflected to
+  other callers.
+
+- **Email-change verification mail is throttled per destination address.** The email-change
+  endpoint's per-IP rate limit bounds one caller, but nothing was keyed on the recipient, so a
+  distributed caller could aim unbounded verification mail at one mailbox through the operator's
+  shared relay. Sends now consume the same per-address budget the password-reset flow already
+  holds — as an independent budget, so mail aimed through one flow cannot lock the other out for
+  that address. The refusal is a plain 429 rather than a uniform accept: the caller is
+  authenticated and already knows the account exists, so there is no enumeration oracle to
+  protect, and a silent drop would read as a delivery failure.
+
+- **Login lockout counts concurrent failures exactly.** Recording a failed attempt read the
+  counter, added one in application code, and wrote the sum back — so concurrent failures against
+  one account overwrote each other and advanced the count by less than the true attempt count,
+  inflating the online guessing budget precisely when someone is hammering a single account. Both
+  stores now increment atomically, with the lock decision in the same operation: a single UPSERT
+  whose threshold check reads the post-increment value in SQL, and a Lua script on the Redis
+  store, so N concurrent failures always advance the counter by exactly N.
+
+- **Proxy-fetch audit details are serialized, never interpolated.** The checksum-failure and
+  source-pin-violation audit rows built their JSON detail by string interpolation over values an
+  upstream or a client controls — the upstream packument's own integrity string, the requested
+  filename, the package name — letting either close a quote and forge sibling keys in a detail
+  the SIEM export parses. Both now go through the JSON serializer.
+
+### Changed — action required
+
+- **The per-org SMTP transport for alert email is removed. SMTP is an instance-level transport.**
+  A tenant configures how Dependably *uses* that transport — whether alert mail is sent and to whom
+  — never how mail is transported. The SMTP fields are gone from the tenant surface entirely: `GET
+  /api/v1/alert-settings` no longer returns `emailInheritInstance`, `emailSmtp*`,
+  `hasEmailSmtpPassword`, or `emailSmtpCleartextCredentials`. What remains of the tenant email
+  surface is a delivery channel — the send-by-email toggle, the recipient list, the channel's
+  delivery health, and the test send — edited on Settings → Integrations beside the Slack and
+  webhook channels, while Settings → Alerts keeps only what *raises* an alert (the severity floor
+  and per-type toggles). The write surface is split one endpoint per editing surface: `PUT
+  /api/v1/alert-settings` carries the gates alone, `PUT /api/v1/alert-settings/email` the email
+  channel, `PUT /api/v1/alert-settings/slack` the Slack channel — a combined PUT lets a tab that no
+  longer renders a field bind it to `false` and silently disable another tab's channel. **If you
+  script the base `PUT /api/v1/alert-settings`, `emailEnabled` and `emailRecipients` are no longer
+  read there** — write them through `/alert-settings/email`.
+
+  **If any org had opted out of inheriting the instance transport, its alert email now sends over
+  the instance relay instead — or over nothing at all if that relay is not configured, and it fails
+  silently.** Configure it at Settings → Instance settings → Instance email (SMTP) in single mode,
+  or the apex System settings → Email (SMTP) in multi-tenant mode. An unconfigured relay shows up on
+  the operator relay-health panel: alert mail is written to the outbox before any delivery attempt
+  and an unconfigured relay claims nothing, so it accumulates as queue depth with a climbing oldest-
+  message age, and as expired messages once the retention bounds retire them.
+
+  **The stored per-org SMTP settings are cleared on upgrade.** A one-time migration sets host, port,
+  security, username, password and from-address to NULL for every org and sets every org back to
+  inheriting the instance transport, so nothing is left holding an envelope-encrypted credential that
+  no code path reads or writes. The columns themselves stay in place, and that is deliberate: a
+  release still in the field names all seven of them in its alert-settings queries, blue-green runs
+  that release against the same database for the length of a cutover, and removing them would break
+  that slot's entire alert-settings read — the Alerts page and the delivery gate, not merely the
+  transport. They are dropped in a later release, once the oldest release Dependably supports
+  upgrading from no longer reads them. Nothing about the clearing depends on which release you
+  upgrade from, so there is no upgrade order to follow.
+
+  **Clearing a value is not erasing the bytes.** Neither `UPDATE … NULL` nor `DROP COLUMN` reclaims
+  the pages a value occupied, on either provider, so the credential's ciphertext can survive in
+  SQLite freelist pages or Postgres dead tuples until that space is reused. If you want those bytes
+  actually gone, run `VACUUM` (SQLite) or `VACUUM FULL alert_settings` (Postgres — takes an exclusive
+  lock on the table) after upgrading. Rotating the credential at your relay provider retires it
+  regardless of what remains on disk, and is the step that matters if the credential was ever
+  exposed.
+
+- **Alert email delivery failure no longer disables an org's email channel.** Because every org now
+  shares the operator's relay, auto-disabling each channel would turn one infrastructure outage into
+  dozens of independent tenant configuration failures, each needing a manual re-enable for a problem
+  the tenant cannot see the cause of or fix. Failures are still recorded and shown beside the email
+  channel on the Integrations tab — `email_consecutive_failures` and friends keep climbing — but
+  `email_enabled` is never rewritten, so delivery resumes by itself when the relay recovers. Slack
+  delivery is unchanged and still auto-disables: a webhook URL is tenant-owned and tenant-fixable.
+
+- **Cookie-authenticated non-browser clients posting form-shaped bodies must send `Origin`.**
+  SameSite is scoped to the registrable domain, not the exact host, so a page on a sibling tenant
+  subdomain is *same-site* and the strict session cookie rides its requests; Fetch Metadata closes
+  that for browsers that send it, but a state-changing request carrying neither `Sec-Fetch-Site`
+  nor `Origin` was allowed through. The CSRF middleware now refuses such a request when it both
+  carries the session cookie and declares one of the three content types an HTML form can produce
+  without a CORS preflight — `application/x-www-form-urlencoded`, `multipart/form-data`, or
+  `text/plain` — which is exactly the shape a cross-site form post takes and only when the request
+  carries the credential the attack rides. **Real browsers are unaffected** (they send Fetch
+  Metadata or `Origin` on cross-origin posts), and so is every client authenticating with an
+  `Authorization` token or posting JSON. A scripted client that authenticates with the session
+  cookie and posts one of those content types now gets 403: send an `Origin` header matching the
+  host, or switch to an API token.
+
+- **Webhook and Slack delivery queues are per-org, and their capacity semantics change with
+  them.** Delivery ran as one process-wide, unpartitioned queue per channel; it is now one lane
+  per org, served round-robin under a hard per-envelope deadline (see the fix below). Two
+  consequences are operator-visible. `WEBHOOK_QUEUE_CAPACITY` (default 1024) now sizes **each
+  org's lane rather than the instance**, so worst-case in-memory depth is that value times the
+  number of orgs with a simultaneous backlog — lower it on instances with a large tenant count and
+  a small memory budget. And webhook subscriptions are now capped at **50 per org** (the request
+  past the cap is refused with 422): every subscription multiplies the delivery work one event
+  creates, and the per-envelope budget can only bound a fan-out of the same order of magnitude.
+  The new tuning knobs — `WEBHOOK_DISPATCH_WORKERS`, `WEBHOOK_FANOUT_CONCURRENCY`,
+  `WEBHOOK_ENVELOPE_BUDGET_SECONDS`, and for Slack `ALERT_SLACK_QUEUE_CAPACITY`,
+  `ALERT_SLACK_WORKERS`, `ALERT_SLACK_BUDGET_SECONDS` — are documented in the `CONTRIBUTING.md`
+  environment-variable tables; the outbound HTTP clients carry fixed per-attempt timeouts (15
+  seconds webhook, 10 seconds Slack) that the budgets depend on.
+
+- **The on-demand vulnerability rescan endpoint is rate-limited, and bulk import caps its file
+  count.** The rescan endpoint's own cooldown is per-package, so nothing bounded a caller fanning
+  out across many distinct packages — each rescan is upstream OSV work. It now carries its own
+  sliding-window limit, `RESCAN_RATE_LIMIT_PERMITS` (default 20 per minute per caller); a script
+  driving bulk rescans faster than that now sees 429. Bulk import refuses a batch of more than
+  5,000 files with 413 before any staging begins: the existing 1 GB aggregate byte cap does not
+  bound a batch of many near-empty files, whose per-file work — staging, detection, a
+  claim-resolution query, an audit row — scales with count rather than bytes.
+
+### Changed — behavior
+
+- **A tenant's proxy storage total is measured from its own bytes.** The `org_storage_bytes` quota
+  view and the dashboard's per-ecosystem storage breakdown both resolve a proxy artefact's size
+  through the tenant's own content binding before the shared row's, so the two agree and a tenant
+  whose upstream served larger or smaller bytes is charged for what it actually holds rather than for
+  another tenant's copy.
+
+- **The proxy cache size cap and every reclamation path now see tenant-bound blobs.** A tenant whose
+  upstream served content other than a coordinate's shared row stores its own bytes under a key no
+  `cache_artifact` row names. `CACHE_MAX_SIZE_BYTES` now counts those bytes toward the measured
+  total, and the LRU sweep, the per-org retention passes, the `local_only` claim purge and the
+  cache-plane version delete all reclaim them alongside the shared blob — each still guarded by the
+  shared-key refcount, so a second tenant that resolved the same bytes keeps its copy. Without this
+  a divergent tenant's blob was invisible to every cap and every sweep, and became an unreachable
+  orphan the moment its coordinate was evicted. **A cache that has been serving divergent content
+  may measure larger than it did before and evict sooner**; the extra bytes were always on disk,
+  they were simply not counted.
+
+- **The global cache size and count caps now reclaim OCI storage.** `CACHE_MAX_SIZE_BYTES` and
+  `CACHE_MAX_ARTIFACTS` previously excluded OCI from both the eviction candidate query and the
+  measured totals, so an image neither counted toward a cap nor could be evicted to relieve one —
+  on an OCI-heavy instance the caps could not be reached at all. All three move together, because
+  totals that count rows the candidate query will not select make a cap unreachable and the sweep
+  spins.
+
+  Eviction of an OCI manifest is not a plain cache-plane delete: a manifest casts two shadows — the
+  shared `cache_artifact` row this sweep selects, and one `oci_blobs` row per org that pulled it.
+  The sweep now releases each holding org's digest claim first and never routes an OCI blob through
+  the cache-plane deleter, which is guarded only against sibling `cache_artifact` rows and would
+  otherwise delete manifest bytes out from under another tenant. Physical reclaim is left to
+  `OciBlobReclaimer`, which frees a digest only once every claim is gone and also collects the
+  layer closure. **If you rely on OCI images being exempt from the global caps, set the caps
+  accordingly** — images are now evictable, and the sweep logs the OCI share of the measured
+  totals whenever a cap is breached.
+
+- **An OCI blob is no longer served from the shared store to an org that has not fetched it
+  itself.** A layer another tenant proxy-cached is no longer a cache hit for your org: the first
+  pull of that digest by your org issues its own upstream request, against your org's own upstream
+  and credentials, before the bytes are served. Two consequences are worth planning for:
+
+  - **A layer your org never cached can now fail when its own upstream is unreachable.** Where the
+    shared store previously answered the request with no upstream call at all, the same request now
+    depends on your org's upstream being reachable and on the credential attached to it — so a
+    registry outage, an expired credential, or a digest that has since been deleted upstream
+    surfaces as a 404 or 502 rather than silently resolving from another tenant's copy.
+  - **N orgs pulling the same public base image now issue N upstream pulls from one egress IP.**
+    Anonymous Docker Hub pull quotas are counted per source address, so a multi-tenant instance
+    whose tenants share a base image can trip them where the collapsed single pull did not. Give
+    the shared upstream an authenticated credential, or stagger the tenants' first pull, if the
+    instance sits near a quota.
+
+  Bytes are still stored once — the blob store is content-addressed and the write is idempotent —
+  so only the upstream request is duplicated, not the storage. Repeat pulls within one org still
+  hit the shared store, and concurrent misses within one org still collapse to a single pull.
+
+- **Single-mode instance settings are editable by admins, not only the owner.** The instance
+  endpoints — settings, metrics access, the SMTP transport, background-job status — now require
+  `tenant:configure`, the capability both the admin and owner roles hold, instead of the owner-only
+  `tenant:admin`. In single mode the org *is* the deployment and its admins are the people running
+  the instance: an admin who already configures the registry's security posture — block gates,
+  licence enforcement, trust anchors, proxy upstreams — could not point the mail relay at a host or
+  raise an upload limit, a distinction without a difference at that scope. Multi-tenant deployments
+  are untouched: these routes still return 404 there, and instance-wide settings remain behind the
+  separate `system_admin` identity on the apex.
+
+- **A searched audit or activity CSV export is bounded, and says so in a response header.** An
+  export's search term runs as a leading-wildcard match no index can serve, and nothing stopped a
+  single `read:audit` holder from re-issuing it at will — each request a full scan of the org's
+  history, a cost lever rather than a one-shot. A search inside a CSV export is now bounded to the
+  same newest-50,000-row window the paged lists use, and when the bound engages the response
+  carries **`X-Export-Truncated: true`** so the truncation is never silent — narrow the export
+  with the indexed `action`/`since` filters, or drop the search term: an export with no search
+  term deliberately stays unbounded, so a complete extract is always available.
+
+- **`/version` no longer appears in the published OpenAPI documents.** It is an IP-allowlisted
+  operator surface, like `/metrics`, and advertising its route and schema in the fully public
+  protocol document contradicts the allowlist's purpose. The endpoint itself is unchanged.
+
+### Fixed
+
+- **On Postgres, seventeen read projections could not materialize at all — breaking per-org
+  webhooks, Slack alerts, alert email and the email outbox, the GDPR self-export, OCI push, Go and
+  Cargo proxy serving, RPM repodata, multi-file PyPI serving, and the session context the SPA
+  reads on every page load.** Dapper's default positional-record binding demands an exact CLR type
+  match for each constructor parameter, and the two providers disagree about what an `INTEGER`
+  column is — SQLite reports `Int64`, Postgres `Int32` — so seventeen row records whose signatures
+  matched one provider threw on the other, and every one of them had only ever run against SQLite.
+  SQLite deployments were never affected. All seventeen now bind through explicit constructors,
+  which is what lets one `long`-typed signature serve both providers; a compliance gate scans
+  every Dapper positional record so a new projection cannot reintroduce the mismatch, and a
+  Postgres-backed materialization test covers the repaired rows against a real database.
+
+- **Omitting a field from `PUT /api/v1/proxy-settings` never changes it.** The whole endpoint now
+  carries one absent-field posture: a field left out of the payload leaves the stored value
+  unchanged, for every field. Previously only the `verify_*` fields behaved that way; the rest
+  bound their C# defaults on absence, so a client or UI tab that did not render a field silently
+  rewrote it on save. The two gates whose "off" state is itself SQL NULL — `min_release_age_hours`
+  and `max_epss_tolerance` — are carried tri-state, so an explicit `null` still deliberately
+  switches the gate off while a missing key leaves it alone; the generated OpenAPI schema for both
+  still renders as a plain nullable number. Partial updates are now safe from any client.
+
+- **Omitting `anonymousPull` or `allowlistMode` from `PUT /api/v1/settings` leaves them
+  unchanged.** Both are security gates, and both were non-nullable on the request record, so a
+  client that did not send one bound its C# default — `false` — on save: a script updating only an
+  upload cap silently disabled allowlist enforcement, or flipped anonymous pull, as a side effect
+  of writing something else. An absent field now flows through to the stored column, the same
+  leave-unchanged-on-absent contract the proxy-settings endpoint carries. The upload-cap fields
+  keep their existing meaning — null is their own domain value ("no org-level cap"), so sending
+  null still clears a cap.
+
+- **Every audit write carries its origin, and the read surfaces show it.** Dozens of audit sites —
+  protocol pushes and fetches, settings changes, login flows, token management — dropped
+  `source_ip` or the acting principal's kind on the floor, leaving those rows unattributable, and
+  the rows that did record a source IP lost it again on read: the tenant audit list and the SIEM
+  export never projected the column. Every write path now records both (a compliance gate over
+  every audit call site keeps it that way), and the audit list, activity list, and SIEM export
+  return `source_ip`.
+
+- **The audit and activity search no longer times out on large instances.** A search issues
+  leading-wildcard matches across six columns, which no index can serve, so each keystroke's
+  request read every row in the filtered window. A paged search is now bounded to the newest
+  50,000 rows of the window, and when the bound engages the response reports the total as capped
+  and the UI says so. The CSV export's searches share the same bound and report their truncation
+  through a response header — see "Changed — behavior".
+
+- **`audit_event` rows get the same personal-data horizons as `audit_log`.** The retention sweep
+  now clears `source_ip` and `user_agent` from `audit_event` rows after 90 days
+  (`AUDIT_EVENT_PII_DAYS`), keeping the forensic skeleton, exactly as it already did for
+  `audit_log`. Erasing a user pseudonymizes their retained `audit_event` rows the same way, and
+  hard-deleting a tenant pseudonymizes rather than deletes them — `audit_event.org_id` carries an
+  `ON DELETE SET NULL` foreign key, so the schema already intends those rows to outlive their
+  tenant.
+
+- **An upstream OCI blob fetch is capped at the shared 600 MB response limit.** Every other
+  ecosystem's upstream fetch already enforced the cap; the OCI resolver streamed without one, so a
+  hostile or misconfigured upstream could stream unbounded bytes into cache staging. A declared
+  `Content-Length` over the cap is refused before a byte is read, a chunked response is cut off at
+  the same bound mid-stream, and the staged entry is deleted on refusal so a capped fetch never
+  leaves partial bytes behind for a later request to find. A layer larger than the cap can no
+  longer be proxied — the bound every other ecosystem already had.
+
+- **A multi-layer OCI push is no longer rejected by the push rate limiter.** An image push bursts
+  structurally — the protocol spends three requests per layer, issued concurrently — and the push
+  policy had no queue, so pushing an image with more than a handful of layers failed mid-upload
+  with an empty `toomanyrequests:` error. The policy now queues requests past its per-second
+  ceiling instead of rejecting them (`PUSH_RATE_LIMIT_PERMITS`, `PUSH_RATE_LIMIT_QUEUE`), and the
+  shipped defaults are pinned by tests rather than only ever running under raised test-harness
+  limits.
+
+- **CDN-shaped PyPI download URLs resolve.** pip-tools and poetry pin the
+  `files.pythonhosted.org` URL shape — `/packages/<2 hex>/<2 hex>/<sha256>/<filename>` — into
+  lockfiles, and only the flat `/packages/<filename>` form was served, so installs from such a
+  lockfile through the proxy answered 404. GET and HEAD now serve the multi-segment shape as an
+  alias of the flat route. The embedded digest is compared against the on-record checksum only
+  after the same auth gate every other download path applies, so an unauthenticated caller learns
+  nothing about whether a digest matches; the three hash segments are constrained to exact-length
+  hex at the route, so nothing traversal-shaped reaches the handler.
+
+- **Transparent intercept routes PyPI by path, not only by host.** PyPI is the one ecosystem whose
+  protocol surface is split across unprefixed roots — PEP 503's `/simple/` and the download host's
+  `/packages/` — while the JSON API and twine's upload endpoint genuinely live under `/pypi`. The
+  intercept prepended `/pypi` to every request on a PyPI-routed host regardless of path, which
+  broke the unprefixed surfaces. It now leaves `/simple/` and `/packages/` requests alone and
+  prepends the segment only where the route needs it — chiefly `upload.pypi.org`'s bare-host
+  `/legacy/` upload.
+
+- **A chained Terraform edge can verify a provider its master has not cached yet.** The version
+  document's `zh:` hash — the only fetch-time checksum a downstream node has — was published only
+  for platforms already in the master's cache, so an edge's first fetch of an uncached platform
+  had nothing to verify against. For a registry-protocol upstream, the master now sources the hash
+  from the per-platform `shasum` the registry publishes on its download document; only a
+  mirror-protocol upstream that publishes no hashes of its own still leaves a platform without
+  one.
+
+- **The deprecation/latest-version refresh resolves npm and PyPI upstreams per-org.** The daily
+  refresh read the instance-level seed settings instead of each org's configured upstream
+  registries, so an org pointing at a private or authenticated upstream had its packages checked
+  against the wrong host — or against a default the org had deliberately removed. The refresh now
+  resolves upstreams through the same per-org registry list every other fetch uses, honours its
+  credentials, and skips an (org, ecosystem) with zero configured upstreams outright, since an
+  empty list means proxying is deliberately disabled.
+
+- **Timezone preferences work in the container images, and each org can set a default.** The
+  runtime images shipped no tz database, so resolving any IANA zone failed inside the container
+  and every display-timezone preference silently fell back to UTC; the images now ship `tzdata`,
+  and a compliance test asserts zone resolution inside the built image rather than only on
+  developer machines. Settings → General gains an org default timezone that applies to members
+  without a personal preference, and saving a preference now takes effect immediately — the SPA
+  re-reads the session context after the save instead of showing the old zone until the next full
+  reload.
+
+- **A failed tenant hard-delete can no longer strand personal data beyond recovery.** The erasure
+  spans six relations, and the sweep finds its work by selecting soft-deleted tenants out of
+  `orgs` — but the sequence deleted the `orgs` row first and ran un-transacted, so a failure
+  partway through (a dropped connection, a busy database) removed the only row that could ever
+  list the tenant again and permanently stranded whatever remained: login attempts, banners, and
+  audit rows keyed to a tenant no pass could find. The whole per-tenant erasure now commits as a
+  single transaction, with the `tenant.hard_deleted` audit row inside it — a failure anywhere
+  rolls everything back including the `orgs` row, the tenant stays in the worklist, and the next
+  pass retries cleanly over whatever the previous attempt left.
+
+- **One tenant's unreachable endpoint no longer stalls webhook and Slack delivery for every
+  tenant.** Each channel's delivery ran as a single process-wide queue drained in order, so a
+  subscriber that black-holed connections — accepted, never responded — held the delivery workers
+  for its full retry budget while every other org's events, security alerts included, queued
+  behind it. Delivery is now partitioned into per-org lanes served round-robin, one envelope per
+  org per turn, under a hard per-envelope deadline, so a broken or hostile endpoint costs only its
+  own org's lane and an overflow sheds only the events of the org that created it. The webhook,
+  Slack, and email consecutive-failure counters are also incremented by the database in the same
+  statement that reads them back, rather than read-modify-written in application code, so
+  concurrent failures — one queue per replica on Postgres — cannot under-count and delay the
+  auto-disable and health signals they drive.
+
+- **A failed NuGet symbol-index rebuild no longer wipes a working index.** Rebuilding a version's
+  symbol index is a delete-then-insert by nature, and the two ran as separate statements — a
+  failure between them (a busy database, a dropped connection, a cancelled request) left the
+  version's symbols empty or partial where a complete, working index existed before the rebuild
+  started. The delete and the re-insert now commit as one transaction, so a failed rebuild rolls
+  back to the previous index.
+
+- **A final PyPI release whose local version identifier contains "dev" is not a dev-release.**
+  PEP 440 phase detection fell back to a whole-string substring scan for "dev", so a version like
+  `1.0+ubuntu.dev1` classified as a development release and sorted below every final release.
+  Dev-ness is now read only from the version's own dev segment, and a combined
+  pre-release-and-dev version keeps its alpha/beta rank, so `2.0.0b1.dev1` still orders above
+  `2.0.0a1.dev1`.
+
+- **npm publish with an empty `versions` object answers 422, not 500.** A publish body carrying
+  `"versions": {}` beside an attachment crashed the handler on the empty sequence; it now falls
+  through to the same validation refusal every other malformed publish body receives.
+
+- **The SIEM webhook forwarder no longer buffers the collector's response, and its drops are
+  visible as metrics.** The forwarder only needs the response status code, but it read the whole
+  body — fully controlled by whatever answers at the configured collector URL — into managed
+  memory on every send; it now discards the body unread, matching the webhook and Slack delivery
+  clients. Alongside it, the forwarder's queue-full and retries-exhausted drop counts, which were
+  tracked internally but wired to nothing, are now exported as OTel counters so a lossy SIEM
+  pipeline is observable rather than silent.
+
+- **The syslog SIEM forwarder no longer leaks TLS state on a failed send.** The TLS stream was
+  disposed only at the end of a fully successful send, so every failed handshake or mid-write
+  failure against the collector — an expired certificate, a TLS version mismatch, a peer reset —
+  leaked the stream's TLS session state, a slow leak keyed to exactly the condition that recurs
+  on every retry. Both stream layers are now disposed on every path.
+
+- **Truncating audit User-Agent and package description text cannot split a character.** Both
+  truncations cut at a fixed UTF-16 code-unit index over caller-controlled text, so an
+  astral-plane character (an emoji, for instance) could be positioned to straddle the cut —
+  leaving a lone surrogate that is invalid UTF-16 and does not round-trip through storage or the
+  SIEM and webhook JSON exports. The cut now backs off one unit rather than split a pair.
+
+- **List pages no longer render a response a newer request has superseded.** Five pages — Audit,
+  Packages, Quarantine, Risk, and Vulnerabilities — issued a fresh load on every page, filter, or
+  search change without discarding the in-flight one, so a slower older response could land after
+  a faster newer one and overwrite the table with the previous query's rows. Each load now carries
+  a sequence token, and a response that is no longer the latest is dropped, errors included.
+
+- **Logging out ends the session watcher for good.** The watcher that re-validates the session
+  when a tab regains focus could be resurrected by its own in-flight request: a logout landing
+  while the re-validation's `GET /me` was on the wire let the stale continuation re-arm the expiry
+  timer for a session that no longer exists. The re-validation now drops its result whenever a
+  logout or a newer login happened while it was in flight.
+
+- **Sizes at and above 1024 GB render in TB and PB.** The byte formatter had no unit above GB, so
+  a terabyte-scale storage total rendered as a four-or-more-digit GB figure.
+
 ## [0.5.0] - 2026-08-06
 
 A feature release adding **Terraform providers** as a new ecosystem, served over the Provider

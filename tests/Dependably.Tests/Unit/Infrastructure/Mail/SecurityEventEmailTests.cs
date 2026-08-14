@@ -1,5 +1,6 @@
 using Dependably.Infrastructure.Mail;
 using Dependably.Tests.Infrastructure;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.Logging;
@@ -75,6 +76,11 @@ public sealed class SecurityEventEmailTests
         ["smtp_from_address"] = "noreply@example.com",
         ["smtp_security"] = "none",
     };
+
+    // SecurityEventEmailJob carries no bearer credential (a plain "your password changed"
+    // notice, not a link), so it is unaffected by CredentialMailPolicy and these tests need no
+    // override — an empty config is exactly what production sees with the env var unset.
+    private static IConfiguration EmptyAppConfig() => new ConfigurationBuilder().Build();
 
     // ── Resolve gate ─────────────────────────────────────────────────────────
 
@@ -240,7 +246,7 @@ public sealed class SecurityEventEmailTests
         var clock = TestTime.Frozen();
         var sender = new FakeMailSender();
         var queue = new EmailDeliveryQueue(sender, clock, NullLogger<EmailDeliveryQueue>.Instance);
-        var service = new TransactionalEmailService(queue, BuildInstance([], clock), RealLocalizer(), NullLogger<TransactionalEmailService>.Instance);
+        var service = new TransactionalEmailService(queue, BuildInstance([], clock), EmptyAppConfig(), RealLocalizer(), NullLogger<TransactionalEmailService>.Instance);
 
         using var cts = new CancellationTokenSource();
         _ = queue.StartAsync(cts.Token);
@@ -263,7 +269,7 @@ public sealed class SecurityEventEmailTests
         var sender = new FakeMailSender();
         var queue = new EmailDeliveryQueue(sender, clock, NullLogger<EmailDeliveryQueue>.Instance);
         var service = new TransactionalEmailService(
-            queue, BuildInstance(EnabledConfig("good.example.com"), clock), RealLocalizer(), NullLogger<TransactionalEmailService>.Instance);
+            queue, BuildInstance(EnabledConfig("good.example.com"), clock), EmptyAppConfig(), RealLocalizer(), NullLogger<TransactionalEmailService>.Instance);
 
         using var cts = new CancellationTokenSource();
         _ = queue.StartAsync(cts.Token);
@@ -290,7 +296,7 @@ public sealed class SecurityEventEmailTests
         var sender = new FakeMailSender();
         var queue = new EmailDeliveryQueue(sender, clock, NullLogger<EmailDeliveryQueue>.Instance);
         var service = new TransactionalEmailService(
-            queue, BuildInstance(EnabledConfig("good.example.com"), clock), RealLocalizer(), NullLogger<TransactionalEmailService>.Instance);
+            queue, BuildInstance(EnabledConfig("good.example.com"), clock), EmptyAppConfig(), RealLocalizer(), NullLogger<TransactionalEmailService>.Instance);
 
         using var cts = new CancellationTokenSource();
         _ = queue.StartAsync(cts.Token);
@@ -326,7 +332,7 @@ public sealed class SecurityEventEmailTests
         var sender = new FakeMailSender();
         var queue = new EmailDeliveryQueue(sender, clock, NullLogger<EmailDeliveryQueue>.Instance);
         var service = new TransactionalEmailService(
-            queue, BuildInstance(EnabledConfig("smtp.example.com"), clock), RealLocalizer(), NullLogger<TransactionalEmailService>.Instance);
+            queue, BuildInstance(EnabledConfig("smtp.example.com"), clock), EmptyAppConfig(), RealLocalizer(), NullLogger<TransactionalEmailService>.Instance);
 
         using var cts = new CancellationTokenSource();
         _ = queue.StartAsync(cts.Token);

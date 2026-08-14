@@ -35,9 +35,14 @@ public sealed class PyPiDownloadHandler(
     /// <see cref="IBlobStore.ExistsAsync"/> instead of <see cref="IBlobStore.GetAsync"/>, so no
     /// network stream is opened for S3/Azure-backed stores. Returns 404 on proxy cache-miss
     /// (the client would receive a 404 on GET too until the blob is fetched and cached).
+    /// <paramref name="expectedSha256"/> is optional — set only by the CDN-shaped alias in
+    /// <see cref="HeadPackageByDigestAsync"/> — and is compared to the on-record checksum only
+    /// AFTER the same auth gate every other caller goes through first (see
+    /// <see cref="HeadUploadedPackageAsync"/>/<see cref="HeadProxyCachedPackageAsync"/>), so an
+    /// unauthenticated caller learns nothing about whether a digest matches.
     /// </summary>
     public async Task<IActionResult> HeadPackageAsync(
-        HttpContext httpContext, string orgId, string file, CancellationToken ct)
+        HttpContext httpContext, string orgId, string file, CancellationToken ct, string? expectedSha256 = null)
     {
         if (!PathSafeValidator.ValidateUpstreamSegment(file, "file").IsValid)
         {
@@ -59,23 +64,34 @@ public sealed class PyPiDownloadHandler(
         var fileHit = await versionFiles.FindFileWithVersionAsync(orgId, "pypi", file, ct);
 
         return fileHit is not null
-            ? await HeadUploadedPackageAsync(httpContext, orgId, fileHit.Value.Version, fileHit.Value.File, token, settings, ct)
+            ? await HeadUploadedPackageAsync(httpContext, orgId, fileHit.Value.Version, fileHit.Value.File, token, settings, expectedSha256, ct)
             : await HeadProxyCachedPackageAsync(
-                httpContext, orgId, parsedPurlName!, parsedVersion!, file, token, settings!, ct);
+                httpContext, orgId, parsedPurlName!, parsedVersion!, file, token, settings!, expectedSha256, ct);
     }
 
     // Returns HEAD headers for an uploaded-origin PyPI artifact. When AnonymousPull is
     // disabled, a token is required; when a token is present, ReadMetadata is required.
     // Blob facts (key, size, checksum) come from the requested FILE record; the gate facts
     // (block state, purl) come from its owning version.
+    // Cohesive HEAD serve helper; expectedSha256 is the optional CDN-alias digest check.
+#pragma warning disable S107
     private async Task<IActionResult> HeadUploadedPackageAsync(
         HttpContext httpContext, string orgId, PackageVersion v, PackageVersionFile fileRec,
-        TokenRecord? token, OrgSettings? settings, CancellationToken ct)
+        TokenRecord? token, OrgSettings? settings, string? expectedSha256, CancellationToken ct)
+#pragma warning restore S107
     {
         var authErr = RequireUploadedAuth(httpContext, token, settings);
         if (authErr is not null)
         {
             return authErr;
+        }
+
+        // Digest check runs only after the auth gate above, so a mismatch (and a match) are
+        // both invisible to a caller who hasn't already cleared RequireUploadedAuth.
+        if (expectedSha256 is not null
+            && !string.Equals(fileRec.ChecksumSha256, expectedSha256, StringComparison.OrdinalIgnoreCase))
+        {
+            return new NotFoundResult();
         }
 
         string? srcIp = httpContext.GetNormalizedRemoteIp();
@@ -106,11 +122,11 @@ public sealed class PyPiDownloadHandler(
 
     // Returns HEAD headers for a proxy-cached PyPI artifact from the global plane. Enforces
     // the AnonymousPull gate, then runs the block gate; returns 401/403/404 when denied or absent.
-    // Cohesive HEAD serve helper; all params are required for auth, block-gate, and blob lookup.
+    // Cohesive HEAD serve helper; expectedSha256 is the optional CDN-alias digest check.
 #pragma warning disable S107
     private async Task<IActionResult> HeadProxyCachedPackageAsync(
         HttpContext httpContext, string orgId, string parsedPurlName, string parsedVersion,
-        string file, TokenRecord? token, OrgSettings settings, CancellationToken ct)
+        string file, TokenRecord? token, OrgSettings settings, string? expectedSha256, CancellationToken ct)
 #pragma warning restore S107
     {
         // Proxy cache-hit path: look up via the global plane.
@@ -124,6 +140,14 @@ public sealed class PyPiDownloadHandler(
             orgId, "pypi", parsedPurlName, parsedVersion, file, ct);
 
         if (caFacts is null)
+        {
+            return new NotFoundResult();
+        }
+
+        // Digest check runs only after the AnonymousPull gate above, so a mismatch (and a
+        // match) are both invisible to a caller who hasn't already cleared it.
+        if (expectedSha256 is not null
+            && !string.Equals(caFacts.ContentHash, expectedSha256, StringComparison.OrdinalIgnoreCase))
         {
             return new NotFoundResult();
         }
@@ -168,9 +192,73 @@ public sealed class PyPiDownloadHandler(
         return new OkResult();
     }
 
-    /// <summary>GET /packages/{file} — blob download with proxy cache (tenant-implicit from host)</summary>
+    /// <summary>
+    /// HEAD /packages/{h1}/{h2}/{sha256}/{file} — CDN-shaped alias of <see cref="HeadPackageAsync"/>.
+    /// <see cref="IsConsistentCdnDigest"/> is pure computation on the route segments (touches no
+    /// data, no auth), so it runs before delegation; the digest itself is threaded through as
+    /// <paramref name="sha256"/> and compared only after <see cref="HeadPackageAsync"/>'s own auth
+    /// gate — see <see cref="DownloadPackageByDigestAsync"/> for why that ordering matters.
+    /// </summary>
+    public Task<IActionResult> HeadPackageByDigestAsync(
+        HttpContext httpContext, string orgId, string h1, string h2, string sha256, string file, CancellationToken ct)
+        => !IsConsistentCdnDigest(h1, h2, sha256)
+            ? Task.FromResult<IActionResult>(new NotFoundResult())
+            : HeadPackageAsync(httpContext, orgId, file, ct, sha256);
+
+    /// <summary>
+    /// GET /packages/{h1}/{h2}/{sha256}/{file} — CDN-shaped alias of <see cref="DownloadPackageAsync"/>.
+    /// h1/h2/sha256 never drive a filesystem or blob-store path and are never composed into an
+    /// outbound URL — only <paramref name="file"/> does that, exactly as on the flat route.
+    /// <see cref="IsConsistentCdnDigest"/> is pure computation on the route segments — no data
+    /// access, no auth implication — so it runs here, before delegation. The route's regex
+    /// constraints already reject anything that isn't exactly 2/2/64 hex characters before this
+    /// method is ever invoked; <see cref="IsConsistentCdnDigest"/> repeats the hex/length check in
+    /// application code (defense in depth, independently unit-testable without depending on
+    /// ASP.NET routing behaviour) and additionally requires h1/h2 to actually be sha256's own
+    /// leading four characters — the same decomposition
+    /// <see cref="PyPiProxyFetcher.ResolveProxyUpstreamUrlAsync"/> uses to build the outbound CDN
+    /// URL, so a garbled shard prefix is rejected as not a real CDN URL.
+    /// <para/>
+    /// The digest itself is NOT compared here. It is threaded through as <paramref name="sha256"/>
+    /// into <see cref="DownloadPackageAsync"/>, which runs completely unchanged, and is checked
+    /// against the on-record checksum only at the points that method already has one in hand
+    /// (<see cref="TryServeUploadedPackageAsync"/>, <see cref="TryServeProxyCacheHitAsync"/>) —
+    /// both strictly AFTER that method's own auth gate. A digest peek run before delegation, like
+    /// this method's own <see cref="IsConsistentCdnDigest"/> check, would let an unauthenticated
+    /// caller distinguish "digest matches" (falls through to the auth gate, 401) from "digest does
+    /// not match" (404 immediately) — a pre-auth oracle for cache contents on an instance with
+    /// AnonymousPull disabled. Comparing only past the gate makes the two outcomes identical to
+    /// anyone who hasn't already cleared it. On a genuine cache miss nothing is on record yet, so
+    /// the digest goes unchecked; <see cref="PyPiProxyFetcher"/>'s existing known-checksum
+    /// verification (from the version's stored hash or the upstream simple index's
+    /// <c>#sha256=</c> fragment) still runs on the fetch path unchanged.
+    /// </summary>
+    public Task<IActionResult> DownloadPackageByDigestAsync(
+        HttpContext httpContext, string orgId, string h1, string h2, string sha256, string file, CancellationToken ct)
+        => !IsConsistentCdnDigest(h1, h2, sha256)
+            ? Task.FromResult<IActionResult>(new NotFoundResult())
+            : DownloadPackageAsync(httpContext, orgId, file, ct, sha256);
+
+    // True only when sha256 is a 64-character hex digest and h1/h2 are literally its own leading
+    // four characters — independent of the route's regex constraints, so this rejects a
+    // traversal-shaped or malformed digest segment even if invoked directly. Pure computation on
+    // the route segments only — no data access, so it carries no pre-auth disclosure risk.
+    private static bool IsConsistentCdnDigest(string h1, string h2, string sha256) =>
+        sha256.Length == PyPiConstants.CdnSha256Length
+        && sha256.All(Uri.IsHexDigit)
+        && string.Equals(sha256[..PyPiConstants.CdnPrefixLength], h1, StringComparison.OrdinalIgnoreCase)
+        && string.Equals(sha256[PyPiConstants.CdnSecondSegmentStart..PyPiConstants.CdnSecondSegmentEnd], h2, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// GET /packages/{file} — blob download with proxy cache (tenant-implicit from host).
+    /// <paramref name="expectedSha256"/> is optional — set only by the CDN-shaped alias in
+    /// <see cref="DownloadPackageByDigestAsync"/> — and is compared to the on-record checksum
+    /// only AFTER the same auth gate every other caller goes through first (see
+    /// <see cref="TryServeUploadedPackageAsync"/>/<see cref="TryServeProxyCacheHitAsync"/>), so an
+    /// unauthenticated caller learns nothing about whether a digest matches.
+    /// </summary>
     public async Task<IActionResult> DownloadPackageAsync(
-        HttpContext httpContext, string orgId, string file, CancellationToken ct)
+        HttpContext httpContext, string orgId, string file, CancellationToken ct, string? expectedSha256 = null)
     {
         // The filename flows into upstream URLs (files.pythonhosted.org path, simple-index
         // resolution) — reject traversal-shaped values before any DB / upstream work,
@@ -202,7 +290,7 @@ public sealed class PyPiDownloadHandler(
         if (fileHit is not null)
         {
             var uploadedResult = await TryServeUploadedPackageAsync(
-                httpContext, orgId, fileHit.Value, file, token, settings, sourceIp, ct);
+                httpContext, orgId, fileHit.Value, file, token, settings, sourceIp, expectedSha256, ct);
             if (uploadedResult is not null)
             {
                 return uploadedResult;
@@ -212,7 +300,7 @@ public sealed class PyPiDownloadHandler(
         {
             // No uploaded row. Check the global-plane proxy cache before going to upstream.
             var proxyCacheResult = await TryServeProxyCacheHitAsync(
-                httpContext, orgId, parsedPurlName!, parsedVersion!, file, token, settings!, sourceIp, ct);
+                httpContext, orgId, parsedPurlName!, parsedVersion!, file, token, settings!, sourceIp, expectedSha256, ct);
             if (proxyCacheResult is not null)
             {
                 return proxyCacheResult;
@@ -229,18 +317,26 @@ public sealed class PyPiDownloadHandler(
     // IActionResult (including 401/403 gate denials or a file stream) when the uploaded file
     // record is found and the blob is in the store, or null when the blob is missing (falls
     // through to upstream).
-    // Cohesive uploaded-serve helper; hit tuple + sourceIp + ct each carry distinct roles.
+    // Cohesive uploaded-serve helper; hit tuple + sourceIp + expectedSha256 + ct each carry
+    // distinct roles. expectedSha256 (the CDN-alias digest check) is compared only after
+    // RequireUploadedAuth — see DownloadPackageByDigestAsync for why that ordering matters.
 #pragma warning disable S107
     private async Task<IActionResult?> TryServeUploadedPackageAsync(
         HttpContext httpContext, string orgId,
         (Package Package, PackageVersion Version, PackageVersionFile File) hit, string file,
-        TokenRecord? token, OrgSettings? settings, string? sourceIp, CancellationToken ct)
+        TokenRecord? token, OrgSettings? settings, string? sourceIp, string? expectedSha256, CancellationToken ct)
 #pragma warning restore S107
     {
         var authErr = RequireUploadedAuth(httpContext, token, settings);
         if (authErr is not null)
         {
             return authErr;
+        }
+
+        if (expectedSha256 is not null
+            && !string.Equals(hit.File.ChecksumSha256, expectedSha256, StringComparison.OrdinalIgnoreCase))
+        {
+            return new NotFoundResult();
         }
 
         var v = hit.Version;
@@ -255,10 +351,12 @@ public sealed class PyPiDownloadHandler(
     // (including a claim/block-gate denial or a file stream) when a cache_artifact row exists
     // and the blob is in the store, or null when absent (falls through to upstream).
     // Cohesive proxy-cache serve helper; sourceIp is separate from HttpContext for testability.
+    // expectedSha256 (the CDN-alias digest check) is compared only after the AnonymousPull gate
+    // just below — see DownloadPackageByDigestAsync for why that ordering matters.
 #pragma warning disable S107
     private async Task<IActionResult?> TryServeProxyCacheHitAsync(
         HttpContext httpContext, string orgId, string parsedPurlName, string parsedVersion,
-        string file, TokenRecord? token, OrgSettings settings, string? sourceIp, CancellationToken ct)
+        string file, TokenRecord? token, OrgSettings settings, string? sourceIp, string? expectedSha256, CancellationToken ct)
 #pragma warning restore S107
     {
         // No uploaded row. Check the global-plane proxy cache before going to upstream.
@@ -274,6 +372,12 @@ public sealed class PyPiDownloadHandler(
         if (caFacts is null)
         {
             return null;
+        }
+
+        if (expectedSha256 is not null
+            && !string.Equals(caFacts.ContentHash, expectedSha256, StringComparison.OrdinalIgnoreCase))
+        {
+            return new NotFoundResult();
         }
 
         // Re-check the claim on every cache-hit serve, not just on the miss/upstream-fetch

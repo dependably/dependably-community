@@ -190,6 +190,8 @@ Output that degenerates (a repetition loop, or a runaway that hits the token cap
 
 A single weak model cannot reliably filter its own output — the verify pass tends to rubber-stamp its own family's speculation. So a **deterministic guard** runs in code after both passes: it drops *ungrounded* speculation (a hedged block — *may / might / could / suggests / can lead to* — that cites no `> ` diff line), caps the number of findings, and caps total report length. A hedged block that **does** quote a diff line is kept: the high-value findings (cross-tenant access, missing session revocation) are reasoning-heavy and naturally cautious in wording but still grounded, and the older "drop anything hedged" rule suppressed them along with the noise. A lens whose findings are all filtered out posts a single "no material findings" line, same as a clean review.
 
+A "no material findings" claim from the **first** pass is never posted straight through. The review pass's raw reply is classified into exactly one of three states: a byte-exact match of the persona's declared sentinel (`_No material security findings._` and so on, one per lens) is `clean`; text carrying a finding marker (a `> ` quote, a bullet, a header, a numbered item, or a `Finding/Problem/Issue/Bug` label) is `findings`; anything else — marker-free prose that is not the sentinel — is `ambiguous` and posts as `(unverifiable response)`, the same no-signal treatment as `(bad response)`. This closes a specific hole: an MR diff can instruct the model to reply with unformatted "nothing to see here" prose, which the old marker-only check read as a clean pass with zero verification. A `clean` classification still isn't trusted on the exact-match alone — the sentinel is disclosed in the persona file, so a diff can just as easily instruct the model to echo it back verbatim. It is confirmed by a second, independently-prompted pass over the diff (`ci/prompts/verify.md`'s "Case B") before the report posts as clean; that pass either agrees, surfaces a finding the first pass missed (which then goes through the same self-verify + deterministic-filter pipeline as any other finding), or fails to confirm anything — which also posts as `(unverifiable response)` rather than defaulting to clean. `ci/ai-review-test.sh` (run by the gating `ai-review-script-test` job, `test` stage) pins this state machine with a self-contained regression suite that drives `has_findings`, `classify_response`, `confirm_clean`, and the full report path.
+
 The reviews are **advisory** — `allow_failure: true` and not part of the release gate — so non-deterministic model output never blocks a merge. They run after the `sbom` stage (so the model only reviews an MR that already built and passed tests), are serialized by a shared `resource_group` so a single local model isn't hit concurrently, and run on merge-request pipelines only.
 
 ### Configuration
@@ -239,40 +241,55 @@ therefore sees every **unprotected** CI/CD variable before a human reviews anyth
 | --- | --- | --- | --- | --- |
 | `REGISTRY_URL` | none (not a secret) | no | no | every restore/publish job |
 | `REGISTRY_KEY` | **read / restore only** | **no** (deliberately) | yes | `.private-registry-setup` (npm `_authToken`, NuGet `ClearTextPassword`), `.apk-mirror-setup`, `private-registry-guard`, the `registry_key` BuildKit secret in `publish-image` |
-| `REGISTRY_PUBLISH_KEY` | **`publish:oci`** | **yes** | yes | `publish-image` and `build-ci-tools` — the `docker login` before a push, nothing else |
+| `REGISTRY_PUBLISH_KEY` | **`publish:oci` + `publish:nuget`** | **yes** | yes | `publish-image` and `build-ci-tools` — the `docker login` before an image push; `publish-symbols` — `PUT $REGISTRY_URL/nuget/symbols` |
 
 `REGISTRY_KEY` stays unprotected on purpose: MR pipelines must resolve dependencies through
 the private feed rather than falling back to public registries, and restoring is read-only.
 Leaking it costs read access to the mirror. `REGISTRY_PUBLISH_KEY` is protected, so GitLab
 exposes it only on protected refs — a feature-branch MR pipeline cannot see it even when the
-MR fully controls the job script, and therefore cannot push an image.
+MR fully controls the job script, and therefore cannot push an image or a NuGet symbol
+package.
+
+There is deliberately no third registry credential for the symbol push. `publish-symbols`
+reuses `REGISTRY_PUBLISH_KEY` rather than minting a `NUGET_SYMBOLS_PUBLISH_KEY`, so its
+underlying Dependably token must carry `publish:nuget` in addition to `publish:oci` —
+`NuGetController` gates `PUT /nuget/symbols` on the `publish:nuget` capability, a distinct
+leaf from the image push's `publish:oci` (`Capabilities.Grants` satisfies a request only via
+an exact match or the `publish:*` family wildcard, so a token scoped to `publish:oci` alone
+does not authorize a NuGet push). `$DEP_IMAGE_REGISTRY` and the NuGet feed the symbol push
+targets (`$REGISTRY_URL`) are the same dogfood instance, so one token minted with both leaf
+capabilities on that instance covers both pushes.
 
 **Prerequisite:** `main` and the `v*` tag pattern must both be **protected refs**
 (Settings → Repository → Protected branches / Protected tags). `publish-image` runs on main
 pushes and on `vX.Y.Z` tags; if the tag pattern is not protected, the publish token is not
 exposed on release-tag pipelines.
 
-### Cutover (one manual step, still outstanding)
+### Cutover (complete)
 
-Creating the token needs registry credentials that CI cannot mint for itself, so the YAML
-currently reads `${REGISTRY_PUBLISH_KEY:-$REGISTRY_KEY}` — it falls back to the read token
-and logs a warning when the publish variable is unset, keeping publishing green in the
-meantime. To finish the split:
+The split is fully in force. `REGISTRY_KEY` is scoped **read-only on the registry itself**,
+not merely by convention in the YAML, and `REGISTRY_PUBLISH_KEY` exists as a protected +
+masked variable carrying `publish:oci` and `publish:nuget`. The publish jobs reference it
+with `:?` and no fallback, so a pipeline that cannot see the protected variable fails before
+`docker login` (or before the symbol push's `curl`) rather than attempting a push it has no
+capability for.
 
-1. Mint a token on `$DEP_IMAGE_REGISTRY` carrying **`publish:oci` only** (no read-only
-   scope needed beyond what the push requires).
-2. Add it as project CI/CD variable `REGISTRY_PUBLISH_KEY` with **Protect variable** and
-   **Mask variable** both checked.
-3. Confirm `main` and `v*` are protected refs (above).
-4. Delete the fallback: replace `${REGISTRY_PUBLISH_KEY:-$REGISTRY_KEY}` with
-   `${REGISTRY_PUBLISH_KEY:?REGISTRY_PUBLISH_KEY must be set (protected + masked)}` in both
-   `publish-image` and `build-ci-tools`, and drop the warning block in `publish-image`.
-5. Re-scope `REGISTRY_KEY` on the registry to read-only, so an unprotected pipeline holds a
-   token that physically cannot publish. Verify by the token's capability set in the
-   registry UI — do not test by attempting a push from a scratch branch.
+That combination is what closes the hole: even an MR that rewrites its own `.gitlab-ci.yml`
+to delete the ref guard holds only a token the registry will not accept a write from. The
+guard and the token scope are independent controls, and neither is relied on alone.
 
-Until step 4 lands, an MR pipeline still sees a publish-capable token; steps 1–3 alone do
-not close the issue.
+If you ever need to rotate the publish token:
+
+1. Mint a replacement on `$DEP_IMAGE_REGISTRY` carrying **`publish:oci` and `publish:nuget`
+   only**.
+2. Update the `REGISTRY_PUBLISH_KEY` project CI/CD variable, keeping **Protect variable**
+   and **Mask variable** both checked.
+3. Confirm `main` and `v*` are still protected refs (above) — an unprotected ref pattern
+   silently removes the variable from those pipelines, and the `:?` will fail them loudly.
+
+Never widen `REGISTRY_KEY` back to a write scope to work around a failing publish. Verify a
+token's capability set in the registry UI — do not test by attempting a push from a scratch
+branch.
 
 ---
 
@@ -284,6 +301,7 @@ published onto a staging host and proves it boots there. The release stages run 
 | Stage     | Job                 | Runs on                    | Effect                                                |
 | --------- | ------------------- | -------------------------- | ----------------------------------------------------- |
 | `release` | `publish-image`     | `main` push, `vX.Y.Z` tag  | Multi-arch (amd64+arm64) push to the Dependably registry |
+| `release` | `publish-symbols`   | `main` push, `vX.Y.Z` tag  | Packs + pushes the `.snupkg` per composition root from the PDBs `publish-image` exported |
 | `staging` | `deploy-staging`    | `main` push, `vX.Y.Z` tag  | Pulls that image onto the staging host, waits for healthy |
 | `mirror`  | `release-to-github` | `vX.Y.Z` tag, **manual**   | Mirrors the tag to GitHub once staging is green         |
 
@@ -425,6 +443,8 @@ CI's `publish` job triggers on `v*.*.*` tags, extracts `0.x.y` from the tag, pas
 
 A release tag also publishes two multi-arch (linux/amd64 + linux/arm64) images to the Dependably registry alongside the ghcr.io images, from the GitLab `publish-image` job (a `parallel: matrix` over the two flavors): the full `dependably.northwardlabs.ca/dependably/community` image (built from `Dockerfile`) and the slim, management-plane-free `dependably.northwardlabs.ca/dependably/edge` image (built from `Dockerfile.edge`), each tagged `:0.x.y` and `:latest`.
 
+Neither image carries `.pdb` files — Release builds are `DebugType=portable`, but the `publish-no-symbols` Dockerfile stage strips the compiled PDBs from the publish output that lands in the image, after the `symbols` stage has already exported them from the same compiled layer. The `publish-symbols` job packs those exported PDBs into a `.snupkg` per composition root (`Dependably` for the community image, `Dependably.Edge` for the edge image) and pushes it to the dogfood instance's own NuGet symbol server (`PUT $REGISTRY_URL/nuget/symbols`) at the same version. A debugger resolves a PDB by its SSQP key (`GET /nuget/symbols/{pdb}/{key}/{pdb}`), not by package id, so the symbol package id has no bearing on which running binary it debugs.
+
 `validate-release-tag` requires the tag to be **annotated** (`git tag -a`, not lightweight), its commit to be an **ancestor of `main`**, and its version to match `Directory.Build.props` `<Version>`. Tagging the branch tip before the version-bump MR merges fails the annotated and ancestor-of-main checks.
 
 ### Verifying the stamp
@@ -494,8 +514,9 @@ This table is the canonical reference — other docs (including `CLAUDE.md`) lin
 | `DB_CONNECTION_STRING` | — | Postgres connection string. Required when `DB_PROVIDER=postgres`; ignored for SQLite. |
 | `DEFAULT_ORG_SLUG` | `default` | Slug of the org created on first boot |
 | `DEFAULT_TENANT_SLUG` | — | Preferred spelling of `DEFAULT_ORG_SLUG`; when both are set, `DEFAULT_TENANT_SLUG` takes precedence. |
-| `DEPLOYMENT_MODE` | `single` | Tenancy mode: `single` or `multi`. `multi` requires a non-localhost `BASE_URL` (the host portion is the apex domain). `bound` pins every request to `BOUND_TENANT_SLUG` regardless of host (single-tenant intercept mode). `edge` runs a headless cache-only node whose sole upstream for every ecosystem is one central master (requires `EDGE_MASTER_URL` + `EDGE_MASTER_TOKEN`; collapses to one implicit realm; no admin user is created). |
+| `DEPLOYMENT_MODE` | `single` | Tenancy mode: `single` or `multi`. `multi` requires a non-localhost `BASE_URL` (the host portion is the apex domain). `header` routes each request to the tenant named by `TENANT_HEADER_NAME` (default `X-Dependably-Tenant`), for transparent-intercept deployments where the host belongs to an impersonated public registry and cannot carry the slug; it **requires `TRUSTED_PROXIES`**, because the header is accepted only from a listed socket peer (an unlisted caller resolves to no tenant, so an unset `TRUSTED_PROXIES` serves nothing). `bound` pins every request to `BOUND_TENANT_SLUG` regardless of host (single-tenant intercept mode). `edge` runs a headless cache-only node whose sole upstream for every ecosystem is one central master (requires `EDGE_MASTER_URL` + `EDGE_MASTER_TOKEN`; collapses to one implicit realm; no admin user is created). |
 | `BOUND_TENANT_SLUG` | — | Required when `DEPLOYMENT_MODE=bound`. Every request resolves to this tenant slug; the request host is ignored. |
+| `TENANT_HEADER_NAME` | `X-Dependably-Tenant` | Header carrying the tenant slug when `DEPLOYMENT_MODE=header`. Honoured only on requests whose socket peer is in `TRUSTED_PROXIES` — the header decides which org's artifacts are served, including on anonymous protocol routes, so an unauthenticated caller reaching the app port directly must not be able to name one. |
 | `EDGE_MASTER_URL` | — | Required when `DEPLOYMENT_MODE=edge`. Base URL of the central master dependably instance the edge pulls through to for every ecosystem. First boot seeds one upstream registry row per ecosystem pointing at this URL; a changed value is re-applied on the next restart. The host is admitted through the SSRF guard so an internal/private master over a LAN link is reachable (only this exact host is exempted). Missing in edge mode is a hard startup error. |
 | `EDGE_MASTER_TOKEN` | — | Required when `DEPLOYMENT_MODE=edge`. A reader-scoped service token minted on the master (in the org whose packages this edge serves), presented on every upstream fetch. Stored encrypted at rest in the seeded upstream rows when `DEPENDABLY_MASTER_KEY` is set. Revoking it on the master takes the edge cold-only immediately. Missing in edge mode is a hard startup error. |
 | `EDGE_ACCESS_TOKEN` | — | Optional, `DEPLOYMENT_MODE=edge` only. Pre-shared token that inbound edge clients present to the edge node. When set, it is seeded as a reader-scoped service token in the edge's own DB and anonymous pull is turned off, so clients must authenticate (`Authorization: Bearer <token>`, or Basic for PyPI/NuGet); rotating the value replaces the row on the next restart. When **unset**, the edge accepts anonymous reads (anonymous pull on) and logs a startup warning — intended for trusted networks only. Never logged. |
@@ -514,17 +535,16 @@ This table is the canonical reference — other docs (including `CLAUDE.md`) lin
 | `REDIS_SSL` | `false` | Set `true` to require TLS for the Redis connection. |
 | `REDIS_DATABASE` | `0` | Redis logical database index. |
 | `REDIS_KEY_PREFIX` | `dependably:` | Prefix for all Redis keys written by Dependably. Change when sharing a Redis instance with other applications. |
-| `TRUSTED_PROXIES` | — (fail-closed: forwarded headers ignored) | Comma-separated IPs/CIDRs whose `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Host` headers are trusted (e.g. `10.0.1.0/24,172.18.0.1`). **When unset, all three forwarded headers are ignored** (fail-closed): `Connection.RemoteIpAddress`, `Request.Host`, and `Request.Scheme` reflect the real socket peer. A startup warning is logged. Set this to your reverse proxy's address(es) in any deployment that sits behind a TLS-terminating or IP-forwarding proxy — without it, `X-Forwarded-*` from the proxy are discarded, so `/metrics`/`/version` see the proxy's socket address, HSTS is not emitted, and scheme-dependent redirects may break. **A co-located proxy (same host/docker network, forwarding to Kestrel over loopback) additionally defeats the `/metrics`, `/version`, and management docs/OpenAPI loopback-default IP allowlists** — every caller it forwards appears as `127.0.0.1`, an allowlisted operator; see [Security model](#security-model). Forwarded-header processing walks the whole `X-Forwarded-For` chain to the first untrusted hop, so **every host inside a trusted CIDR is itself a trusted forwarding hop and can present its own forged address as the client-facing source IP** — this matters most for a broad range like a whole VPC CIDR, where every in-VPC client (not just the reverse proxy) gains that power. A `/0` entry is rejected outright at startup; a narrower-but-still-broad entry (wider than `/22` for IPv4, wider than `/64` for IPv6) is not rejected — a large proxy subnet can be a legitimate deployment — but logs a startup warning naming the entry, and the full resolved trusted-network set is logged at `Information` on every boot so the effective configuration is auditable. |
-| `DEPENDABLY_MASTER_KEY` | — (opt-in; secrets stored unencrypted, startup warning) | Operator master key (KEK) that envelope-encrypts the DB-resident secrets — `jwt_secret`, `mfa_encryption_key`, and the DataProtection key ring — at rest. Value is an inline base64-encoded **32-byte** key (AES-256) **or** a path to a file containing one. When set, those secrets are transparently encrypted (`enc:v1:` envelope) and migrated in place on startup; **when unset, they are stored unencrypted** and a startup warning is logged — place the SQLite file / Postgres data directory on an OS-encrypted volume (LUKS/dm-crypt, encrypted EBS) instead. The key lives **outside** the database and must be injected identically into every replica. **Fail-closed:** if encrypted secrets exist but the key is absent (or invalid), the server refuses to start rather than mint new ones. Losing the key is unrecoverable for the encrypted data (`jwt_secret`/DataProtection regenerate at the cost of forced re-login; losing `mfa_encryption_key` forces MFA re-enrollment). Rotation is a manual offline re-wrap. See `docs/adr/0002-envelope-encryption-db-secrets.md`. |
+| `TRUSTED_PROXIES` | — (fail-closed: forwarded headers ignored) | Comma-separated IPs/CIDRs whose `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Host` headers are trusted (e.g. `10.0.1.0/24,172.18.0.1`). **When unset, all three forwarded headers are ignored** (fail-closed): `Connection.RemoteIpAddress`, `Request.Host`, and `Request.Scheme` reflect the real socket peer. A startup warning is logged. Set this to your reverse proxy's address(es) in any deployment that sits behind a TLS-terminating or IP-forwarding proxy — without it, `X-Forwarded-*` from the proxy are discarded, so `/metrics`/`/version` see the proxy's socket address, HSTS is not emitted, and scheme-dependent redirects may break. **A co-located proxy (same host/docker network, forwarding to Kestrel over loopback) additionally defeats the `/metrics`, `/version`, and management docs/OpenAPI loopback-default IP allowlists** — every caller it forwards appears as `127.0.0.1`, an allowlisted operator; see [Security model](#security-model). Forwarded-header processing walks the whole `X-Forwarded-For` chain to the first untrusted hop, so **every host inside a trusted CIDR is itself a trusted forwarding hop and can present its own forged address as the client-facing source IP** — this matters most for a broad range like a whole VPC CIDR, where every in-VPC client (not just the reverse proxy) gains that power. **`DEPLOYMENT_MODE=header` depends on this setting for its tenant routing**: the tenant header (`TENANT_HEADER_NAME`, default `X-Dependably-Tenant`) is honoured only from a socket peer listed here, on the same fail-closed footing as `X-Forwarded-*` — unset means no peer qualifies, every request resolves to no tenant, and a startup warning names it. A `/0` entry is rejected outright at startup; a narrower-but-still-broad entry (wider than `/22` for IPv4, wider than `/64` for IPv6) is not rejected — a large proxy subnet can be a legitimate deployment — but logs a startup warning naming the entry, and the full resolved trusted-network set is logged at `Information` on every boot so the effective configuration is auditable. |
+| `DEPENDABLY_MASTER_KEY` | — (opt-in; secrets stored unencrypted, startup warning) | Operator master key (KEK) that envelope-encrypts the DB-resident secrets — `jwt_secret`, `mfa_encryption_key`, the instance SMTP password (`smtp_password`), the operator Slack webhook URL (`system_slack_webhook_url`), per-org Slack webhook URLs, webhook signing secrets, and the DataProtection key ring — at rest. Value is an inline base64-encoded **32-byte** key (AES-256) **or** a path to a file containing one. When set, those secrets are transparently encrypted (`enc:v1:` envelope) and migrated in place on startup; **when unset, they are stored unencrypted** and a startup warning is logged — place the SQLite file / Postgres data directory on an OS-encrypted volume (LUKS/dm-crypt, encrypted EBS) instead. The key lives **outside** the database and must be injected identically into every replica. **Fail-closed:** if encrypted secrets exist but the key is absent (or invalid), the server refuses to start rather than mint new ones. Losing the key is unrecoverable for the encrypted data (`jwt_secret`/DataProtection regenerate at the cost of forced re-login; losing `mfa_encryption_key` forces MFA re-enrollment). Rotation is a manual offline re-wrap. See `ADR-envelope-encryption-db-secrets`. |
 | `Auth__JwtSigningKeyRefreshSeconds` | `1` | How often each replica re-reads `instance_settings.jwt_secret` to pick up a rotation performed elsewhere (`POST /api/v1/system/jwt-secret/rotate`, apex + `scope=system`). The rotating replica reloads synchronously, so this bounds only how long *other* replicas keep honouring the superseded secret — the single trust window rotation leaves open. `0` re-reads on every validation, closing the window at the cost of a DB round trip per authenticated request. There is no old-key grace period: rotation invalidates every session, including the caller's. |
-| `HOST_ROUTING` | — | Comma-separated `host=ecosystem` pairs that map incoming `Host` headers to an ecosystem prefix (e.g. `registry.npmjs.org=npm,pypi.org=pypi`). When set, requests whose `Host` matches an entry are treated as if the ecosystem path prefix were present, enabling clients that hardcode ecosystem registry hostnames to work without path rewriting. |
-| `TENANT_HEADER_NAME` | `X-Dependably-Tenant` | Header name used by `HeaderTenantResolver` to identify the tenant in reverse-proxy deployments that inject a trusted tenant slug. |
+| `HOST_ROUTING` | — | Comma-separated `host=ecosystem` pairs that map incoming `Host` headers to an ecosystem prefix (e.g. `registry.npmjs.org=npm,pypi.org=pypi`), so clients that hardcode ecosystem registry hostnames reach the right controller without needing the prefix in the request they send. For every ecosystem but PyPI the mapping is a fixed per-host prefix (`/npm`, `/nuget`, `/maven`, `/rpm`, `/v2`) prepended to the path unless it's already there. `pypi` is path-dependent: a request already under `/simple/` or `/packages/` (PyPI's PEP 503 index and download routes, already unprefixed) passes through unchanged, while everything else routed to a `pypi`-mapped host (the legacy JSON API, and twine's bare-host `/legacy/` upload endpoint) gets `/pypi` prepended so it reaches the route that actually exists. |
 | `CLAIM_ENFORCEMENT` | `off` | Set `on` to require packages to carry an upstream-provenance claim before publish is accepted. `off` (default) disables the gate; `on` enforces it on every push handler. |
-| `PUBLISH_NAME_BINDING` | `off` | Set `on` to enforce name-level publish authorization: the first principal to hosted-publish a `(ecosystem, name)` owns it, and a later publish by a different principal (a token bound to a different identity) is refused with 403 unless it holds a grant. Applies to every hosted push path (npm, PyPI, NuGet, Maven, RPM, OCI, Cargo). Ownership is recorded on first publish **regardless** of this flag (so enabling it later has authoritative first-publisher data, and so a deleted internal name never silently reverts to upstream resolution — the dependency-confusion resurrection guard). Default `off` because binding a name to its first post-upgrade publisher would otherwise break orgs that publish one name from several principals (rotated CI tokens, shared packages); enable it once grants are in place. A user token's principal is its owning user; a service token's is the token itself. Grants are currently managed at the data layer (`package_name_grant`); a management API is a planned follow-up. |
+| `PUBLISH_NAME_BINDING` | `off` | Set `on` to enforce name-level publish authorization: the first principal to hosted-publish a `(ecosystem, name)` owns it, and a later publish by a different principal (a token bound to a different identity) is refused with 403 unless it holds a grant. Applies to every hosted push path (npm, PyPI, NuGet, Maven, RPM, OCI, Cargo). Ownership is recorded on first publish **regardless** of this flag (so enabling it later has authoritative first-publisher data, and so a deleted internal name never silently reverts to upstream resolution — the dependency-confusion resurrection guard). Default `off` because binding a name to its first post-upgrade publisher would otherwise break orgs that publish one name from several principals (rotated CI tokens, shared packages); enable it once grants are in place. A user token's principal is its owning user; a service token's is the token itself. Grants are managed through the management API (caller needs `tenant:configure`): `GET /api/v1/name-bindings` lists the org's bound names, `GET`/`POST /api/v1/name-grants` list and create co-publish grants against a bound name, and `DELETE /api/v1/name-grants/{grantId}` revokes one. The surface is API-only — there is no Settings page for grants; use the management docs at `/api/v1/docs/` or direct calls. |
 | `AIR_GAPPED` | `false` | Set `true` (or `1`) to declare the instance air-gapped. Skips all outbound network calls (OSV queries, deprecation refresh, threat-feed, healthcheck pings) and logs a warning if any network-dependent setting is configured. Also see `OSV_MODE=local`. |
 | `DISABLE_BACKGROUND_JOBS` | — | Comma-separated list of background job names to disable without fully air-gapping the instance (e.g. `vuln-scan,deprecation-refresh`). Known names are logged on startup. `AIR_GAPPED=true` disables all background jobs and takes precedence. |
 | `REQUIRE_MFA` | — | Set `true` (or `1`) to enforce MFA enrollment instance-wide. When set, every authenticated user (tenant and system_admin) must complete TOTP enrollment before accessing any API endpoint. Composes with the per-tenant `require_mfa` setting in org_settings: either signal triggers enforcement. |
-| `REQUIRE_SECURE_COOKIES` | — | Set `true` to force the `Secure` flag on the session/MFA/trusted-device cookies unconditionally, regardless of the inbound request's scheme or `BASE_URL`. Without it, `Secure` is set only when the live request is HTTPS or `BASE_URL` declares an https scheme — a plain-HTTP deployment ships the session cookie without `Secure`, letting a MITM capture the session JWT. A startup warning is logged whenever cookies may be issued without `Secure` on a non-HTTPS-declared deployment. Do not set this on local plain-HTTP dev — the browser will refuse to store a `Secure` cookie over `http://`, and login will silently fail to persist a session. |
+| `REQUIRE_SECURE_COOKIES` | — | Set `true` to force the `Secure` flag on the session/MFA/trusted-device cookies unconditionally, regardless of the inbound request's scheme or `BASE_URL`. Without it, `Secure` is set only when the live request is HTTPS, the request carries `X-Forwarded-Proto: https` (read even when `TRUSTED_PROXIES` left the header untrusted — for this decision a forged value only restricts the forger's own cookie), or `BASE_URL` declares an https scheme — a plain-HTTP deployment ships the session cookie without `Secure`, letting a MITM capture the session JWT. A startup warning is logged whenever cookies may be issued without `Secure` on a non-HTTPS-declared deployment. Do not set this on local plain-HTTP dev — the browser will refuse to store a `Secure` cookie over `http://`, and login will silently fail to persist a session. |
 | `TRUSTED_DEVICE_TTL_DAYS` | `30` | Days a "remember this device" MFA cookie remains valid before re-prompting for a TOTP code. |
 | `Mfa__AcceptLegacyRecoveryCodes` | `false` | Set `true` to keep accepting MFA recovery codes stored in the legacy unsalted SHA-256 format. Codes issued before recovery-code hashes became keyed and salted (releases before v0.2.1) are stored as a bare SHA-256 digest over a ~47-bit code space — brute-forceable offline from a database dump, and usable as a second factor against a known password. A legacy digest cannot be rewritten into the keyed form (the code's plaintext is known only while it is being redeemed, at which point it is consumed), so the fallback is **off by default** and affected users regenerate their recovery codes from Settings → Security instead. New installs have no legacy codes and need no opt-in. Set this only to open a temporary migration window on an instance upgraded from a pre-v0.2.1 release; a warning is logged the first time a legacy code is rejected. Users whose codes stop verifying still hold their TOTP authenticator. |
 | `SHUTDOWN_GRACE_PERIOD` | `30` | Seconds the host waits for in-flight requests to drain after SIGTERM before forcefully exiting. Passed to ASP.NET Core's `ShutdownTimeout`. |
@@ -607,7 +627,7 @@ Instance-wide defaults for per-tenant caps.
 | `Rpm__UpstreamMode` | `passthrough` | `passthrough` forwards upstream repodata verbatim and refuses hosted publish (a local package would shadow upstream); `merged` serves a combined `repomd.xml`/`primary.xml.gz` (local ∪ upstream, local shadows on NEVRA collision) and allows hosted publish alongside proxying. **Group (comps) and module (modulemd) metadata limitation**: Dependably does not generate comps or modulemd documents for locally published RPMs — group definitions and module streams are authored independently of packages. In merged mode, upstream group/module entries with content-addressed (hash-prefixed) hrefs are forwarded verbatim; plain-named entries (e.g. `comps.xml.gz` from classic createrepo) are dropped from the merged repomd so no unreachable href is advertised. In local/hosted-only mode, `comps.xml.gz`, `modules.yaml`, and similar requests return 404. `dnf install` works for all published RPMs; `dnf group install` and modular stream installs work only for packages that have definitions in the upstream repo. |
 | `Rpm__VerifyRepomdSignature` | derived | Instance-level override for RPM `repomd.xml` signature verification. When unset, verification is enabled iff the org has at least one RPM trust anchor in `signature_trust_anchor`. Setting `true` with no per-org anchor configured fails every resolution closed. Trust anchors are per-org and managed via Settings → Trust Anchors (or `POST /api/v1/trust-anchors`), not via an env key. |
 | `Rpm__PrimaryMapCacheSizeLimitBytes` | `314572800` (300 MiB) | Size bound, in bytes, for the dedicated in-memory cache of parsed `primary.xml.gz` package maps. Kept separate from the shared metadata cache because a Fedora/EPEL-scale primary map (tens to 100+ MB) would otherwise evict the rest of that cache, or silently fail to insert if it exceeds the shared budget. Size up for a deployment mirroring several large distro repos at once. |
-| `Oci__ManifestTagTtl` / `Oci__TokenCacheDuration` / `Oci__UpstreamHttpTimeout` / `Oci__CatalogEnabled` | 5m / 55m / 30m / off | Instance-level OCI proxy tunings. **Upstream OCI registries are no longer configured here** — they are per-org and managed in Settings → Proxy → Upstream registries (host + repository-prefix routing + auth type), like every other ecosystem. Every org is seeded with Docker Hub and `mcr.microsoft.com` defaults. |
+| `Oci__ManifestTagTtl` / `Oci__TokenCacheDuration` / `Oci__UpstreamHttpTimeout` | 5m / 55m / 30m | Instance-level OCI proxy tunings. **Upstream OCI registries are no longer configured here** — they are per-org and managed in Settings → Proxy → Upstream registries (host + repository-prefix routing + auth type), like every other ecosystem. Every org is seeded with Docker Hub and `mcr.microsoft.com` defaults. |
 | `Apk__Upstream` | `https://dl-cdn.alpinelinux.org/alpine` | Upstream Alpine apk mirror seeded for new orgs. The route is 1:1 with dl-cdn's `{release}/{repo}/{arch}/{file}` layout, so a sed rewrite of `/etc/apk/repositories` is the only client-side change. Per-org registries are managed from Settings → Proxy; this value seeds the initial row. apk is proxy-only (no hosted push, like Go). |
 | `Terraform__Upstream` | `https://registry.terraform.io` | Upstream Terraform provider registry seeded for new orgs. Its **host** is also what admits a provider to the mirror: a provider is addressed by its own source address (`{hostname}/{namespace}/{type}`), and only providers whose hostname matches a configured upstream are served — the request path never becomes the fetch host. Note this registry serves metadata only; archives come from whatever host it names in `download_url` (`releases.hashicorp.com` for HashiCorp's own providers), discovered per version rather than configured. Terraform is proxy-only (no hosted push, like Go and apk), and the client must reach the mirror over **https** — terraform rejects an `http:` mirror while parsing its CLI config. |
 | `Apk__IndexTtl` | `00:01:00` (60s) | TTL (`TimeSpan` format) for the memory-cached passthrough of `APKINDEX.tar.gz` and other index-adjacent files (`.SIGN.RSA.*`, etc). `.apk` package blobs stay TOFU-only (see `Apk__NegativeCacheTtl` note); `APKINDEX.tar.gz` itself is signature-verified server-side — see `Apk__VerifyIndexSignature`. |
@@ -669,7 +689,8 @@ the same on either host, since a pull-through proxy serves the upstream manifest
 | Variable | Default | Description |
 |---|---|---|
 | `GC_SCHEDULE` | `0 3 * * *` | Cron schedule for the retention GC pass (per-org version limits, proxy eviction, activity pruning). |
-| `AUDIT_EVENT_RETENTION_DAYS` | `365` | Delete `audit_event` rows older than this many days. The GC pass enforces this on each run. |
+| `AUDIT_EVENT_PII_DAYS` | `90` | Pseudonymization horizon for `audit_event`: the GC pass clears `source_ip` and `user_agent` on rows older than this while keeping the forensic skeleton (`actor_id`, `event_type`, `payload`, timestamp). Mirrors `AUDIT_LOG_PII_DAYS`. |
+| `AUDIT_EVENT_RETENTION_DAYS` | `365` | Delete `audit_event` rows older than this many days. The GC pass enforces this on each run. Must be ≥ `AUDIT_EVENT_PII_DAYS` to get a pseudonymized window before deletion. |
 | `ACTIVITY_RETENTION_DAYS` | `90` | Instance default for pruning `activity` rows (per-download IP/actor events) when an org's `activity_retention_days` is NULL. A per-org value overrides it; NULL means "use this default", not "retain forever". |
 | `AUDIT_LOG_PII_DAYS` | `90` | Pseudonymization horizon for `audit_log`: the GC pass clears `source_ip` and `detail` (which carry IPs and email/SAML-NameID data) on rows older than this while keeping the forensic skeleton (actor, action, scope, timestamp). |
 | `AUDIT_LOG_RETENTION_DAYS` | `365` | Deletion horizon for `audit_log`: the GC pass deletes rows older than this many days across every scope. Must be ≥ `AUDIT_LOG_PII_DAYS` to get a pseudonymized window before deletion. |
@@ -677,7 +698,7 @@ the same on either host, since a pull-through proxy serves the upstream manifest
 | `AUDIT_DISABLE_USER_AGENT` | `false` | When true, audit events record no `user_agent` at all. A UA string is a browser/device fingerprint with little forensic value beyond "which client", so a deployment that does not want to hold one need not. |
 | `LOGIN_ATTEMPTS_RETENTION_DAYS` | `30` | Delete idle, unlocked `login_attempts` rows older than this many days. The window is far beyond any lockout duration, so an active throttle is never dropped; it bounds the email-hash membership set. |
 | `ACCOUNT_SEND_THROTTLE_RETENTION_DAYS` | `7` | Delete `account_send_throttle` rows whose window started more than this many days ago. A row that old is inert — the next request for that account restarts its window regardless — so the sweep changes no decision; it bounds the pseudonym set the same way `LOGIN_ATTEMPTS_RETENTION_DAYS` does. |
-| `TENANT_HARD_DELETE_GRACE_DAYS` | `30` | Days after a tenant is marked for deletion before its data is permanently removed. During the grace period the deletion can be cancelled. On permanent removal the tenant's `scope='tenant'` `audit_log` rows are erased (no FK cascade covers them). |
+| `TENANT_HARD_DELETE_GRACE_DAYS` | `30` | Days after a tenant is marked for deletion before its data is permanently removed. During the grace period the deletion can be cancelled. On permanent removal the tenant's `scope='tenant'` `audit_log` rows are erased (no FK cascade covers them), and its `audit_event` rows are pseudonymized (`source_ip`/`user_agent` cleared) rather than deleted, since `audit_event.org_id`'s `ON DELETE SET NULL` foreign key means the schema already intends those rows to outlive the tenant. |
 | `TENANT_HARD_DELETE_SCHEDULE` | `0 4 * * *` | Cron schedule for the tenant hard-delete sweep. |
 | `ORPHAN_RECONCILE_SCHEDULE` | `0 4 * * *` | Cron schedule for the orphan-blob reconciliation pass. Lists the `hosted/` prefix in the registry tier and deletes blobs that no metadata row references. The referenced set is the union of every table that can hold a hosted blob key — `package_versions` plus the secondary-file tables (`package_version_files`, `maven_version_files`, `nuget_symbol_index`), whose rows are the sole reference to artefacts such as a Maven `.pom`/sources jar, a PyPI sdist published alongside a wheel, or a NuGet symbols package. Registry tier only: the cache tier is `CacheEvictionService`'s concern, and the `proxy/`, `oci/`, `go/`, `cargo/`, and `apk/` key namespaces fall outside the `hosted/` prefix this sweep walks. Set to a non-parseable value to disable. |
 | `ORPHAN_RECONCILE_GRACE_MINUTES` | `30` | Blobs modified more recently than this many minutes are skipped by the orphan reconciler, protecting in-flight publish operations that have written the blob but not yet committed the metadata row. |
@@ -761,7 +782,22 @@ Per-org outbound webhooks deliver signed JSON payloads to subscriber URLs when p
 | Variable | Default | Description |
 |---|---|---|
 | `WEBHOOK_ALLOW_PRIVATE` | — | When `true`, RFC 1918 addresses (10/8, 172.16/12, 192.168/16) are allowed as webhook endpoint targets — for example, self-hosted receivers on a private network. Loopback, link-local (169.254/16), and cloud-metadata addresses remain blocked regardless. Unset or `false` requires a public IP or hostname. |
-| `WEBHOOK_QUEUE_CAPACITY` | `1024` | In-memory queue depth for outbound webhook deliveries. Events are dropped (with a log warning) when the queue is full. |
+| `WEBHOOK_QUEUE_CAPACITY` | `1024` | In-memory queue depth **per org**. Queuing is partitioned by org, so a backlog sheds only the events of the org that created it (dropped with a log warning); one org filling its queue never costs another org an event. Worst-case in-memory depth is therefore this value times the number of orgs with a simultaneous backlog — lower it on instances with a large tenant count and a small memory budget. |
+| `WEBHOOK_DISPATCH_WORKERS` | `4` | How many orgs' events are delivered concurrently. Each org is served by at most one worker at a time and yields after one event, so service rotates across orgs rather than draining one org's backlog first. |
+| `WEBHOOK_FANOUT_CONCURRENCY` | `8` | Upper bound on how many subscriptions within one event's fan-out are delivered to concurrently. Bounds one org's own fan-out latency without letting it open an unbounded number of outbound connections. |
+| `WEBHOOK_ENVELOPE_BUDGET_SECONDS` | `120` | Hard deadline on one event's whole fan-out, applied on the shutdown drain as well as in normal service. A worker returns to serving other orgs within this bound however the subscriber endpoints behave; a delivery cut off by it is logged as a warning. One subscription's full retry budget is ~96s (4 attempts at the 15s per-attempt HTTP timeout plus 36s of backoff), so the default leaves a legitimately slow subscriber room to finish. Accepted range is 1-3600 seconds; anything else is refused with a startup warning and the default is used. |
+
+Subscriptions are capped at **50 per org** (not configurable): every subscription multiplies the delivery work one event creates, and the per-event budget above bounds how much of it can be attempted. The delivery HTTP client carries a fixed **15-second** per-attempt timeout, also not configurable — it is a safety bound the budget depends on, not a tuning knob.
+
+### Alert Slack delivery
+
+Per-org Slack notifications for freshly-raised alerts (Settings → Integrations). Same partitioned-queue shape as the webhook dispatcher above, for the same reason: the webhook URL is tenant-supplied, so one org's unreachable endpoint must not delay another org's security alerts. The Slack HTTP client carries a fixed **10-second** per-attempt timeout.
+
+| Variable | Default | Description |
+|---|---|---|
+| `ALERT_SLACK_QUEUE_CAPACITY` | `1024` | In-memory queue depth **per org** for outbound Slack alerts. Overflow drops (with a log warning) only that org's own alerts. Worst-case in-memory depth is this value times the number of orgs with a simultaneous backlog. |
+| `ALERT_SLACK_WORKERS` | `4` | How many orgs' alerts are delivered concurrently, served round-robin one alert per org per turn. |
+| `ALERT_SLACK_BUDGET_SECONDS` | `90` | Hard deadline on one alert's delivery including retries, applied on the shutdown drain as well as in normal service, so a worker returns to serving other orgs within this bound. Accepted range is 1-3600 seconds; anything else is refused with a startup warning and the default is used. |
 
 ### Health probes (`/health`, `/ready`)
 
@@ -812,18 +848,97 @@ Silent unless `HEALTHCHECK_PING_URL` is set. When configured, the instance sends
 | `HEALTHCHECK_PING_FAIL_URL` | — | Optional URL to call when the local readiness check fails. |
 | `HEALTHCHECK_PING_SCOPE` | `replica` | `replica` pings on every replica; `leader` restricts pings to the leader node (requires Redis distributed lock). |
 
-### Invite email delivery (SMTP)
+### Email delivery (SMTP)
 
-SMTP is configured entirely in the database — there is no env-var form. Org invite emails
-(and, going forward, alert delivery and test-sends) are sent when the instance SMTP config is
-enabled and configured; when it isn't, the invite link is returned in the API response body for
-manual delivery. On send failure the endpoint falls back to returning the link and logs a
-Warning.
+**SMTP is an instance-level transport. Tenants configure how Dependably *uses* that transport, not
+how mail is transported.** There is one relay per deployment, owned by the operator; a tenant owns
+only whether alert mail is sent and to whom. There is no per-org SMTP configuration.
 
-Configure the relay (host, port, security mode, username/password, from address) from
-**Settings → Instance** in single mode, or the operator apex **System Settings** in multi mode.
-A master key (`DEPENDABLY_MASTER_KEY`, see above) must be configured before the password field
-can be set.
+SMTP is configured entirely in the database — there is no env-var form. Configure the relay (host,
+port, security mode, username/password, from address) from **Settings → Instance settings →
+Instance email (SMTP)** in single mode, or the operator apex **System Settings → Email (SMTP)** in
+multi-tenant mode. A master key (`DEPENDABLY_MASTER_KEY`, see above) must be configured before the
+password field can be set.
+
+Every outgoing message uses that one transport:
+
+| Message | Trigger | When the relay is unconfigured |
+| --- | --- | --- |
+| Org invite | `POST /api/v1/invites` | 200 with the invite link in the response body for manual delivery. A send failure falls back to the same and logs a Warning. |
+| Password reset link | `POST /api/v1/auth/forgot-password` | 202, nothing sent. Deliberately no link-in-response — the reset token must never reach the response body. |
+| Password-changed notice | password reset, self-service change, operator-forced reset | Nothing sent; the request still succeeds. |
+| MFA enabled / disabled notice | MFA setup verify, MFA disable | Nothing sent. |
+| Email-change verification link | `PATCH /api/v1/users/{id}/email` | 202, nothing sent; the pending change expires unredeemed. |
+| Email-changed notice (to the former address) | `POST /api/v1/auth/confirm-email-change` | Nothing sent. |
+| Alert email | quarantine / vulnerability alerts | Queued durably in `email_outbox` and delivered when the relay appears, or retired by a ceiling below. |
+
+**The org invite, password reset, and email-change verification links are live credentials — possessing
+one grants what a stolen password or session cookie would (account control, and for an invite,
+account creation) — so all three are refused over an unencrypted instance transport
+(`security=none`, or any value that is not `starttls`/`ssl`) unless the operator opts in via
+`SMTP_ALLOW_INSECURE_CREDENTIAL_MAIL`.** A refusal is treated exactly like "relay unconfigured" in
+the table above (202/nothing-sent for reset and email-change; the invite link-in-response fallback
+for invites) and logs a Warning naming the security mode. `starttls` counts as encrypted because
+Dependably requests MailKit's mandatory-upgrade mode — the connection fails rather than falling
+back to cleartext if the server does not complete STARTTLS — never the opportunistic mode that
+would downgrade silently. Loopback and other private-range relay hosts are **not** exempted: an
+operator relaying to `127.0.0.1` in cleartext still needs the override. Password-changed, MFA
+enabled/disabled, email-changed, and alert-email notices carry no bearer secret (a plain "this
+happened" notice, not a link) and are unaffected either way.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `SMTP_ALLOW_INSECURE_CREDENTIAL_MAIL` | `false` | When `true`, permits sending the org-invite, password-reset, and email-change-verification links over an unencrypted (`security=none` or unrecognized) instance SMTP transport. Off by default: those messages carry a bearer credential. Mirrors `SIEM_WEBHOOK_ALLOW_INSECURE`'s naming, accepted spellings (`true`/`1`/`yes`), and posture — an instance-level opt-in, not a per-org setting. |
+| `EMAIL_TRANSPORT_BREAKER_FAILURE_THRESHOLD` | `3` | Consecutive instance-SMTP delivery failures before the transport breaker opens and stops attempting sends. The breaker guards the shared relay, so it is instance-level: it suspends attempts for every org rather than disabling any org's email channel, which stays tenant-owned configuration. |
+| `EMAIL_TRANSPORT_BREAKER_INITIAL_COOLDOWN_SECONDS` | `30` | How long the breaker waits before its first probe after opening. Each further failed probe doubles the wait, up to `EMAIL_TRANSPORT_BREAKER_MAX_COOLDOWN_MINUTES`. |
+| `EMAIL_TRANSPORT_BREAKER_MAX_COOLDOWN_MINUTES` | `10` | Ceiling on the breaker's exponential cooldown, so a long relay outage still retries on a bounded interval rather than backing off indefinitely. |
+
+A tenant enables alert email and sets its recipients on **Settings → Integrations → Email**, which
+also shows delivery health and a test-send button. Delivery failure records health but never disables
+the channel: the relay is operator infrastructure shared by every org, so one outage must not become
+a per-tenant configuration failure. (Slack delivery, whose webhook URL *is* tenant-owned, still
+auto-disables after sustained failure.)
+
+#### The alert-email outbox
+
+Alert mail is the one message class that is **persisted before any delivery attempt**. It carries no
+credential and nobody can re-request it, so losing it to a relay outage loses information outright.
+The guarantee is deliberately narrow:
+
+> Alert email is durably persisted until it is delivered, or until an explicit terminal
+> retry/retention policy expires it.
+
+That is not "every message is eventually sent". Every other message class in the table above stays on
+the in-memory path and keeps its fail-silent semantics — a reset link and a verification link are
+live bearer tokens, and persisting a rendered body would put them at rest in the database, where the
+recovery (request another one) is already cheaper than the exposure.
+
+A message ends in exactly one of five states. `pending` and `sending` are the only non-terminal ones;
+`delivered`, `dead_letter` (the message or the configuration is wrong — a permanent SMTP 5xx, an
+invalid recipient, a relay host the SSRF guard refuses) and `expired` (it ran out of attempts, retry
+time, or retention) are terminal, and nothing in the delivery path deletes them. Keeping
+`dead_letter` and `expired` apart is what makes a backlog readable: the first needs the message
+fixed, the second needs the relay fixed sooner.
+
+Failures are classified off MailKit. An SMTP **4xx**, a socket error, a protocol error, or a timeout
+is transient and retries on an exponential backoff (30 s doubling to a 30-minute ceiling). An SMTP
+**5xx**, an unparseable recipient, a refused credential, or an SSRF-blocked relay host is permanent
+and dead-letters without retrying. Anything **unrecognised** is retried like a transient failure but
+bounded by the retry ceiling — so a novel failure degrades into "gives up eventually" rather than
+"dropped immediately".
+
+An unconfigured or disabled relay is not a failed attempt: the worker claims nothing, so no message
+burns retries against a relay nothing dialed. Those rows wait durably until the operator configures
+the transport, or until the retention ceiling retires them.
+
+| Variable | Default | Description |
+|---|---|---|
+| `EMAIL_OUTBOX_MAX_RETRY_HOURS` | `6` | Maximum retry duration. A message that has been retrying this long is retired to `expired` rather than attempted again — an alert delivered three days late can be worse than one never sent. |
+| `EMAIL_OUTBOX_RETENTION_HOURS` | `72` | Maximum queue retention: how long a row may sit in a non-terminal state **at all**, independent of the retry budget. This is the bound that retires mail queued while the relay was never configured, which consumes no attempts and so would never hit the retry ceiling. |
+| `EMAIL_OUTBOX_MAX_ATTEMPTS` | `12` | Retry ceiling in attempts, the third of the three conditions that retire a message to `expired`. |
+| `EMAIL_OUTBOX_MAX_DEPTH` | `10000` | Maximum queue size, counted over non-terminal rows. **Shed policy: refuse the newest.** At the cap an enqueue fails and the refusal is recorded on the alert row's `email_status` and the org's delivery-health columns, so the drop is visible rather than log-only. Evicting the oldest instead is rejected: those rows are nearest their retention ceiling and already survived a restart, so dropping them discards the start of the outage and makes the durability guarantee unstateable. |
+| `EMAIL_OUTBOX_BACKLOG_WARN_DEPTH` | `100` | Backlog depth at which the worker logs a warning naming the depth, the oldest queued message, and the dead-letter/expired counts. Edge-triggered — logged on the crossing and on recovery, not on every poll. |
+| `EMAIL_OUTBOX_TERMINAL_RETENTION_DAYS` | `30` | How long terminal rows are kept for inspection before the retention GC pass deletes them. The only delete path on the table, and the storage limit on the recipient addresses it holds — see [docs/privacy.md](docs/privacy.md). |
 
 ### Metrics endpoint access
 
@@ -855,12 +970,14 @@ All limiters are per-token (download/push) or per-source-IP (login/anonymous/met
 |---|---|---|
 | `DOWNLOAD_RATE_LIMIT_PERMITS` | `1000` | Sliding-window permits per second per token/IP for package downloads. |
 | `DOWNLOAD_RATE_LIMIT_QUEUE` | `500` | Queue depth for the download limiter. Requests that exceed the window are queued up to this depth before returning `429`. |
-| `PUSH_RATE_LIMIT_PERMITS` | `20` | Sliding-window permits per second per token for package publish. Queue depth is `0` (no queuing — burst is rejected immediately). |
+| `PUSH_RATE_LIMIT_PERMITS` | `20` | Sliding-window permits per second per token for package publish. |
+| `PUSH_RATE_LIMIT_QUEUE` | `100` | Queue depth for the push limiter. Requests that exceed the window are queued up to this depth before returning `429`. A publish client bursts structurally — an OCI push spends three requests per layer and runs several layers concurrently — and OCI clients do not honour `Retry-After` on a write, so a rejected request aborts the whole push. Set to `0` only to restore hard rejection. |
 | `LOGIN_RATE_LIMIT_PERMITS` | `10` | Fixed-window permits per minute per IP for the login endpoint. Honoured by both the in-process limiter (standalone) and the Redis-backed limiter (`DEPENDABLY_DEPLOYMENT_MODE=ha`); the window itself (one minute) is not configurable in either mode. |
 | `TOKEN_CREATE_RATE_LIMIT_PERMITS` | `60` | Fixed-window permits per hour per IP for token-creation endpoints. Honoured by both the in-process limiter (standalone) and the Redis-backed limiter (`DEPENDABLY_DEPLOYMENT_MODE=ha`); the window itself (one hour) is not configurable in either mode. |
 | `INVITE_RATE_LIMIT_PERMITS` | `20` | Fixed-window permits per hour per IP for invite and sensitive-config write endpoints (member invites, instance email/Slack config, alert settings). Honoured by both the in-process limiter (standalone) and the Redis-backed limiter (`DEPENDABLY_DEPLOYMENT_MODE=ha`); the window itself (one hour) is not configurable in either mode. |
 | `ANON_RATE_LIMIT_PERMITS` | `120` | Fixed-window permits per minute per IP for unauthenticated probe endpoints (`/health`, `/ready`, `/version`, `/api/v1/bootstrap`, `/api/v1/auth/methods`, `/api/v1/licenses`). |
 | `IMPORT_RATE_LIMIT_PERMITS` | `5` | Sliding-window permits per minute per token for bulk import requests. Queue depth is `0` (burst is rejected immediately). |
+| `RESCAN_RATE_LIMIT_PERMITS` | `20` | Sliding-window permits per minute per caller (token hash → user sub → IP, same precedence as the management default) for the on-demand vulnerability rescan endpoint. The endpoint's own cooldown is per-package, so this bounds a caller fanning out across many distinct packages instead. Queue depth is `0` (burst is rejected immediately). |
 | `MANAGEMENT_RATE_LIMIT_PERMITS` | `300` | Sliding-window permits per minute per principal for authenticated management endpoints (`/api/v1/*`) not covered by a more specific policy. `/api/v1/docs/` is exempt. |
 | `METADATA_RATE_LIMIT_PERMITS` | `500` | Sliding-window permits per second per source IP for metadata GET endpoints (npm packument, PyPI simple index, NuGet registration). |
 | `METADATA_RATE_LIMIT_QUEUE` | `100` | Queue depth for the metadata rate limiter. Short bursts are absorbed; sustained floods return `429` once the queue fills. |
@@ -916,7 +1033,9 @@ Which capabilities a role can grant to a token it mints follows the role→capab
 
 ## Multitenancy
 
-Each org has independent package namespaces, its own member list with roles (`owner`, `admin`, `member`, `auditor`), per-ecosystem upload size limits, optional anonymous pull, and an optional PURL allowlist to restrict proxied packages. `owner` is the only role that holds `tenant:admin`; `auditor` is a read-only role limited to audit-log access.
+Each org has independent package namespaces, its own member list with roles (`owner`, `admin`, `member`, `auditor`), per-ecosystem upload size limits, optional anonymous pull, and an optional PURL allowlist to restrict proxied packages. `owner` is the only role that holds `tenant:admin`, which gates owner-role assignment — inviting an owner, and changing or removing another member's role. `auditor` is a read-only role limited to audit-log access.
+
+In **single mode** the org is the deployment, so instance-wide configuration (`/api/v1/instance/*` — settings, the SMTP transport, `/metrics` access, background-job status) is gated on `tenant:configure` and is therefore available to `admin` as well as `owner`. Those routes do not exist in multi-tenant mode, where instance configuration is a control-plane concern reached through the `system_admin` realm at `/api/v1/system/*`.
 
 Registry URLs are ecosystem-path-only: `/simple/`, `/npm/`, `/nuget/v3/index.json`, `/maven/`, `/rpm/`. Tenancy is host-resolved — in `DEPLOYMENT_MODE=single` (default) the bare host serves the one org; in `DEPLOYMENT_MODE=multi` each org is a subdomain of the apex host (`my-org.apex/simple/` etc.). OCI is at `/v2/` per the Distribution Spec.
 
@@ -1075,6 +1194,12 @@ Full i18n architecture: see [i18n/README.md](i18n/README.md).
 
 See [CLAUDE.md](CLAUDE.md) for a full breakdown of the project structure, key architectural rules, and tech stack decisions.
 
-Architecture decision records live in [docs/adr/](docs/adr/). Key ADRs:
+Architecture decision records live in the spec repo,
+[dependably-community.spec](https://gitlab.northwardlabs.ca/moonlitlabs/dependably-community.spec),
+under `specs/adr/`, alongside the standing architecture specs. Design intent is
+deliberately kept out of this repo: it changes on a different clock from the
+code, and it is indexed for retrieval as one corpus. Key ADRs:
 
-- [0001 — Auth stack: Identity Core hybrid](docs/adr/0001-auth-identity-hybrid.md) — why the auth layer uses Identity Core for MFA/credential primitives but keeps bespoke first-factor login, lockout, JWT sessions, and per-request session invalidation.
+- [ADR-auth-identity-hybrid](https://gitlab.northwardlabs.ca/moonlitlabs/dependably-community.spec/-/blob/main/specs/adr/ADR-auth-identity-hybrid.md) — why the auth layer uses Identity Core for MFA/credential primitives but keeps bespoke first-factor login, lockout, JWT sessions, and per-request session invalidation.
+- [ADR-envelope-encryption-db-secrets](https://gitlab.northwardlabs.ca/moonlitlabs/dependably-community.spec/-/blob/main/specs/adr/ADR-envelope-encryption-db-secrets.md) — envelope-encrypting DB-resident secrets under an operator-held master key.
+- [ADR-terraform-provider-network-mirror](https://gitlab.northwardlabs.ca/moonlitlabs/dependably-community.spec/-/blob/main/specs/adr/ADR-terraform-provider-network-mirror.md) — why Terraform providers are served as a network mirror, not a provider registry.

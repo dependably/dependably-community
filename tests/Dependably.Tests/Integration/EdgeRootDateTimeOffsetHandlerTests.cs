@@ -34,7 +34,7 @@ public sealed class EdgeRootDateTimeOffsetHandlerTests
             orgRecord.Id, "npm", "lodash", "1.0.0", "lodash-1.0.0.tgz",
             Sha256: "abc123", SizeBytes: 4,
             BlobKey: "proxy/abc123/lodash-1.0.0.tgz",
-            UpstreamUrl: "https://upstream.example/lodash-1.0.0.tgz"));
+            UpstreamUrl: "https://upstream.example/lodash-1.0.0.tgz", Origin: CacheAccessOrigin.FirstFetch));
         Assert.NotNull(caId);
 
         await using var conn = await db.OpenAsync();

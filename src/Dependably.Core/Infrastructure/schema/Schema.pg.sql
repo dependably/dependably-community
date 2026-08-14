@@ -147,6 +147,12 @@ CREATE TABLE IF NOT EXISTS data_protection_keys (
     xml           TEXT NOT NULL
 );
 
+-- Emails are stored canonically (trimmed, lowercased) by every writer, which is what makes the
+-- byte-exact UNIQUE below agree with the case-folded lookups (lower(email) = lower(@email)) that
+-- every account resolution uses. The matching case-insensitive unique index
+-- (idx_users_tenant_email_ci) is created by SchemaInitializer rather than declared here: a
+-- database that already holds two rows differing only in case cannot take it, and that has to be
+-- reported and retried on a later boot rather than abort the schema apply.
 -- personal-data: included — the subject's own account row (email, role, login history)
 CREATE TABLE IF NOT EXISTS users (
     id          TEXT PRIMARY KEY,
@@ -550,10 +556,26 @@ CREATE TABLE IF NOT EXISTS tenant_artifact_access (
         CHECK (last_used IS NULL OR last_used ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
     -- Cumulative download count for this tenant. Monotonic; survives activity-log pruning.
     download_count      BIGINT NOT NULL DEFAULT 0,
+    -- Tenant content binding: the artifact bytes THIS tenant fetched for the coordinate. See
+    -- Schema.sql for the full rationale. The three are bound independently and a NULL falls back
+    -- to the shared cache_artifact value for that field alone.
+    content_hash        TEXT,
+    blob_key            TEXT,
+    size_bytes          BIGINT,
     PRIMARY KEY (org_id, cache_artifact_id)
 );
 CREATE INDEX IF NOT EXISTS idx_tenant_artifact_access_artifact
     ON tenant_artifact_access (cache_artifact_id);
+-- idx_tenant_artifact_access_blob_key covers the tenant half of the shared-blob refcount
+-- CacheOrphanBlobDeleter takes before every physical delete; without it each eviction scans the
+-- whole table, and evictions run in a loop. It is NOT declared here. blob_key reaches an existing
+-- database through RunAdditiveMigrationsAsync, which runs AFTER this whole file, so a CREATE INDEX
+-- naming it here resolves against the old table shape on every upgrade boot: Postgres raises
+-- 42703 and crash-loops, and SQLite silently truncates the rest of this file, never creating the
+-- tables declared below. The index is created next to that ALTER instead, in
+-- SchemaInitializer.RunAdditiveMigrationsAsync, which covers fresh installs too because that pass
+-- runs unconditionally. Declaring it here becomes safe only once a shipped release has the column
+-- in this CREATE TABLE block, which is what SchemaSyncComplianceTests checks.
 
 CREATE TABLE IF NOT EXISTS package_version_vulns (
     -- Surrogate PK so cache_artifact-owned rows can exist without a package_versions FK.
@@ -716,8 +738,14 @@ CREATE TABLE IF NOT EXISTS alert (
 CREATE INDEX IF NOT EXISTS idx_alert_org_state ON alert(org_id, state, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_alert_dismissed_by ON alert(dismissed_by);
 
--- Per-org alert toggles, vuln severity floor, and optional Slack/email delivery channels.
--- See Schema.sql for the full rationale.
+-- Per-org alert toggles, vuln severity floor, and optional Slack/email delivery channels. Slack
+-- auto-disables on sustained failure; email does not, because it rides the instance-level SMTP
+-- transport and its failures belong to the operator, not the tenant. email_inherit_instance and
+-- email_smtp_* are retired and unread; they stay declared because releases still in the field read
+-- all seven during a blue-green cutover, their stored values are scrubbed to the inherit-the-
+-- instance-transport shape by the scrub_alert_settings_retired_smtp_transport migration, and they
+-- are dropped once the minimum supported upgrade-from release no longer reads them. See Schema.sql
+-- for the full rationale.
 CREATE TABLE IF NOT EXISTS alert_settings (
     org_id                     TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
     quarantine_alerts_enabled INTEGER NOT NULL DEFAULT 1,
@@ -753,6 +781,83 @@ CREATE TABLE IF NOT EXISTS alert_settings (
     updated_at                 TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
         CHECK (updated_at IS NULL OR updated_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$')
 );
+
+-- Durable outbox for outbound alert mail. A row is persisted before any delivery attempt and
+-- outlives the process, so an SMTP outage longer than one worker's retry budget — or than one
+-- process lifetime — no longer loses the message. The guarantee the table exists to make is
+-- narrow and exact: alert mail is durably persisted until it is delivered, or until an explicit
+-- terminal retry/retention policy expires it. It is not "every message is eventually sent".
+--
+-- state is the lifecycle. 'pending' and 'sending' are the only non-terminal values; 'delivered',
+-- 'dead_letter' and 'expired' are terminal and the delivery path never rewrites them.
+-- 'dead_letter' means the message is bad (a permanent SMTP 5xx, an invalid recipient, a relay
+-- host the SSRF guard refuses); 'expired' means it ran out of attempts or out of retention.
+-- Keeping the two apart is what makes a backlog readable: a dead letter needs the message or the
+-- configuration fixed, an expired row needs the relay fixed sooner.
+--
+-- org_id is NULLABLE on purpose. Alert mail is per-org, but operator-scope (system_admin) mail
+-- has no tenant, so the column carries which plane a row belongs to instead of assuming one. A
+-- NULL org_id row is operator mail and cascades with no tenant. Every row is written and read
+-- through EmailOutboxRepository; the drain and sweep statements are cross-tenant by design and
+-- carry their own xtenant markers.
+--
+-- coalesce_key is the natural burst-dedup key — the alert kind plus the package coordinate —
+-- carried from the first release even though nothing groups on it yet. Backfilling it onto an
+-- existing backlog would be a migration of every row, which is precisely what declaring it now
+-- avoids. It is always grouped with org_id, never keyed on alone.
+--
+-- message_kind discriminates the terminal bookkeeping the delivery worker performs. 'alert'
+-- writes the outcome back to alert.email_status and the org's alert_settings health columns via
+-- correlation_id. 'invite' is declared capacity with no writer yet: invite mail still sends
+-- synchronously, because its caller falls back to showing the link in the response when the
+-- relay is unavailable and that fallback needs a synchronous outcome.
+--
+-- Security-token mail is deliberately absent. A password-reset link and an email-change
+-- verification link are live credentials, and persisting a rendered body would put them at rest
+-- in this table; both stay on the in-memory, fail-silent path, where the recovery is the user
+-- requesting another one.
+-- `recipients` is the org's configured alert-delivery list snapshotted at raise time, not the data
+-- subject's own address, and one row is addressed to several recipients at once — so returning it to
+-- one of them would disclose the others. Storage limitation is discharged instead: terminal rows are
+-- pruned by the retention sweep, non-terminal rows retire at their own ceiling, and the org_id FK
+-- cascades the whole backlog away with its tenant.
+-- personal-data: excluded — queued outbound alert mail; recipients is the org's delivery list, not the subject's own data
+CREATE TABLE IF NOT EXISTS email_outbox (
+    id                TEXT PRIMARY KEY,
+    org_id            TEXT REFERENCES orgs(id) ON DELETE CASCADE,  -- NULL = operator-scope mail
+    message_kind      TEXT NOT NULL DEFAULT 'alert' CHECK (message_kind IN ('alert', 'invite')),
+    coalesce_key      TEXT NOT NULL,   -- burst-dedup key, always read with org_id
+    correlation_id    TEXT,            -- alert.id when message_kind = 'alert'
+    recipients        TEXT NOT NULL,   -- comma-separated, same form as alert_settings.email_recipients
+    subject           TEXT NOT NULL,
+    body              TEXT NOT NULL,
+    occurrence_count  INTEGER NOT NULL DEFAULT 1,  -- raw alerts folded into this row by coalescing
+    state             TEXT NOT NULL DEFAULT 'pending'
+        CHECK (state IN ('pending', 'sending', 'delivered', 'dead_letter', 'expired')),
+    attempts          INTEGER NOT NULL DEFAULT 0,
+    failure_class     TEXT
+        CHECK (failure_class IS NULL OR failure_class IN ('transient', 'permanent', 'unknown')),
+    last_error        TEXT,
+    next_attempt_at   TEXT COLLATE "C" NOT NULL   -- earliest next delivery attempt (exponential backoff)
+        CHECK (next_attempt_at IS NULL OR next_attempt_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    retry_deadline_at TEXT NOT NULL   -- maximum-retry-duration ceiling; past it the row expires
+        CHECK (retry_deadline_at IS NULL OR retry_deadline_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    expires_at        TEXT NOT NULL   -- maximum-retention ceiling, independent of the retry budget
+        CHECK (expires_at IS NULL OR expires_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    lease_expires_at  TEXT            -- 'sending' claim lease; a lapsed lease returns the row to the drain set
+        CHECK (lease_expires_at IS NULL OR lease_expires_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    completed_at      TEXT COLLATE "C"   -- set once, when the row reaches a terminal state
+        CHECK (completed_at IS NULL OR completed_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    created_at        TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
+        CHECK (created_at IS NULL OR created_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$')
+);
+CREATE INDEX IF NOT EXISTS idx_email_outbox_state_next ON email_outbox(state, next_attempt_at);
+CREATE INDEX IF NOT EXISTS idx_email_outbox_state_completed ON email_outbox(state, completed_at);
+CREATE INDEX IF NOT EXISTS idx_email_outbox_org ON email_outbox(org_id);
+-- Burst-coalescing lookup: "is there already a pending row for this (org, coalesce_key)". Carried
+-- from the first release the column existed, since email_outbox has never shipped without it —
+-- there is no backlog to migrate an index onto.
+CREATE INDEX IF NOT EXISTS idx_email_outbox_coalesce ON email_outbox(coalesce_key, org_id);
 
 -- Per-org upstream proxy registries. One ordered list per ecosystem; `position` ascending is
 -- priority (lowest tried first, falling through on miss/unreachable). An ecosystem with zero

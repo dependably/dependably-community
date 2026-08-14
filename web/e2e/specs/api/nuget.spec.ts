@@ -8,6 +8,7 @@ import {
   mintUserToken,
   auth,
   fixturesRoot,
+  toUpdateOrgSettingsRequest,
 } from '../../helpers/api-client.js'
 
 // Real nupkg: tests/Dependably.Tests/Fixtures/packages/nuget/Newtonsoft.Json.13.0.3.nupkg
@@ -131,8 +132,8 @@ test.describe('API: NuGet push/pull/unlist', () => {
     const authed = await loginAsAdmin(baseURL!)
     // NuGet controller reads org-level MaxUploadBytesNuGet only (no instance fallback).
     const current = await (await authed.get('/api/v1/settings')).json()
-    const restore = { ...current, maxUploadBytesNuGet: null }
-    const lowered = { ...current, maxUploadBytesNuGet: 128 }
+    const restore = toUpdateOrgSettingsRequest(current, { maxUploadBytesNuGet: null })
+    const lowered = toUpdateOrgSettingsRequest(current, { maxUploadBytesNuGet: 128 })
     try {
       const setLow = await authed.put('/api/v1/settings', { data: lowered })
       expect([200, 204]).toContain(setLow.status())

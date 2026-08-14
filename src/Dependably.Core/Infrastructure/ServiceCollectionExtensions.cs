@@ -24,7 +24,12 @@ public static class ServiceCollectionExtensions
         this IServiceCollection services, IConfiguration config)
     {
         // Core repositories
-        services.AddSingleton<UserTokenVersionStore>();
+        // The session-validity cache is dropped on a deployment with peer replicas so a
+        // revocation performed on one replica binds on every other one's next request
+        // instead of after its TTL — see SessionRevocationCachePolicy.
+        services.AddSingleton(sp => new UserTokenVersionStore(
+            sp.GetRequiredService<IMetadataStore>(),
+            SessionRevocationCachePolicy.SessionCacheOrNull(sp)));
         services.AddSingleton<OrgRepository>();
         services.AddSingleton<ArtifactInventoryRepository>();
         services.AddSingleton<PackageRepository>();

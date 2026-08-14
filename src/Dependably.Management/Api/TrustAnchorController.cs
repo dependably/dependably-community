@@ -341,6 +341,7 @@ public sealed class TrustAnchorController : OrgScopedControllerBase
 
         await _audit.LogAsync(
             "trust_anchor_added", orgId, GetUserId(),
+            actorKind: ActorKinds.User,
             ecosystem: ecosystem,
             detail: System.Text.Json.JsonSerializer.Serialize(new
             {
@@ -349,7 +350,8 @@ public sealed class TrustAnchorController : OrgScopedControllerBase
                 anchorKind,
                 label,
                 keyId,
-            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return CreatedAtAction(nameof(List), null, entry);
     }
@@ -371,7 +373,9 @@ public sealed class TrustAnchorController : OrgScopedControllerBase
 
         await _audit.LogAsync(
             "trust_anchor_removed", orgId, GetUserId(),
-            detail: System.Text.Json.JsonSerializer.Serialize(new { id }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+            actorKind: ActorKinds.User,
+            detail: System.Text.Json.JsonSerializer.Serialize(new { id }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return NoContent();
     }

@@ -69,9 +69,12 @@ test.describe('API: SIEM', () => {
         expect(res.headers()['content-type']).toMatch(/x-cef/i)
         const text = await res.text()
         // CEF records start with "CEF:" — body may be empty if no events have been logged yet,
-        // but if any line is present it must conform.
+        // but if any line is present it must conform. The one exception is a trailing
+        // `# next_cursor=…` line: SiemController appends it, CEF/syslog-style, when the page
+        // is full and more events remain — this suite's own logins/token mints are enough
+        // volume to reach that page boundary, so the trailer is expected, not an anomaly.
         for (const line of text.split('\n').filter(l => l.length > 0)) {
-          expect(line).toMatch(/^CEF:/)
+          expect(line).toMatch(/^CEF:|^# next_cursor=/)
         }
       } finally {
         await ctx.dispose()

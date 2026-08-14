@@ -102,6 +102,9 @@ public sealed class ActivityWriterHostedService : BackgroundService
                     buffer.Count,
                     Activity.Current?.TraceId.ToString());
                 Observability.DependablyMeter.ActivityWriterDropped.Add(buffer.Count);
+                // Advance flushed so WaitForIdleAsync stays consistent — these records are
+                // gone (best-effort semantics), not pending.
+                Interlocked.Add(ref _flushed, buffer.Count);
                 buffer.Clear();
             }
         }

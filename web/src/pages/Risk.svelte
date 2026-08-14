@@ -39,6 +39,9 @@
   // Operational only: the tile's own number (distinct packages, not versions).
   let packageCount = 0
   let threshold = 0
+  // Request sequence — page/filter/tab changes can fire overlapping loads; a response whose
+  // token no longer matches the latest issued request is stale and must not overwrite newer state.
+  let seq = 0
 
   function sync() {
     writeQuery({ tab: activeTab, eco: filterEco, reason, page, limit }, DEFAULTS)
@@ -50,6 +53,7 @@
   $: reportPageLoad(pageToken, loading)
 
   async function load() {
+    const mine = ++seq
     loading = true
     error = ''
     try {
@@ -57,6 +61,7 @@
       if (filterEco) params.ecosystem = filterEco
       if (activeTab === 'operational') {
         const data = await api.getOperationalRisk(params)
+        if (mine !== seq) return
         items = data.items
         total = data.total
         packageCount = data.packageCount
@@ -64,11 +69,16 @@
       } else {
         if (reason) params.reason = reason
         const data = await api.getLicenseRisk(params)
+        if (mine !== seq) return
         items = data.items
         total = data.total
       }
-    } catch (e) { error = extractErrorMessage(e) }
-    finally { loading = false }
+    } catch (e) {
+      if (mine !== seq) return
+      error = extractErrorMessage(e)
+    } finally {
+      if (mine === seq) loading = false
+    }
   }
 
   // Reload whenever the org resolves or the active tab changes; the filter and paging

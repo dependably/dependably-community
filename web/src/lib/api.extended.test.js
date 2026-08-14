@@ -356,3 +356,36 @@ describe('systemApi — system_admin CRUD', () => {
     expect(JSON.parse(opts.body)).toEqual({ accountStatus: 'active' })
   })
 })
+
+describe('api.updateOrgSettings', () => {
+  // The PUT body is an explicit whitelist, so a field the backend accepts but the client
+  // never forwards is silently unreachable from the UI — with no error anywhere. That is how
+  // defaultTimezone shipped: the column, the DTO, the validation and the audit entry all
+  // existed while Settings > General could not set it.
+  it('forwards defaultTimezone alongside the other tenant fields', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {}))
+    await api.updateOrgSettings({
+      anonymousPull: true,
+      defaultLanguage: 'fr',
+      defaultTimezone: 'America/Toronto',
+      airGapped: false,
+      requireMfa: true,
+    })
+    const [url, opts] = fetchMock.mock.calls[0]
+    expect(opts.method).toBe('PUT')
+    expect(url).toBe('/api/v1/settings')
+    const body = JSON.parse(opts.body)
+    expect(body.defaultTimezone).toBe('America/Toronto')
+    expect(body.defaultLanguage).toBe('fr')
+  })
+
+  // Adversarial twin: without this, the assertion above would still pass if the client
+  // forwarded the caller's object wholesale, which would prove nothing about the whitelist.
+  it('drops keys that are not part of the tenant-settings contract', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {}))
+    await api.updateOrgSettings({ defaultTimezone: 'Europe/Paris', notASetting: 'x' })
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body)
+    expect(body.defaultTimezone).toBe('Europe/Paris')
+    expect(body).not.toHaveProperty('notASetting')
+  })
+})

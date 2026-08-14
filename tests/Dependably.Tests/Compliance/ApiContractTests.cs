@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Net;
 using System.Text.Json;
 using Dependably.Tests.Infrastructure;
@@ -23,6 +24,38 @@ public sealed class ApiContractTests : IClassFixture<DependablyFactory>, IAsyncL
 
     public Task InitializeAsync() => ((IAsyncLifetime)_factory).InitializeAsync();
     public Task DisposeAsync() => Task.CompletedTask;
+
+    [Fact]
+    public async Task OpenApi_OptionalProxySettingsFields_RenderAsPlainNullableScalars()
+    {
+        // UpdateProxySettingsRequest.MinReleaseAgeHours/MaxEpssTolerance are Optional<T> (see
+        // Optional<T> and OptionalSchemaTransformer). The exporter can't reflect through the
+        // type's JsonConverterFactory, so without OptionalSchemaTransformer these would render
+        // as an opaque/empty schema rather than as "an integer or number, possibly null" the way
+        // every other optional field in this document does — a real regression for anyone
+        // generating a client from this document, not just a cosmetic one.
+        string token = await _factory.CreateAdminJwt();
+        using var client = _factory.CreateClientWithBearer(token);
+        var resp = await client.GetAsync("/openapi/management.json");
+        resp.EnsureSuccessStatusCode();
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStreamAsync());
+        var schemas = doc.RootElement.GetProperty("components").GetProperty("schemas");
+
+        AssertPlainNullableScalar(schemas, "OptionalOfint", "integer");
+        AssertPlainNullableScalar(schemas, "OptionalOfdouble", "number");
+
+        static void AssertPlainNullableScalar(JsonElement schemas, string schemaName, string expectedType)
+        {
+            Assert.True(schemas.TryGetProperty(schemaName, out var schema),
+                $"Expected a component schema named '{schemaName}' for Optional<T>'s rewritten shape.");
+            Assert.False(schema.TryGetProperty("properties", out _),
+                $"'{schemaName}' must not expose Optional<T>'s IsPresent/Value struct shape.");
+            Assert.True(schema.TryGetProperty("type", out var type));
+            string?[] types = type.EnumerateArray().Select(t => t.GetString()).ToArray();
+            Assert.Contains(expectedType, types);
+            Assert.Contains("null", types);
+        }
+    }
 
     [Fact]
     public async Task OpenApi_Loads()

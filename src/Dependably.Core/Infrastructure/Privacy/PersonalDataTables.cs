@@ -3,9 +3,10 @@ namespace Dependably.Infrastructure.Privacy;
 /// <summary>
 /// Single source of truth classifying every schema table that carries a personal-data-shaped
 /// column — <c>user_id</c>, <c>actor_id</c>, <c>created_by</c>, <c>decided_by</c>, <c>email</c>,
-/// <c>email_hash</c>, <c>email_snapshot</c>, <c>nameid</c>, <c>source_ip</c>, <c>user_agent</c> —
-/// as either <see cref="Included"/> in a data-subject export (GDPR Art. 15 right of access /
-/// Art. 20 portability) or deliberately <see cref="ExcludedWithReason"/> with a documented reason.
+/// <c>email_hash</c>, <c>email_snapshot</c>, <c>nameid</c>, <c>recipients</c>, <c>source_ip</c>,
+/// <c>user_agent</c> — as either <see cref="Included"/> in a data-subject export (GDPR Art. 15
+/// right of access / Art. 20 portability) or deliberately <see cref="ExcludedWithReason"/> with a
+/// documented reason.
 ///
 /// <para>
 /// Backed by <c>PersonalDataTableClassificationComplianceTests</c>: a new schema table that
@@ -39,6 +40,10 @@ public static class PersonalDataTables
             "email_hash",
             "email_snapshot",
             "nameid",
+            // A stored list of mail recipients. Named exactly, so a delivery-configuration column
+            // like alert_settings.email_recipients (an org setting, edited by an admin) stays out
+            // while a persisted queue of addresses actually about to be mailed is dragged in.
+            "recipients",
             "source_ip",
             "user_agent",
         };
@@ -99,6 +104,13 @@ public static class PersonalDataTables
                 "Org package-name claim history; actor_id is a provenance stamp on an org-owned row.",
             ["install_script_allowlist"] =
                 "Org install-script allowlist config; created_by is a provenance stamp on an org-owned row.",
+            ["email_outbox"] =
+                "Queued outbound alert mail. `recipients` is the org's configured alert-delivery list " +
+                "snapshotted when the alert was raised, not the subject's own address, and one row is " +
+                "addressed to several recipients at once — returning it to one of them would disclose " +
+                "the others. Storage limitation is discharged instead: RetentionService prunes terminal " +
+                "rows past EMAIL_OUTBOX_TERMINAL_RETENTION_DAYS, non-terminal rows expire at their own " +
+                "retention ceiling, and the org_id FK cascades the whole backlog away with its tenant.",
             ["banners"] =
                 "Operator/admin-authored org or instance announcement; created_by is authorship provenance, " +
                 "not the subject's personal data. (The subject's own dismissals ARE exported, via banner_dismissals.)",

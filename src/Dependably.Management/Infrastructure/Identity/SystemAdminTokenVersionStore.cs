@@ -11,10 +11,11 @@ namespace Dependably.Infrastructure.Identity;
 /// rejected once the stored version moves on — the same password-change session-invalidation
 /// mechanism that <see cref="UserTokenVersionStore"/> provides for tenant users.
 ///
-/// Caching mirrors <see cref="UserTokenVersionStore"/>: the version is stable between password
-/// changes, so hits are cached for 60 seconds. A password change bumps the version and calls
-/// <see cref="Invalidate"/>, so the bumping node invalidates immediately; other nodes converge
-/// within one TTL.
+/// Caching mirrors <see cref="UserTokenVersionStore"/> exactly, including the cross-replica
+/// rule: hits are cached for 60 seconds on a deployment that has no peer replicas, and not cached
+/// at all under <c>DEPENDABLY_DEPLOYMENT_MODE=ha</c> (see
+/// <see cref="SessionRevocationCachePolicy"/>), so a bump made on one replica invalidates the
+/// session on every replica's next request rather than after that replica's own TTL.
 ///
 /// Fill and invalidation race: a lookup that reads the DB just before a concurrent version bump
 /// commits would otherwise cache the pre-bump value <em>after</em> <see cref="Invalidate"/> has

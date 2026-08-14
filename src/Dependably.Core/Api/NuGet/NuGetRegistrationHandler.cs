@@ -145,8 +145,20 @@ public sealed class NuGetRegistrationHandler(
                 var resp = await upstream.GetOrFetchMetadataAsync(upstreamUrl, source.AuthorizationHeader, linkedCts.Token);
                 if (resp.IsSuccessStatusCode)
                 {
-                    string rewritten = NuGetRegistrationHelpers.RewriteRegistrationLeafUrls(
+                    string? rewritten = NuGetRegistrationHelpers.RewriteRegistrationLeafUrls(
                         resp.BodyAsString(), normalizedId, baseUrl);
+                    if (rewritten is null)
+                    {
+                        // No usable version on the leaf, so its download URL cannot be pointed at
+                        // this instance. Serving it verbatim would route the client past the
+                        // proxy's verification and gate, so the leaf is refused, not forwarded.
+                        // RenderedCompactJsonFormatter JSON-encodes {Url}.
+                        logger.LogWarning(
+                            "NuGet upstream registration leaf carries no usable version; refusing to "
+                            + "serve its upstream-controlled download URL for {Url}", upstreamUrl);
+                        continue;
+                    }
+
                     return new ContentResult { Content = rewritten, ContentType = "application/json" };
                 }
                 // RenderedCompactJsonFormatter JSON-encodes {Url}.
@@ -450,7 +462,8 @@ public sealed class NuGetRegistrationHandler(
         // the gzip transparently.
         string variant = semVer2 ? "registration5-gz-semver2" : "registration5-semver1";
 
-        var (upstreamJsonResult, upstreamFailures) = await FetchUpstreamRegistrationJsonAsync(orgId, variant, normalizedId, ct);
+        var (upstreamJsonResult, upstreamFailures, upstreamUrls) =
+            await FetchUpstreamRegistrationJsonAsync(orgId, variant, normalizedId, ct);
         string? upstreamJson = upstreamJsonResult;
         if (upstreamJson is not null)
         {
@@ -498,8 +511,9 @@ public sealed class NuGetRegistrationHandler(
             .ToList();
 
         string responseJson = pkg is null || servableLocalVersions.Count == 0
-            ? NuGetRegistrationHelpers.RewriteRegistrationIndexUrls(upstreamJson, normalizedId, baseUrl)
-            : NuGetRegistrationHelpers.MergeLocalIntoUpstreamRegistration(upstreamJson, servableLocalVersions, pkg, id, baseUrl);
+            ? NuGetRegistrationHelpers.RewriteRegistrationIndexUrls(upstreamJson, normalizedId, baseUrl, upstreamUrls)
+            : NuGetRegistrationHelpers.MergeLocalIntoUpstreamRegistration(
+                upstreamJson, servableLocalVersions, pkg, id, baseUrl, upstreamUrls);
 
         return (System.Text.Encoding.UTF8.GetBytes(responseJson), true);
     }
@@ -562,11 +576,15 @@ public sealed class NuGetRegistrationHandler(
     // absent (404/410)" outcome from "at least one upstream failed non-cleanly" — the caller
     // decides whether that failure must surface as an UpstreamFetchFailedException, since only
     // it knows whether a local fallback exists.
-    private async Task<(string? Json, UpstreamMetadataFailureTracker Failures)> FetchUpstreamRegistrationJsonAsync(
+    private async Task<(string? Json, UpstreamMetadataFailureTracker Failures, IReadOnlyCollection<string> UpstreamUrls)>
+        FetchUpstreamRegistrationJsonAsync(
         string orgId, string variant, string normalizedId, CancellationToken ct)
     {
         var failures = new UpstreamMetadataFailureTracker();
         var bases = await registries.ResolveAsync(orgId, "nuget", ct);
+        // The same resolved set governs the host-pin applied to whatever URLs survive the rewrite,
+        // so a configuration change mid-request cannot widen the pin past what was fetched.
+        var upstreamUrls = bases.Select(b => b.Url).ToList();
         foreach (var source in bases)
         {
             string upstreamUrl = $"{source.Url}/{variant}/{normalizedId}/index.json";
@@ -578,7 +596,7 @@ public sealed class NuGetRegistrationHandler(
                 var resp = await upstream.GetOrFetchMetadataAsync(upstreamUrl, source.AuthorizationHeader, linkedCts.Token);
                 if (resp.IsSuccessStatusCode)
                 {
-                    return (resp.BodyAsString(), failures);
+                    return (resp.BodyAsString(), failures, upstreamUrls);
                 }
                 failures.RecordHttpStatus(upstreamUrl, resp.StatusCode, source.AuthorizationHeader);
                 DependablyMeter.NuGetRegistrationUpstreamFailures.Add(1,
@@ -606,7 +624,7 @@ public sealed class NuGetRegistrationHandler(
                 logger.LogWarning(ex, "NuGet upstream registration fetch threw for {Url}", upstreamUrl);
             }
         }
-        return (null, failures);
+        return (null, failures, upstreamUrls);
     }
 
     // Returns (settings, token) when the caller is authorized to read NuGet packages from this org,

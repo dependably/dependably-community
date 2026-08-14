@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Xml;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Saml;
 using Dependably.Security;
 using ITfoxtec.Identity.Saml2;
 using ITfoxtec.Identity.Saml2.MvcCore;
@@ -323,7 +324,9 @@ public sealed class SamlController : ControllerBase
             claimsDict.Insert(0, new { type = Dependably.Infrastructure.Saml.SamlTestClaimTypes.NameId, values = new[] { nameId } });
             string claimsJson = System.Text.Json.JsonSerializer.Serialize(claimsDict);
 
-            await _login.RecordSamlTestAsync(tenant.TenantId!, cfg!.IdpEntityId!, nameId, email, testActorId, ct);
+            await _login.RecordSamlTestAsync(
+                tenant.TenantId!, cfg!.IdpEntityId!, nameId, email, testActorId,
+                sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
             await _samlConfig.RecordTestSuccessAsync(tenant.TenantId!, email ?? "", claimsJson, ct);
             return RedirectToTestResult();
         }
@@ -480,6 +483,21 @@ public sealed class SamlController : ControllerBase
                 return (null, SamlFailure(isTest, "idp_rejected", authnResponse.Status.ToString(), StatusCodes.Status401Unauthorized,
                     realProblemDetail: $"IdP rejected the request: {authnResponse.Status}"));
             }
+            // Explicit, fail-closed signature precondition, checked before Unbind and stated in
+            // the SP's own code rather than left to the library's default — see
+            // SamlSignaturePolicy for why no Saml2Configuration switch expresses it. Unbind below
+            // is what verifies the signature cryptographically against the pinned IdP
+            // certificate; this only refuses a response that carries no signature at all, so the
+            // weaker half of the requirement is ours and cannot be relaxed by a dependency bump.
+            if (!SamlSignaturePolicy.HasXmlSignature(authnResponse.XmlDocument))
+            {
+                _logger.LogWarning(
+                    "SAML response from IdP {IdpEntityId} carries no XML signature; refused before validation.",
+                    cfg.IdpEntityId);
+                return (null, SamlFailure(isTest, "unsigned_response", "SAML response validation failed.",
+                    StatusCodes.Status401Unauthorized, realProblemDetail: "SAML response validation failed."));
+            }
+
             binding.Unbind(Request.ToGenericHttpRequest(), authnResponse);
             return (authnResponse, null);
         }

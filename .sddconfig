@@ -1,0 +1,33 @@
+# Spec-driven development — project configuration. Commit this.
+#
+# Everything here is a fact about the PROJECT and is the same for everyone who
+# works on it, which is what makes the file safe to review, share, and mirror
+# publicly.
+#
+# Your own settings — the RAG endpoint you query, the MCP server registered
+# against it, your token, and where you clone the spec repo from — are not
+# project facts and are not in this file. They live in `~/.config/sdd/config`,
+# keyed by `scm.project` below, written by `sdd init` and never committed.
+#
+# No credentials here, ever. This file is committed and mirrored, so a token in
+# it is a published token.
+
+scm:
+  # gitlab | github. GitLab is the tested path: skills use this to pick
+  # terminology (MR vs PR, iid vs number) and which forge MCP to look for.
+  # Any other value and a skill will say the path is untested rather than
+  # quietly behave as if it were GitLab.
+  type: gitlab
+
+  # Path of THIS source repo on the forge. Also the key your developer settings
+  # are filed under in ~/.config/sdd/config, so it must stay the stable SCM
+  # identity — renaming the project on the forge means re-running `sdd init`.
+  project: moonlitlabs/dependably-community
+
+spec_repo:
+  # Where finalised specs are committed and what the RAG indexes. The corpus
+  # that documents this project is a project fact; if you need a different
+  # clone URL for it (ssh rather than https), set spec_repo_url in your own
+  # config instead of editing this line.
+  url: https://gitlab.northwardlabs.ca/moonlitlabs/dependably-community.spec.git
+

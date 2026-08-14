@@ -93,6 +93,27 @@ public sealed class OrphanBlobReconcilerService : ScheduledBackgroundService
         // deleted) blob to the next pass rather than double-deleting.
         var referenced = await LoadReferencedKeysAsync(ct);
 
+        var (orphansDeleted, bytesFreed, deletionFailures) =
+            await SweepOrphansAsync(referenced, cutoff, ct);
+
+        if (orphansDeleted > 0 || deletionFailures > 0)
+        {
+            _logger.LogInformation(
+                "Orphan reconciliation pass done (orphansDeleted={Deleted}, bytesFreed={Freed}, deletionFailures={Failed}, gracedMinutes={Grace}).",
+                orphansDeleted, bytesFreed, deletionFailures, graceMinutes);
+        }
+        return new ReconcileSummary(orphansDeleted, bytesFreed, deletionFailures);
+    }
+
+    /// <summary>
+    /// Walks the hosted registry tier once and deletes every blob that is neither referenced nor
+    /// inside the grace window, returning the pass tallies. A cancelled delete ends the sweep
+    /// rather than counting a retry: the pass is stopping, either for host shutdown or because a
+    /// lost leader lease is handing the sweep to another replica.
+    /// </summary>
+    private async Task<ReconcileSummary> SweepOrphansAsync(
+        HashSet<string> referenced, DateTimeOffset cutoff, CancellationToken ct)
+    {
         long orphansDeleted = 0;
         long bytesFreed = 0;
         long deletionFailures = 0;
@@ -113,8 +134,6 @@ public sealed class OrphanBlobReconcilerService : ScheduledBackgroundService
             var outcome = await TryDeleteOrphanAsync(registry, blob, ct);
             if (outcome == OrphanDeleteOutcome.Cancelled)
             {
-                // The pass is stopping (host shutdown, or a lost leader lease handing the sweep
-                // to another replica): end the sweep rather than count a retry.
                 break;
             }
 
@@ -129,12 +148,6 @@ public sealed class OrphanBlobReconcilerService : ScheduledBackgroundService
             }
         }
 
-        if (orphansDeleted > 0 || deletionFailures > 0)
-        {
-            _logger.LogInformation(
-                "Orphan reconciliation pass done (orphansDeleted={Deleted}, bytesFreed={Freed}, deletionFailures={Failed}, gracedMinutes={Grace}).",
-                orphansDeleted, bytesFreed, deletionFailures, graceMinutes);
-        }
         return new ReconcileSummary(orphansDeleted, bytesFreed, deletionFailures);
     }
 

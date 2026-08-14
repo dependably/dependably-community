@@ -35,6 +35,19 @@ public readonly record struct InstallScriptResult(bool HasScript, string? Kind)
 /// </summary>
 public static class ScriptDetectionService
 {
+    /// <summary>
+    /// Ecosystems this service can compute an install-script verdict for at all. Every other
+    /// ecosystem returns <see cref="InstallScriptResult.None"/> unconditionally below — not
+    /// because no evidence exists, but because the concept has no meaning there (a Go module
+    /// <c>.zip</c> has no server-run install/lifecycle-script equivalent, so there is nothing an
+    /// unknown verdict could be standing in for). Exposed so callers outside script detection
+    /// (the proxy content-binding block gate) can tell "never computed for this ecosystem" apart
+    /// from "computed elsewhere but not on this tenant's own bytes" — forcing an
+    /// unknown-on-divergence verdict is only meaningful within this set.
+    /// </summary>
+    public static readonly IReadOnlySet<string> SupportedEcosystems =
+        new HashSet<string>(StringComparer.Ordinal) { "npm", "pypi", "nuget", "rpm" };
+
     // Maximum zip entries inspected when scanning a NuGet .nupkg. nupkgs are a few hundred
     // entries at most; this caps the per-entry name scan for a crafted package.
     private const int MaxZipEntries = 100_000;
@@ -57,7 +70,7 @@ public static class ScriptDetectionService
     public static async Task<InstallScriptResult> DetectAsync(
         string ecosystem, string filename, Stream artefact, CancellationToken ct = default)
     {
-        if (ecosystem is not ("npm" or "pypi" or "nuget" or "rpm"))
+        if (!SupportedEcosystems.Contains(ecosystem))
         {
             return InstallScriptResult.None;
         }

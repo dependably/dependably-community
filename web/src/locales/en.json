@@ -44,7 +44,9 @@
       "title": "Alerts",
       "loading": "Loading alerts…",
       "empty": "No active alerts.",
-      "close": "Close"
+      "dismiss": "Dismiss",
+      "dismissAll": "Dismiss all",
+      "dismissingAll": "Dismissing…"
     }
   },
   "common": {
@@ -438,6 +440,7 @@
     "system": "system",
     "anonymous": "anonymous",
     "empty": "No activity",
+    "emptySearchCapped": "No matches in the most recent activity. Older events were not searched — filter by event type to reach further back, or export to CSV to search all of them.",
     "window": {
       "label": "Time window",
       "all": "All time",
@@ -527,7 +530,8 @@
       "ssrf_blocked": "SSRF blocked",
       "checksum_failure": "Upstream checksum mismatch"
     },
-    "empty": "No audit events"
+    "empty": "No audit events",
+    "emptySearchCapped": "No matches in the most recent audit events. Older events were not searched — filter by action to reach further back, or export to CSV to search all of them."
   },
   "tokenScopes": {
     "pull": "pull only",
@@ -660,10 +664,7 @@
       "vulnEnabled": "Alert on vulnerabilities",
       "minSeverity": "Minimum vulnerability severity",
       "minSeverityHint": "Only advisories at or above this severity raise an alert. Unscored advisories never alert.",
-      "emailEnabled": "Send alerts by email",
-      "emailRecipients": "Recipients",
-      "emailRecipientsHint": "Comma-separated email addresses. Empty means nothing sends. These addresses receive admin alert emails.",
-      "pointer": "Delivery transports (webhooks, Slack, and the email SMTP server) are configured on the Integrations tab."
+      "pointer": "Delivery channels — email, Slack and webhooks — are configured on the Integrations tab."
     },
     "integrations": {
       "title": "Integrations",
@@ -673,6 +674,22 @@
         "webhooks": "Webhooks",
         "slack": "Slack",
         "email": "Email"
+      },
+      "email": {
+        "enabled": "Send alerts by email",
+        "recipients": "Recipients",
+        "recipientsHint": "Comma-separated email addresses. Empty means nothing sends. These addresses receive admin alert emails.",
+        "mailServerConfigured": "Mail server ready",
+        "mailServerNotConfigured": "No mail server",
+        "testSend": "Send test email",
+        "testOk": "Test email sent.",
+        "testFail": "Test email failed.",
+        "testHint": "Sends to the recipients above, over the instance mail server.",
+        "lastStatus": "Last email delivery: {status}",
+        "disabledOff": "Email alerts are turned off — nothing will send.",
+        "disabledRecipients": "Email alerts are on but no recipients are configured — nothing will send.",
+        "disabledInstance": "Email alerts are on, but the instance mail server isn't configured — nothing will send. Contact your operator.",
+        "transportPointer": "The mail server itself is instance-wide and is configured by your operator."
       },
       "slack": {
         "enabled": "Send alerts to Slack",
@@ -685,35 +702,6 @@
         "testSend": "Send test message",
         "testOk": "Test message sent.",
         "testFail": "Test message failed."
-      },
-      "email": {
-        "section": "Email",
-        "hint": "SMTP transport for admin alert emails — the instance's or your own. Turn email alerts on and choose recipients on the Alerts tab.",
-        "inheritInstance": "Use the instance's SMTP transport",
-        "inheritHint": "Uncheck to configure your own SMTP server instead.",
-        "instanceConfigured": "Instance SMTP configured",
-        "instanceNotConfigured": "Instance SMTP not configured",
-        "host": "SMTP host",
-        "port": "Port",
-        "security": "Security",
-        "securityStarttls": "STARTTLS",
-        "securitySsl": "SSL/TLS",
-        "securityNone": "None",
-        "username": "Username",
-        "password": "Password",
-        "passwordSetHint": "SMTP account password. Requires DEPENDABLY_MASTER_KEY to store.",
-        "passwordRotateHint": "Enter a new value to rotate the password. Leave blank to keep the current one.",
-        "cleartextCredentials": "Security is None and a username and password are set, so the SMTP AUTH exchange is sent unencrypted and anyone on the network path can read these credentials. Use STARTTLS or SSL/TLS, or clear the username and password if the relay does not require authentication.",
-        "from": "From address",
-        "testSend": "Send test email",
-        "testOk": "Test email sent.",
-        "testFail": "Test email failed.",
-        "testHint": "Sends to the recipients configured on the Alerts tab.",
-        "disabledPointer": "Email alerts are turned off — enable them on the Alerts tab.",
-        "effectivelyDisabledRecipients": "Email alerts are on but no recipients are configured on the Alerts tab — nothing will send.",
-        "effectivelyDisabledInstance": "Email alerts are on but the instance SMTP transport isn't configured — nothing will send.",
-        "effectivelyDisabledOwnTransport": "Email alerts are on but your own SMTP transport is incomplete — nothing will send.",
-        "lastStatus": "Last email delivery: {status}"
       }
     },
     "banners": {
@@ -759,6 +747,21 @@
       "testOk": "Test email sent to the from address.",
       "testFail": "Test email failed.",
       "masterKeyHint": "DEPENDABLY_MASTER_KEY must be configured before a password can be stored."
+    },
+    "relayHealth": {
+      "title": "SMTP relay health",
+      "hint": "Aggregate delivery health of the shared SMTP relay across every tenant, plus the durable alert-email queue's backlog.",
+      "statusHealthy": "Healthy",
+      "statusUnhealthy": "Unhealthy",
+      "affectedTenants": "Affected tenants",
+      "consecutiveFailures": "Consecutive failures",
+      "firstFailure": "First failure",
+      "backlogDepth": "Backlog depth",
+      "oldestQueued": "Oldest queued",
+      "deadLettered": "Dead-lettered",
+      "expired": "Expired",
+      "refresh": "Refresh",
+      "none": "—"
     },
     "auth": {
       "methodsTitle": "Sign-in methods",
@@ -915,6 +918,8 @@
       "anonymousPull": "Anonymous pull",
       "defaultLanguage": "Default language",
       "defaultLanguageHint": "New users in this tenant start with this language. Each user can override it in their profile.",
+      "defaultTimezone": "Default timezone",
+      "defaultTimezoneHint": "New users in this tenant see timestamps in this zone. Each user can override it in their profile. Stored times are always UTC.",
       "allowVersionOverwrite": "Allow version overwrite",
       "allowVersionOverwriteHint": "When off, publishing a duplicate (name, version) is rejected. Operators must delete the existing version first.",
       "allowVersionOverwriteWarning": "Enabling this lets a publish replace an existing version's bytes. The change is audited (package.replace records both hashes) but the supply-chain implications are real — packages your developers already pulled may have different contents on a refetch. Toggling this setting is itself audited.",
@@ -1582,6 +1587,8 @@
       "timezoneTitle": "Timezone",
       "timezoneHelp": "Times are shown in this zone. Organization default: {timezone}.",
       "timezoneInherit": "Use organization default ({timezone})",
+      "timezoneHelpSystemFallback": "How timestamps are rendered in the operator console. Stored times are always UTC.",
+      "timezoneInheritSystem": "Use instance default (UTC)",
       "timezoneError": "Could not save timezone. Try again."
     },
     "theme": {

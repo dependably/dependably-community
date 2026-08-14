@@ -227,8 +227,8 @@ describe('endpoint contract', () => {
     ['getInstanceEmailConfig', () => api.getInstanceEmailConfig(), 'GET', '/api/v1/instance/email-config'],
     ['updateInstanceEmailConfig', () => api.updateInstanceEmailConfig({}), 'PUT', '/api/v1/instance/email-config'],
     ['testInstanceEmail', () => api.testInstanceEmail(), 'POST', '/api/v1/instance/email-config/test'],
+    ['getInstanceEmailHealth', () => api.getInstanceEmailHealth(), 'GET', '/api/v1/instance/email-health'],
     ['updateAlertSettings', () => api.updateAlertSettings({ emailEnabled: true }), 'PUT', '/api/v1/alert-settings'],
-    ['updateAlertEmail', () => api.updateAlertEmail({ emailInheritInstance: true }), 'PUT', '/api/v1/alert-settings/email'],
     ['testAlertEmail', () => api.testAlertEmail(), 'POST', '/api/v1/alert-settings/email/test'],
   ]
 
@@ -264,6 +264,7 @@ describe('systemApi contract', () => {
     ['getEmailConfig', (s) => s.getEmailConfig(), 'GET', '/api/v1/system/email-config'],
     ['updateEmailConfig', (s) => s.updateEmailConfig({}), 'PUT', '/api/v1/system/email-config'],
     ['testEmailConfig', (s) => s.testEmailConfig(), 'POST', '/api/v1/system/email-config/test'],
+    ['getEmailHealth', (s) => s.getEmailHealth(), 'GET', '/api/v1/system/email-health'],
   ]
 
   it.each(systemCases)('%s — %s %s', async (_label, invoke, expectedMethod, expectedPathFragment) => {

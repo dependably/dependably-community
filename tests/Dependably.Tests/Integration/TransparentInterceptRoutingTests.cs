@@ -79,10 +79,11 @@ public sealed class TransparentInterceptRoutingTests
                     .GetService(typeof(Dependably.Infrastructure.HostEcosystemMap))!;
 
                 Assert.False(map.IsEmpty);
-                Assert.Equal("/npm", map.PrefixForHost("registry.npmjs.org"));
-                Assert.Equal("/pypi", map.PrefixForHost("pypi.org"));
-                Assert.Equal("/nuget", map.PrefixForHost("api.nuget.org"));
-                Assert.Null(map.PrefixForHost("dependably.example.com"));
+                Assert.Equal("/npm", map.PrefixForHost("registry.npmjs.org", "/lodash"));
+                Assert.Equal(string.Empty, map.PrefixForHost("pypi.org", "/simple/lodash/"));
+                Assert.Equal("/pypi", map.PrefixForHost("pypi.org", "/legacy/"));
+                Assert.Equal("/nuget", map.PrefixForHost("api.nuget.org", "/v3/index.json"));
+                Assert.Null(map.PrefixForHost("dependably.example.com", "/health"));
                 return Task.CompletedTask;
             });
     }

@@ -68,7 +68,7 @@ export const formatNumber = derived(locale, $locale => (n) =>
 
 export const formatBytes = derived(locale, $locale => (n) => {
   if (!n || n === 0) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB']
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
   const i = Math.min(Math.floor(Math.log(n) / Math.log(1024)), units.length - 1)
   const value = n / Math.pow(1024, i)
   return new Intl.NumberFormat($locale || 'en', { maximumFractionDigits: 1 }).format(value) + ' ' + units[i]

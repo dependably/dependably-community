@@ -71,7 +71,11 @@ public sealed class WebhookSiemForwarder : ISiemForwarder
             req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _bearer);
         }
 
-        using var resp = await _http.SendAsync(req, ct);
+        // ResponseHeadersRead: the forwarder only needs the status code, so the response body —
+        // fully attacker-controlled by whatever answers at SIEM_WEBHOOK_URL — is never buffered
+        // into managed memory. Mirrors WebhookDeliveryClient/SlackWebhookClient, which read from
+        // the same class of caller/operator-supplied endpoint.
+        using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
         resp.EnsureSuccessStatusCode();
     }
 }

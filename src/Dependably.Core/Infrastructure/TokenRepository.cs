@@ -166,9 +166,10 @@ public class TokenRepository
         string? expiresStr = expiresAt?.ToUtcIso();
 
         await using var conn = await _db.OpenAsync(ct);
-        await conn.ExecuteAsync(
+        await InsertUnderTenantCapAsync(conn, orgId,
             "INSERT INTO user_tokens (id, org_id, user_id, token_hash, capabilities, description, expires_at) VALUES (@id, @orgId, @userId, @hash, @capabilities, @description, @expires)",
-            new { id, orgId, userId, hash, capabilities, description, expires = expiresStr });
+            new { id, orgId, userId, hash, capabilities, description, expires = expiresStr },
+            ct);
 
         return (raw, new TokenRecord
         {
@@ -181,6 +182,75 @@ public class TokenRepository
             ExpiresAt = expiresAt,
             Source = TokenSource.User
         });
+    }
+
+    /// <summary>
+    /// Runs one token INSERT under the tenant's active-token cap, with the count and the insert
+    /// in a single per-tenant serialized transaction
+    /// (<see cref="MetadataTransactionExtensions.BeginTenantSerializedAsync"/>) — the same
+    /// primitive the OCI upload-session cap uses.
+    ///
+    /// <para>Serialization is the whole point. A count in one statement and an insert in another
+    /// is a check-then-act: N concurrent creates all read the same pre-cap total and all insert,
+    /// so the overshoot is bounded by concurrency rather than by one row, and a caller scripting
+    /// parallel creates can put a tenant arbitrarily far past its ceiling. Inside the transaction
+    /// the count each caller sees already includes every earlier committed insert, so the (N+1)th
+    /// is refused.</para>
+    ///
+    /// <para>The cap is read here rather than passed in so no call site can create a token
+    /// without it — an uncapped overload would be the thing every future caller reached for.
+    /// Both token tables count toward the one ceiling, matching
+    /// <c>OrgRepository.CountActiveTokensAsync</c>, and expired rows do not count.</para>
+    /// </summary>
+    /// <exception cref="TokenCapExceededException">The tenant is already at its ceiling.</exception>
+    private async Task InsertUnderTenantCapAsync(
+        System.Data.Common.DbConnection conn, string orgId, string insertSql, object parameters,
+        CancellationToken ct)
+    {
+        string now = _time.GetUtcNow().ToUtcIso();
+        await conn.BeginTenantSerializedAsync(_db.Provider, orgId, ct);
+        try
+        {
+            // max_active_tokens_per_tenant is an instance-wide, non-secret setting, so it is read
+            // directly here rather than through OrgRepository's envelope-aware accessor; both
+            // resolve the raw value through InstanceSettingDefaults.ParseMaxActiveTokensPerTenant
+            // so the ceiling cannot differ between the reader and the enforcer.
+            // xtenant: instance_settings is instance-wide by definition — it has no tenant column.
+            string? rawCap = await conn.ExecuteScalarAsync<string?>(new CommandDefinition(
+                "SELECT value FROM instance_settings WHERE key = 'max_active_tokens_per_tenant'",
+                cancellationToken: ct));
+            int cap = InstanceSettingDefaults.ParseMaxActiveTokensPerTenant(rawCap);
+
+            long active = await conn.ExecuteScalarAsync<long>(new CommandDefinition(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM user_tokens
+                     WHERE org_id = @orgId AND (expires_at IS NULL OR expires_at > @now)) +
+                    (SELECT COUNT(*) FROM service_tokens
+                     WHERE org_id = @orgId AND (expires_at IS NULL OR expires_at > @now))
+                """,
+                new { orgId, now },
+                cancellationToken: ct));
+
+            if (active >= cap)
+            {
+                await conn.ExecuteAsync(new CommandDefinition("ROLLBACK", cancellationToken: ct));
+                throw new TokenCapExceededException(orgId, (int)active, cap);
+            }
+
+            await conn.ExecuteAsync(new CommandDefinition(insertSql, parameters, cancellationToken: ct));
+            await conn.ExecuteAsync(new CommandDefinition("COMMIT", cancellationToken: ct));
+        }
+        catch (TokenCapExceededException)
+        {
+            // Already rolled back above; rethrow without a second ROLLBACK attempt.
+            throw;
+        }
+        catch
+        {
+            await conn.ExecuteAsync("ROLLBACK");
+            throw;
+        }
     }
 
     public async Task<TokenRecord?> GetTokenByIdAsync(string tokenId, string orgId, CancellationToken ct = default)
@@ -256,9 +326,10 @@ public class TokenRepository
         string? expiresStr = expiresAt?.ToUtcIso();
 
         await using var conn = await _db.OpenAsync(ct);
-        await conn.ExecuteAsync(
+        await InsertUnderTenantCapAsync(conn, orgId,
             "INSERT INTO service_tokens (id, org_id, name, token_hash, capabilities, description, expires_at) VALUES (@id, @orgId, @name, @hash, @capabilities, @description, @expires)",
-            new { id, orgId, name, hash, capabilities, description, expires = expiresStr });
+            new { id, orgId, name, hash, capabilities, description, expires = expiresStr },
+            ct);
 
         return (raw, new ServiceTokenRecord
         {

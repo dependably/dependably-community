@@ -62,7 +62,12 @@ public sealed class TenantHardDeleteServiceLockoutErasureTests : IClassFixture<I
     private async Task SeedLockoutAsync(FakeTimeProvider clock, string lockoutKey, int failedCount)
     {
         var lockout = new SqliteLockoutStore(_fixture.Store, clock);
-        await lockout.RecordFailureAsync(lockoutKey, failedCount, lockedUntil: null, ct: default);
+        // A high threshold so the seeded row never trips the lock — these tests only care that a
+        // login_attempts row exists and survives/doesn't survive erasure, not its failed_count.
+        for (int i = 0; i < failedCount; i++)
+        {
+            await lockout.RecordFailureAsync(lockoutKey, maxFailedAttempts: int.MaxValue, TimeSpan.FromMinutes(15), ct: default);
+        }
     }
 
     private async Task SeedSendThrottleAsync(FakeTimeProvider clock, string lockoutKey)

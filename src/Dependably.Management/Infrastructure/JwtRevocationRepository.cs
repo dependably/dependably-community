@@ -17,7 +17,14 @@ namespace Dependably.Infrastructure;
 /// Negative-result cache: every JWT-authenticated request hits <see cref="IsRevokedAsync"/>;
 /// in steady state the answer is "false". We cache that for <see cref="NegativeCacheTtl"/>
 /// so warm JWT validation skips the DB round-trip. <see cref="RevokeAsync"/> evicts the
-/// entry so logout takes effect within one TTL.
+/// entry, so a logout binds immediately on the replica that served it.
+///
+/// The cache is per process, which means it is only sound where the process is alone: on a
+/// deployment with peer replicas a sibling that cached "not revoked" would keep honouring a
+/// logged-out token until its own TTL rolled. It is therefore not supplied at all in that
+/// topology — <see cref="SessionRevocationCachePolicy"/> passes a null cache under
+/// <c>DEPENDABLY_DEPLOYMENT_MODE=ha</c> and every lookup reads through to the database, which is
+/// what makes the revocation bound exact ("next request, everywhere") rather than TTL-shaped.
 ///
 /// Fill and revocation race: an <see cref="IsRevokedAsync"/> whose DB read runs just before a
 /// concurrent <see cref="RevokeAsync"/> commits its INSERT would otherwise cache a stale

@@ -466,6 +466,94 @@ public sealed class ImportControllerResourceControlTests
         Assert.Equal(StatusCodes.Status413PayloadTooLarge, problem.StatusCode);
     }
 
+    // ── Per-request file-COUNT cap ──────────────────────────────────────────
+    //
+    // The aggregate byte cap (BatchSizeLimitBytes, 1 GB) does not bound the number of
+    // individual files in a batch: a request packed with many near-empty files passes the
+    // byte cap while still driving per-file work (staging, ecosystem detection, a
+    // claim-resolution DB call, an audit row) that scales with count. Must track
+    // ImportController's private MaxBatchFileCount.
+
+    private const int MaxBatchFileCountForTest = 5000;
+
+    [Fact]
+    public async Task Upload_TooManyFiles_Returns413BeforeAnyStaging()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var files = new FormFileCollection();
+        for (int i = 0; i < MaxBatchFileCountForTest + 1; i++)
+        {
+            files.Add(BuildFile($"tiny-{i}.tgz", new byte[] { 1 }));
+        }
+        Multipart(b.ImportController.HttpContext, files);
+
+        var result = await b.ImportController.Upload(dryRun: false, CancellationToken.None);
+
+        var problem = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status413PayloadTooLarge, problem.StatusCode);
+    }
+
+    [Fact]
+    public async Task Upload_FileCountAtCapBoundary_DoesNotRejectOnCountAlone()
+    {
+        // Exactly at the cap must not be rejected by the count check — each file here is a
+        // single NUL byte, which EcosystemDetector correctly rejects as unrecognised, so the
+        // batch returns 200 with every file individually rejected rather than a 413 envelope.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var files = new FormFileCollection();
+        for (int i = 0; i < MaxBatchFileCountForTest; i++)
+        {
+            files.Add(BuildFile($"tiny-{i}.tgz", new byte[] { 1 }));
+        }
+        Multipart(b.ImportController.HttpContext, files);
+
+        var result = await b.ImportController.Upload(dryRun: false, CancellationToken.None);
+
+        Assert.IsType<OkObjectResult>(result);
+    }
+
+    [Fact]
+    public async Task ImportManifest_TooManyFiles_Returns413BeforeAnyStaging()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        // At least one non-root entry — an empty entry list fails manifest parsing before the
+        // file-count check ever runs, which would test the wrong thing.
+        string lockfile = """
+            { "name": "test", "version": "1.0.0", "lockfileVersion": 3,
+              "packages": {
+                "": { "name": "test", "version": "1.0.0" },
+                "node_modules/tiny-0": { "version": "1.0.0" }
+              } }
+            """;
+
+        var files = new FormFileCollection
+        {
+            BuildFile("package-lock.json", lockfile, name: "manifest"),
+        };
+        for (int i = 0; i < MaxBatchFileCountForTest + 1; i++)
+        {
+            files.Add(BuildFile($"tiny-{i}.tgz", new byte[] { 1 }));
+        }
+        Multipart(b.ImportController.HttpContext, files);
+
+        var result = await b.ImportController.ImportManifest(dryRun: false, CancellationToken.None);
+
+        var problem = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status413PayloadTooLarge, problem.StatusCode);
+    }
+
     [Fact]
     public async Task Upload_Sha256SumsPartAtCapBoundary_ParsesInsteadOfRejecting()
     {

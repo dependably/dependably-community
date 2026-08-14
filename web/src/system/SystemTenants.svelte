@@ -1,5 +1,6 @@
 <script>
   import { reportPageLoad } from '../lib/pageLoad.js'
+  import { formatDate, formatDateShort } from '../lib/format.js'
   import { onMount } from 'svelte'
   import { t } from 'svelte-i18n'
   import { systemApi } from '../lib/api.js'
@@ -397,8 +398,8 @@
       <td class="num">{ten.memberCount ?? 0}</td>
       <td class="num">{fmtBytes(ten.storageBytes ?? 0)}</td>
       <td><span class="quota">{formatQuota(ten.storageQuotaBytes)}</span></td>
-      <td>{new Date(ten.createdAt).toLocaleDateString()}</td>
-      <td>{ten.deletedAt ? new Date(ten.deletedAt).toLocaleDateString() : '—'}</td>
+      <td>{$formatDateShort(ten.createdAt)}</td>
+      <td>{$formatDateShort(ten.deletedAt)}</td>
       <td class="actions-cell">
         <div class="row-actions">
           <RowActionsMenu id={ten.id} bind:openId={openActionsId} ariaLabel={$t('system.tenants.actionsMenu.open')}>
@@ -468,10 +469,10 @@
                 <dt>{$t('system.tenants.detail.members')}</dt>
                 <dd>{ten.memberCount ?? 0}</dd>
                 <dt>{$t('system.tenants.detail.created')}</dt>
-                <dd>{new Date(ten.createdAt).toLocaleString()}</dd>
+                <dd>{$formatDate(ten.createdAt)}</dd>
                 {#if ten.deletedAt}
                   <dt>{$t('system.tenants.detail.deleted')}</dt>
-                  <dd>{new Date(ten.deletedAt).toLocaleString()}</dd>
+                  <dd>{$formatDate(ten.deletedAt)}</dd>
                 {/if}
                 <dt>{$t('system.tenants.columns.storage')}</dt>
                 <dd>

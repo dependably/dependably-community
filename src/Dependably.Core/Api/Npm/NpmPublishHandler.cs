@@ -187,7 +187,10 @@ public sealed class NpmPublishHandler(
         }
 
         var versions = body?["versions"]?.AsObject();
-        string? versionKey = versions?.First().Key;
+        // A non-null but EMPTY versions object (e.g. `"versions":{}` alongside a present
+        // _attachments entry) must fall through to ValidateBodyMatch's null-key 422 branch
+        // rather than crashing .First() on an empty sequence.
+        string? versionKey = versions is { Count: > 0 } ? versions.First().Key : null;
         var matchError = ValidateBodyMatch(versionKey, innerName, innerVersion, fullName);
         if (matchError is not null)
         {

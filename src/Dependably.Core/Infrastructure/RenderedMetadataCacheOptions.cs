@@ -3,13 +3,13 @@ namespace Dependably.Infrastructure;
 /// <summary>
 /// Resolved TTLs for the rendered-metadata response caches shared by the npm packument, NuGet
 /// registration, PyPI simple-index, and Maven metadata handlers. Those caches are process-local
-/// (<see cref="Caching.RenderedResponseCache{TKey}"/> over IMemoryCache) and, for hosted
-/// packages, are invalidated on publish/unpublish only on the node that served the mutation.
+/// (<see cref="Caching.RenderedResponseCache{TKey}"/> over IMemoryCache) and are invalidated on
+/// mutation — locally on the serving node, and across replicas over the metadata-invalidation
+/// bus (Redis pub/sub in HA; a no-op bus standalone).
 ///
-/// In a multi-replica (HA) deployment the other replicas keep serving pre-mutation metadata until
-/// their copy expires, so operators need a knob to shorten the window (the documented mitigation:
-/// "keep metadata TTLs short in multi-instance deployments where post-push staleness matters").
-/// <see cref="LocalTtl"/> is that knob for locally-owned metadata; <see cref="ProxyTtl"/> bounds
+/// The TTLs are therefore a backstop for a dropped broadcast, not the staleness mechanism:
+/// leave them at their defaults, including in multi-instance deployments.
+/// <see cref="LocalTtl"/> covers locally-owned metadata; <see cref="ProxyTtl"/> bounds
 /// proxy-merged metadata whose upstream can change out from under the cache.
 ///
 /// Distinct from <see cref="Protocol.MetadataCacheOptions"/>, which configures the upstream

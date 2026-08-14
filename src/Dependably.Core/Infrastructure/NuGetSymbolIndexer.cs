@@ -56,16 +56,20 @@ public sealed class NuGetSymbolIndexer(
         try
         {
             var symbols = NuGetSymbolKey.ExtractPortablePdbs(source);
-            await symbolIndex.DeleteForVersionAsync(orgId, packageVersionId, ct);
             if (symbols.Count == 0)
             {
+                // Nothing to insert, so the delete alone is already atomic — no separate
+                // transaction needed to keep this branch consistent.
+                await symbolIndex.DeleteForVersionAsync(orgId, packageVersionId, ct);
                 logger.LogInformation(
                     "Symbol package for version {VersionId} in org {OrgId} contained no indexable Portable PDBs.",
                     packageVersionId, orgId);
                 return 0;
             }
 
-            await symbolIndex.IndexAsync(orgId, packageVersionId, snupkgBlobKey, symbols, ct);
+            // Delete + insert run as one transaction on one connection, so a failure partway
+            // through leaves the version's previous index intact instead of partially wiped.
+            await symbolIndex.ReplaceForVersionAsync(orgId, packageVersionId, snupkgBlobKey, symbols, ct);
             return symbols.Count;
         }
         finally

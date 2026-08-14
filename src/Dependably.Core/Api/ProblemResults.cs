@@ -136,6 +136,21 @@ public sealed class ProblemResults
         return new ObjectResult(problem) { StatusCode = StatusCodes.Status404NotFound };
     }
 
+    /// <summary>Localized HTTP 429 problem response for an <c>[ApiController]</c> action — used
+    /// when a per-account or per-resource budget the caller has already been told about is
+    /// exhausted. Distinct from the rate limiter's own 429, which the middleware emits before the
+    /// action runs.</summary>
+    public IActionResult TooManyRequestsActionKey(string resourceKey, params object[] args)
+    {
+        var problem = new ProblemDetails
+        {
+            Status = StatusCodes.Status429TooManyRequests,
+            Title = _localizer["error.tooManyRequests.title"],
+            Detail = Localize(resourceKey, args),
+        };
+        return new ObjectResult(problem) { StatusCode = StatusCodes.Status429TooManyRequests };
+    }
+
     /// <summary>Localized HTTP 503 problem response for an <c>[ApiController]</c> action —
     /// used when a dependency the request needs (an upstream registry, an external service)
     /// is transiently unreachable. Never used for a policy denial (that's 403/451).</summary>

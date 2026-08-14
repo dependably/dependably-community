@@ -217,13 +217,16 @@ public partial class NuGetController : ControllerBase
 
     internal static string MergeLocalIntoUpstreamRegistration(
         string upstreamJson, IReadOnlyList<PackageVersion> localVersions, Package pkg, string id,
-        string? baseUrl = null) =>
-        NuGetRegistrationHelpers.MergeLocalIntoUpstreamRegistration(upstreamJson, localVersions, pkg, id, baseUrl);
+        string? baseUrl = null, IReadOnlyCollection<string>? upstreamBaseUrls = null) =>
+        NuGetRegistrationHelpers.MergeLocalIntoUpstreamRegistration(
+            upstreamJson, localVersions, pkg, id, baseUrl, upstreamBaseUrls);
 
-    internal static string RewriteRegistrationIndexUrls(string indexJson, string normalizedId, string baseUrl) =>
-        NuGetRegistrationHelpers.RewriteRegistrationIndexUrls(indexJson, normalizedId, baseUrl);
+    internal static string RewriteRegistrationIndexUrls(
+        string indexJson, string normalizedId, string baseUrl,
+        IReadOnlyCollection<string>? upstreamBaseUrls = null) =>
+        NuGetRegistrationHelpers.RewriteRegistrationIndexUrls(indexJson, normalizedId, baseUrl, upstreamBaseUrls);
 
-    internal static string RewriteRegistrationLeafUrls(string leafJson, string normalizedId, string baseUrl) =>
+    internal static string? RewriteRegistrationLeafUrls(string leafJson, string normalizedId, string baseUrl) =>
         NuGetRegistrationHelpers.RewriteRegistrationLeafUrls(leafJson, normalizedId, baseUrl);
 
     // ── Shared utilities ─────────────────────────────────────────────────────

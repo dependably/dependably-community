@@ -22,7 +22,7 @@ namespace Dependably.Infrastructure;
 /// session on the instance), so continuing to honour the previous key would keep the attacker's
 /// forged tokens alive for the width of the window and defeat the rotation. The cost is
 /// deliberate: rotation signs every session out, including the operator who triggered it. This
-/// matches the immediate-invalidation posture ADR 0001 sets for <c>tver</c>, which rejects
+/// matches the immediate-invalidation posture ADR-auth-identity-hybrid sets for <c>tver</c>, which rejects
 /// SecurityStampValidator precisely because of its poll lag.</para>
 ///
 /// <para><b>Cache staleness is the one bounded window.</b> The replica that performs the rotation

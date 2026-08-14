@@ -1,19 +1,19 @@
 <!--
-  Email sub-tab of Settings → Integrations — the SMTP transport for admin alert emails. The
-  delivery gate (send-by-email toggle) and the recipient list live on the Alerts tab; this form
-  only owns how mail gets sent: inherit the instance transport, or configure the org's own. The
-  SMTP password is write-only (hasEmailSmtpPassword drives the set/rotate hint, mirroring the
-  Slack webhook URL convention). Inheriting the instance transport shows only a
-  configured/not-configured badge — never the instance's own host/username/etc. "Resolvable"
-  mirrors the server's SmtpTransportSettings truth table (host + from, plus either a
-  username/password pair or security=none) so the effectively-disabled banner and the test button
-  agree with what the server would actually do.
+  Email sub-tab of Settings → Integrations — the per-org email delivery channel for admin alerts
+  (quarantine + vulnerability), alongside the Webhooks and Slack channels. An org owns the gate and
+  the recipient list and nothing else: SMTP is an instance-level transport owned by the operator,
+  so instanceEmailConfigured is the one fact this panel borrows from it, letting an admin whose
+  recipients would go nowhere be told why rather than watching a silent channel.
+
+  Writes through the channel's own PUT /alert-settings/email, mirroring Slack — the base
+  alert-settings PUT never touches these columns, so an Alerts-tab save can't clobber a save here.
+  The test-send button hits the server's EffectiveEmailConfigResolver, which reads the saved row,
+  so it is gated on what was saved rather than on what is currently typed into the form.
 -->
 <script>
   import { t } from 'svelte-i18n'
   import { api } from '../api.js'
   import { extractErrorMessage, submitForm } from '../form.js'
-  import { secretPlaceholder } from '../secretField.js'
   import ErrorBanner from '../ErrorBanner.svelte'
   import Toggle from '../Toggle.svelte'
 
@@ -22,91 +22,44 @@
   /** @type {(updated: any) => void} */
   export let onUpdated = () => {}
 
-  const SECURITIES = ['starttls', 'ssl', 'none']
-  const DEFAULT_PORT = 587
-  const DEFAULT_SECURITY = 'starttls'
-
   let error = ''
   let success = ''
   let saving = false
   let testMsg = ''
   let testing = false
 
-  let emailInheritInstance = settings.emailInheritInstance
-  let emailSmtpHost = settings.emailSmtpHost || ''
-  let emailSmtpPort = settings.emailSmtpPort || DEFAULT_PORT
-  let emailSmtpSecurity = settings.emailSmtpSecurity || DEFAULT_SECURITY
-  let emailSmtpUsername = settings.emailSmtpUsername || ''
-  let emailSmtpPassword = '' // write-only — never pre-filled from the server
-  let emailSmtpFrom = settings.emailSmtpFrom || ''
+  let emailEnabled = settings.emailEnabled
+  let emailRecipients = settings.emailRecipients || ''
 
   function parseRecipients(value) {
     return (value || '').split(',').map((s) => s.trim()).filter(Boolean)
   }
 
-  // Mirrors SmtpTransportSettings' configured() semantics: host + from, plus either a
-  // username/password pair or security=none (no credentials needed).
-  function ownTransportConfigured(host, from, username, hasPassword, security) {
-    return !!host && !!from && ((!!username && hasPassword) || security === 'none')
-  }
-
-  // Mirrors SmtpTransportSettings.SendsCredentialsInCleartextWhen. Computed from the live form
-  // rather than the saved settings so the warning appears while the operator is choosing "none",
-  // not only after they have already saved credentials into a cleartext session.
-  $: cleartextCredentials = !emailInheritInstance
-    && emailSmtpSecurity === 'none'
-    && !!emailSmtpUsername
-    && (settings.hasEmailSmtpPassword || !!emailSmtpPassword)
-
-  $: formOwnConfigured = ownTransportConfigured(
-    emailSmtpHost, emailSmtpFrom, emailSmtpUsername,
-    settings.hasEmailSmtpPassword || !!emailSmtpPassword, emailSmtpSecurity)
-  $: formResolved = emailInheritInstance ? settings.instanceEmailConfigured : formOwnConfigured
-
-  // The delivery gate (enabled + recipients) is owned by the Alerts tab, so it only exists here
-  // as last-saved server state. The test button hits the server's EffectiveEmailConfigResolver,
-  // which reads the saved row — so it needs the saved state to fully resolve, plus the live
-  // transport form (which is all this page can change) to still resolve.
-  $: savedRecipients = parseRecipients(settings.emailRecipients)
-  $: savedOwnConfigured = ownTransportConfigured(
-    settings.emailSmtpHost, settings.emailSmtpFrom, settings.emailSmtpUsername,
-    settings.hasEmailSmtpPassword, settings.emailSmtpSecurity)
-  $: savedResolved = settings.emailInheritInstance ? settings.instanceEmailConfigured : savedOwnConfigured
-  $: savedResolvable = settings.emailEnabled && savedRecipients.length > 0 && savedResolved
-
-  $: testEnabled = savedResolvable && formResolved
-
+  // Mirrors the server's resolve order (gate -> recipients -> instance transport) so the banner
+  // names the first thing actually stopping delivery, in the same order the server gives up.
+  $: savedRecipientCount = parseRecipients(settings.emailRecipients).length
   $: disabledReason = !settings.emailEnabled
     ? 'off'
-    : savedRecipients.length === 0
+    : savedRecipientCount === 0
       ? 'recipients'
-      : !formResolved
-        ? (emailInheritInstance ? 'instance' : 'ownTransport')
+      : !settings.instanceEmailConfigured
+        ? 'instance'
         : null
+  $: testEnabled = disabledReason === null
 
   async function save() {
     success = ''
     testMsg = ''
-    const port = Number.isFinite(Number(emailSmtpPort)) && Number(emailSmtpPort) > 0
-      ? Number(emailSmtpPort)
-      : DEFAULT_PORT
     await submitForm(
-      () => api.updateAlertEmail({
-        emailInheritInstance,
-        emailSmtpHost: emailSmtpHost || null,
-        emailSmtpPort: port,
-        emailSmtpSecurity,
-        emailSmtpUsername: emailSmtpUsername || null,
-        emailSmtpPassword: emailSmtpPassword || null,
-        emailSmtpFrom: emailSmtpFrom || null,
-      }),
+      () => api.updateAlertEmail(emailEnabled, emailRecipients || null),
       {
-        setSaving: (v) => (saving = v),
-        setError: (v) => (error = v),
+        setSaving: v => saving = v,
+        setError: v => error = v,
         onSuccess: (updated) => {
           settings = updated
           onUpdated(updated)
-          emailSmtpPassword = ''
+          emailEnabled = updated.emailEnabled
+          emailRecipients = updated.emailRecipients || ''
           success = $t('settings.saved')
         },
       })
@@ -126,93 +79,35 @@
 <ErrorBanner message={error} />
 {#if success}<div class="text-success mb-3">{success}</div>{/if}
 
-<div class="email-settings-form">
-  <div class="form-row checkbox-row">
-    <span class="checkbox-label">
-      <Toggle bind:checked={emailInheritInstance}
-              ariaLabel={$t('settings.integrations.email.inheritInstance')} />
-      {$t('settings.integrations.email.inheritInstance')}
+<div class="card card-narrow">
+  <div class="form-row form-row-inline">
+    <label class="flex-1" for="alert-email-enabled">{$t('settings.integrations.email.enabled')}</label>
+    <span class="transport-tag"
+          class:transport-yes={settings.instanceEmailConfigured}
+          class:transport-no={!settings.instanceEmailConfigured}>
+      {settings.instanceEmailConfigured
+        ? $t('settings.integrations.email.mailServerConfigured')
+        : $t('settings.integrations.email.mailServerNotConfigured')}
     </span>
-    <div class="form-hint">{$t('settings.integrations.email.inheritHint')}</div>
-    {#if emailInheritInstance}
-      {#if settings.instanceEmailConfigured}
-        <span class="badge success" aria-label={$t('settings.integrations.email.instanceConfigured')}>
-          {$t('settings.integrations.email.instanceConfigured')}
-        </span>
-      {:else}
-        <div class="form-hint">{$t('settings.integrations.email.instanceNotConfigured')}</div>
-      {/if}
-    {/if}
+    <Toggle id="alert-email-enabled" bind:checked={emailEnabled}
+            ariaLabel={$t('settings.integrations.email.enabled')} />
   </div>
 
-  <div class="own-smtp-fields">
-    <div class="form-row">
-      <label for="integrations-email-host">{$t('settings.integrations.email.host')}</label>
-      <input id="integrations-email-host" type="text" bind:value={emailSmtpHost}
-             disabled={emailInheritInstance} />
-    </div>
-
-    <div class="form-row">
-      <label for="integrations-email-port">{$t('settings.integrations.email.port')}</label>
-      <input id="integrations-email-port" type="number" bind:value={emailSmtpPort}
-             placeholder="587" min="1" max="65535"
-             disabled={emailInheritInstance} />
-    </div>
-
-    <div class="form-row">
-      <label for="integrations-email-security">{$t('settings.integrations.email.security')}</label>
-      <select id="integrations-email-security" bind:value={emailSmtpSecurity}
-              disabled={emailInheritInstance}>
-        {#each SECURITIES as sec (sec)}
-          <option value={sec}>{$t(`settings.integrations.email.security${sec[0].toUpperCase()}${sec.slice(1)}`)}</option>
-        {/each}
-      </select>
-    </div>
-
-    <div class="form-row">
-      <label for="integrations-email-username">{$t('settings.integrations.email.username')}</label>
-      <input id="integrations-email-username" type="text" bind:value={emailSmtpUsername}
-             disabled={emailInheritInstance} />
-    </div>
-
-    <div class="form-row">
-      <label for="integrations-email-password">{$t('settings.integrations.email.password')}</label>
-      <input id="integrations-email-password" type="password" bind:value={emailSmtpPassword}
-             placeholder={secretPlaceholder(settings.hasEmailSmtpPassword)}
-             autocomplete="new-password"
-             disabled={emailInheritInstance || !settings.secretsAvailable} />
-      {#if !settings.secretsAvailable}
-        <div class="form-hint">{$t('settings.integrations.masterKeyHint')}</div>
-      {:else}
-        <div class="form-hint">
-          {settings.hasEmailSmtpPassword
-            ? $t('settings.integrations.email.passwordRotateHint')
-            : $t('settings.integrations.email.passwordSetHint')}
-        </div>
-      {/if}
-    </div>
-
-    <div class="form-row">
-      <label for="integrations-email-from">{$t('settings.integrations.email.from')}</label>
-      <input id="integrations-email-from" type="text" bind:value={emailSmtpFrom}
-             disabled={emailInheritInstance} />
-    </div>
+  <div class="form-row">
+    <label for="alert-email-recipients">{$t('settings.integrations.email.recipients')}</label>
+    <input id="alert-email-recipients" type="text" bind:value={emailRecipients}
+           disabled={!emailEnabled} />
+    <div class="form-hint">{$t('settings.integrations.email.recipientsHint')}</div>
   </div>
-
-  {#if cleartextCredentials}
-    <div class="cleartext-warning" role="status">{$t('settings.integrations.email.cleartextCredentials')}</div>
-  {/if}
 
   {#if disabledReason}
     <div class="effectively-disabled-banner" role="status">
       {#if disabledReason === 'off'}
-        {$t('settings.integrations.email.disabledPointer')}
+        {$t('settings.integrations.email.disabledOff')}
       {:else if disabledReason === 'recipients'}
-        {$t('settings.integrations.email.effectivelyDisabledRecipients')}
-      {:else if disabledReason === 'instance'}
-        {$t('settings.integrations.email.effectivelyDisabledInstance')}
+        {$t('settings.integrations.email.disabledRecipients')}
       {:else}
-        {$t('settings.integrations.email.effectivelyDisabledOwnTransport')}
+        {$t('settings.integrations.email.disabledInstance')}
       {/if}
     </div>
   {/if}
@@ -232,9 +127,7 @@
     </div>
   {/if}
 
-  {#if testMsg}<p class="test-msg">{testMsg}</p>{/if}
-
-  <div class="form-actions">
+  <div class="form-actions last-row">
     <button class="primary" on:click={save} disabled={saving}>
       {saving ? $t('common.actions.saving') : $t('common.actions.save')}
     </button>
@@ -243,46 +136,46 @@
     </button>
   </div>
   <div class="form-hint">{$t('settings.integrations.email.testHint')}</div>
+  {#if testMsg}<p class="test-msg">{testMsg}</p>{/if}
 </div>
 
+<p class="pointer-line">{$t('settings.integrations.email.transportPointer')}</p>
+
 <style>
-  .email-settings-form { max-width: 480px; margin-top: 12px; }
-  .checkbox-row { margin-bottom: 12px; }
-  .checkbox-label {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--text2);
-    cursor: pointer;
+  .card-narrow { max-width: 480px; margin-top: 12px; }
+  /* .form-row is a column flex box by default; the inline variant turns the row back into a
+     left-aligned label + right-edge control, matching the other settings tabs. */
+  .form-row-inline { flex-direction: row; align-items: center; gap: 12px; }
+  .last-row { margin-bottom: 0; }
+  .transport-tag {
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    white-space: nowrap;
   }
-  .own-smtp-fields { margin-top: 4px; }
+  .transport-yes { background: var(--accent); color: var(--on-accent); }
+  .transport-no { background: var(--bg3); color: var(--text2); border: 1px solid var(--border); }
+  /* Warning tint, not the neutral --bg2/--border pair: inside a card that pair renders as
+     another input box, and this is a status note saying the channel sends nothing. */
   .effectively-disabled-banner {
     font-size: 12px;
-    color: var(--text2);
-    background: var(--bg2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 8px 10px;
-    margin: 12px 0;
-  }
-  .cleartext-warning {
+    color: var(--text);
     background: var(--warning-bg);
     border: 1px solid var(--warning-border);
-    color: var(--warning-text);
     border-radius: var(--radius);
     padding: 8px 10px;
-    margin: 12px 0;
-    font-size: 12px;
+    margin-bottom: 12px;
   }
   .email-status {
     font-size: 12px;
     color: var(--text2);
-    margin-top: 4px;
+    margin-bottom: 12px;
   }
   .email-status-failed { color: var(--danger); }
   .email-last-error { font-size: 11px; color: var(--danger); margin-top: 2px; }
-  .test-msg { font-size: 13px; color: var(--text2); margin: 6px 0; }
-  .form-actions { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+  .test-msg { font-size: 13px; color: var(--text2); margin: 6px 0 0; }
+  .pointer-line { font-size: 12px; color: var(--text2); max-width: 480px; margin: 12px 0 0; }
+  .form-actions { display: flex; gap: 8px; align-items: center; }
 </style>

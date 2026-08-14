@@ -183,7 +183,10 @@ public sealed class NuGetSymbolProxyFetcher(
             MaxOsvScoreTolerance: request.Settings.MaxOsvScoreTolerance,
             CacheAccess: new CacheAccess(
                 request.OrgId, SymbolEcosystem, request.PdbName, request.SsqpKey, request.PdbName,
-                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: url),
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: url,
+                // ProxyFetchService overwrites the three bytes fields with the values it computed
+                // over the symbol package it just staged before handing this to the recorder.
+                Origin: CacheAccessOrigin.FirstFetch),
             MinReleaseAgeHours: request.Settings.MinReleaseAgeHours,
             BlockMaliciousMode: request.Settings.BlockMalicious,
             BlockKevMode: request.Settings.BlockKev,

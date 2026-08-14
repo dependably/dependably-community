@@ -1,9 +1,12 @@
 <!--
-  Alert center settings — what fires and who hears about it: per-type toggles, the vulnerability
-  severity floor, and the email delivery gate (send-by-email toggle + recipient list). The
-  delivery transports (Slack webhook, SMTP server) live on the Integrations tab; the base
-  alert-settings PUT never touches those columns, so a save here can't clobber an
-  Integrations-tab save.
+  Alert center settings — what fires: the per-type toggles and the vulnerability severity floor.
+  Who hears about it is a delivery channel, and every channel (email, Slack, webhooks) is edited on
+  the Integrations tab. This tab's PUT carries the gate columns only, so a save here can never
+  clobber a channel saved there.
+
+  Rows follow the settings-tab convention (.card.card-narrow + .form-row.form-row-inline): the
+  label takes the free space and the control sits at the row's right edge, so every control on the
+  tab lines up on one column with the rest of Settings.
 -->
 <script>
   import { onMount } from 'svelte'
@@ -21,23 +24,18 @@
   let success = ''
   let saving = false
 
-  // Form-bound fields, seeded from the loaded settings.
   let quarantineAlertsEnabled = true
   let vulnAlertsEnabled = true
   let vulnMinSeverity = 'HIGH'
-  let emailEnabled = false
-  let emailRecipients = ''
 
   onMount(load)
 
   async function load() {
     try {
-      const settings = await api.getAlertSettings()
-      quarantineAlertsEnabled = settings.quarantineAlertsEnabled
-      vulnAlertsEnabled = settings.vulnAlertsEnabled
-      vulnMinSeverity = settings.vulnMinSeverity
-      emailEnabled = settings.emailEnabled
-      emailRecipients = settings.emailRecipients || ''
+      const s = await api.getAlertSettings()
+      quarantineAlertsEnabled = s.quarantineAlertsEnabled
+      vulnAlertsEnabled = s.vulnAlertsEnabled
+      vulnMinSeverity = s.vulnMinSeverity
       loaded = true
     } catch (e) { error = extractErrorMessage(e) }
   }
@@ -45,18 +43,14 @@
   async function save() {
     success = ''
     await submitForm(
-      () => api.updateAlertSettings({
-        quarantineAlertsEnabled,
-        vulnAlertsEnabled,
-        vulnMinSeverity,
-        emailEnabled,
-        emailRecipients: emailRecipients || null,
-      }),
+      () => api.updateAlertSettings({ quarantineAlertsEnabled, vulnAlertsEnabled, vulnMinSeverity }),
       {
         setSaving: v => saving = v,
         setError: v => error = v,
         onSuccess: (updated) => {
-          emailRecipients = updated.emailRecipients || ''
+          quarantineAlertsEnabled = updated.quarantineAlertsEnabled
+          vulnAlertsEnabled = updated.vulnAlertsEnabled
+          vulnMinSeverity = updated.vulnMinSeverity
           success = $t('settings.saved')
         },
       })
@@ -74,67 +68,50 @@
 {#if !loaded}
   <span class="spinner"></span>
 {:else}
-  <div class="alerts-settings-form">
-    <div class="form-row checkbox-row">
-      <span class="checkbox-label">
-        <Toggle bind:checked={quarantineAlertsEnabled} ariaLabel={$t('settings.alerts.quarantineEnabled')} />
-        {$t('settings.alerts.quarantineEnabled')}
-      </span>
+  <div class="card card-narrow">
+    <div class="form-row form-row-inline">
+      <label class="flex-1" for="alert-quarantine-enabled">{$t('settings.alerts.quarantineEnabled')}</label>
+      <Toggle id="alert-quarantine-enabled" bind:checked={quarantineAlertsEnabled}
+              ariaLabel={$t('settings.alerts.quarantineEnabled')} />
     </div>
 
-    <div class="form-row checkbox-row">
-      <span class="checkbox-label">
-        <Toggle bind:checked={vulnAlertsEnabled} ariaLabel={$t('settings.alerts.vulnEnabled')} />
-        {$t('settings.alerts.vulnEnabled')}
-      </span>
+    <div class="form-row form-row-inline">
+      <label class="flex-1" for="alert-vuln-enabled">{$t('settings.alerts.vulnEnabled')}</label>
+      <Toggle id="alert-vuln-enabled" bind:checked={vulnAlertsEnabled}
+              ariaLabel={$t('settings.alerts.vulnEnabled')} />
     </div>
 
-    <div class="form-row">
-      <label for="alert-min-severity">{$t('settings.alerts.minSeverity')}</label>
-      <select id="alert-min-severity" bind:value={vulnMinSeverity} disabled={!vulnAlertsEnabled}>
+    <div class="form-row form-row-inline last-row">
+      <label class="flex-1 label-row" for="alert-min-severity">
+        {$t('settings.alerts.minSeverity')}
+        <InfoTip text={$t('settings.alerts.minSeverityHint')} />
+      </label>
+      <select id="alert-min-severity" class="w-auto" bind:value={vulnMinSeverity}
+              disabled={!vulnAlertsEnabled}>
         {#each SEVERITIES as sev (sev)}
           <option value={sev}>{sev}</option>
         {/each}
       </select>
-      <div class="form-hint">{$t('settings.alerts.minSeverityHint')}</div>
-    </div>
-
-    <div class="form-row checkbox-row">
-      <span class="checkbox-label">
-        <Toggle bind:checked={emailEnabled} ariaLabel={$t('settings.alerts.emailEnabled')} />
-        {$t('settings.alerts.emailEnabled')}
-      </span>
-    </div>
-
-    <div class="form-row">
-      <label for="alert-email-recipients">{$t('settings.alerts.emailRecipients')}</label>
-      <input id="alert-email-recipients" type="text" bind:value={emailRecipients}
-             disabled={!emailEnabled} />
-      <div class="form-hint">{$t('settings.alerts.emailRecipientsHint')}</div>
-    </div>
-
-    <p class="pointer-line">{$t('settings.alerts.pointer')}</p>
-
-    <div class="form-actions">
-      <button class="primary" on:click={save} disabled={saving}>
-        {saving ? $t('common.actions.saving') : $t('common.actions.save')}
-      </button>
     </div>
   </div>
+
+  <div class="form-actions">
+    <button class="primary" on:click={save} disabled={saving}>
+      {saving ? $t('common.actions.saving') : $t('common.actions.save')}
+    </button>
+  </div>
+
+  <p class="pointer-line">{$t('settings.alerts.pointer')}</p>
 {/if}
 
 <style>
-  .alerts-settings-form { max-width: 480px; }
-  .checkbox-row { margin-bottom: 12px; }
-  .checkbox-label {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--text2);
-    cursor: pointer;
-  }
-  .pointer-line { font-size: 12px; color: var(--text2); margin: 12px 0; }
-  .form-actions { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+  .card-narrow { max-width: 480px; }
+  /* .form-row is a column flex box by default; the inline variant turns the row back into a
+     left-aligned label + right-edge control. Without the explicit row direction the shared
+     align-items lands on the cross axis and centres every control. */
+  .form-row-inline { flex-direction: row; align-items: center; gap: 12px; }
+  /* The card supplies the bottom padding, so the last row drops its own margin. */
+  .last-row { margin-bottom: 0; }
+  .pointer-line { font-size: 12px; color: var(--text2); max-width: 480px; margin: 12px 0 0; }
+  .form-actions { display: flex; gap: 8px; align-items: center; margin-top: 16px; }
 </style>

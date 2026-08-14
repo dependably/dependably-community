@@ -164,6 +164,81 @@ public sealed class AlertsControllerTests : IClassFixture<DependablyFactory>, IA
         Assert.Equal("active", reread!.State);
     }
 
+    // ── Dismiss all: bulk clear, idempotency, tenant scope ──────────────────
+
+    [Fact]
+    public async Task DismissAll_Member_Forbidden()
+    {
+        using var c = await MemberClient();
+        var resp = await c.PostAsync("/api/v1/alerts/dismiss-all", content: null);
+        Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task DismissAll_ClearsEveryActiveAlert_AuditsOnce_AndIsIdempotent()
+    {
+        string orgId = await DefaultOrgIdAsync();
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        var repo = new AlertRepository(store, TimeProvider.System);
+
+        // More than one, and deliberately more than a single page would need to matter: the
+        // point of the endpoint is that it clears what the caller cannot see.
+        var seeded = new List<AlertRecord>();
+        for (int i = 0; i < 3; i++)
+        {
+            seeded.Add(await SeedAlertAsync(orgId));
+        }
+
+        using var c = await AdminClient();
+        var first = await c.PostAsync("/api/v1/alerts/dismiss-all", content: null);
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        var firstDoc = await JsonDocument.ParseAsync(await first.Content.ReadAsStreamAsync());
+        Assert.True(firstDoc.RootElement.GetProperty("dismissed").GetInt32() >= seeded.Count);
+
+        foreach (var alert in seeded)
+        {
+            var reread = await repo.GetByIdAsync(orgId, alert.Id);
+            Assert.Equal("dismissed", reread!.State);
+        }
+
+        Assert.Equal(0, await repo.CountActiveAsync(orgId));
+
+        // Repeat is a no-op: nothing left active, so nothing dismissed and no second audit row.
+        var second = await c.PostAsync("/api/v1/alerts/dismiss-all", content: null);
+        Assert.Equal(HttpStatusCode.OK, second.StatusCode);
+        var secondDoc = await JsonDocument.ParseAsync(await second.Content.ReadAsStreamAsync());
+        Assert.Equal(0, secondDoc.RootElement.GetProperty("dismissed").GetInt32());
+
+        await using var conn = await store.OpenAsync();
+        long auditCount = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM audit_log WHERE action = 'alert_dismissed_all' AND org_id = @orgId",
+            new { orgId });
+        Assert.Equal(1, auditCount);
+    }
+
+    /// <summary>
+    /// The adversarial twin of the bulk clear: a WHERE clause that dropped its org predicate
+    /// would still satisfy every assertion above, because the caller's own alerts do get
+    /// dismissed. This is the assertion that fails when the bulk UPDATE stops being tenant-scoped.
+    /// </summary>
+    [Fact]
+    public async Task DismissAll_LeavesAnotherTenantsAlertsActive()
+    {
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        string foreignOrg = await OrgSeeder.InsertAsync(store, $"alertctl-bulk-foreign-{Guid.NewGuid():N}");
+        var foreignAlert = await SeedAlertAsync(foreignOrg);
+        await SeedAlertAsync(await DefaultOrgIdAsync());
+
+        using var c = await AdminClient();
+        var resp = await c.PostAsync("/api/v1/alerts/dismiss-all", content: null);
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+
+        var repo = new AlertRepository(store, TimeProvider.System);
+        var reread = await repo.GetByIdAsync(foreignOrg, foreignAlert.Id);
+        Assert.Equal("active", reread!.State);
+        Assert.Equal(1, await repo.CountActiveAsync(foreignOrg));
+    }
+
     [Fact]
     public async Task Anonymous_Rejected()
     {

@@ -96,6 +96,20 @@ public sealed class WebhookSubscriptionRepository
             .ToList();
     }
 
+    /// <summary>
+    /// How many subscriptions an org holds, enabled or not. Backs the per-org cap
+    /// (<see cref="Dependably.Api.WebhookController.MaxSubscriptionsPerOrg"/>): every
+    /// subscription costs a delivery attempt on every matching event, so the count is what bounds
+    /// how much work one org's own event can create.
+    /// </summary>
+    public async Task<int> CountAsync(string orgId, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        return await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM webhook_subscription WHERE org_id = @orgId",
+            new { orgId });
+    }
+
     /// <summary>Creates a new subscription. Secret must already be protected by the caller.</summary>
     public async Task<WebhookSubscription> AddAsync(
         string orgId, NewWebhookSubscription req, CancellationToken ct = default)
@@ -221,6 +235,13 @@ public sealed class WebhookSubscriptionRepository
     /// Records a terminal delivery failure and conditionally auto-disables the subscription
     /// when consecutive_failures reaches the threshold OR the failing_since window has elapsed.
     /// Returns true when the subscription was auto-disabled so the caller can log/notify.
+    ///
+    /// The count is incremented by the database and read back from the same statement, never
+    /// computed in application code from a separately-read snapshot: deliveries for one
+    /// subscription run concurrently (a fan-out worker per org, and one dispatch queue per replica
+    /// on a Postgres deployment), so two failures that read the same value would both write the
+    /// same +1 and the counter would advance by one for two failures — pushing out the very
+    /// auto-disable threshold it exists to reach.
     /// </summary>
     public async Task<bool> RecordFailureAsync(
         string orgId, string id, string error,
@@ -230,57 +251,59 @@ public sealed class WebhookSubscriptionRepository
         string now = _time.GetUtcNow().ToUtcIso();
         await using var conn = await _db.OpenAsync(ct);
 
-        // Read current counters to decide whether to auto-disable.
-        // xtenant: id is already org-scoped by the FK; explicit org_id filter is defense-in-depth
-        var (currentFailures, currentFailingSince) = await conn.QuerySingleOrDefaultAsync<(long Failures, string? FailingSince)>(
-            """
-            SELECT consecutive_failures AS Failures, failing_since AS FailingSince
-            FROM webhook_subscription
-            WHERE org_id = @orgId AND id = @id
-            """,
-            new { orgId, id });
-
-        int newFailures = (int)currentFailures + 1;
-        string? failingSince = currentFailingSince ?? now;
-
-        // Auto-disable when count threshold OR duration window is exceeded.
-        bool autoDisable = newFailures >= autoDisableAfterFailures
-            || (DateTimeOffset.TryParse(failingSince, out var since)
-                && _time.GetUtcNow() - since >= autoDisableAfterDuration);
-
         // Truncate error message to avoid unbounded DB column growth.
         string truncatedError = error.Length > 500 ? error[..500] : error;
 
-        await conn.ExecuteAsync(
+        // RETURNING yields the post-update row on both providers, so Failures is the authoritative
+        // count this failure produced and FailingSince the first failure of the current streak.
+        // xtenant: id is already org-scoped by the FK; explicit org_id filter is defense-in-depth
+        var (newFailures, failingSince) = await conn.QuerySingleOrDefaultAsync<(long Failures, string? FailingSince)>(
             """
             UPDATE webhook_subscription
             SET last_delivery_at = @now, last_status = 'failed',
-                consecutive_failures = @newFailures, failing_since = @failingSince,
+                consecutive_failures = consecutive_failures + 1,
+                failing_since = COALESCE(failing_since, @now),
                 last_error = @truncatedError,
-                enabled = CASE WHEN @autoDisable = 1 THEN 0 ELSE enabled END,
                 updated_at = @now
             WHERE org_id = @orgId AND id = @id
+            RETURNING consecutive_failures AS Failures, failing_since AS FailingSince
             """,
-            new
-            {
-                orgId,
-                id,
-                now,
-                newFailures,
-                failingSince,
-                truncatedError,
-                autoDisable = autoDisable ? 1 : 0
-            });
+            new { orgId, id, now, truncatedError });
+
+        // Auto-disable when count threshold OR duration window is exceeded. A row that no longer
+        // exists returns zero failures and a null streak start, which disables nothing.
+        bool autoDisable = newFailures > 0
+            && (newFailures >= autoDisableAfterFailures
+                || (DateTimeOffset.TryParse(failingSince, out var since)
+                    && _time.GetUtcNow() - since >= autoDisableAfterDuration));
+
+        if (autoDisable)
+        {
+            // Separate statement rather than a CASE on the update above so the disable condition
+            // is expressed once, in C#, over the values the increment actually produced. It is
+            // idempotent, so two concurrent failures crossing the threshold together are harmless.
+            // xtenant: id is already org-scoped by the FK; explicit org_id filter is defense-in-depth
+            await conn.ExecuteAsync(
+                """
+                UPDATE webhook_subscription
+                SET enabled = 0, updated_at = @now
+                WHERE org_id = @orgId AND id = @id
+                """,
+                new { orgId, id, now });
+        }
 
         return autoDisable;
     }
 
     // Raw Dapper projection for the API-facing read path (no secret column).
-    // SQLite returns all INTEGER columns as Int64; use long for every integer field to avoid
-    // Dapper constructor-matching errors, then convert in MapRow.
+    // Integer columns bind as long, and [ExplicitConstructor] is what lets one signature serve
+    // both providers — SQLite reports INTEGER as Int64, Postgres as Int32, and Dapper's default
+    // positional-record binding demands an exact CLR match. See
+    // DapperPositionalRecordComplianceTests. Converted to bool/int in MapRow.
     // HasSecret is derived in C# from the raw secret column rather than a SQL CASE:
     // Microsoft.Data.Sqlite reports computed/expression columns as byte[] (no declared
     // type affinity), which fails RawRow materialization on the buffered QueryAsync path.
+    [method: ExplicitConstructor]
     private sealed record RawRow(
         string Id, string OrgId, string Url, string EventTypesJson, long Enabled,
         string? SecretStored, string? Description, string? LastDeliveryAt, string? LastStatus,
@@ -288,6 +311,7 @@ public sealed class WebhookSubscriptionRepository
         string CreatedAt, string UpdatedAt);
 
     // Raw Dapper projection for the delivery fan-out path (includes encrypted secret).
+    [method: ExplicitConstructor]
     private sealed record RawDeliveryRow(
         string Id, string OrgId, string Url, string? SecretStored,
         string EventTypesJson, long ConsecutiveFailures, string? FailingSince);

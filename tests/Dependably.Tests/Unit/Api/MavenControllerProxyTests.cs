@@ -87,6 +87,50 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
             new { id = Guid.NewGuid().ToString("N"), org = _orgId, url });
     }
 
+    // Source pinning is opt-in per instance (PROXY_SOURCE_PINNING), so a test that wants the
+    // dependency-confusion guard active has to turn it on the way an operator would.
+    private static IConfiguration SourcePinConfig(bool enabled) =>
+        new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["PROXY_SOURCE_PINNING"] = enabled ? "true" : "false",
+            })
+            .Build();
+
+    private async Task ClearMavenRegistriesAsync()
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "DELETE FROM upstream_registry WHERE org_id = @org AND ecosystem = 'maven'",
+            new { org = _orgId });
+    }
+
+    private async Task<string?> PinnedHostAsync(string purlName)
+    {
+        await using var conn = await _db.OpenAsync();
+        return await conn.ExecuteScalarAsync<string?>(
+            """
+            SELECT upstream_host FROM upstream_source_pin
+            WHERE org_id = @org AND ecosystem = 'maven' AND name = @name
+            """,
+            new { org = _orgId, name = purlName });
+    }
+
+    private async Task<long> PinViolationCountAsync()
+    {
+        await using var conn = await _db.OpenAsync();
+        return await conn.ExecuteScalarAsync<long>(
+            """
+            SELECT COUNT(*) FROM audit_log
+            WHERE org_id = @org AND action = 'upstream_source_pin_violation'
+            """,
+            new { org = _orgId });
+    }
+
+    // The scheme+authority of a configured upstream base — the granularity a source pin records,
+    // which is why two repository paths under one host collapse to a single pinned value.
+    private static string Authority(string url) => new Uri(url).GetLeftPart(UriPartial.Authority);
+
     public async Task DisposeAsync()
     {
         _server.Stop();
@@ -189,7 +233,8 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
         => _server.LogEntries.Count(e => e.RequestMessage?.Path?.EndsWith(filename) == true);
 
     private MavenController BuildController(
-        IOsvSource osv, TimeProvider? clock = null, bool verifyWithUpstreamSha256 = true)
+        IOsvSource osv, TimeProvider? clock = null, bool verifyWithUpstreamSha256 = true,
+        bool sourcePinning = false)
     {
         var time = clock ?? TimeProvider.System;
         var http = new DefaultHttpContext();
@@ -210,7 +255,7 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
         // Single blob store seen by both the UpstreamClient (which writes the proxied blob at
         // BlobKeys.Proxy(sha)) and the controller (which reads it back on a cache hit).
         var tiered = new TieredBlobStorage(_blobs, _blobs);
-        var httpFactory = new StaticHttpClientFactory(new HttpClient(new WireMockHandler(_server)));
+        var httpFactory = new StaticHttpClientFactory(new HttpClient(new WireMockHandler()));
         var upstreamClient = new UpstreamClient(
             httpFactory, tiered, _audit, new AllowAllValidator(), new StubAirGapMode(false),
             new Dependably.Infrastructure.DriveInfoStagingDiskInfo(Path.GetTempPath()),
@@ -238,7 +283,7 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
             NullLogger<CacheAccessRecorder>.Instance, time);
         var proxyFetch = new ProxyFetchService(
             cacheRecorder, proxyVersions, cacheArtifact, tenantAccess, scanner, blockGate, _audit, time,
-            new Dependably.Infrastructure.SourcePinRepository(_db, new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build()));
+            new Dependably.Infrastructure.SourcePinRepository(_db, SourcePinConfig(sourcePinning)));
 
         var svc = new MavenControllerServices(
             Packages: _packages, Tokens: _tokens, Audit: _audit, Orgs: _orgs,
@@ -641,6 +686,152 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
         Assert.Equal(0, licRows);
     }
 
+    // ── Source pinning (dependency confusion across a multi-repository upstream list) ─────
+    //
+    // Maven's normal configuration is several upstream repositories walked in priority order, so
+    // the shadowing these tests describe is not hypothetical: a public repository ordered ahead of
+    // a private one answers for a coordinate the private one owns. The pin is opt-in
+    // (PROXY_SOURCE_PINNING), and it keys off exactly one input — the top-level
+    // ProxyFetchRequest.UpstreamUrl — so every test here is also a check that the field is
+    // supplied at all. The pinned value is an authority, not a full base URL, which is what keeps
+    // the ordinary releases/snapshots/central-proxy-on-one-host layout from reading as shadowing.
+
+    [Fact]
+    public async Task ProxyMiss_BindsTheCoordinateToTheUpstreamThatServedIt()
+    {
+        byte[] bytes = Encoding.UTF8.GetBytes("pinned-jar-payload");
+        string path = "com/example/pinned/1.0/pinned-1.0.jar";
+        StubArtifact(path, bytes);
+        StubSidecar(path, Sha256Hex(bytes));
+
+        var ctl = BuildController(CleanOsv(), sourcePinning: true);
+        var result = await ctl.Download(path, CancellationToken.None);
+
+        Assert.Equal(bytes, Dependably.Tests.Infrastructure.MavenServe.File(result).FileContents);
+
+        // Without the pin row nothing downstream can ever fire: the violation arm compares against
+        // it, so an absent row is the whole control being absent rather than merely unproven.
+        Assert.Equal(Authority(_upstream), await PinnedHostAsync("com.example:pinned"));
+    }
+
+    [Fact]
+    public async Task ProxyMiss_WithPinningDisabled_BindsNothing()
+    {
+        // Adversarial twin: the pin is an operator opt-in, so the default instance must record
+        // nothing. A pin written while the switch is off would start refusing serves on an
+        // upgrade for deployments that never asked for the control.
+        byte[] bytes = Encoding.UTF8.GetBytes("unpinned-jar-payload");
+        string path = "com/example/unpinned/1.0/unpinned-1.0.jar";
+        StubArtifact(path, bytes);
+        StubSidecar(path, Sha256Hex(bytes));
+
+        var ctl = BuildController(CleanOsv());
+        var result = await ctl.Download(path, CancellationToken.None);
+
+        Assert.Equal(bytes, Dependably.Tests.Infrastructure.MavenServe.File(result).FileContents);
+        Assert.Null(await PinnedHostAsync("com.example:unpinned"));
+    }
+
+    [Fact]
+    public async Task ProxyMiss_SameCoordinateFromASecondUpstreamHost_IsRefusedAsAPinViolation()
+    {
+        // The dependency-confusion shape: com.example:lib resolves from the org's own repository,
+        // then a second repository on a different host answers for the same coordinate. Serving it
+        // is how a squatted groupId reaches a build; the pin is what refuses it.
+        byte[] owned = Encoding.UTF8.GetBytes("owned-lib-1.0");
+        string ownedPath = "com/example/lib/1.0/lib-1.0.jar";
+        StubArtifact(ownedPath, owned);
+        StubSidecar(ownedPath, Sha256Hex(owned));
+
+        var served = await BuildController(CleanOsv(), sourcePinning: true)
+            .Download(ownedPath, CancellationToken.None);
+        Assert.Equal(owned, Dependably.Tests.Infrastructure.MavenServe.File(served).FileContents);
+
+        using var squatter = WireMockServer.Start();
+        string squatterBase = squatter.Urls[0].TrimEnd('/');
+        byte[] shadowed = Encoding.UTF8.GetBytes("shadowed-lib-2.0");
+        string shadowedPath = "com/example/lib/2.0/lib-2.0.jar";
+        squatter.Given(Request.Create().WithPath("/" + shadowedPath).UsingGet())
+                .RespondWith(Response.Create().WithStatusCode(200).WithBody(shadowed));
+        await ClearMavenRegistriesAsync();
+        await SeedMavenRegistryAsync(squatterBase);
+
+        var result = await BuildController(CleanOsv(), sourcePinning: true)
+            .Download(shadowedPath, CancellationToken.None);
+
+        Assert.Equal(403, Assert.IsType<StatusCodeResult>(result).StatusCode);
+        Assert.Equal(1, await PinViolationCountAsync());
+
+        // First-serve wins: the refusal must not re-point the pin at the host it just refused,
+        // which would hand the attacker the binding on the second attempt.
+        Assert.Equal(Authority(_upstream), await PinnedHostAsync("com.example:lib"));
+
+        // The refusal lands before any cache_artifact row is written and Maven's cache-hit lookup
+        // is row-driven, so a replay re-enters the fetch path and re-refuses rather than serving
+        // the staged bytes ungated.
+        var replay = await BuildController(CleanOsv(), sourcePinning: true)
+            .Download(shadowedPath, CancellationToken.None);
+        Assert.Equal(403, Assert.IsType<StatusCodeResult>(replay).StatusCode);
+        Assert.Equal(2, await PinViolationCountAsync());
+    }
+
+    [Fact]
+    public async Task ProxyMiss_AnotherVersionFromThePinnedUpstream_IsServedWithNoViolation()
+    {
+        // Adversarial twin: the pin keys on the serving authority, not on "this name was fetched
+        // before". A second version arriving from the upstream already bound to the coordinate is
+        // the ordinary case and must serve — otherwise the block above is the fetch path breaking,
+        // not the guard firing.
+        byte[] first = Encoding.UTF8.GetBytes("same-host-lib-1.0");
+        string firstPath = "com/example/same/1.0/same-1.0.jar";
+        StubArtifact(firstPath, first);
+        StubSidecar(firstPath, Sha256Hex(first));
+        await BuildController(CleanOsv(), sourcePinning: true).Download(firstPath, CancellationToken.None);
+
+        byte[] second = Encoding.UTF8.GetBytes("same-host-lib-2.0");
+        string secondPath = "com/example/same/2.0/same-2.0.jar";
+        StubArtifact(secondPath, second);
+        StubSidecar(secondPath, Sha256Hex(second));
+
+        var result = await BuildController(CleanOsv(), sourcePinning: true)
+            .Download(secondPath, CancellationToken.None);
+
+        Assert.Equal(second, Dependably.Tests.Infrastructure.MavenServe.File(result).FileContents);
+        Assert.Equal(0, await PinViolationCountAsync());
+    }
+
+    [Fact]
+    public async Task ProxyMiss_ASecondRepositoryOnThePinnedHost_IsNotShadowing()
+    {
+        // Adversarial twin for Maven's defining shape: one Nexus/Artifactory host commonly exposes
+        // several repositories (releases, snapshots, a central proxy) under distinct paths, and a
+        // coordinate legitimately resolving from a second one of them is not dependency confusion.
+        // Pinning the scheme+authority rather than the full base URL is what keeps that from
+        // raising a violation — a false refusal here would be worse than the gap it closes.
+        await ClearMavenRegistriesAsync();
+        await SeedMavenRegistryAsync($"{_upstream}/releases");
+
+        byte[] release = Encoding.UTF8.GetBytes("multi-repo-lib-1.0");
+        string releasePath = "com/example/multi/1.0/multi-1.0.jar";
+        StubArtifact("releases/" + releasePath, release);
+        StubSidecar("releases/" + releasePath, Sha256Hex(release));
+        await BuildController(CleanOsv(), sourcePinning: true).Download(releasePath, CancellationToken.None);
+        Assert.Equal(Authority(_upstream), await PinnedHostAsync("com.example:multi"));
+
+        await ClearMavenRegistriesAsync();
+        await SeedMavenRegistryAsync($"{_upstream}/snapshots");
+        byte[] snapshot = Encoding.UTF8.GetBytes("multi-repo-lib-2.0");
+        string snapshotPath = "com/example/multi/2.0/multi-2.0.jar";
+        StubArtifact("snapshots/" + snapshotPath, snapshot);
+        StubSidecar("snapshots/" + snapshotPath, Sha256Hex(snapshot));
+
+        var result = await BuildController(CleanOsv(), sourcePinning: true)
+            .Download(snapshotPath, CancellationToken.None);
+
+        Assert.Equal(snapshot, Dependably.Tests.Infrastructure.MavenServe.File(result).FileContents);
+        Assert.Equal(0, await PinViolationCountAsync());
+    }
+
     // ── test doubles (mirror MavenUpstreamFetcherTests) ─────────────────────────
 
     private sealed class StubAirGapMode : IAirGapMode
@@ -664,15 +855,18 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
         public HttpClient CreateClient(string name) => _client;
     }
 
+    /// <summary>
+    /// Forwards each outgoing request to the loopback authority it actually names. Pinning every
+    /// request onto one mock server would make a two-upstream scenario impossible to express: the
+    /// second host's requests would be silently answered by the first, and a source-pin test would
+    /// then be asserting against a single authority while believing it had two.
+    /// </summary>
     private sealed class WireMockHandler : HttpMessageHandler
     {
-        private readonly WireMockServer _server;
-        public WireMockHandler(WireMockServer server) => _server = server;
-
         protected override async Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request, CancellationToken ct)
         {
-            string url = _server.Urls[0] + request.RequestUri!.PathAndQuery;
+            var url = request.RequestUri!;
             using var innerRequest = new HttpRequestMessage(request.Method, url);
             foreach (var h in request.Headers)
             {

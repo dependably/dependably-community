@@ -211,8 +211,23 @@ public sealed class AuditEmitter : IAuditEmitter
             || value.Trim() == "1"
             || value.Trim().Equals("yes", StringComparison.OrdinalIgnoreCase));
 
+    // Char-index (UTF-16 code unit) truncation, but never on an unpaired surrogate: the
+    // User-Agent header is fully client-controlled, so an astral-plane character (e.g. an
+    // emoji) can be engineered to straddle the cut point. Cutting at `max` in that case would
+    // keep a lone high surrogate at the end of the persisted string — invalid UTF-16 that does
+    // not round-trip through UTF-8 storage or SIEM/webhook JSON export.
     private static string? Truncate(string? s, int max)
     {
-        return s is null ? null : s.Length <= max ? s : s[..max];
+        if (s is null || s.Length <= max)
+        {
+            return s;
+        }
+
+        int cut = max;
+        if (cut > 0 && char.IsHighSurrogate(s[cut - 1]))
+        {
+            cut--;
+        }
+        return s[..cut];
     }
 }

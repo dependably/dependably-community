@@ -68,7 +68,7 @@ public sealed class ProxyVersionListGlobalPlaneTests : IClassFixture<DependablyF
             orgId, ecosystem, name, version, filename,
             Sha256: sha256, SizeBytes: fakeBytes.Length,
             BlobKey: $"{blobKey}/{filename}",
-            UpstreamUrl: $"https://upstream.example/{filename}"));
+            UpstreamUrl: $"https://upstream.example/{filename}", Origin: CacheAccessOrigin.FirstFetch));
 
         // Real proxy first-fetch (ProxyVersionRecorder) also creates the per-tenant packages row
         // so the package is discoverable in this org's listings; the per-version data lives in the

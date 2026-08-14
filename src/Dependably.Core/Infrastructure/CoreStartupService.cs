@@ -422,11 +422,11 @@ public sealed class CoreStartupService : IHostedService
         _logger.LogWarning(
             "Legacy SMTP environment variables are set but ignored: {LegacySmtpVariables}. Email " +
             "configuration is database-backed and there is no environment-to-database seed, so " +
-            "these values have no effect. Invite emails send only once the relay is configured at " +
-            "Settings -> Instance settings -> Instance email (SMTP); until then an invite returns " +
-            "its link in the API response instead of emailing it. Alert email delivery is " +
-            "configured separately at Settings -> Integrations -> Email. Remove these variables " +
-            "once the transport is configured.",
+            "these values have no effect. Configure the relay at Settings -> Instance settings -> " +
+            "Instance email (SMTP); it is the single transport every outgoing message uses, " +
+            "including invites, password resets, account-security notices and alert email. Until " +
+            "then an invite returns its link in the API response instead of emailing it. Remove " +
+            "these variables once the transport is configured.",
             string.Join(", ", present));
     }
 
@@ -504,6 +504,21 @@ public sealed class CoreStartupService : IHostedService
             "If a TLS-terminating reverse proxy is in front, set TRUSTED_PROXIES to the " +
             "proxy's IP(s)/CIDR(s) so forwarded headers from that proxy are trusted and the " +
             "client-facing scheme and source IP are visible to the application.");
+
+        // Header tenancy rides on the same trust boundary: the tenant header decides which org's
+        // packages a request is served, including on the unauthenticated protocol surfaces, so it
+        // is honoured only from a peer listed in TRUSTED_PROXIES. Unset means no peer qualifies and
+        // every request resolves uninitialized — the deployment does not work at all, which is the
+        // intended failure mode for a header nobody can authenticate.
+        if (IsHeaderTenancyMode(_config["DEPLOYMENT_MODE"]))
+        {
+            _logger.LogWarning(
+                "DEPLOYMENT_MODE=header requires TRUSTED_PROXIES. The tenant header selects the org " +
+                "a request is served — including on anonymous protocol routes — so it is accepted " +
+                "only from a socket peer listed in TRUSTED_PROXIES; with none listed, every request " +
+                "resolves to no tenant and the deployment serves nothing. Set TRUSTED_PROXIES to the " +
+                "edge proxy's IP(s)/CIDR(s).");
+        }
 
         // Layered on top of the base warning above: when the metrics/version/management-docs IP
         // allowlist is still the hard-coded loopback default (never overridden via env or DB), an
@@ -603,6 +618,14 @@ public sealed class CoreStartupService : IHostedService
     internal static bool ShouldWarnCoLocatedProxyDefeatsMetricsAllowlist(
         bool trustedProxiesUnset, MetricsAccessConfig.Source allowlistSource) =>
         trustedProxiesUnset && allowlistSource == MetricsAccessConfig.Source.Default;
+
+    /// <summary>
+    /// True when <c>DEPLOYMENT_MODE</c> selects header-based tenancy, whose tenant header is only
+    /// honoured from a <c>TRUSTED_PROXIES</c> peer. Exposed internally so the warning condition is
+    /// unit-testable without a full DB-backed startup.
+    /// </summary>
+    internal static bool IsHeaderTenancyMode(string? deploymentMode) =>
+        string.Equals(deploymentMode?.Trim(), "header", StringComparison.OrdinalIgnoreCase);
 
     private void LogApexHostWarning()
     {

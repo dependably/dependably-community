@@ -102,7 +102,7 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
         string? url = NormalizeUpstreamBaseUrl(ecosystem, req.Url?.Trim());
         // upstream_protocol is Terraform-only: every other ecosystem serves the same protocol it
         // fetches, so the field has nothing to discriminate and a stray value would silently do
-        // nothing (ADR 0003).
+        // nothing (ADR-terraform-provider-network-mirror).
         string? protocol = string.IsNullOrWhiteSpace(req.Protocol) ? null : req.Protocol.Trim().ToLowerInvariant();
         // Parse auth_type. Non-OCI supports anonymous (default), bearer (Authorization: Bearer
         // <secret>), and basic (Authorization: Basic base64(user:secret)).
@@ -127,6 +127,7 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
 
         // secret is write-only: log authType/hasSecret only, never the value.
         await _audit.LogAsync("upstream_registry_added", orgId, GetUserId(),
+            actorKind: ActorKinds.User,
             detail: System.Text.Json.JsonSerializer.Serialize(new
             {
                 id = entry.Id,
@@ -136,7 +137,8 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
                 authType,
                 hasSecret = entry.HasSecret,
                 protocol = entry.Protocol,
-            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return CreatedAtAction(nameof(List), null, entry);
     }
@@ -299,6 +301,7 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
 
         // secret is write-only: log authType/host/prefixes/hasSecret only.
         await _audit.LogAsync("upstream_registry_added", orgId, GetUserId(),
+            actorKind: ActorKinds.User,
             detail: System.Text.Json.JsonSerializer.Serialize(new
             {
                 id = entry.Id,
@@ -308,7 +311,8 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
                 prefixes = req.Prefixes,
                 hasSecret = entry.HasSecret,
                 name,
-            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return CreatedAtAction(nameof(List), null, entry);
     }
@@ -368,7 +372,9 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
         await _registries.DeleteAsync(orgId, id, ct);
 
         await _audit.LogAsync("upstream_registry_removed", orgId, GetUserId(),
-            detail: System.Text.Json.JsonSerializer.Serialize(new { id }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+            actorKind: ActorKinds.User,
+            detail: System.Text.Json.JsonSerializer.Serialize(new { id }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return NoContent();
     }
@@ -415,9 +421,11 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
         await _registries.SetSymbolServerUrlAsync(orgId, id, url, ct);
 
         await _audit.LogAsync("upstream_registry_symbol_server_set", orgId, GetUserId(),
+            actorKind: ActorKinds.User,
             detail: System.Text.Json.JsonSerializer.Serialize(
                 new { id, cleared = url is null },
-                Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+                Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return NoContent();
     }
@@ -445,7 +453,9 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
         await _registries.ReorderAsync(orgId, eco, ids, ct);
 
         await _audit.LogAsync("upstream_registry_reordered", orgId, GetUserId(),
-            detail: System.Text.Json.JsonSerializer.Serialize(new { ecosystem = eco, ids }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+            actorKind: ActorKinds.User,
+            detail: System.Text.Json.JsonSerializer.Serialize(new { ecosystem = eco, ids }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return NoContent();
     }

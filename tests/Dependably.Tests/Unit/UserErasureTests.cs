@@ -12,7 +12,8 @@ namespace Dependably.Tests.Unit;
 /// RemoveOrgMemberAsync is a full account erasure. These tests prove the two halves of the
 /// defect it fixes: (A) deleting a user who touched any of the seven restrict-FK tables must
 /// not throw (the offboarding 500), and (B) the personal data that used to survive — trusted
-/// devices, login_attempts/account_send_throttle, IPs in activity/audit — is actually gone.
+/// devices, login_attempts/account_send_throttle, IPs and user agents in activity/audit_log/
+/// audit_event — is actually gone.
 ///
 /// <para>
 /// login_attempts and account_send_throttle are keyed by <c>LoginService.HashLockoutKey</c>
@@ -55,7 +56,12 @@ public sealed class UserErasureTests : IAsyncLifetime
     private async Task SeedLockoutAsync(string lockoutKey, int failedCount)
     {
         var lockout = new SqliteLockoutStore(_db, _clock);
-        await lockout.RecordFailureAsync(lockoutKey, failedCount, lockedUntil: null, ct: default);
+        // A high threshold so the seeded row never trips the lock — these tests only care that a
+        // login_attempts row exists and survives/doesn't survive erasure, not its failed_count.
+        for (int i = 0; i < failedCount; i++)
+        {
+            await lockout.RecordFailureAsync(lockoutKey, maxFailedAttempts: int.MaxValue, TimeSpan.FromMinutes(15), ct: default);
+        }
     }
 
     /// <summary>Writes a send-throttle row through the real class — same pseudonym as login_attempts.</summary>
@@ -67,8 +73,8 @@ public sealed class UserErasureTests : IAsyncLifetime
     }
 
     // Seeds one row in each of the seven restrict-FK tables attributing to userId, plus a
-    // trusted device, and an activity + audit_log row carrying the user's source IP. suffix
-    // keeps unique keys distinct per user.
+    // trusted device, and an activity + audit_log + audit_event row carrying the user's source
+    // IP (and, for audit_event, user agent). suffix keeps unique keys distinct per user.
     private async Task SeedUserFootprintAsync(string userId, string suffix)
     {
         await using var conn = await _db.OpenAsync();
@@ -102,6 +108,16 @@ public sealed class UserErasureTests : IAsyncLifetime
         await conn.ExecuteAsync(
             "INSERT INTO audit_log (id, scope, org_id, actor_id, action, detail, source_ip, created_at) VALUES (@id, 'tenant', 'o1', @u, 'login', '{\"email\":\"x@y.com\"}', '203.0.113.9', '2026-06-15T12:00:00Z')",
             new { id = "aud-" + suffix, u = userId });
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO audit_event (
+                event_id, schema_version, event_type, org_id, tenant_resolver,
+                actor_type, actor_id, source_ip, user_agent, outcome, payload, occurred_at)
+            VALUES (
+                @id, 1, 'test.event', 'o1', 'single',
+                'user', @u, '203.0.113.9', 'TestAgent/1.0', 'accepted', '{}', '2026-06-15T12:00:00.000Z')
+            """,
+            new { id = "aev-" + suffix, u = userId });
     }
 
     [Fact]
@@ -139,6 +155,12 @@ public sealed class UserErasureTests : IAsyncLifetime
         Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM activity WHERE id = 'act-u1' AND source_ip IS NULL", new { }));
         Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM audit_log WHERE id = 'aud-u1' AND source_ip IS NULL AND detail IS NULL", new { }));
 
+        // audit_event: row survives (forensic skeleton — actor_id, payload — stays), but the
+        // personal identifiers are gone — no audit_event row still identifies the subject.
+        Assert.Equal(1, await CountAsync(
+            "SELECT COUNT(*) FROM audit_event WHERE event_id = 'aev-u1' AND actor_id = @u AND source_ip IS NULL AND user_agent IS NULL",
+            new { u = _u1 }));
+
         // Adversarial twin: user 2 and every row attributed to them are entirely untouched.
         Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM users WHERE id = @u", new { u = _u2 }));
         Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM invites WHERE created_by = @u", new { u = _u2 }));
@@ -147,6 +169,9 @@ public sealed class UserErasureTests : IAsyncLifetime
         Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM claim_history WHERE id = 'ch-u2' AND actor_id = @u", new { u = _u2 }));
         Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM mfa_trusted_devices WHERE user_id = @u", new { u = _u2 }));
         Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM activity WHERE id = 'act-u2' AND source_ip = '203.0.113.9'", new { }));
+        Assert.Equal(1, await CountAsync(
+            "SELECT COUNT(*) FROM audit_event WHERE event_id = 'aev-u2' AND source_ip = '203.0.113.9' AND user_agent = 'TestAgent/1.0'",
+            new { }));
     }
 
     [Fact]

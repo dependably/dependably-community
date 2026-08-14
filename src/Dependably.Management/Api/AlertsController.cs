@@ -16,16 +16,18 @@ namespace Dependably.Api;
 /// Per-tenant alert center, surfaced as the topbar bell (admin/owner only — <c>read:tenant</c>
 /// and <c>tenant:configure</c> are not granted to member/auditor). GET routes list/summarize
 /// alert rows; dismiss records a shared active/dismissed flag all admins in the org see the same
-/// way. Settings live under <c>/api/v1/alert-settings</c>: the base GET/PUT own the Alerts-tab
-/// columns — the gates (severity floor, per-type toggles) plus the email delivery gate and its
-/// recipient list; <c>/alert-settings/slack</c> owns the optional Slack delivery channel,
+/// way. Settings live under <c>/api/v1/alert-settings</c>, whose write surface is split one
+/// endpoint per editing surface: the base GET/PUT own the Alerts-tab gates (severity floor,
+/// per-type toggles); <c>/alert-settings/email</c> owns the email delivery channel (the gate and
+/// its recipient list); <c>/alert-settings/slack</c> owns the optional Slack delivery channel,
 /// write-only for the webhook URL — GET/PUT never echo the raw URL, only a computed
 /// <c>hasSlackWebhook</c> boolean, mirroring <see cref="WebhookController"/>'s secret-handling
-/// convention. <c>/alert-settings/email</c> owns the email SMTP transport: the password is
-/// write-only (<c>hasEmailSmtpPassword</c>) and <c>instanceEmailConfigured</c> tells the UI
-/// whether inheriting the instance transport would actually resolve to something, without ever
-/// exposing the instance's own host/username/etc. Splitting the write surface this way means an
-/// Alerts-tab save and an Integrations-tab save can never clobber each other's columns.
+/// convention. Both delivery channels are edited on the Integrations tab. There is no per-org SMTP transport: SMTP is an instance-level transport, and an org
+/// configures only whether alert mail is sent and to whom. <c>instanceEmailConfigured</c> tells the
+/// UI whether that transport currently resolves — a boolean only, never the instance's own
+/// host/username/etc — so an admin can be told their recipients would go nowhere. Splitting the
+/// write surface this way means a gates save and either channel's save can never clobber each
+/// other's columns.
 /// </summary>
 [ApiController]
 [Authorize]
@@ -153,18 +155,53 @@ public sealed class AlertsController : OrgScopedControllerBase
         }
 
         await _audit.LogAsync("alert_dismissed", orgId, userId,
+            actorKind: ActorKinds.User,
             detail: JsonSerializer.Serialize(new { id = alert.Id, type = alert.Type, purl = alert.Purl }, WebJson),
-            ct: ct);
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return Ok(new { id = alert.Id, state = "dismissed" });
     }
 
     /// <summary>
+    /// POST /api/v1/alerts/dismiss-all — dismisses every active alert in the caller's org and
+    /// returns how many were dismissed. Server-side rather than a client loop over the rendered
+    /// page: the list is paged, so the caller can only see part of what it is asking to clear.
+    /// Idempotent — a repeat call dismisses nothing, returns <c>dismissed: 0</c>, and writes no
+    /// audit row, matching the single-alert dismiss.
+    /// </summary>
+    [HttpPost("api/v1/alerts/dismiss-all")]
+    public async Task<IActionResult> DismissAll(CancellationToken ct)
+    {
+        var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
+        if (result is not null)
+        {
+            return result;
+        }
+
+        string orgId = CurrentTenantId();
+        string? userId = GetUserId();
+        int dismissed = await _alerts.DismissAllActiveAsync(orgId, userId, ct);
+
+        if (dismissed > 0)
+        {
+            // One audit row carrying the count, not one per alert: the operator action being
+            // recorded is the bulk clear, and the per-alert rows are recoverable from the alert
+            // table's own dismissed_by/dismissed_at stamps.
+            await _audit.LogAsync("alert_dismissed_all", orgId, userId,
+                actorKind: ActorKinds.User,
+                detail: JsonSerializer.Serialize(new { dismissed }, WebJson),
+                sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+        }
+
+        return Ok(new { dismissed });
+    }
+
+    /// <summary>
     /// GET /api/v1/alert-settings — the full projection (gates + Slack + email), plus
     /// <c>secretsAvailable</c> (whether a master key is configured) so the Integrations tab can
-    /// grey the Slack/email secret inputs with an explanatory hint when they can't be saved, and
+    /// grey the Slack webhook input with an explanatory hint when it can't be saved, and
     /// <c>instanceEmailConfigured</c> (boolean only — never the instance's own SMTP details) so
-    /// the email inherit-instance checkbox can show whether inheriting would resolve to anything.
+    /// the Integrations tab can tell an admin their recipients would go nowhere.
     /// </summary>
     [HttpGet("api/v1/alert-settings")]
     public async Task<IActionResult> GetSettings(
@@ -186,13 +223,10 @@ public sealed class AlertsController : OrgScopedControllerBase
     }
 
     /// <summary>
-    /// PUT /api/v1/alert-settings — the Alerts-tab columns: the gates (quarantine/vuln toggles,
-    /// severity floor) plus the email delivery gate (<c>emailEnabled</c>) and its recipient list.
-    /// <c>emailRecipients</c> is comma-separated and validated (each entry must parse as an email
-    /// address, capped at <see cref="EmailRecipients.MaxRecipients"/>). Never touches the Slack or
-    /// SMTP-transport columns; use <see cref="UpdateSlackSettings"/> /
-    /// <see cref="UpdateEmailSettings"/> for those. Audits alert_settings_updated with the gate
-    /// fields, the email toggle, and the recipient count.
+    /// PUT /api/v1/alert-settings — the Alerts-tab gates: the quarantine/vuln toggles and the
+    /// severity floor. Never touches a delivery channel's columns; use
+    /// <see cref="UpdateEmailChannel"/> and <see cref="UpdateSlackSettings"/> for those. Audits
+    /// alert_settings_updated with the gate fields.
     /// </summary>
     [HttpPut("api/v1/alert-settings")]
     public async Task<IActionResult> UpdateSettings(
@@ -211,6 +245,50 @@ public sealed class AlertsController : OrgScopedControllerBase
             return _problems.ValidationErrorActionKey("vulnMinSeverity", "error.alert.severityInvalid");
         }
 
+        string orgId = CurrentTenantId();
+
+        var updated = await _settings.UpdateGatesAsync(orgId, new UpdateAlertGates(
+            req.QuarantineAlertsEnabled, req.VulnAlertsEnabled,
+            string.IsNullOrEmpty(req.VulnMinSeverity) ? "HIGH" : req.VulnMinSeverity.ToUpperInvariant()), ct);
+
+        await _audit.LogAsync("alert_settings_updated", orgId, GetUserId(),
+            detail: JsonSerializer.Serialize(new
+            {
+                quarantineAlertsEnabled = updated.QuarantineAlertsEnabled,
+                vulnAlertsEnabled = updated.VulnAlertsEnabled,
+                vulnMinSeverity = updated.VulnMinSeverity,
+            }, WebJson),
+            actorKind: ActorKinds.User, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+
+        var instance = await instanceSmtp.ResolveAsync(ct);
+        return Ok(updated with
+        {
+            SecretsAvailable = _envelope.IsConfigured,
+            InstanceEmailConfigured = instance.Enabled && instance.Configured,
+        });
+    }
+
+    /// <summary>
+    /// PUT /api/v1/alert-settings/email — the email delivery channel: the gate
+    /// (<c>emailEnabled</c>) and the recipient list. <c>emailRecipients</c> is comma-separated and
+    /// validated (each entry must parse as an email address, capped at
+    /// <see cref="EmailRecipients.MaxRecipients"/>). Never touches the gate or Slack columns, so
+    /// an Integrations-tab email save can't clobber an Alerts-tab or Slack save. There is no SMTP
+    /// transport here — that is instance-level. Audits alert_settings_updated with the email
+    /// toggle and the recipient count, never the addresses.
+    /// </summary>
+    [HttpPut("api/v1/alert-settings/email")]
+    public async Task<IActionResult> UpdateEmailChannel(
+        [FromBody] AlertEmailChannelRequest req,
+        [FromServices] InstanceSmtpConfig instanceSmtp,
+        CancellationToken ct)
+    {
+        var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
+        if (result is not null)
+        {
+            return result;
+        }
+
         var (recipients, recipientsErrorKey) = EmailRecipients.Validate(req.EmailRecipients);
         if (recipientsErrorKey is not null)
         {
@@ -220,21 +298,16 @@ public sealed class AlertsController : OrgScopedControllerBase
         string orgId = CurrentTenantId();
         string? recipientsStored = recipients is { Length: > 0 } ? string.Join(",", recipients) : null;
 
-        var updated = await _settings.UpdateGatesAsync(orgId, new UpdateAlertGates(
-            req.QuarantineAlertsEnabled, req.VulnAlertsEnabled,
-            string.IsNullOrEmpty(req.VulnMinSeverity) ? "HIGH" : req.VulnMinSeverity.ToUpperInvariant(),
-            req.EmailEnabled, recipientsStored), ct);
+        var updated = await _settings.UpdateEmailChannelAsync(
+            orgId, new UpdateAlertEmailChannel(req.EmailEnabled, recipientsStored), ct);
 
         await _audit.LogAsync("alert_settings_updated", orgId, GetUserId(),
             detail: JsonSerializer.Serialize(new
             {
-                quarantineAlertsEnabled = updated.QuarantineAlertsEnabled,
-                vulnAlertsEnabled = updated.VulnAlertsEnabled,
-                vulnMinSeverity = updated.VulnMinSeverity,
                 emailEnabled = updated.EmailEnabled,
                 recipientCount = recipients?.Length ?? 0,
             }, WebJson),
-            ct: ct);
+            actorKind: ActorKinds.User, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         var instance = await instanceSmtp.ResolveAsync(ct);
         return Ok(updated with
@@ -288,7 +361,7 @@ public sealed class AlertsController : OrgScopedControllerBase
             {
                 slackEnabled = updated.SlackEnabled,
             }, WebJson),
-            ct: ct);
+            actorKind: ActorKinds.User, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         var instance = await instanceSmtp.ResolveAsync(ct);
         return Ok(updated with
@@ -338,112 +411,11 @@ public sealed class AlertsController : OrgScopedControllerBase
     }
 
     /// <summary>
-    /// PUT /api/v1/alert-settings/email — full-form replacement of the email SMTP transport
-    /// (inherit flag + own-transport fields); never touches the gate, Slack, or email
-    /// delivery-gate columns (the email toggle and recipients belong to
-    /// <see cref="UpdateSettings"/>). <c>emailSmtpPassword</c> is write-only (empty/absent
-    /// preserves the stored value, non-empty rotates it and requires
-    /// <see cref="EnvelopeProtector.IsConfigured"/>). An IP-literal <c>emailSmtpHost</c> in a
-    /// blocked SSRF range is rejected unless <c>WEBHOOK_ALLOW_PRIVATE=true</c> (via
-    /// <see cref="HostSsrfValidator"/>), reusing the same posture as the Slack webhook URL check
-    /// above — a hostname is not resolved at save time (DNS can change between save and send, and
-    /// a resolution failure here would reject a value the operator has not tried to use yet); the
-    /// authoritative, DNS-rebinding-aware gate is the connect-time guard
-    /// <see cref="SmtpMailSender"/> runs on every send. Audits alert_email_settings_updated with
-    /// the non-secret fields only (inherit flag, host).
-    /// </summary>
-    [HttpPut("api/v1/alert-settings/email")]
-    public async Task<IActionResult> UpdateEmailSettings(
-        [FromBody] AlertEmailSettingsRequest req,
-        [FromServices] InstanceSmtpConfig instanceSmtp,
-        CancellationToken ct)
-    {
-        var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
-        if (result is not null)
-        {
-            return result;
-        }
-
-        // An explicit JSON null bypasses the property initializer; coalesce to "" so it fails
-        // Validate's security-mode check as a 422 instead of dereferencing null further down.
-        string requestedSecurity = req.EmailSmtpSecurity ?? "";
-        var (field, resourceKey) = SmtpTransportSettings.Validate(req.EmailSmtpPort, requestedSecurity, req.EmailSmtpFrom);
-        if (field is not null)
-        {
-            string apiFieldName = field switch
-            {
-                "port" => "emailSmtpPort",
-                "security" => "emailSmtpSecurity",
-                "fromAddress" => "emailSmtpFrom",
-                _ => field,
-            };
-            return _problems.ValidationErrorActionKey(apiFieldName, resourceKey!);
-        }
-
-        if (!string.IsNullOrEmpty(req.EmailSmtpPassword) && !_envelope.IsConfigured)
-        {
-            return _problems.ValidationErrorActionKey("emailSmtpPassword", "error.email.masterKeyRequired");
-        }
-
-        if (!string.IsNullOrWhiteSpace(req.EmailSmtpHost))
-        {
-            bool allowPrivate = string.Equals(
-                _config["WEBHOOK_ALLOW_PRIVATE"], "true", StringComparison.OrdinalIgnoreCase);
-            Func<System.Net.IPAddress, bool> isBlocked = allowPrivate
-                ? SsrfGuard.IsBlockedIpExcludingPrivate
-                : SsrfGuard.IsBlockedIp;
-            if (HostSsrfValidator.IsHostBlocked(req.EmailSmtpHost, isBlocked))
-            {
-                return _problems.ValidationErrorActionKey("emailSmtpHost", "error.email.hostBlocked");
-            }
-        }
-
-        string orgId = CurrentTenantId();
-
-        var updated = await _settings.UpdateEmailAsync(orgId, new UpdateAlertEmail(
-            req.EmailInheritInstance,
-            req.EmailSmtpHost,
-            req.EmailSmtpPort,
-            requestedSecurity.ToLowerInvariant(),
-            req.EmailSmtpUsername,
-            req.EmailSmtpPassword,
-            req.EmailSmtpFrom), ct);
-
-        // security=none with credentials attached means the AUTH exchange goes out readable. Not
-        // rejected — an operator may knowingly relay over a trusted segment, and refusing a save
-        // they can already make by other means would only push them around the check — but it is
-        // recorded and surfaced. The response carries EmailSmtpCleartextCredentials, so the warning
-        // persists across every later read rather than living only in this one save's echo.
-        if (updated.EmailSmtpCleartextCredentials)
-        {
-            _logger.LogWarning(
-                "Org SMTP transport saved with security=none and credentials set: AUTH will be sent "
-                + "in cleartext. org={OrgId} host={Host}",
-                orgId, updated.EmailSmtpHost);
-        }
-
-        await _audit.LogAsync("alert_email_settings_updated", orgId, GetUserId(),
-            detail: JsonSerializer.Serialize(new
-            {
-                emailInheritInstance = updated.EmailInheritInstance,
-                emailSmtpHost = updated.EmailSmtpHost,
-                cleartextCredentials = updated.EmailSmtpCleartextCredentials,
-            }, WebJson),
-            ct: ct);
-
-        var instance = await instanceSmtp.ResolveAsync(ct);
-        return Ok(updated with
-        {
-            SecretsAvailable = _envelope.IsConfigured,
-            InstanceEmailConfigured = instance.Enabled && instance.Configured,
-        });
-    }
-
-    /// <summary>
-    /// POST /api/v1/alert-settings/email/test — resolves the effective transport through
-    /// <see cref="EffectiveEmailConfigResolver"/> (so an inherit-instance org genuinely exercises
-    /// the inherit path, not just its own columns) and sends a test message to the org's
-    /// configured recipients. Rate-limited like the other test-send endpoints.
+    /// POST /api/v1/alert-settings/email/test — resolves the channel through
+    /// <see cref="EffectiveEmailConfigResolver"/> (the same gate/recipients/instance-transport path
+    /// the delivery queue takes) and sends a test message to the org's configured recipients. The
+    /// only way a tenant admin can verify email works at all, since the transport is not theirs to
+    /// inspect. Rate-limited like the other test-send endpoints.
     /// </summary>
     [HttpPost("api/v1/alert-settings/email/test")]
     [EnableRateLimiting("invite")]
@@ -492,13 +464,17 @@ public sealed class AlertsController : OrgScopedControllerBase
     }
 }
 
-/// <summary>Request body for PUT /api/v1/alert-settings — the Alerts-tab columns: gates plus the
-/// email delivery gate and recipient list.</summary>
+/// <summary>Request body for PUT /api/v1/alert-settings — the Alerts-tab gates.</summary>
 public sealed class AlertSettingsRequest
 {
     public bool QuarantineAlertsEnabled { get; set; } = true;
     public bool VulnAlertsEnabled { get; set; } = true;
     public string? VulnMinSeverity { get; set; }
+}
+
+/// <summary>Request body for PUT /api/v1/alert-settings/email — the email delivery channel.</summary>
+public sealed class AlertEmailChannelRequest
+{
     public bool EmailEnabled { get; set; }
     /// <summary>Comma-separated. Empty/absent means the email channel has no recipients (nothing sends).</summary>
     public string? EmailRecipients { get; set; }
@@ -510,23 +486,4 @@ public sealed class AlertSlackSettingsRequest
     public bool SlackEnabled { get; set; }
     /// <summary>Write-only. Null/empty on update means "leave the stored URL unchanged".</summary>
     public string? SlackWebhookUrl { get; set; }
-}
-
-/// <summary>
-/// Request body for PUT /api/v1/alert-settings/email — a full-form replacement of the SMTP
-/// transport the caller always supplies in full, mirroring
-/// <see cref="Dependably.Infrastructure.Mail.EmailConfigRequest"/>'s write-only-secret
-/// convention: every field except <see cref="EmailSmtpPassword"/> replaces the stored value
-/// outright. The email delivery gate and recipients belong to <see cref="AlertSettingsRequest"/>.
-/// </summary>
-public sealed class AlertEmailSettingsRequest
-{
-    public bool EmailInheritInstance { get; set; } = true;
-    public string? EmailSmtpHost { get; set; }
-    public int EmailSmtpPort { get; set; } = Dependably.Infrastructure.Mail.SmtpTransportSettings.DefaultPort;
-    public string EmailSmtpSecurity { get; set; } = Dependably.Infrastructure.Mail.SmtpTransportSettings.DefaultSecurity;
-    public string? EmailSmtpUsername { get; set; }
-    /// <summary>Write-only. Null/empty on update means "leave the stored password unchanged".</summary>
-    public string? EmailSmtpPassword { get; set; }
-    public string? EmailSmtpFrom { get; set; }
 }

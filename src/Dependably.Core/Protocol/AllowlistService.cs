@@ -1,6 +1,8 @@
 using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Observability;
+using Dependably.Security;
+using Microsoft.AspNetCore.Http;
 
 namespace Dependably.Protocol;
 
@@ -13,11 +15,16 @@ public sealed class AllowlistService
 {
     private readonly IMetadataStore _db;
     private readonly AuditRepository _audit;
+    // Registered singleton-safe (IHttpContextAccessor wraps an AsyncLocal, not per-request
+    // state) so a block can attribute its audit row to the request that triggered it, even
+    // though this class has no per-request lifetime of its own. Null outside a request.
+    private readonly IHttpContextAccessor? _httpContextAccessor;
 
-    public AllowlistService(IMetadataStore db, AuditRepository audit)
+    public AllowlistService(IMetadataStore db, AuditRepository audit, IHttpContextAccessor? httpContextAccessor = null)
     {
         _db = db;
         _audit = audit;
+        _httpContextAccessor = httpContextAccessor;
     }
 
     /// <summary>
@@ -53,7 +60,8 @@ public sealed class AllowlistService
         // ecosystem so this is purely a labelling concern.
         string ecosystem = ExtractEcosystem(purl);
         DependablyMeter.AllowlistBlocks.Add(1, new KeyValuePair<string, object?>("ecosystem", ecosystem));
-        await _audit.LogAsync("allowlist_blocked", orgId: orgId, ecosystem: ecosystem, purl: purl, ct: ct);
+        await _audit.LogAsync("allowlist_blocked", orgId: orgId, ecosystem: ecosystem, purl: purl,
+            sourceIp: _httpContextAccessor?.HttpContext.GetNormalizedRemoteIp(), ct: ct);
         return false;
     }
 
@@ -73,6 +81,7 @@ public sealed class AllowlistService
             ecosystem: ecosystem,
             purl: hostedPurl,
             detail: $"{{\"hosted\":\"{hostedPurl}\",\"upstream\":\"{upstreamPurl}\"}}",
+            sourceIp: _httpContextAccessor?.HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
     }
 }

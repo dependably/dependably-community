@@ -11,8 +11,12 @@ namespace Dependably.Tests.Integration;
 
 /// <summary>
 /// Single-tenant mode coverage for /api/v1/instance/settings and
-/// /api/v1/instance/background-jobs. In single mode the tenant owner is
-/// also the operator, so these routes must remain accessible.
+/// /api/v1/instance/background-jobs. In single mode the tenant's admins are also the operators, so
+/// these routes must remain accessible to both admin and owner — they are gated on
+/// tenant:configure, which both roles hold, not on the owner-only tenant:admin.
+///
+/// Note CreateAdminJwt mints the bootstrap *owner*, so the Admin_* tests below exercise the owner
+/// path. The RoleAdmin_* tests are what actually pin a non-owner admin's access.
 /// </summary>
 [Trait("Category", "Integration")]
 public sealed class InstanceControllerTests : IClassFixture<DependablyFactory>, IAsyncLifetime
@@ -41,13 +45,97 @@ public sealed class InstanceControllerTests : IClassFixture<DependablyFactory>, 
     [Fact]
     public async Task Member_Get_Returns403()
     {
-        // tenant:admin is owner-only; a plain member is rejected even though authenticated.
+        // tenant:configure is held by admin and owner; a plain member is rejected even though
+        // authenticated.
         string memberId = await _factory.CreateUser($"member-{Guid.NewGuid():N}@example.com", "Password12345");
         string jwt = await _factory.CreateUserJwt(memberId, "member");
         using var c = _factory.CreateClientWithBearer(jwt);
 
         var resp = await c.GetAsync("/api/v1/instance/settings");
         Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
+    }
+
+    // ── Non-owner admin access ────────────────────────────────────────────────
+    //
+    // In single mode the org is the deployment, so an admin — who already configures the block
+    // gates, licence enforcement, trust anchors and proxy upstreams — also administers the
+    // instance. These pin that a genuine `admin` role (not the bootstrap owner CreateAdminJwt
+    // returns) reaches every instance route.
+
+    // The role must be persisted on the user row, not just claimed on the JWT: OrgAccessGuard
+    // resolves capabilities from the stored role, so a token claiming "admin" over a member row is
+    // correctly refused.
+    private async Task<HttpClient> RoleAdminClient()
+    {
+        string userId = await _factory.CreateUser(
+            $"roleadmin-{Guid.NewGuid():N}@example.com", "Password12345", role: "admin");
+        string jwt = await _factory.CreateUserJwt(userId, "admin");
+        return _factory.CreateClientWithBearer(jwt);
+    }
+
+    [Fact]
+    public async Task RoleAdmin_GetSettings_Returns200()
+    {
+        using var c = await RoleAdminClient();
+        var resp = await c.GetAsync("/api/v1/instance/settings");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task RoleAdmin_UpdateSettings_Persists()
+    {
+        using var c = await RoleAdminClient();
+
+        var put = await c.PutAsJsonAsync("/api/v1/instance/settings", new Dictionary<string, string>
+        {
+            ["MAX_UPLOAD_BYTES"] = "12345678"
+        });
+        Assert.Equal(HttpStatusCode.NoContent, put.StatusCode);
+
+        var get = await c.GetAsync("/api/v1/instance/settings");
+        var root = JsonDocument.Parse(await get.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal("12345678", root.GetProperty("MAX_UPLOAD_BYTES").GetString());
+    }
+
+    [Fact]
+    public async Task RoleAdmin_GetEmailConfig_Returns200()
+    {
+        using var c = await RoleAdminClient();
+        var resp = await c.GetAsync("/api/v1/instance/email-config");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task RoleAdmin_GetBackgroundJobs_Returns200()
+    {
+        using var c = await RoleAdminClient();
+        var resp = await c.GetAsync("/api/v1/instance/background-jobs");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+    }
+
+    /// <summary>
+    /// The widest of the instance routes: this allowlist is what stands between the public and
+    /// /metrics, /version and the management docs. It is deliberately gated the same as its
+    /// siblings rather than carved out as owner-only, so an admin can edit it — pinned here so the
+    /// decision is visible rather than incidental.
+    /// </summary>
+    [Fact]
+    public async Task RoleAdmin_PutMetricsAccess_Persists()
+    {
+        using var c = await RoleAdminClient();
+
+        var put = await c.PutAsJsonAsync("/api/v1/instance/metrics-access", new
+        {
+            enabled = true,
+            allowedIps = new[] { "10.9.9.0/24" },
+        });
+        Assert.Equal(HttpStatusCode.OK, put.StatusCode);
+
+        var get = await c.GetAsync("/api/v1/instance/metrics-access");
+        Assert.Equal(HttpStatusCode.OK, get.StatusCode);
+        var ips = JsonDocument.Parse(await get.Content.ReadAsStringAsync())
+            .RootElement.GetProperty("allowedIps").EnumerateArray().Select(e => e.GetString()).ToList();
+        Assert.Contains("10.9.9.0/24", ips);
     }
 
     [Fact]

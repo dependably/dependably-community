@@ -4,14 +4,16 @@ using Dependably.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace Dependably.Api;
 
 /// <summary>
-/// Tenant membership — list, role patch, removal. Split out of <see cref="OrgController"/>
-/// Both <see cref="PatchMemberRole"/> and <see cref="RemoveUser"/> enforce a
-/// two-tier authorization gate: tenant:configure to enter, plus tenant:admin to touch
-/// owner-role rows or grant the owner role. See <c>project_role_management_policy.md</c>.
+/// Tenant membership — list, role patch, removal, email change. Split out of
+/// <see cref="OrgController"/>. <see cref="PatchMemberRole"/>, <see cref="RemoveUser"/>, and
+/// <see cref="RequestEmailChange"/> (when acting on someone else) all enforce a two-tier
+/// authorization gate: tenant:configure to enter, plus tenant:admin to touch owner-role rows
+/// or grant the owner role. See <c>project_role_management_policy.md</c>.
 /// </summary>
 [ApiController]
 [Authorize]
@@ -115,7 +117,9 @@ public sealed class OrgUsersController : OrgScopedControllerBase
         // takes effect immediately rather than persisting for the 8h token lifetime.
         long newTokenVersion = await _orgs.UpdateMemberRoleAsync(orgId, userId, req.Role, ct);
         await _audit.LogAsync("member_role_changed", orgId, callerId,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { user_id = userId, new_role = req.Role }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+            actorKind: ActorKinds.User,
+            detail: System.Text.Json.JsonSerializer.Serialize(new { user_id = userId, new_role = req.Role }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         // Self role change: the caller's own session JWT was just staled by the token_version bump.
         // Re-issue their cookie at the new role and version so they stay logged in with the updated
@@ -173,7 +177,9 @@ public sealed class OrgUsersController : OrgScopedControllerBase
         string loginAttemptKey = LoginService.HashLockoutKey("tenant", orgId, target.Email);
         await _orgs.RemoveOrgMemberAsync(orgId, userId, loginAttemptKey, ct);
         await _audit.LogAsync("member_removed", orgId, GetUserId(),
-            detail: System.Text.Json.JsonSerializer.Serialize(new { user_id = userId }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+            actorKind: ActorKinds.User,
+            detail: System.Text.Json.JsonSerializer.Serialize(new { user_id = userId }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         return NoContent();
     }
     /// <summary>
@@ -188,12 +194,16 @@ public sealed class OrgUsersController : OrgScopedControllerBase
     /// Two callers are allowed — the subject themselves, who must re-enter their password, and an
     /// admin holding tenant:configure, who is fixing someone else's record and is audited doing
     /// it. Self-service reauthentication is the same posture as a password change: a session alone
-    /// is not enough to move the account's identity.
+    /// is not enough to move the account's identity. Retargeting an owner's account this way needs
+    /// tenant:admin, the same tier-2 gate <see cref="PatchMemberRole"/> and <see cref="RemoveUser"/>
+    /// apply — an admin repointing an owner's email is a step toward taking over that account, not
+    /// just fixing a member's record.
     ///
     /// SAML accounts are refused. The IdP is authoritative for those; a local edit would be
     /// overwritten on next login and the account would silently drift back.
     /// </summary>
     [HttpPatch("api/v1/users/{userId}/email")]
+    [EnableRateLimiting("invite")]
     [ProducesResponseType(StatusCodes.Status202Accepted)]
     public async Task<IActionResult> RequestEmailChange(
         string userId,
@@ -201,6 +211,7 @@ public sealed class OrgUsersController : OrgScopedControllerBase
         [FromServices] EmailChangeTokenRepository changeTokens,
         [FromServices] UserService users,
         [FromServices] Dependably.Infrastructure.Mail.TransactionalEmailService mailer,
+        [FromServices] AccountSendThrottle sendThrottle,
         [FromServices] TimeProvider time,
         CancellationToken ct)
     {
@@ -233,6 +244,19 @@ public sealed class OrgUsersController : OrgScopedControllerBase
         if (target is null)
         {
             return NotFound();
+        }
+
+        // Tier 2: retargeting an owner's account identity requires tenant:admin, the same gate
+        // PatchMemberRole and RemoveUser apply. Without it, an admin (tenant:configure only) could
+        // repoint an owner's email to an address they control, confirm the change themselves, and
+        // ride the password-reset flow into the owner's account.
+        if (!isSelf && target.Role == "owner")
+        {
+            var ownerCheck = await _guard.CheckCapAsync(User, callerId, orgId, Capabilities.TenantAdmin, ct);
+            if (ownerCheck != OrgAccessGuard.AccessResult.Allowed)
+            {
+                return Forbid();
+            }
         }
 
         if (string.Equals(target.AccountType, "saml", StringComparison.Ordinal))
@@ -268,6 +292,21 @@ public sealed class OrgUsersController : OrgScopedControllerBase
             return _problems.ConflictActionKey("error.user.emailTaken");
         }
 
+        // Per-destination send budget, consumed immediately before the mail is enqueued and
+        // keyed on the address the mail goes TO — the same posture ForgotPassword applies, and
+        // for the same reason: the endpoint's per-IP limiter bounds one caller, but nothing in
+        // it is keyed on the recipient, so a distributed caller could otherwise aim unlimited
+        // verification mail at one mailbox through the operator's shared relay. Rejection is a
+        // plain 429 rather than the uniform 202 ForgotPassword returns: this caller is
+        // authenticated and already knows the account exists, so there is no enumeration oracle
+        // to protect, and a silent drop would look like a mail-delivery failure.
+        if (!await sendThrottle.TryConsumeAsync(
+                LoginService.HashLockoutKey("tenant", orgId, email),
+                AccountSendThrottle.PurposeEmailChange, ct))
+        {
+            return _problems.TooManyRequestsActionKey("error.user.emailChangeThrottled");
+        }
+
         string raw = await changeTokens.IssueAsync(userId, orgId, email, ct);
         var expiresAt = EmailChangeTokenRepository.ExpiryFor(time.GetUtcNow());
         mailer.EnqueueEmailChangeVerification(email, _urls.Absolute(HttpContext, $"/confirm-email?token={raw}"), expiresAt);
@@ -276,6 +315,7 @@ public sealed class OrgUsersController : OrgScopedControllerBase
         // change, and a record that cannot say what the account was moved to cannot answer the
         // question it exists for. The OLD address is already on the users row.
         await _audit.LogAsync("user.email_change_requested", orgId, callerId,
+            actorKind: ActorKinds.User,
             detail: System.Text.Json.JsonSerializer.Serialize(new
             {
                 user_id = userId,

@@ -1,6 +1,6 @@
 <!--
   Slack sub-tab of Settings → Integrations — the per-org Slack delivery channel for admin
-  alerts (quarantine + vulnerability), extracted from the alert center's old combined form.
+  alerts (quarantine + vulnerability), alongside the Webhooks and Email channels.
   Write-only webhook URL: never pre-filled from the server, only a computed hasSlackWebhook
   boolean. When the instance has no DEPENDABLY_MASTER_KEY configured (secretsAvailable false),
   the URL input is disabled with an explanatory hint — the PUT would fail closed anyway.
@@ -58,12 +58,11 @@
 <ErrorBanner message={error} />
 {#if success}<div class="text-success mb-3">{success}</div>{/if}
 
-<div class="slack-settings-form">
-  <div class="form-row checkbox-row">
-    <span class="checkbox-label">
-      <Toggle bind:checked={slackEnabled} ariaLabel={$t('settings.integrations.slack.enabled')} />
-      {$t('settings.integrations.slack.enabled')}
-    </span>
+<div class="card card-narrow">
+  <div class="form-row form-row-inline">
+    <label class="flex-1" for="integrations-slack-enabled">{$t('settings.integrations.slack.enabled')}</label>
+    <Toggle id="integrations-slack-enabled" bind:checked={slackEnabled}
+            ariaLabel={$t('settings.integrations.slack.enabled')} />
   </div>
 
   <div class="form-row">
@@ -94,9 +93,7 @@
     {/if}
   </div>
 
-  {#if testMsg}<p class="test-msg">{testMsg}</p>{/if}
-
-  <div class="form-actions">
+  <div class="form-actions last-row">
     <button class="primary" on:click={save} disabled={saving}>
       {saving ? $t('common.actions.saving') : $t('common.actions.save')}
     </button>
@@ -106,20 +103,15 @@
       </button>
     {/if}
   </div>
+  {#if testMsg}<p class="test-msg">{testMsg}</p>{/if}
 </div>
 
 <style>
-  .slack-settings-form { max-width: 480px; margin-top: 12px; }
-  .checkbox-row { margin-bottom: 12px; }
-  .checkbox-label {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--text2);
-    cursor: pointer;
-  }
+  .card-narrow { max-width: 480px; margin-top: 12px; }
+  /* .form-row is a column flex box by default; the inline variant turns the row back into a
+     left-aligned label + right-edge control, matching the other settings tabs. */
+  .form-row-inline { flex-direction: row; align-items: center; gap: 12px; }
+  .last-row { margin-bottom: 0; }
   .slack-status {
     font-size: 12px;
     color: var(--text2);
@@ -127,6 +119,6 @@
   }
   .slack-status-failed { color: var(--danger); }
   .slack-last-error { font-size: 11px; color: var(--danger); margin-top: 2px; }
-  .test-msg { font-size: 13px; color: var(--text2); margin: 6px 0; }
+  .test-msg { font-size: 13px; color: var(--text2); margin: 6px 0 0; }
   .form-actions { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
 </style>

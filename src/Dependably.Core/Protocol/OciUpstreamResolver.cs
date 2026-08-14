@@ -69,29 +69,32 @@ public sealed class OciUpstreamResolver
     private readonly ILogger<OciUpstreamResolver> _logger;
     private readonly TimeProvider _time;
 
-    // Single-flight dedup for concurrent OCI blob fetches: keyed by the content-addressed
-    // blob key (BlobKeys.OciBlob(algo, hex)) so concurrent cache-misses for the same
-    // digest collapse to one upstream pull. The shared work item writes the verified blob
-    // to the cache store and returns only metadata (key + media type) — NOT an open stream.
-    // Each waiter independently calls _blobs.Cache.GetAsync after the Lazy resolves to open
-    // its OWN stream, avoiding use-after-dispose when N callers race on the same digest.
-    // CancellationToken.None prevents a single caller disconnect from faulting the shared
-    // Lazy and cancelling all other waiters — the blob write is idempotent.
-    private readonly ConcurrentDictionary<string, Lazy<Task<OciBlobFetchMetadata?>>> _blobInflight = new();
+    // Single-flight dedup for concurrent OCI blob fetches: keyed by (org id, content-addressed
+    // blob key) so concurrent cache-misses for the same digest WITHIN ONE ORG collapse to one
+    // upstream pull. The org is part of the key because the shared work item captures the
+    // winner's org, upstream, and credentials: a key of bytes alone would hand a caller from
+    // another tenant a payload pulled with credentials it never holds, from a registry it
+    // cannot reach. The shared work item writes the verified blob to the cache store and
+    // returns only metadata (key + media type) — NOT an open stream. Each waiter independently
+    // calls _blobs.Cache.GetAsync after the Lazy resolves to open its OWN stream, avoiding
+    // use-after-dispose when N callers race on the same digest. CancellationToken.None prevents
+    // a single caller disconnect from faulting the shared Lazy and cancelling all other
+    // waiters — the blob write is idempotent.
+    private readonly ConcurrentDictionary<OciBlobInflightKey, Lazy<Task<OciBlobFetchMetadata?>>> _blobInflight = new();
 
     // Test-only observation seam (InternalsVisibleTo Dependably.Tests): counts callers that have
-    // reached the _blobInflight registration point for a given blob key, so a concurrency test
-    // can deterministically wait for "all N callers have registered as winner/joiner" instead of
-    // guessing at that moment with a timeout. Never read on any production path.
-    private readonly ConcurrentDictionary<string, int> _blobInflightArrivals = new();
+    // reached the _blobInflight registration point for a given (org, blob key), so a concurrency
+    // test can deterministically wait for "all N callers have registered as winner/joiner"
+    // instead of guessing at that moment with a timeout. Never read on any production path.
+    private readonly ConcurrentDictionary<OciBlobInflightKey, int> _blobInflightArrivals = new();
 
     /// <summary>
-    /// Number of <see cref="FetchBlobAsync"/> callers that have registered against the shared
-    /// in-flight entry for <paramref name="blobKey"/> (winner + joiners), for deterministic
-    /// concurrency-test synchronization only.
+    /// Number of <see cref="FetchBlobAsync"/> callers from <paramref name="orgId"/> that have
+    /// registered against the shared in-flight entry for <paramref name="blobKey"/> (winner +
+    /// joiners), for deterministic concurrency-test synchronization only.
     /// </summary>
-    internal int BlobInflightArrivalCount(string blobKey) =>
-        _blobInflightArrivals.TryGetValue(blobKey, out int count) ? count : 0;
+    internal int BlobInflightArrivalCount(string orgId, string blobKey) =>
+        _blobInflightArrivals.TryGetValue(new OciBlobInflightKey(orgId, blobKey), out int count) ? count : 0;
 
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
         Justification =
@@ -414,10 +417,14 @@ public sealed class OciUpstreamResolver
     /// The digest is verified against the downloaded bytes; a mismatch evicts the
     /// partially-written cache entry and returns null.
     ///
-    /// Concurrent cache-misses for the same digest are collapsed by a single-flight
-    /// coordinator (keyed by the content-addressed blob key) so only one upstream pull
-    /// runs per digest per process. Each waiter re-opens the cached blob independently
-    /// after the shared fetch completes.
+    /// A hit on the shared content-addressed store is served only to an org that already
+    /// holds its own <c>oci_blobs</c> row for the digest; any other caller falls through to
+    /// its own org-scoped upstream fetch, which re-authenticates and re-verifies the digest.
+    ///
+    /// Concurrent cache-misses are collapsed by a single-flight coordinator keyed on
+    /// (org id, content-addressed blob key), so one upstream pull runs per digest per org
+    /// per process and a caller may only await a fetch made with its own org's credentials.
+    /// Each waiter re-opens the cached blob independently after the shared fetch completes.
     ///
     /// Returns null when no upstream matches or the upstream returns 404.
     /// Throws <see cref="AirGappedException"/> in air-gap mode.
@@ -446,21 +453,18 @@ public sealed class OciUpstreamResolver
         // Blob may already be in the shared content-addressed store from a prior org or request.
         // A bare store hit is NOT authorization: the key (oci/{algo}/{hex}) has no org segment, so
         // in the default single-store deployment (cache == registry) another tenant's PRIVATE
-        // uploaded bytes live under the identical key. Serve the hit only when the caller is
-        // entitled to it; otherwise dispose the unused stream and fall through to a real upstream
-        // fetch scoped to this org (which re-verifies the digest before caching).
+        // uploaded or proxy-cached bytes live under the identical key. Serve the hit only when the
+        // caller's own org already holds an oci_blobs row for this digest (its own prior upload or
+        // proxy fetch); otherwise dispose the unused stream and fall through to a real upstream
+        // fetch scoped to this org (which re-authenticates and re-verifies the digest before
+        // caching, rather than trusting that any configured upstream proves entitlement). That
+        // fallthrough is a real fetch even under concurrency: the single-flight entry below is
+        // keyed per org, so it can never be satisfied by another org's in-flight pull.
         var existing = await _blobs.Cache.GetAsync(blobKey, ct);
         if (existing is not null)
         {
-            if (await CanServeSharedBlobAsync(orgId, repository, blobKey, ct))
+            if (await CanServeSharedBlobAsync(orgId, digest, ct))
             {
-                // Ensure a DB row exists for this org (another org may have primed the key).
-                bool inserted = await EnsureBlobDbRowAsync(orgId, digest, "application/octet-stream", 0, blobKey, ct);
-                if (inserted)
-                {
-                    // First time this org sees the blob: it may be a config awaited by a manifest row.
-                    await _licenseRecorder.RecordConfigBlobArrivalAsync(orgId, digest, blobKey, ct);
-                }
                 return new OciBlobResult(existing, "application/octet-stream");
             }
 
@@ -473,31 +477,45 @@ public sealed class OciUpstreamResolver
             return null;
         }
 
-        // Single-flight: collapse concurrent misses for the same blob key into one fetch.
+        // Single-flight: collapse concurrent misses for the same blob into one fetch, keyed on
+        // (orgId, blobKey) — never on the content-addressed key alone. The work item captures
+        // the org, upstream, and credentials of whichever caller creates the entry, so a key of
+        // bytes alone lets a caller from another org await that fetch and receive a private
+        // layer pulled with credentials it does not hold, from a registry it cannot reach: the
+        // digest-guessing read the entitlement check above refuses, granted through the
+        // in-flight window instead. With the org in the key, every caller sharing an entry is
+        // from the org whose credentials the entry uses. Concurrent misses in different orgs
+        // each pay their own upstream pull and prove their own entitlement; the bytes still
+        // dedup in the store, because the write targets the content-addressed key and is
+        // idempotent.
+        //
         // The shared work item (FetchAndCacheBlobAsync) writes the verified blob to the cache
-        // store and returns only metadata (blobKey + mediaType). Each waiter below opens its
-        // OWN stream via _blobs.Cache.GetAsync so no stream is shared across callers.
-        // CancellationToken.None: a caller disconnect must not fault the shared Lazy and
-        // cancel all other waiters. Blob writes are idempotent (content-addressed key).
-        var lazy = _blobInflight.GetOrAdd(blobKey, _ => new Lazy<Task<OciBlobFetchMetadata?>>(
+        // store, persists this org's oci_blobs row, and returns only metadata (blobKey +
+        // mediaType). Each waiter below opens its OWN stream via _blobs.Cache.GetAsync so no
+        // stream is shared across callers. CancellationToken.None: a caller disconnect must not
+        // fault the shared Lazy and cancel all other waiters. Blob writes are idempotent
+        // (content-addressed key).
+        var inflightKey = new OciBlobInflightKey(orgId, blobKey);
+        var lazy = _blobInflight.GetOrAdd(inflightKey, _ => new Lazy<Task<OciBlobFetchMetadata?>>(
             () => FetchAndCacheBlobAsync(orgId, upstream, repository, digest, blobKey, CancellationToken.None),
             LazyThreadSafetyMode.ExecutionAndPublication));
-        _blobInflightArrivals.AddOrUpdate(blobKey, 1, (_, count) => count + 1);
+        _blobInflightArrivals.AddOrUpdate(inflightKey, 1, (_, count) => count + 1);
 
-        // Removes exactly this (blobKey, lazy) pair once the shared fetch genuinely completes —
-        // success or failure — never when an individual caller's WaitAsync(ct) below merely
-        // detaches early. A caller cancelling mid-fetch must not evict a live in-flight entry
-        // while the shared upstream pull is still running for the remaining waiters, and the
-        // pair-targeted removal never touches a newer generation that replaced this entry. Every
-        // concurrent caller attaches its own continuation to the same Task; TryRemove is
+        // Removes exactly this (inflightKey, lazy) pair once the shared fetch genuinely
+        // completes — success or failure — never when an individual caller's WaitAsync(ct) below
+        // merely detaches early. A caller cancelling mid-fetch must not evict a live in-flight
+        // entry while the shared upstream pull is still running for the remaining waiters, and
+        // the pair-targeted removal never touches a newer generation that replaced this entry.
+        // Every concurrent caller attaches its own continuation to the same Task; TryRemove is
         // idempotent — only the first continuation to run has any effect.
         _ = lazy.Value.ContinueWith(
             completedTask =>
             {
-                _blobInflight.TryRemove(new KeyValuePair<string, Lazy<Task<OciBlobFetchMetadata?>>>(blobKey, lazy));
+                _blobInflight.TryRemove(
+                    new KeyValuePair<OciBlobInflightKey, Lazy<Task<OciBlobFetchMetadata?>>>(inflightKey, lazy));
                 // Bounds _blobInflightArrivals to the same lifecycle as _blobInflight — otherwise
                 // every distinct digest ever fetched would leak an entry for the life of the process.
-                _blobInflightArrivals.TryRemove(blobKey, out int _);
+                _blobInflightArrivals.TryRemove(inflightKey, out int _);
             },
             CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously,
@@ -511,18 +529,12 @@ public sealed class OciUpstreamResolver
             return null;
         }
 
-        // The shared work item wrote the oci_blobs row only for the org captured in the Lazy
-        // (the single-flight winner). A joiner from a DIFFERENT org shares the content-addressed
-        // cache bytes but still needs its own per-org row — and, on first insert, the config-blob
-        // arrival hook that lets an awaiting manifest pick up this config's license. Mirror the
-        // cache-hit branch for this caller's org; EnsureBlobDbRowAsync is idempotent per
-        // (digest, org_id), so the winner re-running it here is a harmless no-op.
-        bool rowInserted = await EnsureBlobDbRowAsync(orgId, digest, meta.MediaType, meta.SizeBytes, blobKey, ct);
-        if (rowInserted)
-        {
-            await _licenseRecorder.RecordConfigBlobArrivalAsync(orgId, digest, blobKey, ct);
-        }
-
+        // No per-caller oci_blobs row is written here: the in-flight entry is org-keyed, so the
+        // work item that resolved it ran for THIS org and already persisted that org's row (with
+        // the real media type and size) plus, on first insert, the config-blob arrival hook.
+        // A row minted here for a caller the work item did not fetch for would be a grant of
+        // another org's bytes on the strength of nothing but a digest.
+        //
         // Each waiter opens an INDEPENDENT stream from the cache store — never shared.
         var stream = await _blobs.Cache.GetAsync(meta.BlobKey, ct);
         return stream is null ? null : new OciBlobResult(stream, meta.MediaType);
@@ -912,7 +924,11 @@ public sealed class OciUpstreamResolver
             string? cacheArtifactId = await _cacheRecorder.RecordAccessAsync(
                 new CacheAccess(
                     orgId, "oci", entry.Repository, entry.Digest, ManifestCacheFilename,
-                    entry.Sha256Hex, entry.SizeBytes, entry.BlobKey, entry.UpstreamUrl),
+                    entry.Sha256Hex, entry.SizeBytes, entry.BlobKey, entry.UpstreamUrl,
+                    // The manifest was pulled and digested on this request. The coordinate is the
+                    // digest itself, so two orgs resolving one coordinate to different bytes is
+                    // not expressible here — the binding is recorded for uniformity, not defence.
+                    CacheAccessOrigin.FirstFetch),
                 ct);
 
             if (cacheArtifactId is not null)
@@ -974,6 +990,18 @@ public sealed class OciUpstreamResolver
         string mediaType = resp.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
         long bytesWritten;
 
+        // Cheap fail-fast on a declared Content-Length before streaming a single byte, mirroring
+        // every other ecosystem's upstream-fetch path (UpstreamClient.FetchAndStageCoreAsync).
+        // OciDigestVerifyStream below still enforces the same cap for chunked transfers that
+        // arrive with no Content-Length header at all.
+        if (resp.Content.Headers.ContentLength > UpstreamClient.MaxUpstreamResponseBytes)
+        {
+            _logger.LogWarning(
+                "OCI blob {Repository}/{Digest} from {Host} declared Content-Length {ContentLength} exceeding the {MaxBytes}-byte upstream cap; refusing.",
+                repository, digest, upstream.Host, resp.Content.Headers.ContentLength, UpstreamClient.MaxUpstreamResponseBytes);
+            return null;
+        }
+
         // Verify-then-commit: stream upstream bytes into an ephemeral staging key so
         // the content-addressed blobKey is never written until the digest is confirmed.
         // A concurrent cache-first reader (FetchBlobAsync) checks blobKey directly;
@@ -981,9 +1009,11 @@ public sealed class OciUpstreamResolver
         // cache-first branch can only ever serve verified bytes.
         string stagingKey = BlobKeys.OciStaging(Guid.NewGuid().ToString("N"));
 
-        await using (var contentStream = await resp.Content.ReadAsStreamAsync(ct))
-        await using (var verifyStream = new OciDigestVerifyStream(contentStream))
+        try
         {
+            await using var contentStream = await resp.Content.ReadAsStreamAsync(ct);
+            await using var verifyStream = new OciDigestVerifyStream(contentStream, UpstreamClient.MaxUpstreamResponseBytes);
+
             await _blobs.Cache.PutAsync(stagingKey, verifyStream, ct);
             bytesWritten = verifyStream.BytesWritten;
 
@@ -996,6 +1026,16 @@ public sealed class OciUpstreamResolver
                 await _blobs.Cache.DeleteAsync(stagingKey, ct);
                 return null;
             }
+        }
+        catch (UpstreamResponseTooLargeException)
+        {
+            // Delete-on-refuse: a coordinate-addressed staging entry left behind here would be a
+            // permanent bypass of this cap for every future request that races the same digest.
+            _logger.LogWarning(
+                "OCI blob {Repository}/{Digest} from {Host} exceeded the {MaxBytes}-byte upstream cap mid-stream; refusing.",
+                repository, digest, upstream.Host, UpstreamClient.MaxUpstreamResponseBytes);
+            await _blobs.Cache.DeleteAsync(stagingKey, ct);
+            return null;
         }
 
         // Digest verified — promote staging entry to the content-addressed key, then
@@ -1023,51 +1063,39 @@ public sealed class OciUpstreamResolver
 
         // Return only metadata — each waiter opens its own stream independently in
         // FetchBlobAsync, so the single shared result never carries a shared stream.
-        return new OciBlobFetchMetadata(blobKey, mediaType, bytesWritten);
+        return new OciBlobFetchMetadata(blobKey, mediaType);
     }
 
-    // Decides whether a bare hit on the shared content-addressed blob store (blobKey) may be
-    // served to orgId. The store is content-addressed with no org segment, so in the default
-    // single-store deployment (cache == registry) one tenant's PRIVATE uploaded bytes resolve
-    // under the same key as anyone else's — a raw store hit is never proof of authorization.
-    // Entitlement holds only when:
-    //   * the caller's own org already has an oci_blobs row for the key (its own upload/cache), or
-    //   * the bytes are proxy-derived (some org holds a proxy-origin row, proving upstream
-    //     provenance) AND the caller has a matching configured upstream for the repository.
-    // An 'uploaded' row owned solely by another org confers no entitlement and is never
-    // cross-served — mirroring the org-scoped oci_blobs gate the manifest serve path enforces.
+    // Decides whether a bare hit on the shared content-addressed blob store may be served to
+    // orgId. The store is content-addressed with no org segment, so in the default
+    // single-store deployment (cache == registry) one tenant's bytes — private uploads AND
+    // proxy-cached layers pulled through an authenticated upstream — resolve under the same key
+    // as anyone else's; a raw store hit is never proof of authorization on its own. Entitlement
+    // holds only when the caller's own org already has an oci_blobs row for the digest: its own
+    // upload, or a proxy fetch it already performed (and so already authenticated) itself.
+    //
+    // Deliberately no cross-org exception for proxy-origin rows: a repository name is
+    // caller-supplied and an upstream with an empty prefix matches every repository, so "the
+    // caller has some configured upstream" proves nothing about whether that upstream's
+    // credentials can actually reach this digest — it lets a caller who guesses a digest (they
+    // leak routinely via SBOMs, CI logs, pinned references) read another org's private layer
+    // without ever presenting that org's upstream credentials. A non-owning org falls through to
+    // its own real, org-scoped upstream fetch below, which re-authenticates and re-verifies the
+    // digest — the only trustworthy proof the caller is entitled to the bytes. The single-flight
+    // dedup on that path is keyed on (org, blob key), so a caller racing another org's in-flight
+    // pull of the same digest still makes its own authenticated request rather than awaiting,
+    // and inheriting the result of, a fetch made with another tenant's credentials.
     private async Task<bool> CanServeSharedBlobAsync(
-        string orgId, string repository, string blobKey, CancellationToken ct)
+        string orgId, string digest, CancellationToken ct)
     {
         await using var conn = await _db.OpenAsync(ct);
-        // xtenant: content-addressed dedup gate — deliberately inspects rows across orgs to decide
-        // whether shared bytes may be served, then enforces the org boundary in the code below.
-        var rows = await conn.QueryAsync<(string OrgId, string Origin)>(
-            "SELECT org_id AS OrgId, origin AS Origin FROM oci_blobs WHERE blob_key = @blobKey",
-            new { blobKey });
-
-        bool ownsRow = false;
-        bool anyProxy = false;
-        foreach (var (RowOrgId, Origin) in rows)
-        {
-            if (string.Equals(RowOrgId, orgId, StringComparison.Ordinal))
-            {
-                ownsRow = true;
-            }
-            if (string.Equals(Origin, "proxy", StringComparison.Ordinal))
-            {
-                anyProxy = true;
-            }
-        }
-
-        if (ownsRow)
-        {
-            return true;
-        }
-
-        // Cross-org serve is permitted only for proxy-derived bytes to an org that has a matching
-        // upstream configured for the repository — never for another tenant's private upload.
-        return anyProxy && await MatchUpstreamAsync(orgId, repository, ct) is not null;
+        // xtenant: (digest, org_id) PK is tenant-scoped — the same predicate the blob HEAD path
+        // (TryGetCachedBlobMetadataByDigestAsync) answers existence with, so GET and HEAD cannot
+        // disagree about which org may see a digest.
+        int owned = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(1) FROM oci_blobs WHERE digest = @digest AND org_id = @orgId",
+            new { digest, orgId });
+        return owned > 0;
     }
 
     // Returns true when a NEW row was inserted (ON CONFLICT DO NOTHING → 0 rows on an existing
@@ -1087,6 +1115,11 @@ public sealed class OciUpstreamResolver
             new { digest, orgId, mediaType, sizeBytes, blobKey, now = UtcTimestamp.Now(_time) });
         return rows > 0;
     }
+
+    // In-flight identity for a blob fetch. The org is part of the identity because the fetch it
+    // guards runs with one org's upstream and credentials, and its result may only be handed to
+    // callers of that org.
+    private readonly record struct OciBlobInflightKey(string OrgId, string BlobKey);
 }
 
 // ── Result types ────────────────────────────────────────────────
@@ -1118,7 +1151,7 @@ public sealed record OciBlobMetadata(string MediaType);
 /// Each concurrent waiter opens its own stream from the cache store after the Lazy resolves,
 /// preventing use-after-dispose when multiple callers race on the same digest.
 /// </summary>
-internal sealed record OciBlobFetchMetadata(string BlobKey, string MediaType, long SizeBytes);
+internal sealed record OciBlobFetchMetadata(string BlobKey, string MediaType);
 
 // ── Digest-verifying pass-through stream ─────────────────────────────────────
 
@@ -1131,8 +1164,21 @@ internal sealed class OciDigestVerifyStream : Stream
 {
     private readonly Stream _inner;
     private readonly IncrementalHash _hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+    private readonly long _maxBytes;
 
-    public OciDigestVerifyStream(Stream inner) => _inner = inner;
+    /// <param name="inner">The upstream response body to hash and pass through.</param>
+    /// <param name="maxBytes">
+    /// Hard ceiling on total bytes read. Every other ecosystem's binary download path caps the
+    /// upstream body (<see cref="HashingFileStream"/> for the hash-and-stage MISS path); this is
+    /// OCI's equivalent for the blob proxy path, which streams straight into the blob store
+    /// without ever buffering the whole body. Catches a Content-Length-less (chunked) response
+    /// that a fixed pre-check on the header alone would miss.
+    /// </param>
+    public OciDigestVerifyStream(Stream inner, long maxBytes)
+    {
+        _inner = inner;
+        _maxBytes = maxBytes;
+    }
 
     public long BytesWritten { get; private set; }
 
@@ -1150,6 +1196,14 @@ internal sealed class OciDigestVerifyStream : Stream
         set => throw new NotSupportedException();
     }
 
+    private void CheckCap()
+    {
+        if (BytesWritten > _maxBytes)
+        {
+            throw new UpstreamResponseTooLargeException("(oci-blob)", _maxBytes);
+        }
+    }
+
     public override int Read(byte[] buffer, int offset, int count)
     {
         int read = _inner.Read(buffer, offset, count);
@@ -1157,6 +1211,7 @@ internal sealed class OciDigestVerifyStream : Stream
         {
             _hasher.AppendData(buffer, offset, read);
             BytesWritten += read;
+            CheckCap();
         }
         return read;
     }
@@ -1168,6 +1223,7 @@ internal sealed class OciDigestVerifyStream : Stream
         {
             _hasher.AppendData(buffer, offset, read);
             BytesWritten += read;
+            CheckCap();
         }
         return read;
     }
@@ -1179,6 +1235,7 @@ internal sealed class OciDigestVerifyStream : Stream
         {
             _hasher.AppendData(buffer.Span[..read]);
             BytesWritten += read;
+            CheckCap();
         }
         return read;
     }

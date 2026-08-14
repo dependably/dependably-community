@@ -28,7 +28,12 @@ public sealed partial class RpmController
     [EnableRateLimiting("download")]
     public async Task<IActionResult> Download(string file, CancellationToken ct)
     {
-        var pathCheck = PathSafeValidator.Validate(file, "file");
+        // ValidateUpstreamSegment (not Validate): the filename is composed into the upstream
+        // proxy URL on a cache miss. ASP.NET decodes a route value once, so a double-encoded
+        // "%252e%252e%252f" arrives here as the literal "%2e%2e%2f" — no literal '..' or '/',
+        // so it clears every base rule — and .NET's Uri carries the "%2e%2e%2f" through to the
+        // upstream, which decodes it back to "../". The '%' ban rejects it before any fetch.
+        var pathCheck = PathSafeValidator.ValidateUpstreamSegment(file, "file");
         if (!pathCheck.IsValid)
         {
             return BadRequest(pathCheck.Message);
@@ -131,7 +136,7 @@ public sealed partial class RpmController
             Response.Headers.CacheControl = "private, max-age=31536000, immutable";
         }
         await _svc.Audit.LogActivityAsync(orgId, "rpm", versionMatch.Version.Purl, "download",
-            token?.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+            token?.UserId, actorKind: token?.ActorKind, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         await _svc.Packages.IncrementDownloadCountAsync(versionMatch.Version.Id, ct);
         return File(stream, "application/x-rpm", file);
     }
@@ -190,7 +195,7 @@ public sealed partial class RpmController
 
         string purl = caFacts.Purl ?? string.Empty;
         await _svc.Audit.LogActivityAsync(orgId, "rpm", purl, "download",
-            token?.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+            token?.UserId, actorKind: token?.ActorKind, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         // Increment per-tenant download count on the global plane. Enqueued off the request
         // path — the row already exists (seeded durably at first-fetch).
         await _svc.TenantAccess.RecordDownloadHitAsync(orgId, caFacts.Id, _svc.Time.GetUtcNow(), ct);
@@ -294,7 +299,7 @@ public sealed partial class RpmController
 
         Response.Headers["X-Cache"] = isHit ? "HIT" : "MISS";
         await _svc.Audit.LogActivityAsync(orgId, "rpm", purl, "download",
-            token?.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+            token?.UserId, actorKind: token?.ActorKind, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         // Keyed by the cache_artifact id just recorded, matching the cache-hit path above. The
         // purl is not a unique key on the cache plane — one RPM purl can span several filenames —
         // so a purl-keyed bump would count this download against all of them and refresh their
@@ -447,7 +452,13 @@ public sealed partial class RpmController
     [EnableRateLimiting("download")]
     public async Task<IActionResult> Repodata(string file, CancellationToken ct)
     {
-        var pathCheck = PathSafeValidator.Validate(file, "file");
+        // ValidateUpstreamSegment (not Validate): the filename is embedded verbatim in the
+        // composed upstream URL "{upstreamBase}/repodata/{file}". IsHashPrefixedFilename only
+        // constrains the leading 64 hex characters and the dash, so a percent-encoded traversal
+        // in the tail would reach the fetch untouched. The '%' ban stops it at the boundary — no
+        // legitimate repodata name (repomd.xml, repomd.xml.asc, {sha256}-primary.xml.gz)
+        // contains a '%'.
+        var pathCheck = PathSafeValidator.ValidateUpstreamSegment(file, "file");
         if (!pathCheck.IsValid)
         {
             return BadRequest(pathCheck.Message);

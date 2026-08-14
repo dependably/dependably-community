@@ -75,6 +75,9 @@ public sealed class SiemController : ControllerBase
     ///   application/x-ndjson      — newline-delimited JSON (one object per line)
     ///   application/x-cef         — Common Event Format (one record per line)
     /// </summary>
+    // input-validation-ok: action is a repeatable prefix filter over the caller's own,
+    // already-authenticated audit query — any string just narrows the result set (safely
+    // parameterized via json_each in ListAuthEventsAsync), so there is no format to reject.
     [HttpGet("api/v1/siem/events/auth")]
     public async Task<IActionResult> GetAuthEvents(
         [FromQuery] string? since,
@@ -340,6 +343,11 @@ public sealed class SiemController : ControllerBase
             if (item.ActorId is not null)
             {
                 ext.Append($" suid={CefFormat.Escape(item.ActorId)}");
+            }
+
+            if (item.SourceIp is not null)
+            {
+                ext.Append($" src={CefFormat.Escape(item.SourceIp)}");
             }
 
             if (item.OrgId is not null)

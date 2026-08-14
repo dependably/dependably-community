@@ -14,10 +14,35 @@ namespace Dependably.Security;
 ///   5. Sec-Fetch-Site: cross-site or same-site → reject 403.
 ///   6. Origin present, host matches request host → allow.
 ///   7. Origin present, host mismatch → reject 403.
-///   8. Neither header → allow (additive layer; SameSite=Strict is the primary guard).
+///   8. Neither header, a session cookie is present, and the body is one a cross-site HTML form
+///      can produce → reject 403.
+///   9. Neither header, anything else → allow.
+///
+/// Rules 8 and 9 split what would otherwise be a blanket allow, because SameSite is scoped to the
+/// registrable domain rather than the exact host: a page on a sibling tenant subdomain is
+/// <em>same-site</em>, so a SameSite=Strict session cookie is attached to its requests. Rule 5 is
+/// what closes that for browsers that send Fetch Metadata; a client that sends neither header
+/// falls back to no cross-origin signal at all.
+///
+/// The residual is bounded by what such a client can actually send. Without CORS approval — and
+/// the management policy allowlists exactly one origin — a browser can only reach this endpoint
+/// cross-site through an HTML form, whose body is limited to
+/// <c>application/x-www-form-urlencoded</c>, <c>multipart/form-data</c>, or <c>text/plain</c>;
+/// anything else (a JSON body, a custom header) is a preflighted request the policy refuses
+/// before it is ever sent. Rule 8 therefore rejects exactly the shape the attack needs, and only
+/// when the request actually carries the credential the attack rides — a request with no session
+/// cookie has nothing to confuse the deputy with, so an anonymous or mis-targeted upload still
+/// gets its real answer (405/401) rather than a misleading CSRF refusal. Rule 9 keeps the
+/// JSON-bodied scripted callers working: none of them is a CSRF vector either, since nothing
+/// attaches their cookies for them.
 /// </summary>
 public sealed class CsrfDefenseMiddleware
 {
+    // The session cookie a browser would attach to a cross-site request on the victim's behalf.
+    // Minted by the management-plane auth controllers; named here because Core owns this
+    // middleware and must not take a dependency on that assembly.
+    private const string SessionCookieName = "dependably_session";
+
     private readonly RequestDelegate _next;
 
     public CsrfDefenseMiddleware(RequestDelegate next) => _next = next;
@@ -116,9 +141,43 @@ public sealed class CsrfDefenseMiddleware
             return true;
         }
 
-        // No CSRF-related header present — allow. The session cookie's strict SameSite
-        // attribute remains the primary guard; this middleware is defence-in-depth only.
+        // Neither header. A form-submittable content type on a request that carries the session
+        // cookie is the one shape a browser can aim at this endpoint from another origin without
+        // a CORS preflight, and it is indistinguishable from a cross-site form post — refuse it.
+        // Everything else is either unreachable cross-site from a browser or carries no cookie
+        // for a cross-site page to spend, so it stays allowed.
+        if (req.Cookies.ContainsKey(SessionCookieName) && IsFormSubmittableContentType(req.ContentType))
+        {
+            reason = $"No Sec-Fetch-Site or Origin on a cookie-authenticated form request: content-type={req.ContentType}";
+            return true;
+        }
+
         reason = null;
         return false;
+    }
+
+    // The three content types an HTML form can produce (the "simple request" set that needs no
+    // CORS preflight). Matched on the media type only — parameters such as a multipart boundary
+    // or a charset follow a ';' and are ignored.
+    private static bool IsFormSubmittableContentType(string? contentType)
+    {
+        if (string.IsNullOrEmpty(contentType))
+        {
+            // A bodyless state-changing request cannot carry form fields, and a body with no
+            // declared type is not something a form produces.
+            return false;
+        }
+
+        var mediaType = contentType.AsSpan();
+        int semicolon = mediaType.IndexOf(';');
+        if (semicolon >= 0)
+        {
+            mediaType = mediaType[..semicolon];
+        }
+
+        mediaType = mediaType.Trim();
+        return mediaType.Equals("application/x-www-form-urlencoded", StringComparison.OrdinalIgnoreCase)
+            || mediaType.Equals("multipart/form-data", StringComparison.OrdinalIgnoreCase)
+            || mediaType.Equals("text/plain", StringComparison.OrdinalIgnoreCase);
     }
 }

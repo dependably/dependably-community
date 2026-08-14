@@ -53,10 +53,34 @@ public sealed class AuditRepository
         CancellationToken ct = default)
         => WriteAsync(new AuditWrite(action, "system", orgId, actorId, null, null, null, detail, sourceIp), ct);
 
+    /// <summary>
+    /// <see cref="LogSystemAsync(string,string?,string?,string?,string?,CancellationToken)"/> written
+    /// on a caller-supplied connection and transaction, so the audit row lands in the same atomic
+    /// unit as the work it records. <see cref="Dependably.Background.TenantHardDeleteService"/> needs
+    /// this: its erasure sequence is one transaction, and a <c>tenant.hard_deleted</c> row written
+    /// outside it would either claim a deletion that later rolled back, or be lost while the
+    /// deletion committed.
+    /// </summary>
+    public Task LogSystemAsync(
+        DbConnection conn,
+        DbTransaction? tx,
+        string action,
+        string? actorId = null,
+        string? orgId = null,
+        string? detail = null,
+        string? sourceIp = null,
+        CancellationToken ct = default)
+        => WriteAsync(new AuditWrite(action, "system", orgId, actorId, null, null, null, detail, sourceIp), conn, tx, ct);
+
     private async Task WriteAsync(AuditWrite entry, CancellationToken ct)
     {
         await using var conn = await _db.OpenAsync(ct);
-        await conn.ExecuteAsync(
+        await WriteAsync(entry, conn, tx: null, ct);
+    }
+
+    private async Task WriteAsync(AuditWrite entry, DbConnection conn, DbTransaction? tx, CancellationToken ct)
+    {
+        await conn.ExecuteAsync(new CommandDefinition(
             """
             INSERT INTO audit_log (id, scope, org_id, actor_id, actor_kind, action, ecosystem, purl, detail, source_ip, created_at)
             VALUES (@id, @scope, @orgId, @actorId, @actorKind, @action, @ecosystem, @purl, @detail, @sourceIp, @createdAt)
@@ -74,7 +98,8 @@ public sealed class AuditRepository
                 detail = entry.Detail,
                 sourceIp = entry.SourceIp,
                 createdAt = NowMs(),
-            });
+            },
+            transaction: tx, cancellationToken: ct));
     }
 
     private sealed record AuditWrite(
@@ -139,6 +164,73 @@ public sealed class AuditRepository
     public const int ListTotalCap = 10_000;
 
     /// <summary>
+    /// Upper bound on the rows a <em>search</em> examines on the paged tenant lists. The search
+    /// predicates are leading-wildcard <c>LIKE</c>s across six columns, which no index can serve,
+    /// so an unbounded search reads every row in the filtered window — and the debounced search
+    /// box issues one such request per pause in typing. Bounding the scan to the newest
+    /// <c>SearchScanCap</c> rows keeps the cost flat as the table grows; the caller reports the
+    /// total as capped, because older matches may exist beyond the scanned window.
+    /// <para>
+    /// The bound applies to every search, the CSV export included. An export is a one-shot action,
+    /// but nothing stops a caller from issuing it repeatedly with a term that matches nothing, and
+    /// each such request reads the org's entire history — one <c>read:audit</c> holder can put a
+    /// single-writer store under sustained full-table scans. The truncation is not silent: the
+    /// export path reports it through <c>TotalCapped</c> (see <see cref="ListAuditAsync"/> and
+    /// <see cref="ListActivityAsync"/>), which the controller surfaces on the response, so a
+    /// compliance export that needs the older window can be narrowed by <c>action</c>/<c>since</c>
+    /// or run without a search term instead of quietly coming back short.
+    /// </para>
+    /// </summary>
+    public const int SearchScanCap = 50_000;
+
+    /// <summary>
+    /// Resolves the <c>created_at</c> floor that bounds a search to the newest
+    /// <see cref="SearchScanCap"/> rows of the filtered window, or null when the window holds
+    /// fewer rows than the cap (nothing to bound, and the total stays exact).
+    /// <para>
+    /// The probe deliberately omits the <c>a.id</c> tiebreak the list orders by: it only needs a
+    /// timestamp threshold, and dropping the tiebreak lets the ordering come straight off
+    /// <c>idx_activity_org</c> as a covering scan instead of through a temp B-tree. Ties on the
+    /// boundary timestamp are all admitted by the <c>&gt;=</c> comparison, so the bound is
+    /// approximate by at most one timestamp's worth of rows — which is the point: it is a cost
+    /// ceiling, not a row-exact limit.
+    /// </para>
+    /// </summary>
+    private static async Task<string?> ResolveActivityScanFloorAsync(
+        DbConnection conn, string orgId, string? eventType, string? since) =>
+        await conn.ExecuteScalarAsync<string?>(
+            """
+            SELECT a.created_at
+            FROM activity a
+            WHERE a.org_id = @orgId
+              AND (@eventType IS NULL
+                   OR (@eventType = 'blocked' AND a.event_type LIKE 'blocked%')
+                   OR (@eventType <> 'blocked' AND a.event_type = @eventType))
+              AND (@since IS NULL OR a.created_at >= @since)
+            ORDER BY a.created_at DESC
+            LIMIT 1 OFFSET @scanCap
+            """,
+            new { orgId, eventType, since, scanCap = SearchScanCap });
+
+    /// <summary>
+    /// The <see cref="ListAuditAsync"/> counterpart of <see cref="ResolveActivityScanFloorAsync"/>,
+    /// over <c>audit_log</c> and its <c>scope='tenant'</c> / <c>login.success</c> filters.
+    /// </summary>
+    private static async Task<string?> ResolveAuditScanFloorAsync(
+        DbConnection conn, string orgId, string? action) =>
+        await conn.ExecuteScalarAsync<string?>(
+            """
+            SELECT a.created_at
+            FROM audit_log a
+            WHERE a.org_id = @orgId AND a.scope = 'tenant'
+              AND a.action <> 'login.success'
+              AND (@action IS NULL OR a.action = @action)
+            ORDER BY a.created_at DESC
+            LIMIT 1 OFFSET @scanCap
+            """,
+            new { orgId, action, scanCap = SearchScanCap });
+
+    /// <summary>
     /// Tenant-facing audit list: filters strictly to <c>scope='tenant'</c> so a sloppy join
     /// can never surface operator events to a tenant user.
     /// <para>
@@ -157,6 +249,13 @@ public sealed class AuditRepository
     /// audited row across the org's whole history. Callers that discard the total (CSV export)
     /// pass <paramref name="includeTotal"/>=false to skip the count entirely.
     /// </para>
+    /// <para>
+    /// A <em>search</em> is additionally bounded to the newest <see cref="SearchScanCap"/> rows
+    /// (see <see cref="ResolveAuditScanFloorAsync"/>), because its <c>LIKE</c> predicates cannot
+    /// be served by any index and would otherwise read the org's whole history per keystroke.
+    /// Count and list share the one floor, so the total never drifts from the rows returned; a
+    /// truncated window reports <c>TotalCapped</c> even when the total is under the cap.
+    /// </para>
     /// </summary>
     public async Task<(IReadOnlyList<AuditEntry> Items, int Total, bool TotalCapped)> ListAuditAsync(
         string orgId, int limit, int offset, string? action = null, string? search = null,
@@ -164,54 +263,21 @@ public sealed class AuditRepository
     {
         await using var conn = await _db.OpenAsync(ct);
         string? searchPattern = string.IsNullOrWhiteSpace(search) ? null : $"%{search.Trim().ToLowerInvariant()}%";
-        int total = 0;
-        bool totalCapped = false;
-        if (includeTotal && searchPattern is null)
-        {
-            int probed = await conn.ExecuteScalarAsync<int>(
-                """
-                SELECT COUNT(*)
-                FROM (SELECT 1
-                      FROM audit_log a
-                      WHERE a.org_id = @orgId AND a.scope = 'tenant'
-                        AND a.action <> 'login.success'
-                        AND (@action IS NULL OR a.action = @action)
-                      LIMIT @countProbe)
-                """,
-                new { orgId, action, countProbe = ListTotalCap + 1 });
-            totalCapped = probed > ListTotalCap;
-            total = totalCapped ? ListTotalCap : probed;
-        }
-        else if (includeTotal)
-        {
-            // A search must count through the same actor joins the list matches against
-            // (u.email / st.name), or the total drifts from the rows returned.
-            int probed = await conn.ExecuteScalarAsync<int>(
-                """
-                SELECT COUNT(*)
-                FROM (SELECT 1
-                      FROM audit_log a
-                      LEFT JOIN users u
-                          ON u.id = a.actor_id
-                          AND (a.actor_kind IS NULL OR a.actor_kind = 'user')
-                      LEFT JOIN service_tokens st
-                          ON st.id = a.actor_id
-                          AND a.actor_kind = 'service'
-                      WHERE a.org_id = @orgId AND a.scope = 'tenant'
-                        AND a.action <> 'login.success'
-                        AND (@action IS NULL OR a.action = @action)
-                        AND (lower(a.action) LIKE @searchPattern
-                             OR lower(COALESCE(a.purl, '')) LIKE @searchPattern
-                             OR lower(COALESCE(a.ecosystem, '')) LIKE @searchPattern
-                             OR lower(COALESCE(a.detail, '')) LIKE @searchPattern
-                             OR lower(COALESCE(u.email, '')) LIKE @searchPattern
-                             OR lower(COALESCE(st.name, '')) LIKE @searchPattern)
-                      LIMIT @countProbe)
-                """,
-                new { orgId, action, searchPattern, countProbe = ListTotalCap + 1 });
-            totalCapped = probed > ListTotalCap;
-            total = totalCapped ? ListTotalCap : probed;
-        }
+
+        // Only a search needs bounding — the no-search path is already served by the index, and
+        // bounding it would stop rows past the cap from being pageable. Every search is bounded,
+        // including the total-less CSV export: an unindexable full-history scan a caller can
+        // re-issue at will is a cost lever, not a one-shot.
+        string? scanFloor = searchPattern is not null
+            ? await ResolveAuditScanFloorAsync(conn, orgId, action)
+            : null;
+
+        // With no total to compute, a truncated scan window is still what TotalCapped reports —
+        // it is the only signal the export path has that older matches went unexamined.
+        var (total, totalCapped) = includeTotal
+            ? await ComputeAuditTotalAsync(conn, orgId, action, searchPattern, scanFloor)
+            : (0, scanFloor is not null);
+
         // Service-token actors live in a different table than users; resolve both and pick
         // by actor_kind. NULL actor_kind = legacy row (pre-migration) — fall back to the
         // users join for back-compat. The 'service:<name>' prefix matches the npm whoami
@@ -225,6 +291,7 @@ public sealed class AuditRepository
                    END as ActorEmail,
                    a.action as Action,
                    a.ecosystem as Ecosystem, a.purl as Purl, a.detail as Detail,
+                   a.source_ip as SourceIp,
                    a.created_at as CreatedAt
             FROM audit_log a
             LEFT JOIN users u
@@ -236,6 +303,7 @@ public sealed class AuditRepository
             WHERE a.org_id = @orgId AND a.scope = 'tenant'
               AND a.action <> 'login.success'
               AND (@action IS NULL OR a.action = @action)
+              AND (@scanFloor IS NULL OR a.created_at >= @scanFloor)
               AND (@searchPattern IS NULL
                    OR lower(a.action) LIKE @searchPattern
                    OR lower(COALESCE(a.purl, '')) LIKE @searchPattern
@@ -245,8 +313,61 @@ public sealed class AuditRepository
                    OR lower(COALESCE(st.name, '')) LIKE @searchPattern)
             ORDER BY a.created_at DESC, a.id DESC LIMIT @limit OFFSET @offset
             """,
-            new { orgId, limit, offset, action, searchPattern });
+            new { orgId, limit, offset, action, searchPattern, scanFloor });
         return (rows.ToList(), total, totalCapped);
+    }
+
+    /// <summary>
+    /// The row count backing <see cref="ListAuditAsync"/>'s <c>Total</c>, capped at
+    /// <see cref="ListTotalCap"/>. A search counts through the same actor joins the list matches
+    /// against (u.email / st.name) and under the same <paramref name="scanFloor"/>, or the total
+    /// drifts from the rows returned; an inactive search skips those joins entirely, because
+    /// their mere presence in the statement defeats LEFT-JOIN elimination.
+    /// </summary>
+    private static async Task<(int Total, bool Capped)> ComputeAuditTotalAsync(
+        DbConnection conn, string orgId, string? action, string? searchPattern, string? scanFloor)
+    {
+        int probed = searchPattern is null
+            ? await conn.ExecuteScalarAsync<int>(
+                """
+                SELECT COUNT(*)
+                FROM (SELECT 1
+                      FROM audit_log a
+                      WHERE a.org_id = @orgId AND a.scope = 'tenant'
+                        AND a.action <> 'login.success'
+                        AND (@action IS NULL OR a.action = @action)
+                      LIMIT @countProbe)
+                """,
+                new { orgId, action, countProbe = ListTotalCap + 1 })
+            : await conn.ExecuteScalarAsync<int>(
+                """
+                SELECT COUNT(*)
+                FROM (SELECT 1
+                      FROM audit_log a
+                      LEFT JOIN users u
+                          ON u.id = a.actor_id
+                          AND (a.actor_kind IS NULL OR a.actor_kind = 'user')
+                      LEFT JOIN service_tokens st
+                          ON st.id = a.actor_id
+                          AND a.actor_kind = 'service'
+                      WHERE a.org_id = @orgId AND a.scope = 'tenant'
+                        AND a.action <> 'login.success'
+                        AND (@action IS NULL OR a.action = @action)
+                        AND (@scanFloor IS NULL OR a.created_at >= @scanFloor)
+                        AND (lower(a.action) LIKE @searchPattern
+                             OR lower(COALESCE(a.purl, '')) LIKE @searchPattern
+                             OR lower(COALESCE(a.ecosystem, '')) LIKE @searchPattern
+                             OR lower(COALESCE(a.detail, '')) LIKE @searchPattern
+                             OR lower(COALESCE(u.email, '')) LIKE @searchPattern
+                             OR lower(COALESCE(st.name, '')) LIKE @searchPattern)
+                      LIMIT @countProbe)
+                """,
+                new { orgId, action, searchPattern, scanFloor, countProbe = ListTotalCap + 1 });
+
+        // A truncated scan window means older matches may exist that were never examined, so the
+        // total is a floor even when it sits well under ListTotalCap.
+        bool totalCapped = probed > ListTotalCap || scanFloor is not null;
+        return (probed > ListTotalCap ? ListTotalCap : probed, totalCapped);
     }
 
     /// <summary>
@@ -310,6 +431,7 @@ public sealed class AuditRepository
             SELECT a.id, a.scope as Scope, a.org_id as OrgId, o.slug as OrgSlug, a.actor_id as ActorId,
                    sa.email as ActorEmail, a.action as Action,
                    a.ecosystem as Ecosystem, a.purl as Purl, a.detail as Detail,
+                   a.source_ip as SourceIp,
                    a.created_at as CreatedAt
             FROM audit_log a LEFT JOIN system_admins sa ON sa.id = a.actor_id LEFT JOIN orgs o ON o.id = a.org_id
             WHERE {listWhereClause}
@@ -402,6 +524,7 @@ public sealed class AuditRepository
         const string sql = """
             SELECT id, org_id as OrgId, actor_id as ActorId, action as Action,
                    ecosystem as Ecosystem, purl as Purl, detail as Detail,
+                   source_ip as SourceIp,
                    created_at as CreatedAt
             FROM audit_log al
             WHERE EXISTS (SELECT 1 FROM json_each(@patternsJson) j WHERE al.action LIKE j.value)
@@ -445,11 +568,15 @@ public sealed class AuditRepository
     /// <para>
     /// The total follows the same strategy as <see cref="ListAuditAsync"/>: capped at
     /// <see cref="ListTotalCap"/>, counted join-free when no search is active, and skipped
-    /// entirely when <paramref name="includeTotal"/> is false (CSV export).
+    /// entirely when <paramref name="includeTotal"/> is false (CSV export). A search is likewise
+    /// bounded to the newest <see cref="SearchScanCap"/> rows of the filtered window via
+    /// <see cref="ResolveActivityScanFloorAsync"/>, which count and list share.
     /// </para>
     /// </summary>
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
-        Justification = "Optional named-arg filter/paging surface read at ~20 call sites; a wrapper type would force every caller to allocate to skip a single field, for no cohesion gain over the current named-argument reads.")]
+        Justification = "Optional named-arg filter/paging surface read at ~20 call sites; a wrapper "
+            + "type would force every caller to allocate to skip a single field, for no cohesion "
+            + "gain over the current named-argument reads.")]
     public async Task<(IReadOnlyList<ActivityEntry> Items, int Total, bool TotalCapped)> ListActivityAsync(
         string orgId, int limit, int offset, string? eventType = null, string? search = null,
         string? since = null, bool includeTotal = true, CancellationToken ct = default)
@@ -457,9 +584,17 @@ public sealed class AuditRepository
         await using var conn = await _db.OpenAsync(ct);
         string? searchPattern = string.IsNullOrWhiteSpace(search) ? null : $"%{search.Trim().ToLowerInvariant()}%";
 
+        // Only a search needs bounding — the no-search path is already served by the index, and
+        // bounding it would stop rows past the cap from being pageable. Every search is bounded,
+        // including the total-less CSV export: see ListAuditAsync for why.
+        string? scanFloor = searchPattern is not null
+            ? await ResolveActivityScanFloorAsync(conn, orgId, eventType, since)
+            : null;
+
+        // With no total to compute, a truncated scan window is still what TotalCapped reports.
         var (total, totalCapped) = includeTotal
-            ? await ComputeActivityTotalAsync(conn, orgId, eventType, since, searchPattern)
-            : (0, false);
+            ? await ComputeActivityTotalAsync(conn, orgId, eventType, since, searchPattern, scanFloor)
+            : (0, scanFloor is not null);
 
         // See ListAuditAsync for the actor_kind branching rationale.
         var rows = await conn.QueryAsync<ActivityEntry>(
@@ -482,6 +617,7 @@ public sealed class AuditRepository
                    OR (@eventType = 'blocked' AND a.event_type LIKE 'blocked%')
                    OR (@eventType <> 'blocked' AND a.event_type = @eventType))
               AND (@since IS NULL OR a.created_at >= @since)
+              AND (@scanFloor IS NULL OR a.created_at >= @scanFloor)
               AND (@searchPattern IS NULL
                    OR lower(COALESCE(a.purl, '')) LIKE @searchPattern
                    OR lower(a.event_type) LIKE @searchPattern
@@ -492,7 +628,7 @@ public sealed class AuditRepository
             ORDER BY a.created_at DESC, a.id DESC
             LIMIT @limit OFFSET @offset
             """,
-            new { orgId, limit, offset, eventType, searchPattern, since });
+            new { orgId, limit, offset, eventType, searchPattern, since, scanFloor });
         return (rows.ToList(), total, totalCapped);
     }
 
@@ -501,11 +637,13 @@ public sealed class AuditRepository
     /// <see cref="ListTotalCap"/>. The 'blocked' token selects the whole block-gate family
     /// (blocked, blocked_release_age, blocked_malicious, …) so the filter agrees with the
     /// dashboard's 'blocked%' tally; any specific 'blocked_&lt;gate&gt;' value still matches
-    /// exactly. A search count carries the same actor joins and the same since bound as the list
-    /// so the total stays in step (no paging drift); an inactive search skips those joins entirely.
+    /// exactly. A search count carries the same actor joins, the same since bound, and the same
+    /// <paramref name="scanFloor"/> as the list so the total stays in step (no paging drift); an
+    /// inactive search skips those joins entirely.
     /// </summary>
     private static async Task<(int Total, bool Capped)> ComputeActivityTotalAsync(
-        DbConnection conn, string orgId, string? eventType, string? since, string? searchPattern)
+        DbConnection conn, string orgId, string? eventType, string? since, string? searchPattern,
+        string? scanFloor)
     {
         int probed = searchPattern is null
             ? await conn.ExecuteScalarAsync<int>(
@@ -537,6 +675,7 @@ public sealed class AuditRepository
                              OR (@eventType = 'blocked' AND a.event_type LIKE 'blocked%')
                              OR (@eventType <> 'blocked' AND a.event_type = @eventType))
                         AND (@since IS NULL OR a.created_at >= @since)
+                        AND (@scanFloor IS NULL OR a.created_at >= @scanFloor)
                         AND (lower(COALESCE(a.purl, '')) LIKE @searchPattern
                              OR lower(a.event_type) LIKE @searchPattern
                              OR lower(COALESCE(a.ecosystem, '')) LIKE @searchPattern
@@ -545,9 +684,11 @@ public sealed class AuditRepository
                              OR lower(COALESCE(st.name, '')) LIKE @searchPattern)
                       LIMIT @countProbe)
                 """,
-                new { orgId, eventType, searchPattern, since, countProbe = ListTotalCap + 1 });
+                new { orgId, eventType, searchPattern, since, scanFloor, countProbe = ListTotalCap + 1 });
 
-        bool totalCapped = probed > ListTotalCap;
-        return (totalCapped ? ListTotalCap : probed, totalCapped);
+        // A truncated scan window means older matches may exist that were never examined, so the
+        // total is a floor even when it sits well under ListTotalCap.
+        bool totalCapped = probed > ListTotalCap || scanFloor is not null;
+        return (probed > ListTotalCap ? ListTotalCap : probed, totalCapped);
     }
 }

@@ -273,9 +273,11 @@ public sealed record PersonalDataExport(
     LoginAttemptRow? LoginAttempts,
     IReadOnlyList<SendThrottleRow> SendThrottles);
 
-// SQLite stores boolean/int columns as INTEGER, which Dapper's positional-record materializer
-// surfaces as Int64; the flag columns are therefore typed long (0/1) rather than bool so the
-// constructor signature matches the reader exactly. 0/1 is unambiguous machine-readable JSON.
+// The flag columns are typed long (0/1) rather than bool, and the constructor is explicit:
+// SQLite reports INTEGER as Int64 while Postgres reports it as Int32, and Dapper's default
+// positional-record binding demands an exact CLR match. See
+// DapperPositionalRecordComplianceTests. 0/1 is unambiguous machine-readable JSON.
+[method: ExplicitConstructor]
 public sealed record UserRow(
     string Id, string TenantId, string Email, string Role, string AccountType,
     long MustChangePassword, string? LastLoginAt, string AccountStatus, long MfaEnabled,
@@ -318,7 +320,9 @@ public sealed record AuditEventRow(
     string EventId, string EventType, string? SourceIp, string? UserAgent,
     string Outcome, string Payload, string OccurredAt);
 
+[method: ExplicitConstructor]
 public sealed record LoginAttemptRow(long FailedCount, string? LockedUntil, string LastAttempt);
 
 /// <summary>The subject's current per-account send budget for one account-targeted mail flow.</summary>
+[method: ExplicitConstructor]
 public sealed record SendThrottleRow(string Purpose, long SendCount, string WindowStart);

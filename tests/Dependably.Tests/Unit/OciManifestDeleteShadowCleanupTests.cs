@@ -223,7 +223,7 @@ public sealed class OciManifestDeleteShadowCleanupTests : IAsyncLifetime
             FirstCachedAt = TestTime.KnownNow,
             LastAccessedAt = TestTime.KnownNow,
         });
-        await _tenantAccess.UpsertAsync(_orgId, artifact.Id, TestTime.KnownNow);
+        await _tenantAccess.UpsertAsync(_orgId, artifact.Id, TestTime.KnownNow, TenantContentBinding.None);
     }
 
     private async Task<string> SeedYankTokenAsync(string orgId)

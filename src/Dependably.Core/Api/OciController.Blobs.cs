@@ -16,7 +16,11 @@ public sealed partial class OciController
     private async Task<IActionResult> ServeBlobAsync(
         string name, string digest, bool headOnly, CancellationToken ct)
     {
-        var auth = await AuthorizePullAsync(ct);
+        // allowPushProbe only on HEAD: docker/BuildKit HEAD a blob's digest before uploading it,
+        // to skip re-uploading a layer the registry already holds — a normal existence probe a
+        // publish-only token must still pass. A GET of the same route returns the actual layer
+        // bytes, which is real pull content and stays gated behind pull:oci/read:artifact.
+        var auth = await AuthorizePullAsync(ct, allowPushProbe: headOnly);
         if (auth.Unauthorized is not null)
         {
             return auth.Unauthorized;
@@ -184,7 +188,7 @@ public sealed partial class OciController
     /// </summary>
     private Task RecordBlobDownloadAsync(string orgId, string purl, TokenRecord? token, CancellationToken ct)
         => _svc.Audit.LogActivityAsync(orgId, "oci", purl, "download",
-            actorId: token?.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+            actorId: token?.UserId, actorKind: token?.ActorKind, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
     /// <summary>
     /// Attempts a ranged (206) read of a locally stored blob. Returns <c>null</c> when the
@@ -301,7 +305,7 @@ public sealed partial class OciController
         Response.Headers.ETag = $"\"{digest}\"";
         Response.Headers.CacheControl = "private, max-age=31536000, immutable";
         await _svc.Audit.LogActivityAsync(orgId, "oci", $"pkg:oci/{name}@{digest}", "download",
-            actorId: token?.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+            actorId: token?.UserId, actorKind: token?.ActorKind, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         return File(upstreamResult.Content, upstreamResult.MediaType);
     }
 
@@ -581,7 +585,7 @@ public sealed partial class OciController
     /// in <see cref="OciUploadService.AppendChunkAsync"/> is the authoritative guard, and it reads
     /// the file the bytes actually land in rather than what the client claims about them.
     /// </summary>
-    private IActionResult? ValidateContentRange(OciUploadSession session)
+    private ObjectResult? ValidateContentRange(OciUploadSession session)
     {
         string? header = Request.Headers.ContentRange.FirstOrDefault();
         if (string.IsNullOrWhiteSpace(header))

@@ -7,6 +7,7 @@ using Dependably.Security;
 using Dependably.Tests.Infrastructure;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -44,6 +45,7 @@ public sealed class EmailRectificationTests
         return new TransactionalEmailService(
             queue,
             new InstanceSmtpConfig((_, _) => Task.FromResult<string?>(null), clock),
+            new ConfigurationBuilder().Build(),
             RealLocalizer(),
             NullLogger<TransactionalEmailService>.Instance);
     }
@@ -95,6 +97,50 @@ public sealed class EmailRectificationTests
         // The first link is gone, not merely superseded.
         Assert.IsType<ObjectResult>(await f.Confirm(firstToken));
         Assert.Equal(f.OriginalEmail, await f.CurrentEmailAsync());
+    }
+
+    /// <summary>
+    /// The verification mail goes to a caller-chosen address through the operator's shared relay,
+    /// so the send is budgeted per destination the same way the password-reset send is. Without
+    /// that budget an authenticated caller can loop this endpoint at any mailbox — the endpoint's
+    /// per-IP limiter bounds one caller, not one recipient. The window is an hour and the default
+    /// budget five, so the sixth request for the same address in one window is refused.
+    /// </summary>
+    [Fact]
+    public async Task RequestsForOneAddress_AreBudgeted_AndTheSurplusIsRefusedWithoutMailingIt()
+    {
+        var f = await FixtureAsync();
+
+        for (int i = 0; i < 5; i++)
+        {
+            Assert.IsType<AcceptedResult>(await f.Request(f.ActorId, NewAddress, f.Password));
+        }
+
+        var refused = await f.Request(f.ActorId, NewAddress, f.Password);
+
+        Assert.Equal(StatusCodes.Status429TooManyRequests,
+            Assert.IsType<ObjectResult>(refused).StatusCode);
+        // Refused before the token is minted: the surplus request neither mails nor rotates the
+        // pending link, so it cannot be used to void a link the user is about to click either.
+        Assert.Equal(1, await f.PendingTokenCountAsync());
+        Assert.Equal(f.OriginalEmail, await f.CurrentEmailAsync());
+    }
+
+    /// <summary>
+    /// The budget is per destination address, not per caller or per account: exhausting one
+    /// mailbox's budget must not stop a change request aimed at a different mailbox.
+    /// </summary>
+    [Fact]
+    public async Task ExhaustingOneAddressBudget_LeavesAnotherAddressSendable()
+    {
+        var f = await FixtureAsync();
+
+        for (int i = 0; i < 6; i++)
+        {
+            await f.Request(f.ActorId, NewAddress, f.Password);
+        }
+
+        Assert.IsType<AcceptedResult>(await f.Request(f.ActorId, "elsewhere@example.test", f.Password));
     }
 
     // ── The confirmation changes everything ──────────────────────────────────
@@ -311,7 +357,13 @@ public sealed class EmailRectificationTests
         public Task<IActionResult> Request(string userId, string? email, string? currentPassword) =>
             Built.OrgUsersController.RequestEmailChange(
                 userId, new ChangeEmailRequest(email, currentPassword),
-                Tokens, Users, Mailer(Clock), Clock, CancellationToken.None);
+                Tokens, Users, Mailer(Clock), SendThrottle, Clock, CancellationToken.None);
+
+        // Real throttle over the scenario's own database and clock: the budget it enforces is
+        // part of the flow under test, so a substitute here would hide a change to it.
+        private AccountSendThrottle SendThrottle => new(
+            Db, Clock, new ConfigurationBuilder().Build(),
+            NullLogger<AccountSendThrottle>.Instance);
 
         public Task<IActionResult> Confirm(string token) =>
             Auth.ConfirmEmailChange(

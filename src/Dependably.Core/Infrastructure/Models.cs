@@ -533,6 +533,12 @@ public class SystemAdmin
     public string AccountStatus { get; set; } = "active";
     public DateTimeOffset? PasswordResetIssuedAt { get; set; }
     public string? Language { get; set; }
+    /// <summary>
+    /// IANA zone name for rendering timestamps in the apex SPA. NULL falls back to
+    /// <see cref="TimeZoneCodes.Default"/> — an operator belongs to no org, so there is no
+    /// tenant default in the chain the way there is for <c>users.timezone</c>.
+    /// </summary>
+    public string? Timezone { get; set; }
     /// <summary>True when the operator has completed MFA enrollment.</summary>
     public bool MfaEnabled { get; set; }
     /// <summary>AES-GCM-encrypted TOTP authenticator key. Null until MFA enrollment.</summary>
@@ -792,7 +798,7 @@ public class UpstreamRegistryEntry
     /// <summary>
     /// Terraform-only: which server-side protocol this upstream speaks — null for the Provider
     /// Registry Protocol (the default), <c>"mirror"</c> for the Provider Network Mirror Protocol.
-    /// No other ecosystem reads this field. See <c>docs/adr/0003-terraform-provider-network-mirror.md</c>.
+    /// No other ecosystem reads this field. See <c>ADR-terraform-provider-network-mirror</c>.
     /// </summary>
     public string? Protocol { get; set; }
 }
@@ -841,6 +847,8 @@ public class AuditEntry
     public string? Ecosystem { get; set; }
     public string? Purl { get; set; }
     public string? Detail { get; set; }
+    /// <summary>Canonical remote IP of the actor; NULL for background paths and for rows past the pseudonymization horizon.</summary>
+    public string? SourceIp { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
 }
 

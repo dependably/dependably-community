@@ -172,6 +172,88 @@ public sealed class PostgresSchemaApplyTests
     // inherently row-preserving, but this catches future regressions where a DELETE or
     // TRUNCATE is accidentally introduced.
     // Unverified locally (requires TEST_POSTGRES_CONNECTION / CI postgres service).
+    /// <summary>
+    /// The per-org SMTP transport on <c>alert_settings</c> is retired by clearing its values, not by
+    /// dropping its columns — releases still in the field name all seven in their alert-settings
+    /// SELECTs and blue-green runs one of those against this same database during a cutover. Both
+    /// halves of that posture are provider-specific enough to be worth proving on a live server:
+    /// Postgres would happily take a <c>DROP COLUMN</c>, so "the columns survive" is a real
+    /// assertion here, and the scrub's <c>COALESCE(...) &lt;&gt; 1</c> predicate has to behave the
+    /// same under Postgres's typing as under SQLite's.
+    /// </summary>
+    [Fact]
+    public async Task ScrubAlertSettingsRetiredSmtpTransport_OnLivePostgres_ClearsValuesAndKeepsColumns()
+    {
+        await using var pg = await LivePostgresReset.FreshAsync(ConnectionString);
+        var store = pg.Store;
+        await new SchemaInitializer(store).InitializeAsync();
+
+        await using var conn = await store.OpenAsync();
+
+        string orgId = Guid.NewGuid().ToString("N");
+        await conn.ExecuteAsync(
+            "INSERT INTO orgs (id, slug) VALUES (@id, @slug)",
+            new { id = orgId, slug = "pg-smtp-scrub-" + orgId[..8] });
+
+        // A row in the shape a release with a per-org transport left behind: inherit-instance off,
+        // a full transport, an envelope-encrypted credential, and a live delivery channel alongside.
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO alert_settings
+                (org_id, email_enabled, email_recipients,
+                 email_inherit_instance, email_smtp_host, email_smtp_port, email_smtp_security,
+                 email_smtp_username, email_smtp_password, email_smtp_from,
+                 email_last_status, email_consecutive_failures)
+            VALUES
+                (@orgId, 1, 'ops@example.com',
+                 0, 'own.example.com', 2525, 'ssl',
+                 'own-user', 'enc:v1:own-secret', 'alerts@own.example.com',
+                 'failed', 3)
+            """, new { orgId });
+
+        // Rewind the ledger entry and re-run so the scrub passes over the seeded row.
+        await conn.ExecuteAsync(
+            "DELETE FROM _applied_migrations WHERE name = 'scrub_alert_settings_retired_smtp_transport'");
+        await new SchemaInitializer(store).InitializeAsync();
+
+        var scrubbed = await conn.QuerySingleAsync<(long InheritInstance, string? Host, int? Port,
+            string? Security, string? Username, string? Password, string? FromAddress)>(
+            """
+            SELECT email_inherit_instance, email_smtp_host, email_smtp_port, email_smtp_security,
+                   email_smtp_username, email_smtp_password, email_smtp_from
+            FROM alert_settings WHERE org_id = @orgId
+            """, new { orgId });
+
+        // Forcing the flag back to 1 is the load-bearing half: an older slot branches on it, and a
+        // 0 row with a NULLed host would resolve as unconfigured and silently stop that org's mail.
+        Assert.Equal(1, scrubbed.InheritInstance);
+        Assert.Null(scrubbed.Host);
+        Assert.Null(scrubbed.Port);
+        Assert.Null(scrubbed.Security);
+        Assert.Null(scrubbed.Username);
+        Assert.Null(scrubbed.Password);
+        Assert.Null(scrubbed.FromAddress);
+
+        // The live delivery channel is untouched — clearing it would silently disable the tenant.
+        var (enabled, recipients) = await conn.QuerySingleAsync<(bool Enabled, string Recipients)>(
+            "SELECT email_enabled, email_recipients FROM alert_settings WHERE org_id = @orgId",
+            new { orgId });
+        Assert.True(enabled);
+        Assert.Equal("ops@example.com", recipients);
+
+        // And all seven columns still exist on the live server, which is the property that keeps an
+        // old blue-green slot's alert-settings read working.
+        var declared = (await conn.QueryAsync<string>(
+            """
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'alert_settings'
+              AND column_name IN ('email_inherit_instance', 'email_smtp_host', 'email_smtp_port',
+                                  'email_smtp_security', 'email_smtp_username', 'email_smtp_password',
+                                  'email_smtp_from')
+            """)).ToList();
+        Assert.Equal(7, declared.Count);
+    }
+
     [Fact]
     public async Task MakePvvPackageVersionIdNullable_OnLivePostgres_AllRowsSurviveReshape()
     {

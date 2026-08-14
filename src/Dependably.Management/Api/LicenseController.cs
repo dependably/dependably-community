@@ -128,7 +128,9 @@ public sealed class LicenseController : ControllerBase
         await _orgs.UpsertLicensePolicyModeAsync(orgId, req.Mode, req.PublishMode, ct);
 
         await _audit.LogAsync("license_policy_mode_changed", orgId, GetUserId(),
-            detail: System.Text.Json.JsonSerializer.Serialize(new { mode = req.Mode, publish_mode = req.PublishMode }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+            actorKind: ActorKinds.User,
+            detail: System.Text.Json.JsonSerializer.Serialize(new { mode = req.Mode, publish_mode = req.PublishMode }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         var updated = await _orgs.GetSettingsAsync(orgId, ct);
         return Ok(new { mode = req.Mode, publishMode = updated?.LicensePublishEnforcementMode ?? "off" });
@@ -179,7 +181,9 @@ public sealed class LicenseController : ControllerBase
         }
 
         await _audit.LogAsync("license_allowlist_added", orgId, GetUserId(),
-            detail: System.Text.Json.JsonSerializer.Serialize(new { spdx = req.LicenseSpdx.Trim() }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+            actorKind: ActorKinds.User,
+            detail: System.Text.Json.JsonSerializer.Serialize(new { spdx = req.LicenseSpdx.Trim() }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return CreatedAtAction(nameof(GetAllowlist), null, entry);
     }
@@ -204,7 +208,9 @@ public sealed class LicenseController : ControllerBase
         }
 
         await _audit.LogAsync("license_allowlist_removed", orgId, GetUserId(),
-            detail: System.Text.Json.JsonSerializer.Serialize(new { spdx }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+            actorKind: ActorKinds.User,
+            detail: System.Text.Json.JsonSerializer.Serialize(new { spdx }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return NoContent();
     }
@@ -254,7 +260,9 @@ public sealed class LicenseController : ControllerBase
         }
 
         await _audit.LogAsync("license_blocklist_added", orgId, GetUserId(),
-            detail: System.Text.Json.JsonSerializer.Serialize(new { spdx = req.LicenseSpdx.Trim() }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+            actorKind: ActorKinds.User,
+            detail: System.Text.Json.JsonSerializer.Serialize(new { spdx = req.LicenseSpdx.Trim() }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return CreatedAtAction(nameof(GetBlocklist), null, entry);
     }
@@ -279,7 +287,9 @@ public sealed class LicenseController : ControllerBase
         }
 
         await _audit.LogAsync("license_blocklist_removed", orgId, GetUserId(),
-            detail: System.Text.Json.JsonSerializer.Serialize(new { spdx }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+            actorKind: ActorKinds.User,
+            detail: System.Text.Json.JsonSerializer.Serialize(new { spdx }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return NoContent();
     }

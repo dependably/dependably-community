@@ -43,6 +43,7 @@ internal static partial class InfrastructureStartupExtensions
         // Passive master-reachability tracker fed at the UpstreamClient fetch boundary; read only
         // by the edge-only /edge/status endpoint. Registered in all modes (near-free), exposed on edge.
         builder.Services.AddSingleton<Dependably.Infrastructure.Observability.EdgeStatusTracker>();
+        builder.Services.AddSingleton<CacheEvictionService.Dependencies>();
         builder.Services.AddHostedService<CacheEvictionService>();
 
         // Hosted-tier orphan reconciliation: closes the SIGKILL window in PackagePublishService

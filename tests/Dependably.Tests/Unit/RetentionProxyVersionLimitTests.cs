@@ -45,7 +45,9 @@ public sealed class RetentionProxyVersionLimitTests : IAsyncLifetime
             new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock),
             new Dependably.Protocol.OciOrphanBlobDeleter(
                 _db, new Dependably.Storage.TieredBlobStorage(_blobs, _blobs),
-                new Dependably.Protocol.OciBlobKeyLock())));
+                new Dependably.Protocol.OciBlobKeyLock()),
+            new Dependably.Infrastructure.Mail.EmailOutboxRepository(_db, _clock),
+            new Dependably.Infrastructure.Mail.EmailOutboxPolicy(cfg)));
     }
 
     // Seeds one proxied FILE of a version, with its blob, for org 'o1'.
@@ -78,7 +80,7 @@ public sealed class RetentionProxyVersionLimitTests : IAsyncLifetime
         });
 
         var access = new TenantArtifactAccessRepository(_db);
-        await access.UpsertAsync("o1", inserted.Id, accessed);
+        await access.UpsertAsync("o1", inserted.Id, accessed, TenantContentBinding.None);
         if (lastUsed is { } used)
         {
             await access.UpsertStateAsync("o1", inserted.Id, used);
@@ -266,7 +268,9 @@ public sealed class RetentionProxyVersionLimitTests : IAsyncLifetime
             new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock),
             new Dependably.Protocol.OciOrphanBlobDeleter(
                 _db, new Dependably.Storage.TieredBlobStorage(_blobs, _blobs),
-                new Dependably.Protocol.OciBlobKeyLock())));
+                new Dependably.Protocol.OciBlobKeyLock()),
+            new Dependably.Infrastructure.Mail.EmailOutboxRepository(_db, _clock),
+            new Dependably.Infrastructure.Mail.EmailOutboxPolicy(cfg)));
 
         await using var conn = await _db.OpenAsync();
         await svc.EnforceVersionLimitAsync(conn, "o1", keepVersions: 1, cts.Token);
@@ -376,7 +380,9 @@ public sealed class RetentionProxyVersionLimitTests : IAsyncLifetime
             new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock),
             new Dependably.Protocol.OciOrphanBlobDeleter(
                 _db, new Dependably.Storage.TieredBlobStorage(_blobs, _blobs),
-                new Dependably.Protocol.OciBlobKeyLock())));
+                new Dependably.Protocol.OciBlobKeyLock()),
+            new Dependably.Infrastructure.Mail.EmailOutboxRepository(_db, _clock),
+            new Dependably.Infrastructure.Mail.EmailOutboxPolicy(cfg)));
 
         await using var conn = await _db.OpenAsync();
         await svc.EvictStaleBlobsAsync(conn, "o1", keepDays: 30, cts.Token);

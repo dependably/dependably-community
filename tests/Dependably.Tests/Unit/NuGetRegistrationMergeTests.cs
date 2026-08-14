@@ -350,8 +350,9 @@ public sealed class NuGetRegistrationMergeTests
             }
             """;
 
-        string rewritten = NuGetController.RewriteRegistrationLeafUrls(
+        string? rewritten = NuGetController.RewriteRegistrationLeafUrls(
             leafJson, "foo", "https://proxy.example/nuget");
+        Assert.NotNull(rewritten);
 
         using var doc = JsonDocument.Parse(rewritten);
         string? leafId = doc.RootElement.GetProperty("@id").GetString();
@@ -365,36 +366,38 @@ public sealed class NuGetRegistrationMergeTests
     }
 
     [Fact]
-    public void RewriteRegistrationLeafUrls_MissingFields_DoesNotThrow()
+    public void RewriteRegistrationLeafUrls_MissingFields_DoesNotThrowAndRefusesTheLeaf()
     {
         // Absent packageContent and catalogEntry fields must not cause exceptions — upstream
-        // JSON is hostile input that may omit optional fields.
+        // JSON is hostile input that may omit optional fields. Without a catalogEntry there is no
+        // version, so the leaf cannot be expressed as a local route and is refused rather than
+        // returned with its upstream @id intact.
         string leafJson = """{"@id":"https://upstream/foo/1.0.0.json","@type":"Package"}""";
 
-        string rewritten = NuGetController.RewriteRegistrationLeafUrls(
-            leafJson, "foo", "https://proxy.example/nuget");
-
-        // Must not throw; @id is left unchanged when version cannot be extracted.
-        Assert.NotNull(rewritten);
-        using var doc = JsonDocument.Parse(rewritten);
-        // No packageContent field was present; document is still valid JSON.
-        Assert.False(doc.RootElement.TryGetProperty("packageContent", out _));
+        Assert.Null(NuGetController.RewriteRegistrationLeafUrls(
+            leafJson, "foo", "https://proxy.example/nuget"));
     }
 
     [Fact]
     public void RewriteRegistrationLeafUrls_MalformedJson_ReturnsUnchanged()
     {
         string bogus = "not json";
-        string result = NuGetController.RewriteRegistrationLeafUrls(bogus, "foo", "https://x/nuget");
+        string? result = NuGetController.RewriteRegistrationLeafUrls(bogus, "foo", "https://x/nuget");
         Assert.Equal(bogus, result);
     }
 
     [Fact]
-    public void RewriteRegistrationIndexUrls_NonStringVersion_SkipsLeafRewriteNoThrow()
+    public void RewriteRegistrationIndexUrls_NonStringVersion_DropsTheLeafAndKeepsTheRest()
     {
         // A hostile or buggy upstream may return a non-string version field (e.g. a number).
-        // GetValue<string>() would throw InvalidOperationException; TryGetString must skip
-        // the bad leaf without crashing, leaving the other leaf still rewritten.
+        // GetValue<string>() would throw InvalidOperationException; TryGetString maps it to null.
+        // With no version there is no local route to point the leaf at, so the leaf is dropped
+        // rather than emitted still carrying the upstream-chosen download URL below — an
+        // attacker-controlled host here, which would take the client straight past this proxy's
+        // checksum verification, OSV scan, block gate, and first-fetch audit.
+        //
+        // Mixed by construction: the good leaf in the same page must survive, rewritten, so the
+        // rule cannot be satisfied by simply emptying the page.
         string indexJson = """
             {
               "@id": "https://api.nuget.org/v3/registration5-semver1/foo/index.json",
@@ -406,14 +409,14 @@ public sealed class NuGetRegistrationMergeTests
                   "count": 2,
                   "items": [
                     {
-                      "@id": "https://api.nuget.org/v3/registration5-semver1/foo/1.0.0.json",
+                      "@id": "https://attacker.example/foo/1.0.0.json",
                       "@type": "Package",
                       "catalogEntry": {
                         "id": "Foo",
                         "version": 123,
-                        "packageContent": "https://api.nuget.org/v3-flatcontainer/foo/1.0.0/foo.1.0.0.nupkg"
+                        "packageContent": "https://attacker.example/evil.nupkg"
                       },
-                      "packageContent": "https://api.nuget.org/v3-flatcontainer/foo/1.0.0/foo.1.0.0.nupkg"
+                      "packageContent": "https://attacker.example/evil.nupkg"
                     },
                     {
                       "@id": "https://api.nuget.org/v3/registration5-semver1/foo/2.0.0.json",
@@ -431,27 +434,93 @@ public sealed class NuGetRegistrationMergeTests
             }
             """;
 
-        // Must not throw — non-string version leaf is skipped (URLs left as-is), string leaf is rewritten.
         string rewritten = NuGetController.RewriteRegistrationIndexUrls(
             indexJson, "foo", "https://proxy.example/nuget");
 
-        using var doc = JsonDocument.Parse(rewritten);
-        var items = doc.RootElement.GetProperty("items")[0].GetProperty("items");
+        // Nothing anywhere in the emitted document may name the attacker host.
+        Assert.DoesNotContain("attacker.example", rewritten, StringComparison.OrdinalIgnoreCase);
 
-        // Leaf with numeric version — @id and packageContent are left unrewritten.
-        string? badLeafId = items[0].GetProperty("@id").GetString();
-        Assert.Contains("api.nuget.org", badLeafId);
+        using var doc = JsonDocument.Parse(rewritten);
+        var page = doc.RootElement.GetProperty("items")[0];
+        var items = page.GetProperty("items");
+
+        // The unusable leaf is gone, and the page's own count agrees with what it now carries.
+        Assert.Equal(1, items.GetArrayLength());
+        Assert.Equal(1, page.GetProperty("count").GetInt32());
 
         // Leaf with valid string version — @id and packageContent are rewritten.
-        string? goodLeafId = items[1].GetProperty("@id").GetString();
+        string? goodLeafId = items[0].GetProperty("@id").GetString();
         Assert.NotNull(goodLeafId);
         Assert.StartsWith("https://proxy.example/nuget/registration/foo/", goodLeafId);
         Assert.DoesNotContain("api.nuget.org", goodLeafId);
 
-        string? goodPc = items[1].GetProperty("catalogEntry").GetProperty("packageContent").GetString();
+        string? goodPc = items[0].GetProperty("catalogEntry").GetProperty("packageContent").GetString();
         Assert.NotNull(goodPc);
         Assert.StartsWith("https://proxy.example/nuget/flatcontainer/foo/", goodPc);
         Assert.DoesNotContain("api.nuget.org", goodPc);
+    }
+
+    [Fact]
+    public void RewriteRegistrationLeafUrls_NonStringVersion_RefusesTheLeaf()
+    {
+        // A single-leaf document has no sibling to fall back on: with no version there is no local
+        // flatcontainer route, so the whole leaf is refused (the caller 404s) rather than handing
+        // the client the upstream's own download URL.
+        string leafJson = """
+            {
+              "@id": "https://attacker.example/foo/1.0.0.json",
+              "@type": "Package",
+              "catalogEntry": {
+                "id": "Foo",
+                "version": 123,
+                "packageContent": "https://attacker.example/evil.nupkg"
+              },
+              "packageContent": "https://attacker.example/evil.nupkg"
+            }
+            """;
+
+        Assert.Null(NuGetController.RewriteRegistrationLeafUrls(leafJson, "foo", "https://proxy.example/nuget"));
+    }
+
+    [Fact]
+    public void RewriteRegistrationIndexUrls_ExternalizedPageOffTheConfiguredUpstream_IsDropped()
+    {
+        // An externalized page keeps its upstream @id so a client can still reach those leaves.
+        // That is only safe while the @id names a host the operator configured: a page @id on any
+        // other host is a path the client follows off this instance entirely, to leaves whose
+        // download URLs this proxy never sees. Mixed by construction: the configured-upstream page
+        // in the same index must survive.
+        string indexJson = new JsonObject
+        {
+            ["@id"] = "https://api.nuget.org/v3/registration5-semver1/foo/index.json",
+            ["count"] = 2,
+            ["items"] = new JsonArray(
+                new JsonObject
+                {
+                    ["@id"] = "https://api.nuget.org/v3/registration5-semver1/foo/page/1.0.0/2.0.0.json",
+                    ["@type"] = "catalog:CatalogPage",
+                    ["count"] = 2
+                },
+                new JsonObject
+                {
+                    ["@id"] = "https://attacker.example/registration/foo/page/3.0.0/4.0.0.json",
+                    ["@type"] = "catalog:CatalogPage",
+                    ["count"] = 2
+                })
+        }.ToJsonString();
+
+        string rewritten = NuGetController.RewriteRegistrationIndexUrls(
+            indexJson, "foo", "https://proxy.example/nuget",
+            upstreamBaseUrls: ["https://api.nuget.org/v3"]);
+
+        Assert.DoesNotContain("attacker.example", rewritten, StringComparison.OrdinalIgnoreCase);
+
+        using var doc = JsonDocument.Parse(rewritten);
+        var pages = doc.RootElement.GetProperty("items");
+        Assert.Equal(1, pages.GetArrayLength());
+        Assert.Equal(
+            "https://api.nuget.org/v3/registration5-semver1/foo/page/1.0.0/2.0.0.json",
+            pages[0].GetProperty("@id").GetString());
     }
 
     // ── Externalized upstream pages ──────────────────────────────────────────

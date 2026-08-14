@@ -359,9 +359,24 @@ public sealed class BannerRepository
     public async Task DeleteForOrgAsync(string orgId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        await conn.ExecuteAsync(
+        await DeleteForOrgAsync(conn, tx: null, orgId, ct);
+    }
+
+    /// <summary>
+    /// <see cref="DeleteForOrgAsync(string,CancellationToken)"/> on a caller-supplied connection and
+    /// transaction. The hard-delete sweep erases a tenant as one atomic unit, and a repository that
+    /// opened its own connection could not join that transaction — its delete would commit
+    /// independently and survive a rollback of everything around it.
+    /// </summary>
+    public async Task DeleteForOrgAsync(
+        System.Data.Common.DbConnection conn,
+        System.Data.Common.DbTransaction? tx,
+        string orgId,
+        CancellationToken ct = default)
+    {
+        await conn.ExecuteAsync(new CommandDefinition(
             "DELETE FROM banners WHERE scope = 'tenant' AND org_id = @orgId",
-            new { orgId });
+            new { orgId }, transaction: tx, cancellationToken: ct));
     }
 }
 

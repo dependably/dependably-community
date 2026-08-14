@@ -239,7 +239,21 @@ public sealed partial class OciController : OrgScopedControllerBase
         return Ok();
     }
 
-    private async Task<(TokenRecord? Token, IActionResult? Unauthorized)> AuthorizePullAsync(CancellationToken ct)
+    /// <param name="allowPushProbe">
+    /// Additionally admits a token holding <see cref="Capabilities.PublishOci"/>. The OCI push
+    /// protocol reads through this same gate before it writes anything — a blob HEAD
+    /// existence/cross-mount probe, and a manifest HEAD/GET to resolve a tag or skip
+    /// re-pushing a digest already present — and dependably ships publish-only OCI tokens
+    /// with no read capability at all (the web token modal's "push" preset mints exactly
+    /// <c>publish:*</c>). Set only on the two call sites those probes actually reach: the
+    /// manifest read path (both GET and HEAD) and the blob read path's HEAD form. It is
+    /// deliberately <b>not</b> set for blob GET (full layer content — the substantive image
+    /// bytes push never needs to read back), tag list, or the referrers list: none of those
+    /// are steps a push performs, and admitting them would hand a publish-only token the
+    /// general pull/enumerate licence this gate exists to deny.
+    /// </param>
+    private async Task<(TokenRecord? Token, IActionResult? Unauthorized)> AuthorizePullAsync(
+        CancellationToken ct, bool allowPushProbe = false)
     {
         string orgId = CurrentTenantId();
         var settings = await _svc.Orgs.GetSettingsAsync(orgId, ct);
@@ -249,6 +263,21 @@ public sealed partial class OciController : OrgScopedControllerBase
             Response.Headers.WWWAuthenticate = BasicChallenge;
             return (null, OciError(StatusCodes.Status401Unauthorized, OciErrorCode.UNAUTHORIZED,
                 "Authentication required."));
+        }
+        // A presented token must carry a read-capable scope: either the OCI-specific
+        // pull:oci (minted for a narrow, pull-only token) or the cross-ecosystem
+        // read:artifact that every reader/admin/owner role already grants. Without this
+        // check any active token — regardless of what it was scoped for — pulls every
+        // hosted and proxied image in the org, since ResolveTokenAsync only validates
+        // that the token is active and belongs to the tenant. See allowPushProbe above for
+        // the narrow publish:oci exception admitted on the push protocol's own read probes.
+        if (token is not null
+            && !token.HasCapability(Capabilities.PullOci)
+            && !token.HasCapability(Capabilities.ReadArtifact)
+            && !(allowPushProbe && token.HasCapability(Capabilities.PublishOci)))
+        {
+            return (null, OciError(StatusCodes.Status403Forbidden, OciErrorCode.DENIED,
+                "Insufficient scope: pull:oci or read:artifact required."));
         }
         return (token, null);
     }

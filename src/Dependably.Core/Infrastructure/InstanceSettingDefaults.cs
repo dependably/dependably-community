@@ -24,6 +24,19 @@ public static class InstanceSettingDefaults
     // the DB surface area for pooled multi-tenant deployments.
     public const string MaxActiveTokensPerTenant = "1000";
 
+    /// <summary>
+    /// Resolves the effective per-tenant active-token cap from a raw
+    /// <c>instance_settings.max_active_tokens_per_tenant</c> value, falling back to
+    /// <see cref="MaxActiveTokensPerTenant"/> when it is absent or unusable. Shared by the
+    /// read-only accessor on <c>OrgRepository</c> and by the enforcing write path in
+    /// <c>TokenRepository</c> so the number the UI reports and the number the insert refuses at
+    /// are the same number.
+    /// </summary>
+    public static int ParseMaxActiveTokensPerTenant(string? raw) =>
+        raw is not null && int.TryParse(raw, out int cap) && cap > 0
+            ? cap
+            : int.Parse(MaxActiveTokensPerTenant);
+
     // 100 pending invites per tenant — bounds the invites table against admin-initiated
     // flooding while allowing large onboarding batches.
     public const string MaxPendingInvitesPerTenant = "100";

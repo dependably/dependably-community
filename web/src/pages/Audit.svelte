@@ -43,6 +43,15 @@
   // since=30d so the feed shows exactly the events they counted.
   let lcSince = init.since
   let lcPage = init.page, lcLimit = init.limit, lcTotal = 0, lcTotalCapped = false
+  // The search term the current rows were actually fetched with — not the live input, which
+  // changes on every keystroke ahead of the debounce.
+  let lcAppliedSearch = ''
+  // A search whose scan window the server truncated and which matched nothing in it. Reported
+  // as its own empty state: "no results" would imply the whole history was searched.
+  $: lcSearchTruncated = lcAppliedSearch !== '' && lcTotalCapped && lcItems.length === 0
+  // Request sequence — page/filter/search changes can fire overlapping loads; a response whose
+  // token no longer matches the latest issued request is stale and must not overwrite newer state.
+  let lcSeq = 0
 
   $: lcColumns = [
     { key: 'createdAt',  label: $t('activity.columns.time'),   sortable: true, defaultDir: 'desc', width: '150px' },
@@ -53,6 +62,7 @@
   ]
 
   async function loadLifecycle() {
+    const mine = ++lcSeq
     lcLoading = true
     lcError = ''
     try {
@@ -61,11 +71,17 @@
       if (lcSearch) p.search = lcSearch
       if (lcSince) p.since = lcSince
       const data = await api.getActivity(p)
+      if (mine !== lcSeq) return
       lcItems = data.items
       lcTotal = data.total
       lcTotalCapped = data.totalCapped ?? false
-    } catch (e) { lcError = e.message }
-    finally { lcLoading = false }
+      lcAppliedSearch = lcSearch
+    } catch (e) {
+      if (mine !== lcSeq) return
+      lcError = e.message
+    } finally {
+      if (mine === lcSeq) lcLoading = false
+    }
   }
 
   function lcOnPageChange(e) { lcPage = e.detail.page; sync(); loadLifecycle() }
@@ -118,6 +134,11 @@
   let adFilterAction = init.action
   let adSearch = init.aq
   let adPage = init.apage, adLimit = init.alimit, adTotal = 0, adTotalCapped = false
+  // See lcAppliedSearch / lcSearchTruncated.
+  let adAppliedSearch = ''
+  $: adSearchTruncated = adAppliedSearch !== '' && adTotalCapped && adItems.length === 0
+  // See lcSeq.
+  let adSeq = 0
 
   // Tenant audit actions, grouped for the filter dropdown. Backend uses exact-match
   // filtering on the action column at scope='tenant'; system-scope actions
@@ -151,6 +172,7 @@
   ]
 
   async function loadAdmin() {
+    const mine = ++adSeq
     adLoading = true
     adError = ''
     try {
@@ -158,11 +180,17 @@
       if (adFilterAction) p.action = adFilterAction
       if (adSearch) p.search = adSearch
       const data = await api.getAudit(p)
+      if (mine !== adSeq) return
       adItems = data.items
       adTotal = data.total
       adTotalCapped = data.totalCapped ?? false
-    } catch (e) { adError = e.message }
-    finally { adLoading = false }
+      adAppliedSearch = adSearch
+    } catch (e) {
+      if (mine !== adSeq) return
+      adError = e.message
+    } finally {
+      if (mine === adSeq) adLoading = false
+    }
   }
 
   function adOnPageChange(e) { adPage = e.detail.page; sync(); loadAdmin() }
@@ -247,7 +275,7 @@
       loadingRows={lcLimit}
       memoryKey="audit:lifecycle"
       initialSort={{ key: 'createdAt', dir: 'desc' }}
-      emptyText={$t('activity.empty')}
+      emptyText={lcSearchTruncated ? $t('activity.emptySearchCapped') : $t('activity.empty')}
       tableClass="table-auto activity-table"
       let:row={ev}
     >
@@ -294,7 +322,7 @@
       loadingRows={adLimit}
       memoryKey="audit:admin"
       initialSort={{ key: 'createdAt', dir: 'desc' }}
-      emptyText={$t('audit.empty')}
+      emptyText={adSearchTruncated ? $t('audit.emptySearchCapped') : $t('audit.empty')}
       tableClass="table-auto audit-table"
       let:row={e}
     >

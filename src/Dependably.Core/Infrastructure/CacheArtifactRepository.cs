@@ -1,4 +1,6 @@
 using Dapper;
+using Dependably.Protocol;
+using Dependably.Protocol.Provenance;
 
 namespace Dependably.Infrastructure;
 
@@ -74,15 +76,14 @@ public sealed class CacheArtifactRepository
     /// Returns artifacts eligible for LRU eviction in oldest-access-first order. The caller
     /// decides how many to evict per pass based on size/count caps.
     ///
-    /// Excludes OCI, but no longer because OCI is un-evictable — the per-org retention arms
-    /// (keep_versions, keep_days, purge_unlisted) now evict OCI images by releasing the digest
-    /// claim, and OciBlobReclaimer's sweep reclaims what that orphans. The exclusion here is
-    /// narrower: this path is global rather than per-org, and the caller's blob delete is guarded
-    /// only against sibling cache_artifact rows, not against the oci_blobs rows that also point at
-    /// a manifest. Evicting an OCI row here would still delete manifest bytes out from under them.
-    /// Doing it correctly means releasing the claim for every org holding access before the row
-    /// goes, inside a sweep that has no org context — a change with its own failure modes, so it
-    /// is deliberately not folded in here.
+    /// OCI is included. The caller evicts an OCI row by releasing every holding org's digest claim
+    /// before the shared row goes, and leaves the physical bytes to OciBlobReclaimer's sweep —
+    /// never to the cache-plane blob delete, which is guarded only against sibling cache_artifact
+    /// rows and knows nothing about the oci_blobs rows that also point at a manifest.
+    ///
+    /// This query, <see cref="GetTotalSizeBytesAsync"/> and <see cref="GetTotalCountAsync"/> must
+    /// range over the same rows. If the totals count rows this query will not select, the cap is
+    /// unreachable and the sweep spins; so the three move as a set.
     /// </summary>
     public async Task<IReadOnlyList<CacheArtifact>> ListLruCandidatesAsync(
         DateTimeOffset olderThan, int limit, CancellationToken ct = default)
@@ -96,7 +97,6 @@ public sealed class CacheArtifactRepository
                    last_accessed_at AS LastAccessedAt
             FROM cache_artifact
             WHERE last_accessed_at < @olderThan
-              AND ecosystem != 'oci'
             ORDER BY last_accessed_at ASC
             LIMIT @limit
             """, new { olderThan, limit });
@@ -105,28 +105,109 @@ public sealed class CacheArtifactRepository
 
     /// <summary>
     /// Total bytes on the evictable cache plane, used by <c>CacheEvictionService</c>'s size cap.
-    /// Excludes OCI to stay consistent with <see cref="ListLruCandidatesAsync"/>: the cap has to be
-    /// measured against the bytes this path can actually reclaim, or counting rows it will never
-    /// select makes the cap unreachable and the sweep spins.
+    /// Ranges over the same rows as <see cref="ListLruCandidatesAsync"/> — see the note there on
+    /// why the three must agree — plus the bytes of every tenant content binding that names a blob
+    /// no shared row does.
+    ///
+    /// Those bound blobs are real files on the cache tier that no <c>cache_artifact.blob_key</c>
+    /// names: a tenant whose upstream served different content than the coordinate's shared row
+    /// stores its own bytes and records the key on <c>tenant_artifact_access</c>. Counting only
+    /// <c>cache_artifact</c> would leave them outside the size cap entirely, so the cache could
+    /// grow past it without eviction ever noticing. Deduplicated by blob key, so two tenants that
+    /// resolved the same divergent bytes are charged once; a bound key that some OTHER coordinate's
+    /// shared row also happens to name is counted twice, which over-reports rather than
+    /// under-reports and so errs toward evicting.
     /// </summary>
     public async Task<long> GetTotalSizeBytesAsync(CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+        // xtenant: the cache tier is one physical budget shared by every org, so its total is
+        // deliberately summed across all tenants; scoping to one would under-report the cap input.
         return await conn.ExecuteScalarAsync<long>(
-            "SELECT COALESCE(SUM(size_bytes), 0) FROM cache_artifact WHERE ecosystem != 'oci'");
+            """
+            SELECT (SELECT COALESCE(SUM(size_bytes), 0) FROM cache_artifact)
+                 + (SELECT COALESCE(SUM(d.size_bytes), 0)
+                    FROM (SELECT taa.blob_key AS blob_key, MAX(taa.size_bytes) AS size_bytes
+                          FROM tenant_artifact_access taa
+                          JOIN cache_artifact ca ON ca.id = taa.cache_artifact_id
+                          WHERE taa.blob_key IS NOT NULL AND taa.blob_key <> ca.blob_key
+                          GROUP BY taa.blob_key) d)
+            """);
     }
 
     /// <summary>
     /// Total row count on the evictable cache plane, used by <c>CacheEvictionService</c>'s
-    /// artifact-count cap. Excludes OCI for the same reason as
-    /// <see cref="GetTotalSizeBytesAsync"/> — the cap must range over the rows this path can
-    /// actually select.
+    /// artifact-count cap. Ranges over the same rows as <see cref="ListLruCandidatesAsync"/>.
     /// </summary>
     public async Task<long> GetTotalCountAsync(CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
         return await conn.ExecuteScalarAsync<long>(
-            "SELECT COUNT(*) FROM cache_artifact WHERE ecosystem != 'oci'");
+            "SELECT COUNT(*) FROM cache_artifact");
+    }
+
+    /// <summary>
+    /// The OCI share of the totals above. Reported by <c>CacheEvictionService</c> when a cap is
+    /// breached so an operator can see how much of the overage is OCI — these rows did not count
+    /// toward the caps before, so an upgraded deployment can find itself retroactively over budget.
+    /// Observability only; no eviction decision reads it.
+    /// </summary>
+    public async Task<(long SizeBytes, long Count)> GetOciTotalsAsync(CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        return await conn.QuerySingleAsync<(long, long)>(
+            """
+            SELECT COALESCE(SUM(size_bytes), 0) AS SizeBytes, COUNT(*) AS Count
+            FROM cache_artifact
+            WHERE ecosystem = 'oci'
+            """);
+    }
+
+    /// <summary>
+    /// The shared <c>cache_artifact.blob_key</c> for <paramref name="id"/>, or null when the row is
+    /// gone. Distinct from the value the serve projections return, which resolve the calling
+    /// tenant's own content binding first — a delete path that has to reclaim BOTH the tenant's
+    /// bytes and the coordinate's needs to see them separately.
+    /// </summary>
+    // xtenant: cache_artifact is global and carries no org_id; the row is addressed by its own id,
+    // which the caller resolved through an org-scoped tenant_artifact_access join.
+    public async Task<string?> GetSharedBlobKeyAsync(string id, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        return await conn.ExecuteScalarAsync<string?>(new CommandDefinition(
+            "SELECT blob_key FROM cache_artifact WHERE id = @id", new { id }, cancellationToken: ct));
+    }
+
+    /// <summary>
+    /// Distinct tenant content bindings on <paramref name="cacheArtifactId"/> that name a blob the
+    /// shared <c>cache_artifact</c> row does not. These are bytes a tenant fetched from its own
+    /// upstream that hashed to something other than the coordinate's shared content, so no
+    /// <c>cache_artifact.blob_key</c> anywhere names them.
+    ///
+    /// Every path that reclaims a coordinate must reclaim these too. The bindings cascade away with
+    /// the row, so once the row is deleted nothing records that the blobs exist and they are
+    /// unreachable orphans — one per divergent tenant per re-fetched coordinate, which accumulates
+    /// rather than costing the single extra copy a one-off divergence suggests. Callers pass each
+    /// key through <see cref="CacheOrphanBlobDeleter"/> rather than deleting it outright, because
+    /// two tenants can resolve the same divergent bytes and share one physical blob.
+    /// </summary>
+    public async Task<IReadOnlyList<string>> ListDivergentTenantBlobKeysAsync(
+        string cacheArtifactId, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: the physical blobs behind one coordinate are asked for across every tenant,
+        // because reclaiming the coordinate has to reclaim all of them, not just the calling org's.
+        var rows = await conn.QueryAsync<string>(new CommandDefinition(
+            """
+            SELECT DISTINCT taa.blob_key
+            FROM tenant_artifact_access taa
+            JOIN cache_artifact ca ON ca.id = taa.cache_artifact_id
+            WHERE taa.cache_artifact_id = @cacheArtifactId
+              AND taa.blob_key IS NOT NULL
+              AND taa.blob_key <> ca.blob_key
+            """,
+            new { cacheArtifactId }, cancellationToken: ct));
+        return rows.AsList();
     }
 
     public async Task DeleteAsync(string id, CancellationToken ct = default)
@@ -136,13 +217,20 @@ public sealed class CacheArtifactRepository
     }
 
     /// <summary>
-    /// True when at least one <c>cache_artifact</c> row other than <paramref name="excludingId"/>
-    /// still references <paramref name="blobKey"/>. Content-addressed proxy blobs
-    /// (<see cref="Storage.BlobKeys.Proxy"/>) are shared across every coordinate — any org, any
-    /// ecosystem/name/version/filename — that happens to hash to the same upstream bytes, so
-    /// evicting one coordinate must never physically delete a blob a sibling coordinate still
-    /// needs. Used by <see cref="CacheOrphanBlobDeleter"/> as the shared-key refcount guard ahead
-    /// of the physical delete on both cache-tier eviction paths.
+    /// True when at least one <c>cache_artifact</c> row, or one tenant content binding, other than
+    /// <paramref name="excludingId"/>'s still references <paramref name="blobKey"/>.
+    /// Content-addressed proxy blobs (<see cref="Storage.BlobKeys.Proxy"/>) are shared across every
+    /// coordinate — any org, any ecosystem/name/version/filename — that happens to hash to the same
+    /// upstream bytes, so evicting one coordinate must never physically delete a blob a sibling
+    /// coordinate still needs. Used by <see cref="CacheOrphanBlobDeleter"/> as the shared-key
+    /// refcount guard ahead of the physical delete on both cache-tier eviction paths.
+    ///
+    /// The <c>tenant_artifact_access</c> half is what keeps a tenant's own bytes alive when they
+    /// are not the coordinate row's: a tenant whose upstream served different content than the
+    /// shared row records its own blob key there, and no <c>cache_artifact</c> row names that key,
+    /// so counting rows alone would let an unrelated coordinate's eviction delete bytes a tenant is
+    /// still bound to and being served. Bindings on the excluded row are not counted — they go with
+    /// it on the cascade the caller is about to perform.
     /// </summary>
     // xtenant: cache_artifact is a global, content-addressed table; whether a blob is still needed
     // anywhere is deliberately checked across every org's rows, not scoped to one tenant.
@@ -150,8 +238,17 @@ public sealed class CacheArtifactRepository
         string blobKey, string excludingId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+        // xtenant: a physical blob is shared across tenants, so whether it is still referenced is
+        // deliberately asked of every org's rows and bindings — scoping to one tenant would let a
+        // delete strand another tenant's bytes.
         long count = await conn.ExecuteScalarAsync<long>(
-            "SELECT COUNT(*) FROM cache_artifact WHERE blob_key = @blobKey AND id <> @excludingId",
+            """
+            SELECT
+                (SELECT COUNT(*) FROM cache_artifact
+                 WHERE blob_key = @blobKey AND id <> @excludingId)
+              + (SELECT COUNT(*) FROM tenant_artifact_access
+                 WHERE blob_key = @blobKey AND cache_artifact_id <> @excludingId)
+            """,
             new { blobKey, excludingId });
         return count > 0;
     }
@@ -160,7 +257,9 @@ public sealed class CacheArtifactRepository
     /// Evicts <paramref name="orgId"/>'s access to every cached proxy version of
     /// <c>(ecosystem, name)</c> and returns how many versions were evicted plus the blob keys that
     /// were dereferenced (whose <c>cache_artifact</c> row had no other tenant retaining access and
-    /// was deleted, so the caller can delete the blob).
+    /// was deleted, so the caller can delete the blob), together with this org's own content
+    /// bindings that name a blob the shared row does not — those are reclaimed as soon as this
+    /// org's access row goes, because no <c>cache_artifact</c> row anywhere names them.
     ///
     /// Removing the <c>tenant_artifact_access</c> row is what stops this org serving the cached
     /// copy — every proxy serve path joins on it — so this alone closes a stale-serve on the cache
@@ -178,10 +277,15 @@ public sealed class CacheArtifactRepository
     {
         await using var conn = await _db.OpenAsync(ct);
 
-        var accessed = (await conn.QueryAsync<(string Id, string BlobKey, string Ecosystem)>(
+        // taa.blob_key comes back alongside ca.blob_key rather than coalesced into it: the two are
+        // reclaimed on different conditions. The shared key goes only when no tenant retains
+        // access; this org's own bound key goes as soon as its access row does, because nothing
+        // else in the org names those bytes.
+        var accessed = (await conn.QueryAsync<(string Id, string BlobKey, string? TenantBlobKey, string Ecosystem)>(
             new CommandDefinition(
                 """
-                SELECT ca.id AS Id, ca.blob_key AS BlobKey, ca.ecosystem AS Ecosystem
+                SELECT ca.id AS Id, ca.blob_key AS BlobKey, taa.blob_key AS TenantBlobKey,
+                       ca.ecosystem AS Ecosystem
                 FROM cache_artifact ca
                 JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id
                 WHERE taa.org_id = @orgId AND ca.ecosystem = @ecosystem AND ca.name = @name
@@ -189,7 +293,7 @@ public sealed class CacheArtifactRepository
                 new { orgId, ecosystem, name }, cancellationToken: ct))).ToList();
 
         var dereferenced = new List<string>();
-        foreach (var (id, blobKey, eco) in accessed)
+        foreach (var (id, blobKey, tenantBlobKey, eco) in accessed)
         {
             if (ct.IsCancellationRequested) { break; }
 
@@ -203,6 +307,16 @@ public sealed class CacheArtifactRepository
             {
                 // Never delete an OCI cache_artifact / manifest blob here — see the summary.
                 continue;
+            }
+
+            // This org's own bound bytes, when its upstream served something other than the shared
+            // row's content. No cache_artifact row anywhere names that key, so the access row just
+            // deleted was its last reference from this org and nothing else would ever reclaim it.
+            // The caller settles the cross-tenant question through CacheOrphanBlobDeleter, so a
+            // second tenant that resolved the same divergent bytes keeps its blob.
+            if (tenantBlobKey is not null && !string.Equals(tenantBlobKey, blobKey, StringComparison.Ordinal))
+            {
+                dereferenced.Add(tenantBlobKey);
             }
 
             // Reclaim the shared row only when no tenant retains access. The NOT EXISTS guard runs
@@ -445,6 +559,14 @@ public sealed class CacheArtifactRepository
     /// <c>cache_artifact</c> (global) and <c>tenant_artifact_access</c> (org-scoped). Used by
     /// ecosystem download handlers as the cache-hit lookup on the proxy serve path. Returns null
     /// when no artifact is registered for the coordinate or when this tenant has never accessed it.
+    ///
+    /// The bytes fields resolve to this tenant's own content binding
+    /// (<c>tenant_artifact_access.content_hash</c> / <c>blob_key</c> / <c>size_bytes</c>) and fall
+    /// back to the shared <c>cache_artifact</c> values only when the tenant has no binding — a row
+    /// written before the binding columns existed, or by a preceding release mid-cutover. That
+    /// order is the whole point: <c>cache_artifact</c> is keyed by coordinate alone while upstream
+    /// registries are per-org, so the shared row holds whichever upstream's bytes arrived first,
+    /// and reading it directly is what let one tenant's upstream decide what another is served.
     /// </summary>
     // xtenant: cache_artifact is global (no org_id); org_id filter is on tenant_artifact_access.
     public async Task<CacheArtifactServeFacts?> GetServeFactsByCoordinateAsync(
@@ -455,9 +577,12 @@ public sealed class CacheArtifactRepository
         return await conn.QuerySingleOrDefaultAsync<CacheArtifactServeFacts>("""
             SELECT
                 ca.id               AS Id,
-                ca.blob_key         AS BlobKey,
-                ca.size_bytes       AS SizeBytes,
-                ca.content_hash     AS ContentHash,
+                COALESCE(taa.blob_key, ca.blob_key)         AS BlobKey,
+                COALESCE(taa.size_bytes, ca.size_bytes)     AS SizeBytes,
+                COALESCE(taa.content_hash, ca.content_hash) AS ContentHash,
+                ca.content_hash     AS SharedContentHash,
+                taa.blob_key        AS TenantBlobKey,
+                taa.content_hash    AS TenantContentHash,
                 ca.purl             AS Purl,
                 ca.published_at     AS PublishedAt,
                 ca.deprecated       AS Deprecated,
@@ -486,6 +611,14 @@ public sealed class CacheArtifactRepository
     /// the row it just recorded, rather than re-deriving the coordinate — the recorded name comes
     /// from upstream repository metadata and need not match the name parsed out of the requested
     /// filename, so a coordinate round-trip could miss the row that is about to be served.
+    ///
+    /// The bytes fields resolve to this tenant's own content binding
+    /// (<c>tenant_artifact_access.content_hash</c> / <c>blob_key</c> / <c>size_bytes</c>) and fall
+    /// back to the shared <c>cache_artifact</c> values only when the tenant has no binding — a row
+    /// written before the binding columns existed, or by a preceding release mid-cutover. That
+    /// order is the whole point: <c>cache_artifact</c> is keyed by coordinate alone while upstream
+    /// registries are per-org, so the shared row holds whichever upstream's bytes arrived first,
+    /// and reading it directly is what let one tenant's upstream decide what another is served.
     /// </summary>
     // xtenant: cache_artifact is global (no org_id); org_id filter is on tenant_artifact_access.
     public async Task<CacheArtifactServeFacts?> GetServeFactsByIdAsync(
@@ -495,9 +628,12 @@ public sealed class CacheArtifactRepository
         return await conn.QuerySingleOrDefaultAsync<CacheArtifactServeFacts>("""
             SELECT
                 ca.id               AS Id,
-                ca.blob_key         AS BlobKey,
-                ca.size_bytes       AS SizeBytes,
-                ca.content_hash     AS ContentHash,
+                COALESCE(taa.blob_key, ca.blob_key)         AS BlobKey,
+                COALESCE(taa.size_bytes, ca.size_bytes)     AS SizeBytes,
+                COALESCE(taa.content_hash, ca.content_hash) AS ContentHash,
+                ca.content_hash     AS SharedContentHash,
+                taa.blob_key        AS TenantBlobKey,
+                taa.content_hash    AS TenantContentHash,
                 ca.purl             AS Purl,
                 ca.published_at     AS PublishedAt,
                 ca.deprecated       AS Deprecated,
@@ -525,6 +661,16 @@ public sealed class CacheArtifactRepository
     /// accessed are returned. Used by the list/index/metadata renderer path as the source of
     /// proxy entries after the proxy first-fetch write path stopped inserting rows into
     /// <c>package_versions</c>.
+    ///
+    /// The bytes fields resolve to this tenant's own content binding
+    /// (<c>tenant_artifact_access.content_hash</c> / <c>blob_key</c> / <c>size_bytes</c>) and fall
+    /// back to the shared <c>cache_artifact</c> values only when the tenant has no binding — a row
+    /// written before the binding columns existed, or by a preceding release mid-cutover. That
+    /// order is the whole point: <c>cache_artifact</c> is keyed by coordinate alone while upstream
+    /// registries are per-org, so the shared row holds whichever upstream's bytes arrived first,
+    /// and reading it directly is what let one tenant's upstream decide what another is served. The renderers publish these
+    /// values as the integrity/shasum a client verifies against, so a tenant whose bytes differ
+    /// from the shared row's must be advertised its own or its own download fails that check.
     /// </summary>
     // xtenant: cache_artifact is global; org_id filter is on tenant_artifact_access.
     public async Task<IReadOnlyList<CacheArtifactIndexFacts>> ListServeFactsForNameAsync(
@@ -536,9 +682,12 @@ public sealed class CacheArtifactRepository
                 ca.id                   AS Id,
                 ca.version              AS Version,
                 ca.filename             AS Filename,
-                ca.blob_key             AS BlobKey,
-                ca.content_hash         AS ContentHash,
-                ca.size_bytes           AS SizeBytes,
+                COALESCE(taa.blob_key, ca.blob_key)         AS BlobKey,
+                COALESCE(taa.content_hash, ca.content_hash) AS ContentHash,
+                ca.content_hash         AS SharedContentHash,
+                taa.blob_key            AS TenantBlobKey,
+                taa.content_hash        AS TenantContentHash,
+                COALESCE(taa.size_bytes, ca.size_bytes)     AS SizeBytes,
                 ca.purl                 AS Purl,
                 ca.published_at         AS PublishedAt,
                 ca.first_cached_at      AS CreatedAt,
@@ -691,9 +840,56 @@ public sealed class CacheArtifact
 public sealed class CacheArtifactServeFacts
 {
     public string Id { get; init; } = "";
+    /// <summary>
+    /// Where this tenant's bytes for the coordinate live: its own
+    /// <c>tenant_artifact_access.blob_key</c> binding, falling back to the shared
+    /// <c>cache_artifact.blob_key</c> when the tenant has none.
+    /// </summary>
     public string BlobKey { get; init; } = "";
+    /// <summary>
+    /// Length of the bytes <see cref="BlobKey"/> names, from the same binding, falling back to the
+    /// shared row when the tenant bound no size — which is what a fetch that could not measure the
+    /// stream leaves behind, rather than binding a zero over a good value.
+    /// </summary>
     public long SizeBytes { get; init; }
+    /// <summary>
+    /// SHA-256 over the bytes <see cref="BlobKey"/> names. This is what the serve paths publish as
+    /// the ETag, so it must never describe bytes other than the ones <see cref="BlobKey"/> names.
+    ///
+    /// It comes from the tenant's own binding when the fetch that established that binding hashed
+    /// the bytes it staged, and from the shared <c>cache_artifact</c> row otherwise. Those are the
+    /// same bytes in every case that reaches the fallback: a tenant with no binding at all is being
+    /// served the shared blob, and the one origin that binds a key without a hash
+    /// (<c>FirstFetchUnidentified</c>) binds no hash precisely so that this field cannot end up
+    /// describing a different tenant's content — see <c>CacheAccessRecorder.BindingFor</c>.
+    /// </summary>
     public string ContentHash { get; init; } = "";
+    /// <summary>
+    /// The shared <c>cache_artifact.content_hash</c>, unresolved by any per-tenant binding. Equal
+    /// to <see cref="ContentHash"/> in the ordinary case; different when this tenant's own
+    /// upstream served other bytes for the coordinate — the signal that every OTHER byte-derived
+    /// fact on the shared row (<see cref="VulnCheckedAt"/>, <see cref="HasInstallScript"/>,
+    /// <see cref="ProvenanceStatus"/>) was computed against content this tenant does not hold, and
+    /// so must not be read as evidence about this tenant's own bytes. See
+    /// <see cref="ContentDivergesFromSharedFacts"/> and the <c>Effective*</c> members below.
+    /// </summary>
+    public string SharedContentHash { get; init; } = "";
+    /// <summary>
+    /// This tenant's own <c>tenant_artifact_access.blob_key</c> binding, unresolved — NULL when
+    /// the tenant has never bound one (reads the shared row's blob throughout). Distinct from
+    /// <see cref="BlobKey"/> (already resolved) because a bound-but-unhashed tenant
+    /// (<c>CacheAccessOrigin.FirstFetchUnidentified</c> — Go modules, whose <c>.zip</c> is never
+    /// hashed on the fetch path) has a real key here but no entry in
+    /// <see cref="TenantContentHash"/>, which <see cref="ContentDivergesFromSharedFacts"/> needs to
+    /// tell apart from "no binding at all".
+    /// </summary>
+    public string? TenantBlobKey { get; init; }
+    /// <summary>
+    /// This tenant's own <c>tenant_artifact_access.content_hash</c> binding, unresolved — NULL both
+    /// when the tenant has no binding and when it bound a key without a hash. See
+    /// <see cref="TenantBlobKey"/> and <see cref="ContentDivergesFromSharedFacts"/>.
+    /// </summary>
+    public string? TenantContentHash { get; init; }
     public string? Purl { get; init; }
     public DateTimeOffset? PublishedAt { get; init; }
     public string? Deprecated { get; init; }
@@ -708,6 +904,83 @@ public sealed class CacheArtifactServeFacts
     public string? ManualBlockState { get; init; }
     /// <summary>Per-tenant yank flag from <c>tenant_artifact_access.yanked</c>.</summary>
     public bool Yanked { get; init; }
+
+    /// <summary>
+    /// True when this tenant's proxy content binding means it is being served bytes the shared
+    /// row's byte-derived facts (<see cref="HasInstallScript"/>, <see cref="ProvenanceStatus"/>,
+    /// SPDX license entries) were not computed from. Two shapes both count:
+    ///
+    /// <list type="bullet">
+    /// <item>A genuine hash mismatch: <see cref="TenantContentHash"/> and
+    /// <see cref="SharedContentHash"/> are both known and differ.</item>
+    /// <item>A binding this tenant established without a hash at all
+    /// (<see cref="TenantBlobKey"/> set, <see cref="TenantContentHash"/> NULL) —
+    /// <c>CacheAccessOrigin.FirstFetchUnidentified</c>, used only where the blob key is
+    /// tenant-scoped (Go modules) because the fetch path never hashes the bytes it stages. This is
+    /// NOT the same as no binding at all: the tenant is served its own, unhashed bytes, which may
+    /// or may not match the shared row, and there is no evidence either way — "unknown" must not
+    /// read as "same as the shared row" here any more than an outright hash mismatch would.</item>
+    /// </list>
+    ///
+    /// A tenant with no binding at all (<see cref="TenantBlobKey"/> NULL) is reading the shared
+    /// blob outright, so there is genuinely nothing to diverge from.
+    /// </summary>
+    public bool ContentDivergesFromSharedFacts =>
+        (!string.IsNullOrEmpty(TenantContentHash)
+         && !string.IsNullOrEmpty(SharedContentHash)
+         && !string.Equals(TenantContentHash, SharedContentHash, StringComparison.OrdinalIgnoreCase))
+        || (!string.IsNullOrEmpty(TenantBlobKey) && string.IsNullOrEmpty(TenantContentHash));
+
+    /// <summary>
+    /// True when <see cref="Purl"/>'s ecosystem is one <see cref="ScriptDetectionService"/>
+    /// actually computes an install-script verdict for. Forcing
+    /// <see cref="EffectiveHasInstallScript"/> unknown-on-divergence is only meaningful inside that
+    /// set — every other ecosystem's <see cref="HasInstallScript"/> is <see langword="false"/> by
+    /// construction (the detector never runs for it), not by absent evidence, so treating
+    /// divergence there as "might have a script" would fabricate a signal that ecosystem can never
+    /// actually carry (a Go module has no install-script equivalent at all).
+    /// </summary>
+    private bool InstallScriptDetectionAppliesHere =>
+        Purl is { } purl && ScriptDetectionService.SupportedEcosystems.Contains(PurlParser.TryGetEcosystem(purl) ?? "");
+
+    /// <summary>
+    /// <see cref="HasInstallScript"/> as the block gate must read it: forced to
+    /// <see langword="true"/> when <see cref="ContentDivergesFromSharedFacts"/> AND
+    /// <see cref="InstallScriptDetectionAppliesHere"/>, so a tenant with no evidence about its own
+    /// bytes' install-script state is denied rather than passed under a 'block' policy — this fact
+    /// carries no existing "not yet determined" bucket to reuse honestly (unlike vuln data — see
+    /// <c>ADR-proxy-artifacts-global-plane</c>). Scoped to the ecosystems that actually compute
+    /// this fact so a Go/Cargo/Terraform/apk/OCI coordinate is never force-blocked over a concept
+    /// that ecosystem structurally does not have.
+    /// </summary>
+    public bool EffectiveHasInstallScript =>
+        (ContentDivergesFromSharedFacts && InstallScriptDetectionAppliesHere) || HasInstallScript;
+
+    /// <summary>
+    /// <see cref="InstallScriptKind"/> as the block gate must read it: NULL whenever
+    /// <see cref="EffectiveHasInstallScript"/> forced <see langword="true"/> on divergence, since
+    /// the shared row's kind describes bytes this tenant did not fetch.
+    /// </summary>
+    public string? EffectiveInstallScriptKind =>
+        ContentDivergesFromSharedFacts && InstallScriptDetectionAppliesHere ? null : InstallScriptKind;
+
+    /// <summary>
+    /// <see cref="ProvenanceStatus"/> as the block gate must read it: forced to
+    /// <see cref="ProvenanceStatuses.Unverifiable"/> whenever
+    /// <see cref="ContentDivergesFromSharedFacts"/>, reusing the same caller-synthesized marker
+    /// <see cref="Protocol.BlockGateService.IsProvenanceEnforcementUnbackedAsync"/> writes for an
+    /// unbacked trust anchor — both describe "verification cannot vouch for this artifact", and
+    /// the provenance arm already denies on that marker under a 'block' policy. Under 'warn'/'off'
+    /// the value is inert, matching the non-divergent case. Not ecosystem-scoped the way
+    /// install-script is: <c>OrgSettings.VerifyProvenanceMode</c> already returns 'off' for every
+    /// ecosystem that does not support signature verification, so the arm this feeds never fires
+    /// for them regardless of this value.
+    /// <see cref="Protocol.BlockGateService.ForProxyFirstFetch"/> prefers the tenant's own
+    /// just-computed verdict over this masked one when it has one (see its
+    /// <c>ownProvenanceStatus</c> parameter) — this projection only ever describes the shared row.
+    /// </summary>
+    public string? EffectiveProvenanceStatus =>
+        ContentDivergesFromSharedFacts ? ProvenanceStatuses.Unverifiable : ProvenanceStatus;
 }
 
 /// <summary>
@@ -725,8 +998,67 @@ public sealed class CacheArtifactIndexFacts
     public string Filename { get; init; } = "";
     public string BlobKey { get; init; } = "";
     public string ContentHash { get; init; } = "";
+    /// <summary>
+    /// The shared <c>cache_artifact.content_hash</c>, unresolved. Equal to
+    /// <see cref="ContentHash"/> in the ordinary case; different when this tenant's own upstream
+    /// served other bytes for the coordinate, which is the signal that every OTHER byte-derived
+    /// column on the shared row describes content this tenant does not hold.
+    /// </summary>
+    public string SharedContentHash { get; init; } = "";
+    /// <summary>
+    /// This tenant's own <c>tenant_artifact_access.blob_key</c> binding, unresolved — see
+    /// <see cref="CacheArtifactServeFacts.TenantBlobKey"/> for the full rationale (identical
+    /// shape, listing-path twin of that projection).
+    /// </summary>
+    public string? TenantBlobKey { get; init; }
+    /// <summary>
+    /// This tenant's own <c>tenant_artifact_access.content_hash</c> binding, unresolved — see
+    /// <see cref="CacheArtifactServeFacts.TenantContentHash"/>.
+    /// </summary>
+    public string? TenantContentHash { get; init; }
     /// <summary>Artifact size in bytes, sourced from <c>cache_artifact.size_bytes</c>.</summary>
     public long SizeBytes { get; init; }
+
+    /// <summary>
+    /// True when this tenant's proxy content binding means it is being served bytes the shared
+    /// row's byte-derived facts were not computed from — see
+    /// <see cref="CacheArtifactServeFacts.ContentDivergesFromSharedFacts"/> for the full two-shape
+    /// rationale (a genuine hash mismatch, or a binding established without a hash at all).
+    /// </summary>
+    public bool ContentDivergesFromSharedFacts =>
+        (!string.IsNullOrEmpty(TenantContentHash)
+         && !string.IsNullOrEmpty(SharedContentHash)
+         && !string.Equals(TenantContentHash, SharedContentHash, StringComparison.OrdinalIgnoreCase))
+        || (!string.IsNullOrEmpty(TenantBlobKey) && string.IsNullOrEmpty(TenantContentHash));
+
+    /// <summary>
+    /// See <see cref="CacheArtifactServeFacts.InstallScriptDetectionAppliesHere"/> (identical
+    /// shape, listing-path twin).
+    /// </summary>
+    private bool InstallScriptDetectionAppliesHere =>
+        Purl is { } purl && ScriptDetectionService.SupportedEcosystems.Contains(PurlParser.TryGetEcosystem(purl) ?? "");
+
+    /// <summary>
+    /// <see cref="HasInstallScript"/> as the listing block-gate filter must read it — see
+    /// <see cref="CacheArtifactServeFacts.EffectiveHasInstallScript"/>.
+    /// </summary>
+    public bool EffectiveHasInstallScript =>
+        (ContentDivergesFromSharedFacts && InstallScriptDetectionAppliesHere) || HasInstallScript;
+
+    /// <summary>
+    /// <see cref="InstallScriptKind"/> as the listing block-gate filter must read it — see
+    /// <see cref="CacheArtifactServeFacts.EffectiveInstallScriptKind"/>.
+    /// </summary>
+    public string? EffectiveInstallScriptKind =>
+        ContentDivergesFromSharedFacts && InstallScriptDetectionAppliesHere ? null : InstallScriptKind;
+
+    /// <summary>
+    /// <see cref="ProvenanceStatus"/> as the listing block-gate filter must read it — see
+    /// <see cref="CacheArtifactServeFacts.EffectiveProvenanceStatus"/>.
+    /// </summary>
+    public string? EffectiveProvenanceStatus =>
+        ContentDivergesFromSharedFacts ? ProvenanceStatuses.Unverifiable : ProvenanceStatus;
+
     public string? Purl { get; init; }
     public DateTimeOffset? PublishedAt { get; init; }
     /// <summary>Timestamp of the global-plane first fetch, sourced from <c>cache_artifact.first_cached_at</c>.</summary>
@@ -786,6 +1118,29 @@ public sealed class CacheArtifactIndexFacts
     public PackageVersion ToPackageVersionSynthetic(IReadOnlyDictionary<string, VulnGateSignals> cacheSignals)
     {
         var sig = cacheSignals.GetValueOrDefault(Id);
+
+        // dist.shasum, dist.integrity and the install manifest are claims about specific bytes, and
+        // they live only on the shared row — so for a tenant whose own upstream served other bytes
+        // they describe somebody else's artefact. Publishing them beside this tenant's own SHA-256
+        // is worse than publishing nothing: NpmPackumentHandler replaces the upstream version
+        // object with this one precisely so the advertised integrity matches the bytes the tarball
+        // route hands out, so a foreign SRI turns every install of the coordinate into EINTEGRITY —
+        // a failure the tenant cannot clear, caused by another tenant's upstream. Omitting them is
+        // the shape the renderers already handle (both dist fields are emitted only when present,
+        // and a null manifest renders the historical minimal object), so the fallback is "no claim"
+        // rather than a false one. ChecksumSha256 needs no such treatment: it is the tenant's own.
+        bool factsDescribeTheseBytes = !ContentDivergesFromSharedFacts;
+
+        // OSV findings (vuln_checked_at, IsMalicious, HasAdvisory, and the KEV/EPSS/CVSS signals
+        // cacheSignals carries) are facts about the package COORDINATE — ecosystem/name/version —
+        // not about any particular byte sequence: OsvClient/LocalOsvSource query by PURL, never by
+        // hash, so they describe "lodash 4.17.21" identically for every tenant regardless of which
+        // upstream's bytes a diverging one actually holds. They are read straight through here,
+        // unmasked by divergence. Install-script detection and the provenance verdict ARE computed
+        // by inspecting this row's specific bytes, so EffectiveHasInstallScript/
+        // EffectiveProvenanceStatus (ecosystem-scoped for install-script — see
+        // InstallScriptDetectionAppliesHere) still mask them on divergence, matching
+        // UpstreamIntegrityValue/ManifestJson above.
         return new PackageVersion
         {
             Id = Id,
@@ -795,7 +1150,7 @@ public sealed class CacheArtifactIndexFacts
             Purl = Purl ?? string.Empty,
             SizeBytes = SizeBytes,
             ChecksumSha256 = ContentHash,
-            ChecksumSha1 = ChecksumSha1,
+            ChecksumSha1 = factsDescribeTheseBytes ? ChecksumSha1 : null,
             Yanked = Yanked,
             YankReason = YankReason,
             ManualBlockState = ManualBlockState,
@@ -805,14 +1160,14 @@ public sealed class CacheArtifactIndexFacts
             PublishedAt = PublishedAt,
             CreatedAt = CreatedAt,
             VulnCheckedAt = VulnCheckedAt,
-            HasInstallScript = HasInstallScript,
-            InstallScriptKind = InstallScriptKind,
-            ProvenanceStatus = ProvenanceStatus,
-            ProvenanceSigner = ProvenanceSigner,
-            UpstreamIntegrityValue = UpstreamIntegrityValue,
-            UpstreamIntegrityAlgorithm = UpstreamIntegrityAlgorithm,
+            HasInstallScript = EffectiveHasInstallScript,
+            InstallScriptKind = EffectiveInstallScriptKind,
+            ProvenanceStatus = EffectiveProvenanceStatus,
+            ProvenanceSigner = factsDescribeTheseBytes ? ProvenanceSigner : null,
+            UpstreamIntegrityValue = factsDescribeTheseBytes ? UpstreamIntegrityValue : null,
+            UpstreamIntegrityAlgorithm = factsDescribeTheseBytes ? UpstreamIntegrityAlgorithm : null,
             UpstreamUrl = UpstreamUrl,
-            ManifestJson = ManifestJson,
+            ManifestJson = factsDescribeTheseBytes ? ManifestJson : null,
             DownloadCount = DownloadCount,
             Origin = "proxy",
             IsMalicious = sig?.HasMalicious ?? false,

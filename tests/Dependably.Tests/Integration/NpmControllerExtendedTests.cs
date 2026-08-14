@@ -457,6 +457,41 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
         Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
     }
 
+    // ── Publish — versions object present but empty → 422 ────────────────────
+
+    [Fact]
+    public async Task Publish_VersionsObjectEmpty_Returns422()
+    {
+        string token = await _factory.CreateToken("push");
+        var (tarball, _, _) = NpmFixtures.BuildTarball("empty-versions", "1.0.0");
+        string base64 = Convert.ToBase64String(tarball);
+
+        // "versions" is present but an EMPTY object (distinct from the key being absent above) —
+        // the `versions?.` null-guard does not protect `.First()` from an empty-but-non-null
+        // JsonObject, which throws InvalidOperationException instead of reaching
+        // ValidateBodyMatch's intended "versions object is empty." 422.
+        string body = JsonSerializer.Serialize(new
+        {
+            name = "empty-versions",
+            versions = new Dictionary<string, object>(),
+            _attachments = new Dictionary<string, object>
+            {
+                ["empty-versions-1.0.0.tgz"] = new
+                {
+                    content_type = "application/octet-stream",
+                    data = base64,
+                    length = tarball.Length
+                }
+            }
+        });
+
+        using var client = _factory.CreateClientWithBearer(token);
+        using var content = new StringContent(body, Encoding.UTF8, "application/json");
+
+        var resp = await client.PutAsync("/npm/empty-versions", content);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
+    }
+
     // ── Publish — package.json inner version mismatch → 422 ─────────────────
 
     [Fact]

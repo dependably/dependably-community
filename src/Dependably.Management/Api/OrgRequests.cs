@@ -13,13 +13,21 @@ namespace Dependably.Api;
 
 public sealed record CreateOrgRequest(string Slug);
 
+// AnonymousPull and AllowlistMode are nullable so a partial PUT can omit them without the
+// JSON binder coercing the absent value to false. Both are security gates whose stored value
+// may already be the enforcing one: a settings tab that no longer renders the allowlist toggle,
+// or a scripted body carrying only one field, must not silently disable allowlist enforcement
+// (or flip anonymous pull) as a side effect of writing something else. Null flows through to
+// OrgSettingsRepository, which COALESCEs it against the stored column (falling back to the
+// schema default, 0, on first insert). Same leave-unchanged-on-absent contract as
+// AirGapped / RequireMfa / VersionOverwritePolicy below and as the proxy-settings gates.
 public sealed record UpdateOrgSettingsRequest(
-    bool AnonymousPull,
-    bool AllowlistMode,
-    long? MaxUploadBytes,
-    long? MaxUploadBytesPyPi,
-    long? MaxUploadBytesNpm,
-    long? MaxUploadBytesNuGet,
+    bool? AnonymousPull = null,
+    bool? AllowlistMode = null,
+    long? MaxUploadBytes = null,
+    long? MaxUploadBytesPyPi = null,
+    long? MaxUploadBytesNpm = null,
+    long? MaxUploadBytesNuGet = null,
     long? MaxUploadBytesMaven = null,
     long? MaxUploadBytesRpm = null,
     long? MaxUploadBytesOci = null,
@@ -45,14 +53,31 @@ public sealed record UpdateRetentionRequest(
     int? ActivityRetentionDays,
     int? PurgeUnlistedAfterDays = null);
 
+// ProxyPassthroughEnabled and MaxOsvScoreTolerance are nullable so a partial PUT can omit them
+// without the JSON binder silently coercing the absent value to false / 0.0 — see
+// ProxyPolicySettings for the leave-unchanged-on-absent contract this DTO feeds.
+//
+// MinReleaseAgeHours and MaxEpssTolerance are Optional<T> rather than a plain nullable: both
+// columns' own "gate disabled" domain value IS null, so a plain nullable can only tell "absent"
+// and "explicitly cleared" apart by picking one meaning and losing the other. Optional<T> keeps
+// all three states distinguishable end to end — see Optional<T> and ProxyPolicySettings.
+//
+// Those same two fields are declared as init-only properties below the primary constructor
+// rather than as constructor parameters: the OpenAPI schema exporter reads a constructor
+// parameter's default value via reflection (ParameterInfo.DefaultValue) to embed a JSON Schema
+// "default", and a custom-struct parameter whose default is `default(Optional<T>)` reflects back
+// as a bare CLR null (a custom struct's `default` literal doesn't round-trip through parameter
+// metadata the way a primitive's does) — the exporter then tries to unbox that null into the
+// non-nullable Optional<T> struct and throws, 500ing /openapi/management.json. A property not
+// tied to a constructor parameter carries no reflected default, so the exporter never hits that
+// path. System.Text.Json still binds them correctly from JSON either way: any body property not
+// consumed by the primary constructor is set via its property setter after construction.
 public sealed record UpdateProxySettingsRequest(
-    bool ProxyPassthroughEnabled,
-    double MaxOsvScoreTolerance,
-    int? MinReleaseAgeHours = null,
+    bool? ProxyPassthroughEnabled = null,
+    double? MaxOsvScoreTolerance = null,
     string? BlockDeprecated = null,
     string? BlockMalicious = null,
     string? BlockKev = null,
-    double? MaxEpssTolerance = null,
     string? BlockInstallScripts = null,
     string? VerifyNpmSignatures = null,
     string? VerifyNuGetSignatures = null,
@@ -60,7 +85,11 @@ public sealed record UpdateProxySettingsRequest(
     string? VerifyRpmSignatures = null,
     string? VerifyMavenSignatures = null,
     string? BlockRevoked = null,
-    string? VerifyTerraformSignatures = null);
+    string? VerifyTerraformSignatures = null)
+{
+    public Optional<int?> MinReleaseAgeHours { get; init; }
+    public Optional<double?> MaxEpssTolerance { get; init; }
+}
 
 // Scope is retained as a nullable field purely so the controller can detect callers still
 // sending the retired field and return a clear 400. The repository never sees it.

@@ -445,7 +445,9 @@ public sealed partial class CargoController
     {
         string? cacheArtifactId = await _cacheRecorder.RecordAccessAsync(
             new CacheAccess(orgId, "cargo", name, version, $"{name}-{version}.crate",
-                sha256Hex, sizeBytes, blobKey, downloadUrl), ct);
+                sha256Hex, sizeBytes, blobKey, downloadUrl,
+                // This request's own hash over the crate it just staged and verified.
+                CacheAccessOrigin.FirstFetch), ct);
         if (cacheArtifactId is not null)
         {
             return cacheArtifactId;
@@ -728,7 +730,11 @@ public sealed partial class CargoController
         // the row already carries it from the first-fetch insert.
         string? cacheArtifactId = await _cacheRecorder.RecordAccessAsync(
             new CacheAccess(orgId, "cargo", name, version, $"{name}-{version}.crate",
-                contentHash, sizeBytes, blobKey, null), ct);
+                contentHash, sizeBytes, blobKey, null,
+                // A tick against bytes already admitted for this org: contentHash is read back off
+                // this org's own package_versions row or serve facts, so it is not evidence of a
+                // fetch and never rewrites the tenant content binding.
+                CacheAccessOrigin.CacheHit), ct);
         // On cache hits, increment the per-tenant download counter; global facts are already
         // populated from first-fetch and do not need to be re-written. Enqueued off the request
         // path — the row already exists.
@@ -786,6 +792,11 @@ public sealed partial class CargoController
                 : CrateCacheHitGateDecision.Allowed;
     }
 
+    // Integer columns bind as long, and [ExplicitConstructor] is what lets one signature serve
+    // both providers — SQLite reports INTEGER as Int64, Postgres as Int32, and Dapper's default
+    // positional-record binding demands an exact CLR match. See
+    // DapperPositionalRecordComplianceTests.
+    [method: ExplicitConstructor]
     private sealed record ProxiedVersionRow(string Origin, string? ChecksumSha256, long SizeBytes);
 
     /// <summary>Parses the <c>vers</c> field from a Cargo index JSON line.</summary>

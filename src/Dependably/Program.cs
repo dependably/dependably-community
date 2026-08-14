@@ -343,6 +343,12 @@ public partial class Program
         // problem+json with a correlation id, and writes the single structured Error log.
         app.UseDependablyTerminalExceptionHandler();
 
+        // Records the raw socket peer before the forwarded-header rewrite below can replace
+        // Connection.RemoteIpAddress with the client address a proxy forwarded. HeaderTenantResolver
+        // authenticates the tenant header against that peer, which is the only value that can tell
+        // "arrived through the trusted edge proxy" from "arrived from anyone".
+        app.UseMiddleware<Dependably.Infrastructure.OriginalPeerMiddleware>();
+
         // Forwarded headers run first. When TRUSTED_PROXIES is set, every downstream consumer
         // of Connection.RemoteIpAddress and Request.IsHttps — the /metrics IP allowlist,
         // rate-limit partition keys, audit source_ip, HSTS emission, cookie Secure decisions —
@@ -364,9 +370,9 @@ public partial class Program
         // See dependably-enterprise/docs/observability/taxonomy.md for property names.
         app.UseMiddleware<Dependably.Infrastructure.Observability.TenantEnrichmentMiddleware>();
 
-        // Transparent intercept. When ROUTING_MODE=transparent and the inbound Host
-        // matches a configured ecosystem hostname (HOST_ROUTING), prepends the ecosystem prefix
-        // so the existing prefix-routed controllers handle the request unchanged. Always-on
+        // Transparent intercept. Gated on a non-empty HOST_ROUTING map: when the inbound Host
+        // matches a configured ecosystem hostname, prepends the ecosystem prefix so the
+        // existing prefix-routed controllers handle the request unchanged. Always-on
         // middleware: when the map is empty (default deployment) it is a no-op pass-through.
         app.UseMiddleware<Dependably.Infrastructure.TransparentInterceptMiddleware>();
 
@@ -440,7 +446,11 @@ public partial class Program
         // /version is an operator/monitoring surface (the SPA never calls it), so it sits
         // behind the same IP allowlist as /metrics — anonymous internet callers can't
         // fingerprint the deployed build for CVE matching. The default allowlist permits
-        // loopback, so local `curl /version` checks keep working.
+        // loopback, so local `curl /version` checks keep working. Like /metrics and
+        // /edge/status it stays out of both OpenAPI documents: the protocol document is
+        // fully public, and advertising an IP-allowlisted operator endpoint's route and
+        // schema there contradicts the allowlist's purpose. CONTRIBUTING.md (Versioning,
+        // Security model) is its inventory record.
         app.MapGet("/version", async (HttpContext ctx, MetricsAccessConfig metricsAccess, ScrapeDiagnostics scrapeDiag) =>
         {
             var resolved = await metricsAccess.ResolveAsync(ctx.RequestAborted);
@@ -452,7 +462,7 @@ public partial class Program
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             }
             return Results.Ok(new { version });
-        }).RequireRateLimiting("anon");
+        }).RequireRateLimiting("anon").ExcludeFromDescription();
 
         // Edge-only, anonymous read-only status surface. Mapped only when DEPLOYMENT_MODE=edge;
         // in every other mode the route is never registered (404) and stays out of the OpenAPI

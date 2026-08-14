@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Dependably.Api;
 using Dependably.Tests.Infrastructure;
 
 namespace Dependably.Tests.Integration;
@@ -50,6 +51,57 @@ public sealed class WebhookControllerTests : IClassFixture<DependablyFactory>, I
         Assert.Contains(doc.RootElement.EnumerateArray(), e =>
             e.GetProperty("url").GetString() == "https://hooks.example.com/endpoint"
             && !e.GetProperty("hasSecret").GetBoolean());
+    }
+
+    /// <summary>
+    /// Subscriptions are capped per org. One event fans out to every matching subscription, and
+    /// the dispatch queue gives each org's envelope a bounded time budget, so an uncapped list
+    /// lets one org queue more delivery work per event than any envelope can attempt — and makes
+    /// the size of that fan-out a tenant-chosen number. The cap is refused as a validation error,
+    /// not silently accepted, and the existing subscriptions are untouched.
+    /// </summary>
+    [Fact]
+    public async Task Create_PastThePerOrgCap_ReturnsValidationError()
+    {
+        using var c = await AdminClient();
+        var existing = await c.GetFromJsonAsync<JsonElement>("/api/v1/webhooks");
+        int already = existing.GetArrayLength();
+
+        var created = new List<string>();
+        try
+        {
+            for (int i = already; i < WebhookController.MaxSubscriptionsPerOrg; i++)
+            {
+                var fill = await c.PostAsJsonAsync("/api/v1/webhooks", new
+                {
+                    url = $"https://hooks.example.com/cap-{i}",
+                    eventTypes = new[] { "package.publish" }
+                });
+                Assert.Equal(HttpStatusCode.Created, fill.StatusCode);
+                using var doc = JsonDocument.Parse(await fill.Content.ReadAsStringAsync());
+                created.Add(doc.RootElement.GetProperty("id").GetString()!);
+            }
+
+            var overCap = await c.PostAsJsonAsync("/api/v1/webhooks", new
+            {
+                url = "https://hooks.example.com/over-the-cap",
+                eventTypes = new[] { "package.publish" }
+            });
+            Assert.Equal(HttpStatusCode.UnprocessableEntity, overCap.StatusCode);
+
+            var list = await c.GetFromJsonAsync<JsonElement>("/api/v1/webhooks");
+            Assert.Equal(WebhookController.MaxSubscriptionsPerOrg, list.GetArrayLength());
+            Assert.DoesNotContain(list.EnumerateArray(), e =>
+                e.GetProperty("url").GetString() == "https://hooks.example.com/over-the-cap");
+        }
+        finally
+        {
+            // The factory's org is shared across this class's tests; leave the list as found.
+            foreach (string id in created)
+            {
+                await c.DeleteAsync($"/api/v1/webhooks/{id}");
+            }
+        }
     }
 
     [Fact]

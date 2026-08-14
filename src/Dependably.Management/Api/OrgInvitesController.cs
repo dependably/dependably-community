@@ -142,13 +142,15 @@ public sealed class OrgInvitesController : OrgScopedControllerBase
         var (raw, record) = created;
 
         await _audit.LogAsync("invite_created", orgId, userId,
+            actorKind: ActorKinds.User,
             detail: System.Text.Json.JsonSerializer.Serialize(new
             {
                 invite_id = record.Id,
                 email = record.Email,
                 role = record.Role,
                 expires_at = record.ExpiresAt,
-            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         // Join is served by the tenant SPA at the request host: single-mode → the bare host IS the
         // tenant; multi-mode → the admin issuing the invite is already on the tenant subdomain
@@ -247,7 +249,9 @@ public sealed class OrgInvitesController : OrgScopedControllerBase
         if (await _invites.DeleteAsync(orgId, id, ct) > 0)
         {
             await _audit.LogAsync("invite_deleted", orgId, GetUserId(),
-                detail: System.Text.Json.JsonSerializer.Serialize(new { invite_id = id }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+                actorKind: ActorKinds.User,
+                detail: System.Text.Json.JsonSerializer.Serialize(new { invite_id = id }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+                sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         }
 
         return NoContent();

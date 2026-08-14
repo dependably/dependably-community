@@ -4,6 +4,7 @@
   import { api } from '../lib/api.js'
   import { submitForm, extractErrorMessage } from '../lib/form.js'
   import { user, bootstrapInfo } from '../lib/store.js'
+  import { applyUserContext } from '../lib/userContext.js'
   import { reportPageLoad } from '../lib/pageLoad.js'
   import ErrorBanner from '../lib/ErrorBanner.svelte'
   import Skeleton from '../lib/Skeleton.svelte'
@@ -23,6 +24,7 @@
   import SettingsInstance from '../lib/settings/SettingsInstance.svelte'
   import SettingsMetrics from '../lib/settings/SettingsMetrics.svelte'
   import SettingsInstanceEmail from '../lib/settings/SettingsInstanceEmail.svelte'
+  import SettingsRelayHealth from '../lib/settings/SettingsRelayHealth.svelte'
   import Toggle from '../lib/Toggle.svelte'
 
   /** The route transition this page was mounted for, supplied by RouteView. @type {number | null} */
@@ -219,11 +221,18 @@
 
   async function saveSettings() {
     success = ''
-    await submitForm(() => api.updateOrgSettings(settings), {
+    const saved = await submitForm(() => api.updateOrgSettings(settings), {
       setSaving: v => saving = v,
       setError:  v => error  = v,
       onSuccess: () => { success = $t('settings.saved') },
     })
+    // The tenant defaults for timezone and language are resolved server-side into the /me
+    // payload, so saving them changes nothing the SPA can see. Re-read it, or an admin whose
+    // own preference inherits the default has to sign out and back in to see their change.
+    // The save already succeeded, so a failure here costs a stale render, not the write.
+    if (saved) {
+      try { await applyUserContext(await api.me()) } catch { /* stale render until next load */ }
+    }
   }
 
   // Build the full proxy settings payload from current proxySettings state.
@@ -401,12 +410,13 @@
   // is cosmetic; the backend is the authority.
   $: viewerRole = $user?.role ?? ''
   $: viewerIsAdmin = viewerRole === 'admin' || viewerRole === 'owner'
-  // Instance + /metrics tabs surface only for a single-mode owner. The backend gates
-  // /api/v1/instance/* on tenant:admin (owner-only) and 404s those routes in multi-tenant
-  // deployments, where instance config is a control-plane concern handled by the system_admin
-  // SPA. Bootstrap reports mode as 'single' or 'multi' (header collapses to multi, bound to
-  // single), so gating on 'single' keeps the tenant from seeing tabs whose forms would error.
-  $: showInstanceTabs = viewerRole === 'owner' && ($bootstrapInfo?.mode ?? 'single') === 'single'
+  // Instance + /metrics tabs surface only in single mode, to admin and owner alike. The backend
+  // gates /api/v1/instance/* on tenant:configure — which both roles hold — and 404s those routes
+  // in multi-tenant deployments, where instance config is a control-plane concern handled by the
+  // system_admin SPA. Bootstrap reports mode as 'single' or 'multi' (header collapses to multi,
+  // bound to single), so gating on 'single' keeps the tenant from seeing tabs whose forms would
+  // error.
+  $: showInstanceTabs = viewerIsAdmin && ($bootstrapInfo?.mode ?? 'single') === 'single'
 
   $: tabKeys = [
     { key: 'general',        label: 'settings.tabs.general' },
@@ -833,6 +843,7 @@
         updateConfig={api.updateInstanceEmailConfig}
         testSend={api.testInstanceEmail}
       />
+      <SettingsRelayHealth getHealth={api.getInstanceEmailHealth} />
 
     {:else if tab === 'metrics' && showInstanceTabs}
       <p class="tab-intro">{$t('settings.metrics.intro')}</p>

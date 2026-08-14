@@ -35,6 +35,11 @@ An edge node does **not**:
   configured entirely from the environment.
 - **Own policy or scanning.** Vulnerability scanning, license/policy enforcement, and the durable
   registry tier all stay central on the master. The edge is a dumb cache.
+- **Serve API documentation.** No `/docs/` Swagger UI and no `/openapi/*.json` on an edge — the
+  OpenAPI stack lives in the management closure the edge image excludes, so its protocol routes
+  are deliberately undocumented on the node itself. The route shapes are identical to the
+  master's, so the master's `/docs/` (spec: `/openapi/protocol.json`) is the reference for what
+  an edge serves.
 
 ## Enrollment (three steps)
 
@@ -154,7 +159,7 @@ set to clear it:
   (inline base64-encoded 32-byte key or a path to a file containing one, fail-closed if encrypted
   secrets exist without the key) are documented in
   [CONTRIBUTING.md → Environment variables](../CONTRIBUTING.md#environment-variables) and
-  [ADR 0002](adr/0002-envelope-encryption-db-secrets.md); generate the value per that convention.
+  [ADR-envelope-encryption-db-secrets](https://gitlab.northwardlabs.ca/moonlitlabs/dependably-community.spec/-/blob/main/specs/adr/ADR-envelope-encryption-db-secrets.md); generate the value per that convention.
   The edge stores no `jwt_secret` or `mfa_encryption_key` (it runs no login or MFA), so — unlike the
   full host — those are not among what this key protects on an edge.
 - **DataProtection keys in the container filesystem.** ASP.NET Core logs that the DataProtection key

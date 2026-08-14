@@ -390,6 +390,76 @@ public sealed partial class SchemaInitializer
         }
     }
 
+    /// <summary>
+    /// Clears every stored value of the retired per-org SMTP transport on alert_settings, leaving
+    /// the columns themselves in place.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// SMTP is an instance-level transport (InstanceSmtpConfig): no code path reads or writes
+    /// email_inherit_instance or any email_smtp_* column, so an org's stored transport is inert
+    /// configuration — and email_smtp_password is an envelope-encrypted credential, which is not
+    /// something to leave sitting in a table nothing reads. Scrubbing the values is what retires
+    /// it; the columns stay declared, because releases still in the field name all seven in their
+    /// alert_settings SELECTs and blue-green runs one of those releases against this database for
+    /// the length of a cutover. Dropping the columns would break that slot's entire alert-settings
+    /// read — the Alerts page and the delivery gate, not merely the transport — and it would break
+    /// it for an operator upgrading straight from any such release, which no amount of release
+    /// sequencing prevents. A value scrub carries no such ordering constraint.
+    /// </para>
+    /// <para>
+    /// Forcing email_inherit_instance = 1 is the load-bearing half, not tidiness. An older slot
+    /// branches on that flag: 1 resolves the instance transport and never reads the per-org
+    /// columns, 0 resolves the org's own host. Leaving a 0 row with a NULLed host would send that
+    /// slot down the own-transport branch with nothing to dial, which resolves as unconfigured and
+    /// silently stops that org's alert mail. Setting the flag routes it to the instance transport
+    /// instead, which is the behaviour every live release already produces.
+    /// </para>
+    /// <para>
+    /// Idempotent by construction: the predicate matches only rows still holding a retired value,
+    /// so a repeat run updates nothing, and every assignment is to a constant rather than to a
+    /// function of the current value. Only the seven retired columns are assigned — email_enabled,
+    /// email_recipients, the email_last_*/email_consecutive_failures/email_failing_since health
+    /// columns and every slack_* column are the live delivery channel and are left as found.
+    /// </para>
+    /// </remarks>
+    private async Task ScrubAlertSettingsRetiredSmtpTransportAsync(DbConnection conn)
+    {
+        // xtenant: one-shot startup migration retiring a per-org transport instance-wide — scoping
+        // it to one org would leave every other tenant's stored credential behind. alert_settings
+        // is keyed by org_id, so there is no caller-supplied scope to honour here.
+        int scrubbed = await conn.ExecuteAsync(
+            """
+            UPDATE alert_settings
+            SET email_inherit_instance = 1,
+                email_smtp_host = NULL,
+                email_smtp_port = NULL,
+                email_smtp_security = NULL,
+                email_smtp_username = NULL,
+                email_smtp_password = NULL,
+                email_smtp_from = NULL
+            WHERE COALESCE(email_inherit_instance, 0) <> 1
+               OR email_smtp_host IS NOT NULL
+               OR email_smtp_port IS NOT NULL
+               OR email_smtp_security IS NOT NULL
+               OR email_smtp_username IS NOT NULL
+               OR email_smtp_password IS NOT NULL
+               OR email_smtp_from IS NOT NULL
+            """);
+
+        if (scrubbed > 0)
+        {
+            // Worth a line at Information: it is the operator's only signal that a stored SMTP
+            // credential existed on this database, and so that reclaiming the pages its ciphertext
+            // occupied needs a VACUUM — neither an UPDATE nor a DROP COLUMN frees them on either
+            // provider.
+            _logger.LogInformation(
+                "Cleared the retired per-org SMTP transport on {ScrubbedRowCount} alert_settings row(s); "
+                + "alert mail for those orgs rides the instance-level relay. VACUUM the database to "
+                + "reclaim the pages the cleared credential ciphertext occupied.", scrubbed);
+        }
+    }
+
     private async Task<bool> ColumnExistsAsync(DbConnection conn, string table, string column)
     {
         if (_db.Provider == DbProvider.Postgres)
@@ -429,6 +499,27 @@ public sealed partial class SchemaInitializer
     private static Task BackfillHostedOriginByBlobKeyAsync(DbConnection conn) =>
         conn.ExecuteAsync(
             "UPDATE package_versions SET origin = 'uploaded' WHERE origin = 'proxy' AND blob_key LIKE 'hosted/%'");
+
+    // Seeds the tenant content binding for rows that predate the columns. Every existing
+    // tenant is bound to the bytes it is being served today (the shared cache_artifact row), so
+    // the binding-first serve projections are a no-op for existing data and only diverge from
+    // the shared row once a tenant records its own differing first fetch. A tenant already
+    // sharing a row whose bytes came from another tenant's upstream stays bound to those bytes
+    // until its next miss re-records the coordinate — the binding cannot reconstruct what that
+    // tenant would have fetched, only stop the substitution from happening again.
+    // xtenant: one-shot backfill across every tenant on the instance.
+    private static Task BackfillTenantArtifactAccessBindingAsync(DbConnection conn) =>
+        conn.ExecuteAsync(
+            """
+            UPDATE tenant_artifact_access
+            SET content_hash = (SELECT ca.content_hash FROM cache_artifact ca
+                                WHERE ca.id = tenant_artifact_access.cache_artifact_id),
+                blob_key     = (SELECT ca.blob_key     FROM cache_artifact ca
+                                WHERE ca.id = tenant_artifact_access.cache_artifact_id),
+                size_bytes   = (SELECT ca.size_bytes   FROM cache_artifact ca
+                                WHERE ca.id = tenant_artifact_access.cache_artifact_id)
+            WHERE content_hash IS NULL
+            """);
 
     // Each DDL statement is a single additive change (column add or index create). SQLite
     // has no native "IF NOT EXISTS" guard for column additions; MigrateSqliteAsync swallows
@@ -862,11 +953,19 @@ public sealed partial class SchemaInitializer
             "ALTER TABLE oci_blobs ADD COLUMN license_checked_at TEXT",
             "CREATE INDEX IF NOT EXISTS idx_oci_blobs_org_config_digest ON oci_blobs(org_id, config_digest)",
             // Per-org email delivery channel for admin alerts, structurally mirroring the
-            // slack_* columns above. email_inherit_instance selects between the instance-level
-            // SMTP transport and the org's own email_smtp_* columns; email_smtp_password is
-            // envelope-encrypted at rest (enc:v1: prefix) and write-only. SQLite's ADD COLUMN
-            // restriction is on PRIMARY KEY/UNIQUE and non-constant DEFAULT, not CHECK, so the
-            // CHECK ships here too (mirrors the rpm_upstream_mode migration above).
+            // slack_* columns above. Of these only email_enabled, email_recipients and the
+            // email_last_*/email_consecutive_failures/email_failing_since health columns are read:
+            // SMTP is an instance-level transport, so email_inherit_instance and email_smtp_* are
+            // retired. They stay declared here (and in both CREATE TABLE blocks, which
+            // SchemaSyncComplianceTests requires them to match) because releases still in the field
+            // name all seven in their alert_settings SELECTs and blue-green runs one of those
+            // against the same database during a cutover; the values are scrubbed instead, by
+            // ScrubAlertSettingsRetiredSmtpTransportAsync below. Declaring them here keeps an
+            // upgraded database's column set identical to a fresh install's, which is what makes
+            // that scrub a plain UPDATE with no per-column existence probing.
+            // SQLite's ADD COLUMN restriction is on PRIMARY KEY/UNIQUE and non-constant DEFAULT,
+            // not CHECK, so the CHECK ships here too (mirrors the rpm_upstream_mode migration
+            // above).
             "ALTER TABLE alert_settings ADD COLUMN email_enabled INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE alert_settings ADD COLUMN email_inherit_instance INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE alert_settings ADD COLUMN email_recipients TEXT",
@@ -893,6 +992,16 @@ public sealed partial class SchemaInitializer
             "ALTER TABLE packages ADD COLUMN homepage TEXT",
             "ALTER TABLE packages ADD COLUMN repository_url TEXT",
             "ALTER TABLE packages ADD COLUMN description TEXT",
+            // Tenant content binding on the shared proxy-cache plane: the bytes this tenant
+            // itself fetched and hashed for the coordinate. cache_artifact is global and carries
+            // no org or upstream discriminator, so without these the per-tenant serve path has no
+            // tenant-scoped fact to read and every tenant is served whichever bytes the first
+            // tenant to reach the coordinate resolved from its own upstream. Nullable: an
+            // existing row keeps NULL until backfill_tenant_artifact_access_binding runs, and a
+            // row written by a preceding release during a blue-green cutover stays NULL, both of
+            // which the serve projections resolve by falling back to the shared row.
+            "ALTER TABLE tenant_artifact_access ADD COLUMN content_hash TEXT",
+            "ALTER TABLE tenant_artifact_access ADD COLUMN blob_key TEXT",
     };
 
     private async Task RunAdditiveMigrationsAsync(DbConnection conn)
@@ -912,6 +1021,21 @@ public sealed partial class SchemaInitializer
         await ApplyAdditiveAsync(conn, _db.Provider == DbProvider.Sqlite
             ? "ALTER TABLE org_settings ADD COLUMN storage_used_bytes INTEGER NOT NULL DEFAULT 0"
             : "ALTER TABLE org_settings ADD COLUMN storage_used_bytes BIGINT NOT NULL DEFAULT 0");
+
+        // The size half of the tenant content binding. Width is provider-specific for the same
+        // reason storage_used_bytes is (SQLite INTEGER is 64-bit; Postgres INTEGER is 32-bit and
+        // would overflow at 2 GiB), so it runs outside the shared loop.
+        await ApplyAdditiveAsync(conn, _db.Provider == DbProvider.Sqlite
+            ? "ALTER TABLE tenant_artifact_access ADD COLUMN size_bytes INTEGER"
+            : "ALTER TABLE tenant_artifact_access ADD COLUMN size_bytes BIGINT");
+
+        // The only declaration site for this index. It deliberately does NOT appear in Schema.sql /
+        // Schema.pg.sql: those run in full before this pass, so on an upgrading database a
+        // CREATE INDEX naming blob_key there resolves against the table shape that predates the
+        // ALTER above. Fresh installs are covered here too, because this pass runs unconditionally.
+        await conn.ExecuteAsync(
+            "CREATE INDEX IF NOT EXISTS idx_tenant_artifact_access_blob_key "
+            + "ON tenant_artifact_access (blob_key)");
 
         // Cargo sparse registry index metadata. CREATE TABLE syntax is provider-specific
         // (SQLite uses AUTOINCREMENT; Postgres uses BIGSERIAL), so this migration runs

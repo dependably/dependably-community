@@ -200,7 +200,7 @@ public sealed partial class SystemController : ControllerBase
                     INSERT INTO users (id, tenant_id, email, password_hash, role, must_change_password)
                     VALUES (@id, @tenantId, @email, @hash, 'owner', 1)
                     """,
-                    new { id = userId, tenantId = orgId, email = req.OwnerEmail, hash });
+                    new { id = userId, tenantId = orgId, email = EmailNormalizer.Normalize(req.OwnerEmail), hash });
 
                 await conn.ExecuteAsync("COMMIT");
             }
@@ -485,6 +485,10 @@ public sealed partial class SystemController : ControllerBase
     /// Filters: <c>?search=</c>, <c>?jobName=</c>, <c>?outcome=</c>. Sort:
     /// <c>?sortBy=startedAt|jobName|durationMs|outcome</c>, <c>?sortDir=asc|desc</c>.
     /// </summary>
+    // input-validation-ok: search/jobName/outcome are free-text filters with no format to reject;
+    // sortBy/sortDir are allowlisted via a switch expression in BackgroundJobRunRepository.ListAsync
+    // (an unrecognised value safely defaults rather than reaching the query), and limit is clamped
+    // above rather than rejected.
     [HttpGet("background-jobs")]
     public async Task<IActionResult> ListBackgroundJobs(
         [FromServices] BackgroundJobRunRepository repo,
@@ -988,6 +992,11 @@ public sealed partial class SystemController : ControllerBase
                 mfaEnrollmentRequired = (_requireMfa?.IsEnabled ?? false) && !sa.MfaEnabled,
                 lastLoginAt = sa.LastLoginAt,
                 language = string.IsNullOrEmpty(sa.Language) ? LanguageCodes.Default : sa.Language,
+                timezone = sa.Timezone,
+                // An operator belongs to no org, so the chain is override → instance default.
+                // Resolved here rather than in the SPA so the apex and tenant payloads carry
+                // the same field and the shared formatter reads one shape.
+                resolvedTimezone = TimeZoneCodes.ResolveEffective(sa.Timezone),
                 // utcformat-ok: session-profile JSON wire field, not a DB write.
                 sessionExpiresAt = User.FindFirst("exp")?.Value is string expUnix
                     && long.TryParse(expUnix, out long exp)
@@ -1020,6 +1029,40 @@ public sealed partial class SystemController : ControllerBase
             action: "system_admin.language_changed",
             actorId: sub,
             detail: System.Text.Json.JsonSerializer.Serialize(new { language = req.Language }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            ct: ct);
+
+        return NoContent();
+    }
+
+    /// <summary>
+    /// POST /api/v1/system/me/timezone — set (or clear) the operator's display-timezone
+    /// override. An absent/empty value clears it back to the instance default. Display only:
+    /// every instant stays stored in UTC regardless of this setting.
+    /// </summary>
+    [HttpPost("me/timezone")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    public async Task<IActionResult> UpdateMyTimezone(
+        [FromBody] UpdateTimezoneRequest req, CancellationToken ct)
+    {
+        string? requested = string.IsNullOrWhiteSpace(req.Timezone) ? null : req.Timezone;
+        if (requested is not null && !TimeZoneCodes.IsSupported(requested))
+        {
+            return _problems.ValidationErrorActionKey("timezone", "error.system.unsupportedTimezone", requested);
+        }
+
+        string? sub = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+            ?? User.FindFirst("sub")?.Value;
+        if (sub is null)
+        {
+            return Unauthorized();
+        }
+
+        await _systemAdmins.UpdateTimezoneAsync(sub, requested, ct);
+
+        await _audit.LogSystemAsync(
+            action: "system_admin.timezone_changed",
+            actorId: sub,
+            detail: System.Text.Json.JsonSerializer.Serialize(new { timezone = requested }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             ct: ct);
 
         return NoContent();

@@ -60,7 +60,7 @@ public sealed class ProxyVersionReadSurfacesTests : IClassFixture<DependablyFact
             orgId, ecosystem, name, version, filename,
             Sha256: sha256, SizeBytes: fakeBytes.Length,
             BlobKey: $"{blobKey}/{filename}",
-            UpstreamUrl: $"https://upstream.example/{filename}"));
+            UpstreamUrl: $"https://upstream.example/{filename}", Origin: CacheAccessOrigin.FirstFetch));
 
         // Real proxy first-fetch also creates the per-tenant packages row.
         await _factory.Services.GetRequiredService<PackageRepository>()

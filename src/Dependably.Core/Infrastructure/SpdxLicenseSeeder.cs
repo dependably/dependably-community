@@ -217,6 +217,9 @@ public sealed class SpdxLicenseSeeder
         return reader.ReadToEnd();
     }
 
+    // dapper-record-ok: deserialized from the embedded SPDX JSON, never materialized from a
+    // reader — it only ever travels the other way, as a Dapper parameter object. The gate flags
+    // it because LicenseNormalizer binds a same-named (and unrelated) class.
     private sealed record LicenseRow(
         string Identifier,
         string Name,

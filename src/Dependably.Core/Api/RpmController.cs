@@ -207,7 +207,7 @@ public sealed partial class RpmController : OrgScopedControllerBase
         }
 
         await _svc.Audit.LogActivityAsync(orgId, "rpm", purl, "push",
-            actorId: token.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+            actorId: token.UserId, actorKind: token.ActorKind, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         Response.Headers["X-Dependably-PURL"] = purl;
         return StatusCode(StatusCodes.Status201Created);
@@ -534,7 +534,10 @@ public sealed partial class RpmController : OrgScopedControllerBase
         string? cacheArtifactId = await _svc.CacheRecorder.RecordAccessAsync(
             new CacheAccess(p.OrgId, "rpm", p.Resolution.Name.ToLowerInvariant(), p.Ver, p.Filename,
                 p.Resolution.Sha256, p.SizeBytes, BlobKeys.Proxy(p.Resolution.Sha256),
-                p.Resolution.PackageUrl), ct);
+                p.Resolution.PackageUrl,
+                // The hash comes from the repodata this org's own upstream resolution produced and
+                // the fetch is verified against it, so it identifies the bytes this org fetched.
+                CacheAccessOrigin.FirstFetch), ct);
 
         if (cacheArtifactId is not null)
         {

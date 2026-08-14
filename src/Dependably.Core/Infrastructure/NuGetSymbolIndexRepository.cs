@@ -116,6 +116,56 @@ public sealed class NuGetSymbolIndexRepository
     }
 
     /// <summary>
+    /// Deletes a version's existing index rows and re-inserts <paramref name="symbols"/> as a
+    /// single unit — one connection, one transaction. A rebuild is a delete-then-insert by
+    /// nature (idempotent insert alone cannot repair a stale <c>snupkg_blob_key</c>), so a
+    /// failure partway through (SQLITE_BUSY, a dropped connection, a cancelled request) must
+    /// roll back to the version's previous index rather than leaving it partially populated or
+    /// empty where a complete index existed before the rebuild started.
+    /// </summary>
+    public async Task ReplaceForVersionAsync(
+        string orgId, string packageVersionId, string snupkgBlobKey,
+        IReadOnlyList<PdbSymbol> symbols, CancellationToken ct = default)
+    {
+        string now = _time.GetUtcNow().ToUtcIso();
+        await using var conn = await _db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+
+        await conn.ExecuteAsync(
+            "DELETE FROM nuget_symbol_index WHERE org_id = @orgId AND package_version_id = @packageVersionId",
+            new { orgId, packageVersionId },
+            transaction: tx);
+
+        foreach (var sym in symbols)
+        {
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO nuget_symbol_index
+                    (id, org_id, package_version_id, cache_artifact_id, owner_kind,
+                     pdb_filename, ssqp_key, snupkg_blob_key, entry_path, created_at)
+                VALUES (@id, @orgId, @packageVersionId, NULL, @ownerKind,
+                        @pdbFilename, @ssqpKey, @snupkgBlobKey, @entryPath, @now)
+                ON CONFLICT DO NOTHING
+                """,
+                new
+                {
+                    id = Guid.NewGuid().ToString("N"),
+                    orgId,
+                    packageVersionId,
+                    ownerKind = SymbolOwner.PackageVersion,
+                    pdbFilename = sym.PdbFileName.ToLowerInvariant(),
+                    ssqpKey = sym.SsqpKey.ToLowerInvariant(),
+                    snupkgBlobKey,
+                    entryPath = sym.EntryPath,
+                    now,
+                },
+                transaction: tx);
+        }
+
+        await tx.CommitAsync(ct);
+    }
+
+    /// <summary>
     /// Resolves an SSQP lookup (filename + key, both matched lowercased) to the stored
     /// <c>.snupkg</c> blob key, the PDB's entry path within it, and the OWNING
     /// <c>package_versions</c> row, scoped to <paramref name="orgId"/>. Returns

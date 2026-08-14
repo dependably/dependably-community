@@ -101,7 +101,7 @@ public sealed class VersionPrecedenceReadSurfacesTests : IClassFixture<Dependabl
             orgId, ecosystem, name, version, filename,
             Sha256: sha256, SizeBytes: fakeBytes.Length,
             BlobKey: $"{blobKey}/{filename}",
-            UpstreamUrl: $"https://upstream.example/{filename}"));
+            UpstreamUrl: $"https://upstream.example/{filename}", Origin: CacheAccessOrigin.FirstFetch));
 
         await _factory.Services.GetRequiredService<PackageRepository>()
             .GetOrCreateAsync(orgId, ecosystem, name, name, isProxy: true, CancellationToken.None);

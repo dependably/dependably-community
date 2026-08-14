@@ -235,9 +235,9 @@ public sealed class RpmRepodataService
             UNION ALL
             SELECT ca.name AS PurlName,
                    ca.version AS Version,
-                   ca.content_hash AS Sha256,
-                   ca.size_bytes AS SizeBytes,
-                   ca.blob_key AS BlobKey,
+                   COALESCE(taa.content_hash, ca.content_hash) AS Sha256,
+                   COALESCE(taa.size_bytes, ca.size_bytes) AS SizeBytes,
+                   COALESCE(taa.blob_key, ca.blob_key) AS BlobKey,
                    ca.filename AS Filename,
                    rm.rpm_name AS Name,
                    rm.arch     AS Arch,
@@ -596,8 +596,11 @@ public sealed class RpmRepodataService
 
     // Positional record so Dapper binds via the constructor — avoids S1144/S3459 false
     // positives on per-property setters / unassigned auto-properties.
-    // INTEGER columns must bind as long: SQLite returns INTEGER as Int64 and Dapper's
-    // constructor binder won't narrow Int64→Int32. (Postgres INTEGER widens cleanly.)
+    // Integer columns bind as long, and [ExplicitConstructor] is what lets one signature serve
+    // both providers — SQLite reports INTEGER as Int64, Postgres as Int32, and Dapper's default
+    // positional-record binding demands an exact CLR match. See
+    // DapperPositionalRecordComplianceTests.
+    [method: ExplicitConstructor]
     private sealed record RpmPrimaryRow(
         string PurlName,
         string Version,

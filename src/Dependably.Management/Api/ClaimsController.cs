@@ -84,7 +84,8 @@ public sealed class ClaimsController : ControllerBase
     /// byte-identical upstream bytes, so each goes through
     /// <see cref="Dependably.Infrastructure.CacheOrphanBlobDeleter"/>'s locked refcount guard
     /// rather than an unconditional delete — a sibling coordinate that still shares the same key
-    /// keeps its blob.
+    /// keeps its blob. The uploaded plane carries both namespaces, so it routes each key by shape
+    /// through <see cref="DeleteUploadedPlaneBlobAsync"/>.
     /// </summary>
     private async Task<int> PurgeProxyArtefactsAsync(
         string orgId, string ecosystem, string name, CancellationToken ct)
@@ -94,7 +95,7 @@ public sealed class ClaimsController : ControllerBase
 
         foreach (string key in uploadedBlobKeys)
         {
-            try { await _blobs.DeleteAsync(key, ct); }
+            try { await DeleteUploadedPlaneBlobAsync(key, ct); }
             catch (Exception ex)
             {
                 // Serilog RenderedCompactJsonFormatter JSON-encodes property
@@ -126,6 +127,45 @@ public sealed class ClaimsController : ControllerBase
             }
         }
         return uploadedBlobKeys.Count + cacheEviction.VersionsEvicted;
+    }
+
+    /// <summary>
+    /// Deletes one blob dereferenced by a legacy <c>origin = 'proxy'</c> <c>package_versions</c>
+    /// row. Three key shapes reach this loop and each needs different handling:
+    /// <list type="bullet">
+    ///   <item>An org-namespaced key (<c>hosted/{orgId}/…</c>, and the
+    ///   <c>go|cargo|apk|terraform/{orgId}/…</c> proxy shapes) belongs to this org alone and comes
+    ///   off unconditionally — no other tenant can reference it.</item>
+    ///   <item><c>proxy/{sha256}</c> is content-addressed with no org segment, so the identical
+    ///   key is what every other tenant's cache-plane row for byte-identical content records.
+    ///   Deleting it outright turns one org's claim transition into a serve-time 404 for every
+    ///   tenant still holding that artifact, so it goes through the same locked refcount guard the
+    ///   cache-plane loop above uses. The store key stays the DB key verbatim, leaving the delete
+    ///   target exactly what it was and adding only the guard.</item>
+    ///   <item><c>oci/{algo}/{hex}</c> is content-addressed too, but its references live in
+    ///   <c>oci_blobs</c>/<c>oci_tags</c>, which the cache-plane refcount cannot see — a
+    ///   cache-guarded delete would still strand another tenant's manifest. Physical reclaim of an
+    ///   OCI digest belongs to <see cref="Dependably.Protocol.OciBlobReclaimer"/>, which frees it
+    ///   only once every claim on it is gone, so this path leaves those bytes alone.</item>
+    /// </list>
+    /// </summary>
+    private async Task DeleteUploadedPlaneBlobAsync(string key, CancellationToken ct)
+    {
+        if (key.StartsWith("oci/", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        if (key.StartsWith("proxy/", StringComparison.Ordinal))
+        {
+            // The package_versions row referencing this key is already gone (deleted inside
+            // DeleteProxyVersionsForNameAsync), and string.Empty can never match a real
+            // cache_artifact id, so nothing is excluded from the shared-key count.
+            await _cacheOrphanBlobs.DeleteIfUnreferencedAsync(key, string.Empty, key, _blobs, ct);
+            return;
+        }
+
+        await _blobs.DeleteAsync(key, ct);
     }
 
     /// <summary>GET /api/v1/admin/claims</summary>
@@ -243,10 +283,12 @@ public sealed class ClaimsController : ControllerBase
         string createDetail = $"{{\"state\":\"{req.State}\"," +
             $"\"reason\":{System.Text.Json.JsonSerializer.Serialize(req.Reason, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail)}," +
             $"\"purged\":{purgedCount}}}";
-        await _audit.LogAsync("claim.create", OrgId, ActorId, ecosystem,
-            PurlNormalizer.NameOnly(ecosystem, name),
+        await _audit.LogAsync("claim.create", OrgId, ActorId,
+            actorKind: ActorKinds.User,
+            ecosystem: ecosystem,
+            purl: PurlNormalizer.NameOnly(ecosystem, name),
             detail: createDetail,
-            ct: ct);
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         // Typed event into audit_event.
         string createPayload = new Dependably.Infrastructure.Audit.Events.ClaimEvents.Create(
             ecosystem, name, req.State!, req.Reason!, validation.PurgesProxy).ToJson();
@@ -372,10 +414,12 @@ public sealed class ClaimsController : ControllerBase
         {
             await _claims.UpdateHistoryPurgedCountAsync(tx.HistoryId, purgedCount, ct);
         }
-        await _audit.LogAsync("claim.transition", OrgId, ActorId, ecosystem,
-            PurlNormalizer.NameOnly(ecosystem, name),
+        await _audit.LogAsync("claim.transition", OrgId, ActorId,
+            actorKind: ActorKinds.User,
+            ecosystem: ecosystem,
+            purl: PurlNormalizer.NameOnly(ecosystem, name),
             detail: $"{{\"from\":\"{existing.State}\",\"to\":\"{req.State}\",\"purged\":{purgedCount}}}",
-            ct: ct);
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         string transitionPayload = new Dependably.Infrastructure.Audit.Events.ClaimEvents.Transition(
             ecosystem, name, existing.State, req.State!, req.Reason!, validation.PurgesProxy).ToJson();
         await _auditEmitter.EmitAsync(
@@ -435,10 +479,12 @@ public sealed class ClaimsController : ControllerBase
             OccurredAt = _time.GetUtcNow(),
         };
         await _claims.ApplyTransitionAsync(tx, ct);
-        await _audit.LogAsync("claim.release", OrgId, ActorId, ecosystem,
-            PurlNormalizer.NameOnly(ecosystem, name),
+        await _audit.LogAsync("claim.release", OrgId, ActorId,
+            actorKind: ActorKinds.User,
+            ecosystem: ecosystem,
+            purl: PurlNormalizer.NameOnly(ecosystem, name),
             detail: $"{{\"from\":\"{existing.State}\"}}",
-            ct: ct);
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         string releasePayload = new Dependably.Infrastructure.Audit.Events.ClaimEvents.Release(
             ecosystem, name, existing.State, reason ?? "released", localCount).ToJson();
         await _auditEmitter.EmitAsync(

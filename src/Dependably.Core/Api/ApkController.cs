@@ -239,6 +239,7 @@ public sealed class ApkController : OrgScopedControllerBase
 
             await _svc.Audit.LogActivityAsync(
                 orgId, "apk", purl, "first_fetch", token?.UserId,
+                actorKind: token?.ActorKind,
                 sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
             Response.Headers["X-Cache"] = "MISS";
@@ -340,7 +341,11 @@ public sealed class ApkController : OrgScopedControllerBase
 
         string? cacheArtifactId = await _svc.CacheRecorder.RecordAccessAsync(
             new CacheAccess(orgId, "apk", p.PkgName, version, coordFilename,
-                contentHash, sizeBytes, blobKey, UpstreamUrl: null), ct);
+                contentHash, sizeBytes, blobKey, UpstreamUrl: null,
+                // A tick against bytes already admitted for this org: contentHash here is read
+                // back off this org's own serve facts (and is empty when there are none), so it
+                // is not evidence of a fetch and never rewrites the tenant content binding.
+                CacheAccessOrigin.CacheHit), ct);
         if (cacheArtifactId is not null)
         {
             await _svc.TenantAccess.RecordDownloadHitAsync(orgId, cacheArtifactId, _svc.Time.GetUtcNow(), ct);
@@ -381,7 +386,11 @@ public sealed class ApkController : OrgScopedControllerBase
 
         string? cacheArtifactId = await _svc.CacheRecorder.RecordAccessAsync(
             new CacheAccess(orgId, "apk", p.PkgName, version, coordFilename,
-                fetchResult.Sha256Hex, fetchResult.SizeBytes, fetchResult.BlobKey, upstreamUrl), ct);
+                fetchResult.Sha256Hex, fetchResult.SizeBytes, fetchResult.BlobKey, upstreamUrl,
+                // TOFU-observed rather than verified against an upstream-declared checksum, but it
+                // is this request's own hash over the bytes it staged, which is what the binding
+                // records.
+                CacheAccessOrigin.FirstFetch), ct);
         if (cacheArtifactId is null)
         {
             await _svc.Blobs.DeleteAsync(BlobKeys.StoreKey(fetchResult.BlobKey), ct);

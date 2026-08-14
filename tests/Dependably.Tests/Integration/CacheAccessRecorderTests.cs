@@ -50,7 +50,7 @@ public sealed class CacheAccessRecorderTests : IClassFixture<DependablyFactory>,
             Sha256: "abc123",
             SizeBytes: 1024,
             BlobKey: "proxy/abc123",
-            UpstreamUrl: "https://files.pythonhosted.org/packages/abc/foo.whl"));
+            UpstreamUrl: "https://files.pythonhosted.org/packages/abc/foo.whl", Origin: CacheAccessOrigin.FirstFetch));
 
         var cache = _factory.Services.GetRequiredService<CacheArtifactRepository>();
         var artifact = await cache.GetByCoordinateAsync(
@@ -75,9 +75,9 @@ public sealed class CacheAccessRecorderTests : IClassFixture<DependablyFactory>,
 
         var recorder = _factory.Services.GetRequiredService<CacheAccessRecorder>();
         await recorder.RecordAccessAsync(new CacheAccess(defaultOrg.Id, "npm", "acme-cve", "1.2.3",
-            "acme-cve-1.2.3.tgz", "h", 1, "proxy/h", "u"));
+            "acme-cve-1.2.3.tgz", "h", 1, "proxy/h", "u", Origin: CacheAccessOrigin.FirstFetch));
         await recorder.RecordAccessAsync(new CacheAccess(second.Id, "npm", "acme-cve", "1.2.3",
-            "acme-cve-1.2.3.tgz", "h", 1, "proxy/h", "u"));
+            "acme-cve-1.2.3.tgz", "h", 1, "proxy/h", "u", Origin: CacheAccessOrigin.FirstFetch));
 
         var access = _factory.Services.GetRequiredService<TenantArtifactAccessRepository>();
         var affected = await access.ListAffectedTenantsAsync("npm", "acme-cve", "1.2.3");
@@ -95,7 +95,7 @@ public sealed class CacheAccessRecorderTests : IClassFixture<DependablyFactory>,
         for (int i = 0; i < 5; i++)
         {
             await recorder.RecordAccessAsync(new CacheAccess(org.Id, "npm", "acme-bump", "1.0.0",
-                "acme-bump-1.0.0.tgz", "h", 1, "proxy/h", "u"));
+                "acme-bump-1.0.0.tgz", "h", 1, "proxy/h", "u", Origin: CacheAccessOrigin.FirstFetch));
         }
 
         var db = _factory.Services.GetRequiredService<IMetadataStore>();

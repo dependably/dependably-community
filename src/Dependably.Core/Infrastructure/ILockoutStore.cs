@@ -29,8 +29,19 @@ public interface ILockoutStore
     /// <summary>Returns current failed count and lockout expiry (or null if not locked).</summary>
     Task<(int FailedCount, DateTimeOffset? LockedUntil)> GetAsync(string emailHash, CancellationToken ct);
 
-    /// <summary>Records a failed attempt, locking the account if the threshold is reached.</summary>
-    Task RecordFailureAsync(string emailHash, int newCount, DateTimeOffset? lockedUntil, CancellationToken ct);
+    /// <summary>
+    /// Atomically increments the failure counter and, in the same operation, locks the account
+    /// once <paramref name="maxFailedAttempts"/> is reached. The increment is computed by the
+    /// store itself rather than by the caller: two concurrent callers racing a read-then-write
+    /// increment computed in application code can both observe the same pre-failure count and
+    /// both write back the same post-failure value, silently losing one of the two failures. An
+    /// implementation must guarantee that N concurrent calls for the same <paramref name="emailHash"/>
+    /// always advance the counter by exactly N, and returns the authoritative post-increment count
+    /// so the caller's lockout decision reflects the real value rather than one it computed from a
+    /// stale read.
+    /// </summary>
+    Task<(int NewCount, DateTimeOffset? LockedUntil)> RecordFailureAsync(
+        string emailHash, int maxFailedAttempts, TimeSpan lockoutDuration, CancellationToken ct);
 
     /// <summary>Clears the lockout state on successful login.</summary>
     Task ClearAsync(string emailHash, CancellationToken ct);

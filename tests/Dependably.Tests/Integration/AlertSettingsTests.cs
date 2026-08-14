@@ -11,11 +11,11 @@ using Microsoft.Extensions.DependencyInjection;
 namespace Dependably.Tests.Integration;
 
 /// <summary>
-/// Management API for /api/v1/alert-settings: round-trip of the Alerts-tab columns (per-type
-/// toggles, severity floor, email delivery gate + validated recipient list) via the base PUT,
-/// the write-only Slack webhook URL (never echoed, only hasSlackWebhook) via the dedicated PUT
-/// /alert-settings/slack, fail-closed behavior when no DEPENDABLY_MASTER_KEY is configured, and
-/// that neither write surface clobbers the other's columns.
+/// Management API for /api/v1/alert-settings: round-trip of the Alerts-tab gates (per-type
+/// toggles, severity floor) via the base PUT, the write-only Slack webhook URL (never echoed,
+/// only hasSlackWebhook) via the dedicated PUT /alert-settings/slack, fail-closed behavior when
+/// no DEPENDABLY_MASTER_KEY is configured, and that neither write surface clobbers the other's
+/// columns. The email channel's own PUT lives in <see cref="AlertEmailSettingsTests"/>.
 /// </summary>
 [Trait("Category", "Integration")]
 public sealed class AlertSettingsTests : IClassFixture<DependablyFactory>, IAsyncLifetime
@@ -57,7 +57,7 @@ public sealed class AlertSettingsTests : IClassFixture<DependablyFactory>, IAsyn
     }
 
     [Fact]
-    public async Task Put_TogglesSeverityAndEmailGate_RoundTrip()
+    public async Task Put_TogglesAndSeverity_RoundTrip()
     {
         using var c = await AdminClient();
 
@@ -66,8 +66,6 @@ public sealed class AlertSettingsTests : IClassFixture<DependablyFactory>, IAsyn
             quarantineAlertsEnabled = false,
             vulnAlertsEnabled = true,
             vulnMinSeverity = "CRITICAL",
-            emailEnabled = true,
-            emailRecipients = "a@example.com, b@example.com",
         });
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
@@ -77,9 +75,44 @@ public sealed class AlertSettingsTests : IClassFixture<DependablyFactory>, IAsyn
         Assert.False(root.GetProperty("quarantineAlertsEnabled").GetBoolean());
         Assert.True(root.GetProperty("vulnAlertsEnabled").GetBoolean());
         Assert.Equal("CRITICAL", root.GetProperty("vulnMinSeverity").GetString());
+    }
+
+    /// <summary>
+    /// The email columns moved to PUT /alert-settings/email, so `emailEnabled`/`emailRecipients`
+    /// are now unmapped on this request. The instance-wide JsonUnmappedMemberHandling.Disallow
+    /// stance turns that into a 400 rather than a silent ignore, which is the outcome worth
+    /// pinning: a stale client posting the old combined payload is told its email fields went
+    /// nowhere instead of believing it saved them. The saved channel is untouched either way.
+    /// </summary>
+    [Fact]
+    public async Task Put_WithRetiredEmailFields_IsRejectedAndLeavesTheChannelAlone()
+    {
+        await using var factory = new DependablyFactory();
+        using var c = factory.CreateClient();
+        string jwt = await factory.CreateAdminJwt();
+        c.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
+
+        var seed = await c.PutAsJsonAsync("/api/v1/alert-settings/email", new
+        {
+            emailEnabled = true,
+            emailRecipients = "keep@example.com",
+        });
+        Assert.Equal(HttpStatusCode.OK, seed.StatusCode);
+
+        var resp = await c.PutAsJsonAsync("/api/v1/alert-settings", new
+        {
+            quarantineAlertsEnabled = true,
+            vulnAlertsEnabled = true,
+            vulnMinSeverity = "HIGH",
+            emailEnabled = false,
+            emailRecipients = "clobber@example.com",
+        });
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+
+        var get = await c.GetAsync("/api/v1/alert-settings");
+        var root = JsonDocument.Parse(await get.Content.ReadAsStringAsync()).RootElement;
         Assert.True(root.GetProperty("emailEnabled").GetBoolean());
-        // Recipients are normalized (trimmed, rejoined without the original whitespace) on save.
-        Assert.Equal("a@example.com,b@example.com", root.GetProperty("emailRecipients").GetString());
+        Assert.Equal("keep@example.com", root.GetProperty("emailRecipients").GetString());
     }
 
     [Fact]
@@ -91,47 +124,6 @@ public sealed class AlertSettingsTests : IClassFixture<DependablyFactory>, IAsyn
             quarantineAlertsEnabled = true,
             vulnAlertsEnabled = true,
             vulnMinSeverity = "SUPER_HIGH",
-        });
-        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
-    }
-
-    /// <summary>Mixed-validity list: one valid address plus one malformed one rejects the whole request.</summary>
-    [Fact]
-    public async Task Put_MixedValidAndInvalidRecipients_RejectsWholeRequest()
-    {
-        await using var factory = new DependablyFactory();
-        using var c = factory.CreateClient();
-        string jwt = await factory.CreateAdminJwt();
-        c.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
-
-        var resp = await c.PutAsJsonAsync("/api/v1/alert-settings", new
-        {
-            quarantineAlertsEnabled = true,
-            vulnAlertsEnabled = true,
-            vulnMinSeverity = "HIGH",
-            emailEnabled = true,
-            emailRecipients = "valid@example.com,not-an-email",
-        });
-        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
-
-        var get = await c.GetAsync("/api/v1/alert-settings");
-        var root = JsonDocument.Parse(await get.Content.ReadAsStringAsync()).RootElement;
-        Assert.False(root.GetProperty("emailEnabled").GetBoolean());
-    }
-
-    [Fact]
-    public async Task Put_TooManyRecipients_Returns422()
-    {
-        using var c = await AdminClient();
-
-        string recipients = string.Join(",", Enumerable.Range(0, 21).Select(i => $"u{i}@example.com"));
-        var resp = await c.PutAsJsonAsync("/api/v1/alert-settings", new
-        {
-            quarantineAlertsEnabled = true,
-            vulnAlertsEnabled = true,
-            vulnMinSeverity = "HIGH",
-            emailEnabled = true,
-            emailRecipients = recipients,
         });
         Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
     }

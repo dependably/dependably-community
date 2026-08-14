@@ -260,7 +260,7 @@ public sealed class PyPiProxyGlobalPlaneTests : IClassFixture<DependablyFactory>
             Sha256: contentHash,
             SizeBytes: wheelBytes.Length,
             BlobKey: $"{BlobKeys.Proxy(contentHash)}/{filename}",
-            UpstreamUrl: $"{_factory.MockUpstream.Urls[0]}/files/{filename}"));
+            UpstreamUrl: $"{_factory.MockUpstream.Urls[0]}/files/{filename}", Origin: CacheAccessOrigin.FirstFetch));
 
         // Mirror what the production proxy path also does: ensure orgB has a per-tenant
         // packages row so the package is discoverable in orgB's listings.

@@ -4,6 +4,7 @@
   import SettingsInstance from '../lib/settings/SettingsInstance.svelte'
   import SettingsMetrics from '../lib/settings/SettingsMetrics.svelte'
   import SettingsInstanceEmail from '../lib/settings/SettingsInstanceEmail.svelte'
+  import SettingsRelayHealth from '../lib/settings/SettingsRelayHealth.svelte'
   import SystemSlackConfig from '../lib/settings/SystemSlackConfig.svelte'
 
   let activeTab = 'instance'  // 'instance' | 'metrics' | 'email' | 'slack'
@@ -38,6 +39,7 @@
       updateConfig={systemApi.updateEmailConfig}
       testSend={systemApi.testEmailConfig}
     />
+    <SettingsRelayHealth getHealth={systemApi.getEmailHealth} />
   {:else}
     <SystemSlackConfig />
   {/if}

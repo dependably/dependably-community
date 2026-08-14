@@ -835,6 +835,107 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
         Assert.Equal("application/xml", fc.ContentType);
     }
 
+    // ── Upstream path-segment traversal ───────────────────────────────────────
+    //
+    // Both /rpm/packages/{file} and /rpm/repodata/{file} embed the route value verbatim in a
+    // composed upstream URL. ASP.NET decodes a route value once, so a double-encoded
+    // "%252e%252e%252f" arrives at the action as the literal "%2e%2e%2f": no literal '..', no
+    // literal '/', so every base path-safety rule passes. .NET's Uri preserves "%2e%2e%2f" on
+    // the wire and the upstream decodes it back to "../". The '%' ban in ValidateUpstreamSegment
+    // is what stops the request before any upstream call is composed.
+    //
+    // Each rejection probe is paired with an acceptance twin below, because real repodata and
+    // NEVRA filenames are dense with dots, dashes, plus signs, tildes and 64-char hex prefixes —
+    // over-blocking them would break every dnf client.
+
+    [Theory]
+    // The once-decoded form of a double-encoded "%252e%252e%252f…" traversal.
+    [InlineData("%2e%2e%2f%2e%2e%2fetc%2fpasswd")]
+    // Single-encoded separator: routing leaves %2F undecoded, so it survives to the upstream.
+    [InlineData("primary%2f..%2fx.xml.gz")]
+    [InlineData("a%2Fb")]
+    [InlineData("a%5Cb")]
+    // The hash-prefixed bypass: IsHashPrefixedFilename constrains only the leading 64 hex
+    // characters and the dash, so everything after it reaches GetHashPrefixedAsync unchecked.
+    [InlineData("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-%2e%2e%2f%2e%2e%2fx")]
+    [InlineData("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-..%2f..%2fx")]
+    public async Task Repodata_PercentEncodedTraversalFilename_Returns400_AndNeverReachesUpstream(string filename)
+    {
+        await EnableAnonPullAsync();
+        await SeedRpmRegistryAsync();
+        // A servable body is staged deliberately: without the '%' ban the hash-prefixed probes
+        // serve it with a 200, so this fails loudly rather than passing on an incidental 404.
+        var repodata = new RepodataResult(new MemoryStream([1, 2, 3]), "application/x-gzip", null, null, NotModified: false);
+        var stubProxy = new StubProxy(repodataResult: repodata);
+        var ctl = BuildController(proxy: stubProxy);
+
+        var result = await ctl.Repodata(filename, default);
+
+        Assert.IsType<BadRequestObjectResult>(result);
+        Assert.Null(stubProxy.LastRepodataFilename);
+    }
+
+    [Theory]
+    [InlineData("repomd.xml")]
+    [InlineData("repomd.xml.asc")]
+    [InlineData("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-primary.xml.gz")]
+    [InlineData("0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0-filelists.sqlite.bz2")]
+    public async Task Repodata_LegitimateRepodataFilename_StillReachesUpstream(string filename)
+    {
+        await EnableAnonPullAsync();
+        await SeedRpmRegistryAsync();
+        byte[] body = [1, 2, 3];
+        var repodata = new RepodataResult(new MemoryStream(body), "application/x-gzip", null, null, NotModified: false);
+        var stubProxy = new StubProxy(repodataResult: repodata);
+        var ctl = BuildController(proxy: stubProxy);
+
+        var result = await ctl.Repodata(filename, default);
+
+        var fc = Assert.IsType<FileStreamResult>(result);
+        Assert.Equal(body, await ReadAllAsync(fc.FileStream));
+        Assert.Equal(filename, stubProxy.LastRepodataFilename);
+    }
+
+    [Theory]
+    [InlineData("%2e%2e%2f%2e%2e%2fetc%2fpasswd.rpm")]
+    [InlineData("tree-2.1.1-1%2e%2e%2f%2e%2e%2fx.fc40.x86_64.rpm")]
+    [InlineData("tree-2.1.1-1.fc40.x86_64%2erpm")]
+    public async Task Download_PercentEncodedTraversalFilename_Returns400_AndNeverResolvesUpstream(string filename)
+    {
+        await EnableAnonPullAsync();
+        await SeedRpmRegistryAsync();
+        var stubProxy = new StubProxy();
+        var ctl = BuildController(proxy: stubProxy);
+
+        var result = await ctl.Download(filename, default);
+
+        Assert.IsType<BadRequestObjectResult>(result);
+        Assert.False(stubProxy.ResolveWasCalled);
+    }
+
+    [Theory]
+    // Real NEVRA filenames: dots, dashes, plus signs, tildes and carets are all legal and must
+    // keep resolving. Only '%' is banned.
+    [InlineData("tree-2.1.1-1.fc40.x86_64.rpm")]
+    [InlineData("libstdc++-13.2.1-3.fc40.x86_64.rpm")]
+    [InlineData("golang-1.22.0~rc1-1.fc40.aarch64.rpm")]
+    [InlineData("nodejs-20.11.1^20240201gitabc-1.fc40.noarch.rpm")]
+    public async Task Download_LegitimateNevraFilename_StillResolvesUpstream(string filename)
+    {
+        await EnableAnonPullAsync();
+        await SeedRpmRegistryAsync();
+        // Resolution is null, so the request ends in a 404 — the point of the assertion is that
+        // the filename got as far as the upstream resolver rather than being rejected at the door.
+        var stubProxy = new StubProxy();
+        var ctl = BuildController(proxy: stubProxy);
+
+        var result = await ctl.Download(filename, default);
+
+        Assert.IsType<NotFoundResult>(result);
+        Assert.True(stubProxy.ResolveWasCalled);
+        Assert.Equal(filename, stubProxy.LastResolvedFilename);
+    }
+
     // ── GPG key ────────────────────────────────────────────────────────────────
 
     [Fact]
@@ -1540,6 +1641,10 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
         public string? LastResolvedFilename { get; private set; }
         public string? LastUpstreamBase { get; private set; }
 
+        // Null until GetRepodataAsync is reached, so a traversal probe can assert the composed
+        // upstream request was never attempted — not merely that the response was not 200.
+        public string? LastRepodataFilename { get; private set; }
+
         public StubProxy(
             PackageResolution? resolution = null,
             bool negativeCache = false,
@@ -1602,6 +1707,7 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
         public Task<RepodataResult?> GetRepodataAsync(string upstreamBase, string filename, string? ifNoneMatch, string? ifModifiedSince, CancellationToken ct)
         {
             LastUpstreamBase = upstreamBase;
+            LastRepodataFilename = filename;
 
             // Mirror the real proxy's filename gate: only repomd passthrough names and
             // hash-prefixed (content-addressed) filenames are fetchable upstream.

@@ -145,4 +145,28 @@ public static class ConfigurationExtensions
         }
         return (networks, proxies);
     }
+
+    /// <summary>
+    /// True when <paramref name="peer"/> is one of the addresses/networks parsed out of
+    /// <c>TRUSTED_PROXIES</c> by <see cref="ParseTrustedProxies"/> — the same question
+    /// <c>ForwardedHeadersMiddleware</c> asks of the immediate peer before it honours any
+    /// <c>X-Forwarded-*</c> header, matched the same way (an IPv4-mapped IPv6 peer is also tried in
+    /// its IPv4 form, so <c>::ffff:10.0.0.1</c> matches a <c>10.0.0.0/8</c> entry). Sharing one
+    /// matcher is what keeps every header the edge injects on one trust boundary instead of two
+    /// that can drift apart.
+    ///
+    /// <para>A null peer, or an empty trusted set (<c>TRUSTED_PROXIES</c> unset), is never trusted:
+    /// forwarded-header processing is disabled in that configuration, so nothing else may treat a
+    /// caller-supplied header as proxy-injected either.</para>
+    /// </summary>
+    public static bool IsTrustedProxyPeer(
+        System.Net.IPAddress? peer,
+        IReadOnlyList<System.Net.IPNetwork> networks,
+        IReadOnlyList<System.Net.IPAddress> proxies)
+    {
+        return peer is not null
+            && ((peer.IsIPv4MappedToIPv6 && IsTrustedProxyPeer(peer.MapToIPv4(), networks, proxies))
+                || proxies.Contains(peer)
+                || networks.Any(n => n.Contains(peer)));
+    }
 }

@@ -191,7 +191,16 @@
 
 <style>
   .instance-email-form { max-width: 480px; }
-  .checkbox-row { margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; }
+  /* .form-row is a column flex box by default; without the explicit row direction the shared
+     align-items lands on the cross axis and centres the toggle, pushing the configured-tag
+     onto its own line. */
+  .checkbox-row {
+    margin-bottom: 12px;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+  }
   .checkbox-label {
     display: flex;
     align-items: center;

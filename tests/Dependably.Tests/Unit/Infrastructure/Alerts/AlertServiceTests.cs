@@ -9,7 +9,7 @@ namespace Dependably.Tests.Unit.Infrastructure.Alerts;
 
 /// <summary>
 /// Covers <see cref="AlertService"/>'s settings-gated raise + notify-on-fresh-insert. The
-/// notifier is substituted so each test asserts exactly when <see cref="IAlertNotifier.Notify"/>
+/// notifier is substituted so each test asserts exactly when <see cref="IAlertNotifier.NotifyAsync"/>
 /// fires, independent of the Slack delivery plane.
 /// </summary>
 [Trait("Category", "Unit")]
@@ -52,7 +52,7 @@ public sealed class AlertServiceTests : IClassFixture<InMemoryDbFixture>
         await svc.RaiseQuarantineAlertAsync(orgId, Guid.NewGuid().ToString("N"), "npm", "pkg:npm/x@1.0.0", "kev", null);
 
         Assert.Equal(1, await _alerts.CountActiveAsync(orgId));
-        notifier.Received(1).Notify(Arg.Any<AlertRecord>());
+        await notifier.Received(1).NotifyAsync(Arg.Any<AlertRecord>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -66,7 +66,7 @@ public sealed class AlertServiceTests : IClassFixture<InMemoryDbFixture>
         await svc.RaiseQuarantineAlertAsync(orgId, Guid.NewGuid().ToString("N"), "npm", "pkg:npm/x@1.0.0", "kev", null);
 
         Assert.Equal(0, await _alerts.CountActiveAsync(orgId));
-        notifier.DidNotReceive().Notify(Arg.Any<AlertRecord>());
+        await notifier.DidNotReceive().NotifyAsync(Arg.Any<AlertRecord>(), Arg.Any<CancellationToken>());
     }
 
     /// <summary>A deduped repeat (same quarantine row id) does not re-notify.</summary>
@@ -82,16 +82,17 @@ public sealed class AlertServiceTests : IClassFixture<InMemoryDbFixture>
         await svc.RaiseQuarantineAlertAsync(orgId, quarantineId, "npm", "pkg:npm/x@1.0.0", "kev", null);
 
         Assert.Equal(1, await _alerts.CountActiveAsync(orgId));
-        notifier.Received(1).Notify(Arg.Any<AlertRecord>());
+        await notifier.Received(1).NotifyAsync(Arg.Any<AlertRecord>(), Arg.Any<CancellationToken>());
     }
 
-    /// <summary>A throwing notifier is swallowed — the alert row is already persisted before Notify runs.</summary>
+    /// <summary>A throwing notifier is swallowed — the alert row is already persisted before NotifyAsync runs.</summary>
     [Fact]
     public async Task RaiseQuarantine_NotifierThrows_DoesNotPropagate_AlertStillPersisted()
     {
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"asvc-d-{Guid.NewGuid():N}");
         var notifier = Substitute.For<IAlertNotifier>();
-        notifier.When(n => n.Notify(Arg.Any<AlertRecord>())).Do(_ => throw new InvalidOperationException("boom"));
+        notifier.NotifyAsync(Arg.Any<AlertRecord>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromException(new InvalidOperationException("boom")));
         var svc = BuildService(notifier);
 
         await svc.RaiseQuarantineAlertAsync(orgId, Guid.NewGuid().ToString("N"), "npm", "pkg:npm/x@1.0.0", "kev", null);
@@ -111,7 +112,7 @@ public sealed class AlertServiceTests : IClassFixture<InMemoryDbFixture>
         await svc.RaiseVulnAlertAsync(orgId, "npm", "vuln-pkg", "pkg:npm/vuln-pkg@1.0.0", "GHSA-xyz", "CRITICAL");
 
         Assert.Equal(1, await _alerts.CountActiveAsync(orgId));
-        notifier.Received(1).Notify(Arg.Any<AlertRecord>());
+        await notifier.Received(1).NotifyAsync(Arg.Any<AlertRecord>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -125,7 +126,7 @@ public sealed class AlertServiceTests : IClassFixture<InMemoryDbFixture>
         await svc.RaiseVulnAlertAsync(orgId, "npm", "vuln-pkg", "pkg:npm/vuln-pkg@1.0.0", "GHSA-low", "MEDIUM");
 
         Assert.Equal(0, await _alerts.CountActiveAsync(orgId));
-        notifier.DidNotReceive().Notify(Arg.Any<AlertRecord>());
+        await notifier.DidNotReceive().NotifyAsync(Arg.Any<AlertRecord>(), Arg.Any<CancellationToken>());
     }
 
     /// <summary>Unscored (null severity) never alerts, even against the org's floor.</summary>
@@ -140,7 +141,7 @@ public sealed class AlertServiceTests : IClassFixture<InMemoryDbFixture>
         await svc.RaiseVulnAlertAsync(orgId, "npm", "vuln-pkg", "pkg:npm/vuln-pkg@1.0.0", "GHSA-unscored", null);
 
         Assert.Equal(0, await _alerts.CountActiveAsync(orgId));
-        notifier.DidNotReceive().Notify(Arg.Any<AlertRecord>());
+        await notifier.DidNotReceive().NotifyAsync(Arg.Any<AlertRecord>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -169,6 +170,6 @@ public sealed class AlertServiceTests : IClassFixture<InMemoryDbFixture>
         await svc.RaiseVulnAlertAsync(orgId, "npm", "pkg-two", "pkg:npm/pkg-two@1.0.0", "GHSA-low", "LOW");
 
         Assert.Equal(1, await _alerts.CountActiveAsync(orgId));
-        notifier.Received(1).Notify(Arg.Any<AlertRecord>());
+        await notifier.Received(1).NotifyAsync(Arg.Any<AlertRecord>(), Arg.Any<CancellationToken>());
     }
 }

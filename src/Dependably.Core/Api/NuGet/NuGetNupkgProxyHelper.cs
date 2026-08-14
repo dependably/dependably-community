@@ -182,7 +182,10 @@ internal static class NuGetNupkgProxyHelper
             MaxOsvScoreTolerance: settings.MaxOsvScoreTolerance,
             MinReleaseAgeHours: settings.MinReleaseAgeHours,
             CacheAccess: new CacheAccess(orgId, "nuget", normalizedId, normalizedVersion, file,
-                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: $"{upstreamBase}/flatcontainer/{normalizedId}/{normalizedVersion}/{file}"),
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: $"{upstreamBase}/flatcontainer/{normalizedId}/{normalizedVersion}/{file}",
+                // ProxyFetchService overwrites the three bytes fields with the values it computed
+                // over the package it just staged before handing this to the recorder.
+                Origin: CacheAccessOrigin.FirstFetch),
             UpstreamUrl: upstreamBase,
             PublishedAt: meta.PublishedAt,
             UpstreamChecksum: meta.Checksum,

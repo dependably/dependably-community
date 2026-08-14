@@ -10,6 +10,10 @@ namespace Dependably.Infrastructure.Mail;
 /// link-in-response fallback the way invites has, since the reset token must never reach the
 /// response body). Delivery failure is logged only — unlike alert email, there is no per-org
 /// health state to auto-disable, and the user can simply request a fresh link.
+///
+/// The reset link is a live credential, so <see cref="ResolveAsync"/> also refuses an unencrypted
+/// transport per <see cref="CredentialMailPolicy"/> — the same "unavailable" outcome, and 202
+/// fallback, as an unconfigured instance.
 /// </summary>
 internal sealed class PasswordResetEmailJob : IEmailDeliveryJob
 {
@@ -17,6 +21,7 @@ internal sealed class PasswordResetEmailJob : IEmailDeliveryJob
     private readonly string _resetLink;
     private readonly DateTimeOffset _expiresAt;
     private readonly InstanceSmtpConfig _instanceConfig;
+    private readonly bool _allowInsecureCredentialMail;
     private readonly IStringLocalizer<SharedResource> _localizer;
     private readonly ILogger _logger;
 
@@ -25,6 +30,7 @@ internal sealed class PasswordResetEmailJob : IEmailDeliveryJob
         string resetLink,
         DateTimeOffset expiresAt,
         InstanceSmtpConfig instanceConfig,
+        bool allowInsecureCredentialMail,
         IStringLocalizer<SharedResource> localizer,
         ILogger logger)
     {
@@ -32,6 +38,7 @@ internal sealed class PasswordResetEmailJob : IEmailDeliveryJob
         _resetLink = resetLink;
         _expiresAt = expiresAt;
         _instanceConfig = instanceConfig;
+        _allowInsecureCredentialMail = allowInsecureCredentialMail;
         _localizer = localizer;
         _logger = logger;
     }
@@ -39,9 +46,21 @@ internal sealed class PasswordResetEmailJob : IEmailDeliveryJob
     public async Task<(SmtpTransportSettings Transport, IReadOnlyList<string> Recipients)?> ResolveAsync(CancellationToken ct)
     {
         var resolved = await _instanceConfig.ResolveAsync(ct);
-        return resolved.Enabled && resolved.Configured
-            ? (resolved.Transport, new[] { _toAddress })
-            : null;
+        if (!resolved.Enabled || !resolved.Configured)
+        {
+            return null;
+        }
+
+        if (CredentialMailPolicy.RefusesCredentialMail(resolved.Transport, _allowInsecureCredentialMail))
+        {
+            _logger.LogWarning(
+                "Refusing to send password reset email to {RecipientDomain}: instance SMTP security={Security} " +
+                "would put the reset link on the wire in cleartext. Set {EnvVar}=true to override.",
+                ExtractDomain(_toAddress), resolved.Transport.Security, CredentialMailPolicy.AllowInsecureEnvVar);
+            return null;
+        }
+
+        return (resolved.Transport, new[] { _toAddress });
     }
 
     /// <summary>

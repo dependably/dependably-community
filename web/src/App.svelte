@@ -1,12 +1,12 @@
 <script>
   import { onMount } from 'svelte'
-  import { t, isLoading, locale } from 'svelte-i18n'
+  import { t, isLoading } from 'svelte-i18n'
   import { route, user, navigate, restoreScroll, bootstrapInfo, pendingRoute, noticesOpen,
            activeRoute, cancelTransition, transitionPending } from './lib/store.js'
   import { useRouter, routeFor, ADMIN_ONLY_PAGES } from './lib/routes.js'
   import { api } from './lib/api.js'
   import { setupI18n } from './i18n/index.js'
-  import { applyLocale } from './lib/locale.js'
+  import { applyUserContext } from './lib/userContext.js'
   import { get } from 'svelte/store'
   import { activeBanners, loadActiveBanners, dismissBanner } from './lib/banners.js'
   import { armSessionWatch, disarmSessionWatch } from './lib/session.js'
@@ -119,12 +119,9 @@
     let me = null
     try { me = await api.me() } catch { /* unauthenticated */ }
     if (me) {
-      user.set(me)
-      // Server resolves the effective locale (user override → tenant default → 'en'). If the
-      // browser is currently rendering in a different locale, realign locally — no API echo.
       // Awaited so the shell's first paint is already in the user's language — without it a
       // non-English user gets a frame of English before the dictionary flushes.
-      if (me.language && me.language !== get(locale)) await applyLocale(me.language)
+      await applyUserContext(me)
       // Load active banners once after auth. One-shot — no polling.
       loadActiveBanners()
       // Arm the proactive session-expiry watcher with the exp claim surfaced by me().

@@ -49,7 +49,11 @@ internal static class IdentityStartupExtensions
         });
 
         builder.Services.AddSingleton<MfaEncryptionKeyProvider>();
-        builder.Services.AddSingleton<SystemAdminTokenVersionStore>();
+        // Same cross-replica posture as the tenant-user store: no process-local answer to
+        // "is this session still valid" when peers can revoke it.
+        builder.Services.AddSingleton(sp => new SystemAdminTokenVersionStore(
+            sp.GetRequiredService<IMetadataStore>(),
+            SessionRevocationCachePolicy.SessionCacheOrNull(sp)));
 
         builder.Services.AddScoped<IUserStore<DependablyUser>, DependablyUserStore>();
         builder.Services.AddScoped<IUserStore<SystemAdminUser>, SystemAdminUserStore>();

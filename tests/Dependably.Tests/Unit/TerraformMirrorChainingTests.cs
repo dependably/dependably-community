@@ -109,7 +109,7 @@ public sealed class TerraformMirrorChainingTests : IClassFixture<InMemoryDbFixtu
         // zh: hash for every archive it holds, so an edge chained to one does verify. The
         // pass-through here covers a third-party mirror that publishes nothing, and refusing that
         // outright would refuse a legitimate topology on a signal that was never mandatory. See
-        // docs/adr/0003-terraform-provider-network-mirror.md for the recorded posture.
+        // ADR-terraform-provider-network-mirror for the recorded posture.
         Assert.Null(TerraformController.ExtractZipHash(null));
         Assert.Null(TerraformController.ExtractZipHash([]));
     }

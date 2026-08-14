@@ -49,6 +49,12 @@
         <target>Aucune activité</target>
       </segment>
     </unit>
+    <unit id="activity.emptySearchCapped">
+      <segment state="translated">
+        <source>No matches in the most recent activity. Older events were not searched — filter by event type to reach further back, or export to CSV to search all of them.</source>
+        <target>Aucune correspondance dans l&apos;activité la plus récente. Les événements plus anciens n&apos;ont pas été parcourus — filtrez par type d&apos;événement pour remonter plus loin, ou exportez en CSV pour tous les parcourir.</target>
+      </segment>
+    </unit>
     <unit id="activity.events.blocked">
       <segment state="translated">
         <source>Blocked (all)</source>
@@ -307,10 +313,22 @@
         <target>Administration — Organisations</target>
       </segment>
     </unit>
-    <unit id="alerts.panel.close">
+    <unit id="alerts.panel.dismiss">
       <segment state="translated">
-        <source>Close</source>
-        <target>Fermer</target>
+        <source>Dismiss</source>
+        <target>Ignorer</target>
+      </segment>
+    </unit>
+    <unit id="alerts.panel.dismissAll">
+      <segment state="translated">
+        <source>Dismiss all</source>
+        <target>Tout ignorer</target>
+      </segment>
+    </unit>
+    <unit id="alerts.panel.dismissingAll">
+      <segment state="translated">
+        <source>Dismissing…</source>
+        <target>En cours…</target>
       </segment>
     </unit>
     <unit id="alerts.panel.empty">
@@ -719,6 +737,12 @@
       <segment state="translated">
         <source>No audit events</source>
         <target>Aucun événement d&apos;audit</target>
+      </segment>
+    </unit>
+    <unit id="audit.emptySearchCapped">
+      <segment state="translated">
+        <source>No matches in the most recent audit events. Older events were not searched — filter by action to reach further back, or export to CSV to search all of them.</source>
+        <target>Aucune correspondance dans les événements d&apos;audit les plus récents. Les événements plus anciens n&apos;ont pas été parcourus — filtrez par action pour remonter plus loin, ou exportez en CSV pour tous les parcourir.</target>
       </segment>
     </unit>
     <unit id="audit.export">
@@ -3031,10 +3055,22 @@
         <target>Les heures sont affichées dans ce fuseau. Valeur par défaut de l’organisation : {timezone}.</target>
       </segment>
     </unit>
+    <unit id="profile.rows.timezoneHelpSystemFallback">
+      <segment state="translated">
+        <source>How timestamps are rendered in the operator console. Stored times are always UTC.</source>
+        <target>Mode d&apos;affichage des horodatages dans la console d&apos;exploitation. Les heures stockées sont toujours en UTC.</target>
+      </segment>
+    </unit>
     <unit id="profile.rows.timezoneInherit">
       <segment state="translated">
         <source>Use organization default ({timezone})</source>
         <target>Utiliser la valeur par défaut de l’organisation ({timezone})</target>
+      </segment>
+    </unit>
+    <unit id="profile.rows.timezoneInheritSystem">
+      <segment state="translated">
+        <source>Use instance default (UTC)</source>
+        <target>Utiliser la valeur par défaut de l&apos;instance (UTC)</target>
       </segment>
     </unit>
     <unit id="profile.rows.timezoneTitle">
@@ -3637,24 +3673,6 @@
         <target>Jeton créé — copiez-le maintenant, il ne sera plus affiché.</target>
       </segment>
     </unit>
-    <unit id="settings.alerts.emailEnabled">
-      <segment state="translated">
-        <source>Send alerts by email</source>
-        <target>Envoyer les alertes par courriel</target>
-      </segment>
-    </unit>
-    <unit id="settings.alerts.emailRecipients">
-      <segment state="translated">
-        <source>Recipients</source>
-        <target>Destinataires</target>
-      </segment>
-    </unit>
-    <unit id="settings.alerts.emailRecipientsHint">
-      <segment state="translated">
-        <source>Comma-separated email addresses. Empty means nothing sends. These addresses receive admin alert emails.</source>
-        <target>Adresses courriel séparées par des virgules. Vide signifie que rien n&apos;est envoyé. Ces adresses reçoivent les alertes d&apos;administration.</target>
-      </segment>
-    </unit>
     <unit id="settings.alerts.hint">
       <segment state="translated">
         <source>Alerts fire on a new quarantine review item and on a vulnerability meeting the severity floor below.</source>
@@ -3675,8 +3693,8 @@
     </unit>
     <unit id="settings.alerts.pointer">
       <segment state="translated">
-        <source>Delivery transports (webhooks, Slack, and the email SMTP server) are configured on the Integrations tab.</source>
-        <target>Les transports de livraison (webhooks, Slack et le serveur SMTP du courriel) se configurent dans l&apos;onglet Intégrations.</target>
+        <source>Delivery channels — email, Slack and webhooks — are configured on the Integrations tab.</source>
+        <target>Les canaux de livraison — courriel, Slack et webhooks — se configurent dans l&apos;onglet Intégrations.</target>
       </segment>
     </unit>
     <unit id="settings.alerts.quarantineEnabled">
@@ -4499,6 +4517,18 @@
         <target>Les nouveaux utilisateurs de ce locataire démarrent dans cette langue. Chacun peut la remplacer dans son profil.</target>
       </segment>
     </unit>
+    <unit id="settings.general.defaultTimezone">
+      <segment state="translated">
+        <source>Default timezone</source>
+        <target>Fuseau horaire par défaut</target>
+      </segment>
+    </unit>
+    <unit id="settings.general.defaultTimezoneHint">
+      <segment state="translated">
+        <source>New users in this tenant see timestamps in this zone. Each user can override it in their profile. Stored times are always UTC.</source>
+        <target>Les nouveaux utilisateurs de ce locataire voient les horodatages dans ce fuseau. Chaque utilisateur peut le remplacer dans son profil. Les heures stockées sont toujours en UTC.</target>
+      </segment>
+    </unit>
     <unit id="settings.general.requireMfa">
       <segment state="translated">
         <source>Require MFA enrollment</source>
@@ -4685,76 +4715,28 @@
         <target>Nom d&apos;utilisateur</target>
       </segment>
     </unit>
-    <unit id="settings.integrations.email.cleartextCredentials">
+    <unit id="settings.integrations.email.disabledInstance">
       <segment state="translated">
-        <source>Security is None and a username and password are set, so the SMTP AUTH exchange is sent unencrypted and anyone on the network path can read these credentials. Use STARTTLS or SSL/TLS, or clear the username and password if the relay does not require authentication.</source>
-        <target>La sécurité est réglée sur Aucune alors qu&apos;un nom d&apos;utilisateur et un mot de passe sont définis : l&apos;échange SMTP AUTH est transmis en clair et toute personne sur le chemin réseau peut lire ces identifiants. Utilisez STARTTLS ou SSL/TLS, ou effacez le nom d&apos;utilisateur et le mot de passe si le relais n&apos;exige pas d&apos;authentification.</target>
+        <source>Email alerts are on, but the instance mail server isn&apos;t configured — nothing will send. Contact your operator.</source>
+        <target>Les alertes courriel sont activées, mais le serveur de messagerie de l&apos;instance n&apos;est pas configuré — rien ne sera envoyé. Contactez votre exploitant.</target>
       </segment>
     </unit>
-    <unit id="settings.integrations.email.disabledPointer">
+    <unit id="settings.integrations.email.disabledOff">
       <segment state="translated">
-        <source>Email alerts are turned off — enable them on the Alerts tab.</source>
-        <target>Les alertes courriel sont désactivées — activez-les dans l&apos;onglet Alertes.</target>
+        <source>Email alerts are turned off — nothing will send.</source>
+        <target>Les alertes courriel sont désactivées — rien ne sera envoyé.</target>
       </segment>
     </unit>
-    <unit id="settings.integrations.email.effectivelyDisabledInstance">
+    <unit id="settings.integrations.email.disabledRecipients">
       <segment state="translated">
-        <source>Email alerts are on but the instance SMTP transport isn&apos;t configured — nothing will send.</source>
-        <target>Les alertes courriel sont activées mais le transport SMTP de l&apos;instance n&apos;est pas configuré — rien ne sera envoyé.</target>
+        <source>Email alerts are on but no recipients are configured — nothing will send.</source>
+        <target>Les alertes courriel sont activées mais aucun destinataire n&apos;est configuré — rien ne sera envoyé.</target>
       </segment>
     </unit>
-    <unit id="settings.integrations.email.effectivelyDisabledOwnTransport">
+    <unit id="settings.integrations.email.enabled">
       <segment state="translated">
-        <source>Email alerts are on but your own SMTP transport is incomplete — nothing will send.</source>
-        <target>Les alertes courriel sont activées mais votre transport SMTP est incomplet — rien ne sera envoyé.</target>
-      </segment>
-    </unit>
-    <unit id="settings.integrations.email.effectivelyDisabledRecipients">
-      <segment state="translated">
-        <source>Email alerts are on but no recipients are configured on the Alerts tab — nothing will send.</source>
-        <target>Les alertes courriel sont activées mais aucun destinataire n&apos;est configuré dans l&apos;onglet Alertes — rien ne sera envoyé.</target>
-      </segment>
-    </unit>
-    <unit id="settings.integrations.email.from">
-      <segment state="translated">
-        <source>From address</source>
-        <target>Adresse d&apos;expédition</target>
-      </segment>
-    </unit>
-    <unit id="settings.integrations.email.hint">
-      <segment state="translated">
-        <source>SMTP transport for admin alert emails — the instance&apos;s or your own. Turn email alerts on and choose recipients on the Alerts tab.</source>
-        <target>Transport SMTP des courriels d&apos;alerte d&apos;administration — celui de l&apos;instance ou le vôtre. Activez les alertes courriel et choisissez les destinataires dans l&apos;onglet Alertes.</target>
-      </segment>
-    </unit>
-    <unit id="settings.integrations.email.host">
-      <segment state="translated">
-        <source>SMTP host</source>
-        <target>Hôte SMTP</target>
-      </segment>
-    </unit>
-    <unit id="settings.integrations.email.inheritHint">
-      <segment state="translated">
-        <source>Uncheck to configure your own SMTP server instead.</source>
-        <target>Décochez pour configurer votre propre serveur SMTP.</target>
-      </segment>
-    </unit>
-    <unit id="settings.integrations.email.inheritInstance">
-      <segment state="translated">
-        <source>Use the instance&apos;s SMTP transport</source>
-        <target>Utiliser le transport SMTP de l&apos;instance</target>
-      </segment>
-    </unit>
-    <unit id="settings.integrations.email.instanceConfigured">
-      <segment state="translated">
-        <source>Instance SMTP configured</source>
-        <target>SMTP de l&apos;instance configuré</target>
-      </segment>
-    </unit>
-    <unit id="settings.integrations.email.instanceNotConfigured">
-      <segment state="translated">
-        <source>Instance SMTP not configured</source>
-        <target>SMTP de l&apos;instance non configuré</target>
+        <source>Send alerts by email</source>
+        <target>Envoyer les alertes par courriel</target>
       </segment>
     </unit>
     <unit id="settings.integrations.email.lastStatus">
@@ -4763,58 +4745,28 @@
         <target>Dernière livraison de courriel : {status}</target>
       </segment>
     </unit>
-    <unit id="settings.integrations.email.password">
+    <unit id="settings.integrations.email.mailServerConfigured">
       <segment state="translated">
-        <source>Password</source>
-        <target>Mot de passe</target>
+        <source>Mail server ready</source>
+        <target>Serveur de messagerie prêt</target>
       </segment>
     </unit>
-    <unit id="settings.integrations.email.passwordRotateHint">
+    <unit id="settings.integrations.email.mailServerNotConfigured">
       <segment state="translated">
-        <source>Enter a new value to rotate the password. Leave blank to keep the current one.</source>
-        <target>Saisissez une nouvelle valeur pour renouveler le mot de passe. Laissez vide pour conserver l&apos;actuel.</target>
+        <source>No mail server</source>
+        <target>Aucun serveur de messagerie</target>
       </segment>
     </unit>
-    <unit id="settings.integrations.email.passwordSetHint">
+    <unit id="settings.integrations.email.recipients">
       <segment state="translated">
-        <source>SMTP account password. Requires DEPENDABLY_MASTER_KEY to store.</source>
-        <target>Mot de passe du compte SMTP. Nécessite DEPENDABLY_MASTER_KEY pour le stockage.</target>
+        <source>Recipients</source>
+        <target>Destinataires</target>
       </segment>
     </unit>
-    <unit id="settings.integrations.email.port">
+    <unit id="settings.integrations.email.recipientsHint">
       <segment state="translated">
-        <source>Port</source>
-        <target>Port</target>
-      </segment>
-    </unit>
-    <unit id="settings.integrations.email.section">
-      <segment state="translated">
-        <source>Email</source>
-        <target>Courriel</target>
-      </segment>
-    </unit>
-    <unit id="settings.integrations.email.security">
-      <segment state="translated">
-        <source>Security</source>
-        <target>Sécurité</target>
-      </segment>
-    </unit>
-    <unit id="settings.integrations.email.securityNone">
-      <segment state="translated">
-        <source>None</source>
-        <target>Aucune</target>
-      </segment>
-    </unit>
-    <unit id="settings.integrations.email.securitySsl">
-      <segment state="translated">
-        <source>SSL/TLS</source>
-        <target>SSL/TLS</target>
-      </segment>
-    </unit>
-    <unit id="settings.integrations.email.securityStarttls">
-      <segment state="translated">
-        <source>STARTTLS</source>
-        <target>STARTTLS</target>
+        <source>Comma-separated email addresses. Empty means nothing sends. These addresses receive admin alert emails.</source>
+        <target>Adresses courriel séparées par des virgules. Vide signifie que rien n&apos;est envoyé. Ces adresses reçoivent les alertes d&apos;administration.</target>
       </segment>
     </unit>
     <unit id="settings.integrations.email.testFail">
@@ -4825,8 +4777,8 @@
     </unit>
     <unit id="settings.integrations.email.testHint">
       <segment state="translated">
-        <source>Sends to the recipients configured on the Alerts tab.</source>
-        <target>Envoyé aux destinataires configurés dans l&apos;onglet Alertes.</target>
+        <source>Sends to the recipients above, over the instance mail server.</source>
+        <target>Envoyé aux destinataires ci-dessus, via le serveur de messagerie de l&apos;instance.</target>
       </segment>
     </unit>
     <unit id="settings.integrations.email.testOk">
@@ -4841,10 +4793,10 @@
         <target>Envoyer un courriel de test</target>
       </segment>
     </unit>
-    <unit id="settings.integrations.email.username">
+    <unit id="settings.integrations.email.transportPointer">
       <segment state="translated">
-        <source>Username</source>
-        <target>Nom d&apos;utilisateur</target>
+        <source>The mail server itself is instance-wide and is configured by your operator.</source>
+        <target>Le serveur de messagerie lui-même est commun à l&apos;instance et il est configuré par votre exploitant.</target>
       </segment>
     </unit>
     <unit id="settings.integrations.hint">
@@ -5915,6 +5867,84 @@ dotnet/</target>
       <segment state="translated">
         <source>Warn — verify, flag only</source>
         <target>Avertir — vérifier, signaler seulement</target>
+      </segment>
+    </unit>
+    <unit id="settings.relayHealth.affectedTenants">
+      <segment state="translated">
+        <source>Affected tenants</source>
+        <target>Locataires affectés</target>
+      </segment>
+    </unit>
+    <unit id="settings.relayHealth.backlogDepth">
+      <segment state="translated">
+        <source>Backlog depth</source>
+        <target>Profondeur de la file</target>
+      </segment>
+    </unit>
+    <unit id="settings.relayHealth.consecutiveFailures">
+      <segment state="translated">
+        <source>Consecutive failures</source>
+        <target>Échecs consécutifs</target>
+      </segment>
+    </unit>
+    <unit id="settings.relayHealth.deadLettered">
+      <segment state="translated">
+        <source>Dead-lettered</source>
+        <target>Rejetés définitivement</target>
+      </segment>
+    </unit>
+    <unit id="settings.relayHealth.expired">
+      <segment state="translated">
+        <source>Expired</source>
+        <target>Expirés</target>
+      </segment>
+    </unit>
+    <unit id="settings.relayHealth.firstFailure">
+      <segment state="translated">
+        <source>First failure</source>
+        <target>Premier échec</target>
+      </segment>
+    </unit>
+    <unit id="settings.relayHealth.hint">
+      <segment state="translated">
+        <source>Aggregate delivery health of the shared SMTP relay across every tenant, plus the durable alert-email queue&apos;s backlog.</source>
+        <target>Santé de livraison agrégée du relais SMTP partagé entre tous les locataires, ainsi que le retard de la file d&apos;attente durable des courriels d&apos;alerte.</target>
+      </segment>
+    </unit>
+    <unit id="settings.relayHealth.none">
+      <segment state="translated">
+        <source>—</source>
+        <target>—</target>
+      </segment>
+    </unit>
+    <unit id="settings.relayHealth.oldestQueued">
+      <segment state="translated">
+        <source>Oldest queued</source>
+        <target>Plus ancien en attente</target>
+      </segment>
+    </unit>
+    <unit id="settings.relayHealth.refresh">
+      <segment state="translated">
+        <source>Refresh</source>
+        <target>Actualiser</target>
+      </segment>
+    </unit>
+    <unit id="settings.relayHealth.statusHealthy">
+      <segment state="translated">
+        <source>Healthy</source>
+        <target>Sain</target>
+      </segment>
+    </unit>
+    <unit id="settings.relayHealth.statusUnhealthy">
+      <segment state="translated">
+        <source>Unhealthy</source>
+        <target>Défaillant</target>
+      </segment>
+    </unit>
+    <unit id="settings.relayHealth.title">
+      <segment state="translated">
+        <source>SMTP relay health</source>
+        <target>Santé du relais SMTP</target>
       </segment>
     </unit>
     <unit id="settings.retention.activityDays">

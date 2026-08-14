@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Identity;
+using Dependably.Infrastructure.Mail;
 using Dependably.Security;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Configuration;
@@ -435,6 +436,66 @@ public sealed class StartupServiceTests : IAsyncLifetime
         var warnings = await StartAndCaptureWarningsAsync(config);
 
         Assert.DoesNotContain(warnings, w => w.Contains(CoLocatedProxyWarningMarker, StringComparison.Ordinal));
+    }
+
+    // ── Header tenancy needs TRUSTED_PROXIES ────────────────────────────────
+    //
+    // DEPLOYMENT_MODE=header resolves the tenant from a header the edge proxy injects, and that
+    // header is only honoured from a peer in TRUSTED_PROXIES. Unset means no peer qualifies, so
+    // the mode serves nothing at all — a startup warning is the difference between diagnosing
+    // that in a minute and diagnosing it in an afternoon.
+
+    private const string HeaderTenancyWarningMarker = "DEPLOYMENT_MODE=header requires TRUSTED_PROXIES";
+
+    [Fact]
+    public async Task StartAsync_HeaderModeWithoutTrustedProxies_WarnsThatTheHeaderIsNotHonoured()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["DEPLOYMENT_MODE"] = "header" })
+            .Build();
+
+        var warnings = await StartAndCaptureWarningsAsync(config);
+
+        Assert.Contains(warnings, w => w.Contains(HeaderTenancyWarningMarker, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task StartAsync_HeaderModeWithTrustedProxies_NoHeaderTenancyWarning()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["DEPLOYMENT_MODE"] = "header",
+                ["TRUSTED_PROXIES"] = "10.0.0.5"
+            })
+            .Build();
+
+        var warnings = await StartAndCaptureWarningsAsync(config);
+
+        Assert.DoesNotContain(warnings, w => w.Contains(HeaderTenancyWarningMarker, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task StartAsync_NonHeaderModeWithoutTrustedProxies_NoHeaderTenancyWarning()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["DEPLOYMENT_MODE"] = "multi" })
+            .Build();
+
+        var warnings = await StartAndCaptureWarningsAsync(config);
+
+        Assert.DoesNotContain(warnings, w => w.Contains(HeaderTenancyWarningMarker, StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("header", true)]
+    [InlineData(" Header ", true)]
+    [InlineData("multi", false)]
+    [InlineData("single", false)]
+    [InlineData(null, false)]
+    public void IsHeaderTenancyMode_MatchesExpected(string? deploymentMode, bool expected)
+    {
+        Assert.Equal(expected, CoreStartupService.IsHeaderTenancyMode(deploymentMode));
     }
 
     [Theory]

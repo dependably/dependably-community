@@ -652,7 +652,10 @@ public sealed class NpmTarballHandler(
             MaxOsvScoreTolerance: settings.MaxOsvScoreTolerance,
             MinReleaseAgeHours: settings.MinReleaseAgeHours,
             CacheAccess: new CacheAccess(orgId, "npm", fullName, version, file,
-                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: upstreamUrl),
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: upstreamUrl,
+                // ProxyFetchService overwrites the three bytes fields with the values it computed
+                // over the tarball it just staged before handing this to the recorder.
+                Origin: CacheAccessOrigin.FirstFetch),
             UpstreamUrl: upstreamUrl,
             PublishedAt: meta.PublishedAt,
             UpstreamChecksum: meta.Checksum,

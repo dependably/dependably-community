@@ -335,6 +335,8 @@ public sealed class SamlCertExpiryCheckService : BackgroundService
             stage = targetStage,
         }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
 
+        // audit-attribution-ok: scheduled SAML cert-expiry sweep — runs off a background
+        // timer with no inbound request, so there is no actor or source IP to record.
         await _audit.LogAsync(action, orgId: row.OrgId, detail: detail, ct: ct);
         await _samlConfig.SetCertExpiryAlertStageAsync(row.OrgId, targetStage, ct);
 

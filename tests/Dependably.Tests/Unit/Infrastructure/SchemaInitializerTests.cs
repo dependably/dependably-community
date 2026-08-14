@@ -179,6 +179,272 @@ public sealed class SchemaInitializerTests : IAsyncLifetime
         Assert.Equal(1, applied);
     }
 
+    // The seven retired per-org SMTP transport columns. They stay DECLARED — releases still in the
+    // field name all seven in their alert_settings SELECTs, and blue-green runs one of those against
+    // the same database during a cutover — and only their values are cleared, so every test below
+    // asserts on values and on continued column existence, never on a column going away.
+    private static readonly string[] RetiredSmtpColumns =
+    [
+        "email_inherit_instance", "email_smtp_host", "email_smtp_port", "email_smtp_security",
+        "email_smtp_username", "email_smtp_password", "email_smtp_from",
+    ];
+
+    private static readonly string[] SeededScrubOrgIds =
+        ["own-transport", "inheriting-but-dirty", "already-clean"];
+
+    // The scrub's own predicate: rows that still hold a retired value. Zero matches is precisely
+    // what "a second run updates nothing" means, so the idempotency test asserts on this directly
+    // instead of inferring it from an unchanged snapshot alone.
+    private const string UnscrubbedRowCountSql = """
+        SELECT COUNT(*) FROM alert_settings
+        WHERE COALESCE(email_inherit_instance, 0) <> 1
+           OR email_smtp_host IS NOT NULL
+           OR email_smtp_port IS NOT NULL
+           OR email_smtp_security IS NOT NULL
+           OR email_smtp_username IS NOT NULL
+           OR email_smtp_password IS NOT NULL
+           OR email_smtp_from IS NOT NULL
+        """;
+
+    /// <summary>
+    /// Seeds three orgs in the shapes a release with a per-org SMTP transport left behind, with the
+    /// live delivery channel and the health columns populated alongside so the scrub's blast radius
+    /// is observable:
+    ///
+    /// <list type="bullet">
+    /// <item><c>own-transport</c> — email_inherit_instance = 0 with a fully populated transport,
+    /// including an envelope-encrypted email_smtp_password. This is the row that matters: an older
+    /// slot reads the 0 and resolves this org's own host, so a scrub that NULLed the host without
+    /// forcing the flag back to 1 would send that slot down the own-transport branch with nothing to
+    /// dial, which resolves as unconfigured and silently stops the org's mail.</item>
+    /// <item><c>inheriting-but-dirty</c> — email_inherit_instance already 1 while the transport
+    /// columns are still populated. The flag needs no change; the stale credential still has to go.</item>
+    /// <item><c>already-clean</c> — nothing retired set, so it comes through untouched and is not
+    /// what makes the assertions pass.</item>
+    /// </list>
+    /// </summary>
+    private async Task SeedRetiredSmtpTransportRowsAsync()
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO orgs (id, slug) VALUES
+                ('own-transport', 'acme'),
+                ('inheriting-but-dirty', 'globex'),
+                ('already-clean', 'initech')
+            """);
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO alert_settings
+                (org_id, quarantine_alerts_enabled, vuln_alerts_enabled, vuln_min_severity,
+                 slack_enabled, slack_webhook_url, slack_last_status, slack_consecutive_failures,
+                 slack_failing_since, slack_last_error,
+                 email_enabled, email_recipients,
+                 email_inherit_instance, email_smtp_host, email_smtp_port, email_smtp_security,
+                 email_smtp_username, email_smtp_password, email_smtp_from,
+                 email_last_status, email_consecutive_failures, email_failing_since, email_last_error)
+            VALUES
+                ('own-transport', 1, 0, 'CRITICAL',
+                 1, 'enc:v1:slack-hook', 'failed', 2,
+                 '2024-03-02T00:00:00Z', 'slack said no',
+                 1, 'ops@example.com,sec@example.com',
+                 0, 'own.example.com', 2525, 'ssl',
+                 'own-user', 'enc:v1:own-secret', 'alerts@own.example.com',
+                 'failed', 3, '2024-03-01T00:00:00Z', 'relay refused the connection'),
+                ('inheriting-but-dirty', 0, 1, 'LOW',
+                 0, NULL, NULL, 0,
+                 NULL, NULL,
+                 1, 'dev@example.com',
+                 1, 'stale.example.com', 587, 'starttls',
+                 'stale-user', 'enc:v1:stale-secret', 'alerts@stale.example.com',
+                 'ok', 0, NULL, NULL),
+                ('already-clean', 1, 1, 'HIGH',
+                 0, NULL, NULL, 0,
+                 NULL, NULL,
+                 1, 'quiet@example.com',
+                 1, NULL, NULL, NULL,
+                 NULL, NULL, NULL,
+                 NULL, 0, NULL, NULL)
+            """);
+    }
+
+    // Brings the database to the pre-scrub state: a full init (so the schema, and therefore all
+    // seven columns, exist), the legacy rows, then a rewind of the ledger entry so the next init
+    // re-runs the scrub over them.
+    private async Task ArrangePreScrubAsync()
+    {
+        await NewInitializer(_db).InitializeAsync();
+        await SeedRetiredSmtpTransportRowsAsync();
+        await ResetMigrationAsync("scrub_alert_settings_retired_smtp_transport");
+    }
+
+    [Fact]
+    public async Task ScrubAlertSettingsRetiredSmtpTransport_ClearsEveryOrgsTransportAndKeepsAllSevenColumns()
+    {
+        await ArrangePreScrubAsync();
+
+        await NewInitializer(_db).InitializeAsync();
+
+        await using var verify = await _db.OpenAsync();
+        foreach (string orgId in SeededScrubOrgIds)
+        {
+            var row = await verify.QuerySingleAsync<(long InheritInstance, string? Host, long? Port,
+                string? Security, string? Username, string? Password, string? FromAddress)>(
+                """
+                SELECT email_inherit_instance AS InheritInstance,
+                       email_smtp_host AS Host,
+                       email_smtp_port AS Port,
+                       email_smtp_security AS Security,
+                       email_smtp_username AS Username,
+                       email_smtp_password AS Password,
+                       email_smtp_from AS FromAddress
+                FROM alert_settings WHERE org_id = @orgId
+                """, new { orgId });
+
+            // Forcing the flag to 1 is what routes an older slot to the instance transport rather
+            // than down the own-transport branch with a NULLed host.
+            Assert.Equal(1, row.InheritInstance);
+            Assert.Null(row.Host);
+            Assert.Null(row.Port);
+            Assert.Null(row.Security);
+            Assert.Null(row.Username);
+            // The envelope-encrypted credential is the whole reason the scrub exists.
+            Assert.Null(row.Password);
+            Assert.Null(row.FromAddress);
+        }
+
+        Assert.Equal(0, await verify.ExecuteScalarAsync<long>(UnscrubbedRowCountSql));
+
+        // The other half of the posture, asserted on the same database in the same pass: the values
+        // go and the columns stay. An old blue-green slot still SELECTs all seven by name, so a drop
+        // would satisfy every value assertion above and still break that slot's entire
+        // alert-settings read.
+        foreach (string column in RetiredSmtpColumns)
+        {
+            long present = await verify.ExecuteScalarAsync<long>(
+                "SELECT COUNT(*) FROM pragma_table_info('alert_settings') WHERE name = @column",
+                new { column });
+            Assert.True(present == 1, $"Expected {column} to still be declared on alert_settings.");
+        }
+
+        string? integrity = await verify.ExecuteScalarAsync<string>("PRAGMA integrity_check");
+        Assert.Equal("ok", integrity);
+    }
+
+    [Fact]
+    public async Task ScrubAlertSettingsRetiredSmtpTransport_IsIdempotent()
+    {
+        await ArrangePreScrubAsync();
+
+        await NewInitializer(_db).InitializeAsync();
+        string firstPass = await SnapshotAlertSettingsAsync();
+
+        // Rewind and re-run: the second pass sees rows that are already clean, so its predicate
+        // matches nothing. It must neither throw nor change a byte.
+        await ResetMigrationAsync("scrub_alert_settings_retired_smtp_transport");
+        var ex = await Record.ExceptionAsync(() => NewInitializer(_db).InitializeAsync());
+        Assert.Null(ex);
+
+        Assert.Equal(firstPass, await SnapshotAlertSettingsAsync());
+
+        await using var verify = await _db.OpenAsync();
+        Assert.Equal(0, await verify.ExecuteScalarAsync<long>(UnscrubbedRowCountSql));
+        Assert.Equal(1, await verify.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM _applied_migrations WHERE name = 'scrub_alert_settings_retired_smtp_transport'"));
+    }
+
+    [Fact]
+    public async Task ScrubAlertSettingsRetiredSmtpTransport_LeavesLiveEmailAndSlackColumnsUntouched()
+    {
+        await ArrangePreScrubAsync();
+
+        await NewInitializer(_db).InitializeAsync();
+
+        await using var verify = await _db.OpenAsync();
+
+        // The delivery channel an org actually owns. Clearing either of these would silently stop
+        // that tenant's alert email — the failure this assertion exists to catch, because the scrub
+        // writes columns whose names share the email_ prefix with them.
+        var (enabled, recipients) = await verify.QuerySingleAsync<(long Enabled, string Recipients)>(
+            """
+            SELECT email_enabled AS Enabled, email_recipients AS Recipients
+            FROM alert_settings WHERE org_id = 'own-transport'
+            """);
+        Assert.Equal(1, enabled);
+        Assert.Equal("ops@example.com,sec@example.com", recipients);
+
+        // Health is reality and stays independent of configuration: the scrub records nothing about
+        // delivery and erases nothing about it either.
+        var (lastStatus, consecutive, failingSince, lastError) =
+            await verify.QuerySingleAsync<(string LastStatus, long Consecutive, string FailingSince, string LastError)>(
+                """
+                SELECT email_last_status AS LastStatus,
+                       email_consecutive_failures AS Consecutive,
+                       email_failing_since AS FailingSince,
+                       email_last_error AS LastError
+                FROM alert_settings WHERE org_id = 'own-transport'
+                """);
+        Assert.Equal("failed", lastStatus);
+        Assert.Equal(3, consecutive);
+        Assert.Equal("2024-03-01T00:00:00Z", failingSince);
+        Assert.Equal("relay refused the connection", lastError);
+
+        // Slack is a different, tenant-owned delivery channel on the same row.
+        var (slackEnabled, webhook, slackStatus, slackConsecutive, slackSince, slackError) =
+            await verify.QuerySingleAsync<(long SlackEnabled, string Webhook, string SlackStatus,
+                long SlackConsecutive, string SlackSince, string SlackError)>(
+                """
+                SELECT slack_enabled AS SlackEnabled,
+                       slack_webhook_url AS Webhook,
+                       slack_last_status AS SlackStatus,
+                       slack_consecutive_failures AS SlackConsecutive,
+                       slack_failing_since AS SlackSince,
+                       slack_last_error AS SlackError
+                FROM alert_settings WHERE org_id = 'own-transport'
+                """);
+        Assert.Equal(1, slackEnabled);
+        Assert.Equal("enc:v1:slack-hook", webhook);
+        Assert.Equal("failed", slackStatus);
+        Assert.Equal(2, slackConsecutive);
+        Assert.Equal("2024-03-02T00:00:00Z", slackSince);
+        Assert.Equal("slack said no", slackError);
+
+        // The alert-raising gates are not a delivery channel at all, and are equally out of scope.
+        var (quarantine, vuln, severity) = await verify.QuerySingleAsync<(long Quarantine, long Vuln, string Severity)>(
+            """
+            SELECT quarantine_alerts_enabled AS Quarantine,
+                   vuln_alerts_enabled AS Vuln,
+                   vuln_min_severity AS Severity
+            FROM alert_settings WHERE org_id = 'own-transport'
+            """);
+        Assert.Equal(1, quarantine);
+        Assert.Equal(0, vuln);
+        Assert.Equal("CRITICAL", severity);
+
+        // Every seeded row survives — a value scrub never changes which rows exist.
+        Assert.Equal(3, await verify.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM alert_settings WHERE org_id IN @orgIds", new { orgIds = SeededScrubOrgIds }));
+
+        // …and the scrub did run over this row. Without this the test would pass vacuously on a
+        // build with no scrub at all, asserting only that nothing happened. The pair is the actual
+        // property: these columns are cleared, those ones are not.
+        Assert.Equal(0, await verify.ExecuteScalarAsync<long>(UnscrubbedRowCountSql));
+    }
+
+    // Whole-table snapshot over every column the table currently declares, so the idempotency test
+    // proves the second pass changes nothing at all rather than nothing among the columns a test
+    // happened to name.
+    private async Task<string> SnapshotAlertSettingsAsync()
+    {
+        await using var conn = await _db.OpenAsync();
+        var rows = await conn.QueryAsync("SELECT * FROM alert_settings ORDER BY org_id");
+        return string.Join("\n", rows
+            .Cast<IDictionary<string, object>>()
+            .Select(row => string.Join("; ", row
+                .OrderBy(cell => cell.Key, StringComparer.Ordinal)
+                .Select(cell => cell.Key + "=" + (cell.Value?.ToString() ?? "<null>")))));
+    }
+
     [Fact]
     public async Task DropAllowlistBlocklistEcosystem_RecreatesTablesPreservingRows()
     {

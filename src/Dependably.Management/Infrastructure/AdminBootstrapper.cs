@@ -36,7 +36,8 @@ public sealed class AdminBootstrapper : IAdminBootstrapper
         string rawPassword = config["FIRST_BOOT_ADMIN_PASSWORD"]
             ?? Convert.ToBase64String(RandomNumberGenerator.GetBytes(16));
         string passwordHash = BCrypt.Net.BCrypt.HashPassword(rawPassword, workFactor: 12);
-        string adminEmail = config["FIRST_BOOT_ADMIN_EMAIL"] ?? "admin@dependably.local";
+        string adminEmail = EmailNormalizer.Normalize(
+            config["FIRST_BOOT_ADMIN_EMAIL"] ?? "admin@dependably.local");
         string adminId = NewId();
 
         // 1:1 user:tenant model — tenant_id and role live on the user row directly.
@@ -60,7 +61,8 @@ public sealed class AdminBootstrapper : IAdminBootstrapper
             ?? config["FIRST_BOOT_ADMIN_PASSWORD"]
             ?? Convert.ToBase64String(RandomNumberGenerator.GetBytes(16));
         string passwordHash = BCrypt.Net.BCrypt.HashPassword(rawPassword, workFactor: 12);
-        string email = config["FIRST_BOOT_SYSTEM_ADMIN_EMAIL"] ?? "system@dependably.local";
+        string email = EmailNormalizer.Normalize(
+            config["FIRST_BOOT_SYSTEM_ADMIN_EMAIL"] ?? "system@dependably.local");
         string id = NewId();
 
         conn.Execute(

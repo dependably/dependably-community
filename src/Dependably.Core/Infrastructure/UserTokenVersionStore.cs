@@ -10,11 +10,16 @@ namespace Dependably.Infrastructure;
 /// session JWTs snapshot the version at issuance (the <c>tver</c> claim) and are rejected once
 /// the stored version moves on — the password-change session-invalidation mechanism.
 ///
-/// Caching mirrors <see cref="JwtRevocationRepository"/>: every JWT-authenticated request hits
-/// this lookup, and in steady state the version is unchanged, so the value is cached for
+/// Caching mirrors the JWT revocation store: every JWT-authenticated request hits this lookup,
+/// and in steady state the version is unchanged, so the value is cached for
 /// <see cref="CacheTtl"/>. A password change bumps the version and calls
-/// <see cref="Invalidate"/>, so on the bumping node stale sessions die immediately; other nodes
-/// converge within one TTL.
+/// <see cref="Invalidate"/>, so on the bumping node stale sessions die immediately.
+///
+/// A peer replica cannot see that eviction, so the cache is supplied only where this process has
+/// no peers: <see cref="SessionRevocationCachePolicy"/> passes null under
+/// <c>DEPENDABLY_DEPLOYMENT_MODE=ha</c> and the version is then read from the database on every
+/// request, so a bump on any replica invalidates outstanding sessions on all of them at once
+/// rather than after a per-replica TTL.
 ///
 /// Fill and invalidation race: a lookup that reads the DB just before a concurrent version bump
 /// commits would otherwise cache the pre-bump value <em>after</em> <see cref="Invalidate"/> has

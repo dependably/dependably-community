@@ -8,6 +8,7 @@ import {
   mintUserToken,
   auth,
   fixturesRoot,
+  toUpdateOrgSettingsRequest,
 } from '../../helpers/api-client.js'
 
 // Real tarball: tests/Dependably.Tests/Fixtures/packages/npm/is-odd-3.0.1.tgz
@@ -133,8 +134,8 @@ test.describe('API: npm push/pull', () => {
     const authed = await loginAsAdmin(baseURL!)
     // npm controller reads org-level MaxUploadBytesNpm only (no instance fallback).
     const current = await (await authed.get('/api/v1/settings')).json()
-    const restore = { ...current, maxUploadBytesNpm: null }
-    const lowered = { ...current, maxUploadBytesNpm: 128 }
+    const restore = toUpdateOrgSettingsRequest(current, { maxUploadBytesNpm: null })
+    const lowered = toUpdateOrgSettingsRequest(current, { maxUploadBytesNpm: 128 })
     try {
       const setLow = await authed.put('/api/v1/settings', { data: lowered })
       expect([200, 204]).toContain(setLow.status())
