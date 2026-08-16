@@ -25,6 +25,7 @@
   import { sortIndicator } from './sortIndicator.js'
   import { rememberedRowCount, rememberRowCount } from './tableSize.js'
   import { fileRowKey } from './versionFiles.js'
+  import { compareVersions, defaultSortColumn } from './versionOrder.js'
 
   /** @type {{ ecosystem: string, isProxy: boolean, name: string, upstreamLatestVersion?: string | null, latestState?: string, abandonedState?: string } | null} */
   export let pkg = null
@@ -55,7 +56,14 @@
 
   const dispatch = createEventDispatcher()
 
-  let sortCol = 'pushed', sortDir = 'desc'
+  // Default sort — see defaultSortColumn for why it is per-ecosystem. Resolved
+  // reactively rather than at declaration because the parent loads `pkg`
+  // asynchronously, so the ecosystem is not known yet when this component is
+  // constructed. `sortTouched` freezes the choice the moment the user picks a
+  // column, so a late-arriving `pkg` can never yank the sort out from under them.
+  let sortCol = defaultSortColumn(null), sortDir = 'desc'
+  let sortTouched = false
+  $: if (!sortTouched && pkg) sortCol = defaultSortColumn(pkg.ecosystem)
   let expandedKey = null
   let openActionsId = null
   let popoverPos = { top: 0, left: 0 }
@@ -153,7 +161,7 @@
 
   $: sortedGroups = [...groups].sort((a, b) => {
     let cmp = 0
-    if (sortCol === 'version')  cmp = a.version.localeCompare(b.version, undefined, { numeric: true, sensitivity: 'base' })
+    if (sortCol === 'version')  cmp = compareVersions(a.version, b.version)
     else if (sortCol === 'size')      cmp = a.sizeBytes - b.sizeBytes
     else if (sortCol === 'pushed')    cmp = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
     else if (sortCol === 'checksum')  cmp = (a.checksumSha256 ?? '').localeCompare(b.checksumSha256 ?? '')
@@ -176,6 +184,7 @@
   $: showPlaceholder = loading && sortedGroups.length === 0
 
   function toggleSort(col) {
+    sortTouched = true
     if (sortCol === col) sortDir = sortDir === 'asc' ? 'desc' : 'asc'
     else { sortCol = col; sortDir = 'desc' }
   }

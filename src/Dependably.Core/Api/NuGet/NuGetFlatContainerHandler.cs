@@ -296,7 +296,7 @@ public sealed class NuGetFlatContainerHandler(
 
         if (await blocklist.IsBlockedAsync(orgId, purlCheck, ct))
         {
-            await audit.LogActivityAsync(orgId, "nuget", purlCheck, "blocked", token?.UserId,
+            await audit.LogActivityAsync(orgId, "nuget", purlCheck, "blocked", token?.AuditActorId, actorLabel: token?.AuditActorLabel,
                 actorKind: token?.ActorKind, sourceIp: httpContext.GetNormalizedRemoteIp(), ct: ct);
             return new StatusCodeResult(StatusCodes.Status403Forbidden);
         }
@@ -513,7 +513,7 @@ public sealed class NuGetFlatContainerHandler(
             httpContext.Response.Headers.ETag = $"\"sha256:{serveChecksum}\"";
             httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
         }
-        await audit.LogActivityAsync(orgId, "nuget", pkgVersion.Purl, "download", token?.UserId,
+        await audit.LogActivityAsync(orgId, "nuget", pkgVersion.Purl, "download", token?.AuditActorId, actorLabel: token?.AuditActorLabel,
             actorKind: token?.ActorKind, sourceIp: sourceIp, ct: ct);
         await packages.IncrementDownloadCountAsync(pkgVersion.Id, ct);
         return new FileStreamResult(stream, "application/octet-stream") { FileDownloadName = file };
@@ -547,7 +547,7 @@ public sealed class NuGetFlatContainerHandler(
         }
         if (caFacts.Purl is not null)
         {
-            await audit.LogActivityAsync(orgId, "nuget", caFacts.Purl, "download", token?.UserId,
+            await audit.LogActivityAsync(orgId, "nuget", caFacts.Purl, "download", token?.AuditActorId, actorLabel: token?.AuditActorLabel,
                 actorKind: token?.ActorKind, sourceIp: sourceIp, ct: ct);
         }
         // Increment per-tenant download count on the global plane. Enqueued off the request

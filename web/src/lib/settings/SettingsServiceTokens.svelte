@@ -15,7 +15,7 @@
   import { formatDateShort } from '../format.js'
   import { copyToClipboard } from '../clipboard.js'
   import DataTable from '../DataTable.svelte'
-  import { presetToCapabilities, capabilitiesToLabel, PACKAGE_PRESETS, PRIVILEGED_PRESETS } from '../tokenCapabilities.js'
+  import { presetToCapabilities, capabilitiesToLabel, capabilitiesToText, PACKAGE_PRESETS, PRIVILEGED_PRESETS } from '../tokenCapabilities.js'
 
   // This tab is admin-only, so all presets — package and privileged — are offered.
   const scopeOptions = [...PACKAGE_PRESETS, ...PRIVILEGED_PRESETS]
@@ -74,7 +74,8 @@
     { key: 'actions',     label: '',                                      sortable: false, width: '90px' },
   ]
   const comparators = {
-    scope: (a, b) => capabilitiesToLabel(a.capabilities).localeCompare(capabilitiesToLabel(b.capabilities)),
+    scope: (a, b) => capabilitiesToLabel(a.capabilities).localeCompare(capabilitiesToLabel(b.capabilities))
+      || capabilitiesToText(a.capabilities).localeCompare(capabilitiesToText(b.capabilities)),
     description: (a, b) => (a.description || '').localeCompare(b.description || ''),
   }
 </script>
@@ -108,10 +109,14 @@
   let:row={tok}
 >
   {@const label = capabilitiesToLabel(tok.capabilities)}
+  {@const caps = capabilitiesToText(tok.capabilities)}
   <tr>
     <td>{tok.name}</td>
     <td class="t-sm" title={tok.description || ''}>{tok.description || '—'}</td>
-    <td><span class="badge {label}">{label === '—' ? '—' : $t('tokenScopes.' + label)}</span></td>
+    <td>
+      <span class="badge {label}">{label === '—' ? '—' : $t('tokenScopes.' + label)}</span>
+      <span class="cap-list t-mono">{caps}</span>
+    </td>
     <td class="text-muted date-cell">{$formatDateShort(tok.createdAt)}</td>
     <td class="date-cell">
       {#if expired(tok)}<span class="badge expired">{$t('serviceTokens.expired')}</span>
@@ -146,4 +151,15 @@
 <style>
   /* Dates read as one token — never wrap "May 31, 2026" onto two lines. */
   .date-cell { white-space: nowrap; }
+
+  /* The badge is shorthand; this is the credential's actual grant. Rendered rather than
+     tucked into a title attribute because "what can this token do" is the question the
+     page exists to answer, and a tooltip is invisible to anyone comparing two rows. */
+  .cap-list {
+    display: block;
+    margin-top: 2px;
+    font-size: 11px;
+    color: var(--text2);
+    overflow-wrap: anywhere;
+  }
 </style>

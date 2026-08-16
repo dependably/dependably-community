@@ -270,6 +270,10 @@ public sealed class HostFilteringTests
         {
             var builder = WebApplication.CreateBuilder();
 
+            // deploymode-ok: every caller supplies DEPLOYMENT_MODE through _settings, which is
+            // applied here before ConfigureBuilder — this factory exists to exercise several
+            // modes, so the key is a constructor parameter rather than a literal the scanner
+            // can see in this class body.
             // Inject settings into IConfiguration before ConfigureBuilder runs so
             // ConfigureHostFiltering (which reads BASE_URL/DEPLOYMENT_MODE from
             // builder.Configuration at call time) sees the correct values.

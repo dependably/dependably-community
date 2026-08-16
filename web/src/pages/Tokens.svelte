@@ -7,7 +7,7 @@
   import { formatDateShort } from '../lib/format.js'
   import { copyToClipboard } from '../lib/clipboard.js'
   import DataTable from '../lib/DataTable.svelte'
-  import { presetToCapabilities, capabilitiesToLabel, PACKAGE_PRESETS, PRIVILEGED_PRESETS } from '../lib/tokenCapabilities.js'
+  import { presetToCapabilities, capabilitiesToLabel, capabilitiesToText, PACKAGE_PRESETS, PRIVILEGED_PRESETS } from '../lib/tokenCapabilities.js'
 
   /** The route transition this page was mounted for, supplied by RouteView. @type {number | null} */
   export let pageToken = null
@@ -77,7 +77,8 @@
     { key: 'actions',     label: '',                               sortable: false, width: '90px' },
   ]
   const comparators = {
-    scope: (a, b) => capabilitiesToLabel(a.capabilities).localeCompare(capabilitiesToLabel(b.capabilities)),
+    scope: (a, b) => capabilitiesToLabel(a.capabilities).localeCompare(capabilitiesToLabel(b.capabilities))
+      || capabilitiesToText(a.capabilities).localeCompare(capabilitiesToText(b.capabilities)),
     description: (a, b) => (a.description || '').localeCompare(b.description || ''),
   }
 </script>
@@ -114,10 +115,14 @@
     let:row={tok}
   >
     {@const label = capabilitiesToLabel(tok.capabilities)}
+    {@const caps = capabilitiesToText(tok.capabilities)}
     <tr>
       <td class="t-mono t-sm">{tok.id.slice(0,8)}…</td>
       <td class="t-sm" title={tok.description || ''}>{tok.description || '—'}</td>
-      <td><span class="badge {label}">{label === '—' ? '—' : $t('tokenScopes.' + label)}</span></td>
+      <td>
+        <span class="badge {label}">{label === '—' ? '—' : $t('tokenScopes.' + label)}</span>
+        <span class="cap-list t-mono">{caps}</span>
+      </td>
       <td class="text-muted">{$formatDateShort(tok.createdAt)}</td>
       <td>
         {#if expired(tok)}<span class="badge expired">{$t('tokens.expired')}</span>
@@ -155,3 +160,16 @@
     </div>
   </div>
 {/if}
+
+<style>
+  /* The badge is shorthand; this is the credential's actual grant. Rendered rather than
+     tucked into a title attribute because "what can this token do" is the question the
+     page exists to answer, and a tooltip is invisible to anyone comparing two rows. */
+  .cap-list {
+    display: block;
+    margin-top: 2px;
+    font-size: 11px;
+    color: var(--text2);
+    overflow-wrap: anywhere;
+  }
+</style>

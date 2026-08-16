@@ -814,7 +814,7 @@ public sealed class TerraformController : OrgScopedControllerBase
             // from BlockGateService.DeclaredLicenseEcosystems: recording zero licences here is the
             // normal case, not an unknown-licence signal.
             ExtractLicenses: null,
-            UserId: token?.UserId,
+            AuditActorId: token?.AuditActorId, AuditActorLabel: token?.AuditActorLabel,
             ActorKind: token?.ActorKind,
             SourceIp: HttpContext.GetNormalizedRemoteIp(),
             MaxOsvScoreTolerance: settings?.MaxOsvScoreTolerance ?? DefaultMaxOsvScoreTolerance,

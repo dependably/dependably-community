@@ -1,3 +1,4 @@
+using Dependably.Infrastructure;
 using Dependably.Security;
 
 namespace Dependably.Tests.Unit;
@@ -87,7 +88,44 @@ public class CapabilitiesTests
         var granted = new HashSet<string> { "publish:*" };
         Assert.True(Capabilities.Grants(granted, Capabilities.PublishNpm));
         Assert.True(Capabilities.Grants(granted, Capabilities.PublishPypi));
-        Assert.False(Capabilities.Grants(granted, Capabilities.ImportNpm));
+        // A family wildcard stays inside its family: it never reaches a sibling family's
+        // leaf or wildcard. This is what keeps "can publish" from meaning "can also delete".
+        Assert.False(Capabilities.Grants(granted, Capabilities.YankNpm));
+        Assert.False(Capabilities.Grants(granted, Capabilities.ImportAll));
+        Assert.False(Capabilities.Grants(granted, Capabilities.ReadArtifact));
+    }
+
+    /// <summary>
+    /// The capability column is parsed all-or-nothing: one non-string element aborts the whole
+    /// deserialize and the token is left granting nothing. Pinned because the UI mirrors this
+    /// rule to decide what to display, and a UI that filtered the bad entries and rendered the
+    /// rest would show a grant the credential does not hold — the exact confusion the display
+    /// exists to remove.
+    /// </summary>
+    [Theory]
+    [InlineData("[\"read:metadata\",1]")]
+    [InlineData("[1,2,3]")]
+    [InlineData("{\"foo\":1}")]
+    [InlineData("not-json")]
+    [InlineData("[]")]
+    [InlineData("")]
+    [InlineData(null)]
+    public void CapabilitySet_MalformedOrMixedTypeValue_GrantsNothing(string? stored)
+    {
+        var token = new TokenRecord { Capabilities = stored };
+
+        Assert.Empty(token.CapabilitySet);
+        Assert.False(Capabilities.Grants(token.CapabilitySet, Capabilities.ReadMetadata));
+        Assert.False(Capabilities.Grants(token.CapabilitySet, Capabilities.PublishOci));
+    }
+
+    /// <summary>A blank entry is dropped, and the surrounding grants survive.</summary>
+    [Fact]
+    public void CapabilitySet_BlankEntry_IsDroppedWithoutVoidingTheRest()
+    {
+        var token = new TokenRecord { Capabilities = "[\"read:metadata\",\"  \"]" };
+
+        Assert.Equal(["read:metadata"], token.CapabilitySet);
     }
 
     [Fact]

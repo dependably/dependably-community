@@ -238,6 +238,7 @@ public sealed class ActivityWriterHostedService : BackgroundService
                 AddParameter(cmd, "@EventType", row.EventType);
                 AddParameter(cmd, "@ActorId", row.ActorId);
                 AddParameter(cmd, "@ActorKind", row.ActorKind);
+                AddParameter(cmd, "@ActorLabel", row.ActorLabel);
                 AddParameter(cmd, "@Detail", row.Detail);
                 AddParameter(cmd, "@SourceIp", row.SourceIp);
                 AddParameter(cmd, "@CreatedAt", row.CreatedAt);
@@ -260,8 +261,8 @@ public sealed class ActivityWriterHostedService : BackgroundService
 
     private const string InsertActivitySql =
         """
-        INSERT INTO activity (id, org_id, ecosystem, purl, event_type, actor_id, actor_kind, detail, source_ip, created_at)
-        VALUES (@Id, @OrgId, @Ecosystem, @Purl, @EventType, @ActorId, @ActorKind, @Detail, @SourceIp, @CreatedAt)
+        INSERT INTO activity (id, org_id, ecosystem, purl, event_type, actor_id, actor_kind, actor_label, detail, source_ip, created_at)
+        VALUES (@Id, @OrgId, @Ecosystem, @Purl, @EventType, @ActorId, @ActorKind, @ActorLabel, @Detail, @SourceIp, @CreatedAt)
         """;
 
     private static void AddParameter(DbBatchCommand command, string name, object? value)

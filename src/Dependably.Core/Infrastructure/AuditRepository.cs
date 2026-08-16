@@ -38,8 +38,9 @@ public sealed class AuditRepository
         string? purl = null,
         string? detail = null,
         string? sourceIp = null,
+        string? actorLabel = null,
         CancellationToken ct = default)
-        => WriteAsync(new AuditWrite(action, "tenant", orgId, actorId, actorKind, ecosystem, purl, detail, sourceIp), ct);
+        => WriteAsync(new AuditWrite(action, "tenant", orgId, actorId, actorKind, ecosystem, purl, detail, sourceIp, actorLabel), ct);
 
     // System-scope events (operator dashboard) — keeps tenant-business events filtered out of
     // the system audit list and vice versa. system_admin actors aren't users or service tokens,
@@ -51,7 +52,7 @@ public sealed class AuditRepository
         string? detail = null,
         string? sourceIp = null,
         CancellationToken ct = default)
-        => WriteAsync(new AuditWrite(action, "system", orgId, actorId, null, null, null, detail, sourceIp), ct);
+        => WriteAsync(new AuditWrite(action, "system", orgId, actorId, null, null, null, detail, sourceIp, null), ct);
 
     /// <summary>
     /// <see cref="LogSystemAsync(string,string?,string?,string?,string?,CancellationToken)"/> written
@@ -70,7 +71,7 @@ public sealed class AuditRepository
         string? detail = null,
         string? sourceIp = null,
         CancellationToken ct = default)
-        => WriteAsync(new AuditWrite(action, "system", orgId, actorId, null, null, null, detail, sourceIp), conn, tx, ct);
+        => WriteAsync(new AuditWrite(action, "system", orgId, actorId, null, null, null, detail, sourceIp, null), conn, tx, ct);
 
     private async Task WriteAsync(AuditWrite entry, CancellationToken ct)
     {
@@ -82,8 +83,8 @@ public sealed class AuditRepository
     {
         await conn.ExecuteAsync(new CommandDefinition(
             """
-            INSERT INTO audit_log (id, scope, org_id, actor_id, actor_kind, action, ecosystem, purl, detail, source_ip, created_at)
-            VALUES (@id, @scope, @orgId, @actorId, @actorKind, @action, @ecosystem, @purl, @detail, @sourceIp, @createdAt)
+            INSERT INTO audit_log (id, scope, org_id, actor_id, actor_kind, actor_label, action, ecosystem, purl, detail, source_ip, created_at)
+            VALUES (@id, @scope, @orgId, @actorId, @actorKind, @actorLabel, @action, @ecosystem, @purl, @detail, @sourceIp, @createdAt)
             """,
             new
             {
@@ -92,6 +93,7 @@ public sealed class AuditRepository
                 orgId = entry.OrgId,
                 actorId = entry.ActorId,
                 actorKind = entry.ActorKind,
+                actorLabel = entry.ActorLabel,
                 action = entry.Action,
                 ecosystem = entry.Ecosystem,
                 purl = entry.Purl,
@@ -106,7 +108,7 @@ public sealed class AuditRepository
         string Action, string Scope,
         string? OrgId, string? ActorId, string? ActorKind,
         string? Ecosystem, string? Purl, string? Detail,
-        string? SourceIp);
+        string? SourceIp, string? ActorLabel);
 
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
         Justification = "Optional named-arg surface for per-version activity events; bundling would churn dozens of call sites for no readability gain.")]
@@ -119,6 +121,10 @@ public sealed class AuditRepository
         string? actorKind = null,
         string? detail = null,
         string? sourceIp = null,
+        // Appended rather than placed beside actorKind on purpose: AuditAttributionComplianceTests
+        // resolves these arguments positionally as a fallback, so inserting mid-signature would
+        // silently shift sourceIp's index and blind that gate on positional call sites.
+        string? actorLabel = null,
         CancellationToken ct = default)
     {
         var record = new ActivityRecord(
@@ -129,6 +135,7 @@ public sealed class AuditRepository
             EventType: eventType,
             ActorId: actorId,
             ActorKind: actorKind,
+            ActorLabel: actorLabel,
             Detail: detail,
             SourceIp: sourceIp,
             CreatedAt: NowMs());
@@ -147,8 +154,8 @@ public sealed class AuditRepository
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             """
-            INSERT INTO activity (id, org_id, ecosystem, purl, event_type, actor_id, actor_kind, detail, source_ip, created_at)
-            VALUES (@Id, @OrgId, @Ecosystem, @Purl, @EventType, @ActorId, @ActorKind, @Detail, @SourceIp, @CreatedAt)
+            INSERT INTO activity (id, org_id, ecosystem, purl, event_type, actor_id, actor_kind, actor_label, detail, source_ip, created_at)
+            VALUES (@Id, @OrgId, @Ecosystem, @Purl, @EventType, @ActorId, @ActorKind, @ActorLabel, @Detail, @SourceIp, @CreatedAt)
             """,
             record);
     }
@@ -286,7 +293,8 @@ public sealed class AuditRepository
         var rows = await conn.QueryAsync<AuditEntry>(
             """
             SELECT a.id, a.scope as Scope, a.org_id as OrgId, a.actor_id as ActorId,
-                   CASE WHEN a.actor_kind = 'service' THEN 'service:' || st.name
+                   CASE WHEN a.actor_kind = 'service'
+                             THEN 'service:' || COALESCE(a.actor_label, st.name)
                         ELSE u.email
                    END as ActorEmail,
                    a.action as Action,
@@ -601,7 +609,8 @@ public sealed class AuditRepository
             """
             SELECT a.id, a.org_id as OrgId, a.ecosystem as Ecosystem, a.purl as Purl,
                    a.event_type as EventType, a.actor_id as ActorId,
-                   CASE WHEN a.actor_kind = 'service' THEN 'service:' || st.name
+                   CASE WHEN a.actor_kind = 'service'
+                             THEN 'service:' || COALESCE(a.actor_label, st.name)
                         ELSE u.email
                    END as ActorEmail,
                    a.detail as Detail, a.source_ip as SourceIp, a.created_at as CreatedAt

@@ -385,7 +385,7 @@ public sealed class BlockGateService
             new { license = offendingLeaf }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
         await _audit.LogActivityAsync(
             request.OrgId, request.Ecosystem, request.Purl,
-            "blocked_license", request.UserId, actorKind: request.ActorKind,
+            "blocked_license", request.AuditActorId, actorKind: request.ActorKind, actorLabel: request.AuditActorLabel,
             detail: detail,
             sourceIp: request.SourceIp, ct: ct);
         await QueueForReviewAsync(request, "license", offendingLeaf, ct);
@@ -402,7 +402,7 @@ public sealed class BlockGateService
             case BlockArm.Manual:
                 await _audit.LogActivityAsync(
                     request.OrgId, request.Ecosystem, request.Purl,
-                    "blocked_manual", request.UserId, actorKind: request.ActorKind,
+                    "blocked_manual", request.AuditActorId, actorKind: request.ActorKind, actorLabel: request.AuditActorLabel,
                     sourceIp: request.SourceIp, ct: ct);
                 // Manual block is a human decision — no quarantine row needed.
                 break;
@@ -459,7 +459,7 @@ public sealed class BlockGateService
             publishedIso, request.MinReleaseAgeHours!.Value, ageRounded);
         await _audit.LogActivityAsync(
             request.OrgId, request.Ecosystem, request.Purl,
-            "blocked_release_age", request.UserId, actorKind: request.ActorKind,
+            "blocked_release_age", request.AuditActorId, actorKind: request.ActorKind, actorLabel: request.AuditActorLabel,
             detail: ageDetail,
             sourceIp: request.SourceIp, ct: ct);
         await QueueForReviewAsync(request, "release_age", ageDetail, ct);
@@ -480,7 +480,7 @@ public sealed class BlockGateService
         string malDetail = System.Text.Json.JsonSerializer.Serialize(new { osv_ids = malIds }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
         await _audit.LogActivityAsync(
             request.OrgId, request.Ecosystem, request.Purl,
-            "blocked_malicious", request.UserId, actorKind: request.ActorKind,
+            "blocked_malicious", request.AuditActorId, actorKind: request.ActorKind, actorLabel: request.AuditActorLabel,
             detail: malDetail,
             sourceIp: request.SourceIp, ct: ct);
         await QueueForReviewAsync(request, "malicious", malDetail, ct);
@@ -499,7 +499,7 @@ public sealed class BlockGateService
         string kevDetail = System.Text.Json.JsonSerializer.Serialize(new { osv_ids = kevIds }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
         await _audit.LogActivityAsync(
             request.OrgId, request.Ecosystem, request.Purl,
-            "blocked_kev", request.UserId, actorKind: request.ActorKind,
+            "blocked_kev", request.AuditActorId, actorKind: request.ActorKind, actorLabel: request.AuditActorLabel,
             detail: kevDetail,
             sourceIp: request.SourceIp, ct: ct);
         await QueueForReviewAsync(request, "kev", kevDetail, ct);
@@ -517,7 +517,7 @@ public sealed class BlockGateService
         string epssDetail = $"{{\"max_epss\":{maxEpss.ToString(CultureInfo.InvariantCulture)},\"tolerance\":{epssTolerance.ToString(CultureInfo.InvariantCulture)}}}";
         await _audit.LogActivityAsync(
             request.OrgId, request.Ecosystem, request.Purl,
-            "blocked_epss", request.UserId, actorKind: request.ActorKind,
+            "blocked_epss", request.AuditActorId, actorKind: request.ActorKind, actorLabel: request.AuditActorLabel,
             detail: epssDetail,
             sourceIp: request.SourceIp, ct: ct);
         await QueueForReviewAsync(request, "epss", epssDetail, ct);
@@ -532,7 +532,7 @@ public sealed class BlockGateService
         string scoreDetail = $"{{\"max_score\":{maxScore},\"tolerance\":{request.MaxOsvScoreTolerance}}}";
         await _audit.LogActivityAsync(
             request.OrgId, request.Ecosystem, request.Purl,
-            "blocked_vuln_score", request.UserId, actorKind: request.ActorKind,
+            "blocked_vuln_score", request.AuditActorId, actorKind: request.ActorKind, actorLabel: request.AuditActorLabel,
             detail: scoreDetail,
             sourceIp: request.SourceIp, ct: ct);
         await QueueForReviewAsync(request, "vuln_score", scoreDetail, ct);
@@ -548,7 +548,7 @@ public sealed class BlockGateService
             new { install_script_kind = request.InstallScriptKind }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
         await _audit.LogActivityAsync(
             request.OrgId, request.Ecosystem, request.Purl,
-            "blocked_install_script", request.UserId, actorKind: request.ActorKind,
+            "blocked_install_script", request.AuditActorId, actorKind: request.ActorKind, actorLabel: request.AuditActorLabel,
             detail: scriptDetail,
             sourceIp: request.SourceIp, ct: ct);
         await QueueForReviewAsync(request, "install_script", scriptDetail, ct);
@@ -595,7 +595,7 @@ public sealed class BlockGateService
         await _audit.LogAsync(
             "provenance_verification_failed",
             orgId: request.OrgId,
-            actorId: request.UserId,
+            actorId: request.AuditActorId, actorLabel: request.AuditActorLabel,
             actorKind: request.ActorKind,
             ecosystem: request.Ecosystem,
             purl: request.Purl,
@@ -605,7 +605,7 @@ public sealed class BlockGateService
         // Per-version activity row so the dashboard surfaces why the download was denied.
         await _audit.LogActivityAsync(
             request.OrgId, request.Ecosystem, request.Purl,
-            "blocked_provenance", request.UserId, actorKind: request.ActorKind,
+            "blocked_provenance", request.AuditActorId, actorKind: request.ActorKind, actorLabel: request.AuditActorLabel,
             detail: provDetail,
             sourceIp: request.SourceIp, ct: ct);
         await QueueForReviewAsync(request, "provenance", provDetail, ct);
@@ -620,7 +620,7 @@ public sealed class BlockGateService
         string detail = $"{{\"deprecated\":{System.Text.Json.JsonSerializer.Serialize(request.Deprecated, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail)}}}";
         await _audit.LogActivityAsync(
             request.OrgId, request.Ecosystem, request.Purl,
-            "blocked_deprecated", request.UserId, actorKind: request.ActorKind,
+            "blocked_deprecated", request.AuditActorId, actorKind: request.ActorKind, actorLabel: request.AuditActorLabel,
             detail: detail,
             sourceIp: request.SourceIp, ct: ct);
         await QueueForReviewAsync(request, "deprecated", detail, ct);
@@ -638,7 +638,7 @@ public sealed class BlockGateService
             new { revoked_at = request.RevokedAt?.ToUtcIso() }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
         await _audit.LogActivityAsync(
             request.OrgId, request.Ecosystem, request.Purl,
-            "blocked_revoked", request.UserId, actorKind: request.ActorKind,
+            "blocked_revoked", request.AuditActorId, actorKind: request.ActorKind, actorLabel: request.AuditActorLabel,
             detail: detail,
             sourceIp: request.SourceIp, ct: ct);
         await QueueForReviewAsync(request, "revoked", detail, ct);
@@ -995,13 +995,13 @@ public sealed record BlockGateRequest(
     string VersionId,
     string? ManualState,
     DateTimeOffset? VulnCheckedAt,
-    string? UserId,
+    string? AuditActorId,
     double MaxOsvScoreTolerance,
     string? SourceIp = null,
     int? MinReleaseAgeHours = null,
     DateTimeOffset? PublishedAt = null,
     /// <summary>
-    /// Discriminator persisted alongside <see cref="UserId"/> in <c>activity.actor_kind</c> on
+    /// Discriminator persisted alongside <see cref="AuditActorId"/> in <c>activity.actor_kind</c> on
     /// the block-decision rows. Without this, service-token-driven block events would render
     /// as "anonymous" in the audit UI even though they are perfectly authenticated. See
     /// <see cref="Infrastructure.ActorKinds"/>.
@@ -1098,7 +1098,15 @@ public sealed record BlockGateRequest(
     /// same "no evidence about this tenant's own bytes" treatment without reading the shared row's
     /// license entries. Always <see langword="false"/> for the hosted (non-proxy) path.
     /// </summary>
-    bool ContentDiverges = false)
+    bool ContentDiverges = false,
+    /// <summary>
+    /// The actor's display name, carried alongside <see cref="AuditActorId"/> and written to
+    /// <c>actor_label</c> so the row stays readable after the row it would otherwise join to
+    /// is gone. Non-null for a service token only — <c>TokenRecord.AuditActorLabel</c> derives
+    /// it, so no call site can put a user's email in that column. NULL means "resolve through
+    /// the existing join", which is what rows predating the column already do.
+    /// </summary>
+    string? AuditActorLabel = null)
 {
     /// <summary>
     /// Constructs a <see cref="BlockGateRequest"/> from the standard download-path inputs shared
@@ -1120,7 +1128,8 @@ public sealed record BlockGateRequest(
         string? sourceIp) =>
         new(orgId, ecosystem, version.Purl, version.Id,
             version.ManualBlockState, version.VulnCheckedAt,
-            token?.UserId, settings?.MaxOsvScoreTolerance ?? DefaultMaxOsvScore, sourceIp,
+            token?.AuditActorId, settings?.MaxOsvScoreTolerance ?? DefaultMaxOsvScore, sourceIp,
+            AuditActorLabel: token?.AuditActorLabel,
             MinReleaseAgeHours: settings?.MinReleaseAgeHours,
             PublishedAt: version.PublishedAt,
             ActorKind: token?.ActorKind,
@@ -1162,7 +1171,8 @@ public sealed record BlockGateRequest(
             // package coordinate, not by bytes — see EvaluateAsync's remark on VulnCheckedAt —
             // so this is the shared row's real stamp, unmasked by divergence.
             caFacts.ManualBlockState, caFacts.VulnCheckedAt,
-            token?.UserId, settings?.MaxOsvScoreTolerance ?? DefaultMaxOsvScore, sourceIp,
+            token?.AuditActorId, settings?.MaxOsvScoreTolerance ?? DefaultMaxOsvScore, sourceIp,
+            AuditActorLabel: token?.AuditActorLabel,
             MinReleaseAgeHours: settings?.MinReleaseAgeHours,
             PublishedAt: caFacts.PublishedAt,
             ActorKind: token?.ActorKind,
@@ -1232,6 +1242,7 @@ public sealed record BlockGateRequest(
         Infrastructure.CacheArtifactServeFacts caFacts,
         string? userId,
         string? actorKind,
+        string? actorLabel,
         string? sourceIp,
         double maxOsvScoreTolerance,
         int? minReleaseAgeHours,
@@ -1252,6 +1263,7 @@ public sealed record BlockGateRequest(
             MinReleaseAgeHours: minReleaseAgeHours,
             PublishedAt: caFacts.PublishedAt,
             ActorKind: actorKind,
+            AuditActorLabel: actorLabel,
             Deprecated: caFacts.Deprecated,
             BlockDeprecatedMode: blockDeprecatedMode,
             BlockMaliciousMode: blockMaliciousMode,
@@ -1281,11 +1293,12 @@ public sealed record BlockGateRequest(
             "null and reads as \"policy off\". Collapsing this parameter list into a wrapper type is the same silent-hole " +
             "shape the factory exists to prevent.")]
     public static BlockGateRequest ForFirstFetchDeprecation(
-        string orgId, string ecosystem, string purl, string? userId, string? actorKind,
+        string orgId, string ecosystem, string purl, string? userId, string? actorKind, string? actorLabel,
         double maxOsvScoreTolerance, string? sourceIp, string? deprecated, string? blockDeprecatedMode) =>
         new(orgId, ecosystem, purl, string.Empty, null, null,
             userId, maxOsvScoreTolerance, sourceIp,
             ActorKind: actorKind,
+            AuditActorLabel: actorLabel,
             Deprecated: deprecated,
             BlockDeprecatedMode: blockDeprecatedMode);
 
@@ -1301,11 +1314,12 @@ public sealed record BlockGateRequest(
             "null and reads as \"policy off\". Collapsing this parameter list into a wrapper type is the same silent-hole " +
             "shape the factory exists to prevent.")]
     public static BlockGateRequest ForFirstFetchProvenance(
-        string orgId, string ecosystem, string purl, string? userId, string? actorKind,
+        string orgId, string ecosystem, string purl, string? userId, string? actorKind, string? actorLabel,
         double maxOsvScoreTolerance, string? sourceIp, string provenanceStatus, string? verifyProvenanceMode) =>
         new(orgId, ecosystem, purl, string.Empty, null, null,
             userId, maxOsvScoreTolerance, sourceIp,
             ActorKind: actorKind,
+            AuditActorLabel: actorLabel,
             ProvenanceStatus: provenanceStatus,
             VerifyProvenanceMode: verifyProvenanceMode);
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { presetToCapabilities, capabilitiesToLabel } from './tokenCapabilities.js'
+import { presetToCapabilities, capabilitiesToLabel, capabilitiesToText } from './tokenCapabilities.js'
 
 describe('presetToCapabilities', () => {
   it('pull → read-only capabilities', () => {
@@ -53,7 +53,6 @@ describe('capabilitiesToLabel', () => {
 
   it('read + publish → both', () => {
     expect(capabilitiesToLabel('["read:metadata","read:artifact","publish:*"]')).toBe('both')
-    expect(capabilitiesToLabel('["read:metadata","publish:npm"]')).toBe('both')
   })
 
   it('publish without read → push', () => {
@@ -68,7 +67,55 @@ describe('capabilitiesToLabel', () => {
     expect(capabilitiesToLabel('["read:audit"]')).toBe('audit')
   })
 
-  it('non-string entries ignored gracefully', () => {
-    expect(capabilitiesToLabel('[1,2,3]')).toBe('custom')
+  it('order does not matter — the set does', () => {
+    expect(capabilitiesToLabel('["read:artifact","read:metadata"]')).toBe('pull')
+    expect(capabilitiesToLabel('["publish:*","read:artifact","read:metadata"]')).toBe('both')
+  })
+
+  it('anything that is not exactly a preset is custom, never an approximation', () => {
+    // Inferring a preset from the presence of any publish: entry would make these two
+    // indistinguishable in the UI, and only publish:* can push an OCI image.
+    expect(capabilitiesToLabel('["publish:nuget"]')).toBe('custom')
+    expect(capabilitiesToLabel('["publish:oci","publish:nuget"]')).toBe('custom')
+    expect(capabilitiesToLabel('["read:metadata","publish:npm"]')).toBe('custom')
+    // A superset of a preset is not that preset: this one can also delete.
+    expect(capabilitiesToLabel('["publish:*","yank:*"]')).toBe('custom')
+    // tenant:configure no longer swallows the label and hides publish rights.
+    expect(capabilitiesToLabel('["tenant:configure","publish:*"]')).toBe('custom')
+  })
+
+  it('a value the server reads as deny-all shows as em-dash, not a label', () => {
+    // TokenRecord.CapabilitySet deserializes to string[], so one non-string element throws and
+    // the whole token grants nothing (pinned server-side by
+    // CapabilitiesTests.CapabilitySet_MalformedOrMixedTypeValue_GrantsNothing). A partial render
+    // would claim a grant the credential does not have, so a malformed array voids the display.
+    expect(capabilitiesToLabel('[1,2,3]')).toBe('—')
+    expect(capabilitiesToLabel('["read:metadata",1]')).toBe('—')
+    expect(capabilitiesToText('["read:metadata",1]')).toBe('—')
+  })
+
+  it('a blank entry is dropped without voiding the rest, as the server does', () => {
+    expect(capabilitiesToLabel('["read:metadata","read:artifact","  "]')).toBe('pull')
+    expect(capabilitiesToText('["read:metadata","  "]')).toBe('read:metadata')
+  })
+})
+
+describe('capabilitiesToText', () => {
+  it('renders the stored grant, sorted', () => {
+    expect(capabilitiesToText('["publish:*","read:metadata"]')).toBe('publish:*, read:metadata')
+    expect(capabilitiesToText('["publish:nuget"]')).toBe('publish:nuget')
+  })
+
+  it('distinguishes the two tokens the badge cannot', () => {
+    expect(capabilitiesToText('["publish:*"]')).not.toBe(capabilitiesToText('["publish:nuget"]'))
+  })
+
+  it('missing, unparseable, empty, and non-array all read as em-dash', () => {
+    expect(capabilitiesToText(null)).toBe('—')
+    expect(capabilitiesToText('')).toBe('—')
+    expect(capabilitiesToText('not-json')).toBe('—')
+    expect(capabilitiesToText('[]')).toBe('—')
+    expect(capabilitiesToText('{"foo":1}')).toBe('—')
+    expect(capabilitiesToText('[1,2,3]')).toBe('—')
   })
 })

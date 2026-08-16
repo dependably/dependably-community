@@ -137,6 +137,10 @@ public sealed class SsrfRedirectHandlerWiringTests : IAsyncLifetime
         protected override IHost CreateHost(IHostBuilder _)
         {
             var builder = WebApplication.CreateBuilder();
+            // Pin before ConfigureBuilder: the tenant resolver is selected from
+            // DEPLOYMENT_MODE at service-registration time, so a UseSetting after this
+            // line is inert. See TestHostEnv.
+            TestHostEnv.PinAmbient(builder);
             Program.ConfigureBuilder(builder);
 
             // Use in-memory stores so the factory can start without a real database.

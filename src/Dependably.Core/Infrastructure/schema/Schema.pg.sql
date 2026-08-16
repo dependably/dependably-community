@@ -410,6 +410,14 @@ CREATE TABLE IF NOT EXISTS audit_log (
     org_id      TEXT,
     actor_id    TEXT,
     actor_kind  TEXT,
+    -- Actor display name, denormalized at write time so a forensic row stays readable after the
+    -- row it would otherwise join to is gone. Written for service actors only: service_tokens is
+    -- hard-deleted on revocation, so the join that resolves 'service:<name>' stops matching and
+    -- the row would read as anonymous. A user actor deliberately gets none -- the erasure and
+    -- retention sweeps null a fixed column list, so an email here would be personal data at rest
+    -- that neither sweep reaches. Nullable: rows predating it, and rows written by a preceding
+    -- release during a blue-green cutover, resolve through the existing joins instead.
+    actor_label TEXT,
     action      TEXT NOT NULL,
     ecosystem   TEXT,
     purl        TEXT,
@@ -435,6 +443,8 @@ CREATE TABLE IF NOT EXISTS activity (
     event_type  TEXT NOT NULL,
     actor_id    TEXT,
     actor_kind  TEXT,
+    -- see audit_log.actor_label; service actors only, NULL for users
+    actor_label TEXT,
     detail      TEXT,
     source_ip   TEXT,
     -- Millisecond precision, matching AuditRepository.LogActivityAsync's NowMs() writer: the
@@ -1191,6 +1201,14 @@ CREATE TABLE IF NOT EXISTS oci_tags (
         CHECK (updated_at IS NULL OR updated_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
     last_revalidated TEXT    -- per-tag TTL revalidation timestamp; NULL forces a re-check on first access
         CHECK (last_revalidated IS NULL OR last_revalidated ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    -- A newer digest observed upstream but not yet promoted onto this tag: the org's
+    -- min_release_age_hours gates PROMOTION (the tag keeps resolving to `digest` until the
+    -- pending digest has been locally observed for that long), never availability. Replaced
+    -- whenever upstream advertises a different digest; cleared on promotion or when upstream
+    -- re-advertises the accepted digest.
+    pending_digest TEXT,
+    pending_first_seen_at TEXT    -- when pending_digest was FIRST observed locally; the promotion age is measured from this instant
+        CHECK (pending_first_seen_at IS NULL OR pending_first_seen_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
     PRIMARY KEY (org_id, repository, tag)
 );
 CREATE INDEX IF NOT EXISTS idx_oci_tags_repository ON oci_tags(org_id, repository);

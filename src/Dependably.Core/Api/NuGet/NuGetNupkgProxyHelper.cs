@@ -176,7 +176,7 @@ internal static class NuGetNupkgProxyHelper
             ExtractLicenses: stream => file.EndsWith(".nupkg", StringComparison.OrdinalIgnoreCase)
                 ? LicenseExtractor.FromNuspec(stream)
                 : LicenseExtractor.ExtractedMetadata.Empty,
-            UserId: token?.UserId,
+            AuditActorId: token?.AuditActorId, AuditActorLabel: token?.AuditActorLabel,
             ActorKind: token?.ActorKind,
             SourceIp: sourceIp,
             MaxOsvScoreTolerance: settings.MaxOsvScoreTolerance,

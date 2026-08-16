@@ -469,6 +469,7 @@
     "searchPlaceholder": "Rechercher action, acteur, PURL, détail…",
     "export": "Exporter CSV",
     "groups": {
+      "packages": "Paquets",
       "tenantConfig": "Configuration du locataire",
       "auth": "Authentification",
       "mfa": "Authentification multifacteur",
@@ -482,6 +483,7 @@
       "upstream": "Amont"
     },
     "actions": {
+      "push": "Paquet publié",
       "org_settings_updated": "Paramètres d'org. mis à jour",
       "retention_updated": "Rétention mise à jour",
       "proxy_settings_updated": "Paramètres proxy mis à jour",

@@ -71,8 +71,10 @@ public sealed class AuditAttributionComplianceTests
     private const int MarkerWindow = 5;
 
     // Positional slot indices, 0-based, matching AuditRepository's declared parameter order.
-    // LogAsync(action, orgId, actorId, actorKind, ecosystem, purl, detail, sourceIp, ct)
-    // LogActivityAsync(orgId, ecosystem, purl, eventType, actorId, actorKind, detail, sourceIp, ct)
+    // LogAsync(action, orgId, actorId, actorKind, ecosystem, purl, detail, sourceIp, actorLabel, ct)
+    // LogActivityAsync(orgId, ecosystem, purl, eventType, actorId, actorKind, detail, sourceIp, actorLabel, ct)
+    // Both signatures append new optional parameters after sourceIp, deliberately: inserting one
+    // mid-signature shifts sourceIp's index and silently blinds the positional fallback below.
     private sealed record MethodShape(int ActorIdIndex, int ActorKindIndex, int SourceIpIndex);
 
     private static readonly Dictionary<string, MethodShape> Targets = new(StringComparer.Ordinal)

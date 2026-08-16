@@ -31,10 +31,10 @@ public sealed class RequireCapabilityTests
     public async Task PolicyProvider_EmitsCapabilityPolicyForCapPrefix()
     {
         var provider = NewProvider();
-        var policy = await provider.GetPolicyAsync($"{RequireCapabilityAttribute.PolicyPrefix}{Capabilities.ImportNpm}");
+        var policy = await provider.GetPolicyAsync($"{RequireCapabilityAttribute.PolicyPrefix}{Capabilities.PublishNpm}");
         Assert.NotNull(policy);
         var req = Assert.Single(policy!.Requirements.OfType<CapabilityRequirement>());
-        Assert.Equal(Capabilities.ImportNpm, req.Capability);
+        Assert.Equal(Capabilities.PublishNpm, req.Capability);
     }
 
     [Fact]

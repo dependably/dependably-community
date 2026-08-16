@@ -566,7 +566,7 @@ public sealed partial class CargoController : OrgScopedControllerBase
 
         // Per-version operator action → activity (the publish auditor already emitted the
         // tenant-level package.publish event; activity is the per-version operator record).
-        await _audit.LogActivityAsync(args.OrgId, "cargo", request.Purl, "publish", args.Token.UserId,
+        await _audit.LogActivityAsync(args.OrgId, "cargo", request.Purl, "publish", args.Token.AuditActorId, actorLabel: args.Token.AuditActorLabel,
             actorKind: args.Token.ActorKind, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         // Cargo expects a warnings envelope on a successful publish.
@@ -661,7 +661,7 @@ public sealed partial class CargoController : OrgScopedControllerBase
 
         // Per-version operator action → activity (not audit_log).
         await _audit.LogActivityAsync(orgId, "cargo", ver.Purl, yanked ? "yank" : "unyank",
-            token.UserId, actorKind: token.ActorKind, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+            token.AuditActorId, actorKind: token.ActorKind, actorLabel: token.AuditActorLabel, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         // Webhook dispatch for yank (not unyank — subscribers track removals, not reinstatements).
         if (yanked)
@@ -678,7 +678,7 @@ public sealed partial class CargoController : OrgScopedControllerBase
                 Version: version,
                 Purl: ver.Purl,
                 ArtifactHash: ver.ChecksumSha256 is null ? null : "sha256:" + ver.ChecksumSha256,
-                Actor: token.UserId,
+                Actor: token.AuditActorId,
                 OccurredAt: _time.GetUtcNow(),
                 DataJson: payload));
         }

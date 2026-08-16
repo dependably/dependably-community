@@ -309,11 +309,14 @@ internal sealed class SystemScopeAuditFactory : WebApplicationFactory<Program>, 
     {
         var builder = WebApplication.CreateBuilder();
 
-        builder.Configuration["DEPLOYMENT_MODE"] = "multi";
         builder.Configuration["BASE_URL"] = $"http://{ApexHost}";
         builder.Configuration["FIRST_BOOT_SYSTEM_ADMIN_EMAIL"] = SystemAdminEmail;
         builder.Configuration["FIRST_BOOT_SYSTEM_ADMIN_PASSWORD"] = SystemAdminPassword;
 
+        // Pin before ConfigureBuilder: the tenant resolver is selected from DEPLOYMENT_MODE
+        // at service-registration time, so a UseSetting after this line is inert.
+        // See TestHostEnv.
+        TestHostEnv.PinAmbient(builder, "multi");
         Program.ConfigureBuilder(builder);
 
         builder.Services.RemoveAll<IBlobStore>();
@@ -446,6 +449,10 @@ internal sealed class TenantScopeAuditFactory : WebApplicationFactory<Program>, 
     protected override IHost CreateHost(IHostBuilder _)
     {
         var builder = WebApplication.CreateBuilder();
+        // Pin before ConfigureBuilder: the tenant resolver is selected from DEPLOYMENT_MODE
+        // at service-registration time, so a UseSetting after this line is inert.
+        // See TestHostEnv.
+        TestHostEnv.PinAmbient(builder);
         Program.ConfigureBuilder(builder);
 
         builder.Services.RemoveAll<IBlobStore>();

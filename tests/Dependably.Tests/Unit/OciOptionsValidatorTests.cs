@@ -29,6 +29,7 @@ public sealed class OciOptionsValidatorTests
         var span = TimeSpan.FromSeconds(seconds);
         var opts = ValidOptions();
         opts.ManifestTagTtl = span;
+        opts.ManifestTagStaleGrace = span;
         opts.TokenCacheDuration = span;
         opts.UpstreamHttpTimeout = span;
 
@@ -36,7 +37,19 @@ public sealed class OciOptionsValidatorTests
 
         Assert.True(result.Failed);
         Assert.Contains("Oci:ManifestTagTtl must be positive.", result.Failures!);
+        Assert.Contains("Oci:ManifestTagStaleGrace must be positive.", result.Failures!);
         Assert.Contains("Oci:TokenCacheDuration must be positive.", result.Failures!);
         Assert.Contains("Oci:UpstreamHttpTimeout must be positive.", result.Failures!);
+    }
+
+    [Fact]
+    public void Defaults_TtlIsOneHour_StaleGraceIsTwentyFourHours()
+    {
+        // The three-policy model's instance-level halves: hourly revalidation cadence and a
+        // 24-hour bounded stale-serving window. Promotion age (min_release_age_hours) is
+        // per-org and deliberately absent from this options object.
+        var opts = new OciOptions();
+        Assert.Equal(TimeSpan.FromHours(1), opts.ManifestTagTtl);
+        Assert.Equal(TimeSpan.FromHours(24), opts.ManifestTagStaleGrace);
     }
 }

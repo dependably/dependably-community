@@ -207,7 +207,7 @@ public sealed partial class RpmController : OrgScopedControllerBase
         }
 
         await _svc.Audit.LogActivityAsync(orgId, "rpm", purl, "push",
-            actorId: token.UserId, actorKind: token.ActorKind, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+            actorId: token.AuditActorId, actorKind: token.ActorKind, actorLabel: token.AuditActorLabel, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         Response.Headers["X-Dependably-PURL"] = purl;
         return StatusCode(StatusCodes.Status201Created);

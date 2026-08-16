@@ -689,6 +689,49 @@ public class TokenRecord
         TokenSource.Service => ActorKinds.Service,
         _ => ActorKinds.User,
     };
+
+    /// <summary>
+    /// Value to persist in <c>activity.actor_id</c> / <c>audit_log.actor_id</c>, and the only
+    /// correct partner for <see cref="ActorKind"/>. A service token has no owning user —
+    /// <c>TokenRepository.ResolveAsync</c> selects <c>NULL AS user_id</c> for the service
+    /// branch — so its own id is the identity, and it is what the audit list queries join
+    /// <c>service_tokens</c> on to render <c>service:&lt;name&gt;</c>. Passing
+    /// <see cref="UserId"/> alongside <c>ActorKind</c> writes a NULL actor under a
+    /// <c>'service'</c> discriminator, which no join resolves and which reads as anonymous —
+    /// indistinguishable from a genuinely unauthenticated request. The two properties sit
+    /// together so a call site cannot pair one with the wrong other.
+    /// Get-only — Dapper's setter-path mapper ignores it on hydration.
+    /// </summary>
+    public string? AuditActorId => Source switch
+    {
+        TokenSource.Service => Id,
+        _ => UserId,
+    };
+
+    /// <summary>
+    /// The service token's own name, resolved alongside the token. NULL for a user token, whose
+    /// display name is its owner's email and is resolved through the <c>users</c> join instead.
+    /// </summary>
+    public string? Name { get; set; }
+
+    /// <summary>
+    /// Value to persist in <c>activity.actor_label</c> / <c>audit_log.actor_label</c>: the actor's
+    /// display name, denormalized so the row survives the disappearance of what it would otherwise
+    /// join to. Non-null for a service token only, and that asymmetry is the point rather than an
+    /// omission. <c>service_tokens</c> is hard-deleted on revocation, so without the stored name a
+    /// revoked token's rows lose their meaning; <c>users</c> has an erasure path that deliberately
+    /// keeps only a pseudonymous <c>actor_id</c> skeleton, and denormalizing an email here would
+    /// put personal data at rest beyond the fixed column lists that
+    /// <c>RetentionService</c> and <c>OrgRepository.RemoveOrgMemberAsync</c> null. Deriving the
+    /// value here rather than letting call sites supply one is what makes that guarantee
+    /// structural: no caller can put an email in this column.
+    /// Get-only — Dapper's setter-path mapper ignores it on hydration.
+    /// </summary>
+    public string? AuditActorLabel => Source switch
+    {
+        TokenSource.Service => Name,
+        _ => null,
+    };
 }
 
 /// <summary>

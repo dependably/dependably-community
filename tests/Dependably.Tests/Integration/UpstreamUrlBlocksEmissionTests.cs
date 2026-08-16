@@ -314,7 +314,7 @@ public sealed class UpstreamUrlBlocksEmissionTests : IAsyncLifetime
                 CREATE TABLE IF NOT EXISTS audit_log (
                     id TEXT PRIMARY KEY,
                     scope TEXT NOT NULL DEFAULT 'tenant',
-                    org_id TEXT, actor_id TEXT, actor_kind TEXT, action TEXT NOT NULL,
+                    org_id TEXT, actor_id TEXT, actor_kind TEXT, actor_label TEXT, action TEXT NOT NULL,
                     ecosystem TEXT, purl TEXT, detail TEXT, source_ip TEXT,
                     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
                 );

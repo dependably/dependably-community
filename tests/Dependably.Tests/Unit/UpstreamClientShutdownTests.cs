@@ -233,7 +233,7 @@ public sealed class UpstreamClientShutdownTests
                 CREATE TABLE IF NOT EXISTS activity (
                     id TEXT PRIMARY KEY,
                     org_id TEXT NOT NULL, ecosystem TEXT NOT NULL, purl TEXT NOT NULL,
-                    event_type TEXT NOT NULL, actor_id TEXT, actor_kind TEXT,
+                    event_type TEXT NOT NULL, actor_id TEXT, actor_kind TEXT, actor_label TEXT,
                     detail TEXT, source_ip TEXT,
                     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
                 );

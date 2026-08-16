@@ -358,21 +358,26 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
             """,
             new { o = orgId, d = oldDigest });
 
-        // Upstream will return a new manifest.
+        // Upstream will return a new manifest. Revalidation issues an observation HEAD first,
+        // then fetches the body by digest — two requests, each answered with a fresh response.
         byte[] newManifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"new\":true}");
         string newSha256 = Sha256Hex(newManifestBytes);
         string newDigest = "sha256:" + newSha256;
 
-        var upstreamResp = new HttpResponseMessage(HttpStatusCode.OK)
+        HttpResponseMessage NewManifestResponse()
         {
-            Content = new ByteArrayContent(newManifestBytes)
+            var resp = new HttpResponseMessage(HttpStatusCode.OK)
             {
-                Headers = { ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/vnd.oci.image.manifest.v1+json") },
-            },
-        };
-        upstreamResp.Headers.TryAddWithoutValidation("Docker-Content-Digest", newDigest);
+                Content = new ByteArrayContent(newManifestBytes)
+                {
+                    Headers = { ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/vnd.oci.image.manifest.v1+json") },
+                },
+            };
+            resp.Headers.TryAddWithoutValidation("Docker-Content-Digest", newDigest);
+            return resp;
+        }
 
-        var http = new SingleResponseFactory(upstreamResp);
+        var http = new SequenceFactory(NewManifestResponse(), NewManifestResponse());
 
         var opts = Options.Create(DefaultOptions());
         var authSvc = new OciUpstreamAuthService(http, opts, new StubAirGap(false),
@@ -1849,7 +1854,137 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         Assert.Equal(1, seq404.CallCount); // exactly 1 HTTP call (404 → no retry)
     }
 
+    // ── Shared tag observation: credential-scoped coalescing ──────────────────
+    //
+    // The upstream tag → digest observation is coalesced instance-wide, but ONLY within one
+    // credential identity. These tests pin both halves on a single resolver instance (the
+    // production singleton shape): tenants with byte-identical credentials share one upstream
+    // ask; any credential difference means a separate ask and a separately-scoped answer —
+    // an observation resolved with private credentials must never be served to a tenant that
+    // does not hold them, and vice versa.
+
+    [Fact]
+    public async Task TagObservation_DifferentCredentials_NeverShared_EachOrgGetsItsOwnUpstreamAnswer()
+    {
+        string orgPrivate = await OrgSeeder.InsertAsync(_db, "obs-private-org");
+        await using (var conn = await _db.OpenAsync())
+        {
+            // Same host + repository as _orgId's anonymous upstream, but authenticated: a
+            // private registry view. Seeded directly because the shared seeder carries no creds.
+            string prefixJson = System.Text.Json.JsonSerializer.Serialize(new[] { "" });
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO upstream_registry (id, org_id, ecosystem, name, url, position, auth_type, username, secret, prefixes)
+                VALUES (@id, @orgId, 'oci', 'private-hub', 'registry-1.docker.io', 0, 'basic', 'alice', 'private-pass', @prefixes)
+                ON CONFLICT (org_id, ecosystem, url) DO NOTHING
+                """,
+                new { id = Guid.NewGuid().ToString("N"), orgId = orgPrivate, prefixes = prefixJson });
+        }
+
+        string publicDigest = Sha256Digest(Encoding.UTF8.GetBytes("public-view"));
+        string privateDigest = Sha256Digest(Encoding.UTF8.GetBytes("private-view"));
+
+        // The upstream answers the anonymous view first and the credentialed view second; the
+        // Authorization header on the request is what proves which org's ask reached upstream.
+        var http = new RepeatFactory(req =>
+        {
+            string digest = req.Headers.Authorization is null ? publicDigest : privateDigest;
+            var resp = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent([])
+                {
+                    Headers = { ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/vnd.oci.image.manifest.v1+json") },
+                },
+            };
+            resp.Headers.TryAddWithoutValidation("Docker-Content-Digest", digest);
+            return resp;
+        });
+
+        var resolver = Build(http);
+
+        var anonMeta = await resolver.FetchManifestMetadataAsync(
+            _orgId, "library/obs-shared", "latest", isDigest: false, default);
+        Assert.Equal(publicDigest, anonMeta!.Digest);
+        Assert.Equal(1, http.CallCount);
+
+        // Different credential identity ⇒ its own upstream ask, answered with its own view —
+        // the anonymous observation must not leak into the credentialed org's answer.
+        var privateMeta = await resolver.FetchManifestMetadataAsync(
+            orgPrivate, "library/obs-shared", "latest", isDigest: false, default);
+        Assert.Equal(privateDigest, privateMeta!.Digest);
+        Assert.Equal(2, http.CallCount);
+    }
+
+    [Fact]
+    public async Task TagObservation_SameAnonymousCredentials_SharedAcrossOrgs_OneUpstreamAsk()
+    {
+        // The adversarial twin's positive half: two orgs on the identical anonymous upstream
+        // ARE one credential identity, so the second org's revalidation reuses the first's
+        // observation with zero additional upstream traffic — the N-tenants × one-moving-tag
+        // multiplication this cache exists to collapse.
+        string orgAnonB = await OrgSeeder.InsertAsync(_db, "obs-anon-b-org");
+        await SeedOciUpstreamAsync(orgAnonB, "registry-1.docker.io", [""], position: 0);
+
+        string sharedDigest = Sha256Digest(Encoding.UTF8.GetBytes("shared-anon-view"));
+        var http = new RepeatFactory(_ =>
+        {
+            var resp = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent([])
+                {
+                    Headers = { ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/vnd.oci.image.manifest.v1+json") },
+                },
+            };
+            resp.Headers.TryAddWithoutValidation("Docker-Content-Digest", sharedDigest);
+            return resp;
+        });
+
+        var resolver = Build(http);
+
+        var first = await resolver.FetchManifestMetadataAsync(
+            _orgId, "library/obs-collapse", "latest", isDigest: false, default);
+        Assert.Equal(sharedDigest, first!.Digest);
+        Assert.Equal(1, http.CallCount);
+
+        var second = await resolver.FetchManifestMetadataAsync(
+            orgAnonB, "library/obs-collapse", "latest", isDigest: false, default);
+        Assert.Equal(sharedDigest, second!.Digest);
+        Assert.Equal(1, http.CallCount); // reused — no second upstream ask
+    }
+
     // ── Test doubles ──────────────────────────────────────────────────────────
+
+    // Builds a FRESH response per upstream request from the supplied responder, counting calls.
+    private sealed class RepeatFactory : IHttpClientFactory
+    {
+        private readonly Func<HttpRequestMessage, HttpResponseMessage> _responder;
+        private readonly RepeatCallCounter _counter = new();
+
+        public RepeatFactory(Func<HttpRequestMessage, HttpResponseMessage> responder) => _responder = responder;
+
+        public int CallCount => _counter.Value;
+
+        public HttpClient CreateClient(string name) => new(new RepeatHandler(this));
+
+        private sealed class RepeatCallCounter
+        {
+            private int _count;
+            public int Value => _count;
+            public void Increment() => Interlocked.Increment(ref _count);
+        }
+
+        private sealed class RepeatHandler : HttpMessageHandler
+        {
+            private readonly RepeatFactory _owner;
+            public RepeatHandler(RepeatFactory owner) => _owner = owner;
+            protected override Task<HttpResponseMessage> SendAsync(
+                HttpRequestMessage request, CancellationToken cancellationToken)
+            {
+                _owner._counter.Increment();
+                return Task.FromResult(_owner._responder(request));
+            }
+        }
+    }
 
     // Returns responses from a fixed sequence in order; tracks the total call count.
     // Each SendAsync call pops the next response; throws if the sequence is exhausted.

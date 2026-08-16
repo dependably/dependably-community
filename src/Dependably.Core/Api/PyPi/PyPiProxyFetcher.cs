@@ -41,7 +41,7 @@ public sealed class PyPiProxyFetcher(
 
         if (await blocklist.IsBlockedAsync(orgId, purlCheck, ct))
         {
-            await audit.LogActivityAsync(orgId, "pypi", purlCheck, "blocked", token?.UserId,
+            await audit.LogActivityAsync(orgId, "pypi", purlCheck, "blocked", token?.AuditActorId, actorLabel: token?.AuditActorLabel,
                 actorKind: token?.ActorKind, sourceIp: sourceIp, ct: ct);
             return new StatusCodeResult(StatusCodes.Status403Forbidden);
         }
@@ -336,7 +336,7 @@ public sealed class PyPiProxyFetcher(
             PackageName: parsed.PurlName, PurlName: parsed.PurlName,
             Version: parsed.Version, Purl: purl, File: file, Blob: blob,
             ExtractLicenses: stream => LicenseExtractor.FromPyPiPackageBytes(stream, file),
-            UserId: gate.UserId,
+            AuditActorId: gate.AuditActorId, AuditActorLabel: gate.AuditActorLabel,
             ActorKind: gate.ActorKind,
             SourceIp: gate.SourceIp,
             MaxOsvScoreTolerance: gate.Settings.MaxOsvScoreTolerance,

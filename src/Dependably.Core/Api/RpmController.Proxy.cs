@@ -136,7 +136,7 @@ public sealed partial class RpmController
             Response.Headers.CacheControl = "private, max-age=31536000, immutable";
         }
         await _svc.Audit.LogActivityAsync(orgId, "rpm", versionMatch.Version.Purl, "download",
-            token?.UserId, actorKind: token?.ActorKind, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+            token?.AuditActorId, actorKind: token?.ActorKind, actorLabel: token?.AuditActorLabel, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         await _svc.Packages.IncrementDownloadCountAsync(versionMatch.Version.Id, ct);
         return File(stream, "application/x-rpm", file);
     }
@@ -195,7 +195,7 @@ public sealed partial class RpmController
 
         string purl = caFacts.Purl ?? string.Empty;
         await _svc.Audit.LogActivityAsync(orgId, "rpm", purl, "download",
-            token?.UserId, actorKind: token?.ActorKind, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+            token?.AuditActorId, actorKind: token?.ActorKind, actorLabel: token?.AuditActorLabel, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         // Increment per-tenant download count on the global plane. Enqueued off the request
         // path — the row already exists (seeded durably at first-fetch).
         await _svc.TenantAccess.RecordDownloadHitAsync(orgId, caFacts.Id, _svc.Time.GetUtcNow(), ct);
@@ -299,7 +299,7 @@ public sealed partial class RpmController
 
         Response.Headers["X-Cache"] = isHit ? "HIT" : "MISS";
         await _svc.Audit.LogActivityAsync(orgId, "rpm", purl, "download",
-            token?.UserId, actorKind: token?.ActorKind, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+            token?.AuditActorId, actorKind: token?.ActorKind, actorLabel: token?.AuditActorLabel, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         // Keyed by the cache_artifact id just recorded, matching the cache-hit path above. The
         // purl is not a unique key on the cache plane — one RPM purl can span several filenames —
         // so a purl-keyed bump would count this download against all of them and refresh their

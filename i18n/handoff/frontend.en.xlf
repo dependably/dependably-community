@@ -601,6 +601,12 @@
         <target>Paramètres proxy mis à jour</target>
       </segment>
     </unit>
+    <unit id="audit.actions.push">
+      <segment state="translated">
+        <source>Package published</source>
+        <target>Paquet publié</target>
+      </segment>
+    </unit>
     <unit id="audit.actions.retention_updated">
       <segment state="translated">
         <source>Retention updated</source>
@@ -785,6 +791,12 @@
       <segment state="translated">
         <source>Multi-factor auth</source>
         <target>Authentification multifacteur</target>
+      </segment>
+    </unit>
+    <unit id="audit.groups.packages">
+      <segment state="translated">
+        <source>Packages</source>
+        <target>Paquets</target>
       </segment>
     </unit>
     <unit id="audit.groups.saml">

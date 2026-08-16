@@ -1409,7 +1409,7 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
             VersionId: accepted.VersionId,
             ManualState: null,
             VulnCheckedAt: null,
-            UserId: null,
+            AuditActorId: null,
             MaxOsvScoreTolerance: 10.0,
             LicenseEnforcementMode: "block");
 

@@ -167,7 +167,7 @@ public sealed class NpmDistTagsHandler(
         }
 
         await distTags.SetTagAsync(orgId, pkg.Id, tag, version, ct);
-        await audit.LogActivityAsync(orgId, "npm", pkg.Name, "dist-tag.set", token.UserId,
+        await audit.LogActivityAsync(orgId, "npm", pkg.Name, "dist-tag.set", token.AuditActorId, actorLabel: token.AuditActorLabel,
             actorKind: token.ActorKind, sourceIp: httpContext.GetNormalizedRemoteIp(), ct: ct);
 
         // Invalidate the cached packument so the updated dist-tag is visible immediately.
@@ -220,7 +220,7 @@ public sealed class NpmDistTagsHandler(
             return new NotFoundObjectResult(new ProblemDetails { Detail = $"Tag '{tag}' not found.", Status = StatusCodes.Status404NotFound });
         }
 
-        await audit.LogActivityAsync(orgId, "npm", pkg.Name, "dist-tag.delete", token.UserId,
+        await audit.LogActivityAsync(orgId, "npm", pkg.Name, "dist-tag.delete", token.AuditActorId, actorLabel: token.AuditActorLabel,
             actorKind: token.ActorKind, sourceIp: httpContext.GetNormalizedRemoteIp(), ct: ct);
 
         // Invalidate the cached packument so the removed dist-tag is visible immediately.

@@ -37,7 +37,7 @@ public sealed record PyPiFilename(string PurlName, string Version);
 /// settings snapshot, and source IP so block-gate evaluation at first-fetch can fire without
 /// re-reading settings.
 /// </summary>
-public sealed record ProxyContext(string OrgId, string? UserId, string? ActorKind, OrgSettings Settings, string? SourceIp = null);
+public sealed record ProxyContext(string OrgId, string? AuditActorId, string? ActorKind, OrgSettings Settings, string? SourceIp = null, string? AuditActorLabel = null);
 
 /// <summary>
 /// Minimal tenant context used by the publish handler to associate a token with a request.

@@ -46,12 +46,21 @@ public sealed partial class OciController
             "SELECT tag FROM oci_tags WHERE org_id = @orgId AND repository = @repo ORDER BY tag ASC",
             new { orgId, repo = name })).ToList();
 
-        var upstreamTags = await FetchUpstreamTagsOrDegradeAsync(name, ct);
+        var (upstreamTags, upstreamFailed) = await FetchUpstreamTagsOrDegradeAsync(name, ct);
         var allTags = MergeTags(localTags, upstreamTags);
 
-        return allTags.Count == 0
-            ? OciError(StatusCodes.Status404NotFound, OciErrorCode.NAME_UNKNOWN, "Repository unknown.")
-            : BuildTagsPage(name, allTags, n, last);
+        if (allTags.Count == 0)
+        {
+            // With no local tags to degrade to, an upstream failure must not be reported as
+            // "repository unknown" — a rate-limited or down upstream is a 502, not a 404.
+            // A genuine upstream 404 (upstreamFailed = false, null list) stays a 404.
+            return upstreamFailed
+                ? OciError(StatusCodes.Status502BadGateway, OciErrorCode.UNAVAILABLE,
+                    $"Upstream registry unreachable while listing tags for {name}.")
+                : OciError(StatusCodes.Status404NotFound, OciErrorCode.NAME_UNKNOWN, "Repository unknown.");
+        }
+
+        return BuildTagsPage(name, allTags, n, last);
     }
 
     /// <summary>
@@ -80,26 +89,29 @@ public sealed partial class OciController
     /// <summary>
     /// Fetches the upstream tag list (attempted when the proxy is enabled), degrading to
     /// <c>null</c> — a local-only listing — on failure. AirGappedException means upstream is
-    /// intentionally unreachable; any other transport failure is also degraded so a network
-    /// error never 503s a local listing.
+    /// intentionally unreachable (deliberate absence, not a failure); any other transport or
+    /// upstream failure also degrades so a network error never 503s a local listing, but is
+    /// reported as <c>UpstreamFailed</c> so a listing with nothing local to fall back on can
+    /// answer 502 rather than claiming the repository is unknown.
     /// </summary>
-    private async Task<List<string>?> FetchUpstreamTagsOrDegradeAsync(string name, CancellationToken ct)
+    private async Task<(List<string>? Tags, bool UpstreamFailed)> FetchUpstreamTagsOrDegradeAsync(
+        string name, CancellationToken ct)
     {
         try
         {
-            return await _svc.Upstream.FetchTagsAsync(CurrentTenantId(), name, ct);
+            return (await _svc.Upstream.FetchTagsAsync(CurrentTenantId(), name, ct), false);
         }
         catch (AirGappedException)
         {
             // Air-gap mode: upstream unreachable by design; serve local tags only.
-            return null;
+            return (null, false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            // Transport or parse failure: degrade to local tags; a warning is already
+            // Transport or upstream failure: degrade to local tags; a warning is already
             // emitted inside FetchTagsAsync for the upstream-error case.
             _ = ex; // suppressed; logged upstream
-            return null;
+            return (null, true);
         }
     }
 

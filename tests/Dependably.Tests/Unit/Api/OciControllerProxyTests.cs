@@ -7,6 +7,7 @@ using Dependably.Api;
 using Dependably.Configuration;
 using Dependably.Infrastructure;
 using Dependably.Protocol;
+using Dependably.Security;
 using Dependably.Storage;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
@@ -103,10 +104,15 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
         return b;
     }
 
+    // lastRevalidated: when supplied, stamps oci_tags.last_revalidated at that exact instant
+    // instead of the wall clock, so a test pairing this with a FakeTimeProvider controls tag
+    // freshness deterministically rather than racing strftime('now').
     private async Task<string> SeedManifestAsync(
         byte[] manifestBytes,
         string? tag = null,
-        string origin = "proxy")
+        string origin = "proxy",
+        DateTimeOffset? lastRevalidated = null,
+        bool nullRevalidated = false)
     {
         string sha256 = Sha256Hex(manifestBytes);
         string digest = "sha256:" + sha256;
@@ -126,17 +132,28 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
 
         if (tag is not null)
         {
-            await conn.ExecuteAsync(
-                """
-                INSERT INTO oci_tags (org_id, repository, tag, digest, updated_at, last_revalidated)
-                VALUES (@orgId, 'library/ubuntu', @tag, @digest,
-                        strftime('%Y-%m-%dT%H:%M:%SZ','now'),
-                        strftime('%Y-%m-%dT%H:%M:%SZ','now'))
-                ON CONFLICT (org_id, repository, tag) DO UPDATE SET
-                    digest = excluded.digest, updated_at = excluded.updated_at,
-                    last_revalidated = excluded.last_revalidated
-                """,
-                new { orgId = _orgId, tag, digest });
+            // A push writes last_revalidated = NULL (OciUploadService); a proxy fetch always
+            // stamps it. nullRevalidated reproduces the pushed-tag shape.
+            string? stamp = lastRevalidated?.ToUtcIso();
+            string sql = nullRevalidated
+                ? """
+                  INSERT INTO oci_tags (org_id, repository, tag, digest, updated_at, last_revalidated)
+                  VALUES (@orgId, 'library/ubuntu', @tag, @digest,
+                          strftime('%Y-%m-%dT%H:%M:%SZ','now'), NULL)
+                  ON CONFLICT (org_id, repository, tag) DO UPDATE SET
+                      digest = excluded.digest, updated_at = excluded.updated_at,
+                      last_revalidated = NULL
+                  """
+                : """
+                  INSERT INTO oci_tags (org_id, repository, tag, digest, updated_at, last_revalidated)
+                  VALUES (@orgId, 'library/ubuntu', @tag, @digest,
+                          COALESCE(@stamp, strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                          COALESCE(@stamp, strftime('%Y-%m-%dT%H:%M:%SZ','now')))
+                  ON CONFLICT (org_id, repository, tag) DO UPDATE SET
+                      digest = excluded.digest, updated_at = excluded.updated_at,
+                      last_revalidated = excluded.last_revalidated
+                  """;
+            await conn.ExecuteAsync(sql, new { orgId = _orgId, tag, digest, stamp });
         }
 
         return digest;
@@ -230,7 +247,8 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
             BlockGate: BuildBlockGate(),
             EdgeGuard: Dependably.Tests.Infrastructure.TestEdgeMode.DisabledPublishGuard(),
             Packages: new PackageRepository(_db),
-            TenantArtifactAccess: new TenantArtifactAccessRepository(_db));
+            TenantArtifactAccess: new TenantArtifactAccessRepository(_db),
+            DenialAudit: new AuthDenialAuditCoalescer(TimeProvider.System));
 
         return new OciController(svc, NullLogger<OciController>.Instance)
         {
@@ -262,7 +280,8 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
             BlockGate: BuildBlockGate(),
             EdgeGuard: Dependably.Tests.Infrastructure.TestEdgeMode.DisabledPublishGuard(),
             Packages: new PackageRepository(_db),
-            TenantArtifactAccess: new TenantArtifactAccessRepository(_db));
+            TenantArtifactAccess: new TenantArtifactAccessRepository(_db),
+            DenialAudit: new AuthDenialAuditCoalescer(TimeProvider.System));
 
         return new OciController(svc, NullLogger<OciController>.Instance)
         {
@@ -272,8 +291,10 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
 
     private OciUpstreamResolver BuildResolver(
         IHttpClientFactory? http = null,
-        OciOptions? opts = null)
+        OciOptions? opts = null,
+        TimeProvider? time = null)
     {
+        time ??= TimeProvider.System;
         var options = Options.Create(opts ?? new OciOptions
         {
             ManifestTagTtl = TimeSpan.FromMinutes(5),
@@ -283,11 +304,11 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
         var authSvc = new OciUpstreamAuthService(
             http, options, new DisabledAirGap(), NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
         var blobs = new TieredBlobStorage(_cacheBlobs, _registryBlobs);
-        var recorder = new OciImageLicenseRecorder(_db, blobs, TimeProvider.System, NullLogger<OciImageLicenseRecorder>.Instance,
+        var recorder = new OciImageLicenseRecorder(_db, blobs, time, NullLogger<OciImageLicenseRecorder>.Instance,
                 new LicenseRepository(_db, TimeProvider.System, TestNormalizers.License(_db)));
         return new OciUpstreamResolver(
             http, authSvc, options, blobs, _db,
-            new DisabledAirGap(), recorder, _cacheRecorder, _cacheArtifacts, NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            new DisabledAirGap(), recorder, _cacheRecorder, _cacheArtifacts, NullLogger<OciUpstreamResolver>.Instance, time, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
     }
 
     // Returns a controller that uses _emptyOrgId (no OCI upstreams in the DB) so that
@@ -882,6 +903,519 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
         Assert.Equal(digest, ctl.Response.Headers["Docker-Content-Digest"].ToString());
     }
 
+    // ── Mutable-tag TTL revalidation ──────────────────────────────────────────
+    //
+    // A tag is a mutable reference by the Distribution Spec: the upstream may repoint it at any
+    // time. Oci:ManifestTagTtl bounds how long a cached tag → digest mapping may be served before
+    // it must be re-checked. These tests pin that the bound is actually enforced on the serve
+    // path — the controller answers from local state first, so a TTL honoured only inside
+    // OciUpstreamResolver would never run at all.
+
+    // Builds the upstream response for a manifest fetch (GET body + the headers a HEAD reads).
+    private static HttpResponseMessage UpstreamManifestResponse(byte[] bytes)
+    {
+        var resp = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(bytes)
+            {
+                Headers = { ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(
+                    "application/vnd.oci.image.manifest.v1+json") },
+            },
+        };
+        resp.Headers.Add("Docker-Content-Digest", "sha256:" + Sha256Hex(bytes));
+        return resp;
+    }
+
+    [Fact]
+    public async Task GetManifest_ProxiedTag_StaleBeyondTtl_RevalidatesUpstreamAndServesNewDigest()
+    {
+        var clock = TestTime.Frozen();
+
+        // Cached ten minutes ago against a five-minute TTL, so the mapping is stale.
+        byte[] cachedBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"gen\":\"old\"}");
+        string cachedDigest = await SeedManifestAsync(
+            cachedBytes, tag: "latest", lastRevalidated: clock.GetUtcNow().AddMinutes(-10));
+
+        // Upstream has since repointed :latest at different content.
+        byte[] repointedBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"gen\":\"new\"}");
+        string repointedDigest = "sha256:" + Sha256Hex(repointedBytes);
+        Assert.NotEqual(cachedDigest, repointedDigest);
+
+        // Revalidation observes with a HEAD, then fetches the new body by digest — two
+        // upstream requests, each needing its own response instance.
+        var ctl = BuildController(BuildResolver(
+            new RepeatFactory(_ => UpstreamManifestResponse(repointedBytes)), time: clock));
+
+        var result = await ctl.Get("library/ubuntu/manifests/latest", default);
+
+        Assert.IsType<FileStreamResult>(result);
+        Assert.Equal("MISS", ctl.Response.Headers["X-Cache"].ToString());
+        Assert.Equal(repointedDigest, ctl.Response.Headers["Docker-Content-Digest"].ToString());
+
+        // The repoint must be durable, not merely reflected in response headers: the tag row
+        // now maps to the new digest and the successful revalidation refreshed the stamp.
+        await using var conn = await _db.OpenAsync();
+        var (Digest, LastRevalidated, PendingDigest) = await conn.QuerySingleAsync<(string Digest, string? LastRevalidated, string? PendingDigest)>(
+            "SELECT digest AS Digest, last_revalidated AS LastRevalidated, pending_digest AS PendingDigest " +
+            "FROM oci_tags WHERE org_id = @orgId AND repository = 'library/ubuntu' AND tag = 'latest'",
+            new { orgId = _orgId });
+        Assert.Equal(repointedDigest, Digest);
+        Assert.Equal(clock.GetUtcNow().ToUtcIso(), LastRevalidated);
+        Assert.Null(PendingDigest);
+    }
+
+    [Fact]
+    public async Task GetManifest_ProxiedTag_WithinTtl_ServesCachedDigest_WithoutUpstreamCall()
+    {
+        var clock = TestTime.Frozen();
+
+        byte[] cachedBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"gen\":\"fresh\"}");
+        string cachedDigest = await SeedManifestAsync(
+            cachedBytes, tag: "latest", lastRevalidated: clock.GetUtcNow().AddMinutes(-1));
+
+        // NeverCallFactory throws on any HTTP call, so this asserts the absence of a round-trip
+        // rather than merely that the cached digest came back.
+        var ctl = BuildController(BuildResolver(new NeverCallFactory(), time: clock));
+
+        var result = await ctl.Get("library/ubuntu/manifests/latest", default);
+
+        Assert.IsType<FileStreamResult>(result);
+        Assert.Equal("HIT", ctl.Response.Headers["X-Cache"].ToString());
+        Assert.Equal(cachedDigest, ctl.Response.Headers["Docker-Content-Digest"].ToString());
+    }
+
+    [Fact]
+    public async Task GetManifest_HostedTag_IsServedLocally_RegardlessOfAge()
+    {
+        var clock = TestTime.Frozen();
+
+        // A pushed tag is authoritative here — no upstream can disagree with it — so age is not a
+        // reason to revalidate. A push leaves last_revalidated NULL, which is what marks it.
+        byte[] hostedBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"hosted\":true}");
+        string hostedDigest = await SeedManifestAsync(
+            hostedBytes, tag: "latest", origin: "uploaded", nullRevalidated: true);
+
+        var ctl = BuildController(BuildResolver(new NeverCallFactory(), time: clock));
+
+        var result = await ctl.Get("library/ubuntu/manifests/latest", default);
+
+        Assert.IsType<FileStreamResult>(result);
+        Assert.Equal("HIT", ctl.Response.Headers["X-Cache"].ToString());
+        Assert.Equal(hostedDigest, ctl.Response.Headers["Docker-Content-Digest"].ToString());
+    }
+
+    [Fact]
+    public async Task GetManifest_PushedTag_WhoseBlobRowIsProxyOrigin_IsStillServedLocally()
+    {
+        var clock = TestTime.Frozen();
+
+        // oci_blobs is content-addressed and shared, so a manifest pushed here keeps
+        // origin = 'proxy' when the same bytes were proxied first. Origin therefore describes the
+        // bytes, not the tag — keying revalidation on it sends a hosted tag upstream and 404s a
+        // fully round-trippable image. OciPushTests.DeleteManifest_ByDigest_WhenOriginIsProxy_StillDeletes
+        // pins the same dedup state end to end; this is its unit-level twin.
+        byte[] pushedBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"dedup\":\"proxy-origin\"}");
+        string pushedDigest = await SeedManifestAsync(
+            pushedBytes, tag: "latest", origin: "proxy", nullRevalidated: true);
+
+        var ctl = BuildController(BuildResolver(new NeverCallFactory(), time: clock));
+
+        var result = await ctl.Get("library/ubuntu/manifests/latest", default);
+
+        Assert.IsType<FileStreamResult>(result);
+        Assert.Equal("HIT", ctl.Response.Headers["X-Cache"].ToString());
+        Assert.Equal(pushedDigest, ctl.Response.Headers["Docker-Content-Digest"].ToString());
+    }
+
+    [Fact]
+    public async Task GetManifest_ProxiedTag_StaleAndUpstreamUnreachable_ServesLastAcceptedDigestWithinGrace()
+    {
+        var clock = TestTime.Frozen();
+
+        byte[] cachedBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"gen\":\"stale\"}");
+        var seededStamp = clock.GetUtcNow().AddMinutes(-10);
+        string cachedDigest = await SeedManifestAsync(
+            cachedBytes, tag: "latest", lastRevalidated: seededStamp);
+
+        var ctl = BuildController(BuildResolver(new ThrowingFactory(), time: clock));
+
+        var result = await ctl.Get("library/ubuntu/manifests/latest", default);
+
+        // Bounded serve-stale. The old hard fail argued that serving the stale digest would
+        // let an upstream outage silently extend the TTL to forever — and the grace bound is
+        // precisely what answers that objection: the last accepted digest serves only until
+        // last_revalidated + ManifestTagTtl + ManifestTagStaleGrace, a failed revalidation
+        // never refreshes the stamp (asserted below), so the deadline cannot slide, and past
+        // it the pull fails 502 (GetManifest_ProxiedTag_StaleBeyondGrace_Returns502). Within
+        // the bound, an upstream blip must not break every `docker pull` of a moving tag.
+        Assert.IsType<FileStreamResult>(result);
+        Assert.Equal("STALE", ctl.Response.Headers["X-Cache"].ToString());
+        Assert.Equal(cachedDigest, ctl.Response.Headers["Docker-Content-Digest"].ToString());
+
+        // The failed revalidation must not be recorded as a successful one.
+        await using var conn = await _db.OpenAsync();
+        string? stamp = await conn.ExecuteScalarAsync<string>(
+            "SELECT last_revalidated FROM oci_tags WHERE org_id = @orgId AND repository = 'library/ubuntu' AND tag = 'latest'",
+            new { orgId = _orgId });
+        Assert.Equal(seededStamp.ToUtcIso(), stamp);
+    }
+
+    [Fact]
+    public async Task GetManifest_ProxiedTag_StaleBeyondGrace_Returns502()
+    {
+        var clock = TestTime.Frozen();
+
+        // Stale onset was last_revalidated + 5m TTL; the 24h grace expired hours ago.
+        byte[] cachedBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"gen\":\"exhausted\"}");
+        _ = await SeedManifestAsync(
+            cachedBytes, tag: "latest",
+            lastRevalidated: clock.GetUtcNow() - (TimeSpan.FromMinutes(5) + TimeSpan.FromHours(30)));
+
+        var ctl = BuildController(BuildResolver(new ThrowingFactory(), time: clock));
+
+        var result = await ctl.Get("library/ubuntu/manifests/latest", default);
+
+        var obj = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status502BadGateway, obj.StatusCode);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.TooManyRequests)]
+    [InlineData(HttpStatusCode.ServiceUnavailable)]
+    public async Task GetManifest_ProxiedTag_Stale_UpstreamErrorStatus_ServesStaleWithinGrace_Never404(
+        HttpStatusCode upstreamStatus)
+    {
+        var clock = TestTime.Frozen();
+
+        byte[] cachedBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"gen\":\"rate-limited\"}");
+        string cachedDigest = await SeedManifestAsync(
+            cachedBytes, tag: "latest", lastRevalidated: clock.GetUtcNow().AddMinutes(-10));
+
+        // A Docker Hub 429 (or a 5xx) told the old code "not found", which told `docker pull`
+        // the image does not exist — while the manifest and every layer sat cached locally.
+        var http = new RepeatFactory(_ => new HttpResponseMessage(upstreamStatus));
+        var ctl = BuildController(BuildResolver(http, time: clock));
+
+        var result = await ctl.Get("library/ubuntu/manifests/latest", default);
+
+        Assert.IsType<FileStreamResult>(result);
+        Assert.Equal("STALE", ctl.Response.Headers["X-Cache"].ToString());
+        Assert.Equal(cachedDigest, ctl.Response.Headers["Docker-Content-Digest"].ToString());
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.TooManyRequests)]
+    [InlineData(HttpStatusCode.ServiceUnavailable)]
+    public async Task GetManifest_ProxiedTag_StaleBeyondGrace_UpstreamErrorStatus_Returns502_Never404(
+        HttpStatusCode upstreamStatus)
+    {
+        var clock = TestTime.Frozen();
+
+        byte[] cachedBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"gen\":\"429-exhausted\"}");
+        _ = await SeedManifestAsync(
+            cachedBytes, tag: "latest",
+            lastRevalidated: clock.GetUtcNow() - (TimeSpan.FromMinutes(5) + TimeSpan.FromHours(30)));
+
+        var http = new RepeatFactory(_ => new HttpResponseMessage(upstreamStatus));
+        var ctl = BuildController(BuildResolver(http, time: clock));
+
+        var result = await ctl.Get("library/ubuntu/manifests/latest", default);
+
+        // Past the grace the answer is "upstream failed" — never "the image does not exist".
+        var obj = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status502BadGateway, obj.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetManifest_ProxiedTag_GraceMeasuredFromStaleOnset_NotResetByRepeatedFailures()
+    {
+        var clock = TestTime.Frozen();
+
+        // Stale onset = seeded last_revalidated + 5m TTL; grace deadline = onset + 24h.
+        var seededStamp = clock.GetUtcNow().AddMinutes(-10);
+        byte[] cachedBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"gen\":\"no-reset\"}");
+        string cachedDigest = await SeedManifestAsync(
+            cachedBytes, tag: "latest", lastRevalidated: seededStamp);
+
+        // Two failed revalidations inside the window both serve stale...
+        var first = BuildController(BuildResolver(new ThrowingFactory(), time: clock));
+        Assert.IsType<FileStreamResult>(await first.Get("library/ubuntu/manifests/latest", default));
+        Assert.Equal(cachedDigest, first.Response.Headers["Docker-Content-Digest"].ToString());
+
+        clock.Advance(TimeSpan.FromHours(12));
+        var second = BuildController(BuildResolver(new ThrowingFactory(), time: clock));
+        Assert.IsType<FileStreamResult>(await second.Get("library/ubuntu/manifests/latest", default));
+
+        // ...and neither failure moved the deadline: 13h later (25h past onset, but only 13h
+        // after the most recent failed attempt) the tag expires at the ORIGINAL deadline. If
+        // the grace were re-anchored on each failed attempt, this request would still be
+        // inside a fresh 24h window and serve stale — silently forever across an outage.
+        clock.Advance(TimeSpan.FromHours(13));
+        var third = BuildController(BuildResolver(new ThrowingFactory(), time: clock));
+        var expired = Assert.IsType<ObjectResult>(await third.Get("library/ubuntu/manifests/latest", default));
+        Assert.Equal(StatusCodes.Status502BadGateway, expired.StatusCode);
+
+        await using var conn = await _db.OpenAsync();
+        string? stamp = await conn.ExecuteScalarAsync<string>(
+            "SELECT last_revalidated FROM oci_tags WHERE org_id = @orgId AND repository = 'library/ubuntu' AND tag = 'latest'",
+            new { orgId = _orgId });
+        Assert.Equal(seededStamp.ToUtcIso(), stamp);
+    }
+
+    [Fact]
+    public async Task GetManifest_TokenExchangeFailure_Returns502_Not500()
+    {
+        // OciUnauthorizedException (token-exchange failure — e.g. auth.docker.io down, or the
+        // unimplemented ECR exchange refusing) previously escaped as an unhandled 500. It is an
+        // upstream-availability failure and must answer 502. The aws_ecr auth type throws it
+        // before any HTTP call, which makes it a hermetic stand-in for the whole class.
+        await using (var conn = await _db.OpenAsync())
+        {
+            string prefixJson = System.Text.Json.JsonSerializer.Serialize(new[] { "" });
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO upstream_registry (id, org_id, ecosystem, name, url, position, auth_type, prefixes)
+                VALUES (@id, @orgId, 'oci', 'ecr', 'ecr.example.test', 0, 'aws_ecr', @prefixes)
+                ON CONFLICT (org_id, ecosystem, url) DO NOTHING
+                """,
+                new { id = Guid.NewGuid().ToString("N"), orgId = _emptyOrgId, prefixes = prefixJson });
+        }
+
+        var ctl = BuildControllerForOrg(_emptyOrgId, BuildResolver(new NeverCallFactory()));
+
+        var result = await ctl.Get("library/ubuntu/manifests/latest", default);
+
+        var obj = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status502BadGateway, obj.StatusCode);
+    }
+
+    [Fact]
+    public async Task HeadManifest_ProxiedTag_StaleBeyondTtl_RevalidatesUpstream()
+    {
+        var clock = TestTime.Frozen();
+
+        byte[] cachedBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"head\":\"old\"}");
+        string cachedDigest = await SeedManifestAsync(
+            cachedBytes, tag: "latest", lastRevalidated: clock.GetUtcNow().AddMinutes(-10));
+
+        byte[] repointedBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"head\":\"new\"}");
+        string repointedDigest = "sha256:" + Sha256Hex(repointedBytes);
+
+        var ctl = BuildController(BuildResolver(
+            new SingleResponseFactory(UpstreamManifestResponse(repointedBytes)), time: clock));
+
+        var result = await ctl.Head("library/ubuntu/manifests/latest", default);
+
+        // HEAD and GET must agree about staleness, or a client that probes with HEAD and then
+        // pulls sees two different answers for the same reference.
+        Assert.IsType<OkResult>(result);
+        Assert.Equal("MISS", ctl.Response.Headers["X-Cache"].ToString());
+        Assert.Equal(repointedDigest, ctl.Response.Headers["Docker-Content-Digest"].ToString());
+        Assert.NotEqual(cachedDigest, ctl.Response.Headers["Docker-Content-Digest"].ToString());
+    }
+
+    [Fact]
+    public async Task HeadManifest_ProxiedTag_StaleWithUnchangedDigest_RefreshesStampDurably_NextPullIsCacheHit()
+    {
+        var clock = TestTime.Frozen();
+
+        byte[] cachedBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"head\":\"unchanged\"}");
+        string cachedDigest = await SeedManifestAsync(
+            cachedBytes, tag: "latest", lastRevalidated: clock.GetUtcNow().AddMinutes(-10));
+
+        // Upstream still advertises the same digest.
+        var http = new RepeatFactory(_ => UpstreamManifestResponse(cachedBytes));
+        var headCtl = BuildController(BuildResolver(http, time: clock));
+
+        var headResult = await headCtl.Head("library/ubuntu/manifests/latest", default);
+
+        Assert.IsType<OkResult>(headResult);
+        Assert.Equal(cachedDigest, headCtl.Response.Headers["Docker-Content-Digest"].ToString());
+        Assert.Equal(1, http.CallCount);
+
+        // The confirmation must persist: last_revalidated is refreshed by the HEAD itself, so a
+        // HEAD-then-GET-by-digest client (containerd snapshotter, BuildKit) regains the fresh
+        // window instead of paying an upstream round-trip on every pull after the first expiry.
+        await using (var conn = await _db.OpenAsync())
+        {
+            string? stamp = await conn.ExecuteScalarAsync<string>(
+                "SELECT last_revalidated FROM oci_tags WHERE org_id = @orgId AND repository = 'library/ubuntu' AND tag = 'latest'",
+                new { orgId = _orgId });
+            Assert.Equal(clock.GetUtcNow().ToUtcIso(), stamp);
+        }
+
+        // The immediately-following pull is a local cache HIT with zero upstream dependency —
+        // NeverCallFactory throws on any HTTP call, so this asserts the absence of a round-trip.
+        var getCtl = BuildController(BuildResolver(new NeverCallFactory(), time: clock));
+        var getResult = await getCtl.Get("library/ubuntu/manifests/latest", default);
+        Assert.IsType<FileStreamResult>(getResult);
+        Assert.Equal("HIT", getCtl.Response.Headers["X-Cache"].ToString());
+        Assert.Equal(cachedDigest, getCtl.Response.Headers["Docker-Content-Digest"].ToString());
+    }
+
+    // ── Promotion gate: min_release_age_hours holds a too-young repoint ───────
+
+    [Fact]
+    public async Task GetManifest_TagRepointedToYoungDigest_KeepsServingAcceptedDigest_ThenPromotesAfterAging()
+    {
+        var clock = TestTime.Frozen();
+
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "UPDATE org_settings SET min_release_age_hours = 24 WHERE org_id = @orgId",
+                new { orgId = _orgId });
+        }
+
+        byte[] acceptedBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"age\":\"accepted\"}");
+        string acceptedDigest = await SeedManifestAsync(
+            acceptedBytes, tag: "latest", lastRevalidated: clock.GetUtcNow().AddMinutes(-10));
+
+        byte[] youngBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"age\":\"young\"}");
+        string youngDigest = "sha256:" + Sha256Hex(youngBytes);
+
+        // First revalidation: upstream advertises a digest observed for the first time NOW —
+        // younger than min_release_age_hours. The tag must NOT advance, and it must NOT become
+        // unavailable either (no 404, no 403): min_release_age gates promotion, never
+        // availability. The previously accepted digest keeps serving.
+        var firstHttp = new RepeatFactory(_ => UpstreamManifestResponse(youngBytes));
+        var firstCtl = BuildController(BuildResolver(firstHttp, time: clock));
+        var firstResult = await firstCtl.Get("library/ubuntu/manifests/latest", default);
+
+        Assert.IsType<FileStreamResult>(firstResult);
+        Assert.Equal(acceptedDigest, firstCtl.Response.Headers["Docker-Content-Digest"].ToString());
+        // Observation HEAD only — the young body is never fetched while it is held pending.
+        Assert.Equal(1, firstHttp.CallCount);
+
+        await using (var conn = await _db.OpenAsync())
+        {
+            var (Digest, PendingDigest, PendingFirstSeenAt, LastRevalidated) = await conn.QuerySingleAsync<(string Digest, string? PendingDigest, string? PendingFirstSeenAt, string? LastRevalidated)>(
+                "SELECT digest AS Digest, pending_digest AS PendingDigest, pending_first_seen_at AS PendingFirstSeenAt, last_revalidated AS LastRevalidated " +
+                "FROM oci_tags WHERE org_id = @orgId AND repository = 'library/ubuntu' AND tag = 'latest'",
+                new { orgId = _orgId });
+            Assert.Equal(acceptedDigest, Digest);                       // not advanced
+            Assert.Equal(youngDigest, PendingDigest);                    // observed, pending
+            Assert.Equal(clock.GetUtcNow().ToUtcIso(), PendingFirstSeenAt);
+            Assert.Equal(clock.GetUtcNow().ToUtcIso(), LastRevalidated); // successful revalidation
+        }
+
+        // 30 hours later (well past the 24h threshold, far from the boundary) the next
+        // successful revalidation promotes: body fetched by digest, tag repointed, pending
+        // cleared.
+        clock.Advance(TimeSpan.FromHours(30));
+        var secondHttp = new RepeatFactory(_ => UpstreamManifestResponse(youngBytes));
+        var secondCtl = BuildController(BuildResolver(secondHttp, time: clock));
+        var secondResult = await secondCtl.Get("library/ubuntu/manifests/latest", default);
+
+        Assert.IsType<FileStreamResult>(secondResult);
+        Assert.Equal(youngDigest, secondCtl.Response.Headers["Docker-Content-Digest"].ToString());
+
+        await using (var conn = await _db.OpenAsync())
+        {
+            var (Digest, PendingDigest, PendingFirstSeenAt, LastRevalidated) = await conn.QuerySingleAsync<(string Digest, string? PendingDigest, string? PendingFirstSeenAt, string? LastRevalidated)>(
+                "SELECT digest AS Digest, pending_digest AS PendingDigest, pending_first_seen_at AS PendingFirstSeenAt, last_revalidated AS LastRevalidated " +
+                "FROM oci_tags WHERE org_id = @orgId AND repository = 'library/ubuntu' AND tag = 'latest'",
+                new { orgId = _orgId });
+            Assert.Equal(youngDigest, Digest);
+            Assert.Null(PendingDigest);
+            Assert.Null(PendingFirstSeenAt);
+            Assert.Equal(clock.GetUtcNow().ToUtcIso(), LastRevalidated);
+        }
+    }
+
+    [Fact]
+    public async Task GetManifest_TagRepointedToBlockedLicenseDigest_IsDeniedOnTheRevalidatingRequest()
+    {
+        var clock = TestTime.Frozen();
+
+        byte[] cachedBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"lic\":\"old\"}");
+        _ = await SeedManifestAsync(
+            cachedBytes, tag: "latest", lastRevalidated: clock.GetUtcNow().AddMinutes(-10));
+
+        // The digest :latest now points at — already held and already stamped by this org, the
+        // state an earlier by-digest pull leaves behind. The stamp is what the serve path reads;
+        // seeding it stands in for OciImageLicenseRecorder having run on the config label.
+        byte[] repointedBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"lic\":\"gpl\"}");
+        string repointedDigest = "sha256:" + Sha256Hex(repointedBytes);
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO oci_blobs (digest, org_id, media_type, size_bytes, blob_key, origin,
+                                       license_spdx, license_checked_at)
+                VALUES (@digest, @orgId, 'application/vnd.oci.image.manifest.v1+json', @size,
+                        @blobKey, 'proxy', 'GPL-3.0-only', @checkedAt)
+                ON CONFLICT (digest, org_id) DO NOTHING
+                """,
+                new
+                {
+                    digest = repointedDigest,
+                    orgId = _orgId,
+                    size = (long)repointedBytes.Length,
+                    blobKey = BlobKeys.OciBlob("sha256", Sha256Hex(repointedBytes)),
+                    checkedAt = clock.GetUtcNow().ToUtcIso(),
+                });
+        }
+
+        await LicensePolicySeeder.SetModeAsync(_db, _orgId, "block");
+        await LicensePolicySeeder.AddBlocklistEntryAsync(_db, _orgId, "GPL-3.0-only");
+
+        var ctl = BuildController(BuildResolver(
+            new RepeatFactory(_ => UpstreamManifestResponse(repointedBytes)), time: clock));
+
+        var result = await ctl.Get("library/ubuntu/manifests/latest", default);
+
+        // Without the arm on the upstream path, the repointed image serves once before the next
+        // request denies it — and a tag that keeps moving keeps re-arming that window.
+        var obj = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status403Forbidden, obj.StatusCode);
+    }
+
+    [Fact]
+    public async Task HeadManifest_TagRepointedToBlockedLicenseDigest_IsDeniedLikeGet()
+    {
+        var clock = TestTime.Frozen();
+
+        byte[] cachedBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"lic\":\"head-old\"}");
+        _ = await SeedManifestAsync(
+            cachedBytes, tag: "latest", lastRevalidated: clock.GetUtcNow().AddMinutes(-10));
+
+        byte[] repointedBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"lic\":\"head-gpl\"}");
+        string repointedDigest = "sha256:" + Sha256Hex(repointedBytes);
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO oci_blobs (digest, org_id, media_type, size_bytes, blob_key, origin,
+                                       license_spdx, license_checked_at)
+                VALUES (@digest, @orgId, 'application/vnd.oci.image.manifest.v1+json', @size,
+                        @blobKey, 'proxy', 'GPL-3.0-only', @checkedAt)
+                ON CONFLICT (digest, org_id) DO NOTHING
+                """,
+                new
+                {
+                    digest = repointedDigest,
+                    orgId = _orgId,
+                    size = (long)repointedBytes.Length,
+                    blobKey = BlobKeys.OciBlob("sha256", Sha256Hex(repointedBytes)),
+                    checkedAt = clock.GetUtcNow().ToUtcIso(),
+                });
+        }
+
+        await LicensePolicySeeder.SetModeAsync(_db, _orgId, "block");
+        await LicensePolicySeeder.AddBlocklistEntryAsync(_db, _orgId, "GPL-3.0-only");
+
+        var ctl = BuildController(BuildResolver(
+            new SingleResponseFactory(UpstreamManifestResponse(repointedBytes)), time: clock));
+
+        var result = await ctl.Head("library/ubuntu/manifests/latest", default);
+
+        // HEAD must answer the licence arm the same way GET does. A client that probes with HEAD
+        // and pulls on 200 would otherwise be told the blocked image is available.
+        var obj = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status403Forbidden, obj.StatusCode);
+    }
+
     // ── Test doubles ──────────────────────────────────────────────────────────
 
     private sealed class SingleResponseFactory : IHttpClientFactory
@@ -897,6 +1431,53 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
             protected override Task<HttpResponseMessage> SendAsync(
                 HttpRequestMessage request, CancellationToken cancellationToken)
                 => Task.FromResult(_resp);
+        }
+    }
+
+    // Builds a FRESH response per upstream request from the supplied responder, counting calls.
+    // Needed by the revalidation flows, which may make two upstream calls (an observation HEAD
+    // followed by a by-digest GET) — SingleResponseFactory's shared instance is disposed by the
+    // first caller.
+    private sealed class RepeatFactory : IHttpClientFactory
+    {
+        private readonly Func<HttpRequestMessage, HttpResponseMessage> _responder;
+        private readonly RepeatCallCounter _counter = new();
+
+        public RepeatFactory(Func<HttpRequestMessage, HttpResponseMessage> responder) => _responder = responder;
+
+        public int CallCount => _counter.Value;
+
+        public HttpClient CreateClient(string name) => new(new RepeatHandler(this));
+
+        private sealed class RepeatCallCounter
+        {
+            private int _count;
+            public int Value => _count;
+            public void Increment() => Interlocked.Increment(ref _count);
+        }
+
+        private sealed class RepeatHandler : HttpMessageHandler
+        {
+            private readonly RepeatFactory _owner;
+            public RepeatHandler(RepeatFactory owner) => _owner = owner;
+            protected override Task<HttpResponseMessage> SendAsync(
+                HttpRequestMessage request, CancellationToken cancellationToken)
+            {
+                _owner._counter.Increment();
+                return Task.FromResult(_owner._responder(request));
+            }
+        }
+    }
+
+    // Upstream that fails at the transport layer — the shape IsUpstreamFailure classifies.
+    private sealed class ThrowingFactory : IHttpClientFactory
+    {
+        public HttpClient CreateClient(string name) => new(new ThrowingHandler());
+        private sealed class ThrowingHandler : HttpMessageHandler
+        {
+            protected override Task<HttpResponseMessage> SendAsync(
+                HttpRequestMessage request, CancellationToken cancellationToken)
+                => throw new HttpRequestException("upstream unreachable");
         }
     }
 

@@ -141,6 +141,10 @@ public sealed class MetricsAllowlistForwardedIpTests
                 builder.Configuration["TRUSTED_PROXIES"] = _trustedProxies;
             }
 
+            // Pin before ConfigureBuilder: the tenant resolver is selected from
+            // DEPLOYMENT_MODE at service-registration time, so a UseSetting after this
+            // line is inert. See TestHostEnv.
+            TestHostEnv.PinAmbient(builder);
             Program.ConfigureBuilder(builder);
 
             builder.Services.RemoveAll<IBlobStore>();

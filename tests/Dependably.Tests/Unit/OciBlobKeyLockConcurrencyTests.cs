@@ -395,7 +395,8 @@ public sealed class OciBlobKeyLockConcurrencyTests : IAsyncLifetime
             BlockGate: null!,
             EdgeGuard: TestEdgeMode.DisabledPublishGuard(),
             Packages: _packages,
-            TenantArtifactAccess: new TenantArtifactAccessRepository(_db));
+            TenantArtifactAccess: new TenantArtifactAccessRepository(_db),
+            DenialAudit: new AuthDenialAuditCoalescer(TimeProvider.System));
 
         return new OciController(svc, NullLogger<OciController>.Instance)
         {

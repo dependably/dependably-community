@@ -10,8 +10,29 @@ namespace Dependably.Configuration;
 /// </summary>
 public sealed class OciOptions
 {
-    /// <summary>Short TTL for manifest lookups by tag (default 5 minutes).</summary>
-    public TimeSpan ManifestTagTtl { get; set; } = TimeSpan.FromMinutes(5);
+    /// <summary>
+    /// How long a tag → digest mapping may be served before upstream is asked again
+    /// (default 1 hour). Moving tags rebuild on the order of days or weeks, so hourly
+    /// revalidation is ample while cutting upstream round-trips (and Docker Hub 429
+    /// exposure) roughly 12× versus a 5-minute cadence. The TTL answers only "when do we
+    /// ask again" — whether a newly observed digest is *promoted* is governed separately
+    /// by the org's <c>min_release_age_hours</c>, and how long a stale answer may be
+    /// served through an upstream outage by <see cref="ManifestTagStaleGrace"/>. The
+    /// three policies compose; they do not stack into a delay.
+    /// </summary>
+    public TimeSpan ManifestTagTtl { get; set; } = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// How long past its TTL a tag's last accepted digest may still be served while the
+    /// upstream is unavailable (default 24 hours). Within the grace window an upstream
+    /// 429/5xx/timeout serves the previously accepted digest (audited, marked
+    /// <c>X-Cache: STALE</c>) instead of failing the pull; past it the pull fails 502.
+    /// The window is measured from the moment the entry became stale
+    /// (<c>last_revalidated + ManifestTagTtl</c>) and is never extended by further failed
+    /// revalidation attempts — otherwise a long outage would silently become
+    /// serve-stale-forever.
+    /// </summary>
+    public TimeSpan ManifestTagStaleGrace { get; set; } = TimeSpan.FromHours(24);
 
     /// <summary>How long to cache upstream Bearer tokens (default 55 minutes).</summary>
     public TimeSpan TokenCacheDuration { get; set; } = TimeSpan.FromMinutes(55);
@@ -99,6 +120,11 @@ public sealed class OciOptionsValidator : IValidateOptions<OciOptions>
         if (options.ManifestTagTtl <= TimeSpan.Zero)
         {
             errors.Add("Oci:ManifestTagTtl must be positive.");
+        }
+
+        if (options.ManifestTagStaleGrace <= TimeSpan.Zero)
+        {
+            errors.Add("Oci:ManifestTagStaleGrace must be positive.");
         }
 
         if (options.TokenCacheDuration <= TimeSpan.Zero)

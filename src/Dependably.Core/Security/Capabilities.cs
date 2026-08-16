@@ -19,7 +19,8 @@ namespace Dependably.Security;
 /// like <c>publish:*</c> remain in the vocabulary as role-level shorthand (the admin
 /// role grants <c>publish:*</c> rather than enumerating leaves); callers may request
 /// either the wildcard or per-ecosystem leaves (<c>publish:npm</c>, <c>publish:pypi</c>,
-/// <c>publish:nuget</c>). <c>read:*</c> follows the same shorthand for the six read
+/// <c>publish:nuget</c>). <c>import:*</c> is the exception with no leaves at all — see the
+/// Import section below for why. <c>read:*</c> follows the same shorthand for the six read
 /// leaves — granted alongside them (not in place of them) to admin/owner/platform-admin,
 /// who already hold every individual leaf, so minting it never widens effective access.
 /// </summary>
@@ -44,13 +45,14 @@ public static class Capabilities
     public const string PublishCargo = "publish:cargo";
     public const string PublishAll = "publish:*";
 
-    // ── Import (per-ecosystem and wildcard) ─────────────────────────────────────
-    public const string ImportNpm = "import:npm";
-    public const string ImportPypi = "import:pypi";
-    public const string ImportNuget = "import:nuget";
-    public const string ImportMaven = "import:maven";
-    public const string ImportRpm = "import:rpm";
-    public const string ImportOci = "import:oci";
+    // ── Import ─────────────────────────────────────────────────────────────────
+    // Import is not per-ecosystem, and deliberately has no leaves. Both import routes
+    // (POST /api/v1/admin/upload and /api/v1/admin/import/manifest) accept a mixed batch and
+    // determine each artefact's ecosystem from its own magic bytes, so one request routinely
+    // spans several — there is no ecosystem to scope the grant to at the point the decision is
+    // made. A leaf would also be inert rather than merely narrow: Grants only widens (a wildcard
+    // grants its leaves, never the reverse), so an `import:<ecosystem>` token would satisfy
+    // neither route while reading as a working import credential.
     public const string ImportAll = "import:*";
 
     // OCI also needs a "pull" capability for the proxy path — pure read of a public-repo
@@ -193,7 +195,7 @@ public static class Capabilities
     {
         ReadMetadata, ReadArtifact, ReadPackages, ReadClaims, ReadAudit, ReadTenant, ReadAll,
         PublishNpm, PublishPypi, PublishNuget, PublishMaven, PublishRpm, PublishOci, PublishCargo, PublishAll,
-        ImportNpm, ImportPypi, ImportNuget, ImportMaven, ImportRpm, ImportOci, ImportAll,
+        ImportAll,
         YankNpm, YankPypi, YankNuget, YankMaven, YankRpm, YankOci, YankCargo, YankAll,
         PullOci,
         ClaimManage, TenantConfigure, TenantAdmin, ManageOwnTokens,

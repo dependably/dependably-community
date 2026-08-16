@@ -23,33 +23,60 @@ public sealed class PublishAuditor
         _auditEmitter = auditEmitter;
     }
 
+    /// <summary>
+    /// The value <c>audit_log.actor_id</c> / <c>activity.actor_id</c> must carry, paired with
+    /// <see cref="PublishRequest.ActorKind"/>. A service token has no owning user
+    /// (<c>TokenRepository.ResolveAsync</c> selects <c>NULL AS user_id</c> for it), so its own
+    /// token id is the stable publisher identity — and it is what the audit list queries join
+    /// against to render <c>service:&lt;name&gt;</c>. Writing the NULL user id instead leaves the
+    /// row indistinguishable from an anonymous one no matter what <c>actor_kind</c> says. Same
+    /// principal rule <see cref="PackagePublishService"/> already applies for name ownership.
+    /// </summary>
+    private static string? ResolveAuditActorId(PublishRequest request)
+        => request.ActorKind == ActorKinds.Service ? request.ActorTokenId : request.ActorUserId;
+
+    /// <summary>
+    /// The <c>audit_event.actor_type</c> value for a publish. A service-token publish is
+    /// <c>api_token</c>, not <c>system</c>: it has a named credential behind it, and calling it
+    /// a system event both hides that credential and mixes operator-originated rows in with
+    /// tenant-originated ones on the SIEM surface.
+    /// </summary>
+    private static string ResolveActorType(PublishRequest request) => request switch
+    {
+        { ActorKind: ActorKinds.Service } => "api_token",
+        { ActorUserId: null } => "system",
+        _ => "user",
+    };
+
     public async Task RecordAsync(PublishRequest request, string sha256, PackageVersion? existing,
         long sizeBytes, CancellationToken ct)
     {
+        string? actorId = ResolveAuditActorId(request);
+
         // Imports are per-version operator events and belong in `activity` only —
         // `audit_log` is the tenant-level config/security sink. Never dual-write.
         // `push` still dual-writes pending the separate sweep.
         if (request.AuditAction != "import")
         {
-            await _audit.LogAsync(request.AuditAction, request.OrgId, request.ActorUserId,
+            await _audit.LogAsync(request.AuditAction, request.OrgId, actorId,
                 request.ActorKind, request.Ecosystem, request.Purl, detail: request.AuditDetail,
                 sourceIp: request.SourceIp, ct: ct);
         }
         await _audit.LogActivityAsync(request.OrgId, request.Ecosystem, request.Purl,
-            request.AuditAction, request.ActorUserId, actorKind: request.ActorKind,
+            request.AuditAction, actorId, actorKind: request.ActorKind,
             detail: request.AuditDetail, sourceIp: request.SourceIp, ct: ct);
 
-        string actorType = request.ActorUserId is null ? "system" : "user";
-        await EmitTypedAsync(request, sha256, sizeBytes, actorType, ct);
+        string actorType = ResolveActorType(request);
+        await EmitTypedAsync(request, sha256, sizeBytes, actorType, actorId, ct);
 
         if (existing is not null)
         {
-            await RecordReplaceAsync(request, sha256, sizeBytes, existing, actorType, ct);
+            await RecordReplaceAsync(request, sha256, sizeBytes, existing, actorType, actorId, ct);
         }
     }
 
     private async Task EmitTypedAsync(PublishRequest request, string sha256,
-        long sizeBytes, string actorType, CancellationToken ct)
+        long sizeBytes, string actorType, string? actorId, CancellationToken ct)
     {
         if (request.AuditAction == "import")
         {
@@ -59,7 +86,7 @@ public sealed class PublishAuditor
                 "sha256:" + sha256, sizeBytes, request.Origin,
                 batchId, importMode, request.ClaimState).ToJson();
             await _auditEmitter.EmitAsync(PackageEvents.TypeImport,
-                request.OrgId, actorType, request.ActorUserId, "accepted", payload, ct);
+                request.OrgId, actorType, actorId, "accepted", payload, ct);
         }
         else
         {
@@ -68,12 +95,12 @@ public sealed class PublishAuditor
                 "sha256:" + sha256, sizeBytes, request.Origin,
                 request.ClaimState).ToJson();
             await _auditEmitter.EmitAsync(PackageEvents.TypePublish,
-                request.OrgId, actorType, request.ActorUserId, "accepted", payload, ct);
+                request.OrgId, actorType, actorId, "accepted", payload, ct);
         }
     }
 
     private async Task RecordReplaceAsync(PublishRequest request, string sha256, long sizeBytes,
-        PackageVersion existing, string actorType, CancellationToken ct)
+        PackageVersion existing, string actorType, string? actorId, CancellationToken ct)
     {
         string priorHash = "sha256:" + (existing.ChecksumSha256 ?? "");
         string newHash = "sha256:" + sha256;
@@ -86,7 +113,7 @@ public sealed class PublishAuditor
         // A replace overwrites an existing version's artifact — a per-version operator
         // action, so it belongs in `activity` only, same as publish and import.
         await _audit.LogActivityAsync(request.OrgId, request.Ecosystem, request.Purl,
-            "package.replace", request.ActorUserId, actorKind: request.ActorKind,
+            "package.replace", actorId, actorKind: request.ActorKind,
             detail: replaceDetail, sourceIp: request.SourceIp, ct: ct);
 
         string replacePayload = new PackageEvents.Replace(
@@ -94,7 +121,7 @@ public sealed class PublishAuditor
             newHash, priorHash, sizeBytes, request.Origin,
             request.ClaimState).ToJson();
         await _auditEmitter.EmitAsync(PackageEvents.TypeReplace,
-            request.OrgId, actorType, request.ActorUserId, "accepted", replacePayload, ct);
+            request.OrgId, actorType, actorId, "accepted", replacePayload, ct);
     }
 
     /// <summary>
@@ -110,7 +137,7 @@ public sealed class PublishAuditor
             new { license = Dependably.Protocol.BlockGateService.NoLicenseAssertion },
             Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
         return _audit.LogActivityAsync(request.OrgId, request.Ecosystem, request.Purl,
-            "license_publish_warn", request.ActorUserId, actorKind: request.ActorKind,
+            "license_publish_warn", ResolveAuditActorId(request), actorKind: request.ActorKind,
             detail: detail, sourceIp: request.SourceIp, ct: ct);
     }
 

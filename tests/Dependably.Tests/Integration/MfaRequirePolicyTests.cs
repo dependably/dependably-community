@@ -416,6 +416,10 @@ public sealed class MfaRequireEnforcedSettingsTests : IAsyncLifetime
         protected override IHost CreateHost(IHostBuilder _)
         {
             var builder = WebApplication.CreateBuilder();
+            // Pin before ConfigureBuilder: the tenant resolver is selected from DEPLOYMENT_MODE
+            // at service-registration time, so a UseSetting after this line is inert.
+            // See TestHostEnv.
+            TestHostEnv.PinAmbient(builder);
             Program.ConfigureBuilder(builder);
 
             builder.Services.RemoveAll<IBlobStore>();
@@ -697,11 +701,14 @@ public sealed class SystemMfaRequirePolicyTests : IAsyncLifetime
         {
             var builder = WebApplication.CreateBuilder();
 
-            builder.Configuration["DEPLOYMENT_MODE"] = "multi";
             builder.Configuration["BASE_URL"] = $"http://{ApexHost}";
             builder.Configuration["FIRST_BOOT_SYSTEM_ADMIN_EMAIL"] = "sysadmin@require-mfa-test.local";
             builder.Configuration["FIRST_BOOT_SYSTEM_ADMIN_PASSWORD"] = "TestRequireMfa1!";
 
+            // Pin before ConfigureBuilder: the tenant resolver is selected from DEPLOYMENT_MODE
+            // at service-registration time, so a UseSetting after this line is inert.
+            // See TestHostEnv.
+            TestHostEnv.PinAmbient(builder, "multi");
             Program.ConfigureBuilder(builder);
 
             builder.Services.RemoveAll<IBlobStore>();

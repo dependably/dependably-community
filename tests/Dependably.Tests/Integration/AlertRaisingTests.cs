@@ -54,7 +54,7 @@ public sealed class AlertRaisingTests : IAsyncLifetime
         var recentPublish = TimeProvider.System.GetUtcNow().AddHours(-1);
         var request = new BlockGateRequest(
             OrgId: orgId, Ecosystem: "npm", Purl: purl, VersionId: verId,
-            ManualState: null, VulnCheckedAt: null, UserId: null, MaxOsvScoreTolerance: 10.0,
+            ManualState: null, VulnCheckedAt: null, AuditActorId: null, MaxOsvScoreTolerance: 10.0,
             MinReleaseAgeHours: 24, PublishedAt: recentPublish, Origin: "proxy");
 
         var first = await blockGate.EvaluateAsync(request);
@@ -83,7 +83,7 @@ public sealed class AlertRaisingTests : IAsyncLifetime
         var recentPublish = TimeProvider.System.GetUtcNow().AddHours(-1); // now-ok: see above
         var request = new BlockGateRequest(
             OrgId: orgId, Ecosystem: "npm", Purl: purl, VersionId: verId,
-            ManualState: null, VulnCheckedAt: null, UserId: null, MaxOsvScoreTolerance: 10.0,
+            ManualState: null, VulnCheckedAt: null, AuditActorId: null, MaxOsvScoreTolerance: 10.0,
             MinReleaseAgeHours: 24, PublishedAt: recentPublish, Origin: "proxy");
 
         await blockGate.EvaluateAsync(request);

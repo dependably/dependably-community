@@ -187,6 +187,10 @@ public sealed class ManagementDocsGateTests : IAsyncLifetime
         protected override IHost CreateHost(IHostBuilder _)
         {
             var builder = WebApplication.CreateBuilder();
+            // Pin before ConfigureBuilder: the tenant resolver is selected from
+            // DEPLOYMENT_MODE at service-registration time, so a UseSetting after this
+            // line is inert. See TestHostEnv.
+            TestHostEnv.PinAmbient(builder);
             Program.ConfigureBuilder(builder);
             builder.Services.RemoveAll<IBlobStore>();
             builder.Services.AddSingleton<IBlobStore>(_blob);
@@ -286,6 +290,10 @@ public sealed class ManagementDocsGateTests : IAsyncLifetime
         protected override IHost CreateHost(IHostBuilder _)
         {
             var builder = WebApplication.CreateBuilder();
+            // Pin before ConfigureBuilder: the tenant resolver is selected from
+            // DEPLOYMENT_MODE at service-registration time, so a UseSetting after this
+            // line is inert. See TestHostEnv.
+            TestHostEnv.PinAmbient(builder);
             Program.ConfigureBuilder(builder);
             builder.Services.RemoveAll<IBlobStore>();
             builder.Services.AddSingleton<IBlobStore>(_blob);

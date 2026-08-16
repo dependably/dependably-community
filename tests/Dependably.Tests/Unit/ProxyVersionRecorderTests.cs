@@ -131,7 +131,7 @@ public sealed class ProxyVersionRecorderTests : IAsyncLifetime
         var req = new ProxyVersionRequest(
             OrgId: orgId, Ecosystem: "npm", PackageName: "left-pad", PurlName: "left-pad",
             Version: "1.0.0", Purl: "pkg:npm/left-pad@1.0.0",
-            Sha256: "sha", File: "left-pad-1.0.0.tgz", Blob: blob, UserId: null);
+            Sha256: "sha", File: "left-pad-1.0.0.tgz", Blob: blob, AuditActorId: null);
 
         await recorder.RecordAsync(
             req, extractLicenses: null, extractManifest: _ => "{\"dependencies\":{}}", cacheArtifactId: caId);
@@ -208,7 +208,7 @@ public sealed class ProxyVersionRecorderTests : IAsyncLifetime
         return new ProxyVersionRequest(
             OrgId: orgId, Ecosystem: "npm", PackageName: name, PurlName: name,
             Version: version, Purl: $"pkg:npm/{name}@{version}",
-            Sha256: sha, File: $"{name}-{version}.tgz", Blob: blob, UserId: null);
+            Sha256: sha, File: $"{name}-{version}.tgz", Blob: blob, AuditActorId: null);
     }
 
     private async Task<string> SeedOrgAsync()

@@ -1002,6 +1002,20 @@ public sealed partial class SchemaInitializer
             // which the serve projections resolve by falling back to the shared row.
             "ALTER TABLE tenant_artifact_access ADD COLUMN content_hash TEXT",
             "ALTER TABLE tenant_artifact_access ADD COLUMN blob_key TEXT",
+            // Actor display name denormalized at write time — see the column comment in
+            // Schema.sql. Service actors only; a user actor stays NULL so no email is
+            // stored past the fixed column lists the erasure and retention sweeps null.
+            "ALTER TABLE audit_log ADD COLUMN actor_label TEXT",
+            "ALTER TABLE activity ADD COLUMN actor_label TEXT",
+            // OCI moving-tag promotion gate: a newer digest observed upstream but not yet
+            // promoted onto the tag. min_release_age_hours gates promotion (the tag keeps
+            // resolving to the accepted digest until the pending one has been locally observed
+            // long enough), never availability. NULL on existing rows — no observation held.
+            // pending_first_seen_at's canonical-UTC CHECK reaches fresh installs from the
+            // CREATE TABLE blocks; upgraded DBs rely on the canonical UtcTimestamp writers
+            // (SQLite ALTER cannot add a CHECK), same as license_checked_at.
+            "ALTER TABLE oci_tags ADD COLUMN pending_digest TEXT",
+            "ALTER TABLE oci_tags ADD COLUMN pending_first_seen_at TEXT",
     };
 
     private async Task RunAdditiveMigrationsAsync(DbConnection conn)

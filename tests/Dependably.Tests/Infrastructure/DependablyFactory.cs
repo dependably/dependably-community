@@ -154,6 +154,25 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
     /// </summary>
     public Dependably.Infrastructure.Mail.SmtpMailSender? MailSenderOverride { get; init; }
 
+    /// <summary>
+    /// Optional stub for the <c>OciUpstream</c> named HttpClient's primary handler. The OCI
+    /// resolver builds <c>https://{host}/v2/…</c> URLs, so it cannot be pointed at the plain-HTTP
+    /// <see cref="MockUpstream"/> WireMock server; this delegate intercepts at the handler layer
+    /// instead — each upstream request is answered by the test's responder, letting an
+    /// integration test simulate a real OCI upstream (moving tags included) hermetically.
+    /// </summary>
+    public Func<HttpRequestMessage, HttpResponseMessage>? OciUpstreamHandler { get; init; }
+
+    private sealed class StubbedOciUpstreamHandler : HttpMessageHandler
+    {
+        private readonly Func<HttpRequestMessage, HttpResponseMessage> _responder;
+        public StubbedOciUpstreamHandler(Func<HttpRequestMessage, HttpResponseMessage> responder)
+            => _responder = responder;
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+            => Task.FromResult(_responder(request));
+    }
+
     protected override IHost CreateHost(IHostBuilder _)
     {
         var builder = WebApplication.CreateBuilder();
@@ -221,6 +240,13 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         {
             builder.Services.RemoveAll<Dependably.Protocol.IOsvSource>();
             builder.Services.AddSingleton(OsvSource);
+        }
+
+        if (OciUpstreamHandler is not null)
+        {
+            var responder = OciUpstreamHandler;
+            builder.Services.AddHttpClient("OciUpstream")
+                .ConfigurePrimaryHttpMessageHandler(() => new StubbedOciUpstreamHandler(responder));
         }
 
         // Test overrides: replace real stores with in-memory equivalents. Both the legacy
@@ -363,6 +389,13 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
     {
         "pull" => """["read:artifact","read:metadata"]""",
         "push" => """["publish:*","read:artifact","read:metadata","yank:*"]""",
+        // What the product actually mints for a "push" token: the web token modal's push
+        // preset is exactly publish:*, with no read capability at all. The "push" kind above
+        // carries read:artifact, which satisfies the OCI pull gate on its own and so lets a
+        // push test pass without ever reaching the publish:oci push-probe exception — the
+        // branch a real docker push depends on. Use this kind for anything asserting how a
+        // publish-scoped client behaves.
+        "publish-only" => """["publish:*"]""",
         "siem:read" => """["read:audit"]""",
         _ => throw new ArgumentException($"Unknown test token kind '{kind}'.", nameof(kind))
     };

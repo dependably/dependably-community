@@ -5,6 +5,7 @@ using Dependably.Api;
 using Dependably.Configuration;
 using Dependably.Infrastructure;
 using Dependably.Protocol;
+using Dependably.Security;
 using Dependably.Storage;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
@@ -431,6 +432,7 @@ public sealed class OciBlobPresignRedirectTests : IAsyncLifetime
             EdgeGuard: TestEdgeMode.DisabledPublishGuard(),
             Packages: new PackageRepository(_db),
             TenantArtifactAccess: new TenantArtifactAccessRepository(_db),
+            DenialAudit: new AuthDenialAuditCoalescer(TimeProvider.System),
             Presign: presign);
 
         return new OciController(svc, NullLogger<OciController>.Instance)

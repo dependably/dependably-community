@@ -2,6 +2,7 @@ using Dapper;
 using Dependably.Api;
 using Dependably.Infrastructure;
 using Dependably.Protocol;
+using Dependably.Security;
 using Dependably.Storage;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
@@ -259,7 +260,8 @@ public sealed class OciManifestDeleteShadowCleanupTests : IAsyncLifetime
             BlockGate: null!,
             EdgeGuard: Dependably.Tests.Infrastructure.TestEdgeMode.DisabledPublishGuard(),
             Packages: _packages,
-            TenantArtifactAccess: _tenantAccess);
+            TenantArtifactAccess: _tenantAccess,
+            DenialAudit: new AuthDenialAuditCoalescer(TimeProvider.System));
 
         return new OciController(svc, NullLogger<OciController>.Instance)
         {

@@ -179,7 +179,7 @@ public sealed class ContentBindingAwareBlockGateTests : IClassFixture<InMemoryDb
 
         var req = BlockGateRequest.ForProxyFirstFetch(
             orgId, "npm", caFacts,
-            userId: null, actorKind: null, sourceIp: null,
+            userId: null, actorKind: null, actorLabel: null, sourceIp: null,
             maxOsvScoreTolerance: 10.0,
             minReleaseAgeHours: null,
             blockDeprecatedMode: null,
@@ -211,7 +211,7 @@ public sealed class ContentBindingAwareBlockGateTests : IClassFixture<InMemoryDb
 
         var req = BlockGateRequest.ForProxyFirstFetch(
             orgId, "npm", caFacts,
-            userId: null, actorKind: null, sourceIp: null,
+            userId: null, actorKind: null, actorLabel: null, sourceIp: null,
             maxOsvScoreTolerance: 10.0,
             minReleaseAgeHours: null,
             blockDeprecatedMode: null,

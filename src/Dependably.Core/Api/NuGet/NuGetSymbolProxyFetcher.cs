@@ -177,7 +177,7 @@ public sealed class NuGetSymbolProxyFetcher(
             // A PDB declares no licence; it is debug metadata for a package whose licence is
             // recorded on the package itself.
             ExtractLicenses: null,
-            UserId: request.UserId,
+            AuditActorId: request.AuditActorId, AuditActorLabel: request.AuditActorLabel,
             ActorKind: request.ActorKind,
             SourceIp: request.SourceIp,
             MaxOsvScoreTolerance: request.Settings.MaxOsvScoreTolerance,
@@ -202,9 +202,17 @@ public sealed record SymbolProxyRequest(
     string PdbName,
     string SsqpKey,
     OrgSettings Settings,
-    string? UserId,
+    string? AuditActorId,
     string? ActorKind,
-    string? SourceIp);
+    string? SourceIp,
+    /// <summary>
+    /// The actor's display name, carried alongside <see cref="AuditActorId"/> and written to
+    /// <c>actor_label</c> so the row stays readable after the row it would otherwise join to
+    /// is gone. Non-null for a service token only — <c>TokenRecord.AuditActorLabel</c> derives
+    /// it, so no call site can put a user's email in that column. NULL means "resolve through
+    /// the existing join", which is what rows predating the column already do.
+    /// </summary>
+    string? AuditActorLabel = null);
 
 /// <summary>
 /// Outcome of a forward-on-miss fetch: the recorded cache artefact, the stored blob, and the gate

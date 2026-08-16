@@ -188,7 +188,7 @@ public sealed partial class OciController
     /// </summary>
     private Task RecordBlobDownloadAsync(string orgId, string purl, TokenRecord? token, CancellationToken ct)
         => _svc.Audit.LogActivityAsync(orgId, "oci", purl, "download",
-            actorId: token?.UserId, actorKind: token?.ActorKind, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+            actorId: token?.AuditActorId, actorKind: token?.ActorKind, actorLabel: token?.AuditActorLabel, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
     /// <summary>
     /// Attempts a ranged (206) read of a locally stored blob. Returns <c>null</c> when the
@@ -260,7 +260,7 @@ public sealed partial class OciController
             {
                 return AirGappedBlobMiss(name, digest);
             }
-            catch (Exception ex) when (IsUpstreamTransportFailure(ex, ct))
+            catch (Exception ex) when (IsUpstreamFailure(ex, ct))
             {
                 return UpstreamUnreachable(ex, name, digest);
             }
@@ -288,7 +288,7 @@ public sealed partial class OciController
         {
             return AirGappedBlobMiss(name, digest);
         }
-        catch (Exception ex) when (IsUpstreamTransportFailure(ex, ct))
+        catch (Exception ex) when (IsUpstreamFailure(ex, ct))
         {
             return UpstreamUnreachable(ex, name, digest);
         }
@@ -305,7 +305,7 @@ public sealed partial class OciController
         Response.Headers.ETag = $"\"{digest}\"";
         Response.Headers.CacheControl = "private, max-age=31536000, immutable";
         await _svc.Audit.LogActivityAsync(orgId, "oci", $"pkg:oci/{name}@{digest}", "download",
-            actorId: token?.UserId, actorKind: token?.ActorKind, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+            actorId: token?.AuditActorId, actorKind: token?.ActorKind, actorLabel: token?.AuditActorLabel, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         return File(upstreamResult.Content, upstreamResult.MediaType);
     }
 

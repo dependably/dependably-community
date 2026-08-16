@@ -78,19 +78,19 @@ public class TokenRepository
         // its API tokens immediately — the rows stay in user_tokens (inert) and resume
         // working only if an operator re-activates the account. Removing the user deletes
         // the rows outright via the user_id ON DELETE CASCADE.
-        var (Id, OrgId, UserId, Capabilities, Description, CreatedAt, ExpiresAt, LastUsedAt, Source) = await conn.QuerySingleOrDefaultAsync<(
+        var (Id, OrgId, UserId, Capabilities, Description, CreatedAt, ExpiresAt, LastUsedAt, Name, Source) = await conn.QuerySingleOrDefaultAsync<(
             string Id, string OrgId, string? UserId, string? Capabilities,
             string? Description, string CreatedAt, string? ExpiresAt, string? LastUsedAt,
-            string Source)>(
+            string? Name, string Source)>(
             """
-            SELECT t.id, t.org_id, t.user_id, t.capabilities, t.description, t.created_at, t.expires_at, t.last_used_at, 'user' AS source
+            SELECT t.id, t.org_id, t.user_id, t.capabilities, t.description, t.created_at, t.expires_at, t.last_used_at, NULL AS name, 'user' AS source
             FROM user_tokens t
             JOIN users u ON u.id = t.user_id AND u.tenant_id = t.org_id
             WHERE t.token_hash = @hash
               AND (t.expires_at IS NULL OR t.expires_at > @now)
               AND u.account_status = 'active'
             UNION ALL
-            SELECT id, org_id, NULL AS user_id, capabilities, description, created_at, expires_at, last_used_at, 'service' AS source
+            SELECT id, org_id, NULL AS user_id, capabilities, description, created_at, expires_at, last_used_at, name, 'service' AS source
             FROM service_tokens
             WHERE token_hash = @hash AND (expires_at IS NULL OR expires_at > @now)
             LIMIT 1
@@ -109,6 +109,7 @@ public class TokenRepository
                 CreatedAt = DateTimeOffset.Parse(CreatedAt),
                 ExpiresAt = ExpiresAt is not null ? DateTimeOffset.Parse(ExpiresAt) : null,
                 LastUsedAt = LastUsedAt is not null ? DateTimeOffset.Parse(LastUsedAt) : null,
+                Name = Name,
                 Source = Source == "service" ? TokenSource.Service : TokenSource.User,
             };
 

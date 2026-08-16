@@ -49,9 +49,11 @@ public sealed partial class OciController
     // license_checked_at on oci_blobs), and this serve path enforces the license arm only. When
     // the manifest row has a captured SPDX expression and the tenant's license_enforcement_mode is
     // 'block', the download is denied via BlockGateService's license arm (same activity row, meter,
-    // and quarantine review as every other license block). The first pull of a not-yet-stamped
-    // image serves once through the upstream path, is stamped from the config label, and subsequent
-    // local serves deny.
+    // and quarantine review as every other license block). Both serve paths evaluate the arm: the
+    // upstream path stamps the image from its config label and then evaluates the stamp it just
+    // wrote, so a manifest reaching this org for the first time — including a mutable tag that has
+    // repointed to a digest never held here — is enforced on that same request rather than on the
+    // next one.
     //
     // The remaining supply-chain arms (deprecated / revoked / vuln-score / provenance /
     // manual-block / install-script) stay deliberately excluded: OCI images are not run through the
@@ -63,8 +65,8 @@ public sealed partial class OciController
         string orgId, string name, OciCoordinates coords, bool headOnly, TokenRecord? token, CancellationToken ct)
     {
         // Resolve tag → digest first (returns the reference unchanged if it's already a digest).
-        string? resolved = await ResolveDigestAsync(orgId, coords, ct);
-        if (resolved is null)
+        var localRef = await ResolveDigestAsync(orgId, coords, ct);
+        if (localRef.Digest is not { } resolved)
         {
             return null;
         }
@@ -78,6 +80,23 @@ public sealed partial class OciController
             new { digest = resolved, orgId });
 
         if (BlobKey is null)
+        {
+            return null;
+        }
+
+        // A proxied tag is a mutable reference: the upstream may have repointed it since it was
+        // cached, so it may be served from here only while its oci_tags entry is inside
+        // Oci:ManifestTagTtl. Past that, report a miss and let the caller revalidate upstream.
+        //
+        // This check has to live here rather than in OciUpstreamResolver alone. This method runs
+        // first and answers from local state, so the resolver's own TTL check is reached only
+        // once this one has already declined — without this line a cached tag is pinned to its
+        // first-pulled digest for the life of the blob and the TTL never runs at all.
+        //
+        // Which tags it applies to is the tag's own stamp, not the blob row's origin — see
+        // IsTagDueForUpstreamRevalidation. A pushed manifest keeps origin = 'proxy' whenever the
+        // same bytes were proxied first, so origin would send a hosted tag upstream.
+        if (!coords.IsDigest && _svc.Upstream.IsTagDueForUpstreamRevalidation(localRef.LastRevalidated))
         {
             return null;
         }
@@ -122,8 +141,22 @@ public sealed partial class OciController
         // match the version row's canonical PURL (which carries ?repository_url=…&tag=…).
         // OCI download volume is still tracked org-wide via these activity rows.
         await _svc.Audit.LogActivityAsync(orgId, "oci", $"pkg:oci/{name}@{resolved}", "download",
-            actorId: token?.UserId, actorKind: token?.ActorKind, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+            actorId: token?.AuditActorId, actorKind: token?.ActorKind, actorLabel: token?.AuditActorLabel, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         return File(stream, MediaType!);
+    }
+
+    /// <summary>
+    /// Reads the SPDX expression stamped on a manifest's <c>oci_blobs</c> row, or null when the
+    /// row carries none (no label on the image, or the config blob had not landed when the
+    /// recorder ran). Null is the empty-licence case OCI passes through, not a block.
+    /// </summary>
+    private async Task<string?> ReadStampedLicenseAsync(string orgId, string digest, CancellationToken ct)
+    {
+        await using var conn = await _svc.Db.OpenAsync(ct);
+        // xtenant: (digest, org_id) PK is tenant-scoped.
+        return await conn.ExecuteScalarAsync<string?>(
+            "SELECT license_spdx FROM oci_blobs WHERE digest = @digest AND org_id = @orgId",
+            new { digest, orgId });
     }
 
     /// <summary>
@@ -149,15 +182,28 @@ public sealed partial class OciController
             {
                 return AirGappedManifestMiss(name, reference);
             }
-            catch (Exception ex) when (IsUpstreamTransportFailure(ex, ct))
+            catch (Exception ex) when (IsUpstreamFailure(ex, ct))
             {
-                return UpstreamUnreachable(ex, name, reference);
+                return await ServeStaleOrUpstreamErrorAsync(orgId, name, reference, isDigest, headOnly: true, token, ex, ct);
             }
 
             if (meta is null)
             {
                 return OciError(StatusCodes.Status404NotFound, OciErrorCode.MANIFEST_UNKNOWN,
                     $"Manifest unknown: {reference}");
+            }
+
+            // HEAD answers the licence arm exactly as GET does. A HEAD that revalidates a stale
+            // tag resolves the same repointed digest a GET would, so letting it answer 200 while
+            // GET answers 403 would tell a client probing before a pull that a blocked image is
+            // available. Only a digest already stamped here can be judged — an upstream HEAD
+            // downloads no config blob — and an unstamped digest is the empty-licence case OCI
+            // passes through, the same answer it gets on the GET path.
+            if (await EvaluateLicenseBlockAsync(
+                    orgId, $"pkg:oci/{name}@{meta.Digest}",
+                    await ReadStampedLicenseAsync(orgId, meta.Digest, ct), token, ct) is { } headBlocked)
+            {
+                return headBlocked;
             }
 
             SetManifestHeaders(meta.Digest, meta.SizeBytes, meta.MediaType, "MISS", isDigest);
@@ -173,9 +219,9 @@ public sealed partial class OciController
         {
             return AirGappedManifestMiss(name, reference);
         }
-        catch (Exception ex) when (IsUpstreamTransportFailure(ex, ct))
+        catch (Exception ex) when (IsUpstreamFailure(ex, ct))
         {
-            return UpstreamUnreachable(ex, name, reference);
+            return await ServeStaleOrUpstreamErrorAsync(orgId, name, reference, isDigest, headOnly: false, token, ex, ct);
         }
 
         if (upstreamResult is null)
@@ -184,9 +230,26 @@ public sealed partial class OciController
                 $"Manifest unknown: {reference}");
         }
 
+        // The fetch above catalogued the manifest and stamped its license facts
+        // (FetchAndCacheManifestAsync → OciImageLicenseRecorder.RecordManifestAsync), so the
+        // licence arm can be answered for these bytes now rather than on the next request.
+        //
+        // Evaluating it here is what keeps a mutable tag from buying a free pull on every
+        // repoint: a repointed tag resolves to a digest this org has never held, which is a
+        // guaranteed miss, and deferring the decision would serve the new image unenforced each
+        // time it changed. A label-less image still stamps NULL and still passes — OCI keeps the
+        // empty-licence pass-through, so this denies only an expression the tenant blocks.
+        string? upstreamLicense = await ReadStampedLicenseAsync(orgId, upstreamResult.Digest, ct);
+        if (await EvaluateLicenseBlockAsync(
+                orgId, $"pkg:oci/{name}@{upstreamResult.Digest}", upstreamLicense, token, ct) is { } blocked)
+        {
+            await upstreamResult.Content.DisposeAsync();
+            return blocked;
+        }
+
         SetManifestHeaders(upstreamResult.Digest, upstreamResult.SizeBytes, upstreamResult.MediaType, "MISS", isDigest);
         await _svc.Audit.LogActivityAsync(orgId, "oci", $"pkg:oci/{name}@{upstreamResult.Digest}", "download",
-            actorId: token?.UserId, actorKind: token?.ActorKind, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+            actorId: token?.AuditActorId, actorKind: token?.ActorKind, actorLabel: token?.AuditActorLabel, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         return File(upstreamResult.Content, upstreamResult.MediaType);
     }
 
@@ -212,6 +275,107 @@ public sealed partial class OciController
         OciError(StatusCodes.Status404NotFound, OciErrorCode.MANIFEST_UNKNOWN,
             $"Manifest unknown: {reference}. This instance is air-gapped, so {name} was not "
             + "fetched from an upstream registry; only locally held images are available.");
+
+    /// <summary>
+    /// The answer when the upstream failed while a tag needed revalidation: the last accepted
+    /// digest, served for as long as the bounded stale grace allows, then 502.
+    ///
+    /// <para>
+    /// The bound is what makes serving stale safe: without it, an upstream outage would
+    /// silently extend the TTL to forever. The grace window is anchored at the moment the entry
+    /// became stale (<c>last_revalidated + ManifestTagTtl</c>) and a failed revalidation never
+    /// refreshes <c>last_revalidated</c>, so repeated failures cannot slide the deadline — see
+    /// <see cref="OciUpstreamResolver.IsWithinStaleGrace"/>. Digest references never serve
+    /// stale: they are content-addressed, so there is no "previously accepted" mapping to fall
+    /// back to — a digest miss with a dead upstream is simply unreachable content.
+    /// </para>
+    /// </summary>
+#pragma warning disable S107 // Threads the request coordinates plus the failure through to the stale decision
+    private async Task<IActionResult> ServeStaleOrUpstreamErrorAsync(
+        string orgId, string name, string reference, bool isDigest, bool headOnly,
+        TokenRecord? token, Exception ex, CancellationToken ct)
+#pragma warning restore S107
+    {
+        if (!isDigest)
+        {
+            var stale = await TryServeStaleTagManifestAsync(orgId, name, reference, headOnly, token, ct);
+            if (stale is not null)
+            {
+                _logger.LogWarning(
+                    "OCI upstream unavailable while revalidating {Repository}:{Reference} ({ExceptionType}); "
+                    + "served last accepted digest within Oci:ManifestTagStaleGrace.",
+                    name, reference, ex.GetType().Name);
+                return stale;
+            }
+        }
+
+        return UpstreamUnreachable(ex, name, reference);
+    }
+
+    /// <summary>
+    /// Serves the tag's last accepted digest from local state despite its TTL having expired,
+    /// or returns null when stale serving is not possible: no accepted mapping, grace window
+    /// exhausted, or the manifest blob evicted. The licence arm still runs — an image the
+    /// policy blocks does not become servable by being stale — and every stale serve is
+    /// audited (the download activity row carries a stale-serve detail) and marked
+    /// <c>X-Cache: STALE</c>, an additive header value alongside the existing HIT/MISS.
+    /// </summary>
+    private async Task<IActionResult?> TryServeStaleTagManifestAsync(
+        string orgId, string name, string tag, bool headOnly, TokenRecord? token, CancellationToken ct)
+    {
+        await using var conn = await _svc.Db.OpenAsync(ct);
+        // xtenant: (org_id, repository, tag) PK.
+        var (Digest, LastRevalidated) = await conn.QuerySingleOrDefaultAsync<(string? Digest, string? LastRevalidated)>(
+            "SELECT digest AS Digest, last_revalidated AS LastRevalidated " +
+            "FROM oci_tags WHERE org_id = @orgId AND repository = @repo AND tag = @tag",
+            new { orgId, repo = name, tag });
+
+        // A NULL stamp is a hosted tag (already served locally, never reaches here) or a row
+        // with no revalidation evidence — neither has a grace window to measure from.
+        if (Digest is null || LastRevalidated is null || !_svc.Upstream.IsWithinStaleGrace(LastRevalidated))
+        {
+            return null;
+        }
+
+        // xtenant: (digest, org_id) PK is tenant-scoped.
+        var (MediaType, SizeBytes, BlobKey, Origin, LicenseSpdx) = await conn.QuerySingleOrDefaultAsync<(string? MediaType, long SizeBytes, string? BlobKey, string? Origin, string? LicenseSpdx)>(
+            "SELECT media_type AS MediaType, size_bytes AS SizeBytes, blob_key AS BlobKey, origin AS Origin, license_spdx AS LicenseSpdx " +
+            "FROM oci_blobs WHERE digest = @digest AND org_id = @orgId",
+            new { digest = Digest, orgId });
+        if (BlobKey is null)
+        {
+            return null;
+        }
+
+        if (await EvaluateLicenseBlockAsync(orgId, $"pkg:oci/{name}@{Digest}", LicenseSpdx, token, ct) is { } blocked)
+        {
+            return blocked;
+        }
+
+        if (headOnly)
+        {
+            if (!await BlobTierFor(Origin).ExistsAsync(BlobKey, ct))
+            {
+                return null;
+            }
+
+            SetManifestHeaders(Digest, SizeBytes, MediaType, "STALE", isDigest: false);
+            return Ok();
+        }
+
+        var stream = await BlobTierFor(Origin).GetAsync(BlobKey, ct);
+        if (stream is null)
+        {
+            return null;
+        }
+
+        SetManifestHeaders(Digest, SizeBytes, MediaType, "STALE", isDigest: false);
+        await _svc.Audit.LogActivityAsync(orgId, "oci", $"pkg:oci/{name}@{Digest}", "download",
+            actorId: token?.AuditActorId, actorKind: token?.ActorKind, actorLabel: token?.AuditActorLabel,
+            detail: "stale serve: upstream unavailable during tag revalidation; last accepted digest served within Oci:ManifestTagStaleGrace",
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+        return File(stream, MediaType!);
+    }
 
     /// <summary>
     /// Sets the manifest response headers shared by the local-cache and upstream paths.
@@ -484,7 +648,7 @@ public sealed partial class OciController
             }
 
             await _svc.Audit.LogActivityAsync(orgId, "oci", $"pkg:oci/{name}@{reference}", "delete",
-                actorId: token?.UserId, actorKind: token?.ActorKind, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+                actorId: token?.AuditActorId, actorKind: token?.ActorKind, actorLabel: token?.AuditActorLabel, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
             return NoContent();
         }
@@ -505,7 +669,7 @@ public sealed partial class OciController
             }
 
             await _svc.Audit.LogActivityAsync(orgId, "oci", $"pkg:oci/{name}:{reference}", "delete",
-                actorId: token?.UserId, actorKind: token?.ActorKind, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+                actorId: token?.AuditActorId, actorKind: token?.ActorKind, actorLabel: token?.AuditActorLabel, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
             return NoContent();
         }
@@ -624,7 +788,7 @@ public sealed partial class OciController
                     await ownerGate.RecordOwnershipAsync(orgId, "oci", name, namePrincipal, ct);
                 }
                 await _svc.Audit.LogActivityAsync(orgId, "oci", $"pkg:oci/{name}@{result.Digest}", "push",
-                    actorId: token?.UserId, actorKind: token?.ActorKind, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+                    actorId: token?.AuditActorId, actorKind: token?.ActorKind, actorLabel: token?.AuditActorLabel, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
                 Response.Headers.Location = $"/v2/{name}/manifests/{result.Digest}";
                 Response.Headers["Docker-Content-Digest"] = result.Digest!;
                 return StatusCode(StatusCodes.Status201Created);

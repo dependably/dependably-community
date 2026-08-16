@@ -469,6 +469,7 @@
     "searchPlaceholder": "Search action, actor, PURL, detail…",
     "export": "Export CSV",
     "groups": {
+      "packages": "Packages",
       "tenantConfig": "Tenant configuration",
       "auth": "Authentication",
       "mfa": "Multi-factor auth",
@@ -482,6 +483,7 @@
       "upstream": "Upstream"
     },
     "actions": {
+      "push": "Package published",
       "org_settings_updated": "Org settings updated",
       "retention_updated": "Retention updated",
       "proxy_settings_updated": "Proxy settings updated",

@@ -125,7 +125,7 @@ public sealed class ProxyVersionRecorder
         // per-tenant event stream is not silenced. Download-count is on tenant_artifact_access;
         // the caller (ProxyFetchService) already called UpsertStateAsync before RecordAsync.
         await _audit.LogActivityAsync(req.OrgId, req.Ecosystem, req.Purl, "first_fetch",
-            req.UserId, actorKind: req.ActorKind, sourceIp: req.SourceIp, ct: ct);
+            req.AuditActorId, actorKind: req.ActorKind, actorLabel: req.AuditActorLabel, sourceIp: req.SourceIp, ct: ct);
 
         // License extraction writes only to the global plane.
         if (extractLicenses is not null)
@@ -236,14 +236,14 @@ public sealed record ProxyVersionRequest(
     string Sha256,
     string File,
     BlobHandle Blob,
-    string? UserId,
+    string? AuditActorId,
     /// <summary>
-    /// Discriminator persisted alongside <see cref="UserId"/> in <c>activity.actor_kind</c>:
+    /// Discriminator persisted alongside <see cref="AuditActorId"/> in <c>activity.actor_kind</c>:
     /// <see cref="ActorKinds.User"/> for user-token-attributed first fetches,
     /// <see cref="ActorKinds.Service"/> for service-token-attributed ones, or NULL for
     /// truly-anonymous fetches (only reachable on pull paths when AnonymousPull=1). Without
     /// this, service-token first fetches show up as "anonymous" in the audit UI because
-    /// <c>TokenRepository.ResolveAsync</c> never sets <c>UserId</c> for service tokens.
+    /// <c>TokenRepository.ResolveAsync</c> never sets <c>AuditActorId</c> for service tokens.
     /// </summary>
     string? ActorKind = null,
     string? SourceIp = null,
@@ -273,4 +273,12 @@ public sealed record ProxyVersionRequest(
     /// flag the version. Persisted via <c>PackageRepository.UpdateDeprecatedAsync</c>
     /// so the UI badge mirrors the publish-path behaviour.
     /// </summary>
-    string? Deprecated = null);
+    string? Deprecated = null,
+    /// <summary>
+    /// The actor's display name, carried alongside <see cref="AuditActorId"/> and written to
+    /// <c>actor_label</c> so the row stays readable after the row it would otherwise join to
+    /// is gone. Non-null for a service token only — <c>TokenRecord.AuditActorLabel</c> derives
+    /// it, so no call site can put a user's email in that column. NULL means "resolve through
+    /// the existing join", which is what rows predating the column already do.
+    /// </summary>
+    string? AuditActorLabel = null);

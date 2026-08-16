@@ -90,6 +90,7 @@ public sealed class ActivityWriterPostgresTests
                 EventType: "download",
                 ActorId: null,
                 ActorKind: null,
+                ActorLabel: null,
                 Detail: null,
                 SourceIp: null,
                 CreatedAt: TestTime.KnownNow.ToUtcIsoMillis());

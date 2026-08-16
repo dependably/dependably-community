@@ -288,6 +288,7 @@ public sealed class ActivityWriterTests : IAsyncLifetime
         EventType: eventType,
         ActorId: null,
         ActorKind: null,
+                ActorLabel: null,
         Detail: null,
         SourceIp: null,
         CreatedAt: "2026-05-25T00:00:00.000Z");

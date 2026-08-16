@@ -238,7 +238,7 @@ public sealed class ApkController : OrgScopedControllerBase
             }
 
             await _svc.Audit.LogActivityAsync(
-                orgId, "apk", purl, "first_fetch", token?.UserId,
+                orgId, "apk", purl, "first_fetch", token?.AuditActorId, actorLabel: token?.AuditActorLabel,
                 actorKind: token?.ActorKind,
                 sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 

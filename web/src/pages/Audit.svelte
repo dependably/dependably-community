@@ -146,6 +146,10 @@
   // excluded because ListAuditAsync filters them out and they'd be dead options.
   // Mirrors the catalogue tracked in en.json#audit.actions / en.json#audit.groups.
   const TENANT_AUDIT_ACTION_GROUPS = [
+    // `push` is dual-written into audit_log by PublishAuditor as well as into the activity
+    // feed. Until that dual-write is swept it is a real, and on a busy tenant a dominant,
+    // slice of this list — so it needs to be selectable and, more to the point, excludable.
+    { labelKey: 'audit.groups.packages',     actions: ['push'] },
     { labelKey: 'audit.groups.tenantConfig', actions: ['org_settings_updated', 'retention_updated', 'proxy_settings_updated', 'tenant.setting.change'] },
     // No login.success — ListAuditAsync excludes it from this list (a routine login is not a
     // config change; it lives in the Lifecycle feed). Listing it here would be a dead option.
@@ -164,11 +168,17 @@
     { labelKey: 'audit.groups.upstream',     actions: ['upstream_response_too_large', 'ssrf_blocked', 'checksum_failure'] },
   ]
 
+  // Ecosystem and PURL are carried on every audit_log row and already returned by the API, but
+  // only package-scoped actions (push, allowlist_blocked, checksum_failure) populate them — a
+  // config change has no artifact. Rendering them is what makes a `push` row state what was
+  // pushed instead of reading as a bare verb with an empty detail.
   $: adColumns = [
-    { key: 'createdAt',  label: $t('audit.columns.time'),   sortable: true, defaultDir: 'desc', width: '150px' },
-    { key: 'action',     label: $t('audit.columns.action'), sortable: true, width: '220px' },
-    { key: 'actorEmail', label: $t('audit.columns.actor'),  sortable: true, width: '200px' },
-    { key: 'detail',     label: $t('audit.columns.detail'), sortable: true },
+    { key: 'createdAt',  label: $t('audit.columns.time'),      sortable: true, defaultDir: 'desc', width: '150px' },
+    { key: 'action',     label: $t('audit.columns.action'),    sortable: true, width: '200px' },
+    { key: 'ecosystem',  label: $t('audit.columns.ecosystem'), sortable: true, width: '90px' },
+    { key: 'purl',       label: $t('audit.columns.purl'),      sortable: true },
+    { key: 'actorEmail', label: $t('audit.columns.actor'),     sortable: true, width: '180px' },
+    { key: 'detail',     label: $t('audit.columns.detail'),    sortable: true },
   ]
 
   async function loadAdmin() {
@@ -329,7 +339,9 @@
       <tr>
         <td class="nowrap text-muted">{$formatDate(e.createdAt)}</td>
         <td><code>{e.action}</code></td>
-        <td class="text-muted">{e.actorEmail ?? e.actorId ?? '—'}</td>
+        <td class="nowrap text-muted t-sm">{e.ecosystem ?? '—'}</td>
+        <td class="mono purl-cell" title={e.purl ?? ''}>{e.purl ?? '—'}</td>
+        <td class="actor-cell text-muted">{e.actorEmail ?? e.actorId ?? '—'}</td>
         <td class="audit-detail-cell">{e.detail || '—'}</td>
       </tr>
     </DataTable>

@@ -978,7 +978,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
         VersionId: Guid.NewGuid().ToString("N"),
         ManualState: null,
         VulnCheckedAt: null,
-        UserId: null,
+        AuditActorId: null,
         MaxOsvScoreTolerance: 10.0,
         SourceIp: null);
 

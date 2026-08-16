@@ -438,7 +438,7 @@ public sealed class PyPiDownloadHandler(
             : await proxyFetcher.FetchAndCacheUpstreamAsync(
                 httpContext,
                 new PyPiProxyDownload(file, resolved.Value.Url, resolved.Value.Sha256Hex, parsed, pkgVersions, resolved.Value.AuthorizationHeader),
-                new ProxyContext(orgId, token?.UserId, token?.ActorKind, settings, sourceIp),
+                new ProxyContext(orgId, token?.AuditActorId, token?.ActorKind, settings, sourceIp),
                 ct);
     }
 
@@ -486,7 +486,7 @@ public sealed class PyPiDownloadHandler(
             httpContext.Response.Headers.ETag = $"\"sha256:{hit.File.ChecksumSha256}\"";
             httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
         }
-        await audit.LogActivityAsync(orgId, "pypi", hit.Version.Purl, "download", token?.UserId,
+        await audit.LogActivityAsync(orgId, "pypi", hit.Version.Purl, "download", token?.AuditActorId, actorLabel: token?.AuditActorLabel,
             actorKind: token?.ActorKind, sourceIp: sourceIp, ct: ct);
         await packages.IncrementDownloadCountAsync(hit.Version.Id, ct);
         return new FileStreamResult(blob, "application/octet-stream") { FileDownloadName = file };
@@ -528,7 +528,7 @@ public sealed class PyPiDownloadHandler(
         }
         if (caFacts.Purl is not null)
         {
-            await audit.LogActivityAsync(orgId, "pypi", caFacts.Purl, "download", token?.UserId,
+            await audit.LogActivityAsync(orgId, "pypi", caFacts.Purl, "download", token?.AuditActorId, actorLabel: token?.AuditActorLabel,
                 actorKind: token?.ActorKind, sourceIp: sourceIp, ct: ct);
         }
         // Increment per-tenant download count on the global plane. Enqueued off the request

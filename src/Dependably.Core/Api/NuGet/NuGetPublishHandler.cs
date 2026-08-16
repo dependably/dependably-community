@@ -157,7 +157,7 @@ public sealed class NuGetPublishHandler(
         invalidation.Invalidate(MetadataInvalidation.ForNuGet(orgId, id));
 
         // Per-version operator action → activity (audit gap: unlist had no activity row before).
-        string? actorId = token?.UserId;
+        string? actorId = token?.AuditActorId;
         string? actorKind = token?.ActorKind;
         await audit.LogActivityAsync(orgId, "nuget", pkgVersion.Purl, "unlist",
             actorId, actorKind: actorKind, sourceIp: httpContext.GetNormalizedRemoteIp(), ct: ct);
@@ -400,7 +400,7 @@ public sealed class NuGetPublishHandler(
         {
             fetched = await symbolProxy.TryFetchAsync(
                 new SymbolProxyRequest(orgId, pdbName.ToLowerInvariant(), key.ToLowerInvariant(),
-                    settings, token?.UserId, token?.ActorKind, httpContext.GetNormalizedRemoteIp()),
+                    settings, token?.AuditActorId, token?.ActorKind, httpContext.GetNormalizedRemoteIp()),
                 ct);
         }
         catch (AirGappedException)

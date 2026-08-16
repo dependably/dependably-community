@@ -245,7 +245,7 @@ public sealed class PolymorphicReadCapabilityTests : IAsyncLifetime
             VersionId: "",               // empty — no package_versions row yet
             ManualState: null,
             VulnCheckedAt: _clock.GetUtcNow(),
-            UserId: null,
+            AuditActorId: null,
             MaxOsvScoreTolerance: 5.0,  // threshold below the 9.5 score
             CacheArtifactId: caId);
 
@@ -272,7 +272,7 @@ public sealed class PolymorphicReadCapabilityTests : IAsyncLifetime
             VersionId: "",
             ManualState: null,
             VulnCheckedAt: null,         // not yet scanned — must fail open
-            UserId: null,
+            AuditActorId: null,
             MaxOsvScoreTolerance: 0.0,  // extremely tight
             CacheArtifactId: caId);
 
@@ -301,7 +301,7 @@ public sealed class PolymorphicReadCapabilityTests : IAsyncLifetime
             VersionId: verId,
             ManualState: null,
             VulnCheckedAt: _clock.GetUtcNow(),
-            UserId: null,
+            AuditActorId: null,
             MaxOsvScoreTolerance: 5.0,
             CacheArtifactId: null);       // legacy path
 

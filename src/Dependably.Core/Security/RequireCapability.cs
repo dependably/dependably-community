@@ -17,12 +17,15 @@ namespace Dependably.Security;
 /// <em>which</em> action; the org guard restricts <em>which</em> tenant they can
 /// touch and that they are a member of it at all.
 ///
-/// Scope of this iteration: JWT-authenticated routes only (admin/import/claims/
-/// audit-events). API-token-authenticated protocol routes (npm/pypi/nuget) gate
-/// per-controller via <see cref="TokenAuthExtensions.HasCapability"/> — they
-/// don't flow through ASP.NET authorization, so attribute-based policies cannot
-/// reach them yet. Wiring the token-auth path through an
-/// <c>AuthenticationHandler</c> is tracked as separate-PR work.
+/// Applies to both principal kinds. JWT-session routes (admin/import/claims/audit-events)
+/// reach it through ASP.NET authorization directly; API-token principals reach it through
+/// <see cref="TokenAuthenticationDefaults.Scheme"/>, which projects a resolved token's
+/// capabilities onto <c>cap</c> claims — so protocol controllers that authenticate by token
+/// can and do carry the attribute (npm, pypi, nuget, maven and rpm gate publish this way).
+/// The paths that cannot are the ones whose gate is not a single capability: OCI's read gate
+/// accepts either of two, and every ecosystem's anonymous-pull branch has to decide before it
+/// knows whether a principal exists. Those call
+/// <see cref="TokenAuthExtensions.HasCapability"/> inline instead.
 /// </summary>
 [AttributeUsage(AttributeTargets.Class | AttributeTargets.Method, AllowMultiple = true)]
 public sealed class RequireCapabilityAttribute : AuthorizeAttribute

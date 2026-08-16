@@ -152,7 +152,7 @@ public sealed class PyPiProxyFetcherUnclassifiedExceptionTests : IAsyncLifetime
             Parsed: new PyPiFilename(name, version),
             PkgVersions: (package, pkgVersion));
 
-        var gate = new ProxyContext(_orgId, UserId: null, ActorKind: null,
+        var gate = new ProxyContext(_orgId, AuditActorId: null, ActorKind: null,
             Settings: new OrgSettings { OrgId = _orgId });
 
         var result = await fetcher.FetchAndCacheUpstreamAsync(http, download, gate, CancellationToken.None);

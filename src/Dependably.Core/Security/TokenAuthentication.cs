@@ -38,8 +38,11 @@ public sealed class TokenAuthenticationOptions : AuthenticationSchemeOptions
 ///   <item><c>org_id</c>, <c>tid</c> — tenant id (both forms; downstream code reads either)</item>
 ///   <item><c>role</c> — the user's DB role, or <c>ci</c> for CI/CD tokens</item>
 ///   <item><c>cap</c> — one claim per explicit capability when the token carries a
-///         <c>capabilities</c> JSON array. Absent for legacy tokens — those fall back to
-///         role-based capabilities via <see cref="CapabilityHandler"/>.</item>
+///         <c>capabilities</c> JSON array. Absent when that column is NULL, empty or
+///         malformed, and <see cref="CapabilityHandler"/> then <b>denies</b>: an API token
+///         never falls back to its owner's role, which would silently upgrade a token that
+///         should authorize nothing to its owner's full grant. The role fallback there is
+///         reachable only by JWT-session principals.</item>
 /// </list>
 ///
 /// On no auth header → <see cref="AuthenticateResult.NoResult"/> so other schemes (JWT

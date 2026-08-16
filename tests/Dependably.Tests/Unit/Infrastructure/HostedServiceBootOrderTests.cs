@@ -1,4 +1,5 @@
 using Dependably.Infrastructure;
+using Dependably.Tests.Infrastructure;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -21,6 +22,10 @@ public sealed class HostedServiceBootOrderTests
     {
         var builder = WebApplication.CreateBuilder();
 
+        // Pin before ConfigureBuilder: the tenant resolver is selected from
+        // DEPLOYMENT_MODE at service-registration time, so a UseSetting after this
+        // line is inert. See TestHostEnv.
+        TestHostEnv.PinAmbient(builder);
         Program.ConfigureBuilder(builder);
 
         var hostedServiceDescriptors = builder.Services

@@ -605,7 +605,7 @@ spec-code-alignment:
   extends: [.runs-on-ci, .private-registry-setup]
   image: ${DEP_IMAGE_REGISTRY}/library/node:26-slim@sha256:ffc78385a788964bb3cbab5e434ff79a10bdc25b8ae6db03fe5fe6cb14053c09
   variables:
-    SDD_VERSION: "0.6.1"
+    SDD_VERSION: "0.7.0"
     SPEC_REPO: "dependably-community.spec"
     # The target-branch merge below needs a common ancestor in the local history,
     # which the default shallow fetch does not reliably carry.

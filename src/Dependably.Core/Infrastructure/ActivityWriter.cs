@@ -99,6 +99,7 @@ public sealed record ActivityRecord(
     string EventType,
     string? ActorId,
     string? ActorKind,
+    string? ActorLabel,
     string? Detail,
     string? SourceIp,
     string CreatedAt);

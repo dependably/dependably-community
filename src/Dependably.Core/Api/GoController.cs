@@ -435,7 +435,7 @@ public sealed class GoController : OrgScopedControllerBase
             await _svc.Audit.LogActivityAsync(
                 orgId, "golang", PurlNormalizer.Golang(module, version),
                 ext == "zip" ? "first_fetch" : "download",
-                token?.UserId,
+                token?.AuditActorId, actorLabel: token?.AuditActorLabel,
                 actorKind: token?.ActorKind,
                 sourceIp: HttpContext.GetNormalizedRemoteIp(),
                 ct: ct);

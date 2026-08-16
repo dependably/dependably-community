@@ -106,7 +106,8 @@ public sealed class NpmPublishHandler(
 
         // [Authorize] above already enforced auth + capability. We still resolve the token
         // for the cross-tenant guard (token.OrgId vs requested org) and to attribute the
-        // audit row to the token owner (token.UserId).
+        // audit row to the actor the token represents — its owning user, or the token itself
+        // when it is a service token, which has no owner.
         var token = await httpContext.Request.ResolveTokenAsync(tokens, ct);
         if (token is null || token.OrgId != orgId)
         {
@@ -403,7 +404,7 @@ public sealed class NpmPublishHandler(
             await packages.UpdateDeprecatedAsync(ver.Id, stored, ct);
         }
 
-        await audit.LogActivityAsync(orgId, "npm", fullName, "deprecate", token.UserId,
+        await audit.LogActivityAsync(orgId, "npm", fullName, "deprecate", token.AuditActorId, actorLabel: token.AuditActorLabel,
             actorKind: token.ActorKind, sourceIp: httpContext.GetNormalizedRemoteIp(), ct: ct);
 
         // Invalidate the cached packument so the deprecation change is visible immediately.
@@ -722,7 +723,7 @@ public sealed class NpmPublishHandler(
                 removedTags.Add(tag);
             }
 
-            await audit.LogActivityAsync(orgId, "npm", ver.Purl, "delete", token.UserId,
+            await audit.LogActivityAsync(orgId, "npm", ver.Purl, "delete", token.AuditActorId, actorLabel: token.AuditActorLabel,
                 actorKind: token.ActorKind, sourceIp: httpContext.GetNormalizedRemoteIp(), ct: ct);
         }
 

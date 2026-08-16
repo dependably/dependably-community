@@ -1657,14 +1657,14 @@ file sealed class NullMetadataStore : IMetadataStore
             CREATE TABLE IF NOT EXISTS audit_log (
                 id TEXT PRIMARY KEY,
                 scope TEXT NOT NULL DEFAULT 'tenant',
-                org_id TEXT, actor_id TEXT, actor_kind TEXT, action TEXT NOT NULL,
+                org_id TEXT, actor_id TEXT, actor_kind TEXT, actor_label TEXT, action TEXT NOT NULL,
                 ecosystem TEXT, purl TEXT, detail TEXT, source_ip TEXT,
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
             );
             CREATE TABLE IF NOT EXISTS activity (
                 id TEXT PRIMARY KEY,
                 org_id TEXT NOT NULL, ecosystem TEXT NOT NULL, purl TEXT NOT NULL,
-                event_type TEXT NOT NULL, actor_id TEXT, actor_kind TEXT,
+                event_type TEXT NOT NULL, actor_id TEXT, actor_kind TEXT, actor_label TEXT,
                 detail TEXT, source_ip TEXT,
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
             );

@@ -124,7 +124,7 @@ public sealed class ProxyFetchService
                 PackageName: request.PackageName, PurlName: request.PurlName,
                 Version: request.Version, Purl: request.Purl,
                 Sha256: sha256, File: request.File, Blob: request.Blob,
-                UserId: request.UserId, ActorKind: request.ActorKind, SourceIp: request.SourceIp,
+                AuditActorId: request.AuditActorId, AuditActorLabel: request.AuditActorLabel, ActorKind: request.ActorKind, SourceIp: request.SourceIp,
                 PublishedAt: request.PublishedAt,
                 Sha1Hex: request.Sha1Hex,
                 UpstreamIntegrityValue: request.UpstreamIntegrityValue,
@@ -176,7 +176,7 @@ public sealed class ProxyFetchService
         await _audit.LogAsync(
             "checksum_failure",
             orgId: request.OrgId,
-            actorId: request.UserId,
+            actorId: request.AuditActorId, actorLabel: request.AuditActorLabel,
             actorKind: request.ActorKind,
             ecosystem: request.Ecosystem,
             purl: request.Purl,
@@ -229,7 +229,7 @@ public sealed class ProxyFetchService
         await _audit.LogAsync(
             "upstream_source_pin_violation",
             orgId: request.OrgId,
-            actorId: request.UserId,
+            actorId: request.AuditActorId, actorLabel: request.AuditActorLabel,
             actorKind: request.ActorKind,
             ecosystem: request.Ecosystem,
             purl: request.Purl,
@@ -272,7 +272,7 @@ public sealed class ProxyFetchService
             var firstFetch = await _blockGate.EvaluateFirstFetchDeprecationAsync(
                 BlockGateRequest.ForFirstFetchDeprecation(
                     request.OrgId, request.Ecosystem, request.Purl,
-                    request.UserId, request.ActorKind, request.MaxOsvScoreTolerance, request.SourceIp,
+                    request.AuditActorId, request.ActorKind, request.AuditActorLabel, request.MaxOsvScoreTolerance, request.SourceIp,
                     request.Deprecated, request.BlockDeprecatedMode), ct);
             if (firstFetch == BlockDecision.Blocked)
             {
@@ -303,7 +303,7 @@ public sealed class ProxyFetchService
                 await _blockGate.RecordProvenanceBlockAsync(
                     BlockGateRequest.ForFirstFetchProvenance(
                         request.OrgId, request.Ecosystem, request.Purl,
-                        request.UserId, request.ActorKind, request.MaxOsvScoreTolerance, request.SourceIp,
+                        request.AuditActorId, request.ActorKind, request.AuditActorLabel, request.MaxOsvScoreTolerance, request.SourceIp,
                         status, request.VerifyProvenanceMode), ct);
                 return new ProxyFetchResult(BlockDecision.Blocked, sha256, blobKey);
             }
@@ -400,7 +400,7 @@ public sealed class ProxyFetchService
         var caDecision = await _blockGate.EvaluateAsync(
             BlockGateRequest.ForProxyFirstFetch(
                 request.OrgId, request.Ecosystem, caFacts,
-                request.UserId, request.ActorKind, request.SourceIp,
+                request.AuditActorId, request.ActorKind, request.AuditActorLabel, request.SourceIp,
                 request.MaxOsvScoreTolerance,
                 request.MinReleaseAgeHours,
                 request.BlockDeprecatedMode,
@@ -471,9 +471,9 @@ public sealed record ProxyFetchRequest(
     /// and the licence row is silently skipped — the first-fetch artefact still serves.
     /// </summary>
     Func<Stream, LicenseExtractor.ExtractedMetadata>? ExtractLicenses,
-    string? UserId,
+    string? AuditActorId,
     /// <summary>
-    /// Discriminator persisted alongside <see cref="UserId"/> in <c>activity.actor_kind</c>:
+    /// Discriminator persisted alongside <see cref="AuditActorId"/> in <c>activity.actor_kind</c>:
     /// <see cref="Infrastructure.ActorKinds.User"/> or <see cref="Infrastructure.ActorKinds.Service"/>
     /// (or NULL for truly-anonymous fetches). Without this, service-token first fetches show
     /// up as "anonymous" in the audit UI — see <see cref="Infrastructure.ProxyVersionRequest.ActorKind"/>.
@@ -612,7 +612,15 @@ public sealed record ProxyFetchRequest(
     /// <see cref="ExtractLicenses"/>: any throw is swallowed and the artifact keeps rendering the
     /// minimal packument shape. Null for every non-npm ecosystem.
     /// </summary>
-    Func<Stream, string?>? ExtractManifest = null);
+    Func<Stream, string?>? ExtractManifest = null,
+    /// <summary>
+    /// The actor's display name, carried alongside <see cref="AuditActorId"/> and written to
+    /// <c>actor_label</c> so the row stays readable after the row it would otherwise join to
+    /// is gone. Non-null for a service token only — <c>TokenRecord.AuditActorLabel</c> derives
+    /// it, so no call site can put a user's email in that column. NULL means "resolve through
+    /// the existing join", which is what rows predating the column already do.
+    /// </summary>
+    string? AuditActorLabel = null);
 
 /// <summary>Outcome of <see cref="ProxyFetchService.RecordAndScanAsync"/>.</summary>
 public sealed record ProxyFetchResult(

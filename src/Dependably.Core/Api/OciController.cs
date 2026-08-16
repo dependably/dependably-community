@@ -276,8 +276,8 @@ public sealed partial class OciController : OrgScopedControllerBase
             && !token.HasCapability(Capabilities.ReadArtifact)
             && !(allowPushProbe && token.HasCapability(Capabilities.PublishOci)))
         {
-            return (null, OciError(StatusCodes.Status403Forbidden, OciErrorCode.DENIED,
-                "Insufficient scope: pull:oci or read:artifact required."));
+            return (null, await DenyInsufficientScopeAsync(
+                token, "pull:oci or read:artifact", "pull", ct));
         }
         return (token, null);
     }
@@ -294,8 +294,7 @@ public sealed partial class OciController : OrgScopedControllerBase
         }
         if (!token.HasCapability(Capabilities.PublishOci))
         {
-            return (null, OciError(StatusCodes.Status403Forbidden, OciErrorCode.DENIED,
-                "Insufficient scope: publish:oci required."));
+            return (null, await DenyInsufficientScopeAsync(token, Capabilities.PublishOci, "push", ct));
         }
 
         return (token, null);
@@ -313,8 +312,7 @@ public sealed partial class OciController : OrgScopedControllerBase
         }
         if (!token.HasCapability(Capabilities.YankOci))
         {
-            return (null, OciError(StatusCodes.Status403Forbidden, OciErrorCode.DENIED,
-                "Insufficient scope: yank:oci required."));
+            return (null, await DenyInsufficientScopeAsync(token, Capabilities.YankOci, "yank", ct));
         }
 
         return (token, null);
@@ -360,7 +358,7 @@ public sealed partial class OciController : OrgScopedControllerBase
             VersionId: "",
             ManualState: null,
             VulnCheckedAt: null,
-            UserId: token?.UserId,
+            AuditActorId: token?.AuditActorId, AuditActorLabel: token?.AuditActorLabel,
             MaxOsvScoreTolerance: settings.MaxOsvScoreTolerance,
             SourceIp: HttpContext.GetNormalizedRemoteIp(),
             ActorKind: token?.ActorKind,
@@ -372,19 +370,37 @@ public sealed partial class OciController : OrgScopedControllerBase
             : null;
     }
 
-    private async Task<string?> ResolveDigestAsync(string orgId, OciCoordinates coords, CancellationToken ct)
+    /// <summary>
+    /// Resolves an OCI reference to the digest held locally, together with the tag entry's
+    /// <c>last_revalidated</c> stamp so the caller can judge whether a mutable reference is
+    /// still fresh. <c>Digest</c> is null when nothing is held locally.
+    ///
+    /// <para>
+    /// A digest reference resolves to itself and carries no stamp — it is content-addressed and
+    /// has no expiry. Only a tag needs the stamp, because only a tag can be repointed upstream.
+    /// </para>
+    /// </summary>
+    private async Task<LocalReference> ResolveDigestAsync(string orgId, OciCoordinates coords, CancellationToken ct)
     {
         if (coords.IsDigest)
         {
-            return coords.Reference;
+            return new LocalReference(coords.Reference, null);
         }
 
         await using var conn = await _svc.Db.OpenAsync(ct);
         // xtenant: (org_id, repository, tag) PK.
-        return await conn.ExecuteScalarAsync<string?>(
-            "SELECT digest FROM oci_tags WHERE org_id = @orgId AND repository = @repo AND tag = @tag",
+        var (Digest, LastRevalidated) = await conn.QuerySingleOrDefaultAsync<(string? Digest, string? LastRevalidated)>(
+            "SELECT digest AS Digest, last_revalidated AS LastRevalidated " +
+            "FROM oci_tags WHERE org_id = @orgId AND repository = @repo AND tag = @tag",
             new { orgId, repo = coords.Repository, tag = coords.Reference });
+        return new LocalReference(Digest, LastRevalidated);
     }
+
+    /// <summary>
+    /// A reference resolved against local state: the digest it names (null when not held here),
+    /// and the <c>oci_tags.last_revalidated</c> stamp when it was reached through a tag.
+    /// </summary>
+    private readonly record struct LocalReference(string? Digest, string? LastRevalidated);
 
     /// <summary>
     /// Returns the blob-store tier to read from based on the <c>origin</c> column.
@@ -400,8 +416,14 @@ public sealed partial class OciController : OrgScopedControllerBase
     private sealed record ResolvedLocalBlob(IBlobStore Tier, string BlobKey, long SizeBytes, string? MediaType);
 
     /// <summary>
-    /// True when <paramref name="ex"/> is the upstream registry failing at the transport layer —
-    /// DNS, connect, TLS, or a read timeout — rather than a fault in this registry.
+    /// True when <paramref name="ex"/> is the upstream failing to serve — rather than a fault in
+    /// this registry (a bug here stays a 500) or a definitive upstream miss (a 404). Three
+    /// shapes qualify: the transport layer failing (DNS, connect, TLS, read timeout); the
+    /// upstream answering with an error status (<see cref="OciUpstreamUnavailableException"/> —
+    /// a 429 or 5xx, which must never masquerade as MANIFEST_UNKNOWN); and the token-exchange
+    /// endpoint refusing or failing (<see cref="OciUnauthorizedException"/> — e.g.
+    /// auth.docker.io returning 429/503, or an untrusted challenge realm), which without this
+    /// classification would surface as an unhandled 500 on the pull path.
     ///
     /// <para>
     /// A caller-cancelled request is deliberately excluded: when <paramref name="ct"/> is already
@@ -410,12 +432,14 @@ public sealed partial class OciController : OrgScopedControllerBase
     /// metrics, which is the sort of noise that makes a real outage harder to see.
     /// </para>
     /// </summary>
-    private static bool IsUpstreamTransportFailure(Exception ex, CancellationToken ct) =>
+    private static bool IsUpstreamFailure(Exception ex, CancellationToken ct) =>
         !ct.IsCancellationRequested
         && ex is HttpRequestException
             or System.Net.Sockets.SocketException
             or System.Security.Authentication.AuthenticationException
-            or TaskCanceledException;   // HttpClient surfaces its own timeout as this
+            or TaskCanceledException   // HttpClient surfaces its own timeout as this
+            or OciUpstreamUnavailableException
+            or OciUnauthorizedException;
 
     /// <summary>
     /// The answer when a configured upstream could not be reached: 502, not 500.
@@ -438,11 +462,105 @@ public sealed partial class OciController : OrgScopedControllerBase
             $"Upstream registry unreachable while resolving {reference}.");
     }
 
-    private static ObjectResult OciError(int statusCode, OciErrorCode code, string message)
+    private static ObjectResult OciError(
+        int statusCode, OciErrorCode code, string message, object? detail = null)
     {
-        var body = new OciErrorResponse(new[] { new OciError(code, message) });
+        var body = new OciErrorResponse(new[] { new OciError(code, message, detail) });
         return new ObjectResult(body) { StatusCode = statusCode };
     }
+
+    /// <summary>
+    /// Builds — and records — the 403 for a capability-gated v2 route.
+    ///
+    /// <para>
+    /// The failure this has to stay diagnosable for is not "the token is scoped wrong" — it is
+    /// "the client presented a different credential than the operator believes it did". That one
+    /// is invisible from the client: <c>docker login</c> succeeds either way, because the
+    /// <c>/v2/</c> ping checks only that a token resolves and runs no capability check at all,
+    /// and a read-scoped token additionally clears the blob HEAD probes a push issues before each
+    /// layer. A <c>~/.docker/config.json</c> holding two entries for the same host, or a CI
+    /// variable whose value drifted from the token it is named after, both land here. So the
+    /// response names <b>which</b> credential was refused — never what it can do.
+    /// </para>
+    ///
+    /// <para>
+    /// The granted capability set is deliberately <b>not</b> on the wire. <c>/v2/</c> is a public
+    /// protocol surface and its error bodies travel further than the credential ever did — into
+    /// CI job logs, screenshots, support tickets. Enumerating a token's powers there also hands a
+    /// holder of a stolen token in one silent response what they would otherwise have to sweep
+    /// endpoints to learn, and that sweep is exactly the noise the rate limiter and the audit log
+    /// exist to catch. The full set goes to the Serilog line and the audit row instead, both of
+    /// which are operator-side. The token reference is a truncated database key, never the
+    /// secret, and identifies without disclosing.
+    /// </para>
+    ///
+    /// <para>
+    /// The denial is audited so an operator can answer "which credential was refused, and what
+    /// did it carry" when the client-side log belongs to somebody else's CI job — resolving the
+    /// trace ref the client did get. Reaching this line requires a live, in-tenant token, so it
+    /// is a tenant writing to its own audit log, under the <c>push</c> limiter's ceiling and the
+    /// retention sweep's horizon.
+    /// </para>
+    /// </summary>
+    private async Task<ObjectResult> DenyInsufficientScopeAsync(
+        TokenRecord token, string requiredLabel, string route, CancellationToken ct)
+    {
+        string[] granted = token.CapabilitySet
+            .OrderBy(c => c, StringComparer.Ordinal)
+            .ToArray();
+        string grantedLabel = granted.Length == 0 ? "none" : string.Join(", ", granted);
+        string tokenRef = TokenReference(token.Id);
+        string? traceId = System.Diagnostics.Activity.Current?.TraceId.ToString();
+
+        // Always logged, at most once per cooldown window audited. The log line is per-request
+        // because log volume is already bounded by retention and rotation; the audit row is not.
+        _logger.LogWarning(
+            "OCI {Route} denied for token {TokenId} in org {OrgId}: requires {Required}, token grants {Granted}. TraceId={TraceId}",
+            route, token.Id, token.OrgId, requiredLabel, grantedLabel, traceId);
+
+        if (_svc.DenialAudit.ShouldAudit(token.OrgId, token.Id, route))
+        {
+            try
+            {
+                await _svc.Audit.LogAsync(
+                    "oci.scope_denied",
+                    orgId: token.OrgId,
+                    actorId: token.AuditActorId,
+                    actorKind: token.ActorKind,
+                    ecosystem: "oci",
+                    detail: $"{route} requires {requiredLabel}; token grants {grantedLabel}",
+                    sourceIp: HttpContext.GetNormalizedRemoteIp(),
+                    actorLabel: token.AuditActorLabel,
+                    ct: ct);
+            }
+            catch (Exception ex)
+            {
+                // The 403 is the security decision and it has already been made; a failed audit
+                // write must not convert a correct denial into a 500 the client reads as a
+                // server fault worth retrying.
+                _logger.LogWarning(ex,
+                    "{ExceptionType} writing the OCI {Route} denial audit row for token {TokenId}",
+                    ex.GetType().Name, route, token.Id);
+            }
+        }
+
+        string locator = traceId is null
+            ? $"token {tokenRef}…"
+            : $"token {tokenRef}…, ref {traceId}";
+
+        return OciError(StatusCodes.Status403Forbidden, OciErrorCode.DENIED,
+            $"Insufficient scope: {requiredLabel} required ({locator}).",
+            new { required = requiredLabel, tokenRef, traceId });
+    }
+
+    /// <summary>
+    /// The leading segment of a token's database id — enough for an operator to tell two
+    /// credentials apart in a job log, short enough that the response is not republishing a
+    /// whole internal key. Ids are 32-hex-character GUIDs, so eight characters distinguish any
+    /// pair of tokens a tenant realistically holds.
+    /// </summary>
+    private static string TokenReference(string tokenId) =>
+        tokenId.Length <= 8 ? tokenId : tokenId[..8];
 }
 
 /// <summary>Parses a v2 path suffix into one of three Distribution-Spec verbs.</summary>
@@ -527,5 +645,6 @@ public sealed record OciControllerServices(
     Dependably.Infrastructure.Edge.EdgePublishGuard EdgeGuard,
     PackageRepository Packages,
     TenantArtifactAccessRepository TenantArtifactAccess,
+    Dependably.Security.AuthDenialAuditCoalescer DenialAudit,
     Dependably.Security.NameBindingGate? NameBinding = null,
     BlobPresignService? Presign = null);

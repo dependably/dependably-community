@@ -436,7 +436,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
 
         return coords.IsChecksumSidecar
             ? await ServeChecksumSidecarAsync(coords, row, ct)
-            : await ServePrimaryFromCacheAsync(orgId, coords, token?.UserId, token?.ActorKind, row, ct);
+            : await ServePrimaryFromCacheAsync(orgId, coords, token?.AuditActorId, token?.ActorKind, row, ct);
     }
 
     // Serves a Maven proxy artifact that was cached in the global plane (cache_artifact) rather
@@ -497,7 +497,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
             Response.Headers.CacheControl = globalCacheControl;
         }
         string purl = caFacts.Purl ?? PurlNormalizer.Maven(coords.GroupId, coords.ArtifactId, coords.Version ?? "unknown");
-        await _svc.Audit.LogActivityAsync(orgId, "maven", purl, "download", token?.UserId,
+        await _svc.Audit.LogActivityAsync(orgId, "maven", purl, "download", token?.AuditActorId, actorLabel: token?.AuditActorLabel,
             actorKind: token?.ActorKind, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         // Increment per-tenant download count on the global plane. Enqueued off the request
         // path — the row already exists (seeded durably at first-fetch).
@@ -819,7 +819,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
             ExtractLicenses: string.Equals(resolvedCoords.Extension, "pom", StringComparison.OrdinalIgnoreCase)
                 ? LicenseExtractor.FromPomXml
                 : null,
-            UserId: token?.UserId,
+            AuditActorId: token?.AuditActorId, AuditActorLabel: token?.AuditActorLabel,
             ActorKind: token?.ActorKind,
             SourceIp: HttpContext.GetNormalizedRemoteIp(),
             MaxOsvScoreTolerance: settings?.MaxOsvScoreTolerance ?? DefaultMaxOsvScoreTolerance,
@@ -1091,7 +1091,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
         }
 
         await _svc.Audit.LogActivityAsync(orgId, "maven", purl, "push",
-            actorId: token.UserId, actorKind: token.ActorKind, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+            actorId: token.AuditActorId, actorKind: token.ActorKind, actorLabel: token.AuditActorLabel, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         EvictMavenMetadataCacheAfterPublish(orgId, coords);
 

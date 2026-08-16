@@ -170,7 +170,7 @@ public sealed class SuspectTrustAnchorDeletionFlipTests : IClassFixture<InMemory
             VersionId: Guid.NewGuid().ToString("N"),
             ManualState: null,
             VulnCheckedAt: null,
-            UserId: null,
+            AuditActorId: null,
             MaxOsvScoreTolerance: 10.0,
             SourceIp: null) with
         { VerifyProvenanceMode = "block" };

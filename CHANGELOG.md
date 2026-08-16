@@ -7,6 +7,96 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-16
+
+### Changed
+
+- **Pulling a moving OCI tag (`:latest`, `python:3.11-slim`) through the proxy is now reliable
+  across upstream rate limits and outages.** Moving-tag freshness is governed by three orthogonal
+  policies. `Oci:ManifestTagTtl` (default raised 5 minutes → 1 hour) answers only "when is upstream
+  asked again" — moving tags rebuild on the order of days, so hourly revalidation cuts Docker Hub
+  429 exposure ~12× without delaying acceptance. The org's `min_release_age_hours` now also gates
+  OCI tag *promotion*: a newly observed digest younger than the threshold is recorded as pending on
+  `oci_tags` (new `pending_digest` / `pending_first_seen_at` columns) while the previously accepted
+  digest keeps serving — the age is measured from the digest's first local observation, never the
+  publisher-controlled image `created` timestamp, so a backdated rebuild cannot bypass the cooldown.
+  And a new `Oci:ManifestTagStaleGrace` (default 24 hours) serves the last accepted digest through
+  an upstream failure, marked `X-Cache: STALE` (an additive value alongside HIT/MISS) and audited;
+  the window is anchored at the moment the entry went stale and is never extended by further failed
+  attempts, so an outage cannot become serve-stale-forever — past the grace the pull fails 502.
+
+### Fixed
+
+- **A Docker Hub 429 (or any upstream 5xx) no longer tells `docker pull` the image does not
+  exist.** Upstream answers are classified: 404 (and the data plane's 401/403, which Docker Hub
+  returns for nonexistent repositories) stay `MANIFEST_UNKNOWN`/`BLOB_UNKNOWN`; 429/5xx and
+  token-exchange failures (previously an unhandled 500) surface as 502 `UNAVAILABLE` — or a stale
+  serve within the tag grace window. A tags listing with nothing held locally reports a failed
+  upstream as 502 rather than "repository unknown".
+- **HEAD revalidation is durable.** A HEAD that confirms the tag's digest unchanged refreshes
+  `last_revalidated`, so HEAD-then-GET-by-digest clients (containerd snapshotter, BuildKit) regain
+  the fresh window instead of paying an upstream round-trip on every pull after the first TTL
+  expiry. A changed digest never repoints from a HEAD — it is recorded as a pending observation and
+  the next GET-by-tag fetches the body and repoints, preserving the body-before-tag write ordering.
+- **N tenants no longer multiply upstream polls for the same public moving tag.** The upstream
+  tag → digest observation is coalesced instance-wide per credential identity (single-flight plus a
+  TTL-bounded cache); only the observation is shared — acceptance, promotion timing, licence
+  gating, audit rows, and all bytes stay strictly per-org, and tenants with differing upstream
+  credentials never share anything.
+
+- **A `docker push` refused for the wrong scope now says which credential was refused.**
+  `403 Insufficient scope: publish:oci required.` named the capability the route wanted and nothing
+  about the credential presented, which collapses two very different faults: a token scoped wrong,
+  and a client sending a different credential than the operator believes it is. The second is the
+  common one and the message pointed away from it — `docker login` succeeds either way, because the
+  `/v2/` ping only checks that a token resolves and runs no capability check, and a read-scoped
+  token additionally clears the blob `HEAD` probes a push issues before each layer (those render as
+  `Layer already exists`). The denial now carries an eight-character prefix of the token's id and
+  the trace ref, in `message` and in the Distribution Spec's `detail` field, which was previously
+  always null. A token reference the operator does not recognise means the client sent something
+  other than what was minted. The granted capability set is deliberately **not** on the wire — `/v2/`
+  error bodies travel into CI logs and screenshots, and enumerating a token's powers there would
+  hand the holder of a stolen token in one silent response what they would otherwise sweep endpoints
+  to learn. The full set is written to the server log and to a new `oci.scope_denied` audit row,
+  coalesced to one row per (org, token, route) per 10 minutes so a multi-layer push cannot flood the
+  audit log.
+
+- **The Tokens page now shows what a token actually grants.** The scope badge was inferred from a
+  prefix scan, so a token holding only `publish:nuget` rendered the identical "push only" badge as
+  one holding `publish:*` — and only the second can push an OCI image. `tenant:configure` was
+  checked first and swallowed the label entirely, hiding publish rights behind "admin". No screen
+  anywhere rendered the stored capability array, so two credentials with different powers were
+  indistinguishable. The badge now matches a preset's exact capability set or reads `custom`, and
+  both the personal-token and service-token tables render the real grant beside it. A malformed
+  capability value displays as "no grants" rather than salvaging the readable entries, matching how
+  the server reads the same column — it deserializes all-or-nothing, so one bad element means the
+  token grants nothing.
+
+- **Every audit row names the actor behind it.** A service token's display name is denormalized onto
+  `audit_log` / `activity` at write time, because `service_tokens` is hard-deleted on revocation and
+  the join stops resolving exactly when an operator is asking who used a credential. Service-token
+  publishes are attributed to the token rather than to anonymous, publish rows record what was
+  pushed, and the block-gate factories carry the actor label through every arm.
+
+- **Version tables sort newest-first by default** instead of by the order rows came back.
+
+- Pinned `nanoid` to close an infinite loop on a zero-size input.
+
+### Removed
+
+- **The six per-ecosystem `import:` capabilities (`import:npm`, `import:pypi`, `import:nuget`,
+  `import:maven`, `import:rpm`, `import:oci`) are no longer mintable.** They authorized nothing:
+  both import routes require `import:*`, and capability matching only widens — a wildcard grants its
+  leaves, never the reverse — so a token minted with a leaf satisfied no route anywhere while
+  reading as a working import credential. Import is not per-ecosystem by construction: both routes
+  accept a mixed batch and classify each artefact from its own magic bytes, so there is no single
+  ecosystem to scope the grant to at the point the decision is made.
+
+  **Action required (API callers only):** a `POST /api/v1/tokens` or `/api/v1/service-tokens`
+  request naming one of these capabilities now returns `400` instead of minting a token. Use
+  `import:*`. Nothing changes for tokens already issued — the stored string still resolves and still
+  matches nothing, exactly as before — and nothing changes for the UI, which never offered them.
+
 ## [0.6.0] - 2026-08-13
 
 ### Added

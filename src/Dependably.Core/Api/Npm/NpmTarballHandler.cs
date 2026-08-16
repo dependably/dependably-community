@@ -374,7 +374,7 @@ public sealed class NpmTarballHandler(
         }
         if (caFacts.Purl is not null)
         {
-            await audit.LogActivityAsync(orgId, "npm", caFacts.Purl, "download", token?.UserId,
+            await audit.LogActivityAsync(orgId, "npm", caFacts.Purl, "download", token?.AuditActorId, actorLabel: token?.AuditActorLabel,
                 actorKind: token?.ActorKind, sourceIp: sourceIp, ct: ct);
         }
         // Increment per-tenant download count on the global plane. Enqueued off the request
@@ -403,7 +403,7 @@ public sealed class NpmTarballHandler(
 
         if (await blocklist.IsBlockedAsync(orgId, purlCheck, ct))
         {
-            await audit.LogActivityAsync(orgId, "npm", purlCheck, "blocked", token?.UserId,
+            await audit.LogActivityAsync(orgId, "npm", purlCheck, "blocked", token?.AuditActorId, actorLabel: token?.AuditActorLabel,
                 actorKind: token?.ActorKind, sourceIp: httpContext.GetNormalizedRemoteIp(), ct: ct);
             return new StatusCodeResult(StatusCodes.Status403Forbidden);
         }
@@ -463,7 +463,7 @@ public sealed class NpmTarballHandler(
             httpContext.Response.Headers.ETag = $"\"sha256:{pkgVersion.ChecksumSha256}\"";
             httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
         }
-        await audit.LogActivityAsync(orgId, "npm", pkgVersion.Purl, "download", token?.UserId,
+        await audit.LogActivityAsync(orgId, "npm", pkgVersion.Purl, "download", token?.AuditActorId, actorLabel: token?.AuditActorLabel,
             actorKind: token?.ActorKind, sourceIp: sourceIp, ct: ct);
         await packages.IncrementDownloadCountAsync(pkgVersion.Id, ct);
         return new FileStreamResult(stream, "application/octet-stream") { FileDownloadName = file };
@@ -646,7 +646,7 @@ public sealed class NpmTarballHandler(
             Version: version, Purl: purl, File: file, Blob: blob,
             ExtractLicenses: LicenseExtractor.FromNpmTarballPackageJson,
             ExtractManifest: stream => ExtractNpmManifest(stream, fullName),
-            UserId: token?.UserId,
+            AuditActorId: token?.AuditActorId, AuditActorLabel: token?.AuditActorLabel,
             ActorKind: token?.ActorKind,
             SourceIp: httpContext.GetNormalizedRemoteIp(),
             MaxOsvScoreTolerance: settings.MaxOsvScoreTolerance,
