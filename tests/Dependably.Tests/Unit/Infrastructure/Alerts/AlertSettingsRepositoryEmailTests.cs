@@ -175,37 +175,4 @@ public sealed class AlertSettingsRepositoryEmailTests : IAsyncLifetime
         Assert.Equal("ok", updated.EmailLastStatus);
     }
 
-    /// <summary>
-    /// A row upgraded from a release that had a per-org transport still carries
-    /// <c>email_inherit_instance = 0</c> and its own SMTP columns. Nothing reads them: the delivery
-    /// config resolves from the gate and recipients alone, so the org sends over the instance
-    /// transport like every other.
-    /// </summary>
-    [Fact]
-    public async Task GetDecryptedEmailDeliveryConfig_RowWithRetiredOwnTransport_StillResolvesRecipients()
-    {
-        using var ep = MakeProtector();
-        var settings = new AlertSettingsRepository(_db, ep, Clock);
-        await EnableEmailAsync(settings, recipients: "a@example.com");
-
-        await using (var conn = await _db.OpenAsync())
-        {
-            await conn.ExecuteAsync(
-                """
-                UPDATE alert_settings
-                SET email_inherit_instance = 0,
-                    email_smtp_host = 'legacy.example.com',
-                    email_smtp_port = 2525,
-                    email_smtp_security = 'ssl',
-                    email_smtp_username = 'legacy',
-                    email_smtp_from = 'legacy@example.com'
-                WHERE org_id = 'org1'
-                """);
-        }
-
-        var delivery = await settings.GetDecryptedEmailDeliveryConfigAsync("org1");
-
-        Assert.NotNull(delivery);
-        Assert.Equal(["a@example.com"], delivery!.Recipients);
-    }
 }

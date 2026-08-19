@@ -173,6 +173,17 @@ public sealed class PackageAnalyticsRepository
     // plane. artifact_inventory is already one row per artefact, so a Maven (name, version) with
     // several proxied files still surfaces as several rows (one cache_artifact each) — the
     // per-filename count the tile relies on is preserved without this body deduping.
+    // Three reasons, ranked most-severe first by the CASE: an artifact with no recorded licence
+    // at all ('unknown'), one carrying a blocklisted licence ('blocklisted'), and one carrying a
+    // licence the org marked conditional ('conditional'). The third is not a risk in the same
+    // sense as the other two — it serves normally — but it is the review surface the conditional
+    // disposition exists to feed, and it belongs on the same drill-down rather than a page of its
+    // own. An artifact matching more than one reason reports the most severe.
+    //
+    // The comparison joins on the raw license_spdx text rather than parsing expressions, matching
+    // the blocklist arm that preceded it: a compound expression recorded verbatim will not match a
+    // single-leaf policy row here even though CheckPolicyAsync would decompose it. That is a known
+    // limitation of this read model, not of enforcement.
     private const string LicenseRiskBody =
         """
         SELECT ai.owner_kind   AS OwnerKind,
@@ -188,7 +199,14 @@ public sealed class PackageAnalyticsRepository
                CASE WHEN NOT EXISTS (SELECT 1 FROM artifact_license al
                                      WHERE al.org_id = ai.org_id AND al.owner_kind = ai.owner_kind
                                        AND al.owner_id = ai.owner_id)
-                    THEN 'unknown' ELSE 'blocklisted' END AS Reason
+                    THEN 'unknown'
+                    WHEN EXISTS (SELECT 1 FROM artifact_license al
+                                 JOIN license_blocklist bl
+                                   ON bl.license_spdx = al.license_spdx AND bl.org_id = @orgId
+                                 WHERE al.org_id = ai.org_id AND al.owner_kind = ai.owner_kind
+                                   AND al.owner_id = ai.owner_id)
+                    THEN 'blocklisted'
+                    ELSE 'conditional' END AS Reason
         FROM artifact_inventory ai
         WHERE ai.org_id = @orgId
           AND (@ecosystem IS NULL OR ai.ecosystem = @ecosystem)
@@ -199,6 +217,12 @@ public sealed class PackageAnalyticsRepository
             OR EXISTS (SELECT 1 FROM artifact_license al
                        JOIN license_blocklist bl
                          ON bl.license_spdx = al.license_spdx AND bl.org_id = @orgId
+                       WHERE al.org_id = ai.org_id AND al.owner_kind = ai.owner_kind
+                         AND al.owner_id = ai.owner_id)
+            OR EXISTS (SELECT 1 FROM artifact_license al
+                       JOIN license_allowlist cl
+                         ON cl.license_spdx = al.license_spdx AND cl.org_id = @orgId
+                        AND cl.disposition = 'conditional'
                        WHERE al.org_id = ai.org_id AND al.owner_kind = ai.owner_kind
                          AND al.owner_id = ai.owner_id)
           )
@@ -220,6 +244,12 @@ public sealed class PackageAnalyticsRepository
     private const string LicenseRiskCountSql =
         "SELECT COUNT(*) FROM (" + LicenseRiskBody + ") u WHERE (@reason IS NULL OR u.Reason = @reason)";
 
+    // Dashboard-tile count: the two reasons that are genuinely risk, never 'conditional'.
+    // rawsql: const concatenation of compile-time-constant fragments; no runtime value interpolated.
+    private const string LicenseRiskRiskOnlyCountSql =
+        "SELECT COUNT(*) FROM (" + LicenseRiskBody + ") u " +
+        "WHERE u.Reason <> 'conditional' AND (@reason IS NULL OR u.Reason = @reason)";
+
     // rawsql: const concatenation of compile-time-constant fragments; no runtime value interpolated.
     private const string LicenseRiskListSql =
         "SELECT * FROM (" + LicenseRiskBody + ") u WHERE (@reason IS NULL OR u.Reason = @reason) " +
@@ -238,8 +268,13 @@ public sealed class PackageAnalyticsRepository
             OperationalRiskPackageCountSql,
             new { orgId, threshold = VersionsBehindDashboardThreshold, ecosystem = (string?)null });
 
+        // The tile counts artifacts at licence *risk* — unknown or blocklisted. Conditional rows
+        // now share the drill-down but are deliberately excluded here: they serve normally, and
+        // folding them in would make a tile that has always meant "these are problems" start
+        // counting artifacts the org already decided were acceptable. The drill-down's own
+        // reason filter is where conditional is surfaced.
         int licenseRiskVersions = await conn.ExecuteScalarAsync<int>(
-            LicenseRiskCountSql,
+            LicenseRiskRiskOnlyCountSql,
             new { orgId, ecosystem = (string?)null, reason = (string?)null });
 
         return (operationalRiskPackages, licenseRiskVersions);

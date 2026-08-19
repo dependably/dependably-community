@@ -83,8 +83,8 @@ public class SiemForwarderQueueTests
         Assert.Equal(3, meterDrops);
     }
 
-    // A dedicated FakeTimeProvider drives the queue's retry backoff so the test advances virtual
-    // time instead of waiting out the real 1s delay between the first and second attempt.
+    // The retry chain runs on NoBackoff, so the second attempt happens without the test either
+    // waiting out the real 1s delay or hand-driving a clock through it.
     [Fact]
     public async Task TransientFailure_RetriesAndCounts()
     {
@@ -100,12 +100,12 @@ public class SiemForwarderQueueTests
             }
         };
         var clock = new FakeTimeProvider(TestTime.KnownNow);
-        var q = new SiemForwarderQueue(fwd, clock, Cfg(), NullLogger<SiemForwarderQueue>.Instance);
+        var q = new SiemForwarderQueue(fwd, clock, Cfg(), NullLogger<SiemForwarderQueue>.Instance, NoBackoff);
         using var cts = new CancellationTokenSource();
         await q.StartAsync(cts.Token);
 
         q.TryEnqueue(Sample());
-        await ClockPump.UntilAsync(clock, () => q.DeliveredCount == 1, TimeSpan.FromSeconds(1));
+        await WaitAsync(() => q.DeliveredCount == 1);
 
         await cts.CancelAsync();
         try { await q.StopAsync(CancellationToken.None); } catch { }
@@ -162,7 +162,7 @@ public class SiemForwarderQueueTests
                 : Task.CompletedTask
         };
         var clock = new FakeTimeProvider(TestTime.KnownNow);
-        var q = new SiemForwarderQueue(fwd, clock, Cfg(), NullLogger<SiemForwarderQueue>.Instance);
+        var q = new SiemForwarderQueue(fwd, clock, Cfg(), NullLogger<SiemForwarderQueue>.Instance, NoBackoff);
 
         long meterFailed = 0;
         using var listener = MeterListenerFor("dependably.siem_forwarder.failed", delta => meterFailed += delta);
@@ -172,9 +172,9 @@ public class SiemForwarderQueueTests
 
         var executeTask = q.ExecuteAsyncForTests(new CancellationToken(canceled: true));
 
-        // The failing event burns through the 1s/5s/30s backoff inside the drain itself; pump
-        // the fake clock so that finishes in virtual time instead of real time.
-        await ClockPump.UntilAsync(clock, () => q.DeliveredCount == 1 && q.FailedCount == 1, TimeSpan.FromSeconds(1));
+        // The failing event exhausts its retry budget inside the drain itself. On NoBackoff that
+        // costs no time at all, real or virtual, so nothing has to drive the clock through it.
+        await WaitAsync(() => q.DeliveredCount == 1 && q.FailedCount == 1);
 
         await executeTask;
 
@@ -184,6 +184,19 @@ public class SiemForwarderQueueTests
         // failure on the meter, and the one genuine failure must be visible on it.
         Assert.Equal(1, meterFailed);
     }
+
+    /// <summary>
+    /// Production's retry schedule with the intervals removed, for the tests whose subject is the
+    /// terminal outcome of the retry chain rather than its pacing. The same four attempts run and
+    /// the bookkeeping is identical; what disappears is the need to drive a clock from the test to
+    /// let the chain proceed, which is a race the test cannot win reliably on a loaded machine —
+    /// every advance spent before the loop registers its next timer is lost, and when the advance
+    /// budget runs out the clock freezes with the chain still parked on it. The intervals
+    /// themselves are pinned where they belong, in the tests that assert on backoff, which keep
+    /// the real schedule.
+    /// </summary>
+    private static readonly TimeSpan[] NoBackoff =
+        [TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero];
 
     private static async Task WaitAsync(Func<bool> condition, TimeSpan? timeout = null)
     {

@@ -201,14 +201,12 @@ public sealed class RetentionService : ScheduledBackgroundService
         _logger.LogInformation("Retention GC pass complete.");
     }
 
-    // Instance default (days) for orgs whose activity_retention_days is NULL. 90 days matches the
-    // schema column default and the aggregate-survives-pruning design (tenant_artifact_access
-    // carries the monotonic download_count, so analytics value does not depend on the per-event
-    // IP rows). Configurable via ACTIVITY_RETENTION_DAYS.
-    private const int DefaultActivityRetentionDays = 90;
-
+    // Resolved by RetentionDefaults so the GC that enforces this window and the settings API that
+    // reports it to the operator read one value. 90 days matches the schema column default and the
+    // aggregate-survives-pruning design (tenant_artifact_access carries the monotonic
+    // download_count, so analytics value does not depend on the per-event IP rows).
     private int ResolveActivityRetentionDefaultDays() =>
-        int.TryParse(_config["ACTIVITY_RETENTION_DAYS"], out int d) && d > 0 ? d : DefaultActivityRetentionDays;
+        RetentionDefaults.ResolveActivityRetentionDays(_config);
 
     // Two-horizon personal-data policy for audit_log, reconciling forensic value against Art.
     // 5(1)(e) storage limitation / Art. 17 erasure:

@@ -235,6 +235,7 @@ public sealed class MavenSnapshotProxyTests : IAsyncLifetime
             Log: NullLogger<MavenController>.Instance,
             CacheArtifacts: cacheArtifact,
             TenantAccess: tenantAccess,
+            Vulns: new VulnerabilityRepository(_db, TimeProvider.System),
             Time: TimeProvider.System,
             CacheRecorder: cacheRecorder,
             // No Maven trust anchors configured — IsConfiguredForAsync returns false, provenance skipped.

@@ -1557,7 +1557,7 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
             Orgs: _orgs,
             BlobStore: new TieredBlobStorage(cacheStore, _blobs),
             Db: _db,
-            Repodata: new RpmRepodataService(_db, NullLogger<RpmRepodataService>.Instance, TimeProvider.System),
+            Repodata: new RpmRepodataService(_db, NullLogger<RpmRepodataService>.Instance, TimeProvider.System, new OrgRepository(_db), new VulnerabilityRepository(_db, TimeProvider.System)),
             Registries: new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured())),
             MergedRepodataCache: new MetadataResponseCache<RpmMergedRepodataKey, MergedRepodataCache>(
                 new MemoryCache(new MemoryCacheOptions()), MetadataCacheKeys.RpmMergedRepodata),

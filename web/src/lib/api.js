@@ -431,12 +431,34 @@ export const api = {
 
   // License policy. Mode is one of 'off' | 'warn' | 'block'. Allow/block lists are
   // SPDX identifiers; DELETE keys on the SPDX itself (not an opaque id).
+  //
+  // The allowlist carries both non-denied dispositions: 'allowed' is a blanket yes and
+  // 'conditional' means acceptable only in some contexts, with the condition in the note.
+  // Both serve; only the blocklist refuses.
   getLicensePolicy: () => req('GET', '/license-policy'),
   setLicenseMode: (mode) => req('PUT', '/license-policy/mode', { mode }),
-  addLicenseAllow: (spdx) => req('POST', '/license-policy/allowlist', { licenseSpdx: spdx }),
+  addLicenseAllow: (spdx, disposition = 'allowed', note = null) =>
+    req('POST', '/license-policy/allowlist', { licenseSpdx: spdx, disposition, note }),
+  // PATCH edits in place. Omitting a field leaves it alone; sending note: null clears it — a
+  // delete/re-add round trip would lose createdAt and, under block mode, briefly refuse the
+  // licence while it is unlisted.
+  updateLicenseAllow: (spdx, patch) =>
+    req('PATCH', `/license-policy/allowlist/${encodeURIComponent(spdx)}`, patch),
   removeLicenseAllow: (spdx) => req('DELETE', `/license-policy/allowlist/${encodeURIComponent(spdx)}`),
-  addLicenseBlock: (spdx) => req('POST', '/license-policy/blocklist', { licenseSpdx: spdx }),
+  addLicenseBlock: (spdx, note = null) =>
+    req('POST', '/license-policy/blocklist', { licenseSpdx: spdx, note }),
+  updateLicenseBlock: (spdx, patch) =>
+    req('PATCH', `/license-policy/blocklist/${encodeURIComponent(spdx)}`, patch),
   removeLicenseBlock: (spdx) => req('DELETE', `/license-policy/blocklist/${encodeURIComponent(spdx)}`),
+
+  // Standing compliance annotations on a package coordinate. version omitted = a note about
+  // every version of the package; a version-scoped read also returns the package-wide notes.
+  getPackageNotes: (ecosystem, name, version = null) =>
+    req('GET', `/package-notes?${qs({ ecosystem, name, version })}`),
+  addPackageNote: (ecosystem, name, version, note) =>
+    req('POST', '/package-notes', { ecosystem, name, version, note }),
+  updatePackageNote: (id, note) => req('PUT', `/package-notes/${encodeURIComponent(id)}`, { note }),
+  removePackageNote: (id) => req('DELETE', `/package-notes/${encodeURIComponent(id)}`),
   // SPDX reference data (seeded from license-list-data 3.28.0). q is a case-insensitive
   // identifier+name substring filter; includeDeprecated surfaces retired SPDX IDs.
   searchSpdx: (q = '', includeDeprecated = false, limit = 50) =>

@@ -26,7 +26,7 @@ public sealed class SiemForwarderQueue : BackgroundService
     /// </summary>
     private static readonly TimeSpan DrainTimeout = TimeSpan.FromSeconds(25);
 
-    private static readonly TimeSpan[] BackoffSchedule =
+    private static readonly TimeSpan[] DefaultBackoffSchedule =
     [
         TimeSpan.FromSeconds(1),
         TimeSpan.FromSeconds(5),
@@ -37,13 +37,38 @@ public sealed class SiemForwarderQueue : BackgroundService
     private readonly ISiemForwarder _forwarder;
     private readonly TimeProvider _time;
     private readonly ILogger<SiemForwarderQueue> _logger;
+    private readonly TimeSpan[] _backoffSchedule;
     private long _droppedCount;
     private long _deliveredCount;
     private long _failedCount;
 
     public SiemForwarderQueue(
         ISiemForwarder forwarder, TimeProvider time, IConfiguration config, ILogger<SiemForwarderQueue> logger)
+        : this(forwarder, time, config, logger, backoffSchedule: null)
     {
+    }
+
+    /// <summary>
+    /// Test seam over the retry backoff. <paramref name="backoffSchedule"/> replaces
+    /// <see cref="DefaultBackoffSchedule"/>; null keeps it, which is what every production caller gets. It is not
+    /// configuration — an operator has no way to reach it, so no deployment can shorten the
+    /// interval a failing SIEM event is retried on.
+    ///
+    /// It exists because the alternative is worse. A test that only needs the retry chain to
+    /// reach its terminal outcome, and asserts nothing about the intervals, otherwise has to
+    /// hand-drive a <c>FakeTimeProvider</c> from outside while the loop registers its next
+    /// timer from inside — and the two race. Every advance the pump spends before that timer
+    /// exists is wasted, so the wait passes or fails on how heavily loaded the machine is.
+    /// Injecting a zero schedule removes the clock from those tests entirely: a zero delay
+    /// completes without any time, real or virtual, having to pass. Tests that assert on the
+    /// intervals, or on the per-item budget that runs on the same injected clock, keep the real
+    /// schedule and drive the clock.
+    /// </summary>
+    internal SiemForwarderQueue(
+        ISiemForwarder forwarder, TimeProvider time, IConfiguration config, ILogger<SiemForwarderQueue> logger,
+        TimeSpan[]? backoffSchedule)
+    {
+        _backoffSchedule = backoffSchedule ?? DefaultBackoffSchedule;
         _forwarder = forwarder;
         _time = time;
         _logger = logger;
@@ -154,7 +179,7 @@ public sealed class SiemForwarderQueue : BackgroundService
 
     private async Task DeliverWithRetryAsync(SiemEvent ev, CancellationToken ct)
     {
-        for (int attempt = 0; attempt <= BackoffSchedule.Length; attempt++)
+        for (int attempt = 0; attempt <= _backoffSchedule.Length; attempt++)
         {
             if (ct.IsCancellationRequested)
             {
@@ -170,7 +195,7 @@ public sealed class SiemForwarderQueue : BackgroundService
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
             catch (Exception ex)
             {
-                if (attempt == BackoffSchedule.Length)
+                if (attempt == _backoffSchedule.Length)
                 {
                     Interlocked.Increment(ref _failedCount);
                     DependablyMeter.SiemForwarderFailed.Add(1);
@@ -181,8 +206,8 @@ public sealed class SiemForwarderQueue : BackgroundService
                 }
                 _logger.LogDebug(ex,
                     "SIEM forward attempt {Attempt} failed; retrying in {Backoff}.",
-                    attempt + 1, BackoffSchedule[attempt]);
-                try { await Task.Delay(BackoffSchedule[attempt], _time, ct); }
+                    attempt + 1, _backoffSchedule[attempt]);
+                try { await Task.Delay(_backoffSchedule[attempt], _time, ct); }
                 catch (OperationCanceledException) { return; }
             }
         }

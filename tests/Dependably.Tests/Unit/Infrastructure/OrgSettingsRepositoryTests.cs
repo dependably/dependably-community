@@ -244,22 +244,49 @@ public sealed class OrgSettingsRepositoryTests : IClassFixture<InMemoryDbFixture
     public async Task UpsertRetentionAsync_InsertThenUpdate_BothPathsHit()
     {
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"ret-{Guid.NewGuid():N}");
-        await _repo.UpsertRetentionAsync(orgId, keepVersions: 10, keepDays: 30, activityRetentionDays: 90,
-            purgeUnlistedAfterDays: 45);
+        await _repo.UpsertRetentionAsync(orgId, Optional<int?>.Of(10), Optional<int?>.Of(30),
+            Optional<int?>.Of(90), Optional<int?>.Of(45));
         var first = (await _repo.GetSettingsAsync(orgId))!;
         Assert.Equal(10, first.KeepVersions);
         Assert.Equal(30, first.KeepDays);
         Assert.Equal(90, first.ActivityRetentionDays);
         Assert.Equal(45, first.PurgeUnlistedAfterDays);
 
-        // Update path — ON CONFLICT DO UPDATE branch.
-        await _repo.UpsertRetentionAsync(orgId, keepVersions: null, keepDays: 7, activityRetentionDays: null,
-            purgeUnlistedAfterDays: null);
+        // Update path — ON CONFLICT DO UPDATE branch. Each field is PRESENT and explicitly null,
+        // which must still clear the column: leave-unchanged applies to absence, never to a
+        // deliberate reset to unlimited.
+        await _repo.UpsertRetentionAsync(orgId, Optional<int?>.Of(null), Optional<int?>.Of(7),
+            Optional<int?>.Of(null), Optional<int?>.Of(null));
         var second = (await _repo.GetSettingsAsync(orgId))!;
         Assert.Null(second.KeepVersions);
         Assert.Equal(7, second.KeepDays);
         Assert.Null(second.ActivityRetentionDays);
         Assert.Null(second.PurgeUnlistedAfterDays);
+    }
+
+    /// <summary>
+    /// The partial-write contract: a field the caller never mentioned keeps its stored value.
+    /// Before this, <c>UpsertRetentionAsync</c> was a plain overwrite, so a caller changing one
+    /// dimension silently reset the other three to unlimited — turning off a configured retention
+    /// policy as a side effect of an unrelated write. Paired with the explicit-null case above,
+    /// which must still clear, so the two intents cannot be collapsed again without a red test.
+    /// </summary>
+    [Fact]
+    public async Task UpsertRetentionAsync_AbsentField_LeavesStoredValueUnchanged()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"ret-partial-{Guid.NewGuid():N}");
+        await _repo.UpsertRetentionAsync(orgId, Optional<int?>.Of(10), Optional<int?>.Of(30),
+            Optional<int?>.Of(90), Optional<int?>.Of(45));
+
+        // Touch only keep_days, the way a partial PUT body would.
+        await _repo.UpsertRetentionAsync(orgId, Optional<int?>.Absent, Optional<int?>.Of(7),
+            Optional<int?>.Absent, Optional<int?>.Absent);
+
+        var after = (await _repo.GetSettingsAsync(orgId))!;
+        Assert.Equal(7, after.KeepDays);
+        Assert.Equal(10, after.KeepVersions);
+        Assert.Equal(90, after.ActivityRetentionDays);
+        Assert.Equal(45, after.PurgeUnlistedAfterDays);
     }
 
     // ── UpsertProxySettingsAsync ─────────────────────────────────────────────

@@ -269,7 +269,7 @@
   $: mfaQrSvg = mfaOtpauthUri ? qrSvg(mfaOtpauthUri, { size: 180 }) : ''
 </script>
 
-<div class="page profile-page">
+<div class="page">
   <div class="page-header">
     <h1 class="page-title">{$t('profile.title')}</h1>
   </div>
@@ -551,7 +551,6 @@
 {/if}
 
 <style>
-  .profile-page { max-width: 720px; }
   .warning-banner {
     background: var(--accent-soft);
     border: 1px solid var(--accent);
@@ -561,7 +560,10 @@
     margin-bottom: 16px;
     font-size: 13px;
   }
-  .settings-panel { padding: 0; }
+  /* Readable measure for the settings rows, capped on the panel rather than the page
+     shell: no auto margins, so the panel stays flush left while `.page` is full-bleed.
+     Without it a row's control sits ~1200px from its label on a wide monitor. */
+  .settings-panel { padding: 0; max-width: 720px; }
   .settings-row {
     display: flex;
     align-items: center;

@@ -81,7 +81,8 @@ audit or log call, and SAML NameIDs go through `HashNameId` for the same reason.
 ### Governance rows that name a person
 
 `reserved_namespace`, `quarantine`, `signature_trust_anchor`, `saml_test_runs`, `claim`,
-`claim_history`, `package_name_grant`, `install_script_allowlist`, and `banners` each carry a
+`claim_history`, `package_name_grant`, `install_script_allowlist`, `license_allowlist`,
+`license_blocklist`, `package_note`, and `banners` each carry a
 `created_by` / `decided_by` / `actor_id` pointer. The row's content is org data; the pointer is an
 authorship-provenance stamp saying who made a governance decision. These are excluded from the
 subject export for that reason — exporting them into a personal package would hand the subject the

@@ -32,6 +32,9 @@
   export let versions = []
   /** Blocklisted SPDX identifiers (uppercased) — drives the per-row license risk flag. */
   export let licenseBlocklist = new Set()
+  /** Uppercased SPDX ids the org marked conditional. These serve — the cell flags them for
+    * review rather than marking them refused. @type {Set<string>} */
+  export let licenseConditional = new Set()
   /** @type {Map<string, Array<{osvId: string, severity?: string, summary?: string, cvssScore?: number}>>} */
   export let vulnsByPurl
   export let isAdmin = false
@@ -410,9 +413,14 @@
         <td class="nowrap text-muted">{$formatDate(g.createdAt)}</td>
         <td class="license-cell">
           {#if g.licenses?.length > 0}
-            <span class:license-blocked={g.licenses.some(l => licenseBlocklist.has((l ?? '').toUpperCase()))}>{g.licenses.join(', ')}</span>
-            {#if g.licenses.some(l => licenseBlocklist.has((l ?? '').toUpperCase()))}
+            {@const blocked = g.licenses.some(l => licenseBlocklist.has((l ?? '').toUpperCase()))}
+            {@const conditional = !blocked && g.licenses.some(l => licenseConditional.has((l ?? '').toUpperCase()))}
+            <span class:license-blocked={blocked} class:license-review={conditional}>{g.licenses.join(', ')}</span>
+            {#if blocked}
               <svg class="license-risk-icon" width="11" height="11" role="img" aria-label={$t('versionDetail.badges.licenseBlockedHelp')}><use href="/icons.svg#icon-alert"/></svg>
+            {:else if conditional}
+              <!-- Not the alert icon: this artifact is not refused, it carries a condition. -->
+              <svg class="license-review-icon" width="11" height="11" role="img" aria-label={$t('versionDetail.badges.licenseReviewHelp')}><use href="/icons.svg#icon-info"/></svg>
             {/if}
           {:else}
             <span class="text-muted" title={$t('versionDetail.badges.licenseUnknownHelp')}>{$t('versionDetail.badges.licenseUnknown')}</span>
@@ -635,6 +643,9 @@
   .license-cell { font-size: 12px; overflow-wrap: anywhere; }
   .license-blocked { color: var(--badge-red-text); font-weight: 600; }
   .license-risk-icon { color: var(--danger); margin-left: 3px; vertical-align: middle; }
+  /* Conditional reads as informational, not as a failure — the artifact serves. */
+  .license-review { color: var(--badge-sky-text); font-weight: 600; }
+  .license-review-icon { color: var(--badge-sky-text); margin-left: 3px; vertical-align: middle; }
   .versions-table .col-version   { width: 180px; }
   .versions-table .col-tag       { width: 140px; }
   .versions-table .col-latest    { width: 70px; }

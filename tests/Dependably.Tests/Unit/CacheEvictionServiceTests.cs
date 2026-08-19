@@ -175,8 +175,14 @@ public class CacheEvictionServiceTests : IAsyncLifetime
             new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock));
     }
 
+    // The inverse of ExplicitCap_Evicts below, and the reason this pair exists: an unconfigured
+    // deployment must evict NOTHING. The proxy plane is the only catalogue a proxied version has,
+    // so an implicit cap here expired packages behind an operator who had deliberately left
+    // keep_versions unlimited — a retention decision made in a place that never mentions caching.
+    // The age chosen (-100 days) is well past every cap this service has ever defaulted to, so the
+    // assertion fails if any implicit fallback is reintroduced at any value.
     [Fact]
-    public async Task NoCapsConfigured_AppliesDefaultAgeCap()
+    public async Task NoCapsConfigured_EvictsNothing()
     {
         var t = _clock.GetUtcNow();
         await SeedAsync("old", t.AddDays(-100));
@@ -185,14 +191,15 @@ public class CacheEvictionServiceTests : IAsyncLifetime
         var svc = Build(new Dictionary<string, string?>());
         var result = await svc.RunOnceAsync();
 
-        Assert.Equal(1, result.ArtifactsEvicted);
+        Assert.Equal(0, result.ArtifactsEvicted);
+        Assert.Equal(0, result.BytesFreed);
         var repo = new CacheArtifactRepository(_db);
-        Assert.Null(await repo.GetByCoordinateAsync("npm", "lodash", "old", "lodash-old.tgz"));
+        Assert.NotNull(await repo.GetByCoordinateAsync("npm", "lodash", "old", "lodash-old.tgz"));
         Assert.NotNull(await repo.GetByCoordinateAsync("npm", "lodash", "recent", "lodash-recent.tgz"));
     }
 
     [Fact]
-    public async Task ExplicitCap_OverridesDefault()
+    public async Task ExplicitCap_Evicts()
     {
         var t = _clock.GetUtcNow();
         await SeedAsync("stale", t.AddDays(-15));
@@ -219,7 +226,7 @@ public class CacheEvictionServiceTests : IAsyncLifetime
             onEvictions: delta => evictions += delta,
             onBytes: delta => evictedBytes += delta);
 
-        var svc = Build(new Dictionary<string, string?>());
+        var svc = Build(new Dictionary<string, string?> { ["CACHE_MAX_AGE_DAYS"] = "30" });
         var result = await svc.RunOnceAsync();
 
         Assert.Equal(1, result.ArtifactsEvicted);

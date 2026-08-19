@@ -38,7 +38,7 @@ public sealed class RpmRepodataServiceMergeTests : IClassFixture<InMemoryDbFixtu
             ("hello", "2.10", "1.el9", "x86_64", "Packages/h/hello-2.10-1.el9.x86_64.rpm", 1),
             ("tree", "2.1.1", "1.el9", "x86_64", "Packages/t/tree-2.1.1-1.el9.x86_64.rpm", 4242));
 
-        var svc = new RpmRepodataService(_fixture.Store, NullLogger<RpmRepodataService>.Instance, TimeProvider.System);
+        var svc = new RpmRepodataService(_fixture.Store, NullLogger<RpmRepodataService>.Instance, TimeProvider.System, new OrgRepository(_fixture.Store), new VulnerabilityRepository(_fixture.Store, TimeProvider.System));
         byte[] gz = await svc.BuildMergedPrimaryGzAsync(orgId, upstreamGz, CancellationToken.None);
         string xml = System.Text.Encoding.UTF8.GetString(Gunzip(gz));
         var doc = XDocument.Parse(xml);
@@ -66,7 +66,7 @@ public sealed class RpmRepodataServiceMergeTests : IClassFixture<InMemoryDbFixtu
         byte[] upstreamGz = BuildUpstreamPrimaryGz(
             ("tree", "2.1.1", "1.el9", "x86_64", "Packages/t/tree-2.1.1-1.el9.x86_64.rpm", 7));
 
-        var svc = new RpmRepodataService(_fixture.Store, NullLogger<RpmRepodataService>.Instance, TimeProvider.System);
+        var svc = new RpmRepodataService(_fixture.Store, NullLogger<RpmRepodataService>.Instance, TimeProvider.System, new OrgRepository(_fixture.Store), new VulnerabilityRepository(_fixture.Store, TimeProvider.System));
         byte[] gz = await svc.BuildMergedPrimaryGzAsync(orgId, upstreamGz, CancellationToken.None);
         string xml = System.Text.Encoding.UTF8.GetString(Gunzip(gz));
         var doc = XDocument.Parse(xml);
@@ -92,7 +92,7 @@ public sealed class RpmRepodataServiceMergeTests : IClassFixture<InMemoryDbFixtu
             ("wget", "1.21", "3.fc40", "x86_64", "Packages/w/wget-1.21-3.fc40.x86_64.rpm",
              "A utility for retrieving files", "GNU Wget retrieves content from web servers.", "GPL-3.0-or-later"));
 
-        var svc = new RpmRepodataService(_fixture.Store, NullLogger<RpmRepodataService>.Instance, TimeProvider.System);
+        var svc = new RpmRepodataService(_fixture.Store, NullLogger<RpmRepodataService>.Instance, TimeProvider.System, new OrgRepository(_fixture.Store), new VulnerabilityRepository(_fixture.Store, TimeProvider.System));
         byte[] gz = await svc.BuildMergedPrimaryGzAsync(orgId, upstreamGz, CancellationToken.None);
         string xml = System.Text.Encoding.UTF8.GetString(Gunzip(gz));
         var doc = XDocument.Parse(xml);

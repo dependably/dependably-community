@@ -627,11 +627,13 @@ public sealed class PackagePublishService : IPackagePublishService
             return null;
         }
 
-        var (allowed, blockedLicense) = await _licenses.CheckPolicyAsync(request.OrgId, "block", licenses, ct);
-        return allowed
+        // A conditional licence publishes: the org said it is acceptable in some contexts, and
+        // refusing the push would make "conditional" a synonym for "denied" on this path.
+        var verdict = await _licenses.CheckPolicyAsync(request.OrgId, "block", licenses, ct);
+        return verdict.Allowed
             ? null
             : new PublishResult.Rejected(403, "license_blocked",
-                $"License '{blockedLicense}' is not permitted by this org's license policy.");
+                $"License '{verdict.BlockedLicense}' is not permitted by this org's license policy.");
     }
 
     // Publish-side licence gate for a hosted publish that declares no license at all, governed by

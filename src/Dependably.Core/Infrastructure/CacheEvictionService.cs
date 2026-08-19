@@ -12,9 +12,13 @@ namespace Dependably.Infrastructure;
 ///   <item><c>CACHE_MAX_SIZE_BYTES</c> — evict oldest-accessed until under cap</item>
 ///   <c>CACHE_MAX_ARTIFACTS</c> — evict oldest-accessed until row count is under cap</item>
 /// </list>
-/// When none of the three caps are configured, a default age cap of 30 days applies so the
-/// proxy cache does not grow unbounded. Set any cap explicitly to take full control; setting
-/// any one cap suppresses the default.
+/// All three caps are opt-in and there is no implicit fallback: when none of them is
+/// configured the pass evicts nothing at all. Eviction removes the only catalogue row a
+/// proxied version has (<c>cache_artifact</c> — proxy versions are not <c>package_versions</c>
+/// rows), so an implicit default silently expired packages an operator who had left version
+/// retention unlimited believed were retained, and left the parent <c>packages</c> row behind
+/// reading as "0 versions". Bounding the cache is therefore a deliberate operator decision:
+/// set any one of the three caps to enable it.
 ///
 /// Schedule via <c>CACHE_EVICT_SCHEDULE</c> (cron, default hourly). The job is idempotent and
 /// holds no state across runs; in a multi-replica (HA) deployment the per-tick leader lock (see
@@ -91,15 +95,13 @@ public sealed class CacheEvictionService : ScheduledBackgroundService
         long? maxSizeBytes = ParseLong("CACHE_MAX_SIZE_BYTES");
         int? maxArtifacts = ParseInt("CACHE_MAX_ARTIFACTS");
 
-        bool usingDefault = maxAgeDays is null && maxSizeBytes is null && maxArtifacts is null;
-        if (usingDefault)
+        if (maxAgeDays is null && maxSizeBytes is null && maxArtifacts is null)
         {
-            maxAgeDays = DefaultMaxAgeDays;
             _logger.LogInformation(
-                "No cache caps configured; applying default CACHE_MAX_AGE_DAYS={Default}. " +
-                "Proxy-cache artefacts not accessed within {Default} days are evicted. Set " +
-                "CACHE_MAX_SIZE_BYTES or CACHE_MAX_ARTIFACTS to bound the cache by disk size or count.",
-                DefaultMaxAgeDays, DefaultMaxAgeDays);
+                "No cache caps configured; proxy-cache eviction is disabled and this pass evicts nothing. " +
+                "Set CACHE_MAX_AGE_DAYS, CACHE_MAX_SIZE_BYTES or CACHE_MAX_ARTIFACTS to bound the cache " +
+                "by age, disk size or artefact count.");
+            return new EvictionSummary(0, 0);
         }
 
         _logger.LogInformation(
@@ -132,7 +134,6 @@ public sealed class CacheEvictionService : ScheduledBackgroundService
         return new EvictionSummary(evicted, bytesFreed);
     }
 
-    private const int DefaultMaxAgeDays = 30;
     private const int Batch = 256;
 
     /// <summary>

@@ -181,7 +181,7 @@
   }
 </script>
 
-<div class="page page-fluid">
+<div class="page">
   <div class="page-header">
     <h1 class="page-title">{$t('vulnerabilities.title')}</h1>
   </div>

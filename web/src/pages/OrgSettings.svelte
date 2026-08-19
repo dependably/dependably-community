@@ -60,6 +60,9 @@
   let licenseAllowEntries = [], licenseBlockEntries = []
   let showAddLicenseAllow = false, newLicenseAllowSpdx = ''
   let showAddLicenseBlock = false, newLicenseBlockSpdx = ''
+  let showAddLicenseConditional = false
+  // The note being edited, as { spdx, list, value }, or null. One editor at a time.
+  let editingNote = null
   let savingLicenseMode = false
   // Review queue: SPDX IDs seen during ingestion not yet on either list.
   let licenseReviewEntries = [], licenseReviewLoaded = false
@@ -74,6 +77,12 @@
     ...licenseAllowEntries.map(e => e.licenseSpdx),
     ...licenseBlockEntries.map(e => e.licenseSpdx),
   ]
+  // The allowlist response carries both non-denied dispositions; the two tables split it.
+  // A row from a server that predates the disposition column has none, and reads as 'allowed'.
+  $: licenseAllowedEntries = licenseAllowEntries.filter(e => e.disposition !== 'conditional')
+  $: licenseConditionalEntries = licenseAllowEntries.filter(e => e.disposition === 'conditional')
+  // Block mode refuses anything not on the allowlist, and a conditional entry satisfies that
+  // check too — so the warning is about having neither kind, not about the allowed table alone.
   $: licenseAllowlistEmpty = licenseAllowEntries.length === 0
 
   onMount(async () => {
@@ -161,12 +170,12 @@
     } finally { savingLicenseMode = false }
   }
 
-  async function addLicenseAllow(spdxArg) {
+  async function addLicenseAllow(spdxArg, disposition = 'allowed') {
     const spdx = (spdxArg ?? newLicenseAllowSpdx ?? '').trim()
     if (!spdx) return
     error = ''
     try {
-      const entry = await api.addLicenseAllow(spdx)
+      const entry = await api.addLicenseAllow(spdx, disposition)
       licenseAllowEntries = [...licenseAllowEntries, entry]
       // Drop from the review queue if present — the next refresh would also drop it, but
       // updating optimistically prevents the row from flickering back briefly.
@@ -217,6 +226,46 @@
     licenseReviewBusy = { ...licenseReviewBusy, [spdx]: 'block' }
     try { await addLicenseBlock(spdx) }
     finally { licenseReviewBusy = { ...licenseReviewBusy, [spdx]: undefined } }
+  }
+  // Marks the licence conditional. It leaves the queue and starts serving like an approved one;
+  // the note recording the condition is added from the conditional table.
+  async function conditionalReview(spdx) {
+    licenseReviewBusy = { ...licenseReviewBusy, [spdx]: 'conditional' }
+    try { await addLicenseAllow(spdx, 'conditional') }
+    finally { licenseReviewBusy = { ...licenseReviewBusy, [spdx]: undefined } }
+  }
+
+  // ── Policy-entry notes ─────────────────────────────────────────────────────
+  function startEditNote(list, entry) {
+    editingNote = { list, spdx: entry.licenseSpdx, value: entry.note ?? '' }
+  }
+
+  async function saveNote() {
+    if (!editingNote) return
+    const { list, spdx, value } = editingNote
+    // An emptied box means "clear the note", which the API takes as an explicit null — distinct
+    // from omitting the field, which would leave the stored note alone.
+    const note = value.trim() === '' ? null : value.trim()
+    error = ''
+    try {
+      const updated = list === 'block'
+        ? await api.updateLicenseBlock(spdx, { note })
+        : await api.updateLicenseAllow(spdx, { note })
+      const replace = (entries) => entries.map(e => (e.licenseSpdx === spdx ? updated : e))
+      if (list === 'block') licenseBlockEntries = replace(licenseBlockEntries)
+      else licenseAllowEntries = replace(licenseAllowEntries)
+      editingNote = null
+    } catch (e) { error = extractErrorMessage(e) }
+  }
+
+  // Moves an entry between the allowed and conditional tables without a delete/re-add, which
+  // under block mode would briefly leave the licence unlisted and therefore refused.
+  async function setDisposition(spdx, disposition) {
+    error = ''
+    try {
+      const updated = await api.updateLicenseAllow(spdx, { disposition })
+      licenseAllowEntries = licenseAllowEntries.map(e => (e.licenseSpdx === spdx ? updated : e))
+    } catch (e) { error = extractErrorMessage(e) }
   }
 
   async function saveSettings() {
@@ -483,7 +532,7 @@
 
 </script>
 
-<div class="page page-fluid">
+<div class="page">
   <div class="page-header"><h1 class="page-title">{$t('settings.title')}</h1></div>
 
   <!-- The tab strip is decided by role and deployment mode, both resolved before this page
@@ -653,6 +702,11 @@
                         on:click={() => approveReview(r.licenseSpdx)}>
                   {$t('settings.licenses.review.approve')}
                 </button>
+                <button class="btn-sm"
+                        disabled={!!licenseReviewBusy[r.licenseSpdx]}
+                        on:click={() => conditionalReview(r.licenseSpdx)}>
+                  {$t('settings.licenses.review.conditional')}
+                </button>
                 <button class="danger btn-sm"
                         disabled={!!licenseReviewBusy[r.licenseSpdx]}
                         on:click={() => blockReview(r.licenseSpdx)}>
@@ -672,14 +726,15 @@
         <button class="primary" on:click={() => showAddLicenseAllow = true}>{$t('settings.licenses.allow.addEntry')}</button>
       </div>
       <table class="list-table">
-        <colgroup><col><col class="col-added"><col class="col-actions"></colgroup>
+        <colgroup><col class="col-spdx"><col><col class="col-added"><col class="col-policy-actions"></colgroup>
         <thead><tr>
           <th>{$t('settings.licenses.columns.spdx')}</th>
+          <th>{$t('settings.licenses.columns.note')}</th>
           <th>{$t('settings.licenses.columns.added')}</th>
           <th></th>
         </tr></thead>
         <tbody>
-          {#each licenseAllowEntries as e (e.id)}
+          {#each licenseAllowedEntries as e (e.id)}
             <tr>
               <td class="t-mono">
                 <button class="link t-mono"
@@ -689,12 +744,97 @@
                   {e.licenseSpdx}
                 </button>
               </td>
+              <td>
+                {#if editingNote && editingNote.list === 'allow' && editingNote.spdx === e.licenseSpdx}
+                  <div class="note-edit">
+                    <!-- svelte-ignore a11y-autofocus -->
+                    <textarea rows="2" bind:value={editingNote.value} autofocus
+                              aria-label={$t('settings.licenses.columns.note')}
+                              placeholder={$t('settings.licenses.notePlaceholder')}></textarea>
+                    <div class="row-actions">
+                      <button class="primary btn-sm" on:click={saveNote}>{$t('common.actions.save')}</button>
+                      <button class="btn-sm" on:click={() => editingNote = null}>{$t('common.actions.cancel')}</button>
+                    </div>
+                  </div>
+                {:else}
+                  <button class="link note-cell" on:click={() => startEditNote('allow', e)}>
+                    {e.note || $t('settings.licenses.addNote')}
+                  </button>
+                {/if}
+              </td>
               <td class="text-muted">{$formatDateShort(e.createdAt)}</td>
-              <td><button class="danger btn-sm" on:click={() => removeLicenseAllow(e.licenseSpdx)}>{$t('common.actions.remove')}</button></td>
+              <td>
+                <div class="row-actions">
+                  <button class="btn-sm" on:click={() => setDisposition(e.licenseSpdx, 'conditional')}>
+                    {$t('settings.licenses.makeConditional')}
+                  </button>
+                  <button class="danger btn-sm" on:click={() => removeLicenseAllow(e.licenseSpdx)}>{$t('common.actions.remove')}</button>
+                </div>
+              </td>
             </tr>
           {/each}
-          {#if licenseAllowEntries.length === 0}
-            <tr><td colspan="3" class="text-center text-muted">{$t('settings.licenses.allow.empty')}</td></tr>
+          {#if licenseAllowedEntries.length === 0}
+            <tr><td colspan="4" class="text-center text-muted">{$t('settings.licenses.allow.empty')}</td></tr>
+          {/if}
+        </tbody>
+      </table>
+
+      <div class="page-header list-header mt-4">
+        <h3 class="section-h">{$t('settings.licenses.conditional.title')}</h3>
+        <button class="primary" on:click={() => showAddLicenseConditional = true}>{$t('settings.licenses.conditional.addEntry')}</button>
+      </div>
+      <p class="section-hint">{$t('settings.licenses.conditional.intro')}</p>
+      <table class="list-table">
+        <colgroup><col class="col-spdx"><col><col class="col-added"><col class="col-policy-actions"></colgroup>
+        <thead><tr>
+          <th>{$t('settings.licenses.columns.spdx')}</th>
+          <th>{$t('settings.licenses.columns.condition')}</th>
+          <th>{$t('settings.licenses.columns.added')}</th>
+          <th></th>
+        </tr></thead>
+        <tbody>
+          {#each licenseConditionalEntries as e (e.id)}
+            <tr>
+              <td class="t-mono">
+                <button class="link t-mono"
+                        aria-label={$t('licenseText.open')}
+                        title={$t('licenseText.open')}
+                        on:click={() => licenseTextModal = e.licenseSpdx}>
+                  {e.licenseSpdx}
+                </button>
+              </td>
+              <td>
+                {#if editingNote && editingNote.list === 'conditional' && editingNote.spdx === e.licenseSpdx}
+                  <div class="note-edit">
+                    <!-- svelte-ignore a11y-autofocus -->
+                    <textarea rows="2" bind:value={editingNote.value} autofocus
+                              aria-label={$t('settings.licenses.columns.condition')}
+                              placeholder={$t('settings.licenses.conditionPlaceholder')}></textarea>
+                    <div class="row-actions">
+                      <button class="primary btn-sm" on:click={saveNote}>{$t('common.actions.save')}</button>
+                      <button class="btn-sm" on:click={() => editingNote = null}>{$t('common.actions.cancel')}</button>
+                    </div>
+                  </div>
+                {:else}
+                  <button class="link note-cell" class:note-missing={!e.note}
+                          on:click={() => startEditNote('conditional', e)}>
+                    {e.note || $t('settings.licenses.conditionMissing')}
+                  </button>
+                {/if}
+              </td>
+              <td class="text-muted">{$formatDateShort(e.createdAt)}</td>
+              <td>
+                <div class="row-actions">
+                  <button class="btn-sm" on:click={() => setDisposition(e.licenseSpdx, 'allowed')}>
+                    {$t('settings.licenses.makeAllowed')}
+                  </button>
+                  <button class="danger btn-sm" on:click={() => removeLicenseAllow(e.licenseSpdx)}>{$t('common.actions.remove')}</button>
+                </div>
+              </td>
+            </tr>
+          {/each}
+          {#if licenseConditionalEntries.length === 0}
+            <tr><td colspan="4" class="text-center text-muted">{$t('settings.licenses.conditional.empty')}</td></tr>
           {/if}
         </tbody>
       </table>
@@ -704,9 +844,10 @@
         <button class="primary" on:click={() => showAddLicenseBlock = true}>{$t('settings.licenses.block.addEntry')}</button>
       </div>
       <table class="list-table">
-        <colgroup><col><col class="col-added"><col class="col-actions"></colgroup>
+        <colgroup><col class="col-spdx"><col><col class="col-added"><col class="col-actions"></colgroup>
         <thead><tr>
           <th>{$t('settings.licenses.columns.spdx')}</th>
+          <th>{$t('settings.licenses.columns.note')}</th>
           <th>{$t('settings.licenses.columns.added')}</th>
           <th></th>
         </tr></thead>
@@ -721,12 +862,30 @@
                   {e.licenseSpdx}
                 </button>
               </td>
+              <td>
+                {#if editingNote && editingNote.list === 'block' && editingNote.spdx === e.licenseSpdx}
+                  <div class="note-edit">
+                    <!-- svelte-ignore a11y-autofocus -->
+                    <textarea rows="2" bind:value={editingNote.value} autofocus
+                              aria-label={$t('settings.licenses.columns.note')}
+                              placeholder={$t('settings.licenses.blockNotePlaceholder')}></textarea>
+                    <div class="row-actions">
+                      <button class="primary btn-sm" on:click={saveNote}>{$t('common.actions.save')}</button>
+                      <button class="btn-sm" on:click={() => editingNote = null}>{$t('common.actions.cancel')}</button>
+                    </div>
+                  </div>
+                {:else}
+                  <button class="link note-cell" on:click={() => startEditNote('block', e)}>
+                    {e.note || $t('settings.licenses.addNote')}
+                  </button>
+                {/if}
+              </td>
               <td class="text-muted">{$formatDateShort(e.createdAt)}</td>
               <td><button class="danger btn-sm" on:click={() => removeLicenseBlock(e.licenseSpdx)}>{$t('common.actions.remove')}</button></td>
             </tr>
           {/each}
           {#if licenseBlockEntries.length === 0}
-            <tr><td colspan="3" class="text-center text-muted">{$t('settings.licenses.block.empty')}</td></tr>
+            <tr><td colspan="4" class="text-center text-muted">{$t('settings.licenses.block.empty')}</td></tr>
           {/if}
         </tbody>
       </table>
@@ -878,8 +1037,28 @@
   /* .list-header margin-bottom is global — see app.css */
   .list-table .col-added   { width: 110px; }
   .list-table .col-actions { width: 90px; }
-  .list-table .col-review-actions { width: 160px; }
+  .list-table .col-review-actions { width: 230px; }
+  .list-table .col-spdx { width: 220px; }
+  .list-table .col-policy-actions { width: 210px; }
   .t-actions { white-space: nowrap; }
+  /* Wrapper, never display:flex on the td itself — a flexed cell drops out of the table's
+     column sizing and the row loses its alignment. */
+  .row-actions { display: flex; gap: 6px; align-items: center; }
+  /* The note cell is a click target across its whole width so the empty state is discoverable. */
+  .note-cell {
+    text-align: left;
+    white-space: normal;
+    width: 100%;
+  }
+  /* A conditional entry with no condition written down is the one state worth nudging: the
+     disposition says "it depends" and nothing records on what. */
+  .note-missing { color: var(--warning-text); }
+  .note-edit textarea {
+    width: 100%;
+    font: inherit;
+    resize: vertical;
+    margin-bottom: 6px;
+  }
   /* Inline link-style trigger for the SPDX id cells that open LicenseTextModal. */
   .link {
     background: none;
@@ -1040,6 +1219,25 @@
       </div>
       <div class="modal-actions">
         <button on:click={() => showAddLicenseAllow = false}>{$t('common.actions.cancel')}</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if showAddLicenseConditional}
+  <div class="modal-backdrop">
+    <div class="modal">
+      <h3>{$t('settings.licenses.modal.addConditionalTitle')}</h3>
+      {#if error}<div class="error-msg">{error}</div>{/if}
+      <div class="form-row">
+        <label>{$t('settings.licenses.modal.spdxLabel')}</label>
+        <SpdxPicker exclude={licensePolicyIdentifiers}
+                    placeholder={$t('settings.licenses.modal.spdxPlaceholder')}
+                    on:select={e => { showAddLicenseConditional = false; addLicenseAllow(e.detail.identifier, 'conditional') }} />
+        <div class="form-hint">{$t('settings.licenses.modal.conditionalHint')}</div>
+      </div>
+      <div class="modal-actions">
+        <button on:click={() => showAddLicenseConditional = false}>{$t('common.actions.cancel')}</button>
       </div>
     </div>
   </div>

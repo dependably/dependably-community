@@ -170,8 +170,7 @@ public sealed class PostgresRecordMaterializationTests
         // ── rpm_metadata: six integer columns plus package_versions.size_bytes ──
         await ProbeAsync("RpmRepodataService.RpmPrimaryRow", async () =>
         {
-            string primary = await new RpmRepodataService(
-                    store, NullLogger<RpmRepodataService>.Instance, clock)
+            string primary = await new RpmRepodataService(store, NullLogger<RpmRepodataService>.Instance, clock, new OrgRepository(store), new VulnerabilityRepository(store, clock))
                 .BuildPrimaryAsync(OrgId, CancellationToken.None);
             // package=size_bytes, installed=installed_size, archive=archive_size,
             // build=build_time — four separate integer columns from the same projection.

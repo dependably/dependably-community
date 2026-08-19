@@ -30,12 +30,18 @@ public sealed class RpmRepodataService
     private readonly IMetadataStore _db;
     private readonly ILogger<RpmRepodataService> _logger;
     private readonly TimeProvider _time;
+    private readonly OrgRepository _orgs;
+    private readonly VulnerabilityRepository _vulns;
 
-    public RpmRepodataService(IMetadataStore db, ILogger<RpmRepodataService> logger, TimeProvider time)
+    public RpmRepodataService(
+        IMetadataStore db, ILogger<RpmRepodataService> logger, TimeProvider time,
+        OrgRepository orgs, VulnerabilityRepository vulns)
     {
         _db = db;
         _logger = logger;
         _time = time;
+        _orgs = orgs;
+        _vulns = vulns;
     }
 
     /// <summary>
@@ -198,9 +204,25 @@ public sealed class RpmRepodataService
         // this arm to prevent double-counting artefacts present in both planes during the P3
         // transition.
         // xtenant: tenant_artifact_access.org_id = @orgId scopes the global cache_artifact rows.
-        return (await conn.QueryAsync<RpmPrimaryRow>(
+        var rows = (await conn.QueryAsync<RpmPrimaryRow>(
             """
-            SELECT p.purl_name AS PurlName,
+            SELECT pv.id AS GateId,
+                   'package_version' AS GatePlane,
+                   pv.manual_block_state AS ManualBlockState,
+                   pv.deprecated AS Deprecated,
+                   pv.published_at AS PublishedAt,
+                   pv.vuln_checked_at AS VulnCheckedAt,
+                   -- CASE, not a bare EXISTS: Postgres types EXISTS as boolean while the
+                   -- cache-plane arm below supplies an integer literal, and a UNION cannot
+                   -- match the two. SQLite accepts either, so the mismatch is invisible there.
+                   CASE WHEN EXISTS (SELECT 1 FROM package_version_vulns pvv
+                           JOIN vulnerabilities v ON v.id = pvv.vuln_id
+                           WHERE pvv.package_version_id = pv.id
+                             AND v.osv_id LIKE 'MAL-%') THEN 1 ELSE 0 END AS IsMalicious,
+                   pv.origin AS Origin,
+                   pv.provenance_status AS ProvenanceStatus,
+                   pv.revoked_at AS RevokedAt,
+                   p.purl_name AS PurlName,
                    pv.version  AS Version,
                    pv.checksum_sha256 AS Sha256,
                    pv.size_bytes AS SizeBytes,
@@ -233,7 +255,17 @@ public sealed class RpmRepodataService
             WHERE p.org_id = @orgId AND p.ecosystem = 'rpm'
               AND pv.origin = 'uploaded'
             UNION ALL
-            SELECT ca.name AS PurlName,
+            SELECT ca.id AS GateId,
+                   'cache_artifact' AS GatePlane,
+                   taa.manual_block_state AS ManualBlockState,
+                   ca.deprecated AS Deprecated,
+                   ca.published_at AS PublishedAt,
+                   ca.vuln_checked_at AS VulnCheckedAt,
+                   0 AS IsMalicious,
+                   'proxy' AS Origin,
+                   ca.provenance_status AS ProvenanceStatus,
+                   ca.revoked_at AS RevokedAt,
+                   ca.name AS PurlName,
                    ca.version AS Version,
                    COALESCE(taa.content_hash, ca.content_hash) AS Sha256,
                    COALESCE(taa.size_bytes, ca.size_bytes) AS SizeBytes,
@@ -268,7 +300,100 @@ public sealed class RpmRepodataService
             ORDER BY PurlName, Sha256 DESC
             """,
             new { orgId })).ToList();
+
+        return await FilterServableAsync(orgId, rows, ct);
     }
+
+    /// <summary>
+    /// Drops the packages this tenant's download gate would refuse, so repodata never advertises
+    /// an RPM <c>GET /rpm/packages/{file}</c> answers 403 for. dnf resolves dependencies out of
+    /// this document and commits to what it finds, so a listed-but-refused package fails a
+    /// transaction after resolution rather than being routed around.
+    ///
+    /// Applied here rather than at each builder because all five documents — primary, filelists,
+    /// other, and the two merged variants — read this one row set, and the <c>packages="N"</c>
+    /// counts are computed from it. Filtering at the source keeps the count and the element list
+    /// describing the same set by construction, which a per-builder filter would have to
+    /// re-establish five times.
+    ///
+    /// A missing settings row withholds everything rather than filtering nothing: absent input
+    /// must not read as "no policy configured", which on a gate is an allow decision.
+    /// </summary>
+    private async Task<List<RpmPrimaryRow>> FilterServableAsync(
+        string orgId, List<RpmPrimaryRow> rows, CancellationToken ct)
+    {
+        if (rows.Count == 0)
+        {
+            return rows;
+        }
+
+        var settings = await _orgs.GetSettingsAsync(orgId, ct);
+        if (settings is null)
+        {
+            return [];
+        }
+
+        // Two batched loads for the whole repository, not one per package: this document lists
+        // every RPM the tenant holds, so a per-coordinate signal lookup would scale with the
+        // catalogue on every rebuild.
+        var pvIds = rows.Where(r => r.GatePlane == "package_version").Select(r => r.GateId).Distinct().ToList();
+        var caIds = rows.Where(r => r.GatePlane == "cache_artifact").Select(r => r.GateId).Distinct().ToList();
+
+        var pvSignals = pvIds.Count > 0
+            ? await _vulns.GetGateSignalsBatchAsync(pvIds, ct)
+            : new Dictionary<string, VulnGateSignals>();
+        var caSignals = caIds.Count > 0
+            ? await _vulns.GetGateSignalsBatchForCacheArtifactsAsync(caIds, ct)
+            : new Dictionary<string, VulnGateSignals>();
+
+        var policy = new BlockPolicy(
+            MinReleaseAgeHours: settings.MinReleaseAgeHours,
+            BlockDeprecatedMode: settings.BlockDeprecated,
+            BlockMaliciousMode: settings.BlockMalicious,
+            BlockKevMode: settings.BlockKev,
+            MaxEpssTolerance: settings.MaxEpssTolerance,
+            MaxOsvScoreTolerance: settings.MaxOsvScoreTolerance,
+            BlockInstallScriptsMode: settings.BlockInstallScripts,
+            VerifyProvenanceMode: settings.VerifyProvenanceMode("rpm"),
+            BlockRevokedMode: settings.BlockRevoked);
+
+        var now = _time.GetUtcNow();
+        return [.. rows.Where(r => BlockGateService.Evaluate(FactsOf(r, pvSignals, caSignals), policy, now).Servable)];
+    }
+
+    // Projects one repodata row into the gate's fact shape. The signals come from whichever
+    // plane's table the row was read from — a cache row's per-tenant block state already arrived
+    // through tenant_artifact_access, so one tenant's decision cannot reach another's document.
+    private static VersionFacts FactsOf(
+        RpmPrimaryRow row,
+        IReadOnlyDictionary<string, VulnGateSignals> pvSignals,
+        IReadOnlyDictionary<string, VulnGateSignals> caSignals)
+    {
+        var signals = (row.GatePlane == "package_version" ? pvSignals : caSignals).GetValueOrDefault(row.GateId);
+        return new VersionFacts(
+            ManualState: row.ManualBlockState,
+            Deprecated: row.Deprecated,
+            PublishedAt: ParseInstant(row.PublishedAt),
+            Scanned: row.VulnCheckedAt is not null,
+            HasMalicious: row.IsMalicious != 0 || (signals?.HasMalicious ?? false),
+            HasKev: signals?.HasKev ?? false,
+            MaxEpss: signals?.MaxEpss,
+            MaxCvss: signals?.MaxCvss,
+            Origin: row.Origin,
+            ProvenanceStatus: row.ProvenanceStatus,
+            RevokedAt: ParseInstant(row.RevokedAt));
+    }
+
+    // Timestamps arrive as the stored ISO text because both planes are unioned into one shape and
+    // the two providers bind their column types differently. An unparseable value reads as
+    // unknown, which fails the release-age hold open — the gate's own posture for a missing date.
+    private static DateTimeOffset? ParseInstant(string? value) =>
+        DateTimeOffset.TryParse(
+            value, System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+            out var parsed)
+            ? parsed
+            : null;
 
     /// <summary>
     /// Decompresses the upstream <c>primary.xml.gz</c> and returns its <c>&lt;package&gt;</c>
@@ -602,6 +727,19 @@ public sealed class RpmRepodataService
     // DapperPositionalRecordComplianceTests.
     [method: ExplicitConstructor]
     private sealed record RpmPrimaryRow(
+        // Row identity on whichever plane supplied it, used to key the batched vuln-signal load.
+        string GateId,
+        // Whether GateId names a package_versions row or a cache_artifact row. The two planes
+        // carry their signals in different tables, so the discriminator has to survive the union.
+        string GatePlane,
+        string? ManualBlockState,
+        string? Deprecated,
+        string? PublishedAt,
+        string? VulnCheckedAt,
+        long IsMalicious,
+        string? Origin,
+        string? ProvenanceStatus,
+        string? RevokedAt,
         string PurlName,
         string Version,
         string? Sha256,

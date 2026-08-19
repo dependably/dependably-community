@@ -68,25 +68,6 @@ public sealed class EffectiveEmailConfigResolverTests : IAsyncLifetime
         settings.UpdateEmailChannelAsync("org1", new UpdateAlertEmailChannel(
             EmailEnabled: emailEnabled, EmailRecipients: recipients));
 
-    /// <summary>
-    /// Writes the transport columns a pre-removal release would have persisted, straight to the
-    /// row. Nothing reads them any more; the tests that use this assert exactly that.
-    /// </summary>
-    private async Task SeedRetiredOwnTransportAsync()
-    {
-        await using var conn = await _db.OpenAsync();
-        await conn.ExecuteAsync(
-            """
-            UPDATE alert_settings
-            SET email_inherit_instance = 0,
-                email_smtp_host = 'org.example.com',
-                email_smtp_port = 587,
-                email_smtp_security = 'none',
-                email_smtp_from = 'org@example.com'
-            WHERE org_id = 'org1'
-            """);
-    }
-
     [Fact]
     public async Task Disabled_ReturnsNull_RegardlessOfTransportState()
     {
@@ -148,42 +129,6 @@ public sealed class EffectiveEmailConfigResolverTests : IAsyncLifetime
         var settings = new AlertSettingsRepository(_db, ep, Clock);
         await SeedOrgAsync(settings, emailEnabled: true);
         var resolver = new EffectiveEmailConfigResolver(settings, BuildInstance(enabled: false, configured: true));
-
-        Assert.Null(await resolver.ResolveAsync("org1"));
-    }
-
-    /// <summary>
-    /// A row upgraded from a release with a per-org transport still carries those columns. They are
-    /// inert: the org resolves to the instance transport like every other org, never to the host it
-    /// used to be pointed at.
-    /// </summary>
-    [Fact]
-    public async Task Enabled_RowWithRetiredOwnTransport_StillResolvesTheInstanceTransport()
-    {
-        using var ep = MakeProtector();
-        var settings = new AlertSettingsRepository(_db, ep, Clock);
-        await SeedOrgAsync(settings, emailEnabled: true);
-        await SeedRetiredOwnTransportAsync();
-        var resolver = new EffectiveEmailConfigResolver(settings, BuildInstance(enabled: true, configured: true));
-
-        var resolved = await resolver.ResolveAsync("org1");
-
-        Assert.NotNull(resolved);
-        Assert.Equal("instance.example.com", resolved!.Transport.Host);
-    }
-
-    /// <summary>
-    /// The same row with the instance relay unconfigured resolves to nothing — it does NOT fall
-    /// back to the retired per-org host.
-    /// </summary>
-    [Fact]
-    public async Task Enabled_RowWithRetiredOwnTransport_InstanceUnconfigured_ReturnsNull()
-    {
-        using var ep = MakeProtector();
-        var settings = new AlertSettingsRepository(_db, ep, Clock);
-        await SeedOrgAsync(settings, emailEnabled: true);
-        await SeedRetiredOwnTransportAsync();
-        var resolver = new EffectiveEmailConfigResolver(settings, BuildInstance(enabled: true, configured: false));
 
         Assert.Null(await resolver.ResolveAsync("org1"));
     }

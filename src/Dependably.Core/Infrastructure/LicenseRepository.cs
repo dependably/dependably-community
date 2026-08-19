@@ -12,6 +12,17 @@ public sealed class LicenseRepository
     // SQLite SQLITE_CONSTRAINT error code (unique constraint violation on insert).
     private const int SqliteConstraintErrorCode = 19;
 
+    // Extended constraint codes. The bare SQLITE_CONSTRAINT (19) covers every constraint kind,
+    // including the foreign key on created_by — catching it wholesale would report a dangling
+    // author id as "this licence is already listed", a 409 for a request that has no duplicate
+    // in it. Only a genuine uniqueness collision means "already listed".
+    private const int SqliteConstraintUnique = 2067;
+    private const int SqliteConstraintPrimaryKey = 1555;
+
+    private static bool IsUniquenessViolation(Microsoft.Data.Sqlite.SqliteException ex) =>
+        ex.SqliteErrorCode == SqliteConstraintErrorCode
+        && ex.SqliteExtendedErrorCode is SqliteConstraintUnique or SqliteConstraintPrimaryKey;
+
     private readonly IMetadataStore _db;
     private readonly TimeProvider _time;
     private readonly LicenseNormalizer _normalizer;
@@ -166,7 +177,9 @@ public sealed class LicenseRepository
         await using var conn = await _db.OpenAsync(ct);
         var rows = await conn.QueryAsync<LicenseAllowlistEntry>(
             """
-            SELECT id as Id, org_id as OrgId, license_spdx as LicenseSpdx, created_at as CreatedAt
+            SELECT id as Id, org_id as OrgId, license_spdx as LicenseSpdx,
+                   disposition as Disposition, note as Note, created_by as CreatedBy,
+                   created_at as CreatedAt
             FROM license_allowlist WHERE org_id = @orgId ORDER BY license_spdx
             """,
             new { orgId });
@@ -175,6 +188,16 @@ public sealed class LicenseRepository
 
     public async Task<LicenseAllowlistEntry?> AddAllowlistAsync(
         string orgId, string licenseSpdx, CancellationToken ct = default)
+        => await AddAllowlistAsync(orgId, licenseSpdx, LicenseDispositions.Allowed, null, null, ct);
+
+    /// <summary>Adds an allow- or conditional-list entry. <paramref name="disposition"/> selects
+    /// which of the two non-denied postures the licence takes; <paramref name="note"/> records the
+    /// operator's rationale, which for a conditional entry is the condition itself. Returns null
+    /// when the org already has an entry for this licence — one licence carries one disposition,
+    /// enforced by UNIQUE (org_id, license_spdx).</summary>
+    public async Task<LicenseAllowlistEntry?> AddAllowlistAsync(
+        string orgId, string licenseSpdx, string disposition, string? note, string? createdBy,
+        CancellationToken ct = default)
     {
         // Normalize the incoming id to its canonical SPDX form before storing, so the entry is
         // consistent with the case-sensitive Remove* / CheckPolicy comparisons and collapses
@@ -185,10 +208,13 @@ public sealed class LicenseRepository
         try
         {
             await conn.ExecuteAsync(
-                "INSERT INTO license_allowlist (id, org_id, license_spdx) VALUES (@id, @orgId, @licenseSpdx)",
-                new { id, orgId, licenseSpdx = normalized });
+                """
+                INSERT INTO license_allowlist (id, org_id, license_spdx, disposition, note, created_by)
+                VALUES (@id, @orgId, @licenseSpdx, @disposition, @note, @createdBy)
+                """,
+                new { id, orgId, licenseSpdx = normalized, disposition, note, createdBy });
         }
-        catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.SqliteErrorCode == SqliteConstraintErrorCode)
+        catch (Microsoft.Data.Sqlite.SqliteException ex) when (IsUniquenessViolation(ex))
         {
             // UNIQUE constraint — already exists
             return null;
@@ -198,8 +224,41 @@ public sealed class LicenseRepository
             Id = id,
             OrgId = orgId,
             LicenseSpdx = normalized,
+            Disposition = disposition,
+            Note = note,
+            CreatedBy = createdBy,
             CreatedAt = _time.GetUtcNow()
         };
+    }
+
+    /// <summary>Edits an existing allowlist entry in place. Both fields are leave-unchanged when
+    /// the corresponding <c>Optional</c> is absent, so a caller that only means to retitle a note
+    /// cannot silently reset the disposition — the same posture the proxy-settings endpoint takes.
+    /// Returns the updated entry, or null when the org has no entry for this licence.</summary>
+    public async Task<LicenseAllowlistEntry?> UpdateAllowlistAsync(
+        string orgId, string licenseSpdx, string? disposition, bool noteSet, string? note,
+        CancellationToken ct = default)
+    {
+        string normalized = _normalizer.Normalize(licenseSpdx);
+        await using var conn = await _db.OpenAsync(ct);
+        int affected = await conn.ExecuteAsync(
+            """
+            UPDATE license_allowlist
+               SET disposition = COALESCE(@disposition, disposition),
+                   note        = CASE WHEN @noteSet = 1 THEN @note ELSE note END
+             WHERE org_id = @orgId AND license_spdx = @licenseSpdx
+            """,
+            new { orgId, licenseSpdx = normalized, disposition, noteSet = noteSet ? 1 : 0, note });
+        return affected == 0
+            ? null
+            : await conn.QuerySingleOrDefaultAsync<LicenseAllowlistEntry>(
+                """
+                SELECT id as Id, org_id as OrgId, license_spdx as LicenseSpdx,
+                       disposition as Disposition, note as Note, created_by as CreatedBy,
+                       created_at as CreatedAt
+                FROM license_allowlist WHERE org_id = @orgId AND license_spdx = @licenseSpdx
+                """,
+                new { orgId, licenseSpdx = normalized });
     }
 
     public async Task<bool> RemoveAllowlistAsync(
@@ -220,7 +279,8 @@ public sealed class LicenseRepository
         await using var conn = await _db.OpenAsync(ct);
         var rows = await conn.QueryAsync<LicenseBlocklistEntry>(
             """
-            SELECT id as Id, org_id as OrgId, license_spdx as LicenseSpdx, created_at as CreatedAt
+            SELECT id as Id, org_id as OrgId, license_spdx as LicenseSpdx,
+                   note as Note, created_by as CreatedBy, created_at as CreatedAt
             FROM license_blocklist WHERE org_id = @orgId ORDER BY license_spdx
             """,
             new { orgId });
@@ -229,6 +289,13 @@ public sealed class LicenseRepository
 
     public async Task<LicenseBlocklistEntry?> AddBlocklistAsync(
         string orgId, string licenseSpdx, CancellationToken ct = default)
+        => await AddBlocklistAsync(orgId, licenseSpdx, null, null, ct);
+
+    /// <summary>Adds a blocklist entry. <paramref name="note"/> records why the licence is
+    /// refused — the most frequently asked question of any policy row.</summary>
+    public async Task<LicenseBlocklistEntry?> AddBlocklistAsync(
+        string orgId, string licenseSpdx, string? note, string? createdBy,
+        CancellationToken ct = default)
     {
         // Normalize the incoming id to its canonical SPDX form before storing (see AddAllowlist).
         string normalized = _normalizer.Normalize(licenseSpdx);
@@ -237,10 +304,13 @@ public sealed class LicenseRepository
         try
         {
             await conn.ExecuteAsync(
-                "INSERT INTO license_blocklist (id, org_id, license_spdx) VALUES (@id, @orgId, @licenseSpdx)",
-                new { id, orgId, licenseSpdx = normalized });
+                """
+                INSERT INTO license_blocklist (id, org_id, license_spdx, note, created_by)
+                VALUES (@id, @orgId, @licenseSpdx, @note, @createdBy)
+                """,
+                new { id, orgId, licenseSpdx = normalized, note, createdBy });
         }
-        catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.SqliteErrorCode == SqliteConstraintErrorCode)
+        catch (Microsoft.Data.Sqlite.SqliteException ex) when (IsUniquenessViolation(ex))
         {
             return null;
         }
@@ -249,8 +319,35 @@ public sealed class LicenseRepository
             Id = id,
             OrgId = orgId,
             LicenseSpdx = normalized,
+            Note = note,
+            CreatedBy = createdBy,
             CreatedAt = _time.GetUtcNow()
         };
+    }
+
+    /// <summary>Edits an existing blocklist entry's note in place. Leave-unchanged when
+    /// <paramref name="noteSet"/> is false. Returns the updated entry, or null when absent.</summary>
+    public async Task<LicenseBlocklistEntry?> UpdateBlocklistAsync(
+        string orgId, string licenseSpdx, bool noteSet, string? note, CancellationToken ct = default)
+    {
+        string normalized = _normalizer.Normalize(licenseSpdx);
+        await using var conn = await _db.OpenAsync(ct);
+        int affected = await conn.ExecuteAsync(
+            """
+            UPDATE license_blocklist
+               SET note = CASE WHEN @noteSet = 1 THEN @note ELSE note END
+             WHERE org_id = @orgId AND license_spdx = @licenseSpdx
+            """,
+            new { orgId, licenseSpdx = normalized, noteSet = noteSet ? 1 : 0, note });
+        return affected == 0
+            ? null
+            : await conn.QuerySingleOrDefaultAsync<LicenseBlocklistEntry>(
+                """
+                SELECT id as Id, org_id as OrgId, license_spdx as LicenseSpdx,
+                       note as Note, created_by as CreatedBy, created_at as CreatedAt
+                FROM license_blocklist WHERE org_id = @orgId AND license_spdx = @licenseSpdx
+                """,
+                new { orgId, licenseSpdx = normalized });
     }
 
     public async Task<bool> RemoveBlocklistAsync(
@@ -414,29 +511,39 @@ public sealed class LicenseRepository
     // ── Policy check ──────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Returns whether the given SPDX license entries pass the org's license policy. Each entry
+    /// Evaluates the given SPDX license entries against the org's license policy. Each entry
     /// may be a whole compound expression (e.g. "MIT OR Apache-2.0", "GPL-2.0-only WITH
     /// Classpath-exception-2.0") — it is parsed and evaluated, so an OR is satisfied when any
-    /// one leaf is allowed (a blocked sibling does not sink it) and an AND requires every leaf.
-    /// Both stored allow/block ids and each observed leaf are normalized to canonical SPDX form
+    /// one leaf is satisfied (a blocked sibling does not sink it) and an AND requires every leaf.
+    /// Both stored policy ids and each observed leaf are normalized to canonical SPDX form
     /// before comparison, so "Apache License 2.0" matches an "Apache-2.0" allowlist entry.
     ///
-    /// Returns (allowed: true, null) when mode is 'off' or entries are empty. On the first
-    /// unsatisfied entry returns (allowed: false, offendingLeaf) where the offending leaf is the
-    /// first normalized leaf under that entry the policy rejects — naming a concrete license,
-    /// not the whole expression.
+    /// <para>A licence carries one of three postures. 'allowed' and 'conditional' both satisfy
+    /// the block-mode leaf check — a conditional licence serves and publishes normally — while
+    /// the blocklist refuses. The blocklist still wins over both: a licence somehow present on
+    /// the allowlist and the blocklist at once is refused.</para>
+    ///
+    /// <para>The verdict names the conditional leaves it matched, because "allowed" alone cannot
+    /// express "allowed, and somebody should look at this". Callers surface those for review
+    /// rather than refusing them.</para>
     /// </summary>
-    public async Task<(bool Allowed, string? BlockedLicense)> CheckPolicyAsync(
+    public async Task<LicensePolicyVerdict> CheckPolicyAsync(
         string orgId, string mode, IReadOnlyList<string> spdxIds, CancellationToken ct = default)
     {
         if (mode == "off" || spdxIds.Count == 0)
         {
-            return (true, null);
+            return LicensePolicyVerdict.Clean;
         }
 
         var allowlist = await GetAllowlistAsync(orgId, ct);
         var blocklist = await GetBlocklistAsync(orgId, ct);
-        var allowSet = allowlist.Select(e => _normalizer.Normalize(e.LicenseSpdx))
+        var allowSet = allowlist
+            .Where(e => e.Disposition != LicenseDispositions.Conditional)
+            .Select(e => _normalizer.Normalize(e.LicenseSpdx))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var conditionalSet = allowlist
+            .Where(e => e.Disposition == LicenseDispositions.Conditional)
+            .Select(e => _normalizer.Normalize(e.LicenseSpdx))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var blockSet = blocklist.Select(e => _normalizer.Normalize(e.LicenseSpdx))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -444,21 +551,78 @@ public sealed class LicenseRepository
         bool LeafSatisfied(string leaf)
         {
             string norm = _normalizer.Normalize(leaf);
-            return mode == "block"
-                ? allowSet.Contains(norm) && !blockSet.Contains(norm)
-                : !blockSet.Contains(norm);
+            if (blockSet.Contains(norm))
+            {
+                // Blocklist wins over both non-denied postures, in either mode.
+                return false;
+            }
+            return mode != "block" || allowSet.Contains(norm) || conditionalSet.Contains(norm);
         }
 
+        // True when removing this leaf from the satisfied set would leave the expression
+        // unsatisfied — i.e. the artifact genuinely relies on the conditional licence. Under an
+        // AND every leaf is load-bearing; under an OR a conditional leaf only matters when no
+        // unconditional sibling already satisfies the expression on its own.
+        bool LeafIsLoadBearing(SpdxLicenseExpression expr, string normalizedLeaf) =>
+            !expr.Evaluate(leaf =>
+                !_normalizer.Normalize(leaf).Equals(normalizedLeaf, StringComparison.OrdinalIgnoreCase)
+                && LeafSatisfied(leaf));
+
+        var conditionalLeaves = new List<string>();
         foreach (string entry in spdxIds)
         {
             var expr = SpdxLicenseExpression.Parse(entry);
             if (!expr.Evaluate(LeafSatisfied))
             {
                 string offending = expr.Leaves().FirstOrDefault(leaf => !LeafSatisfied(leaf)) ?? entry;
-                return (false, _normalizer.Normalize(offending));
+                return LicensePolicyVerdict.Blocked(_normalizer.Normalize(offending));
+            }
+
+            // Only leaves that actually carried the expression are reported. A satisfied OR whose
+            // conditional branch was not the one that satisfied it (say "MIT OR LGPL-3.0" with MIT
+            // plainly allowed) raises nothing — the artifact is usable under the unconditional
+            // branch, so there is no condition for anyone to review.
+            foreach (string leaf in expr.Leaves())
+            {
+                string norm = _normalizer.Normalize(leaf);
+                if (conditionalSet.Contains(norm)
+                    && !conditionalLeaves.Contains(norm, StringComparer.OrdinalIgnoreCase)
+                    && LeafIsLoadBearing(expr, norm))
+                {
+                    conditionalLeaves.Add(norm);
+                }
             }
         }
 
-        return (true, null);
+        return conditionalLeaves.Count == 0
+            ? LicensePolicyVerdict.Clean
+            : LicensePolicyVerdict.Conditional(conditionalLeaves);
     }
+
+}
+
+/// <summary>
+/// Outcome of a licence-policy evaluation. Three states, not two: an artifact can be refused,
+/// plainly usable, or usable under a licence the org marked conditional — the last of which is
+/// allowed to serve but named so callers can surface it for review.
+/// </summary>
+/// <param name="Allowed">False only when the policy refuses the artifact.</param>
+/// <param name="BlockedLicense">The first leaf the policy rejected; null when allowed.</param>
+/// <param name="ConditionalLicenses">Conditional leaves the artifact actually relies on. Empty
+/// when nothing needs review.</param>
+public sealed record LicensePolicyVerdict(
+    bool Allowed,
+    string? BlockedLicense,
+    IReadOnlyList<string> ConditionalLicenses)
+{
+    private static readonly string[] None = [];
+
+    public static readonly LicensePolicyVerdict Clean = new(true, null, None);
+
+    public static LicensePolicyVerdict Blocked(string? offendingLeaf) => new(false, offendingLeaf, None);
+
+    public static LicensePolicyVerdict Conditional(IReadOnlyList<string> leaves) => new(true, null, leaves);
+
+    /// <summary>True when the artifact serves but relies on a licence the org marked conditional.</summary>
+    public bool IsConditional => Allowed && ConditionalLicenses.Count > 0;
 }

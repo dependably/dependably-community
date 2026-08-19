@@ -104,6 +104,13 @@ public static class PersonalDataTables
                 "Org package-name claim history; actor_id is a provenance stamp on an org-owned row.",
             ["install_script_allowlist"] =
                 "Org install-script allowlist config; created_by is a provenance stamp on an org-owned row.",
+            ["license_allowlist"] =
+                "Org licence-policy config; created_by is a provenance stamp on an org-owned policy row.",
+            ["license_blocklist"] =
+                "Org licence-policy config; created_by is a provenance stamp on an org-owned policy row.",
+            ["package_note"] =
+                "Org compliance annotation on a package coordinate; created_by is an authorship stamp on " +
+                "an org-owned note, not the subject's personal data.",
             ["email_outbox"] =
                 "Queued outbound alert mail. `recipients` is the org's configured alert-delivery list " +
                 "snapshotted when the alert was raised, not the subject's own address, and one row is " +

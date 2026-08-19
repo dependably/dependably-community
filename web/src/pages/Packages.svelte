@@ -128,7 +128,7 @@
   }
 </script>
 
-<div class="page page-fluid">
+<div class="page">
   <div class="page-header">
     <h1 class="page-title">{$t('packages.title')}</h1>
   </div>

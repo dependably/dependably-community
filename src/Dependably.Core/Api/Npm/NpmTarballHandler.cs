@@ -311,10 +311,10 @@ public sealed class NpmTarballHandler(
         }
 
         string? sourceIpProxy = httpContext.GetNormalizedRemoteIp();
-        return await blockGate.EvaluateAsync(
-                BlockGateRequest.ForProxyCacheFacts(key.OrgId, "npm", caFacts, token, settings, sourceIpProxy), ct)
-            == BlockDecision.Blocked
-            ? new StatusCodeResult(StatusCodes.Status403Forbidden)
+        var blockOutcome = await blockGate.EvaluateAsync(
+                BlockGateRequest.ForProxyCacheFacts(key.OrgId, "npm", caFacts, token, settings, sourceIpProxy), ct);
+        return blockOutcome == BlockDecision.Blocked
+            ? BlockRefusalResult.Forbidden(httpContext, blockOutcome)
             : await TryServeProxyCachedTarballAsync(httpContext, caFacts, key.File, key.OrgId, token, sourceIpProxy, ct);
     }
 

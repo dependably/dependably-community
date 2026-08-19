@@ -51,6 +51,19 @@ public sealed class SystemSlackQueueTests : IAsyncLifetime
         await orgs.SetInstanceSettingAsync("system_slack_webhook_url", webhookUrl);
     }
 
+    /// <summary>
+    /// Production's retry schedule with the intervals removed, for the tests whose subject is the
+    /// terminal outcome of the retry chain rather than its pacing. The same four attempts run and
+    /// the durable bookkeeping is identical; what disappears is the need to drive a clock from the
+    /// test to let the chain proceed, which is a race the test cannot win reliably on a loaded
+    /// machine — every advance spent before the loop registers its next timer is lost, and when
+    /// the advance budget runs out the clock freezes with the chain still parked on it. The
+    /// intervals themselves are pinned where they belong, in the tests that assert on backoff,
+    /// which keep the real schedule.
+    /// </summary>
+    private static readonly TimeSpan[] NoBackoff =
+        [TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero];
+
     private static async Task WaitAsync(Func<bool> condition, TimeSpan? timeout = null)
     {
         // now-ok: polling deadline awaiting real async completion of the queue's consumer loop
@@ -197,9 +210,11 @@ public sealed class SystemSlackQueueTests : IAsyncLifetime
     // ── Terminal failure + mixed partial-failure fan-out ────────────────────────
 
     /// <summary>
-    /// Two events go through the same queue in sequence: one delivers ("good"), the other 502s
-    /// through the full 1s/5s/30s backoff before the terminal failure is recorded — a mixed
-    /// partial-failure scenario across sequential deliveries on the single-reader queue.
+    /// Two events go through the same queue in sequence: one delivers ("good"), the other
+    /// exhausts its retry budget 502ing before the terminal failure is recorded — a mixed
+    /// partial-failure scenario across sequential deliveries on the single-reader queue. The
+    /// chain runs on <see cref="NoBackoff"/>: the subject is which outcome each event reaches,
+    /// not the pacing between attempts.
     /// </summary>
     [Fact]
     public async Task Notify_SequentialEvents_OneSucceedsOneFails_IndependentOutcomes()
@@ -209,7 +224,9 @@ public sealed class SystemSlackQueueTests : IAsyncLifetime
         var slackClock = new FakeTimeProvider(Clock.GetUtcNow());
         await EnableSlackAsync("https://good.example.com/hook");
 
-        var queue = new SystemSlackQueue(Orgs, client, slackClock, RealLocalizer(), BuildCfg(), NullLogger<SystemSlackQueue>.Instance);
+        var queue = new SystemSlackQueue(
+            Orgs, client, slackClock, RealLocalizer(), BuildCfg(), NullLogger<SystemSlackQueue>.Instance,
+            NoBackoff);
         using var cts = new CancellationTokenSource();
         _ = queue.StartAsync(cts.Token);
 
@@ -220,10 +237,10 @@ public sealed class SystemSlackQueueTests : IAsyncLifetime
         await orgs.SetInstanceSettingAsync("system_slack_webhook_url", "https://bad.example.com/hook");
         queue.Notify(new SystemEventRecord("tenant.deleted", "acme", null, "ops@example.com"));
 
-        // Pump until BOTH events are fully processed (ProcessedCount == 2), not merely until
+        // Wait until BOTH events are fully processed (ProcessedCount == 2), not merely until
         // FailedCount == 1: the failure counter is bumped before the "failed" status columns are
         // written, so waiting on it races the status/error writes asserted below.
-        await ClockPump.UntilAsync(slackClock, () => queue.ProcessedCount == 2, TimeSpan.FromSeconds(1));
+        await WaitAsync(() => queue.ProcessedCount == 2);
 
         await cts.CancelAsync();
         try { await queue.StopAsync(CancellationToken.None); } catch { }
@@ -267,7 +284,9 @@ public sealed class SystemSlackQueueTests : IAsyncLifetime
     /// mid-shutdown, with an event still buffered). Two events are buffered before the drain runs;
     /// a <see cref="SequencedHandler"/> forces the first event to exhaust its retry budget failing
     /// and the second to succeed on its first attempt — the drain must record both outcomes
-    /// independently instead of losing either to the pre-cancelled token.
+    /// independently instead of losing either to the pre-cancelled token. The chain runs on
+    /// <see cref="NoBackoff"/>; <see cref="SequencedHandler"/>'s call ordering, not the intervals
+    /// between attempts, is what makes the mixed outcome deterministic.
     /// </summary>
     [Fact]
     public async Task ExecuteAsync_CancelledMidRun_DrainsMixedSuccessAndFailure()
@@ -278,7 +297,9 @@ public sealed class SystemSlackQueueTests : IAsyncLifetime
         var orgs = new OrgRepository(_db);
         await EnableSlackAsync("https://hook.example.com/hook");
 
-        var queue = new SystemSlackQueue(Orgs, client, slackClock, RealLocalizer(), BuildCfg(), NullLogger<SystemSlackQueue>.Instance);
+        var queue = new SystemSlackQueue(
+            Orgs, client, slackClock, RealLocalizer(), BuildCfg(), NullLogger<SystemSlackQueue>.Instance,
+            NoBackoff);
 
         // Buffer both events before the worker ever starts reading.
         queue.Notify(new SystemEventRecord("tenant.created", "acme", null, "ops@example.com"));
@@ -288,9 +309,9 @@ public sealed class SystemSlackQueueTests : IAsyncLifetime
         // stopping token is in by the time BackgroundService.StopAsync signals cancellation.
         var executeTask = queue.ExecuteAsyncForTests(new CancellationToken(canceled: true));
 
-        // The first event burns through the 1s/5s/30s backoff inside the drain itself; pump the
-        // fake clock so that finishes in virtual time instead of real time.
-        await ClockPump.UntilAsync(slackClock, () => queue.DeliveredCount == 1 && queue.FailedCount == 1, TimeSpan.FromSeconds(1));
+        // The first event exhausts its retry budget inside the drain itself. On NoBackoff that
+        // costs no time at all, real or virtual, so nothing has to drive the clock through it.
+        await WaitAsync(() => queue.DeliveredCount == 1 && queue.FailedCount == 1);
 
         await executeTask;
 

@@ -417,21 +417,17 @@ public sealed class NpmPackumentHandler(
 
         foreach (string ver in versionKeys)
         {
-            // Project the upstream-only version entry into VersionFacts. Upstream versions
-            // have no local row: no scan data, no manual state. The deprecated field comes
-            // from the packument version object via LicenseExtractor so boolean/empty/whitespace
-            // values are treated identically to the first-fetch download path.
+            // Project the upstream-only version entry through the shared factory rather than
+            // building VersionFacts here. Every ecosystem's index faces the same "no row on either
+            // plane" case, and spelling the absent facts once is what stops a fact added later from
+            // reaching one ecosystem's filter while silently missing another's. The deprecated
+            // field comes from the packument version object via LicenseExtractor so
+            // boolean/empty/whitespace values are treated identically to the first-fetch path.
             publishedAtByVersion.TryGetValue(ver, out var publishedAt);
             string? deprecated = LicenseExtractor.FromNpmPackumentVersion(versionsObj[ver]).Deprecated;
-            var facts = new VersionFacts(
-                ManualState: null,
-                Deprecated: deprecated,
-                PublishedAt: publishedAtByVersion.ContainsKey(ver) ? publishedAt : null,
-                Scanned: false,
-                HasMalicious: false,
-                HasKev: false,
-                MaxEpss: null,
-                MaxCvss: null);
+            var facts = VersionFacts.ForUpstreamOnly(
+                deprecated,
+                publishedAtByVersion.ContainsKey(ver) ? publishedAt : null);
 
             if (!BlockGateService.Evaluate(facts, policy, now).Servable)
             {

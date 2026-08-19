@@ -262,8 +262,21 @@ public static partial class MavenPathParser
         return ext?[1..];
     }
 
+    // Distinguishes g/a/{v}/maven-metadata.xml from g/a/maven-metadata.xml, where the two are
+    // genuinely ambiguous from the path alone — the segment before the filename is either a
+    // version or an artifactId, and nothing in the path says which.
+    //
+    // A Maven version effectively always begins with a digit; an artifactId effectively never
+    // does. Testing the FIRST character rather than any character is what separates them:
+    // "contains a digit anywhere" classifies commons-lang3, log4j-core, slf4j-api and every other
+    // artifactId carrying a version-ish suffix as a version, which makes their artifact-level
+    // metadata unreachable — the document Maven resolves ranges and LATEST/RELEASE through.
+    //
+    // SNAPSHOT is kept as a second arm because a snapshot version is not required to start with a
+    // digit, and the marker is unambiguous wherever it appears.
     private static bool LooksLikeVersion(string segment)
-        => segment.Any(char.IsDigit) || segment.Contains("SNAPSHOT", StringComparison.OrdinalIgnoreCase);
+        => (segment.Length > 0 && char.IsDigit(segment[0]))
+            || segment.Contains("SNAPSHOT", StringComparison.OrdinalIgnoreCase);
 }
 
 /// <summary>

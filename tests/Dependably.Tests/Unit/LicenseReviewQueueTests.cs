@@ -57,6 +57,24 @@ public class LicenseReviewQueueTests : IAsyncLifetime
             new { id = Guid.NewGuid().ToString("N"), pv = pvId, spdx });
     }
 
+    // A conditional licence is a decision, not a pending one. The queue lists what nobody has
+    // ruled on yet, so marking a licence conditional must remove it — otherwise every condition
+    // an org records stays in the queue forever, nagging about a decision already made.
+    [Fact]
+    public async Task ReviewQueue_ExcludesConditionalLicenses()
+    {
+        var repo = Repo();
+        await SeenAsync("pv1", "LGPL-3.0-only");
+
+        Assert.Contains(await repo.GetReviewQueueAsync("org1", false),
+            e => e.LicenseSpdx == "LGPL-3.0-only");
+
+        await repo.AddAllowlistAsync("org1", "LGPL-3.0-only", LicenseDispositions.Conditional, null, null);
+
+        Assert.DoesNotContain(await repo.GetReviewQueueAsync("org1", false),
+            e => e.LicenseSpdx == "LGPL-3.0-only");
+    }
+
     /// <summary>
     /// Seeds a proxied (global cache-plane) artifact: a cache_artifact row, a
     /// tenant_artifact_access grant for <paramref name="orgId"/>, and a cache-plane

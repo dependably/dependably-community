@@ -31,7 +31,9 @@ namespace Dependably.Infrastructure.Mail;
 /// </summary>
 public sealed class EmailDeliveryQueue : BackgroundService
 {
-    private const int DefaultCapacity = 1024;
+    /// <summary>Channel bound when no explicit capacity is given. Internal so the tests that
+    /// reach the backoff seam can keep production's capacity rather than inventing one.</summary>
+    internal const int DefaultCapacity = 1024;
 
     /// <summary>
     /// Upper bound on how long the shutdown drain (see <see cref="ExecuteAsync"/>) spends
@@ -45,6 +47,7 @@ public sealed class EmailDeliveryQueue : BackgroundService
     private readonly SmtpMailSender _sender;
     private readonly TimeProvider _time;
     private readonly ILogger<EmailDeliveryQueue> _logger;
+    private readonly TimeSpan[] _backoffSchedule;
     private long _droppedCount;
     private long _deliveredCount;
     private long _failedCount;
@@ -64,12 +67,29 @@ public sealed class EmailDeliveryQueue : BackgroundService
     /// Not configurable in production — the channel capacity is a process-internal backpressure
     /// bound, not an operator-tunable setting.
     /// </summary>
+    /// <remarks>
+    /// Test seam over the retry backoff. <paramref name="backoffSchedule"/> replaces
+    /// <see cref="AlertDeliveryPolicy.BackoffSchedule"/>; null keeps it, which is what every
+    /// production caller gets. It is not configuration — an operator has no way to reach it, so
+    /// no deployment can shorten the interval a failing message is retried on.
+    ///
+    /// It exists because the alternative is worse. A test that only needs the retry chain to
+    /// reach its terminal outcome, and asserts nothing about the intervals, otherwise has to
+    /// hand-drive a <c>FakeTimeProvider</c> from outside while the loop registers its next
+    /// timer from inside — and the two race. Every advance the pump spends before that timer
+    /// exists is wasted, so the wait passes or fails on how heavily loaded the machine is.
+    /// Injecting a zero schedule removes the clock from those tests entirely: a zero delay
+    /// completes without any time, real or virtual, having to pass. Tests that assert on the
+    /// intervals keep the real schedule and drive the clock.
+    /// </remarks>
     internal EmailDeliveryQueue(
         SmtpMailSender sender,
         TimeProvider time,
         ILogger<EmailDeliveryQueue> logger,
-        int capacity)
+        int capacity,
+        TimeSpan[]? backoffSchedule = null)
     {
+        _backoffSchedule = backoffSchedule ?? AlertDeliveryPolicy.BackoffSchedule;
         _sender = sender;
         _time = time;
         _logger = logger;
@@ -222,7 +242,7 @@ public sealed class EmailDeliveryQueue : BackgroundService
         (string subject, string body) = job.Render();
         Exception? lastEx = null;
 
-        for (int attempt = 0; attempt <= AlertDeliveryPolicy.BackoffSchedule.Length; attempt++)
+        for (int attempt = 0; attempt <= _backoffSchedule.Length; attempt++)
         {
             if (ct.IsCancellationRequested)
             {
@@ -249,17 +269,17 @@ public sealed class EmailDeliveryQueue : BackgroundService
             catch (Exception ex)
             {
                 lastEx = ex;
-                if (attempt == AlertDeliveryPolicy.BackoffSchedule.Length)
+                if (attempt == _backoffSchedule.Length)
                 {
                     break;
                 }
 
                 _logger.LogDebug(ex,
                     "Email delivery attempt {Attempt} failed for a {JobType} job; retrying in {Backoff}.",
-                    attempt + 1, job.GetType().Name, AlertDeliveryPolicy.BackoffSchedule[attempt]);
+                    attempt + 1, job.GetType().Name, _backoffSchedule[attempt]);
                 try
                 {
-                    await Task.Delay(AlertDeliveryPolicy.BackoffSchedule[attempt], _time, ct);
+                    await Task.Delay(_backoffSchedule[attempt], _time, ct);
                 }
                 catch (OperationCanceledException)
                 {
@@ -273,7 +293,7 @@ public sealed class EmailDeliveryQueue : BackgroundService
         string errorMsg = lastEx?.Message ?? "Unknown error";
         _logger.LogWarning(lastEx,
             "Email delivery failed after {Attempts} attempts for a {JobType} job; recording failure.",
-            AlertDeliveryPolicy.BackoffSchedule.Length + 1, job.GetType().Name);
+            _backoffSchedule.Length + 1, job.GetType().Name);
 
         await job.RecordFailureAsync(errorMsg);
         Interlocked.Increment(ref _failedCount);

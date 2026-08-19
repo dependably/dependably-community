@@ -1,8 +1,14 @@
 <!--
   The rows behind the Overview dashboard's risk tiles. Operational risk lists the versions that
   have fallen behind upstream; License risk lists the versions carrying a blocklisted SPDX
-  identifier or no license at all. Both surfaces are read-only — a row clicks through to the
-  package's version-detail page, which is where a version is actually blocked or unblocked.
+  identifier, no license at all, or a licence the org marked conditional. Both surfaces are
+  read-only — a row clicks through to the package's version-detail page, which is where a
+  version is actually blocked or unblocked.
+
+  The conditional rows are the odd ones out: they are not at risk in the sense the other two
+  reasons are — they serve normally — but they are the review surface the conditional
+  disposition exists to feed, so they share this drill-down. They are deliberately excluded
+  from the dashboard tile's count, which has always meant "these are problems".
 
   Not an admin-only page: the endpoints gate on read:packages, the same capability that serves
   the dashboard tiles, so every role that can see a number can open the rows behind it.
@@ -126,7 +132,7 @@
     (activeTab === 'operational' ? operationalColumns : licenseColumns).map(c => [c.key, NOOP_CMP]))
 </script>
 
-<div class="page page-wide">
+<div class="page">
   <header class="page-header">
     <h1>{$t('risk.title')}</h1>
   </header>
@@ -168,6 +174,7 @@
           <option value="">{$t('risk.reasonFilter.all')}</option>
           <option value="blocklisted">{$t('risk.reason.blocklisted')}</option>
           <option value="unknown">{$t('risk.reason.unknown')}</option>
+          <option value="conditional">{$t('risk.reason.conditional')}</option>
         </select>
       {/if}
     </div>
@@ -280,4 +287,7 @@
   .reason { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
   .reason-blocklisted { color: var(--danger); }
   .reason-unknown { color: var(--text2); }
+  /* Conditional artifacts serve — this is a review cue, not a failure, so it does not borrow
+     the danger colour the blocklisted rows use. */
+  .reason-conditional { color: var(--badge-sky-text); }
 </style>

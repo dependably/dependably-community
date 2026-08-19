@@ -202,7 +202,7 @@ table column with versions, counts, durations, or timestamps.
 │ .navbar (sticky, 48px, --bg2)               │
 ├─────────────────────────────────────────────┤
 │ .main-content                               │
-│   .page (max-width: 1100px, padding: 24px)  │
+│   .page (full-bleed, padding: 24px)         │
 │     .page-header (flex, space-between)      │
 │       .page-title          [action buttons] │
 │     [content]                               │
@@ -212,20 +212,25 @@ table column with versions, counts, durations, or timestamps.
 Forms width-constrained ≤ 480px. Full-width tables live directly inside
 `.page`.
 
-**Page-width wrappers** — pick exactly one per route root:
+**Page width** — there is exactly one page wrapper, `.page`, and it is
+full-bleed and left-aligned. It sets the 24px gutter and nothing else: no
+`max-width`, no `margin: 0 auto`. Every page therefore starts at the same
+x-offset, so moving between a form page and a data-table page does not shift
+the content edge.
 
-| Class         | Max width | Use for                                         |
-| ------------- | --------- | ----------------------------------------------- |
-| `.page`       | 1100px    | forms / narrow reading (the default)            |
-| `.page-wide`  | 1320px    | data-dense pages (Dashboard, Vulnerabilities, Packages, Audit, AdminSettings) |
-| `.page-fluid` | none      | full-bleed list / data-table pages; 24px gutters |
+**Readable measure is capped on the inner element, never on the shell.** A page
+whose content would be unreadable at full width constrains the specific element
+that needs it — a form, a prose block, a dropzone — with a plain `max-width` and
+no auto margins, which keeps it left-aligned inside the page. `OrgSettings` is
+the reference: a full-bleed `.page` with 480/540/640px caps on the forms inside
+it. A scoped `.page { max-width: … }` override in a page's own `<style>` block
+re-introduces the centred well and is the one thing this rule forbids.
 
-All three carry `padding: 24px`. **The wrapper belongs once, at the route
-root.** A component that is embedded as a sub-section of another page — e.g. a
-settings-tab panel — renders bare (heading via `.section-h`, tables directly);
-it must not re-wrap itself in `.page`/`.page-fluid`, or the gutters stack and
-the section is inset from its siblings. Separate stacked sub-sections with
-`margin-top: 24px`, not nested wrappers.
+**The wrapper belongs once, at the route root.** A component that is embedded as
+a sub-section of another page — e.g. a settings-tab panel — renders bare
+(heading via `.section-h`, tables directly); it must not re-wrap itself in
+`.page`, or the gutters stack and the section is inset from its siblings.
+Separate stacked sub-sections with `margin-top: 24px`, not nested wrappers.
 
 ### 4.1 Navbar contract
 

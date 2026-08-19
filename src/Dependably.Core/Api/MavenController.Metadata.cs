@@ -135,6 +135,7 @@ public sealed partial class MavenController
         // Cache-Control header. On a cache HIT the rebuild below is skipped, so the only work
         // these incur is a registry resolve + reserved-namespace lookup (DB/registry reads,
         // not the upstream HTTP fetch that the cache exists to avoid).
+        var settings = await _svc.Orgs.GetSettingsAsync(orgId, ct);
         var bases = await _svc.Registries.ResolveAsync(orgId, "maven", ct);
         bool useUpstream = _svc.Upstream is not null &&
             bases.Count > 0 &&
@@ -148,7 +149,7 @@ public sealed partial class MavenController
             cacheKey, ttl,
             rebuildCt => isSnapshotVersionMetadata
                 ? BuildMavenSnapshotMetadataBytesAsync(orgId, coords, rebuildCt)
-                : BuildMavenMetadataBytesAsync(orgId, coords, bases, useUpstream, rebuildCt),
+                : BuildMavenMetadataBytesAsync(orgId, coords, bases, useUpstream, settings, rebuildCt),
             ct);
 
         if (bodyBytes is null)
@@ -246,9 +247,73 @@ public sealed partial class MavenController
     // Builds the maven-metadata.xml bytes from local DB rows merged with upstream versions.
     // Returns null when the version list is empty (caller surfaces as 404).
     // Used as the GetOrRebuildAsync factory inside ServeMetadataAsync.
+    /// <summary>
+    /// The versions of one coordinate this org holds on either plane and the download gate would
+    /// hard-block, read through the same shared predicates the artifact route evaluates.
+    ///
+    /// Kept out of the version query rather than folded into it: that SQL's ordering is load
+    /// bearing — the document must be byte-stable for a given version set so the ETag honours
+    /// If-None-Match and the generated .sha1/.md5 sidecars match the XML clients fetched — and a
+    /// separate subtraction leaves it untouched.
+    ///
+    /// A null settings row withholds every held version rather than filtering none of them.
+    /// Absent input must not read as "no policy configured", which on a gate is an allow decision.
+    /// </summary>
+    private async Task<HashSet<string>> BlockedMavenVersionsAsync(
+        string orgId, string purlName, OrgSettings? settings, CancellationToken ct)
+    {
+        var blocked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var now = _svc.Time.GetUtcNow();
+
+        var pkg = await _svc.Packages.GetByPurlNameAsync(orgId, "maven", purlName, ct);
+        var uploaded = pkg is null
+            ? []
+            : await _svc.Packages.GetVersionsAsync(pkg.Id, ct);
+        var proxyEntries = await _svc.CacheArtifacts.ListServeFactsForNameAsync(orgId, "maven", purlName, ct);
+
+        if (settings is null)
+        {
+            foreach (var v in uploaded) { blocked.Add(v.Version); }
+            foreach (var e in proxyEntries) { blocked.Add(e.Version); }
+            return blocked;
+        }
+
+        if (uploaded.Count > 0)
+        {
+            var signals = await _svc.Vulns.GetGateSignalsBatchAsync(uploaded.Select(v => v.Id).ToList(), ct);
+            foreach (var v in uploaded)
+            {
+                if (BlockGateService.IsHardBlockedByStoredState(v, settings, signals.GetValueOrDefault(v.Id), now))
+                {
+                    blocked.Add(v.Version);
+                }
+            }
+        }
+
+        if (proxyEntries.Count > 0)
+        {
+            var proxySignals = await _svc.Vulns.GetGateSignalsBatchForCacheArtifactsAsync(
+                proxyEntries.Select(e => e.Id).ToList(), ct);
+
+            // A Maven version spans several cache rows — jar, pom, checksum sidecars — so any
+            // blocked row blocks the version. maven-metadata.xml lists versions, not files, and
+            // there is no way to advertise "this version, but only some of its artifacts".
+            foreach (var entry in proxyEntries)
+            {
+                if (BlockGateService.IsHardBlockedByCacheEntry(
+                        entry, settings, proxySignals.GetValueOrDefault(entry.Id), now))
+                {
+                    blocked.Add(entry.Version);
+                }
+            }
+        }
+
+        return blocked;
+    }
+
     private async Task<byte[]?> BuildMavenMetadataBytesAsync(
         string orgId, MavenCoordinates coords, IReadOnlyList<UpstreamSource> bases,
-        bool useUpstream, CancellationToken ct)
+        bool useUpstream, OrgSettings? settings, CancellationToken ct)
     {
         // The org can serve a version from either catalogue — a hosted publish in
         // package_versions, or a proxy fetch on the shared cache plane (cache_artifact +
@@ -293,7 +358,20 @@ public sealed partial class MavenController
             .OrderBy(r => r.CreatedAt, StringComparer.Ordinal)
             .ThenBy(r => r.Version, MavenVersionComparer.Instance)
             .ToList();
-        var localVersions = ordered.Select(r => r.Version).ToList();
+        // Withhold the versions this org holds and hard-blocks, so maven-metadata.xml never
+        // advertises a version the artifact route refuses. Applied to the upstream union below as
+        // well: the facts are this org's own, and which side of the merge named a version says
+        // nothing about whether this org may serve it.
+        //
+        // An upstream version this org has never cached carries no facts and cannot be decided
+        // here — maven-metadata.xml has only a document-level <lastUpdated>, no per-version
+        // timestamp, and Maven's own publish date is only ever observed as a Last-Modified header
+        // on an artifact fetch. Those versions are gated at first fetch.
+        var blocked = await BlockedMavenVersionsAsync(orgId, coords.PackageName, settings, ct);
+        var localVersions = ordered
+            .Select(r => r.Version)
+            .Where(v => !blocked.Contains(v))
+            .ToList();
 
         // lastUpdated comes from the newest local publish, not the wall clock — the metadata
         // body must be byte-stable for a given version set so the ETag honours If-None-Match
@@ -321,7 +399,10 @@ public sealed partial class MavenController
                 {
                     // Union: local wins on collision; preserve order (local first, then upstream-only additions).
                     var localSet = new HashSet<string>(localVersions, StringComparer.OrdinalIgnoreCase);
-                    mergedVersions = [.. localVersions, .. upstreamVersions.Where(v => !localSet.Contains(v))];
+                    mergedVersions = [
+                        .. localVersions,
+                        .. upstreamVersions.Where(v => !localSet.Contains(v) && !blocked.Contains(v)),
+                    ];
                     break;
                 }
             }

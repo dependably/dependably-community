@@ -100,9 +100,26 @@ public sealed partial class CargoController
             return NotFound();
         }
 
+        // Drop the versions this org holds and hard-blocks, so the index never advertises a crate
+        // version the download route refuses on the stored per-version facts. The licence arm and
+        // the unbacked-provenance synthesis stay download-side only — both need I/O the shared
+        // pure predicate does not do — as they do on every other ecosystem's index. The set is
+        // applied to the upstream lines too:
+        // the facts are this org's own, and which side of the merge named a version says nothing
+        // about whether this org may serve it.
+        //
+        // An upstream version this org has never cached carries no facts and cannot be decided
+        // here — a crates.io sparse-index line has no publish timestamp and no policy state — so it
+        // stays advertised and is gated at first fetch.
+        var blocked = await BlockedIndexVersionsAsync(orgId, name, settings, ct);
+
         var allLines = new List<string>(localLines.Count + upstreamLines.Count);
         allLines.AddRange(localLines);
         allLines.AddRange(upstreamLines);
+        if (blocked.Count > 0)
+        {
+            allLines.RemoveAll(line => ParseVersionFromIndexLine(line) is { } v && blocked.Contains(v));
+        }
 
         string body = string.Join('\n', allLines);
 
@@ -135,6 +152,63 @@ public sealed partial class CargoController
     {
         byte[] hash = SHA256.HashData(bytes);
         return "\"" + Convert.ToHexString(hash)[..ETagHexPrefixLength].ToLowerInvariant() + "\"";
+    }
+
+    /// <summary>
+    /// The versions of one crate that this org holds on either plane and the download gate would
+    /// hard-block. Reads the same facts the download path evaluates — uploaded rows through
+    /// <see cref="BlockGateService.IsHardBlockedByStoredState"/>, global-plane proxy rows through
+    /// <see cref="BlockGateService.IsHardBlockedByCacheEntry"/> — so the index and the artifact
+    /// route cannot disagree about a version either plane knows.
+    ///
+    /// Release-age is inert for Cargo in particular: the proxy first fetch records no publish
+    /// timestamp for a crate, so that arm has nothing to read. The arms that do have facts —
+    /// manual, revoked, malicious, KEV, EPSS, CVSS — fire normally, which is the whole point of
+    /// routing through the shared predicates rather than reimplementing a subset here.
+    /// </summary>
+    private async Task<HashSet<string>> BlockedIndexVersionsAsync(
+        string orgId, string name, OrgSettings settings, CancellationToken ct)
+    {
+        var blocked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var now = _time.GetUtcNow();
+
+        var pkg = await _packages.GetByPurlNameAsync(orgId, "cargo", name, ct);
+        if (pkg is not null)
+        {
+            var uploaded = await _packages.GetVersionsAsync(pkg.Id, ct);
+            var uploadedSignals = uploaded.Count > 0
+                ? await _vulns.GetGateSignalsBatchAsync(uploaded.Select(v => v.Id).ToList(), ct)
+                : new Dictionary<string, VulnGateSignals>();
+
+            foreach (var v in uploaded)
+            {
+                if (BlockGateService.IsHardBlockedByStoredState(
+                        v, settings, uploadedSignals.GetValueOrDefault(v.Id), now))
+                {
+                    blocked.Add(v.Version);
+                }
+            }
+        }
+
+        var proxyEntries = await _cacheArtifacts.ListServeFactsForNameAsync(orgId, "cargo", name, ct);
+        if (proxyEntries.Count == 0)
+        {
+            return blocked;
+        }
+
+        var proxySignals = await _vulns.GetGateSignalsBatchForCacheArtifactsAsync(
+            proxyEntries.Select(e => e.Id).ToList(), ct);
+
+        foreach (var entry in proxyEntries)
+        {
+            if (BlockGateService.IsHardBlockedByCacheEntry(
+                    entry, settings, proxySignals.GetValueOrDefault(entry.Id), now))
+            {
+                blocked.Add(entry.Version);
+            }
+        }
+
+        return blocked;
     }
 
     /// <summary>

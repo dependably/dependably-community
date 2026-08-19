@@ -176,7 +176,7 @@ public sealed class RpmPublishBlobRaceTests : IAsyncLifetime
             new OrgRepository(_db),
             new TieredBlobStorage(_blobs, registry),
             _db,
-            new RpmRepodataService(_db, NullLogger<RpmRepodataService>.Instance, _clock),
+            new RpmRepodataService(_db, NullLogger<RpmRepodataService>.Instance, _clock, new OrgRepository(_db), new VulnerabilityRepository(_db, _clock)),
             new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, _clock, TestEnvelope.Unconfigured())),
             new MetadataResponseCache<RpmMergedRepodataKey, MergedRepodataCache>(
                 new MemoryCache(new MemoryCacheOptions()), MetadataCacheKeys.RpmMergedRepodata),

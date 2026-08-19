@@ -128,6 +128,14 @@ public sealed partial class SchemaInitializer
         // must be retried on a later boot rather than recorded as done or aborting the apply.
         await EnsureEmailCaseInsensitiveUniquenessAsync(conn);
 
+        // Removes the retired per-org SMTP transport columns from alert_settings. Deliberately not
+        // a ledgered one-shot either, and for a different reason: a previous release's own additive
+        // list still re-adds all seven, so a slot of that release booting against this database
+        // resurrects them. A ledgered drop would already read as done and never run again, leaving
+        // the live schema permanently — and invisibly — diverged from the schema file. Repeating the
+        // drop is what makes the two converge. See DropAlertSettingsRetiredSmtpColumnsAsync.
+        await DropAlertSettingsRetiredSmtpColumnsAsync(conn);
+
         await RunOnceAsync(conn, "reset_nuget_vuln_checked_at", ResetNuGetVulnCheckedAtAsync);
         await RunOnceAsync(conn, "fix_npm_purl_encoding", FixNpmPurlEncodingAsync);
         await RunOnceAsync(conn, "fix_npm_purl_name_unencoded", FixNpmPurlNameUnencodedAsync);
@@ -366,12 +374,13 @@ public sealed partial class SchemaInitializer
         // in memory instead); drop it so the schema doesn't advertise a TTL sweep that doesn't exist.
         await RunOnceAsync(conn, "drop_metadata_cache_table", DropMetadataCacheTableAsync);
 
-        // Retires the per-org SMTP transport by clearing its stored values — every row forced to
-        // email_inherit_instance = 1 with the six transport/credential columns NULL — while leaving
-        // the columns declared for the releases still in the field that read them. See
-        // ScrubAlertSettingsRetiredSmtpTransportAsync for why the values go and the columns stay.
-        await RunOnceAsync(
-            conn, "scrub_alert_settings_retired_smtp_transport", ScrubAlertSettingsRetiredSmtpTransportAsync);
+        // Reclaim packages rows left cataloguing nothing by the two background reclaimers, which
+        // remove a package's last version without GC'ing its parent row (SchemaInitializer
+        // .EmptyPackageSweep.cs). Ordered after every plane migration above: those move versions
+        // between package_versions and cache_artifact, and a sweep placed ahead of them would read
+        // a mid-migration package as empty and delete a row whose versions were about to land.
+        await RunOnceAsync(conn, "delete_empty_package_rows", DeleteEmptyPackageRowsAsync);
+
 
         // Last, after every migration: the view bodies can only be created once every table and
         // column they reference is guaranteed to exist.

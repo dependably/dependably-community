@@ -178,7 +178,7 @@ public sealed class BlockGateService
         await QueueForReviewAsync(request, "content_divergence", detail, ct);
     }
 
-    public async Task<BlockDecision> EvaluateAsync(BlockGateRequest request, CancellationToken ct = default)
+    public async Task<BlockOutcome> EvaluateAsync(BlockGateRequest request, CancellationToken ct = default)
     {
         // Surfaced regardless of the eventual Allowed/Blocked verdict below — divergence itself,
         // not any one gate's reaction to it, is the actionable signal.
@@ -261,7 +261,7 @@ public sealed class BlockGateService
                     ? request
                     : request with { ProvenanceStatus = provenanceStatus },
                 signals, ct);
-            return BlockDecision.Blocked;
+            return new BlockOutcome(BlockDecision.Blocked, verdict.Arm);
         }
 
         // Lowest-priority arm: license enforcement. It runs after the pure core has already
@@ -272,8 +272,8 @@ public sealed class BlockGateService
         // verdict, no license row is ever read, so the hot path pays zero extra DB cost.
         return request.LicenseEnforcementMode == "block" && request.ManualState != "allowed" &&
                await EvaluateLicenseArmAsync(request, ct) == BlockDecision.Blocked
-            ? BlockDecision.Blocked
-            : BlockDecision.Allowed;
+            ? new BlockOutcome(BlockDecision.Blocked, BlockArm.License)
+            : BlockOutcome.Allow();
     }
 
     /// <summary>
@@ -337,13 +337,16 @@ public sealed class BlockGateService
             return BlockDecision.Blocked;
         }
 
-        var (allowed, blockedLicense) = await _licenses.CheckPolicyAsync(request.OrgId, "block", entries, ct);
-        if (allowed)
+        // A conditional verdict is an allow: the licence serves, and the review signal is
+        // derived from the policy tables by the license-risk read model rather than written
+        // here — this arm runs on every gate pass including cache hits.
+        var verdict = await _licenses.CheckPolicyAsync(request.OrgId, "block", entries, ct);
+        if (verdict.Allowed)
         {
             return BlockDecision.Allowed;
         }
 
-        await RecordLicenseBlockAsync(request, blockedLicense, ct);
+        await RecordLicenseBlockAsync(request, verdict.BlockedLicense, ct);
         return BlockDecision.Blocked;
     }
 
@@ -365,13 +368,13 @@ public sealed class BlockGateService
             return BlockDecision.Allowed;
         }
 
-        var (allowed, blockedLicense) = await _licenses.CheckPolicyAsync(request.OrgId, "block", licenseEntries, ct);
-        if (allowed)
+        var verdict = await _licenses.CheckPolicyAsync(request.OrgId, "block", licenseEntries, ct);
+        if (verdict.Allowed)
         {
             return BlockDecision.Allowed;
         }
 
-        await RecordLicenseBlockAsync(request, blockedLicense, ct);
+        await RecordLicenseBlockAsync(request, verdict.BlockedLicense, ct);
         return BlockDecision.Blocked;
     }
 
@@ -953,7 +956,34 @@ public readonly record struct VersionFacts(
     /// Upstream-removal timestamp from <c>revoked_at</c>. Non-null = the version was removed from
     /// the upstream registry. Drives the revoked arm under a 'block' policy.
     /// </summary>
-    DateTimeOffset? RevokedAt = null);
+    DateTimeOffset? RevokedAt = null)
+{
+    /// <summary>
+    /// Projects a coordinate that exists only in an upstream's metadata — advertised by an index
+    /// merge, never fetched, so carrying no row on either plane. Every fact a local row would
+    /// supply is absent, and absent is spelled out here once so a fact added to
+    /// <see cref="VersionFacts"/> later cannot reach one ecosystem's index filter while silently
+    /// missing another's.
+    ///
+    /// Only the release-age and deprecation arms can decide such an entry. The manual arm is
+    /// vacuous — there is no row to carry a manual state — and the vulnerability, provenance,
+    /// install-script and licence arms each need an artifact nobody has fetched. An index
+    /// therefore reaches parity with its download path for the arms decidable from metadata
+    /// alone, and no further; the rest are enforced at first fetch.
+    ///
+    /// A null <paramref name="publishedAt"/> fails the release-age hold open, matching
+    /// <see cref="BlockGateService.Evaluate"/>'s posture for an unknown publish time.
+    /// </summary>
+    public static VersionFacts ForUpstreamOnly(string? deprecated, DateTimeOffset? publishedAt) =>
+        new(ManualState: null,
+            Deprecated: deprecated,
+            PublishedAt: publishedAt,
+            Scanned: false,
+            HasMalicious: false,
+            HasKev: false,
+            MaxEpss: null,
+            MaxCvss: null);
+}
 
 /// <summary>
 /// Immutable projection of the tenant policy knobs that every arm reads. Built from
@@ -986,6 +1016,47 @@ public enum BlockDecision
 {
     Allowed,
     Blocked,
+}
+
+/// <summary>
+/// A gate verdict together with the arm that produced it. The arm is what lets a refusal explain
+/// itself on the wire: without it, every policy denial reaches the client as a bare 403 that is
+/// indistinguishable from an authorization failure, and an operator diagnosing a broken build has
+/// nothing to correlate against their own policy.
+///
+/// It converts implicitly to <see cref="BlockDecision"/> so the existing <c>== BlockDecision.Blocked</c>
+/// call sites keep reading as they did. Widening the return type this way rather than rewriting
+/// three dozen comparisons keeps the diff about the new capability instead of about mechanical
+/// churn, and leaves no site silently changed.
+/// </summary>
+public readonly record struct BlockOutcome(BlockDecision Decision, BlockArm Arm)
+{
+    public static implicit operator BlockDecision(BlockOutcome outcome) => outcome.Decision;
+
+    /// <summary>Allowed, with no arm — nothing refused it.</summary>
+    public static BlockOutcome Allow() => new(BlockDecision.Allowed, BlockArm.None);
+
+    /// <summary>
+    /// The arm's wire spelling: the same vocabulary the quarantine queue and the dashboard already
+    /// use (<c>release_age</c>, <c>malicious</c>, …), so an operator reading a response header and
+    /// an operator reading the review queue are looking at one name for one thing.
+    /// </summary>
+    public string? ReasonToken => Arm switch
+    {
+        BlockArm.None => null,
+        BlockArm.Manual => "manual",
+        BlockArm.Deprecated => "deprecated",
+        BlockArm.Revoked => "revoked",
+        BlockArm.ReleaseAge => "release_age",
+        BlockArm.Malicious => "malicious",
+        BlockArm.Provenance => "provenance",
+        BlockArm.Kev => "kev",
+        BlockArm.Epss => "epss",
+        BlockArm.VulnScore => "vuln_score",
+        BlockArm.InstallScript => "install_script",
+        BlockArm.License => "license",
+        _ => null,
+    };
 }
 
 public sealed record BlockGateRequest(

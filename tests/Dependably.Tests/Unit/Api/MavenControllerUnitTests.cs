@@ -140,6 +140,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
             Log: Microsoft.Extensions.Logging.Abstractions.NullLogger<MavenController>.Instance,
             CacheArtifacts: new CacheArtifactRepository(_db),
             TenantAccess: new TenantArtifactAccessRepository(_db),
+            Vulns: new VulnerabilityRepository(_db, TimeProvider.System),
             Time: _clock,
             CacheRecorder: new CacheAccessRecorder(
                 new CacheArtifactRepository(_db),

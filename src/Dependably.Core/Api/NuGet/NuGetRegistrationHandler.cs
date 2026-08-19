@@ -510,10 +510,17 @@ public sealed class NuGetRegistrationHandler(
             .Where(v => !BlockGateService.IsHardBlockedByStoredState(v, settings!, signals.GetValueOrDefault(v.Id), now))
             .ToList();
 
+        // The upstream leaves merged in below carry no local row, so only the release-age and
+        // deprecated (unlisted) arms are decidable — see VersionFacts.ForUpstreamOnly — from
+        // catalogEntry.published/listed, the same facts the first-fetch path reads off this same
+        // registration leaf shape (NuGetNupkgProxyHelper.TryFetchNuGetFirstFetchMetadataAsync).
+        var upstreamGate = (BlockPolicyFrom(settings!), now);
+
         string responseJson = pkg is null || servableLocalVersions.Count == 0
-            ? NuGetRegistrationHelpers.RewriteRegistrationIndexUrls(upstreamJson, normalizedId, baseUrl, upstreamUrls)
+            ? NuGetRegistrationHelpers.RewriteRegistrationIndexUrls(
+                upstreamJson, normalizedId, baseUrl, upstreamGate, upstreamUrls)
             : NuGetRegistrationHelpers.MergeLocalIntoUpstreamRegistration(
-                upstreamJson, servableLocalVersions, pkg, id, baseUrl, upstreamUrls);
+                upstreamJson, servableLocalVersions, pkg, id, upstreamGate, baseUrl, upstreamUrls);
 
         return (System.Text.Encoding.UTF8.GetBytes(responseJson), true);
     }
@@ -644,6 +651,21 @@ public sealed class NuGetRegistrationHandler(
         }
         return (settings, token, null);
     }
+
+    // The tenant policy an upstream-merged registration leaf is gated against. Projects the whole
+    // policy — not just the release-age and deprecated modes the leaf-level facts can decide —
+    // mirroring BlockGateService.IsHardBlockedByStoredState's own projection, so an arm that
+    // becomes decidable from registration metadata later needs no change here.
+    private static BlockPolicy BlockPolicyFrom(OrgSettings settings) =>
+        new(MinReleaseAgeHours: settings.MinReleaseAgeHours,
+            BlockDeprecatedMode: settings.BlockDeprecated,
+            BlockMaliciousMode: settings.BlockMalicious,
+            BlockKevMode: settings.BlockKev,
+            MaxEpssTolerance: settings.MaxEpssTolerance,
+            MaxOsvScoreTolerance: settings.MaxOsvScoreTolerance,
+            BlockInstallScriptsMode: settings.BlockInstallScripts,
+            VerifyProvenanceMode: settings.VerifyProvenanceMode("nuget"),
+            BlockRevokedMode: settings.BlockRevoked);
 
     private static bool AreUpstreamSafeNuGetSegments(params string[] values)
         => Array.TrueForAll(values, v => PathSafeValidator.ValidateUpstreamSegment(v, "segment").IsValid);

@@ -59,6 +59,7 @@ services:
       # Warm-cache disk cap (bytes). Cache eviction removes least-recently-accessed proxy
       # artefacts once the cache tier exceeds this. Tune to the volume size. CACHE_MAX_AGE_DAYS
       # (age-based) and CACHE_MAX_ARTIFACTS (count-based) are alternative/additional caps.
+      # All three are opt-in: remove every one of them and the eviction pass evicts nothing.
       CACHE_MAX_SIZE_BYTES: ${CACHE_MAX_SIZE_BYTES:-10737418240}
       # Eviction schedule (cron). Default is hourly when unset.
       CACHE_EVICT_SCHEDULE: ${CACHE_EVICT_SCHEDULE:-0 * * * *}

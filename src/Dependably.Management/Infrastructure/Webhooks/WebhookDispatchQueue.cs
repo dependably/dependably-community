@@ -67,7 +67,7 @@ public sealed class WebhookDispatchQueue : BackgroundService, IPackageEventSink
     /// <summary>Auto-disable a subscription that has been failing continuously for this long.</summary>
     internal static readonly TimeSpan AutoDisableAfterDuration = TimeSpan.FromHours(48);
 
-    private static readonly TimeSpan[] BackoffSchedule =
+    private static readonly TimeSpan[] DefaultBackoffSchedule =
     [
         TimeSpan.FromSeconds(1),
         TimeSpan.FromSeconds(5),
@@ -82,6 +82,7 @@ public sealed class WebhookDispatchQueue : BackgroundService, IPackageEventSink
     private readonly int _workers;
     private readonly int _fanOutConcurrency;
     private readonly TimeSpan _envelopeBudget;
+    private readonly TimeSpan[] _backoffSchedule;
     private long _droppedCount;
     private long _deliveredCount;
     private long _failedCount;
@@ -92,7 +93,34 @@ public sealed class WebhookDispatchQueue : BackgroundService, IPackageEventSink
         TimeProvider time,
         IConfiguration config,
         ILogger<WebhookDispatchQueue> logger)
+        : this(subscriptions, client, time, config, logger, backoffSchedule: null)
     {
+    }
+
+    /// <summary>
+    /// Test seam over the retry backoff. <paramref name="backoffSchedule"/> replaces
+    /// <see cref="DefaultBackoffSchedule"/>; null keeps it, which is what every production
+    /// caller gets. It is not configuration — an operator has no way to reach it, so no
+    /// deployment can shorten the interval a failing subscriber is retried on.
+    ///
+    /// It exists because the alternative is worse. A test that only needs the retry chain to
+    /// reach its terminal outcome, and asserts nothing about the intervals, otherwise has to
+    /// hand-drive a <c>FakeTimeProvider</c> from outside while the loop registers its next
+    /// timer from inside — and the two race. Every advance the pump spends before that timer
+    /// exists is wasted, so the wait passes or fails on how heavily loaded the machine is.
+    /// Injecting a zero schedule removes the clock from those tests entirely: a zero delay
+    /// completes without any time, real or virtual, having to pass. Tests that assert on the
+    /// intervals or on the envelope budget keep the real schedule and drive the clock.
+    /// </summary>
+    internal WebhookDispatchQueue(
+        WebhookSubscriptionRepository subscriptions,
+        WebhookDeliveryClient client,
+        TimeProvider time,
+        IConfiguration config,
+        ILogger<WebhookDispatchQueue> logger,
+        TimeSpan[]? backoffSchedule)
+    {
+        _backoffSchedule = backoffSchedule ?? DefaultBackoffSchedule;
         _subscriptions = subscriptions;
         _client = client;
         _time = time;
@@ -309,7 +337,7 @@ public sealed class WebhookDispatchQueue : BackgroundService, IPackageEventSink
         string deliveryId = Guid.NewGuid().ToString("D");
         Exception? lastEx = null;
 
-        for (int attempt = 0; attempt <= BackoffSchedule.Length; attempt++)
+        for (int attempt = 0; attempt <= _backoffSchedule.Length; attempt++)
         {
             if (ct.IsCancellationRequested)
             {
@@ -337,17 +365,17 @@ public sealed class WebhookDispatchQueue : BackgroundService, IPackageEventSink
             catch (Exception ex)
             {
                 lastEx = ex;
-                if (attempt == BackoffSchedule.Length)
+                if (attempt == _backoffSchedule.Length)
                 {
                     break;
                 }
 
                 _logger.LogDebug(ex,
                     "Webhook delivery attempt {Attempt} failed for subscription {SubId}; retrying in {Backoff}.",
-                    attempt + 1, sub.Id, BackoffSchedule[attempt]);
+                    attempt + 1, sub.Id, _backoffSchedule[attempt]);
                 try
                 {
-                    await Task.Delay(BackoffSchedule[attempt], _time, ct);
+                    await Task.Delay(_backoffSchedule[attempt], _time, ct);
                 }
                 catch (OperationCanceledException)
                 {
@@ -361,7 +389,7 @@ public sealed class WebhookDispatchQueue : BackgroundService, IPackageEventSink
         string errorMsg = lastEx?.Message ?? "Unknown error";
         _logger.LogWarning(lastEx,
             "Webhook delivery failed after {Attempts} attempts for subscription {SubId} ({Url}); recording failure.",
-            BackoffSchedule.Length + 1, sub.Id, sub.Url);
+            _backoffSchedule.Length + 1, sub.Id, sub.Url);
 
         await RecordFailureAsync(sub, errorMsg, CancellationToken.None);
         Interlocked.Increment(ref _failedCount);

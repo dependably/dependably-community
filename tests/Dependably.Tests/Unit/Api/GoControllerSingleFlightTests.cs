@@ -39,6 +39,7 @@ public sealed class GoControllerSingleFlightTests
             CacheRecorder: null!,
             CacheArtifacts: null!,
             TenantAccess: null!,
+            Vulns: null!,
             Time: TimeProvider.System,
             Configuration: null!,
             Logger: NullLogger<GoController>.Instance,

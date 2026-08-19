@@ -147,7 +147,7 @@ public sealed partial class RpmController
     /// same projection, so the two paths cannot drift into asymmetric enforcement: whatever refuses
     /// the second download refuses the first one too.
     /// </summary>
-    private Task<BlockDecision> EvaluateGlobalPlaneGateAsync(
+    private Task<BlockOutcome> EvaluateGlobalPlaneGateAsync(
         string orgId, CacheArtifactServeFacts caFacts, TokenRecord? token,
         OrgSettings? settings, CancellationToken ct)
         => _svc.BlockGate.EvaluateAsync(
@@ -401,9 +401,9 @@ public sealed partial class RpmController
                 "Artifact catalogue unavailable; package not served.");
         }
 
-        return await EvaluateGlobalPlaneGateAsync(orgId, caFacts, token, settings, ct)
-            == BlockDecision.Blocked
-            ? StatusCode(StatusCodes.Status403Forbidden)
+        var blockOutcome = await EvaluateGlobalPlaneGateAsync(orgId, caFacts, token, settings, ct);
+        return blockOutcome == BlockDecision.Blocked
+            ? BlockRefusalResult.Forbidden(HttpContext, blockOutcome)
             : null;
     }
 

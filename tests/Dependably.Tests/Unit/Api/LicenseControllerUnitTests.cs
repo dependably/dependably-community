@@ -163,7 +163,7 @@ public sealed class LicenseControllerUnitTests
         var b = await s.BuildAsync();
         string spdx = $"MIT-{Guid.NewGuid():N}"[..12];
 
-        var result = await b.LicenseController.AddAllowlist(new LicenseSpdxRequest(spdx), CancellationToken.None);
+        var result = await b.LicenseController.AddAllowlist(new LicenseEntryRequest(spdx), CancellationToken.None);
         var created = Assert.IsType<CreatedAtActionResult>(result);
         Assert.NotNull(created.Value);
 
@@ -181,7 +181,7 @@ public sealed class LicenseControllerUnitTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var result = await b.LicenseController.AddAllowlist(new LicenseSpdxRequest("   "), CancellationToken.None);
+        var result = await b.LicenseController.AddAllowlist(new LicenseEntryRequest("   "), CancellationToken.None);
         var obj = Assert.IsType<ObjectResult>(result);
         Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
     }
@@ -194,10 +194,10 @@ public sealed class LicenseControllerUnitTests
         var b = await s.BuildAsync();
         string spdx = $"APACHE-{Guid.NewGuid():N}"[..15];
 
-        var first = await b.LicenseController.AddAllowlist(new LicenseSpdxRequest(spdx), CancellationToken.None);
+        var first = await b.LicenseController.AddAllowlist(new LicenseEntryRequest(spdx), CancellationToken.None);
         Assert.IsType<CreatedAtActionResult>(first);
 
-        var second = await b.LicenseController.AddAllowlist(new LicenseSpdxRequest(spdx), CancellationToken.None);
+        var second = await b.LicenseController.AddAllowlist(new LicenseEntryRequest(spdx), CancellationToken.None);
         var obj = Assert.IsType<ObjectResult>(second);
         Assert.Equal(StatusCodes.Status409Conflict, obj.StatusCode);
     }
@@ -253,7 +253,7 @@ public sealed class LicenseControllerUnitTests
         var b = await s.BuildAsync();
         string spdx = $"GPL-{Guid.NewGuid():N}"[..10];
 
-        var result = await b.LicenseController.AddBlocklist(new LicenseSpdxRequest(spdx), CancellationToken.None);
+        var result = await b.LicenseController.AddBlocklist(new LicenseEntryRequest(spdx), CancellationToken.None);
         Assert.IsType<CreatedAtActionResult>(result);
 
         await using var conn = await b.Db.OpenAsync();
@@ -269,7 +269,7 @@ public sealed class LicenseControllerUnitTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "member");
         var b = await s.BuildAsync();
 
-        var result = await b.LicenseController.AddBlocklist(new LicenseSpdxRequest("MIT"), CancellationToken.None);
+        var result = await b.LicenseController.AddBlocklist(new LicenseEntryRequest("MIT"), CancellationToken.None);
         Assert.False(IsOk(result));
     }
 
@@ -299,7 +299,7 @@ public sealed class LicenseControllerUnitTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var result = await b.LicenseController.AddBlocklist(new LicenseSpdxRequest("   "), CancellationToken.None);
+        var result = await b.LicenseController.AddBlocklist(new LicenseEntryRequest("   "), CancellationToken.None);
         var obj = Assert.IsType<ObjectResult>(result);
         Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
     }
@@ -313,10 +313,10 @@ public sealed class LicenseControllerUnitTests
         var b = await s.BuildAsync();
         string spdx = $"LGPL-{Guid.NewGuid():N}"[..12];
 
-        var first = await b.LicenseController.AddBlocklist(new LicenseSpdxRequest(spdx), CancellationToken.None);
+        var first = await b.LicenseController.AddBlocklist(new LicenseEntryRequest(spdx), CancellationToken.None);
         Assert.IsType<CreatedAtActionResult>(first);
 
-        var second = await b.LicenseController.AddBlocklist(new LicenseSpdxRequest(spdx), CancellationToken.None);
+        var second = await b.LicenseController.AddBlocklist(new LicenseEntryRequest(spdx), CancellationToken.None);
         var obj = Assert.IsType<ObjectResult>(second);
         Assert.Equal(StatusCodes.Status409Conflict, obj.StatusCode);
     }

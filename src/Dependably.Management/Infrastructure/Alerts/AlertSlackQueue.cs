@@ -52,7 +52,7 @@ public sealed class AlertSlackQueue : BackgroundService, IAlertNotifier
     /// </summary>
     private static readonly TimeSpan DrainTimeout = TimeSpan.FromSeconds(25);
 
-    private static readonly TimeSpan[] BackoffSchedule = AlertDeliveryPolicy.BackoffSchedule;
+    private static readonly TimeSpan[] DefaultBackoffSchedule = AlertDeliveryPolicy.BackoffSchedule;
 
     private readonly OrgFairDispatcher<AlertRecord> _dispatcher;
     private readonly AlertSettingsRepository _settings;
@@ -60,6 +60,7 @@ public sealed class AlertSlackQueue : BackgroundService, IAlertNotifier
     private readonly SlackWebhookClient _client;
     private readonly TimeProvider _time;
     private readonly ILogger<AlertSlackQueue> _logger;
+    private readonly TimeSpan[] _backoffSchedule;
     private readonly int _workers;
     private readonly TimeSpan _alertBudget;
     private long _droppedCount;
@@ -73,7 +74,36 @@ public sealed class AlertSlackQueue : BackgroundService, IAlertNotifier
         TimeProvider time,
         IConfiguration config,
         ILogger<AlertSlackQueue> logger)
+        : this(settings, alerts, client, time, config, logger, backoffSchedule: null)
     {
+    }
+
+    /// <summary>
+    /// Test seam over the retry backoff. <paramref name="backoffSchedule"/> replaces
+    /// <see cref="DefaultBackoffSchedule"/> (<see cref="AlertDeliveryPolicy.BackoffSchedule"/>); null keeps it, which is what every production caller gets. It is not
+    /// configuration — an operator has no way to reach it, so no deployment can shorten the
+    /// interval a failing org's Slack webhook is retried on.
+    ///
+    /// It exists because the alternative is worse. A test that only needs the retry chain to
+    /// reach its terminal outcome, and asserts nothing about the intervals, otherwise has to
+    /// hand-drive a <c>FakeTimeProvider</c> from outside while the loop registers its next
+    /// timer from inside — and the two race. Every advance the pump spends before that timer
+    /// exists is wasted, so the wait passes or fails on how heavily loaded the machine is.
+    /// Injecting a zero schedule removes the clock from those tests entirely: a zero delay
+    /// completes without any time, real or virtual, having to pass. Tests that assert on the
+    /// intervals, or on the per-item budget that runs on the same injected clock, keep the real
+    /// schedule and drive the clock.
+    /// </summary>
+    internal AlertSlackQueue(
+        AlertSettingsRepository settings,
+        AlertRepository alerts,
+        SlackWebhookClient client,
+        TimeProvider time,
+        IConfiguration config,
+        ILogger<AlertSlackQueue> logger,
+        TimeSpan[]? backoffSchedule)
+    {
+        _backoffSchedule = backoffSchedule ?? DefaultBackoffSchedule;
         _settings = settings;
         _alerts = alerts;
         _client = client;
@@ -227,7 +257,7 @@ public sealed class AlertSlackQueue : BackgroundService, IAlertNotifier
         string text = BuildMessage(alert);
         Exception? lastEx = null;
 
-        for (int attempt = 0; attempt <= BackoffSchedule.Length; attempt++)
+        for (int attempt = 0; attempt <= _backoffSchedule.Length; attempt++)
         {
             if (ct.IsCancellationRequested)
             {
@@ -255,17 +285,17 @@ public sealed class AlertSlackQueue : BackgroundService, IAlertNotifier
             catch (Exception ex)
             {
                 lastEx = ex;
-                if (attempt == BackoffSchedule.Length)
+                if (attempt == _backoffSchedule.Length)
                 {
                     break;
                 }
 
                 _logger.LogDebug(ex,
                     "Slack delivery attempt {Attempt} failed for alert {AlertId} (org {OrgId}); retrying in {Backoff}.",
-                    attempt + 1, alert.Id, alert.OrgId, BackoffSchedule[attempt]);
+                    attempt + 1, alert.Id, alert.OrgId, _backoffSchedule[attempt]);
                 try
                 {
-                    await Task.Delay(BackoffSchedule[attempt], _time, ct);
+                    await Task.Delay(_backoffSchedule[attempt], _time, ct);
                 }
                 catch (OperationCanceledException)
                 {
@@ -279,7 +309,7 @@ public sealed class AlertSlackQueue : BackgroundService, IAlertNotifier
         string errorMsg = lastEx?.Message ?? "Unknown error";
         _logger.LogWarning(lastEx,
             "Slack delivery failed after {Attempts} attempts for alert {AlertId} (org {OrgId}); recording failure.",
-            BackoffSchedule.Length + 1, alert.Id, alert.OrgId);
+            _backoffSchedule.Length + 1, alert.Id, alert.OrgId);
 
         await RecordFailureAsync(alert, errorMsg, CancellationToken.None);
         Interlocked.Increment(ref _failedCount);

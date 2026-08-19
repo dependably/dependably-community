@@ -1027,11 +1027,29 @@ public class PackageVersionLicense
     public DateTimeOffset CreatedAt { get; set; }
 }
 
+/// <summary>The two non-denied licence-policy postures. 'allowed' is a blanket yes;
+/// 'conditional' means acceptability depends on how the dependency is used, with the condition
+/// itself recorded in the entry's note. Both satisfy the block-mode policy check — the
+/// difference is that conditional artifacts are surfaced for review rather than refused.</summary>
+public static class LicenseDispositions
+{
+    public const string Allowed = "allowed";
+    public const string Conditional = "conditional";
+
+    public static bool IsValid(string? value) => value is Allowed or Conditional;
+}
+
 public class LicenseAllowlistEntry
 {
     public string Id { get; set; } = "";
     public string OrgId { get; set; } = "";
     public string LicenseSpdx { get; set; } = "";
+    /// <summary>'allowed' | 'conditional' — see <see cref="LicenseDispositions"/>.</summary>
+    public string Disposition { get; set; } = LicenseDispositions.Allowed;
+    /// <summary>Operator-supplied rationale: why this licence is allowed, or what condition makes
+    /// it acceptable. NULL when the entry was recorded before notes existed, or nobody wrote one.</summary>
+    public string? Note { get; set; }
+    public string? CreatedBy { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
 }
 
@@ -1040,7 +1058,28 @@ public class LicenseBlocklistEntry
     public string Id { get; set; } = "";
     public string OrgId { get; set; } = "";
     public string LicenseSpdx { get; set; } = "";
+    /// <summary>Operator-supplied rationale for the refusal.</summary>
+    public string? Note { get; set; }
+    public string? CreatedBy { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
+}
+
+/// <summary>A standing operator annotation on a package coordinate. <see cref="Version"/> NULL
+/// scopes the note to every version of the package.</summary>
+public class PackageNote
+{
+    public string Id { get; set; } = "";
+    public string OrgId { get; set; } = "";
+    public string Ecosystem { get; set; } = "";
+    public string Name { get; set; } = "";
+    public string? Version { get; set; }
+    public string Note { get; set; } = "";
+    public string? CreatedBy { get; set; }
+    /// <summary>Display name of the author, resolved from users at read time; NULL when the
+    /// author row is gone or the note was written without one.</summary>
+    public string? CreatedByLabel { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
 }
 
 public class SpdxLicense

@@ -319,7 +319,8 @@
       "symbolsUnindexedHelp": "A symbol package is stored for this version but no Portable PDB was indexed, so its PDBs do not resolve by debug-id. Native/Windows PDBs are not indexable; if the package does contain Portable PDBs, re-index the version.",
       "licenseBlockedHelp": "This license is on the org's license blocklist.",
       "licenseUnknown": "unknown",
-      "licenseUnknownHelp": "No license was extracted for this version."
+      "licenseUnknownHelp": "No license was extracted for this version.",
+      "licenseReviewHelp": "This license is permitted with a condition. See the license policy page."
     },
     "status": {
       "blocked": "Blocked",
@@ -356,7 +357,11 @@
       "license": "License",
       "operational": "Operational",
       "noAdvisories": "No advisories",
-      "licenseCount": "{count, plural, =0 {no risk} one {# version} other {# versions}}"
+      "licenseClean": "No risk",
+      "licenseBlocked": "Blocked license",
+      "licenseUndeclared": "Not declared",
+      "subject": "For version",
+      "licenseReview": "Review"
     },
     "vulnNever": "Never",
     "fileCount": "{count} files",
@@ -424,6 +429,10 @@
       "blockedEpss": "Blocked (EPSS)",
       "blockedVulnScore": "Blocked (vuln score)",
       "blockedDeprecated": "Blocked (deprecated)",
+      "blockedRevoked": "Blocked (revoked)",
+      "blockedProvenance": "Blocked (provenance)",
+      "blockedInstallScript": "Blocked (install script)",
+      "blockedLicense": "Blocked (license)",
       "loginSuccess": "Login (success)",
       "loginFailure": "Login (failure)",
       "loginLocked": "Login (locked)",
@@ -530,7 +539,12 @@
       "conflict_resolved": "Conflict resolved",
       "upstream_response_too_large": "Upstream response too large",
       "ssrf_blocked": "SSRF blocked",
-      "checksum_failure": "Upstream checksum mismatch"
+      "checksum_failure": "Upstream checksum mismatch",
+      "license_allowlist_updated": "License allowlist entry updated",
+      "license_blocklist_updated": "License blocklist entry updated",
+      "package_note_added": "Package note added",
+      "package_note_updated": "Package note updated",
+      "package_note_removed": "Package note removed"
     },
     "empty": "No audit events",
     "emptySearchCapped": "No matches in the most recent audit events. Older events were not searched — filter by action to reach further back, or export to CSV to search all of them."
@@ -953,7 +967,9 @@
       "keepDays": "Keep days (proxy blobs)",
       "activityDays": "Activity retention days",
       "purgeUnlistedDays": "Purge unlisted after (days)",
-      "unlimited": "unlimited"
+      "unlimited": "unlimited",
+      "instanceDefault": "instance default: {days} days",
+      "activityDaysHint": "Unlike the limits above, empty is not unlimited here: activity rows carry per-download IP data, so they are bounded by the ACTIVITY_RETENTION_DAYS instance default."
     },
     "proxy": {
       "passthroughEnabled": "Proxy passthrough enabled",
@@ -1135,7 +1151,8 @@
           "firstSeen": "First seen",
           "classification": "Classification",
           "flags": "Flags"
-        }
+        },
+        "conditional": "Conditional"
       },
       "allow": {
         "title": "Allowed licenses",
@@ -1149,7 +1166,9 @@
       },
       "columns": {
         "spdx": "SPDX identifier",
-        "added": "Added"
+        "added": "Added",
+        "note": "Note",
+        "condition": "Condition"
       },
       "removeConfirm": "Remove this license entry?",
       "modal": {
@@ -1157,7 +1176,22 @@
         "addBlockTitle": "Add blocked license",
         "spdxLabel": "SPDX identifier",
         "spdxPlaceholder": "Search SPDX identifier or name…",
-        "spdxHint": "Pick from the seeded SPDX 3.28.0 list. Deprecated identifiers are hidden by default."
+        "spdxHint": "Pick from the seeded SPDX 3.28.0 list. Deprecated identifiers are hidden by default.",
+        "addConditionalTitle": "Add conditional license",
+        "conditionalHint": "The license will serve normally. Add the condition as a note once it is in the list."
+      },
+      "addNote": "Add a note",
+      "notePlaceholder": "Why is this license allowed?",
+      "blockNotePlaceholder": "Why is this license refused?",
+      "conditionPlaceholder": "What makes this license acceptable, and when?",
+      "conditionMissing": "No condition recorded",
+      "makeConditional": "Make conditional",
+      "makeAllowed": "Make allowed",
+      "conditional": {
+        "title": "Conditional licenses",
+        "addEntry": "Add license",
+        "empty": "No conditional licenses configured.",
+        "intro": "Licenses that are acceptable only in some contexts. They are served and published like allowed licenses; the difference is that every package carrying one is listed under License risk for review. Record the condition in the note so the next person does not have to ask."
       }
     }
   },
@@ -1504,7 +1538,8 @@
       "unavailable": "Not determinable from upstream metadata for this ecosystem.",
       "allowed": "Allowed by policy",
       "blocked": "Not allowed by policy ({spdx})",
-      "informational": "Recorded informationally — license policy is off."
+      "informational": "Recorded informationally — license policy is off.",
+      "conditional": "Permitted with a condition ({spdx}). Check the license policy before adopting."
     },
     "unavailableChecks": {
       "title": "Not checked at lookup time",
@@ -1545,7 +1580,15 @@
     "columns": {
       "spdx": "SPDX",
       "name": "Name",
-      "attributes": "Attributes"
+      "attributes": "Attributes",
+      "note": "Note",
+      "condition": "Condition"
+    },
+    "conditional": {
+      "title": "Conditional licenses",
+      "empty": "No licenses are marked conditional.",
+      "intro": "These licenses are permitted, but your organization recorded a condition on each. Read the condition before depending on a package that carries one.",
+      "noCondition": "No condition recorded — ask an administrator."
     }
   },
   "licenseClassification": {
@@ -2181,7 +2224,8 @@
     },
     "reason": {
       "blocklisted": "Blocklisted",
-      "unknown": "No license"
+      "unknown": "No license",
+      "conditional": "conditional"
     },
     "reasonFilter": {
       "all": "All reasons"
@@ -2194,5 +2238,27 @@
       "operational": "No versions are behind upstream by that margin.",
       "license": "No versions are at license risk."
     }
+  },
+  "error": {
+    "license": {
+      "dispositionInvalid": "Disposition must be one of: allowed, conditional.",
+      "noteTooLong": "Note is too long."
+    },
+    "packageNote": {
+      "coordinateRequired": "Ecosystem and package name are required.",
+      "noteRequired": "Note text is required.",
+      "noteTooLong": "Note is too long."
+    }
+  },
+  "packageNotes": {
+    "title": "Notes",
+    "intro": "Compliance notes an administrator has left on this package — including why it was accepted under a conditional license.",
+    "empty": "No notes on this package.",
+    "placeholder": "Add a note about this package",
+    "add": "Add note",
+    "removeConfirm": "Remove this note?",
+    "scopedToPackage": "All versions",
+    "scopedToVersion": "Version {version}",
+    "unknownAuthor": "Unknown author"
   }
 }

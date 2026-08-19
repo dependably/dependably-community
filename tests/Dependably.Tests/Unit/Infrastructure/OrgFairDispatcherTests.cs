@@ -130,6 +130,10 @@ public sealed class OrgFairDispatcherTests
         Assert.True(dispatcher.TryEnqueue("orgB", "b1"));
         Assert.False(orgBHandled.Task.IsCompleted, "the only worker is still held by org A.");
 
+        // KEEPS its pump: virtual time IS this test's subject. org A's handler parks forever, so
+        // the only thing that frees the worker is the per-item budget expiring on the injected
+        // clock. There is no retry backoff anywhere in the dispatcher to skip — advancing the
+        // clock is the behaviour under test, not a way around one.
         await ClockPump.UntilAsync(clock, () => orgBHandled.Task.IsCompleted, TimeSpan.FromSeconds(5));
 
         await Settles(orgACancelled.Task);
@@ -346,6 +350,8 @@ public sealed class OrgFairDispatcherTests
         }, cts.Token);
 
         Assert.True(dispatcher.TryEnqueue("orgA", "over-budget"));
+        // KEEPS its pump, for the same reason: the item is abandoned by its own budget expiring
+        // on the injected clock, which is exactly what this test asserts.
         await ClockPump.UntilAsync(clock, () => cancelled.Task.IsCompleted, TimeSpan.FromSeconds(5));
 
         await cts.CancelAsync();

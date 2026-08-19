@@ -173,16 +173,19 @@ public sealed class PostgresSchemaApplyTests
     // TRUNCATE is accidentally introduced.
     // Unverified locally (requires TEST_POSTGRES_CONNECTION / CI postgres service).
     /// <summary>
-    /// The per-org SMTP transport on <c>alert_settings</c> is retired by clearing its values, not by
-    /// dropping its columns — releases still in the field name all seven in their alert-settings
-    /// SELECTs and blue-green runs one of those against this same database during a cutover. Both
-    /// halves of that posture are provider-specific enough to be worth proving on a live server:
-    /// Postgres would happily take a <c>DROP COLUMN</c>, so "the columns survive" is a real
-    /// assertion here, and the scrub's <c>COALESCE(...) &lt;&gt; 1</c> predicate has to behave the
-    /// same under Postgres's typing as under SQLite's.
+    /// The per-org SMTP transport columns on <c>alert_settings</c> are dropped, and the drop
+    /// repeats on every boot so a database an older slot re-populated converges back.
+    ///
+    /// <para>
+    /// Worth proving on a live server rather than only on SQLite: the drop is provider-branched
+    /// only through <c>ColumnExistsAsync</c> (information_schema on Postgres, pragma on SQLite), so
+    /// the probe that decides whether each <c>DROP COLUMN</c> runs is a different query here, and a
+    /// probe that silently answered "absent" would turn the whole pass into a no-op that no SQLite
+    /// test could see. This also pins that the live delivery channel survives the drop.
+    /// </para>
     /// </summary>
     [Fact]
-    public async Task ScrubAlertSettingsRetiredSmtpTransport_OnLivePostgres_ClearsValuesAndKeepsColumns()
+    public async Task DropAlertSettingsRetiredSmtpColumns_OnLivePostgres_DropsThemAndRepeats()
     {
         await using var pg = await LivePostgresReset.FreshAsync(ConnectionString);
         var store = pg.Store;
@@ -193,66 +196,61 @@ public sealed class PostgresSchemaApplyTests
         string orgId = Guid.NewGuid().ToString("N");
         await conn.ExecuteAsync(
             "INSERT INTO orgs (id, slug) VALUES (@id, @slug)",
-            new { id = orgId, slug = "pg-smtp-scrub-" + orgId[..8] });
+            new { id = orgId, slug = "pg-smtp-drop-" + orgId[..8] });
 
-        // A row in the shape a release with a per-org transport left behind: inherit-instance off,
-        // a full transport, an envelope-encrypted credential, and a live delivery channel alongside.
         await conn.ExecuteAsync(
             """
             INSERT INTO alert_settings
-                (org_id, email_enabled, email_recipients,
-                 email_inherit_instance, email_smtp_host, email_smtp_port, email_smtp_security,
-                 email_smtp_username, email_smtp_password, email_smtp_from,
-                 email_last_status, email_consecutive_failures)
-            VALUES
-                (@orgId, 1, 'ops@example.com',
-                 0, 'own.example.com', 2525, 'ssl',
-                 'own-user', 'enc:v1:own-secret', 'alerts@own.example.com',
-                 'failed', 3)
+                (org_id, email_enabled, email_recipients, email_last_status, email_consecutive_failures)
+            VALUES (@orgId, 1, 'ops@example.com', 'failed', 3)
             """, new { orgId });
 
-        // Rewind the ledger entry and re-run so the scrub passes over the seeded row.
+        // A fresh install never had the columns, so assert that first — otherwise the re-drop below
+        // could pass against a schema that simply never declared them.
+        Assert.Equal(0, await RetiredColumnCountAsync(conn));
+
+        // An older release's slot boots against this database and re-adds its own columns, exactly
+        // as its additive-migration list does — including the CHECK-bearing one.
         await conn.ExecuteAsync(
-            "DELETE FROM _applied_migrations WHERE name = 'scrub_alert_settings_retired_smtp_transport'");
+            """
+            ALTER TABLE alert_settings ADD COLUMN email_inherit_instance INTEGER NOT NULL DEFAULT 1;
+            ALTER TABLE alert_settings ADD COLUMN email_smtp_host TEXT;
+            ALTER TABLE alert_settings ADD COLUMN email_smtp_port INTEGER;
+            ALTER TABLE alert_settings ADD COLUMN email_smtp_security TEXT
+                CHECK (email_smtp_security IS NULL OR email_smtp_security IN ('starttls','ssl','none'));
+            ALTER TABLE alert_settings ADD COLUMN email_smtp_username TEXT;
+            ALTER TABLE alert_settings ADD COLUMN email_smtp_password TEXT;
+            ALTER TABLE alert_settings ADD COLUMN email_smtp_from TEXT;
+            """);
+        await conn.ExecuteAsync(
+            "UPDATE alert_settings SET email_smtp_host = 'own.example.com', "
+            + "email_smtp_password = 'enc:v1:own-secret' WHERE org_id = @orgId", new { orgId });
+
+        Assert.Equal(7, await RetiredColumnCountAsync(conn));
+
+        // The current release boots again. No ledger rewind: the drop is deliberately not ledgered,
+        // and that is exactly the property under test here.
         await new SchemaInitializer(store).InitializeAsync();
 
-        var scrubbed = await conn.QuerySingleAsync<(long InheritInstance, string? Host, int? Port,
-            string? Security, string? Username, string? Password, string? FromAddress)>(
-            """
-            SELECT email_inherit_instance, email_smtp_host, email_smtp_port, email_smtp_security,
-                   email_smtp_username, email_smtp_password, email_smtp_from
-            FROM alert_settings WHERE org_id = @orgId
-            """, new { orgId });
+        Assert.Equal(0, await RetiredColumnCountAsync(conn));
 
-        // Forcing the flag back to 1 is the load-bearing half: an older slot branches on it, and a
-        // 0 row with a NULLed host would resolve as unconfigured and silently stop that org's mail.
-        Assert.Equal(1, scrubbed.InheritInstance);
-        Assert.Null(scrubbed.Host);
-        Assert.Null(scrubbed.Port);
-        Assert.Null(scrubbed.Security);
-        Assert.Null(scrubbed.Username);
-        Assert.Null(scrubbed.Password);
-        Assert.Null(scrubbed.FromAddress);
-
-        // The live delivery channel is untouched — clearing it would silently disable the tenant.
+        // The live delivery channel is untouched — dropping it would silently disable the tenant.
         var (enabled, recipients) = await conn.QuerySingleAsync<(bool Enabled, string Recipients)>(
             "SELECT email_enabled, email_recipients FROM alert_settings WHERE org_id = @orgId",
             new { orgId });
         Assert.True(enabled);
         Assert.Equal("ops@example.com", recipients);
+    }
 
-        // And all seven columns still exist on the live server, which is the property that keeps an
-        // old blue-green slot's alert-settings read working.
-        var declared = (await conn.QueryAsync<string>(
+    private static async Task<int> RetiredColumnCountAsync(System.Data.Common.DbConnection conn) =>
+        (await conn.QueryAsync<string>(
             """
             SELECT column_name FROM information_schema.columns
             WHERE table_name = 'alert_settings'
               AND column_name IN ('email_inherit_instance', 'email_smtp_host', 'email_smtp_port',
                                   'email_smtp_security', 'email_smtp_username', 'email_smtp_password',
                                   'email_smtp_from')
-            """)).ToList();
-        Assert.Equal(7, declared.Count);
-    }
+            """)).Count();
 
     [Fact]
     public async Task MakePvvPackageVersionIdNullable_OnLivePostgres_AllRowsSurviveReshape()

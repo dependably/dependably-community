@@ -319,7 +319,8 @@
       "symbolsUnindexedHelp": "Un paquet de symboles est stocké pour cette version mais aucun PDB portable n'a été indexé ; ses PDB ne sont donc pas résolubles par debug-id. Les PDB natifs/Windows ne sont pas indexables ; si le paquet contient bien des PDB portables, réindexez la version.",
       "licenseBlockedHelp": "Cette licence figure sur la liste de blocage de licences de l'organisation.",
       "licenseUnknown": "inconnue",
-      "licenseUnknownHelp": "Aucune licence n'a été extraite pour cette version."
+      "licenseUnknownHelp": "Aucune licence n'a été extraite pour cette version.",
+      "licenseReviewHelp": "Cette licence est autorisée sous condition. Voir la page de politique de licences."
     },
     "status": {
       "blocked": "Bloqué",
@@ -356,7 +357,11 @@
       "license": "Licence",
       "operational": "Opérationnel",
       "noAdvisories": "Aucun avis",
-      "licenseCount": "{count, plural, =0 {aucun risque} one {# version} other {# versions}}"
+      "licenseClean": "Aucun risque",
+      "licenseBlocked": "Licence bloquée",
+      "licenseUndeclared": "Non déclarée",
+      "subject": "Pour la version",
+      "licenseReview": "À revoir"
     },
     "vulnNever": "Jamais",
     "fileCount": "{count} fichiers",
@@ -424,6 +429,10 @@
       "blockedEpss": "Bloqué (EPSS)",
       "blockedVulnScore": "Bloqué (score vuln.)",
       "blockedDeprecated": "Bloqué (obsolète)",
+      "blockedRevoked": "Bloqué (révoqué)",
+      "blockedProvenance": "Bloqué (provenance)",
+      "blockedInstallScript": "Bloqué (script d'installation)",
+      "blockedLicense": "Bloqué (licence)",
       "loginSuccess": "Connexion (réussie)",
       "loginFailure": "Connexion (échec)",
       "loginLocked": "Connexion (verrouillée)",
@@ -530,7 +539,12 @@
       "conflict_resolved": "Conflit résolu",
       "upstream_response_too_large": "Réponse amont trop volumineuse",
       "ssrf_blocked": "SSRF bloqué",
-      "checksum_failure": "Échec de somme de contrôle amont"
+      "checksum_failure": "Échec de somme de contrôle amont",
+      "license_allowlist_updated": "Entrée de liste d'autorisation de licence modifiée",
+      "license_blocklist_updated": "Entrée de liste de blocage de licence modifiée",
+      "package_note_added": "Note de paquet ajoutée",
+      "package_note_updated": "Note de paquet modifiée",
+      "package_note_removed": "Note de paquet supprimée"
     },
     "empty": "Aucun événement d'audit",
     "emptySearchCapped": "Aucune correspondance dans les événements d'audit les plus récents. Les événements plus anciens n'ont pas été parcourus — filtrez par action pour remonter plus loin, ou exportez en CSV pour tous les parcourir."
@@ -953,7 +967,9 @@
       "keepDays": "Durée de conservation (blobs proxy)",
       "activityDays": "Jours de rétention des activités",
       "purgeUnlistedDays": "Purger les versions retirées après (jours)",
-      "unlimited": "illimité"
+      "unlimited": "illimité",
+      "instanceDefault": "valeur par défaut de l'instance : {days} jours",
+      "activityDaysHint": "Contrairement aux limites ci-dessus, un champ vide n'est pas illimité ici : les lignes d'activité contiennent des adresses IP par téléchargement, elles sont donc limitées par la valeur ACTIVITY_RETENTION_DAYS de l'instance."
     },
     "proxy": {
       "passthroughEnabled": "Relais proxy activé",
@@ -1135,7 +1151,8 @@
           "firstSeen": "Première détection",
           "classification": "Classification",
           "flags": "Indicateurs"
-        }
+        },
+        "conditional": "Conditionnelle"
       },
       "allow": {
         "title": "Licences autorisées",
@@ -1149,7 +1166,9 @@
       },
       "columns": {
         "spdx": "Identifiant SPDX",
-        "added": "Ajoutée"
+        "added": "Ajoutée",
+        "note": "Note",
+        "condition": "Condition"
       },
       "removeConfirm": "Supprimer cette entrée de licence?",
       "modal": {
@@ -1157,7 +1176,22 @@
         "addBlockTitle": "Ajouter une licence bloquée",
         "spdxLabel": "Identifiant SPDX",
         "spdxPlaceholder": "Rechercher un identifiant ou un nom SPDX…",
-        "spdxHint": "Choisissez dans la liste SPDX 3.28.0 préchargée. Les identifiants dépréciés sont masqués par défaut."
+        "spdxHint": "Choisissez dans la liste SPDX 3.28.0 préchargée. Les identifiants dépréciés sont masqués par défaut.",
+        "addConditionalTitle": "Ajouter une licence conditionnelle",
+        "conditionalHint": "La licence sera servie normalement. Ajoutez la condition en note une fois l'entrée créée."
+      },
+      "addNote": "Ajouter une note",
+      "notePlaceholder": "Pourquoi cette licence est-elle autorisée ?",
+      "blockNotePlaceholder": "Pourquoi cette licence est-elle refusée ?",
+      "conditionPlaceholder": "Qu'est-ce qui rend cette licence acceptable, et quand ?",
+      "conditionMissing": "Aucune condition enregistrée",
+      "makeConditional": "Rendre conditionnelle",
+      "makeAllowed": "Rendre autorisée",
+      "conditional": {
+        "title": "Licences conditionnelles",
+        "addEntry": "Ajouter une licence",
+        "empty": "Aucune licence conditionnelle configurée.",
+        "intro": "Licences acceptables uniquement dans certains contextes. Elles sont servies et publiées comme les licences autorisées ; la différence est que chaque paquet qui en porte une apparaît sous Risque de licence pour révision. Consignez la condition dans la note afin que la prochaine personne n'ait pas à la demander."
       }
     }
   },
@@ -1504,7 +1538,8 @@
       "unavailable": "Non déterminable à partir des métadonnées en amont pour cet écosystème.",
       "allowed": "Autorisée par la politique",
       "blocked": "Non autorisée par la politique ({spdx})",
-      "informational": "Consignée à titre informatif — la politique de licence est désactivée."
+      "informational": "Consignée à titre informatif — la politique de licence est désactivée.",
+      "conditional": "Autorisée sous condition ({spdx}). Consultez la politique de licences avant l'adoption."
     },
     "unavailableChecks": {
       "title": "Non vérifié lors de la recherche",
@@ -1545,7 +1580,15 @@
     "columns": {
       "spdx": "SPDX",
       "name": "Nom",
-      "attributes": "Attributs"
+      "attributes": "Attributs",
+      "note": "Note",
+      "condition": "Condition"
+    },
+    "conditional": {
+      "title": "Licences conditionnelles",
+      "empty": "Aucune licence marquée conditionnelle.",
+      "intro": "Ces licences sont autorisées, mais votre organisation a consigné une condition pour chacune. Lisez la condition avant de dépendre d'un paquet qui en porte une.",
+      "noCondition": "Aucune condition enregistrée — contactez un administrateur."
     }
   },
   "licenseClassification": {
@@ -2181,7 +2224,8 @@
     },
     "reason": {
       "blocklisted": "Sur la liste de blocage",
-      "unknown": "Aucune licence"
+      "unknown": "Aucune licence",
+      "conditional": "conditionnelle"
     },
     "reasonFilter": {
       "all": "Tous les motifs"
@@ -2194,5 +2238,27 @@
       "operational": "Aucune version n'accuse un tel retard sur l'amont.",
       "license": "Aucune version à risque de licence."
     }
+  },
+  "error": {
+    "license": {
+      "dispositionInvalid": "La disposition doit être : allowed ou conditional.",
+      "noteTooLong": "La note est trop longue."
+    },
+    "packageNote": {
+      "coordinateRequired": "L'écosystème et le nom du paquet sont requis.",
+      "noteRequired": "Le texte de la note est requis.",
+      "noteTooLong": "La note est trop longue."
+    }
+  },
+  "packageNotes": {
+    "title": "Notes",
+    "intro": "Notes de conformité laissées par un administrateur sur ce paquet — y compris la raison pour laquelle il a été accepté sous une licence conditionnelle.",
+    "empty": "Aucune note sur ce paquet.",
+    "placeholder": "Ajouter une note sur ce paquet",
+    "add": "Ajouter une note",
+    "removeConfirm": "Supprimer cette note ?",
+    "scopedToPackage": "Toutes les versions",
+    "scopedToVersion": "Version {version}",
+    "unknownAuthor": "Auteur inconnu"
   }
 }

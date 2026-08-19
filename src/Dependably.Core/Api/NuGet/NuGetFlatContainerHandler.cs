@@ -118,6 +118,15 @@ public sealed class NuGetFlatContainerHandler(
     // outcome from "at least one upstream failed non-cleanly" — the caller decides whether that
     // failure must surface as an UpstreamFetchFailedException, since only it knows whether any
     // local version was already merged into versionSet.
+    //
+    // The flatcontainer index document is `{"versions": [...]}` — bare version strings with no
+    // per-version metadata, so nothing here can feed VersionFacts.ForUpstreamOnly (no published
+    // timestamp, no listed flag). Unlike the registration index — which carries a catalogEntry
+    // per leaf and so gates upstream entries in NuGetRegistrationHelpers.RewriteAllLeafUrls —
+    // this merge stays unfiltered; the registration surface is what NuGet clients (and this
+    // instance's own registration-leaf fetch that backs a first-fetch) resolve publish/listed
+    // metadata from, so index/download parity for the arms decidable from upstream metadata is
+    // still reached, just on that surface rather than this one.
     private async Task<UpstreamMetadataFailureTracker> MergeUpstreamVersionsAsync(
         HttpContext httpContext, string orgId, string id, HashSet<string> versionSet, CancellationToken ct)
     {
@@ -265,10 +274,10 @@ public sealed class NuGetFlatContainerHandler(
         }
 
         string? sourceIpCa = httpContext.GetNormalizedRemoteIp();
-        return await blockGate.EvaluateAsync(
-                BlockGateRequest.ForProxyCacheFacts(orgId, "nuget", caFacts, token, settings, sourceIpCa), ct)
-            == BlockDecision.Blocked
-            ? new StatusCodeResult(StatusCodes.Status403Forbidden)
+        var blockOutcome = await blockGate.EvaluateAsync(
+                BlockGateRequest.ForProxyCacheFacts(orgId, "nuget", caFacts, token, settings, sourceIpCa), ct);
+        return blockOutcome == BlockDecision.Blocked
+            ? BlockRefusalResult.Forbidden(httpContext, blockOutcome)
             : await TryServeProxyCachedNupkgAsync(httpContext, caFacts, file, orgId, token, sourceIpCa, ct);
     }
 

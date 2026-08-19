@@ -226,6 +226,11 @@
             <p class="text-muted">{$t('lookup.license.unavailable')}</p>
           {:else if result.license.mode === 'off'}
             <p class="text-muted">{$t('lookup.license.informational')}</p>
+          {:else if result.license.conditionalLicenses?.length > 0}
+            <!-- Allowed, but the org recorded a condition. Reading this as a plain "allowed"
+                 would tell a developer the licence is fine when the org's own note says to
+                 check something first. -->
+            <p class="check-review-text">{$t('lookup.license.conditional', { values: { spdx: result.license.conditionalLicenses.join(', ') } })}</p>
           {:else if result.license.allowed}
             <p class="check-ok-text">{$t('lookup.license.allowed')}</p>
           {:else}
@@ -314,6 +319,8 @@
   .check-bad-text { color: var(--danger); margin: 0; }
   .check-warn-text { color: var(--warning-text); margin: 0; }
   .check-ok-text { color: var(--success); margin: 0; }
+  /* Usable, with a condition attached — neither a pass nor a refusal. */
+  .check-review-text { color: var(--badge-sky-text); margin: 0; }
 
   .advisory-ids { margin: 0; padding-left: 18px; }
   .vuln-group { display: flex; flex-direction: column; gap: 4px; }

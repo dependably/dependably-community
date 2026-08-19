@@ -4,30 +4,32 @@ using Dependably.Security;
 namespace Dependably.Tests.Unit.Security;
 
 /// <summary>
-/// Enforces the API/CI-CD token-generator invariants declared in encryption.md §3:
-/// 32 bytes of CSPRNG entropy, URL-safe base64 encoding (no `+`, `/`, or `=`).
+/// Enforces the API/CI-CD token-generator invariants: at least 256 bits of
+/// CSPRNG entropy, and an alphabet that GitLab masked CI/CD variables accept
+/// (alphanumeric only — masking rejects the base64url '-' and '_'
+/// substitutions, and a rejected save silently keeps a variable's old value,
+/// which strands token rotations).
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed partial class TokenGeneratorTests
 {
     [Fact]
-    public void Decoded_token_is_exactly_32_bytes()
+    public void Token_carries_at_least_256_bits_of_entropy()
     {
         string token = TokenGenerator.Generate();
-        // Reverse the URL-safe transform, restore padding, decode.
-        string padded = token.Replace('-', '+').Replace('_', '/');
-        padded = padded.PadRight(padded.Length + (4 - padded.Length % 4) % 4, '=');
-        byte[] decoded = Convert.FromBase64String(padded);
-        Assert.Equal(32, decoded.Length);
+        double entropyBits = token.Length * Math.Log2(62);
+        Assert.True(
+            entropyBits >= 256,
+            $"{token.Length} alphanumeric chars carry only {entropyBits:F0} bits of entropy");
     }
 
     [Fact]
-    public void Token_uses_only_url_safe_base64_alphabet()
+    public void Token_uses_only_the_gitlab_maskable_alphanumeric_alphabet()
     {
         string token = TokenGenerator.Generate();
-        Assert.Matches(UrlSafeAlphabetRegex(), token);
-        Assert.DoesNotContain('+', token);
-        Assert.DoesNotContain('/', token);
+        Assert.Matches(AlphanumericRegex(), token);
+        Assert.DoesNotContain('-', token);
+        Assert.DoesNotContain('_', token);
         Assert.DoesNotContain('=', token);
     }
 
@@ -35,7 +37,7 @@ public sealed partial class TokenGeneratorTests
     public void Ten_thousand_tokens_are_all_distinct()
     {
         // Smoke check: a future refactor that swapped the CSPRNG for a counter
-        // would still produce 32-byte output but lose this property fast.
+        // would still produce well-formed output but lose this property fast.
         var tokens = new HashSet<string>();
         for (int i = 0; i < 10_000; i++)
         {
@@ -45,6 +47,6 @@ public sealed partial class TokenGeneratorTests
         Assert.Equal(10_000, tokens.Count);
     }
 
-    [GeneratedRegex(@"^[A-Za-z0-9_-]+$")]
-    private static partial Regex UrlSafeAlphabetRegex();
+    [GeneratedRegex(@"^[A-Za-z0-9]+$")]
+    private static partial Regex AlphanumericRegex();
 }

@@ -86,7 +86,10 @@ public sealed class RiskController : OrgScopedControllerBase
         });
     }
 
-    /// <summary>GET /api/v1/risk/license?ecosystem=npm&amp;reason=blocklisted&amp;limit=50&amp;page=1</summary>
+    /// <summary>GET /api/v1/risk/license?ecosystem=npm&amp;reason=blocklisted&amp;limit=50&amp;page=1.
+    /// <c>reason</c> is 'unknown' (no licence recorded), 'blocklisted' (a refused licence), or
+    /// 'conditional' (a licence the org marked conditional — the artifact serves, but the org
+    /// wrote down a condition somebody should check).</summary>
     // Read-only: accepts a PAT/service token carrying read:packages.
     [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [HttpGet("api/v1/risk/license")]
@@ -102,7 +105,7 @@ public sealed class RiskController : OrgScopedControllerBase
         }
 
         reason = NullIfEmpty(reason);
-        if (reason is not (null or "blocklisted" or "unknown"))
+        if (reason is not (null or "blocklisted" or "unknown" or "conditional"))
         {
             return _problems.ValidationErrorActionKey("reason", "error.risk.reasonInvalid");
         }

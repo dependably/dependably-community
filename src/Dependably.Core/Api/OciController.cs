@@ -364,10 +364,19 @@ public sealed partial class OciController : OrgScopedControllerBase
             ActorKind: token?.ActorKind,
             LicenseEnforcementMode: settings.LicenseEnforcementMode);
 
-        return await _svc.BlockGate.EvaluateLicenseExpressionAsync(gate, [licenseSpdx], ct) == BlockDecision.Blocked
-            ? OciError(StatusCodes.Status403Forbidden, OciErrorCode.DENIED,
-                "Image license is blocked by the organization's license policy.")
-            : null;
+        if (await _svc.BlockGate.EvaluateLicenseExpressionAsync(gate, [licenseSpdx], ct) != BlockDecision.Blocked)
+        {
+            return null;
+        }
+
+        // OCI already carries a spec-shaped error body, so the header is additive rather than the
+        // only signal — but it keeps one refusal spelled the same way across every ecosystem, which
+        // is what makes an operator's header-based diagnosis portable.
+        HttpContext.Response.Headers[BlockRefusalResult.ReasonHeader] =
+            new BlockOutcome(BlockDecision.Blocked, BlockArm.License).ReasonToken;
+
+        return OciError(StatusCodes.Status403Forbidden, OciErrorCode.DENIED,
+            "Image license is blocked by the organization's license policy.");
     }
 
     /// <summary>

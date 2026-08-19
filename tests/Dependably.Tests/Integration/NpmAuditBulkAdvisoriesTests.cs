@@ -363,18 +363,61 @@ public sealed class NpmAuditBulkAdvisoriesTests
     }
 
     /// <summary>
-    /// Too many distinct packages is likewise refused before any query — the other axis of the
-    /// same bound.
+    /// A tree larger than one upstream batch is audited, not refused. This is the regression that
+    /// made the endpoint useless in practice: the old 500-distinct-package ceiling 413'd any
+    /// ordinary project — this repo's own frontend is 523 packages — and npm neither chunks nor
+    /// retries on 413, so the caller got no advisory data at all rather than a partial report.
+    ///
+    /// 1500 packages spans two chunks and proves the seam: every package is queried, the advisory
+    /// on a package in the SECOND chunk is reported (a first-chunk-only implementation returns 200
+    /// with an empty body and looks like a pass), and the response is a real report.
     /// </summary>
     [Fact]
-    public async Task RequestExceedingPackageCap_Returns413AndQueriesNothing()
+    public async Task TreeLargerThanOneUpstreamBatch_IsAuditedRatherThanRefused()
+    {
+        // The advisory sits on pkg-1200, which lands in the second chunk of 1000.
+        var stub = new StubOsvSource(("pkg-1200", LodashAdvisory()));
+        await using var factory = await FactoryWithStubAsync(stub);
+        using var client = await AuthedClientAsync(factory);
+
+        var payload = Enumerable.Range(0, 1500)
+            .ToDictionary(i => $"pkg-{i}", _ => new[] { "4.0.0" });
+        using var content = new StringContent(
+            JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+
+        var resp = await client.PostAsync(BulkPath, content);
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        Assert.Equal(1500, stub.QueriedPurls.Count);
+
+        // Two upstream calls for 1500 pairs — the tree is split, not sent as one oversized batch
+        // the source would reject, and not fanned out one call per package.
+        Assert.Equal(2, stub.BatchCalls.Count);
+        Assert.Equal([1000, 500], stub.BatchCalls);
+
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        Assert.True(doc.RootElement.TryGetProperty("pkg-1200", out var advisories),
+            "the advisory on a second-chunk package must appear in the report");
+        Assert.Equal(1, advisories.GetArrayLength());
+    }
+
+    /// <summary>
+    /// The adversarial twin: a request beyond the endpoint's actual resource bound is still
+    /// refused. The bound is total package-version pairs — cost the caller cannot reshape away —
+    /// not a package count npm has no way to act on, and the refusal names the limit it hit.
+    /// </summary>
+    [Fact]
+    public async Task RequestBeyondThePairBound_Returns413AndQueriesNothing()
     {
         var stub = new StubOsvSource([]);
         await using var factory = await FactoryWithStubAsync(stub);
         using var client = await AuthedClientAsync(factory);
 
-        var payload = Enumerable.Range(0, 501)
-            .ToDictionary(i => $"pkg-{i}", _ => new[] { "1.0.0" });
+        // 10 001 pairs: 1001 packages x 10 versions, one pair past the 10 000 ceiling.
+        var payload = Enumerable.Range(0, 1001)
+            .ToDictionary(
+                i => $"pkg-{i}",
+                _ => Enumerable.Range(0, 10).Select(v => $"1.0.{v}").ToArray());
         using var content = new StringContent(
             JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
 
@@ -382,6 +425,33 @@ public sealed class NpmAuditBulkAdvisoriesTests
 
         Assert.Equal(HttpStatusCode.RequestEntityTooLarge, resp.StatusCode);
         Assert.Empty(stub.QueriedPurls);
+
+        // problem+json naming the actual limit hit, so the refusal is actionable rather than opaque.
+        string body = await resp.Content.ReadAsStringAsync();
+        Assert.Contains("10000", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Chunking must not weaken the never-fabricate-an-all-clear posture. When a LATER chunk cannot
+    /// reach the advisory source, the whole request answers 503 — the packages in the earlier,
+    /// successful chunk must not be reported as clean, which would be a partial all-clear dressed
+    /// as a complete report.
+    /// </summary>
+    [Fact]
+    public async Task UnreachableOnALaterChunk_Fails503RatherThanReportingTheEarlierChunkClean()
+    {
+        var stub = new StubOsvSource([]) { UnreachedFromBatch = 2 };
+        await using var factory = await FactoryWithStubAsync(stub);
+        using var client = await AuthedClientAsync(factory);
+
+        var payload = Enumerable.Range(0, 1500)
+            .ToDictionary(i => $"pkg-{i}", _ => new[] { "1.0.0" });
+        using var content = new StringContent(
+            JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+
+        var resp = await client.PostAsync(BulkPath, content);
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, resp.StatusCode);
     }
 
     /// <summary>
@@ -630,6 +700,19 @@ public sealed class NpmAuditBulkAdvisoriesTests
     {
         public List<string> QueriedPurls { get; } = [];
 
+        /// <summary>
+        /// One entry per upstream batch call, holding that call's purl count. A plain call counter
+        /// would not tell a correctly chunked request apart from one fanned out a package at a
+        /// time, which is the fan-out regression the chunking must not become.
+        /// </summary>
+        public List<int> BatchCalls { get; } = [];
+
+        /// <summary>
+        /// 1-based index of a batch call that reports the source as unreached, or null for none.
+        /// Reproduces an outage that begins partway through a chunked request.
+        /// </summary>
+        public int? UnreachedFromBatch { get; init; }
+
         public Task<List<OsvAdvisory>> QueryAsync(string purl, CancellationToken ct = default)
         {
             QueriedPurls.Add(purl);
@@ -639,6 +722,7 @@ public sealed class NpmAuditBulkAdvisoriesTests
         public Task<List<List<OsvAdvisory>>> QueryBatchAsync(
             IReadOnlyList<string> purls, CancellationToken ct = default)
         {
+            BatchCalls.Add(purls.Count);
             var results = new List<List<OsvAdvisory>>(purls.Count);
             foreach (string purl in purls)
             {
@@ -646,6 +730,21 @@ public sealed class NpmAuditBulkAdvisoriesTests
                 results.Add(Answer(purl));
             }
             return Task.FromResult(results);
+        }
+
+        // Overridden rather than left to the interface default so a nominated chunk can answer
+        // with the production outage contract: full-length empty results, no throw, Reached=false.
+        public async Task<OsvBatchQueryResult> TryQueryBatchAsync(
+            IReadOnlyList<string> purls, CancellationToken ct = default)
+        {
+            if (UnreachedFromBatch is { } failing && BatchCalls.Count + 1 >= failing)
+            {
+                BatchCalls.Add(purls.Count);
+                return new OsvBatchQueryResult(
+                    purls.Select(_ => new List<OsvAdvisory>()).ToList(), Reached: false);
+            }
+
+            return new OsvBatchQueryResult(await QueryBatchAsync(purls, ct), Reached: true);
         }
 
         private List<OsvAdvisory> Answer(string purl)

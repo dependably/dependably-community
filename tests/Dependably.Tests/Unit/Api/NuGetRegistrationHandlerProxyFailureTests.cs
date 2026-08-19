@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Dapper;
 using Dependably.Api.NuGetProtocol;
 using Dependably.Infrastructure;
@@ -12,9 +13,6 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
-using WireMock.RequestBuilders;
-using WireMock.ResponseBuilders;
-using WireMock.Server;
 
 namespace Dependably.Tests.Unit.Api;
 
@@ -31,32 +29,31 @@ namespace Dependably.Tests.Unit.Api;
 [Trait("Category", "Unit")]
 public sealed class NuGetRegistrationHandlerProxyFailureTests : IAsyncLifetime
 {
+    private const string UpstreamA = "https://upstream-a.nuget.test";
+    private const string UpstreamB = "https://upstream-b.nuget.test";
+
     private readonly TestMetadataStore _db = new();
-    private WireMockServer _serverA = null!;
-    private WireMockServer _serverB = null!;
+    private readonly StubUpstreams _upstreams = new();
     private string _orgId = null!;
 
     public async Task InitializeAsync()
     {
         await new SchemaInitializer(_db).InitializeAsync();
-        _serverA = WireMockServer.Start();
-        _serverB = WireMockServer.Start();
         _orgId = await OrgSeeder.InsertAsync(_db, "nuget-proxy-failure-org");
         await SetAnonymousPullAsync(true);
     }
 
     public async Task DisposeAsync()
     {
-        _serverA.Stop();
-        _serverB.Stop();
+        _upstreams.Dispose();
         await _db.DisposeAsync();
     }
 
     [Fact]
     public async Task RegistrationIndex_AllUpstreamsConfirmAbsent_NoLocalRow_StaysA404()
     {
-        await SeedUpstreamsAsync(_serverA.Urls[0]);
-        StubIndex(_serverA, "missing-pkg", 404, "");
+        await SeedUpstreamsAsync(UpstreamA);
+        _upstreams.Stub(UpstreamA, "missing-pkg", 404, "");
 
         var handler = BuildHandler();
         var http = BuildContext();
@@ -68,8 +65,8 @@ public sealed class NuGetRegistrationHandlerProxyFailureTests : IAsyncLifetime
     [Fact]
     public async Task RegistrationIndex_UpstreamServerError_NoLocalRow_ThrowsTransientUpstreamFetchFailure()
     {
-        await SeedUpstreamsAsync(_serverA.Urls[0]);
-        StubIndex(_serverA, "flaky-pkg", 500, "boom");
+        await SeedUpstreamsAsync(UpstreamA);
+        _upstreams.Stub(UpstreamA, "flaky-pkg", 500, "boom");
 
         var handler = BuildHandler();
         var http = BuildContext();
@@ -88,9 +85,9 @@ public sealed class NuGetRegistrationHandlerProxyFailureTests : IAsyncLifetime
         // must not stop #2 from being tried, and no exception should propagate. The body must
         // actually come from upstream #2's response — a regression that returns upstream #1's
         // (failed) data or an empty document must not silently pass.
-        await SeedUpstreamsAsync(_serverA.Urls[0], _serverB.Urls[0]);
-        StubIndex(_serverA, "fallback-pkg", 500, "boom");
-        StubIndex(_serverB, "fallback-pkg", 200, """
+        await SeedUpstreamsAsync(UpstreamA, UpstreamB);
+        _upstreams.Stub(UpstreamA, "fallback-pkg", 500, "boom");
+        _upstreams.Stub(UpstreamB, "fallback-pkg", 200, """
             {"count":1,"items":[{"count":1,"items":[
             {"@id":"x","catalogEntry":{"id":"fallback-pkg","version":"9.9.9-from-upstream-b","listed":true}}
             ]}]}
@@ -118,8 +115,8 @@ public sealed class NuGetRegistrationHandlerProxyFailureTests : IAsyncLifetime
         // an explicit "mixed" claim is the deliberate operator opt-in back to upstream merging,
         // which is what this scenario needs to reach the proxy-merge path at all.
         await SeedMixedClaimAsync("nuget", id);
-        await SeedUpstreamsAsync(_serverA.Urls[0]);
-        StubIndex(_serverA, id, 500, "boom");
+        await SeedUpstreamsAsync(UpstreamA);
+        _upstreams.Stub(UpstreamA, id, 500, "boom");
 
         var handler = BuildHandler();
         var http = BuildContext();
@@ -138,8 +135,8 @@ public sealed class NuGetRegistrationHandlerProxyFailureTests : IAsyncLifetime
     {
         // A 401 from an upstream this request AUTHENTICATED to is a deterministic auth/policy
         // refusal — non-transient (502, not 503) and never carries a Retry-After.
-        await SeedAuthenticatedUpstreamAsync(_serverA.Urls[0], "test-bearer-token");
-        StubIndex(_serverA, "refused-pkg", 401, "");
+        await SeedAuthenticatedUpstreamAsync(UpstreamA, "test-bearer-token");
+        _upstreams.Stub(UpstreamA, "refused-pkg", 401, "");
 
         var handler = BuildHandler();
         var http = BuildContext();
@@ -150,14 +147,15 @@ public sealed class NuGetRegistrationHandlerProxyFailureTests : IAsyncLifetime
         Assert.True(ex.Refused);
         Assert.False(ex.Transient);
         Assert.Null(ex.RetryAfter);
+        // The refusal classification is credential-aware: the identical 401 from an anonymous
+        // upstream is NOT a refusal. Asserting the header actually reached the upstream is what
+        // makes this an end-to-end pin rather than a restatement of the tracker's unit test — a
+        // handler that stopped threading source.AuthorizationHeader into RecordHttpStatus would
+        // otherwise still be classified as refused here by coincidence.
+        Assert.Equal("Bearer test-bearer-token", _upstreams.AuthorizationSeenFor(UpstreamA, "refused-pkg"));
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────────
-
-    private static void StubIndex(WireMockServer server, string id, int status, string body)
-        => server.Given(Request.Create()
-                      .WithPath($"/registration5-semver1/{id.ToLowerInvariant()}/index.json").UsingGet())
-                  .RespondWith(Response.Create().WithStatusCode(status).WithBody(body).WithHeader("Content-Type", "application/json"));
 
     private async Task SeedUpstreamsAsync(params string[] urls)
     {
@@ -273,7 +271,7 @@ public sealed class NuGetRegistrationHandlerProxyFailureTests : IAsyncLifetime
             new MemoryCache(new MemoryCacheOptions { SizeLimit = 32 * 1024 * 1024 }),
             MetadataCacheKeys.NuGetRegistration, epochStore);
 
-        var httpFactory = new StaticHttpClientFactory(new HttpClient());
+        var httpFactory = new StaticHttpClientFactory(new HttpClient(_upstreams, disposeHandler: false));
         var audit = new AuditRepository(db);
         string stagingDir = config["PROXY_STAGING_PATH"]!;
         var upstream = new UpstreamClient(
@@ -322,5 +320,54 @@ public sealed class NuGetRegistrationHandlerProxyFailureTests : IAsyncLifetime
         private readonly HttpClient _client;
         public StaticHttpClientFactory(HttpClient client) => _client = client;
         public HttpClient CreateClient(string name) => _client;
+    }
+
+    /// <summary>
+    /// In-process stand-in for the org's configured upstream registries: routes a registration
+    /// index request to the status/body the test stubbed for that (base URL, package id) pair,
+    /// and records the Authorization header each URL was fetched with so the credential-aware
+    /// refusal classification can be pinned end to end.
+    ///
+    /// An unstubbed URL answers 404, matching what an upstream that simply does not carry the
+    /// package returns — a clean confirmed-absent answer rather than a failure.
+    /// </summary>
+    private sealed class StubUpstreams : HttpMessageHandler
+    {
+        private readonly ConcurrentDictionary<string, (int Status, string Body)> _responses = new(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, string> _authSeen = new(StringComparer.OrdinalIgnoreCase);
+
+        public void Stub(string baseUrl, string id, int status, string body)
+            => _responses[IndexUrl(baseUrl, id)] = (status, body);
+
+        /// <summary>
+        /// The Authorization header value the request for this coordinate carried, or null when
+        /// it was fetched anonymously — indistinguishable here from never having been requested,
+        /// which is deliberate: both mean "no credential reached this upstream".
+        /// </summary>
+        public string? AuthorizationSeenFor(string baseUrl, string id)
+            => _authSeen.TryGetValue(IndexUrl(baseUrl, id), out string? header) ? header : null;
+
+        private static string IndexUrl(string baseUrl, string id)
+            => $"{baseUrl}/registration5-semver1/{id.ToLowerInvariant()}/index.json";
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            string url = request.RequestUri!.ToString();
+            if (request.Headers.Authorization is { } auth)
+            {
+                _authSeen[url] = auth.ToString();
+            }
+
+            (int status, string body) = _responses.TryGetValue(url, out var stubbed)
+                ? stubbed
+                : (404, string.Empty);
+
+            var response = new HttpResponseMessage((System.Net.HttpStatusCode)status)
+            {
+                Content = new StringContent(body, System.Text.Encoding.UTF8, "application/json"),
+                RequestMessage = request,
+            };
+            return Task.FromResult(response);
+        }
     }
 }

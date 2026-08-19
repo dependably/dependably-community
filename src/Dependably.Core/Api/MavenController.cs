@@ -1208,12 +1208,12 @@ public sealed partial class MavenController : OrgScopedControllerBase
             return null;
         }
 
-        var (allowed, blocked) = await _svc.Licenses.CheckPolicyAsync(orgId, "block", licenses.Spdx, ct);
-        return allowed
+        var verdict = await _svc.Licenses.CheckPolicyAsync(orgId, "block", licenses.Spdx, ct);
+        return verdict.Allowed
             ? null
             : new ObjectResult(new ProblemDetails
             {
-                Detail = $"License '{blocked}' is not permitted by this org's license policy.",
+                Detail = $"License '{verdict.BlockedLicense}' is not permitted by this org's license policy.",
                 Status = StatusCodes.Status403Forbidden,
             })
             { StatusCode = StatusCodes.Status403Forbidden };
@@ -1482,6 +1482,7 @@ public sealed record MavenControllerServices(
     ILogger<MavenController> Log,
     CacheArtifactRepository CacheArtifacts,
     TenantArtifactAccessRepository TenantAccess,
+    VulnerabilityRepository Vulns,
     TimeProvider Time,
     CacheAccessRecorder CacheRecorder,
     Dependably.Protocol.Provenance.MavenProvenanceVerifier MavenProvenance,

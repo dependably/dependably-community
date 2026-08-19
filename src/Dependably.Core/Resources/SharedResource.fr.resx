@@ -165,6 +165,26 @@
   <data name="error.license.blocklistDuplicate" xml:space="preserve">
     <value>« {0} » figure déjà sur la liste de blocage.</value>
   </data>
+  <data name="error.license.dispositionInvalid" xml:space="preserve">
+    <value>La disposition doit être 'allowed' ou 'conditional'.</value>
+    <comment>422 detail. The quoted values are API literals - do not translate them.</comment>
+  </data>
+  <data name="error.license.noteTooLong" xml:space="preserve">
+    <value>La note est trop longue.</value>
+    <comment>422 detail: a licence-policy note exceeded the length cap.</comment>
+  </data>
+  <data name="error.packageNote.coordinateRequired" xml:space="preserve">
+    <value>L'écosystème et le nom du paquet sont requis.</value>
+    <comment>422 detail: a package note without a package coordinate.</comment>
+  </data>
+  <data name="error.packageNote.noteRequired" xml:space="preserve">
+    <value>Le texte de la note est requis.</value>
+    <comment>422 detail: a package note with no text.</comment>
+  </data>
+  <data name="error.packageNote.noteTooLong" xml:space="preserve">
+    <value>La note est trop longue.</value>
+    <comment>422 detail: a package note exceeded the length cap.</comment>
+  </data>
   <data name="error.saml.nameIdFormatRequired" xml:space="preserve">
     <value>nameIdFormat est obligatoire.</value>
   </data>

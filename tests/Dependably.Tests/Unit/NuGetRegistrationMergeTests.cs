@@ -78,7 +78,7 @@ public sealed class NuGetRegistrationMergeTests
         var local = new[] { Ver("13.0.5-beta1") };
 
         string merged = NuGetController.MergeLocalIntoUpstreamRegistration(
-            upstream, local, Pkg("Newtonsoft.Json"), "newtonsoft.json");
+            upstream, local, Pkg("Newtonsoft.Json"), "newtonsoft.json", upstreamGate: null);
 
         var (count, versions) = ReadPages(merged);
         Assert.Equal(2, count); // upstream page + new local page
@@ -97,7 +97,7 @@ public sealed class NuGetRegistrationMergeTests
         var local = new[] { Ver("1.0.0"), Ver("3.0.0-pre") };
 
         string merged = NuGetController.MergeLocalIntoUpstreamRegistration(
-            upstream, local, Pkg("Foo"), "foo");
+            upstream, local, Pkg("Foo"), "foo", upstreamGate: null);
 
         var (_, versions) = ReadPages(merged);
         Assert.Equal(3, versions.Length); // 1.0.0, 2.0.0 (upstream) + 3.0.0-pre (local)
@@ -111,7 +111,7 @@ public sealed class NuGetRegistrationMergeTests
         var local = new[] { Ver("2.0.0", yanked: true), Ver("3.0.0") };
 
         string merged = NuGetController.MergeLocalIntoUpstreamRegistration(
-            upstream, local, Pkg("Foo"), "foo");
+            upstream, local, Pkg("Foo"), "foo", upstreamGate: null);
 
         var (_, versions) = ReadPages(merged);
         Assert.DoesNotContain("2.0.0", versions);
@@ -126,7 +126,7 @@ public sealed class NuGetRegistrationMergeTests
         var local = new[] { Ver("1.0.0"), Ver("2.0.0") };
 
         string merged = NuGetController.MergeLocalIntoUpstreamRegistration(
-            upstream, local, Pkg("Foo"), "foo");
+            upstream, local, Pkg("Foo"), "foo", upstreamGate: null);
 
         var (count, _) = ReadPages(merged);
         Assert.Equal(1, count);
@@ -141,7 +141,7 @@ public sealed class NuGetRegistrationMergeTests
         var local = new[] { Ver("9.9.9-private") };
 
         string merged = NuGetController.MergeLocalIntoUpstreamRegistration(
-            upstream, local, Pkg("Foo"), "foo");
+            upstream, local, Pkg("Foo"), "foo", upstreamGate: null);
 
         using var doc = JsonDocument.Parse(merged);
         var localPage = doc.RootElement.GetProperty("items")[1];
@@ -161,7 +161,7 @@ public sealed class NuGetRegistrationMergeTests
         var local = new[] { Ver("10.0.0"), Ver("9.0.0"), Ver("9.5.0-beta") };
 
         string merged = NuGetController.MergeLocalIntoUpstreamRegistration(
-            upstream, local, Pkg("Foo"), "foo");
+            upstream, local, Pkg("Foo"), "foo", upstreamGate: null);
 
         using var doc = JsonDocument.Parse(merged);
         var localPage = doc.RootElement.GetProperty("items")[1];
@@ -176,7 +176,7 @@ public sealed class NuGetRegistrationMergeTests
         // whether to fall back. We propagate the original string unchanged.
         string bogus = "not json at all";
         string merged = NuGetController.MergeLocalIntoUpstreamRegistration(
-            bogus, new[] { Ver("1.0.0") }, Pkg("Foo"), "foo");
+            bogus, new[] { Ver("1.0.0") }, Pkg("Foo"), "foo", upstreamGate: null);
         Assert.Equal(bogus, merged);
     }
 
@@ -192,7 +192,7 @@ public sealed class NuGetRegistrationMergeTests
         var local = new[] { Ver("3.0.0-pre") };
 
         string merged = NuGetController.MergeLocalIntoUpstreamRegistration(
-            upstream, local, Pkg("Foo"), "foo", "https://my.instance/nuget");
+            upstream, local, Pkg("Foo"), "foo", upstreamGate: null, baseUrl: "https://my.instance/nuget");
 
         using var doc = JsonDocument.Parse(merged);
         var upstreamPage = doc.RootElement.GetProperty("items")[0];
@@ -214,7 +214,7 @@ public sealed class NuGetRegistrationMergeTests
         var local = new[] { Ver("9.0.0") };
 
         string merged = NuGetController.MergeLocalIntoUpstreamRegistration(
-            upstream, local, Pkg("Foo"), "foo", "https://my.instance/nuget");
+            upstream, local, Pkg("Foo"), "foo", upstreamGate: null, baseUrl: "https://my.instance/nuget");
 
         using var doc = JsonDocument.Parse(merged);
         var upstreamPage = doc.RootElement.GetProperty("items")[0];
@@ -235,7 +235,7 @@ public sealed class NuGetRegistrationMergeTests
         var local = new[] { Ver("9.9.9-private") };
 
         string merged = NuGetController.MergeLocalIntoUpstreamRegistration(
-            upstream, local, Pkg("Foo"), "foo", "https://my.instance/nuget");
+            upstream, local, Pkg("Foo"), "foo", upstreamGate: null, baseUrl: "https://my.instance/nuget");
 
         using var doc = JsonDocument.Parse(merged);
         var localPage = doc.RootElement.GetProperty("items")[1];
@@ -256,7 +256,7 @@ public sealed class NuGetRegistrationMergeTests
         var local = new[] { Ver("9.9.9-private") };
 
         string merged = NuGetController.MergeLocalIntoUpstreamRegistration(
-            upstream, local, Pkg("Foo"), "foo");
+            upstream, local, Pkg("Foo"), "foo", upstreamGate: null);
 
         using var doc = JsonDocument.Parse(merged);
         var localPage = doc.RootElement.GetProperty("items")[1];
@@ -278,7 +278,7 @@ public sealed class NuGetRegistrationMergeTests
         var local = new[] { Ver("9.9.9-private") };
 
         string merged = NuGetController.MergeLocalIntoUpstreamRegistration(
-            upstream, local, Pkg("Foo"), "foo", "https://my.instance/nuget");
+            upstream, local, Pkg("Foo"), "foo", upstreamGate: null, baseUrl: "https://my.instance/nuget");
 
         using var doc = JsonDocument.Parse(merged);
         var localPage = doc.RootElement.GetProperty("items")[1];
@@ -304,7 +304,7 @@ public sealed class NuGetRegistrationMergeTests
         string upstream = MinimalUpstream("bar", "4.0.0", "5.0.0");
 
         string rewritten = NuGetController.RewriteRegistrationIndexUrls(
-            upstream, "bar", "https://proxy.example/nuget");
+            upstream, "bar", "https://proxy.example/nuget", upstreamGate: null);
 
         using var doc = JsonDocument.Parse(rewritten);
         foreach (var page in doc.RootElement.GetProperty("items").EnumerateArray())
@@ -327,7 +327,7 @@ public sealed class NuGetRegistrationMergeTests
     {
         // Malformed upstream JSON must not throw — the caller receives the original string.
         string bogus = "{bad json";
-        string result = NuGetController.RewriteRegistrationIndexUrls(bogus, "foo", "https://x/nuget");
+        string result = NuGetController.RewriteRegistrationIndexUrls(bogus, "foo", "https://x/nuget", upstreamGate: null);
         Assert.Equal(bogus, result);
     }
 
@@ -435,7 +435,7 @@ public sealed class NuGetRegistrationMergeTests
             """;
 
         string rewritten = NuGetController.RewriteRegistrationIndexUrls(
-            indexJson, "foo", "https://proxy.example/nuget");
+            indexJson, "foo", "https://proxy.example/nuget", upstreamGate: null);
 
         // Nothing anywhere in the emitted document may name the attacker host.
         Assert.DoesNotContain("attacker.example", rewritten, StringComparison.OrdinalIgnoreCase);
@@ -511,7 +511,7 @@ public sealed class NuGetRegistrationMergeTests
 
         string rewritten = NuGetController.RewriteRegistrationIndexUrls(
             indexJson, "foo", "https://proxy.example/nuget",
-            upstreamBaseUrls: ["https://api.nuget.org/v3"]);
+            upstreamBaseUrls: ["https://api.nuget.org/v3"], upstreamGate: null);
 
         Assert.DoesNotContain("attacker.example", rewritten, StringComparison.OrdinalIgnoreCase);
 
@@ -596,7 +596,7 @@ public sealed class NuGetRegistrationMergeTests
         // contributes no versions, so BOTH cached versions are misread as local-only and 2.0.0 is
         // re-emitted as a duplicate of a version the same document already advertises upstream.
         using (var unInlined = JsonDocument.Parse(NuGetRegistrationHelpers.MergeLocalIntoUpstreamRegistration(
-            index, [Ver("2.0.0"), Ver("9.9.9")], Pkg("Foo"), "foo", "https://proxy.example/nuget")))
+            index, [Ver("2.0.0"), Ver("9.9.9")], Pkg("Foo"), "foo", upstreamGate: null, baseUrl: "https://proxy.example/nuget")))
         {
             var splicedWithoutInlining = unInlined.RootElement.GetProperty("items")[1]
                 .GetProperty("items").EnumerateArray()
@@ -610,7 +610,7 @@ public sealed class NuGetRegistrationMergeTests
             maxPages: 32, CancellationToken.None);
 
         string merged = NuGetRegistrationHelpers.MergeLocalIntoUpstreamRegistration(
-            inlined, [Ver("2.0.0"), Ver("9.9.9")], Pkg("Foo"), "foo", "https://proxy.example/nuget");
+            inlined, [Ver("2.0.0"), Ver("9.9.9")], Pkg("Foo"), "foo", upstreamGate: null, baseUrl: "https://proxy.example/nuget");
 
         using var doc = JsonDocument.Parse(merged);
         var pages = doc.RootElement.GetProperty("items").EnumerateArray().ToList();
@@ -643,7 +643,7 @@ public sealed class NuGetRegistrationMergeTests
             maxPages: 32, CancellationToken.None);
 
         string merged = NuGetRegistrationHelpers.MergeLocalIntoUpstreamRegistration(
-            inlined, [Ver("9.9.9")], Pkg("Foo"), "foo", "https://proxy.example/nuget");
+            inlined, [Ver("9.9.9")], Pkg("Foo"), "foo", upstreamGate: null, baseUrl: "https://proxy.example/nuget");
 
         // The index root @id is upstream-supplied and informational; every url the client would
         // dereference to download or resolve must be local.
@@ -677,7 +677,7 @@ public sealed class NuGetRegistrationMergeTests
             maxPages: 32, CancellationToken.None);
 
         string merged = NuGetRegistrationHelpers.MergeLocalIntoUpstreamRegistration(
-            inlined, [Ver("2.0.0")], Pkg("Foo"), "foo", "https://proxy.example/nuget");
+            inlined, [Ver("2.0.0")], Pkg("Foo"), "foo", upstreamGate: null, baseUrl: "https://proxy.example/nuget");
 
         using var doc = JsonDocument.Parse(merged);
         var upstreamPage = doc.RootElement.GetProperty("items")[0];
@@ -750,7 +750,7 @@ public sealed class NuGetRegistrationMergeTests
 
         // Without a baseUrl argument the local page uses relative paths (unchanged behaviour).
         string merged = NuGetController.MergeLocalIntoUpstreamRegistration(
-            upstream, local, Pkg("Baz"), "baz");
+            upstream, local, Pkg("Baz"), "baz", upstreamGate: null);
 
         using var doc = JsonDocument.Parse(merged);
         var localPage = doc.RootElement.GetProperty("items")[1];

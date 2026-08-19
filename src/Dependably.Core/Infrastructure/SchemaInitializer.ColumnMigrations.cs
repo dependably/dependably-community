@@ -391,72 +391,80 @@ public sealed partial class SchemaInitializer
     }
 
     /// <summary>
-    /// Clears every stored value of the retired per-org SMTP transport on alert_settings, leaving
-    /// the columns themselves in place.
+    /// Removes the retired per-org SMTP transport columns from <c>alert_settings</c>:
+    /// <c>email_inherit_instance</c> and <c>email_smtp_host/port/security/username/password/from</c>.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// SMTP is an instance-level transport (InstanceSmtpConfig): no code path reads or writes
-    /// email_inherit_instance or any email_smtp_* column, so an org's stored transport is inert
-    /// configuration — and email_smtp_password is an envelope-encrypted credential, which is not
-    /// something to leave sitting in a table nothing reads. Scrubbing the values is what retires
-    /// it; the columns stay declared, because releases still in the field name all seven in their
-    /// alert_settings SELECTs and blue-green runs one of those releases against this database for
-    /// the length of a cutover. Dropping the columns would break that slot's entire alert-settings
-    /// read — the Alerts page and the delivery gate, not merely the transport — and it would break
-    /// it for an operator upgrading straight from any such release, which no amount of release
-    /// sequencing prevents. A value scrub carries no such ordering constraint.
+    /// SMTP is an instance-level transport (InstanceSmtpConfig): an org configures whether alert
+    /// mail is sent and to whom, never how it is carried. No code path has read or written any of
+    /// these columns since the release that removed the readers, and there is nothing to fold
+    /// forward — a per-org relay is retired configuration, not a fact another column absorbs.
     /// </para>
     /// <para>
-    /// Forcing email_inherit_instance = 1 is the load-bearing half, not tidiness. An older slot
-    /// branches on that flag: 1 resolves the instance transport and never reads the per-org
-    /// columns, 0 resolves the org's own host. Leaving a 0 row with a NULLed host would send that
-    /// slot down the own-transport branch with nothing to dial, which resolves as unconfigured and
-    /// silently stops that org's alert mail. Setting the flag routes it to the instance transport
-    /// instead, which is the behaviour every live release already produces.
+    /// <b>Deliberately not ledgered through <c>RunOnceAsync</c>, and this is the load-bearing
+    /// detail.</b> A previous release's own <c>BuildAdditiveMigrations</c> list still contains all
+    /// seven <c>ADD COLUMN</c> entries. Any slot of such a release that boots against a migrated
+    /// database — a rolling restart, a crash, a second replica — silently re-adds them. Under a
+    /// one-shot ledger the drop would already be recorded as done and would never run again, so the
+    /// live schema would diverge permanently from the schema file, invisibly: the backward-
+    /// compatibility gate is declarative and never reads a live database. Running the drop on every
+    /// boot makes the two converge instead, because the next boot re-drops whatever an older slot
+    /// resurrected.
     /// </para>
     /// <para>
-    /// Idempotent by construction: the predicate matches only rows still holding a retired value,
-    /// so a repeat run updates nothing, and every assignment is to a constant rather than to a
-    /// function of the current value. Only the seven retired columns are assigned — email_enabled,
-    /// email_recipients, the email_last_*/email_consecutive_failures/email_failing_since health
-    /// columns and every slack_* column are the live delivery channel and are left as found.
+    /// Each column is guarded independently, so the pass is a no-op on a fresh install (none
+    /// present), on an already-migrated database (the overwhelmingly common case, one cheap column
+    /// probe apiece), and on a partial-state restore. A plain <c>DROP COLUMN</c> suffices on both
+    /// providers: <c>email_smtp_security</c> carries an inline column-level CHECK, which SQLite
+    /// drops together with the column — its documented refusal applies to <i>table</i>-level CHECKs
+    /// naming the column, which this schema does not use. Verified against the pinned engine by
+    /// DropAlertSettingsRetiredSmtpColumns_RemovesTheCheckBearingColumn.
     /// </para>
     /// </remarks>
-    private async Task ScrubAlertSettingsRetiredSmtpTransportAsync(DbConnection conn)
+    private async Task DropAlertSettingsRetiredSmtpColumnsAsync(DbConnection conn)
     {
-        // xtenant: one-shot startup migration retiring a per-org transport instance-wide — scoping
-        // it to one org would leave every other tenant's stored credential behind. alert_settings
-        // is keyed by org_id, so there is no caller-supplied scope to honour here.
-        int scrubbed = await conn.ExecuteAsync(
-            """
-            UPDATE alert_settings
-            SET email_inherit_instance = 1,
-                email_smtp_host = NULL,
-                email_smtp_port = NULL,
-                email_smtp_security = NULL,
-                email_smtp_username = NULL,
-                email_smtp_password = NULL,
-                email_smtp_from = NULL
-            WHERE COALESCE(email_inherit_instance, 0) <> 1
-               OR email_smtp_host IS NOT NULL
-               OR email_smtp_port IS NOT NULL
-               OR email_smtp_security IS NOT NULL
-               OR email_smtp_username IS NOT NULL
-               OR email_smtp_password IS NOT NULL
-               OR email_smtp_from IS NOT NULL
-            """);
+        string[] retired =
+        [
+            "email_inherit_instance",
+            "email_smtp_host",
+            "email_smtp_port",
+            "email_smtp_security",
+            "email_smtp_username",
+            "email_smtp_password",
+            "email_smtp_from",
+        ];
 
-        if (scrubbed > 0)
+        // Reported before the drop, because afterwards there is nothing left to count. It is the
+        // operator's only signal that a stored SMTP credential existed on this database — and that
+        // reclaiming the pages its ciphertext occupied needs a VACUUM, since neither DROP COLUMN
+        // nor an UPDATE frees them on either provider.
+        if (await ColumnExistsAsync(conn, "alert_settings", "email_smtp_password"))
         {
-            // Worth a line at Information: it is the operator's only signal that a stored SMTP
-            // credential existed on this database, and so that reclaiming the pages its ciphertext
-            // occupied needs a VACUUM — neither an UPDATE nor a DROP COLUMN frees them on either
-            // provider.
-            _logger.LogInformation(
-                "Cleared the retired per-org SMTP transport on {ScrubbedRowCount} alert_settings row(s); "
-                + "alert mail for those orgs rides the instance-level relay. VACUUM the database to "
-                + "reclaim the pages the cleared credential ciphertext occupied.", scrubbed);
+            // xtenant: startup migration retiring a per-org transport instance-wide — scoping it to
+            // one org would leave every other tenant's stored credential behind. alert_settings is
+            // keyed by org_id, so there is no caller-supplied scope to honour here.
+            long withCredential = await conn.ExecuteScalarAsync<long>(
+                "SELECT COUNT(*) FROM alert_settings WHERE email_smtp_password IS NOT NULL");
+
+            if (withCredential > 0)
+            {
+                _logger.LogInformation(
+                    "Dropping the retired per-org SMTP transport columns; {CredentialRowCount} alert_settings "
+                    + "row(s) still held a stored credential. Alert mail for those orgs rides the "
+                    + "instance-level relay. VACUUM the database to reclaim the pages the credential "
+                    + "ciphertext occupied.", withCredential);
+            }
+        }
+
+        foreach (string column in retired)
+        {
+            if (await ColumnExistsAsync(conn, "alert_settings", column))
+            {
+                // rawsql: column names come from the compile-time-constant list above, never from a
+                // caller; ALTER TABLE takes no parameter binding for an identifier.
+                await conn.ExecuteAsync($"ALTER TABLE alert_settings DROP COLUMN {column}");
+            }
         }
     }
 
@@ -953,29 +961,14 @@ public sealed partial class SchemaInitializer
             "ALTER TABLE oci_blobs ADD COLUMN license_checked_at TEXT",
             "CREATE INDEX IF NOT EXISTS idx_oci_blobs_org_config_digest ON oci_blobs(org_id, config_digest)",
             // Per-org email delivery channel for admin alerts, structurally mirroring the
-            // slack_* columns above. Of these only email_enabled, email_recipients and the
-            // email_last_*/email_consecutive_failures/email_failing_since health columns are read:
-            // SMTP is an instance-level transport, so email_inherit_instance and email_smtp_* are
-            // retired. They stay declared here (and in both CREATE TABLE blocks, which
-            // SchemaSyncComplianceTests requires them to match) because releases still in the field
-            // name all seven in their alert_settings SELECTs and blue-green runs one of those
-            // against the same database during a cutover; the values are scrubbed instead, by
-            // ScrubAlertSettingsRetiredSmtpTransportAsync below. Declaring them here keeps an
-            // upgraded database's column set identical to a fresh install's, which is what makes
-            // that scrub a plain UPDATE with no per-column existence probing.
-            // SQLite's ADD COLUMN restriction is on PRIMARY KEY/UNIQUE and non-constant DEFAULT,
-            // not CHECK, so the CHECK ships here too (mirrors the rpm_upstream_mode migration
-            // above).
+            // slack_* columns above: email_enabled and email_recipients are the channel, the
+            // email_last_*/email_consecutive_failures/email_failing_since columns its health. SMTP
+            // itself is an instance-level transport, so no per-org transport column is added here —
+            // the seven a previous release added are removed on every boot by
+            // DropAlertSettingsRetiredSmtpColumnsAsync above. Re-adding them here would fight that
+            // pass on every start.
             "ALTER TABLE alert_settings ADD COLUMN email_enabled INTEGER NOT NULL DEFAULT 0",
-            "ALTER TABLE alert_settings ADD COLUMN email_inherit_instance INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE alert_settings ADD COLUMN email_recipients TEXT",
-            "ALTER TABLE alert_settings ADD COLUMN email_smtp_host TEXT",
-            "ALTER TABLE alert_settings ADD COLUMN email_smtp_port INTEGER",
-            "ALTER TABLE alert_settings ADD COLUMN email_smtp_security TEXT " +
-                "CHECK (email_smtp_security IS NULL OR email_smtp_security IN ('starttls','ssl','none'))",
-            "ALTER TABLE alert_settings ADD COLUMN email_smtp_username TEXT",
-            "ALTER TABLE alert_settings ADD COLUMN email_smtp_password TEXT",
-            "ALTER TABLE alert_settings ADD COLUMN email_smtp_from TEXT",
             "ALTER TABLE alert_settings ADD COLUMN email_last_delivery_at TEXT",
             "ALTER TABLE alert_settings ADD COLUMN email_last_status TEXT",
             "ALTER TABLE alert_settings ADD COLUMN email_consecutive_failures INTEGER NOT NULL DEFAULT 0",
@@ -1016,6 +1009,19 @@ public sealed partial class SchemaInitializer
             // (SQLite ALTER cannot add a CHECK), same as license_checked_at.
             "ALTER TABLE oci_tags ADD COLUMN pending_digest TEXT",
             "ALTER TABLE oci_tags ADD COLUMN pending_first_seen_at TEXT",
+            // Third licence-policy posture: 'conditional' means the licence is acceptable only in
+            // some contexts and the condition is recorded in note. Defaults to 'allowed' so every
+            // existing row keeps the posture it already had. The CHECK reaches fresh installs from
+            // the CREATE TABLE block; upgraded databases rely on controller-side validation
+            // (SQLite ALTER cannot add a CHECK), the same treatment license_enforcement_mode got.
+            "ALTER TABLE license_allowlist ADD COLUMN disposition TEXT NOT NULL DEFAULT 'allowed'",
+            // Operator rationale on a policy row. Nullable: every pre-existing entry was recorded
+            // without one, and an absent note is honestly "nobody wrote one down" rather than a
+            // value to invent.
+            "ALTER TABLE license_allowlist ADD COLUMN note TEXT",
+            "ALTER TABLE license_allowlist ADD COLUMN created_by TEXT",
+            "ALTER TABLE license_blocklist ADD COLUMN note TEXT",
+            "ALTER TABLE license_blocklist ADD COLUMN created_by TEXT",
     };
 
     private async Task RunAdditiveMigrationsAsync(DbConnection conn)

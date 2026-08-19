@@ -617,6 +617,14 @@
           "responseCodes": [
             "204"
           ]
+        },
+        "patch": {
+          "requiredParams": [
+            "spdx"
+          ],
+          "responseCodes": [
+            "200"
+          ]
         }
       }
     },
@@ -644,6 +652,14 @@
           ],
           "responseCodes": [
             "204"
+          ]
+        },
+        "patch": {
+          "requiredParams": [
+            "spdx"
+          ],
+          "responseCodes": [
+            "200"
           ]
         }
       }
@@ -772,6 +788,42 @@
           ],
           "responseCodes": [
             "204"
+          ]
+        }
+      }
+    },
+    "/api/v1/package-notes": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "post": {
+          "requiredParams": [],
+          "responseCodes": [
+            "201"
+          ]
+        }
+      }
+    },
+    "/api/v1/package-notes/{id}": {
+      "operations": {
+        "delete": {
+          "requiredParams": [
+            "id"
+          ],
+          "responseCodes": [
+            "204"
+          ]
+        },
+        "put": {
+          "requiredParams": [
+            "id"
+          ],
+          "responseCodes": [
+            "200"
           ]
         }
       }

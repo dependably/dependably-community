@@ -641,18 +641,30 @@ CREATE INDEX IF NOT EXISTS idx_alert_dismissed_by ON alert(dismissed_by);
 -- email_enabled is never rewritten, since auto-disabling would turn one relay outage into dozens of
 -- independent tenant configuration failures.
 --
--- email_inherit_instance and the email_smtp_* columns are retired: no code path reads or writes
--- them, because an org configures whether alert mail is sent and to whom, never how it is carried.
--- They stay declared because releases still in the field name all seven in their alert_settings
--- SELECTs, and blue-green runs one of those releases against this database for the length of a
--- cutover — removing the columns breaks that slot's entire alert-settings read, the Alerts page and
--- the delivery gate both, not merely the transport. The values are scrubbed instead, by the
--- scrub_alert_settings_retired_smtp_transport migration (SchemaInitializer.ColumnMigrations.cs):
--- every row is forced to email_inherit_instance = 1 with the six transport/credential columns NULL,
--- which is exactly the shape an older slot reads as "carry this org's mail over the instance
--- transport". So no envelope-encrypted credential remains stored, and no reader of any live release
--- changes behaviour. The columns are dropped once the minimum supported upgrade-from release no
--- longer reads them.
+-- There is no per-org SMTP transport here: an org configures whether alert mail is sent and to
+-- whom, never how it is carried. The seven columns that once held one (email_inherit_instance and
+-- email_smtp_host/port/security/username/password/from) are removed from every database by
+-- DropAlertSettingsRetiredSmtpColumnsAsync (SchemaInitializer.ColumnMigrations.cs), which carries
+-- the waivers below. That pass runs on every boot rather than once, because a previous release's
+-- own additive-column list still re-adds all seven — so a slot of that release booting against this
+-- database during a cutover resurrects them, and only a repeating drop converges.
+--
+-- backcompat-ok: alert_settings.email_inherit_instance — retired per-org SMTP transport flag; the
+-- previous release names no email_inherit_instance or email_smtp_* column in any statement (its
+-- readers were removed a release earlier), so this drop is the contract step against a baseline
+-- that already tolerates it.
+-- backcompat-ok: alert_settings.email_smtp_host — same contract step; no supported blue-green peer
+-- reads it.
+-- backcompat-ok: alert_settings.email_smtp_port — same contract step; no supported blue-green peer
+-- reads it.
+-- backcompat-ok: alert_settings.email_smtp_security — same contract step, including its own inline
+-- CHECK, which SQLite drops with the column.
+-- backcompat-ok: alert_settings.email_smtp_username — same contract step; no supported blue-green
+-- peer reads it.
+-- backcompat-ok: alert_settings.email_smtp_password — same contract step; envelope-encrypted
+-- credential, already scrubbed to NULL on any database that passed through the previous release.
+-- backcompat-ok: alert_settings.email_smtp_from — same contract step; no supported blue-green peer
+-- reads it.
 CREATE TABLE IF NOT EXISTS alert_settings (
     org_id                     TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
     quarantine_alerts_enabled INTEGER NOT NULL DEFAULT 1,
@@ -668,14 +680,7 @@ CREATE TABLE IF NOT EXISTS alert_settings (
         CHECK (slack_failing_since IS NULL OR slack_failing_since GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR slack_failing_since GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR slack_failing_since GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     slack_last_error           TEXT,
     email_enabled              INTEGER NOT NULL DEFAULT 0,
-    email_inherit_instance     INTEGER NOT NULL DEFAULT 1,
     email_recipients           TEXT,   -- comma-separated; NULL/empty = nothing sends
-    email_smtp_host            TEXT,
-    email_smtp_port            INTEGER,
-    email_smtp_security        TEXT CHECK (email_smtp_security IS NULL OR email_smtp_security IN ('starttls', 'ssl', 'none')),
-    email_smtp_username        TEXT,
-    email_smtp_password        TEXT,   -- enc:v1: envelope-encrypted; write-only, NULL when unset
-    email_smtp_from            TEXT,
     email_last_delivery_at     TEXT
         CHECK (email_last_delivery_at IS NULL OR email_last_delivery_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR email_last_delivery_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR email_last_delivery_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     email_last_status          TEXT,   -- 'ok' | 'failed' | NULL (never delivered)
@@ -1105,25 +1110,71 @@ CREATE TABLE IF NOT EXISTS package_version_licenses (
 CREATE INDEX IF NOT EXISTS idx_package_version_licenses_cache_artifact
     ON package_version_licenses (cache_artifact_id);
 
+-- Licenses this org does not refuse. disposition splits the row into the two non-denied
+-- postures: 'allowed' is a blanket yes, 'conditional' means acceptability depends on how the
+-- dependency is used (linked vs vendored, internal vs redistributed) and the condition itself
+-- lives in note. Both satisfy the block-mode leaf check, so a conditional licence serves and
+-- publishes normally; the difference is that conditional artifacts surface in the license-risk
+-- drill-down for review. A release that predates this column reads the table without the
+-- disposition filter and so treats conditional rows as plainly allowed -- the same serve
+-- posture, minus the flagging.
+-- personal-data: excluded -- created_by is a provenance stamp on org-owned licence-policy config
 CREATE TABLE IF NOT EXISTS license_allowlist (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
     license_spdx TEXT NOT NULL,
+    disposition TEXT NOT NULL DEFAULT 'allowed'
+        CHECK (disposition IN ('allowed','conditional')),
+    -- Operator-supplied rationale: why this licence is allowed, or what condition makes it
+    -- acceptable. Surfaced verbatim wherever the policy row is shown.
+    note        TEXT,
+    created_by  TEXT REFERENCES users(id),
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     UNIQUE (org_id, license_spdx)
 );
 
+-- Licenses this org refuses outright. note records why -- the most frequently asked question
+-- of any policy row, and the one the two-column original could not answer.
+-- personal-data: excluded -- created_by is a provenance stamp on org-owned licence-policy config
 CREATE TABLE IF NOT EXISTS license_blocklist (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
     license_spdx TEXT NOT NULL,
+    note        TEXT,
+    created_by  TEXT REFERENCES users(id),
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     UNIQUE (org_id, license_spdx)
 );
 
 CREATE INDEX IF NOT EXISTS idx_pkg_version_licenses ON package_version_licenses(package_version_id);
+
+-- Standing operator annotations on a package coordinate. Two things needed the same shape: the
+-- rationale recorded when someone rules on a package whose licence is conditional, and a general
+-- compliance note an admin wants left on a package regardless of any gate decision.
+-- version NULL scopes the note to every version of the package; a value scopes it to one.
+-- Keyed by (ecosystem, name, version) rather than an FK to package_versions because proxy
+-- artifacts live on the cache_artifact plane and have no version row -- a coordinate key covers
+-- both planes, which an FK to either one could not.
+-- quarantine.note is unchanged and still records the decision made on a blocked artifact; this
+-- table is the surface for everything that never reached a block.
+-- personal-data: excluded -- created_by is an authorship stamp on an org-owned compliance note, not the subject's data
+CREATE TABLE IF NOT EXISTS package_note (
+    id          TEXT PRIMARY KEY,
+    org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    ecosystem   TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    version     TEXT,
+    note        TEXT NOT NULL,
+    created_by  TEXT REFERENCES users(id),
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (updated_at IS NULL OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
+);
+CREATE INDEX IF NOT EXISTS idx_package_note_coord ON package_note(org_id, ecosystem, name);
+
 
 -- RPM metadata. One row per artifact carrying everything the RPM header parser pulls from
 -- a .rpm upload. Arrays (requires/provides/files/changelogs) are stored as JSON strings so

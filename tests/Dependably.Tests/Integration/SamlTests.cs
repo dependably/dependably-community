@@ -454,14 +454,15 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
         string relayState = relayValues.FirstOrDefault() ?? "";
         Assert.StartsWith("test:", relayState, StringComparison.Ordinal);
 
-        // The suffix is an opaque cid minted by TokenGenerator (CSPRNG, URL-safe base64), not a
+        // The suffix is an opaque cid minted by TokenGenerator (CSPRNG, alphanumeric), not a
         // Guid — see TokenGenerator's "Guid.NewGuid() is never used for security-sensitive values"
-        // rule. 32 random bytes → 43 trimmed base64url chars from the [A-Za-z0-9-_] alphabet.
+        // rule. 44 chars over the 62-symbol [A-Za-z0-9] alphabet, which carries ~262 bits of
+        // entropy and stays maskable as a GitLab CI/CD variable.
         string cid = relayState["test:".Length..];
-        Assert.Equal(43, cid.Length);
+        Assert.Equal(44, cid.Length);
         Assert.All(cid, c => Assert.True(
-            char.IsAsciiLetterOrDigit(c) || c == '-' || c == '_',
-            $"'{c}' is not a URL-safe base64 character"));
+            char.IsAsciiLetterOrDigit(c),
+            $"'{c}' is not an alphanumeric character"));
     }
 
     [Fact]

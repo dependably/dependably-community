@@ -217,14 +217,17 @@ public partial class NuGetController : ControllerBase
 
     internal static string MergeLocalIntoUpstreamRegistration(
         string upstreamJson, IReadOnlyList<PackageVersion> localVersions, Package pkg, string id,
+        (Dependably.Protocol.BlockPolicy Policy, DateTimeOffset Now)? upstreamGate,
         string? baseUrl = null, IReadOnlyCollection<string>? upstreamBaseUrls = null) =>
         NuGetRegistrationHelpers.MergeLocalIntoUpstreamRegistration(
-            upstreamJson, localVersions, pkg, id, baseUrl, upstreamBaseUrls);
+            upstreamJson, localVersions, pkg, id, upstreamGate, baseUrl, upstreamBaseUrls);
 
     internal static string RewriteRegistrationIndexUrls(
         string indexJson, string normalizedId, string baseUrl,
+        (Dependably.Protocol.BlockPolicy Policy, DateTimeOffset Now)? upstreamGate,
         IReadOnlyCollection<string>? upstreamBaseUrls = null) =>
-        NuGetRegistrationHelpers.RewriteRegistrationIndexUrls(indexJson, normalizedId, baseUrl, upstreamBaseUrls);
+        NuGetRegistrationHelpers.RewriteRegistrationIndexUrls(
+            indexJson, normalizedId, baseUrl, upstreamGate, upstreamBaseUrls);
 
     internal static string? RewriteRegistrationLeafUrls(string leafJson, string normalizedId, string baseUrl) =>
         NuGetRegistrationHelpers.RewriteRegistrationLeafUrls(leafJson, normalizedId, baseUrl);

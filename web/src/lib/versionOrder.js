@@ -189,3 +189,16 @@ export function compareVersions(a, b) {
   // sort is stable, so equal versions keep the order the API returned them in.
   return 0
 }
+
+/**
+ * True when a version string carries a pre-release qualifier — an alpha, beta,
+ * rc, dev or snapshot marker that sorts it below the bare release.
+ *
+ * Used to pick the version that represents a package's current state: when the
+ * upstream latest is unknown or not cached, the newest STABLE cached version is
+ * a truer answer than the newest string, which may be a pre-release nobody
+ * installs by default.
+ */
+export function isPreReleaseVersion(version) {
+  return parseVersion(version).tokens.some(isPreRelease)
+}

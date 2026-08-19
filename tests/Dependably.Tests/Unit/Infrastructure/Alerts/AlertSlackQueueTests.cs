@@ -69,6 +69,20 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         await settings.UpdateSlackAsync(orgId, new UpdateAlertSlack(SlackEnabled: true, SlackWebhookUrl: webhookUrl));
 
     /// <summary>
+    /// Production's retry schedule with the intervals removed, for the tests whose subject is the
+    /// terminal outcome of the retry chain rather than its pacing. The same four attempts run and
+    /// the durable bookkeeping is identical; what disappears is the need to drive a clock from the
+    /// test to let the chain proceed, which is a race the test cannot win reliably on a loaded
+    /// machine — every advance spent before the loop registers its next timer is lost, and when
+    /// the advance budget runs out the clock freezes with the chain still parked on it. The
+    /// intervals themselves are pinned where they belong, and the one test here whose subject IS
+    /// virtual time — <see cref="Drain_OneOrgsHungWebhook_DoesNotConsumeAnotherOrgsShareOfTheWindow"/>,
+    /// which needs the per-alert budget to expire — keeps the real schedule and drives the clock.
+    /// </summary>
+    private static readonly TimeSpan[] NoBackoff =
+        [TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero];
+
+    /// <summary>
     /// Polls the DURABLE end state (the persisted alert/settings row) rather than the queue's
     /// in-memory counters. <see cref="AlertSlackQueue"/> increments <c>DeliveredCount</c>/
     /// <c>FailedCount</c> BEFORE its two DB writes complete — waiting on the counter and then
@@ -241,8 +255,9 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
     /// <summary>
     /// Same shutdown-window scenario on the terminal-failure path: once retries are exhausted,
     /// the failure bookkeeping (which drives auto-disable) must also survive a stopping token
-    /// cancelled the instant the last attempt finishes. A dedicated <see cref="FakeTimeProvider"/>
-    /// drives the retry backoff so the test doesn't wait out the real 1s/5s/30s schedule.
+    /// cancelled the instant the last attempt finishes. The chain runs on <see cref="NoBackoff"/>
+    /// so it reaches that final attempt without the test waiting out — or hand-driving a clock
+    /// through — the real 1s/5s/30s schedule.
     /// </summary>
     [Fact]
     public async Task DeliverAsync_ShutdownCancelsTokenRightAfterFinalAttemptFails_FailureStillRecorded()
@@ -266,14 +281,18 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         using var cts = new CancellationTokenSource();
         var handler = new CancelOnFinalFailureHandler(cts);
         var client = BuildClient(handler);
-        var queue = new AlertSlackQueue(settings, alerts, client, slackClock, BuildCfg(), NullLogger<AlertSlackQueue>.Instance);
+        var queue = new AlertSlackQueue(
+            settings, alerts, client, slackClock, BuildCfg(), NullLogger<AlertSlackQueue>.Instance,
+            NoBackoff);
 
         var deliverTask = queue.DeliverAsync(alert, cts.Token);
-        await ClockPump.UntilAsync(
-            slackClock, () => Task.FromResult(cts.IsCancellationRequested), TimeSpan.FromSeconds(1),
-            maxAdvances: 1000);
         await deliverTask;
 
+        // The handler cancels the token on the fourth (final) attempt, so a completed delivery
+        // that left the token uncancelled would mean the retry chain never reached that attempt —
+        // and the shutdown window this test is about was never actually opened.
+        Assert.True(cts.IsCancellationRequested,
+            "The final attempt must have run — otherwise the cancelled-token window was never entered.");
         Assert.Equal(1, queue.FailedCount);
 
         var reread = await alerts.GetByIdAsync("org1", alert.Id);
@@ -356,7 +375,9 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         var goodAlert = await SeedActiveAlertAsync(alerts, "org1", Guid.NewGuid().ToString("N"));
         var badAlert = await SeedActiveAlertAsync(alerts, "org2", Guid.NewGuid().ToString("N"));
 
-        var queue = new AlertSlackQueue(settings, alerts, client, slackClock, BuildCfg(), NullLogger<AlertSlackQueue>.Instance);
+        var queue = new AlertSlackQueue(
+            settings, alerts, client, slackClock, BuildCfg(), NullLogger<AlertSlackQueue>.Instance,
+            NoBackoff);
 
         // Buffer both alerts before the worker ever starts reading.
         await queue.NotifyAsync(goodAlert);
@@ -366,14 +387,15 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         // stopping token is in by the time BackgroundService.StopAsync signals cancellation.
         var executeTask = queue.ExecuteAsyncForTests(new CancellationToken(canceled: true));
 
-        // The failing alert burns through the 1s/5s/30s backoff inside the drain itself; pump
-        // the fake clock so that finishes in virtual time instead of real time.
-        await ClockPump.UntilAsync(slackClock, async () =>
+        // Wait on the DURABLE end state (both persisted rows), not the in-memory counters, which
+        // are incremented before the DB writes complete. The failing alert exhausts its retry
+        // budget inside the drain itself; on NoBackoff that costs no time, real or virtual.
+        await WaitAsync(async () =>
         {
             var good = await alerts.GetByIdAsync("org1", goodAlert.Id);
             var bad = await alerts.GetByIdAsync("org2", badAlert.Id);
             return good?.SlackStatus is not null && bad?.SlackStatus is not null;
-        }, TimeSpan.FromSeconds(1), maxAdvances: 1000);
+        });
 
         await executeTask;
 
@@ -422,10 +444,10 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
 
     /// <summary>
     /// End-to-end through the running queue: one org's webhook is reachable ("good"), another's
-    /// always 502s ("bad"). The bad org goes through the full 1s/5s/30s backoff before the
-    /// terminal failure is recorded — outcomes are independent per org (mixed partial-failure).
-    /// A dedicated <see cref="FakeTimeProvider"/> drives the queue's retry backoff so the test
-    /// advances virtual time instead of waiting out the real 36-second schedule.
+    /// always 502s ("bad"). The bad org exhausts its retry budget before the terminal failure is
+    /// recorded — outcomes are independent per org (mixed partial-failure). The chain runs on
+    /// <see cref="NoBackoff"/>, so it reaches both terminal outcomes without the test waiting out
+    /// — or hand-driving a clock through — the real 36-second schedule.
     /// </summary>
     [Fact]
     public async Task Notify_MixedOrgs_OneSucceedsOneFails_IndependentOutcomes()
@@ -442,26 +464,25 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         var goodAlert = await SeedActiveAlertAsync(alerts, "org1", Guid.NewGuid().ToString("N"));
         var badAlert = await SeedActiveAlertAsync(alerts, "org2", Guid.NewGuid().ToString("N"));
 
-        var queue = new AlertSlackQueue(settings, alerts, client, slackClock, BuildCfg(), NullLogger<AlertSlackQueue>.Instance);
+        var queue = new AlertSlackQueue(
+            settings, alerts, client, slackClock, BuildCfg(), NullLogger<AlertSlackQueue>.Instance,
+            NoBackoff);
         using var cts = new CancellationTokenSource();
         _ = queue.StartAsync(cts.Token);
 
         await queue.NotifyAsync(goodAlert);
         await queue.NotifyAsync(badAlert);
 
-        // Advance the fake clock through the 1s + 5s + 30s backoff schedule; each iteration only
-        // yields a few real milliseconds so the background delivery loop can observe the fired
-        // timer, keeping the test fast and deterministic instead of waiting out real backoff.
-        // Pumps until the DURABLE end state (both persisted rows) lands, not the queue's
-        // in-memory DeliveredCount/FailedCount — the queue increments those counters BEFORE its
-        // DB writes complete, so pumping only until the counter changes and then cancelling
-        // races the write.
-        await ClockPump.UntilAsync(slackClock, async () =>
+        // Wait on the DURABLE end state (both persisted rows) rather than the queue's in-memory
+        // DeliveredCount/FailedCount — the queue increments those counters BEFORE its DB writes
+        // complete, so waiting only until the counter changes and then cancelling races the write.
+        // No clock is driven: the retry chain has no intervals left to wait out.
+        await WaitAsync(async () =>
         {
             var good = await alerts.GetByIdAsync("org1", goodAlert.Id);
             var bad = await alerts.GetByIdAsync("org2", badAlert.Id);
             return good?.SlackStatus is not null && bad?.SlackStatus is not null;
-        }, TimeSpan.FromSeconds(1), maxAdvances: 1000);
+        });
 
         // Graceful drain — StopAsync signals ExecuteAsync's stopping token itself, but by the
         // time we get here both durable writes have already landed, so there is nothing
@@ -570,6 +591,11 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
 
         var executeTask = queue.ExecuteAsyncForTests(new CancellationToken(canceled: true));
 
+        // KEEPS its pump, and keeps the real backoff schedule: virtual time IS this test's
+        // subject. org1's endpoint accepts the connection and never answers, so the only thing
+        // that ends its turn is ALERT_SLACK_BUDGET_SECONDS expiring on the injected clock —
+        // nothing else advances it, and until it does org2's alert never gets its share of the
+        // drain window. There is no backoff chain to skip here: neither alert retries.
         await ClockPump.UntilAsync(slackClock, async () =>
             (await alerts.GetByIdAsync("org2", otherAlert.Id))?.SlackStatus is not null,
             TimeSpan.FromSeconds(5), maxAdvances: 60);

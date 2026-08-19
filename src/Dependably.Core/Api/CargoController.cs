@@ -250,7 +250,7 @@ public sealed partial class CargoController : OrgScopedControllerBase
             // installable version. Combines uploaded (package_versions) and global-plane proxy
             // (cache_artifact) versions so proxy-cached crates are represented. Falls back to
             // any version when all are yanked.
-            string? maxVersion = await ResolveMaxVersionAsync(orgId, pkg.Id, pkg.Name, ct);
+            string? maxVersion = await ResolveMaxVersionAsync(orgId, pkg.Id, pkg.Name, settings, ct);
             cratesArr.Add(new System.Text.Json.Nodes.JsonObject
             {
                 ["name"] = pkg.Name,
@@ -277,7 +277,8 @@ public sealed partial class CargoController : OrgScopedControllerBase
     /// not restricted to stable releases. Falls back to considering yanked versions too when
     /// every version is yanked. Returns null when the crate has no versions at all.
     /// </summary>
-    private async Task<string?> ResolveMaxVersionAsync(string orgId, string packageId, string name, CancellationToken ct)
+    private async Task<string?> ResolveMaxVersionAsync(
+        string orgId, string packageId, string name, OrgSettings settings, CancellationToken ct)
     {
         var uploadedVersions = await _packages.GetVersionsAsync(packageId, ct);
         var proxyEntries = await _cacheArtifacts.ListServeFactsForNameAsync(orgId, "cargo", name, ct);
@@ -311,8 +312,15 @@ public sealed partial class CargoController : OrgScopedControllerBase
             versions = combined;
         }
 
-        var nonYanked = versions.Where(v => !v.Yanked).ToList();
-        var candidates = nonYanked.Count > 0 ? nonYanked : versions.ToList();
+        // A blocked version is never the answer, even in the all-yanked fallback below: search
+        // reports max_version as the version to install, so naming one the download refuses sends
+        // a client at a coordinate it cannot fetch — the same failure the sparse-index filter
+        // exists to prevent, on a surface that reaches the user first.
+        var blocked = await BlockedIndexVersionsAsync(orgId, name, settings, ct);
+        var servable = versions.Where(v => !blocked.Contains(v.Version)).ToList();
+
+        var nonYanked = servable.Where(v => !v.Yanked).ToList();
+        var candidates = nonYanked.Count > 0 ? nonYanked : servable;
         if (candidates.Count == 0)
         {
             return null;

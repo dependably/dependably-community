@@ -519,6 +519,8 @@ public sealed class PackageAnalyticsRepositoryTests : IAsyncLifetime
         var stats = await repo.GetOrgStatsAsync("o1");
         var (items, total) = await repo.ListLicenseRiskAsync("o1", null, null, limit: 50, offset: 0);
 
+        // With no conditional licence configured, the tile and the unfiltered drill-down agree.
+        // They deliberately diverge once one exists — see the tile/drill-down test below.
         Assert.Equal(stats.LicenseRiskVersionCount, total);
         Assert.Equal(3, total);
 
@@ -728,6 +730,90 @@ public sealed class PackageAnalyticsRepositoryTests : IAsyncLifetime
 
     // For o1: a blocklisted uploaded version, a clean MIT one, one with no license row at all, and a
     // blocklisted artifact on the proxy plane.
+    // Adds a conditional-licence artifact on each plane: an uploaded npm package and a proxied
+    // one. Both must reach the drill-down, or the read model has the cache-plane blind spot that
+    // has bitten every other per-org licence surface.
+    [Fact]
+    public async Task License_risk_list_surfaces_conditional_artifacts_on_both_planes()
+    {
+        await SeedLicenseRiskAsync();
+        await SeedConditionalLicenseAsync();
+        var repo = new PackageAnalyticsRepository(_db);
+
+        var (items, total) = await repo.ListLicenseRiskAsync("o1", null, "conditional", limit: 50, offset: 0);
+
+        Assert.Equal(2, total);
+        Assert.All(items, r => Assert.Equal("conditional", r.Reason));
+        // The uploaded arm and the proxy arm both report. A read model that joined only
+        // package_versions would return the first and silently drop the second.
+        Assert.Equal(["lgpl-pkg", "proxy-lgpl"], items.Select(r => r.Name).Order());
+        Assert.Equal("cache_artifact", items.Single(r => r.Name == "proxy-lgpl").OwnerKind);
+    }
+
+    // The Dashboard tile has always meant "these are problems". Conditional artifacts serve
+    // normally — the org already decided they are acceptable — so they must stay out of the tile
+    // even though they share the drill-down. Without this the tile silently grows the moment an
+    // org marks its first licence conditional.
+    [Fact]
+    public async Task License_risk_tile_excludes_conditional_but_the_drilldown_includes_it()
+    {
+        await SeedLicenseRiskAsync();
+        await SeedConditionalLicenseAsync();
+        var repo = new PackageAnalyticsRepository(_db);
+
+        var stats = await repo.GetOrgStatsAsync("o1");
+        var (_, total) = await repo.ListLicenseRiskAsync("o1", null, null, limit: 50, offset: 0);
+
+        Assert.Equal(3, stats.LicenseRiskVersionCount);   // gpl-pkg, no-license-pkg, proxy-gpl
+        Assert.Equal(5, total);                           // ...plus the two conditional rows
+    }
+
+    // A blocklisted licence outranks a conditional one in the reason ranking, so an artifact
+    // somehow carrying both is reported as blocklisted — the more severe fact wins rather than
+    // the artifact being filed under a reason that reads as acceptable.
+    [Fact]
+    public async Task License_risk_reason_prefers_blocklisted_over_conditional()
+    {
+        await SeedLicenseRiskAsync();
+        await SeedConditionalLicenseAsync();
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO package_version_licenses (id, package_version_id, license_spdx, owner_kind) " +
+                "VALUES ('ll6','lv4','GPL-3.0-only','package_version')");
+        }
+
+        var repo = new PackageAnalyticsRepository(_db);
+        var (items, _) = await repo.ListLicenseRiskAsync("o1", null, null, limit: 50, offset: 0);
+
+        Assert.Equal("blocklisted", items.Single(r => r.Name == "lgpl-pkg").Reason);
+    }
+
+    private async Task SeedConditionalLicenseAsync()
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "INSERT INTO license_allowlist (id, org_id, license_spdx, disposition, note) " +
+            "VALUES ('al1', 'o1', 'LGPL-3.0-only', 'conditional', 'OK when dynamically linked')");
+        await conn.ExecuteAsync(
+            "INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy) VALUES " +
+            "('lp4','o1','npm','lgpl-pkg','lgpl-pkg',0)");
+        await conn.ExecuteAsync(
+            "INSERT INTO package_versions (id, package_id, version, purl, blob_key, origin) VALUES " +
+            "('lv4','lp4','1.0.0','pkg:npm/lgpl-pkg@1.0.0','registry/lv4','uploaded')");
+        await conn.ExecuteAsync(
+            "INSERT INTO package_version_licenses (id, package_version_id, license_spdx, owner_kind) VALUES " +
+            "('ll4','lv4','LGPL-3.0-only','package_version')");
+        await conn.ExecuteAsync(
+            "INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash) VALUES " +
+            "('lca2','npm','proxy-lgpl','1.0.0','proxy-lgpl-1.0.0.tgz','proxy/lic2','lic2')");
+        await conn.ExecuteAsync(
+            "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES ('o1','lca2')");
+        await conn.ExecuteAsync(
+            "INSERT INTO package_version_licenses (id, cache_artifact_id, license_spdx, owner_kind) VALUES " +
+            "('ll5','lca2','LGPL-3.0-only','cache_artifact')");
+    }
+
     private async Task SeedLicenseRiskAsync()
     {
         await using var conn = await _db.OpenAsync();

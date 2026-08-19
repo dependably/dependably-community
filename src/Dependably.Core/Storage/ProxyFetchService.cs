@@ -245,7 +245,7 @@ public sealed class ProxyFetchService
                 Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             sourceIp: request.SourceIp, ct: ct);
 
-        return new ProxyFetchResult(BlockDecision.Blocked, sha256, blobKey);
+        return new ProxyFetchResult(BlockDecision.Blocked, sha256, blobKey, BlockArm.Manual);
     }
 
     // Returns the scheme+authority (e.g. https://registry.npmjs.org) of an absolute URL, or null
@@ -276,7 +276,7 @@ public sealed class ProxyFetchService
                     request.Deprecated, request.BlockDeprecatedMode), ct);
             if (firstFetch == BlockDecision.Blocked)
             {
-                return new ProxyFetchResult(BlockDecision.Blocked, sha256, blobKey);
+                return new ProxyFetchResult(BlockDecision.Blocked, sha256, blobKey, BlockArm.Deprecated);
             }
         }
 
@@ -305,7 +305,7 @@ public sealed class ProxyFetchService
                         request.OrgId, request.Ecosystem, request.Purl,
                         request.AuditActorId, request.ActorKind, request.AuditActorLabel, request.MaxOsvScoreTolerance, request.SourceIp,
                         status, request.VerifyProvenanceMode), ct);
-                return new ProxyFetchResult(BlockDecision.Blocked, sha256, blobKey);
+                return new ProxyFetchResult(BlockDecision.Blocked, sha256, blobKey, BlockArm.Provenance);
             }
         }
 
@@ -394,6 +394,22 @@ public sealed class ProxyFetchService
             // projection. Whatever the cause, this request cannot be gated on the facts a later
             // request would be gated on, and the bytes have not reached the client yet — so refuse
             // rather than serve ungated, the same posture the missing-catalogue-row branch takes.
+            //
+            // Audited because this refusal is otherwise invisible: it is not a policy arm, so no
+            // activity row is written for it, and a client meeting it saw a bare 403 that nothing
+            // anywhere recorded. An operator investigating one had no trace to find.
+            await _audit.LogAsync(
+                "proxy_serve_facts_unreadable",
+                orgId: request.OrgId,
+                actorId: request.AuditActorId, actorLabel: request.AuditActorLabel,
+                actorKind: request.ActorKind,
+                ecosystem: request.Ecosystem,
+                purl: request.Purl,
+                detail: System.Text.Json.JsonSerializer.Serialize(
+                    new { name = request.PurlName, cache_artifact_id = cacheArtifactId },
+                    Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+                sourceIp: request.SourceIp, ct: ct);
+
             return new ProxyFetchResult(BlockDecision.Blocked, sha256, blobKey);
         }
 
@@ -416,7 +432,7 @@ public sealed class ProxyFetchService
                 // stored value when this ecosystem computes one at all.
                 ownProvenanceStatus: request.ProvenanceStatus), ct);
 
-        return new ProxyFetchResult(caDecision, sha256, blobKey);
+        return new ProxyFetchResult(caDecision, sha256, blobKey, caDecision.Arm);
     }
 
     /// <summary>
@@ -626,4 +642,8 @@ public sealed record ProxyFetchRequest(
 public sealed record ProxyFetchResult(
     BlockDecision Decision,
     string Sha256,
-    string BlobKey);
+    string BlobKey,
+    // The arm that refused, when Decision is Blocked. Carried out of the pipeline so the caller's
+    // 403 can name it: a first-fetch refusal is the one a client is most likely to meet, and the
+    // one it has least context to interpret.
+    BlockArm Arm = BlockArm.None);

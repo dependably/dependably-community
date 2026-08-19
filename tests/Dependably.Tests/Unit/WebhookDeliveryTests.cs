@@ -78,6 +78,17 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
     }
 
     /// <summary>
+    /// Production's retry schedule with the intervals removed, for the tests whose subject is the
+    /// terminal outcome of the retry chain rather than its pacing. The same four attempts run and
+    /// the durable bookkeeping is identical; what disappears is the need to drive a clock from the
+    /// test to let the chain proceed, which is a race the test cannot win reliably on a loaded
+    /// machine. The intervals themselves are pinned where they belong — in the tests that assert
+    /// on backoff and on the per-envelope budget, which keep the real schedule.
+    /// </summary>
+    private static readonly TimeSpan[] NoBackoff =
+        [TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero];
+
+    /// <summary>
     /// Polls the DURABLE end state (the persisted subscription row) rather than the queue's in-memory
     /// counters. The counters are incremented only after the outcome write lands, so they do imply
     /// durable state — but asserting on the row keeps the test independent of that internal
@@ -620,16 +631,15 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
     /// to two subscriptions where the HTTP endpoint is up for one ("good") and returns 502 for
     /// the other ("bad") results in exactly one delivered and eventually one failed count.
     /// Because the queue retries on failure, the "bad" subscription goes through the full
-    /// backoff schedule before being counted as failed. A dedicated <see cref="FakeTimeProvider"/>
-    /// drives the queue's retry backoff so the test advances virtual time instead of waiting out
-    /// the real 36-second (1s + 5s + 30s) schedule.
+    /// retry chain before being counted as failed. The chain runs on <see cref="NoBackoff"/>, so
+    /// it reaches that terminal outcome without the test waiting out — or hand-driving a clock
+    /// through — the real 36-second (1s + 5s + 30s) schedule.
     /// </summary>
     [Fact]
     public async Task FanOut_QueueEndToEnd_OneSucceeds_OneFails_IndependentCounters()
     {
         using var ep = MakeProtector();
         var repo = new WebhookSubscriptionRepository(_db, ep, Clock);
-        var webhookClock = new FakeTimeProvider(Clock.GetUtcNow());
 
         var subGood = await repo.AddAsync("org1", new NewWebhookSubscription(
             "https://good.example.com/hook2",
@@ -644,22 +654,22 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
         var mockClient = BuildPartialFailureClient();
 
         var queue = new WebhookDispatchQueue(
-            repo, mockClient, webhookClock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance);
+            repo, mockClient, Clock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance,
+            NoBackoff);
         using var cts = new CancellationTokenSource();
         _ = queue.StartAsync(cts.Token);
 
         queue.Dispatch(SampleEnvelope(eventType: "package.publish", orgId: "org1"));
 
-        // Advance the fake clock through the 1s + 5s + 30s backoff schedule so the "bad" sub's
-        // retries cost virtual time, not real time — and wait on the DURABLE end state (the
-        // persisted subscription rows) rather than the in-memory counters, so the assertion does
-        // not depend on the queue's internal increment ordering.
-        await ClockPump.UntilAsync(webhookClock, async () =>
+        // Wait on the DURABLE end state (the persisted subscription rows) rather than the
+        // in-memory counters, so the assertion does not depend on the queue's internal increment
+        // ordering. No clock is driven: the retry chain has no intervals left to wait out.
+        await WaitAsync(async () =>
         {
             var good = await repo.GetAsync("org1", subGood.Id);
             var bad = await repo.GetAsync("org1", subBad.Id);
             return good?.LastStatus is not null && bad?.LastStatus is not null;
-        }, TimeSpan.FromSeconds(1));
+        });
 
         // Graceful drain — StopAsync signals ExecuteAsync's stopping token itself, but by the
         // time we get here both durable writes have already landed, so there is nothing
@@ -805,15 +815,15 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
     /// <summary>
     /// Same shutdown-window scenario on the terminal-failure path: once retries are exhausted,
     /// the failure bookkeeping (which drives auto-disable) must also survive a stopping token
-    /// cancelled at the moment the last attempt finishes. A dedicated <see cref="FakeTimeProvider"/>
-    /// drives the retry backoff so the test doesn't wait out the real 1s/5s/30s schedule.
+    /// cancelled at the moment the last attempt finishes. The chain runs on
+    /// <see cref="NoBackoff"/> so the test reaches that final attempt without waiting out — or
+    /// hand-driving a clock through — the real 1s/5s/30s schedule.
     /// </summary>
     [Fact]
     public async Task DeliverToSubscriptionAsync_ShutdownCancelsTokenRightAfterFinalAttemptFails_FailureStillRecorded()
     {
         using var ep = MakeProtector();
         var repo = new WebhookSubscriptionRepository(_db, ep, Clock);
-        var webhookClock = new FakeTimeProvider(Clock.GetUtcNow());
 
         var sub = await repo.AddAsync("org1", new NewWebhookSubscription(
             "https://bad.example.com/hook",
@@ -836,14 +846,13 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
         }
 
         var queue = new WebhookDispatchQueue(
-            repo, client, webhookClock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance);
+            repo, client, Clock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance,
+            NoBackoff);
         var delivery = new WebhookSubscriptionDelivery(
             sub.Id, "org1", sub.Url, Secret: null, sub.EventTypes,
             ConsecutiveFailures: WebhookDispatchQueue.AutoDisableAfterFailures - 1, FailingSince: null);
 
-        var deliverTask = queue.DeliverToSubscriptionAsync(SampleEnvelope(), delivery, cts.Token);
-        await ClockPump.UntilAsync(webhookClock, () => Task.FromResult(cts.IsCancellationRequested), TimeSpan.FromSeconds(1));
-        await deliverTask;
+        await queue.DeliverToSubscriptionAsync(SampleEnvelope(), delivery, cts.Token);
 
         Assert.True(cts.IsCancellationRequested);
         Assert.Equal(1, queue.FailedCount);
@@ -953,7 +962,6 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
     {
         using var ep = MakeProtector();
         var repo = new WebhookSubscriptionRepository(_db, ep, Clock);
-        var webhookClock = new FakeTimeProvider(Clock.GetUtcNow());
 
         var subGood = await repo.AddAsync("org1", new NewWebhookSubscription(
             "https://good.example.com/drain",
@@ -967,7 +975,8 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
 
         var mockClient = BuildPartialFailureClient();
         var queue = new WebhookDispatchQueue(
-            repo, mockClient, webhookClock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance);
+            repo, mockClient, Clock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance,
+            NoBackoff);
 
         // Both subscriptions match the same event type, so one Dispatch fans out to both — one
         // succeeds, one exhausts its retry budget — before the worker ever starts reading.
@@ -975,14 +984,14 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
 
         var executeTask = queue.ExecuteAsyncForTests(new CancellationToken(canceled: true));
 
-        // The failing subscription burns through the 1s/5s/30s backoff inside the drain itself;
-        // pump the fake clock so that finishes in virtual time instead of real time.
-        await ClockPump.UntilAsync(webhookClock, async () =>
+        // The failing subscription runs its whole retry chain inside the drain itself, on
+        // NoBackoff, so the drain completes without the test driving a clock through it.
+        await WaitAsync(async () =>
         {
             var good = await repo.GetAsync("org1", subGood.Id);
             var bad = await repo.GetAsync("org1", subBad.Id);
             return good?.LastStatus is not null && bad?.LastStatus is not null;
-        }, TimeSpan.FromSeconds(1));
+        });
 
         await executeTask;
 
@@ -1038,8 +1047,8 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
         await WaitAsync(async () => (await repo.GetAsync("org2", subOrg2.Id))?.LastStatus is not null);
 
         Assert.Equal("ok", (await repo.GetAsync("org2", subOrg2.Id))!.LastStatus);
-        Assert.False(handler.HangReleased.Task.IsCompleted,
-            "org1's delivery must still be in flight — otherwise the test proved nothing.");
+        Assert.True(handler.IsParked,
+            "org1's delivery must still be parked in its handler — otherwise the test proved nothing.");
 
         handler.HangReleased.TrySetResult();
         await cts.CancelAsync();
@@ -1052,6 +1061,11 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
     /// endpoint answering and one failing. The healthy delivery lands, the failing one exhausts
     /// its retry budget and is durably recorded as failed, and the two are accounted
     /// independently — all while the first tenant's delivery is still hanging.
+    ///
+    /// Like its sibling above, the wait is gated rather than timed: org2's fan-out runs on
+    /// <see cref="NoBackoff"/> so it reaches its terminal outcome with no clock involved, and
+    /// org1 stays parked in its handler until the test releases it. Nothing about the pass
+    /// depends on scheduling luck.
     /// </summary>
     [Fact]
     public async Task Dispatch_OneOrgsEndpointHangs_AnotherOrgsMixedFanOutStillCompletes()
@@ -1061,7 +1075,6 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
 
         using var ep = MakeProtector();
         var repo = new WebhookSubscriptionRepository(_db, ep, Clock);
-        var webhookClock = new FakeTimeProvider(Clock.GetUtcNow());
 
         await repo.AddAsync("org1", new NewWebhookSubscription(
             "https://hang.example.com/hook", ["package.publish"], Secret: null, Description: null));
@@ -1073,7 +1086,8 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
         var handler = new HangingDelegatingHandler();
         var client = new WebhookDeliveryClient(new HttpClient(handler));
         var queue = new WebhookDispatchQueue(
-            repo, client, webhookClock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance);
+            repo, client, Clock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance,
+            NoBackoff);
 
         using var cts = new CancellationTokenSource();
         _ = queue.StartAsync(cts.Token);
@@ -1083,21 +1097,21 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
 
         queue.Dispatch(SampleEnvelope(orgId: "org2", orgSlug: "beta"));
 
-        // The failing subscription burns the 1s/5s/30s backoff in virtual time. The advance budget
-        // stays well inside the 120s per-envelope fair-share budget, so org1's hung delivery is
-        // still hanging for its own reasons rather than having been cut off by its deadline.
-        await ClockPump.UntilAsync(webhookClock, async () =>
+        // No clock is driven here, which is also what keeps org1's hung delivery hanging for its
+        // own reasons: the per-envelope fair-share budget runs on the injected clock, so a frozen
+        // clock cannot cut org1 off mid-test and leave the fairness claim unproven.
+        await WaitAsync(async () =>
         {
             var good = await repo.GetAsync("org2", subGood.Id);
             var bad = await repo.GetAsync("org2", subBad.Id);
             return good?.LastStatus is not null && bad?.LastStatus is not null;
-        }, TimeSpan.FromSeconds(1), maxAdvances: 60);
+        });
 
         Assert.Equal("ok", (await repo.GetAsync("org2", subGood.Id))!.LastStatus);
         Assert.Equal("failed", (await repo.GetAsync("org2", subBad.Id))!.LastStatus);
         Assert.Equal(1, (await repo.GetAsync("org2", subBad.Id))!.ConsecutiveFailures);
-        Assert.False(handler.HangReleased.Task.IsCompleted,
-            "org1's delivery must still be in flight — otherwise the test proved nothing.");
+        Assert.True(handler.IsParked,
+            "org1's delivery must still be parked in its handler — otherwise the test proved nothing.");
 
         handler.HangReleased.TrySetResult();
         await cts.CancelAsync();
@@ -1184,10 +1198,20 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
     {
         private readonly bool _parkOnlyFirstRequest;
         private int _requests;
+        private int _parked;
 
         public TaskCompletionSource HangEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public TaskCompletionSource HangReleased { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        /// <summary>
+        /// Whether a request is parked in the handler right now. This is what distinguishes
+        /// "still hanging" from "cancelled out from under us": a delivery that gets cancelled
+        /// leaves the park, while <see cref="HangReleased"/> stays uncompleted either way — so
+        /// asserting on that source alone cannot tell the two apart, and passes green over a
+        /// test that has stopped proving its point.
+        /// </summary>
+        public bool IsParked => Volatile.Read(ref _parked) == 1;
 
         public HangingDelegatingHandler(bool parkOnlyFirstRequest = false) : base(new HttpClientHandler())
         {
@@ -1202,8 +1226,16 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
                 && (!_parkOnlyFirstRequest || Interlocked.Increment(ref _requests) == 1);
             if (park)
             {
+                Interlocked.Exchange(ref _parked, 1);
                 HangEntered.TrySetResult();
-                await HangReleased.Task.WaitAsync(cancellationToken);
+                try
+                {
+                    await HangReleased.Task.WaitAsync(cancellationToken);
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref _parked, 0);
+                }
             }
 
             return new HttpResponseMessage(
@@ -1259,6 +1291,11 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
 
         var executeTask = queue.ExecuteAsyncForTests(new CancellationToken(canceled: true));
 
+        // KEEPS its pump, and keeps the real backoff schedule: virtual time IS this test's
+        // subject. org1's endpoint accepts the connection and never answers, so the only thing
+        // that ends its turn is WEBHOOK_ENVELOPE_BUDGET_SECONDS expiring on the injected clock —
+        // until it does, org2's envelope never gets its share of the drain window. There is no
+        // backoff chain to skip here: neither envelope retries.
         await ClockPump.UntilAsync(webhookClock, async () =>
             (await repo.GetAsync("org2", subGood.Id))?.LastStatus is not null,
             TimeSpan.FromSeconds(5), maxAdvances: 60);

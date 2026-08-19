@@ -202,5 +202,7 @@
   .nav-link:hover { background: var(--bg3); color: var(--text); }
   .nav-link.active { color: var(--accent); background: var(--bg); }
   .nav-actions { display: flex; gap: 6px; align-items: center; }
-  .main-content { flex: 1; padding: 16px; }
+  /* No padding here: the shell owns no gutter. Every system page roots at `.page`,
+     which sets the 24px gutter — matching the tenant shell in App.svelte. */
+  .main-content { flex: 1; }
 </style>

@@ -125,9 +125,22 @@ public sealed class OrgSettingsRepository
         return value is null ? null : value.Value ? 1 : 0;
     }
 
+    /// <summary>
+    /// Leave-unchanged-on-absent for all four retention dimensions. Each is
+    /// <see cref="Optional{T}"/> rather than a plain nullable because null is a real value here
+    /// ("unlimited"/"off"), so an omitted field and an explicit clear are different intents that
+    /// a plain nullable cannot tell apart. A parameterized <c>CASE WHEN @xSet = 1</c> picks the
+    /// branch — <c>COALESCE</c> cannot, since it would read a deliberate clear-to-unlimited as
+    /// "absent" and keep the old limit forever.
+    ///
+    /// The INSERT arm binds the value directly: a first-ever write for an org has no prior row to
+    /// preserve, so an absent field correctly lands the column default (SQL NULL for three of the
+    /// four; 90 for activity_retention_days, which is bounded by default on purpose).
+    /// </summary>
     public async Task UpsertRetentionAsync(
-        string orgId, int? keepVersions, int? keepDays, int? activityRetentionDays,
-        int? purgeUnlistedAfterDays, CancellationToken ct = default)
+        string orgId, Optional<int?> keepVersions, Optional<int?> keepDays,
+        Optional<int?> activityRetentionDays, Optional<int?> purgeUnlistedAfterDays,
+        CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
@@ -135,12 +148,23 @@ public sealed class OrgSettingsRepository
             INSERT INTO org_settings (org_id, keep_versions, keep_days, activity_retention_days, purge_unlisted_after_days)
             VALUES (@orgId, @keepVersions, @keepDays, @activityDays, @purgeUnlistedAfterDays)
             ON CONFLICT(org_id) DO UPDATE SET
-                keep_versions             = @keepVersions,
-                keep_days                 = @keepDays,
-                activity_retention_days   = @activityDays,
-                purge_unlisted_after_days = @purgeUnlistedAfterDays
+                keep_versions             = CASE WHEN @keepVersionsSet = 1 THEN @keepVersions ELSE keep_versions END,
+                keep_days                 = CASE WHEN @keepDaysSet = 1 THEN @keepDays ELSE keep_days END,
+                activity_retention_days   = CASE WHEN @activityDaysSet = 1 THEN @activityDays ELSE activity_retention_days END,
+                purge_unlisted_after_days = CASE WHEN @purgeUnlistedAfterDaysSet = 1 THEN @purgeUnlistedAfterDays ELSE purge_unlisted_after_days END
             """,
-            new { orgId, keepVersions, keepDays, activityDays = activityRetentionDays, purgeUnlistedAfterDays });
+            new
+            {
+                orgId,
+                keepVersions = keepVersions.IsPresent ? keepVersions.Value : null,
+                keepVersionsSet = keepVersions.IsPresent ? 1 : 0,
+                keepDays = keepDays.IsPresent ? keepDays.Value : null,
+                keepDaysSet = keepDays.IsPresent ? 1 : 0,
+                activityDays = activityRetentionDays.IsPresent ? activityRetentionDays.Value : null,
+                activityDaysSet = activityRetentionDays.IsPresent ? 1 : 0,
+                purgeUnlistedAfterDays = purgeUnlistedAfterDays.IsPresent ? purgeUnlistedAfterDays.Value : null,
+                purgeUnlistedAfterDaysSet = purgeUnlistedAfterDays.IsPresent ? 1 : 0,
+            });
         _orgs?.InvalidateSettingsCache(orgId);
     }
 

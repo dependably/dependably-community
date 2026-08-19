@@ -97,6 +97,9 @@ public sealed class OrgControllerUnitTests
         Assert.IsType<OkObjectResult>(await b.OrgSettingsController.GetRetention(CancellationToken.None));
     }
 
+    // A theory row's null means "field omitted" (a partial PUT), not "explicitly cleared".
+    private static Optional<int?> Opt(int? v) => v is null ? Optional<int?>.Absent : Optional<int?>.Of(v);
+
     [Fact]
     public async Task UpdateRetention_PersistsToOrgSettings()
     {
@@ -105,7 +108,12 @@ public sealed class OrgControllerUnitTests
         var b = await s.BuildAsync();
 
         var result = await b.OrgSettingsController.UpdateRetention(
-            new UpdateRetentionRequest(KeepVersions: 5, KeepDays: 30, ActivityRetentionDays: 90),
+            new UpdateRetentionRequest
+            {
+                KeepVersions = Optional<int?>.Of(5),
+                KeepDays = Optional<int?>.Of(30),
+                ActivityRetentionDays = Optional<int?>.Of(90),
+            },
             CancellationToken.None);
         Assert.IsType<NoContentResult>(result);
 
@@ -129,7 +137,15 @@ public sealed class OrgControllerUnitTests
         var b = await s.BuildAsync();
 
         var result = await b.OrgSettingsController.UpdateRetention(
-            new UpdateRetentionRequest(keepVersions, keepDays, activityRetentionDays, purgeUnlistedAfterDays),
+            new UpdateRetentionRequest
+            {
+                // A null in the theory row means the caller omitted the field, which is the
+                // shape a partial PUT sends; only the one negative value is present.
+                KeepVersions = Opt(keepVersions),
+                KeepDays = Opt(keepDays),
+                ActivityRetentionDays = Opt(activityRetentionDays),
+                PurgeUnlistedAfterDays = Opt(purgeUnlistedAfterDays),
+            },
             CancellationToken.None);
 
         var obj = Assert.IsType<ObjectResult>(result);

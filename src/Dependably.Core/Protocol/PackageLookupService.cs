@@ -168,16 +168,16 @@ public sealed partial class PackageLookupService
 
         var analysis = await AnalyzeAdvisoriesAsync(advisoryQuery.Advisories, advisoryQuery.Available, ct);
 
-        var (licenseAllowed, blockedLicense) = await _licenses.CheckPolicyAsync(
+        var licenseVerdict = await _licenses.CheckPolicyAsync(
             orgId, settings.LicenseEnforcementMode, facts.Spdx, ct);
 
         var (overall, blockedReason) = DetermineOverall(
-            facts, settings, analysis, advisoryQuery.Available, licenseAllowed, _time.GetUtcNow());
+            facts, settings, analysis, advisoryQuery.Available, licenseVerdict, _time.GetUtcNow());
 
         var result = BuildResult(new LookupResultContext(
             purl, ecosystem, name, version, resolution.VersionInferred,
             overall, blockedReason, facts, settings, analysis, advisoryQuery.Available,
-            licenseAllowed, blockedLicense, settings.AirGapped || _airGap.IsEnabled, unavailable));
+            licenseVerdict, settings.AirGapped || _airGap.IsEnabled, unavailable));
 
         return PackageLookupOutcome.Ok(result);
     }
@@ -308,7 +308,7 @@ public sealed partial class PackageLookupService
 
     private static (string Overall, string? BlockedReason) DetermineOverall(
         VersionMetadataFacts facts, OrgSettings settings, AdvisoryAnalysis analysis,
-        bool advisoriesAvailable, bool licenseAllowed, DateTimeOffset now)
+        bool advisoriesAvailable, LicensePolicyVerdict licenseVerdict, DateTimeOffset now)
     {
         var gateFacts = new VersionFacts(
             ManualState: null,
@@ -346,7 +346,11 @@ public sealed partial class PackageLookupService
             || (analysis.HasMalicious && settings.BlockMalicious == "warn")
             || (analysis.HasKev && settings.BlockKev == "warn")
             || (facts.Deprecated is not null && settings.BlockDeprecated == "warn")
-            || (settings.LicenseEnforcementMode != "off" && !licenseAllowed);
+            // A conditional licence warns rather than passing silently: the org recorded a
+            // condition on it, and a pre-adoption check that reads "allowed" would tell a
+            // developer the licence is fine when the org's own note says otherwise.
+            || (settings.LicenseEnforcementMode != "off"
+                && (!licenseVerdict.Allowed || licenseVerdict.IsConditional));
         return (warn ? "warn" : "allowed", null);
     }
 
@@ -371,9 +375,12 @@ public sealed partial class PackageLookupService
         License: new LicenseLookupCheck(
             Spdx: c.Facts.Spdx,
             Mode: c.Settings.LicenseEnforcementMode,
-            Allowed: c.Settings.LicenseEnforcementMode == "off" ? null : c.LicenseAllowed,
-            BlockedLicense: c.BlockedLicense,
-            Available: c.Facts.Spdx.Count > 0),
+            Allowed: c.Settings.LicenseEnforcementMode == "off" ? null : c.LicenseVerdict.Allowed,
+            BlockedLicense: c.LicenseVerdict.BlockedLicense,
+            Available: c.Facts.Spdx.Count > 0,
+            ConditionalLicenses: c.Settings.LicenseEnforcementMode == "off"
+                ? []
+                : c.LicenseVerdict.ConditionalLicenses),
         AirGapped: c.AirGapped,
         UnavailableChecks: c.Unavailable);
 
@@ -568,7 +575,7 @@ public sealed partial class PackageLookupService
     private sealed record LookupResultContext(
         string Purl, string Ecosystem, string Name, string Version, bool VersionInferred,
         string Overall, string? BlockedReason, VersionMetadataFacts Facts, OrgSettings Settings,
-        AdvisoryAnalysis Analysis, bool AdvisoriesAvailable, bool LicenseAllowed, string? BlockedLicense,
+        AdvisoryAnalysis Analysis, bool AdvisoriesAvailable, LicensePolicyVerdict LicenseVerdict,
         bool AirGapped, IReadOnlyList<string> Unavailable);
 }
 
@@ -675,7 +682,11 @@ public sealed record LicenseLookupCheck(
     string? BlockedLicense,
     /// <summary>False when no SPDX identifiers could be derived from upstream metadata at
     /// lookup time (Allowed/BlockedLicense are then not meaningful, only informational).</summary>
-    bool Available);
+    bool Available,
+    /// <summary>Licences the candidate relies on that this org marked conditional. Non-empty
+    /// means the package is usable but carries a condition the org wrote down — distinct from
+    /// both a clean pass and a refusal. Empty when Mode is 'off'.</summary>
+    IReadOnlyList<string> ConditionalLicenses);
 
 // ── Bounded in-memory TTL cache ───────────────────────────────────────────────────
 

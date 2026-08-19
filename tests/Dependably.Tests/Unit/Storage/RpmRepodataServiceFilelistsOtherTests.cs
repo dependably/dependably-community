@@ -394,7 +394,8 @@ public sealed class RpmRepodataServiceFilelistsOtherTests : IClassFixture<InMemo
     // ── Helpers ────────────────────────────────────────────────────────────────
 
     private RpmRepodataService MakeSvc()
-        => new(_fixture.Store, NullLogger<RpmRepodataService>.Instance, TimeProvider.System);
+        => new(_fixture.Store, NullLogger<RpmRepodataService>.Instance, TimeProvider.System,
+            new OrgRepository(_fixture.Store), new VulnerabilityRepository(_fixture.Store, TimeProvider.System));
 
     private async Task<string> SeedPackageVersionAsync(
         string orgId,

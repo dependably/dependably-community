@@ -2074,10 +2074,17 @@ publish-image:
     # than in the Dockerfiles, which must keep resolving normally for local and
     # GitHub builds that have no mirror.
     BUILDKIT_SYNTAX_IMAGE: ${DEP_IMAGE_REGISTRY}/docker/dockerfile:1@sha256:87999aa3d42bdc6bea60565083ee17e86d1f3339802f543c0d03998580f9cb89
-  # Registry auth is split by capability: the push authenticates with
-  # REGISTRY_PUBLISH_KEY (protected + masked), while build-time dependency routing
-  # reuses the unprotected read-only REGISTRY_URL / REGISTRY_KEY pair the build job
-  # uses. See .private-registry-setup for the rationale.
+  # Registry auth here is split by *purpose*, not by capability. REGISTRY_PUBLISH_KEY
+  # (protected + masked) authenticates the docker client, and REGISTRY_URL /
+  # REGISTRY_KEY (unprotected, read-only) is passed into the build as a BuildKit
+  # secret for the image's own npm/NuGet/apk restores. See .private-registry-setup.
+  #
+  # REGISTRY_PUBLISH_KEY needs read capability as well as publish. `buildx build
+  # --push` is one command that pulls the base images and pushes the result, and the
+  # mirror it pulls from is the registry it pushes to — so the client credential has
+  # to satisfy both gates. A publish-only token fails at the first pull with
+  # "denied: Insufficient scope: pull:oci or read:artifact required." Narrowing it
+  # again means dropping --push and building into the local image store first.
   script:
     - |
       case "$IMAGE_FLAVOR" in

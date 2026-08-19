@@ -136,7 +136,7 @@ public readonly record struct NuGetRegistrationKey(string OrgId, string Normaliz
 }
 
 /// <summary>Identifies a tenant's merged RPM repodata tuple.</summary>
-public readonly record struct RpmMergedRepodataKey(string OrgId);
+public readonly record struct RpmMergedRepodataKey(string OrgId) : IOrgScopedCacheKey;
 
 /// <summary>
 /// Identifies a Maven metadata document by tenant, groupId, and artifactId, plus an optional
@@ -152,4 +152,4 @@ public readonly record struct MavenMetadataKey(string OrgId, string GroupId, str
 /// by tenant and document type. The type string is the lowercase filename stem ("primary",
 /// "filelists", or "other") — distinct from the merged-mode cache that holds the full tuple.
 /// </summary>
-public readonly record struct RpmLocalRepodataKey(string OrgId, string DocType);
+public readonly record struct RpmLocalRepodataKey(string OrgId, string DocType) : IOrgScopedCacheKey;

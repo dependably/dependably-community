@@ -12,6 +12,10 @@
   let mode = 'off'
   let allowEntries = []
   let blockEntries = []
+  // The allowlist response carries both non-denied dispositions. An entry from a server that
+  // predates the disposition column has none and reads as 'allowed'.
+  $: allowedEntries = allowEntries.filter(e => e.disposition !== 'conditional')
+  $: conditionalEntries = allowEntries.filter(e => e.disposition === 'conditional')
   // Hydrated details: { identifier: { name, isOsiApproved, isFsfLibre, copyleft, isDeprecated, referenceUrl } }
   let detail = {}
   let loading = true
@@ -55,7 +59,7 @@
   }
 </script>
 
-<div class="page page-fluid">
+<div class="page">
   <header class="page-header">
     <h1>{$t('licensePolicy.title')}</h1>
     <div class="mode-line">
@@ -73,12 +77,13 @@
   {:else}
     <section>
       <h2 class="section-h">{$t('licensePolicy.allow.title')}</h2>
-      {#if allowEntries.length === 0}
+      {#if allowedEntries.length === 0}
         <p class="text-muted empty">{$t('licensePolicy.allow.empty')}</p>
       {:else}
         <table class="list-table">
           <colgroup>
             <col class="col-spdx">
+            <col>
             <col>
             <col class="col-badges">
           </colgroup>
@@ -86,11 +91,12 @@
             <tr>
               <th>{$t('licensePolicy.columns.spdx')}</th>
               <th>{$t('licensePolicy.columns.name')}</th>
+              <th>{$t('licensePolicy.columns.note')}</th>
               <th>{$t('licensePolicy.columns.attributes')}</th>
             </tr>
           </thead>
           <tbody>
-            {#each allowEntries as e (e.id)}
+            {#each allowedEntries as e (e.id)}
               {@const d = detail[e.licenseSpdx]}
               <tr>
                 <td class="t-mono">
@@ -102,6 +108,61 @@
                   </button>
                 </td>
                 <td>{d?.name ?? '—'}</td>
+                <td class="note-cell">{e.note || '—'}</td>
+                <td>
+                  <div class="badges">
+                    {#if d?.isOsiApproved}<span class="badge osi" title="OSI Approved">OSI</span>{/if}
+                    {#if d?.isFsfLibre}<span class="badge fsf" title="FSF Free/Libre">FSF</span>{/if}
+                    {#if d?.copyleft && d.copyleft !== 'unclassified'}
+                      <span class="badge cl-{d.copyleft}">{copyleftLabel(d.copyleft)}</span>
+                    {/if}
+                    {#if d?.isDeprecated}<span class="badge dep">deprecated</span>{/if}
+                  </div>
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+    </section>
+
+    <section class="mt-4">
+      <h2 class="section-h">{$t('licensePolicy.conditional.title')}</h2>
+      <p class="text-muted">{$t('licensePolicy.conditional.intro')}</p>
+      {#if conditionalEntries.length === 0}
+        <p class="text-muted empty">{$t('licensePolicy.conditional.empty')}</p>
+      {:else}
+        <table class="list-table">
+          <colgroup>
+            <col class="col-spdx">
+            <col>
+            <col>
+            <col class="col-badges">
+          </colgroup>
+          <thead>
+            <tr>
+              <th>{$t('licensePolicy.columns.spdx')}</th>
+              <th>{$t('licensePolicy.columns.name')}</th>
+              <th>{$t('licensePolicy.columns.condition')}</th>
+              <th>{$t('licensePolicy.columns.attributes')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each conditionalEntries as e (e.id)}
+              {@const d = detail[e.licenseSpdx]}
+              <tr>
+                <td class="t-mono">
+                  <button class="link t-mono"
+                          aria-label={$t('licenseText.open')}
+                          title={$t('licenseText.open')}
+                          on:click={() => licenseTextModal = e.licenseSpdx}>
+                    {e.licenseSpdx}
+                  </button>
+                </td>
+                <td>{d?.name ?? '—'}</td>
+                <!-- The condition is the whole point of this row: it is the part a developer who
+                     hits the licence actually needs to read. -->
+                <td class="note-cell">{e.note || $t('licensePolicy.conditional.noCondition')}</td>
                 <td>
                   <div class="badges">
                     {#if d?.isOsiApproved}<span class="badge osi" title="OSI Approved">OSI</span>{/if}
@@ -128,12 +189,14 @@
           <colgroup>
             <col class="col-spdx">
             <col>
+            <col>
             <col class="col-badges">
           </colgroup>
           <thead>
             <tr>
               <th>{$t('licensePolicy.columns.spdx')}</th>
               <th>{$t('licensePolicy.columns.name')}</th>
+              <th>{$t('licensePolicy.columns.note')}</th>
               <th>{$t('licensePolicy.columns.attributes')}</th>
             </tr>
           </thead>
@@ -150,6 +213,7 @@
                   </button>
                 </td>
                 <td>{d?.name ?? '—'}</td>
+                <td class="note-cell">{e.note || '—'}</td>
                 <td>
                   <div class="badges">
                     {#if d?.isOsiApproved}<span class="badge osi" title="OSI Approved">OSI</span>{/if}
@@ -176,8 +240,8 @@
 {/if}
 
 <style>
-  /* Keep the tighter vertical padding, but let the global .page-fluid control width
-     (this scoped rule would otherwise out-specify it and re-cap the page at 1100px). */
+  /* Tighter vertical padding than the global .page gutter. Width is deliberately
+     untouched — the page shell is full-bleed and never re-caps itself. */
   .page { padding: 20px 24px; }
   .page-header {
     display: flex;
@@ -206,5 +270,8 @@
   }
   .link:hover { text-decoration: underline; background: none; }
   .col-spdx { width: 200px; }
+  /* Notes wrap: a condition is a sentence, not a label, and truncating it would hide the part
+     the reader came for. */
+  .note-cell { white-space: normal; }
   .col-badges { width: 220px; }
 </style>

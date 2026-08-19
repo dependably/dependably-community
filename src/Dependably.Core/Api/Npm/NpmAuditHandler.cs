@@ -19,8 +19,13 @@ namespace Dependably.Api.NpmProtocol;
 /// <c>AnonymousPull</c> settings lookup that gates every other npm read path.
 ///
 /// Fan-out: one OSV query per (name, version) pair, issued through
-/// <see cref="IOsvSource.TryQueryBatchAsync"/> (which dedupes advisory hydration across the batch).
-/// The request is capped on every axis before any query is issued — see the Max* constants.
+/// <see cref="IOsvSource.TryQueryBatchAsync"/> (which dedupes advisory hydration across the batch)
+/// in sequential chunks of <c>OsvQueriesPerBatch</c>. A tree too large for one upstream batch call
+/// is split here rather than refused: npm sends its whole tree in a single POST and neither chunks
+/// nor retries on 413, so a package-count limit does not throttle the client — it disables auditing
+/// for that project entirely. What bounds the work is cost the caller cannot reshape away: the
+/// decompressed body (<c>MaxBodyBytes</c>, read through a counting cap) and the total
+/// package-version pairs (<c>MaxQueriesPerRequest</c>), both checked before any query is issued.
 ///
 /// Never fabricates an all-clear: the endpoint answers 503 whenever it cannot vouch for a complete
 /// report — an unreached source, a short result set, or advisories that could not be hydrated. The
@@ -35,14 +40,21 @@ public sealed class NpmAuditHandler(
     ILogger<NpmAuditHandler> logger)
 {
     /// <summary>
-    /// Ceiling on (name, version) pairs per request. Matches OSV's documented <c>/querybatch</c>
-    /// limit of 1000 queries, so a request that passes this check maps onto exactly one upstream
-    /// batch call rather than an unbounded fan-out of them.
+    /// Ceiling on (name, version) pairs per request — the work bound for the whole endpoint, and
+    /// the only pair-count limit left. It is deliberately far above any real dependency tree: npm
+    /// sends the entire tree in one POST and does not chunk or retry on 413, so a limit a real
+    /// project can cross does not throttle the client, it turns <c>npm audit</c> off. At
+    /// <see cref="OsvQueriesPerBatch"/> per upstream call this bounds one request to ten
+    /// <c>/querybatch</c> calls.
     /// </summary>
-    private const int MaxQueriesPerRequest = 1000;
+    private const int MaxQueriesPerRequest = 10_000;
 
-    /// <summary>Ceiling on distinct package names per request.</summary>
-    private const int MaxPackagesPerRequest = 500;
+    /// <summary>
+    /// Pairs per upstream batch call. Matches OSV's documented <c>/querybatch</c> limit, so each
+    /// chunk maps onto exactly one upstream call and the registry — not the client — is what
+    /// reshapes an oversized tree into calls the source will accept.
+    /// </summary>
+    private const int OsvQueriesPerBatch = 1000;
 
     /// <summary>Ceiling on distinct versions for any one package.</summary>
     private const int MaxVersionsPerPackage = 100;
@@ -128,13 +140,6 @@ public sealed class NpmAuditHandler(
     private static (List<QueryPair> Pairs, IActionResult? Error) BuildQueryPlan(
         Dictionary<string, string[]> requested)
     {
-        if (requested.Count > MaxPackagesPerRequest)
-        {
-            return ([], TooLarge(
-                $"Request names {requested.Count} packages; this registry audits at most " +
-                $"{MaxPackagesPerRequest} per request."));
-        }
-
         var pairs = new List<QueryPair>();
 
         foreach (var (name, versions) in requested)
@@ -160,6 +165,8 @@ public sealed class NpmAuditHandler(
 
                 if (pairs.Count >= MaxQueriesPerRequest)
                 {
+                    // The one refusal left, and the only one bounded by cost rather than by a
+                    // shape npm can act on. Names the real limit so the body is actionable.
                     return ([], TooLarge(
                         $"Request exceeds the {MaxQueriesPerRequest} package-version limit this " +
                         "registry audits per request."));
@@ -172,27 +179,45 @@ public sealed class NpmAuditHandler(
         return (pairs, null);
     }
 
-    // Issues the batch query and folds the per-pair results into npm's per-package shape.
+    // Issues the batch queries and folds the per-pair results into npm's per-package shape.
+    //
+    // The request is split into OsvQueriesPerBatch-sized chunks and each chunk is one upstream
+    // call. Splitting here rather than refusing is the whole point: npm sends the entire tree in a
+    // single POST and neither chunks nor retries on 413, so a registry-side limit does not throttle
+    // the client, it denies it the advisory data outright. Reshaping the request is work only the
+    // registry can do.
+    //
+    // Chunks are issued sequentially, not concurrently. Ten parallel calls would multiply this
+    // endpoint's peak load on a shared upstream by ten for no latency win worth having, and the
+    // remote source already retries with backoff against its own rate limit; sequential keeps one
+    // audit's upstream footprint one call wide. The cost accepted in exchange is that advisory
+    // hydration dedupes within a chunk and not across them, so an advisory matching purls in
+    // several chunks is hydrated once per chunk.
     private async Task<IActionResult> QueryAndProjectAsync(List<QueryPair> pairs, CancellationToken ct)
     {
         var purls = pairs.Select(p => PurlNormalizer.Npm(p.Name, p.Version)).ToList();
+        var results = new List<List<OsvAdvisory>>(pairs.Count);
 
-        var (batch, fetchError) = await FetchReachedBatchAsync(purls, pairs.Count, ct);
-        if (fetchError is not null)
+        foreach (string[] chunk in purls.Chunk(OsvQueriesPerBatch))
         {
-            return fetchError;
-        }
+            var (batch, fetchError) = await FetchReachedBatchAsync(chunk, chunk.Length, ct);
+            if (fetchError is not null)
+            {
+                return fetchError;
+            }
 
-        var results = batch!.Results;
+            // Checked per chunk, not once at the end: a short list from one chunk would otherwise
+            // be masked by a long one from another, and the misalignment would silently shift every
+            // later result onto the wrong package. Refuse rather than under-report.
+            if (batch!.Results.Count != chunk.Length)
+            {
+                logger.LogWarning(
+                    "npm bulk audit: advisory source returned {Results} result sets for {Queries} queries; refusing to report a partial answer",
+                    batch.Results.Count, chunk.Length);
+                return Unavailable("The vulnerability advisory source returned an incomplete result set.");
+            }
 
-        // The batch contract is one result list per input purl, in order. A short list would
-        // silently answer "clean" for the unmatched tail, so refuse rather than under-report.
-        if (results.Count != pairs.Count)
-        {
-            logger.LogWarning(
-                "npm bulk audit: advisory source returned {Results} result sets for {Queries} queries; refusing to report a partial answer",
-                results.Count, pairs.Count);
-            return Unavailable("The vulnerability advisory source returned an incomplete result set.");
+            results.AddRange(batch.Results);
         }
 
         var (byPackage, unprojectable) = AccumulateByPackage(pairs, results);
@@ -231,7 +256,7 @@ public sealed class NpmAuditHandler(
     // Issues the OSV batch query and refuses (rather than reports a false all-clear) when the
     // source could not be queried at all or was not reached.
     private async Task<(OsvBatchQueryResult? Batch, IActionResult? Error)> FetchReachedBatchAsync(
-        List<string> purls, int queryCount, CancellationToken ct)
+        IReadOnlyList<string> purls, int queryCount, CancellationToken ct)
     {
         OsvBatchQueryResult batch;
         try

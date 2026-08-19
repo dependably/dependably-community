@@ -47,11 +47,23 @@ public sealed record UpdateOrgSettingsRequest(
 // 'merged'. Validated by OrgSettingsController.UpdateRpmUpstreamMode.
 public sealed record UpdateRpmUpstreamModeRequest(string? Mode);
 
-public sealed record UpdateRetentionRequest(
-    int? KeepVersions,
-    int? KeepDays,
-    int? ActivityRetentionDays,
-    int? PurgeUnlistedAfterDays = null);
+// Every field is Optional<int?>, not a plain nullable, because null is a legitimate VALUE here
+// ("unlimited"/"off"), not merely an absence. A plain nullable collapses "the client didn't
+// mention this field" into "the client cleared it", so a caller PUTting only `keep_days` silently
+// reset the other three to unlimited — turning off a configured retention policy as a side effect
+// of an unrelated write. That is the same hazard the split alert-settings endpoints exist to
+// prevent, and the same tri-state shape min_release_age_hours/max_epss_tolerance already use.
+//
+// Declared as init-only properties rather than constructor parameters for the reason spelled out
+// on UpdateProxySettingsRequest below: the OpenAPI exporter reflects a parameter's default value
+// and throws on a custom struct's `default`, 500ing /openapi/management.json.
+public sealed record UpdateRetentionRequest
+{
+    public Optional<int?> KeepVersions { get; init; }
+    public Optional<int?> KeepDays { get; init; }
+    public Optional<int?> ActivityRetentionDays { get; init; }
+    public Optional<int?> PurgeUnlistedAfterDays { get; init; }
+}
 
 // ProxyPassthroughEnabled and MaxOsvScoreTolerance are nullable so a partial PUT can omit them
 // without the JSON binder silently coercing the absent value to false / 0.0 — see

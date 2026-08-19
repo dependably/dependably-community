@@ -8,6 +8,14 @@
   import { navigate, user } from '../lib/store.js'
   import { reportPageLoad } from '../lib/pageLoad.js'
   import { copyToClipboard } from '../lib/clipboard.js'
+  import { formatDate } from '../lib/format.js'
+  import {
+    licenseStateFor,
+    resolveStateVersion,
+    rowsForVersion,
+    versionsBehindFor,
+    worstSeverityFor
+  } from '../lib/packageRisk.js'
 
   /**
    * The route params this page was mounted for, supplied by RouteView. Read as a prop rather than
@@ -30,6 +38,14 @@
   // Blocklisted SPDX identifiers (uppercased) for the license risk-pillar summary below.
   // Fetched once per page load from the existing license-policy endpoint — no new API surface.
   let licenseBlocklist = new Set()
+  // Licences the org marked conditional. Separate from the blocklist because they serve — the
+  // pillar reports them as "review", not as blocked.
+  let licenseConditional = new Set()
+  // Standing compliance notes on this package — including the rationale someone recorded when
+  // accepting it under a conditional licence.
+  let packageNotes = []
+  let newNoteText = '', addingNote = false, noteError = ''
+  let editingNoteId = null, editingNoteText = ''
 
   $: if (params.ecosystem && params.name) load()
   $: reportPageLoad(pageToken, loading)
@@ -58,7 +74,11 @@
       try {
         const policy = await api.getLicensePolicy()
         licenseBlocklist = new Set((policy.blocklist || []).map(e => (e.licenseSpdx ?? '').toUpperCase()))
-      } catch { licenseBlocklist = new Set() }
+        licenseConditional = new Set((policy.allowlist || [])
+          .filter(e => e.disposition === 'conditional')
+          .map(e => (e.licenseSpdx ?? '').toUpperCase()))
+      } catch { licenseBlocklist = new Set(); licenseConditional = new Set() }
+      await loadPackageNotes()
     } catch (e) {
       error = e.message
     } finally {
@@ -67,28 +87,15 @@
   }
 
   // ── Three-pillar risk summary (Security / License / Operational) ─────────────
+  // All three describe ONE version — the one the package's state is read off,
+  // resolved in packageRisk.js — not the worst value anywhere in the release
+  // history. Per-version detail stays in the table below, a row at a time.
 
-  const SEVERITY_RANK = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, UNKNOWN: 4 }
-
-  // Worst (lowest-rank) severity across every advisory linked to any version in this package.
-  // Null when no version carries an advisory.
-  $: worstSeverity = [...vulnsByPurl.values()].flat().reduce((worst, v) => {
-    const sev = v.severity || 'UNKNOWN'
-    return worst === null || (SEVERITY_RANK[sev] ?? 5) < (SEVERITY_RANK[worst] ?? 5) ? sev : worst
-  }, null)
-
-  // Versions carrying either a blocklisted SPDX license or no extracted license at all —
-  // mirrors the dashboard license-risk tile's definition (see PackageAnalyticsRepository).
-  $: licenseRiskCount = versions.filter(v => {
-    const licenses = v.licenses ?? []
-    return licenses.length === 0 || licenses.some(l => licenseBlocklist.has((l ?? '').toUpperCase()))
-  }).length
-
-  // Worst (highest) known versions-behind count across every version. Null when every version's
-  // count is unknown — never coerced to 0.
-  $: operationalWorst = versions.reduce(
-    (max, v) => v.versionsBehind !== null && v.versionsBehind !== undefined && (max === null || v.versionsBehind > max) ? v.versionsBehind : max,
-    null)
+  $: stateVersion = resolveStateVersion(pkg, versions)
+  $: stateRows = rowsForVersion(versions, stateVersion)
+  $: worstSeverity = worstSeverityFor(stateRows, vulnsByPurl)
+  $: licenseState = licenseStateFor(stateRows, licenseBlocklist, licenseConditional)
+  $: versionsBehind = versionsBehindFor(stateRows)
 
   function buildVulnMap(items) {
     const map = new SvelteMap()
@@ -168,9 +175,51 @@
   }
 
   $: isAdmin = $user?.role === 'admin' || $user?.role === 'owner'
+
+  // ── Package notes ───────────────────────────────────────────────────────────
+  // Supplemental like the vuln and licence-policy fetches: a failure here must not take the
+  // package page down, so the list simply stays empty.
+  async function loadPackageNotes() {
+    try {
+      packageNotes = await api.getPackageNotes(params.ecosystem, params.name)
+    } catch { packageNotes = [] }
+  }
+
+  async function addNote() {
+    const text = newNoteText.trim()
+    if (!text) return
+    addingNote = true; noteError = ''
+    try {
+      // version null: a note left from the package page is about the package, not one release.
+      const created = await api.addPackageNote(params.ecosystem, params.name, null, text)
+      packageNotes = [created, ...packageNotes]
+      newNoteText = ''
+    } catch (e) { noteError = e.message ?? 'failed to add note' }
+    finally { addingNote = false }
+  }
+
+  async function saveNoteEdit() {
+    const text = editingNoteText.trim()
+    if (!text || !editingNoteId) return
+    noteError = ''
+    try {
+      await api.updatePackageNote(editingNoteId, text)
+      packageNotes = packageNotes.map(n => (n.id === editingNoteId ? { ...n, note: text } : n))
+      editingNoteId = null
+    } catch (e) { noteError = e.message ?? 'failed to update note' }
+  }
+
+  async function removeNote(id) {
+    if (!confirm($t('packageNotes.removeConfirm'))) return
+    noteError = ''
+    try {
+      await api.removePackageNote(id)
+      packageNotes = packageNotes.filter(n => n.id !== id)
+    } catch (e) { noteError = e.message ?? 'failed to remove note' }
+  }
 </script>
 
-<div class="page page-fluid">
+<div class="page">
   <div class="page-header">
     <div>
       <button on:click={() => {
@@ -230,7 +279,10 @@
   {#if scanError}<div class="error-msg">{scanError}</div>{/if}
 
   <!-- Three-pillar risk summary: Security / License / Operational, side by side. Signal-display
-       only — no composite/weighted score across the pillars. -->
+       only — no composite/weighted score across the pillars. Every pillar reports the state of
+       the version named in the caption, so the strip answers "what is this package like today"
+       rather than "what is the worst thing in its history" — which described a version nobody
+       installs and contradicted the currency banner below it. -->
   {#if loading || (pkg && versions.length > 0)}
     <div class="risk-pillars">
       <div class="pillar">
@@ -249,24 +301,41 @@
         <span class="pillar-label">{$t('versionDetail.pillars.license')}</span>
         {#if loading}
           <span class="pillar-value"><Skeleton width="80px" height="16px" /></span>
+        {:else if licenseState === 'blocked'}
+          <span class="pillar-value pillar-warn">{$t('versionDetail.pillars.licenseBlocked')}</span>
+        {:else if licenseState === 'undeclared'}
+          <!-- No extracted SPDX entry is an unknown licence, not a clean one — the block gate
+               treats the two differently, so the pillar does too. -->
+          <span class="pillar-value text-muted">{$t('versionDetail.pillars.licenseUndeclared')}</span>
+        {:else if licenseState === 'review'}
+          <!-- Serves, but the org recorded a condition on the licence. Showing this as clean
+               would hide the org's own note from the person about to depend on it. -->
+          <span class="pillar-value pillar-review">{$t('versionDetail.pillars.licenseReview')}</span>
         {:else}
-          <span class="pillar-value" class:pillar-warn={licenseRiskCount > 0}>
-            {$t('versionDetail.pillars.licenseCount', { values: { count: licenseRiskCount } })}
-          </span>
+          <span class="pillar-value pillar-clean">{$t('versionDetail.pillars.licenseClean')}</span>
         {/if}
       </div>
       <div class="pillar">
         <span class="pillar-label">{$t('versionDetail.pillars.operational')}</span>
         {#if loading}
           <span class="pillar-value"><Skeleton width="80px" height="16px" /></span>
-        {:else if operationalWorst !== null}
-          <span class="pillar-value" class:pillar-warn={operationalWorst > 0}>
-            {$t('versionDetail.behindCell.count', { values: { count: operationalWorst } })}
+        {:else if versionsBehind !== null}
+          <span class="pillar-value" class:pillar-warn={versionsBehind > 0} class:pillar-clean={versionsBehind === 0}>
+            {$t('versionDetail.behindCell.count', { values: { count: versionsBehind } })}
           </span>
         {:else}
           <span class="pillar-value text-muted">{$t('versionDetail.behindCell.unscored')}</span>
         {/if}
       </div>
+      <!-- Names the subject of all three pillars. Without it a clean headline is ambiguous:
+           a reader cannot tell a package with no advisories anywhere from one whose current
+           release is clean while older cached releases are not. -->
+      {#if !loading && stateVersion}
+        <div class="pillar pillar-subject">
+          <span class="pillar-label">{$t('versionDetail.pillars.subject')}</span>
+          <span class="pillar-value">{stateVersion}</span>
+        </div>
+      {/if}
     </div>
   {/if}
 
@@ -278,6 +347,7 @@
       {pkg}
       {versions}
       {licenseBlocklist}
+      {licenseConditional}
       {vulnsByPurl}
       {isAdmin}
       {scanningId}
@@ -290,6 +360,59 @@
       on:unblock={(e) => unblockVersion(e.detail)}
       on:delete={(e) => deleteVersion(e.detail)}
     />
+  {/if}
+
+  {#if !loading && (packageNotes.length > 0 || isAdmin)}
+    <section class="package-notes">
+      <h2 class="section-h">{$t('packageNotes.title')}</h2>
+      <p class="text-muted t-sm">{$t('packageNotes.intro')}</p>
+      {#if noteError}<div class="error-msg">{noteError}</div>{/if}
+
+      {#if isAdmin}
+        <div class="note-add">
+          <textarea rows="2" bind:value={newNoteText}
+                    aria-label={$t('packageNotes.title')}
+                    placeholder={$t('packageNotes.placeholder')}></textarea>
+          <button class="primary" disabled={addingNote || !newNoteText.trim()} on:click={addNote}>
+            {$t('packageNotes.add')}
+          </button>
+        </div>
+      {/if}
+
+      {#if packageNotes.length === 0}
+        <p class="text-muted">{$t('packageNotes.empty')}</p>
+      {:else}
+        <ul class="note-list">
+          {#each packageNotes as n (n.id)}
+            <li>
+              {#if editingNoteId === n.id}
+                <textarea rows="2" bind:value={editingNoteText}
+                          aria-label={$t('packageNotes.title')}></textarea>
+                <div class="row-actions">
+                  <button class="primary btn-sm" on:click={saveNoteEdit}>{$t('common.actions.save')}</button>
+                  <button class="btn-sm" on:click={() => editingNoteId = null}>{$t('common.actions.cancel')}</button>
+                </div>
+              {:else}
+                <p class="note-body">{n.note}</p>
+                <p class="note-meta text-muted t-sm">
+                  {#if n.version}{$t('packageNotes.scopedToVersion', { values: { version: n.version } })}{:else}{$t('packageNotes.scopedToPackage')}{/if}
+                  · {n.createdByLabel ?? $t('packageNotes.unknownAuthor')}
+                  · {$formatDate(n.createdAt)}
+                </p>
+                {#if isAdmin}
+                  <div class="row-actions">
+                    <button class="btn-sm" on:click={() => { editingNoteId = n.id; editingNoteText = n.note }}>
+                      {$t('common.actions.edit')}
+                    </button>
+                    <button class="danger btn-sm" on:click={() => removeNote(n.id)}>{$t('common.actions.remove')}</button>
+                  </div>
+                {/if}
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </section>
   {/if}
 </div>
 
@@ -316,8 +439,26 @@
     color: var(--text2);
   }
   .pillar-value { font-size: 13px; font-weight: 600; }
+  /* The version the three pillars describe, pushed to the trailing edge so it reads as the
+     strip's subject rather than a fourth pillar. */
+  .pillar-subject { margin-left: auto; text-align: right; }
   .pillar-clean { color: var(--success); }
   .pillar-warn { color: var(--badge-warning-text); }
+  /* Distinct from pillar-warn: the artifact is usable, the org just wrote a condition on it. */
+  .pillar-review { color: var(--badge-sky-text); }
+  .package-notes { margin-top: 24px; }
+  .note-add { display: flex; gap: 8px; align-items: flex-start; margin-bottom: 12px; }
+  .note-add textarea { flex: 1; font: inherit; resize: vertical; }
+  .note-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 12px; }
+  .note-list li {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 10px 12px;
+  }
+  .note-list textarea { width: 100%; font: inherit; resize: vertical; margin-bottom: 6px; }
+  .note-body { margin: 0 0 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .note-meta { margin: 0 0 6px; }
+  .row-actions { display: flex; gap: 6px; align-items: center; }
 
   /* Package-level metadata (homepage / repository / description) under the title. Floored at
      two clamped description lines plus the link row, and rendered whether or not the fetch has

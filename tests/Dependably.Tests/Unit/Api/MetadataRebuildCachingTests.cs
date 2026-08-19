@@ -349,7 +349,7 @@ public sealed class MetadataRebuildCachingTests : IAsyncLifetime
         var packages = new PackageRepository(_db);
         var audit = new AuditRepository(_db);
         var orgs = new OrgRepository(_db);
-        var repodata = new RpmRepodataService(_db, NullLogger<RpmRepodataService>.Instance, _clock);
+        var repodata = new RpmRepodataService(_db, NullLogger<RpmRepodataService>.Instance, _clock, new OrgRepository(_db), new VulnerabilityRepository(_db, _clock));
         var cacheArtifacts = new CacheArtifactRepository(_db);
         var tenantAccess = new TenantArtifactAccessRepository(_db);
         var cacheRecorder = new CacheAccessRecorder(cacheArtifacts, tenantAccess,

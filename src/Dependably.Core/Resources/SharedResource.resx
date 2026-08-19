@@ -213,6 +213,26 @@
     <value>'{0}' is already on the blocklist.</value>
     <comment>409 detail. {0} = the SPDX identifier.</comment>
   </data>
+  <data name="error.license.dispositionInvalid" xml:space="preserve">
+    <value>Disposition must be 'allowed' or 'conditional'.</value>
+    <comment>422 detail. The quoted values are API literals - do not translate them.</comment>
+  </data>
+  <data name="error.license.noteTooLong" xml:space="preserve">
+    <value>Note is too long.</value>
+    <comment>422 detail: a licence-policy note exceeded the length cap.</comment>
+  </data>
+  <data name="error.packageNote.coordinateRequired" xml:space="preserve">
+    <value>Ecosystem and package name are required.</value>
+    <comment>422 detail: a package note without a package coordinate.</comment>
+  </data>
+  <data name="error.packageNote.noteRequired" xml:space="preserve">
+    <value>Note text is required.</value>
+    <comment>422 detail: a package note with no text.</comment>
+  </data>
+  <data name="error.packageNote.noteTooLong" xml:space="preserve">
+    <value>Note is too long.</value>
+    <comment>422 detail: a package note exceeded the length cap.</comment>
+  </data>
   <data name="error.saml.nameIdFormatRequired" xml:space="preserve">
     <value>nameIdFormat is required.</value>
     <comment>422 detail. 'nameIdFormat' is the JSON field name - keep it verbatim.</comment>

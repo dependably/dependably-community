@@ -11,8 +11,8 @@ namespace Dependably.Infrastructure.OpenApi;
 /// and writes on the wire: absent-vs-present-vs-value is a server-side binding concern, not
 /// something an API consumer needs to see — from outside, <c>Optional&lt;int?&gt;</c> is just
 /// "an integer, or null, or omit the property entirely" like any other optional nullable field.
-/// Only <c>int</c>/<c>double</c> underlying types are handled because those are the only
-/// <see cref="Optional{T}"/> instantiations that currently exist on a request DTO; a future
+/// Only <c>int</c>/<c>double</c>/<c>string</c> underlying types are handled because those are the
+/// only <see cref="Optional{T}"/> instantiations that currently exist on a request DTO; a future
 /// instantiation with an unhandled underlying type keeps the exporter's default (empty) schema
 /// rather than silently mis-describing it.
 /// </summary>
@@ -41,6 +41,10 @@ internal sealed class OptionalSchemaTransformer : IOpenApiSchemaTransformer
         {
             schema.Type = JsonSchemaType.Number | JsonSchemaType.Null;
             schema.Format = "double";
+        }
+        else if (underlying == typeof(string))
+        {
+            schema.Type = JsonSchemaType.String | JsonSchemaType.Null;
         }
         else
         {

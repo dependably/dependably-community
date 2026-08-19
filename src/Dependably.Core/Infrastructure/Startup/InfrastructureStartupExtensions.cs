@@ -84,11 +84,13 @@ internal static partial class InfrastructureStartupExtensions
         builder.Services.AddSingleton(sp =>
             new MetadataResponseCache<RpmMergedRepodataKey, MergedRepodataCache>(
                 sp.GetRequiredService<Microsoft.Extensions.Caching.Memory.IMemoryCache>(),
-                MetadataCacheKeys.RpmMergedRepodata));
+                MetadataCacheKeys.RpmMergedRepodata,
+                sp.GetRequiredService<OrgCacheEpochStore>()));
         builder.Services.AddSingleton(sp =>
             new RenderedResponseCache<RpmLocalRepodataKey>(
                 sp.GetRequiredService<Microsoft.Extensions.Caching.Memory.IMemoryCache>(),
-                MetadataCacheKeys.RpmLocalRepodata));
+                MetadataCacheKeys.RpmLocalRepodata,
+                sp.GetRequiredService<OrgCacheEpochStore>()));
         builder.Services.AddSingleton(sp =>
             new RenderedResponseCache<MavenMetadataKey>(
                 sp.GetRequiredService<Microsoft.Extensions.Caching.Memory.IMemoryCache>(),

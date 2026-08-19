@@ -162,7 +162,7 @@
     { labelKey: 'audit.groups.tokens',       actions: ['token_created', 'token_revoked', 'service_token_created', 'service_token_revoked'] },
     { labelKey: 'audit.groups.usersInvites', actions: ['member_role_changed', 'member_removed', 'invite_created', 'invite_deleted'] },
     { labelKey: 'audit.groups.lists',        actions: ['allowlist_added', 'allowlist_removed', 'blocklist_added', 'blocklist_removed'] },
-    { labelKey: 'audit.groups.licenses',     actions: ['license_policy_mode_changed', 'license_allowlist_added', 'license_allowlist_removed', 'license_blocklist_added', 'license_blocklist_removed'] },
+    { labelKey: 'audit.groups.licenses',     actions: ['license_policy_mode_changed', 'license_allowlist_added', 'license_allowlist_updated', 'license_allowlist_removed', 'license_blocklist_added', 'license_blocklist_updated', 'license_blocklist_removed', 'package_note_added', 'package_note_updated', 'package_note_removed'] },
     { labelKey: 'audit.groups.claims',       actions: ['claim.create', 'claim.transition', 'claim.release'] },
     { labelKey: 'audit.groups.supplyChain',  actions: ['allowlist_blocked', 'conflict_resolved'] },
     { labelKey: 'audit.groups.upstream',     actions: ['upstream_response_too_large', 'ssrf_blocked', 'checksum_failure'] },
@@ -223,7 +223,7 @@
   }
 </script>
 
-<div class="page page-fluid">
+<div class="page">
   <div class="page-header">
     <h1 class="page-title">{$t('audit.title')}</h1>
   </div>

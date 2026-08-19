@@ -220,17 +220,22 @@ public sealed class PyPiSimpleIndexHandler(
             {
                 // Single-flight simple-index fetch — collapses N concurrent pip-install
                 // requests onto a single upstream call when a coordinate first warms up.
-                var response = await upstream.GetOrFetchMetadataAsync($"{source.Url}/simple/{purlName}/", source.AuthorizationHeader, ct);
+                var response = await upstream.GetOrFetchMetadataAsync(
+                    $"{source.Url}/simple/{purlName}/",
+                    UpstreamClient.MaxMetadataResponseBytes,
+                    source.AuthorizationHeader,
+                    PyPiSimpleIndexHelper.UpstreamAccept,
+                    ct);
                 if (!response.IsSuccessStatusCode)
                 {
                     continue;
                 }
 
-                // Parse only the anchor filename/sha256 pairs out of the upstream page — the
-                // served index is rendered from this parsed data below, never from the raw
-                // upstream body, so hostile upstream markup (inside or outside an anchor) never
-                // reaches the client.
-                upstreamEntries = PyPiSimpleIndexHelper.ParseUpstreamSimpleIndexLinks(response.BodyAsString());
+                // Parse only the file facts out of the upstream document — the served index is
+                // rendered from this parsed data below, never from the raw upstream body, so
+                // hostile upstream markup (inside or outside an anchor) never reaches the client.
+                upstreamEntries = PyPiSimpleIndexHelper.ParseUpstreamSimpleIndex(
+                    response.ContentType, response.BodyAsString());
                 upstreamOk = true;
                 break;
             }

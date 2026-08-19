@@ -1,6 +1,8 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Dependably.Api.NuGetProtocol;
 using Dependably.Infrastructure;
+using Dependably.Protocol;
 using NuGet.Versioning;
 
 namespace Dependably.Api;
@@ -23,8 +25,15 @@ internal static class NuGetRegistrationHelpers
     // a privately uploaded build of an upstream version doesn't appear twice. Rewrites upstream
     // leaf URLs (packageContent, @id) to local routes before returning. Public so unit tests can
     // verify the splice without spinning up the controller.
+    //
+    // upstreamGate carries the tenant's block policy and evaluation instant so the upstream
+    // leaves this splices around can be filtered for parity with the flatcontainer download
+    // path — see RewriteAllLeafUrls. Passing null skips that filtering, for local-only callers
+    // whose output never carries an upstream leaf; the parameter is required so that choice is
+    // made at the call site rather than inherited from a default.
     internal static string MergeLocalIntoUpstreamRegistration(
         string upstreamJson, IReadOnlyList<PackageVersion> localVersions, Package pkg, string id,
+        (BlockPolicy Policy, DateTimeOffset Now)? upstreamGate,
         string? baseUrl = null, IReadOnlyCollection<string>? upstreamBaseUrls = null)
     {
         string normalizedId = id.ToLowerInvariant();
@@ -41,9 +50,12 @@ internal static class NuGetRegistrationHelpers
             .Where(v => !v.Yanked && !upstreamVersionSet.Contains(v.Version))
             .ToList();
 
+        // Filters upstream leaves (and rewrites their URLs) before the local page below is
+        // appended, so the gate only ever walks upstream-sourced leaves — the freshly built
+        // local page isn't in the document yet.
         if (baseUrl is not null)
         {
-            RewriteAllLeafUrls(root, normalizedId, baseUrl, upstreamBaseUrls);
+            RewriteAllLeafUrls(root, normalizedId, baseUrl, upstreamGate, upstreamBaseUrls);
         }
 
         if (localOnly.Count == 0)
@@ -61,9 +73,12 @@ internal static class NuGetRegistrationHelpers
     // or non-string fields — upstream JSON is untrusted input.
     //
     // upstreamBaseUrls carries the org's configured upstream URLs so any URL that survives the
-    // rewrite can be host-pinned to one of them; see RewriteAllLeafUrls.
+    // rewrite can be host-pinned to one of them; see RewriteAllLeafUrls. upstreamGate carries the
+    // block policy that filters upstream leaves for download-path parity — see
+    // MergeLocalIntoUpstreamRegistration.
     internal static string RewriteRegistrationIndexUrls(
         string indexJson, string normalizedId, string baseUrl,
+        (BlockPolicy Policy, DateTimeOffset Now)? upstreamGate,
         IReadOnlyCollection<string>? upstreamBaseUrls = null)
     {
         JsonObject? root;
@@ -74,7 +89,7 @@ internal static class NuGetRegistrationHelpers
             return indexJson;
         }
 
-        RewriteAllLeafUrls(root, normalizedId, baseUrl, upstreamBaseUrls);
+        RewriteAllLeafUrls(root, normalizedId, baseUrl, upstreamGate, upstreamBaseUrls);
         return root.ToJsonString(RelaxedJsonOptions);
     }
 
@@ -119,9 +134,23 @@ internal static class NuGetRegistrationHelpers
     // logged it by URL. A null upstreamBaseUrls means no pin information was supplied (test seams
     // and local-only callers that never reach a client) and skips only the page-host check.
     //
+    // upstreamGate is deliberately NOT optional. A gate parameter that defaults to "no gate" is
+    // the same shape as a BlockGateRequest field left off a call site — it reads as policy off,
+    // it does not fail to compile, and this repo has been bitten by exactly that twice (see
+    // BlockGateRequestConstructionComplianceTests). Requiring it makes every caller state whether
+    // upstream leaves are gated, so a new call site cannot silently opt out by omission.
+    //
+    // A leaf that survives the URL rewrite is also removed when upstreamGate is supplied and its
+    // catalogEntry.published/listed facts fail the block gate — the download path (flatcontainer
+    // proxy-fetch) evaluates the same MinReleaseAgeHours cooldown and BlockDeprecatedMode from
+    // this same upstream metadata, so leaving the leaf listed here would advertise a version the
+    // download path is about to 403. A null upstreamGate (the default) skips that check: test
+    // seams and local-only callers that never reach a client.
+    //
     // Absent or non-object nodes are silently skipped — upstream JSON is untrusted input.
     internal static void RewriteAllLeafUrls(
         JsonObject root, string normalizedId, string baseUrl,
+        (BlockPolicy Policy, DateTimeOffset Now)? upstreamGate,
         IReadOnlyCollection<string>? upstreamBaseUrls = null)
     {
         if (root["items"] is not JsonArray pages)
@@ -151,7 +180,10 @@ internal static class NuGetRegistrationHelpers
 
             for (int i = leaves.Count - 1; i >= 0; i--)
             {
-                if (leaves[i] is JsonObject leafNode && !RewriteLeafNode(leafNode, normalizedId, baseUrl))
+                bool keep = leaves[i] is JsonObject leafNode
+                    && RewriteLeafNode(leafNode, normalizedId, baseUrl)
+                    && IsUpstreamLeafServable(leafNode, upstreamGate);
+                if (!keep)
                 {
                     leaves.RemoveAt(i);
                 }
@@ -164,6 +196,28 @@ internal static class NuGetRegistrationHelpers
                 pageNode["count"] = leaves.Count;
             }
         }
+    }
+
+    // True when an upstream-merged leaf passes the block gate on the facts a registration
+    // document carries for a coordinate nobody has fetched: catalogEntry.published (the
+    // release-age arm) and catalogEntry.listed (the deprecated arm). VersionFacts.ForUpstreamOnly
+    // leaves every other arm vacuous — no row exists yet to carry a manual state, a vuln scan, or
+    // a provenance verdict — so this is index/download parity for exactly the arms decidable from
+    // upstream metadata, not full parity with a fetched artifact's gate. A null upstreamGate means
+    // the caller supplied no policy context and every leaf passes, matching the no-op posture of
+    // IsPinnedToConfiguredUpstream's null upstreamBaseUrls just above.
+    private static bool IsUpstreamLeafServable(
+        JsonObject leaf, (BlockPolicy Policy, DateTimeOffset Now)? upstreamGate)
+    {
+        if (upstreamGate is not { } gate)
+        {
+            return true;
+        }
+
+        var facts = VersionFacts.ForUpstreamOnly(
+            deprecated: NuGetNupkgProxyHelper.ParseUnlistedDeprecation(leaf),
+            publishedAt: NuGetNupkgProxyHelper.ParsePublishedAt(leaf));
+        return BlockGateService.Evaluate(facts, gate.Policy, gate.Now).Servable;
     }
 
     // True when candidateUrl is absolute and its host matches one of the org's configured upstream

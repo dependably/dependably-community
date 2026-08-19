@@ -241,7 +241,7 @@ therefore sees every **unprotected** CI/CD variable before a human reviews anyth
 | --- | --- | --- | --- | --- |
 | `REGISTRY_URL` | none (not a secret) | no | no | every restore/publish job |
 | `REGISTRY_KEY` | **read / restore only** | **no** (deliberately) | yes | `.private-registry-setup` (npm `_authToken`, NuGet `ClearTextPassword`), `.apk-mirror-setup`, `private-registry-guard`, the `registry_key` BuildKit secret in `publish-image` |
-| `REGISTRY_PUBLISH_KEY` | **`publish:oci` + `publish:nuget`** | **yes** | yes | `publish-image` and `build-ci-tools` — the `docker login` before an image push; `publish-symbols` — `PUT $REGISTRY_URL/nuget/symbols` |
+| `REGISTRY_PUBLISH_KEY` | **read + publish** (`read:artifact` + `read:metadata` + `publish:*`, i.e. the token modal's **both** preset) | **yes** | yes | `publish-image` and `build-ci-tools` — the `docker login` before an image push; `publish-symbols` — `PUT $REGISTRY_URL/nuget/symbols` |
 
 `REGISTRY_KEY` stays unprotected on purpose: MR pipelines must resolve dependencies through
 the private feed rather than falling back to public registries, and restoring is read-only.
@@ -249,6 +249,20 @@ Leaking it costs read access to the mirror. `REGISTRY_PUBLISH_KEY` is protected,
 exposes it only on protected refs — a feature-branch MR pipeline cannot see it even when the
 MR fully controls the job script, and therefore cannot push an image or a NuGet symbol
 package.
+
+`REGISTRY_PUBLISH_KEY` must carry **read** capability as well as publish, and that is a
+property of the job rather than a convenience. `publish-image` builds and pushes in a single
+`docker buildx build --push`, and the base images that build pulls come from the same host it
+pushes to — the mirror and the push target are one registry. One command, one credential, both
+directions. A publish-only token fails that build at its first pull with
+`denied: Insufficient scope: pull:oci or read:artifact required.`, before any layer is uploaded.
+
+The failure is invisible until the registry itself is upgraded, which is what makes it worth
+stating here: `publish-image` runs against the *already deployed* instance, never the one it is
+building. A release that tightens the pull path therefore publishes successfully, and the release
+after it fails — the change and its consequence land one version apart. Splitting the credential
+further (a read token for the build, a publish token for the push) requires the job to stop using
+`--push` and build into the local image store first, which is a separate change.
 
 There is deliberately no third registry credential for the symbol push. `publish-symbols`
 reuses `REGISTRY_PUBLISH_KEY` rather than minting a `NUGET_SYMBOLS_PUBLISH_KEY`, so its
@@ -583,10 +597,10 @@ Storage has two tiers: **cache** (proxy artefacts, eviction-friendly) and **regi
 | `STAGING_DISK_FLOOR_BYTES` | `536870912` (512 MiB) | Hard floor: proxy fetches are rejected with 507 Insufficient Storage when available staging disk space falls below this value. When `Content-Length` is present the effective floor is `max(STAGING_DISK_FLOOR_BYTES, 2 × Content-Length)`. An explicit `0` is a deliberate opt-out that disables the guardrail entirely — both the absolute floor and the dynamic `2 × Content-Length` floor are skipped, and a startup `Warning` is logged (not recommended). A negative or unparseable value falls back to the default rather than disabling. |
 | `STAGING_DISK_POLL_INTERVAL_SECONDS` | `60` | How often the background staging-disk monitor samples free/used space on the staging volume and evaluates `STAGING_DISK_WARN_THRESHOLD_PERCENT`. Independent of the per-request `STAGING_DISK_FLOOR_BYTES` check, which is evaluated live on each proxy fetch. |
 | `DOTNET_GCHeapHardLimit` | — | Hex byte count; caps the .NET GC heap to protect the host from OOM-kill on memory-constrained hosts (Raspberry Pi, small ARM64 containers). Set to ~75 % of the container `mem_limit`; for a 1 GiB host use `0x30000000` (768 MiB), for 2 GiB use `0x60000000` (1.5 GiB), for 4 GiB use `0xC0000000` (3 GiB). See the `docker-compose.yml` environment block for a ready-to-uncomment example. This is a runtime hint — no code reads it; it is consumed by the .NET runtime before the process starts. |
-| `CACHE_EVICT_SCHEDULE` | `0 * * * *` | Cron schedule (standard 5-field) for the cache eviction pass. Defaults to hourly. When none of the three cap variables are set, a default 30-day age cap applies. |
-| `CACHE_MAX_AGE_DAYS` | `30` (when all three caps unset) | Evict proxy-cache artefacts not accessed within this many days. Setting this variable (or either of the two below) takes full control and suppresses the default 30-day cap. |
-| `CACHE_MAX_SIZE_BYTES` | — (no limit) | Evict oldest-accessed proxy-cache artefacts until total cache size is at or below this byte count. Setting this (or any other cap) suppresses the default age cap. |
-| `CACHE_MAX_ARTIFACTS` | — (no limit) | Evict oldest-accessed proxy-cache artefacts until the row count is at or below this value. Setting this (or any other cap) suppresses the default age cap. |
+| `CACHE_EVICT_SCHEDULE` | `0 * * * *` | Cron schedule (standard 5-field) for the cache eviction pass. Defaults to hourly. The pass evicts nothing unless at least one of the three cap variables below is set. |
+| `CACHE_MAX_AGE_DAYS` | — (no limit) | Evict proxy-cache artefacts not accessed within this many days. Opt-in: with this and the two caps below all unset, the eviction pass evicts nothing. A proxied version's only catalogue row lives on the cache plane, so a cap here expires packages that per-org `keep_versions` retention — the intended control, and unlimited by default — would have retained. |
+| `CACHE_MAX_SIZE_BYTES` | — (no limit) | Evict oldest-accessed proxy-cache artefacts until total cache size is at or below this byte count. |
+| `CACHE_MAX_ARTIFACTS` | — (no limit) | Evict oldest-accessed proxy-cache artefacts until the row count is at or below this value. |
 | `BLOB_STORE_SIZE_POLL_INTERVAL_SECONDS` | `300` | How often the blob-store size metric is refreshed. Set `0` to disable the background poller. |
 
 ### Uploads

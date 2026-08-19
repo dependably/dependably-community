@@ -857,6 +857,112 @@ public sealed class TerraformControllerProxyTests : IAsyncLifetime
                 sha256, SizeBytes: 14, blobKey, UpstreamUrl: null, Origin: CacheAccessOrigin.FirstFetch), default);
     }
 
+    // ── Index/download parity ───────────────────────────────────────────────
+
+    /// <summary>
+    /// A cached version this org has manually blocked must not be advertised. Before this, the
+    /// version index consulted no policy at all: a blocked provider stayed listed and
+    /// <c>terraform init</c> selected it, only to be refused at the archive.
+    /// </summary>
+    [Fact]
+    public async Task VersionIndex_ManuallyBlockedCachedVersion_IsNotAdvertised()
+    {
+        await SeedUpstreamAsync(MasterBase, mirror: true, secret: null);
+        await SeedCachedArchiveAsync(new string('c', 64));
+        await SetPassthroughAsync(enabled: false);
+        await BlockCachedVersionAsync();
+
+        var result = await BuildController().HandleMirrorRequest($"{Provider}/index.json", default);
+
+        var versions = JsonDocument.Parse(Assert.IsType<ContentResult>(result).Content!)
+            .RootElement.GetProperty("versions");
+        Assert.False(versions.TryGetProperty(Version, out _));
+    }
+
+    /// <summary>
+    /// The blocked set applies to the upstream-derived list too. The index used to treat local
+    /// facts as a FALLBACK — consulted only when the registry could not answer — so a reachable
+    /// upstream re-advertised a version this org had blocked, and the filter would have appeared
+    /// to work in every test where upstream happened to be down.
+    /// </summary>
+    [Fact]
+    public async Task VersionIndex_BlockedVersion_IsWithheldEvenWhenUpstreamAnswers()
+    {
+        await SeedUpstreamAsync(MasterBase, mirror: true, secret: null);
+        _http.Route($"{MasterBase}/{Provider}/index.json", Json("{\"versions\":{\"" + Version + "\":{},\"9.9.9\":{}}}"));
+        await SeedCachedArchiveAsync(new string('c', 64));
+        await BlockCachedVersionAsync();
+
+        var result = await BuildController().HandleMirrorRequest($"{Provider}/index.json", default);
+
+        var versions = JsonDocument.Parse(Assert.IsType<ContentResult>(result).Content!)
+            .RootElement.GetProperty("versions");
+        Assert.False(versions.TryGetProperty(Version, out _));
+        // An upstream version this org holds no facts about is still advertised — it is decided at
+        // first fetch, not here — so this is a filter, not a blanket drop of the upstream list.
+        Assert.True(versions.TryGetProperty("9.9.9", out _));
+    }
+
+    /// <summary>
+    /// The control: the same cached version with no block is advertised. Without it, a filter that
+    /// dropped every cached version would satisfy the two tests above.
+    /// </summary>
+    [Fact]
+    public async Task VersionIndex_UnblockedCachedVersion_IsAdvertised()
+    {
+        await SeedUpstreamAsync(MasterBase, mirror: true, secret: null);
+        await SeedCachedArchiveAsync(new string('c', 64));
+        await SetPassthroughAsync(enabled: false);
+
+        var result = await BuildController().HandleMirrorRequest($"{Provider}/index.json", default);
+
+        var versions = JsonDocument.Parse(Assert.IsType<ContentResult>(result).Content!)
+            .RootElement.GetProperty("versions");
+        Assert.True(versions.TryGetProperty(Version, out _));
+    }
+
+    /// <summary>
+    /// Holding only blocked versions is a different answer from holding none. The provider exists
+    /// here and every version of it is withheld by policy, which is an empty index — reporting it
+    /// as an upstream failure would send an operator hunting a connectivity problem instead of
+    /// reading their own policy.
+    /// </summary>
+    [Fact]
+    public async Task VersionIndex_AllCachedVersionsBlockedAndUpstreamDown_IsEmptyNotAnUpstreamFailure()
+    {
+        await SeedUpstreamAsync(MasterBase, mirror: true, secret: null);
+        await SeedCachedArchiveAsync(new string('c', 64));
+        _http.Route($"{MasterBase}/{Provider}/index.json",
+            () => new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
+        await BlockCachedVersionAsync();
+
+        var result = await BuildController().HandleMirrorRequest($"{Provider}/index.json", default);
+
+        var content = Assert.IsType<ContentResult>(result);
+        var versions = JsonDocument.Parse(content.Content!).RootElement.GetProperty("versions");
+        Assert.Empty(versions.EnumerateObject());
+    }
+
+    // Manually blocks this org's cached row for the seeded coordinate — the one gate arm that
+    // needs no timestamp, so it exercises the filter on an ecosystem whose proxy fetch records
+    // no publish time.
+    private async Task BlockCachedVersionAsync()
+    {
+        await using var conn = await _db.OpenAsync();
+        int rows = await conn.ExecuteAsync(
+            """
+            UPDATE tenant_artifact_access SET manual_block_state = 'blocked'
+            WHERE org_id = @orgId
+              AND cache_artifact_id IN (
+                  SELECT id FROM cache_artifact WHERE ecosystem = 'terraform' AND name = @name)
+            """,
+            new { orgId = _orgId, name = Provider });
+
+        // A silent no-op would leave the version unblocked and make every assertion that follows
+        // pass for the wrong reason.
+        Assert.Equal(1, rows);
+    }
+
     // ── Terraform signature verification (provenance) ────────────────────────
 
     [Fact]
@@ -1130,6 +1236,7 @@ public sealed class TerraformControllerProxyTests : IAsyncLifetime
             CacheRecorder: cacheRecorder,
             CacheArtifacts: cacheArtifacts,
             TenantAccess: tenantAccess,
+            Vulns: new VulnerabilityRepository(_db, time),
             Reserved: new ReservedNamespaceService(
                 _db, new MemoryCache(new MemoryCacheOptions()), TimeProvider.System),
             BlockGate: TestBlockGate.Create(_db, time, _trustStore),

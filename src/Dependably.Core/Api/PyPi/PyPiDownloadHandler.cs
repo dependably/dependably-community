@@ -340,10 +340,10 @@ public sealed class PyPiDownloadHandler(
         }
 
         var v = hit.Version;
-        return await blockGate.EvaluateAsync(
-                BlockGateRequest.For(orgId, "pypi", v, token, settings, sourceIp), ct)
-            == BlockDecision.Blocked
-            ? new StatusCodeResult(StatusCodes.Status403Forbidden)
+        var blockOutcome = await blockGate.EvaluateAsync(
+                BlockGateRequest.For(orgId, "pypi", v, token, settings, sourceIp), ct);
+        return blockOutcome == BlockDecision.Blocked
+            ? BlockRefusalResult.Forbidden(httpContext, blockOutcome)
             : await TryServeCachedBlobAsync(httpContext, hit, file, orgId, token, sourceIp, ct);
     }
 
@@ -390,11 +390,12 @@ public sealed class PyPiDownloadHandler(
             return new NotFoundResult();
         }
 
+        var blockOutcome = await blockGate.EvaluateAsync(
+            BlockGateRequest.ForProxyCacheFacts(orgId, "pypi", caFacts, token, settings, sourceIp), ct);
+
         // Ternary form satisfies IDE0046: last guard before a single return expression.
-        return await (await blockGate.EvaluateAsync(
-                BlockGateRequest.ForProxyCacheFacts(orgId, "pypi", caFacts, token, settings, sourceIp), ct)
-            == BlockDecision.Blocked
-            ? Task.FromResult<IActionResult?>(new StatusCodeResult(StatusCodes.Status403Forbidden))
+        return await (blockOutcome == BlockDecision.Blocked
+            ? Task.FromResult<IActionResult?>(BlockRefusalResult.Forbidden(httpContext, blockOutcome))
             : TryServeProxyCachedBlobAsync(httpContext, caFacts, file, orgId, token, sourceIp, ct));
     }
 

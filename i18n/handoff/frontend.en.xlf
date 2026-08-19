@@ -73,10 +73,22 @@
         <target>Bloqué (EPSS)</target>
       </segment>
     </unit>
+    <unit id="activity.events.blockedInstallScript">
+      <segment state="translated">
+        <source>Blocked (install script)</source>
+        <target>Bloqué (script d&apos;installation)</target>
+      </segment>
+    </unit>
     <unit id="activity.events.blockedKev">
       <segment state="translated">
         <source>Blocked (KEV)</source>
         <target>Bloqué (KEV)</target>
+      </segment>
+    </unit>
+    <unit id="activity.events.blockedLicense">
+      <segment state="translated">
+        <source>Blocked (license)</source>
+        <target>Bloqué (licence)</target>
       </segment>
     </unit>
     <unit id="activity.events.blockedMalicious">
@@ -91,10 +103,22 @@
         <target>Bloqué (manuel)</target>
       </segment>
     </unit>
+    <unit id="activity.events.blockedProvenance">
+      <segment state="translated">
+        <source>Blocked (provenance)</source>
+        <target>Bloqué (provenance)</target>
+      </segment>
+    </unit>
     <unit id="activity.events.blockedReleaseAge">
       <segment state="translated">
         <source>Blocked (release age)</source>
         <target>Bloqué (âge de version)</target>
+      </segment>
+    </unit>
+    <unit id="activity.events.blockedRevoked">
+      <segment state="translated">
+        <source>Blocked (revoked)</source>
+        <target>Bloqué (révoqué)</target>
       </segment>
     </unit>
     <unit id="activity.events.blockedVulnScore">
@@ -523,6 +547,12 @@
         <target>Entrée de liste d&apos;autorisation de licences supprimée</target>
       </segment>
     </unit>
+    <unit id="audit.actions.license_allowlist_updated">
+      <segment state="translated">
+        <source>License allowlist entry updated</source>
+        <target>Entrée de liste d&apos;autorisation de licence modifiée</target>
+      </segment>
+    </unit>
     <unit id="audit.actions.license_blocklist_added">
       <segment state="translated">
         <source>License blocklist entry added</source>
@@ -533,6 +563,12 @@
       <segment state="translated">
         <source>License blocklist entry removed</source>
         <target>Entrée de liste de blocage de licences supprimée</target>
+      </segment>
+    </unit>
+    <unit id="audit.actions.license_blocklist_updated">
+      <segment state="translated">
+        <source>License blocklist entry updated</source>
+        <target>Entrée de liste de blocage de licence modifiée</target>
       </segment>
     </unit>
     <unit id="audit.actions.license_policy_mode_changed">
@@ -593,6 +629,24 @@
       <segment state="translated">
         <source>Org settings updated</source>
         <target>Paramètres d&apos;org. mis à jour</target>
+      </segment>
+    </unit>
+    <unit id="audit.actions.package_note_added">
+      <segment state="translated">
+        <source>Package note added</source>
+        <target>Note de paquet ajoutée</target>
+      </segment>
+    </unit>
+    <unit id="audit.actions.package_note_removed">
+      <segment state="translated">
+        <source>Package note removed</source>
+        <target>Note de paquet supprimée</target>
+      </segment>
+    </unit>
+    <unit id="audit.actions.package_note_updated">
+      <segment state="translated">
+        <source>Package note updated</source>
+        <target>Note de paquet modifiée</target>
       </segment>
     </unit>
     <unit id="audit.actions.proxy_settings_updated">
@@ -1879,6 +1933,36 @@
         <target>7 j</target>
       </segment>
     </unit>
+    <unit id="error.license.dispositionInvalid">
+      <segment state="translated">
+        <source>Disposition must be one of: allowed, conditional.</source>
+        <target>La disposition doit être : allowed ou conditional.</target>
+      </segment>
+    </unit>
+    <unit id="error.license.noteTooLong">
+      <segment state="translated">
+        <source>Note is too long.</source>
+        <target>La note est trop longue.</target>
+      </segment>
+    </unit>
+    <unit id="error.packageNote.coordinateRequired">
+      <segment state="translated">
+        <source>Ecosystem and package name are required.</source>
+        <target>L&apos;écosystème et le nom du paquet sont requis.</target>
+      </segment>
+    </unit>
+    <unit id="error.packageNote.noteRequired">
+      <segment state="translated">
+        <source>Note text is required.</source>
+        <target>Le texte de la note est requis.</target>
+      </segment>
+    </unit>
+    <unit id="error.packageNote.noteTooLong">
+      <segment state="translated">
+        <source>Note is too long.</source>
+        <target>La note est trop longue.</target>
+      </segment>
+    </unit>
     <unit id="globalSearch.empty">
       <segment state="translated">
         <source>No results</source>
@@ -2059,16 +2143,52 @@
         <target>Attributs</target>
       </segment>
     </unit>
+    <unit id="licensePolicy.columns.condition">
+      <segment state="translated">
+        <source>Condition</source>
+        <target>Condition</target>
+      </segment>
+    </unit>
     <unit id="licensePolicy.columns.name">
       <segment state="translated">
         <source>Name</source>
         <target>Nom</target>
       </segment>
     </unit>
+    <unit id="licensePolicy.columns.note">
+      <segment state="translated">
+        <source>Note</source>
+        <target>Note</target>
+      </segment>
+    </unit>
     <unit id="licensePolicy.columns.spdx">
       <segment state="translated">
         <source>SPDX</source>
         <target>SPDX</target>
+      </segment>
+    </unit>
+    <unit id="licensePolicy.conditional.empty">
+      <segment state="translated">
+        <source>No licenses are marked conditional.</source>
+        <target>Aucune licence marquée conditionnelle.</target>
+      </segment>
+    </unit>
+    <unit id="licensePolicy.conditional.intro">
+      <segment state="translated">
+        <source>These licenses are permitted, but your organization recorded a condition on each. Read the condition before depending on a package that carries one.</source>
+        <target>Ces licences sont autorisées, mais votre organisation a consigné une condition pour chacune. Lisez la condition avant de dépendre d&apos;un paquet qui en porte une.</target>
+      </segment>
+    </unit>
+    <unit id="licensePolicy.conditional.noCondition">
+      <segment state="translated">
+        <source>No condition recorded — ask an administrator.</source>
+        <target>Aucune condition enregistrée — contactez un administrateur.</target>
+      </segment>
+    </unit>
+    <unit id="licensePolicy.conditional.title">
+      <segment state="translated">
+        <source>Conditional licenses</source>
+        <target>Licences conditionnelles</target>
       </segment>
     </unit>
     <unit id="licensePolicy.intro.block">
@@ -2225,6 +2345,12 @@
       <segment state="translated">
         <source>Not allowed by policy ({spdx})</source>
         <target>Non autorisée par la politique ({spdx})</target>
+      </segment>
+    </unit>
+    <unit id="lookup.license.conditional">
+      <segment state="translated">
+        <source>Permitted with a condition ({spdx}). Check the license policy before adopting.</source>
+        <target>Autorisée sous condition ({spdx}). Consultez la politique de licences avant l&apos;adoption.</target>
       </segment>
     </unit>
     <unit id="lookup.license.informational">
@@ -2561,6 +2687,60 @@
       <segment state="translated">
         <source>Vulnerabilities</source>
         <target>Vulnérabilités</target>
+      </segment>
+    </unit>
+    <unit id="packageNotes.add">
+      <segment state="translated">
+        <source>Add note</source>
+        <target>Ajouter une note</target>
+      </segment>
+    </unit>
+    <unit id="packageNotes.empty">
+      <segment state="translated">
+        <source>No notes on this package.</source>
+        <target>Aucune note sur ce paquet.</target>
+      </segment>
+    </unit>
+    <unit id="packageNotes.intro">
+      <segment state="translated">
+        <source>Compliance notes an administrator has left on this package — including why it was accepted under a conditional license.</source>
+        <target>Notes de conformité laissées par un administrateur sur ce paquet — y compris la raison pour laquelle il a été accepté sous une licence conditionnelle.</target>
+      </segment>
+    </unit>
+    <unit id="packageNotes.placeholder">
+      <segment state="translated">
+        <source>Add a note about this package</source>
+        <target>Ajouter une note sur ce paquet</target>
+      </segment>
+    </unit>
+    <unit id="packageNotes.removeConfirm">
+      <segment state="translated">
+        <source>Remove this note?</source>
+        <target>Supprimer cette note ?</target>
+      </segment>
+    </unit>
+    <unit id="packageNotes.scopedToPackage">
+      <segment state="translated">
+        <source>All versions</source>
+        <target>Toutes les versions</target>
+      </segment>
+    </unit>
+    <unit id="packageNotes.scopedToVersion">
+      <segment state="translated">
+        <source>Version {version}</source>
+        <target>Version {version}</target>
+      </segment>
+    </unit>
+    <unit id="packageNotes.title">
+      <segment state="translated">
+        <source>Notes</source>
+        <target>Notes</target>
+      </segment>
+    </unit>
+    <unit id="packageNotes.unknownAuthor">
+      <segment state="translated">
+        <source>Unknown author</source>
+        <target>Auteur inconnu</target>
       </segment>
     </unit>
     <unit id="packages.abandoned.help">
@@ -3515,6 +3695,12 @@
       <segment state="translated">
         <source>Blocklisted</source>
         <target>Sur la liste de blocage</target>
+      </segment>
+    </unit>
+    <unit id="risk.reason.conditional">
+      <segment state="translated">
+        <source>conditional</source>
+        <target>conditionnelle</target>
       </segment>
     </unit>
     <unit id="risk.reason.unknown">
@@ -4907,6 +5093,12 @@
         <target>Intégrations</target>
       </segment>
     </unit>
+    <unit id="settings.licenses.addNote">
+      <segment state="translated">
+        <source>Add a note</source>
+        <target>Ajouter une note</target>
+      </segment>
+    </unit>
     <unit id="settings.licenses.allow.addEntry">
       <segment state="translated">
         <source>Add license</source>
@@ -4949,10 +5141,28 @@
         <target>L&apos;application est définie sur Bloquer mais aucune licence n&apos;est autorisée. Toutes les publications et tous les téléchargements proxy seront rejetés tant que vous n&apos;aurez pas approuvé au moins une licence ci-dessous.</target>
       </segment>
     </unit>
+    <unit id="settings.licenses.blockNotePlaceholder">
+      <segment state="translated">
+        <source>Why is this license refused?</source>
+        <target>Pourquoi cette licence est-elle refusée ?</target>
+      </segment>
+    </unit>
     <unit id="settings.licenses.columns.added">
       <segment state="translated">
         <source>Added</source>
         <target>Ajoutée</target>
+      </segment>
+    </unit>
+    <unit id="settings.licenses.columns.condition">
+      <segment state="translated">
+        <source>Condition</source>
+        <target>Condition</target>
+      </segment>
+    </unit>
+    <unit id="settings.licenses.columns.note">
+      <segment state="translated">
+        <source>Note</source>
+        <target>Note</target>
       </segment>
     </unit>
     <unit id="settings.licenses.columns.spdx">
@@ -4961,10 +5171,58 @@
         <target>Identifiant SPDX</target>
       </segment>
     </unit>
+    <unit id="settings.licenses.conditional.addEntry">
+      <segment state="translated">
+        <source>Add license</source>
+        <target>Ajouter une licence</target>
+      </segment>
+    </unit>
+    <unit id="settings.licenses.conditional.empty">
+      <segment state="translated">
+        <source>No conditional licenses configured.</source>
+        <target>Aucune licence conditionnelle configurée.</target>
+      </segment>
+    </unit>
+    <unit id="settings.licenses.conditional.intro">
+      <segment state="translated">
+        <source>Licenses that are acceptable only in some contexts. They are served and published like allowed licenses; the difference is that every package carrying one is listed under License risk for review. Record the condition in the note so the next person does not have to ask.</source>
+        <target>Licences acceptables uniquement dans certains contextes. Elles sont servies et publiées comme les licences autorisées ; la différence est que chaque paquet qui en porte une apparaît sous Risque de licence pour révision. Consignez la condition dans la note afin que la prochaine personne n&apos;ait pas à la demander.</target>
+      </segment>
+    </unit>
+    <unit id="settings.licenses.conditional.title">
+      <segment state="translated">
+        <source>Conditional licenses</source>
+        <target>Licences conditionnelles</target>
+      </segment>
+    </unit>
+    <unit id="settings.licenses.conditionMissing">
+      <segment state="translated">
+        <source>No condition recorded</source>
+        <target>Aucune condition enregistrée</target>
+      </segment>
+    </unit>
+    <unit id="settings.licenses.conditionPlaceholder">
+      <segment state="translated">
+        <source>What makes this license acceptable, and when?</source>
+        <target>Qu&apos;est-ce qui rend cette licence acceptable, et quand ?</target>
+      </segment>
+    </unit>
     <unit id="settings.licenses.intro">
       <segment state="translated">
         <source>Govern which SPDX licenses are permitted for packages in this tenant. License metadata is extracted on publish and on proxy cache fill.</source>
         <target>Définissez les licences SPDX autorisées pour les paquets de ce locataire. Les métadonnées de licence sont extraites à la publication et lors du remplissage du cache proxy.</target>
+      </segment>
+    </unit>
+    <unit id="settings.licenses.makeAllowed">
+      <segment state="translated">
+        <source>Make allowed</source>
+        <target>Rendre autorisée</target>
+      </segment>
+    </unit>
+    <unit id="settings.licenses.makeConditional">
+      <segment state="translated">
+        <source>Make conditional</source>
+        <target>Rendre conditionnelle</target>
       </segment>
     </unit>
     <unit id="settings.licenses.modal.addAllowTitle">
@@ -4977,6 +5235,18 @@
       <segment state="translated">
         <source>Add blocked license</source>
         <target>Ajouter une licence bloquée</target>
+      </segment>
+    </unit>
+    <unit id="settings.licenses.modal.addConditionalTitle">
+      <segment state="translated">
+        <source>Add conditional license</source>
+        <target>Ajouter une licence conditionnelle</target>
+      </segment>
+    </unit>
+    <unit id="settings.licenses.modal.conditionalHint">
+      <segment state="translated">
+        <source>The license will serve normally. Add the condition as a note once it is in the list.</source>
+        <target>La licence sera servie normalement. Ajoutez la condition en note une fois l&apos;entrée créée.</target>
       </segment>
     </unit>
     <unit id="settings.licenses.modal.spdxHint">
@@ -5039,6 +5309,12 @@
         <target>Avertir</target>
       </segment>
     </unit>
+    <unit id="settings.licenses.notePlaceholder">
+      <segment state="translated">
+        <source>Why is this license allowed?</source>
+        <target>Pourquoi cette licence est-elle autorisée ?</target>
+      </segment>
+    </unit>
     <unit id="settings.licenses.removeConfirm">
       <segment state="translated">
         <source>Remove this license entry?</source>
@@ -5085,6 +5361,12 @@
       <segment state="translated">
         <source>Packages</source>
         <target>Paquets</target>
+      </segment>
+    </unit>
+    <unit id="settings.licenses.review.conditional">
+      <segment state="translated">
+        <source>Conditional</source>
+        <target>Conditionnelle</target>
       </segment>
     </unit>
     <unit id="settings.licenses.review.deprecated">
@@ -5963,6 +6245,18 @@ dotnet/</target>
       <segment state="translated">
         <source>Activity retention days</source>
         <target>Jours de rétention des activités</target>
+      </segment>
+    </unit>
+    <unit id="settings.retention.activityDaysHint">
+      <segment state="translated">
+        <source>Unlike the limits above, empty is not unlimited here: activity rows carry per-download IP data, so they are bounded by the ACTIVITY_RETENTION_DAYS instance default.</source>
+        <target>Contrairement aux limites ci-dessus, un champ vide n&apos;est pas illimité ici : les lignes d&apos;activité contiennent des adresses IP par téléchargement, elles sont donc limitées par la valeur ACTIVITY_RETENTION_DAYS de l&apos;instance.</target>
+      </segment>
+    </unit>
+    <unit id="settings.retention.instanceDefault">
+      <segment state="translated">
+        <source>instance default: {days} days</source>
+        <target>valeur par défaut de l&apos;instance : {days} jours</target>
       </segment>
     </unit>
     <unit id="settings.retention.keepDays">
@@ -9517,6 +9811,12 @@ dotnet/</target>
         <target>Cette licence figure sur la liste de blocage de licences de l&apos;organisation.</target>
       </segment>
     </unit>
+    <unit id="versionDetail.badges.licenseReviewHelp">
+      <segment state="translated">
+        <source>This license is permitted with a condition. See the license policy page.</source>
+        <target>Cette licence est autorisée sous condition. Voir la page de politique de licences.</target>
+      </segment>
+    </unit>
     <unit id="versionDetail.badges.licenseUnknown">
       <segment state="translated">
         <source>unknown</source>
@@ -9913,10 +10213,28 @@ dotnet/</target>
         <target>Licence</target>
       </segment>
     </unit>
-    <unit id="versionDetail.pillars.licenseCount">
+    <unit id="versionDetail.pillars.licenseBlocked">
       <segment state="translated">
-        <source>{count, plural, =0 {no risk} one {# version} other {# versions}}</source>
-        <target>{count, plural, =0 {aucun risque} one {# version} other {# versions}}</target>
+        <source>Blocked license</source>
+        <target>Licence bloquée</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.pillars.licenseClean">
+      <segment state="translated">
+        <source>No risk</source>
+        <target>Aucun risque</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.pillars.licenseReview">
+      <segment state="translated">
+        <source>Review</source>
+        <target>À revoir</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.pillars.licenseUndeclared">
+      <segment state="translated">
+        <source>Not declared</source>
+        <target>Non déclarée</target>
       </segment>
     </unit>
     <unit id="versionDetail.pillars.noAdvisories">
@@ -9935,6 +10253,12 @@ dotnet/</target>
       <segment state="translated">
         <source>Security</source>
         <target>Sécurité</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.pillars.subject">
+      <segment state="translated">
+        <source>For version</source>
+        <target>Pour la version</target>
       </segment>
     </unit>
     <unit id="versionDetail.rescan">

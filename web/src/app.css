@@ -331,16 +331,11 @@ tr:hover td { background: var(--bg2); }
   margin-bottom: 10px;
 }
 
-/* Page width rule (one rule, applied everywhere). Pick exactly one per page;
-   do not mix or invent a fourth width.
-     .page        forms / narrow reading    max 1100px, centered
-     .page-wide   dashboard well            max 1320px, centered
-     .page-fluid  list / data-table pages   full-bleed, 24px gutters
-   The dashboard uses the centered well on purpose; list and data-table pages —
-   including the package version-detail table — are full-bleed. */
-.page { padding: 24px; max-width: 1100px; margin: 0 auto; }
-.page-wide { max-width: 1320px; }
-.page-fluid { max-width: none; }
+/* Page width rule (one rule, applied everywhere). Every page is full-bleed and
+   left-aligned: the shell sets gutters only, never a centred well and never a
+   width cap. Content that needs a readable measure caps the inner element — a
+   form, a prose block, a dropzone — not the page container. */
+.page { padding: 24px; }
 .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
 .page-title { font-size: 20px; font-weight: 700; margin: 0; }
 

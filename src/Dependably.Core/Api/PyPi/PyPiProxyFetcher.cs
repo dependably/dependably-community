@@ -36,6 +36,11 @@ public sealed class PyPiProxyFetcher(
         string purlCheck = PurlNormalizer.NameOnly("pypi", parsed.PurlName);
         if (settings.AllowlistMode && !await allowlist.IsAllowedAsync(orgId, purlCheck, ct))
         {
+            // Recorded for the same reason the blocklist arm below is: an allowlist miss is an
+            // operator's own configuration refusing a request, and it previously produced a bare
+            // 403 with no activity row — invisible in the feed the operator would check first.
+            await audit.LogActivityAsync(orgId, "pypi", purlCheck, "blocked", token?.AuditActorId,
+                actorLabel: token?.AuditActorLabel, actorKind: token?.ActorKind, sourceIp: sourceIp, ct: ct);
             return new StatusCodeResult(StatusCodes.Status403Forbidden);
         }
 
@@ -98,7 +103,7 @@ public sealed class PyPiProxyFetcher(
                 // matching npm/NuGet/Maven. This must NOT key on fetched.IsHit: that is the GLOBAL
                 // content-addressed blob-store hit, so an org first-fetching bytes another tenant
                 // already cached would otherwise adopt with no gate at all.
-                var firstFetchArgs = new FirstFetchArgs(file, parsed, upstreamSha256, cacheAccess, upstreamUrl);
+                var firstFetchArgs = new FirstFetchArgs(file, parsed, upstreamSha256, cacheAccess, upstreamUrl, httpContext);
                 var firstFetchBlock = await RecordAndScanFirstFetchAsync(firstFetchArgs, fetched.Blob, gate, ct);
                 if (firstFetchBlock is not null)
                 {
@@ -302,7 +307,9 @@ public sealed class PyPiProxyFetcher(
     // checksum/URL, and the not-yet-recorded cache-access record) that RecordAndScanFirstFetchAsync
     // threads through to the shared proxy pipeline, which adopts it only after its gates pass.
     private sealed record FirstFetchArgs(
-        string File, PyPiFilename Parsed, string? UpstreamSha256, CacheAccess CacheAccess, string UpstreamUrl);
+        string File, PyPiFilename Parsed, string? UpstreamSha256, CacheAccess CacheAccess, string UpstreamUrl,
+        // Carried so a first-fetch refusal can name the arm that produced it on the response.
+        HttpContext HttpContext);
 
     // bytes are cached under BlobKeys.Proxy(sha) which validates
     // 64-char lowercase hex; Serilog uses RenderedCompactJsonFormatter (CRLF-safe).
@@ -362,7 +369,9 @@ public sealed class PyPiProxyFetcher(
             VerifyProvenanceMode: gate.Settings.VerifyPyPiAttestations,
             UpstreamUrl: args.UpstreamUrl,
             LicenseEnforcementMode: gate.Settings.LicenseEnforcementMode), ct);
-        return result.Decision == BlockDecision.Blocked ? new StatusCodeResult(StatusCodes.Status403Forbidden) : null;
+        return result.Decision == BlockDecision.Blocked
+            ? BlockRefusalResult.Forbidden(args.HttpContext, new BlockOutcome(result.Decision, result.Arm))
+            : null;
     }
 
     // Runs PEP 740 attestation verification for a proxy-origin PyPI file when the tenant enabled it
@@ -461,9 +470,16 @@ public sealed class PyPiProxyFetcher(
             // This simple-index fetch fires inline with every PyPI file-download path,
             // so concurrent CI fan-out would otherwise stampede here too. Route through
             // single-flight.
-            var resp = await upstream.GetOrFetchMetadataAsync(simpleIndexUrl, source.AuthorizationHeader, ct);
+            // Same Accept as the index render, so both consumers of this URL keep sharing one
+            // single-flight slot and one cache entry instead of splitting into two variants.
+            var resp = await upstream.GetOrFetchMetadataAsync(
+                simpleIndexUrl,
+                UpstreamClient.MaxMetadataResponseBytes,
+                source.AuthorizationHeader,
+                PyPiSimpleIndexHelper.UpstreamAccept,
+                ct);
             return resp.IsSuccessStatusCode
-                ? ResolvePyPiHref(simpleIndexUrl, resp.BodyAsString(), filename)
+                ? ResolvePyPiUrl(simpleIndexUrl, resp.ContentType, resp.BodyAsString(), filename)
                 : null;
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or OperationCanceledException or RegexMatchTimeoutException)
@@ -476,6 +492,33 @@ public sealed class PyPiProxyFetcher(
                 System.Diagnostics.Activity.Current?.TraceId.ToString());
             return null;
         }
+    }
+
+    /// <summary>
+    /// Extracts the download URL and optional SHA-256 for <paramref name="filename"/> from an
+    /// upstream simple-index document in either representation, resolving a relative URL against
+    /// <paramref name="simpleIndexUrl"/>. Returns null when the file isn't in the index or its
+    /// URL can't be resolved.
+    ///
+    /// The PEP 691 branch reads <c>url</c> and <c>hashes.sha256</c> as fields, which is both
+    /// cheaper and safer than the HTML branch's regex over an attacker-controlled body; the HTML
+    /// branch remains for upstreams that answer PEP 503 regardless of the Accept sent.
+    /// </summary>
+    internal static (string Url, string? Sha256Hex)? ResolvePyPiUrl(
+        string simpleIndexUrl, string? contentType, string body, string filename)
+    {
+        if (contentType is null
+            || !contentType.Contains(PyPiSimpleIndexHelper.JsonContentType, StringComparison.OrdinalIgnoreCase))
+        {
+            return ResolvePyPiHref(simpleIndexUrl, body, filename);
+        }
+
+        var entry = PyPiSimpleIndexHelper.ParseUpstreamSimpleIndexJson(body)
+            .FirstOrDefault(e => string.Equals(e.Filename, filename, StringComparison.OrdinalIgnoreCase));
+        return entry?.Url is { Length: > 0 } url
+            && Uri.TryCreate(new Uri(simpleIndexUrl), url, out var resolved)
+                ? (resolved.ToString(), entry.Sha256?.ToLowerInvariant())
+                : null;
     }
 
     /// <summary>

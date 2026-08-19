@@ -20,6 +20,33 @@ namespace Dependably.Tests.Unit.Infrastructure.Mail;
 [Trait("Category", "Unit")]
 public sealed class SecurityEventEmailTests
 {
+    /// <summary>
+    /// Production's retry schedule with the intervals removed, for the test whose subject is the
+    /// terminal outcome of the retry chain rather than its pacing. The same four attempts run and
+    /// the bookkeeping is identical; what disappears is the need to drive a clock from the test to
+    /// let the chain proceed, which is a race the test cannot win reliably on a loaded machine —
+    /// every advance spent before the single-reader loop registers its next timer is lost, and
+    /// when the advance budget runs out the clock freezes with the job still parked on it. The
+    /// intervals themselves are pinned where they belong, in the tests that assert on backoff.
+    /// </summary>
+    private static readonly TimeSpan[] NoBackoff =
+        [TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero];
+
+    private static async Task WaitAsync(Func<bool> condition, TimeSpan? timeout = null)
+    {
+        // now-ok: polling deadline awaiting real async completion of the queue's consumer loop.
+        var deadline = DateTimeOffset.UtcNow + (timeout ?? TimeSpan.FromSeconds(10));
+        while (!condition() && DateTimeOffset.UtcNow < deadline)
+        {
+            await Task.Delay(20);
+        }
+
+        if (!condition())
+        {
+            throw new TimeoutException("Condition never satisfied.");
+        }
+    }
+
     private static IStringLocalizer<SharedResource> RealLocalizer()
     {
         var services = new ServiceCollection();
@@ -330,7 +357,9 @@ public sealed class SecurityEventEmailTests
     {
         var clock = new FakeTimeProvider(TestTime.KnownNow);
         var sender = new FakeMailSender();
-        var queue = new EmailDeliveryQueue(sender, clock, NullLogger<EmailDeliveryQueue>.Instance);
+        var queue = new EmailDeliveryQueue(
+            sender, clock, NullLogger<EmailDeliveryQueue>.Instance,
+            EmailDeliveryQueue.DefaultCapacity, NoBackoff);
         var service = new TransactionalEmailService(
             queue, BuildInstance(EnabledConfig("smtp.example.com"), clock), EmptyAppConfig(), RealLocalizer(), NullLogger<TransactionalEmailService>.Instance);
 
@@ -340,14 +369,12 @@ public sealed class SecurityEventEmailTests
         service.EnqueueMfaEnabled("good-user@example.com", "en", clock.GetUtcNow());
         service.EnqueuePasswordChanged("bad-user@example.com", "en", clock.GetUtcNow());
 
-        // The good job delivers on its first attempt; the bad one burns its full 1s/5s/30s retry
-        // backoff before its terminal failure is recorded. Pump the frozen clock in a loop that
-        // keeps advancing until BOTH terminal outcomes are observed — advancing a fixed number of
-        // times instead races the single-reader loop: an Advance issued before the loop registers
-        // its next backoff timer is lost, and the job then parks forever on a tick that never comes.
-        await ClockPump.UntilAsync(
-            clock, () => queue.DeliveredCount == 1 && queue.FailedCount == 1, TimeSpan.FromSeconds(1),
-            maxAdvances: 400);
+        // The good job delivers on its first attempt; the bad one exhausts its retry budget
+        // before its terminal failure is recorded. Both outcomes are reached on NoBackoff, so no
+        // clock is driven at all — which removes the race the pump had with the single-reader
+        // loop, where an Advance issued before the loop registered its next backoff timer was
+        // lost and the job parked on a tick that never came.
+        await WaitAsync(() => queue.DeliveredCount == 1 && queue.FailedCount == 1);
 
         try { await queue.StopAsync(CancellationToken.None); } catch { }
 

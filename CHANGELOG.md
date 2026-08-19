@@ -7,6 +7,107 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-08-19
+
+### Fixed
+
+- **`maven-metadata.xml` returned 404 for any artifactId containing a digit.** `commons-lang3`,
+  `log4j-core`, `slf4j-api`, `h2`, `junit-jupiter-api` and every other artifactId carrying a
+  version-ish suffix were affected. The path parser classified any segment containing a digit as a
+  *version*, so `org/apache/commons/commons-lang3/maven-metadata.xml` resolved to a coordinate that
+  does not exist.
+
+  This is the document Maven resolves version **ranges** and the `LATEST`/`RELEASE` markers
+  through, so those dependencies could not be resolved at all — while pinned exact versions kept
+  downloading, which made the failure look coordinate-specific rather than systematic. The
+  `.sha1`/`.md5` sidecars resolved through the same parse and were equally unreachable.
+
+  **No action required.** Upgrading fixes affected coordinates immediately; nothing to reconfigure.
+
+- **Version listings no longer advertise versions the download path refuses.** Every listing
+  surface — the PyPI simple index, npm packument, NuGet registration, `maven-metadata.xml`, RPM
+  repodata, the Cargo sparse index, Go `@v/list` and `@latest`, and the Terraform version index —
+  now applies the same block gate the artifact route does.
+
+  Previously a blocked, revoked, malicious or too-new version was listed and then refused with a
+  bare 403. Package managers do not backtrack on an HTTP error once they have resolved to a
+  version, so a hold meant to keep developers on the last known-good release instead broke the
+  build. A cooldown (`min_release_age_hours`) is now invisible to a developer, which is what it was
+  always meant to be.
+
+  Where a listing genuinely cannot decide — an upstream version nobody has fetched, Alpine `apk`'s
+  signature-verified index, OCI's mutable tag list — enforcement remains at first fetch, and each
+  exception is recorded and enforced by a compliance gate.
+
+- **A manual block on a Go module version was accepted and never enforced.** The `.zip` download
+  gate read only the global cache plane and allowed anything with no row there, so a block written
+  to `package_versions` — the plane the management API uses whenever such a row exists — was shown
+  as applied while the artifact kept being served.
+
+  **Action:** if you blocked a Go module version on 0.7.0 or earlier, re-check that it is actually
+  refused now.
+
+- **`cargo search` reported a `max_version` the download refuses**, and Go's `@latest` named blocked
+  versions. Both now skip withheld versions; `@latest` falls back to the newest servable one.
+
+- **RPM repodata caches ignored proxy-settings changes.** Neither repodata cache was bound to the
+  org policy epoch, so a policy change did not evict them. They now expire like every other
+  ecosystem's rendered metadata.
+
+- **npm bulk audit refused large dependency trees** instead of chunking the upstream request.
+
+- **The retention settings page misreported what governs retention.**
+
+- **Generated token secrets are now alphanumeric**, so they can be stored as masked CI variables.
+
+### Added
+
+- **A refusal now says which policy arm produced it.** Policy denials carry an
+  `X-Dependably-Block-Reason` response header naming the arm (`release_age`, `malicious`, `manual`,
+  …). A 403 **without** the header is not a policy decision — it is an authentication or
+  authorization failure, so the two are now distinguishable without reading the activity feed.
+
+  Only the arm name is disclosed; configured thresholds and advisory ids stay out of the response,
+  because an error body travels further than the request did. New operator guide:
+  `docs/diagnosing-a-blocked-package.md`.
+
+- **A conditional disposition for licence policy**, with policy and package notes.
+
+### Changed
+
+- **Proxy-cache eviction is now opt-in.** `CacheEvictionService` previously applied an implicit
+  30-day age cap when none of `CACHE_MAX_AGE_DAYS` / `CACHE_MAX_SIZE_BYTES` /
+  `CACHE_MAX_ARTIFACTS` was set, so a default installation expired proxy artefacts on a schedule
+  its operator never chose — overriding a per-org `keep_versions` retention decision made somewhere
+  that never mentions caching.
+
+  **Action required if you relied on the implicit cap.** Eviction now does nothing unless one of
+  those three variables is set; set one explicitly to keep the previous behaviour. A one-shot
+  `delete_empty_package_rows` pass clears the "0 versions" package rows the old default left behind.
+
+### Removed
+
+- **The retired per-org SMTP transport columns on `alert_settings` are dropped**
+
+  (`email_inherit_instance`, `email_smtp_host`, `email_smtp_port`, `email_smtp_security`,
+  `email_smtp_username`, `email_smtp_password`, `email_smtp_from`). SMTP is an instance-level
+  transport; an org owns whether alert mail is sent and to whom, never how it is carried. Their
+  readers were removed in 0.6.0 and their values scrubbed in 0.7.0; this is the contract step. The
+  drop runs on every boot rather than once, so a database an older slot re-populated converges back
+  on the next start.
+
+  No action is needed upgrading from 0.6.x or 0.7.x — neither reads these columns. An operator
+  running a **blue-green cutover directly from 0.5.x or earlier** should stop the old slot first:
+  left serving, its alert-settings read fails until it restarts (the Alerts page and alert-email
+  delivery; it self-repairs on restart, and no data is lost). Upgrading via 0.6.x or 0.7.x avoids
+  this entirely.
+
+  The stored credential was already cleared in 0.7.0, so nothing readable remains. Note the drop
+  reclaims no pages on either provider: ciphertext written before 0.7.0 can survive in SQLite
+  freelist pages or Postgres dead tuples until that space is reused. `VACUUM` reclaims it. If a
+  per-org SMTP credential was ever configured on this database and may have been exposed, rotate it
+  at the relay provider — that, not the drop, is the step that matters.
+
 ## [0.7.0] - 2026-08-16
 
 ### Changed

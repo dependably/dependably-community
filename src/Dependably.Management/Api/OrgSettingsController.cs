@@ -263,6 +263,11 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
             keep_days = settings?.KeepDays,
             activity_retention_days = settings?.ActivityRetentionDays,
             purge_unlisted_after_days = settings?.PurgeUnlistedAfterDays,
+            // Unlike the other three, a NULL activity_retention_days is NOT unlimited — it
+            // resolves to this instance-wide default, because activity rows carry per-download
+            // IP/actor data and are bounded by default on purpose. The UI needs the effective
+            // number to avoid rendering "unlimited" over a window that is actually enforced.
+            activity_retention_default_days = RetentionDefaults.ResolveActivityRetentionDays(_config),
         });
     }
 
@@ -287,31 +292,47 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         await _settings.UpsertRetentionAsync(orgId, req.KeepVersions, req.KeepDays, req.ActivityRetentionDays,
             req.PurgeUnlistedAfterDays, ct);
 
+        // Only the fields the caller actually sent. Logging all four would record an absent
+        // field as an explicit null — i.e. claim the operator set it to unlimited when the write
+        // deliberately left it alone, which is exactly the ambiguity Optional<T> removes here.
+        var changed = new Dictionary<string, object?>();
+        AddIfPresent(changed, "keep_versions", req.KeepVersions);
+        AddIfPresent(changed, "keep_days", req.KeepDays);
+        AddIfPresent(changed, "activity_retention_days", req.ActivityRetentionDays);
+        AddIfPresent(changed, "purge_unlisted_after_days", req.PurgeUnlistedAfterDays);
+
         await _audit.LogAsync("retention_updated", orgId, GetUserId(),
-            detail: System.Text.Json.JsonSerializer.Serialize(new
-            {
-                keep_versions = req.KeepVersions,
-                keep_days = req.KeepDays,
-                activity_retention_days = req.ActivityRetentionDays,
-                purge_unlisted_after_days = req.PurgeUnlistedAfterDays,
-            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            detail: System.Text.Json.JsonSerializer.Serialize(
+                changed, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             actorKind: ActorKinds.User, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return NoContent();
     }
 
+    private static void AddIfPresent(Dictionary<string, object?> target, string key, Optional<int?> field)
+    {
+        if (field.IsPresent)
+        {
+            target[key] = field.Value;
+        }
+    }
+
     // Every field is a day/version count fed straight into a retention purge job; a negative value
     // has no meaning here and would either no-op the purge or underflow it, depending on the reader.
     private IActionResult? ValidateRetentionFields(UpdateRetentionRequest req)
-        => req.KeepVersions is < 0
+        => Negative(req.KeepVersions)
             ? _problems.ValidationErrorActionKey("keep_versions", "error.settings.retentionRange")
-            : req.KeepDays is < 0
+            : Negative(req.KeepDays)
                 ? _problems.ValidationErrorActionKey("keep_days", "error.settings.retentionRange")
-                : req.ActivityRetentionDays is < 0
+                : Negative(req.ActivityRetentionDays)
                     ? _problems.ValidationErrorActionKey("activity_retention_days", "error.settings.retentionRange")
-                    : req.PurgeUnlistedAfterDays is < 0
+                    : Negative(req.PurgeUnlistedAfterDays)
                         ? _problems.ValidationErrorActionKey("purge_unlisted_after_days", "error.settings.retentionRange")
                         : null;
+
+    // An absent field is not a value and cannot be out of range; an explicit null clears the
+    // dimension and is always legal. Only a present, negative number is rejected.
+    private static bool Negative(Optional<int?> field) => field.IsPresent && field.Value is < 0;
 
     /// <summary>GET /api/v1/orgs/{org}/proxy-settings</summary>
     // Read-only: accepts a PAT/service token carrying read:tenant.

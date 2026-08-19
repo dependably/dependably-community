@@ -119,15 +119,7 @@ internal static class NuGetNupkgProxyHelper
 
             var node = JsonNode.Parse(resp.BodyAsString());
 
-            DateTimeOffset? publishedAt = null;
-            string? published = node?["published"]?.GetValue<string>()
-                ?? node?["catalogEntry"]?["published"]?.GetValue<string>();
-            if (DateTimeOffset.TryParse(published, null,
-                    System.Globalization.DateTimeStyles.RoundtripKind, out var ts)
-                && ts.Year >= MinValidPublishedYear)
-            {
-                publishedAt = ts;
-            }
+            var publishedAt = ParsePublishedAt(node);
 
             // packageHash + packageHashAlgorithm live at the leaf root on most NuGet
             // sources; fall back to catalogEntry.* for older feeds that nest them there.
@@ -144,17 +136,54 @@ internal static class NuGetNupkgProxyHelper
                 && string.Equals(algorithm, "SHA512", StringComparison.OrdinalIgnoreCase)
                 ? hash : null;
 
-            string? deprecated = null;
-            var listed = node?["listed"] ?? node?["catalogEntry"]?["listed"];
-            if (listed is JsonValue lv && lv.TryGetValue<bool>(out bool listedVal) && !listedVal)
-            {
-                deprecated = "Unlisted upstream";
-            }
+            string? deprecated = ParseUnlistedDeprecation(node);
 
             return new NuGetFirstFetchMetadata(publishedAt, checksum, integrityB64, deprecated);
         }
         catch { return NuGetFirstFetchMetadata.Empty; }
     }
+
+    /// <summary>
+    /// Parses NuGet's <c>published</c> timestamp off either the leaf root or, on older feeds,
+    /// nested under <c>catalogEntry</c> — the same fallback shape the registration leaf and the
+    /// registration index's per-leaf <c>catalogEntry</c> both use. The <c>1900-01-01</c> sentinel
+    /// NuGet emits for "no publish timestamp recorded" is coerced to null via
+    /// <see cref="MinValidPublishedYear"/>, so an index filter or a first-fetch caller never
+    /// treats it as a real timestamp. Shared by <see cref="TryFetchNuGetFirstFetchMetadataAsync"/>
+    /// (first-fetch) and the registration-index upstream-leaf gate, so the sentinel handling
+    /// cannot drift between the two call sites.
+    /// </summary>
+    internal static DateTimeOffset? ParsePublishedAt(JsonNode? leafOrCatalogRoot)
+    {
+        string? published = TryGetString(leafOrCatalogRoot?["published"])
+            ?? TryGetString(leafOrCatalogRoot?["catalogEntry"]?["published"]);
+        return DateTimeOffset.TryParse(published, null,
+                System.Globalization.DateTimeStyles.RoundtripKind, out var ts)
+            && ts.Year >= MinValidPublishedYear
+            ? ts
+            : null;
+    }
+
+    /// <summary>
+    /// Parses NuGet's <c>listed</c> flag (leaf root or nested under <c>catalogEntry</c>) into the
+    /// deprecation reason the block gate's deprecated arm reads. NuGet carries no separate unlist
+    /// reason, so <c>listed: false</c> maps to a fixed label rather than an upstream-supplied
+    /// string. Shared with <see cref="TryFetchNuGetFirstFetchMetadataAsync"/> for the same reason
+    /// as <see cref="ParsePublishedAt"/>.
+    /// </summary>
+    internal static string? ParseUnlistedDeprecation(JsonNode? leafOrCatalogRoot)
+    {
+        var listed = leafOrCatalogRoot?["listed"] ?? leafOrCatalogRoot?["catalogEntry"]?["listed"];
+        return listed is JsonValue lv && lv.TryGetValue<bool>(out bool listedVal) && !listedVal
+            ? "Unlisted upstream"
+            : null;
+    }
+
+    // Reads a string member of a JsonNode, or null when absent or not a JSON string — upstream
+    // JSON is untrusted input, so a wrong-typed member degrades a single field rather than
+    // throwing out of the whole parse.
+    private static string? TryGetString(JsonNode? node) =>
+        node is JsonValue jv && jv.TryGetValue<string>(out string? s) ? s : null;
 
     // Builds the ProxyFetchRequest record for a NuGet package, including integrity metadata
     // from the upstream registration leaf. The license extractor branches on file extension:

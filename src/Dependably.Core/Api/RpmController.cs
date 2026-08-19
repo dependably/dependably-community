@@ -359,12 +359,12 @@ public sealed partial class RpmController : OrgScopedControllerBase
             return null;
         }
 
-        var (allowed, blocked) = await _svc.Licenses.CheckPolicyAsync(orgId, "block", [mapped], ct);
-        return allowed
+        var verdict = await _svc.Licenses.CheckPolicyAsync(orgId, "block", [mapped], ct);
+        return verdict.Allowed
             ? null
             : new ObjectResult(new ProblemDetails
             {
-                Detail = $"License '{blocked}' is not permitted by this org's license policy.",
+                Detail = $"License '{verdict.BlockedLicense}' is not permitted by this org's license policy.",
                 Status = StatusCodes.Status403Forbidden,
             })
             { StatusCode = StatusCodes.Status403Forbidden };

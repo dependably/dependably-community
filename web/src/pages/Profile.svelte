@@ -255,7 +255,7 @@
   $: mfaQrSvg = mfaOtpauthUri ? qrSvg(mfaOtpauthUri, { size: 180 }) : ''
 </script>
 
-<div class="page profile-page">
+<div class="page">
   <div class="page-header">
     <h1 class="page-title">{$t('profile.title')}</h1>
   </div>
@@ -533,7 +533,6 @@
 {/if}
 
 <style>
-  .profile-page { max-width: 720px; }
   .warning-banner {
     background: var(--accent-soft);
     border: 1px solid var(--accent);
@@ -544,8 +543,11 @@
     font-size: 13px;
   }
 
-  /* Settings-row pattern: scales to N rows. Title + help on the left, control on the right. */
-  .settings-panel { padding: 0; }
+  /* Settings-row pattern: scales to N rows. Title + help on the left, control on the right.
+     The measure is capped on the panel rather than the page shell, with no auto margins, so
+     the panel stays flush left while `.page` is full-bleed. Without the cap a row's control
+     sits ~1200px from its label on a wide monitor. */
+  .settings-panel { padding: 0; max-width: 720px; }
   .settings-row {
     display: flex;
     align-items: center;

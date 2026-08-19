@@ -362,11 +362,28 @@ public sealed class TerraformController : OrgScopedControllerBase
     /// archives are fully cached must stay resolvable, or <c>terraform init</c> fails on the very
     /// discovery step before it can reach the cached archive. Nothing cached leaves the upstream
     /// outcome standing, so a genuinely unknown provider is still a 404.
+    ///
+    /// Whichever list the versions come from, the ones this org holds and hard-blocks are removed,
+    /// so the index never advertises a version <see cref="ServeArchiveAsync"/> refuses on the
+    /// stored per-version facts. Two arms stay outside that promise because the shared listing
+    /// predicate cannot reach them — the licence arm, and the synthesis that treats provenance
+    /// enforcement with no trust anchor as unverifiable — both of which need I/O the pure core
+    /// does not do. Those remain download-side only, as they are on every other ecosystem's
+    /// index. The
+    /// block set is applied to the upstream-derived list as well as to the cached fallback: the
+    /// facts are the org's own, and which list happens to be answering says nothing about whether
+    /// this org may serve the archive.
+    ///
+    /// A version this org has never cached carries no facts and so cannot be decided here. The
+    /// registry protocol publishes a per-version publish timestamp, but only from a per-version
+    /// document — one upstream round-trip per version — so screening the whole upstream list at
+    /// index time is not affordable. Those versions are gated at first fetch instead.
     /// </summary>
     private async Task<IActionResult> ServeVersionIndexAsync(
         string orgId, ProviderAddress provider, OrgSettings? settings, CancellationToken ct)
     {
         var versions = await FetchUpstreamVersionsAsync(orgId, provider, settings, ct);
+        var local = await LocalVersionFactsAsync(orgId, provider, settings, ct);
 
         IReadOnlyCollection<string> versionStrings;
         if (versions.Value is not null)
@@ -374,17 +391,21 @@ public sealed class TerraformController : OrgScopedControllerBase
             versionStrings = versions.Value
                 .Where(v => !string.IsNullOrWhiteSpace(v.Version))
                 .Select(v => v.Version!)
+                .Where(v => !local.Blocked.Contains(v))
                 .ToList();
+        }
+        else if (local.Servable.Count == 0 && local.Blocked.Count == 0)
+        {
+            // Nothing cached at all and no upstream answer — the provider is genuinely unknown.
+            return UpstreamFailure(versions.Outcome);
         }
         else
         {
-            var local = await LocalVersionsAsync(orgId, provider, ct);
-            if (local.Count == 0)
-            {
-                return UpstreamFailure(versions.Outcome);
-            }
-
-            versionStrings = local;
+            // Holding only blocked versions is a different answer from holding none: the provider
+            // exists here, and every version of it is withheld by policy. That is an empty index,
+            // not an upstream failure, and reporting it as one would send an operator hunting a
+            // connectivity problem instead of reading their own policy.
+            versionStrings = local.Servable;
         }
 
         var index = new Dictionary<string, object>(StringComparer.Ordinal);
@@ -398,18 +419,31 @@ public sealed class TerraformController : OrgScopedControllerBase
     }
 
     /// <summary>
-    /// The provider versions this org holds a cached archive for. Restricted to rows whose blob key
-    /// is this org's own — the same guard <see cref="CachedZipHashesAsync"/> applies — so a version
-    /// listed here is one the org can actually serve an archive for, and a foreign tenant's global
-    /// cache row does not inflate this org's index.
+    /// The provider versions this org holds a cached archive for, split by what the block gate
+    /// says about each. Restricted to rows whose blob key is this org's own — the same guard
+    /// <see cref="CachedZipHashesAsync"/> applies — so a version listed here is one the org can
+    /// actually serve an archive for, and a foreign tenant's global cache row does not inflate
+    /// this org's index.
+    ///
+    /// The split matters because the two sides are used differently: <c>Servable</c> is the
+    /// fallback index when upstream cannot answer, while <c>Blocked</c> is subtracted from the
+    /// upstream-derived list as well, since a version this org refuses to serve must not be
+    /// advertised regardless of which list named it.
+    ///
+    /// A version can appear on both planes across several platform rows. Any blocked row blocks
+    /// the version: the gate's facts are per artifact and the index is per version, so the
+    /// conservative direction is the only one that keeps the index's promise — advertising a
+    /// version whose only servable platform is one the client does not want is a resolution
+    /// failure it can see, while advertising one the download refuses is the 403 this exists to
+    /// prevent.
     /// </summary>
-    private async Task<IReadOnlyCollection<string>> LocalVersionsAsync(
-        string orgId, ProviderAddress provider, CancellationToken ct)
+    private async Task<LocalVersionFacts> LocalVersionFactsAsync(
+        string orgId, ProviderAddress provider, OrgSettings? settings, CancellationToken ct)
     {
         var rows = await _svc.CacheArtifacts.ListServeFactsForNameAsync(
             orgId, Ecosystem, ProviderName(provider), ct);
 
-        var versions = new HashSet<string>(StringComparer.Ordinal);
+        var own = new List<CacheArtifactIndexFacts>();
         foreach (var row in rows)
         {
             if (string.IsNullOrWhiteSpace(row.Version)
@@ -423,12 +457,52 @@ public sealed class TerraformController : OrgScopedControllerBase
                 orgId, provider.Hostname, provider.Namespace, provider.Type, row.Version, platform);
             if (string.Equals(row.BlobKey, ownKey, StringComparison.Ordinal))
             {
-                versions.Add(row.Version);
+                own.Add(row);
             }
         }
 
-        return versions;
+        if (own.Count == 0)
+        {
+            return new LocalVersionFacts(
+                new HashSet<string>(StringComparer.Ordinal),
+                new HashSet<string>(StringComparer.Ordinal));
+        }
+
+        if (settings is null)
+        {
+            // No policy row to evaluate against. Absent input must not read as "no policy", which
+            // on a gate is an allow decision — so every held version is treated as withheld.
+            // Every org-creation path writes org_settings, so this means a deleted or
+            // pre-migration row, and refusing to advertise is the recoverable direction.
+            return new LocalVersionFacts(
+                new HashSet<string>(StringComparer.Ordinal),
+                own.Select(r => r.Version).ToHashSet(StringComparer.Ordinal));
+        }
+
+        var signals = await _svc.Vulns.GetGateSignalsBatchForCacheArtifactsAsync(
+            own.Select(r => r.Id).ToList(), ct);
+
+        var blocked = new HashSet<string>(StringComparer.Ordinal);
+        var servable = new HashSet<string>(StringComparer.Ordinal);
+        var now = _svc.Time.GetUtcNow();
+        foreach (var row in own)
+        {
+            if (BlockGateService.IsHardBlockedByCacheEntry(row, settings, signals.GetValueOrDefault(row.Id), now))
+            {
+                blocked.Add(row.Version);
+            }
+            else
+            {
+                servable.Add(row.Version);
+            }
+        }
+
+        servable.ExceptWith(blocked);
+        return new LocalVersionFacts(servable, blocked);
     }
+
+    // The cached versions of one provider, partitioned by the block gate.
+    private sealed record LocalVersionFacts(HashSet<string> Servable, HashSet<string> Blocked);
 
     /// <summary>
     /// Serves the per-version document listing one archive per platform the upstream registry
@@ -1627,6 +1701,7 @@ public sealed record TerraformControllerServices(
     CacheAccessRecorder CacheRecorder,
     CacheArtifactRepository CacheArtifacts,
     TenantArtifactAccessRepository TenantAccess,
+    VulnerabilityRepository Vulns,
     ReservedNamespaceService Reserved,
     BlockGateService BlockGate,
     ProxyFetchService ProxyFetch,

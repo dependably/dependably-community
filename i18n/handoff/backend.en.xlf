@@ -779,6 +779,15 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
         <target>« {0} » figure déjà sur la liste de blocage.</target>
       </segment>
     </unit>
+    <unit id="error.license.dispositionInvalid">
+      <notes>
+        <note category="translator">422 detail. The quoted values are API literals - do not translate them.</note>
+      </notes>
+      <segment state="translated">
+        <source>Disposition must be &apos;allowed&apos; or &apos;conditional&apos;.</source>
+        <target>La disposition doit être &apos;allowed&apos; ou &apos;conditional&apos;.</target>
+      </segment>
+    </unit>
     <unit id="error.license.modeInvalid">
       <notes>
         <note category="translator">422 detail. The quoted values are API literals - do not translate them.</note>
@@ -786,6 +795,15 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       <segment state="translated">
         <source>Mode must be &apos;off&apos;, &apos;warn&apos;, or &apos;block&apos;.</source>
         <target>Le mode doit être « off », « warn » ou « block ».</target>
+      </segment>
+    </unit>
+    <unit id="error.license.noteTooLong">
+      <notes>
+        <note category="translator">422 detail: a licence-policy note exceeded the length cap.</note>
+      </notes>
+      <segment state="translated">
+        <source>Note is too long.</source>
+        <target>La note est trop longue.</target>
       </segment>
     </unit>
     <unit id="error.license.publishModeInvalid">
@@ -1047,6 +1065,33 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       <segment state="translated">
         <source>Slug is missing, reserved, or contains invalid characters.</source>
         <target>L&apos;identifiant est manquant, réservé ou contient des caractères non valides.</target>
+      </segment>
+    </unit>
+    <unit id="error.packageNote.coordinateRequired">
+      <notes>
+        <note category="translator">422 detail: a package note without a package coordinate.</note>
+      </notes>
+      <segment state="translated">
+        <source>Ecosystem and package name are required.</source>
+        <target>L&apos;écosystème et le nom du paquet sont requis.</target>
+      </segment>
+    </unit>
+    <unit id="error.packageNote.noteRequired">
+      <notes>
+        <note category="translator">422 detail: a package note with no text.</note>
+      </notes>
+      <segment state="translated">
+        <source>Note text is required.</source>
+        <target>Le texte de la note est requis.</target>
+      </segment>
+    </unit>
+    <unit id="error.packageNote.noteTooLong">
+      <notes>
+        <note category="translator">422 detail: a package note exceeded the length cap.</note>
+      </notes>
+      <segment state="translated">
+        <source>Note is too long.</source>
+        <target>La note est trop longue.</target>
       </segment>
     </unit>
     <unit id="error.password.currentRequired">

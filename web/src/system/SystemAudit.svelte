@@ -329,8 +329,6 @@
 </div>
 
 <style>
-  /* Override the global 1100px page cap — the JSON detail column needs the breathing room. */
-  .page { max-width: 1500px; }
   .subtitle { color: var(--text2); font-size: 13px; margin: 0 0 16px; }
   /* Toolbar proportions: the global `input, select, textarea { width: 100% }` rule makes flex
      children fight for the whole track. Search grows but is capped; selects size to their content. */

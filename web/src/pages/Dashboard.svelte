@@ -187,7 +187,7 @@
   }
 </script>
 
-<div class="page page-wide">
+<div class="page">
   <div class="page-header title-row">
     <h1 class="page-title">{$t('dashboard.title')}</h1>
 

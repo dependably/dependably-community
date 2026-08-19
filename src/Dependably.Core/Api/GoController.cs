@@ -154,7 +154,7 @@ public sealed class GoController : OrgScopedControllerBase
         {
             string encodedModule = path[..^"/@v/list".Length];
             string module = DecodeBangEncoding(encodedModule);
-            return await ServeVersionListAsync(orgId, module, ct);
+            return await ServeVersionListAsync(orgId, module, settings, ct);
         }
 
         // @v/{version}.{ext}: find the last /@v/ segment
@@ -520,10 +520,11 @@ public sealed class GoController : OrgScopedControllerBase
     // ── @v/list ──────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Returns a newline-separated list of locally-cached versions for the module.
-    /// Only versions recorded in the catalogue (package_versions) are returned.
+    /// Returns a newline-separated list of the module versions this org holds, across both the
+    /// uploaded catalogue and the global proxy plane, minus the ones the download would refuse.
     /// </summary>
-    private async Task<IActionResult> ServeVersionListAsync(string orgId, string module, CancellationToken ct)
+    private async Task<IActionResult> ServeVersionListAsync(
+        string orgId, string module, OrgSettings? settings, CancellationToken ct)
     {
         if (ValidateModulePath(module) is { } moduleError)
         {
@@ -531,8 +532,120 @@ public sealed class GoController : OrgScopedControllerBase
         }
 
         var versions = await _svc.Packages.ListVersionsForGoModuleAsync(orgId, module, ct);
+
+        // Withhold the versions the .zip route would refuse, so `go list` never resolves to a
+        // coordinate the download then denies. Go's resolver treats a refused download as a hard
+        // failure the same way pip does, and it has already committed to the version by then.
+        // A missing settings row cannot be read as "no policy configured" — that would turn an
+        // absent input into an allow decision on a security gate. Every org-creation path writes
+        // org_settings, so null here means a deleted or pre-migration row: withhold rather than
+        // advertise, and let the operator see an empty list instead of an unenforced one.
+        if (settings is null)
+        {
+            return Content(string.Empty, "text/plain; charset=utf-8");
+        }
+
+        if (versions.Count > 0)
+        {
+            var blocked = await BlockedModuleVersionsAsync(orgId, module, settings, ct);
+            if (blocked.Count > 0)
+            {
+                versions = [.. versions.Where(v => !blocked.Contains(v))];
+            }
+        }
+
         string body = string.Join('\n', versions);
         return Content(body, "text/plain; charset=utf-8");
+    }
+
+    /// <summary>
+    /// The newest cached version of a module that survives the block gate, or null when every
+    /// cached version is withheld. Ordered by the same recency the unfiltered lookup uses, so the
+    /// fallback answer differs from the primary one only by having skipped refused versions.
+    /// </summary>
+    private async Task<PackageVersion?> LatestServableGoVersionAsync(
+        string orgId, string module, HashSet<string> blocked, CancellationToken ct)
+    {
+        var pkg = await _svc.Packages.GetByPurlNameAsync(orgId, "golang", module, ct);
+        if (pkg is null)
+        {
+            return null;
+        }
+
+        var candidates = new List<PackageVersion>(await _svc.Packages.GetVersionsAsync(pkg.Id, ct));
+
+        // The cache plane holds every proxy version recorded after the P3b flip, so a fallback
+        // that read only package_versions would answer "nothing servable" for a module whose
+        // versions all live there.
+        var proxyRows = await _svc.CacheArtifacts.ListServeFactsForNameAsync(orgId, "golang", module, ct);
+        if (proxyRows.Count > 0)
+        {
+            var known = candidates.Select(v => v.Version).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var signals = await _svc.Vulns.GetGateSignalsBatchForCacheArtifactsAsync(
+                proxyRows.Select(r => r.Id).ToList(), ct);
+            candidates.AddRange(proxyRows
+                .Where(r => !known.Contains(r.Version))
+                .Select(r => r.ToPackageVersionSynthetic(signals)));
+        }
+
+        return candidates
+            .Where(v => !blocked.Contains(v.Version))
+            .OrderByDescending(v => v.CreatedAt)
+            .FirstOrDefault();
+    }
+
+    /// <summary>
+    /// The versions of one module this org holds on either plane and the download gate would
+    /// hard-block, read through the same shared predicates the artifact route evaluates.
+    ///
+    /// Release-age is inert for Go: the proxy first fetch records no publish timestamp for a
+    /// module version, so that arm has nothing to read. Every arm that does have facts — manual,
+    /// revoked, malicious, KEV, EPSS, CVSS — fires, which is why this routes through the shared
+    /// predicates rather than reimplementing whichever subset looks reachable today.
+    /// </summary>
+    private async Task<HashSet<string>> BlockedModuleVersionsAsync(
+        string orgId, string module, OrgSettings settings, CancellationToken ct)
+    {
+        var blocked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var now = _svc.Time.GetUtcNow();
+
+        var pkg = await _svc.Packages.GetByPurlNameAsync(orgId, "golang", module, ct);
+        if (pkg is not null)
+        {
+            var uploaded = await _svc.Packages.GetVersionsAsync(pkg.Id, ct);
+            var signals = uploaded.Count > 0
+                ? await _svc.Vulns.GetGateSignalsBatchAsync(uploaded.Select(v => v.Id).ToList(), ct)
+                : new Dictionary<string, VulnGateSignals>();
+
+            foreach (var v in uploaded)
+            {
+                if (BlockGateService.IsHardBlockedByStoredState(
+                        v, settings, signals.GetValueOrDefault(v.Id), now))
+                {
+                    blocked.Add(v.Version);
+                }
+            }
+        }
+
+        var proxyEntries = await _svc.CacheArtifacts.ListServeFactsForNameAsync(orgId, "golang", module, ct);
+        if (proxyEntries.Count == 0)
+        {
+            return blocked;
+        }
+
+        var proxySignals = await _svc.Vulns.GetGateSignalsBatchForCacheArtifactsAsync(
+            proxyEntries.Select(e => e.Id).ToList(), ct);
+
+        foreach (var entry in proxyEntries)
+        {
+            if (BlockGateService.IsHardBlockedByCacheEntry(
+                    entry, settings, proxySignals.GetValueOrDefault(entry.Id), now))
+            {
+                blocked.Add(entry.Version);
+            }
+        }
+
+        return blocked;
     }
 
     // ── @latest ──────────────────────────────────────────────────────────────
@@ -550,13 +663,38 @@ public sealed class GoController : OrgScopedControllerBase
             return BadRequest($"Invalid module path: {moduleError}");
         }
 
-        // Return the latest locally-cached version if we have one.
+        // Return the latest locally-cached version if we have one — skipping any the download
+        // would refuse. `go get` with no version pin resolves through here, so answering with a
+        // blocked version hands the client a coordinate it commits to and then cannot fetch,
+        // which is the same broken build @v/list filtering exists to prevent.
         var latest = await _svc.Packages.GetLatestGoVersionAsync(orgId, module, ct);
         if (latest is not null)
         {
-            return Content(
-                JsonSerializer.Serialize(new GoVersionInfo(latest.Version, latest.CreatedAt)),
-                "application/json");
+            var blocked = settings is null
+                ? []
+                : await BlockedModuleVersionsAsync(orgId, module, settings, ct);
+
+            if (!blocked.Contains(latest.Version))
+            {
+                return Content(
+                    JsonSerializer.Serialize(new GoVersionInfo(latest.Version, latest.CreatedAt)),
+                    "application/json");
+            }
+
+            // The newest version is withheld; fall back to the newest that is not. Reporting an
+            // older servable version is the answer a resolver can act on — going upstream instead
+            // would re-propose the very version this org just refused.
+            if (await LatestServableGoVersionAsync(orgId, module, blocked, ct) is { } servable)
+            {
+                return Content(
+                    JsonSerializer.Serialize(new GoVersionInfo(servable.Version, servable.CreatedAt)),
+                    "application/json");
+            }
+
+            // Every cached version is withheld. 404 rather than falling through to upstream: the
+            // module is known here and entirely blocked, and a proxied answer would name a version
+            // the download refuses.
+            return NotFound();
         }
 
         // Proxy upstream @latest — refused when proxying is off or the module path is reserved
@@ -874,18 +1012,43 @@ public sealed class GoController : OrgScopedControllerBase
         }
     }
 
-    // Evaluates the block gate for a cache-hit Go .zip download from the global plane. Returns
-    // false (allow) when no cache_artifact row exists for the coordinate — there is no block
-    // state to enforce.
+    // Evaluates the block gate for a Go .zip download against whichever plane holds the
+    // coordinate. The global plane is checked first because that is where a proxy fetch records
+    // today; a version can also sit on package_versions — a pre-P3b proxy row — and those are the
+    // rows the management plane writes manual_block_state onto whenever a PV row exists at all.
+    // Reading only the cache plane meant an operator's block on such a row was accepted, shown as
+    // applied, and never enforced on the download.
+    //
+    // Returns false (allow) only when neither plane holds the coordinate, which is genuinely no
+    // block state rather than an unread one.
     private async Task<bool> IsGoZipBlockedAsync(
         string orgId, string module, string version, OrgSettings? settings, TokenRecord? token, CancellationToken ct)
     {
+        string? sourceIp = HttpContext.GetNormalizedRemoteIp();
+
         var caFacts = await _svc.CacheArtifacts.GetServeFactsByCoordinateAsync(
             orgId, "golang", module, version, $"{version}.zip", ct);
-        return caFacts is not null
+        if (caFacts is not null)
+        {
+            return await _svc.BlockGate.EvaluateAsync(
+                BlockGateRequest.ForProxyCacheFacts(orgId, "golang", caFacts, token, settings, sourceIp), ct)
+                == BlockDecision.Blocked;
+        }
+
+        var pkg = await _svc.Packages.GetByPurlNameAsync(orgId, "golang", module, ct);
+        if (pkg is null)
+        {
+            return false;
+        }
+
+        // A targeted single-row lookup, not a fetch of every version filtered down: this runs on
+        // each .zip download, and a module with hundreds of versions would pay for all of them to
+        // answer a question about one.
+        var pvRow = await _svc.Packages.GetVersionAsync(pkg.Id, version, ct);
+
+        return pvRow is not null
             && await _svc.BlockGate.EvaluateAsync(
-                BlockGateRequest.ForProxyCacheFacts(
-                    orgId, "golang", caFacts, token, settings, HttpContext.GetNormalizedRemoteIp()), ct)
+                BlockGateRequest.For(orgId, "golang", pvRow, token, settings, sourceIp), ct)
                 == BlockDecision.Blocked;
     }
 
@@ -945,6 +1108,7 @@ public sealed record GoControllerServices(
     CacheAccessRecorder CacheRecorder,
     CacheArtifactRepository CacheArtifacts,
     TenantArtifactAccessRepository TenantAccess,
+    VulnerabilityRepository Vulns,
     TimeProvider Time,
     IConfiguration Configuration,
     ILogger<GoController> Logger,
