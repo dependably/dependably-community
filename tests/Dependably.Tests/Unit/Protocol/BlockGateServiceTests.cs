@@ -1,10 +1,14 @@
+using System.Text.Json;
 using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Alerts;
+using Dependably.Infrastructure.Audit.Events;
+using Dependably.Infrastructure.Webhooks;
 using Dependably.Protocol;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
 using Microsoft.Extensions.Time.Testing;
+using NSubstitute;
 
 namespace Dependably.Tests.Unit.Protocol;
 
@@ -23,6 +27,8 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
     private readonly BlockGateService _sut;
     private readonly AuditRepository _audit;
     private readonly StubPerOrgTrustAnchorStore _anchors = new();
+    private readonly Dependably.Infrastructure.Webhooks.IPackageEventSink _eventSink =
+        NSubstitute.Substitute.For<Dependably.Infrastructure.Webhooks.IPackageEventSink>();
 
     public BlockGateServiceTests(InMemoryDbFixture fixture)
     {
@@ -37,7 +43,10 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
             new LicenseRepository(_fixture.Store, _clock, new LicenseNormalizer(_fixture.Store, Microsoft.Extensions.Logging.Abstractions.NullLogger<LicenseNormalizer>.Instance)),
             _anchors,
             Microsoft.Extensions.Logging.Abstractions.NullLogger<BlockGateService>.Instance,
-            _clock);
+            _clock,
+            new OrgRepository(_fixture.Store),
+            _eventSink,
+            new BlockRefusalWebhookThrottle(_clock, TimeSpan.Zero));
     }
 
     // ── manual-block / manual-allow ───────────────────────────────────────────
@@ -575,6 +584,38 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
     }
 
     [Fact]
+    public async Task Cvss4OnlyAdvisory_StillBlocksOnScore()
+    {
+        // Regression guard for #609: a v4-only advisory (no CVSS v3 vector at all) now yields
+        // a real numeric score via OsvScoring, so max_osv_score_tolerance fires exactly the
+        // same way it does for a v3 advisory — this arm was previously permanently inert for
+        // every CVSS-v4-only advisory (measured ~21% of npm, ~19% of crates.io).
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"cvss4-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", $"pkg:npm/{Guid.NewGuid():N}/acme@1.0.0");
+        var req = BaseRequest(orgId) with
+        {
+            VersionId = verId,
+            VulnCheckedAt = _clock.GetUtcNow(),
+            BlockMaliciousMode = "block",
+            MaxOsvScoreTolerance = 5.0,
+        };
+
+        (double? cvss4Score, string? cvss4Severity) = OsvScoring.ParseCvssBaseScore(
+            "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H");
+        Assert.Equal(10.0, cvss4Score);
+        Assert.Equal("CRITICAL", cvss4Severity);
+
+        string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
+            _fixture.Store, $"EEF-CVE-{Guid.NewGuid():N}", severity: cvss4Severity, cvssScore: cvss4Score);
+        await VulnerabilitySeeder.LinkAsync(_fixture.Store, req.VersionId, vulnId);
+
+        Assert.Equal(BlockDecision.Blocked, await _sut.EvaluateAsync(req));
+        Assert.Equal(1, await CountActivityAsync(orgId, "blocked_vuln_score"));
+        Assert.Equal(0, await CountActivityAsync(orgId, "blocked_malicious"));
+    }
+
+    [Fact]
     public async Task Malicious_UnscannedVersion_AllowsThrough()
     {
         // VulnCheckedAt null = the OSV scan hasn't run yet, so no advisory data exists to act
@@ -969,7 +1010,231 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
         Assert.Equal(req.Purl, items.Single().Purl);
     }
 
+    // ── webhook dispatch (package.blocked) ──────────────────────────────────────
+
+    [Fact]
+    public async Task Refusal_DispatchesExactlyOneBlockedWebhookEvent_WithExpectedPayload()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"wh-single-{Guid.NewGuid():N}");
+        var req = BaseRequest(orgId) with { ManualState = "blocked", Purl = "pkg:npm/acme@2.3.4" };
+
+        var captured = new List<PackageEventEnvelope>();
+        _eventSink.Dispatch(Arg.Do<PackageEventEnvelope>(e => captured.Add(e)));
+
+        Assert.Equal(BlockDecision.Blocked, await _sut.EvaluateAsync(req));
+
+        var envelope = Assert.Single(captured);
+        Assert.Equal(PackageEvents.TypeBlocked, envelope.EventType);
+        Assert.Equal(orgId, envelope.OrgId);
+        Assert.Equal("npm", envelope.Ecosystem);
+        Assert.Equal("acme", envelope.Name);
+        Assert.Equal("2.3.4", envelope.Version);
+        Assert.Equal(req.Purl, envelope.Purl);
+
+        using var doc = JsonDocument.Parse(envelope.DataJson);
+        Assert.Equal("manual", doc.RootElement.GetProperty("arm").GetString());
+        Assert.Equal("acme", doc.RootElement.GetProperty("name").GetString());
+        Assert.Equal("npm", doc.RootElement.GetProperty("ecosystem").GetString());
+        Assert.Equal(JsonValueKind.Null, doc.RootElement.GetProperty("severity").ValueKind);
+    }
+
+    [Fact]
+    public async Task VulnScoreArm_PayloadCarriesCvssSeverity()
+    {
+        // The vuln-score arm is the one arm whose block reason is itself a CVSS score, so its
+        // webhook payload carries a real severity band rather than the null every other arm sends.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"wh-sev-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", $"pkg:npm/{Guid.NewGuid():N}/acme@1.0.0");
+        var req = BaseRequest(orgId) with
+        {
+            VersionId = verId,
+            Purl = "pkg:npm/acme@1.0.0",
+            VulnCheckedAt = _clock.GetUtcNow(),
+            MaxOsvScoreTolerance = 5.0,
+        };
+        string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
+            _fixture.Store, $"GHSA-sev-{Guid.NewGuid():N}", severity: "CRITICAL", cvssScore: 9.8);
+        await VulnerabilitySeeder.LinkAsync(_fixture.Store, req.VersionId, vulnId);
+
+        var captured = new List<PackageEventEnvelope>();
+        _eventSink.Dispatch(Arg.Do<PackageEventEnvelope>(e => captured.Add(e)));
+
+        Assert.Equal(BlockDecision.Blocked, await _sut.EvaluateAsync(req));
+
+        var envelope = Assert.Single(captured);
+        using var doc = JsonDocument.Parse(envelope.DataJson);
+        Assert.Equal("vuln_score", doc.RootElement.GetProperty("arm").GetString());
+        Assert.Equal("CRITICAL", doc.RootElement.GetProperty("severity").GetString());
+    }
+
+    [Fact]
+    public async Task RepeatedRefusal_SameCoordinate_CoalescesWithinWindow_ThenResumesAfter()
+    {
+        // A CI loop hammering the same blocked (org, purl, arm) coordinate must not flood the
+        // dispatch queue with one envelope per request: only the first refusal inside the window
+        // dispatches, and advancing the clock past the window lets the next refusal dispatch again.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"wh-coalesce-{Guid.NewGuid():N}");
+        var (gate, sink) = BuildGateWithThrottle(TimeSpan.FromMinutes(15));
+        var req = BaseRequest(orgId) with { ManualState = "blocked", Purl = "pkg:npm/acme@2.3.4" };
+
+        Assert.Equal(BlockDecision.Blocked, await gate.EvaluateAsync(req));
+        Assert.Equal(BlockDecision.Blocked, await gate.EvaluateAsync(req));
+        Assert.Equal(BlockDecision.Blocked, await gate.EvaluateAsync(req));
+        sink.Received(1).Dispatch(Arg.Any<PackageEventEnvelope>());
+
+        _clock.Advance(TimeSpan.FromMinutes(15));
+
+        Assert.Equal(BlockDecision.Blocked, await gate.EvaluateAsync(req));
+        sink.Received(2).Dispatch(Arg.Any<PackageEventEnvelope>());
+    }
+
+    [Fact]
+    public async Task RepeatedRefusal_DifferentArmOrDifferentPurl_NotCoalesced()
+    {
+        // Adversarial twin of the coalescing test above: the throttle must discriminate the
+        // (org, purl, arm) coordinate, not just the org — a different arm on the same purl, and
+        // the same arm on a different purl, both dispatch independently within the same window.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"wh-discriminate-{Guid.NewGuid():N}");
+        var (gate, sink) = BuildGateWithThrottle(TimeSpan.FromMinutes(15));
+
+        var manualBlock = BaseRequest(orgId) with { ManualState = "blocked", Purl = "pkg:npm/acme@2.3.4" };
+        var releaseAgeBlock = BaseRequest(orgId) with
+        {
+            Purl = "pkg:npm/acme@2.3.4",
+            MinReleaseAgeHours = 24,
+            PublishedAt = _clock.GetUtcNow().AddHours(-1),
+        };
+        var otherPurlManualBlock = BaseRequest(orgId) with { ManualState = "blocked", Purl = "pkg:npm/other@9.9.9" };
+
+        Assert.Equal(BlockDecision.Blocked, await gate.EvaluateAsync(manualBlock));
+        Assert.Equal(BlockDecision.Blocked, await gate.EvaluateAsync(releaseAgeBlock));
+        Assert.Equal(BlockDecision.Blocked, await gate.EvaluateAsync(otherPurlManualBlock));
+
+        sink.Received(3).Dispatch(Arg.Any<PackageEventEnvelope>());
+    }
+
+    [Fact]
+    public async Task RepeatedRefusal_ThrottledDispatch_StillWritesActivityRowEveryTime()
+    {
+        // The throttle narrows webhook dispatch only — it must never suppress the
+        // audit/activity/quarantine trail that already protects the tenant.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"wh-audit-{Guid.NewGuid():N}");
+        var (gate, sink) = BuildGateWithThrottle(TimeSpan.FromMinutes(15));
+        var req = BaseRequest(orgId) with { ManualState = "blocked", Purl = "pkg:npm/acme@2.3.4" };
+
+        for (int i = 0; i < 3; i++)
+        {
+            Assert.Equal(BlockDecision.Blocked, await gate.EvaluateAsync(req));
+        }
+
+        sink.Received(1).Dispatch(Arg.Any<PackageEventEnvelope>());
+        Assert.Equal(3, await CountActivityAsync(orgId, "blocked_manual"));
+    }
+
+    [Fact]
+    public async Task Refusal_WebhookDispatchThrows_StillBlocksAndWritesActivityAndQuarantineRows()
+    {
+        // EmitBlockWebhookEventAsync is best-effort: a failure inside the sink (a bad subscriber
+        // URL resolving synchronously, a serialization bug, anything) must never turn a correct
+        // block into an unhandled exception, and it must never cost the audit/activity/quarantine
+        // trail that already protects the tenant — those are written before the dispatch call.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"wh-throws-{Guid.NewGuid():N}");
+        // Empty VersionId maps to a NULL review-row FK — the first-fetch shape, where the block
+        // fires before any version row exists (matches PolicyBlock_WritesPendingReviewRow above).
+        var req = BaseRequest(orgId) with
+        {
+            VersionId = string.Empty,
+            Purl = "pkg:npm/acme@2.3.4",
+            MinReleaseAgeHours = 24,
+            PublishedAt = _clock.GetUtcNow().AddHours(-1),
+        };
+
+        _eventSink.When(x => x.Dispatch(Arg.Any<PackageEventEnvelope>()))
+            .Do(_ => throw new InvalidOperationException("dispatch boom"));
+
+        Assert.Equal(BlockDecision.Blocked, await _sut.EvaluateAsync(req));
+        Assert.Equal(1, await CountActivityAsync(orgId, "blocked_release_age"));
+
+        var quarantine = new QuarantineRepository(_fixture.Store, _clock);
+        var (items, total) = await quarantine.ListAsync(new QuarantineListQuery(orgId, State: "pending", Limit: 10));
+        Assert.Equal(1, total);
+        Assert.Equal(req.Purl, items.Single().Purl);
+    }
+
+    [Fact]
+    public async Task FirstFetchDeprecationBlock_DispatchesTheSameEventShapeAsServePath()
+    {
+        // EvaluateFirstFetchDeprecationAsync is ProxyFetchService's cache-miss entry point — a
+        // separate call path into RecordDeprecatedBlockAsync from the cache-hit serve path
+        // (EvaluateAsync → ApplySideEffectsAsync). Both must reach the one shared webhook
+        // emission helper, not just the serve path.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"wh-ff-dep-{Guid.NewGuid():N}");
+        var req = BaseRequest(orgId) with
+        {
+            Purl = "pkg:npm/acme@2.3.4",
+            Deprecated = "abandoned",
+            BlockDeprecatedMode = "block_all",
+        };
+
+        var captured = new List<PackageEventEnvelope>();
+        _eventSink.Dispatch(Arg.Do<PackageEventEnvelope>(e => captured.Add(e)));
+
+        Assert.Equal(BlockDecision.Blocked, await _sut.EvaluateFirstFetchDeprecationAsync(req));
+
+        var envelope = Assert.Single(captured);
+        Assert.Equal(PackageEvents.TypeBlocked, envelope.EventType);
+        using var doc = JsonDocument.Parse(envelope.DataJson);
+        Assert.Equal("deprecated", doc.RootElement.GetProperty("arm").GetString());
+    }
+
+    [Fact]
+    public async Task FirstFetchProvenanceBlock_DispatchesTheSameEventShapeAsServePath()
+    {
+        // RecordProvenanceBlockAsync is public specifically so ProxyFetchService can call it
+        // directly on the cache-miss first-fetch path (fail closed, before the version is
+        // recorded) — the same shared side-effect method the serve path's ApplySideEffectsAsync
+        // switch also calls for the Provenance arm.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"wh-ff-prov-{Guid.NewGuid():N}");
+        var req = BaseRequest(orgId) with
+        {
+            VersionId = string.Empty,
+            Purl = "pkg:npm/acme@2.3.4",
+            ProvenanceStatus = "unsigned",
+        };
+
+        var captured = new List<PackageEventEnvelope>();
+        _eventSink.Dispatch(Arg.Do<PackageEventEnvelope>(e => captured.Add(e)));
+
+        await _sut.RecordProvenanceBlockAsync(req);
+
+        var envelope = Assert.Single(captured);
+        Assert.Equal(PackageEvents.TypeBlocked, envelope.EventType);
+        using var doc = JsonDocument.Parse(envelope.DataJson);
+        Assert.Equal("provenance", doc.RootElement.GetProperty("arm").GetString());
+    }
+
     // ── helpers ───────────────────────────────────────────────────────────────
+
+    private (BlockGateService Gate, Dependably.Infrastructure.Webhooks.IPackageEventSink Sink) BuildGateWithThrottle(
+        TimeSpan window)
+    {
+        var sink = NSubstitute.Substitute.For<Dependably.Infrastructure.Webhooks.IPackageEventSink>();
+        var gate = new BlockGateService(
+            new VulnerabilityRepository(_fixture.Store, _clock),
+            _audit,
+            new QuarantineRepository(_fixture.Store, _clock),
+            new AlertService(new AlertRepository(_fixture.Store, _clock), new NoOpAlertNotifier(), Microsoft.Extensions.Logging.Abstractions.NullLogger<AlertService>.Instance),
+            new InstallScriptAllowlistService(_fixture.Store, new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), _clock),
+            new LicenseRepository(_fixture.Store, _clock, new LicenseNormalizer(_fixture.Store, Microsoft.Extensions.Logging.Abstractions.NullLogger<LicenseNormalizer>.Instance)),
+            _anchors,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<BlockGateService>.Instance,
+            _clock,
+            new OrgRepository(_fixture.Store),
+            sink,
+            new BlockRefusalWebhookThrottle(_clock, window));
+        return (gate, sink);
+    }
 
     private static BlockGateRequest BaseRequest(string orgId) => new(
         OrgId: orgId,

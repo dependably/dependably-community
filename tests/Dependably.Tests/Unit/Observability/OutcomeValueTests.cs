@@ -29,6 +29,9 @@ public sealed partial class OutcomeValueTests
         "hit", "miss",
         // Auth-resolution (dependably.token_auth.requests only)
         "no_auth", "invalid",
+        // SBOM component scan result (dependably.sbom.scan_components only) — "deferred" is the
+        // fail-closed branch: the advisory source was unreachable, so nothing was scored.
+        "scanned", "deferred",
     };
 
     // Matches: ("outcome", "value")  or  ("dependably.outcome", "value")

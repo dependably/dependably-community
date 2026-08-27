@@ -54,6 +54,7 @@ internal static class ProtocolStartupExtensions
                 SsrfGuard.IsBlockedIp, edge.IsEdge ? edge.MasterHost : null);
         });
         builder.Services.AddSingleton<AllowlistService>();
+        builder.Services.AddSingleton<BlockRefusalWebhookThrottle>();
         builder.Services.AddSingleton<BlockGateService>();
 
         // SPDX license identity normalization (name/alias variants -> canonical id). Lazily
@@ -158,6 +159,8 @@ internal static class ProtocolStartupExtensions
         })
         .ConfigurePrimaryHttpMessageHandler(sp => new System.Net.Http.SocketsHttpHandler
         {
+            // UseProxy=false: an ambient HTTP(S)_PROXY would make ConnectCallback vet the proxy, not the target.
+            UseProxy = false,
             ConnectTimeout = TimeSpan.FromSeconds(30),
             MaxConnectionsPerServer = UpstreamMaxConnectionsPerServer,
             AllowAutoRedirect = false,
@@ -198,6 +201,8 @@ internal static class ProtocolStartupExtensions
         })
         .ConfigurePrimaryHttpMessageHandler(sp => new System.Net.Http.SocketsHttpHandler
         {
+            // UseProxy=false: an ambient HTTP(S)_PROXY would make ConnectCallback vet the proxy, not the target.
+            UseProxy = false,
             ConnectTimeout = TimeSpan.FromSeconds(30),
             MaxConnectionsPerServer = OciUpstreamMaxConnectionsPerServer,
             AllowAutoRedirect = false,
@@ -229,6 +234,8 @@ internal static class ProtocolStartupExtensions
         builder.Services.AddHttpClient(Microsoft.Extensions.Options.Options.DefaultName)
         .ConfigurePrimaryHttpMessageHandler(sp => new System.Net.Http.SocketsHttpHandler
         {
+            // UseProxy=false: an ambient HTTP(S)_PROXY would make ConnectCallback vet the proxy, not the target.
+            UseProxy = false,
             AllowAutoRedirect = false,
             ConnectCallback = sp.GetRequiredService<SsrfConnectCallback>().ConnectAsync,
         });
@@ -238,6 +245,8 @@ internal static class ProtocolStartupExtensions
                 int.TryParse(builder.Configuration["HEALTHCHECK_PING_TIMEOUT_SECONDS"], out int t) ? t : HealthcheckPingTimeoutSecondsDefault))
         .ConfigurePrimaryHttpMessageHandler(sp => new System.Net.Http.SocketsHttpHandler
         {
+            // UseProxy=false: an ambient HTTP(S)_PROXY would make ConnectCallback vet the proxy, not the target.
+            UseProxy = false,
             AllowAutoRedirect = false,
             ConnectTimeout = TimeSpan.FromSeconds(5),
             // SSRF defense-in-depth: HEALTHCHECK_PING_URL is operator-supplied, but a

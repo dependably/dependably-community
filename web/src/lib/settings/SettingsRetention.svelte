@@ -1,7 +1,8 @@
 <!--
-  Retention tab — keep_versions, keep_days, activity_retention_days, purge_unlisted_after_days.
+  Retention tab — keep_versions, keep_days, activity_retention_days, purge_unlisted_after_days,
+  keep_project_versions.
 
-  Empty input = unlimited for THREE of the four: the server stores null and the GC skips that
+  Empty input = unlimited for FOUR of the five: the server stores null and the GC skips that
   dimension entirely. activity_retention_days is the exception and must not render as unlimited —
   a null there resolves to the instance-wide ACTIVITY_RETENTION_DAYS default (90) because activity
   rows carry per-download IP/actor data and are bounded by default on purpose. The server reports
@@ -44,6 +45,11 @@
     <label>{$t('settings.retention.purgeUnlistedDays')}</label>
     <input data-testid="retention-purge-unlisted" type="number" bind:value={retention.purge_unlisted_after_days} placeholder={$t('settings.retention.unlimited')} min="1" />
   </div>
+  <div class="form-row">
+    <label>{$t('settings.retention.keepProjectVersions')}</label>
+    <input data-testid="retention-keep-project-versions" type="number" bind:value={retention.keep_project_versions} placeholder={$t('settings.retention.unlimited')} min="1" />
+  </div>
+  <p class="hint" data-testid="retention-project-versions-hint">{$t('settings.retention.keepProjectVersionsHint')}</p>
   <button class="primary" on:click={onSave} disabled={saving}>
     {saving ? $t('common.actions.saving') : $t('common.actions.save')}
   </button>

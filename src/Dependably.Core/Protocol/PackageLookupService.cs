@@ -310,15 +310,24 @@ public sealed partial class PackageLookupService
         VersionMetadataFacts facts, OrgSettings settings, AdvisoryAnalysis analysis,
         bool advisoriesAvailable, LicensePolicyVerdict licenseVerdict, DateTimeOffset now)
     {
+        // vuln-facts-ok: this read-only "check before you add it" lookup never goes through
+        // BlockGateService's own request/index paths — it evaluates a candidate the org has not
+        // fetched yet, so there is no BlockGateRequest-shaped call site to route through.
         var gateFacts = new VersionFacts(
             ManualState: null,
             Deprecated: facts.Deprecated,
             PublishedAt: facts.PublishedAt,
             Scanned: advisoriesAvailable,
-            HasMalicious: analysis.HasMalicious,
-            HasKev: analysis.HasKev,
-            MaxEpss: analysis.MaxEpss,
-            MaxCvss: analysis.MaxCvss,
+            // This lookup path never goes through VulnGateSignals — it reduces its own ad hoc
+            // OSV query into AdvisoryAnalysis — so only the four signals it actually computes are
+            // set; every other VulnFacts member stays at its unknown default.
+            Vulnerability: VulnFacts.None with
+            {
+                IsMalicious = analysis.HasMalicious,
+                IsKev = analysis.HasKev,
+                Epss = analysis.MaxEpss,
+                Cvss = analysis.MaxCvss,
+            },
             Origin: "proxy",
             HasInstallScript: false,
             ProvenanceStatus: null,

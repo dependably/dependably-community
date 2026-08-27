@@ -214,6 +214,51 @@ public sealed class SystemHealthTests
         Assert.Contains("stats_stale", reasons);
     }
 
+    // ── suspended tenant's frozen (not stale) stats surfaces its own reason ──────
+
+    /// <summary>
+    /// StatsRefreshService deliberately stops refreshing a suspended org's snapshot (see
+    /// TenantLifecycle). A plain "stats_stale" reading here would misrepresent that as a
+    /// health-pipeline problem — this pins that a suspended org with an aged snapshot gets the
+    /// distinct "stats_frozen_non_active" reason instead, never "stats_stale", so the operator
+    /// surface states plainly why the snapshot stopped moving.
+    /// </summary>
+    [Fact]
+    public async Task ListTenants_SuspendedTenantWithStaleSnapshot_SurfacesFrozenNotStale()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        string slug = $"frozen-{Guid.NewGuid():N}"[..18];
+        string orgId = await OrgSeeder.InsertAsync(s.Store, slug);
+        await using (var conn = await s.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "UPDATE orgs SET status = 'suspended' WHERE id = @id", new { id = orgId });
+        }
+
+        var staleTime = s.Clock.GetUtcNow().AddHours(-3);
+        var statsSnaps = new StatsSnapshotRepository(s.Store);
+        await statsSnaps.UpsertSnapshotAsync(
+            orgId,
+            """{"packagesByEcosystem":[],"downloadsByHour":[],"vulnsByEcosystemAndSeverity":[],"diskByEcosystem":[],"totalDiskBytes":0,"newVulns":{"day":0,"week":0,"month":0},"activeUsers7d":0,"blockedPulls30d":0,"totalDownloads30d":0}""",
+            staleTime.ToUtcIso(),
+            100);
+
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var ok = Assert.IsType<OkObjectResult>(await b.SystemController.ListTenants());
+        string json = SerializeTenants(ok);
+        using var doc = JsonDocument.Parse(json);
+        var el = FindTenant(doc.RootElement.GetProperty("items"), slug);
+        var (status, reasons) = ReadHealth(el);
+
+        Assert.Equal("warn", status);
+        Assert.Contains("suspended", reasons);
+        Assert.Contains("stats_frozen_non_active", reasons);
+        Assert.DoesNotContain("stats_stale", reasons);
+    }
+
     // ── unparseable computed_at → treated as stale, not ignored ──────────────────
 
     [Fact]

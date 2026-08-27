@@ -15,6 +15,7 @@ const TENANT_STATIC = [
   ['dashboard',         '/'],
   ['login',             '/login'],
   ['packages',          '/packages'],
+  ['projects',          '/projects'],
   ['audit',             '/audit'],
   ['tokens',            '/tokens'],
   ['settings',          '/settings'],
@@ -63,6 +64,16 @@ export function pathFor(page, params = {}) {
     const name = String(params.name ?? '').split('/').map(encodeURIComponent).join('/')
     return `/package/${eco}/${name}`
   }
+  // Projects epic: GUIDs in the path (labels are opaque user strings that may contain '/',
+  // so — unlike version-detail's name segments — there is no multi-segment-encode dance here).
+  if (activeTable === 'tenant' && page === 'project-version') {
+    const id = encodeURIComponent(params.id ?? '')
+    const versionId = encodeURIComponent(params.versionId ?? '')
+    return `/project/${id}/version/${versionId}`
+  }
+  if (activeTable === 'tenant' && page === 'project-detail') {
+    return `/project/${encodeURIComponent(params.id ?? '')}`
+  }
   for (const [p, path] of staticTable()) {
     if (p === page) return path
   }
@@ -77,6 +88,11 @@ export function pathFor(page, params = {}) {
 // Empty/nullish values are dropped so a bare navigation still yields a clean URL = default state.
 export function searchFor(page, params = {}) {
   if (activeTable === 'tenant' && page === 'version-detail') return ''
+  // project-detail/project-version carry their identity as path GUIDs (see pathFor). A page
+  // with its own URL-persisted table state (the project-version component table) writes its
+  // query string directly via tableState.js's readQuery/writeQuery once mounted, independent of
+  // navigate() — the same relationship Packages.svelte has with the plain 'packages' page.
+  if (activeTable === 'tenant' && (page === 'project-detail' || page === 'project-version')) return ''
   const sp = new URLSearchParams()
   for (const [key, value] of Object.entries(params)) {
     if (value === undefined || value === null || value === '') continue
@@ -104,6 +120,20 @@ export function routeFor(pathname) {
           name: m[2].split('/').map(decodeURIComponent).join('/'),
         },
       }
+    }
+
+    // versionId also matches the literal 'latest' — a server-resolved alias, not a GUID; the
+    // route layer passes whatever string is in the path through untouched.
+    const mv = /^\/project\/([^/]+)\/version\/([^/]+)$/.exec(path)
+    if (mv) {
+      return {
+        page: 'project-version',
+        params: { id: decodeURIComponent(mv[1]), versionId: decodeURIComponent(mv[2]) },
+      }
+    }
+    const mp = /^\/project\/([^/]+)$/.exec(path)
+    if (mp) {
+      return { page: 'project-detail', params: { id: decodeURIComponent(mp[1]) } }
     }
   }
 

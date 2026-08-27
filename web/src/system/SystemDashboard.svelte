@@ -108,6 +108,13 @@
 
   // Dependencies to display as chips (omit null/unconfigured ones).
   $: deps = (health?.dependencies ?? []).filter(d => d.name !== 'redis' || d.status !== null)
+
+  // Enrichment coverage tile: a percent is only meaningful once the vulnerability tracker is
+  // configured and there's a nonzero advisory total to divide by — never fabricate a 0%/100%
+  // for either the unconfigured or the nothing-to-enrich state.
+  $: enrichmentPercent = (data?.enrichmentCoverage?.configured && data.enrichmentCoverage.total > 0)
+    ? Math.round((data.enrichmentCoverage.enriched / data.enrichmentCoverage.total) * 100)
+    : null
 </script>
 
 <div class="page">
@@ -285,6 +292,21 @@
           <div class="stat"><div class="stat-value">{$formatBytes(data.storage?.byTier?.registry ?? 0)}</div><div class="stat-label">{$t('system.dashboard.storage.registry')}</div></div>
         </div>
         <div class="stat-foot">{$t('system.dashboard.storage.total', { values: { total: $formatBytes(data.storage?.totalBytes ?? 0) } })}</div>
+      </section>
+
+      <section class="card">
+        <h2>{$t('system.dashboard.enrichmentCoverage.title')}</h2>
+        {#if !data.enrichmentCoverage.configured}
+          <p class="muted">{$t('system.dashboard.enrichmentCoverage.notConfigured')}</p>
+        {:else if data.enrichmentCoverage.total === 0}
+          <p class="muted">{$t('system.dashboard.enrichmentCoverage.none')}</p>
+        {:else}
+          <div class="stat-value">{$t('system.dashboard.enrichmentCoverage.percent', { values: { percent: enrichmentPercent } })}</div>
+          <div class="stat-foot">{$t('system.dashboard.enrichmentCoverage.sub', { values: {
+            enriched: data.enrichmentCoverage.enriched,
+            total: data.enrichmentCoverage.total,
+          } })}</div>
+        {/if}
       </section>
     </div>
 

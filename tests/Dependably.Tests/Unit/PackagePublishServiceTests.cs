@@ -66,7 +66,12 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
             _clock,
             new OrgRepository(_db),
             Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(TimeProvider.System),
-            Dependably.Tests.Infrastructure.TestAlerts.NoOp(_db, _clock)));
+            Dependably.Tests.Infrastructure.TestAlerts.NoOp(_db, _clock),
+            new SbomComponentVulnRepository(_db, _clock),
+            new SbomComponentScanner(_osv, new VulnerabilityRepository(_db, _clock), new SbomComponentVulnRepository(_db, _clock), NullLogger<SbomComponentScanner>.Instance),
+            Dependably.Tests.Infrastructure.TestSbomPolicy.Service(_db, _clock),
+            Dependably.Tests.Infrastructure.TestEnrichment.Unused(),
+            Dependably.Tests.Infrastructure.TestEnrichment.NoConnection()));
         var auditor = new Dependably.Infrastructure.Publish.PublishAuditor(audit, emitter);
         var licenses = new LicenseRepository(_db, _clock, TestNormalizers.License(_db));
         return new PackagePublishService(packages, new PackageVersionFilesRepository(_db), new OrgRepository(_db), storage, gate,
@@ -137,6 +142,25 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
         var svc = Build();
         var rej = Assert.IsType<PublishResult.Rejected>(
             await svc.StoreAndRecordAsync(Sample(name: "../../etc/passwd")));
+        Assert.Equal(422, rej.HttpStatus);
+        Assert.Equal("path_unsafe", rej.Code);
+    }
+
+    // A .NET regex anchored '$' rather than '\z' matches one trailing newline, so every
+    // ecosystem's charset regex accepted "pkg\n". npm reaches this service with only that regex
+    // behind it, so the control character landed in the hosted blob key as a real on-disk path
+    // segment and in the packages.name / packages.purl_name rows. This scan is deliberately
+    // independent of regex anchoring, so it holds even if a future ecosystem regex regresses.
+    [Theory]
+    [InlineData("pkg\n")]           // the $-anchor case: a single trailing LF
+    [InlineData("pkg\rmalicious")]  // CR mid-name
+    [InlineData("pkg\u0001")]       // SOH
+    [InlineData("pkg\u007f")]       // DEL
+    public async Task ControlCharacterInName_RejectedWith422(string badName)
+    {
+        var svc = Build();
+        var rej = Assert.IsType<PublishResult.Rejected>(
+            await svc.StoreAndRecordAsync(Sample(name: badName)));
         Assert.Equal(422, rej.HttpStatus);
         Assert.Equal("path_unsafe", rej.Code);
     }
@@ -807,7 +831,12 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
             _clock,
             new OrgRepository(_db),
             Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(TimeProvider.System),
-            Dependably.Tests.Infrastructure.TestAlerts.NoOp(_db, _clock)));
+            Dependably.Tests.Infrastructure.TestAlerts.NoOp(_db, _clock),
+            new SbomComponentVulnRepository(_db, _clock),
+            new SbomComponentScanner(_osv, new VulnerabilityRepository(_db, _clock), new SbomComponentVulnRepository(_db, _clock), NullLogger<SbomComponentScanner>.Instance),
+            Dependably.Tests.Infrastructure.TestSbomPolicy.Service(_db, _clock),
+            Dependably.Tests.Infrastructure.TestEnrichment.Unused(),
+            Dependably.Tests.Infrastructure.TestEnrichment.NoConnection()));
         var auditor = new Dependably.Infrastructure.Publish.PublishAuditor(audit, emitter);
         var licenses = new LicenseRepository(_db, _clock, TestNormalizers.License(_db));
         return new PackagePublishService(packages, new PackageVersionFilesRepository(_db), new OrgRepository(_db), storage, gate,
@@ -1432,7 +1461,10 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
             new LicenseRepository(_db, _clock, TestNormalizers.License(_db)),
             new StubPerOrgTrustAnchorStore(),
             NullLogger<BlockGateService>.Instance,
-            _clock);
+            _clock,
+            new OrgRepository(_db),
+            NSubstitute.Substitute.For<Dependably.Infrastructure.Webhooks.IPackageEventSink>(),
+            new BlockRefusalWebhookThrottle(_clock, TimeSpan.Zero));
     }
 
     // ── #438 item 6: declared dist.integrity is compared, not trusted verbatim ──

@@ -38,10 +38,10 @@ public static partial class PyPiArtifactValidator
     // Minimum egg filename segment count (name + version).
     private const int EggMinSegments = 2;
 
-    [GeneratedRegex(@"^[A-Za-z0-9]([A-Za-z0-9._\-]*[A-Za-z0-9])?$")]
+    [GeneratedRegex(@"^[A-Za-z0-9]([A-Za-z0-9._\-]*[A-Za-z0-9])?\z")]
     private static partial Regex Pep508NameRegex();
 
-    [GeneratedRegex(@"^\d[\w\.\!\+\-]*$")]
+    [GeneratedRegex(@"^\d[\w\.\!\+\-]*\z")]
     private static partial Regex Pep440VersionRegex();
 
     /// <summary>
@@ -91,7 +91,7 @@ public static partial class PyPiArtifactValidator
     {
         try
         {
-            using var zip = new ZipArchive(archiveStream, ZipArchiveMode.Read, leaveOpen: true);
+            using var zip = SafeZipArchive.Open(archiveStream, leaveOpen: true);
             var metaEntry = zip.Entries.FirstOrDefault(e =>
                 e.FullName.EndsWith(".dist-info/METADATA", StringComparison.OrdinalIgnoreCase));
             if (metaEntry is null)
@@ -170,7 +170,7 @@ public static partial class PyPiArtifactValidator
     {
         try
         {
-            using var zip = new ZipArchive(archiveStream, ZipArchiveMode.Read, leaveOpen: true);
+            using var zip = SafeZipArchive.Open(archiveStream, leaveOpen: true);
             var metaEntry = zip.Entries.FirstOrDefault(e =>
                 e.FullName.EndsWith("EGG-INFO/PKG-INFO", StringComparison.OrdinalIgnoreCase));
             if (metaEntry is null)
@@ -248,8 +248,21 @@ public static partial class PyPiArtifactValidator
                 ArchiveDecompressLimits.MaxDecompressedBytes, "Sdist");
             using var tar = new TarReader(gzip, leaveOpen: false);
 
+            // Entry count is bounded independently of the decompressed-byte cap above: an sdist of
+            // millions of zero-byte entries stays far inside the byte ceiling while costing a full
+            // TarReader header parse each. NpmTarballValidator and EcosystemDetector.ScanGzippedTar
+            // have always counted; this loop did not.
+            int entryCount = 0;
             while (tar.GetNextEntry() is { } entry)
             {
+                if (++entryCount > TarScanLimits.MaxEntries)
+                {
+                    return new PyPiArtifactParsed(
+                        ValidationResult.Fail("content",
+                            $"Sdist exceeds the {TarScanLimits.MaxEntries}-entry limit."),
+                        null, null);
+                }
+
                 if (entry.Name.EndsWith("/PKG-INFO", StringComparison.OrdinalIgnoreCase)
                     && entry.Name.Count(c => c == '/') == 1)
                 {

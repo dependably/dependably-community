@@ -21,6 +21,10 @@ namespace Dependably.Infrastructure.Health;
 ///   HEALTHCHECK_PING_INSTANCE_ID       — defaults to hostname; included in POST payload
 ///   HEALTHCHECK_PING_FAIL_URL          — optional; called when local readiness fails
 ///   HEALTHCHECK_PING_SCOPE             — replica (default) or leader
+///
+/// suspension-ok: not per-tenant. The ping target is an operator-configured monitoring URL
+/// (HEALTHCHECK_PING_URL, an instance-level env var), never a tenant-owned endpoint, and the
+/// payload reports this replica's own liveness — not any org's data.
 /// </summary>
 public sealed class HealthcheckPinger : BackgroundService
 {

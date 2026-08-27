@@ -1,10 +1,12 @@
 namespace Dependably.Protocol;
 
 /// <summary>
-/// CVSS v3.x scoring and severity-text normalisation. Shared by <see cref="OsvClient"/> and
-/// <c>LocalOsvSource</c> so offline scans produce the same numeric scores as remote scans.
+/// CVSS v3.x and v4.0 scoring and severity-text normalisation. Shared by <see cref="OsvClient"/>
+/// and <c>LocalOsvSource</c> so offline scans produce the same numeric scores as remote scans.
+/// The v4.0 macro-vector lookup table and interpolation algorithm live in the
+/// <c>OsvScoring.Cvss4.cs</c> partial, which carries its own BSD-2-Clause attribution header.
 /// </summary>
-public static class OsvScoring
+public static partial class OsvScoring
 {
     // CVSS v3 severity band thresholds (CVSS 3.1 specification §8).
     private const double CvssThresholdCritical = 9.0;
@@ -33,9 +35,53 @@ public static class OsvScoring
             return (appended, CvssScoreToSeverity(appended));
         }
 
-        double? computed = ComputeCvss3Score(parts[0]);
+        double? computed = parts[0].StartsWith("CVSS:4.", StringComparison.OrdinalIgnoreCase)
+            ? ComputeCvss4Score(parts[0])
+            : ComputeCvss3Score(parts[0]);
         return (computed, computed is not null ? CvssScoreToSeverity(computed.Value) : null);
     }
+
+    /// <summary>
+    /// Selects the best <em>parseable</em> CVSS severity entry from an OSV advisory's
+    /// <c>severity[]</c> array and parses it — rather than the first entry whose <c>type</c>
+    /// merely starts with "CVSS". An advisory carrying both a <c>CVSS_V3</c> and a
+    /// <c>CVSS_V4</c> entry must not lose its score just because the v4 entry happens to be
+    /// listed first: entries are tried highest-CVSS-version-first, and the first one that
+    /// actually produces a score wins. Shared by <see cref="OsvClient"/> and
+    /// <c>LocalOsvSource</c> so an advisory scores identically online and offline.
+    /// </summary>
+    public static (double? Score, string? Severity) SelectCvssBaseScore(
+        IEnumerable<(string? Type, string? Score)>? severityEntries)
+    {
+        if (severityEntries is null)
+        {
+            return (null, null);
+        }
+
+        var candidates = severityEntries
+            .Where(e => e.Type?.StartsWith("CVSS", StringComparison.OrdinalIgnoreCase) == true
+                && e.Score is not null)
+            .OrderByDescending(e => CvssVersionRank(e.Type!));
+
+        foreach (var entry in candidates)
+        {
+            (double? score, string? severity) = ParseCvssBaseScore(entry.Score!);
+            if (score is not null)
+            {
+                return (score, severity);
+            }
+        }
+
+        return (null, null);
+    }
+
+    private static int CvssVersionRank(string type) => type.ToUpperInvariant() switch
+    {
+        "CVSS_V4" => 4,
+        "CVSS_V3" => 3,
+        "CVSS_V2" => 2,
+        _ => 0,
+    };
 
     public static string CvssScoreToSeverity(double score) => score switch
     {

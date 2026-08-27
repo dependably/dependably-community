@@ -6,6 +6,8 @@ namespace Dependably.Infrastructure;
 /// message a pre-check would have, without repeating the count outside the transaction that
 /// enforced it.
 /// </summary>
+[System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S3925:\"ISerializable\" should be implemented correctly",
+    Justification = "Binary serialization ctor on Exception is obsolete in .NET 10 (SYSLIB0051); this exception is never serialized across an AppDomain or binary boundary.")]
 public sealed class TokenCapExceededException : Exception
 {
     public TokenCapExceededException(string orgId, int activeCount, int cap)

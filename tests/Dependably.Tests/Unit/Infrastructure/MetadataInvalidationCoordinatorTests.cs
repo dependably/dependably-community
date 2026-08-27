@@ -76,18 +76,18 @@ public sealed class MetadataInvalidationCoordinatorTests
     // ── PyPI: HTML + JSON, with PEP 503 normalization ─────────────────────────
 
     [Fact]
-    public void PyPi_EvictsBothNegotiatedRepresentations()
+    public void PyPi_EvictsAllFourVariants()
     {
         var h = TestMetadataInvalidation.Build();
-        var html = new PyPiSimpleIndexKey(OrgA, "My_Package");
-        var json = new PyPiSimpleIndexKey(OrgA, "My_Package") { WantsJson = true };
-        h.PyPi.Set(html, [1], Ttl);
-        h.PyPi.Set(json, [2], Ttl);
+        var keys = PyPiVariants(OrgA, "My_Package");
+        foreach (var key in keys)
+        {
+            h.PyPi.Set(key, [1], Ttl);
+        }
 
         h.Coordinator.Invalidate(MetadataInvalidation.ForPyPi(OrgA, "My_Package"));
 
-        Assert.False(h.PyPi.TryGet(html, out _));
-        Assert.False(h.PyPi.TryGet(json, out _));
+        Assert.All(keys, key => Assert.False(h.PyPi.TryGet(key, out _)));
     }
 
     /// <summary>
@@ -111,21 +111,42 @@ public sealed class MetadataInvalidationCoordinatorTests
     public void PyPi_LeavesOtherProjectsIntact()
     {
         var h = TestMetadataInvalidation.Build();
-        var neighbour = new PyPiSimpleIndexKey(OrgA, "other-package");
-        var neighbourJson = new PyPiSimpleIndexKey(OrgA, "other-package") { WantsJson = true };
-        h.PyPi.Set(new PyPiSimpleIndexKey(OrgA, "my-package"), [1], Ttl);
-        h.PyPi.Set(neighbour, [2], Ttl);
-        h.PyPi.Set(neighbourJson, [3], Ttl);
+        var survivors = PyPiVariants(OrgA, "other-package");
+        foreach (var key in PyPiVariants(OrgA, "my-package").Concat(survivors))
+        {
+            h.PyPi.Set(key, [1], Ttl);
+        }
 
         h.Coordinator.Invalidate(MetadataInvalidation.ForPyPi(OrgA, "my-package"));
 
-        Assert.True(h.PyPi.TryGet(neighbour, out _));
-        Assert.True(h.PyPi.TryGet(neighbourJson, out _));
+        Assert.All(survivors, key => Assert.True(h.PyPi.TryGet(key, out _)));
+    }
+
+    /// <summary>
+    /// The proxy-merged body and the local-only body are different documents rendered at
+    /// different TTLs, so they must not share a slot: a claim-state flip (a name becoming
+    /// local-only, or proxy passthrough being toggled) moves subsequent requests between the two
+    /// render paths, and a shared key would serve the stale wrong-path body until its TTL expired.
+    /// </summary>
+    [Fact]
+    public void PyPi_ProxyAndLocalBodiesOccupyDistinctEntries()
+    {
+        var h = TestMetadataInvalidation.Build();
+        var local = new PyPiSimpleIndexKey(OrgA, "my-package");
+        var proxy = new PyPiSimpleIndexKey(OrgA, "my-package") { IsProxy = true };
+
+        h.PyPi.Set(local, [1], Ttl);
+        h.PyPi.Set(proxy, [2], Ttl);
+
+        Assert.True(h.PyPi.TryGet(local, out byte[]? localHit));
+        Assert.True(h.PyPi.TryGet(proxy, out byte[]? proxyHit));
+        Assert.Equal([1], localHit);
+        Assert.Equal([2], proxyHit);
     }
 
     [Fact]
-    public void PyPiSimpleIndexKey_HasExactlyOneVariantAxis()
-        => AssertVariantAxes<PyPiSimpleIndexKey>("WantsJson");
+    public void PyPiSimpleIndexKey_HasExactlyTwoVariantAxes()
+        => AssertVariantAxes<PyPiSimpleIndexKey>("WantsJson", "IsProxy");
 
     // ── NuGet: SemVer1/2 x local/proxy ────────────────────────────────────────
 
@@ -466,6 +487,14 @@ public sealed class MetadataInvalidationCoordinatorTests
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private static PyPiSimpleIndexKey[] PyPiVariants(string orgId, string name) =>
+    [
+        new(orgId, name),
+        new(orgId, name) { WantsJson = true },
+        new(orgId, name) { IsProxy = true },
+        new(orgId, name) { WantsJson = true, IsProxy = true },
+    ];
 
     private static NuGetRegistrationKey[] NuGetVariants(string orgId, string normalizedId) =>
     [

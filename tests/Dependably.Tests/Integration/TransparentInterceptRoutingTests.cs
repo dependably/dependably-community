@@ -11,11 +11,14 @@ namespace Dependably.Tests.Integration;
 /// parser, or the rewrite logic would silently break stock-client compatibility.
 ///
 /// Strategy: target <c>GET /health</c>. It's an unauthenticated endpoint that always
-/// returns 200 when reached. With HOST_ROUTING active and a mapped host, the path
-/// becomes <c>/npm/health</c> — which has no matching route and 404s. Three cases:
-///   - mapped host + HOST_ROUTING set    → 404 (rewrite happened)
+/// returns 200 when reached with the path unrewritten. Three route-outcome cases:
 ///   - localhost (unmapped) + HOST_ROUTING set → 200 (no rewrite for this host)
 ///   - localhost + HOST_ROUTING unset    → 200 (middleware is no-op when map is empty)
+///   - mapped host + HOST_ROUTING set    → rewritten to <c>/npm/health</c>, which DOES
+///     have a matching route (<c>NpmController</c>'s <c>/npm/{package}</c> treats "health"
+///     as a package name and answers 200, not a framework 404 — an earlier version of this
+///     doc comment assumed a 404, which <see cref="MappedHost_SecurityHeadersClassifyOnTheRewrittenPath_ThroughTheRealPipeline"/>
+///     found does not hold); that case is proven on response headers instead of status code.
 /// Every mapped host is also always accepted by host filtering (regardless of BASE_URL) —
 /// those hostnames are the entire point of transparent intercept; localhost stands in for
 /// "any host the filter would accept but the map doesn't recognise" without also having to
@@ -67,10 +70,12 @@ public sealed class TransparentInterceptRoutingTests
         // integration boundary needs to prove is that `HOST_ROUTING=...` reaches the DI
         // singleton at startup — i.e., the wiring in Program.cs picks up the env var.
         //
-        // We don't verify the actual rewrite over TestServer because TestServer normalises
-        // `context.Request.Host.Host` away from the impersonated hostname (a known quirk
-        // of the in-proc test pipeline). End-to-end verification with stock clients lives
-        // in `docs/deployment/transparent-intercept.md`.
+        // TestServer DOES propagate the impersonated Host correctly when it is encoded into
+        // the request URI's authority (see GetHealthAsync) — verified directly by
+        // MappedHost_SecurityHeadersClassifyOnTheRewrittenPath_ThroughTheRealPipeline below,
+        // which asserts on the rewrite's actual effect. This test stays narrower on purpose:
+        // it isolates the DI-wiring question (does HOST_ROUTING reach the singleton at all)
+        // from the pipeline-behaviour question the other test answers.
         await WithHostRoutingAsync(
             "registry.npmjs.org=npm,pypi.org=pypi,api.nuget.org=nuget",
             factory =>
@@ -118,6 +123,46 @@ public sealed class TransparentInterceptRoutingTests
 
             Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         });
+    }
+
+    /// <summary>
+    /// The actual registration-order proof, through the real pipeline —
+    /// <see cref="DependablyFactory"/> boots via the genuine <c>Program.ConfigureApp</c>, so this
+    /// exercises the real middleware order in the composition root, not a hand-built chain.
+    /// <c>TransparentInterceptMiddlewareTests.MappedHost_SecurityHeadersClassifyOnRewrittenPath_NotTheOriginalHostRelativePath</c>
+    /// proves the invariant holds when the two middlewares are composed correctly; it cannot
+    /// prove <c>Program.cs</c> actually composes them that way, because it builds its own chain.
+    /// This test is what can, and did: hoisting <c>SecurityHeadersMiddleware</c> above
+    /// <c>TransparentInterceptMiddleware</c> in <c>src/Dependably/Program.cs</c> was confirmed to
+    /// fail this test while leaving the rest of the suite green.
+    ///
+    /// <c>SecurityHeadersMiddleware</c> runs unconditionally before routing and classifies off
+    /// <c>Request.Path</c> at that point, regardless of what routing later does with the
+    /// (possibly rewritten) path — so a registry CSP and <c>Cache-Control: no-store</c> on this
+    /// response are only possible if <c>TransparentInterceptMiddleware</c> already rewrote
+    /// <c>/health</c> to <c>/npm/health</c> before <c>SecurityHeadersMiddleware</c> ran.
+    /// </summary>
+    [Fact]
+    public async Task MappedHost_SecurityHeadersClassifyOnTheRewrittenPath_ThroughTheRealPipeline()
+    {
+        await WithHostRoutingAsync(
+            "registry.npmjs.org=npm,pypi.org=pypi,api.nuget.org=nuget",
+            async factory =>
+            {
+                var resp = await GetHealthAsync(factory, host: "registry.npmjs.org");
+
+                string csp = Assert.Single(resp.Headers.GetValues("Content-Security-Policy"));
+                Assert.Contains("default-src 'none'", csp);
+                // The frontend CSP this regresses to if the ordering is ever wrong — asserting
+                // its absence, not just the registry CSP's presence, is what makes this a
+                // negative control against the specific historical regression, not just a
+                // positive assertion that could coincidentally pass some other way.
+                Assert.DoesNotContain("script-src 'self'", csp);
+                Assert.Equal(
+                    "no-store",
+                    resp.Headers.CacheControl?.ToString(),
+                    ignoreCase: true);
+            });
     }
 }
 

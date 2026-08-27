@@ -323,7 +323,10 @@ public sealed partial class SchemaInitializer
         }
 
         // Recreate the table with id as the surrogate PK and package_version_id nullable.
-        // Column list covers: base columns + P0 additive columns (cache_artifact_id, owner_kind).
+        // Column list covers: base columns + P0 additive columns (cache_artifact_id, owner_kind)
+        // + first_seen_at — an ADD COLUMN-only migration on a table that still needs THIS reshape
+        // (package_version_id still constrained) would otherwise be silently dropped by the
+        // recreate below; carrying it here keeps the rebuild body in parity with Schema.sql.
         // xtenant: DDL-only; no data query across tenants.
         const string recreateSql = """
             DROP TABLE IF EXISTS package_version_vulns_new;
@@ -332,13 +335,14 @@ public sealed partial class SchemaInitializer
                 package_version_id  TEXT REFERENCES package_versions(id) ON DELETE CASCADE,
                 vuln_id             TEXT NOT NULL REFERENCES vulnerabilities(id) ON DELETE CASCADE,
                 checked_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                first_seen_at       TEXT,
                 cache_artifact_id   TEXT REFERENCES cache_artifact(id) ON DELETE CASCADE,
                 owner_kind          TEXT NOT NULL DEFAULT 'package_version'
                                     CHECK (owner_kind IN ('package_version','cache_artifact'))
             );
             INSERT INTO package_version_vulns_new
-                (id, package_version_id, vuln_id, checked_at, cache_artifact_id, owner_kind)
-            SELECT lower(hex(randomblob(16))), package_version_id, vuln_id, checked_at,
+                (id, package_version_id, vuln_id, checked_at, first_seen_at, cache_artifact_id, owner_kind)
+            SELECT lower(hex(randomblob(16))), package_version_id, vuln_id, checked_at, first_seen_at,
                    cache_artifact_id, owner_kind
             FROM package_version_vulns;
             DROP TABLE package_version_vulns;

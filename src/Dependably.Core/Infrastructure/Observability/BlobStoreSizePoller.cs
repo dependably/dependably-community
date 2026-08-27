@@ -17,6 +17,9 @@ namespace Dependably.Infrastructure.Observability;
 /// and Azure backends, so the poll interval should comfortably exceed how
 /// long a single sweep takes. The first poll happens shortly after startup
 /// so dashboards aren't empty on cold-launch.</para>
+///
+/// suspension-ok: not per-tenant. Sums bytes across the whole cache/registry tier in one pass;
+/// there is no per-org selection point to gate.
 /// </summary>
 public sealed class BlobStoreSizePoller : BackgroundService
 {

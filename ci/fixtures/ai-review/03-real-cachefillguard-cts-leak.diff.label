@@ -1,0 +1,19 @@
+fixture: 03-real-cachefillguard-cts-leak.diff
+class: REAL_FINDING
+expected_verdict: FINDING
+lens: security (primary), code (secondary)
+expected_finding: |
+  SubdomainTenantResolver's fill-guard entry is not retired when the DB open/read throws, so the
+  throwing branch permanently leaks a CancellationTokenSource for every failed resolution. The
+  path is pre-auth and pre-rate-limit with an attacker-controlled, unbounded key space (any
+  Host header subdomain), making it a remote unauthenticated memory-exhaustion vector.
+provenance:
+  origin: reverse of commit 22699fa9 ("fix(tenancy): retire the fill guard on a thrown DB open/read..."), src/ only
+  mr: !1031
+  ground_truth: KNOWN FALSE NEGATIVE -- on that MR three of the four lenses that existed at the
+    time posted (unverifiable response) and the fourth was clean; raw-log recovery showed all
+    three were off-format CLEAN claims, i.e. no lens found this. Found by an independent
+    adversarial verification pass.
+notes: |
+  Smallest fixture (9 KB). Well under every cap, single file of substance. If a lens misses this
+  one, the miss cannot be attributed to context pressure.

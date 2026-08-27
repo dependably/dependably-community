@@ -28,16 +28,18 @@ public sealed class AlertServiceTests : IClassFixture<InMemoryDbFixture>
         new(_alerts, notifier, NullLogger<AlertService>.Instance);
 
     private async Task SeedSettingsAsync(
-        string orgId, bool quarantineEnabled = true, bool vulnEnabled = true, string minSeverity = "HIGH")
+        string orgId, bool quarantineEnabled = true, bool vulnEnabled = true,
+        bool sbomPolicyEnabled = true, string minSeverity = "HIGH")
     {
         await using var conn = await _fixture.Store.OpenAsync();
         await conn.ExecuteAsync(
             """
             INSERT INTO alert_settings
-                (org_id, quarantine_alerts_enabled, vuln_alerts_enabled, vuln_min_severity, created_at, updated_at)
-            VALUES (@orgId, @q, @v, @sev, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                (org_id, quarantine_alerts_enabled, vuln_alerts_enabled, sbom_policy_alerts_enabled,
+                 vuln_min_severity, created_at, updated_at)
+            VALUES (@orgId, @q, @v, @s, @sev, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
             """,
-            new { orgId, q = quarantineEnabled ? 1 : 0, v = vulnEnabled ? 1 : 0, sev = minSeverity });
+            new { orgId, q = quarantineEnabled ? 1 : 0, v = vulnEnabled ? 1 : 0, s = sbomPolicyEnabled ? 1 : 0, sev = minSeverity });
     }
 
     // ── Quarantine trigger ───────────────────────────────────────────────────
@@ -171,5 +173,205 @@ public sealed class AlertServiceTests : IClassFixture<InMemoryDbFixture>
 
         Assert.Equal(1, await _alerts.CountActiveAsync(orgId));
         await notifier.Received(1).NotifyAsync(Arg.Any<AlertRecord>(), Arg.Any<CancellationToken>());
+    }
+
+    // ── KEV trigger ──────────────────────────────────────────────────────────
+
+    /// <summary>The headline bug: an unscored (null severity) advisory still raises the KEV alert.</summary>
+    [Fact]
+    public async Task RaiseVulnKev_UnscoredSeverity_StillRaises()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"asvc-n-{Guid.NewGuid():N}");
+        var notifier = Substitute.For<IAlertNotifier>();
+        var svc = BuildService(notifier);
+
+        await svc.RaiseVulnKevAlertAsync(
+            orgId, "npm", "kev-pkg", "pkg:npm/kev-pkg@1.0.0", "GHSA-kev-unscored", null, null);
+
+        Assert.Equal(1, await _alerts.CountActiveAsync(orgId));
+        await notifier.Received(1).NotifyAsync(Arg.Any<AlertRecord>(), Arg.Any<CancellationToken>());
+    }
+
+    /// <summary>
+    /// A KEV advisory scored below the org's severity floor still raises the KEV alert, even
+    /// though the existing vuln_severity arm correctly would not.
+    /// </summary>
+    [Fact]
+    public async Task RaiseVulnKev_ScoredBelowFloor_StillRaises()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"asvc-o-{Guid.NewGuid():N}");
+        await SeedSettingsAsync(orgId, minSeverity: "HIGH");
+        var notifier = Substitute.For<IAlertNotifier>();
+        var svc = BuildService(notifier);
+
+        await svc.RaiseVulnKevAlertAsync(
+            orgId, "npm", "kev-pkg", "pkg:npm/kev-pkg@1.0.0", "GHSA-kev-below-floor", "MEDIUM", null);
+
+        Assert.Equal(1, await _alerts.CountActiveAsync(orgId));
+        var (items, _) = await _alerts.ListAsync(orgId, "active", 10, 0);
+        Assert.Contains(items, a => a.Type == AlertTypes.VulnKev);
+    }
+
+    [Fact]
+    public async Task RaiseVulnKev_TypeDisabled_DoesNotRaise()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"asvc-p-{Guid.NewGuid():N}");
+        await SeedSettingsAsync(orgId, vulnEnabled: false);
+        var notifier = Substitute.For<IAlertNotifier>();
+        var svc = BuildService(notifier);
+
+        await svc.RaiseVulnKevAlertAsync(
+            orgId, "npm", "kev-pkg", "pkg:npm/kev-pkg@1.0.0", "GHSA-kev-off", "CRITICAL", true);
+
+        Assert.Equal(0, await _alerts.CountActiveAsync(orgId));
+        await notifier.DidNotReceive().NotifyAsync(Arg.Any<AlertRecord>(), Arg.Any<CancellationToken>());
+    }
+
+    /// <summary>A repeat raise for the same advisory/package dedups to exactly one row.</summary>
+    [Fact]
+    public async Task RaiseVulnKev_RepeatSameAdvisory_NotifiesOnlyOnce()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"asvc-q-{Guid.NewGuid():N}");
+        var notifier = Substitute.For<IAlertNotifier>();
+        var svc = BuildService(notifier);
+
+        await svc.RaiseVulnKevAlertAsync(
+            orgId, "npm", "kev-pkg", "pkg:npm/kev-pkg@1.0.0", "GHSA-kev-repeat", "CRITICAL", true);
+        await svc.RaiseVulnKevAlertAsync(
+            orgId, "npm", "kev-pkg", "pkg:npm/kev-pkg@1.0.0", "GHSA-kev-repeat", "CRITICAL", true);
+
+        Assert.Equal(1, await _alerts.CountActiveAsync(orgId));
+        await notifier.Received(1).NotifyAsync(Arg.Any<AlertRecord>(), Arg.Any<CancellationToken>());
+    }
+
+    /// <summary>
+    /// vuln_severity and vuln_kev are independent alert types: the same advisory, both KEV and
+    /// above the severity floor, raises two distinct rows.
+    /// </summary>
+    [Fact]
+    public async Task RaiseVulnSeverityAndVulnKev_SameAdvisory_RaisesTwoIndependentAlerts()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"asvc-r-{Guid.NewGuid():N}");
+        await SeedSettingsAsync(orgId, minSeverity: "HIGH");
+        var notifier = Substitute.For<IAlertNotifier>();
+        var svc = BuildService(notifier);
+
+        await svc.RaiseVulnAlertAsync(orgId, "npm", "kev-pkg", "pkg:npm/kev-pkg@1.0.0", "GHSA-kev-both", "CRITICAL");
+        await svc.RaiseVulnKevAlertAsync(
+            orgId, "npm", "kev-pkg", "pkg:npm/kev-pkg@1.0.0", "GHSA-kev-both", "CRITICAL", true);
+
+        Assert.Equal(2, await _alerts.CountActiveAsync(orgId));
+        var (items, _) = await _alerts.ListAsync(orgId, "active", 10, 0);
+        Assert.Contains(items, a => a.Type == AlertTypes.VulnSeverity);
+        Assert.Contains(items, a => a.Type == AlertTypes.VulnKev);
+    }
+
+    /// <summary>
+    /// The ransomware tri-state must render as three distinguishable Detail texts on the alert
+    /// itself — not just be correct somewhere upstream. true/false/null must not collapse.
+    /// </summary>
+    [Theory]
+    [InlineData(true, "CISA marks this entry as used in ransomware campaigns.")]
+    [InlineData(false, "CISA has not recorded ransomware-campaign use for this entry.")]
+    [InlineData(null, "No ransomware-campaign assertion is recorded for this entry.")]
+    public async Task RaiseVulnKev_RansomwareTriState_RendersDistinctDetailText(bool? known, string expectedSentence)
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"asvc-s-{known?.ToString() ?? "null"}-{Guid.NewGuid():N}");
+        var notifier = Substitute.For<IAlertNotifier>();
+        var svc = BuildService(notifier);
+
+        await svc.RaiseVulnKevAlertAsync(
+            orgId, "npm", "kev-pkg", "pkg:npm/kev-pkg@1.0.0", "GHSA-kev-ransomware", "HIGH", known);
+
+        var (items, _) = await _alerts.ListAsync(orgId, "active", 10, 0);
+        var alert = Assert.Single(items);
+        Assert.Contains(expectedSentence, alert.Detail);
+    }
+
+    /// <summary>The three tri-state renderings are pairwise distinct — no two states share text.</summary>
+    [Fact]
+    public async Task RaiseVulnKev_RansomwareTriState_AllThreeRenderingsAreDistinct()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"asvc-t-{Guid.NewGuid():N}");
+        var notifier = Substitute.For<IAlertNotifier>();
+        var svc = BuildService(notifier);
+
+        await svc.RaiseVulnKevAlertAsync(orgId, "npm", "pkg-true", "pkg:npm/pkg-true@1.0.0", "GHSA-tri-true", "HIGH", true);
+        await svc.RaiseVulnKevAlertAsync(orgId, "npm", "pkg-false", "pkg:npm/pkg-false@1.0.0", "GHSA-tri-false", "HIGH", false);
+        await svc.RaiseVulnKevAlertAsync(orgId, "npm", "pkg-null", "pkg:npm/pkg-null@1.0.0", "GHSA-tri-null", "HIGH", null);
+
+        var (items, _) = await _alerts.ListAsync(orgId, "active", 10, 0);
+        var details = items.Select(a => a.Detail).ToHashSet();
+        Assert.Equal(3, details.Count);
+    }
+
+    // ── SBOM policy trigger ──────────────────────────────────────────────────
+
+    [Fact]
+    public async Task RaiseSbomPolicy_DefaultSettings_RaisesAndNotifies()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"asvc-j-{Guid.NewGuid():N}");
+        string versionId = Guid.NewGuid().ToString("N");
+        var notifier = Substitute.For<IAlertNotifier>();
+        var svc = BuildService(notifier);
+
+        await svc.RaiseSbomPolicyViolationAlertAsync(orgId, versionId, "checkout-service", "1.0.0", 3);
+
+        Assert.Equal(1, await _alerts.CountActiveAsync(orgId));
+        await notifier.Received(1).NotifyAsync(Arg.Any<AlertRecord>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task RaiseSbomPolicy_TypeDisabled_DoesNotRaise()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"asvc-k-{Guid.NewGuid():N}");
+        await SeedSettingsAsync(orgId, sbomPolicyEnabled: false);
+        string versionId = Guid.NewGuid().ToString("N");
+        var notifier = Substitute.For<IAlertNotifier>();
+        var svc = BuildService(notifier);
+
+        await svc.RaiseSbomPolicyViolationAlertAsync(orgId, versionId, "checkout-service", "1.0.0", 3);
+
+        Assert.Equal(0, await _alerts.CountActiveAsync(orgId));
+        await notifier.DidNotReceive().NotifyAsync(Arg.Any<AlertRecord>(), Arg.Any<CancellationToken>());
+    }
+
+    /// <summary>Re-evaluation of the same project version (same source_ref) does not re-notify.</summary>
+    [Fact]
+    public async Task RaiseSbomPolicy_RepeatSameProjectVersion_NotifiesOnlyOnce()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"asvc-l-{Guid.NewGuid():N}");
+        string versionId = Guid.NewGuid().ToString("N");
+        var notifier = Substitute.For<IAlertNotifier>();
+        var svc = BuildService(notifier);
+
+        await svc.RaiseSbomPolicyViolationAlertAsync(orgId, versionId, "checkout-service", "1.0.0", 1);
+        await svc.RaiseSbomPolicyViolationAlertAsync(orgId, versionId, "checkout-service", "1.0.0", 5);
+
+        Assert.Equal(1, await _alerts.CountActiveAsync(orgId));
+        await notifier.Received(1).NotifyAsync(Arg.Any<AlertRecord>(), Arg.Any<CancellationToken>());
+    }
+
+    /// <summary>
+    /// Per CONTRACT D5, the coalescing key must be exactly <c>sbom_policy_violation:{projectVersionId}</c>.
+    /// <c>EmailOutboxCoalescing.ForAlert</c> derives that from the type plus (purl ?? source_ref),
+    /// so the alert row must carry a null purl and a source_ref equal to the project version id —
+    /// this pins the exact shape that makes the coalescing key fall out for free.
+    /// </summary>
+    [Fact]
+    public async Task RaiseSbomPolicy_SourceRefIsProjectVersionId_AndPurlIsNull()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"asvc-m-{Guid.NewGuid():N}");
+        string versionId = Guid.NewGuid().ToString("N");
+        var notifier = Substitute.For<IAlertNotifier>();
+        var svc = BuildService(notifier);
+
+        await svc.RaiseSbomPolicyViolationAlertAsync(orgId, versionId, "checkout-service", "1.0.0", 2);
+
+        var (items, _) = await _alerts.ListAsync(orgId, null, 10, 0);
+        var alert = Assert.Single(items);
+        Assert.Equal(versionId, alert.SourceRef);
+        Assert.Null(alert.Purl);
+        Assert.Equal(AlertTypes.SbomPolicyViolation, alert.Type);
     }
 }

@@ -20,6 +20,11 @@ namespace Dependably.Infrastructure.SystemEvents;
 /// never constructed from, or passed into, anything that also touches
 /// <see cref="Dependably.Infrastructure.Alerts.IAlertNotifier"/> — see that interface's doc
 /// comment for the isolation invariant this enforces.
+///
+/// suspension-ok: not per-tenant. The Slack target is instance-wide operator configuration
+/// (<c>instance_settings.system_slack_webhook_url</c>), never a tenant-owned endpoint, and the
+/// events it delivers are control-plane events, not any one org's data — same posture as
+/// <see cref="Dependably.Infrastructure.Siem.SiemForwarderQueue"/>.
 /// </summary>
 public sealed class SystemSlackQueue : BackgroundService, ISystemEventNotifier
 {

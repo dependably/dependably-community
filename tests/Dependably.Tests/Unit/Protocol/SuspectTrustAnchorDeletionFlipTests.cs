@@ -66,7 +66,10 @@ public sealed class SuspectTrustAnchorDeletionFlipTests : IClassFixture<InMemory
             new LicenseNormalizer(_fixture.Store, NullLogger<LicenseNormalizer>.Instance)),
         anchors,
         NullLogger<BlockGateService>.Instance,
-        _clock);
+        _clock,
+        new OrgRepository(_fixture.Store),
+        NSubstitute.Substitute.For<Dependably.Infrastructure.Webhooks.IPackageEventSink>(),
+        new BlockRefusalWebhookThrottle(_clock, TimeSpan.Zero));
 
     // The pure policy core under a 'block' provenance policy, with every other arm neutral, so
     // the verdict isolates the provenance arm.
@@ -77,10 +80,7 @@ public sealed class SuspectTrustAnchorDeletionFlipTests : IClassFixture<InMemory
                 Deprecated: null,
                 PublishedAt: null,
                 Scanned: false,
-                HasMalicious: false,
-                HasKev: false,
-                MaxEpss: null,
-                MaxCvss: null,
+                Vulnerability: VulnFacts.None,
                 ProvenanceStatus: provenanceStatus),
             new BlockPolicy(
                 MinReleaseAgeHours: null,

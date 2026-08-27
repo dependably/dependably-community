@@ -36,12 +36,15 @@ namespace Dependably.Tests.Compliance;
 /// </para>
 /// </summary>
 [Trait("Category", "Compliance")]
-public sealed class RuntimeTzDataComplianceTests
+public sealed partial class RuntimeTzDataComplianceTests
 {
     private const string ZoneInfoPath = "/usr/share/zoneinfo";
 
-    private static readonly Regex ApkAdd = new(@"\bapk\s+add\b", RegexOptions.Compiled);
-    private static readonly Regex TzData = new(@"\btzdata\b", RegexOptions.Compiled);
+    [GeneratedRegex(@"\bapk\s+add\b")]
+    private static partial Regex ApkAdd();
+
+    [GeneratedRegex(@"\btzdata\b")]
+    private static partial Regex TzData();
 
     private readonly ITestOutputHelper _output;
     public RuntimeTzDataComplianceTests(ITestOutputHelper output) => _output = output;
@@ -169,7 +172,7 @@ public sealed class RuntimeTzDataComplianceTests
                 probed = true;
             }
 
-            if (ApkAdd.IsMatch(line) && !TzData.IsMatch(line))
+            if (ApkAdd().IsMatch(line) && !TzData().IsMatch(line))
             {
                 yield return $"{name}:{i + 1}: runtime-stage 'apk add' does not install tzdata — " +
                              $"the image would resolve only UTC. Line: {line.Trim()}";

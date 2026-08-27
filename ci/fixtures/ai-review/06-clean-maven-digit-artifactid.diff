@@ -1,0 +1,286 @@
+diff --git a/src/Dependably.Core/Api/MavenController.Metadata.cs b/src/Dependably.Core/Api/MavenController.Metadata.cs
+index 41a32ab7..fdd6bb75 100644
+--- a/src/Dependably.Core/Api/MavenController.Metadata.cs
++++ b/src/Dependably.Core/Api/MavenController.Metadata.cs
+@@ -116,22 +116,25 @@ public sealed partial class MavenController
+         return null;
+     }
+ 
+     private async Task<IActionResult> ServeMetadataAsync(
+         string orgId, MavenCoordinates coords, CancellationToken ct)
+     {
+         // Version-level SNAPSHOT metadata (g/a/{version}/maven-metadata.xml, coords.Version set
+         // and IsSnapshot) is a different document from the artifact-level version list
+         // (g/a/maven-metadata.xml) — it carries the <snapshot>/<snapshotVersions> block a
+         // client needs to resolve 1.0-SNAPSHOT to the latest timestamped build. It gets its own
+-        // cache key so the two flavours never collide. A release version-level request keeps
+-        // the pre-existing (artifact-level) behavior — Maven clients don't fetch that path.
++        // cache key so the two flavours never collide. A version-level request is the only thing
++        // MavenPathParser sets coords.Version for on a metadata path, and it only sets it when the
++        // segment carries the SNAPSHOT marker, so the release flavour never reaches this branch —
++        // g/a/{release}/maven-metadata.xml parses as an artifact-level request for a coordinate
++        // nothing holds and 404s, which is what Maven Central answers for it too.
+         bool isSnapshotVersionMetadata = coords.Version is not null && coords.IsSnapshot;
+         var cacheKey = isSnapshotVersionMetadata
+             ? new MavenMetadataKey(orgId, coords.GroupId, coords.ArtifactId, coords.Version)
+             : new MavenMetadataKey(orgId, coords.GroupId, coords.ArtifactId);
+ 
+         // Decide proxy-vs-local up front from the cheap checks: a configured upstream registry
+         // and a non-reserved groupId. This drives both the in-memory cache TTL and the HTTP
+         // Cache-Control header. On a cache HIT the rebuild below is skipped, so the only work
+         // these incur is a registry resolve + reserved-namespace lookup (DB/registry reads,
+         // not the upstream HTTP fetch that the cache exists to avoid).
+diff --git a/src/Dependably.Core/Protocol/MavenPathParser.cs b/src/Dependably.Core/Protocol/MavenPathParser.cs
+index 56663bae..ebfabfcc 100644
+--- a/src/Dependably.Core/Protocol/MavenPathParser.cs
++++ b/src/Dependably.Core/Protocol/MavenPathParser.cs
+@@ -259,31 +259,38 @@ public static partial class MavenPathParser
+     {
+         string? ext = ChecksumExtensions.FirstOrDefault(
+             e => filename.EndsWith(e, StringComparison.OrdinalIgnoreCase));
+         return ext?[1..];
+     }
+ 
+     // Distinguishes g/a/{v}/maven-metadata.xml from g/a/maven-metadata.xml, where the two are
+     // genuinely ambiguous from the path alone — the segment before the filename is either a
+     // version or an artifactId, and nothing in the path says which.
+     //
+-    // A Maven version effectively always begins with a digit; an artifactId effectively never
+-    // does. Testing the FIRST character rather than any character is what separates them:
+-    // "contains a digit anywhere" classifies commons-lang3, log4j-core, slf4j-api and every other
+-    // artifactId carrying a version-ish suffix as a version, which makes their artifact-level
+-    // metadata unreachable — the document Maven resolves ranges and LATEST/RELEASE through.
++    // The SNAPSHOT marker is the whole test, because the version-level document only ever exists
++    // for a SNAPSHOT version. Maven Central answers 404 for a release coordinate's version-level
++    // maven-metadata.xml (com/google/guava/guava/33.4.0-jre/maven-metadata.xml and
++    // org/apache/commons/commons-lang3/3.14.0/maven-metadata.xml both 404 while the artifact-level
++    // document 200s), and Dependably's own hosted plane agrees — MavenMetadataBuilder's only
++    // version-level builder is BuildSnapshotVersion, which is SNAPSHOT-only by construction. So no
++    // arm beyond the marker carries traffic on either plane.
+     //
+-    // SNAPSHOT is kept as a second arm because a snapshot version is not required to start with a
+-    // digit, and the marker is unambiguous wherever it appears.
++    // Every shape test tried in that missing arm's place has instead misread artifactIds as
++    // versions and made their artifact-level document — the one Maven resolves ranges and
++    // LATEST/RELEASE through — unreachable. "Contains a digit anywhere" took out commons-lang3,
++    // log4j-core and slf4j-api; "begins with a digit" narrowed that to artifactIds starting with a
++    // digit, which is a real population because WebJars mirrors npm names (3d-view, 3dmol, 7.css,
++    // 98.css all resolve on Central today). A shape test also has a false-negative side: it read
++    // Guava's r03–r09 releases as artifactIds. Dropping it costs nothing that exists and closes
++    // both directions.
+     private static bool LooksLikeVersion(string segment)
+-        => (segment.Length > 0 && char.IsDigit(segment[0]))
+-            || segment.Contains("SNAPSHOT", StringComparison.OrdinalIgnoreCase);
++        => segment.Contains("SNAPSHOT", StringComparison.OrdinalIgnoreCase);
+ }
+ 
+ /// <summary>
+ /// One Maven coordinate triple plus the file shape inside it. Produced by
+ /// <see cref="MavenPathParser.Parse"/>. Each request resolves to either an artifact file
+ /// (one row in <c>maven_version_files</c>) or a metadata document (synthesised at request
+ /// time from <c>package_versions</c> rows).
+ /// </summary>
+ public sealed record MavenCoordinates(
+     string GroupId,
+diff --git a/tests/Dependably.Tests/Integration/MavenMetadataDigitArtifactIdTests.cs b/tests/Dependably.Tests/Integration/MavenMetadataDigitArtifactIdTests.cs
+index 0105a97b..9ed084f6 100644
+--- a/tests/Dependably.Tests/Integration/MavenMetadataDigitArtifactIdTests.cs
++++ b/tests/Dependably.Tests/Integration/MavenMetadataDigitArtifactIdTests.cs
+@@ -61,20 +61,49 @@ public sealed class MavenMetadataDigitArtifactIdTests : IClassFixture<Dependably
+ 
+         var shaResp = await client.GetAsync(path + ".sha1");
+         Assert.Equal(HttpStatusCode.OK, shaResp.StatusCode);
+         string sha1 = (await shaResp.Content.ReadAsStringAsync()).Trim();
+ 
+         Assert.Equal(
+             Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(body)).ToLowerInvariant(),
+             sha1);
+     }
+ 
++    /// <summary>
++    /// The residual population the first-character test still misread: an artifactId that BEGINS
++    /// with a digit. <c>org/webjars/npm/3d-view/maven-metadata.xml</c> resolved as version-level
++    /// metadata for groupId <c>org.webjars</c>, artifactId <c>npm</c>, and answered 404 for a
++    /// coordinate this org holds.
++    /// </summary>
++    [Theory]
++    [InlineData("org.webjars.npm", "3d-view", "org/webjars/npm/3d-view")]
++    [InlineData("org.webjars", "3rdwavemedia-themes-developer", "org/webjars/3rdwavemedia-themes-developer")]
++    public async Task Metadata_ForArtifactIdBeginningWithADigit_ListsItsVersions(
++        string groupId, string artifactId, string pathPrefix)
++    {
++        await _factory.PushMavenArtifact(groupId, artifactId, "1.0.0");
++        await _factory.PushMavenArtifact(groupId, artifactId, "2.0.0");
++
++        string token = await _factory.CreateToken("pull");
++        using var client = _factory.CreateClientWithBasic(token);
++
++        var resp = await client.GetAsync($"/maven/{pathPrefix}/maven-metadata.xml");
++        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
++
++        var doc = XDocument.Parse(await resp.Content.ReadAsStringAsync());
++        Assert.Equal(groupId, doc.Root!.Element("groupId")!.Value);
++        Assert.Equal(artifactId, doc.Root!.Element("artifactId")!.Value);
++        var versions = doc.Descendants("version").Select(v => v.Value).ToList();
++        Assert.Contains("1.0.0", versions);
++        Assert.Contains("2.0.0", versions);
++    }
++
+     /// <summary>
+     /// The control that keeps the fix honest in the other direction: a genuine version-level
+     /// SNAPSHOT request must still resolve, or the narrowed check has simply broken SNAPSHOT
+     /// metadata instead.
+     /// </summary>
+     [Fact]
+     public async Task VersionLevelSnapshotMetadata_StillResolves()
+     {
+         await _factory.PushMavenArtifact("com.example", "snaplib2", "1.0-SNAPSHOT");
+ 
+diff --git a/tests/Dependably.Tests/Unit/MavenArtifactIdWithDigitTests.cs b/tests/Dependably.Tests/Unit/MavenArtifactIdWithDigitTests.cs
+index 62aa69ee..752614e9 100644
+--- a/tests/Dependably.Tests/Unit/MavenArtifactIdWithDigitTests.cs
++++ b/tests/Dependably.Tests/Unit/MavenArtifactIdWithDigitTests.cs
+@@ -1,25 +1,32 @@
+ using Dependably.Protocol;
+ 
+ namespace Dependably.Tests.Unit;
+ 
+ /// <summary>
+ /// <c>g/a/maven-metadata.xml</c> and <c>g/a/{version}/maven-metadata.xml</c> are ambiguous from
+ /// the path alone: the segment before the filename is either an artifactId or a version, and
+-/// nothing in the request distinguishes them. The parser decides by shape, and the shape it used
+-/// — "contains a digit anywhere" — classified a large share of real artifactIds as versions.
++/// nothing in the request distinguishes them.
+ ///
+-/// The consequence was not subtle. <c>commons-lang3</c>, <c>log4j-core</c>, <c>slf4j-api</c> and
+-/// every other artifactId carrying a version-ish suffix had its artifact-level metadata parsed as
+-/// a version-level request for a different coordinate, and answered 404 — while the versions sat
+-/// in the catalogue. That document is what Maven resolves version ranges and LATEST/RELEASE
+-/// through, so the effect is a dependency that cannot be resolved at all.
++/// The consequence of guessing wrong is not subtle. An artifactId read as a version has its
++/// artifact-level metadata parsed as a version-level request for a different coordinate and
++/// answered 404 — while the versions sit in the catalogue. That document is what Maven resolves
++/// version ranges and LATEST/RELEASE through, so the effect is a dependency that cannot be
++/// resolved at all.
++///
++/// Two successive shape heuristics failed in turn. "Contains a digit anywhere" took out
++/// <c>commons-lang3</c>, <c>log4j-core</c>, <c>slf4j-api</c> and every other artifactId with a
++/// version-ish suffix. Narrowing it to "begins with a digit" left a smaller but real population —
++/// WebJars mirrors npm package names into artifactIds, and npm names may start with a digit. The
++/// parser now tests the SNAPSHOT marker alone, because the version-level document exists only for
++/// a SNAPSHOT version on both the upstream and the hosted plane; the file keeps its original name
++/// because the population it guards is still "artifactIds a shape test misreads as versions".
+ /// </summary>
+ [Trait("Category", "Unit")]
+ public sealed class MavenArtifactIdWithDigitTests
+ {
+     /// <summary>
+     /// Real coordinates, chosen because each one is among the most-depended-on artifacts in the
+     /// ecosystem and each has a digit somewhere in its artifactId.
+     /// </summary>
+     [Theory]
+     [InlineData("org/apache/commons/commons-lang3/maven-metadata.xml", "org.apache.commons", "commons-lang3")]
+@@ -32,53 +39,97 @@ public sealed class MavenArtifactIdWithDigitTests
+     {
+         var coords = MavenPathParser.Parse(path);
+ 
+         Assert.NotNull(coords);
+         Assert.True(coords.IsMetadata);
+         Assert.Null(coords.Version);
+         Assert.Equal(expectedGroupId, coords.GroupId);
+         Assert.Equal(expectedArtifactId, coords.ArtifactId);
+     }
+ 
++    /// <summary>
++    /// Real coordinates whose artifactId BEGINS with a digit, which the first-character shape test
++    /// misread as versions. All five serve 200 on Maven Central today. WebJars mirrors npm package
++    /// names into artifactIds and npm names may start with a digit, so this is a populated set
++    /// rather than a theoretical one — <c>org/webjars/npm/3d-view/maven-metadata.xml</c> resolved
++    /// as version-level metadata for groupId <c>org.webjars</c>, artifactId <c>npm</c>.
++    /// </summary>
++    [Theory]
++    [InlineData("org/webjars/npm/3d-view/maven-metadata.xml", "org.webjars.npm", "3d-view")]
++    [InlineData("org/webjars/npm/3dmol/maven-metadata.xml", "org.webjars.npm", "3dmol")]
++    [InlineData("org/webjars/npm/7.css/maven-metadata.xml", "org.webjars.npm", "7.css")]
++    [InlineData("org/webjars/npm/98.css/maven-metadata.xml", "org.webjars.npm", "98.css")]
++    [InlineData("org/webjars/3rdwavemedia-themes-developer/maven-metadata.xml", "org.webjars", "3rdwavemedia-themes-developer")]
++    public void ArtifactLevelMetadata_ForAnArtifactIdBeginningWithADigit_ParsesAsArtifactLevel(
++        string path, string expectedGroupId, string expectedArtifactId)
++    {
++        var coords = MavenPathParser.Parse(path);
++
++        Assert.NotNull(coords);
++        Assert.True(coords.IsMetadata);
++        Assert.Null(coords.Version);
++        Assert.Equal(expectedGroupId, coords.GroupId);
++        Assert.Equal(expectedArtifactId, coords.ArtifactId);
++    }
++
+     /// <summary>
+     /// The other half, and the reason the check cannot simply be deleted: a real version-level
+-    /// request must still be recognised, or SNAPSHOT resolution breaks.
++    /// request must still be recognised, or SNAPSHOT resolution breaks. SNAPSHOT is the whole
++    /// population — a release coordinate has no version-level document to recognise.
+     /// </summary>
+     [Theory]
+-    [InlineData("com/example/mylib/1.0.0/maven-metadata.xml", "1.0.0")]
+     [InlineData("com/example/mylib/2.0-SNAPSHOT/maven-metadata.xml", "2.0-SNAPSHOT")]
+-    [InlineData("org/apache/commons/commons-lang3/3.14.0/maven-metadata.xml", "3.14.0")]
+     [InlineData("org/apache/logging/log4j/log4j-core/2.24.1-SNAPSHOT/maven-metadata.xml", "2.24.1-SNAPSHOT")]
+-    public void VersionLevelMetadata_IsStillRecognised(string path, string expectedVersion)
++    [InlineData("org/webjars/npm/3d-view/1.0.0-SNAPSHOT/maven-metadata.xml", "1.0.0-SNAPSHOT")]
++    public void VersionLevelSnapshotMetadata_IsStillRecognised(string path, string expectedVersion)
+     {
+         var coords = MavenPathParser.Parse(path);
+ 
+         Assert.NotNull(coords);
+         Assert.True(coords.IsMetadata);
+         Assert.Equal(expectedVersion, coords.Version);
+     }
+ 
+     /// <summary>
+-    /// A SNAPSHOT version that does not begin with a digit is why the marker stays a second arm
+-    /// rather than the first-character test standing alone.
++    /// A SNAPSHOT version that does not begin with a digit is why the marker, and not a numeric
++    /// shape test, is the arm that survived.
+     /// </summary>
+     [Fact]
+     public void NonNumericSnapshotVersion_IsStillRecognisedAsAVersion()
+     {
+         var coords = MavenPathParser.Parse("com/example/mylib/trunk-SNAPSHOT/maven-metadata.xml");
+ 
+         Assert.NotNull(coords);
+         Assert.Equal("trunk-SNAPSHOT", coords.Version);
+         Assert.Equal("mylib", coords.ArtifactId);
+         Assert.True(coords.IsSnapshot);
+     }
+ 
++    /// <summary>
++    /// The false-negative direction the shape test also got wrong, recorded so a future
++    /// reintroduction has to argue with it. Guava published <c>r03</c>–<c>r09</c>: version strings
++    /// that begin with a letter. They were the entire false-negative population measured across
++    /// 4,509 real Maven Central version strings, and they are unreachable — Central 404s the
++    /// version-level document for a release version, so nothing ever requests this path.
++    /// </summary>
++    [Fact]
++    public void ReleaseVersionLevelMetadata_ParsesAsArtifactLevel_BecauseNoSuchDocumentExists()
++    {
++        var coords = MavenPathParser.Parse("com/google/guava/guava/r09/maven-metadata.xml");
++
++        Assert.NotNull(coords);
++        Assert.True(coords.IsMetadata);
++        Assert.Null(coords.Version);
++        Assert.Equal("com.google.guava.guava", coords.GroupId);
++        Assert.Equal("r09", coords.ArtifactId);
++    }
++
+     /// <summary>
+     /// The checksum sidecars resolve to the same coordinate as the document they describe. They
+     /// were broken by exactly the same misparse, and a client that cannot verify the metadata it
+     /// fetched is in no better position than one that could not fetch it.
+     /// </summary>
+     [Theory]
+     [InlineData("org/apache/commons/commons-lang3/maven-metadata.xml.sha1", "sha1")]
+     [InlineData("org/apache/commons/commons-lang3/maven-metadata.xml.md5", "md5")]
+     public void ChecksumSidecar_ForAnArtifactIdContainingADigit_ResolvesToTheSameCoordinate(
+         string path, string expectedAlgorithm)

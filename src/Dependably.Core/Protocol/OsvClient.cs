@@ -213,6 +213,19 @@ public sealed class OsvClient : IOsvSource
     private static OsvBatchQueryResult Unreached(IReadOnlyList<string> purls) =>
         new(purls.Select(_ => new List<OsvAdvisory>()).ToList(), Reached: false);
 
+    /// <summary>
+    /// No-behavior-change override: the live osv.dev API resolves a <c>pkg:rpm/...</c> purl
+    /// against its distro feeds server-side (Rocky Linux, AlmaLinux, Red Hat, …) with no
+    /// RPM-specific logic needed on this end, so remote coverage is exactly the static
+    /// <see cref="OsvFeedCoverage.HasAdvisoryFeed"/> gate for every ecosystem, RPM included —
+    /// unlike <c>LocalOsvSource</c>, there is no dump to have loaded with or without distro
+    /// feeds. Explicit here (rather than relying on <see cref="IOsvSource"/>'s identical default)
+    /// so the "remote is unaffected by this fix" decision is documented at the implementation
+    /// that actually makes it true, not left implicit.
+    /// </summary>
+    public Task<bool> HasCoverageFor(string? ecosystem) =>
+        Task.FromResult(OsvFeedCoverage.HasAdvisoryFeed(ecosystem));
+
     /// <summary>Fetch a single advisory's full details via GET /vulns/{id}. Returns null on any failure.</summary>
     private async Task<OsvAdvisory?> FetchAdvisoryAsync(string id, CancellationToken ct)
     {
@@ -295,15 +308,12 @@ public sealed class OsvClient : IOsvSource
                 Versions: a.Versions?.Distinct().ToArray() ?? []))
             .ToArray() ?? [];
 
-        // Extract CVSS score and severity text from the severity array
-        string? severity = null;
-        double? cvssScore = null;
-        var cvssEntry = raw.Severity?.FirstOrDefault(s =>
-            s.Type?.StartsWith("CVSS", StringComparison.OrdinalIgnoreCase) == true);
-        if (cvssEntry?.Score is not null)
-        {
-            (cvssScore, severity) = OsvScoring.ParseCvssBaseScore(cvssEntry.Score);
-        }
+        // Extract CVSS score and severity text from the severity array — prefers whichever
+        // entry actually parses, highest CVSS version first, over the array's listing order.
+        string? severity;
+        double? cvssScore;
+        (cvssScore, severity) = OsvScoring.SelectCvssBaseScore(
+            raw.Severity?.Select(s => (s.Type, s.Score)));
 
         // Fall back to database_specific.severity for severity text
         if (severity is null && raw.DatabaseSpecific?.TryGetValue("severity", out object? dbSev) == true)

@@ -12,6 +12,16 @@ namespace Dependably.Infrastructure.Siem;
 ///
 /// If no <see cref="ISiemForwarder"/> is registered, this service is not started; producers
 /// see <see cref="TryEnqueue"/> as a no-op (returns true; queue absent).
+///
+/// <para>
+/// suspension-ok: this queue does not skip events for a suspended/archived/deleting org (see
+/// TenantLifecycle for the rule every other per-tenant scheduled job follows). Unlike
+/// <c>WebhookDispatchQueue</c>, the forward target here is the operator's own instance-wide SIEM
+/// collector (<c>SIEM_FORWARDER_TYPE</c>/<c>SIEM_WEBHOOK_URL</c>/<c>SIEM_SYSLOG_HOST</c>), never a
+/// tenant-owned endpoint — forwarding an event about a suspended org still serves the operator's
+/// own audit/compliance visibility into a tenant they just locked out, which is exactly the
+/// signal an operator wants after suspending one, not egress spent on the tenant's behalf.
+/// </para>
 /// </summary>
 public sealed class SiemForwarderQueue : BackgroundService
 {

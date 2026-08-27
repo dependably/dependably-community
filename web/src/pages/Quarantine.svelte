@@ -19,13 +19,15 @@
   import SearchInput from '../lib/SearchInput.svelte'
   import RowActionsMenu from '../lib/RowActionsMenu.svelte'
   import { ECOSYSTEMS, ECO_LABEL } from '../lib/ecosystems.js'
+  import { blastRadiusCell } from '../lib/blastRadius.js'
   import { readQuery, writeQuery } from '../lib/tableState.js'
+  import { daysSince } from '../lib/age.js'
 
   // Every gate the block gate can record. Drives the gate filter, so a value missing here is a
   // gate the queue cannot be narrowed to.
   const GATES = [
     'deprecated', 'revoked', 'release_age', 'license', 'install_script',
-    'provenance', 'malicious', 'kev', 'epss', 'vuln_score',
+    'provenance', 'malicious', 'kev', 'kev_ransomware', 'epss', 'vuln_score',
   ]
 
   // Table state lives in the URL query string so it survives navigating into a detail page and
@@ -73,12 +75,50 @@
       if (mine !== seq) return
       items = resp.items
       total = resp.total
+      await loadBlastRadius(mine)
     } catch (e) {
       if (mine !== seq) return
       error = extractErrorMessage(e)
     } finally {
       if (mine === seq) loading = false
     }
+  }
+
+  // How many of this tenant's applications ship each quarantined coordinate — the consequence of
+  // an approve/deny decision, on the row where the decision is taken. One request per page, never
+  // one per row. Supplemental: a failure renders no count rather than a zero, which would read as
+  // "denying this affects nobody".
+  /** @type {Record<string, number>} */
+  let blastRadius = {}
+  // A fetch that failed is not a count of zero. Without this flag an outage renders exactly what
+  // "no application ships this" renders — on the one page whose help text says denying a package
+  // affects the applications shipping it. Same posture as the counts endpoint refusing an
+  // over-large batch rather than truncating it.
+  let blastRadiusFailed = false
+
+  async function loadBlastRadius(mine) {
+    blastRadius = {}
+    blastRadiusFailed = false
+    const keys = [...new Set(
+      items.map(e => (e.ecosystem && e.purl_name ? `${e.ecosystem}/${e.purl_name}` : null)).filter(Boolean))]
+    if (keys.length === 0) return
+    try {
+      const data = await api.getBlastRadiusCounts('package', keys)
+      if (mine !== seq) return
+      blastRadius = data.counts ?? {}
+    } catch (err) {
+      console.error(err)
+      if (mine !== seq) return
+      blastRadiusFailed = true
+    }
+  }
+
+  // The lookup key only, not the count: the markup indexes `blastRadius` itself so the cell
+  // re-renders when the counts land. A helper that closed over `blastRadius` and returned the
+  // number would leave the template referencing no reactive value, and the column would stay
+  // empty for the life of the page.
+  function radiusKey(entry) {
+    return entry.ecosystem && entry.purl_name ? `${entry.ecosystem}/${entry.purl_name}` : ''
   }
 
   function onPageChange(e) { page = e.detail.page; sync(); load() }
@@ -199,6 +239,7 @@
     on:sortchange={onSortChange}
     let:row={e}
   >
+    {@const cell = blastRadiusCell(blastRadius, radiusKey(e), blastRadiusFailed)}
     <tr
       class="cursor-pointer"
       class:expanded-row={expandedId === e.id}
@@ -207,6 +248,18 @@
       <td class="t-mono" title={e.purl}>
         <span class="badge {e.ecosystem}">{e.ecosystem}</span>
         {e.purl}
+        <!-- The consequence of the decision on this row. A real zero renders nothing — "0
+             applications" on every row of a registry with no SBOMs is noise — but a count that
+             could not be loaded says so, because a blank cell there would read as that zero. -->
+        {#if cell.state === 'unavailable'}
+          <span class="badge apps-unknown" title={$t('quarantine.blastRadius.unavailableHelp')}>
+            {$t('quarantine.blastRadius.unavailable')}
+          </span>
+        {:else if cell.state === 'count'}
+          <span class="badge apps-count" title={$t('quarantine.blastRadius.help')}>
+            {$t('quarantine.blastRadius.summary', { values: { count: cell.count } })}
+          </span>
+        {/if}
       </td>
       <td><span class="badge">{gateLabel(e.gate)}</span></td>
       <td class="text-muted t-sm">
@@ -216,9 +269,18 @@
         </div>
       </td>
       <!-- Email when the decider is still a member of this org, their id when the account has
-           since been erased, an em dash while the entry is undecided. -->
+           since been erased, an em dash while the entry is undecided. The decision age (e.g.
+           "Approved 5 days ago") rides beneath it — never shown for a still-pending row, which
+           carries no decided_at at all. -->
       <td class="text-muted t-sm decider" title={e.decided_by_email ?? e.decided_by ?? ''}>
-        {e.decided_by_email ?? e.decided_by ?? '—'}
+        <div class="decider-cell">
+          <span class="decider-email">{e.decided_by_email ?? e.decided_by ?? '—'}</span>
+          {#if e.decided_at}
+            <span class="decider-age">
+              {$t('quarantine.decisionAge', { values: { verb: $t(`quarantine.states.${e.state}`), days: daysSince(e.decided_at) } })}
+            </span>
+          {/if}
+        </div>
       </td>
       <td class="text-muted t-sm nowrap">{$formatDate(e.updated_at)}</td>
       <td class="actions-cell">
@@ -309,6 +371,19 @@
 </div>
 
 <style>
+  /* Blast-radius count on the coordinate cell — informational, not a risk signal. */
+  .badge.apps-count {
+    background: var(--info-bg);
+    border: 1px solid var(--info-border);
+    color: var(--info-text);
+  }
+  /* The count could not be loaded. Deliberately not styled as a zero. */
+  .badge.apps-unknown {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    color: var(--text2);
+  }
+
   .nowrap { white-space: nowrap; }
 
   /* Column widths, the placeholder rows, and the empty row are DataTable's now — the widths ride
@@ -318,6 +393,9 @@
   /* An email overruns its column sooner than the other cells do; the full value is on the title
      attribute either way. */
   .decider { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .decider-cell { display: flex; flex-direction: column; gap: 2px; overflow: hidden; min-width: 0; }
+  .decider-email { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .decider-age { font-size: 11px; color: var(--text2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 
   /* Action buttons live in a flex DIV inside the cell — never flex on the td itself, which
      breaks the row's border-bottom alignment. The cell stays nowrap so the buttons (or the

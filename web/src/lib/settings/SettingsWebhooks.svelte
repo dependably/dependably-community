@@ -12,13 +12,18 @@
   import InfoTip from '../InfoTip.svelte'
   import Toggle from '../Toggle.svelte'
 
+  // Must match WebhookController.ValidEventTypes exactly (backend rejects any other literal
+  // with a 422). Kept in lockstep by hand across the language boundary — pinned by
+  // SettingsWebhooks.parity.test.js here and by WebhookSubscriptionEventTypeParityComplianceTests
+  // on the backend; update all three together when a subscribable event type changes.
   const ALL_EVENT_TYPES = [
     'package.publish',
     'package.replace',
     'package.import',
     'package.unlist',
     'package.yank',
-    'package.vulnerability',
+    'package.vuln',
+    'package.blocked',
   ]
 
   /** @type {any[]} */

@@ -69,12 +69,16 @@ FROM --platform=$BUILDPLATFORM ${SDK_IMAGE} AS build
 WORKDIR /src
 
 COPY Dependably.sln .
+# MSBuild auto-imports Directory.Build.props by walking up from the project
+# directory, so the publish step below deliberately passes no -p:Version: the
+# shipped assembly version is always exactly what this file says, for every build
+# — CI-tagged, CI-main-push, or a bare local `docker build` with no --build-arg —
+# with no second version to keep in sync.
 COPY Directory.Build.props .
 COPY src/Dependably/Dependably.csproj src/Dependably/
 COPY src/Dependably.Core/Dependably.Core.csproj src/Dependably.Core/
 COPY src/Dependably.Management/Dependably.Management.csproj src/Dependably.Management/
 ARG TARGETARCH
-ARG VERSION=0.1.0
 ARG REGISTRY_URL=
 # NuGet.Config carries only the (non-secret) source URL. The feed credential is
 # surfaced per-step via NuGet's NuGetPackageSourceCredentials_<source> environment
@@ -140,7 +144,6 @@ RUN --mount=type=secret,id=registry_key \
     -c Release \
     -r "$RID" \
     --self-contained true \
-    -p:Version="${VERSION}" \
     -o /app/publish
 
 # Symbols export stage — a filesystem holding only the portable PDBs this compilation

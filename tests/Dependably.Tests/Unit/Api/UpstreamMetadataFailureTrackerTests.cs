@@ -28,7 +28,7 @@ public sealed class UpstreamMetadataFailureTrackerTests
     {
         var tracker = new UpstreamMetadataFailureTracker();
 
-        tracker.ThrowIfFailed();
+        Assert.Null(Record.Exception(tracker.ThrowIfFailed));
     }
 
     [Theory]
@@ -40,7 +40,7 @@ public sealed class UpstreamMetadataFailureTrackerTests
 
         tracker.RecordHttpStatus(Url, statusCode, authorizationHeader: null);
 
-        tracker.ThrowIfFailed();
+        Assert.Null(Record.Exception(tracker.ThrowIfFailed));
     }
 
     [Theory]

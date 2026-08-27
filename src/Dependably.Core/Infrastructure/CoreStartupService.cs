@@ -19,6 +19,10 @@ namespace Dependably.Infrastructure;
 /// fail-closed guard when it is missing — is a separate management hosted service registered
 /// immediately after this one, so it runs once first-boot has written the secret. Both are
 /// <see cref="IHostedService"/>s; hosted services start in registration order.
+///
+/// suspension-ok: not per-tenant. A one-shot, instance-wide boot sequence (schema, instance
+/// lock, first-boot seed, secret migration) that runs once before the host accepts any request;
+/// there is no per-org selection point and no org even resolvable yet at this point in startup.
 /// </summary>
 public sealed class CoreStartupService : IHostedService
 {

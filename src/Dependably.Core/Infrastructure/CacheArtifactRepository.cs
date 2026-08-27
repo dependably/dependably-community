@@ -356,6 +356,9 @@ public sealed class CacheArtifactRepository
     {
         string threshold = time.GetUtcNow().AddHours(-ageHours).ToUtcIso();
         await using var conn = await _db.OpenAsync(ct);
+        // A suspended/archived/deleting org (see TenantLifecycle) is excluded the same way a
+        // soft-deleted/air-gapped one already is — this pass fetches upstream metadata (npm
+        // packument / PyPI project JSON) on the org's behalf.
         var rows = await conn.QueryAsync<(string Ecosystem, string Name, string OrgId)>(
             """
             SELECT ca.ecosystem AS Ecosystem, ca.name AS Name, taa.org_id AS OrgId
@@ -366,6 +369,7 @@ public sealed class CacheArtifactRepository
             WHERE ca.ecosystem IN ('npm', 'pypi', 'nuget', 'maven')
               AND (ca.deprecation_checked_at IS NULL OR ca.deprecation_checked_at < @threshold)
               AND o.deleted_at IS NULL
+              AND o.status = 'active'
               AND COALESCE(os.air_gapped, 0) = 0
             GROUP BY ca.ecosystem, ca.name, taa.org_id
             ORDER BY MIN(ca.deprecation_checked_at) ASC

@@ -53,7 +53,9 @@ public sealed class SamlConfigRepository
     public async Task<IReadOnlyList<TenantSamlCertRow>> GetAllCertRowsAsync(CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        // xtenant: daily cert-expiry sweep reads all orgs for operator-level monitoring
+        // xtenant: daily cert-expiry sweep reads all orgs for operator-level monitoring — see
+        // SamlCertExpiryCheckService's own suspension-ok marker for why a suspended/archived/
+        // deleting org is deliberately NOT excluded here the way other per-tenant sweeps are.
         var rows = await conn.QueryAsync<TenantSamlCertRow>(
             """
             SELECT tsc.org_id              AS OrgId,

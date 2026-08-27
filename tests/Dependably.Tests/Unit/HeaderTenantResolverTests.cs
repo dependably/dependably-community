@@ -4,6 +4,7 @@ using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Primitives;
 
 namespace Dependably.Tests.Unit;
 
@@ -60,6 +61,44 @@ public class HeaderTenantResolverTests : IAsyncLifetime
     {
         var r = new HeaderTenantResolver(_db, Config());
         var t = await r.ResolveAsync(WithHeader("X-Dependably-Tenant", "acme"));
+        Assert.True(t.IsTenant);
+        Assert.Equal("acme", t.TenantSlug);
+    }
+
+    // An edge proxy that APPENDS its tenant header rather than replacing it leaves the client's own
+    // copy first in arrival order, and the peer check still passes because the peer really is the
+    // trusted proxy. Taking either end would serve one of two contradictory answers silently; on the
+    // unauthenticated protocol surfaces there is no JWT for RouteScopeFilter to cross-check, so the
+    // wrong pick is a cross-tenant read. Both orderings must refuse.
+    [Theory]
+    [InlineData("victim", "acme")]
+    [InlineData("acme", "victim")]
+    public async Task DuplicateTenantHeader_IsRefused(string first, string second)
+    {
+        var r = new HeaderTenantResolver(_db, Config());
+
+        var ctx = new DefaultHttpContext();
+        ctx.Request.Headers["X-Dependably-Tenant"] = new StringValues([first, second]);
+        ctx.Items[OriginalPeerMiddleware.HttpItemsKey] = IPAddress.Parse(TrustedProxy);
+
+        var t = await r.ResolveAsync(ctx);
+
+        Assert.False(t.IsTenant);
+    }
+
+    // The control: the same known slug, sent once, still resolves — so the guard above rejects
+    // duplication rather than the value.
+    [Fact]
+    public async Task SingleTenantHeader_StillResolves()
+    {
+        var r = new HeaderTenantResolver(_db, Config());
+
+        var ctx = new DefaultHttpContext();
+        ctx.Request.Headers["X-Dependably-Tenant"] = new StringValues(["acme"]);
+        ctx.Items[OriginalPeerMiddleware.HttpItemsKey] = IPAddress.Parse(TrustedProxy);
+
+        var t = await r.ResolveAsync(ctx);
+
         Assert.True(t.IsTenant);
         Assert.Equal("acme", t.TenantSlug);
     }

@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using Dapper;
 
 namespace Dependably.Infrastructure;
@@ -368,6 +369,10 @@ public sealed class BannerRepository
     /// opened its own connection could not join that transaction — its delete would commit
     /// independently and survive a rollback of everything around it.
     /// </summary>
+    // Not static despite touching no instance state: this is the transaction-enlisted overload of
+    // the instance DeleteForOrgAsync(string, CancellationToken) above, and a static overload cannot
+    // be reached through the injected repository the one caller holds.
+    [SuppressMessage("Performance", "CA1822:Mark members as static", Justification = "Overload pair with an instance method; callers hold the repository, not the type.")]
     public async Task DeleteForOrgAsync(
         System.Data.Common.DbConnection conn,
         System.Data.Common.DbTransaction? tx,

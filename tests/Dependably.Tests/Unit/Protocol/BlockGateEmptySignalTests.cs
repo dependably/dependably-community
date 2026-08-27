@@ -51,7 +51,10 @@ public sealed class BlockGateEmptySignalTests : IClassFixture<InMemoryDbFixture>
                 new LicenseNormalizer(_fixture.Store, NullLogger<LicenseNormalizer>.Instance)),
             _anchors,
             NullLogger<BlockGateService>.Instance,
-            _clock);
+            _clock,
+            new OrgRepository(_fixture.Store),
+            NSubstitute.Substitute.For<Dependably.Infrastructure.Webhooks.IPackageEventSink>(),
+            new BlockRefusalWebhookThrottle(_clock, TimeSpan.Zero));
     }
 
     // ── License arm: empty SPDX set ───────────────────────────────────────────

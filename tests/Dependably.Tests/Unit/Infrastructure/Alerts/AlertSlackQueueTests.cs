@@ -149,7 +149,9 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         await EnableSlackAsync(settings, "org1", "https://good.example.com/hook");
         var alert = await SeedActiveAlertAsync(alerts, "org1", Guid.NewGuid().ToString("N"));
 
-        var queue = new AlertSlackQueue(settings, alerts, client, Clock, BuildCfg(), NullLogger<AlertSlackQueue>.Instance);
+        var queue = new AlertSlackQueue(
+                        new AlertSlackQueueServices(
+                        settings, alerts, client, new OrgRepository(_db), Clock, BuildCfg(), NullLogger<AlertSlackQueue>.Instance));
         using var cts = new CancellationTokenSource();
         _ = queue.StartAsync(cts.Token);
 
@@ -186,7 +188,9 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         await EnableSlackAsync(settings, "org1", "https://good.example.com/hook");
         var alert = await SeedActiveAlertAsync(alerts, "org1", Guid.NewGuid().ToString("N"));
 
-        var queue = new AlertSlackQueue(settings, alerts, client, Clock, BuildCfg(), NullLogger<AlertSlackQueue>.Instance);
+        var queue = new AlertSlackQueue(
+                        new AlertSlackQueueServices(
+                        settings, alerts, client, new OrgRepository(_db), Clock, BuildCfg(), NullLogger<AlertSlackQueue>.Instance));
         using var cts = new CancellationTokenSource();
         _ = queue.StartAsync(cts.Token);
 
@@ -234,7 +238,9 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         using var cts = new CancellationTokenSource();
         var handler = new CancelOnSendHandler(cts);
         var client = BuildClient(handler);
-        var queue = new AlertSlackQueue(settings, alerts, client, Clock, BuildCfg(), NullLogger<AlertSlackQueue>.Instance);
+        var queue = new AlertSlackQueue(
+                        new AlertSlackQueueServices(
+                        settings, alerts, client, new OrgRepository(_db), Clock, BuildCfg(), NullLogger<AlertSlackQueue>.Instance));
 
         // Drives the delivery path directly (no queue/BackgroundService loop needed) with a
         // token that gets cancelled synchronously the instant the POST "lands" — the exact
@@ -282,8 +288,9 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         var handler = new CancelOnFinalFailureHandler(cts);
         var client = BuildClient(handler);
         var queue = new AlertSlackQueue(
-            settings, alerts, client, slackClock, BuildCfg(), NullLogger<AlertSlackQueue>.Instance,
-            NoBackoff);
+                        new AlertSlackQueueServices(
+                        settings, alerts, client, new OrgRepository(_db), slackClock, BuildCfg(), NullLogger<AlertSlackQueue>.Instance),
+                        NoBackoff);
 
         var deliverTask = queue.DeliverAsync(alert, cts.Token);
         await deliverTask;
@@ -376,8 +383,9 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         var badAlert = await SeedActiveAlertAsync(alerts, "org2", Guid.NewGuid().ToString("N"));
 
         var queue = new AlertSlackQueue(
-            settings, alerts, client, slackClock, BuildCfg(), NullLogger<AlertSlackQueue>.Instance,
-            NoBackoff);
+                        new AlertSlackQueueServices(
+                        settings, alerts, client, new OrgRepository(_db), slackClock, BuildCfg(), NullLogger<AlertSlackQueue>.Instance),
+                        NoBackoff);
 
         // Buffer both alerts before the worker ever starts reading.
         await queue.NotifyAsync(goodAlert);
@@ -422,7 +430,9 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         // No EnableSlackAsync call — org1 has no settings row at all (Slack off by default).
         var alert = await SeedActiveAlertAsync(alerts, "org1", Guid.NewGuid().ToString("N"));
 
-        var queue = new AlertSlackQueue(settings, alerts, client, Clock, BuildCfg(), NullLogger<AlertSlackQueue>.Instance);
+        var queue = new AlertSlackQueue(
+                        new AlertSlackQueueServices(
+                        settings, alerts, client, new OrgRepository(_db), Clock, BuildCfg(), NullLogger<AlertSlackQueue>.Instance));
         using var cts = new CancellationTokenSource();
         _ = queue.StartAsync(cts.Token);
 
@@ -465,8 +475,9 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         var badAlert = await SeedActiveAlertAsync(alerts, "org2", Guid.NewGuid().ToString("N"));
 
         var queue = new AlertSlackQueue(
-            settings, alerts, client, slackClock, BuildCfg(), NullLogger<AlertSlackQueue>.Instance,
-            NoBackoff);
+                        new AlertSlackQueueServices(
+                        settings, alerts, client, new OrgRepository(_db), slackClock, BuildCfg(), NullLogger<AlertSlackQueue>.Instance),
+                        NoBackoff);
         using var cts = new CancellationTokenSource();
         _ = queue.StartAsync(cts.Token);
 
@@ -533,7 +544,8 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         var otherAlert = await SeedActiveAlertAsync(alerts, "org2", Guid.NewGuid().ToString("N"));
 
         var queue = new AlertSlackQueue(
-            settings, alerts, client, Clock, BuildCfg(), NullLogger<AlertSlackQueue>.Instance);
+                        new AlertSlackQueueServices(
+                        settings, alerts, client, new OrgRepository(_db), Clock, BuildCfg(), NullLogger<AlertSlackQueue>.Instance));
         using var cts = new CancellationTokenSource();
         _ = queue.StartAsync(cts.Token);
 
@@ -583,7 +595,8 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
             .Build();
 
         var queue = new AlertSlackQueue(
-            settings, alerts, client, slackClock, cfg, NullLogger<AlertSlackQueue>.Instance);
+                        new AlertSlackQueueServices(
+                        settings, alerts, client, new OrgRepository(_db), slackClock, cfg, NullLogger<AlertSlackQueue>.Instance));
 
         // Both alerts are queued before any worker runs, so both go through the drain.
         await queue.NotifyAsync(hangingAlert);
@@ -665,7 +678,9 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
             Ecosystem: "npm", Purl: "pkg:npm/org2-secret@1.0.0",
             Title: "ORG2-ONLY quarantine item", Detail: "org2 detail payload"));
 
-        var queue = new AlertSlackQueue(settings, alerts, client, Clock, BuildCfg(), NullLogger<AlertSlackQueue>.Instance);
+        var queue = new AlertSlackQueue(
+                        new AlertSlackQueueServices(
+                        settings, alerts, client, new OrgRepository(_db), Clock, BuildCfg(), NullLogger<AlertSlackQueue>.Instance));
         using var cts = new CancellationTokenSource();
         _ = queue.StartAsync(cts.Token);
 
@@ -907,7 +922,9 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
             .AddInMemoryCollection(new Dictionary<string, string?> { ["ALERT_SLACK_QUEUE_CAPACITY"] = "1" })
             .Build();
         // Never started — nothing is dequeued, so the channel fills and drops.
-        var queue = new AlertSlackQueue(settings, alerts, client, Clock, cfg, NullLogger<AlertSlackQueue>.Instance);
+        var queue = new AlertSlackQueue(
+                        new AlertSlackQueueServices(
+                        settings, alerts, client, new OrgRepository(_db), Clock, cfg, NullLogger<AlertSlackQueue>.Instance));
 
         for (int i = 0; i < 5; i++)
         {

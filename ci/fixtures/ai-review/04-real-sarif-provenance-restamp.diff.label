@@ -1,0 +1,21 @@
+fixture: 04-real-sarif-provenance-restamp.diff
+class: REAL_FINDING
+expected_verdict: FINDING
+lens: security (primary), code (secondary)
+expected_finding: |
+  The SBOM/VEX analysis upsert's ON CONFLICT target does not fold vuln_key case, so a
+  re-ingested SARIF/VEX row misses its conflict target, inserts a duplicate, and restamps the
+  analysis provenance columns -- the UI renders them as "Set by {actor}", so a machine re-ingest
+  silently reattributes a human analyst's suppression decision.
+provenance:
+  origin: reverse of MR !1021 head (12739115..26efd012), src/ only
+  mr: !1021 (defect shipped by !1019/!1020; fixed in !1021)
+  ground_truth: KNOWN FALSE NEGATIVE, EXPLICITLY RECORDED -- the !1021 triage note states
+    "on the previous run these same four lenses were also all CLEAN, over a diff that contained
+    the SARIF provenance-restamp defect - including the security lens." Found by a spec review.
+notes: |
+  The triage note also names WHY a diff-scoped reviewer cannot see it: recognising it requires
+  holding the conflict-target change, VexAnalysisEditor.svelte's rendering (a file the diff does
+  not touch), and the prior no-conflict behaviour simultaneously. This fixture is therefore the
+  best available probe for "is the finding class reachable from a diff at all" -- a NEGATIVE
+  result here is a defensible structural limit, not a lens-quality regression.

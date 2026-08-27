@@ -10,11 +10,18 @@
  *   capabilities → preset  for the row badge after a token lands
  *
  * Preset semantics:
- *   pull   — read-only            (read:metadata + read:artifact)
+ *   pull   — read-only            (read:metadata + read:artifact + read:packages)
  *   push   — publish-only         (publish:*)
- *   both   — read + publish       (read:metadata + read:artifact + publish:*)
+ *   both   — read + publish       (read:metadata + read:artifact + read:packages + publish:*)
  *   admin  — org configuration    (tenant:configure + read:tenant)
  *   audit  — audit-log reads      (read:audit) — for SIEM / logging integrations
+ *   sbom   — SBOM upload only     (sbom:upload) — CI uploading SBOM/VEX/SARIF, nothing else.
+ *            Privileged, not package: sbom:upload is in AdminCaps, so only an admin/owner
+ *            token may carry it — offering it to a member would render a control the server
+ *            refuses as privilege escalation. It is also deliberately its own preset rather
+ *            than folded into `push`: publish:* already covers uploading a package, and
+ *            widening it to also cover SBOM upload would silently broaden what every existing
+ *            `push`/`both` token can already do.
  *
  * The capabilities → preset direction is only ever a convenience label, and it matches a
  * preset's exact capability set and nothing else. A token minted through the API can hold any
@@ -22,23 +29,29 @@
  * inferring "push" from the presence of any `publish:` entry makes a `publish:nuget` token
  * indistinguishable from a `publish:*` one, and only the second can push an OCI image.
  * Anything that is not exactly a preset is `custom`, and every caller renders
- * `capabilitiesToText` alongside the badge so the actual grant is always on screen.
+ * `capabilitiesToText` alongside the badge only in that case — a preset match already names
+ * the grant, so the raw list would be noise on every ordinary row; it earns its place once the
+ * badge can no longer speak for the token.
  *
  * The package presets (pull/push/both) are always offered. The privileged presets
- * (admin/audit) are gated to admin/owner callers in the UI and to the admin-only
+ * (admin/audit/sbom) are gated to admin/owner callers in the UI and to the admin-only
  * service-token screen; the server enforces the same ceiling regardless.
  */
 
 const PRESET_CAPS = {
-  pull:  ['read:metadata', 'read:artifact'],
+  pull:  ['read:metadata', 'read:artifact', 'read:packages'],
   push:  ['publish:*'],
-  both:  ['read:metadata', 'read:artifact', 'publish:*'],
+  both:  ['read:metadata', 'read:artifact', 'read:packages', 'publish:*'],
+  sbom:  ['sbom:upload'],
   admin: ['tenant:configure', 'read:tenant'],
   audit: ['read:audit'],
 }
 
+// `sbom` sits with the privileged presets because `sbom:upload` is in AdminCaps: only an
+// admin or owner carries it, so offering it to a member would render a control whose mint
+// the server refuses as privilege escalation.
 export const PACKAGE_PRESETS = ['pull', 'push', 'both']
-export const PRIVILEGED_PRESETS = ['admin', 'audit']
+export const PRIVILEGED_PRESETS = ['admin', 'audit', 'sbom']
 
 export function presetToCapabilities(preset) {
   return PRESET_CAPS[preset] ?? PRESET_CAPS.pull

@@ -1,3 +1,5 @@
+using System.Data.Common;
+using Dependably.Infrastructure;
 using Dependably.Protocol;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
@@ -37,5 +39,32 @@ public sealed class ReservedNamespaceServiceRaceTests : IClassFixture<InMemoryDb
         // Killer assertion: the next check must enforce the reservation, not a stale pre-reservation
         // list cached by the racing fill.
         Assert.True(await sut.IsReservedAsync(orgId, "npm", "@acme/http-client"));
+    }
+
+    [Fact]
+    public async Task DbOpenThrowsAfterGuardIsMinted_DoesNotRetainItsFillGuard()
+    {
+        // GuardFor mints the guard BEFORE the DB open/read. ReservedNamespaceService is registered
+        // Singleton, so the guard map is process-lifetime — if the open or read throws with no
+        // cache entry ever installed to tie the guard's lifetime to, the guard must not survive
+        // the throw. Fails on the pre-fix code (no try/finally around the read), passes once the
+        // throwing branch retires the just-minted guard.
+        var sut = new ReservedNamespaceService(
+            new ThrowingAfterGuardStore(), new MemoryCache(new MemoryCacheOptions()), TimeProvider.System);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => sut.ListAsync($"org-{Guid.NewGuid():N}"));
+
+        Assert.Equal(0, sut.FillGuardCount);
+    }
+
+    private sealed class ThrowingAfterGuardStore : IMetadataStore
+    {
+        public DbProvider Provider => DbProvider.Sqlite;
+
+        public Task<DbConnection> OpenAsync(CancellationToken ct = default) =>
+            throw new InvalidOperationException(
+                "Simulates a cancelled/refused/exhausted DB open after ListAsync has already " +
+                "minted the fill guard.");
     }
 }

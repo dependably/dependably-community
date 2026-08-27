@@ -145,6 +145,14 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         new Dictionary<string, string?>();
 
     /// <summary>
+    /// Extra host settings applied last, so a test can pin an instance-level knob the fixture
+    /// does not otherwise expose (an upload cap, a limit) without a bespoke property per knob.
+    /// Applied after every default below, so a key set here wins.
+    /// </summary>
+    public IReadOnlyDictionary<string, string?> ExtraSettings { get; init; } =
+        new Dictionary<string, string?>();
+
+    /// <summary>
     /// Opt-in replacement for the production <see cref="Dependably.Infrastructure.Mail.SmtpMailSender"/>
     /// singleton — set to a <see cref="CapturingMailSender"/> so a test can assert exactly which
     /// address/subject/body a fire site enqueued, through the real DI-wired
@@ -162,6 +170,15 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
     /// integration test simulate a real OCI upstream (moving tags included) hermetically.
     /// </summary>
     public Func<HttpRequestMessage, HttpResponseMessage>? OciUpstreamHandler { get; init; }
+
+    /// <summary>
+    /// Last-word service replacements, applied after every other override this factory makes.
+    /// The seam exists so a test can make one collaborator fail on demand and observe what the
+    /// request leaves behind — an ordering or a rollback the happy path cannot reach — without a
+    /// bespoke factory knob per collaborator. Prefer a named property above for anything a second
+    /// test would want.
+    /// </summary>
+    public Action<IServiceCollection>? ServiceOverrides { get; init; }
 
     private sealed class StubbedOciUpstreamHandler : HttpMessageHandler
     {
@@ -310,7 +327,7 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         // intact — this disables only these six, not every background job.
         builder.WebHost.UseSetting(
             "DISABLE_BACKGROUND_JOBS",
-            "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+            "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
 
         builder.WebHost.UseSetting("PyPI:Upstream", MockUpstream.Urls[0]);
         builder.WebHost.UseSetting("Npm:Upstream", MockUpstream.Urls[0]);
@@ -354,6 +371,13 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         // self-throttle the fixture. Tests that explicitly exercise the 429 behaviour create
         // a dedicated factory instance with a tight limit.
         builder.WebHost.UseSetting("RESCAN_RATE_LIMIT_PERMITS", "1000000");
+
+        foreach (var (key, value) in ExtraSettings)
+        {
+            builder.WebHost.UseSetting(key, value);
+        }
+
+        ServiceOverrides?.Invoke(builder.Services);
 
         var app = builder.Build();
         Program.ConfigureApp(app);
@@ -700,6 +724,23 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         // read sees the new limit. Production paths go through OrgSettingsRepository which
         // already invalidates; the test helper does direct UPDATE for terseness.
         Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
+    }
+
+    /// <summary>
+    /// Flips <c>orgs.status</c> directly (bypassing <c>SystemController</c>, which is
+    /// apex-only and unreachable from a single-mode factory). Invalidates the tenant-slug cache
+    /// if a resolver registered one — the single-mode default doesn't, since
+    /// <see cref="SingleTenantResolver"/> reads live on every request, so this call takes effect
+    /// on the very next request regardless.
+    /// </summary>
+    public async Task SetOrgStatus(string org, string status)
+    {
+        await using var conn = await _metadataStore.OpenAsync();
+        string orgId = await conn.ExecuteScalarAsync<string>("SELECT id FROM orgs WHERE slug = @slug", new { slug = org })
+            ?? throw new InvalidOperationException($"Org '{org}' not found.");
+
+        await conn.ExecuteAsync("UPDATE orgs SET status = @status WHERE id = @orgId", new { status, orgId });
+        Services.GetService<ITenantSlugCacheInvalidator>()?.InvalidateSlug(org);
     }
 
     // ── Package push helpers ──────────────────────────────────────────────────

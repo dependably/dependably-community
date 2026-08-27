@@ -44,6 +44,15 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
     // empty or malware-free dump set.
     private volatile bool _sourceReachable;
 
+    // Dynamic coverage signal for HasCoverageFor("rpm"): true once the current reload indexed
+    // at least one advisory under a known RPM-distro ecosystem (see KnownRpmDistroEcosystems).
+    // RPM has no single OSV ecosystem of its own — distro feeds are what a pkg:rpm query can
+    // ever match — so unlike every other ecosystem, "the dump loaded fine" does not imply
+    // "this dump could ever answer an RPM query". Set on every reload, including the
+    // no-directory early return, so a dump that stops carrying distro feeds is reflected here
+    // rather than sticking at whatever the previous reload found.
+    private volatile bool _rpmDistroCoverageLoaded;
+
     public LocalOsvSource(IConfiguration config, ILogger<LocalOsvSource> logger, TimeProvider time)
     {
         _logger = logger;
@@ -149,6 +158,23 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
     }
 
     /// <summary>
+    /// Defers to the static <see cref="OsvFeedCoverage.HasAdvisoryFeed"/> gate first — an
+    /// ecosystem it already excludes (OCI, Terraform) stays excluded here regardless of what is
+    /// loaded. For every ecosystem the static gate allows other than RPM, coverage is
+    /// unconditionally true (unchanged from before this member existed): those ecosystems index
+    /// under their own name or a well-known aggregate bucket (Alpine), so "the dump loaded" has
+    /// always implied "this ecosystem could match". RPM is the one exception — see the field
+    /// doc on <see cref="_rpmDistroCoverageLoaded"/>.
+    /// </summary>
+    public async Task<bool> HasCoverageFor(string? ecosystem)
+    {
+        await _initialLoad.Value;
+
+        return OsvFeedCoverage.HasAdvisoryFeed(ecosystem)
+            && (!string.Equals(ecosystem, "rpm", StringComparison.OrdinalIgnoreCase) || _rpmDistroCoverageLoaded);
+    }
+
+    /// <summary>
     /// Re-reads the dump directory and rebuilds the index. Public so operators can trigger a
     /// reload via an admin endpoint (e.g. after sideloading new dumps without restarting).
     /// </summary>
@@ -159,12 +185,14 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
             _logger.LogWarning("OSV local path not found: {Path}", _path);
             _index = new Dictionary<(string, string), List<OsvAdvisory>>(EcosystemNameComparer.Instance);
             _sourceReachable = false;
+            _rpmDistroCoverageLoaded = false;
             return;
         }
 
         var newIndex = new Dictionary<(string Ecosystem, string Name), List<OsvAdvisory>>(EcosystemNameComparer.Instance);
         int loaded = 0;
         int errors = 0;
+        bool rpmDistroCoverageFound = false;
 
         foreach (string file in Directory.EnumerateFiles(_path, "*.json", SearchOption.AllDirectories))
         {
@@ -173,9 +201,11 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
                 break;
             }
 
-            if (await TryIndexFileAsync(file, newIndex, ct))
+            var result = await TryIndexFileAsync(file, newIndex, ct);
+            if (result.Success)
             {
                 loaded++;
+                rpmDistroCoverageFound |= result.FoundRpmDistroCoverage;
             }
             else
             {
@@ -185,18 +215,22 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
 
         _index = newIndex;
         _sourceReachable = true;
+        _rpmDistroCoverageLoaded = rpmDistroCoverageFound;
         _logger.LogInformation(
-            "OSV local index reloaded: {Loaded} advisories, {Keys} keys, {Errors} parse errors.",
-            loaded, newIndex.Count, errors);
+            "OSV local index reloaded: {Loaded} advisories, {Keys} keys, {Errors} parse errors, RPM distro coverage: {RpmCoverage}.",
+            loaded, newIndex.Count, errors, rpmDistroCoverageFound);
     }
+
+    /// <summary>Outcome of indexing one dump file — see <see cref="TryIndexFileAsync"/>.</summary>
+    private readonly record struct FileIndexResult(bool Success, bool FoundRpmDistroCoverage);
 
     /// <summary>
     /// Reads one OSV JSON file and merges its advisories into the building index. Returns
-    /// true on success, false if parsing failed or the file was empty (cancellations
-    /// propagate). Extracted so <see cref="ReloadAsync"/> stays a thin loop and the parse
-    /// error path lives in one place.
+    /// <see cref="FileIndexResult.Success"/> false if parsing failed or the file was empty
+    /// (cancellations propagate). Extracted so <see cref="ReloadAsync"/> stays a thin loop and
+    /// the parse error path lives in one place.
     /// </summary>
-    private async Task<bool> TryIndexFileAsync(
+    private async Task<FileIndexResult> TryIndexFileAsync(
         string file,
         Dictionary<(string Ecosystem, string Name), List<OsvAdvisory>> index,
         CancellationToken ct)
@@ -209,10 +243,11 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
             var raw = JsonSerializer.Deserialize<RawOsvDump>(content, JsonOpts);
             if (raw is null)
             {
-                return false;
+                return new FileIndexResult(false, false);
             }
 
             var advisory = BuildAdvisory(raw, content);
+            bool foundRpmDistroCoverage = false;
             foreach (var pkg in advisory.AffectedPackages)
             {
                 if (pkg.Ecosystem is null || pkg.Name is null)
@@ -234,13 +269,27 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
                 {
                     AddToIndex(index, ("alpine", key.Item2), advisory);
                 }
+
+                // RPM has no single OSV ecosystem of its own — advisories live under
+                // distro-specific, release-qualified names ("Rocky Linux:9", "Red Hat:…", …),
+                // never under a bare "rpm" key. Mirror the Alpine dual-bucket mechanism: also
+                // index every advisory affecting a known RPM-distro ecosystem under the bare
+                // "rpm" bucket, so QueryAsync's pkg:rpm lookup (which normalises to the bare
+                // "rpm" key) finds it. MatchesEcosystemAndName then narrows against
+                // KnownRpmDistroEcosystems rather than a single fixed prefix, because — unlike
+                // "alpine" — "rpm" itself is not a prefix any distro's ecosystem string carries.
+                if (IsKnownRpmDistroEcosystem(pkg.Ecosystem))
+                {
+                    AddToIndex(index, ("rpm", key.Item2), advisory);
+                    foundRpmDistroCoverage = true;
+                }
             }
-            return true;
+            return new FileIndexResult(true, foundRpmDistroCoverage);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogDebug(ex, "Failed to parse OSV dump: {Path}", file);
-            return false;
+            return new FileIndexResult(false, false);
         }
     }
 
@@ -365,15 +414,47 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
         // normalises to the bare "Alpine" and MatchesEcosystemAndName does a release-qualified
         // prefix match against the indexed advisories (see the dual-bucket indexing above).
         "apk" => "Alpine",
-        // RPM, OCI, and Terraform are intentionally not normalised here: OSV has no single "RPM"
-        // ecosystem (vulnerabilities live under distro-specific names like "Rocky Linux",
-        // "AlmaLinux", "Red Hat"), OCI image vulns are image-scan territory (Trivy), not OSV, and
-        // OSV publishes no Terraform provider ecosystem at all. Falling through with the
-        // lower-cased key yields no matches, which is the safe outcome — for Terraform it is also
-        // the honest one: a provider archive has no advisory feed to consult, while the rest of
-        // the block gate (operator blocks, revocation, source pinning) still applies.
+        // RPM falls through to the bare lower-cased "rpm" key deliberately: OSV has no single
+        // "RPM" ecosystem of its own (vulnerabilities live under distro-specific, release-
+        // qualified names — "Rocky Linux:9", "AlmaLinux:9", "Red Hat:…", …), so a pkg:rpm query
+        // normalises to "rpm" and is answered from the dual-bucket "rpm" index that
+        // TryIndexFileAsync builds from every known-RPM-distro advisory, mirroring how the
+        // "alpine" bucket is built. OCI and Terraform are not normalised for a different reason:
+        // OCI image vulns are image-scan territory (Trivy), not OSV, and OSV publishes no
+        // Terraform provider ecosystem at all, so falling through with the lower-cased key
+        // correctly yields no matches — the honest outcome, since neither has any feed to
+        // consult, while the rest of the block gate (operator blocks, revocation, source
+        // pinning) still applies.
         var other => other
     };
+
+    // OSV.dev's own ecosystem-list documentation
+    // (https://ossf.github.io/osv-schema/#defined-ecosystems) names these as RPM-packaged
+    // distro ecosystems — either explicitly ("the name is the name of the source RPM" / "RPM
+    // package" / "binary or source RPM": openEuler, openSUSE, Photon OS, Red Hat, SUSE) or, for
+    // AlmaLinux, Azure Linux, Mageia, and Rocky Linux (whose OSV description says only "source
+    // package"), because the distro itself is independently and unambiguously documented as
+    // RPM-based (AlmaLinux and Rocky Linux are RHEL clones; Azure Linux/CBL-Mariner packages
+    // with rpm/tdnf; Mageia — a Mandriva Linux fork — packages with DNF/urpmi over RPM). Each
+    // publishes advisories release- or product-qualified with a ":<RELEASE>" suffix on the
+    // ecosystem string, mirroring Alpine's "Alpine:v3.18" convention, so membership is matched
+    // by prefix rather than exact equality (see IsKnownRpmDistroEcosystem).
+    private static readonly string[] KnownRpmDistroEcosystems =
+    [
+        "AlmaLinux",
+        "Azure Linux",
+        "Mageia",
+        "openEuler",
+        "openSUSE",
+        "Photon OS",
+        "Red Hat",
+        "Rocky Linux",
+        "SUSE",
+    ];
+
+    private static bool IsKnownRpmDistroEcosystem(string? ecosystem) =>
+        ecosystem is not null
+        && KnownRpmDistroEcosystems.Any(d => ecosystem.StartsWith(d, StringComparison.OrdinalIgnoreCase));
 
     private static bool MatchesEcosystemAndName(OsvAffectedPackage ap, string ecosystem, string name)
     {
@@ -388,8 +469,19 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
         // Alpine (apk) advisories are release-qualified ("Alpine:v3.18"); the query ecosystem is
         // the bare "Alpine" (apk purls carry no OS-release qualifier), so match any release via a
         // prefix check instead of exact equality.
-        return string.Equals(ecosystem, "Alpine", StringComparison.OrdinalIgnoreCase)
-            ? apEco.StartsWith("alpine", StringComparison.OrdinalIgnoreCase)
+        if (string.Equals(ecosystem, "Alpine", StringComparison.OrdinalIgnoreCase))
+        {
+            return apEco.StartsWith("alpine", StringComparison.OrdinalIgnoreCase);
+        }
+
+        // RPM (query ecosystem "rpm") has no fixed prefix the way "alpine" does — no distro's
+        // ecosystem string starts with "rpm" itself. The advisories reachable from the "rpm"
+        // bucket were added there only when the affected package's own ecosystem matched a known
+        // RPM-distro name (TryIndexFileAsync), but an advisory can carry affected packages across
+        // several ecosystems at once, so this still narrows against the same known-distro set at
+        // match time rather than trusting bucket membership alone.
+        return string.Equals(ecosystem, "rpm", StringComparison.OrdinalIgnoreCase)
+            ? IsKnownRpmDistroEcosystem(ap.Ecosystem)
             : string.Equals(apEco, ecosystem, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -404,15 +496,13 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
                 Versions: a.Versions?.Distinct().ToArray() ?? []))
             .ToArray() ?? [];
 
-        string? severity = null;
-        double? cvssScore = null;
-
-        var cvss = raw.Severity?.FirstOrDefault(s =>
-            s.Type?.StartsWith("CVSS", StringComparison.OrdinalIgnoreCase) == true);
-        if (cvss?.Score is not null)
-        {
-            (cvssScore, severity) = OsvScoring.ParseCvssBaseScore(cvss.Score);
-        }
+        // Prefers whichever severity entry actually parses, highest CVSS version first, over
+        // the array's listing order — kept identical to OsvClient.ParseAdvisory so the same
+        // advisory scores the same online and offline.
+        string? severity;
+        double? cvssScore;
+        (cvssScore, severity) = OsvScoring.SelectCvssBaseScore(
+            raw.Severity?.Select(s => (s.Type, s.Score)));
 
         if (severity is null && raw.DatabaseSpecific is not null
             && raw.DatabaseSpecific.TryGetValue("severity", out object? dbSev))

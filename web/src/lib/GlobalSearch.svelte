@@ -58,7 +58,19 @@
     groups = []
     if (r.kind === 'packages') {
       navigate('version-detail', { ecosystem: r.ecosystem, name: r.purlName ?? r.name })
+    } else if (r.kind === 'projects') {
+      navigate('project-detail', { id: r.id })
+    } else if (r.kind === 'vulnerabilities') {
+      navigate('vulnerabilities', { q: r.osvId })
     }
+  }
+
+  /** Stable per-row key for the {#each}: a package is keyed by coordinate, a project or
+   *  vulnerability by its own id. */
+  function resultKey(r) {
+    if (r.kind === 'projects') return `projects:${r.id}`
+    if (r.kind === 'vulnerabilities') return `vulnerabilities:${r.osvId}`
+    return `packages:${r.ecosystem}/${r.purlName ?? r.name}`
   }
 
   function onKeydown(e) {
@@ -128,7 +140,7 @@
       {:else if !flat.length}
         <div class="gs-status">{$t('globalSearch.empty')}</div>
       {:else}
-        {#each flat as r, i (r.kind + ':' + r.ecosystem + '/' + (r.purlName ?? r.name))}
+        {#each flat as r, i (resultKey(r))}
           {#if i === 0 || flat[i - 1].kind !== r.kind}
             <div class="gs-group">{$t(`globalSearch.groups.${r.kind}`)}</div>
           {/if}
@@ -140,10 +152,20 @@
             role="option"
             aria-selected={i === activeIndex}
           >
-            <svg class="gs-result-icon" width="16" height="16" aria-hidden="true"><use href="/icons.svg#icon-package"/></svg>
-            <span class="badge {r.ecosystem} gs-eco">{r.ecosystem}</span>
-            <span class="mono gs-name" title={r.name}>{r.name}</span>
-            {#if r.version}<span class="gs-ver mono">{r.version}</span>{/if}
+            {#if r.kind === 'projects'}
+              <svg class="gs-result-icon" width="16" height="16" aria-hidden="true"><use href="/icons.svg#icon-layers"/></svg>
+              <span class="mono gs-name" title={r.name}>{r.name}</span>
+            {:else if r.kind === 'vulnerabilities'}
+              <svg class="gs-result-icon" width="16" height="16" aria-hidden="true"><use href="/icons.svg#icon-bug"/></svg>
+              {#if r.severity}<span class="sev sev-{r.severity.toLowerCase()}">{r.severity}</span>{/if}
+              <span class="mono gs-name" title={r.osvId}>{r.osvId}</span>
+              {#if r.packageName}<span class="gs-ver mono">{r.packageName}</span>{/if}
+            {:else}
+              <svg class="gs-result-icon" width="16" height="16" aria-hidden="true"><use href="/icons.svg#icon-package"/></svg>
+              <span class="badge {r.ecosystem} gs-eco">{r.ecosystem}</span>
+              <span class="mono gs-name" title={r.name}>{r.name}</span>
+              {#if r.version}<span class="gs-ver mono">{r.version}</span>{/if}
+            {/if}
           </button>
         {/each}
       {/if}

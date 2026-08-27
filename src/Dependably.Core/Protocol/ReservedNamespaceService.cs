@@ -98,27 +98,43 @@ public sealed partial class ReservedNamespaceService
         // binds an already-cancelled expiration token and never persists the stale list.
         var guardSource = GuardFor(orgId);
 
-        await using var conn = await _db.OpenAsync(ct);
-        var rows = await conn.QueryAsync<ReservedNamespaceEntry>(
-            """
-            SELECT id, org_id AS OrgId, ecosystem, pattern,
-                   created_by AS CreatedBy, created_at AS CreatedAt
-            FROM reserved_namespace WHERE org_id = @orgId
-            ORDER BY ecosystem, pattern
-            """,
-            new { orgId });
-        var list = (IReadOnlyList<ReservedNamespaceEntry>)rows.ToList();
-        var options = new MemoryCacheEntryOptions
+        // From here on guardSource MUST end up either tied to a cache entry (TieToEntryLifetime,
+        // below) or explicitly retired in the finally. The map is process-lifetime (this service
+        // is registered Singleton), so a DB open/read that throws before a cache entry is installed
+        // to own the guard's lifetime would otherwise leak it for the rest of the process.
+        bool tied = false;
+        try
         {
-            AbsoluteExpirationRelativeToNow = CacheTtl,
-            Size = 1,
-        };
-        options.AddExpirationToken(new CancellationChangeToken(guardSource.Token));
-        // Tie the generation's lifetime to this entry so an org whose cache entry expires without
-        // a mutation does not leave its guard in the map forever.
-        CacheFillGuard.TieToEntryLifetime(options, _fillGuards, orgId, guardSource);
-        _cache.Set(CacheKey(orgId), list, options);
-        return list;
+            await using var conn = await _db.OpenAsync(ct);
+            var rows = await conn.QueryAsync<ReservedNamespaceEntry>(
+                """
+                SELECT id, org_id AS OrgId, ecosystem, pattern,
+                       created_by AS CreatedBy, created_at AS CreatedAt
+                FROM reserved_namespace WHERE org_id = @orgId
+                ORDER BY ecosystem, pattern
+                """,
+                new { orgId });
+            var list = (IReadOnlyList<ReservedNamespaceEntry>)rows.ToList();
+            var options = new MemoryCacheEntryOptions
+            {
+                AbsoluteExpirationRelativeToNow = CacheTtl,
+                Size = 1,
+            };
+            options.AddExpirationToken(new CancellationChangeToken(guardSource.Token));
+            // Tie the generation's lifetime to this entry so an org whose cache entry expires
+            // without a mutation does not leave its guard in the map forever.
+            CacheFillGuard.TieToEntryLifetime(options, _fillGuards, orgId, guardSource);
+            _cache.Set(CacheKey(orgId), list, options);
+            tied = true;
+            return list;
+        }
+        finally
+        {
+            if (!tied)
+            {
+                CacheFillGuard.RetireUnbound(_fillGuards, orgId, guardSource);
+            }
+        }
     }
 
     public async Task<ReservedNamespaceEntry> AddAsync(

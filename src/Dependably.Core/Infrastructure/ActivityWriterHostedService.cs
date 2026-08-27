@@ -14,6 +14,11 @@ namespace Dependably.Infrastructure;
 /// Shutdown: when the host signals cancellation we drain the channel one last time so
 /// any rows queued just before SIGTERM still make it to disk. The 30 s SIGTERM drain
 /// configured in Program.cs gives this plenty of headroom even at queue capacity.
+///
+/// suspension-ok: not a scheduled tenant sweep — a write-behind flush of activity events that
+/// already happened. A suspended org cannot generate new activity (the protocol and management
+/// planes are behind TenantStatusEnforcementMiddleware), so this only ever persists rows from
+/// legitimate pre-suspension activity; nothing here initiates work on a non-active org's behalf.
 /// </summary>
 public sealed class ActivityWriterHostedService : BackgroundService
 {

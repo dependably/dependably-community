@@ -22,7 +22,7 @@ public sealed class SpdxLicenseRepository
     {
         await using var conn = await _db.OpenAsync(ct);
 
-        string? filter = string.IsNullOrWhiteSpace(query) ? null : $"%{query.Trim()}%";
+        string? filter = LikePattern.Contains(query);
 
         var rows = await conn.QueryAsync<SpdxLicense>(
             """
@@ -35,16 +35,16 @@ public sealed class SpdxLicenseRepository
                    copyleft        AS Copyleft
             FROM spdx_license
             WHERE (@includeDeprecated = 1 OR is_deprecated = 0)
-              AND (@filter IS NULL OR identifier LIKE @filter COLLATE NOCASE OR name LIKE @filter COLLATE NOCASE)
+              AND (@filter IS NULL OR identifier LIKE @filter COLLATE NOCASE ESCAPE '\' OR name LIKE @filter COLLATE NOCASE ESCAPE '\')
             ORDER BY
               -- Exact-prefix matches first when filtering, otherwise alphabetical.
               CASE WHEN @filter IS NULL THEN 0
-                   WHEN identifier LIKE @prefix COLLATE NOCASE THEN 0
+                   WHEN identifier LIKE @prefix COLLATE NOCASE ESCAPE '\' THEN 0
                    ELSE 1 END,
               identifier
             LIMIT @limit
             """,
-            new { filter, prefix = filter is null ? null : $"{query!.Trim()}%", includeDeprecated = includeDeprecated ? 1 : 0, limit });
+            new { filter, prefix = filter is null ? null : $"{LikePattern.Escape(query!.Trim())}%", includeDeprecated = includeDeprecated ? 1 : 0, limit });
 
         return rows.ToList();
     }

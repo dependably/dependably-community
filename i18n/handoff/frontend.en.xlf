@@ -87,7 +87,7 @@
     </unit>
     <unit id="activity.events.blockedLicense">
       <segment state="translated">
-        <source>Blocked (license)</source>
+        <source>Blocked (licence)</source>
         <target>Bloqué (licence)</target>
       </segment>
     </unit>
@@ -537,43 +537,43 @@
     </unit>
     <unit id="audit.actions.license_allowlist_added">
       <segment state="translated">
-        <source>License allowlist entry added</source>
+        <source>Licence allowlist entry added</source>
         <target>Entrée de liste d&apos;autorisation de licences ajoutée</target>
       </segment>
     </unit>
     <unit id="audit.actions.license_allowlist_removed">
       <segment state="translated">
-        <source>License allowlist entry removed</source>
+        <source>Licence allowlist entry removed</source>
         <target>Entrée de liste d&apos;autorisation de licences supprimée</target>
       </segment>
     </unit>
     <unit id="audit.actions.license_allowlist_updated">
       <segment state="translated">
-        <source>License allowlist entry updated</source>
+        <source>Licence allowlist entry updated</source>
         <target>Entrée de liste d&apos;autorisation de licence modifiée</target>
       </segment>
     </unit>
     <unit id="audit.actions.license_blocklist_added">
       <segment state="translated">
-        <source>License blocklist entry added</source>
+        <source>Licence blocklist entry added</source>
         <target>Entrée de liste de blocage de licences ajoutée</target>
       </segment>
     </unit>
     <unit id="audit.actions.license_blocklist_removed">
       <segment state="translated">
-        <source>License blocklist entry removed</source>
+        <source>Licence blocklist entry removed</source>
         <target>Entrée de liste de blocage de licences supprimée</target>
       </segment>
     </unit>
     <unit id="audit.actions.license_blocklist_updated">
       <segment state="translated">
-        <source>License blocklist entry updated</source>
+        <source>Licence blocklist entry updated</source>
         <target>Entrée de liste de blocage de licence modifiée</target>
       </segment>
     </unit>
     <unit id="audit.actions.license_policy_mode_changed">
       <segment state="translated">
-        <source>License policy mode changed</source>
+        <source>Licence policy mode changed</source>
         <target>Mode de politique de licences modifié</target>
       </segment>
     </unit>
@@ -831,7 +831,7 @@
     </unit>
     <unit id="audit.groups.licenses">
       <segment state="translated">
-        <source>License policy</source>
+        <source>Licence policy</source>
         <target>Politique de licences</target>
       </segment>
     </unit>
@@ -1531,6 +1531,12 @@
         <target>Annuler</target>
       </segment>
     </unit>
+    <unit id="common.actions.close">
+      <segment state="translated">
+        <source>Close</source>
+        <target>Fermer</target>
+      </segment>
+    </unit>
     <unit id="common.actions.copied">
       <segment state="translated">
         <source>Copied!</source>
@@ -1687,10 +1693,28 @@
         <target>{from}–{to} sur {total}+</target>
       </segment>
     </unit>
+    <unit id="dashboard.activeOverrides">
+      <segment state="translated">
+        <source>Active overrides</source>
+        <target>Autorisations actives</target>
+      </segment>
+    </unit>
+    <unit id="dashboard.activeOverridesSub">
+      <segment state="translated">
+        <source>{days, plural, one {oldest # day} other {oldest # days}}</source>
+        <target>{days, plural, one {la plus ancienne remonte à # jour} other {la plus ancienne remonte à # jours}}</target>
+      </segment>
+    </unit>
     <unit id="dashboard.activeUsers">
       <segment state="translated">
         <source>Active users (7d)</source>
         <target>Utilisateurs actifs (7j)</target>
+      </segment>
+    </unit>
+    <unit id="dashboard.blockedKev">
+      <segment state="translated">
+        <source>KEV blocked (30d)</source>
+        <target>Paquets KEV bloqués (30j)</target>
       </segment>
     </unit>
     <unit id="dashboard.blockedMalicious">
@@ -1703,6 +1727,36 @@
       <segment state="translated">
         <source>Blocked pulls (30d)</source>
         <target>Récupérations bloquées (30j)</target>
+      </segment>
+    </unit>
+    <unit id="dashboard.coverage.noFeed">
+      <segment state="translated">
+        <source>{count} no advisory feed</source>
+        <target>{count} aucun flux de vulnérabilités</target>
+      </segment>
+    </unit>
+    <unit id="dashboard.coverage.none">
+      <segment state="translated">
+        <source>No coverage yet</source>
+        <target>Aucune couverture pour l&apos;instant</target>
+      </segment>
+    </unit>
+    <unit id="dashboard.coverage.percent">
+      <segment state="translated">
+        <source>{percent}%</source>
+        <target>{percent} %</target>
+      </segment>
+    </unit>
+    <unit id="dashboard.coverage.sub">
+      <segment state="translated">
+        <source>{scanned} scanned · {unscanned} unscanned</source>
+        <target>{scanned} analysées · {unscanned} non analysées</target>
+      </segment>
+    </unit>
+    <unit id="dashboard.coverage.title">
+      <segment state="translated">
+        <source>Scan coverage</source>
+        <target>Couverture d&apos;analyse</target>
       </segment>
     </unit>
     <unit id="dashboard.diskUsed">
@@ -1747,10 +1801,28 @@
         <target>EPSS</target>
       </segment>
     </unit>
+    <unit id="dashboard.gates.install_script">
+      <segment state="translated">
+        <source>install script</source>
+        <target>script d&apos;installation</target>
+      </segment>
+    </unit>
     <unit id="dashboard.gates.kev">
       <segment state="translated">
         <source>KEV</source>
         <target>KEV</target>
+      </segment>
+    </unit>
+    <unit id="dashboard.gates.kev_ransomware">
+      <segment state="translated">
+        <source>KEV · ransomware</source>
+        <target>KEV · rançongiciel</target>
+      </segment>
+    </unit>
+    <unit id="dashboard.gates.license">
+      <segment state="translated">
+        <source>licence</source>
+        <target>licence</target>
       </segment>
     </unit>
     <unit id="dashboard.gates.malicious">
@@ -1765,10 +1837,22 @@
         <target>manuel</target>
       </segment>
     </unit>
+    <unit id="dashboard.gates.provenance">
+      <segment state="translated">
+        <source>provenance</source>
+        <target>provenance</target>
+      </segment>
+    </unit>
     <unit id="dashboard.gates.release_age">
       <segment state="translated">
         <source>release age</source>
         <target>âge de publication</target>
+      </segment>
+    </unit>
+    <unit id="dashboard.gates.revoked">
+      <segment state="translated">
+        <source>revoked</source>
+        <target>révoquée</target>
       </segment>
     </unit>
     <unit id="dashboard.gates.vuln_score">
@@ -1785,7 +1869,7 @@
     </unit>
     <unit id="dashboard.licenseRisk">
       <segment state="translated">
-        <source>License risk</source>
+        <source>Licence risk</source>
         <target>Risque lié aux licences</target>
       </segment>
     </unit>
@@ -1829,6 +1913,36 @@
       <segment state="translated">
         <source>Packages</source>
         <target>Paquets</target>
+      </segment>
+    </unit>
+    <unit id="dashboard.prevention.empty">
+      <segment state="translated">
+        <source>0 pulls blocked in the last 30 days</source>
+        <target>0 récupération bloquée au cours des 30 derniers jours</target>
+      </segment>
+    </unit>
+    <unit id="dashboard.prevention.emptyNoTraffic">
+      <segment state="translated">
+        <source>No pulls were served in this window, so there was nothing to evaluate.</source>
+        <target>Aucune récupération n&apos;a été servie durant cette période; il n&apos;y avait donc rien à évaluer.</target>
+      </segment>
+    </unit>
+    <unit id="dashboard.prevention.emptyServed">
+      <segment state="translated">
+        <source>{count, plural, one {# pull was served in this window and no gate refused it.} other {# pulls were served in this window and no gate refused any of them.}} Enforcement modes are set in Settings → Gates.</source>
+        <target>{count, plural, one {# récupération a été servie durant cette période et aucun filtre ne l&apos;a refusée.} other {# récupérations ont été servies durant cette période et aucun filtre ne les a refusées.}} Les modes d&apos;application se configurent dans Paramètres → Filtres.</target>
+      </segment>
+    </unit>
+    <unit id="dashboard.prevention.title">
+      <segment state="translated">
+        <source>Prevention (30d)</source>
+        <target>Prévention (30j)</target>
+      </segment>
+    </unit>
+    <unit id="dashboard.projectsSub">
+      <segment state="translated">
+        <source>{pass} pass · {warn} warn · {violation} violation · {unevaluated} unevaluated</source>
+        <target>{pass} conformes · {warn} avertissements · {violation} violations · {unevaluated} non évaluées</target>
       </segment>
     </unit>
     <unit id="dashboard.quarantinePending">
@@ -1897,6 +2011,54 @@
         <target>Total des paquets</target>
       </segment>
     </unit>
+    <unit id="dashboard.totalProjects">
+      <segment state="translated">
+        <source>Projects</source>
+        <target>Projets</target>
+      </segment>
+    </unit>
+    <unit id="dashboard.trends.blockedPulls">
+      <segment state="translated">
+        <source>Blocked pulls</source>
+        <target>Récupérations bloquées</target>
+      </segment>
+    </unit>
+    <unit id="dashboard.trends.downloads">
+      <segment state="translated">
+        <source>Downloads</source>
+        <target>Téléchargements</target>
+      </segment>
+    </unit>
+    <unit id="dashboard.trends.empty">
+      <segment state="translated">
+        <source>Not enough history yet</source>
+        <target>Pas encore assez d&apos;historique</target>
+      </segment>
+    </unit>
+    <unit id="dashboard.trends.emptyHint">
+      <segment state="translated">
+        <source>Trends appear once two daily snapshots have been recorded.</source>
+        <target>Les tendances apparaissent une fois que deux instantanés quotidiens ont été enregistrés.</target>
+      </segment>
+    </unit>
+    <unit id="dashboard.trends.title">
+      <segment state="translated">
+        <source>Trends (30d)</source>
+        <target>Tendances (30j)</target>
+      </segment>
+    </unit>
+    <unit id="dashboard.trends.vs7d">
+      <segment state="translated">
+        <source>{delta} vs 7d ago</source>
+        <target>{delta} vs il y a 7 j</target>
+      </segment>
+    </unit>
+    <unit id="dashboard.trends.vulnerabilities">
+      <segment state="translated">
+        <source>Vulnerabilities</source>
+        <target>Vulnérabilités</target>
+      </segment>
+    </unit>
     <unit id="dashboard.unscored">
       <segment state="translated">
         <source>UNSCORED</source>
@@ -1936,7 +2098,7 @@
     <unit id="error.license.dispositionInvalid">
       <segment state="translated">
         <source>Disposition must be one of: allowed, conditional.</source>
-        <target>La disposition doit être : allowed ou conditional.</target>
+        <target>La disposition doit être : allowed ou conditional.</target>
       </segment>
     </unit>
     <unit id="error.license.noteTooLong">
@@ -1975,6 +2137,18 @@
         <target>Paquets</target>
       </segment>
     </unit>
+    <unit id="globalSearch.groups.projects">
+      <segment state="translated">
+        <source>Projects</source>
+        <target>Projets</target>
+      </segment>
+    </unit>
+    <unit id="globalSearch.groups.vulnerabilities">
+      <segment state="translated">
+        <source>Vulnerabilities</source>
+        <target>Vulnérabilités</target>
+      </segment>
+    </unit>
     <unit id="globalSearch.loading">
       <segment state="translated">
         <source>Searching…</source>
@@ -1983,8 +2157,8 @@
     </unit>
     <unit id="globalSearch.placeholder">
       <segment state="translated">
-        <source>Search packages</source>
-        <target>Rechercher des paquets</target>
+        <source>Search packages, projects, vulnerabilities</source>
+        <target>Rechercher des paquets, des projets, des vulnérabilités</target>
       </segment>
     </unit>
     <unit id="installScriptAllowlist.addEntry">
@@ -2115,25 +2289,25 @@
     </unit>
     <unit id="licensePolicy.allow.empty">
       <segment state="translated">
-        <source>No licenses on the allow list.</source>
+        <source>No licences on the allow list.</source>
         <target>Aucune licence sur la liste d&apos;autorisation.</target>
       </segment>
     </unit>
     <unit id="licensePolicy.allow.title">
       <segment state="translated">
-        <source>Allowed licenses</source>
+        <source>Allowed licences</source>
         <target>Licences autorisées</target>
       </segment>
     </unit>
     <unit id="licensePolicy.block.empty">
       <segment state="translated">
-        <source>No licenses on the block list.</source>
+        <source>No licences on the block list.</source>
         <target>Aucune licence sur la liste de blocage.</target>
       </segment>
     </unit>
     <unit id="licensePolicy.block.title">
       <segment state="translated">
-        <source>Blocked licenses</source>
+        <source>Blocked licences</source>
         <target>Licences bloquées</target>
       </segment>
     </unit>
@@ -2169,13 +2343,13 @@
     </unit>
     <unit id="licensePolicy.conditional.empty">
       <segment state="translated">
-        <source>No licenses are marked conditional.</source>
+        <source>No licences are marked conditional.</source>
         <target>Aucune licence marquée conditionnelle.</target>
       </segment>
     </unit>
     <unit id="licensePolicy.conditional.intro">
       <segment state="translated">
-        <source>These licenses are permitted, but your organization recorded a condition on each. Read the condition before depending on a package that carries one.</source>
+        <source>These licences are permitted, but your organization recorded a condition on each. Read the condition before depending on a package that carries one.</source>
         <target>Ces licences sont autorisées, mais votre organisation a consigné une condition pour chacune. Lisez la condition avant de dépendre d&apos;un paquet qui en porte une.</target>
       </segment>
     </unit>
@@ -2187,25 +2361,25 @@
     </unit>
     <unit id="licensePolicy.conditional.title">
       <segment state="translated">
-        <source>Conditional licenses</source>
+        <source>Conditional licences</source>
         <target>Licences conditionnelles</target>
       </segment>
     </unit>
     <unit id="licensePolicy.intro.block">
       <segment state="translated">
-        <source>Your tenant blocks publish and proxy fetch for packages whose license isn&apos;t allowed below or appears on the block list.</source>
+        <source>Your tenant blocks publish and proxy fetch for packages whose licence isn&apos;t allowed below or appears on the block list.</source>
         <target>Votre locataire bloque la publication et la récupération proxy des paquets dont la licence ne figure pas dans la liste d&apos;autorisation ou se trouve sur la liste de blocage.</target>
       </segment>
     </unit>
     <unit id="licensePolicy.intro.off">
       <segment state="translated">
-        <source>Your tenant records the SPDX license of every package but does not enforce policy. The lists below show what would be allowed or blocked if enforcement were enabled.</source>
+        <source>Your tenant records the SPDX licence of every package but does not enforce policy. The lists below show what would be allowed or blocked if enforcement were enabled.</source>
         <target>Votre locataire enregistre la licence SPDX de chaque paquet sans appliquer de politique. Les listes ci-dessous montrent ce qui serait autorisé ou bloqué si l&apos;application était activée.</target>
       </segment>
     </unit>
     <unit id="licensePolicy.intro.warn">
       <segment state="translated">
-        <source>Your tenant logs license-policy violations to audit but still serves packages. Use the lists below to understand which licenses an admin has allowed or blocked.</source>
+        <source>Your tenant logs licence-policy violations to audit but still serves packages. Use the lists below to understand which licences an admin has allowed or blocked.</source>
         <target>Votre locataire journalise les violations de la politique dans l&apos;audit mais sert toujours les paquets. Utilisez les listes ci-dessous pour comprendre quelles licences un administrateur a autorisées ou bloquées.</target>
       </segment>
     </unit>
@@ -2235,8 +2409,56 @@
     </unit>
     <unit id="licensePolicy.title">
       <segment state="translated">
-        <source>License policy</source>
+        <source>Licence policy</source>
         <target>Politique de licences</target>
+      </segment>
+    </unit>
+    <unit id="licenses.columns.copyright">
+      <segment state="translated">
+        <source>Copyright</source>
+        <target>Droit d&apos;auteur</target>
+      </segment>
+    </unit>
+    <unit id="licenses.columns.license">
+      <segment state="translated">
+        <source>Licence</source>
+        <target>Licence</target>
+      </segment>
+    </unit>
+    <unit id="licenses.columns.package">
+      <segment state="translated">
+        <source>Package</source>
+        <target>Paquet</target>
+      </segment>
+    </unit>
+    <unit id="licenses.columns.version">
+      <segment state="translated">
+        <source>Version</source>
+        <target>Version</target>
+      </segment>
+    </unit>
+    <unit id="licenses.devStub">
+      <segment state="translated">
+        <source>Notices are populated during the Docker build. They are not available when running locally with:</source>
+        <target>Les avis sont générés lors de la construction Docker. Ils ne sont pas disponibles en exécution locale avec :</target>
+      </segment>
+    </unit>
+    <unit id="licenses.meta">
+      <segment state="translated">
+        <source>{count, plural, one {# component} other {# components}}</source>
+        <target>{count, plural, one {# composant} other {# composants}}</target>
+      </segment>
+    </unit>
+    <unit id="licenses.metaGenerated">
+      <segment state="translated">
+        <source>{count, plural, one {# component} other {# components}} · generated {date}</source>
+        <target>{count, plural, one {# composant} other {# composants}} · généré le {date}</target>
+      </segment>
+    </unit>
+    <unit id="licenses.title">
+      <segment state="translated">
+        <source>Open source notices</source>
+        <target>Avis de logiciels libres</target>
       </segment>
     </unit>
     <unit id="licenseText.close">
@@ -2247,25 +2469,25 @@
     </unit>
     <unit id="licenseText.loading">
       <segment state="translated">
-        <source>Loading license text…</source>
+        <source>Loading licence text…</source>
         <target>Chargement du texte de la licence…</target>
       </segment>
     </unit>
     <unit id="licenseText.notAvailable">
       <segment state="translated">
-        <source>The bundled text for this license is not available.</source>
+        <source>The bundled text for this licence is not available.</source>
         <target>Le texte intégré de cette licence n&apos;est pas disponible.</target>
       </segment>
     </unit>
     <unit id="licenseText.open">
       <segment state="translated">
-        <source>View license text</source>
+        <source>View licence text</source>
         <target>Voir le texte de la licence</target>
       </segment>
     </unit>
     <unit id="licenseText.title">
       <segment state="translated">
-        <source>License text</source>
+        <source>Licence text</source>
         <target>Texte de la licence</target>
       </segment>
     </unit>
@@ -2277,13 +2499,13 @@
     </unit>
     <unit id="lookup.airGapped">
       <segment state="translated">
-        <source>Air-gapped — upstream metadata was not checked; advisories and license came from the local mirror only.</source>
+        <source>Air-gapped — upstream metadata was not checked; advisories and licence came from the local mirror only.</source>
         <target>Isolé du réseau — les métadonnées en amont n&apos;ont pas été vérifiées; les avis et la licence proviennent uniquement du miroir local.</target>
       </segment>
     </unit>
     <unit id="lookup.empty">
       <segment state="translated">
-        <source>Enter a package above to check its malware, CVE, and license status before you add it.</source>
+        <source>Enter a package above to check its malware, CVE, and licence status before you add it.</source>
         <target>Saisissez un paquet ci-dessus pour vérifier son statut de maliciel, de CVE et de licence avant de l&apos;ajouter.</target>
       </segment>
     </unit>
@@ -2331,7 +2553,7 @@
     </unit>
     <unit id="lookup.intro">
       <segment state="translated">
-        <source>Check a candidate package for malware, known CVEs, and license policy before you add it. Nothing is downloaded, cached, or installed.</source>
+        <source>Check a candidate package for malware, known CVEs, and licence policy before you add it. Nothing is downloaded, cached, or installed.</source>
         <target>Vérifiez un paquet candidat pour un maliciel, des CVE connues et la politique de licence avant de l&apos;ajouter. Rien n&apos;est téléchargé, mis en cache ou installé.</target>
       </segment>
     </unit>
@@ -2349,25 +2571,25 @@
     </unit>
     <unit id="lookup.license.conditional">
       <segment state="translated">
-        <source>Permitted with a condition ({spdx}). Check the license policy before adopting.</source>
+        <source>Permitted with a condition ({spdx}). Check the licence policy before adopting.</source>
         <target>Autorisée sous condition ({spdx}). Consultez la politique de licences avant l&apos;adoption.</target>
       </segment>
     </unit>
     <unit id="lookup.license.informational">
       <segment state="translated">
-        <source>Recorded informationally — license policy is off.</source>
+        <source>Recorded informationally — licence policy is off.</source>
         <target>Consignée à titre informatif — la politique de licence est désactivée.</target>
       </segment>
     </unit>
     <unit id="lookup.license.policy">
       <segment state="translated">
         <source>Policy: {mode}</source>
-        <target>Politique : {mode}</target>
+        <target>Politique : {mode}</target>
       </segment>
     </unit>
     <unit id="lookup.license.title">
       <segment state="translated">
-        <source>License</source>
+        <source>Licence</source>
         <target>Licence</target>
       </segment>
     </unit>
@@ -2427,7 +2649,7 @@
     </unit>
     <unit id="lookup.unavailableChecks.license">
       <segment state="translated">
-        <source>License</source>
+        <source>Licence</source>
         <target>Licence</target>
       </segment>
     </unit>
@@ -2464,7 +2686,7 @@
     <unit id="lookup.verdict.evaluated">
       <segment state="translated">
         <source>Evaluated {purl}</source>
-        <target>Évalué : {purl}</target>
+        <target>Évalué : {purl}</target>
       </segment>
     </unit>
     <unit id="lookup.verdict.versionInferred">
@@ -2589,7 +2811,7 @@
     </unit>
     <unit id="nav.licensePolicy">
       <segment state="translated">
-        <source>Licenses</source>
+        <source>Licences</source>
         <target>Licences</target>
       </segment>
     </unit>
@@ -2627,6 +2849,12 @@
       <segment state="translated">
         <source>Profile</source>
         <target>Profil</target>
+      </segment>
+    </unit>
+    <unit id="nav.projects">
+      <segment state="translated">
+        <source>Projects</source>
+        <target>Projets</target>
       </segment>
     </unit>
     <unit id="nav.quarantine">
@@ -2703,7 +2931,7 @@
     </unit>
     <unit id="packageNotes.intro">
       <segment state="translated">
-        <source>Compliance notes an administrator has left on this package — including why it was accepted under a conditional license.</source>
+        <source>Compliance notes an administrator has left on this package — including why it was accepted under a conditional licence.</source>
         <target>Notes de conformité laissées par un administrateur sur ce paquet — y compris la raison pour laquelle il a été accepté sous une licence conditionnelle.</target>
       </segment>
     </unit>
@@ -2716,7 +2944,7 @@
     <unit id="packageNotes.removeConfirm">
       <segment state="translated">
         <source>Remove this note?</source>
-        <target>Supprimer cette note ?</target>
+        <target>Supprimer cette note?</target>
       </segment>
     </unit>
     <unit id="packageNotes.scopedToPackage">
@@ -2843,6 +3071,18 @@
       <segment state="translated">
         <source>Hosted</source>
         <target>Hébergé</target>
+      </segment>
+    </unit>
+    <unit id="packages.kev.help">
+      <segment state="translated">
+        <source>This package has a version linked to a vulnerability in the CISA Known Exploited Vulnerabilities Catalog.</source>
+        <target>Ce paquet a une version liée à une vulnérabilité du catalogue KEV (Known Exploited Vulnerabilities) de la CISA.</target>
+      </segment>
+    </unit>
+    <unit id="packages.kev.label">
+      <segment state="translated">
+        <source>KEV</source>
+        <target>KEV</target>
       </segment>
     </unit>
     <unit id="packages.latest.current">
@@ -3238,13 +3478,13 @@
     <unit id="profile.rows.timezoneError">
       <segment state="translated">
         <source>Could not save timezone. Try again.</source>
-        <target>Impossible d’enregistrer le fuseau horaire. Réessayez.</target>
+        <target>Impossible d&apos;enregistrer le fuseau horaire. Réessayez.</target>
       </segment>
     </unit>
     <unit id="profile.rows.timezoneHelp">
       <segment state="translated">
         <source>Times are shown in this zone. Organization default: {timezone}.</source>
-        <target>Les heures sont affichées dans ce fuseau. Valeur par défaut de l’organisation : {timezone}.</target>
+        <target>Les heures sont affichées dans ce fuseau. Valeur par défaut de l&apos;organisation : {timezone}.</target>
       </segment>
     </unit>
     <unit id="profile.rows.timezoneHelpSystemFallback">
@@ -3256,7 +3496,7 @@
     <unit id="profile.rows.timezoneInherit">
       <segment state="translated">
         <source>Use organization default ({timezone})</source>
-        <target>Utiliser la valeur par défaut de l’organisation ({timezone})</target>
+        <target>Utiliser la valeur par défaut de l&apos;organisation ({timezone})</target>
       </segment>
     </unit>
     <unit id="profile.rows.timezoneInheritSystem">
@@ -3301,6 +3541,426 @@
         <target>Profil</target>
       </segment>
     </unit>
+    <unit id="projects.breadcrumb">
+      <segment state="translated">
+        <source>Breadcrumb</source>
+        <target>Fil d&apos;Ariane</target>
+      </segment>
+    </unit>
+    <unit id="projects.collection">
+      <segment state="translated">
+        <source>Collection</source>
+        <target>Collection</target>
+      </segment>
+    </unit>
+    <unit id="projects.columns.components">
+      <segment state="translated">
+        <source>Components</source>
+        <target>Composants</target>
+      </segment>
+    </unit>
+    <unit id="projects.columns.lastUpload">
+      <segment state="translated">
+        <source>Last upload</source>
+        <target>Dernier téléversement</target>
+      </segment>
+    </unit>
+    <unit id="projects.columns.latest">
+      <segment state="translated">
+        <source>Latest</source>
+        <target>Dernière version</target>
+      </segment>
+    </unit>
+    <unit id="projects.columns.name">
+      <segment state="translated">
+        <source>Name</source>
+        <target>Nom</target>
+      </segment>
+    </unit>
+    <unit id="projects.columns.policy">
+      <segment state="translated">
+        <source>Policy</source>
+        <target>Politique</target>
+      </segment>
+    </unit>
+    <unit id="projects.columns.severity">
+      <segment state="translated">
+        <source>Severity</source>
+        <target>Gravité</target>
+      </segment>
+    </unit>
+    <unit id="projects.detail.childrenEmpty">
+      <segment state="translated">
+        <source>No projects in this collection yet.</source>
+        <target>Aucun projet dans cette collection pour l&apos;instant.</target>
+      </segment>
+    </unit>
+    <unit id="projects.detail.childrenTitle">
+      <segment state="translated">
+        <source>Projects in this collection</source>
+        <target>Projets de cette collection</target>
+      </segment>
+    </unit>
+    <unit id="projects.detail.collectionBadge">
+      <segment state="translated">
+        <source>Collection</source>
+        <target>Collection</target>
+      </segment>
+    </unit>
+    <unit id="projects.detail.columns.components">
+      <segment state="translated">
+        <source>Components</source>
+        <target>Composants</target>
+      </segment>
+    </unit>
+    <unit id="projects.detail.columns.latest">
+      <segment state="translated">
+        <source>Latest version</source>
+        <target>Dernière version</target>
+      </segment>
+    </unit>
+    <unit id="projects.detail.columns.name">
+      <segment state="translated">
+        <source>Name</source>
+        <target>Nom</target>
+      </segment>
+    </unit>
+    <unit id="projects.detail.columns.policy">
+      <segment state="translated">
+        <source>Policy</source>
+        <target>Politique</target>
+      </segment>
+    </unit>
+    <unit id="projects.detail.columns.uploaded">
+      <segment state="translated">
+        <source>Uploaded</source>
+        <target>Téléversé</target>
+      </segment>
+    </unit>
+    <unit id="projects.detail.columns.version">
+      <segment state="translated">
+        <source>Version</source>
+        <target>Version</target>
+      </segment>
+    </unit>
+    <unit id="projects.detail.deleteCollectionConfirm">
+      <segment state="translated">
+        <source>Delete the folder &quot;{name}&quot; and everything inside it — every project it contains and all their versions? This cannot be undone.</source>
+        <target>Supprimer le dossier « {name} » et tout ce qu&apos;il contient — chaque projet et toutes leurs versions? Cette action est irréversible.</target>
+      </segment>
+    </unit>
+    <unit id="projects.detail.deleteProjectConfirm">
+      <segment state="translated">
+        <source>Delete &quot;{name}&quot; and all its versions? This cannot be undone.</source>
+        <target>Supprimer « {name} » et toutes ses versions? Cette action est irréversible.</target>
+      </segment>
+    </unit>
+    <unit id="projects.detail.deleteVersion">
+      <segment state="translated">
+        <source>Delete</source>
+        <target>Supprimer</target>
+      </segment>
+    </unit>
+    <unit id="projects.detail.deleteVersionConfirm">
+      <segment state="translated">
+        <source>Delete version {version}? This removes its uploaded documents and components.</source>
+        <target>Supprimer la version {version}? Ses documents téléversés et ses composants seront retirés.</target>
+      </segment>
+    </unit>
+    <unit id="projects.detail.exportHint">
+      <segment state="translated">
+        <source>Every project in this folder, each at its latest version. Projects with no SBOM are listed and marked.</source>
+        <target>Tous les projets de ce dossier, chacun à sa dernière version. Les projets sans SBOM sont listés et signalés.</target>
+      </segment>
+    </unit>
+    <unit id="projects.detail.isLatest">
+      <segment state="translated">
+        <source>Latest</source>
+        <target>Dernière</target>
+      </segment>
+    </unit>
+    <unit id="projects.detail.loadFailed">
+      <segment state="translated">
+        <source>Failed to load project: {message}</source>
+        <target>Échec du chargement du projet : {message}</target>
+      </segment>
+    </unit>
+    <unit id="projects.detail.promote">
+      <segment state="translated">
+        <source>Promote to latest</source>
+        <target>Promouvoir comme dernière version</target>
+      </segment>
+    </unit>
+    <unit id="projects.detail.promoting">
+      <segment state="translated">
+        <source>Promoting…</source>
+        <target>Promotion en cours…</target>
+      </segment>
+    </unit>
+    <unit id="projects.detail.stat.children">
+      <segment state="translated">
+        <source>Children</source>
+        <target>Projets enfants</target>
+      </segment>
+    </unit>
+    <unit id="projects.detail.stat.components">
+      <segment state="translated">
+        <source>Components (latest)</source>
+        <target>Composants (dernière version)</target>
+      </segment>
+    </unit>
+    <unit id="projects.detail.stat.policy">
+      <segment state="translated">
+        <source>Policy (latest)</source>
+        <target>Politique (dernière version)</target>
+      </segment>
+    </unit>
+    <unit id="projects.detail.stat.subtreeComponents">
+      <segment state="translated">
+        <source>Components (rolled up)</source>
+        <target>Composants (cumulés)</target>
+      </segment>
+    </unit>
+    <unit id="projects.detail.stat.subtreePolicy">
+      <segment state="translated">
+        <source>Policy (rolled up)</source>
+        <target>Politique (cumulée)</target>
+      </segment>
+    </unit>
+    <unit id="projects.detail.stat.subtreeProjects">
+      <segment state="translated">
+        <source>Projects (all levels)</source>
+        <target>Projets (tous niveaux)</target>
+      </segment>
+    </unit>
+    <unit id="projects.detail.stat.subtreeSeverity">
+      <segment state="translated">
+        <source>Findings (rolled up)</source>
+        <target>Résultats (cumulés)</target>
+      </segment>
+    </unit>
+    <unit id="projects.detail.stat.versions">
+      <segment state="translated">
+        <source>Versions</source>
+        <target>Versions</target>
+      </segment>
+    </unit>
+    <unit id="projects.detail.versionsEmpty">
+      <segment state="translated">
+        <source>No versions uploaded yet.</source>
+        <target>Aucune version téléversée pour l&apos;instant.</target>
+      </segment>
+    </unit>
+    <unit id="projects.detail.versionsTitle">
+      <segment state="translated">
+        <source>Versions</source>
+        <target>Versions</target>
+      </segment>
+    </unit>
+    <unit id="projects.empty">
+      <segment state="translated">
+        <source>No projects yet. Packages are the artefacts you serve — projects are the applications you build with them. Upload an SBOM to get started.</source>
+        <target>Aucun projet pour l&apos;instant. Les paquets sont les artefacts que vous diffusez — les projets sont les applications que vous construisez avec eux. Téléversez un SBOM pour commencer.</target>
+      </segment>
+    </unit>
+    <unit id="projects.emptySearch">
+      <segment state="translated">
+        <source>No projects match your search.</source>
+        <target>Aucun projet ne correspond à votre recherche.</target>
+      </segment>
+    </unit>
+    <unit id="projects.folders.actionsMenu">
+      <segment state="translated">
+        <source>Actions for {name}</source>
+        <target>Actions pour {name}</target>
+      </segment>
+    </unit>
+    <unit id="projects.folders.currentFolder">
+      <segment state="translated">
+        <source>Current folder</source>
+        <target>Dossier actuel</target>
+      </segment>
+    </unit>
+    <unit id="projects.folders.descriptionLabel">
+      <segment state="translated">
+        <source>Description (optional)</source>
+        <target>Description (facultatif)</target>
+      </segment>
+    </unit>
+    <unit id="projects.folders.edit">
+      <segment state="translated">
+        <source>Edit…</source>
+        <target>Modifier…</target>
+      </segment>
+    </unit>
+    <unit id="projects.folders.editFolderTitle">
+      <segment state="translated">
+        <source>Edit folder</source>
+        <target>Modifier le dossier</target>
+      </segment>
+    </unit>
+    <unit id="projects.folders.editProjectTitle">
+      <segment state="translated">
+        <source>Edit project</source>
+        <target>Modifier le projet</target>
+      </segment>
+    </unit>
+    <unit id="projects.folders.nameLabel">
+      <segment state="translated">
+        <source>Name</source>
+        <target>Nom</target>
+      </segment>
+    </unit>
+    <unit id="projects.folders.namePlaceholder">
+      <segment state="translated">
+        <source>e.g. Platform</source>
+        <target>ex. Plateforme</target>
+      </segment>
+    </unit>
+    <unit id="projects.folders.newFolder">
+      <segment state="translated">
+        <source>New folder</source>
+        <target>Nouveau dossier</target>
+      </segment>
+    </unit>
+    <unit id="projects.folders.newFolderTitle">
+      <segment state="translated">
+        <source>New folder</source>
+        <target>Nouveau dossier</target>
+      </segment>
+    </unit>
+    <unit id="projects.folders.parentHint">
+      <segment state="translated">
+        <source>Folders group projects. A folder holds no versions of its own.</source>
+        <target>Les dossiers regroupent les projets. Un dossier ne contient aucune version.</target>
+      </segment>
+    </unit>
+    <unit id="projects.folders.parentLabel">
+      <segment state="translated">
+        <source>Folder</source>
+        <target>Dossier</target>
+      </segment>
+    </unit>
+    <unit id="projects.folders.rootOption">
+      <segment state="translated">
+        <source>Top level</source>
+        <target>Niveau racine</target>
+      </segment>
+    </unit>
+    <unit id="projects.folders.targetsFailed">
+      <segment state="translated">
+        <source>Folders could not be loaded, so this project cannot be moved right now: {message}</source>
+        <target>Impossible de charger les dossiers; ce projet ne peut pas être déplacé pour l&apos;instant : {message}</target>
+      </segment>
+    </unit>
+    <unit id="projects.loadFailed">
+      <segment state="translated">
+        <source>Failed to load projects: {message}</source>
+        <target>Échec du chargement des projets : {message}</target>
+      </segment>
+    </unit>
+    <unit id="projects.noVersion">
+      <segment state="translated">
+        <source>—</source>
+        <target>—</target>
+      </segment>
+    </unit>
+    <unit id="projects.policy.pass">
+      <segment state="translated">
+        <source>Pass</source>
+        <target>Conforme</target>
+      </segment>
+    </unit>
+    <unit id="projects.policy.unscanned">
+      <segment state="translated">
+        <source>Not scanned</source>
+        <target>Non analysé</target>
+      </segment>
+    </unit>
+    <unit id="projects.policy.violation">
+      <segment state="translated">
+        <source>Violation</source>
+        <target>Violation</target>
+      </segment>
+    </unit>
+    <unit id="projects.policy.warn">
+      <segment state="translated">
+        <source>Warn</source>
+        <target>Avertissement</target>
+      </segment>
+    </unit>
+    <unit id="projects.searchPlaceholder">
+      <segment state="translated">
+        <source>Search projects…</source>
+        <target>Rechercher des projets…</target>
+      </segment>
+    </unit>
+    <unit id="projects.severity.critical">
+      <segment state="translated">
+        <source>{count} critical</source>
+        <target>{count} critique</target>
+      </segment>
+    </unit>
+    <unit id="projects.severity.high">
+      <segment state="translated">
+        <source>{count} high</source>
+        <target>{count} élevée</target>
+      </segment>
+    </unit>
+    <unit id="projects.severity.kev">
+      <segment state="translated">
+        <source>{count} known exploited</source>
+        <target>{count} exploitée connue</target>
+      </segment>
+    </unit>
+    <unit id="projects.severity.low">
+      <segment state="translated">
+        <source>{count} low</source>
+        <target>{count} faible</target>
+      </segment>
+    </unit>
+    <unit id="projects.severity.medium">
+      <segment state="translated">
+        <source>{count} medium</source>
+        <target>{count} moyenne</target>
+      </segment>
+    </unit>
+    <unit id="projects.severity.none">
+      <segment state="translated">
+        <source>No known vulnerabilities</source>
+        <target>Aucune vulnérabilité connue</target>
+      </segment>
+    </unit>
+    <unit id="projects.severity.unscored">
+      <segment state="translated">
+        <source>{count} unscored</source>
+        <target>{count} non évaluée</target>
+      </segment>
+    </unit>
+    <unit id="projects.title">
+      <segment state="translated">
+        <source>Projects</source>
+        <target>Projets</target>
+      </segment>
+    </unit>
+    <unit id="projects.unevaluatedOf">
+      <segment state="translated">
+        <source>{count} of {total} not evaluated</source>
+        <target>{count} sur {total} non évalués</target>
+      </segment>
+    </unit>
+    <unit id="projects.versionDetail.placeholder">
+      <segment state="translated">
+        <source>Component inventory and analysis for this version are on their way.</source>
+        <target>L&apos;inventaire des composants et l&apos;analyse de cette version seront bientôt disponibles.</target>
+      </segment>
+    </unit>
+    <unit id="projects.versionDetail.placeholderTitle">
+      <segment state="translated">
+        <source>Version detail</source>
+        <target>Détail de la version</target>
+      </segment>
+    </unit>
     <unit id="quarantine.actions.menuLabel">
       <segment state="translated">
         <source>Change decision</source>
@@ -3317,6 +3977,30 @@
       <segment state="translated">
         <source>Approve</source>
         <target>Approuver</target>
+      </segment>
+    </unit>
+    <unit id="quarantine.blastRadius.help">
+      <segment state="translated">
+        <source>Applications whose latest version ships this package. Denying it here affects them.</source>
+        <target>Applications dont la dernière version livre ce paquet. Le refuser ici les touche.</target>
+      </segment>
+    </unit>
+    <unit id="quarantine.blastRadius.summary">
+      <segment state="translated">
+        <source>{count, plural, one {# app} other {# apps}}</source>
+        <target>{count, plural, one {# appli} other {# applis}}</target>
+      </segment>
+    </unit>
+    <unit id="quarantine.blastRadius.unavailable">
+      <segment state="translated">
+        <source>apps unavailable</source>
+        <target>applis indisponibles</target>
+      </segment>
+    </unit>
+    <unit id="quarantine.blastRadius.unavailableHelp">
+      <segment state="translated">
+        <source>The affected-application count could not be loaded. This is not a count of zero.</source>
+        <target>Le nombre d&apos;applications touchées n&apos;a pas pu être chargé. Ce n&apos;est pas un décompte nul.</target>
       </segment>
     </unit>
     <unit id="quarantine.columns.decidedBy">
@@ -3347,6 +4031,12 @@
       <segment state="translated">
         <source>Updated</source>
         <target>Mis à jour</target>
+      </segment>
+    </unit>
+    <unit id="quarantine.decisionAge">
+      <segment state="translated">
+        <source>{verb} {days, plural, one {# day ago} other {# days ago}}</source>
+        <target>{verb} il y a {days, plural, one {# jour} other {# jours}}</target>
       </segment>
     </unit>
     <unit id="quarantine.deny">
@@ -3457,9 +4147,15 @@
         <target>KEV</target>
       </segment>
     </unit>
+    <unit id="quarantine.gates.kev_ransomware">
+      <segment state="translated">
+        <source>KEV ransomware</source>
+        <target>KEV rançongiciel</target>
+      </segment>
+    </unit>
     <unit id="quarantine.gates.license">
       <segment state="translated">
-        <source>license</source>
+        <source>licence</source>
         <target>licence</target>
       </segment>
     </unit>
@@ -3603,7 +4299,7 @@
     </unit>
     <unit id="risk.columns.licenses">
       <segment state="translated">
-        <source>Licenses</source>
+        <source>Licences</source>
         <target>Licences</target>
       </segment>
     </unit>
@@ -3645,7 +4341,7 @@
     </unit>
     <unit id="risk.empty.license">
       <segment state="translated">
-        <source>No versions are at license risk.</source>
+        <source>No versions are at licence risk.</source>
         <target>Aucune version à risque de licence.</target>
       </segment>
     </unit>
@@ -3653,6 +4349,30 @@
       <segment state="translated">
         <source>No versions are behind upstream by that margin.</source>
         <target>Aucune version n&apos;accuse un tel retard sur l&apos;amont.</target>
+      </segment>
+    </unit>
+    <unit id="risk.enrichment.detail">
+      <segment state="translated">
+        <source>{enriched} of {total} advisories carry an NVD band or SSVC decision</source>
+        <target>{enriched} avis sur {total} portent une bande NVD ou une décision SSVC</target>
+      </segment>
+    </unit>
+    <unit id="risk.enrichment.none">
+      <segment state="translated">
+        <source>No advisories to enrich</source>
+        <target>Aucun avis à enrichir</target>
+      </segment>
+    </unit>
+    <unit id="risk.enrichment.notConfigured">
+      <segment state="translated">
+        <source>Vulnerability-tracker connection not configured</source>
+        <target>Connexion au suivi des vulnérabilités non configurée</target>
+      </segment>
+    </unit>
+    <unit id="risk.enrichment.percent">
+      <segment state="translated">
+        <source>{percent}% enrichment coverage</source>
+        <target>{percent} % de couverture d&apos;enrichissement</target>
       </segment>
     </unit>
     <unit id="risk.filters.allEcosystems">
@@ -3669,7 +4389,7 @@
     </unit>
     <unit id="risk.intro.license">
       <segment state="translated">
-        <source>Versions carrying a license on your blocklist, or with no license we could extract at all. Open a row to review the package and, if needed, block the version.</source>
+        <source>Versions carrying a licence on your blocklist, or with no licence we could extract at all. Open a row to review the package and, if needed, block the version.</source>
         <target>Versions dont la licence figure sur votre liste de blocage, ou dont aucune licence n&apos;a pu être extraite. Ouvrez une ligne pour examiner le paquet et, au besoin, bloquer la version.</target>
       </segment>
     </unit>
@@ -3705,7 +4425,7 @@
     </unit>
     <unit id="risk.reason.unknown">
       <segment state="translated">
-        <source>No license</source>
+        <source>No licence</source>
         <target>Aucune licence</target>
       </segment>
     </unit>
@@ -3717,19 +4437,19 @@
     </unit>
     <unit id="risk.summary.license">
       <segment state="translated">
-        <source>{count} versions at license risk</source>
+        <source>{count} versions at licence risk</source>
         <target>{count} versions à risque de licence</target>
       </segment>
     </unit>
     <unit id="risk.summary.operational">
       <segment state="translated">
         <source>{packages} packages · {versions} versions at least {threshold} behind</source>
-        <target>{packages} paquets · {versions} versions en retard d’au moins {threshold}</target>
+        <target>{packages} paquets · {versions} versions en retard d&apos;au moins {threshold}</target>
       </segment>
     </unit>
     <unit id="risk.tabs.license">
       <segment state="translated">
-        <source>License risk</source>
+        <source>Licence risk</source>
         <target>Risque de licence</target>
       </segment>
     </unit>
@@ -3743,6 +4463,1374 @@
       <segment state="translated">
         <source>Risk</source>
         <target>Risque</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.columns.component">
+      <segment state="translated">
+        <source>Component</source>
+        <target>Composant</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.columns.dep">
+      <segment state="translated">
+        <source>Dep</source>
+        <target>Dép</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.columns.dependency">
+      <segment state="translated">
+        <source>Dependency</source>
+        <target>Dépendance</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.columns.licenses">
+      <segment state="translated">
+        <source>Licences</source>
+        <target>Licences</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.columns.priority">
+      <segment state="translated">
+        <source>Priority</source>
+        <target>Priorité</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.columns.reach">
+      <segment state="translated">
+        <source>Reach</source>
+        <target>Atteignabilité</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.columns.scope">
+      <segment state="translated">
+        <source>Scope</source>
+        <target>Portée</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.columns.type">
+      <segment state="translated">
+        <source>Type</source>
+        <target>Type</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.columns.version">
+      <segment state="translated">
+        <source>Version</source>
+        <target>Version</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.columns.vulns">
+      <segment state="translated">
+        <source>Vulns</source>
+        <target>Vulnérabilités</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.copyPurl">
+      <segment state="translated">
+        <source>Copy PURL</source>
+        <target>Copier le PURL</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.dependencyKind.direct">
+      <segment state="translated">
+        <source>direct</source>
+        <target>directe</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.dependencyKind.transitive">
+      <segment state="translated">
+        <source>transitive</source>
+        <target>transitive</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.documents.copyDigest">
+      <segment state="translated">
+        <source>Copy digest</source>
+        <target>Copier l&apos;empreinte</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.documents.digest">
+      <segment state="translated">
+        <source>SHA-256</source>
+        <target>SHA-256</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.documents.download">
+      <segment state="translated">
+        <source>Download original</source>
+        <target>Télécharger l&apos;original</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.documents.empty">
+      <segment state="translated">
+        <source>No documents have been uploaded for this version.</source>
+        <target>Aucun document n&apos;a été téléversé pour cette version.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.documents.format">
+      <segment state="translated">
+        <source>Format</source>
+        <target>Format</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.documents.help">
+      <segment state="translated">
+        <source>The uploads exactly as they arrived. Downloading one returns those bytes, digest and all.</source>
+        <target>Les téléversements tels qu&apos;ils sont arrivés. Le téléchargement retourne ces octets exacts, empreinte comprise.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.documents.size">
+      <segment state="translated">
+        <source>Size</source>
+        <target>Taille</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.documents.title">
+      <segment state="translated">
+        <source>Documents</source>
+        <target>Documents</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.documents.tool">
+      <segment state="translated">
+        <source>Tool</source>
+        <target>Outil</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.documents.type">
+      <segment state="translated">
+        <source>Type</source>
+        <target>Type</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.documents.uploaded">
+      <segment state="translated">
+        <source>Uploaded</source>
+        <target>Téléversé</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.empty">
+      <segment state="translated">
+        <source>No components match these filters.</source>
+        <target>Aucun composant ne correspond à ces filtres.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.export.button">
+      <segment state="translated">
+        <source>Export</source>
+        <target>Exporter</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.export.hint">
+      <segment state="translated">
+        <source>Freshly rendered documents. Originals are in the Documents panel below.</source>
+        <target>Documents régénérés à l&apos;instant. Les originaux se trouvent dans le panneau Documents ci-dessous.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.export.inventory">
+      <segment state="translated">
+        <source>SBOM — inventory (CycloneDX)</source>
+        <target>SBOM — inventaire (CycloneDX)</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.export.vdr">
+      <segment state="translated">
+        <source>SBOM — with vulnerabilities (VDR)</source>
+        <target>SBOM — avec vulnérabilités (VDR)</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.export.vex">
+      <segment state="translated">
+        <source>VEX document</source>
+        <target>Document VEX</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.licenseUndeclared">
+      <segment state="translated">
+        <source>Undeclared</source>
+        <target>Non déclarée</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.licenseUndeclaredHelp">
+      <segment state="translated">
+        <source>The SBOM declared no SPDX licence for this component. An undeclared licence is an unknown one, not a permissive one.</source>
+        <target>Le SBOM ne déclare aucune licence SPDX pour ce composant. Une licence non déclarée est une licence inconnue, pas une licence permissive.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.noAdvisories">
+      <segment state="translated">
+        <source>No advisories</source>
+        <target>Aucun avis</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.orphans.detailsToggle">
+      <segment state="translated">
+        <source>Details</source>
+        <target>Détails</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.orphans.help">
+      <segment state="translated">
+        <source>VEX statements and SARIF results whose package identifier matches no component in this version&apos;s SBOM. Shown rather than dropped — a statement nobody can see is a statement nobody can correct.</source>
+        <target>Déclarations VEX et résultats SARIF dont l&apos;identifiant de paquet ne correspond à aucun composant du SBOM de cette version. Affichés plutôt que rejetés — une déclaration que personne ne voit est une déclaration que personne ne corrige.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.orphans.purlKey">
+      <segment state="translated">
+        <source>Package</source>
+        <target>Paquet</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.orphans.title">
+      <segment state="translated">
+        <source>Unmatched analysis</source>
+        <target>Analyses non appariées</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.orphans.vulnKey">
+      <segment state="translated">
+        <source>Advisory</source>
+        <target>Avis</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.aliases">
+      <segment state="translated">
+        <source>Aliases</source>
+        <target>Alias</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.allSuppressed">
+      <segment state="translated">
+        <source>Every advisory on this component is suppressed. Turn on Show suppressed to review them.</source>
+        <target>Tous les avis de ce composant sont supprimés. Activez Afficher les avis supprimés pour les réviser.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.blockedBy">
+      <segment state="translated">
+        <source>Blocked by: {arm}</source>
+        <target>Bloqué par : {arm}</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.confidence">
+      <segment state="translated">
+        <source>Confidence</source>
+        <target>Confiance</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.cvss">
+      <segment state="translated">
+        <source>CVSS</source>
+        <target>CVSS</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.dependencyPath">
+      <segment state="translated">
+        <source>Dependency path</source>
+        <target>Chemin de dépendance</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.epss">
+      <segment state="translated">
+        <source>EPSS</source>
+        <target>EPSS</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.epssHelp">
+      <segment state="translated">
+        <source>FIRST.org EPSS — probability of exploitation in the wild within the next 30 days.</source>
+        <target>Score EPSS de FIRST.org — probabilité d&apos;exploitation en conditions réelles au cours des 30 prochains jours.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.inherited">
+      <segment state="translated">
+        <source>Inherited, decided {at}</source>
+        <target>Hérité, décidé le {at}</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.inheritedHelp">
+      <segment state="translated">
+        <source>This decision was carried forward from an earlier version rather than made for this release.</source>
+        <target>Cette décision a été reportée d&apos;une version antérieure plutôt que prise pour cette version-ci.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.kev">
+      <segment state="translated">
+        <source>KEV</source>
+        <target>KEV</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.kevHelp">
+      <segment state="translated">
+        <source>Listed in the CISA Known Exploited Vulnerabilities Catalog — confirmed exploited in the wild, independent of CVSS score.</source>
+        <target>Répertorié dans le catalogue KEV (Known Exploited Vulnerabilities) de la CISA — exploitation confirmée en conditions réelles, indépendamment du score CVSS.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.kevRansomware">
+      <segment state="translated">
+        <source>KEV · Ransomware</source>
+        <target>KEV · Rançongiciel</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.kevRansomwareHelp">
+      <segment state="translated">
+        <source>Listed in the CISA Known Exploited Vulnerabilities Catalog with confirmed use in ransomware campaigns — the highest-urgency KEV entries.</source>
+        <target>Répertorié dans le catalogue KEV de la CISA avec utilisation confirmée dans des campagnes de rançongiciel — les entrées KEV les plus urgentes.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.noAdvisories">
+      <segment state="translated">
+        <source>No advisories recorded against this component.</source>
+        <target>Aucun avis enregistré pour ce composant.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.noCvss">
+      <segment state="translated">
+        <source>NO CVSS</source>
+        <target>AUCUN CVSS</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.noCvssHelp">
+      <segment state="translated">
+        <source>No CVSS base score was recorded for this advisory.</source>
+        <target>Aucun score de base CVSS n&apos;a été enregistré pour cet avis.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.noReachabilityHelp">
+      <segment state="translated">
+        <source>No SARIF analysis has reported on this advisory, so reachability is unstated — which is not the same as an analyzer reporting it unknown.</source>
+        <target>Aucune analyse SARIF ne s&apos;est prononcée sur cet avis; l&apos;atteignabilité n&apos;est donc pas énoncée — ce qui diffère d&apos;un analyseur qui la déclare inconnue.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.otherViolations">
+      <segment state="translated">
+        <source>Additional policy findings</source>
+        <target>Autres constats de politique</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.policyVerdict">
+      <segment state="translated">
+        <source>Policy</source>
+        <target>Politique</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.purl">
+      <segment state="translated">
+        <source>PURL</source>
+        <target>PURL</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.reachability">
+      <segment state="translated">
+        <source>Reachability</source>
+        <target>Atteignabilité</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.remediation.error">
+      <segment state="translated">
+        <source>Guidance could not be loaded.</source>
+        <target>Impossible de charger les conseils.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.remediation.fixedIn">
+      <segment state="translated">
+        <source>Fixed in</source>
+        <target>Corrigé dans</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.remediation.loading">
+      <segment state="translated">
+        <source>Loading guidance…</source>
+        <target>Chargement des conseils…</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.remediation.noFixedVersion">
+      <segment state="translated">
+        <source>The advisory names no release that fixes the version this application ships.</source>
+        <target>L&apos;avis ne nomme aucune version qui corrige celle que livre cette application.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.remediation.skills">
+      <segment state="translated">
+        <source>Remediation skills</source>
+        <target>Compétences de correction</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.remediation.toggle">
+      <segment state="translated">
+        <source>Remediation guidance</source>
+        <target>Conseils de correction</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.sarifSuppressed">
+      <segment state="translated">
+        <source>SARIF</source>
+        <target>SARIF</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.sarifSuppressedHelp">
+      <segment state="translated">
+        <source>The uploaded SARIF marked this result as suppressed.</source>
+        <target>Le SARIF téléversé marque ce résultat comme supprimé.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.securitySeverity">
+      <segment state="translated">
+        <source>SARIF severity</source>
+        <target>Gravité SARIF</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.severityOrigin">
+      <segment state="translated">
+        <source>Severity from</source>
+        <target>Gravité provenant de</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.unscored">
+      <segment state="translated">
+        <source>UNSCORED</source>
+        <target>NON COTÉ</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.unscoredHelp">
+      <segment state="translated">
+        <source>No source assigned this advisory a severity. Unscored is an open question, not a low severity.</source>
+        <target>Aucune source n&apos;a attribué de gravité à cet avis. Non coté est une question ouverte, pas une gravité faible.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.pillars.license">
+      <segment state="translated">
+        <source>Licence</source>
+        <target>Licence</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.pillars.licenseBreakdown">
+      <segment state="translated">
+        <source>Top licences</source>
+        <target>Licences principales</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.pillars.licenseClean">
+      <segment state="translated">
+        <source>No licence findings</source>
+        <target>Aucun constat de licence</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.pillars.licenseFlagged">
+      <segment state="translated">
+        <source>{count} to review</source>
+        <target>{count} à réviser</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.pillars.noAdvisories">
+      <segment state="translated">
+        <source>No advisories</source>
+        <target>Aucun avis</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.pillars.policy">
+      <segment state="translated">
+        <source>Policy</source>
+        <target>Politique</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.pillars.security">
+      <segment state="translated">
+        <source>Security</source>
+        <target>Sécurité</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.policy.pass">
+      <segment state="translated">
+        <source>Pass</source>
+        <target>Conforme</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.policy.ribbon.pass">
+      <segment state="translated">
+        <source>Policy: pass</source>
+        <target>Politique : conforme</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.policy.ribbon.unevaluated">
+      <segment state="translated">
+        <source>Policy: not evaluated</source>
+        <target>Politique : non évaluée</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.policy.ribbon.warn">
+      <segment state="translated">
+        <source>Policy: warn</source>
+        <target>Politique : avertissement</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.policy.unevaluated">
+      <segment state="translated">
+        <source>Not evaluated</source>
+        <target>Non évaluée</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.policy.violations">
+      <segment state="translated">
+        <source>{count} policy violations</source>
+        <target>{count} violations de politique</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.policy.warn">
+      <segment state="translated">
+        <source>Warn</source>
+        <target>Avertissement</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.priority.act">
+      <segment state="translated">
+        <source>Act</source>
+        <target>Agir</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.priority.attend">
+      <segment state="translated">
+        <source>Attend</source>
+        <target>Surveiller</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.priority.help">
+      <segment state="translated">
+        <source>Priority combines CVSS, KEV listing, EPSS, the recorded VEX state and reachability. It is computed on the server and never derived here.</source>
+        <target>La priorité combine le score CVSS, l&apos;inscription au catalogue KEV, le score EPSS, l&apos;état VEX enregistré et l&apos;atteignabilité. Elle est calculée sur le serveur et n&apos;est jamais déduite ici.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.priority.none">
+      <segment state="translated">
+        <source>No advisories</source>
+        <target>Aucun avis</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.priority.suppressed">
+      <segment state="translated">
+        <source>Suppressed</source>
+        <target>Supprimé</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.priority.track">
+      <segment state="translated">
+        <source>Track</source>
+        <target>Suivre</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.reach.imported-not-called">
+      <segment state="translated">
+        <source>imported, not called</source>
+        <target>importé, non appelé</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.reach.not-observed">
+      <segment state="translated">
+        <source>not observed</source>
+        <target>non observée</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.reach.reachable">
+      <segment state="translated">
+        <source>reachable</source>
+        <target>atteignable</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.reach.unknown">
+      <segment state="translated">
+        <source>unknown</source>
+        <target>inconnue</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.reachFilter.all">
+      <segment state="translated">
+        <source>Any reachability</source>
+        <target>Toute atteignabilité</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.reachFilter.label">
+      <segment state="translated">
+        <source>Filter by reachability</source>
+        <target>Filtrer par atteignabilité</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.registry.blocked">
+      <segment state="translated">
+        <source>blocked here</source>
+        <target>bloqué ici</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.registry.blockedHelp">
+      <segment state="translated">
+        <source>This exact version is manually blocked in your registry. Anything installing it from here is refused.</source>
+        <target>Cette version exacte est bloquée manuellement dans votre registre. Toute installation depuis ce registre est refusée.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.registry.blockedOther">
+      <segment state="translated">
+        <source>blocked (other version)</source>
+        <target>bloqué (autre version)</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.registry.blockedOtherHelp">
+      <segment state="translated">
+        <source>Another version of this package is manually blocked in your registry — not the one this application ships, or the two version spellings could not be matched.</source>
+        <target>Une autre version de ce paquet est bloquée manuellement dans votre registre — pas celle que livre cette application, ou les deux graphies de version n&apos;ont pas pu être appariées.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.registry.deprecated">
+      <segment state="translated">
+        <source>deprecated upstream</source>
+        <target>déprécié en amont</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.registry.deprecatedHelp">
+      <segment state="translated">
+        <source>Upstream has marked this exact version deprecated.</source>
+        <target>La source amont a marqué cette version exacte comme dépréciée.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.registry.deprecatedOther">
+      <segment state="translated">
+        <source>deprecated (other version)</source>
+        <target>déprécié (autre version)</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.registry.deprecatedOtherHelp">
+      <segment state="translated">
+        <source>Upstream has deprecated another version of this package — not the one this application ships, or the two version spellings could not be matched.</source>
+        <target>La source amont a déprécié une autre version de ce paquet — pas celle que livre cette application, ou les deux graphies de version n&apos;ont pas pu être appariées.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.registry.latestKnown">
+      <segment state="translated">
+        <source>latest known {latest}</source>
+        <target>dernière connue {latest}</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.registry.latestKnownHelp">
+      <segment state="translated">
+        <source>Your registry knows of {latest} upstream. This ecosystem has no version ordering here, so whether the shipped version is behind it is unknown — not confirmed current.</source>
+        <target>Votre registre connaît la version {latest} en amont. Cet écosystème n&apos;a pas d&apos;ordonnancement de versions ici : savoir si la version livrée est en retard est inconnu — et non confirmé à jour.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.registry.notInRegistry">
+      <segment state="translated">
+        <source>not in your registry</source>
+        <target>absent de votre registre</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.registry.notInRegistryHelp">
+      <segment state="translated">
+        <source>Your registry has never served this coordinate, so nothing it enforces — block state, licence policy, provenance, the advisory scan — has ever applied to these bytes.</source>
+        <target>Votre registre n&apos;a jamais servi cette coordonnée : rien de ce qu&apos;il applique — état de blocage, politique de licence, provenance, analyse des avis de sécurité — n&apos;a jamais porté sur ces octets.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.registry.outdated">
+      <segment state="translated">
+        <source>behind {latest}</source>
+        <target>en retard sur {latest}</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.registry.outdatedHelp">
+      <segment state="translated">
+        <source>Your registry knows of {latest} upstream; this application ships {shipped}.</source>
+        <target>Votre registre connaît la version {latest} en amont; cette application livre {shipped}.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.rescan.button">
+      <segment state="translated">
+        <source>Rescan</source>
+        <target>Réanalyser</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.rescan.cooldown">
+      <segment state="translated">
+        <source>Cooldown: {minutes}m remaining</source>
+        <target>Délai de recharge : {minutes} min restantes</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.rescan.scanning">
+      <segment state="translated">
+        <source>Rescanning…</source>
+        <target>Réanalyse en cours…</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.rescan.title">
+      <segment state="translated">
+        <source>Scan this version&apos;s components for vulnerabilities</source>
+        <target>Analyser les composants de cette version pour des vulnérabilités</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.rollup.components">
+      <segment state="translated">
+        <source>components</source>
+        <target>composants</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.rollup.dev">
+      <segment state="translated">
+        <source>dev</source>
+        <target>dév</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.rollup.excludedByScope">
+      <segment state="translated">
+        <source>excluded from build</source>
+        <target>exclus de la construction</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.rollup.excludedByScopeHelp">
+      <segment state="translated">
+        <source>The SBOM&apos;s own producer marked these components excluded from the assembled deliverable. The four vulnerability arms exempt them; the licence arm still evaluates them.</source>
+        <target>Le producteur du SBOM a marqué ces composants comme exclus du livrable assemblé. Les quatre volets de vulnérabilité les exemptent; le volet de licence continue de les évaluer.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.rollup.lastScan">
+      <segment state="translated">
+        <source>Last scanned {at}</source>
+        <target>Dernière analyse le {at}</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.rollup.neverScanned">
+      <segment state="translated">
+        <source>Never scanned</source>
+        <target>Jamais analysée</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.rollup.notInRegistry">
+      <segment state="translated">
+        <source>never served here</source>
+        <target>jamais servis ici</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.rollup.notInRegistryHelp">
+      <segment state="translated">
+        <source>Components this application ships that your registry has never served. Nothing it enforces has ever applied to them. Select to list them.</source>
+        <target>Composants livrés par cette application que votre registre n&apos;a jamais servis. Rien de ce qu&apos;il applique n&apos;a jamais porté sur eux. Sélectionnez pour les lister.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.rollup.prod">
+      <segment state="translated">
+        <source>prod</source>
+        <target>prod</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.rollup.registryUnknown">
+      <segment state="translated">
+        <source>no coordinate</source>
+        <target>sans coordonnée</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.rollup.registryUnknownHelp">
+      <segment state="translated">
+        <source>Components carrying no PURL your registry could be asked about. Not a clean result and not a blind spot — an unanswerable question. Select to list them.</source>
+        <target>Composants sans PURL sur lequel interroger votre registre. Ni un résultat sain ni un angle mort — une question sans réponse possible. Sélectionnez pour les lister.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.rollup.unknownScope">
+      <segment state="translated">
+        <source>unknown scope</source>
+        <target>portée inconnue</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.rollup.unscannable">
+      <segment state="translated">
+        <source>unscannable — no advisory feed</source>
+        <target>non analysables — aucun flux d&apos;avis</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.rollup.unscannableHelp">
+      <segment state="translated">
+        <source>No advisory feed covers these components: the purl is unparseable or the ecosystem has no feed. No scan can ever answer for them, and they do not hold this version at warn.</source>
+        <target>Aucun flux d&apos;avis ne couvre ces composants : purl illisible ou écosystème sans flux. Aucune analyse ne pourra jamais répondre pour eux, et ils ne maintiennent pas cette version en avertissement.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.rollup.unscannableWarnHelp">
+      <segment state="translated">
+        <source>No advisory feed covers these components, and waiting will not change that. This version&apos;s warn comes from deferred scans, which resolve once the advisory source is reachable again — not from these components.</source>
+        <target>Aucun flux d&apos;avis ne couvre ces composants, et attendre n&apos;y changera rien. L&apos;avertissement de cette version vient d&apos;analyses différées, qui se résolvent dès que la source d&apos;avis redevient joignable — pas de ces composants.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.scope.dev">
+      <segment state="translated">
+        <source>dev</source>
+        <target>dév</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.scope.devHelp">
+      <segment state="translated">
+        <source>A development-only dependency. It is not shipped in the running application.</source>
+        <target>Dépendance de développement seulement. Elle n&apos;est pas livrée dans l&apos;application en exécution.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.scope.excluded">
+      <segment state="translated">
+        <source>excluded</source>
+        <target>exclue</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.scope.excludedHelp">
+      <segment state="translated">
+        <source>The SBOM declared this component as excluded from the build.</source>
+        <target>Le SBOM déclare ce composant comme exclu de la construction.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.scope.optional">
+      <segment state="translated">
+        <source>optional</source>
+        <target>optionnelle</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.scope.optionalHelp">
+      <segment state="translated">
+        <source>The SBOM declared this component as optional.</source>
+        <target>Le SBOM déclare ce composant comme optionnel.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.scope.required">
+      <segment state="translated">
+        <source>required</source>
+        <target>requise</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.scope.requiredHelp">
+      <segment state="translated">
+        <source>The SBOM declared this component as required.</source>
+        <target>Le SBOM déclare ce composant comme requis.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.scope.runtime">
+      <segment state="translated">
+        <source>runtime</source>
+        <target>exécution</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.scope.runtimeHelp">
+      <segment state="translated">
+        <source>A runtime dependency, shipped with the application.</source>
+        <target>Dépendance d&apos;exécution, livrée avec l&apos;application.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.scope.unknown">
+      <segment state="translated">
+        <source>unknown</source>
+        <target>inconnue</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.scope.unknownHelp">
+      <segment state="translated">
+        <source>No scan classified this component as development or runtime. It stays visible under Prod because an unclassified dependency may well ship.</source>
+        <target>Aucune analyse n&apos;a classé ce composant comme dépendance de développement ou d&apos;exécution. Il reste visible sous Prod, car une dépendance non classée peut fort bien être livrée.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.scopeFilter.all">
+      <segment state="translated">
+        <source>All</source>
+        <target>Toutes</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.scopeFilter.dev">
+      <segment state="translated">
+        <source>Dev</source>
+        <target>Dév</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.scopeFilter.label">
+      <segment state="translated">
+        <source>Filter by scope</source>
+        <target>Filtrer par portée</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.scopeFilter.prod">
+      <segment state="translated">
+        <source>Prod</source>
+        <target>Prod</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.searchPlaceholder">
+      <segment state="translated">
+        <source>Search component, version, PURL…</source>
+        <target>Rechercher un composant, une version, un PURL…</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.severityFilter.all">
+      <segment state="translated">
+        <source>All</source>
+        <target>Toutes</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.severityFilter.critical">
+      <segment state="translated">
+        <source>Critical</source>
+        <target>Critique</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.severityFilter.high">
+      <segment state="translated">
+        <source>High</source>
+        <target>Élevée</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.severityFilter.label">
+      <segment state="translated">
+        <source>Filter by severity</source>
+        <target>Filtrer par gravité</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.severityFilter.low">
+      <segment state="translated">
+        <source>Low</source>
+        <target>Faible</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.severityFilter.medium">
+      <segment state="translated">
+        <source>Medium</source>
+        <target>Moyenne</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.showSuppressed">
+      <segment state="translated">
+        <source>Show suppressed</source>
+        <target>Afficher les avis supprimés</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.suppressedHidden">
+      <segment state="translated">
+        <source>{count} suppressed advisories hidden. Turn on Show suppressed to see them.</source>
+        <target>{count} avis supprimés sont masqués. Activez Afficher les avis supprimés pour les voir.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.title">
+      <segment state="translated">
+        <source>Project version</source>
+        <target>Version du projet</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.detail">
+      <segment state="translated">
+        <source>Detail</source>
+        <target>Détail</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.edit">
+      <segment state="translated">
+        <source>Edit analysis</source>
+        <target>Modifier l&apos;analyse</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.justification">
+      <segment state="translated">
+        <source>Justification</source>
+        <target>Justification</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.justificationHint">
+      <segment state="translated">
+        <source>CycloneDX attaches a justification to not_affected only.</source>
+        <target>CycloneDX n&apos;associe une justification qu&apos;à l&apos;état not_affected.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.justificationValue.code_not_present">
+      <segment state="translated">
+        <source>Code not present</source>
+        <target>Code absent</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.justificationValue.code_not_reachable">
+      <segment state="translated">
+        <source>Code not reachable</source>
+        <target>Code non atteignable</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.justificationValue.protected_at_perimeter">
+      <segment state="translated">
+        <source>Protected at perimeter</source>
+        <target>Protégé au périmètre</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.justificationValue.protected_at_runtime">
+      <segment state="translated">
+        <source>Protected at runtime</source>
+        <target>Protégé à l&apos;exécution</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.justificationValue.protected_by_compiler">
+      <segment state="translated">
+        <source>Protected by compiler</source>
+        <target>Protégé par le compilateur</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.justificationValue.protected_by_mitigating_control">
+      <segment state="translated">
+        <source>Protected by mitigating control</source>
+        <target>Protégé par une mesure d&apos;atténuation</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.justificationValue.requires_configuration">
+      <segment state="translated">
+        <source>Requires configuration</source>
+        <target>Exige une configuration</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.justificationValue.requires_dependency">
+      <segment state="translated">
+        <source>Requires dependency</source>
+        <target>Exige une dépendance</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.justificationValue.requires_environment">
+      <segment state="translated">
+        <source>Requires environment</source>
+        <target>Exige un environnement</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.none">
+      <segment state="translated">
+        <source>None</source>
+        <target>Aucune</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.noState">
+      <segment state="translated">
+        <source>No state recorded</source>
+        <target>Aucun état enregistré</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.provenance.manual">
+      <segment state="translated">
+        <source>Set by {actor} on {at}.</source>
+        <target>Défini par {actor} le {at}.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.provenance.manualPlain">
+      <segment state="translated">
+        <source>Set manually in Dependably.</source>
+        <target>Défini manuellement dans Dependably.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.provenance.none">
+      <segment state="translated">
+        <source>No analysis recorded.</source>
+        <target>Aucune analyse enregistrée.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.provenance.sarif">
+      <segment state="translated">
+        <source>From an uploaded SARIF report.</source>
+        <target>Provient d&apos;un rapport SARIF téléversé.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.provenance.uploaded">
+      <segment state="translated">
+        <source>From an uploaded VEX document.</source>
+        <target>Provient d&apos;un document VEX téléversé.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.response">
+      <segment state="translated">
+        <source>Response</source>
+        <target>Réponse</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.responseValue.can_not_fix">
+      <segment state="translated">
+        <source>Cannot fix</source>
+        <target>Correction impossible</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.responseValue.rollback">
+      <segment state="translated">
+        <source>Roll back</source>
+        <target>Revenir en arrière</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.responseValue.update">
+      <segment state="translated">
+        <source>Update</source>
+        <target>Mettre à jour</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.responseValue.will_not_fix">
+      <segment state="translated">
+        <source>Will not fix</source>
+        <target>Ne sera pas corrigée</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.responseValue.workaround_available">
+      <segment state="translated">
+        <source>Workaround available</source>
+        <target>Contournement disponible</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.state.exploitable">
+      <segment state="translated">
+        <source>Exploitable</source>
+        <target>Exploitable</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.state.false_positive">
+      <segment state="translated">
+        <source>False positive</source>
+        <target>Faux positif</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.state.in_triage">
+      <segment state="translated">
+        <source>In triage</source>
+        <target>En triage</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.state.label">
+      <segment state="translated">
+        <source>State</source>
+        <target>État</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.state.not_affected">
+      <segment state="translated">
+        <source>Not affected</source>
+        <target>Non affecté</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.state.resolved">
+      <segment state="translated">
+        <source>Resolved</source>
+        <target>Résolue</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.state.resolved_with_pedigree">
+      <segment state="translated">
+        <source>Resolved with pedigree</source>
+        <target>Résolue avec traçabilité</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.vex.title">
+      <segment state="translated">
+        <source>Analysis</source>
+        <target>Analyse</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.violationsOnly">
+      <segment state="translated">
+        <source>Policy violations only</source>
+        <target>Violations de politique seulement</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.autoCreate">
+      <segment state="translated">
+        <source>Create project/version if missing</source>
+        <target>Créer le projet ou la version si absent</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.button">
+      <segment state="translated">
+        <source>Upload</source>
+        <target>Téléverser</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.collectionNotice">
+      <segment state="translated">
+        <source>Collections don&apos;t accept uploads. Upload to one of the collection&apos;s member projects instead.</source>
+        <target>Les collections n&apos;acceptent aucun téléversement. Téléversez plutôt vers l&apos;un des projets membres de la collection.</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.curl.summary">
+      <segment state="translated">
+        <source>Show CI curl command</source>
+        <target>Afficher la commande curl pour la CI</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.drop">
+      <segment state="translated">
+        <source>Drop files here, or click to choose</source>
+        <target>Déposez des fichiers ici, ou cliquez pour en choisir</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.hint">
+      <segment state="translated">
+        <source>CycloneDX 1.4–1.6 JSON, OpenVEX, and SARIF 2.1.0 are accepted. VEX and SARIF enrich the SBOM already uploaded for this version.</source>
+        <target>Les formats acceptés sont CycloneDX 1.4–1.6 JSON, OpenVEX et SARIF 2.1.0. VEX et SARIF enrichissent le SBOM déjà téléversé pour cette version.</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.isLatest">
+      <segment state="translated">
+        <source>Mark this version as latest</source>
+        <target>Marquer cette version comme la plus récente</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.kind.sarif">
+      <segment state="translated">
+        <source>SARIF</source>
+        <target>SARIF</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.kind.sbom">
+      <segment state="translated">
+        <source>SBOM</source>
+        <target>SBOM</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.kind.unknown">
+      <segment state="translated">
+        <source>Unrecognized</source>
+        <target>Non reconnu</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.kind.vex">
+      <segment state="translated">
+        <source>VEX</source>
+        <target>VEX</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.kindLabel">
+      <segment state="translated">
+        <source>Detected document type</source>
+        <target>Type de document détecté</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.notAllowed">
+      <segment state="translated">
+        <source>Only organization admins and owners can upload documents from this interface. Use an API token from CI instead.</source>
+        <target>Seuls les administrateurs et propriétaires de l&apos;organisation peuvent téléverser des documents depuis cette interface. Utilisez un jeton API depuis la CI.</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.outcome.accepted">
+      <segment state="translated">
+        <source>Accepted</source>
+        <target>Accepté</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.outcome.detail.error">
+      <segment state="translated">
+        <source>Upload failed: {message}</source>
+        <target>Échec du téléversement : {message}</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.outcome.detail.generic">
+      <segment state="translated">
+        <source>Uploaded.</source>
+        <target>Téléversé.</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.outcome.detail.sarif">
+      <segment state="translated">
+        <source>{applied} of {total} results applied ({unmatched} unmatched)</source>
+        <target>{applied} résultat(s) appliqué(s) sur {total} ({unmatched} non apparié(s))</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.outcome.detail.sbom">
+      <segment state="translated">
+        <source>{added} added, {removed} removed, {unchanged} unchanged (of {total} total)</source>
+        <target>{added} ajouté(s), {removed} supprimé(s), {unchanged} inchangé(s) (sur {total} au total)</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.outcome.detail.sbomNoop">
+      <segment state="translated">
+        <source>No changes — already up to date ({total} components)</source>
+        <target>Aucun changement — déjà à jour ({total} composants)</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.outcome.detail.vex">
+      <segment state="translated">
+        <source>{applied} of {total} statements applied ({unmatched} unmatched)</source>
+        <target>{applied} déclaration(s) appliquée(s) sur {total} ({unmatched} non appariée(s))</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.outcome.detailColumn">
+      <segment state="translated">
+        <source>Detail</source>
+        <target>Détail</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.outcome.file">
+      <segment state="translated">
+        <source>File</source>
+        <target>Fichier</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.outcome.rejected">
+      <segment state="translated">
+        <source>Rejected</source>
+        <target>Rejeté</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.outcome.status">
+      <segment state="translated">
+        <source>Status</source>
+        <target>Statut</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.outcome.type">
+      <segment state="translated">
+        <source>Type</source>
+        <target>Type</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.project.choose">
+      <segment state="translated">
+        <source>Choose a project…</source>
+        <target>Choisir un projet…</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.project.chooseExisting">
+      <segment state="translated">
+        <source>Choose an existing project instead</source>
+        <target>Choisir un projet existant à la place</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.project.createNew">
+      <segment state="translated">
+        <source>Create a new project instead</source>
+        <target>Créer un nouveau projet à la place</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.project.intoFolder">
+      <segment state="translated">
+        <source>Uploads land in {folder}. Picking an existing project lists only that folder&apos;s projects; a new one is created inside it.</source>
+        <target>Les téléversements sont classés dans {folder}. La liste ne propose que les projets de ce dossier; un nouveau projet y est créé.</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.project.label">
+      <segment state="translated">
+        <source>Project</source>
+        <target>Projet</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.project.newPlaceholder">
+      <segment state="translated">
+        <source>New project name</source>
+        <target>Nom du nouveau projet</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.submit">
+      <segment state="translated">
+        <source>Upload</source>
+        <target>Téléverser</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.title">
+      <segment state="translated">
+        <source>Upload SBOM, VEX, or SARIF</source>
+        <target>Téléverser un SBOM, VEX ou SARIF</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.uploading">
+      <segment state="translated">
+        <source>Uploading…</source>
+        <target>Téléversement en cours…</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.version.label">
+      <segment state="translated">
+        <source>Version</source>
+        <target>Version</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.version.placeholder">
+      <segment state="translated">
+        <source>e.g. 1.4.0</source>
+        <target>p. ex. 1.4.0</target>
       </segment>
     </unit>
     <unit id="serviceTokens.columns.created">
@@ -3903,7 +5991,7 @@
     </unit>
     <unit id="settings.alerts.section">
       <segment state="translated">
-        <source>Alert center</source>
+        <source>Alert centre</source>
         <target>Centre d&apos;alertes</target>
       </segment>
     </unit>
@@ -3977,6 +6065,12 @@
       <segment state="translated">
         <source>Choose file</source>
         <target>Choisir un fichier</target>
+      </segment>
+    </unit>
+    <unit id="settings.auth.claimMapKeyPlaceholder">
+      <segment state="translated">
+        <source>e.g. Admins</source>
+        <target>p. ex. Admins</target>
       </segment>
     </unit>
     <unit id="settings.auth.connectionFieldsHint">
@@ -4729,7 +6823,7 @@
     </unit>
     <unit id="settings.general.requireMfa">
       <segment state="translated">
-        <source>Require MFA enrollment</source>
+        <source>Require MFA enrolment</source>
         <target>Exiger l&apos;inscription MFA</target>
       </segment>
     </unit>
@@ -4741,7 +6835,7 @@
     </unit>
     <unit id="settings.general.requireMfaHint">
       <segment state="translated">
-        <source>When on, all users in this organization must complete MFA enrollment before accessing any API endpoints. The instance REQUIRE_MFA env var enforces this across every organization.</source>
+        <source>When on, all users in this organization must complete MFA enrolment before accessing any API endpoints. The instance REQUIRE_MFA env var enforces this across every organization.</source>
         <target>Lorsque activé, tous les utilisateurs de cette organisation doivent compléter l&apos;inscription MFA avant d&apos;accéder aux points d&apos;accès API. La variable d&apos;environnement REQUIRE_MFA de l&apos;instance applique cette règle à toutes les organisations.</target>
       </segment>
     </unit>
@@ -4790,7 +6884,7 @@
     <unit id="settings.instanceEmail.cleartextCredentials">
       <segment state="translated">
         <source>Security is None and a username and password are set, so the SMTP AUTH exchange is sent unencrypted and anyone on the network path can read these credentials. Use STARTTLS or Implicit TLS, or clear the username and password if the relay does not require authentication.</source>
-        <target>La sécurité est réglée sur Aucune alors qu&apos;un nom d&apos;utilisateur et un mot de passe sont définis : l&apos;échange SMTP AUTH est transmis en clair et toute personne sur le chemin réseau peut lire ces identifiants. Utilisez STARTTLS ou TLS implicite, ou effacez le nom d&apos;utilisateur et le mot de passe si le relais n&apos;exige pas d&apos;authentification.</target>
+        <target>La sécurité est réglée sur Aucune alors qu&apos;un nom d&apos;utilisateur et un mot de passe sont définis : l&apos;échange SMTP AUTH est transmis en clair et toute personne sur le chemin réseau peut lire ces identifiants. Utilisez STARTTLS ou TLS implicite, ou effacez le nom d&apos;utilisateur et le mot de passe si le relais n&apos;exige pas d&apos;authentification.</target>
       </segment>
     </unit>
     <unit id="settings.instanceEmail.configured">
@@ -4814,7 +6908,7 @@
     <unit id="settings.instanceEmail.hint">
       <segment state="translated">
         <source>SMTP relay used to deliver org invite emails. Configure it once here; every invite send and the test button below use it.</source>
-        <target>Relais SMTP utilisé pour livrer les courriels d&apos;invitation d&apos;organisation. Configurez-le une seule fois ici ; chaque invitation envoyée et le bouton de test ci-dessous l&apos;utilisent.</target>
+        <target>Relais SMTP utilisé pour livrer les courriels d&apos;invitation d&apos;organisation. Configurez-le une seule fois ici; chaque invitation envoyée et le bouton de test ci-dessous l&apos;utilisent.</target>
       </segment>
     </unit>
     <unit id="settings.instanceEmail.host">
@@ -4850,7 +6944,7 @@
     <unit id="settings.instanceEmail.passwordSetHint">
       <segment state="translated">
         <source>Set a password to enable authenticated relay. Required unless security is None.</source>
-        <target>Définissez un mot de passe pour activer le relais authentifié. Requis sauf si la sécurité est « Aucune ».</target>
+        <target>Définissez un mot de passe pour activer le relais authentifié. Requis sauf si la sécurité est « Aucune ».</target>
       </segment>
     </unit>
     <unit id="settings.instanceEmail.port">
@@ -4940,7 +7034,7 @@
     <unit id="settings.integrations.email.lastStatus">
       <segment state="translated">
         <source>Last email delivery: {status}</source>
-        <target>Dernière livraison de courriel : {status}</target>
+        <target>Dernière livraison de courriel : {status}</target>
       </segment>
     </unit>
     <unit id="settings.integrations.email.mailServerConfigured">
@@ -5030,7 +7124,7 @@
     <unit id="settings.integrations.slack.lastStatus">
       <segment state="translated">
         <source>Last Slack delivery: {status}</source>
-        <target>Dernière livraison Slack : {status}</target>
+        <target>Dernière livraison Slack : {status}</target>
       </segment>
     </unit>
     <unit id="settings.integrations.slack.testFail">
@@ -5101,50 +7195,50 @@
     </unit>
     <unit id="settings.licenses.allow.addEntry">
       <segment state="translated">
-        <source>Add license</source>
+        <source>Add licence</source>
         <target>Ajouter une licence</target>
       </segment>
     </unit>
     <unit id="settings.licenses.allow.empty">
       <segment state="translated">
-        <source>No allowed licenses configured. When the allowlist is empty, only the blocklist applies.</source>
+        <source>No allowed licences configured. When the allowlist is empty, only the blocklist applies.</source>
         <target>Aucune licence autorisée configurée. Lorsque la liste d&apos;autorisation est vide, seule la liste de blocage s&apos;applique.</target>
       </segment>
     </unit>
     <unit id="settings.licenses.allow.title">
       <segment state="translated">
-        <source>Allowed licenses</source>
+        <source>Allowed licences</source>
         <target>Licences autorisées</target>
       </segment>
     </unit>
     <unit id="settings.licenses.block.addEntry">
       <segment state="translated">
-        <source>Add license</source>
+        <source>Add licence</source>
         <target>Ajouter une licence</target>
       </segment>
     </unit>
     <unit id="settings.licenses.block.empty">
       <segment state="translated">
-        <source>No blocked licenses configured.</source>
+        <source>No blocked licences configured.</source>
         <target>Aucune licence bloquée configurée.</target>
       </segment>
     </unit>
     <unit id="settings.licenses.block.title">
       <segment state="translated">
-        <source>Blocked licenses</source>
+        <source>Blocked licences</source>
         <target>Licences bloquées</target>
       </segment>
     </unit>
     <unit id="settings.licenses.blockEmptyWarn">
       <segment state="translated">
-        <source>Enforcement is set to Block but no licenses are allowed. Every publish and proxy fetch will be rejected until you approve at least one license below.</source>
+        <source>Enforcement is set to Block but no licences are allowed. Every publish and proxy fetch will be rejected until you approve at least one licence below.</source>
         <target>L&apos;application est définie sur Bloquer mais aucune licence n&apos;est autorisée. Toutes les publications et tous les téléchargements proxy seront rejetés tant que vous n&apos;aurez pas approuvé au moins une licence ci-dessous.</target>
       </segment>
     </unit>
     <unit id="settings.licenses.blockNotePlaceholder">
       <segment state="translated">
-        <source>Why is this license refused?</source>
-        <target>Pourquoi cette licence est-elle refusée ?</target>
+        <source>Why is this licence refused?</source>
+        <target>Pourquoi cette licence est-elle refusée?</target>
       </segment>
     </unit>
     <unit id="settings.licenses.columns.added">
@@ -5173,25 +7267,25 @@
     </unit>
     <unit id="settings.licenses.conditional.addEntry">
       <segment state="translated">
-        <source>Add license</source>
+        <source>Add licence</source>
         <target>Ajouter une licence</target>
       </segment>
     </unit>
     <unit id="settings.licenses.conditional.empty">
       <segment state="translated">
-        <source>No conditional licenses configured.</source>
+        <source>No conditional licences configured.</source>
         <target>Aucune licence conditionnelle configurée.</target>
       </segment>
     </unit>
     <unit id="settings.licenses.conditional.intro">
       <segment state="translated">
-        <source>Licenses that are acceptable only in some contexts. They are served and published like allowed licenses; the difference is that every package carrying one is listed under License risk for review. Record the condition in the note so the next person does not have to ask.</source>
-        <target>Licences acceptables uniquement dans certains contextes. Elles sont servies et publiées comme les licences autorisées ; la différence est que chaque paquet qui en porte une apparaît sous Risque de licence pour révision. Consignez la condition dans la note afin que la prochaine personne n&apos;ait pas à la demander.</target>
+        <source>Licences that are acceptable only in some contexts. They are served and published like allowed licences; the difference is that every package carrying one is listed under Licence risk for review. Record the condition in the note so the next person does not have to ask.</source>
+        <target>Licences acceptables uniquement dans certains contextes. Elles sont servies et publiées comme les licences autorisées; la différence est que chaque paquet qui en porte une apparaît sous Risque de licence pour révision. Consignez la condition dans la note afin que la prochaine personne n&apos;ait pas à la demander.</target>
       </segment>
     </unit>
     <unit id="settings.licenses.conditional.title">
       <segment state="translated">
-        <source>Conditional licenses</source>
+        <source>Conditional licences</source>
         <target>Licences conditionnelles</target>
       </segment>
     </unit>
@@ -5203,13 +7297,13 @@
     </unit>
     <unit id="settings.licenses.conditionPlaceholder">
       <segment state="translated">
-        <source>What makes this license acceptable, and when?</source>
-        <target>Qu&apos;est-ce qui rend cette licence acceptable, et quand ?</target>
+        <source>What makes this licence acceptable, and when?</source>
+        <target>Qu&apos;est-ce qui rend cette licence acceptable, et quand?</target>
       </segment>
     </unit>
     <unit id="settings.licenses.intro">
       <segment state="translated">
-        <source>Govern which SPDX licenses are permitted for packages in this tenant. License metadata is extracted on publish and on proxy cache fill.</source>
+        <source>Govern which SPDX licences are permitted for packages in this tenant. Licence metadata is extracted on publish and on proxy cache fill.</source>
         <target>Définissez les licences SPDX autorisées pour les paquets de ce locataire. Les métadonnées de licence sont extraites à la publication et lors du remplissage du cache proxy.</target>
       </segment>
     </unit>
@@ -5227,25 +7321,25 @@
     </unit>
     <unit id="settings.licenses.modal.addAllowTitle">
       <segment state="translated">
-        <source>Add allowed license</source>
+        <source>Add allowed licence</source>
         <target>Ajouter une licence autorisée</target>
       </segment>
     </unit>
     <unit id="settings.licenses.modal.addBlockTitle">
       <segment state="translated">
-        <source>Add blocked license</source>
+        <source>Add blocked licence</source>
         <target>Ajouter une licence bloquée</target>
       </segment>
     </unit>
     <unit id="settings.licenses.modal.addConditionalTitle">
       <segment state="translated">
-        <source>Add conditional license</source>
+        <source>Add conditional licence</source>
         <target>Ajouter une licence conditionnelle</target>
       </segment>
     </unit>
     <unit id="settings.licenses.modal.conditionalHint">
       <segment state="translated">
-        <source>The license will serve normally. Add the condition as a note once it is in the list.</source>
+        <source>The licence will serve normally. Add the condition as a note once it is in the list.</source>
         <target>La licence sera servie normalement. Ajoutez la condition en note une fois l&apos;entrée créée.</target>
       </segment>
     </unit>
@@ -5269,7 +7363,7 @@
     </unit>
     <unit id="settings.licenses.mode.block.hint">
       <segment state="translated">
-        <source>Versions whose license violates this policy are blocked at download.</source>
+        <source>Versions whose licence violates this policy are blocked at download.</source>
         <target>Les versions dont la licence enfreint cette politique sont bloquées au téléchargement.</target>
       </segment>
     </unit>
@@ -5281,7 +7375,7 @@
     </unit>
     <unit id="settings.licenses.mode.off.hint">
       <segment state="translated">
-        <source>License metadata is recorded but no policy is enforced.</source>
+        <source>Licence metadata is recorded but no policy is enforced.</source>
         <target>Les métadonnées de licence sont enregistrées mais aucune politique n&apos;est appliquée.</target>
       </segment>
     </unit>
@@ -5311,13 +7405,13 @@
     </unit>
     <unit id="settings.licenses.notePlaceholder">
       <segment state="translated">
-        <source>Why is this license allowed?</source>
-        <target>Pourquoi cette licence est-elle autorisée ?</target>
+        <source>Why is this licence allowed?</source>
+        <target>Pourquoi cette licence est-elle autorisée?</target>
       </segment>
     </unit>
     <unit id="settings.licenses.removeConfirm">
       <segment state="translated">
-        <source>Remove this license entry?</source>
+        <source>Remove this licence entry?</source>
         <target>Supprimer cette entrée de licence?</target>
       </segment>
     </unit>
@@ -5377,7 +7471,7 @@
     </unit>
     <unit id="settings.licenses.review.empty">
       <segment state="translated">
-        <source>No licenses awaiting review.</source>
+        <source>No licences awaiting review.</source>
         <target>Aucune licence en attente de revue.</target>
       </segment>
     </unit>
@@ -5389,7 +7483,7 @@
     </unit>
     <unit id="settings.licenses.review.intro">
       <segment state="translated">
-        <source>Licenses observed during ingestion that are on neither the allow- nor block-list. Approve or block each one to drive the enforcement policy.</source>
+        <source>Licences observed during ingestion that are on neither the allow- nor block-list. Approve or block each one to drive the enforcement policy.</source>
         <target>Licences observées lors de l&apos;ingestion qui ne figurent ni sur la liste d&apos;autorisation ni sur la liste de blocage. Approuvez ou bloquez chacune pour piloter la politique.</target>
       </segment>
     </unit>
@@ -5497,7 +7591,7 @@
     </unit>
     <unit id="settings.proxy.blockKevHint">
       <segment state="translated">
-        <source>How versions are handled when one of their advisories aliases a CVE in the CISA Known Exploited Vulnerabilities catalog — confirmed exploited in the wild, independent of CVSS score. The catalog is refreshed daily by the threat-feed job. Block returns 403 on fetch and serve; Warn surfaces the KEV flag in the vulnerability report only. A per-version manual allow override still wins.</source>
+        <source>How versions are handled when one of their advisories aliases a CVE in the CISA Known Exploited Vulnerabilities Catalog — confirmed exploited in the wild, independent of CVSS score. The catalogue is refreshed daily by the threat-feed job. Block returns 403 on fetch and serve; Warn surfaces the KEV flag in the vulnerability report only. A per-version manual allow override still wins.</source>
         <target>Traitement des versions dont un avis correspond à une CVE du catalogue CISA Known Exploited Vulnerabilities — exploitation confirmée sur le terrain, indépendamment du score CVSS. Le catalogue est actualisé chaque jour par la tâche de flux de menaces. « Bloquer » renvoie une erreur 403 à la récupération et au service; « Avertir » affiche seulement l&apos;indicateur KEV dans le rapport de vulnérabilités. Une autorisation manuelle par version reste prioritaire.</target>
       </segment>
     </unit>
@@ -5505,6 +7599,36 @@
       <segment state="translated">
         <source>Off — ignore KEV listings</source>
         <target>Désactivé — ignorer le catalogue KEV</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.blockKevRansomware">
+      <segment state="translated">
+        <source>Ransomware-linked exploited CVEs</source>
+        <target>CVE exploitées liées à un rançongiciel</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.blockKevRansomwareBlock">
+      <segment state="translated">
+        <source>Block</source>
+        <target>Bloquer</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.blockKevRansomwareHint">
+      <segment state="translated">
+        <source>Narrower than the exploited-CVE gate above: applies only to CVEs CISA marks as used in ransomware campaigns. Leave the gate above at Off and set this to Block to refuse only the ransomware-linked ones rather than the whole catalogue. Acts only on an explicit CISA verdict — CVEs it has not assessed are covered by the broader gate, not this one.</source>
+        <target>Plus restrictif que la porte ci-dessus : s&apos;applique uniquement aux CVE que la CISA signale comme utilisées dans des campagnes de rançongiciel. Laissez la porte ci-dessus sur Désactivé et réglez celle-ci sur Bloquer pour refuser seulement les CVE liées à un rançongiciel plutôt que tout le catalogue. N&apos;agit que sur un verdict explicite de la CISA : les CVE non évaluées relèvent de la porte plus large, pas de celle-ci.</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.blockKevRansomwareOff">
+      <segment state="translated">
+        <source>Off</source>
+        <target>Désactivé</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.blockKevRansomwareWarn">
+      <segment state="translated">
+        <source>Warn</source>
+        <target>Avertir</target>
       </segment>
     </unit>
     <unit id="settings.proxy.blockKevWarn">
@@ -5579,6 +7703,36 @@
         <target>Avertir — signaler seulement</target>
       </segment>
     </unit>
+    <unit id="settings.proxy.blockSsvcExploitation">
+      <segment state="translated">
+        <source>Actively exploited (CISA assessment)</source>
+        <target>Exploitation active (évaluation de la CISA)</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.blockSsvcExploitationBlock">
+      <segment state="translated">
+        <source>Block</source>
+        <target>Bloquer</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.blockSsvcExploitationHint">
+      <segment state="translated">
+        <source>Acts on CISA&apos;s Vulnrichment exploitation assessment, which grades far more CVEs than the exploited-CVE catalogue above and so catches exploitation CISA has evidence for but has not catalogued. Requires the vulnerability tracker connection; without one, no advisory carries an assessment and this gate never fires however it is set.</source>
+        <target>Agit sur l&apos;évaluation d&apos;exploitation Vulnrichment de la CISA, qui note bien plus de CVE que le catalogue ci-dessus et détecte donc une exploitation dont la CISA a des preuves sans l&apos;avoir cataloguée. Nécessite la connexion au suivi des vulnérabilités. Sans elle, aucun avis ne porte d&apos;évaluation et cette porte ne se déclenche jamais, quel que soit son réglage.</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.blockSsvcExploitationOff">
+      <segment state="translated">
+        <source>Off</source>
+        <target>Désactivé</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.blockSsvcExploitationWarn">
+      <segment state="translated">
+        <source>Warn</source>
+        <target>Avertir</target>
+      </segment>
+    </unit>
     <unit id="settings.proxy.installScriptAllowlistHint">
       <segment state="translated">
         <source>Packages exempt from the install-script block gate. When the policy above is &apos;Block&apos;, versions listed here are served normally regardless of whether they ship an install/lifecycle script. Use this to permit known-good build tools (e.g. esbuild, node-gyp) while keeping the gate active for everything else.</source>
@@ -5589,6 +7743,24 @@
       <segment state="translated">
         <source>Install-script allowlist</source>
         <target>Liste d&apos;autorisation des scripts d&apos;installation</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.maxEpssPercentile">
+      <segment state="translated">
+        <source>EPSS percentile ceiling</source>
+        <target>Plafond de centile EPSS</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.maxEpssPercentileHint">
+      <segment state="translated">
+        <source>Blocks when an advisory ranks above this percentile (0.00–1.00). A rank keeps its meaning when FIRST recalibrates the model, where the probability ceiling above tracks absolute risk. Set either or both — whichever trips first blocks. Empty to disable.</source>
+        <target>Bloque lorsqu&apos;un avis se classe au-dessus de ce centile (0,00–1,00). Un rang conserve sa signification lorsque FIRST recalibre le modèle, alors que le plafond de probabilité ci-dessus suit le risque absolu. Réglez l&apos;un, l&apos;autre ou les deux : le premier dépassement bloque. Laissez vide pour désactiver.</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.maxEpssPercentilePlaceholder">
+      <segment state="translated">
+        <source>e.g. 0.95</source>
+        <target>p. ex. 0,95</target>
       </segment>
     </unit>
     <unit id="settings.proxy.maxEpssTolerance">
@@ -5902,7 +8074,7 @@ dotnet/</target>
     <unit id="settings.proxy.upstreamRegistries.rpmMode.effective">
       <segment state="translated">
         <source>Currently in effect: {mode}</source>
-        <target>Actuellement en vigueur : {mode}</target>
+        <target>Actuellement en vigueur : {mode}</target>
       </segment>
     </unit>
     <unit id="settings.proxy.upstreamRegistries.rpmMode.hint">
@@ -5914,7 +8086,7 @@ dotnet/</target>
     <unit id="settings.proxy.upstreamRegistries.rpmMode.inherit">
       <segment state="translated">
         <source>Inherit (instance default: {mode})</source>
-        <target>Hérité (valeur par défaut de l&apos;instance : {mode})</target>
+        <target>Hérité (valeur par défaut de l&apos;instance : {mode})</target>
       </segment>
     </unit>
     <unit id="settings.proxy.upstreamRegistries.rpmMode.label">
@@ -5997,7 +8169,7 @@ dotnet/</target>
     </unit>
     <unit id="settings.proxy.verifyMavenSignaturesHint">
       <segment state="translated">
-        <source>Verify the detached OpenPGP signature (.asc sidecar) for each proxied Maven artifact against pinned trust anchors. Block fails closed — a version whose .asc fails verification or that carries none is refused (never cached or served); Warn records the outcome without blocking. Applies to proxy-fetched versions only. Configure keys in Settings → Signatures → Trust anchors.</source>
+        <source>Verify the detached OpenPGP signature (.asc sidecar) for each proxied Maven artefact against pinned trust anchors. Block fails closed — a version whose .asc fails verification or that carries none is refused (never cached or served); Warn records the outcome without blocking. Applies to proxy-fetched versions only. Configure keys in Settings → Signatures → Trust anchors.</source>
         <target>Vérifie la signature OpenPGP détachée (sidecar .asc) de chaque artefact Maven proxifié par rapport aux ancres de confiance épinglées. Bloquer échoue en mode fermé — une version dont le .asc échoue à la vérification ou sans .asc est refusée (jamais mise en cache ni servie); Avertir enregistre le résultat sans bloquer. S&apos;applique uniquement aux versions récupérées via le proxy. Configurez les clés dans Paramètres → Signatures → Ancres de confiance.</target>
       </segment>
     </unit>
@@ -6250,19 +8422,31 @@ dotnet/</target>
     <unit id="settings.retention.activityDaysHint">
       <segment state="translated">
         <source>Unlike the limits above, empty is not unlimited here: activity rows carry per-download IP data, so they are bounded by the ACTIVITY_RETENTION_DAYS instance default.</source>
-        <target>Contrairement aux limites ci-dessus, un champ vide n&apos;est pas illimité ici : les lignes d&apos;activité contiennent des adresses IP par téléchargement, elles sont donc limitées par la valeur ACTIVITY_RETENTION_DAYS de l&apos;instance.</target>
+        <target>Contrairement aux limites ci-dessus, un champ vide n&apos;est pas illimité ici : les lignes d&apos;activité contiennent des adresses IP par téléchargement, elles sont donc limitées par la valeur ACTIVITY_RETENTION_DAYS de l&apos;instance.</target>
       </segment>
     </unit>
     <unit id="settings.retention.instanceDefault">
       <segment state="translated">
         <source>instance default: {days} days</source>
-        <target>valeur par défaut de l&apos;instance : {days} jours</target>
+        <target>valeur par défaut de l&apos;instance : {days} jours</target>
       </segment>
     </unit>
     <unit id="settings.retention.keepDays">
       <segment state="translated">
         <source>Keep days (proxy blobs)</source>
         <target>Durée de conservation (blobs proxy)</target>
+      </segment>
+    </unit>
+    <unit id="settings.retention.keepProjectVersions">
+      <segment state="translated">
+        <source>Keep project versions</source>
+        <target>Conserver les versions de projet</target>
+      </segment>
+    </unit>
+    <unit id="settings.retention.keepProjectVersionsHint">
+      <segment state="translated">
+        <source>Caps the SBOM/VEX/SARIF versions kept per project and releases the documents of the ones it removes. The latest version of a project is never removed, whatever its age.</source>
+        <target>Limite le nombre de versions SBOM/VEX/SARIF conservées par projet et libère les documents de celles qui sont supprimées. La dernière version d&apos;un projet n&apos;est jamais supprimée, quel que soit son âge.</target>
       </segment>
     </unit>
     <unit id="settings.retention.keepVersions">
@@ -6388,7 +8572,7 @@ dotnet/</target>
     <unit id="settings.security.trustAnchors.modal.materialHint">
       <segment state="translated">
         <source>Public key material only — no private keys are accepted. For example: an ASCII-armored PGP public key block for RPM/Maven, a base64-encoded SPKI DER for npm, a PEM certificate for NuGet, Sigstore root JSON for PyPI, or a PEM RSA public key for apk.</source>
-        <target>Matériel de clé publique uniquement — aucune clé privée n&apos;est acceptée. Par exemple, pour apk : une clé publique RSA au format PEM.</target>
+        <target>Matériel de clé publique uniquement — aucune clé privée n&apos;est acceptée. Par exemple, pour apk : une clé publique RSA au format PEM.</target>
       </segment>
     </unit>
     <unit id="settings.security.trustAnchors.modal.materialPlaceholder">
@@ -6477,8 +8661,8 @@ dotnet/</target>
     </unit>
     <unit id="settings.security.trustAnchors.unsupportedPairTitle">
       <segment state="translated">
-        <source>This anchor&apos;s ecosystem and kind combination has no validator, so its key material was never checked. Verify it is still needed before removing it — removing the only anchor for an ecosystem with signature verification set to block denies every artifact of that ecosystem.</source>
-        <target>La combinaison écosystème/type de cette ancre n&apos;a aucun validateur : son matériel de clé n&apos;a jamais été vérifié. Confirmez qu&apos;elle est toujours nécessaire avant de la supprimer — supprimer la seule ancre d&apos;un écosystème dont la vérification des signatures est réglée sur « bloquer » refuse tous les artefacts de cet écosystème.</target>
+        <source>This anchor&apos;s ecosystem and kind combination has no validator, so its key material was never checked. Verify it is still needed before removing it — removing the only anchor for an ecosystem with signature verification set to block denies every artefact of that ecosystem.</source>
+        <target>La combinaison écosystème/type de cette ancre n&apos;a aucun validateur : son matériel de clé n&apos;a jamais été vérifié. Confirmez qu&apos;elle est toujours nécessaire avant de la supprimer — supprimer la seule ancre d&apos;un écosystème dont la vérification des signatures est réglée sur « bloquer » refuse tous les artefacts de cet écosystème.</target>
       </segment>
     </unit>
     <unit id="settings.storage.retentionHint">
@@ -6496,7 +8680,7 @@ dotnet/</target>
     <unit id="settings.storage.uploadHint">
       <segment state="translated">
         <source>Caps the size of a single upload, in MB. Per-ecosystem limits override the limit below; the instance owner&apos;s ceiling bounds all of them.</source>
-        <target>Plafonne la taille d&apos;un téléversement, en Mo. Les limites par écosystème remplacent la limite ci-dessous ; le plafond de l&apos;instance les borde toutes.</target>
+        <target>Plafonne la taille d&apos;un téléversement, en Mo. Les limites par écosystème remplacent la limite ci-dessous; le plafond de l&apos;instance les borde toutes.</target>
       </segment>
     </unit>
     <unit id="settings.storage.uploadTitle">
@@ -6549,7 +8733,7 @@ dotnet/</target>
     </unit>
     <unit id="settings.tabs.licenses">
       <segment state="translated">
-        <source>Licenses</source>
+        <source>Licences</source>
         <target>Licences</target>
       </segment>
     </unit>
@@ -6637,6 +8821,426 @@ dotnet/</target>
         <target>Remplace la limite ci-dessus pour cet écosystème seulement. Un champ vide utilise la limite ci-dessus, ou celle de l&apos;instance si elle aussi est vide.</target>
       </segment>
     </unit>
+    <unit id="settings.vulnTracker.baseUrl">
+      <segment state="translated">
+        <source>Base URL</source>
+        <target>URL de base</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTracker.baseUrlHint">
+      <segment state="translated">
+        <source>Absolute http or https URL of the tracker. Leave it empty to turn the connection off entirely.</source>
+        <target>URL absolue http ou https du service de suivi. Laissez le champ vide pour désactiver complètement la connexion.</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTracker.batchSize">
+      <segment state="translated">
+        <source>Batch size</source>
+        <target>Taille des lots</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTracker.batchSizeHint">
+      <segment state="translated">
+        <source>PURLs per lookup request. 1 to 1000; default 100. The producer refuses a larger batch outright rather than truncating it.</source>
+        <target>Nombre de PURL par requête de consultation. De 1 à 1000; valeur par défaut 100. Le fournisseur refuse tout lot plus grand au lieu de le tronquer.</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTracker.clearDiscardsToken">
+      <segment state="translated">
+        <source>Clearing the base URL turns the connection off for every organization and discards the stored token. You will have to enter the token again to reconnect.</source>
+        <target>Effacer l&apos;URL de base désactive la connexion pour toutes les organisations et supprime le jeton enregistré. Vous devrez saisir le jeton de nouveau pour vous reconnecter.</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTracker.enabled">
+      <segment state="translated">
+        <source>Enabled</source>
+        <target>Activé</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTracker.enabledHint">
+      <segment state="translated">
+        <source>Turns enrichment on and off without discarding the connection. The base URL and token stay stored while it is paused.</source>
+        <target>Active ou suspend l&apos;enrichissement sans supprimer la connexion. L&apos;URL de base et le jeton demeurent enregistrés pendant la suspension.</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTracker.errors.baseUrl">
+      <segment state="translated">
+        <source>Enter an absolute http or https URL, or leave the field empty to turn the connection off.</source>
+        <target>Entrez une URL absolue http ou https, ou laissez le champ vide pour désactiver la connexion.</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTracker.errors.batchSize">
+      <segment state="translated">
+        <source>Batch size must be a whole number between 1 and 1000.</source>
+        <target>La taille des lots doit être un nombre entier compris entre 1 et 1000.</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTracker.errors.staleness">
+      <segment state="translated">
+        <source>Maximum staleness must be a whole number of hours between 1 and 8760.</source>
+        <target>La fraîcheur maximale doit être un nombre entier d&apos;heures compris entre 1 et 8760.</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTracker.hint">
+      <segment state="translated">
+        <source>Connection to the external vulnerability tracker that supplies the NVD-band and SSVC enrichment overlay. One connection serves the whole deployment; each organization sets its own thresholds for what to do with the signals.</source>
+        <target>Connexion au service externe de suivi des vulnérabilités qui fournit la couche d&apos;enrichissement (bandes NVD et SSVC). Une seule connexion dessert tout le déploiement; chaque organisation définit ses propres seuils quant à l&apos;usage des signaux.</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTracker.masterKeyHint">
+      <segment state="translated">
+        <source>DEPENDABLY_MASTER_KEY must be configured before a token can be stored.</source>
+        <target>DEPENDABLY_MASTER_KEY doit être configuré avant de pouvoir enregistrer un jeton.</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTracker.maxStalenessHint">
+      <segment state="translated">
+        <source>Enrichment older than this is treated as unknown rather than clean. 1 to 8760 hours; default 168 (7 days).</source>
+        <target>Un enrichissement plus ancien que cette valeur est considéré comme inconnu plutôt que sain. De 1 à 8760 heures; valeur par défaut 168 (7 jours).</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTracker.maxStalenessHours">
+      <segment state="translated">
+        <source>Maximum staleness (hours)</source>
+        <target>Fraîcheur maximale (heures)</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTracker.scopeNote">
+      <segment state="translated">
+        <source>This connection is instance-wide. Every organization on this deployment is enriched over it, and no organization can see or override it.</source>
+        <target>Cette connexion vaut pour toute l&apos;instance. Chaque organisation de ce déploiement est enrichie par son entremise, et aucune organisation ne peut la consulter ni la remplacer.</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTracker.state.active">
+      <segment state="translated">
+        <source>Active</source>
+        <target>Actif</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTracker.state.notConfigured">
+      <segment state="translated">
+        <source>Not configured</source>
+        <target>Non configuré</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTracker.state.paused">
+      <segment state="translated">
+        <source>Paused</source>
+        <target>Suspendu</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTracker.title">
+      <segment state="translated">
+        <source>Vulnerability tracker</source>
+        <target>Suivi des vulnérabilités</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTracker.token">
+      <segment state="translated">
+        <source>Token</source>
+        <target>Jeton</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTracker.tokenRotateHint">
+      <segment state="translated">
+        <source>A token is stored. Enter a new value to rotate it, or leave blank to keep the current one.</source>
+        <target>Un jeton est enregistré. Entrez une nouvelle valeur pour le remplacer, ou laissez vide pour conserver l&apos;actuel.</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTracker.tokenSetHint">
+      <segment state="translated">
+        <source>Optional. A tracker that needs no credential works without one; a tracker that does answers 401, and enrichment is then recorded as unknown rather than clean.</source>
+        <target>Facultatif. Un service qui n&apos;exige aucun identifiant fonctionne sans jeton; un service qui en exige un répond 401, et l&apos;enrichissement est alors consigné comme inconnu plutôt que comme sain.</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.col.advisories">
+      <segment state="translated">
+        <source>Advisories</source>
+        <target>Avis</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.col.duration">
+      <segment state="translated">
+        <source>ms</source>
+        <target>ms</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.col.kind">
+      <segment state="translated">
+        <source>Kind</source>
+        <target>Type</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.col.outcome">
+      <segment state="translated">
+        <source>Outcome</source>
+        <target>Résultat</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.col.purls">
+      <segment state="translated">
+        <source>Purls</source>
+        <target>Purls</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.col.when">
+      <segment state="translated">
+        <source>When</source>
+        <target>Quand</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.consecutiveFailures">
+      <segment state="translated">
+        <source>Consecutive failures</source>
+        <target>Échecs consécutifs</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.enrichedAdvisories">
+      <segment state="translated">
+        <source>Enriched advisories</source>
+        <target>Avis enrichis</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.failingSince">
+      <segment state="translated">
+        <source>Failing since</source>
+        <target>En échec depuis</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.hint">
+      <segment state="translated">
+        <source>What the scan pass&apos;s tracker lookups actually did. Health is observed, never written back to the configuration above — a failing tracker is never switched off for you.</source>
+        <target>Ce que les recherches du suivi ont réellement fait pendant l&apos;analyse. L&apos;état est observé et jamais réécrit dans la configuration ci-dessus — un suivi défaillant n&apos;est jamais désactivé à votre place.</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.horizonHint">
+      <segment state="translated">
+        <source>Enrichment older than {hours} h is treated as stale and stops counting as a usable signal.</source>
+        <target>Un enrichissement de plus de {hours} h est considéré comme périmé et cesse de compter comme signal utilisable.</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.kind.probe">
+      <segment state="translated">
+        <source>Test</source>
+        <target>Test</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.kind.scan">
+      <segment state="translated">
+        <source>Scan</source>
+        <target>Analyse</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.lastSuccess">
+      <segment state="translated">
+        <source>Last reached</source>
+        <target>Dernier contact</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.never">
+      <segment state="translated">
+        <source>Never</source>
+        <target>Jamais</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.noFetches">
+      <segment state="translated">
+        <source>No lookups recorded yet.</source>
+        <target>Aucune recherche enregistrée.</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.none">
+      <segment state="translated">
+        <source>None</source>
+        <target>Aucun</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.notAsserted">
+      <segment state="translated">
+        <source>Not asserted</source>
+        <target>Non déclaré</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.notConfigured">
+      <segment state="translated">
+        <source>No tracker connection is configured, so there is nothing to report yet.</source>
+        <target>Aucune connexion au suivi n&apos;est configurée; il n&apos;y a donc rien à signaler.</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.nvdAsOf">
+      <segment state="translated">
+        <source>NVD current to</source>
+        <target>NVD à jour au</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.outcomeOk">
+      <segment state="translated">
+        <source>Reached</source>
+        <target>Joint</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.pausedHint">
+      <segment state="translated">
+        <source>The connection is paused, so no lookups are made and it cannot be tested. Enable it above to test.</source>
+        <target>La connexion est en pause : aucune recherche n&apos;est effectuée et elle ne peut pas être testée. Activez-la ci-dessus pour la tester.</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.probeFailed">
+      <segment state="translated">
+        <source>Did not reach the tracker: {reason}.</source>
+        <target>Suivi non joint : {reason}.</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.probeReached">
+      <segment state="translated">
+        <source>Reached the tracker in {ms} ms.</source>
+        <target>Suivi joint en {ms} ms.</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.reason.batchTooLarge">
+      <segment state="translated">
+        <source>Batch exceeded the producer&apos;s cap</source>
+        <target>Lot supérieur à la limite du fournisseur</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.reason.emptyRequest">
+      <segment state="translated">
+        <source>Nothing to look up</source>
+        <target>Rien à rechercher</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.reason.exception">
+      <segment state="translated">
+        <source>Client fault</source>
+        <target>Défaillance du client</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.reason.malformedResponse">
+      <segment state="translated">
+        <source>Tracker&apos;s response could not be read</source>
+        <target>Réponse du suivi illisible</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.reason.none">
+      <segment state="translated">
+        <source>Reached</source>
+        <target>Joint</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.reason.notConfigured">
+      <segment state="translated">
+        <source>No connection configured</source>
+        <target>Aucune connexion configurée</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.reason.rateLimited">
+      <segment state="translated">
+        <source>Refused on quota or rate limit</source>
+        <target>Refusé pour quota ou limite de débit</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.reason.refused">
+      <segment state="translated">
+        <source>Tracker refused the request</source>
+        <target>Le suivi a refusé la requête</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.reason.serverError">
+      <segment state="translated">
+        <source>Tracker returned a server error</source>
+        <target>Le suivi a renvoyé une erreur de serveur</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.reason.timeout">
+      <segment state="translated">
+        <source>Timed out</source>
+        <target>Délai dépassé</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.reason.transport">
+      <segment state="translated">
+        <source>Could not connect</source>
+        <target>Connexion impossible</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.reason.unauthorized">
+      <segment state="translated">
+        <source>Credential rejected</source>
+        <target>Justificatif refusé</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.reason.unknown">
+      <segment state="translated">
+        <source>Unrecognized refusal</source>
+        <target>Refus non reconnu</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.recentFetches">
+      <segment state="translated">
+        <source>Recent lookups</source>
+        <target>Recherches récentes</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.refresh">
+      <segment state="translated">
+        <source>Refresh</source>
+        <target>Actualiser</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.ssvcAsOf">
+      <segment state="translated">
+        <source>SSVC current to</source>
+        <target>SSVC à jour au</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.staleAdvisories">
+      <segment state="translated">
+        <source>Past the horizon</source>
+        <target>Au-delà de l&apos;horizon</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.state.failed">
+      <segment state="translated">
+        <source>Not reaching the tracker</source>
+        <target>Le suivi ne répond pas</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.state.neverAttempted">
+      <segment state="translated">
+        <source>No lookup attempted yet</source>
+        <target>Aucune recherche tentée</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.state.notConfigured">
+      <segment state="translated">
+        <source>Not configured</source>
+        <target>Non configuré</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.state.ok">
+      <segment state="translated">
+        <source>Reaching the tracker</source>
+        <target>Le suivi répond</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.test">
+      <segment state="translated">
+        <source>Test connection</source>
+        <target>Tester la connexion</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.testing">
+      <segment state="translated">
+        <source>Testing…</source>
+        <target>Test en cours…</target>
+      </segment>
+    </unit>
+    <unit id="settings.vulnTrackerHealth.title">
+      <segment state="translated">
+        <source>Connection health</source>
+        <target>État de la connexion</target>
+      </segment>
+    </unit>
     <unit id="settings.webhooks.add">
       <segment state="translated">
         <source>Add webhook</source>
@@ -6685,6 +9289,12 @@ dotnet/</target>
         <target>Activé</target>
       </segment>
     </unit>
+    <unit id="settings.webhooks.eventTypes.package.blocked">
+      <segment state="translated">
+        <source>Blocked</source>
+        <target>Blocage</target>
+      </segment>
+    </unit>
     <unit id="settings.webhooks.eventTypes.package.import">
       <segment state="translated">
         <source>Import</source>
@@ -6709,7 +9319,7 @@ dotnet/</target>
         <target>Retrait de la liste</target>
       </segment>
     </unit>
-    <unit id="settings.webhooks.eventTypes.package.vulnerability">
+    <unit id="settings.webhooks.eventTypes.package.vuln">
       <segment state="translated">
         <source>Vulnerability</source>
         <target>Vulnérabilité</target>
@@ -6857,6 +9467,48 @@ dotnet/</target>
       <segment state="translated">
         <source>Setup Snippets</source>
         <target>Extraits de configuration</target>
+      </segment>
+    </unit>
+    <unit id="spdx.alreadyListed">
+      <segment state="translated">
+        <source>Already on a list</source>
+        <target>Déjà dans une liste</target>
+      </segment>
+    </unit>
+    <unit id="spdx.deprecated">
+      <segment state="translated">
+        <source>Deprecated SPDX identifier</source>
+        <target>Identifiant SPDX obsolète</target>
+      </segment>
+    </unit>
+    <unit id="spdx.fsfLibre">
+      <segment state="translated">
+        <source>FSF Free/Libre</source>
+        <target>Libre selon la FSF</target>
+      </segment>
+    </unit>
+    <unit id="spdx.lookupFailed">
+      <segment state="translated">
+        <source>Lookup failed.</source>
+        <target>La recherche a échoué.</target>
+      </segment>
+    </unit>
+    <unit id="spdx.noMatches">
+      <segment state="translated">
+        <source>No matches.</source>
+        <target>Aucun résultat.</target>
+      </segment>
+    </unit>
+    <unit id="spdx.osiApproved">
+      <segment state="translated">
+        <source>OSI Approved</source>
+        <target>Approuvée par l&apos;OSI</target>
+      </segment>
+    </unit>
+    <unit id="spdx.searchPlaceholder">
+      <segment state="translated">
+        <source>Search SPDX identifier or name…</source>
+        <target>Rechercher un identifiant ou un nom SPDX…</target>
       </segment>
     </unit>
     <unit id="system.admins.columns.actions">
@@ -7447,6 +10099,36 @@ dotnet/</target>
         <target>{count} au total</target>
       </segment>
     </unit>
+    <unit id="system.dashboard.enrichmentCoverage.none">
+      <segment state="translated">
+        <source>No advisories to enrich</source>
+        <target>Aucun avis à enrichir</target>
+      </segment>
+    </unit>
+    <unit id="system.dashboard.enrichmentCoverage.notConfigured">
+      <segment state="translated">
+        <source>No tracker configured</source>
+        <target>Aucun suivi configuré</target>
+      </segment>
+    </unit>
+    <unit id="system.dashboard.enrichmentCoverage.percent">
+      <segment state="translated">
+        <source>{percent}% enriched</source>
+        <target>{percent} % enrichis</target>
+      </segment>
+    </unit>
+    <unit id="system.dashboard.enrichmentCoverage.sub">
+      <segment state="translated">
+        <source>{enriched} of {total} advisories carry an NVD band or SSVC decision</source>
+        <target>{enriched} avis sur {total} portent une bande NVD ou une décision SSVC</target>
+      </segment>
+    </unit>
+    <unit id="system.dashboard.enrichmentCoverage.title">
+      <segment state="translated">
+        <source>Enrichment coverage</source>
+        <target>Couverture d&apos;enrichissement</target>
+      </segment>
+    </unit>
     <unit id="system.dashboard.health.ageRelative.daysAgo">
       <segment state="translated">
         <source>{n}d ago</source>
@@ -7635,8 +10317,8 @@ dotnet/</target>
     </unit>
     <unit id="system.dashboard.health.trustAnchors.detail">
       <segment state="translated">
-        <source>These anchors were stored under an ecosystem and kind combination that has no validator, so their key material was never checked. Review each one in its tenant&apos;s Settings → Security before removing it: removing the only anchor for an ecosystem whose signature verification is set to block denies every artifact of that ecosystem.</source>
-        <target>Ces ancres ont été enregistrées sous une combinaison écosystème/type sans validateur : leur matériel de clé n&apos;a jamais été vérifié. Examinez chacune dans Paramètres → Sécurité du locataire concerné avant de la supprimer : supprimer la seule ancre d&apos;un écosystème dont la vérification des signatures est réglée sur « bloquer » refuse tous les artefacts de cet écosystème.</target>
+        <source>These anchors were stored under an ecosystem and kind combination that has no validator, so their key material was never checked. Review each one in its tenant&apos;s Settings → Security before removing it: removing the only anchor for an ecosystem whose signature verification is set to block denies every artefact of that ecosystem.</source>
+        <target>Ces ancres ont été enregistrées sous une combinaison écosystème/type sans validateur : leur matériel de clé n&apos;a jamais été vérifié. Examinez chacune dans Paramètres → Sécurité du locataire concerné avant de la supprimer : supprimer la seule ancre d&apos;un écosystème dont la vérification des signatures est réglée sur « bloquer » refuse tous les artefacts de cet écosystème.</target>
       </segment>
     </unit>
     <unit id="system.dashboard.health.trustAnchors.suspect">
@@ -8518,13 +11200,13 @@ dotnet/</target>
     <unit id="system.settings.slack.hint">
       <segment state="translated">
         <source>Control-plane events only: tenant lifecycle and operator accounts. Never mirrors a per-org quarantine or vulnerability alert.</source>
-        <target>Événements de plan de contrôle uniquement : cycle de vie des locataires et comptes opérateurs. Ne reflète jamais une alerte de quarantaine ou de vulnérabilité par organisme.</target>
+        <target>Événements de plan de contrôle uniquement : cycle de vie des locataires et comptes opérateurs. Ne reflète jamais une alerte de quarantaine ou de vulnérabilité par organisme.</target>
       </segment>
     </unit>
     <unit id="system.settings.slack.lastStatus">
       <segment state="translated">
         <source>Last delivery: {status}</source>
-        <target>Dernière livraison : {status}</target>
+        <target>Dernière livraison : {status}</target>
       </segment>
     </unit>
     <unit id="system.settings.slack.masterKeyHint">
@@ -8536,7 +11218,7 @@ dotnet/</target>
     <unit id="system.settings.slack.testFail">
       <segment state="translated">
         <source>Test failed:</source>
-        <target>Échec du test :</target>
+        <target>Échec du test :</target>
       </segment>
     </unit>
     <unit id="system.settings.slack.testOk">
@@ -8566,7 +11248,7 @@ dotnet/</target>
     <unit id="system.settings.slack.webhookUrlHint">
       <segment state="translated">
         <source>Slack incoming-webhook URL. Stored encrypted; never shown again after saving.</source>
-        <target>URL de webhook entrant Slack. Stockée chiffrée ; jamais réaffichée après l&apos;enregistrement.</target>
+        <target>URL de webhook entrant Slack. Stockée chiffrée; jamais réaffichée après l&apos;enregistrement.</target>
       </segment>
     </unit>
     <unit id="system.settings.slack.webhookUrlRotateHint">
@@ -8603,6 +11285,12 @@ dotnet/</target>
       <segment state="translated">
         <source>Slack</source>
         <target>Slack</target>
+      </segment>
+    </unit>
+    <unit id="system.settings.tabs.vulnTracker">
+      <segment state="translated">
+        <source>Vulnerability tracker</source>
+        <target>Suivi des vulnérabilités</target>
       </segment>
     </unit>
     <unit id="system.settings.title">
@@ -8663,6 +11351,12 @@ dotnet/</target>
       <segment state="translated">
         <source>Deleted</source>
         <target>Supprimé</target>
+      </segment>
+    </unit>
+    <unit id="system.tenants.columns.enrichment">
+      <segment state="translated">
+        <source>Enrichment</source>
+        <target>Enrichissement</target>
       </segment>
     </unit>
     <unit id="system.tenants.columns.health">
@@ -8815,6 +11509,12 @@ dotnet/</target>
         <target>{count} paquets en attente de révision de quarantaine.</target>
       </segment>
     </unit>
+    <unit id="system.tenants.detail.reasonDetail.stats_frozen_non_active">
+      <segment state="translated">
+        <source>Statistics snapshot is frozen because the tenant is not active — it resumes once the tenant is reinstated.</source>
+        <target>L&apos;instantané de statistiques est figé parce que le locataire n&apos;est pas actif. Il reprendra une fois le locataire réactivé.</target>
+      </segment>
+    </unit>
     <unit id="system.tenants.detail.reasonDetail.stats_missing">
       <segment state="translated">
         <source>No statistics snapshot yet.</source>
@@ -8841,8 +11541,8 @@ dotnet/</target>
     </unit>
     <unit id="system.tenants.detail.reasonDetail.suspended">
       <segment state="translated">
-        <source>Tenant is suspended — writes are rejected.</source>
-        <target>Locataire suspendu — les écritures sont refusées.</target>
+        <source>Tenant is suspended — all access is refused (protocol, management API, and login).</source>
+        <target>Locataire suspendu — tout accès est refusé (protocole, API de gestion et connexion).</target>
       </segment>
     </unit>
     <unit id="system.tenants.detail.sectionActivity">
@@ -8889,8 +11589,8 @@ dotnet/</target>
     </unit>
     <unit id="system.tenants.disableConfirm">
       <segment state="translated">
-        <source>Disable {slug}? Pushes and uploads will be refused until re-enabled. Existing data is preserved.</source>
-        <target>Désactiver {slug}? Les publications et téléversements seront refusés jusqu&apos;à la réactivation. Les données existantes sont préservées.</target>
+        <source>Disable {slug}? The tenant will be fully locked out — protocol access, downloads, the management API, and login — until re-enabled. Existing data is preserved.</source>
+        <target>Désactiver {slug}? Le locataire sera entièrement verrouillé — accès aux protocoles, téléchargements, API de gestion et connexion — jusqu&apos;à la réactivation. Les données existantes sont préservées.</target>
       </segment>
     </unit>
     <unit id="system.tenants.disableModalTitle">
@@ -8907,8 +11607,8 @@ dotnet/</target>
     </unit>
     <unit id="system.tenants.enableConfirm">
       <segment state="translated">
-        <source>Re-enable {slug}? Writes will resume immediately.</source>
-        <target>Réactiver {slug}? Les écritures reprendront immédiatement.</target>
+        <source>Re-enable {slug}? Protocol access, downloads, the management API, and login will resume immediately.</source>
+        <target>Réactiver {slug}? L&apos;accès aux protocoles, les téléchargements, l&apos;API de gestion et la connexion reprendront immédiatement.</target>
       </segment>
     </unit>
     <unit id="system.tenants.enableModalTitle">
@@ -8933,6 +11633,12 @@ dotnet/</target>
       <segment state="translated">
         <source>Packages pending quarantine review</source>
         <target>Paquets en attente de révision de quarantaine</target>
+      </segment>
+    </unit>
+    <unit id="system.tenants.health.reasons.stats_frozen_non_active">
+      <segment state="translated">
+        <source>Stats frozen (tenant not active)</source>
+        <target>Statistiques figées (locataire inactif)</target>
       </segment>
     </unit>
     <unit id="system.tenants.health.reasons.stats_missing">
@@ -9193,6 +11899,12 @@ dotnet/</target>
         <target>Verrouiller</target>
       </segment>
     </unit>
+    <unit id="system.userLookup.mfaEnabled">
+      <segment state="translated">
+        <source>MFA enabled</source>
+        <target>MFA activée</target>
+      </segment>
+    </unit>
     <unit id="system.userLookup.mustRotateSuffix">
       <segment state="translated">
         <source> · must rotate</source>
@@ -9407,6 +12119,12 @@ dotnet/</target>
       <segment state="translated">
         <source>push only</source>
         <target>écriture seule</target>
+      </segment>
+    </unit>
+    <unit id="tokenScopes.sbom">
+      <segment state="translated">
+        <source>SBOM upload</source>
+        <target>Téléversement SBOM</target>
       </segment>
     </unit>
     <unit id="upload.claimAndUpload">
@@ -9807,13 +12525,13 @@ dotnet/</target>
     </unit>
     <unit id="versionDetail.badges.licenseBlockedHelp">
       <segment state="translated">
-        <source>This license is on the org&apos;s license blocklist.</source>
+        <source>This licence is on the org&apos;s licence blocklist.</source>
         <target>Cette licence figure sur la liste de blocage de licences de l&apos;organisation.</target>
       </segment>
     </unit>
     <unit id="versionDetail.badges.licenseReviewHelp">
       <segment state="translated">
-        <source>This license is permitted with a condition. See the license policy page.</source>
+        <source>This licence is permitted with a condition. See the licence policy page.</source>
         <target>Cette licence est autorisée sous condition. Voir la page de politique de licences.</target>
       </segment>
     </unit>
@@ -9825,7 +12543,7 @@ dotnet/</target>
     </unit>
     <unit id="versionDetail.badges.licenseUnknownHelp">
       <segment state="translated">
-        <source>No license was extracted for this version.</source>
+        <source>No licence was extracted for this version.</source>
         <target>Aucune licence n&apos;a été extraite pour cette version.</target>
       </segment>
     </unit>
@@ -9892,7 +12610,7 @@ dotnet/</target>
     <unit id="versionDetail.badges.symbolsHelp">
       <segment state="translated">
         <source>This version ships a symbol package; {count} Portable PDB(s) are indexed and resolvable by debug-id from the symbol server.</source>
-        <target>Cette version fournit un paquet de symboles ; {count} PDB portable(s) sont indexés et résolubles par debug-id depuis le serveur de symboles.</target>
+        <target>Cette version fournit un paquet de symboles; {count} PDB portable(s) sont indexés et résolubles par debug-id depuis le serveur de symboles.</target>
       </segment>
     </unit>
     <unit id="versionDetail.badges.symbolsUnindexed">
@@ -9904,7 +12622,7 @@ dotnet/</target>
     <unit id="versionDetail.badges.symbolsUnindexedHelp">
       <segment state="translated">
         <source>A symbol package is stored for this version but no Portable PDB was indexed, so its PDBs do not resolve by debug-id. Native/Windows PDBs are not indexable; if the package does contain Portable PDBs, re-index the version.</source>
-        <target>Un paquet de symboles est stocké pour cette version mais aucun PDB portable n&apos;a été indexé ; ses PDB ne sont donc pas résolubles par debug-id. Les PDB natifs/Windows ne sont pas indexables ; si le paquet contient bien des PDB portables, réindexez la version.</target>
+        <target>Un paquet de symboles est stocké pour cette version mais aucun PDB portable n&apos;a été indexé; ses PDB ne sont donc pas résolubles par debug-id. Les PDB natifs/Windows ne sont pas indexables; si le paquet contient bien des PDB portables, réindexez la version.</target>
       </segment>
     </unit>
     <unit id="versionDetail.badges.verified">
@@ -9941,6 +12659,30 @@ dotnet/</target>
       <segment state="translated">
         <source>Unknown — no upstream version data to compare (hosted-only, air-gapped, or not yet refreshed).</source>
         <target>Inconnu — aucune donnée de version en amont à comparer (hébergé uniquement, air-gapped, ou pas encore actualisé).</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.blastRadius.help">
+      <segment state="translated">
+        <source>The latest version of each application whose SBOM lists this package. Older releases are not counted — they are not what you ship, and their component scans are not kept current.</source>
+        <target>La dernière version de chaque application dont le SBOM liste ce paquet. Les versions antérieures ne sont pas comptées : elles ne sont pas ce que vous livrez, et leurs analyses de composants ne sont pas tenues à jour.</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.blastRadius.more">
+      <segment state="translated">
+        <source>and {count} more</source>
+        <target>et {count} de plus</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.blastRadius.ships">
+      <segment state="translated">
+        <source>ships {version}</source>
+        <target>livre {version}</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.blastRadius.summary">
+      <segment state="translated">
+        <source>{count, plural, one {# application ships this} other {# applications ship this}}</source>
+        <target>{count, plural, one {# application livre ce paquet} other {# applications livrent ce paquet}}</target>
       </segment>
     </unit>
     <unit id="versionDetail.blockDisabledTitle">
@@ -9981,7 +12723,7 @@ dotnet/</target>
     </unit>
     <unit id="versionDetail.columns.license">
       <segment state="translated">
-        <source>License</source>
+        <source>Licence</source>
         <target>Licence</target>
       </segment>
     </unit>
@@ -10209,13 +12951,13 @@ dotnet/</target>
     </unit>
     <unit id="versionDetail.pillars.license">
       <segment state="translated">
-        <source>License</source>
+        <source>Licence</source>
         <target>Licence</target>
       </segment>
     </unit>
     <unit id="versionDetail.pillars.licenseBlocked">
       <segment state="translated">
-        <source>Blocked license</source>
+        <source>Blocked licence</source>
         <target>Licence bloquée</target>
       </segment>
     </unit>
@@ -10329,8 +13071,8 @@ dotnet/</target>
     </unit>
     <unit id="versionDetail.status.noFeedHelp">
       <segment state="translated">
-        <source>OSV publishes no advisory feed for this ecosystem, so this artifact has never been screened against one. It is not known to be clean.</source>
-        <target>OSV ne publie aucun flux d&apos;avis pour cet écosystème ; cet artefact n&apos;a donc jamais été confronté à un tel flux. Il n&apos;est pas réputé sain.</target>
+        <source>OSV publishes no advisory feed for this ecosystem, so this artefact has never been screened against one. It is not known to be clean.</source>
+        <target>OSV ne publie aucun flux d&apos;avis pour cet écosystème; cet artefact n&apos;a donc jamais été confronté à un tel flux. Il n&apos;est pas réputé sain.</target>
       </segment>
     </unit>
     <unit id="versionDetail.status.unscanned">
@@ -10355,6 +13097,48 @@ dotnet/</target>
       <segment state="translated">
         <source>Never</source>
         <target>Jamais</target>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.ageOpen">
+      <segment state="translated">
+        <source>{days, plural, one {open # day} other {open # days}}</source>
+        <target>{days, plural, one {ouverte depuis # jour} other {ouverte depuis # jours}}</target>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.apps.help">
+      <segment state="translated">
+        <source>Applications whose latest version ships a component this advisory affects.</source>
+        <target>Applications dont la dernière version livre un composant visé par cet avis.</target>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.apps.noneHelp">
+      <segment state="translated">
+        <source>No application&apos;s latest version ships a component this advisory affects.</source>
+        <target>Aucune dernière version d&apos;application ne livre un composant visé par cet avis.</target>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.apps.unavailable">
+      <segment state="translated">
+        <source>—</source>
+        <target>—</target>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.apps.unavailableHelp">
+      <segment state="translated">
+        <source>The affected-application count could not be loaded. This is not a count of zero.</source>
+        <target>Le nombre d&apos;applications touchées n&apos;a pas pu être chargé. Ce n&apos;est pas un décompte nul.</target>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.columns.age">
+      <segment state="translated">
+        <source>Age</source>
+        <target>Âge</target>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.columns.apps">
+      <segment state="translated">
+        <source>Apps</source>
+        <target>Applis</target>
       </segment>
     </unit>
     <unit id="vulnerabilities.columns.checkedAt">
@@ -10417,6 +13201,30 @@ dotnet/</target>
         <target>Affectées</target>
       </segment>
     </unit>
+    <unit id="vulnerabilities.detail.affectedApps">
+      <segment state="translated">
+        <source>Applications affected</source>
+        <target>Applications touchées</target>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.detail.affectedAppsMore">
+      <segment state="translated">
+        <source>and {count} more</source>
+        <target>et {count} de plus</target>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.detail.affectedAppsNone">
+      <segment state="translated">
+        <source>No application&apos;s latest version ships a component this advisory affects.</source>
+        <target>Aucune dernière version d&apos;application ne livre un composant visé par cet avis.</target>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.detail.affectedAppsShips">
+      <segment state="translated">
+        <source>ships {version}</source>
+        <target>livre {version}</target>
+      </segment>
+    </unit>
     <unit id="vulnerabilities.detail.aliases">
       <segment state="translated">
         <source>Aliases</source>
@@ -10463,6 +13271,24 @@ dotnet/</target>
       <segment state="translated">
         <source>Known exploited</source>
         <target>Exploitation connue</target>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.detail.links.nvd">
+      <segment state="translated">
+        <source>NVD</source>
+        <target>NVD</target>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.detail.links.osvDev">
+      <segment state="translated">
+        <source>OSV.dev</source>
+        <target>OSV.dev</target>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.detail.links.view">
+      <segment state="translated">
+        <source>View</source>
+        <target>Consulter</target>
       </segment>
     </unit>
     <unit id="vulnerabilities.detail.loading">
@@ -10569,14 +13395,32 @@ dotnet/</target>
     </unit>
     <unit id="vulnerabilities.kevHelp">
       <segment state="translated">
-        <source>Listed in the CISA Known Exploited Vulnerabilities catalog — confirmed exploited in the wild, independent of CVSS score.</source>
+        <source>Listed in the CISA Known Exploited Vulnerabilities Catalog — confirmed exploited in the wild, independent of CVSS score.</source>
         <target>Répertoriée dans le catalogue KEV (Known Exploited Vulnerabilities) de la CISA — exploitation confirmée en conditions réelles, indépendamment du score CVSS.</target>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.kevRansomware">
+      <segment state="translated">
+        <source>KEV · Ransomware</source>
+        <target>KEV · Rançongiciel</target>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.kevRansomwareHelp">
+      <segment state="translated">
+        <source>Listed in the CISA Known Exploited Vulnerabilities Catalog with confirmed use in ransomware campaigns — the highest-urgency KEV entries.</source>
+        <target>Répertoriée dans le catalogue KEV de la CISA avec utilisation confirmée dans des campagnes de rançongiciel — les entrées KEV les plus urgentes.</target>
       </segment>
     </unit>
     <unit id="vulnerabilities.malicious">
       <segment state="translated">
         <source>MALICIOUS</source>
         <target>MALVEILLANT</target>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.noCvssTitle">
+      <segment state="translated">
+        <source>No CVSS score</source>
+        <target>Aucun score CVSS</target>
       </segment>
     </unit>
     <unit id="vulnerabilities.revoked">
@@ -10595,6 +13439,12 @@ dotnet/</target>
       <segment state="translated">
         <source>Revoked only</source>
         <target>Révoquées seulement</target>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.searchPlaceholder">
+      <segment state="translated">
+        <source>Search package, OSV ID, summary…</source>
+        <target>Rechercher un paquet, un identifiant OSV, un résumé…</target>
       </segment>
     </unit>
     <unit id="vulnerabilities.severityFilter.all">

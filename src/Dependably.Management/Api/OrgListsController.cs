@@ -85,6 +85,15 @@ public sealed class OrgListsController : OrgScopedControllerBase
             return _problems.ValidationErrorActionKey("purl_pattern", "error.allowlist.purlPatternRequired");
         }
 
+        // The same cap the blocklist and reserved-namespace arms already apply. Matching is exact
+        // string equality (AllowlistService), so this is not a ReDoS bound like the blocklist's —
+        // it stops an unbounded row being stored and re-rendered on every list read. SQLite ignores
+        // VARCHAR(n), so the column is not a backstop.
+        if (req.PurlPattern.Length > AllowlistPatternMaxLength)
+        {
+            return _problems.ValidationErrorActionKey("purl_pattern", "error.list.patternTooLong512");
+        }
+
         string orgId = CurrentTenantId();
         var entry = await _allowlist.AddAsync(orgId, req.PurlPattern, ct);
 

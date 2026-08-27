@@ -19,8 +19,7 @@ public sealed partial class PackageRepository
         //
         // The leading wildcard is therefore load-bearing, and no B-tree index can range-bound it
         // on either provider — see FullFilterClause for how the scan is bounded instead.
-        string? escapedSearch = query.Search?.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
-        string? searchPattern = escapedSearch is not null ? $"%{escapedSearch}%" : null;
+        string? searchPattern = LikePattern.Contains(query.Search);
 
         int total = await conn.ExecuteScalarAsync<int>(CountSql,
             new { orgId = query.OrgId, ecosystem = query.Ecosystem, searchPattern });
@@ -194,6 +193,17 @@ public sealed partial class PackageRepository
                            JOIN vulnerabilities v ON v.id = pvv.vuln_id
                            WHERE taa.org_id = p.org_id AND ca.ecosystem = p.ecosystem AND ca.name = p.purl_name
                              AND v.osv_id LIKE 'MAL-%')) as HasMaliciousVersion,
+                   (EXISTS (SELECT 1 FROM package_versions pvk
+                           JOIN package_version_vulns pvv ON pvv.package_version_id = pvk.id
+                           JOIN vulnerabilities v ON v.id = pvv.vuln_id
+                           WHERE pvk.package_id = p.id
+                             AND v.is_kev = 1)
+                    OR EXISTS (SELECT 1 FROM cache_artifact ca
+                           JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id
+                           JOIN package_version_vulns pvv ON pvv.cache_artifact_id = ca.id
+                           JOIN vulnerabilities v ON v.id = pvv.vuln_id
+                           WHERE taa.org_id = p.org_id AND ca.ecosystem = p.ecosystem AND ca.name = p.purl_name
+                             AND v.is_kev = 1)) as HasKevVersion,
                    CASE
                      WHEN p.upstream_latest_version IS NULL THEN 'unknown'
                      WHEN EXISTS (

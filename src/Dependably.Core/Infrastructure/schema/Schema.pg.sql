@@ -29,15 +29,22 @@
 -- collation and required a REINDEX. This is NOT applied in place to an existing database:
 -- ALTER COLUMN ... TYPE text COLLATE "C" rewrites the table and every index on it under
 -- ACCESS EXCLUSIVE — the same boot-stall hazard removed from the timestamp normalization
--- sweep — so it is an operator-run, maintenance-window change instead; see
--- docs/postgres-collate-migration.md for the copy-pasteable SQL.
+-- sweep — so it is an operator-run, maintenance-window change instead; the copy-pasteable
+-- SQL is in the COLLATE "C" migration runbook.
 
 CREATE TABLE IF NOT EXISTS orgs (
     id          TEXT PRIMARY KEY,
     slug        TEXT NOT NULL UNIQUE,
     deleted_at  TEXT
         CHECK (deleted_at IS NULL OR deleted_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
-    -- Tenant lifecycle gate consulted by ITenantStorageResolver before every registry write.
+    -- Tenant lifecycle gate. 'active' is the only state that admits a request: every
+    -- ITenantResolver selects this column into TenantContext.Status, and
+    -- TenantStatusEnforcementMiddleware refuses a non-active tenant before it reaches a
+    -- controller (protocol plane, management API, and login alike), while
+    -- ITenantStorageResolver.GetRegistryAsync applies the same check independently as defence
+    -- in depth. system_admin flips 'suspended' via PATCH /api/v1/system/tenants/{slug}/status;
+    -- 'archived'/'deleting' get the identical refusal but currently have no operator-facing
+    -- trigger in community.
     status      TEXT NOT NULL DEFAULT 'active'
                 CHECK (status IN ('active','suspended','archived','deleting')),
     -- Reserved for future multi-region routing. Fully dormant in community.
@@ -70,6 +77,11 @@ CREATE TABLE IF NOT EXISTS org_settings (
     keep_days           INTEGER,            -- GC: evict proxy blobs unused for this many days
     activity_retention_days INTEGER DEFAULT 90,  -- GC: delete activity rows older than this; NULL resolves to the ACTIVITY_RETENTION_DAYS instance default (90) so activity is bounded by default
     purge_unlisted_after_days INTEGER,      -- GC: hard-delete uploaded versions unlisted longer than this (opt-in; NULL = off)
+    -- GC: max project versions to retain per project (opt-in; NULL = unlimited). The GC ranks a
+    -- project's versions by created_at and deletes past the cap, never the is_latest row: a
+    -- project with no latest version answers 404 on every `latest` route and rolls up as
+    -- "Not scanned", so age alone must not be able to produce that state.
+    keep_project_versions INTEGER,
     license_enforcement_mode  TEXT    NOT NULL DEFAULT 'off',
     -- Publish-side licence gate, independent of license_enforcement_mode. See Schema.sql for
     -- the full rationale.
@@ -108,6 +120,44 @@ CREATE TABLE IF NOT EXISTS org_settings (
     block_kev                 TEXT    NOT NULL DEFAULT 'off' CHECK (block_kev IN ('off', 'warn', 'block')),
     -- EPSS exploitation-probability ceiling (0.0–1.0); NULL = policy off. See Schema.sql.
     max_epss_tolerance        REAL,
+    -- Narrower companion to block_kev: fires only on advisories CISA marks as used in
+    -- ransomware campaigns (vulnerabilities.kev_known_ransomware = 1). Independent of block_kev
+    -- rather than a mode on it, because the two dimensions are orthogonal and the useful policy
+    -- combines them: block_kev='warn' with this at 'block' means "tell me about every exploited
+    -- CVE, refuse the ransomware ones". A mode enum could not express that.
+    --
+    -- Fires ONLY on an explicit 1. Both 0 (CISA asserts no known use) and NULL (CISA made no
+    -- assertion — most pre-2022 entries) leave it alone. That is a deliberate departure from
+    -- fail-closed-on-unknown, and it is safe for one specific reason: block_kev is the
+    -- fail-closed superset and is one setting away. Blocking on "no assertion" would make this
+    -- arm identical to block_kev for older entries, which is exactly the breadth it exists to
+    -- avoid. An operator who wants the cautious posture already has it.
+    block_kev_ransomware      TEXT    NOT NULL DEFAULT 'off' CHECK (block_kev_ransomware IN ('off', 'warn', 'block')),
+    -- EPSS percentile ceiling (0.0–1.0), the rank sibling of max_epss_tolerance above. Blocked
+    -- when the maximum epss_percentile across a version's advisories exceeds this value.
+    -- NULL = policy off (default).
+    --
+    -- Deliberately a separate setting rather than a reinterpretation of max_epss_tolerance: the
+    -- two express different policies. A probability ceiling is absolute risk ("refuse anything
+    -- above a 10% chance of exploitation") and correctly blocks less when FIRST recalibrates
+    -- downward; a percentile ceiling is relative rank ("refuse the most exploitable 5%") and
+    -- holds its meaning across retrains but always blocks a proportion regardless of absolute
+    -- risk. Neither dominates, so the operator states which they mean. Both may be set; either
+    -- tripping is enough.
+    max_epss_percentile_tolerance REAL,
+    -- Enrichment-overlay gate: refuses artefacts whose advisories CISA Vulnrichment marks as
+    -- having active exploitation (ssvc_exploitation = 'active'). Distinct from block_kev: KEV is
+    -- a curated catalogue of ~1400 CVEs, while SSVC assesses far more and grades them, so this
+    -- catches exploitation CISA has evidence for but has not promoted to KEV.
+    --
+    -- Also refuses when the enrichment behind the assessment is past the operator's staleness
+    -- horizon: an enforcing arm that cannot answer denies, the same posture as provenance
+    -- enforcement with no trust anchor. Stale is deliberately distinct from never-enriched.
+    --
+    -- Populated only when the operator configures the optional vulnerability-tracker connection.
+    -- A deployment without one records no enrichment stamps at all, so no row is ever active OR
+    -- stale and this arm never fires however it is set — unaffected by construction.
+    block_ssvc_exploitation   TEXT    NOT NULL DEFAULT 'off' CHECK (block_ssvc_exploitation IN ('off', 'warn', 'block')),
     -- Install/lifecycle-script proxy gate: 'off' (default) / 'warn' / 'block'. See Schema.sql.
     block_install_scripts     TEXT    NOT NULL DEFAULT 'off' CHECK (block_install_scripts IN ('off', 'warn', 'block')),
     -- npm proxy-origin signature-verification gate: 'off' (default) / 'warn' / 'block'. See Schema.sql.
@@ -478,7 +528,76 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
         CHECK (kev_checked_at IS NULL OR kev_checked_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
     epss_score      REAL,
     epss_checked_at TEXT
-        CHECK (epss_checked_at IS NULL OR epss_checked_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$')
+        CHECK (epss_checked_at IS NULL OR epss_checked_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    -- Tracker enrichment overlay: the NIST NVD CVSS band and the CISA Vulnrichment SSVC
+    -- decision points, attached by CVE alias to advisories the OSV scan already resolved.
+    -- Sourced from the one instance-level vulnerability-tracker connection, so all of it is
+    -- NULL when that connection is unconfigured — which is the state a deployment that never
+    -- configures one stays in permanently.
+    --
+    -- nvd_severity deliberately admits 'NONE' where the OSV-derived `severity` column above does
+    -- not. NVD assigns NONE to a 0.0 base score, and refusing a value the source legitimately
+    -- publishes would fail the enrichment write rather than record the band it reports.
+    --
+    -- Each signal class carries TWO stamps, and the pair is load-bearing rather than redundant.
+    -- *_checked_at is when dependably last reached the tracker; *_asserted_at is the as-of the
+    -- tracker itself claims for the source behind that answer. A tracker whose NVD ingest broke
+    -- days ago still answers lookups cheerfully, so a local stamp alone would record stale data
+    -- as current and silently re-enable gate arms that should read unknown. Every staleness
+    -- question evaluates the OLDER of the pair.
+    nvd_severity    TEXT
+                    CHECK (nvd_severity IN ('CRITICAL','HIGH','MEDIUM','LOW','NONE')),
+    nvd_score       REAL,
+    nvd_checked_at  TEXT
+        CHECK (nvd_checked_at IS NULL OR nvd_checked_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    nvd_asserted_at TEXT
+        CHECK (nvd_asserted_at IS NULL OR nvd_asserted_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    ssvc_exploitation TEXT
+                    CHECK (ssvc_exploitation IN ('none','poc','active')),
+    ssvc_automatable TEXT
+                    CHECK (ssvc_automatable IN ('yes','no')),
+    ssvc_technical_impact TEXT
+                    CHECK (ssvc_technical_impact IN ('partial','total')),
+    ssvc_checked_at TEXT
+        CHECK (ssvc_checked_at IS NULL OR ssvc_checked_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    ssvc_asserted_at TEXT
+        CHECK (ssvc_asserted_at IS NULL OR ssvc_asserted_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    -- KEV catalogue context beyond membership, and the EPSS percentile. All of this arrives in
+    -- the same two feed responses is_kev/epss_score are already parsed from — it was previously
+    -- downloaded and discarded. No external service is involved: these are the operator's own
+    -- fetches of the public CISA and FIRST feeds, so they populate on every deployment.
+    --
+    -- kev_known_ransomware is TRI-STATE and the distinction is load-bearing. 1 = CISA marks the
+    -- entry 'Known'; 0 = CISA marks it 'Unknown', which is an assertion of no known use; NULL =
+    -- the entry carried no such field at all, or this advisory is not in KEV. A gate arm reading
+    -- this must not collapse 0 and NULL: one is a source assertion, the other is the absence of
+    -- one.
+    --
+    -- The two KEV dates are calendar dates ('2021-11-03'), not instants, which is why they are
+    -- named *_date rather than *_at: the canonical-UTC timestamp CHECK that every *_at column
+    -- carries would reject the very format the feed publishes.
+    kev_known_ransomware INTEGER
+                    CHECK (kev_known_ransomware IN (0,1)),
+    kev_date_added  TEXT,
+    kev_due_date    TEXT,
+    -- FIRST.org publishes a percentile alongside every EPSS probability. The percentile is a rank
+    -- and is stable across model retrains, where the raw probability is a model output that
+    -- shifts — so a threshold expressed against this column keeps meaning what an operator meant.
+    epss_percentile REAL
+                    CHECK (epss_percentile IS NULL OR (epss_percentile >= 0.0 AND epss_percentile <= 1.0)),
+    -- Three more KEV catalogue fields, same posture as kev_known_ransomware/kev_date_added/
+    -- kev_due_date above: already present in the same feed response, previously discarded.
+    -- kev_required_action is CISA's prescribed remediation prose. kev_notes carries vendor
+    -- advisory/patch links, free text. Both stay NULL when the catalogue entry carries no such
+    -- field, distinguishable from an entry that supplies the field as empty text.
+    kev_required_action TEXT,
+    -- kev_cwes is a JSON array of CWE classification ids, stored as TEXT in the same shape as
+    -- the `aliases` column above rather than as opaque prose, so a future consumer can query
+    -- into it (json_each on SQLite, jsonb functions on Postgres). NULL means the catalogue entry
+    -- carried no cwes array at all; '[]' means the entry explicitly recorded zero
+    -- classifications — a different fact from never having been asked.
+    kev_cwes        TEXT,
+    kev_notes       TEXT
 );
 
 -- Global shared proxy-cache index. See Schema.sql for the full rationale.
@@ -595,6 +714,14 @@ CREATE TABLE IF NOT EXISTS package_version_vulns (
     vuln_id             TEXT NOT NULL REFERENCES vulnerabilities(id) ON DELETE CASCADE,
     checked_at          TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
         CHECK (checked_at IS NULL OR checked_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    -- Durable first-observation instant: set once, at insert, and never moved by a later
+    -- upsert/re-scan. On this table checked_at is stamped identically at insert and, because
+    -- the link INSERT's conflict clause is ON CONFLICT DO NOTHING, is equally frozen by a
+    -- re-link — unlike sbom_component_vulns.checked_at, whose upsert genuinely refreshes it on
+    -- every re-scan. See Schema.sql for why the upgrade path adds this nullable and backfills
+    -- from checked_at.
+    first_seen_at       TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
+        CHECK (first_seen_at IS NULL OR first_seen_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
     -- Polymorphic metadata owner: NULL for the package_version arm; set to the
     -- cache_artifact row for proxy-origin metadata. owner_kind discriminates which FK
     -- is authoritative.
@@ -724,7 +851,7 @@ CREATE INDEX IF NOT EXISTS idx_quarantine_decided_by ON quarantine(decided_by);
 CREATE TABLE IF NOT EXISTS alert (
     id           TEXT PRIMARY KEY,
     org_id       TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-    type         TEXT NOT NULL CHECK (type IN ('quarantine_new', 'vuln_severity')),
+    type         TEXT NOT NULL CHECK (type IN ('quarantine_new', 'vuln_severity', 'sbom_policy_violation', 'vuln_kev')),
     severity     TEXT,
     source_ref   TEXT NOT NULL,
     ecosystem    TEXT,
@@ -775,6 +902,8 @@ CREATE TABLE IF NOT EXISTS alert_settings (
     org_id                     TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
     quarantine_alerts_enabled INTEGER NOT NULL DEFAULT 1,
     vuln_alerts_enabled       INTEGER NOT NULL DEFAULT 1,
+    -- Raises an alert on an SBOM policy violation. Defaults on, like the other gates.
+    sbom_policy_alerts_enabled INTEGER NOT NULL DEFAULT 1,
     vuln_min_severity         TEXT NOT NULL DEFAULT 'HIGH' CHECK (vuln_min_severity IN ('LOW', 'MEDIUM', 'HIGH', 'CRITICAL')),
     slack_enabled              INTEGER NOT NULL DEFAULT 0,
     slack_webhook_url          TEXT,
@@ -1634,6 +1763,29 @@ CREATE TABLE IF NOT EXISTS org_stats_snapshot (
     duration_ms BIGINT NOT NULL DEFAULT 0
 );
 
+-- Append-only daily trend history, one row per org per calendar day (UTC, StatsRefreshService's
+-- clock). The same pass that overwrites org_stats_snapshot upserts this row for the current day —
+-- last write of the day wins, so a raised STATS_REFRESH_INTERVAL_SECONDS still leaves exactly one
+-- row per org per day. trend_json carries a small subset of what org_stats_snapshot holds (the
+-- dashboard's headline trend figures), not the full OrgStats payload, so a year of daily rows per
+-- org stays bounded and immune to OrgStats's own field growth. Bounded by RetentionService per
+-- STATS_HISTORY_RETENTION_DAYS (default 365) — see RetentionService's stats-history sweep.
+-- Observational only: nothing reads this table for gating, retention, or policy decisions — its
+-- only consumers are the /api/v1/stats trend series and the Dashboard sparklines/deltas.
+CREATE TABLE IF NOT EXISTS org_stats_history (
+    org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    day         TEXT NOT NULL
+        CHECK (day ~ '^\d{4}-\d{2}-\d{2}$'),
+    trend_json  TEXT NOT NULL,
+    computed_at TEXT NOT NULL
+        CHECK (computed_at IS NULL OR computed_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    PRIMARY KEY (org_id, day)
+);
+-- Serves the cross-tenant retention sweep, which filters on day alone with no org_id (see
+-- RetentionService.PruneStatsHistoryAsync) — without this index that sweep is a full-table scan,
+-- the same reasoning as idx_audit_event_occurred_at.
+CREATE INDEX IF NOT EXISTS idx_org_stats_history_day ON org_stats_history (day);
+
 -- npm dist-tag registry. One row per (package, tag); tag names are freeform strings
 -- npm sends on `npm publish --tag <tag>`. UNIQUE(package_id, tag) enforces one version
 -- per tag per package. org_id is denormalized from packages so org_id-scoped queries
@@ -1772,6 +1924,260 @@ CREATE TABLE IF NOT EXISTS instance_lock (
     acquired_at  TEXT NOT NULL
         CHECK (acquired_at IS NULL OR acquired_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$')
 );
+
+-- ── Vulnerability-tracker connection health ─────────────────────────────────────
+-- Observed health of the one instance-level vulnerability-tracker connection (the
+-- vuln_tracker_* keys in instance_settings). Instance-global, like instance_settings itself:
+-- there is exactly one connection per deployment, so its health is one fact rather than one per
+-- tenant, and neither table carries an org_id.
+--
+-- Health is observation; instance_settings is intent. Nothing here is ever written back to the
+-- vuln_tracker_* keys — a failing tracker never switches itself off, for the same reason a
+-- failing SMTP relay never disables a tenant's email channel (see alert_settings.email_last_*).
+-- Configuration is what the operator asked for, health is what happened, and collapsing the two
+-- turns one outage into a configuration change nobody made.
+--
+-- Counts only, never purls. Both tables are read by operator surfaces that in multi-tenant mode
+-- render in the system_admin SPA, which must never show tenant business data. A purl names a
+-- package some tenant holds, so only aggregates cross that boundary — the same rule
+-- RelayHealthAggregator states as "affected-tenant count, never a tenant list".
+-- personal-data: excluded — no actor, no address, no tenant identifier; counts and instants only.
+CREATE TABLE IF NOT EXISTS vuln_tracker_health (
+    -- Fixed sentinel 'primary' so the table holds at most one row.
+    id                   TEXT PRIMARY KEY,
+    -- The most recent lookup attempt, reached or not. Always advances.
+    last_attempt_at      TEXT COLLATE "C" NOT NULL
+        CHECK (last_attempt_at IS NULL OR last_attempt_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    -- The most recent attempt that was actually reached (2xx with a parseable body). NULL until
+    -- one has been. Deliberately separate from last_attempt_at: an operator reading "last
+    -- contact 2 minutes ago" off an attempt that returned 401 would be reading a failure as
+    -- success.
+    last_success_at      TEXT
+        CHECK (last_success_at IS NULL OR last_success_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    -- Outcome of the most recent attempt.
+    last_status          TEXT NOT NULL
+                         CHECK (last_status IN ('ok','failed')),
+    -- Why the most recent attempt did not reach, normalized from EnrichmentUnreachedReason;
+    -- 'none' when it did reach. A reason this schema does not know is normalized to 'unknown'
+    -- rather than written raw, so a client-side enum addition cannot fail the write and silently
+    -- stop health being recorded at all.
+    last_reason          TEXT NOT NULL DEFAULT 'none'
+                         CHECK (last_reason IN ('none','notConfigured','emptyRequest','batchTooLarge','transport','timeout','unauthorized','rateLimited','serverError','refused','malformedResponse','exception','unknown')),
+    -- Size of the most recent reached lookup. Counts, never identities.
+    last_purl_count      INTEGER NOT NULL DEFAULT 0,
+    last_advisory_count  INTEGER NOT NULL DEFAULT 0,
+    -- Consecutive failed attempts, reset to 0 by any reached attempt.
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    -- When the current failure streak began; NULL whenever the last attempt was reached. Written
+    -- with COALESCE so it records the FIRST failure of the streak rather than the latest — an
+    -- operator needs "failing for six hours", which a last-failure stamp cannot express.
+    failing_since        TEXT
+        CHECK (failing_since IS NULL OR failing_since ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    -- The producer's own asserted as-of per signal class, from the last reached lookup that
+    -- carried one. Load-bearing alongside last_success_at rather than redundant with it: a
+    -- tracker whose NVD ingest broke days ago still answers lookups cheerfully, so the local
+    -- stamp alone would report stale data as current. Every staleness question evaluates the
+    -- older of the pair.
+    nvd_asserted_at      TEXT
+        CHECK (nvd_asserted_at IS NULL OR nvd_asserted_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    ssvc_asserted_at     TEXT
+        CHECK (ssvc_asserted_at IS NULL OR ssvc_asserted_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$')
+);
+
+-- Bounded log of recent tracker lookups, newest-first, for the operator's connection panel.
+-- Operational telemetry, NOT audit: audit_log records what an actor did to the system, and a
+-- background pass's HTTP outcome is neither an actor's action nor a tenant's. The configuration
+-- change that created this connection is audited (system_admin.vuln_tracker_config_updated);
+-- the fetches it produces are not, and are never dual-written to audit_log or activity.
+--
+-- Ring-bounded on write by VulnTrackerFetchLogRepository (newest N kept) rather than swept by a
+-- retention job, so the bound holds without a background service and cannot drift from the reader.
+-- personal-data: excluded — see vuln_tracker_health above.
+CREATE TABLE IF NOT EXISTS vuln_tracker_fetch_log (
+    id              TEXT PRIMARY KEY,
+    started_at      TEXT COLLATE "C" NOT NULL
+        CHECK (started_at IS NULL OR started_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    -- 'scan' for a lookup the enrichment pass made, 'probe' for an operator-initiated connection
+    -- test. Kept apart because they answer different questions: a scan row is evidence about the
+    -- pass the gate arms depend on, while a probe is the operator asking whether the connection
+    -- works right now. Only 'scan' rows move vuln_tracker_health.
+    kind            TEXT NOT NULL DEFAULT 'scan'
+                    CHECK (kind IN ('scan','probe')),
+    outcome         TEXT NOT NULL
+                    CHECK (outcome IN ('ok','failed')),
+    reason          TEXT NOT NULL DEFAULT 'none'
+                    CHECK (reason IN ('none','notConfigured','emptyRequest','batchTooLarge','transport','timeout','unauthorized','rateLimited','serverError','refused','malformedResponse','exception','unknown')),
+    purl_count      INTEGER NOT NULL DEFAULT 0,
+    advisory_count  INTEGER NOT NULL DEFAULT 0,
+    duration_ms     BIGINT NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_vuln_tracker_fetch_log_started_at
+    ON vuln_tracker_fetch_log(started_at DESC);
+
+-- ── Projects plane ──────────────────────────────────────────────────────────────
+-- Applications a team builds, the SBOM/VEX/SARIF documents uploaded about them, and everything
+-- derived from those documents. See Schema.sql for the full rationale.
+
+-- An application or service, plus the collections that group several of them. Name uniqueness
+-- is two partial unique indexes because both providers treat NULLs as distinct.
+-- personal-data: excluded — created_by is an authorship-provenance stamp on an org-owned row.
+CREATE TABLE IF NOT EXISTS projects (
+    id          TEXT PRIMARY KEY,
+    org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    parent_id   TEXT REFERENCES projects(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL DEFAULT 'project' CHECK (kind IN ('project','collection')),
+    name        TEXT NOT NULL,
+    classifier  TEXT NOT NULL DEFAULT 'application',
+    description TEXT,
+    created_by  TEXT,
+    created_at  TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
+        CHECK (created_at IS NULL OR created_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$')
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_org_root_name
+    ON projects (org_id, name) WHERE parent_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_org_parent_name
+    ON projects (org_id, parent_id, name) WHERE parent_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_projects_org ON projects(org_id);
+CREATE INDEX IF NOT EXISTS idx_projects_parent ON projects(parent_id);
+
+-- One release of a project. is_latest is the only notion of "latest"; the partial unique index
+-- makes a double-latest impossible at commit. policy_status NULL = never evaluated.
+-- personal-data: excluded — created_by is an authorship-provenance stamp on an org-owned row.
+CREATE TABLE IF NOT EXISTS project_versions (
+    id            TEXT PRIMARY KEY,
+    org_id        TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    version       TEXT NOT NULL,
+    is_latest     INTEGER NOT NULL DEFAULT 0,
+    policy_status TEXT CHECK (policy_status IN ('pass','warn','violation')),
+    created_by    TEXT,
+    created_at    TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
+        CHECK (created_at IS NULL OR created_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    UNIQUE (project_id, version)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_project_versions_latest
+    ON project_versions (project_id) WHERE is_latest = 1;
+CREATE INDEX IF NOT EXISTS idx_project_versions_org ON project_versions(org_id);
+
+-- Metadata for one uploaded SBOM/VEX/SARIF original, stored verbatim in the registry blob
+-- tier. Latest-wins per (project_version_id, doc_type); blob_key is the sole reference that
+-- keeps the blob out of the orphan sweep.
+-- personal-data: excluded — uploaded_by is an authorship-provenance stamp on an org-owned row.
+CREATE TABLE IF NOT EXISTS project_documents (
+    id                 TEXT PRIMARY KEY,
+    org_id             TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    project_version_id TEXT NOT NULL REFERENCES project_versions(id) ON DELETE CASCADE,
+    doc_type           TEXT NOT NULL CHECK (doc_type IN ('sbom','vex','sarif')),
+    format             TEXT NOT NULL CHECK (format IN ('cyclonedx-json','openvex-json','sarif-json')),
+    spec_version       TEXT,
+    tool_name          TEXT,
+    tool_version       TEXT,
+    sha256             TEXT NOT NULL,
+    size_bytes         INTEGER NOT NULL DEFAULT 0,
+    blob_key           TEXT NOT NULL,
+    uploaded_by        TEXT,
+    uploaded_at        TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
+        CHECK (uploaded_at IS NULL OR uploaded_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    UNIQUE (project_version_id, doc_type)
+);
+CREATE INDEX IF NOT EXISTS idx_project_documents_org ON project_documents(org_id);
+
+-- One component of one project version's SBOM, with the parsed purl triple beside the verbatim
+-- purl. sbom_scope is raw CycloneDX, drives no UI ranking, and is read by policy for its
+-- 'excluded' value alone; dependency_scope is the authoritative dev/prod signal. See Schema.sql.
+CREATE TABLE IF NOT EXISTS sbom_components (
+    id                 TEXT PRIMARY KEY,
+    org_id             TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    project_version_id TEXT NOT NULL REFERENCES project_versions(id) ON DELETE CASCADE,
+    purl               TEXT,
+    ecosystem          TEXT,
+    purl_name          TEXT,
+    version            TEXT,
+    name               TEXT NOT NULL,
+    component_type     TEXT,
+    sbom_scope         TEXT CHECK (sbom_scope IN ('required','optional','excluded')),
+    dependency_scope   TEXT NOT NULL DEFAULT 'unknown'
+                       CHECK (dependency_scope IN ('dev','runtime','unknown')),
+    dependency_kind    TEXT CHECK (dependency_kind IN ('direct','transitive','root','graph-unknown')),
+    dependency_path    TEXT,
+    license_spdx       TEXT,
+    vuln_checked_at    TEXT
+        CHECK (vuln_checked_at IS NULL OR vuln_checked_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    created_at         TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
+        CHECK (created_at IS NULL OR created_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$')
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sbom_components_pv_purl
+    ON sbom_components (project_version_id, purl) WHERE purl IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_sbom_components_pv ON sbom_components(project_version_id);
+CREATE INDEX IF NOT EXISTS idx_sbom_components_org_eco_name
+    ON sbom_components(org_id, ecosystem, purl_name);
+CREATE INDEX IF NOT EXISTS idx_sbom_components_scan
+    ON sbom_components(vuln_checked_at) WHERE ecosystem IS NOT NULL;
+-- Covers the nightly policy re-evaluation's DISTINCT over the (org, version) pair. See Schema.sql.
+CREATE INDEX IF NOT EXISTS idx_sbom_components_org_pv
+    ON sbom_components(org_id, project_version_id);
+
+-- Scan-result link from an SBOM component to the global vulnerabilities table. A table of its
+-- own rather than a third owner_kind arm on package_version_vulns. See Schema.sql.
+CREATE TABLE IF NOT EXISTS sbom_component_vulns (
+    id           TEXT PRIMARY KEY,
+    component_id TEXT NOT NULL REFERENCES sbom_components(id) ON DELETE CASCADE,
+    vuln_id      TEXT NOT NULL REFERENCES vulnerabilities(id) ON DELETE CASCADE,
+    checked_at   TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
+        CHECK (checked_at IS NULL OR checked_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    -- Durable first-observation instant: set once, at insert, and never moved by the upsert's
+    -- checked_at refresh on re-scan. See package_version_vulns.first_seen_at above.
+    first_seen_at TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
+        CHECK (first_seen_at IS NULL OR first_seen_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    UNIQUE (component_id, vuln_id)
+);
+CREATE INDEX IF NOT EXISTS idx_sbom_component_vulns_vuln ON sbom_component_vulns(vuln_id);
+
+-- The single (product, vulnerability) statement row: VEX arm and reachability arm side by side,
+-- keyed on the version-less purl. vuln_key deliberately carries no FK. See Schema.sql.
+CREATE TABLE IF NOT EXISTS project_vuln_analysis (
+    id                 TEXT PRIMARY KEY,
+    org_id             TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    project_version_id TEXT NOT NULL REFERENCES project_versions(id) ON DELETE CASCADE,
+    purl_key           TEXT NOT NULL,
+    vuln_key           TEXT NOT NULL,
+    vex_state          TEXT CHECK (vex_state IN ('in_triage','exploitable','resolved',
+                           'resolved_with_pedigree','false_positive','not_affected')),
+    vex_justification  TEXT,
+    vex_response       TEXT,
+    vex_detail         TEXT,
+    vex_source         TEXT CHECK (vex_source IN ('upload','manual')),
+    reachability       TEXT CHECK (reachability IN ('reachable','not-observed','unknown','imported-not-called')),
+    confidence         TEXT CHECK (confidence IN ('high','medium','low')),
+    sarif_suppressed   INTEGER NOT NULL DEFAULT 0,
+    security_severity  REAL,
+    severity_origin    TEXT CHECK (severity_origin IN ('asserted','representative')),
+    fingerprint        TEXT,
+    updated_by         TEXT,
+    updated_at         TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
+        CHECK (updated_at IS NULL OR updated_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    UNIQUE (project_version_id, purl_key, vuln_key)
+);
+CREATE INDEX IF NOT EXISTS idx_project_vuln_analysis_org ON project_vuln_analysis(org_id);
+
+-- Materialized policy violations for a project version — which arm fired, on which component,
+-- over which advisory or licence. Nothing here denies a serve. See Schema.sql.
+CREATE TABLE IF NOT EXISTS sbom_policy_findings (
+    id                 TEXT PRIMARY KEY,
+    org_id             TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    project_version_id TEXT NOT NULL REFERENCES project_versions(id) ON DELETE CASCADE,
+    component_id       TEXT NOT NULL REFERENCES sbom_components(id) ON DELETE CASCADE,
+    arm                TEXT NOT NULL
+                       CHECK (arm IN ('malicious','kev','epss','cvss','license')),
+    vuln_key           TEXT,
+    license_spdx       TEXT,
+    detail             TEXT,
+    created_at         TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
+        CHECK (created_at IS NULL OR created_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$')
+);
+CREATE INDEX IF NOT EXISTS idx_sbom_policy_findings_pv ON sbom_policy_findings(project_version_id);
+CREATE INDEX IF NOT EXISTS idx_sbom_policy_findings_org ON sbom_policy_findings(org_id);
+CREATE INDEX IF NOT EXISTS idx_sbom_policy_findings_component ON sbom_policy_findings(component_id);
 
 -- NOTE: SchemaInitializer also runs ALTER TABLE statements for the columns above.
 -- Those are no-ops on fresh installs (IF NOT EXISTS). They exist solely to add the

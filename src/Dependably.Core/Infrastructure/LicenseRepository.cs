@@ -535,68 +535,103 @@ public sealed class LicenseRepository
             return LicensePolicyVerdict.Clean;
         }
 
-        var allowlist = await GetAllowlistAsync(orgId, ct);
-        var blocklist = await GetBlocklistAsync(orgId, ct);
-        var allowSet = allowlist
-            .Where(e => e.Disposition != LicenseDispositions.Conditional)
-            .Select(e => _normalizer.Normalize(e.LicenseSpdx))
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var conditionalSet = allowlist
-            .Where(e => e.Disposition == LicenseDispositions.Conditional)
-            .Select(e => _normalizer.Normalize(e.LicenseSpdx))
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var blockSet = blocklist.Select(e => _normalizer.Normalize(e.LicenseSpdx))
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var policy = new LicenseLeafPolicy(
+            _normalizer, mode,
+            await GetAllowlistAsync(orgId, ct),
+            await GetBlocklistAsync(orgId, ct));
 
-        bool LeafSatisfied(string leaf)
+        var conditionalLeaves = new List<string>();
+        foreach (string entry in spdxIds)
+        {
+            var expr = SpdxLicenseExpression.Parse(entry);
+            if (!expr.Evaluate(policy.LeafSatisfied))
+            {
+                string offending = expr.Leaves().FirstOrDefault(leaf => !policy.LeafSatisfied(leaf)) ?? entry;
+                return LicensePolicyVerdict.Blocked(_normalizer.Normalize(offending));
+            }
+
+            policy.CollectLoadBearingConditionals(expr, conditionalLeaves);
+        }
+
+        return conditionalLeaves.Count == 0
+            ? LicensePolicyVerdict.Clean
+            : LicensePolicyVerdict.Conditional(conditionalLeaves);
+    }
+
+    /// <summary>
+    /// One org's licence policy, resolved into the three normalized sets a verdict is decided
+    /// from. Lifting it out of <see cref="CheckPolicyAsync"/> is what lets the expression walk
+    /// read as a walk: the set-building, the per-leaf verdict and the load-bearing test are three
+    /// separate rules that the closure form interleaved.
+    /// </summary>
+    private sealed class LicenseLeafPolicy
+    {
+        private readonly LicenseNormalizer _normalizer;
+        private readonly string _mode;
+        private readonly HashSet<string> _allowed;
+        private readonly HashSet<string> _conditional;
+        private readonly HashSet<string> _blocked;
+
+        public LicenseLeafPolicy(
+            LicenseNormalizer normalizer,
+            string mode,
+            IReadOnlyList<LicenseAllowlistEntry> allowlist,
+            IReadOnlyList<LicenseBlocklistEntry> blocklist)
+        {
+            _normalizer = normalizer;
+            _mode = mode;
+            _allowed = Normalized(
+                normalizer, allowlist.Where(e => e.Disposition != LicenseDispositions.Conditional).Select(e => e.LicenseSpdx));
+            _conditional = Normalized(
+                normalizer, allowlist.Where(e => e.Disposition == LicenseDispositions.Conditional).Select(e => e.LicenseSpdx));
+            _blocked = Normalized(normalizer, blocklist.Select(e => e.LicenseSpdx));
+        }
+
+        public bool LeafSatisfied(string leaf)
         {
             string norm = _normalizer.Normalize(leaf);
-            if (blockSet.Contains(norm))
+            if (_blocked.Contains(norm))
             {
                 // Blocklist wins over both non-denied postures, in either mode.
                 return false;
             }
-            return mode != "block" || allowSet.Contains(norm) || conditionalSet.Contains(norm);
+
+            return _mode != "block" || _allowed.Contains(norm) || _conditional.Contains(norm);
+        }
+
+        /// <summary>
+        /// Appends the conditional leaves this expression genuinely relies on. Only leaves that
+        /// actually carried the expression are reported: a satisfied OR whose conditional branch
+        /// was not the one that satisfied it (say "MIT OR LGPL-3.0" with MIT plainly allowed)
+        /// raises nothing — the artifact is usable under the unconditional branch, so there is no
+        /// condition for anyone to review.
+        /// </summary>
+        public void CollectLoadBearingConditionals(SpdxLicenseExpression expr, List<string> into)
+        {
+            foreach (string leaf in expr.Leaves())
+            {
+                string norm = _normalizer.Normalize(leaf);
+                if (_conditional.Contains(norm)
+                    && !into.Contains(norm, StringComparer.OrdinalIgnoreCase)
+                    && IsLoadBearing(expr, norm))
+                {
+                    into.Add(norm);
+                }
+            }
         }
 
         // True when removing this leaf from the satisfied set would leave the expression
         // unsatisfied — i.e. the artifact genuinely relies on the conditional licence. Under an
         // AND every leaf is load-bearing; under an OR a conditional leaf only matters when no
         // unconditional sibling already satisfies the expression on its own.
-        bool LeafIsLoadBearing(SpdxLicenseExpression expr, string normalizedLeaf) =>
+        private bool IsLoadBearing(SpdxLicenseExpression expr, string normalizedLeaf) =>
             !expr.Evaluate(leaf =>
                 !_normalizer.Normalize(leaf).Equals(normalizedLeaf, StringComparison.OrdinalIgnoreCase)
                 && LeafSatisfied(leaf));
 
-        var conditionalLeaves = new List<string>();
-        foreach (string entry in spdxIds)
-        {
-            var expr = SpdxLicenseExpression.Parse(entry);
-            if (!expr.Evaluate(LeafSatisfied))
-            {
-                string offending = expr.Leaves().FirstOrDefault(leaf => !LeafSatisfied(leaf)) ?? entry;
-                return LicensePolicyVerdict.Blocked(_normalizer.Normalize(offending));
-            }
-
-            // Only leaves that actually carried the expression are reported. A satisfied OR whose
-            // conditional branch was not the one that satisfied it (say "MIT OR LGPL-3.0" with MIT
-            // plainly allowed) raises nothing — the artifact is usable under the unconditional
-            // branch, so there is no condition for anyone to review.
-            foreach (string leaf in expr.Leaves())
-            {
-                string norm = _normalizer.Normalize(leaf);
-                if (conditionalSet.Contains(norm)
-                    && !conditionalLeaves.Contains(norm, StringComparer.OrdinalIgnoreCase)
-                    && LeafIsLoadBearing(expr, norm))
-                {
-                    conditionalLeaves.Add(norm);
-                }
-            }
-        }
-
-        return conditionalLeaves.Count == 0
-            ? LicensePolicyVerdict.Clean
-            : LicensePolicyVerdict.Conditional(conditionalLeaves);
+        private static HashSet<string> Normalized(
+            LicenseNormalizer normalizer, IEnumerable<string> spdxIds) =>
+            spdxIds.Select(normalizer.Normalize).ToHashSet(StringComparer.OrdinalIgnoreCase);
     }
 
 }

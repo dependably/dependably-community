@@ -4,7 +4,7 @@
   import ErrorBanner from '../lib/ErrorBanner.svelte'
   import { currentOrg, navigate } from '../lib/store.js'
   import { reportPageLoad } from '../lib/pageLoad.js'
-  import { formatDateShort } from '../lib/format.js'
+  import { formatDateShort, formatNumber } from '../lib/format.js'
   import DataTable from '../lib/DataTable.svelte'
   import Pagination from '../lib/Pagination.svelte'
   import SearchInput from '../lib/SearchInput.svelte'
@@ -165,11 +165,14 @@
             {$t('packages.malicious.label')}
           </span>
         {/if}
+        {#if pkg.hasKevVersion}
+          <span class="badge kev ml-1" title={$t('packages.kev.help')}>{$t('packages.kev.label')}</span>
+        {/if}
       </td>
       <td class="nowrap"><span class="badge {pkg.ecosystem}">{ECO_LABEL[pkg.ecosystem] ?? pkg.ecosystem}</span></td>
       <td class="mono purl-cell" title={fullPurl(pkg)}>{fullPurl(pkg)}</td>
       <td class="nowrap text-right text-muted">{pkg.versionCount ?? 0}</td>
-      <td class="nowrap text-right text-muted">{(pkg.totalDownloads ?? 0).toLocaleString()}</td>
+      <td class="nowrap text-right text-muted">{$formatNumber(pkg.totalDownloads)}</td>
       <td class="nowrap text-center latest-cell">
         <!-- Instant hover bubble (no native `title` delay) reveals the upstream latest
              version number; mirrors InfoTip.svelte's bubble. -->

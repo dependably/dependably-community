@@ -2,6 +2,18 @@
   "banner": {
     "dismiss": "Fermer"
   },
+  "licenses": {
+    "title": "Avis de logiciels libres",
+    "devStub": "Les avis sont générés lors de la construction Docker. Ils ne sont pas disponibles en exécution locale avec :",
+    "meta": "{count, plural, one {# composant} other {# composants}}",
+    "metaGenerated": "{count, plural, one {# composant} other {# composants}} · généré le {date}",
+    "columns": {
+      "package": "Paquet",
+      "version": "Version",
+      "license": "Licence",
+      "copyright": "Droit d'auteur"
+    }
+  },
   "nav": {
     "brand": "Dependably",
     "packages": "Paquets",
@@ -29,14 +41,17 @@
     "expand": "Développer la barre latérale",
     "openMenu": "Ouvrir le menu",
     "notifications": "Notifications",
-    "risk": "Risque"
+    "risk": "Risque",
+    "projects": "Projets"
   },
   "globalSearch": {
-    "placeholder": "Rechercher des paquets",
+    "placeholder": "Rechercher des paquets, des projets, des vulnérabilités",
     "loading": "Recherche…",
     "empty": "Aucun résultat",
     "groups": {
-      "packages": "Paquets"
+      "packages": "Paquets",
+      "projects": "Projets",
+      "vulnerabilities": "Vulnérabilités"
     }
   },
   "alerts": {
@@ -51,6 +66,7 @@
   },
   "common": {
     "actions": {
+      "close": "Fermer",
       "save": "Enregistrer",
       "saving": "Enregistrement…",
       "cancel": "Annuler",
@@ -191,6 +207,10 @@
       "label": "Malveillant",
       "help": "Ce paquet a une version signalée comme malveillante (avis OSV MAL-)."
     },
+    "kev": {
+      "label": "KEV",
+      "help": "Ce paquet a une version liée à une vulnérabilité du catalogue KEV (Known Exploited Vulnerabilities) de la CISA."
+    },
     "abandoned": {
       "label": "Abandonné",
       "help": "Aucune nouvelle version publiée en amont depuis plus d'un an."
@@ -202,6 +222,94 @@
       "inheritOrgDefault": "Hériter (valeur par défaut de l'organisation)"
     },
     "empty": "Aucun paquet trouvé"
+  },
+  "projects": {
+    "title": "Projets",
+    "searchPlaceholder": "Rechercher des projets…",
+    "empty": "Aucun projet pour l'instant. Les paquets sont les artefacts que vous diffusez — les projets sont les applications que vous construisez avec eux. Téléversez un SBOM pour commencer.",
+    "emptySearch": "Aucun projet ne correspond à votre recherche.",
+    "collection": "Collection",
+    "breadcrumb": "Fil d'Ariane",
+    "folders": {
+      "newFolder": "Nouveau dossier",
+      "newFolderTitle": "Nouveau dossier",
+      "editProjectTitle": "Modifier le projet",
+      "editFolderTitle": "Modifier le dossier",
+      "nameLabel": "Nom",
+      "namePlaceholder": "ex. Plateforme",
+      "descriptionLabel": "Description (facultatif)",
+      "parentLabel": "Dossier",
+      "rootOption": "Niveau racine",
+      "currentFolder": "Dossier actuel",
+      "parentHint": "Les dossiers regroupent les projets. Un dossier ne contient aucune version.",
+      "targetsFailed": "Impossible de charger les dossiers; ce projet ne peut pas être déplacé pour l'instant : {message}",
+      "actionsMenu": "Actions pour {name}",
+      "edit": "Modifier…"
+    },
+    "columns": {
+      "name": "Nom",
+      "components": "Composants",
+      "severity": "Gravité",
+      "policy": "Politique",
+      "latest": "Dernière version",
+      "lastUpload": "Dernier téléversement"
+    },
+    "severity": {
+      "critical": "{count} critique",
+      "high": "{count} élevée",
+      "medium": "{count} moyenne",
+      "low": "{count} faible",
+      "unscored": "{count} non évaluée",
+      "kev": "{count} exploitée connue",
+      "none": "Aucune vulnérabilité connue"
+    },
+    "policy": {
+      "pass": "Conforme",
+      "warn": "Avertissement",
+      "violation": "Violation",
+      "unscanned": "Non analysé"
+    },
+    "noVersion": "—",
+    "unevaluatedOf": "{count} sur {total} non évalués",
+    "loadFailed": "Échec du chargement des projets : {message}",
+    "detail": {
+      "collectionBadge": "Collection",
+      "stat": {
+        "versions": "Versions",
+        "components": "Composants (dernière version)",
+        "policy": "Politique (dernière version)",
+        "children": "Projets enfants",
+        "subtreeProjects": "Projets (tous niveaux)",
+        "subtreeComponents": "Composants (cumulés)",
+        "subtreeSeverity": "Résultats (cumulés)",
+        "subtreePolicy": "Politique (cumulée)"
+      },
+      "versionsTitle": "Versions",
+      "childrenTitle": "Projets de cette collection",
+      "versionsEmpty": "Aucune version téléversée pour l'instant.",
+      "childrenEmpty": "Aucun projet dans cette collection pour l'instant.",
+      "columns": {
+        "version": "Version",
+        "components": "Composants",
+        "policy": "Politique",
+        "uploaded": "Téléversé",
+        "name": "Nom",
+        "latest": "Dernière version"
+      },
+      "isLatest": "Dernière",
+      "promote": "Promouvoir comme dernière version",
+      "promoting": "Promotion en cours…",
+      "deleteVersion": "Supprimer",
+      "deleteVersionConfirm": "Supprimer la version {version}? Ses documents téléversés et ses composants seront retirés.",
+      "deleteProjectConfirm": "Supprimer « {name} » et toutes ses versions? Cette action est irréversible.",
+      "deleteCollectionConfirm": "Supprimer le dossier « {name} » et tout ce qu'il contient — chaque projet et toutes leurs versions? Cette action est irréversible.",
+      "loadFailed": "Échec du chargement du projet : {message}",
+      "exportHint": "Tous les projets de ce dossier, chacun à sa dernière version. Les projets sans SBOM sont listés et signalés."
+    },
+    "versionDetail": {
+      "placeholderTitle": "Détail de la version",
+      "placeholder": "L'inventaire des composants et l'analyse de cette version seront bientôt disponibles."
+    }
   },
   "claims": {
     "title": "Revendications de noms",
@@ -245,6 +353,15 @@
     "empty": "Aucune revendication pour ce locataire pour l'instant.",
     "loadFailed": "Échec du chargement des revendications : {message}"
   },
+  "spdx": {
+    "searchPlaceholder": "Rechercher un identifiant ou un nom SPDX…",
+    "noMatches": "Aucun résultat.",
+    "lookupFailed": "La recherche a échoué.",
+    "osiApproved": "Approuvée par l'OSI",
+    "fsfLibre": "Libre selon la FSF",
+    "deprecated": "Identifiant SPDX obsolète",
+    "alreadyListed": "Déjà dans une liste"
+  },
   "upload": {
     "title": "Téléverser des paquets",
     "description": "Sélectionnez le paquet à téléverser",
@@ -270,6 +387,56 @@
       "fileCount": "Fichiers",
       "totalSize": "Taille totale",
       "serverValidationNote": "Les résultats par fichier (détection d'écosystème, contrôle de revendication, déduplication, empreinte) sont évalués côté serveur après téléversement."
+    }
+  },
+  "sbomUpload": {
+    "title": "Téléverser un SBOM, VEX ou SARIF",
+    "button": "Téléverser",
+    "hint": "Les formats acceptés sont CycloneDX 1.4–1.6 JSON, OpenVEX et SARIF 2.1.0. VEX et SARIF enrichissent le SBOM déjà téléversé pour cette version.",
+    "drop": "Déposez des fichiers ici, ou cliquez pour en choisir",
+    "kindLabel": "Type de document détecté",
+    "kind": {
+      "sbom": "SBOM",
+      "vex": "VEX",
+      "sarif": "SARIF",
+      "unknown": "Non reconnu"
+    },
+    "project": {
+      "label": "Projet",
+      "choose": "Choisir un projet…",
+      "newPlaceholder": "Nom du nouveau projet",
+      "chooseExisting": "Choisir un projet existant à la place",
+      "createNew": "Créer un nouveau projet à la place",
+      "intoFolder": "Les téléversements sont classés dans {folder}. La liste ne propose que les projets de ce dossier; un nouveau projet y est créé."
+    },
+    "version": {
+      "label": "Version",
+      "placeholder": "p. ex. 1.4.0"
+    },
+    "autoCreate": "Créer le projet ou la version si absent",
+    "isLatest": "Marquer cette version comme la plus récente",
+    "submit": "Téléverser",
+    "uploading": "Téléversement en cours…",
+    "collectionNotice": "Les collections n'acceptent aucun téléversement. Téléversez plutôt vers l'un des projets membres de la collection.",
+    "notAllowed": "Seuls les administrateurs et propriétaires de l'organisation peuvent téléverser des documents depuis cette interface. Utilisez un jeton API depuis la CI.",
+    "outcome": {
+      "file": "Fichier",
+      "type": "Type",
+      "status": "Statut",
+      "detailColumn": "Détail",
+      "accepted": "Accepté",
+      "rejected": "Rejeté",
+      "detail": {
+        "sbom": "{added} ajouté(s), {removed} supprimé(s), {unchanged} inchangé(s) (sur {total} au total)",
+        "sbomNoop": "Aucun changement — déjà à jour ({total} composants)",
+        "vex": "{applied} déclaration(s) appliquée(s) sur {total} ({unmatched} non appariée(s))",
+        "sarif": "{applied} résultat(s) appliqué(s) sur {total} ({unmatched} non apparié(s))",
+        "generic": "Téléversé.",
+        "error": "Échec du téléversement : {message}"
+      }
+    },
+    "curl": {
+      "summary": "Afficher la commande curl pour la CI"
     }
   },
   "versionDetail": {
@@ -314,9 +481,9 @@
       "provenanceUnsigned": "non signée",
       "provenanceUnsignedHelp": "Le registre amont n'a publié aucune signature pour cette version.",
       "symbols": "symboles ({count})",
-      "symbolsHelp": "Cette version fournit un paquet de symboles ; {count} PDB portable(s) sont indexés et résolubles par debug-id depuis le serveur de symboles.",
+      "symbolsHelp": "Cette version fournit un paquet de symboles; {count} PDB portable(s) sont indexés et résolubles par debug-id depuis le serveur de symboles.",
       "symbolsUnindexed": "symboles non indexés",
-      "symbolsUnindexedHelp": "Un paquet de symboles est stocké pour cette version mais aucun PDB portable n'a été indexé ; ses PDB ne sont donc pas résolubles par debug-id. Les PDB natifs/Windows ne sont pas indexables ; si le paquet contient bien des PDB portables, réindexez la version.",
+      "symbolsUnindexedHelp": "Un paquet de symboles est stocké pour cette version mais aucun PDB portable n'a été indexé; ses PDB ne sont donc pas résolubles par debug-id. Les PDB natifs/Windows ne sont pas indexables; si le paquet contient bien des PDB portables, réindexez la version.",
       "licenseBlockedHelp": "Cette licence figure sur la liste de blocage de licences de l'organisation.",
       "licenseUnknown": "inconnue",
       "licenseUnknownHelp": "Aucune licence n'a été extraite pour cette version.",
@@ -330,7 +497,7 @@
       "clean": "Aucun avis",
       "unscanned": "Non analysé",
       "no_feed": "Aucun flux d'avis",
-      "noFeedHelp": "OSV ne publie aucun flux d'avis pour cet écosystème ; cet artefact n'a donc jamais été confronté à un tel flux. Il n'est pas réputé sain.",
+      "noFeedHelp": "OSV ne publie aucun flux d'avis pour cet écosystème; cet artefact n'a donc jamais été confronté à un tel flux. Il n'est pas réputé sain.",
       "malicious": "Malveillant",
       "maliciousHelp": "Lié à un avis de paquet malveillant connu (OSV MAL-)."
     },
@@ -403,6 +570,12 @@
         "sha512-b64": "SHA-512 amont (base64)",
         "shasum": "SHA-1 amont (shasum)"
       }
+    },
+    "blastRadius": {
+      "summary": "{count, plural, one {# application livre ce paquet} other {# applications livrent ce paquet}}",
+      "help": "La dernière version de chaque application dont le SBOM liste ce paquet. Les versions antérieures ne sont pas comptées : elles ne sont pas ce que vous livrez, et leurs analyses de composants ne sont pas tenues à jour.",
+      "ships": "livre {version}",
+      "more": "et {count} de plus"
     }
   },
   "activity": {
@@ -553,6 +726,7 @@
     "pull": "lecture seule",
     "push": "écriture seule",
     "both": "lecture & écriture",
+    "sbom": "Téléversement SBOM",
     "admin": "admin",
     "audit": "audit",
     "custom": "personnalisé"
@@ -627,7 +801,7 @@
     },
     "storage": {
       "uploadTitle": "Limites de téléversement",
-      "uploadHint": "Plafonne la taille d'un téléversement, en Mo. Les limites par écosystème remplacent la limite ci-dessous ; le plafond de l'instance les borde toutes.",
+      "uploadHint": "Plafonne la taille d'un téléversement, en Mo. Les limites par écosystème remplacent la limite ci-dessous; le plafond de l'instance les borde toutes.",
       "retentionTitle": "Rétention",
       "retentionHint": "Détermine la durée de conservation des anciennes versions, des fichiers de proxy en cache et de l'historique d'activité avant le nettoyage automatique. Laissez un champ vide pour une durée illimitée."
     },
@@ -670,7 +844,8 @@
         "package.import": "Importation",
         "package.unlist": "Retrait de la liste",
         "package.yank": "Rétractation",
-        "package.vulnerability": "Vulnérabilité"
+        "package.vuln": "Vulnérabilité",
+        "package.blocked": "Blocage"
       }
     },
     "alerts": {
@@ -701,7 +876,7 @@
         "testOk": "Courriel de test envoyé.",
         "testFail": "Échec du courriel de test.",
         "testHint": "Envoyé aux destinataires ci-dessus, via le serveur de messagerie de l'instance.",
-        "lastStatus": "Dernière livraison de courriel : {status}",
+        "lastStatus": "Dernière livraison de courriel : {status}",
         "disabledOff": "Les alertes courriel sont désactivées — rien ne sera envoyé.",
         "disabledRecipients": "Les alertes courriel sont activées mais aucun destinataire n'est configuré — rien ne sera envoyé.",
         "disabledInstance": "Les alertes courriel sont activées, mais le serveur de messagerie de l'instance n'est pas configuré — rien ne sera envoyé. Contactez votre exploitant.",
@@ -712,7 +887,7 @@
         "url": "URL du webhook Slack",
         "urlHint": "URL de webhook entrant de Slack. Nécessite DEPENDABLY_MASTER_KEY pour le stockage.",
         "urlRotateHint": "Saisissez une nouvelle valeur pour renouveler l'URL du webhook. Laissez vide pour conserver l'URL actuelle.",
-        "lastStatus": "Dernière livraison Slack : {status}",
+        "lastStatus": "Dernière livraison Slack : {status}",
         "consecutiveFailures": "({count} échecs consécutifs)",
         "failingSince": "En échec depuis {since}",
         "testSend": "Envoyer un message de test",
@@ -743,7 +918,7 @@
     },
     "instanceEmail": {
       "title": "Courriel de l'instance (SMTP)",
-      "hint": "Relais SMTP utilisé pour livrer les courriels d'invitation d'organisation. Configurez-le une seule fois ici ; chaque invitation envoyée et le bouton de test ci-dessous l'utilisent.",
+      "hint": "Relais SMTP utilisé pour livrer les courriels d'invitation d'organisation. Configurez-le une seule fois ici; chaque invitation envoyée et le bouton de test ci-dessous l'utilisent.",
       "enabled": "Activé",
       "host": "Hôte SMTP",
       "port": "Port",
@@ -753,9 +928,9 @@
       "securityNone": "Aucune",
       "username": "Nom d'utilisateur",
       "password": "Mot de passe",
-      "passwordSetHint": "Définissez un mot de passe pour activer le relais authentifié. Requis sauf si la sécurité est « Aucune ».",
+      "passwordSetHint": "Définissez un mot de passe pour activer le relais authentifié. Requis sauf si la sécurité est « Aucune ».",
       "passwordRotateHint": "Un mot de passe est enregistré. Entrez une nouvelle valeur pour le remplacer, ou laissez vide pour conserver l'actuel.",
-      "cleartextCredentials": "La sécurité est réglée sur Aucune alors qu'un nom d'utilisateur et un mot de passe sont définis : l'échange SMTP AUTH est transmis en clair et toute personne sur le chemin réseau peut lire ces identifiants. Utilisez STARTTLS ou TLS implicite, ou effacez le nom d'utilisateur et le mot de passe si le relais n'exige pas d'authentification.",
+      "cleartextCredentials": "La sécurité est réglée sur Aucune alors qu'un nom d'utilisateur et un mot de passe sont définis : l'échange SMTP AUTH est transmis en clair et toute personne sur le chemin réseau peut lire ces identifiants. Utilisez STARTTLS ou TLS implicite, ou effacez le nom d'utilisateur et le mot de passe si le relais n'exige pas d'authentification.",
       "from": "Adresse d'expédition",
       "configured": "Configuré",
       "notConfigured": "Non configuré",
@@ -763,6 +938,92 @@
       "testOk": "Courriel de test envoyé à l'adresse d'expédition.",
       "testFail": "Échec du courriel de test.",
       "masterKeyHint": "DEPENDABLY_MASTER_KEY doit être configuré avant de pouvoir enregistrer un mot de passe."
+    },
+    "vulnTracker": {
+      "title": "Suivi des vulnérabilités",
+      "hint": "Connexion au service externe de suivi des vulnérabilités qui fournit la couche d'enrichissement (bandes NVD et SSVC). Une seule connexion dessert tout le déploiement; chaque organisation définit ses propres seuils quant à l'usage des signaux.",
+      "scopeNote": "Cette connexion vaut pour toute l'instance. Chaque organisation de ce déploiement est enrichie par son entremise, et aucune organisation ne peut la consulter ni la remplacer.",
+      "enabled": "Activé",
+      "enabledHint": "Active ou suspend l'enrichissement sans supprimer la connexion. L'URL de base et le jeton demeurent enregistrés pendant la suspension.",
+      "baseUrl": "URL de base",
+      "baseUrlHint": "URL absolue http ou https du service de suivi. Laissez le champ vide pour désactiver complètement la connexion.",
+      "token": "Jeton",
+      "tokenSetHint": "Facultatif. Un service qui n'exige aucun identifiant fonctionne sans jeton; un service qui en exige un répond 401, et l'enrichissement est alors consigné comme inconnu plutôt que comme sain.",
+      "tokenRotateHint": "Un jeton est enregistré. Entrez une nouvelle valeur pour le remplacer, ou laissez vide pour conserver l'actuel.",
+      "masterKeyHint": "DEPENDABLY_MASTER_KEY doit être configuré avant de pouvoir enregistrer un jeton.",
+      "maxStalenessHours": "Fraîcheur maximale (heures)",
+      "maxStalenessHint": "Un enrichissement plus ancien que cette valeur est considéré comme inconnu plutôt que sain. De 1 à 8760 heures; valeur par défaut 168 (7 jours).",
+      "batchSize": "Taille des lots",
+      "batchSizeHint": "Nombre de PURL par requête de consultation. De 1 à 1000; valeur par défaut 100. Le fournisseur refuse tout lot plus grand au lieu de le tronquer.",
+      "state": {
+        "active": "Actif",
+        "paused": "Suspendu",
+        "notConfigured": "Non configuré"
+      },
+      "clearDiscardsToken": "Effacer l'URL de base désactive la connexion pour toutes les organisations et supprime le jeton enregistré. Vous devrez saisir le jeton de nouveau pour vous reconnecter.",
+      "errors": {
+        "baseUrl": "Entrez une URL absolue http ou https, ou laissez le champ vide pour désactiver la connexion.",
+        "staleness": "La fraîcheur maximale doit être un nombre entier d'heures compris entre 1 et 8760.",
+        "batchSize": "La taille des lots doit être un nombre entier compris entre 1 et 1000."
+      }
+    },
+    "vulnTrackerHealth": {
+      "title": "État de la connexion",
+      "hint": "Ce que les recherches du suivi ont réellement fait pendant l'analyse. L'état est observé et jamais réécrit dans la configuration ci-dessus — un suivi défaillant n'est jamais désactivé à votre place.",
+      "notConfigured": "Aucune connexion au suivi n'est configurée; il n'y a donc rien à signaler.",
+      "state": {
+        "ok": "Le suivi répond",
+        "failed": "Le suivi ne répond pas",
+        "neverAttempted": "Aucune recherche tentée",
+        "notConfigured": "Non configuré"
+      },
+      "kind": {
+        "scan": "Analyse",
+        "probe": "Test"
+      },
+      "reason": {
+        "none": "Joint",
+        "notConfigured": "Aucune connexion configurée",
+        "emptyRequest": "Rien à rechercher",
+        "batchTooLarge": "Lot supérieur à la limite du fournisseur",
+        "transport": "Connexion impossible",
+        "timeout": "Délai dépassé",
+        "unauthorized": "Justificatif refusé",
+        "rateLimited": "Refusé pour quota ou limite de débit",
+        "serverError": "Le suivi a renvoyé une erreur de serveur",
+        "refused": "Le suivi a refusé la requête",
+        "malformedResponse": "Réponse du suivi illisible",
+        "exception": "Défaillance du client",
+        "unknown": "Refus non reconnu"
+      },
+      "test": "Tester la connexion",
+      "testing": "Test en cours…",
+      "refresh": "Actualiser",
+      "pausedHint": "La connexion est en pause : aucune recherche n'est effectuée et elle ne peut pas être testée. Activez-la ci-dessus pour la tester.",
+      "probeReached": "Suivi joint en {ms} ms.",
+      "probeFailed": "Suivi non joint : {reason}.",
+      "lastSuccess": "Dernier contact",
+      "consecutiveFailures": "Échecs consécutifs",
+      "failingSince": "En échec depuis",
+      "enrichedAdvisories": "Avis enrichis",
+      "staleAdvisories": "Au-delà de l'horizon",
+      "nvdAsOf": "NVD à jour au",
+      "ssvcAsOf": "SSVC à jour au",
+      "never": "Jamais",
+      "none": "Aucun",
+      "notAsserted": "Non déclaré",
+      "horizonHint": "Un enrichissement de plus de {hours} h est considéré comme périmé et cesse de compter comme signal utilisable.",
+      "recentFetches": "Recherches récentes",
+      "noFetches": "Aucune recherche enregistrée.",
+      "outcomeOk": "Joint",
+      "col": {
+        "when": "Quand",
+        "kind": "Type",
+        "outcome": "Résultat",
+        "purls": "Purls",
+        "advisories": "Avis",
+        "duration": "ms"
+      }
     },
     "relayHealth": {
       "title": "Santé du relais SMTP",
@@ -780,6 +1041,7 @@
       "none": "—"
     },
     "auth": {
+      "claimMapKeyPlaceholder": "p. ex. Admins",
       "methodsTitle": "Méthodes de connexion",
       "methodsIntro": "Choisissez les méthodes proposées sur la page de connexion de ce locataire. Les changements sont enregistrés immédiatement.",
       "formsLogin": "Connexion par formulaire (courriel + mot de passe)",
@@ -905,7 +1167,7 @@
         "colLabel": "Étiquette",
         "colAdded": "Ajouté",
         "unsupportedPair": "non pris en charge — jamais validée",
-        "unsupportedPairTitle": "La combinaison écosystème/type de cette ancre n'a aucun validateur : son matériel de clé n'a jamais été vérifié. Confirmez qu'elle est toujours nécessaire avant de la supprimer — supprimer la seule ancre d'un écosystème dont la vérification des signatures est réglée sur « bloquer » refuse tous les artefacts de cet écosystème.",
+        "unsupportedPairTitle": "La combinaison écosystème/type de cette ancre n'a aucun validateur : son matériel de clé n'a jamais été vérifié. Confirmez qu'elle est toujours nécessaire avant de la supprimer — supprimer la seule ancre d'un écosystème dont la vérification des signatures est réglée sur « bloquer » refuse tous les artefacts de cet écosystème.",
         "modal": {
           "title": "Ajouter une ancre de confiance",
           "ecosystem": "Écosystème",
@@ -917,7 +1179,7 @@
           "keyIdHint": "L'identifiant de clé du registre npm, par exemple SHA256:jl3bwswu80Pj… extrait du point de terminaison /-/npm/v1/keys. Obligatoire pour les ancres npm SPKI — l'identifiant ne peut pas être déduit des octets de la clé seule.",
           "material": "Matériel de clé publique",
           "materialPlaceholder": "Collez ici un bloc PGP blindé, du DER base64, un certificat PEM ou un JSON…",
-          "materialHint": "Matériel de clé publique uniquement — aucune clé privée n'est acceptée. Par exemple, pour apk : une clé publique RSA au format PEM.",
+          "materialHint": "Matériel de clé publique uniquement — aucune clé privée n'est acceptée. Par exemple, pour apk : une clé publique RSA au format PEM.",
           "tpIssuer": "Émetteur",
           "tpIssuerPlaceholder": "ex. : https://token.actions.githubusercontent.com",
           "tpSubject": "Sujet",
@@ -967,9 +1229,11 @@
       "keepDays": "Durée de conservation (blobs proxy)",
       "activityDays": "Jours de rétention des activités",
       "purgeUnlistedDays": "Purger les versions retirées après (jours)",
+      "keepProjectVersions": "Conserver les versions de projet",
+      "keepProjectVersionsHint": "Limite le nombre de versions SBOM/VEX/SARIF conservées par projet et libère les documents de celles qui sont supprimées. La dernière version d'un projet n'est jamais supprimée, quel que soit son âge.",
       "unlimited": "illimité",
-      "instanceDefault": "valeur par défaut de l'instance : {days} jours",
-      "activityDaysHint": "Contrairement aux limites ci-dessus, un champ vide n'est pas illimité ici : les lignes d'activité contiennent des adresses IP par téléchargement, elles sont donc limitées par la valeur ACTIVITY_RETENTION_DAYS de l'instance."
+      "instanceDefault": "valeur par défaut de l'instance : {days} jours",
+      "activityDaysHint": "Contrairement aux limites ci-dessus, un champ vide n'est pas illimité ici : les lignes d'activité contiennent des adresses IP par téléchargement, elles sont donc limitées par la valeur ACTIVITY_RETENTION_DAYS de l'instance."
     },
     "proxy": {
       "passthroughEnabled": "Relais proxy activé",
@@ -1104,10 +1368,10 @@
         "rpmMode": {
           "label": "Publication hébergée",
           "hint": "Le mode passthrough transmet les repodata amont telles quelles et refuse les téléversements RPM hébergés tant qu'un amont est configuré (un paquet local masquerait l'amont et casserait la résolution dnf). Le mode merged sert un index combinant local et amont et autorise les téléversements hébergés. Le mode hérité suit la valeur par défaut de l'instance et change automatiquement si l'opérateur la modifie.",
-          "inherit": "Hérité (valeur par défaut de l'instance : {mode})",
+          "inherit": "Hérité (valeur par défaut de l'instance : {mode})",
           "passthrough": "Passthrough (refuser la publication hébergée)",
           "merged": "Merged (autoriser la publication hébergée)",
-          "effective": "Actuellement en vigueur : {mode}"
+          "effective": "Actuellement en vigueur : {mode}"
         },
         "terraform": {
           "protocolLabel": "Protocole",
@@ -1117,7 +1381,20 @@
             "mirror": "Miroir réseau"
           }
         }
-      }
+      },
+      "blockKevRansomware": "CVE exploitées liées à un rançongiciel",
+      "blockKevRansomwareHint": "Plus restrictif que la porte ci-dessus : s'applique uniquement aux CVE que la CISA signale comme utilisées dans des campagnes de rançongiciel. Laissez la porte ci-dessus sur Désactivé et réglez celle-ci sur Bloquer pour refuser seulement les CVE liées à un rançongiciel plutôt que tout le catalogue. N'agit que sur un verdict explicite de la CISA : les CVE non évaluées relèvent de la porte plus large, pas de celle-ci.",
+      "blockKevRansomwareOff": "Désactivé",
+      "blockKevRansomwareWarn": "Avertir",
+      "blockKevRansomwareBlock": "Bloquer",
+      "blockSsvcExploitation": "Exploitation active (évaluation de la CISA)",
+      "blockSsvcExploitationHint": "Agit sur l'évaluation d'exploitation Vulnrichment de la CISA, qui note bien plus de CVE que le catalogue ci-dessus et détecte donc une exploitation dont la CISA a des preuves sans l'avoir cataloguée. Nécessite la connexion au suivi des vulnérabilités. Sans elle, aucun avis ne porte d'évaluation et cette porte ne se déclenche jamais, quel que soit son réglage.",
+      "blockSsvcExploitationOff": "Désactivé",
+      "blockSsvcExploitationWarn": "Avertir",
+      "blockSsvcExploitationBlock": "Bloquer",
+      "maxEpssPercentile": "Plafond de centile EPSS",
+      "maxEpssPercentileHint": "Bloque lorsqu'un avis se classe au-dessus de ce centile (0,00–1,00). Un rang conserve sa signification lorsque FIRST recalibre le modèle, alors que le plafond de probabilité ci-dessus suit le risque absolu. Réglez l'un, l'autre ou les deux : le premier dépassement bloque. Laissez vide pour désactiver.",
+      "maxEpssPercentilePlaceholder": "p. ex. 0,95"
     },
     "licenses": {
       "intro": "Définissez les licences SPDX autorisées pour les paquets de ce locataire. Les métadonnées de licence sont extraites à la publication et lors du remplissage du cache proxy.",
@@ -1181,9 +1458,9 @@
         "conditionalHint": "La licence sera servie normalement. Ajoutez la condition en note une fois l'entrée créée."
       },
       "addNote": "Ajouter une note",
-      "notePlaceholder": "Pourquoi cette licence est-elle autorisée ?",
-      "blockNotePlaceholder": "Pourquoi cette licence est-elle refusée ?",
-      "conditionPlaceholder": "Qu'est-ce qui rend cette licence acceptable, et quand ?",
+      "notePlaceholder": "Pourquoi cette licence est-elle autorisée?",
+      "blockNotePlaceholder": "Pourquoi cette licence est-elle refusée?",
+      "conditionPlaceholder": "Qu'est-ce qui rend cette licence acceptable, et quand?",
       "conditionMissing": "Aucune condition enregistrée",
       "makeConditional": "Rendre conditionnelle",
       "makeAllowed": "Rendre autorisée",
@@ -1191,7 +1468,7 @@
         "title": "Licences conditionnelles",
         "addEntry": "Ajouter une licence",
         "empty": "Aucune licence conditionnelle configurée.",
-        "intro": "Licences acceptables uniquement dans certains contextes. Elles sont servies et publiées comme les licences autorisées ; la différence est que chaque paquet qui en porte une apparaît sous Risque de licence pour révision. Consignez la condition dans la note afin que la prochaine personne n'ait pas à la demander."
+        "intro": "Licences acceptables uniquement dans certains contextes. Elles sont servies et publiées comme les licences autorisées; la différence est que chaque paquet qui en porte une apparaît sous Risque de licence pour révision. Consignez la condition dans la note afin que la prochaine personne n'ait pas à la demander."
       }
     }
   },
@@ -1361,22 +1638,45 @@
     "window30d": "30 j",
     "activeUsers": "Utilisateurs actifs (7j)",
     "totalDownloads": "Téléchargements (30j)",
+    "totalProjects": "Projets",
+    "projectsSub": "{pass} conformes · {warn} avertissements · {violation} violations · {unevaluated} non évaluées",
     "blockedPulls": "Récupérations bloquées (30j)",
     "blockedMalicious": "Paquets malveillants bloqués (30j)",
+    "blockedKev": "Paquets KEV bloqués (30j)",
     "operationalRisk": "Risque opérationnel",
     "operationalRiskSub": "≥ {threshold} versions de retard",
     "licenseRisk": "Risque lié aux licences",
     "quarantinePending": "Quarantaine en attente",
+    "activeOverrides": "Autorisations actives",
+    "activeOverridesSub": "{days, plural, one {la plus ancienne remonte à # jour} other {la plus ancienne remonte à # jours}}",
     "hostedProxied": "{hosted} hébergés · {proxied} relayés",
     "quotaUsage": "sur {total} de quota",
+    "coverage": {
+      "title": "Couverture d'analyse",
+      "percent": "{percent} %",
+      "none": "Aucune couverture pour l'instant",
+      "sub": "{scanned} analysées · {unscanned} non analysées",
+      "noFeed": "{count} aucun flux de vulnérabilités"
+    },
+    "prevention": {
+      "title": "Prévention (30j)",
+      "empty": "0 récupération bloquée au cours des 30 derniers jours",
+      "emptyServed": "{count, plural, one {# récupération a été servie durant cette période et aucun filtre ne l'a refusée.} other {# récupérations ont été servies durant cette période et aucun filtre ne les a refusées.}} Les modes d'application se configurent dans Paramètres → Filtres.",
+      "emptyNoTraffic": "Aucune récupération n'a été servie durant cette période; il n'y avait donc rien à évaluer."
+    },
     "gates": {
       "deprecated": "obsolète",
       "release_age": "âge de publication",
       "malicious": "malveillant",
       "kev": "KEV",
+      "kev_ransomware": "KEV · rançongiciel",
       "epss": "EPSS",
       "vuln_score": "score de vuln.",
-      "manual": "manuel"
+      "manual": "manuel",
+      "license": "licence",
+      "install_script": "script d'installation",
+      "provenance": "provenance",
+      "revoked": "révoquée"
     },
     "packages": "Paquets",
     "diskUsed": "Espace disque",
@@ -1387,7 +1687,16 @@
     "samlCertExpiryCard": "Cert. SAML arrivant à expiration",
     "samlCertExpiredCard": "Cert. SAML expiré",
     "samlCertDays": "{days, plural, one {# jour restant} other {# jours restants}}",
-    "samlCertNotAfter": "Expire le {notAfter}"
+    "samlCertNotAfter": "Expire le {notAfter}",
+    "trends": {
+      "title": "Tendances (30j)",
+      "empty": "Pas encore assez d'historique",
+      "emptyHint": "Les tendances apparaissent une fois que deux instantanés quotidiens ont été enregistrés.",
+      "vulnerabilities": "Vulnérabilités",
+      "blockedPulls": "Récupérations bloquées",
+      "downloads": "Téléchargements",
+      "vs7d": "{delta} vs il y a 7 j"
+    }
   },
   "quarantine": {
     "title": "Quarantaine",
@@ -1415,6 +1724,7 @@
       "release_age": "âge de publication",
       "malicious": "malveillant",
       "kev": "KEV",
+      "kev_ransomware": "KEV rançongiciel",
       "epss": "EPSS",
       "vuln_score": "score de vuln.",
       "revoked": "révoquée",
@@ -1433,15 +1743,24 @@
       "menuLabel": "Changer la décision",
       "resetToPending": "Remettre en attente"
     },
+    "decisionAge": "{verb} il y a {days, plural, one {# jour} other {# jours}}",
     "detail": {
       "policyDetail": "Détail de la politique",
       "created": "Créée",
       "decidedBy": "Décidée par",
       "decidedAt": "Décidée le",
       "note": "Note"
+    },
+    "blastRadius": {
+      "summary": "{count, plural, one {# appli} other {# applis}}",
+      "help": "Applications dont la dernière version livre ce paquet. Le refuser ici les touche.",
+      "unavailable": "applis indisponibles",
+      "unavailableHelp": "Le nombre d'applications touchées n'a pas pu être chargé. Ce n'est pas un décompte nul."
     }
   },
   "vulnerabilities": {
+    "noCvssTitle": "Aucun score CVSS",
+    "searchPlaceholder": "Rechercher un paquet, un identifiant OSV, un résumé…",
     "title": "Vulnérabilités",
     "malicious": "MALVEILLANT",
     "revoked": "révoquée",
@@ -1449,6 +1768,9 @@
     "revokedHelp": "Retirée du registre en amont le {at}; ne peut plus être récupérée. Un signal de cycle de vie distinct, pas une vulnérabilité.",
     "kev": "KEV",
     "kevHelp": "Répertoriée dans le catalogue KEV (Known Exploited Vulnerabilities) de la CISA — exploitation confirmée en conditions réelles, indépendamment du score CVSS.",
+    "kevRansomware": "KEV · Rançongiciel",
+    "kevRansomwareHelp": "Répertoriée dans le catalogue KEV de la CISA avec utilisation confirmée dans des campagnes de rançongiciel — les entrées KEV les plus urgentes.",
+    "ageOpen": "{days, plural, one {ouverte depuis # jour} other {ouverte depuis # jours}}",
     "severityFilter": {
       "label": "Filtrer par gravité",
       "all": "Toutes",
@@ -1466,7 +1788,9 @@
       "summary": "Résumé",
       "published": "Publié le",
       "checkedAt": "Vérifié le",
-      "epss": "EPSS"
+      "epss": "EPSS",
+      "apps": "Applis",
+      "age": "Âge"
     },
     "detail": {
       "modified": "Modifié le",
@@ -1494,9 +1818,24 @@
         "fixedIn": "Corrigée dans",
         "copyBrief": "Copier le résumé de remédiation",
         "copyBriefHelp": "Un résumé autonome à coller dans n'importe quel assistant IA ou système de suivi."
+      },
+      "affectedApps": "Applications touchées",
+      "affectedAppsNone": "Aucune dernière version d'application ne livre un composant visé par cet avis.",
+      "affectedAppsShips": "livre {version}",
+      "affectedAppsMore": "et {count} de plus",
+      "links": {
+        "osvDev": "OSV.dev",
+        "nvd": "NVD",
+        "view": "Consulter"
       }
     },
-    "empty": "Aucun paquet vulnérable trouvé"
+    "empty": "Aucun paquet vulnérable trouvé",
+    "apps": {
+      "help": "Applications dont la dernière version livre un composant visé par cet avis.",
+      "noneHelp": "Aucune dernière version d'application ne livre un composant visé par cet avis.",
+      "unavailable": "—",
+      "unavailableHelp": "Le nombre d'applications touchées n'a pas pu être chargé. Ce n'est pas un décompte nul."
+    }
   },
   "lookup": {
     "title": "Vérifier un paquet",
@@ -1514,7 +1853,7 @@
       "allowed": "Autorisé",
       "warn": "Avertissement",
       "blocked": "Bloqué",
-      "evaluated": "Évalué : {purl}",
+      "evaluated": "Évalué : {purl}",
       "versionInferred": "Dernière version stable — aucune version n'a été précisée"
     },
     "malware": {
@@ -1534,7 +1873,7 @@
     },
     "license": {
       "title": "Licence",
-      "policy": "Politique : {mode}",
+      "policy": "Politique : {mode}",
       "unavailable": "Non déterminable à partir des métadonnées en amont pour cet écosystème.",
       "allowed": "Autorisée par la politique",
       "blocked": "Non autorisée par la politique ({spdx})",
@@ -1630,11 +1969,11 @@
       "languageHelpTenantDefault": "Langue par défaut du locataire : {language}.",
       "languageHelpSystemFallback": "Bascule sur {language} par défaut.",
       "timezoneTitle": "Fuseau horaire",
-      "timezoneHelp": "Les heures sont affichées dans ce fuseau. Valeur par défaut de l’organisation : {timezone}.",
-      "timezoneInherit": "Utiliser la valeur par défaut de l’organisation ({timezone})",
+      "timezoneHelp": "Les heures sont affichées dans ce fuseau. Valeur par défaut de l'organisation : {timezone}.",
+      "timezoneInherit": "Utiliser la valeur par défaut de l'organisation ({timezone})",
       "timezoneHelpSystemFallback": "Mode d'affichage des horodatages dans la console d'exploitation. Les heures stockées sont toujours en UTC.",
       "timezoneInheritSystem": "Utiliser la valeur par défaut de l'instance (UTC)",
-      "timezoneError": "Impossible d’enregistrer le fuseau horaire. Réessayez."
+      "timezoneError": "Impossible d'enregistrer le fuseau horaire. Réessayez."
     },
     "theme": {
       "light": "Clair",
@@ -1711,6 +2050,13 @@
         "registry": "Registre",
         "total": "{total} au total"
       },
+      "enrichmentCoverage": {
+        "title": "Couverture d'enrichissement",
+        "notConfigured": "Aucun suivi configuré",
+        "none": "Aucun avis à enrichir",
+        "percent": "{percent} % enrichis",
+        "sub": "{enriched} avis sur {total} portent une bande NVD ou une décision SSVC"
+      },
       "recentJobs": {
         "title": "Tâches en arrière-plan récentes",
         "empty": "Aucune exécution de tâche enregistrée.",
@@ -1740,7 +2086,7 @@
         "trustAnchors": {
           "suspect": "{count} ancre de confiance n'a jamais été validée",
           "suspectPlural": "{count} ancres de confiance n'ont jamais été validées",
-          "detail": "Ces ancres ont été enregistrées sous une combinaison écosystème/type sans validateur : leur matériel de clé n'a jamais été vérifié. Examinez chacune dans Paramètres → Sécurité du locataire concerné avant de la supprimer : supprimer la seule ancre d'un écosystème dont la vérification des signatures est réglée sur « bloquer » refuse tous les artefacts de cet écosystème."
+          "detail": "Ces ancres ont été enregistrées sous une combinaison écosystème/type sans validateur : leur matériel de clé n'a jamais été vérifié. Examinez chacune dans Paramètres → Sécurité du locataire concerné avant de la supprimer : supprimer la seule ancre d'un écosystème dont la vérification des signatures est réglée sur « bloquer » refuse tous les artefacts de cet écosystème."
         },
         "overallSummary": {
           "healthy": "Tous les systèmes sont opérationnels",
@@ -1825,6 +2171,7 @@
         "slug": "Locataire",
         "status": "Statut",
         "health": "Santé",
+        "enrichment": "Enrichissement",
         "users": "Utilisateurs",
         "storage": "Stockage",
         "quota": "Quota de stockage",
@@ -1842,6 +2189,7 @@
           "storage_quota_near": "Quota de stockage presque atteint",
           "stats_stale": "Instantané de statistiques obsolète",
           "stats_missing": "Instantané de statistiques manquant",
+          "stats_frozen_non_active": "Statistiques figées (locataire inactif)",
           "quarantine_pending": "Paquets en attente de révision de quarantaine"
         }
       },
@@ -1864,9 +2212,9 @@
       "deleteModalTitle": "Suppression douce du locataire",
       "deleteConfirm": "Supprimer (suppression douce) le locataire {slug}? Il sera inaccessible immédiatement et supprimé définitivement après le délai de grâce (30 jours par défaut).",
       "disableModalTitle": "Désactiver le locataire",
-      "disableConfirm": "Désactiver {slug}? Les publications et téléversements seront refusés jusqu'à la réactivation. Les données existantes sont préservées.",
+      "disableConfirm": "Désactiver {slug}? Le locataire sera entièrement verrouillé — accès aux protocoles, téléchargements, API de gestion et connexion — jusqu'à la réactivation. Les données existantes sont préservées.",
       "enableModalTitle": "Réactiver le locataire",
-      "enableConfirm": "Réactiver {slug}? Les écritures reprendront immédiatement.",
+      "enableConfirm": "Réactiver {slug}? L'accès aux protocoles, les téléchargements, l'API de gestion et la connexion reprendront immédiatement.",
       "statusUpdating": "Mise à jour…",
       "modal": {
         "title": "Créer un locataire",
@@ -1916,11 +2264,12 @@
         "noStats": "Aucun instantané de statistiques.",
         "healthOk": "Aucun problème détecté.",
         "reasonDetail": {
-          "suspended": "Locataire suspendu — les écritures sont refusées.",
+          "suspended": "Locataire suspendu — tout accès est refusé (protocole, API de gestion et connexion).",
           "storage_quota_exceeded": "Quota de stockage dépassé.",
           "storage_quota_near": "Stockage proche de la limite du quota.",
           "stats_stale": "Instantané de statistiques obsolète.",
           "stats_missing": "Aucun instantané de statistiques.",
+          "stats_frozen_non_active": "L'instantané de statistiques est figé parce que le locataire n'est pas actif. Il reprendra une fois le locataire réactivé.",
           "quarantine_pending": "{count} paquets en attente de révision de quarantaine."
         }
       }
@@ -1982,6 +2331,7 @@
       }
     },
     "userLookup": {
+      "mfaEnabled": "MFA activée",
       "title": "Recherche d'utilisateur",
       "email": "Courriel",
       "tenantSlug": "Locataire",
@@ -2060,7 +2410,8 @@
         "instance": "Paramètres d'instance",
         "metrics": "Accès aux métriques",
         "email": "Courriel (SMTP)",
-        "slack": "Slack"
+        "slack": "Slack",
+        "vulnTracker": "Suivi des vulnérabilités"
       },
       "labels": {
         "maxUploadBytes": "Taille max. d'envoi — global",
@@ -2122,16 +2473,16 @@
       },
       "slack": {
         "title": "Slack opérateur",
-        "hint": "Événements de plan de contrôle uniquement : cycle de vie des locataires et comptes opérateurs. Ne reflète jamais une alerte de quarantaine ou de vulnérabilité par organisme.",
+        "hint": "Événements de plan de contrôle uniquement : cycle de vie des locataires et comptes opérateurs. Ne reflète jamais une alerte de quarantaine ou de vulnérabilité par organisme.",
         "enabled": "Activé",
         "webhookUrl": "URL du webhook",
-        "webhookUrlHint": "URL de webhook entrant Slack. Stockée chiffrée ; jamais réaffichée après l'enregistrement.",
+        "webhookUrlHint": "URL de webhook entrant Slack. Stockée chiffrée; jamais réaffichée après l'enregistrement.",
         "webhookUrlRotateHint": "Une URL de webhook est configurée. Laissez vide pour la conserver, ou collez-en une nouvelle pour la remplacer.",
         "masterKeyHint": "DEPENDABLY_MASTER_KEY n'est pas configurée — définissez-la pour activer la livraison Slack de l'opérateur.",
-        "lastStatus": "Dernière livraison : {status}",
+        "lastStatus": "Dernière livraison : {status}",
         "testSend": "Envoyer un message de test",
         "testOk": "Message de test envoyé.",
-        "testFail": "Échec du test :"
+        "testFail": "Échec du test :"
       }
     },
     "banners": {
@@ -2204,8 +2555,14 @@
       "operational": "Versions qui accusent un retard d'au moins {threshold} versions stables sur l'amont. Ouvrez une ligne pour examiner le paquet et, au besoin, bloquer la version.",
       "license": "Versions dont la licence figure sur votre liste de blocage, ou dont aucune licence n'a pu être extraite. Ouvrez une ligne pour examiner le paquet et, au besoin, bloquer la version."
     },
+    "enrichment": {
+      "notConfigured": "Connexion au suivi des vulnérabilités non configurée",
+      "none": "Aucun avis à enrichir",
+      "percent": "{percent} % de couverture d'enrichissement",
+      "detail": "{enriched} avis sur {total} portent une bande NVD ou une décision SSVC"
+    },
     "summary": {
-      "operational": "{packages} paquets · {versions} versions en retard d’au moins {threshold}",
+      "operational": "{packages} paquets · {versions} versions en retard d'au moins {threshold}",
       "license": "{count} versions à risque de licence"
     },
     "filters": {
@@ -2241,7 +2598,7 @@
   },
   "error": {
     "license": {
-      "dispositionInvalid": "La disposition doit être : allowed ou conditional.",
+      "dispositionInvalid": "La disposition doit être : allowed ou conditional.",
       "noteTooLong": "La note est trop longue."
     },
     "packageNote": {
@@ -2256,9 +2613,251 @@
     "empty": "Aucune note sur ce paquet.",
     "placeholder": "Ajouter une note sur ce paquet",
     "add": "Ajouter une note",
-    "removeConfirm": "Supprimer cette note ?",
+    "removeConfirm": "Supprimer cette note?",
     "scopedToPackage": "Toutes les versions",
     "scopedToVersion": "Version {version}",
     "unknownAuthor": "Auteur inconnu"
+  },
+  "sbomAnalysis": {
+    "title": "Version du projet",
+    "searchPlaceholder": "Rechercher un composant, une version, un PURL…",
+    "empty": "Aucun composant ne correspond à ces filtres.",
+    "copyPurl": "Copier le PURL",
+    "noAdvisories": "Aucun avis",
+    "licenseUndeclared": "Non déclarée",
+    "licenseUndeclaredHelp": "Le SBOM ne déclare aucune licence SPDX pour ce composant. Une licence non déclarée est une licence inconnue, pas une licence permissive.",
+    "suppressedHidden": "{count} avis supprimés sont masqués. Activez Afficher les avis supprimés pour les voir.",
+    "violationsOnly": "Violations de politique seulement",
+    "showSuppressed": "Afficher les avis supprimés",
+    "columns": {
+      "component": "Composant",
+      "version": "Version",
+      "type": "Type",
+      "dependency": "Dépendance",
+      "scope": "Portée",
+      "dep": "Dép",
+      "licenses": "Licences",
+      "vulns": "Vulnérabilités",
+      "priority": "Priorité",
+      "reach": "Atteignabilité"
+    },
+    "dependencyKind": {
+      "direct": "directe",
+      "transitive": "transitive"
+    },
+    "scopeFilter": {
+      "label": "Filtrer par portée",
+      "all": "Toutes",
+      "prod": "Prod",
+      "dev": "Dév"
+    },
+    "severityFilter": {
+      "label": "Filtrer par gravité",
+      "all": "Toutes",
+      "critical": "Critique",
+      "high": "Élevée",
+      "medium": "Moyenne",
+      "low": "Faible"
+    },
+    "reachFilter": {
+      "label": "Filtrer par atteignabilité",
+      "all": "Toute atteignabilité"
+    },
+    "scope": {
+      "dev": "dév",
+      "devHelp": "Dépendance de développement seulement. Elle n'est pas livrée dans l'application en exécution.",
+      "runtime": "exécution",
+      "runtimeHelp": "Dépendance d'exécution, livrée avec l'application.",
+      "unknown": "inconnue",
+      "unknownHelp": "Aucune analyse n'a classé ce composant comme dépendance de développement ou d'exécution. Il reste visible sous Prod, car une dépendance non classée peut fort bien être livrée.",
+      "required": "requise",
+      "requiredHelp": "Le SBOM déclare ce composant comme requis.",
+      "optional": "optionnelle",
+      "optionalHelp": "Le SBOM déclare ce composant comme optionnel.",
+      "excluded": "exclue",
+      "excludedHelp": "Le SBOM déclare ce composant comme exclu de la construction."
+    },
+    "reach": {
+      "reachable": "atteignable",
+      "imported-not-called": "importé, non appelé",
+      "not-observed": "non observée",
+      "unknown": "inconnue"
+    },
+    "priority": {
+      "act": "Agir",
+      "attend": "Surveiller",
+      "track": "Suivre",
+      "suppressed": "Supprimé",
+      "none": "Aucun avis",
+      "help": "La priorité combine le score CVSS, l'inscription au catalogue KEV, le score EPSS, l'état VEX enregistré et l'atteignabilité. Elle est calculée sur le serveur et n'est jamais déduite ici."
+    },
+    "policy": {
+      "pass": "Conforme",
+      "warn": "Avertissement",
+      "unevaluated": "Non évaluée",
+      "violations": "{count} violations de politique",
+      "ribbon": {
+        "pass": "Politique : conforme",
+        "warn": "Politique : avertissement",
+        "unevaluated": "Politique : non évaluée"
+      }
+    },
+    "rollup": {
+      "components": "composants",
+      "prod": "prod",
+      "dev": "dév",
+      "unknownScope": "portée inconnue",
+      "unscannable": "non analysables — aucun flux d'avis",
+      "unscannableHelp": "Aucun flux d'avis ne couvre ces composants : purl illisible ou écosystème sans flux. Aucune analyse ne pourra jamais répondre pour eux, et ils ne maintiennent pas cette version en avertissement.",
+      "unscannableWarnHelp": "Aucun flux d'avis ne couvre ces composants, et attendre n'y changera rien. L'avertissement de cette version vient d'analyses différées, qui se résolvent dès que la source d'avis redevient joignable — pas de ces composants.",
+      "excludedByScope": "exclus de la construction",
+      "excludedByScopeHelp": "Le producteur du SBOM a marqué ces composants comme exclus du livrable assemblé. Les quatre volets de vulnérabilité les exemptent; le volet de licence continue de les évaluer.",
+      "lastScan": "Dernière analyse le {at}",
+      "neverScanned": "Jamais analysée",
+      "notInRegistry": "jamais servis ici",
+      "notInRegistryHelp": "Composants livrés par cette application que votre registre n'a jamais servis. Rien de ce qu'il applique n'a jamais porté sur eux. Sélectionnez pour les lister.",
+      "registryUnknown": "sans coordonnée",
+      "registryUnknownHelp": "Composants sans PURL sur lequel interroger votre registre. Ni un résultat sain ni un angle mort — une question sans réponse possible. Sélectionnez pour les lister."
+    },
+    "pillars": {
+      "security": "Sécurité",
+      "license": "Licence",
+      "policy": "Politique",
+      "noAdvisories": "Aucun avis",
+      "licenseFlagged": "{count} à réviser",
+      "licenseClean": "Aucun constat de licence",
+      "licenseBreakdown": "Licences principales"
+    },
+    "rescan": {
+      "button": "Réanalyser",
+      "scanning": "Réanalyse en cours…",
+      "cooldown": "Délai de recharge : {minutes} min restantes",
+      "title": "Analyser les composants de cette version pour des vulnérabilités"
+    },
+    "export": {
+      "button": "Exporter",
+      "hint": "Documents régénérés à l'instant. Les originaux se trouvent dans le panneau Documents ci-dessous.",
+      "inventory": "SBOM — inventaire (CycloneDX)",
+      "vdr": "SBOM — avec vulnérabilités (VDR)",
+      "vex": "Document VEX"
+    },
+    "documents": {
+      "title": "Documents",
+      "help": "Les téléversements tels qu'ils sont arrivés. Le téléchargement retourne ces octets exacts, empreinte comprise.",
+      "empty": "Aucun document n'a été téléversé pour cette version.",
+      "type": "Type",
+      "format": "Format",
+      "tool": "Outil",
+      "digest": "SHA-256",
+      "size": "Taille",
+      "uploaded": "Téléversé",
+      "download": "Télécharger l'original",
+      "copyDigest": "Copier l'empreinte"
+    },
+    "orphans": {
+      "title": "Analyses non appariées",
+      "help": "Déclarations VEX et résultats SARIF dont l'identifiant de paquet ne correspond à aucun composant du SBOM de cette version. Affichés plutôt que rejetés — une déclaration que personne ne voit est une déclaration que personne ne corrige.",
+      "purlKey": "Paquet",
+      "vulnKey": "Avis",
+      "detailsToggle": "Détails"
+    },
+    "panel": {
+      "purl": "PURL",
+      "dependencyPath": "Chemin de dépendance",
+      "noAdvisories": "Aucun avis enregistré pour ce composant.",
+      "allSuppressed": "Tous les avis de ce composant sont supprimés. Activez Afficher les avis supprimés pour les réviser.",
+      "unscored": "NON COTÉ",
+      "unscoredHelp": "Aucune source n'a attribué de gravité à cet avis. Non coté est une question ouverte, pas une gravité faible.",
+      "cvss": "CVSS",
+      "noCvss": "AUCUN CVSS",
+      "noCvssHelp": "Aucun score de base CVSS n'a été enregistré pour cet avis.",
+      "epss": "EPSS",
+      "epssHelp": "Score EPSS de FIRST.org — probabilité d'exploitation en conditions réelles au cours des 30 prochains jours.",
+      "kev": "KEV",
+      "kevHelp": "Répertorié dans le catalogue KEV (Known Exploited Vulnerabilities) de la CISA — exploitation confirmée en conditions réelles, indépendamment du score CVSS.",
+      "kevRansomware": "KEV · Rançongiciel",
+      "kevRansomwareHelp": "Répertorié dans le catalogue KEV de la CISA avec utilisation confirmée dans des campagnes de rançongiciel — les entrées KEV les plus urgentes.",
+      "reachability": "Atteignabilité",
+      "noReachabilityHelp": "Aucune analyse SARIF ne s'est prononcée sur cet avis; l'atteignabilité n'est donc pas énoncée — ce qui diffère d'un analyseur qui la déclare inconnue.",
+      "confidence": "Confiance",
+      "securitySeverity": "Gravité SARIF",
+      "severityOrigin": "Gravité provenant de",
+      "sarifSuppressed": "SARIF",
+      "sarifSuppressedHelp": "Le SARIF téléversé marque ce résultat comme supprimé.",
+      "aliases": "Alias",
+      "policyVerdict": "Politique",
+      "blockedBy": "Bloqué par : {arm}",
+      "otherViolations": "Autres constats de politique",
+      "inherited": "Hérité, décidé le {at}",
+      "inheritedHelp": "Cette décision a été reportée d'une version antérieure plutôt que prise pour cette version-ci.",
+      "remediation": {
+        "toggle": "Conseils de correction",
+        "loading": "Chargement des conseils…",
+        "error": "Impossible de charger les conseils.",
+        "fixedIn": "Corrigé dans",
+        "noFixedVersion": "L'avis ne nomme aucune version qui corrige celle que livre cette application.",
+        "skills": "Compétences de correction"
+      }
+    },
+    "vex": {
+      "title": "Analyse",
+      "noState": "Aucun état enregistré",
+      "none": "Aucune",
+      "edit": "Modifier l'analyse",
+      "justification": "Justification",
+      "justificationHint": "CycloneDX n'associe une justification qu'à l'état not_affected.",
+      "response": "Réponse",
+      "detail": "Détail",
+      "state": {
+        "label": "État",
+        "in_triage": "En triage",
+        "exploitable": "Exploitable",
+        "resolved": "Résolue",
+        "resolved_with_pedigree": "Résolue avec traçabilité",
+        "false_positive": "Faux positif",
+        "not_affected": "Non affecté"
+      },
+      "justificationValue": {
+        "code_not_present": "Code absent",
+        "code_not_reachable": "Code non atteignable",
+        "requires_configuration": "Exige une configuration",
+        "requires_dependency": "Exige une dépendance",
+        "requires_environment": "Exige un environnement",
+        "protected_by_compiler": "Protégé par le compilateur",
+        "protected_at_runtime": "Protégé à l'exécution",
+        "protected_at_perimeter": "Protégé au périmètre",
+        "protected_by_mitigating_control": "Protégé par une mesure d'atténuation"
+      },
+      "responseValue": {
+        "can_not_fix": "Correction impossible",
+        "will_not_fix": "Ne sera pas corrigée",
+        "update": "Mettre à jour",
+        "rollback": "Revenir en arrière",
+        "workaround_available": "Contournement disponible"
+      },
+      "provenance": {
+        "manual": "Défini par {actor} le {at}.",
+        "manualPlain": "Défini manuellement dans Dependably.",
+        "sarif": "Provient d'un rapport SARIF téléversé.",
+        "uploaded": "Provient d'un document VEX téléversé.",
+        "none": "Aucune analyse enregistrée."
+      }
+    },
+    "registry": {
+      "blocked": "bloqué ici",
+      "blockedHelp": "Cette version exacte est bloquée manuellement dans votre registre. Toute installation depuis ce registre est refusée.",
+      "blockedOther": "bloqué (autre version)",
+      "blockedOtherHelp": "Une autre version de ce paquet est bloquée manuellement dans votre registre — pas celle que livre cette application, ou les deux graphies de version n'ont pas pu être appariées.",
+      "deprecated": "déprécié en amont",
+      "deprecatedHelp": "La source amont a marqué cette version exacte comme dépréciée.",
+      "deprecatedOther": "déprécié (autre version)",
+      "deprecatedOtherHelp": "La source amont a déprécié une autre version de ce paquet — pas celle que livre cette application, ou les deux graphies de version n'ont pas pu être appariées.",
+      "outdated": "en retard sur {latest}",
+      "outdatedHelp": "Votre registre connaît la version {latest} en amont; cette application livre {shipped}.",
+      "latestKnown": "dernière connue {latest}",
+      "latestKnownHelp": "Votre registre connaît la version {latest} en amont. Cet écosystème n'a pas d'ordonnancement de versions ici : savoir si la version livrée est en retard est inconnu — et non confirmé à jour.",
+      "notInRegistry": "absent de votre registre",
+      "notInRegistryHelp": "Votre registre n'a jamais servi cette coordonnée : rien de ce qu'il applique — état de blocage, politique de licence, provenance, analyse des avis de sécurité — n'a jamais porté sur ces octets."
+    }
   }
 }

@@ -1,26 +1,34 @@
 <?xml version="1.0" encoding="utf-8"?>
-<root>
-  <xsd:schema id="root" xmlns="" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:msdata="urn:schemas-microsoft-com:xml-msdata">
-    <xsd:element name="root" msdata:IsDataSet="true">
-      <xsd:complexType>
-        <xsd:choice maxOccurs="unbounded">
-          <xsd:element name="data">
-            <xsd:complexType>
-              <xsd:sequence>
-                <xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" />
-              </xsd:sequence>
-              <xsd:attribute name="name" use="required" type="xsd:string" />
-              <xsd:attribute name="xml:space" default="preserve" />
-            </xsd:complexType>
-          </xsd:element>
-        </xsd:choice>
-      </xsd:complexType>
-    </xsd:element>
-  </xsd:schema>
-  <resheader name="resmimetype"><value>text/microsoft-resx</value></resheader>
-  <resheader name="version"><value>2.0</value></resheader>
-  <resheader name="reader"><value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader>
-  <resheader name="writer"><value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader>
+<root xmlns:ns1="urn:schemas-microsoft-com:xml-msdata" xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <xs:schema id="root">
+    <xs:element name="root" ns1:IsDataSet="true">
+      <xs:complexType>
+        <xs:choice maxOccurs="unbounded">
+          <xs:element name="data">
+            <xs:complexType>
+              <xs:sequence>
+                <xs:element name="value" type="xsd:string" minOccurs="0" ns1:Ordinal="1" />
+              </xs:sequence>
+              <xs:attribute name="name" use="required" type="xsd:string" />
+              <xs:attribute name="xml:space" default="preserve" />
+            </xs:complexType>
+          </xs:element>
+        </xs:choice>
+      </xs:complexType>
+    </xs:element>
+  </xs:schema>
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <resheader name="version">
+    <value>2.0</value>
+  </resheader>
+  <resheader name="reader">
+    <value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <resheader name="writer">
+    <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
   <data name="error.validation.title" xml:space="preserve">
     <value>Erreur de validation</value>
   </data>
@@ -46,7 +54,7 @@
     <value>Erreur interne du serveur</value>
   </data>
   <data name="error.internal.detail" xml:space="preserve">
-    <value>La requête n'a pas pu aboutir en raison d'une erreur inattendue du serveur. L'incident a été journalisé ; indiquez l'identifiant de corrélation lors de son signalement.</value>
+    <value>La requête n'a pas pu aboutir en raison d'une erreur inattendue du serveur. L'incident a été journalisé; indiquez l'identifiant de corrélation lors de son signalement.</value>
   </data>
   <data name="error.org.notFound" xml:space="preserve">
     <value>Organisation introuvable.</value>
@@ -148,7 +156,7 @@
     <value>granteeId ne désigne aucun utilisateur ni jeton de service de cette organisation.</value>
   </data>
   <data name="error.nameGrant.nameNotBound" xml:space="preserve">
-    <value>Aucun éditeur n'est lié à ce nom de paquet dans cette organisation ; une autorisation de copublication n'aurait donc aucun effet.</value>
+    <value>Aucun éditeur n'est lié à ce nom de paquet dans cette organisation; une autorisation de copublication n'aurait donc aucun effet.</value>
   </data>
   <data name="error.license.modeInvalid" xml:space="preserve">
     <value>Le mode doit être « off », « warn » ou « block ».</value>
@@ -252,7 +260,7 @@
     <value>Doit être « block », « exception » ou « allow ».</value>
   </data>
   <data name="error.settings.rpmUpstreamModeInvalid" xml:space="preserve">
-    <value>Doit être null (hérite de la valeur par défaut de l'instance), « passthrough » ou « merged ».</value>
+    <value>Doit être null (hérite de la valeur par défaut de l'instance), « passthrough » ou « merged ».</value>
   </data>
   <data name="error.settings.osvScoreRange" xml:space="preserve">
     <value>Doit être compris entre 0,0 et 10,0.</value>
@@ -277,6 +285,9 @@
   </data>
   <data name="error.activity.sinceInvalid" xml:space="preserve">
     <value>Doit être « 24h », « 7d », « 30d » ou « 90d ».</value>
+  </data>
+  <data name="error.sbom.export.invalidVariant" xml:space="preserve">
+    <value>Doit être « inventory » ou « vdr ».</value>
   </data>
   <data name="error.quarantine.stateInvalid" xml:space="preserve">
     <value>Doit être « pending », « approved » ou « denied ».</value>
@@ -336,7 +347,7 @@
     <value>Code de langue non pris en charge. Autorisés : {0}.</value>
   </data>
   <data name="error.system.unsupportedTimezone" xml:space="preserve">
-    <value>Fuseau horaire non reconnu « {0} ». Utilisez un nom de zone IANA, par exemple America/Toronto.</value>
+    <value>Fuseau horaire non reconnu « {0} ». Utilisez un nom de zone IANA, par exemple America/Toronto.</value>
   </data>
   <data name="error.password.currentRequired" xml:space="preserve">
     <value>Le mot de passe actuel est obligatoire.</value>
@@ -348,7 +359,7 @@
     <value>material ne doit pas être vide.</value>
   </data>
   <data name="error.trustAnchor.unsupportedAnchorKindForEcosystem" xml:space="preserve">
-    <value>anchorKind « {0} » n'est pas pris en charge pour ecosystem « {1} ». Valeurs anchorKind prises en charge pour {1} : {2}.</value>
+    <value>anchorKind « {0} » n'est pas pris en charge pour ecosystem « {1} ». Valeurs anchorKind prises en charge pour {1} : {2}.</value>
   </data>
   <data name="error.upstream.ociOnlyFields" xml:space="preserve">
     <value>Les champs prefixes et tokenEndpoint ne sont valides que pour ecosystem=oci.</value>
@@ -393,10 +404,10 @@
     <value>authType doit être l'une des valeurs suivantes : anonymous, basic, dockerhub_token_exchange.</value>
   </data>
   <data name="error.upstream.protocolTerraformOnly" xml:space="preserve">
-    <value>protocol n’est valide que pour ecosystem=terraform.</value>
+    <value>protocol n'est valide que pour ecosystem=terraform.</value>
   </data>
   <data name="error.upstream.protocolInvalid" xml:space="preserve">
-    <value>protocol doit être omis ou « {0} ».</value>
+    <value>protocol doit être omis ou « {0} ».</value>
   </data>
   <data name="error.webhook.masterKeyRequired" xml:space="preserve">
     <value>DEPENDABLY_MASTER_KEY doit être configurée pour stocker un secret de signature de webhook au repos.</value>
@@ -441,13 +452,13 @@
     <value>La version n'est pas valide.</value>
   </data>
   <data name="error.lookup.mavenCoordinateInvalid" xml:space="preserve">
-    <value>Le nom Maven doit être une coordonnée « groupId:artifactId ».</value>
+    <value>Le nom Maven doit être une coordonnée « groupId:artifactId ».</value>
   </data>
   <data name="error.lookup.versionRequired" xml:space="preserve">
-    <value>version est obligatoire pour l'écosystème « {0} ».</value>
+    <value>version est obligatoire pour l'écosystème « {0} ».</value>
   </data>
   <data name="error.lookup.upstreamUnavailable" xml:space="preserve">
-    <value>La source amont pour « {0} » est temporairement indisponible. Réessayez sous peu.</value>
+    <value>La source amont pour « {0} » est temporairement indisponible. Réessayez sous peu.</value>
   </data>
   <data name="email.invite.subject" xml:space="preserve">
     <value>Invitation à rejoindre {0} sur Dependably</value>
@@ -528,7 +539,7 @@ Si vous n'êtes pas à l'origine de ce changement, contactez immédiatement votr
     <value>Doit être une adresse courriel valide.</value>
   </data>
   <data name="error.email.invalidSecurity" xml:space="preserve">
-    <value>Doit être « starttls », « ssl » ou « none ».</value>
+    <value>Doit être « starttls », « ssl » ou « none ».</value>
   </data>
   <data name="error.email.invalidPort" xml:space="preserve">
     <value>Doit être compris entre 1 et 65535.</value>
@@ -537,7 +548,7 @@ Si vous n'êtes pas à l'origine de ce changement, contactez immédiatement votr
     <value>La livraison de courriels n'est pas activée ou le transport SMTP n'est pas entièrement configuré.</value>
   </data>
   <data name="error.email.testFailed" xml:space="preserve">
-    <value>Échec du courriel de test : {0}</value>
+    <value>Échec du courriel de test : {0}</value>
   </data>
   <data name="error.email.testFailedGeneric" xml:space="preserve">
     <value>Échec du courriel de test. Consultez les journaux du serveur pour plus de détails.</value>
@@ -565,40 +576,40 @@ Si vous n'êtes pas à l'origine de ce changement, contactez immédiatement votr
     <value>La livraison Slack de l'opérateur n'est pas activée ou aucune URL de webhook n'est configurée pour cette instance.</value>
   </data>
   <data name="error.system.slackTestFailed" xml:space="preserve">
-    <value>Échec du message de test Slack : {0}</value>
+    <value>Échec du message de test Slack : {0}</value>
   </data>
   <data name="error.system.slackTestFailedGeneric" xml:space="preserve">
     <value>Échec du message de test Slack. Consultez les journaux du serveur pour plus de détails.</value>
   </data>
   <data name="system.slack.tenantCreated" xml:space="preserve">
-    <value>Dependably [système] : locataire « {0} » créé par {1}</value>
+    <value>Dependably [système] : locataire « {0} » créé par {1}</value>
   </data>
   <data name="system.slack.tenantDeleted" xml:space="preserve">
-    <value>Dependably [système] : locataire « {0} » supprimé par {1}</value>
+    <value>Dependably [système] : locataire « {0} » supprimé par {1}</value>
   </data>
   <data name="system.slack.tenantRestored" xml:space="preserve">
-    <value>Dependably [système] : locataire « {0} » restauré par {1}</value>
+    <value>Dependably [système] : locataire « {0} » restauré par {1}</value>
   </data>
   <data name="system.slack.tenantStatusChanged" xml:space="preserve">
-    <value>Dependably [système] : statut du locataire « {0} » modifié par {1}</value>
+    <value>Dependably [système] : statut du locataire « {0} » modifié par {1}</value>
   </data>
   <data name="system.slack.tenantHardDeleted" xml:space="preserve">
-    <value>Dependably [système] : locataire « {0} » supprimé définitivement (délai de grâce de rétention expiré)</value>
+    <value>Dependably [système] : locataire « {0} » supprimé définitivement (délai de grâce de rétention expiré)</value>
   </data>
   <data name="system.slack.adminCreated" xml:space="preserve">
-    <value>Dependably [système] : compte opérateur créé par {0}</value>
+    <value>Dependably [système] : compte opérateur créé par {0}</value>
   </data>
   <data name="system.slack.adminDeleted" xml:space="preserve">
-    <value>Dependably [système] : compte opérateur supprimé par {0}</value>
+    <value>Dependably [système] : compte opérateur supprimé par {0}</value>
   </data>
   <data name="system.slack.genericEvent" xml:space="preserve">
-    <value>Dependably [système] : {0}</value>
+    <value>Dependably [système] : {0}</value>
   </data>
   <data name="system.slack.actorUnknown" xml:space="preserve">
     <value>un opérateur inconnu</value>
   </data>
   <data name="email.alert.subject" xml:space="preserve">
-    <value>Alerte Dependably : {0}</value>
+    <value>Alerte Dependably : {0}</value>
   </data>
   <data name="email.alert.body" xml:space="preserve">
     <value>{0}
@@ -609,7 +620,7 @@ Consultez cette alerte dans les paramètres Alertes de Dependably.
 </value>
   </data>
   <data name="email.alert.digest.subject" xml:space="preserve">
-    <value>Alerte Dependably : {0} ({1} occurrences)</value>
+    <value>Alerte Dependably : {0} ({1} occurrences)</value>
   </data>
   <data name="email.alert.digest.body" xml:space="preserve">
     <value>{0}
@@ -651,5 +662,201 @@ Si vous n'êtes pas à l'origine de ce changement, contactez immédiatement votr
   </data>
   <data name="error.user.emailChangeThrottled" xml:space="preserve">
     <value>Trop de courriels de vérification ont été envoyés à cette adresse récemment. Réessayez plus tard.</value>
+  </data>
+  <data name="error.project.nameRequired" xml:space="preserve">
+    <value>name est obligatoire.</value>
+  </data>
+  <data name="error.project.nameTooLong" xml:space="preserve">
+    <value>name doit contenir au plus {0} caractères.</value>
+  </data>
+  <data name="error.project.descriptionTooLong" xml:space="preserve">
+    <value>description doit contenir au plus {0} caractères.</value>
+  </data>
+  <data name="error.project.nameTaken" xml:space="preserve">
+    <value>Un projet portant ce nom existe déjà à cet endroit.</value>
+  </data>
+  <data name="error.project.parentNotFound" xml:space="preserve">
+    <value>parentId ne désigne aucune collection de cette organisation.</value>
+  </data>
+  <data name="error.project.parentNotACollection" xml:space="preserve">
+    <value>parentId désigne un projet. Seule une collection peut contenir d'autres projets.</value>
+  </data>
+  <data name="error.project.parentIsSelf" xml:space="preserve">
+    <value>Un projet ne peut pas être déplacé à l'intérieur de lui-même.</value>
+  </data>
+  <data name="error.project.parentIsDescendant" xml:space="preserve">
+    <value>parentId désigne une collection située à l'intérieur du projet déplacé. Choisissez une destination en dehors de celui-ci.</value>
+  </data>
+  <data name="error.project.isCollection" xml:space="preserve">
+    <value>Ce projet est une collection. Les collections ne contiennent aucune version.</value>
+  </data>
+  <data name="error.sbom.ambiguousProject" xml:space="preserve">
+    <value>{1} projets portent le nom « {0} ». Un nom de projet est unique dans son dossier, pas dans toute l'organisation; indiquez parentId pour préciser lequel.</value>
+  </data>
+  <data name="error.sbom.versionNotFound" xml:space="preserve">
+    <value>Cette version de projet n'existe pas.</value>
+  </data>
+  <data name="error.sbom.analysisRowNotFound" xml:space="preserve">
+    <value>La décision de tri n'a pas pu être relue après son enregistrement.</value>
+  </data>
+  <data name="error.sbom.sortInvalid" xml:space="preserve">
+    <value>Doit être « priority », « name », « version », « severity » ou « scope ».</value>
+  </data>
+  <data name="error.sbom.dirInvalid" xml:space="preserve">
+    <value>Doit être « asc » ou « desc ».</value>
+  </data>
+  <data name="error.sbom.scopeInvalid" xml:space="preserve">
+    <value>Doit être « all », « prod » ou « dev ».</value>
+  </data>
+  <data name="error.sbom.severityInvalid" xml:space="preserve">
+    <value>Doit être « critical », « high », « medium », « low » ou « unscored ».</value>
+  </data>
+  <data name="error.sbom.reachInvalid" xml:space="preserve">
+    <value>Doit être « reachable », « not-observed », « unknown » ou « imported-not-called ».</value>
+  </data>
+  <data name="error.sbom.registryInvalid" xml:space="preserve">
+    <value>Doit être « all », « present », « absent » ou « unknown ».</value>
+  </data>
+  <data name="error.blastRadius.ecosystemRequired" xml:space="preserve">
+    <value>Un écosystème est requis.</value>
+  </data>
+  <data name="error.blastRadius.nameRequired" xml:space="preserve">
+    <value>Un nom de paquet est requis.</value>
+  </data>
+  <data name="error.blastRadius.osvIdRequired" xml:space="preserve">
+    <value>Un identifiant d'avis de sécurité est requis.</value>
+  </data>
+  <data name="error.blastRadius.kindInvalid" xml:space="preserve">
+    <value>Doit être « advisory » ou « package ».</value>
+  </data>
+  <data name="error.blastRadius.tooManyKeys" xml:space="preserve">
+    <value>Au plus {0} clés peuvent être comptées en une seule requête.</value>
+  </data>
+  <data name="error.sbom.purlKeyRequired" xml:space="preserve">
+    <value>Un identifiant de composant est requis.</value>
+  </data>
+  <data name="error.sbom.vulnKeyRequired" xml:space="preserve">
+    <value>Un identifiant d'avis de sécurité est requis.</value>
+  </data>
+  <data name="error.sbom.triageEmpty" xml:space="preserve">
+    <value>Indiquez au moins un champ d'analyse à modifier.</value>
+  </data>
+  <data name="error.sbom.vexStateInvalid" xml:space="preserve">
+    <value>Cet état d'analyse n'existe pas dans CycloneDX.</value>
+  </data>
+  <data name="error.sbom.vexJustificationInvalid" xml:space="preserve">
+    <value>Cette justification d'analyse n'existe pas dans CycloneDX.</value>
+  </data>
+  <data name="error.sbom.vexResponseInvalid" xml:space="preserve">
+    <value>Cette réponse d'analyse n'existe pas dans CycloneDX.</value>
+  </data>
+  <data name="error.sbom.vexDetailTooLong" xml:space="preserve">
+    <value>La justification est trop longue.</value>
+  </data>
+  <data name="error.sbom.justificationRequiresNotAffected" xml:space="preserve">
+    <value>CycloneDX ne définit une justification que pour l'état « not_affected ».</value>
+  </data>
+  <data name="error.sbom.projectNameRequired" xml:space="preserve">
+    <value>Un paramètre de requête projectName est requis.</value>
+    <comment>Validation error returned when a document upload omits the project name.</comment>
+  </data>
+  <data name="error.sbom.projectVersionRequired" xml:space="preserve">
+    <value>Un paramètre de requête projectVersion est requis.</value>
+    <comment>Validation error returned when a document upload omits the project version label.</comment>
+  </data>
+  <data name="error.sbom.tooLarge" xml:space="preserve">
+    <value>Le document dépasse la limite de téléversement de {0} octets de cette instance.</value>
+    <comment>Returned when an uploaded SBOM, VEX or SARIF document is larger than the configured cap. {0} is the cap in bytes.</comment>
+  </data>
+  <data name="error.sbom.malformed" xml:space="preserve">
+    <value>Le document téléversé n'a pas pu être lu comme du JSON.</value>
+    <comment>Validation error returned when an uploaded document is not well-formed JSON.</comment>
+  </data>
+  <data name="error.sbom.wrongDocumentKind" xml:space="preserve">
+    <value>Le document téléversé n'est pas du format accepté par ce point de terminaison.</value>
+    <comment>Validation error returned when a document is well-formed JSON but not the expected kind, for example a SARIF log sent to the SBOM endpoint.</comment>
+  </data>
+  <data name="error.sbom.unsupportedSpecVersion" xml:space="preserve">
+    <value>La version {0} de la spécification n'est pas prise en charge.</value>
+    <comment>Validation error returned for a CycloneDX version outside 1.4-1.6 or a SARIF version other than 2.1.0. {0} is the version the document declared.</comment>
+  </data>
+  <data name="error.sbom.tooManyComponents" xml:space="preserve">
+    <value>Le document déclare plus de {0} composants.</value>
+    <comment>Validation error returned when an SBOM exceeds the per-upload component ceiling. {0} is the ceiling.</comment>
+  </data>
+  <data name="error.sbom.tooManyStatements" xml:space="preserve">
+    <value>Le document déclare plus de {0} énoncés d'analyse visant des composants.</value>
+    <comment>Validation error returned when a VEX or SBOM document exceeds the per-upload analysis-statement ceiling, which counts one statement per component it names. {0} is the ceiling.</comment>
+  </data>
+  <data name="error.sbom.tooManyResults" xml:space="preserve">
+    <value>Le journal déclare plus de {0} résultats.</value>
+    <comment>Validation error returned when a SARIF log exceeds the per-upload result ceiling. {0} is the ceiling.</comment>
+  </data>
+  <data name="error.sbom.projectNotFound" xml:space="preserve">
+    <value>Cette version de projet n'existe pas.</value>
+    <comment>Returned when a document upload names a project or version that does not exist and was not created.</comment>
+  </data>
+  <data name="error.sbom.collectionTarget" xml:space="preserve">
+    <value>Une collection ne contient aucun composant et ne peut donc pas recevoir de document.</value>
+    <comment>Conflict returned when a document upload targets a collection project rather than a project.</comment>
+  </data>
+  <data name="error.sbom.parentNotFound" xml:space="preserve">
+    <value>La collection parente nommée n'existe pas.</value>
+    <comment>Returned when a document upload names a parent collection that does not exist.</comment>
+  </data>
+  <data name="error.sbom.parentNotACollection" xml:space="preserve">
+    <value>L'élément parent nommé est un projet, pas une collection.</value>
+    <comment>Conflict returned when a document upload names a parent that exists but is not a collection.</comment>
+  </data>
+  <data name="error.vulnTracker.invalidBaseUrl" xml:space="preserve">
+    <value>Doit être une URL absolue http:// ou https://.</value>
+    <comment>422 detail for the baseUrl field on the vulnerability-tracker config PUT. The two schemes are URL literals - keep them verbatim.</comment>
+  </data>
+  <data name="error.vulnTracker.invalidStaleness" xml:space="preserve">
+    <value>Doit être compris entre 1 et 8760 heures.</value>
+    <comment>422 detail for the maxStalenessHours field on the vulnerability-tracker config PUT. 8760 hours is one year.</comment>
+  </data>
+  <data name="error.vulnTracker.invalidBatchSize" xml:space="preserve">
+    <value>Doit être compris entre 1 et 1000.</value>
+    <comment>422 detail for the batchSize field on the vulnerability-tracker config PUT. 1000 is the tracker's published per-request cap.</comment>
+  </data>
+  <data name="error.vulnTracker.masterKeyRequired" xml:space="preserve">
+    <value>DEPENDABLY_MASTER_KEY doit être configuré pour stocker un jeton de suivi des vulnérabilités.</value>
+    <comment>422 detail returned when a vulnerability-tracker config PUT supplies a token with no master key configured. DEPENDABLY_MASTER_KEY is an environment variable name - keep it verbatim.</comment>
+  </data>
+  <data name="error.vulnTracker.hostBlocked" xml:space="preserve">
+    <value>L'hôte du suivi des vulnérabilités se trouve dans la plage de métadonnées d'instance infonuagique, qui n'est jamais une adresse de suivi valide.</value>
+    <comment>422 detail for the baseUrl field on the vulnerability-tracker config PUT when its host is an IP literal in a blocked SSRF range.</comment>
+  </data>
+  <data name="error.vulnTracker.notActive" xml:space="preserve">
+    <value>Aucune connexion au suivi des vulnérabilités n'est activée. Enregistrez une URL de base et activez la connexion avant de la tester.</value>
+    <comment>422 detail for the baseUrl field on the vulnerability-tracker test POST when no connection is configured, or one is configured but switched off. Deliberately distinct from a reached:false result, which is a 200 — an unbuilt integration is not a broken one.</comment>
+  </data>
+  <data name="error.token.nameTooLong" xml:space="preserve">
+    <value>Le nom doit compter au plus {0} caractères.</value>
+  </data>
+  <data name="error.token.nameInvalidChars" xml:space="preserve">
+    <value>Le nom ne doit pas contenir de caractères de contrôle.</value>
+  </data>
+  <data name="error.upstream.nameTooLong" xml:space="preserve">
+    <value>Le nom doit compter au plus {0} caractères.</value>
+  </data>
+  <data name="error.upstream.tooManyIds" xml:space="preserve">
+    <value>Au plus {0} entrées peuvent être réordonnées en une seule requête.</value>
+  </data>
+  <data name="error.webhook.descriptionTooLong" xml:space="preserve">
+    <value>La description doit compter au plus {0} caractères.</value>
+  </data>
+  <data name="error.packageNote.ecosystemTooLong" xml:space="preserve">
+    <value>L'écosystème doit compter au plus {0} caractères.</value>
+  </data>
+  <data name="error.packageNote.nameTooLong" xml:space="preserve">
+    <value>Le nom doit compter au plus {0} caractères.</value>
+  </data>
+  <data name="error.trustAnchor.materialTooLong" xml:space="preserve">
+    <value>Le matériel doit compter au plus {0} caractères.</value>
+  </data>
+  <data name="error.trustAnchor.labelTooLong" xml:space="preserve">
+    <value>L'étiquette doit compter au plus {0} caractères.</value>
   </data>
 </root>

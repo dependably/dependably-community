@@ -62,6 +62,11 @@ public sealed class AuditRepository
     /// outside it would either claim a deletion that later rolled back, or be lost while the
     /// deletion committed.
     /// </summary>
+    // S107: the parameters are the audit row's own columns, all optional and all passed by name at
+    // every call site. Bundling them into a record would only move the same list behind a
+    // constructor, and the one thing a reader needs to see here — which columns this write fills —
+    // would stop being visible in the signature.
+    [SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters", Justification = "The parameters are the audit row's columns; callers pass them by name.")]
     public Task LogSystemAsync(
         DbConnection conn,
         DbTransaction? tx,
@@ -269,7 +274,7 @@ public sealed class AuditRepository
         bool includeTotal = true, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        string? searchPattern = string.IsNullOrWhiteSpace(search) ? null : $"%{search.Trim().ToLowerInvariant()}%";
+        string? searchPattern = LikePattern.ContainsLower(search);
 
         // Only a search needs bounding — the no-search path is already served by the index, and
         // bounding it would stop rows past the cap from being pageable. Every search is bounded,
@@ -313,12 +318,12 @@ public sealed class AuditRepository
               AND (@action IS NULL OR a.action = @action)
               AND (@scanFloor IS NULL OR a.created_at >= @scanFloor)
               AND (@searchPattern IS NULL
-                   OR lower(a.action) LIKE @searchPattern
-                   OR lower(COALESCE(a.purl, '')) LIKE @searchPattern
-                   OR lower(COALESCE(a.ecosystem, '')) LIKE @searchPattern
-                   OR lower(COALESCE(a.detail, '')) LIKE @searchPattern
-                   OR lower(COALESCE(u.email, '')) LIKE @searchPattern
-                   OR lower(COALESCE(st.name, '')) LIKE @searchPattern)
+                   OR lower(a.action) LIKE @searchPattern ESCAPE '\'
+                   OR lower(COALESCE(a.purl, '')) LIKE @searchPattern ESCAPE '\'
+                   OR lower(COALESCE(a.ecosystem, '')) LIKE @searchPattern ESCAPE '\'
+                   OR lower(COALESCE(a.detail, '')) LIKE @searchPattern ESCAPE '\'
+                   OR lower(COALESCE(u.email, '')) LIKE @searchPattern ESCAPE '\'
+                   OR lower(COALESCE(st.name, '')) LIKE @searchPattern ESCAPE '\')
             ORDER BY a.created_at DESC, a.id DESC LIMIT @limit OFFSET @offset
             """,
             new { orgId, limit, offset, action, searchPattern, scanFloor });
@@ -362,12 +367,12 @@ public sealed class AuditRepository
                         AND a.action <> 'login.success'
                         AND (@action IS NULL OR a.action = @action)
                         AND (@scanFloor IS NULL OR a.created_at >= @scanFloor)
-                        AND (lower(a.action) LIKE @searchPattern
-                             OR lower(COALESCE(a.purl, '')) LIKE @searchPattern
-                             OR lower(COALESCE(a.ecosystem, '')) LIKE @searchPattern
-                             OR lower(COALESCE(a.detail, '')) LIKE @searchPattern
-                             OR lower(COALESCE(u.email, '')) LIKE @searchPattern
-                             OR lower(COALESCE(st.name, '')) LIKE @searchPattern)
+                        AND (lower(a.action) LIKE @searchPattern ESCAPE '\'
+                             OR lower(COALESCE(a.purl, '')) LIKE @searchPattern ESCAPE '\'
+                             OR lower(COALESCE(a.ecosystem, '')) LIKE @searchPattern ESCAPE '\'
+                             OR lower(COALESCE(a.detail, '')) LIKE @searchPattern ESCAPE '\'
+                             OR lower(COALESCE(u.email, '')) LIKE @searchPattern ESCAPE '\'
+                             OR lower(COALESCE(st.name, '')) LIKE @searchPattern ESCAPE '\')
                       LIMIT @countProbe)
                 """,
                 new { orgId, action, searchPattern, scanFloor, countProbe = ListTotalCap + 1 });
@@ -408,7 +413,7 @@ public sealed class AuditRepository
         };
         string orderDirection = string.Equals(sortDir, "asc", StringComparison.OrdinalIgnoreCase) ? "ASC" : "DESC";
 
-        string? searchPattern = string.IsNullOrWhiteSpace(search) ? null : $"%{search.Trim().ToLowerInvariant()}%";
+        string? searchPattern = LikePattern.ContainsLower(search);
         string? actionFilter = string.IsNullOrWhiteSpace(action) ? null : action;
 
         // Single where clause shared by the count and list queries — both join system_admins
@@ -418,12 +423,12 @@ public sealed class AuditRepository
             a.scope = 'system'
               AND (@action IS NULL OR a.action = @action)
               AND (@searchPattern IS NULL
-                   OR lower(a.action) LIKE @searchPattern
-                   OR lower(COALESCE(a.actor_id, '')) LIKE @searchPattern
-                   OR lower(COALESCE(sa.email, '')) LIKE @searchPattern
-                   OR lower(COALESCE(a.org_id, '')) LIKE @searchPattern
-                   OR lower(COALESCE(o.slug, '')) LIKE @searchPattern
-                   OR lower(COALESCE(a.detail, '')) LIKE @searchPattern)
+                   OR lower(a.action) LIKE @searchPattern ESCAPE '\'
+                   OR lower(COALESCE(a.actor_id, '')) LIKE @searchPattern ESCAPE '\'
+                   OR lower(COALESCE(sa.email, '')) LIKE @searchPattern ESCAPE '\'
+                   OR lower(COALESCE(a.org_id, '')) LIKE @searchPattern ESCAPE '\'
+                   OR lower(COALESCE(o.slug, '')) LIKE @searchPattern ESCAPE '\'
+                   OR lower(COALESCE(a.detail, '')) LIKE @searchPattern ESCAPE '\')
             """;
 
         // rawsql: only the const listWhereClause (only @param placeholders) is interpolated (see S2077 justification above).
@@ -590,7 +595,7 @@ public sealed class AuditRepository
         string? since = null, bool includeTotal = true, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        string? searchPattern = string.IsNullOrWhiteSpace(search) ? null : $"%{search.Trim().ToLowerInvariant()}%";
+        string? searchPattern = LikePattern.ContainsLower(search);
 
         // Only a search needs bounding — the no-search path is already served by the index, and
         // bounding it would stop rows past the cap from being pageable. Every search is bounded,
@@ -628,12 +633,12 @@ public sealed class AuditRepository
               AND (@since IS NULL OR a.created_at >= @since)
               AND (@scanFloor IS NULL OR a.created_at >= @scanFloor)
               AND (@searchPattern IS NULL
-                   OR lower(COALESCE(a.purl, '')) LIKE @searchPattern
-                   OR lower(a.event_type) LIKE @searchPattern
-                   OR lower(COALESCE(a.ecosystem, '')) LIKE @searchPattern
-                   OR lower(COALESCE(a.detail, '')) LIKE @searchPattern
-                   OR lower(COALESCE(u.email, '')) LIKE @searchPattern
-                   OR lower(COALESCE(st.name, '')) LIKE @searchPattern)
+                   OR lower(COALESCE(a.purl, '')) LIKE @searchPattern ESCAPE '\'
+                   OR lower(a.event_type) LIKE @searchPattern ESCAPE '\'
+                   OR lower(COALESCE(a.ecosystem, '')) LIKE @searchPattern ESCAPE '\'
+                   OR lower(COALESCE(a.detail, '')) LIKE @searchPattern ESCAPE '\'
+                   OR lower(COALESCE(u.email, '')) LIKE @searchPattern ESCAPE '\'
+                   OR lower(COALESCE(st.name, '')) LIKE @searchPattern ESCAPE '\')
             ORDER BY a.created_at DESC, a.id DESC
             LIMIT @limit OFFSET @offset
             """,
@@ -685,12 +690,12 @@ public sealed class AuditRepository
                              OR (@eventType <> 'blocked' AND a.event_type = @eventType))
                         AND (@since IS NULL OR a.created_at >= @since)
                         AND (@scanFloor IS NULL OR a.created_at >= @scanFloor)
-                        AND (lower(COALESCE(a.purl, '')) LIKE @searchPattern
-                             OR lower(a.event_type) LIKE @searchPattern
-                             OR lower(COALESCE(a.ecosystem, '')) LIKE @searchPattern
-                             OR lower(COALESCE(a.detail, '')) LIKE @searchPattern
-                             OR lower(COALESCE(u.email, '')) LIKE @searchPattern
-                             OR lower(COALESCE(st.name, '')) LIKE @searchPattern)
+                        AND (lower(COALESCE(a.purl, '')) LIKE @searchPattern ESCAPE '\'
+                             OR lower(a.event_type) LIKE @searchPattern ESCAPE '\'
+                             OR lower(COALESCE(a.ecosystem, '')) LIKE @searchPattern ESCAPE '\'
+                             OR lower(COALESCE(a.detail, '')) LIKE @searchPattern ESCAPE '\'
+                             OR lower(COALESCE(u.email, '')) LIKE @searchPattern ESCAPE '\'
+                             OR lower(COALESCE(st.name, '')) LIKE @searchPattern ESCAPE '\')
                       LIMIT @countProbe)
                 """,
                 new { orgId, eventType, searchPattern, since, scanFloor, countProbe = ListTotalCap + 1 });

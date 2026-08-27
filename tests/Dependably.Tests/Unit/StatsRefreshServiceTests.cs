@@ -206,9 +206,11 @@ public sealed class StatsRefreshServiceTests
     {
         var config = new ConfigurationBuilder().Build();
         var snapshots = new StatsSnapshotRepository(store);
+        var history = new OrgStatsHistoryRepository(store);
         var analytics = new PackageAnalyticsRepository(store);
         return new StatsRefreshService(
             snapshots,
+            history,
             analytics,
             config,
             new AirGapMode(config),

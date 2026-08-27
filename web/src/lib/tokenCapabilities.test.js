@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest'
-import { presetToCapabilities, capabilitiesToLabel, capabilitiesToText } from './tokenCapabilities.js'
+import { PACKAGE_PRESETS, PRIVILEGED_PRESETS, presetToCapabilities, capabilitiesToLabel, capabilitiesToText } from './tokenCapabilities.js'
 
 describe('presetToCapabilities', () => {
   it('pull → read-only capabilities', () => {
-    expect(presetToCapabilities('pull')).toEqual(['read:metadata', 'read:artifact'])
+    expect(presetToCapabilities('pull')).toEqual(['read:metadata', 'read:artifact', 'read:packages'])
   })
 
   it('push → publish-only (no read)', () => {
@@ -11,7 +11,25 @@ describe('presetToCapabilities', () => {
   })
 
   it('both → read + publish wildcard', () => {
-    expect(presetToCapabilities('both')).toEqual(['read:metadata', 'read:artifact', 'publish:*'])
+    expect(presetToCapabilities('both')).toEqual(['read:metadata', 'read:artifact', 'read:packages', 'publish:*'])
+  })
+
+  it('sbom → sbom:upload only, nothing else', () => {
+    expect(presetToCapabilities('sbom')).toEqual(['sbom:upload'])
+  })
+
+  it('sbom is a privileged preset, distinct from push, which does not silently grant it', () => {
+    // sbom:upload is in AdminCaps — only an admin/owner token may carry it — so it sits with
+    // the privileged presets, never the package ones a member sees. It is also deliberately its
+    // own preset rather than folded into `push`: doing so would widen every existing push/both
+    // token's meaning. This is what a mutant that adds 'sbom:upload' to PRESET_CAPS.push
+    // (instead of giving it its own key) would break: `push` would start reporting a capability
+    // list containing the SBOM grant, and `sbom` would drop off the privileged-preset list if it
+    // were removed in favour of that shortcut.
+    expect(presetToCapabilities('push')).not.toContain('sbom:upload')
+    expect(presetToCapabilities('both')).not.toContain('sbom:upload')
+    expect(PRIVILEGED_PRESETS).toContain('sbom')
+    expect(PACKAGE_PRESETS).not.toContain('sbom')
   })
 
   it('admin → tenant configure + read tenant', () => {
@@ -23,8 +41,8 @@ describe('presetToCapabilities', () => {
   })
 
   it('unknown preset falls back to pull (conservative default)', () => {
-    expect(presetToCapabilities('something-else')).toEqual(['read:metadata', 'read:artifact'])
-    expect(presetToCapabilities(undefined)).toEqual(['read:metadata', 'read:artifact'])
+    expect(presetToCapabilities('something-else')).toEqual(['read:metadata', 'read:artifact', 'read:packages'])
+    expect(presetToCapabilities(undefined)).toEqual(['read:metadata', 'read:artifact', 'read:packages'])
   })
 })
 
@@ -48,11 +66,11 @@ describe('capabilitiesToLabel', () => {
   })
 
   it('read-only → pull', () => {
-    expect(capabilitiesToLabel('["read:metadata","read:artifact"]')).toBe('pull')
+    expect(capabilitiesToLabel('["read:metadata","read:artifact","read:packages"]')).toBe('pull')
   })
 
   it('read + publish → both', () => {
-    expect(capabilitiesToLabel('["read:metadata","read:artifact","publish:*"]')).toBe('both')
+    expect(capabilitiesToLabel('["read:metadata","read:artifact","read:packages","publish:*"]')).toBe('both')
   })
 
   it('publish without read → push', () => {
@@ -67,9 +85,14 @@ describe('capabilitiesToLabel', () => {
     expect(capabilitiesToLabel('["read:audit"]')).toBe('audit')
   })
 
+  it('sbom:upload alone → sbom, distinct from push', () => {
+    expect(capabilitiesToLabel('["sbom:upload"]')).toBe('sbom')
+    expect(capabilitiesToLabel('["publish:*","sbom:upload"]')).toBe('custom')
+  })
+
   it('order does not matter — the set does', () => {
-    expect(capabilitiesToLabel('["read:artifact","read:metadata"]')).toBe('pull')
-    expect(capabilitiesToLabel('["publish:*","read:artifact","read:metadata"]')).toBe('both')
+    expect(capabilitiesToLabel('["read:artifact","read:metadata","read:packages"]')).toBe('pull')
+    expect(capabilitiesToLabel('["publish:*","read:artifact","read:metadata","read:packages"]')).toBe('both')
   })
 
   it('anything that is not exactly a preset is custom, never an approximation', () => {
@@ -95,7 +118,7 @@ describe('capabilitiesToLabel', () => {
   })
 
   it('a blank entry is dropped without voiding the rest, as the server does', () => {
-    expect(capabilitiesToLabel('["read:metadata","read:artifact","  "]')).toBe('pull')
+    expect(capabilitiesToLabel('["read:metadata","read:artifact","read:packages","  "]')).toBe('pull')
     expect(capabilitiesToText('["read:metadata","  "]')).toBe('read:metadata')
   })
 })

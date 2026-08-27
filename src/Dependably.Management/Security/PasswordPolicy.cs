@@ -6,8 +6,8 @@ namespace Dependably.Security;
 /// Gate for user-supplied passwords at set/reset time (not login). Follows
 /// NIST SP 800-63B + OWASP ASVS v4.0.3 §V2.1: length floor, byte ceiling,
 /// no composition rules, entropy gate via zxcvbn, context-dictionary block.
-/// Breach-corpus check is deferred — see GitLab issue referenced in
-/// docs/encryption.md gap §6.
+/// Breach-corpus check is deferred — see the encryption gap analysis in
+/// dependably-enterprise/docs/encryption.md.
 /// </summary>
 public static class PasswordPolicy
 {

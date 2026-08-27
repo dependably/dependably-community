@@ -118,4 +118,38 @@ public sealed class WebhookControllerTests : IClassFixture<DependablyFactory>, I
         });
         Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
     }
+
+    [Fact]
+    public async Task Create_WithBlockedEventType_IsAccepted()
+    {
+        // Pins ValidEventTypes actually containing package.blocked end to end — a deleted
+        // registration line would otherwise leave the whole suite green (nothing else exercises
+        // the accept path for this specific literal).
+        using var c = await AdminClient();
+        var resp = await c.PostAsJsonAsync("/api/v1/webhooks", new
+        {
+            url = "https://hooks.example.com/blocked-events",
+            eventTypes = new[] { "package.blocked" }
+        });
+        Assert.Equal(HttpStatusCode.Created, resp.StatusCode);
+        using var doc = await JsonDocument.ParseAsync(await resp.Content.ReadAsStreamAsync());
+        Assert.Equal("package.blocked",
+            Assert.Single(doc.RootElement.GetProperty("eventTypes").EnumerateArray()).GetString());
+
+        await c.DeleteAsync($"/api/v1/webhooks/{doc.RootElement.GetProperty("id").GetString()}");
+    }
+
+    [Fact]
+    public async Task Create_WithUnknownEventType_ReturnsValidationError()
+    {
+        // Pins the reject side of the same validation: an unrecognised event-type literal never
+        // reaches a stored subscription.
+        using var c = await AdminClient();
+        var resp = await c.PostAsJsonAsync("/api/v1/webhooks", new
+        {
+            url = "https://hooks.example.com/unknown-event",
+            eventTypes = new[] { "package.not-a-real-event" }
+        });
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
+    }
 }

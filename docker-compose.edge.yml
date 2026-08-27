@@ -9,13 +9,13 @@
 #   EDGE_MASTER_TOKEN=<reader service token minted on the master> \
 #   docker compose -f docker-compose.edge.yml up -d
 #
-# See docs/edge-node.md for enrollment, the trusted-LAN anonymous-access note, and recovery.
+# See the edge-node runbook for enrollment, the trusted-LAN anonymous-access note, and recovery.
 services:
   dependably-edge:
     # The prebuilt slim edge image. It ships no management plane — the assembly reference graph
     # (Dependably.Edge references only Dependably.Core) excludes the admin/auth/SAML/SPA closure,
     # so the reduction is structural, not runtime stripping. Pull it from the Dependably registry;
-    # docs/edge-node.md covers logging in and the community-image-with-DEPLOYMENT_MODE=edge
+    # the edge-node runbook covers logging in and the community-image-with-DEPLOYMENT_MODE=edge
     # alternative for operators who build locally.
     image: dependably.northwardlabs.ca/dependably/edge:latest
     ports:

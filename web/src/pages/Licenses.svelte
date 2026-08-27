@@ -1,4 +1,5 @@
 <script>
+  import { t } from 'svelte-i18n'
   import { createEventDispatcher, onMount } from 'svelte'
   import { api } from '../lib/api.js'
   import ErrorBanner from '../lib/ErrorBanner.svelte'
@@ -41,8 +42,8 @@
 <div class="overlay" on:click={onBackdropClick} role="presentation">
   <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="notices-title">
     <header>
-      <h2 id="notices-title">Open source notices</h2>
-      <button class="close" on:click={close} aria-label="Close">×</button>
+      <h2 id="notices-title">{$t('licenses.title')}</h2>
+      <button class="close" on:click={close} aria-label={$t('common.actions.close')}>×</button>
     </header>
 
     <div class="body">
@@ -52,11 +53,13 @@
         <span class="spinner"></span>
       {:else if devModeStub}
         <div class="stub">
-          Notices are populated during the Docker build; not available when running <code>dotnet run</code> locally.
+          {$t('licenses.devStub')} <code>dotnet run</code>
         </div>
       {:else}
         <p class="meta">
-          {count} component{count === 1 ? '' : 's'}{generatedAt ? ` · generated ${generatedAt}` : ''}
+          {generatedAt
+            ? $t('licenses.metaGenerated', { values: { count, date: generatedAt } })
+            : $t('licenses.meta', { values: { count } })}
         </p>
         <table class="licenses-table">
           <colgroup>
@@ -67,10 +70,10 @@
           </colgroup>
           <thead>
             <tr>
-              <th>Package</th>
-              <th>Version</th>
-              <th>License</th>
-              <th>Copyright</th>
+              <th>{$t('licenses.columns.package')}</th>
+              <th>{$t('licenses.columns.version')}</th>
+              <th>{$t('licenses.columns.license')}</th>
+              <th>{$t('licenses.columns.copyright')}</th>
             </tr>
           </thead>
           <tbody>

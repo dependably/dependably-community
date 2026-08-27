@@ -37,6 +37,13 @@ namespace Dependably.Infrastructure;
 /// without this second pass their <c>upstream_latest_version</c> and hosted <c>versions_behind</c>
 /// would freeze at eviction time. A purely-internal name that was never proxied has a NULL
 /// <c>upstream_latest_checked_at</c> and is deliberately never fetched.
+///
+/// Both group-enumeration queries — <see cref="CacheArtifactRepository.ListGroupsNeedingDeprecationRefreshAsync"/>
+/// and <see cref="PackageRepository.ListHostedGroupsNeedingUpstreamRefreshAsync"/> — carry an
+/// <c>o.status = 'active'</c> predicate excluding a suspended/archived/deleting org (see
+/// TenantLifecycle) the same way they already exclude a soft-deleted or air-gapped one: this pass
+/// fetches upstream metadata on the org's behalf, and TenantStatusEnforcementMiddleware has
+/// already refused the upload path that would have produced these rows for a non-active org.
 /// </summary>
 public sealed class DeprecationRefreshService : ScheduledBackgroundService
 {

@@ -19,7 +19,6 @@ internal static class ObservabilityStartupExtensions
     // structured JSON via EcsTextFormatter — one object per line, log.level always present,
     // suitable for Elastic Stack, AWS CloudWatch, Datadog, and Loki ingestion; "text" emits
     // human-readable Serilog console output suitable for interactive tailing.
-    // See docs/observability/logs.md.
     // Optional OTel logs bridge (Serilog.Sinks.OpenTelemetry) ships log records via
     // OTLP when OTEL_EXPORTER_OTLP_ENDPOINT is set. Air-gap deployments leave it unset
     // and keep the console sink only.
@@ -70,7 +69,6 @@ internal static class ObservabilityStartupExtensions
     // OpenTelemetry SDK — metrics + traces. Exports metrics via the built-in
     // Prometheus scraping endpoint (registered later as /metrics) and, when
     // OTEL_EXPORTER_OTLP_ENDPOINT is set, also via OTLP push (metrics + traces).
-    // See docs/observability/metrics.md and docs/observability/traces.md.
     internal static void AddDependablyOpenTelemetry(this WebApplicationBuilder builder)
     {
         string? otlpEndpoint = builder.Configuration["OTEL_EXPORTER_OTLP_ENDPOINT"];

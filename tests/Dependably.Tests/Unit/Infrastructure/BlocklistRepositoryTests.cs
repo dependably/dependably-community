@@ -1,3 +1,4 @@
+using System.Data.Common;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
@@ -118,5 +119,69 @@ public sealed class BlocklistRepositoryTests : IClassFixture<InMemoryDbFixture>
         // Killer assertion: the next check must enforce the newly-added block, not serve a stale
         // pre-block list cached by the racing fill.
         Assert.True(await repo.IsBlockedAsync(orgId, "pkg:npm/evil-x@1.0.0"));
+    }
+
+    [Fact]
+    public async Task DbOpenThrowsAfterGuardIsMinted_DoesNotRetainItsFillGuard()
+    {
+        // GuardFor mints the guard BEFORE the DB open/read. BlocklistRepository is registered
+        // Singleton, so the guard map is process-lifetime — if the open or read throws with no
+        // cache entry ever installed to tie the guard's lifetime to, the guard must not survive
+        // the throw. Fails on the pre-fix code (no try/finally around the read), passes once the
+        // throwing branch retires the just-minted guard.
+        var repo = new BlocklistRepository(
+            new ThrowingAfterGuardStore(), new MemoryCache(new MemoryCacheOptions()), TimeProvider.System);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => repo.ListAsync($"org-{Guid.NewGuid():N}"));
+
+        Assert.Equal(0, repo.FillGuardCount);
+    }
+
+    [Fact]
+    public async Task RacingFillReusesAboutToRetireGuard_ItsInstalledEntryDoesNotSurviveTheDelayedEviction()
+    {
+        // Async post-eviction-callback race: MemoryCache dispatches TieToEntryLifetime's callback
+        // on a thread-pool task, not synchronously with eviction, so a concurrent fill can call
+        // GuardFor and receive the about-to-retire generation before that callback ever runs. The
+        // hook fires the FIRST entry's captured eviction callback (simulating that delayed
+        // dispatch, deterministically rather than by timing) between the SECOND fill's DB read and
+        // its cache write. Fails on a callback that only compare-removes from the map; passes once
+        // it also cancels the generation, which is what lets the SECOND (racing) entry's own
+        // already-cancelled expiration token keep it from ever installing.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        var wrappedCache = new PostEvictionCallbackCapturingMemoryCache(new MemoryCache(new MemoryCacheOptions()));
+        var hooked = new AfterDbReadHookStore(_fixture.Store);
+        var repo = new BlocklistRepository(hooked, wrappedCache, TimeProvider.System);
+        string cacheKey = "blocklist:" + orgId;
+
+        // Entry 1: a normal fill installs a real cache entry bound to G1 and captures its
+        // post-eviction callback — not fired yet, simulating "logically expired, physical
+        // eviction still pending" the way a naturally-elapsed TTL would leave it.
+        await repo.ListAsync(orgId);
+
+        hooked.AfterRead = () =>
+        {
+            wrappedCache.FireCapturedEvictionCallbacks(cacheKey);
+            return Task.CompletedTask;
+        };
+
+        // Force the second fill to observe a cache miss; G1 is still in the repo's own
+        // _fillGuards map (nothing has retired it yet), so GuardFor hands back the SAME instance.
+        wrappedCache.Remove(cacheKey);
+        await repo.ListAsync(orgId);
+
+        // Killer assertion: entry 2 — installed by the racing fill, bound to the same G1 the hook
+        // cancelled mid-read — must not survive; MemoryCache installs it as expired-on-insert.
+        Assert.False(wrappedCache.TryGetValue(cacheKey, out _));
+    }
+
+    private sealed class ThrowingAfterGuardStore : IMetadataStore
+    {
+        public DbProvider Provider => DbProvider.Sqlite;
+
+        public Task<DbConnection> OpenAsync(CancellationToken ct = default) =>
+            throw new InvalidOperationException(
+                "Simulates a cancelled/refused/exhausted DB open after ListAsync has already minted the fill guard.");
     }
 }

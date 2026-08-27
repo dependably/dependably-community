@@ -71,34 +71,48 @@ public sealed class SystemAdminTokenVersionStore
         // cancelled or collected.
         var guardSource = _cache is null ? null : GuardFor(adminId);
 
-        await using var conn = await _db.OpenAsync(ct);
-        long? version = await conn.ExecuteScalarAsync<long?>(
-            "SELECT token_version FROM system_admins WHERE id = @id", new { id = adminId });
-
-        if (version is not null && _cache is not null)
+        // From here on, guardSource (when non-null) MUST end up either tied to a cache entry
+        // (TieToEntryLifetime, below) or explicitly retired in the finally — never left dangling.
+        // The map is process-lifetime (this store is registered Singleton), so a DB open/read that
+        // throws before a cache entry is installed to own the guard's lifetime would otherwise
+        // leak it for the rest of the process.
+        bool tied = false;
+        try
         {
-            var options = new MemoryCacheEntryOptions
+            await using var conn = await _db.OpenAsync(ct);
+            long? version = await conn.ExecuteScalarAsync<long?>(
+                "SELECT token_version FROM system_admins WHERE id = @id", new { id = adminId });
+
+            if (version is not null && _cache is not null)
             {
-                AbsoluteExpirationRelativeToNow = CacheTtl,
-                Size = 1,
-            };
-            // If the guard was cancelled by a concurrent Invalidate the entry is expired on
-            // insert; if cancellation lands after the insert the registered callback evicts it.
-            options.AddExpirationToken(new CancellationChangeToken(guardSource!.Token));
-            // Tie the generation's lifetime to this entry so a naturally-expiring admin session
-            // (which never calls Invalidate) does not leave its guard in the map forever.
-            CacheFillGuard.TieToEntryLifetime(options, _fillGuards, adminId, guardSource);
-            _cache.Set(CacheKey(adminId), version.Value, options);
-        }
-        else if (guardSource is not null)
-        {
-            // A missing system_admin row is never cached, so the generation minted before the read
-            // is never tied to a cache entry. Retire the just-minted instance here so a removed
-            // admin's id does not leave its guard in the map forever.
-            CacheFillGuard.RetireUnbound(_fillGuards, adminId, guardSource);
-        }
+                var options = new MemoryCacheEntryOptions
+                {
+                    AbsoluteExpirationRelativeToNow = CacheTtl,
+                    Size = 1,
+                };
+                // If the guard was cancelled by a concurrent Invalidate the entry is expired on
+                // insert; if cancellation lands after the insert the registered callback evicts it.
+                options.AddExpirationToken(new CancellationChangeToken(guardSource!.Token));
+                // Tie the generation's lifetime to this entry so a naturally-expiring admin session
+                // (which never calls Invalidate) does not leave its guard in the map forever.
+                CacheFillGuard.TieToEntryLifetime(options, _fillGuards, adminId, guardSource);
+                _cache.Set(CacheKey(adminId), version.Value, options);
+                tied = true;
+            }
 
-        return version;
+            return version;
+        }
+        finally
+        {
+            if (guardSource is not null && !tied)
+            {
+                // A missing system_admin row is never cached, so the generation minted before the
+                // read is never tied to a cache entry. Retire the just-minted instance here so a
+                // removed admin's id (or a thrown DB open/read) does not leave its guard in the map
+                // forever.
+                CacheFillGuard.RetireUnbound(_fillGuards, adminId, guardSource);
+            }
+        }
     }
 
     /// <summary>

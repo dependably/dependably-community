@@ -4,6 +4,7 @@ import { Page } from '@playwright/test'
 //   <nav class="sidebar">
 //     <div class="nav-links">
 //       <button class="nav-link">Packages</button>
+//       <button class="nav-link">Projects</button>
 //       <button class="nav-link">Vulnerabilities</button>
 //       <button class="nav-link">Tokens</button>
 //       <button class="nav-link">Users</button>     (admin/owner only)
@@ -29,6 +30,10 @@ export class NavPage {
 
   async goToPackages() {
     await this.navLink('Packages').click()
+  }
+
+  async goToProjects() {
+    await this.navLink('Projects').click()
   }
 
   async goToActivity() {

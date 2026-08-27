@@ -1,0 +1,159 @@
+diff --git a/i18n/handoff/backend.en.xlf b/i18n/handoff/backend.en.xlf
+index 9a2e95cf..a9477d6d 100644
+--- a/i18n/handoff/backend.en.xlf
++++ b/i18n/handoff/backend.en.xlf
+@@ -1165,30 +1165,30 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
+         <source>name must be {0} characters or fewer.</source>
+         <target>name doit contenir au plus {0} caractères.</target>
+       </segment>
+     </unit>
+     <unit id="error.project.parentIsDescendant">
+       <notes>
+         <note category="translator">422 detail on project relocate: the move would detach the subtree into a cycle. &apos;parentId&apos; is the API field name - keep it verbatim.</note>
+       </notes>
+       <segment state="translated">
+         <source>parentId names a collection inside the project being moved. Pick a destination outside it.</source>
+-        <target>parentId désigne une collection située à l’intérieur du projet déplacé. Choisissez une destination en dehors de celui-ci.</target>
++        <target>parentId désigne une collection située à l&apos;intérieur du projet déplacé. Choisissez une destination en dehors de celui-ci.</target>
+       </segment>
+     </unit>
+     <unit id="error.project.parentIsSelf">
+       <notes>
+         <note category="translator">422 detail on project relocate: parentId named the project being moved.</note>
+       </notes>
+       <segment state="translated">
+         <source>A project cannot be moved inside itself.</source>
+-        <target>Un projet ne peut pas être déplacé à l’intérieur de lui-même.</target>
++        <target>Un projet ne peut pas être déplacé à l&apos;intérieur de lui-même.</target>
+       </segment>
+     </unit>
+     <unit id="error.project.parentNotACollection">
+       <notes>
+         <note category="translator">422 detail on project create. &apos;parentId&apos; is the API field name - keep it verbatim.</note>
+       </notes>
+       <segment state="translated">
+         <source>parentId names a project. Only a collection can contain other projects.</source>
+         <target>parentId désigne un projet. Seule une collection peut contenir d&apos;autres projets.</target>
+       </segment>
+diff --git a/i18n/handoff/frontend.en.xlf b/i18n/handoff/frontend.en.xlf
+index ff4ab226..5bb1bca1 100644
+--- a/i18n/handoff/frontend.en.xlf
++++ b/i18n/handoff/frontend.en.xlf
+@@ -3357,21 +3357,21 @@
+     </unit>
+     <unit id="profile.title">
+       <segment state="translated">
+         <source>Profile</source>
+         <target>Profil</target>
+       </segment>
+     </unit>
+     <unit id="projects.breadcrumb">
+       <segment state="translated">
+         <source>Breadcrumb</source>
+-        <target>Fil d’Ariane</target>
++        <target>Fil d&apos;Ariane</target>
+       </segment>
+     </unit>
+     <unit id="projects.collection">
+       <segment state="translated">
+         <source>Collection</source>
+         <target>Collection</target>
+       </segment>
+     </unit>
+     <unit id="projects.columns.components">
+       <segment state="translated">
+@@ -3633,21 +3633,21 @@
+     </unit>
+     <unit id="projects.folders.rootOption">
+       <segment state="translated">
+         <source>Top level</source>
+         <target>Niveau racine</target>
+       </segment>
+     </unit>
+     <unit id="projects.folders.targetsFailed">
+       <segment state="translated">
+         <source>Folders could not be loaded, so this project cannot be moved right now: {message}</source>
+-        <target>Impossible de charger les dossiers ; ce projet ne peut pas être déplacé pour l’instant : {message}</target>
++        <target>Impossible de charger les dossiers; ce projet ne peut pas être déplacé pour l&apos;instant : {message}</target>
+       </segment>
+     </unit>
+     <unit id="projects.loadFailed">
+       <segment state="translated">
+         <source>Failed to load projects: {message}</source>
+         <target>Échec du chargement des projets : {message}</target>
+       </segment>
+     </unit>
+     <unit id="projects.noVersion">
+       <segment state="translated">
+diff --git a/src/Dependably.Core/Resources/SharedResource.fr.resx b/src/Dependably.Core/Resources/SharedResource.fr.resx
+index 5d92c59f..ea3f446c 100644
+--- a/src/Dependably.Core/Resources/SharedResource.fr.resx
++++ b/src/Dependably.Core/Resources/SharedResource.fr.resx
+@@ -675,24 +675,24 @@ Si vous n'êtes pas à l'origine de ce changement, contactez immédiatement votr
+   <data name="error.project.nameTaken" xml:space="preserve">
+     <value>Un projet portant ce nom existe déjà à cet endroit.</value>
+   </data>
+   <data name="error.project.parentNotFound" xml:space="preserve">
+     <value>parentId ne désigne aucune collection de cette organisation.</value>
+   </data>
+   <data name="error.project.parentNotACollection" xml:space="preserve">
+     <value>parentId désigne un projet. Seule une collection peut contenir d'autres projets.</value>
+   </data>
+   <data name="error.project.parentIsSelf" xml:space="preserve">
+-    <value>Un projet ne peut pas être déplacé à l’intérieur de lui-même.</value>
++    <value>Un projet ne peut pas être déplacé à l'intérieur de lui-même.</value>
+   </data>
+   <data name="error.project.parentIsDescendant" xml:space="preserve">
+-    <value>parentId désigne une collection située à l’intérieur du projet déplacé. Choisissez une destination en dehors de celui-ci.</value>
++    <value>parentId désigne une collection située à l'intérieur du projet déplacé. Choisissez une destination en dehors de celui-ci.</value>
+   </data>
+   <data name="error.project.isCollection" xml:space="preserve">
+     <value>Ce projet est une collection. Les collections ne contiennent aucune version.</value>
+   </data>
+   <data name="error.sbom.versionNotFound" xml:space="preserve">
+     <value>Cette version de projet n'existe pas.</value>
+   </data>
+   <data name="error.sbom.analysisRowNotFound" xml:space="preserve">
+     <value>La décision de tri n'a pas pu être relue après son enregistrement.</value>
+   </data>
+diff --git a/web/src/locales/fr.json b/web/src/locales/fr.json
+index f6f9a22f..78f54638 100644
+--- a/web/src/locales/fr.json
++++ b/web/src/locales/fr.json
+@@ -216,34 +216,34 @@
+       "inheritOrgDefault": "Hériter (valeur par défaut de l'organisation)"
+     },
+     "empty": "Aucun paquet trouvé"
+   },
+   "projects": {
+     "title": "Projets",
+     "searchPlaceholder": "Rechercher des projets…",
+     "empty": "Aucun projet pour l'instant. Les paquets sont les artefacts que vous diffusez — les projets sont les applications que vous construisez avec eux. Téléversez un SBOM pour commencer.",
+     "emptySearch": "Aucun projet ne correspond à votre recherche.",
+     "collection": "Collection",
+-    "breadcrumb": "Fil d’Ariane",
++    "breadcrumb": "Fil d'Ariane",
+     "folders": {
+       "newFolder": "Nouveau dossier",
+       "newFolderTitle": "Nouveau dossier",
+       "editProjectTitle": "Modifier le projet",
+       "editFolderTitle": "Modifier le dossier",
+       "nameLabel": "Nom",
+       "namePlaceholder": "ex. Plateforme",
+       "descriptionLabel": "Description (facultatif)",
+       "parentLabel": "Dossier",
+       "rootOption": "Niveau racine",
+       "currentFolder": "Dossier actuel",
+       "parentHint": "Les dossiers regroupent les projets. Un dossier ne contient aucune version.",
+-      "targetsFailed": "Impossible de charger les dossiers ; ce projet ne peut pas être déplacé pour l’instant : {message}",
++      "targetsFailed": "Impossible de charger les dossiers; ce projet ne peut pas être déplacé pour l'instant : {message}",
+       "actionsMenu": "Actions pour {name}",
+       "edit": "Modifier…"
+     },
+     "columns": {
+       "name": "Nom",
+       "components": "Composants",
+       "severity": "Gravité",
+       "policy": "Politique",
+       "latest": "Dernière version",
+       "lastUpload": "Dernier téléversement"

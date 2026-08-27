@@ -31,9 +31,17 @@ public sealed class AirGappedExceptionMiddleware
                 throw;
             }
 
+            var headerSnapshot = ResponseHeaderPreserver.Capture(context);
             context.Response.Clear();
             context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
             context.Response.Headers.RetryAfter = "0";
+
+            // Response.Clear() drops the request-derived headers SecurityHeadersMiddleware set
+            // on the way in, restored from the snapshot above (see ResponseHeaderPreserver's own
+            // doc comment for what it preserves and why). This refusal is reachable by an
+            // anonymous caller and the body reflects ex.Resource, so it must still be sniff-proof.
+            ResponseHeaderPreserver.Restore(context, headerSnapshot);
+            context.Response.Headers.XContentTypeOptions = "nosniff";
             context.Response.ContentType = "application/problem+json";
 
             string payload = JsonSerializer.Serialize(new

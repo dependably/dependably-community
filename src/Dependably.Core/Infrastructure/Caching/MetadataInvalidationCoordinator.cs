@@ -108,8 +108,9 @@ public sealed class MetadataInvalidationCoordinator
         _npm.Evict(new NpmPackumentKey(inv.OrgId, name) { IsProxy = true });
     }
 
-    // PyPI: two negotiated representations at one URL — PEP 503 HTML and PEP 691 JSON. The key
-    // formatter applies PEP 503 name normalization, so the raw project name is passed through.
+    // PyPI: four variants — the two negotiated representations at one URL (PEP 503 HTML and
+    // PEP 691 JSON) × local/proxy. The key formatter applies PEP 503 name normalization, so the
+    // raw project name is passed through.
     private void EvictPyPi(MetadataInvalidation inv)
     {
         if (inv.Name is not { Length: > 0 } name)
@@ -119,6 +120,8 @@ public sealed class MetadataInvalidationCoordinator
 
         _pypi.Evict(new PyPiSimpleIndexKey(inv.OrgId, name));
         _pypi.Evict(new PyPiSimpleIndexKey(inv.OrgId, name) { WantsJson = true });
+        _pypi.Evict(new PyPiSimpleIndexKey(inv.OrgId, name) { IsProxy = true });
+        _pypi.Evict(new PyPiSimpleIndexKey(inv.OrgId, name) { WantsJson = true, IsProxy = true });
     }
 
     // NuGet: four variants — SemVer1/SemVer2 × local/proxy. The registration key holds the

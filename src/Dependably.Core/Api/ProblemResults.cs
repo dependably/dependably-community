@@ -136,6 +136,20 @@ public sealed class ProblemResults
         return new ObjectResult(problem) { StatusCode = StatusCodes.Status404NotFound };
     }
 
+    /// <summary>Localized HTTP 413 problem response for an <c>[ApiController]</c> action — used
+    /// when a request body exceeds a configured cap. Distinct from the pipeline's own 413, which
+    /// the framework emits before the action runs and which carries no localizable detail.</summary>
+    public IActionResult PayloadTooLargeActionKey(string resourceKey, params object[] args)
+    {
+        var problem = new ProblemDetails
+        {
+            Status = StatusCodes.Status413PayloadTooLarge,
+            Title = _localizer["error.payloadTooLarge.title"],
+            Detail = Localize(resourceKey, args),
+        };
+        return new ObjectResult(problem) { StatusCode = StatusCodes.Status413PayloadTooLarge };
+    }
+
     /// <summary>Localized HTTP 429 problem response for an <c>[ApiController]</c> action — used
     /// when a per-account or per-resource budget the caller has already been told about is
     /// exhausted. Distinct from the rate limiter's own 429, which the middleware emits before the

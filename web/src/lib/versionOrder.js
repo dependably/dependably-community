@@ -128,17 +128,57 @@ export function parseVersion(input) {
  *
  * @returns {number} negative if `a` precedes `b`, positive if it follows, 0 if equal
  */
+/**
+ * One side's tokens ran out at this position; `present` is the token the other side still has.
+ * The verdict is stated from the EXHAUSTED side's point of view — negative means the exhausted
+ * side sorts first — so the caller flips it when the exhausted side is `b`. Null means the two
+ * are still equal here and the walk continues.
+ *
+ * Zero-padding a missing trailing segment is right for the release part ("1.0" is "1.0.0") but
+ * wrong once a pre-release marker has been seen: there a version with fewer identifiers ranks
+ * BELOW one that continues, so "1.0-alpha" precedes "1.0-alpha.0".
+ */
+function compareAgainstExhausted(present, inPreRelease) {
+  if (!inPreRelease && typeof present === 'number') {
+    return present === 0 ? null : -1
+  }
+  return isPreRelease(present) ? 1 : -1
+}
+
+/**
+ * Both sides still have a token. Null means equal at this position.
+ *
+ * A number against a word: the number is a further release segment and the word qualifies the
+ * release, so the number sorts higher. This holds for both directions of qualifier — "1.0.1"
+ * outranks "1.0rc1" and "1.0.post1" alike.
+ */
+function compareTokenPair(ta, tb) {
+  const aNum = typeof ta === 'number'
+  const bNum = typeof tb === 'number'
+
+  if (aNum !== bNum) return aNum ? 1 : -1
+  if (aNum && bNum) return order(ta, tb)
+
+  const ra = markerRank(ta)
+  const rb = markerRank(tb)
+  if (ra !== rb) return ra < rb ? -1 : 1
+  return order(ta, tb)
+}
+
+/** Ascending order of two comparable values, or null when they are equal. */
+function order(a, b) {
+  if (a === b) return null
+  return a < b ? -1 : 1
+}
+
 export function compareVersions(a, b) {
   const pa = parseVersion(a)
   const pb = parseVersion(b)
 
   if (pa.epoch !== pb.epoch) return pa.epoch < pb.epoch ? -1 : 1
 
-  // Zero-padding a missing trailing segment is right for the release part ("1.0"
-  // is "1.0.0") but wrong once a pre-release marker has been seen: there, a
-  // version with fewer identifiers ranks BELOW one that continues, so "1.0-alpha"
-  // precedes "1.0-alpha.0". Tracked rather than assumed, because the boundary is
-  // only known part-way through the walk.
+  // Tracked rather than assumed, because the pre-release boundary is only known part-way
+  // through the walk — see compareAgainstExhausted.
   let inPreRelease = false
 
   const len = Math.max(pa.tokens.length, pb.tokens.length)
@@ -146,41 +186,17 @@ export function compareVersions(a, b) {
     const ta = pa.tokens[i]
     const tb = pb.tokens[i]
 
-    // One side ran out.
-    if (ta === undefined) {
-      if (!inPreRelease && typeof tb === 'number') {
-        if (tb === 0) continue
-        return -1
-      }
-      return isPreRelease(tb) ? 1 : -1
-    }
-    if (tb === undefined) {
-      if (!inPreRelease && typeof ta === 'number') {
-        if (ta === 0) continue
-        return 1
-      }
-      return isPreRelease(ta) ? -1 : 1
+    if (ta === undefined || tb === undefined) {
+      const exhaustedIsA = ta === undefined
+      const verdict = compareAgainstExhausted(exhaustedIsA ? tb : ta, inPreRelease)
+      if (verdict === null) continue
+      return exhaustedIsA ? verdict : -verdict
     }
 
     if (isPreRelease(ta) || isPreRelease(tb)) inPreRelease = true
 
-    const aNum = typeof ta === 'number'
-    const bNum = typeof tb === 'number'
-
-    if (aNum && bNum) {
-      if (ta !== tb) return ta < tb ? -1 : 1
-      continue
-    }
-
-    // A number against a word: the number is a further release segment and the
-    // word qualifies the release, so the number sorts higher. This holds for both
-    // directions of qualifier — "1.0.1" outranks "1.0rc1" and "1.0.post1" alike.
-    if (aNum !== bNum) return aNum ? 1 : -1
-
-    const ra = markerRank(ta)
-    const rb = markerRank(tb)
-    if (ra !== rb) return ra < rb ? -1 : 1
-    if (ta !== tb) return ta < tb ? -1 : 1
+    const verdict = compareTokenPair(ta, tb)
+    if (verdict !== null) return verdict
   }
 
   // Tokens are exhausted and equal, so these are the same version however they

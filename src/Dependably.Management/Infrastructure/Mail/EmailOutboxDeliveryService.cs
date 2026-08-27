@@ -3,6 +3,19 @@ using Dependably.Infrastructure.Alerts;
 
 namespace Dependably.Infrastructure.Mail;
 
+/// <summary>Injected dependencies, bundled so the constructor stays within S107.</summary>
+public sealed record EmailOutboxDeliveryServices(
+    EmailOutboxRepository Outbox,
+    EmailOutboxPolicy Policy,
+    EmailTransportBreaker Breaker,
+    InstanceSmtpConfig InstanceConfig,
+    SmtpMailSender Sender,
+    AlertRepository Alerts,
+    AlertSettingsRepository AlertSettings,
+    OrgRepository Orgs,
+    TimeProvider Time,
+    ILogger<EmailOutboxDeliveryService> Logger);
+
 /// <summary>
 /// The delivery worker behind the durable outbox. Each pass retires rows that have passed a
 /// ceiling, claims the due ones under a lease, and attempts each over the instance-level SMTP
@@ -36,6 +49,15 @@ namespace Dependably.Infrastructure.Mail;
 /// </para>
 ///
 /// <para>
+/// Each pass also reconciles the alert-side projection of terminal rows —
+/// <see cref="ReconcileAlertProjectionsAsync"/>. The terminal outbox write and the write onto
+/// <c>alert.email_status</c> are not one transaction, so a projection that does not land leaves a
+/// permanent divergence rather than a lag; the sweep re-derives that state from the outbox row,
+/// which stays authoritative. It re-projects the idempotent state only, never the accumulative
+/// delivery-health counters.
+/// </para>
+///
+/// <para>
 /// Deliberately absent, and deliberately not simulated here: burst coalescing at delivery time (it
 /// happens at enqueue, in <see cref="AlertEmailQueue"/>) and an operator aggregate health surface.
 /// What this worker does carry in the interim is a backlog-depth warning on threshold crossing, so
@@ -51,6 +73,7 @@ public sealed class EmailOutboxDeliveryService : BackgroundService
     private readonly SmtpMailSender _sender;
     private readonly AlertRepository _alerts;
     private readonly AlertSettingsRepository _alertSettings;
+    private readonly OrgRepository _orgs;
     private readonly TimeProvider _time;
     private readonly ILogger<EmailOutboxDeliveryService> _logger;
 
@@ -70,33 +93,34 @@ public sealed class EmailOutboxDeliveryService : BackgroundService
     private long _deadLetteredCount;
     private long _expiredCount;
     private long _retriedCount;
+    private long _reconciledCount;
 
-    public EmailOutboxDeliveryService(
-        EmailOutboxRepository outbox,
-        EmailOutboxPolicy policy,
-        EmailTransportBreaker breaker,
-        InstanceSmtpConfig instanceConfig,
-        SmtpMailSender sender,
-        AlertRepository alerts,
-        AlertSettingsRepository alertSettings,
-        TimeProvider time,
-        ILogger<EmailOutboxDeliveryService> logger)
+    public EmailOutboxDeliveryService(EmailOutboxDeliveryServices services)
     {
-        _outbox = outbox;
-        _policy = policy;
-        _breaker = breaker;
-        _instanceConfig = instanceConfig;
-        _sender = sender;
-        _alerts = alerts;
-        _alertSettings = alertSettings;
-        _time = time;
-        _logger = logger;
+        _outbox = services.Outbox;
+        _policy = services.Policy;
+        _breaker = services.Breaker;
+        _instanceConfig = services.InstanceConfig;
+        _sender = services.Sender;
+        _alerts = services.Alerts;
+        _alertSettings = services.AlertSettings;
+        _orgs = services.Orgs;
+        _time = services.Time;
+        _logger = services.Logger;
     }
 
     public long DeliveredCount => Interlocked.Read(ref _deliveredCount);
     public long DeadLetteredCount => Interlocked.Read(ref _deadLetteredCount);
     public long ExpiredCount => Interlocked.Read(ref _expiredCount);
     public long RetriedCount => Interlocked.Read(ref _retriedCount);
+
+    /// <summary>
+    /// Stale alert projections this worker has repaired — see
+    /// <see cref="ReconcileAlertProjectionsAsync"/>. A non-zero value is a signal in its own right:
+    /// it counts terminal outcomes the inline projection did not land, which is the condition an
+    /// operator would otherwise have no way to see.
+    /// </summary>
+    public long ReconciledCount => Interlocked.Read(ref _reconciledCount);
 
     /// <summary>
     /// Nudges the worker to run a pass now instead of at the next poll tick. Non-blocking, and a
@@ -114,6 +138,7 @@ public sealed class EmailOutboxDeliveryService : BackgroundService
             // already covers them.
             while (_wake.Reader.TryRead(out _))
             {
+                // Draining is the whole body — TryRead already consumed the nudge.
             }
 
             try
@@ -157,6 +182,11 @@ public sealed class EmailOutboxDeliveryService : BackgroundService
                 expired);
         }
 
+        // Immediately after the ceiling sweep, and before anything that can return early: the
+        // sweep above just retired rows set-based with no per-row projection, and reconciliation
+        // is independent of the transport and of the breaker, exactly as ExpireOverdueAsync is.
+        await ReconcileAlertProjectionsAsync(ct);
+
         await ReportBacklogAsync(ct);
 
         var instance = await _instanceConfig.ResolveAsync(ct);
@@ -185,16 +215,133 @@ public sealed class EmailOutboxDeliveryService : BackgroundService
             return;
         }
 
+        // Tracks whether this pass ever reached a REAL delivery attempt (AttemptAsync). A pass
+        // whose entire claimed batch is skipped (suspension or a lookup failure) must still
+        // resolve the breaker's probe below — see the AbandonUnusedProbe call after the loop for
+        // why leaving it unresolved is a whole-instance outage, not a per-org one.
+        bool anyRealAttempt = false;
+
         foreach (var message in due)
         {
             if (ct.IsCancellationRequested)
             {
                 // The lease lapses on its own; the row returns to the drain set untouched.
-                return;
+                break;
             }
 
-            await AttemptAsync(instance.Transport, message, ct);
+            switch (await ClassifySkipAsync(message, ct))
+            {
+                case SkipReason.None:
+                    anyRealAttempt = true;
+                    await AttemptAsync(instance.Transport, message, ct);
+                    break;
+
+                case SkipReason.NonActiveOrg:
+                    // Not a failure, not a success: defer the row forward by the same ceiling a
+                    // real transient failure ultimately backs off to, releasing its lease so it
+                    // does not occupy this org's spot in every subsequent pass's claim query.
+                    // `failureClass: null` deliberately does not reuse
+                    // "transient"/"permanent"/"unknown": no delivery attempt happened, so no
+                    // delivery failure occurred to classify. This deferral is deliberately NOT
+                    // applied to a lookup failure (see SkipReason.LookupFailed below) — a
+                    // suspended org should back off hard, a possibly-active org whose status this
+                    // pass simply failed to resolve should not.
+                    await _outbox.ScheduleRetryAsync(
+                        message.Id,
+                        _time.GetUtcNow() + EmailOutboxPolicy.MaxBackoff,
+                        failureClass: null,
+                        error: "Suspended/archived/deleting org - delivery deferred, not attempted.",
+                        ct);
+                    break;
+
+                case SkipReason.LookupFailed:
+                    // Deliberately not deferred: this org may be perfectly active, and a one-off
+                    // lookup failure (e.g. a transient SQLITE_BUSY) is not evidence it should back
+                    // off for MaxBackoff (30 min). The row stays claimed and its lease simply
+                    // lapses (EmailOutboxPolicy.LeaseDuration, 2 min), so it is retried promptly
+                    // on a later pass rather than losing most of a half-hour to a
+                    // suspension-strength backoff it never earned.
+                    break;
+            }
         }
+
+        // This pass claimed at least one row (the branch above already handled zero) but never
+        // reached a real attempt — every claimed row was skipped, whether for suspension or a
+        // lookup failure. That is exactly the shape a probe budget (BeginPassBudget granting
+        // exactly 1 while HalfOpen) can hit: ClaimDueAsync orders by (next_attempt_at,
+        // created_at), so a long-idle row can keep winning the single probe slot pass after pass.
+        // Leaving the probe unresolved here freezes EmailTransportBreaker in HalfOpen forever —
+        // BeginPassBudget returns 0 for every state but Closed/cooled-down-Open, so no later pass
+        // would ever call ClaimDueAsync again, for ANY org, including operator-scope
+        // (org_id IS NULL) mail. The NonActiveOrg deferral above already moves that row out of
+        // the immediate claim order for its own reason (see the case above); this call is what
+        // stops the current pass's probe from wedging the breaker regardless of which skip
+        // reason emptied the pass.
+        if (!anyRealAttempt)
+        {
+            _breaker.AbandonUnusedProbe();
+        }
+    }
+
+    /// <summary>Why <see cref="ClassifySkipAsync"/> declined to attempt a message this pass.</summary>
+    private enum SkipReason
+    {
+        /// <summary>No skip — attempt delivery normally.</summary>
+        None,
+
+        /// <summary>The org is suspended/archived/deleting (or soft-deleted). Back off hard.</summary>
+        NonActiveOrg,
+
+        /// <summary>
+        /// The org lookup itself failed. Not a suspension signal — the org may be perfectly
+        /// active — so the caller must not apply the suspension-strength deferral to it.
+        /// </summary>
+        LookupFailed,
+    }
+
+    // A suspended/archived/deleting org (see TenantLifecycle) never receives fresh alert email at
+    // its own configured recipients — those addresses are tenant-owned, exactly the kind of
+    // egress-on-the-org's-behalf the suspension is meant to stop. A null OrgId is operator-scope
+    // mail (no tenant owner to suspend) and is never skipped.
+    private async Task<SkipReason> ClassifySkipAsync(ClaimedEmailOutboxMessage message, CancellationToken ct)
+    {
+        if (message.OrgId is null)
+        {
+            return SkipReason.None;
+        }
+
+        Org? org;
+        try
+        {
+            org = await _orgs.GetByIdAsync(message.OrgId, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Fail closed, matching WebhookDispatchQueue.FanOutAsync and AlertSlackQueue.DeliverAsync:
+            // an org lookup that failed for its own reasons must not read as "active" and let
+            // delivery through. This is a lookup failure, not evidence of suspension — the caller
+            // leaves the row's lease to lapse naturally rather than applying the
+            // suspension-strength MaxBackoff deferral, so a perfectly active org's mail is
+            // retried promptly rather than delayed by up to half an hour.
+            _logger.LogWarning(ex,
+                "Failed to resolve org {OrgId} while draining the email outbox; skipping message {MessageId} this pass.",
+                message.OrgId, message.Id);
+            return SkipReason.LookupFailed;
+        }
+
+        if (TenantLifecycle.IsActive(org))
+        {
+            return SkipReason.None;
+        }
+
+        _logger.LogInformation(
+            "Email outbox delivery skipped for message {MessageId}: org {OrgId} is {Status} (deleted={Deleted}).",
+            message.Id, message.OrgId, org?.Status ?? "unknown", org?.DeletedAt is not null);
+        return SkipReason.NonActiveOrg;
     }
 
     private async Task AttemptAsync(
@@ -296,7 +443,8 @@ public sealed class EmailOutboxDeliveryService : BackgroundService
         try
         {
             await _alerts.RecordEmailOutcomeAsync(
-                message.OrgId, message.CorrelationId, delivered ? "sent" : "failed", error,
+                message.OrgId, message.CorrelationId,
+                delivered ? AlertEmailStatuses.Sent : AlertEmailStatuses.Failed, error,
                 CancellationToken.None);
 
             if (delivered)
@@ -312,14 +460,164 @@ public sealed class EmailOutboxDeliveryService : BackgroundService
         catch (Exception ex)
         {
             // The outbox row already holds the authoritative terminal state; only the domain
-            // read-model write failed. Log loudly and move on rather than re-queueing a message
-            // that was already handed to the relay.
+            // read-model write failed. Log and move on rather than re-queueing a message that was
+            // already handed to the relay — an inline retry here has no natural bound, because the
+            // outbox row is terminal and so nothing else would ever stop retrying it.
+            // ReconcileAlertProjectionsAsync is what closes the divergence instead, on a later
+            // pass, from the outbox row that is still authoritative.
             _logger.LogWarning(ex,
                 "{ExceptionType} recording the {Outcome} outcome of outbox message {MessageId} on alert "
-                + "{AlertId} (org {OrgId}); the outbox row is correct but the alert row was not updated.",
+                + "{AlertId} (org {OrgId}); the outbox row is correct but the alert row was not updated. "
+                + "A later pass reconciles it.",
                 ex.GetType().Name, delivered ? "delivered" : "failed", message.Id,
                 message.CorrelationId, message.OrgId);
         }
+    }
+
+    /// <summary>
+    /// Re-projects terminal outbox rows whose alert row disagrees with them, and only those.
+    ///
+    /// <para>
+    /// The terminal outbox write and the projection onto the alert are separate statements with no
+    /// transaction around them. When the second fails — or the process dies between them — the
+    /// divergence is permanent rather than a lag: the outbox row is already terminal, so
+    /// <see cref="EmailOutboxRepository.ClaimDueAsync"/> never returns the message again and
+    /// nothing else writes that <c>email_status</c>. The alert then reads as NULL, indistinguishable
+    /// from mail that was never attempted, on the surface where a drop is supposed to become
+    /// visible. The same sweep also covers the rows
+    /// <see cref="EmailOutboxRepository.ExpireOverdueAsync"/> retires set-based, which have never
+    /// had a per-row projection at all.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Only the idempotent state is re-projected. The accumulative health columns deliberately
+    /// are not.</b> <c>alert.email_status</c> is a state: writing <c>sent</c> or <c>failed</c> onto
+    /// a row that already holds it changes nothing, so re-deriving it from the authoritative outbox
+    /// row is safe however many times it runs. <c>alert_settings.email_consecutive_failures</c> is
+    /// a counter and <c>email_failing_since</c> is a first-seen instant, so replaying
+    /// <c>RecordEmailFailureAsync</c> here would invent failures that never happened — and could
+    /// cross a threshold on replay. Three reasons make that not merely risky but unfixable in this
+    /// shape. This repair is itself best-effort and retried on the next pass, so an accumulative
+    /// replay double-counts by construction whenever a repair partially lands. The health columns
+    /// are a running summary of *now* with no event time and no idempotency key, so folding a
+    /// historical failure into them stamps a current timestamp on an old event and can reopen
+    /// <c>email_failing_since</c> for a relay that recovered hours ago — reporting an outage that
+    /// is over is worse than reporting one increment short. And exactly-once is unreachable here
+    /// without an idempotency ledger: a replay and the status write are themselves two statements
+    /// with no transaction around them, so replaying before the status write double-counts when the
+    /// status write throws and the row is selected again, while replaying after it loses the
+    /// increment for good when the replay throws and the row has already left the predicate.
+    /// (It is tempting to reason that a selected row must have failed at the alert write, which
+    /// runs first in the same <c>try</c>, so its health write cannot have run — true of this one
+    /// path, but it makes correctness rest on statement order inside a <c>catch</c>, which is not
+    /// an invariant a repair loop should depend on.) The honest operator signal is this sweep's own
+    /// count, logged below: it is the number of divergences actually found, where a replayed
+    /// counter would be fiction.
+    /// </para>
+    ///
+    /// <para>
+    /// Nothing here writes tenant configuration — no <c>email_enabled</c>, no recipients — for the
+    /// same reason <c>RecordEmailFailureAsync</c> does not: the component that failed is the
+    /// operator's, and configuration is intent while health is reality.
+    /// </para>
+    /// </summary>
+    private async Task ReconcileAlertProjectionsAsync(CancellationToken ct)
+    {
+        IReadOnlyList<DivergentAlertProjection> divergent;
+        try
+        {
+            divergent = await _outbox.FindDivergentAlertProjectionsAsync(
+                EmailOutboxPolicy.ReconcileBatchSize, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Reconciliation is repair work; a failure to even read the divergence set must not
+            // stop this pass from draining the queue. The next pass reads it again.
+            _logger.LogWarning(ex,
+                "{ExceptionType} reading the email outbox reconciliation set; delivery continues and "
+                + "the next pass retries the reconciliation.",
+                ex.GetType().Name);
+            return;
+        }
+
+        if (divergent.Count == 0)
+        {
+            return;
+        }
+
+        var (repaired, failed, lastFailure) = await RepairProjectionsAsync(divergent, ct);
+
+        if (repaired > 0)
+        {
+            Interlocked.Add(ref _reconciledCount, repaired);
+            _logger.LogWarning(
+                "Email outbox: reconciled {Count} alert(s) whose email outcome had not been projected "
+                + "from their terminal outbox row. Delivery-health counters are deliberately not "
+                + "replayed. Divergences older than the terminal-retention window are unrecoverable — "
+                + "the outbox row carrying the outcome is already gone.",
+                repaired);
+        }
+
+        if (failed > 0)
+        {
+            _logger.LogWarning(lastFailure,
+                "{ExceptionType} reconciling {Count} alert email projection(s); the outbox rows remain "
+                + "authoritative and the next pass retries them.",
+                lastFailure?.GetType().Name ?? "Error", failed);
+        }
+    }
+
+    /// <summary>
+    /// Re-projects each divergent row's outcome onto its alert. Failures are counted and the last
+    /// one kept rather than logged per row: a database refusing writes would otherwise emit one
+    /// line per row in the batch. Cancellation stops the batch — whatever is left stays divergent
+    /// and is selected again next pass, since the outbox row it derives from is untouched.
+    /// </summary>
+    private async Task<(int Repaired, int Failed, Exception? LastFailure)> RepairProjectionsAsync(
+        IReadOnlyList<DivergentAlertProjection> divergent, CancellationToken ct)
+    {
+        int repaired = 0;
+        int failed = 0;
+        Exception? lastFailure = null;
+
+        foreach (var row in divergent)
+        {
+            if (ct.IsCancellationRequested)
+            {
+                break;
+            }
+
+            bool delivered = row.State == EmailOutboxStates.Delivered;
+
+            try
+            {
+                // The error text comes from the outbox row itself, so the repaired projection
+                // carries the same diagnostic the inline one would have. A delivered row records
+                // no error, matching RecordDomainOutcomeAsync: last_error on a delivered row can
+                // still hold a prior attempt's transient failure, which is not this outcome.
+                await _alerts.RecordEmailOutcomeAsync(
+                    row.OrgId, row.CorrelationId,
+                    delivered ? AlertEmailStatuses.Sent : AlertEmailStatuses.Failed,
+                    delivered ? null : row.LastError,
+                    ct);
+                repaired++;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                failed++;
+                lastFailure = ex;
+            }
+        }
+
+        return (repaired, failed, lastFailure);
     }
 
     /// <summary>

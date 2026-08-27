@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte'
   import { t } from 'svelte-i18n'
+  import { formatTime } from '../format.js'
   import Toggle from '../Toggle.svelte'
 
   // /metrics access editor, shared by the multi-mode system SPA and the single-mode tenant
@@ -140,7 +141,7 @@
     >
       {accessSaving ? $t('system.settings.saving') : $t('system.settings.metrics.save')}
     </button>
-    {#if accessSavedAt}<span class="saved">{$t('system.settings.savedAt', { values: { time: accessSavedAt.toLocaleTimeString() } })}</span>{/if}
+    {#if accessSavedAt}<span class="saved">{$t('system.settings.savedAt', { values: { time: $formatTime(accessSavedAt) } })}</span>{/if}
 
     {#each accessWarnings as warning, i (i)}
       <div class="warn-box"><svg width="12" height="12" aria-hidden="true"><use href="/icons.svg#icon-alert"/></svg> {warning}</div>

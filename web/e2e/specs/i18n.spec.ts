@@ -37,5 +37,18 @@ test.describe('i18n', () => {
     await expect(
       adminPage.locator('nav.sidebar button.nav-link', { hasText: 'Paquets' })
     ).toBeVisible({ timeout: 5_000 })
+
+    // Switch back. The language is a SERVER-SIDE preference on the one admin account the whole
+    // suite shares, so leaving it on French hands every later spec a French UI and breaks any
+    // selector keyed on an English label. Restoring narrows that window to this test's own
+    // duration; it cannot close it entirely (CI runs two workers against the same account), which
+    // is why locale-sensitive specs should use structural selectors rather than rely on this.
+    //
+    // Re-located by the options it carries, not by aria-label: that label is itself translated
+    // ("Langue"), so the English-named locator above no longer matches the element it just used.
+    await adminPage.locator('select:has(option[value="fr"])').selectOption('en')
+    await expect(
+      adminPage.locator('nav.sidebar button.nav-link', { hasText: 'Packages' })
+    ).toBeVisible({ timeout: 5_000 })
   })
 })

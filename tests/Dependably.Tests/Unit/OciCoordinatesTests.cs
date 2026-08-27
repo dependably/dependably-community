@@ -32,15 +32,24 @@ public sealed class OciCoordinatesTests
 
     [Theory]
     [InlineData("sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abcd")]
-    [InlineData("sha512:00112233")]
+    [InlineData("sha512:00112233001122330011223300112233001122330011223300112233001122330011223300112233001122330011223300112233001122330011223300112233")]
     public void IsValidDigest_AcceptsLegal(string digest)
         => Assert.True(OciCoordinatesParser.IsValidDigest(digest));
 
+    // The hex run is length-checked against the named algorithm (64 for sha256, 128 for sha512).
+    // It previously matched [a-f0-9]+, so "sha512:00112233" — a 8-character sha512 — asserted here
+    // as legal. Nothing downstream was exploitable, because every consumer compares for exact
+    // equality against a digest the server computed itself, so a malformed one simply never
+    // matched. But the reject list is where a wrong-length digest belongs: it should be refused at
+    // the DIGEST_INVALID gate rather than saved by an equality check that happens to miss it.
     [Theory]
     [InlineData("notadigest")]
     [InlineData("sha1:abc")]
     [InlineData("sha256:")]
     [InlineData("sha256:ZZZZ")]
+    [InlineData("sha512:00112233")]
+    [InlineData("sha256:abc123")]
+    [InlineData("sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abcdef")]
     public void IsValidDigest_RejectsIllegal(string digest)
         => Assert.False(OciCoordinatesParser.IsValidDigest(digest));
 

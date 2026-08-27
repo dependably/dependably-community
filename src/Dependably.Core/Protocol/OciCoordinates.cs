@@ -22,13 +22,13 @@ public static partial class OciCoordinatesParser
     // Maximum OCI repository name length per the Distribution Spec (matches DNS name limit).
     private const int MaxRepositoryNameLength = 255;
 
-    [GeneratedRegex(@"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$")]
+    [GeneratedRegex(@"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*\z")]
     private static partial Regex RepoNameRegex();
 
-    [GeneratedRegex(@"^[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}$")]
+    [GeneratedRegex(@"^[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}\z")]
     private static partial Regex TagRegex();
 
-    [GeneratedRegex(@"^(sha256|sha512):[a-f0-9]+$")]
+    [GeneratedRegex(@"^(?:sha256:[a-f0-9]{64}|sha512:[a-f0-9]{128})\z")]
     private static partial Regex DigestRegex();
 
     /// <summary>Validates that <paramref name="name"/> is a legal OCI repo name.</summary>

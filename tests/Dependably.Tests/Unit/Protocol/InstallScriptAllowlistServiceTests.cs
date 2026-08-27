@@ -1,3 +1,4 @@
+using System.Data.Common;
 using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Protocol;
@@ -218,5 +219,34 @@ public sealed class InstallScriptAllowlistServiceTests : IClassFixture<InMemoryD
         // Killer assertion: the next check must honour the newly-added exemption, not a stale
         // pre-add list cached by the racing fill.
         Assert.True(await sut.IsAllowlistedAsync(orgId, "npm", "esbuild", "1.0.0"));
+    }
+
+    // ── throwing-branch leak ──────────────────────────────────────────────────
+
+    [Fact]
+    public async Task DbOpenThrowsAfterGuardIsMinted_DoesNotRetainItsFillGuard()
+    {
+        // GuardFor mints the guard BEFORE the DB open/read. InstallScriptAllowlistService is
+        // registered Singleton, so the guard map is process-lifetime — if the open or read throws
+        // with no cache entry ever installed to tie the guard's lifetime to, the guard must not
+        // survive the throw. Fails on the pre-fix code (no try/finally around the read), passes
+        // once the throwing branch retires the just-minted guard.
+        var sut = new InstallScriptAllowlistService(
+            new ThrowingAfterGuardStore(), new MemoryCache(new MemoryCacheOptions()), _clock);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => sut.ListAsync($"org-{Guid.NewGuid():N}"));
+
+        Assert.Equal(0, sut.FillGuardCount);
+    }
+
+    private sealed class ThrowingAfterGuardStore : IMetadataStore
+    {
+        public DbProvider Provider => DbProvider.Sqlite;
+
+        public Task<DbConnection> OpenAsync(CancellationToken ct = default) =>
+            throw new InvalidOperationException(
+                "Simulates a cancelled/refused/exhausted DB open after ListAsync has already " +
+                "minted the fill guard.");
     }
 }

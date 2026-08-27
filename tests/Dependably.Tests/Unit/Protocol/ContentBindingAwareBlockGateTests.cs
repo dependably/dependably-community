@@ -59,7 +59,10 @@ public sealed class ContentBindingAwareBlockGateTests : IClassFixture<InMemoryDb
             new LicenseRepository(_fixture.Store, _clock, new LicenseNormalizer(_fixture.Store, Microsoft.Extensions.Logging.Abstractions.NullLogger<LicenseNormalizer>.Instance)),
             _anchors,
             Microsoft.Extensions.Logging.Abstractions.NullLogger<BlockGateService>.Instance,
-            _clock);
+            _clock,
+            new OrgRepository(_fixture.Store),
+            NSubstitute.Substitute.For<Dependably.Infrastructure.Webhooks.IPackageEventSink>(),
+            new BlockRefusalWebhookThrottle(_clock, TimeSpan.Zero));
     }
 
     // ── install-script arm: fail-closed on divergence, scoped to detecting ecosystems ──

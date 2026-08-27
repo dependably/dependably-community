@@ -17,6 +17,9 @@
   import Reset from './pages/Reset.svelte'
   import Packages from './pages/Packages.svelte'
   import VersionDetail from './pages/VersionDetail.svelte'
+  import Projects from './pages/Projects.svelte'
+  import ProjectDetail from './pages/ProjectDetail.svelte'
+  import ProjectVersionDetail from './pages/ProjectVersionDetail.svelte'
   import Audit from './pages/Audit.svelte'
   import Tokens from './pages/Tokens.svelte'
   import OrgSettings from './pages/OrgSettings.svelte'
@@ -251,6 +254,12 @@
           <Packages pageToken={token} />
         {:else if page === 'version-detail'}
           <VersionDetail {params} pageToken={token} />
+        {:else if page === 'projects'}
+          <Projects pageToken={token} />
+        {:else if page === 'project-detail'}
+          <ProjectDetail {params} pageToken={token} />
+        {:else if page === 'project-version'}
+          <ProjectVersionDetail {params} pageToken={token} />
         {:else if page === 'audit'}
           <Audit pageToken={token} />
         {:else if page === 'tokens'}

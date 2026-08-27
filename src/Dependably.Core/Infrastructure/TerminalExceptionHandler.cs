@@ -65,12 +65,23 @@ public sealed class TerminalExceptionHandler : IExceptionHandler
             return false;
         }
 
+        // ASP.NET Core's own ExceptionHandlerMiddlewareImpl already called Response.Clear() before
+        // invoking this handler (that is how UseExceptionHandler works), so by this point a live
+        // read of the response headers finds nothing from SecurityHeadersMiddleware — Capture()
+        // instead recovers them from the HttpContext.Items stash SecurityHeadersMiddleware left
+        // behind earlier in the pipeline, which that framework-level clear never touches. The
+        // Response.Clear() call below is this handler's own belt-and-suspenders — a no-op against
+        // the framework's already-cleared response, but still needed for a caller (a unit test,
+        // or a future direct invocation) that reaches this method without going through
+        // UseExceptionHandler first.
+        var headerSnapshot = ResponseHeaderPreserver.Capture(httpContext);
         httpContext.Response.Clear();
         httpContext.Response.StatusCode = StatusCodes.Status500InternalServerError;
         httpContext.Response.ContentType = "application/problem+json";
 
-        // Response.Clear() drops the headers SecurityHeadersMiddleware set on the way in.
-        // A JSON error body must still be sniff-proof.
+        // A JSON error body must still be sniff-proof; set explicitly too, since the snapshot only
+        // captures it when SecurityHeadersMiddleware actually ran ahead of this handler.
+        ResponseHeaderPreserver.Restore(httpContext, headerSnapshot);
         httpContext.Response.Headers.XContentTypeOptions = "nosniff";
 
         var problem = new ProblemDetails

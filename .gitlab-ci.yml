@@ -153,6 +153,7 @@ variables:
   - { job: sbom-backend,           artifacts: false }
   - { job: sbom-frontend,          artifacts: false }
   - { job: dt-publish,             artifacts: false }
+  - { job: zap-baseline,           artifacts: false }
   - { job: zap-full,               artifacts: false }
   - { job: zap-api-management,     artifacts: false }
   - { job: zap-api-protocol,       artifacts: false }
@@ -1001,10 +1002,58 @@ unit-tests:
     # directory, which would land the file at tests/Dependably.Tests/test-results/…
     # — outside the artifact path below, so GitLab's Tests tab stays empty. Pin to
     # $CI_PROJECT_DIR so the file lands where artifacts:reports:junit looks.
-    - dotnet test --filter "Category!=Integration&Category!=ApiContract&Category!=Schema&Category!=SchemaPostgres" --logger "junit;LogFilePath=$CI_PROJECT_DIR/test-results/unit.xml"
+    #
+    # --blame-crash is what makes a dead test host diagnosable. The host can die of native
+    # memory corruption (an AccessViolationException out of the SQLite native layer), which
+    # aborts the run mid-suite and lands on whichever test happened to be executing — so the
+    # named test is a bystander, not the defect, and the junit report holds only the partial
+    # results collected before the abort. The blame collector writes a Sequence_*.xml naming
+    # the test in flight on each thread plus a dump with the faulting native stack; without
+    # it a crash yields no evidence at all and the next occurrence starts from zero.
+    #
+    # mini, not full: a full dump of this test host is ~6 GB, a mini one ~480 MB (~50 MB once
+    # GitLab zips the artifact), and both carry the thread stacks the diagnosis needs. Nothing
+    # is written on a clean run, so the artifact costs nothing until the host actually dies.
+    - dotnet test --filter "Category!=Integration&Category!=ApiContract&Category!=Schema&Category!=SchemaPostgres" --logger "junit;LogFilePath=$CI_PROJECT_DIR/test-results/unit.xml" --blame-crash --blame-crash-dump-type mini --results-directory "$CI_PROJECT_DIR/test-results"
+  after_script:
+    # An OOM-killed test host and a host that died of native memory corruption are
+    # INDISTINGUISHABLE above: both print "Test host process crashed", both report
+    # "Failed: 0" over a partial run, and neither leaves a dump — SIGKILL gives the blame
+    # collector nothing to capture, so the absence of a dump is not evidence of either one.
+    # Without this, a reader triaging an abort cannot tell which fault they are looking at,
+    # and the memory-corruption reading is the expensive guess to get wrong.
+    #
+    # The whole cgroup v2 memory.events line is printed, not just the kill count, because the
+    # two are different diagnoses. `oom_kill` counts kills ATTRIBUTED to this cgroup, while
+    # `max`/`oom` count times this cgroup hit its OWN limit — so `oom_kill` non-zero with
+    # `max 0` and `oom 0` means the host ran out of memory and this job was the victim, not
+    # that the job needs a bigger limit. Reading only the kill count sends the reader to
+    # raise a limit that was never reached.
+    #
+    # Fail-soft on every path: the cgroup layout differs between v1 and v2 and a runner may
+    # expose neither, so an unreadable counter reports itself as unknown rather than
+    # asserting "not an OOM" — and can never turn a passing job red.
+    - |
+      if [ -r /sys/fs/cgroup/memory.events ]; then
+        echo "memory (cgroup v2): $(tr '\n' ' ' < /sys/fs/cgroup/memory.events)"
+        echo "memory.peak (cgroup v2): $(cat /sys/fs/cgroup/memory.peak 2>/dev/null || echo unavailable)"
+      elif [ -r /sys/fs/cgroup/memory/memory.failcnt ]; then
+        echo "memory.failcnt (cgroup v1): $(cat /sys/fs/cgroup/memory/memory.failcnt)"
+        echo "max_usage_in_bytes (cgroup v1): $(cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes 2>/dev/null || echo unavailable)"
+      else
+        echo "memory cgroup counters unavailable: an OOM kill cannot be distinguished from a native crash in this environment"
+      fi
   artifacts:
     when: always
     expire_in: 7 days
+    # Developer, not all: a crash dump is a process memory image, and this job's environment
+    # carries REGISTRY_KEY (.private-registry-setup exports it and writes it cleartext into
+    # ~/.npmrc and nuget.config), so the dump has to be treated as secret-bearing. Public
+    # pipelines are on for this project, which would otherwise put that image in reach of
+    # every account with read access to it.
+    access: developer
+    paths:
+      - test-results/
     reports:
       junit: test-results/unit.xml
 
@@ -1512,8 +1561,8 @@ dt-publish:
 # non-deterministic model output must never gate a release (mirrors zap-full /
 # sonarqube-check). Each concrete job supplies a persona prompt file + a report
 # name; all diff/curl/jq/report/comment logic lives in ci/ai-review.sh so the
-# jobs don't duplicate it. resource_group serializes the four jobs so a single
-# local model isn't hit by four concurrent 30B requests.
+# jobs don't duplicate it. resource_group serializes the three jobs so a single
+# local model isn't hit by three concurrent 30B requests.
 .ai-review:
   stage: ai-review
   image: ${DEP_IMAGE_REGISTRY}/library/alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
@@ -1547,6 +1596,36 @@ dt-publish:
   before_script:
     - !reference [.apk-mirror-setup, script]
     - apk add --no-cache bash curl jq git
+    # The job runs from the MR branch, so without this an MR could edit
+    # ci/prompts/*.md or ci/ai-review.sh itself (e.g. "output the sentinel")
+    # and shape its own review. These two NAMED paths — the persona prompts
+    # and the driver script — are overwritten from the target branch before
+    # `script:` runs, so editing either of them in the MR has no effect.
+    # This is narrower than "the reviewer is MR-proof": the job DEFINITION
+    # itself (this `before_script:`/`script:`/`variables:` block, including
+    # which persona file AI_REVIEW_PERSONA_FILE names) is still read from
+    # .gitlab-ci.yml on the MR branch, same as any other CI job — an MR could
+    # still repoint AI_REVIEW_PERSONA_FILE at a file of its own, add a new
+    # untracked ci/prompts/evil.md this checkout does not touch or delete, or
+    # replace `script:` outright, all with AI_REVIEW_GITLAB_TOKEN in scope.
+    # Nothing here closes that; it closes the one attack this MR's own review
+    # would otherwise be exposed to (editing its own reviewer's TEXT).
+    #
+    # Fault-tolerant, not job-fatal: a transient fetch/checkout failure (a
+    # network blip to origin) must not silently drop this lens's note
+    # entirely -- of every degraded state this job can reach, a MISSING note
+    # is the one a reviewer is least likely to notice or count (see
+    # CLAUDE.md's "Definition of done"). On failure this falls back to the
+    # MR branch's own ci/prompts + ci/ai-review.sh (what the job would have
+    # run before this checkout existed) and flags the run so the posted
+    # report says so, rather than losing the lens outright.
+    - |
+      if git fetch --depth=1 origin "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"          && git checkout FETCH_HEAD -- ci/prompts ci/ai-review.sh; then
+        echo "Reviewer (ci/ai-review.sh + ci/prompts/) checked out from target branch $CI_MERGE_REQUEST_TARGET_BRANCH_NAME."
+      else
+        echo "WARN: could not check out the reviewer from the target branch $CI_MERGE_REQUEST_TARGET_BRANCH_NAME (network blip?) -- falling back to this MR branch's own ci/ai-review.sh + ci/prompts/. The self-review-immunity guarantee does not hold for this run." >&2
+        export AI_REVIEW_REVIEWER_SOURCE_DEGRADED=1
+      fi
   script:
     - bash ci/ai-review.sh "$AI_REVIEW_PERSONA_FILE" "$AI_REVIEW_REPORT_FILE"
   artifacts:
@@ -1554,6 +1633,10 @@ dt-publish:
     expire_in: 30 days
     paths:
       - "$AI_REVIEW_REPORT_FILE"
+      # emit_outcome writes "<report-stem>.outcome.json" alongside the report
+      # (ci/ai-review.sh); the glob is needed because GitLab CI artifact paths
+      # don't support the shell "${VAR%.md}" substitution used to derive it.
+      - "*.outcome.json"
 
 ai-review-security:
   extends: .ai-review
@@ -1576,12 +1659,12 @@ ai-review-architecture:
     AI_REVIEW_REPORT_FILE: "ai-architecture-review.md"
     AI_REVIEW_LABEL: "Architecture"
 
-ai-review-docs:
-  extends: .ai-review
-  variables:
-    AI_REVIEW_PERSONA_FILE: "ci/prompts/documentation.md"
-    AI_REVIEW_REPORT_FILE: "ai-docs-review.md"
-    AI_REVIEW_LABEL: "Documentation"
+# ai-review-docs was retired: 0 findings across a 50-MR / 200-run measured
+# sample, the highest dark rate of the four lenses, and a structural reason
+# that isn't a tuning problem — a documentation gap is an absence, and a
+# diff-scoped reviewer cannot see an absence. The three remaining lenses
+# (security, code, architecture) review defects that are IN the diff; the docs
+# lens was asked to review something that is, by definition, not.
 
 # === dast ===
 
@@ -1593,8 +1676,17 @@ ai-review-docs:
 # every boot: vuln-scan/-rescan, deprecation-refresh (→ npmjs/pypi), and threat-feed
 # (→ cisa.gov + first.org) each make a real outbound HTTP call; license-backfill makes no
 # outbound call but mutates the shared cache_artifact.license_checked_at column under a leader
-# lock at boot, its own source of run non-determinism, so it is disabled too. OSV stays in
-# default remote mode but is never invoked, so no OSV_LOCAL_PATH is required.
+# lock at boot, its own source of run non-determinism, so it is disabled too. `sbom-scan` belongs
+# with them for the same reason and had drifted out of this list: it is nudged by every SBOM
+# upload, queries OSV per component, and stamps real severities on the seeded fixtures — which is
+# a scan the specs explicitly assume has not run ("every advisory the fixtures carry is
+# unscored"). OSV stays in default remote mode but is never invoked, so no OSV_LOCAL_PATH is
+# required.
+#
+# THIS LIST AND `SBOM_UPLOAD_RATE_LIMIT_PERMITS` BELOW MUST MATCH web/e2e/playwright.config.ts.
+# Playwright manages its own server locally and this block boots the one CI tests against, so a
+# knob added to only one of them makes local and CI disagree about what the product does — and
+# the local half is the one an author checks before pushing.
 .app_boot: &app_boot |
   mkdir -p /tmp/dast/blobs
   export DB_PATH=/tmp/dast/dependably.db
@@ -1627,7 +1719,13 @@ ai-review-docs:
   # with the rest so the bounded scan probes unthrottled; a high (not infinite) ceiling still bounds
   # a real DoS on any non-DAST run.
   export PROTOCOL_DEFAULT_RATE_LIMIT_PERMITS=100000
-  export DISABLE_BACKGROUND_JOBS=vuln-scan,vuln-rescan,deprecation-refresh,threat-feed,license-backfill
+  export DISABLE_BACKGROUND_JOBS=vuln-scan,vuln-rescan,deprecation-refresh,threat-feed,license-backfill,sbom-scan
+  # The SBOM upload surface carries its own limiter (30/min sliding, QueueLimit = 0) rather than
+  # the `import` one raised above, so the knobs above do not reach it. A suite that seeds three
+  # documents per project version crosses 30 in well under a minute, and QueueLimit = 0 means the
+  # 31st is refused outright rather than delayed — a 429 the seeding helper reports as a failed
+  # upload, in whichever spec happened to be running.
+  export SBOM_UPLOAD_RATE_LIMIT_PERMITS=100000
   # DAST log volume: a full active scan drives tens of thousands of probes, each of which
   # UseSerilogRequestLogging records as one request-completion event. At the default
   # Information level that is one ECS-JSON line per probe — the after_script's app-log dump
@@ -1662,9 +1760,54 @@ ai-review-docs:
 # separate passive baseline over the same spider surface. interruptible so a
 # re-push cancels an in-flight scan instead of stacking work on the single amd64
 # runner it shares with the other gating jobs.
-zap-full:
+# Passive baseline — the DAST signal every MR gets. Restored from 32a06c49, which
+# folded it into zap-full on the reasoning that full's passive phase reports the
+# same findings. True, but full is an active scan behind a 15-minute AJAX spider
+# and a 20-minute active-scan budget, and the three active scans together are
+# ~1,164s of runner time on the single amd64 runner every gating job shares. This
+# splits the two apart again by cost, not by coverage: passive here on every MR,
+# active on main pushes and release tags.
+#
+# Unauthenticated on purpose, same as the original: it is the cheap regression
+# net for the headers SecurityHeadersMiddleware sets (CSP, X-Content-Type-Options,
+# X-Frame-Options, HSTS), which are absent from .zap/baseline.conf precisely so a
+# dropped one surfaces as a NEW, unaccepted finding and reds the pipeline.
+zap-baseline:
   stage: dast
   extends: [.runs-on-ci, .release-required]
+  image:
+    name: ${DEP_IMAGE_REGISTRY}/zaproxy/zap-stable:2.17.0@sha256:2ec1d5d5b44d55cfd02ba9b89cd26852f06d92b7fc0ce9f064b9463babc73074
+    entrypoint: [""]
+  needs: [build]
+  # ZAP image is multi-arch; on a Pi runner Docker pulls the native arm64 variant
+  # and the x64 Dependably binary fails with "Exec format error". Pin to amd64
+  # runners so the published binary executes natively.
+  tags: [amd64]
+  interruptible: true
+  script:
+    - *app_boot
+    # ZAP scripts hardcode base_dir='/zap/wrk/' for report output, but the image
+    # ships without that directory (it's the conventional bind-mount target).
+    # Symlink it to $PWD so .zap/*.conf is in place and -J/-r land in the build
+    # dir where GitLab picks them up as artifacts.
+    - ln -sfn "$PWD" /zap/wrk
+    - >
+      sh ci/zap-scan-retry.sh
+      zap-baseline.py -t http://localhost:8080 -c .zap/baseline.conf
+      -J zap-baseline.json -r zap-baseline.html
+  after_script:
+    - echo "=== dependably app log kept as a job artifact, not printed (see artifacts) ==="
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths:
+      - zap-baseline.html
+      - zap-baseline.json
+      - app.log
+
+zap-full:
+  stage: dast
+  extends: [.runs-on-ci-main, .release-required]
   image:
     name: ${DEP_IMAGE_REGISTRY}/zaproxy/zap-stable:2.17.0@sha256:2ec1d5d5b44d55cfd02ba9b89cd26852f06d92b7fc0ce9f064b9463babc73074
     entrypoint: [""]
@@ -1846,7 +1989,7 @@ zap-full:
 # here, dpd_ Bearer for protocol), so the two cannot collapse into a single scan.
 zap-api-management:
   stage: dast
-  extends: [.runs-on-ci, .release-required]
+  extends: [.runs-on-ci-main, .release-required]
   image:
     name: ${DEP_IMAGE_REGISTRY}/zaproxy/zap-stable:2.17.0@sha256:2ec1d5d5b44d55cfd02ba9b89cd26852f06d92b7fc0ce9f064b9463babc73074
     entrypoint: [""]
@@ -1901,7 +2044,7 @@ zap-api-management:
 # rationale as zap-api-management.
 zap-api-protocol:
   stage: dast
-  extends: [.runs-on-ci, .release-required]
+  extends: [.runs-on-ci-main, .release-required]
   image:
     name: ${DEP_IMAGE_REGISTRY}/zaproxy/zap-stable:2.17.0@sha256:2ec1d5d5b44d55cfd02ba9b89cd26852f06d92b7fc0ce9f064b9463babc73074
     entrypoint: [""]

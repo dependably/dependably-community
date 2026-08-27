@@ -1,0 +1,69 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.4",
+  "serialNumber": "urn:uuid:1b7e9c44-6d2a-4f0b-8a5e-3c9d1f7b2e60",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-08-01T10:05:00Z",
+    "tools": [
+      {
+        "vendor": "CycloneDX",
+        "name": "cyclonedx-python",
+        "version": "3.11.7"
+      }
+    ],
+    "component": {
+      "type": "application",
+      "bom-ref": "billing-service@0.9.4",
+      "name": "billing-service",
+      "version": "0.9.4"
+    }
+  },
+  "components": [
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/flask@2.2.3",
+      "name": "flask",
+      "version": "2.2.3",
+      "purl": "pkg:pypi/flask@2.2.3",
+      "scope": "required",
+      "licenses": [
+        {
+          "expression": "BSD-3-Clause"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/jinja2@3.1.2",
+      "name": "jinja2",
+      "version": "3.1.2",
+      "purl": "pkg:pypi/jinja2@3.1.2",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ]
+    }
+  ],
+  "dependencies": [
+    {
+      "ref": "billing-service@0.9.4",
+      "dependsOn": [
+        "pkg:pypi/flask@2.2.3"
+      ]
+    },
+    {
+      "ref": "pkg:pypi/flask@2.2.3",
+      "dependsOn": [
+        "pkg:pypi/jinja2@3.1.2"
+      ]
+    },
+    {
+      "ref": "pkg:pypi/jinja2@3.1.2",
+      "dependsOn": []
+    }
+  ]
+}

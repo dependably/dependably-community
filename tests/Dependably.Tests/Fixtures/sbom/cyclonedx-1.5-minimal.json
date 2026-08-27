@@ -1,0 +1,72 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "serialNumber": "urn:uuid:5f0c2d7b-91e4-4a6d-b3c8-0a2f4e6d8c11",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-08-01T10:00:00Z",
+    "tools": {
+      "components": [
+        {
+          "type": "application",
+          "name": "cyclonedx-dotnet",
+          "version": "5.3.1"
+        }
+      ]
+    },
+    "component": {
+      "type": "application",
+      "bom-ref": "ledger-worker@1.2.0",
+      "name": "ledger-worker",
+      "version": "1.2.0"
+    }
+  },
+  "components": [
+    {
+      "type": "library",
+      "bom-ref": "pkg:nuget/Dapper@2.0.123",
+      "name": "Dapper",
+      "version": "2.0.123",
+      "purl": "pkg:nuget/Dapper@2.0.123",
+      "scope": "required",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/axios@1.6.8",
+      "name": "axios",
+      "version": "1.6.8",
+      "purl": "pkg:npm/axios@1.6.8",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ]
+    }
+  ],
+  "dependencies": [
+    {
+      "ref": "ledger-worker@1.2.0",
+      "dependsOn": [
+        "pkg:nuget/Dapper@2.0.123",
+        "pkg:npm/axios@1.6.8"
+      ]
+    },
+    {
+      "ref": "pkg:nuget/Dapper@2.0.123",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/axios@1.6.8",
+      "dependsOn": []
+    }
+  ]
+}

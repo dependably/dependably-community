@@ -14,7 +14,6 @@ web/node_modules/
 web/.vscode/
 
 # Docs and metadata
-docs/
 *.md
 .claude/
 

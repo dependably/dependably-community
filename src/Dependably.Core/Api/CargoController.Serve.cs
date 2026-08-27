@@ -180,14 +180,10 @@ public sealed partial class CargoController
                 ? await _vulns.GetGateSignalsBatchAsync(uploaded.Select(v => v.Id).ToList(), ct)
                 : new Dictionary<string, VulnGateSignals>();
 
-            foreach (var v in uploaded)
-            {
-                if (BlockGateService.IsHardBlockedByStoredState(
-                        v, settings, uploadedSignals.GetValueOrDefault(v.Id), now))
-                {
-                    blocked.Add(v.Version);
-                }
-            }
+            blocked.UnionWith(uploaded
+                .Where(v => BlockGateService.IsHardBlockedByStoredState(
+                    v, settings, uploadedSignals.GetValueOrDefault(v.Id), now))
+                .Select(v => v.Version));
         }
 
         var proxyEntries = await _cacheArtifacts.ListServeFactsForNameAsync(orgId, "cargo", name, ct);
@@ -199,14 +195,10 @@ public sealed partial class CargoController
         var proxySignals = await _vulns.GetGateSignalsBatchForCacheArtifactsAsync(
             proxyEntries.Select(e => e.Id).ToList(), ct);
 
-        foreach (var entry in proxyEntries)
-        {
-            if (BlockGateService.IsHardBlockedByCacheEntry(
-                    entry, settings, proxySignals.GetValueOrDefault(entry.Id), now))
-            {
-                blocked.Add(entry.Version);
-            }
-        }
+        blocked.UnionWith(proxyEntries
+            .Where(entry => BlockGateService.IsHardBlockedByCacheEntry(
+                entry, settings, proxySignals.GetValueOrDefault(entry.Id), now))
+            .Select(entry => entry.Version));
 
         return blocked;
     }

@@ -310,7 +310,17 @@ public partial class Program
         // Forwarded headers first (fail-closed when TRUSTED_PROXIES is unset).
         app.UseForwardedHeaders();
 
-        // Tenant context — SingleTenantResolver on an edge (one implicit realm).
+        // Translate TenantNotReadyException raised by ITenantStorageResolver.GetRegistryAsync
+        // into problem JSON, or an OCI Distribution Spec error envelope on /v2/ (where
+        // StatusInactive is 403 DENIED, not 423). Registered early so it wraps every downstream middleware that can
+        // throw it, regardless of how deep the throw originates. TenantStatusEnforcementMiddleware
+        // does NOT reach here: it shapes its refusal through TenantNotReadyResponseWriter directly
+        // rather than throwing, so a suspended tenant's 423 is never logged as a 500.
+        app.UseMiddleware<TenantNotReadyExceptionMiddleware>();
+
+        // Tenant context — SingleTenantResolver on an edge (one implicit realm). Only resolves and
+        // stashes — never refuses; see TenantStatusEnforcementMiddleware (after UseRateLimiter
+        // below) for the actual lockout gate and why it sits there instead of here.
         app.UseMiddleware<SubdomainTenantMiddleware>();
 
         // Push canonical taxonomy properties into Serilog's LogContext.
@@ -319,11 +329,16 @@ public partial class Program
         // Transparent intercept (no-op unless HOST_ROUTING is configured).
         app.UseMiddleware<TransparentInterceptMiddleware>();
 
+        // Security headers. Must sit strictly after TransparentInterceptMiddleware (it
+        // classifies CSP/Cache-Control on Request.Path before _next, and the intercept is what
+        // rewrites that path to carry the ecosystem prefix) and strictly before
+        // UploadSizeLimitMiddleware (which can short-circuit with a bare 413 and never call
+        // _next, so anything registered after it never runs on that path) — see the matching
+        // comment in src/Dependably/Program.cs for the full reasoning.
+        app.UseMiddleware<SecurityHeadersMiddleware>();
+
         // Upload size limits — after tenant + intercept, before routing.
         app.UseMiddleware<UploadSizeLimitMiddleware>();
-
-        // Security headers.
-        app.UseMiddleware<SecurityHeadersMiddleware>();
 
         // Metrics access restriction (IP allowlist for /metrics + /version).
         app.UseMiddleware<MetricsAccessMiddleware>();
@@ -334,7 +349,6 @@ public partial class Program
         app.UseMiddleware<TenantStorageQuotaExceededExceptionMiddleware>();
         app.UseMiddleware<UpstreamFetchFailedExceptionMiddleware>();
         app.UseMiddleware<SsrfBlockedExceptionMiddleware>();
-        app.UseMiddleware<TenantNotReadyExceptionMiddleware>();
 
         app.UseResponseCompression();
         app.UseSerilogRequestLogging(opts => opts.GetLevel = SerilogRequestLogLevel);
@@ -369,6 +383,12 @@ public partial class Program
         Dependably.Api.EdgeStatusEndpoint.Map(app, version);
 
         app.UseRateLimiter();
+
+        // The tenant lockout gate for a suspended/archived/deleting org. Deliberately sits here —
+        // after auth and rate limiting, not immediately after SubdomainTenantMiddleware — so
+        // neither stage gets bypassed for a cut-off tenant; see the middleware's own doc comment
+        // for the full reasoning. /health, /ready, /metrics, and /version are exempt.
+        app.UseMiddleware<TenantStatusEnforcementMiddleware>();
 
         // Prometheus exposition (IP-allowlisted via MetricsAccessMiddleware earlier).
         app.MapPrometheusScrapingEndpoint("/metrics");

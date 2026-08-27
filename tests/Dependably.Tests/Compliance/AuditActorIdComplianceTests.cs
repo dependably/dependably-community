@@ -40,7 +40,7 @@ namespace Dependably.Tests.Compliance;
 /// <see cref="AuditAttributionComplianceTests"/> and <c>// xtenant:</c>.</para>
 /// </summary>
 [Trait("Category", "Compliance")]
-public sealed class AuditActorIdComplianceTests
+public sealed partial class AuditActorIdComplianceTests
 {
     private readonly ITestOutputHelper _output;
 
@@ -53,8 +53,11 @@ public sealed class AuditActorIdComplianceTests
     // Receiver of a `.ActorKind` / `.UserId` / `.AuditActorId` member access — `token`,
     // `token?`, `args.Token`, `ctx.Token?`. Normalized by stripping `?` so the nullable and
     // non-nullable spellings of the same receiver compare equal.
-    private static readonly Regex ActorKindRef = new(@"([A-Za-z_][\w.?]*)\.ActorKind\b", RegexOptions.Compiled);
-    private static readonly Regex UserIdRef = new(@"([A-Za-z_][\w.?]*)\.UserId\b", RegexOptions.Compiled);
+    [GeneratedRegex(@"([A-Za-z_][\w.?]*)\.ActorKind\b")]
+    private static partial Regex ActorKindRef();
+
+    [GeneratedRegex(@"([A-Za-z_][\w.?]*)\.UserId\b")]
+    private static partial Regex UserIdRef();
 
     [Fact]
     public void AuditWritesIdentifyATokenActorByAuditActorIdNotUserId()
@@ -73,13 +76,13 @@ public sealed class AuditActorIdComplianceTests
                 }
 
                 string call = ReadCallExpression(lines, i, marker);
-                var kindReceivers = Receivers(ActorKindRef, call);
+                var kindReceivers = Receivers(ActorKindRef(), call);
                 if (kindReceivers.Count == 0)
                 {
                     continue;
                 }
 
-                var offenders = Receivers(UserIdRef, call).Intersect(kindReceivers, StringComparer.Ordinal).ToList();
+                var offenders = Receivers(UserIdRef(), call).Intersect(kindReceivers, StringComparer.Ordinal).ToList();
                 if (offenders.Count == 0 || HasOptOutAbove(lines, i))
                 {
                     continue;
@@ -115,11 +118,11 @@ public sealed class AuditActorIdComplianceTests
     {
         string[] broken = ["await _audit.LogActivityAsync(orgId, \"oci\", purl, \"push\", actorId: token?.UserId, actorKind: token?.ActorKind, ct: ct);"];
         string call = ReadCallExpression(broken, 0, ".LogActivityAsync(");
-        Assert.Contains("token", Receivers(UserIdRef, call).Intersect(Receivers(ActorKindRef, call), StringComparer.Ordinal));
+        Assert.Contains("token", Receivers(UserIdRef(), call).Intersect(Receivers(ActorKindRef(), call), StringComparer.Ordinal));
 
         string[] fixedUp = ["await _audit.LogActivityAsync(orgId, \"oci\", purl, \"push\", actorId: token?.AuditActorId, actorKind: token?.ActorKind, ct: ct);"];
         string fixedCall = ReadCallExpression(fixedUp, 0, ".LogActivityAsync(");
-        Assert.Empty(Receivers(UserIdRef, fixedCall).Intersect(Receivers(ActorKindRef, fixedCall), StringComparer.Ordinal));
+        Assert.Empty(Receivers(UserIdRef(), fixedCall).Intersect(Receivers(ActorKindRef(), fixedCall), StringComparer.Ordinal));
     }
 
     /// <summary>
@@ -132,7 +135,7 @@ public sealed class AuditActorIdComplianceTests
     {
         string[] fine = ["await _audit.LogAsync(\"user.password_reset\", orgId, actorId: consumed.UserId, actorKind: token.ActorKind, ct: ct);"];
         string call = ReadCallExpression(fine, 0, ".LogAsync(");
-        Assert.Empty(Receivers(UserIdRef, call).Intersect(Receivers(ActorKindRef, call), StringComparer.Ordinal));
+        Assert.Empty(Receivers(UserIdRef(), call).Intersect(Receivers(ActorKindRef(), call), StringComparer.Ordinal));
     }
 
     [Fact]

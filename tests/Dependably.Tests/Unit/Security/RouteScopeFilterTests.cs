@@ -219,6 +219,41 @@ public sealed class RouteScopeFilterTests
         Assert.IsType<NotFoundResult>(context.Result);
     }
 
+    // An absent tid used to clear the filter on ANY tenant's subdomain: the check read
+    // `tid is not null && tid != ctx.TenantId`, so "no claim" meant "no opinion". No principal this
+    // codebase mints omits it, so this is not a reachable hole — it is a fail-open default on the
+    // component whose own doc calls it the structural realm boundary, one omission at any future
+    // issuing site away from being load-bearing.
+    [Fact]
+    public void OnAuthorization_TenantRoute_TenantScope_TidAbsent_Returns404()
+    {
+        var filter = new RouteScopeFilter();
+        var user = AuthenticatedUser(new Claim("scope", "tenant"));
+        var tenantCtx = TenantContext.ForTenant("tid-1", "acme");
+        var context = BuildContext("/api/v1/settings", user: user, tenantContext: tenantCtx);
+
+        filter.OnAuthorization(context);
+
+        Assert.IsType<NotFoundResult>(context.Result);
+    }
+
+    // The empty-string form was already refused by the inequality; pinned so the fail-closed
+    // rewrite cannot regress it into a match against an empty TenantId.
+    [Fact]
+    public void OnAuthorization_TenantRoute_TenantScope_TidEmpty_Returns404()
+    {
+        var filter = new RouteScopeFilter();
+        var user = AuthenticatedUser(
+            new Claim("scope", "tenant"),
+            new Claim("tid", ""));
+        var tenantCtx = TenantContext.ForTenant("tid-1", "acme");
+        var context = BuildContext("/api/v1/settings", user: user, tenantContext: tenantCtx);
+
+        filter.OnAuthorization(context);
+
+        Assert.IsType<NotFoundResult>(context.Result);
+    }
+
     [Fact]
     public void OnAuthorization_TenantRoute_TenantScope_NoContext_Passes()
     {
@@ -248,20 +283,6 @@ public sealed class RouteScopeFilterTests
         filter.OnAuthorization(context);
 
         Assert.IsType<NotFoundResult>(context.Result);
-    }
-
-    [Fact]
-    public void OnAuthorization_TenantRoute_TenantScope_NoTidClaim_Passes()
-    {
-        // tid claim absent entirely → no mismatch possible → allow through
-        var filter = new RouteScopeFilter();
-        var user = AuthenticatedUser(new Claim("scope", "tenant"));
-        var tenantCtx = TenantContext.ForTenant("tid-1", "acme");
-        var context = BuildContext("/api/v1/settings", user: user, tenantContext: tenantCtx);
-
-        filter.OnAuthorization(context);
-
-        Assert.Null(context.Result);
     }
 
     // ── Edge-condition coverage ───────────────────────────────────────────────

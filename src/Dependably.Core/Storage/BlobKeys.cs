@@ -8,7 +8,7 @@ namespace Dependably.Storage;
 /// </summary>
 public static partial class BlobKeys
 {
-    [GeneratedRegex("^[0-9a-f]{64}$")]
+    [GeneratedRegex(@"^[0-9a-f]{64}\z")]
     private static partial Regex Sha256HexRegex();
 
     /// <summary>Content-addressed key for proxy (upstream-cached) blobs.</summary>
@@ -58,6 +58,35 @@ public static partial class BlobKeys
         return !Sha256HexRegex().IsMatch(sha256)
             ? throw new ArgumentException("sha256 must be 64 lowercase hex characters", nameof(sha256))
             : $"hosted/{orgId}/{ecosystem}/{purlName}/{version}/{sha256}/{filename}";
+    }
+
+    /// <summary>
+    /// Org-scoped, content-addressed key for an uploaded project document — the verbatim SBOM,
+    /// VEX, or SARIF a team pushed about one of its own builds. Registry (durable) tier: these
+    /// are the operator's own records, never an evictable copy of somebody else's artefact.
+    /// </summary>
+    /// <remarks>
+    /// The key sits under the same <c>hosted/</c> prefix as published artefacts, which is what
+    /// puts it inside <c>OrphanBlobReconcilerService</c>'s sweep — so <c>project_documents</c> is
+    /// part of that sweep's referenced-key union, and a document whose metadata row is gone is
+    /// reclaimed by the same pass that reclaims an abandoned publish.
+    ///
+    /// <paramref name="docType"/> is one of <c>sbom</c>, <c>vex</c>, or <c>sarif</c>, and
+    /// <paramref name="sha256"/> is validated as 64 lowercase hex characters — the same
+    /// path-traversal defence at the BlobKeys boundary that <see cref="Proxy"/> and
+    /// <see cref="HostedArtifact"/> apply. Content-addressing the last segment means a re-upload
+    /// of identical bytes addresses the same key and a re-upload of different bytes addresses a
+    /// different one, so the metadata row's <c>(blob_key, sha256)</c> pair is self-consistent with
+    /// no ordering constraint between the blob write and the metadata write.
+    /// </remarks>
+    public static string ProjectDocument(
+        string orgId, string projectId, string projectVersionId, string docType, string sha256)
+    {
+        return docType is not ("sbom" or "vex" or "sarif")
+            ? throw new ArgumentException("docType must be one of sbom, vex, sarif", nameof(docType))
+            : !Sha256HexRegex().IsMatch(sha256)
+                ? throw new ArgumentException("sha256 must be 64 lowercase hex characters", nameof(sha256))
+                : $"hosted/{orgId}/projects/{projectId}/{projectVersionId}/{docType}/{sha256}.json";
     }
 
     /// <summary>

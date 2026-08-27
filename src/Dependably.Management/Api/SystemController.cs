@@ -34,11 +34,7 @@ public sealed partial class SystemController : ControllerBase
     // Maximum page size for system admin list responses.
     private const int MaxSystemAdminPageSize = 200;
 
-    // Snapshot age threshold for "stale" warning on tenant health: 2 hours.
-    private static readonly TimeSpan SnapshotStaleThreshold = TimeSpan.FromHours(2);
 
-    // Storage utilisation thresholds for per-tenant health signals.
-    private const double StorageWarnFraction = 0.90;
 
     // Random byte count for generated admin passwords (produces a base64 string ≈ 22 chars).
     private const int GeneratedPasswordByteLength = 16;
@@ -113,7 +109,7 @@ public sealed partial class SystemController : ControllerBase
         var now = _time.GetUtcNow();
         var rows = items.Select(o =>
         {
-            var (health, stats) = DeriveHealthAndStats(o, now);
+            var (health, stats) = TenantHealthProjection.DeriveHealthAndStats(o, now);
             return new
             {
                 id = o.Id,
@@ -313,11 +309,18 @@ public sealed partial class SystemController : ControllerBase
 
     /// <summary>
     /// PATCH /api/v1/system/tenants/{slug}/status — flip the tenant lifecycle gate between
-    /// <c>'active'</c> and <c>'suspended'</c>. Suspending immediately causes
-    /// <see cref="Storage.ITenantStorageResolver"/> to reject registry writes for the tenant
-    /// (raising <see cref="Storage.TenantNotReadyException"/>); existing data is preserved.
-    /// Body: <c>{ "status": "active" | "suspended" }</c>. Soft-deleted tenants must be restored
-    /// first. <c>'archived'</c> and <c>'deleting'</c> are enterprise-only and rejected here.
+    /// <c>'active'</c> and <c>'suspended'</c>. Suspending is a full lockout, not just a write
+    /// refusal: <c>Infrastructure.TenantStatusEnforcementMiddleware</c> refuses every tenant-bound
+    /// request for the org — protocol plane, management API, and login alike — and
+    /// <see cref="Storage.ITenantStorageResolver"/> applies the same status check independently as
+    /// defence in depth. <c>ITenantSlugCacheInvalidator.InvalidateSlug</c> below evicts this
+    /// process's subdomain cache immediately, but it is process-local: on this community's
+    /// single-process SQLite deployment that is instance-wide by construction, while on a
+    /// multi-replica Postgres deployment each other replica keeps serving from its own slug cache
+    /// for up to its remaining TTL (5 seconds) before it re-reads the new status. Existing data is
+    /// preserved. Body: <c>{ "status": "active" | "suspended" }</c>. Soft-deleted tenants must be
+    /// restored first. <c>'archived'</c> and <c>'deleting'</c> get the identical lockout but are
+    /// enterprise-only and rejected here.
     /// </summary>
     [HttpPatch("tenants/{slug}/status")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
@@ -535,6 +538,7 @@ public sealed partial class SystemController : ControllerBase
     public async Task<IActionResult> GetDashboard(
         [FromServices] BackgroundJobRunRepository jobs,
         [FromServices] Dependably.Infrastructure.Observability.MetricsSnapshotProvider snapshots,
+        [FromServices] PackageAnalyticsRepository analytics,
         CancellationToken ct = default)
     {
         var (activeTenants, suspendedTenants, softDeletedTenants) = await _orgs.CountByStatusAsync(ct);
@@ -547,6 +551,9 @@ public sealed partial class SystemController : ControllerBase
         // observability page reads. Empty dictionary (poller hasn't run yet) sums to 0.
         var byTier = snapshots.Capture().BlobStoreSizesByTier;
         long totalBytes = byTier.Values.Sum();
+
+        var (trackerConfigured, enrichedAdvisories, totalAdvisories) =
+            await analytics.GetInstanceEnrichmentCoverageAsync(ct);
 
         return Ok(new
         {
@@ -568,6 +575,12 @@ public sealed partial class SystemController : ControllerBase
             {
                 totalBytes,
                 byTier,
+            },
+            enrichmentCoverage = new
+            {
+                configured = trackerConfigured,
+                enriched = enrichedAdvisories,
+                total = totalAdvisories,
             },
             recentJobs,
         });
@@ -620,125 +633,6 @@ public sealed partial class SystemController : ControllerBase
             staleSnapshotCount = report.StaleSnapshotCount,
             capturedAt = report.CapturedAt,
         });
-    }
-
-    // Severity rank for health status promotion: higher rank wins.
-    private const int RankOk = 0;
-    private const int RankWarn = 1;
-    private const int RankCritical = 2;
-
-    private static int SeverityRank(string s) =>
-        s switch { "critical" => RankCritical, "warn" => RankWarn, _ => RankOk };
-
-    // Promotes status to the higher-severity value; "ok" < "warn" < "critical".
-    private static string Promote(string current, string candidate) =>
-        SeverityRank(candidate) > SeverityRank(current) ? candidate : current;
-
-    // Derives per-tenant health status and a stats summary from OrgListItem data. Returns
-    // both so the list projection can include a stats object alongside the health verdict
-    // without a second query or parse pass.
-    private static (object Health, object? Stats) DeriveHealthAndStats(OrgListItem org, DateTimeOffset now)
-    {
-        var reasons = new List<string>();
-        string status = "ok";
-        object? statsSummary = null;
-
-        if (org.Status == "suspended")
-        {
-            reasons.Add("suspended");
-            status = Promote(status, "warn");
-        }
-
-        if (org.StorageQuotaBytes.HasValue && org.StorageQuotaBytes.Value > 0)
-        {
-            double fraction = (double)org.StorageBytes / org.StorageQuotaBytes.Value;
-            if (fraction >= 1.0)
-            {
-                reasons.Add("storage_quota_exceeded");
-                status = Promote(status, "critical");
-            }
-            else if (fraction >= StorageWarnFraction)
-            {
-                reasons.Add("storage_quota_near");
-                status = Promote(status, "warn");
-            }
-        }
-
-        if (org.StatsComputedAt is null)
-        {
-            reasons.Add("stats_missing");
-            status = Promote(status, "warn");
-        }
-        else if (!DateTimeOffset.TryParse(org.StatsComputedAt, out var computedAt)
-            || now - computedAt > SnapshotStaleThreshold)
-        {
-            // An unparseable timestamp is surfaced as a stale snapshot, not silently ignored.
-            reasons.Add("stats_stale");
-            status = Promote(status, "warn");
-        }
-
-        if (org.StatsJson is not null)
-        {
-            var (statsStatus, statsReasons, statsSnapshotSummary) =
-                EvaluateStatsHealth(org.StatsJson, org.StatsComputedAt);
-            foreach (string reason in statsReasons)
-            {
-                if (!reasons.Contains(reason))
-                {
-                    reasons.Add(reason);
-                }
-            }
-
-            status = Promote(status, statsStatus);
-            statsSummary = statsSnapshotSummary;
-        }
-
-        var health = new { status, reasons };
-        return (health, statsSummary);
-    }
-
-    // Evaluates the per-tenant stats snapshot in isolation so the snapshot parsing and its
-    // nesting stay out of DeriveHealthAndStats. Returns the health verdict plus a summary object
-    // built from the same parse (so the list projection needs no second parse). A stale or
-    // malformed snapshot surfaces as "stats_stale" and a null summary.
-    private static (string Status, IReadOnlyList<string> Reasons, object? Summary) EvaluateStatsHealth(
-        string statsJson, string? computedAt)
-    {
-        var reasons = new List<string>();
-        string status = "ok";
-        object? summary = null;
-
-        try
-        {
-            var stats = JsonSerializer.Deserialize<OrgStats>(statsJson, JsonContracts.Web);
-            if (stats is not null)
-            {
-                if (stats.QuarantinePending > 0)
-                {
-                    reasons.Add("quarantine_pending");
-                    status = Promote(status, "warn");
-                }
-
-                // Summary for the frontend detail panel, from the already-parsed stats object.
-                summary = new
-                {
-                    packagesByEcosystem = stats.PackagesByEcosystem,
-                    vulnsByEcosystemAndSeverity = stats.VulnsByEcosystemAndSeverity,
-                    diskByEcosystem = stats.DiskByEcosystem,
-                    totalDownloads30d = stats.TotalDownloads30d,
-                    quarantinePending = stats.QuarantinePending,
-                    computedAt,
-                };
-            }
-        }
-        catch (JsonException)
-        {
-            // Stale or malformed snapshot: surface as stale, not a crash.
-            reasons.Add("stats_stale");
-            status = Promote(status, "warn");
-        }
-
-        return (status, reasons, summary);
     }
 
     /// <summary>

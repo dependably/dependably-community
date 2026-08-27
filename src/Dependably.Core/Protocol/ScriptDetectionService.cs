@@ -196,7 +196,7 @@ public static class ScriptDetectionService
 
     private static InstallScriptResult DetectPyPiZipSdist(byte[] bytes)
     {
-        using var zip = new ZipArchive(new MemoryStream(bytes), ZipArchiveMode.Read);
+        using var zip = SafeZipArchive.Open(new MemoryStream(bytes));
         int entryCount = 0;
         foreach (var entry in zip.Entries)
         {
@@ -227,7 +227,7 @@ public static class ScriptDetectionService
     // imported into the consumer's MSBuild graph and can execute arbitrary tasks at build time.
     private static InstallScriptResult DetectNuGet(byte[] bytes)
     {
-        using var zip = new ZipArchive(new MemoryStream(bytes), ZipArchiveMode.Read);
+        using var zip = SafeZipArchive.Open(new MemoryStream(bytes));
         bool hasMsbuild = false;
         int entryCount = 0;
         foreach (var entry in zip.Entries)

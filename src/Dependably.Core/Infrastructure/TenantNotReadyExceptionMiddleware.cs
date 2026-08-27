@@ -1,23 +1,23 @@
-using System.Text.Json;
 using Dependably.Storage;
 
 namespace Dependably.Infrastructure;
 
 /// <summary>
 /// Translates <see cref="TenantNotReadyException"/> raised by
-/// <see cref="ITenantStorageResolver.GetRegistryAsync"/> into structured HTTP responses.
-/// Without this, every gated path (publish, import) returns 500 and clients can't tell
-/// "tenant doesn't exist" from "your bucket is still being provisioned, retry shortly".
+/// <see cref="ITenantStorageResolver.GetRegistryAsync"/> into structured HTTP responses via
+/// <see cref="TenantNotReadyResponseWriter"/>. Without this, every gated path (publish, import)
+/// returns 500 and clients can't tell "tenant doesn't exist" from "your bucket is still being
+/// provisioned, retry shortly" from "this org is suspended".
 ///
-/// Mapping by <see cref="TenantNotReadyReason"/>:
-///   <list type="bullet">
-///     <item><c>NotFound</c> → 404</item>
-///     <item><c>StatusInactive</c> → 423 Locked (suspended / archived / deleting — admin must act)</item>
-///     <item><c>ProvisioningPending</c> → 503 Service Unavailable, Retry-After: 30</item>
-///     <item><c>ProvisioningFailed</c> → 503 Service Unavailable, Retry-After: 60</item>
-///   </list>
-/// Body is RFC 7807 problem JSON; the <c>reason</c> extension carries the enum value so
-/// programmatic callers can branch without parsing the title.
+/// <para>
+/// <see cref="TenantStatusEnforcementMiddleware"/> raises the same
+/// <see cref="TenantNotReadyReason.StatusInactive"/> refusal for a resolved non-active tenant, but
+/// calls <see cref="TenantNotReadyResponseWriter"/> directly instead of throwing through this
+/// middleware — see that writer's doc comment for why (an exception unwinding through
+/// <c>UseSerilogRequestLogging</c> logs a spurious Error-level 500 for every refused request).
+/// This middleware stays registered early regardless, because <c>GetRegistryAsync</c>'s throw is
+/// the one case that genuinely has no other way back to the pipeline.
+/// </para>
 /// </summary>
 public sealed class TenantNotReadyExceptionMiddleware
 {
@@ -38,41 +38,7 @@ public sealed class TenantNotReadyExceptionMiddleware
                 throw;
             }
 
-            var (status, title, retryAfter) = Map(ex.Reason);
-
-            context.Response.Clear();
-            context.Response.StatusCode = status;
-            if (retryAfter is not null)
-            {
-                context.Response.Headers.RetryAfter = retryAfter;
-            }
-
-            context.Response.ContentType = "application/problem+json";
-
-            string payload = JsonSerializer.Serialize(new
-            {
-                type = "about:blank",
-                title,
-                status,
-                detail = ex.Detail,
-                reason = ex.Reason.ToString(),
-                tenantId = ex.TenantId,
-            });
-            await context.Response.WriteAsync(payload);
+            await TenantNotReadyResponseWriter.WriteAsync(context, ex.Reason);
         }
     }
-
-    private static (int status, string title, string? retryAfter) Map(TenantNotReadyReason reason) =>
-        reason switch
-        {
-            TenantNotReadyReason.NotFound =>
-                (StatusCodes.Status404NotFound, "Tenant not found", null),
-            TenantNotReadyReason.StatusInactive =>
-                (StatusCodes.Status423Locked, "Tenant is not active", null),
-            TenantNotReadyReason.ProvisioningPending =>
-                (StatusCodes.Status503ServiceUnavailable, "Tenant registry is still being provisioned", "30"),
-            TenantNotReadyReason.ProvisioningFailed =>
-                (StatusCodes.Status503ServiceUnavailable, "Tenant registry provisioning failed", "60"),
-            _ => (StatusCodes.Status500InternalServerError, "Tenant not ready", null),
-        };
 }

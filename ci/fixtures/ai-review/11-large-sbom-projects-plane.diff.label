@@ -1,0 +1,16 @@
+fixture: 11-large-sbom-projects-plane.diff
+class: LARGE
+size_bytes: 185077
+cap_ratio: 65% of the diff fits under AI_REVIEW_MAX_DIFF_BYTES=120000
+expected_verdict: TRUNCATED -- treat any clean claim as unsupported
+lens: security, code, architecture
+provenance:
+  origin: MR !1018 (a49b7979..ec271f97), full MR diff -- "feat(sbom): project-plane schema and
+    cross-cutting seams"
+  ground_truth: no triage note on !1018; all four final lens notes clean. UNCLASSIFIED for
+    precision. Its siblings !1019 (1.16 MB, lens saw 10%, all four clean, five defects shipped)
+    and !1020 (339 KB, lens saw 35%) are the same epic.
+pass_criteria: |
+  35% of this diff never reaches the model. A "clean" verdict on this fixture is therefore not
+  a review result, and the harness should say so in the note rather than only in the job log.
+  Use this fixture to test any truncation-disclosure change end to end.

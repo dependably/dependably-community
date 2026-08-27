@@ -1,0 +1,2902 @@
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index 6806ea2a..992d9e1a 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -639,20 +639,21 @@ Instance-wide defaults for per-tenant caps.
+ | `Maven__VerifyWithUpstreamSha256` | `true` | Verify Maven artifacts against the upstream-published `.sha256` sidecar |
+ | `Go__Upstream` | `https://proxy.golang.org` | Upstream Go module proxy (GOPROXY) seeded for new orgs. Override to point at a corporate mirror or GOPROXY-compatible proxy (e.g. `https://goproxy.cn`). Per-org registries are managed from the web UI; this value seeds the initial row. |
+ | `Go__SumDb` | `sum.golang.org` | The single Go checksum database (sumdb) proxied at `/go/sumdb/{name}/…` per the GOPROXY spec. A request naming any other sumdb returns 404 so the go client falls back to verifying directly; only this configured host is fetched (never a client-chosen host). Accepts a bare host or a full URL. To consume private modules whose checksums are not in the public sumdb, clients still set `GOPRIVATE` (or `GONOSUMDB`/`GONOSUMCHECK`) for those module prefixes so the go toolchain skips checksum-database verification for them. |
+ | `Cargo__Upstream` | `https://index.crates.io` | Upstream Cargo sparse registry index seeded for new orgs. Override to point at a mirror (the value must be a sparse index base URL, not the crates.io git index). Per-org registries are managed from the web UI; this value seeds the initial row. |
+ | `Rpm__Upstream` | — (no default URL) | Upstream RPM repo base URL. Proxy passthrough is enabled by default per-org (`ProxyPassthroughEnabled`), like every ecosystem — RPM is not disabled by default. It just has **no built-in default upstream** (RPM repos are distro/release-specific), so set this to give RPM a fetch target. |
+ | `Rpm__UpstreamMode` | `passthrough` | `passthrough` forwards upstream repodata verbatim and refuses hosted publish (a local package would shadow upstream); `merged` serves a combined `repomd.xml`/`primary.xml.gz` (local ∪ upstream, local shadows on NEVRA collision) and allows hosted publish alongside proxying. **Group (comps) and module (modulemd) metadata limitation**: Dependably does not generate comps or modulemd documents for locally published RPMs — group definitions and module streams are authored independently of packages. In merged mode, upstream group/module entries with content-addressed (hash-prefixed) hrefs are forwarded verbatim; plain-named entries (e.g. `comps.xml.gz` from classic createrepo) are dropped from the merged repomd so no unreachable href is advertised. In local/hosted-only mode, `comps.xml.gz`, `modules.yaml`, and similar requests return 404. `dnf install` works for all published RPMs; `dnf group install` and modular stream installs work only for packages that have definitions in the upstream repo. |
+ | `Rpm__VerifyRepomdSignature` | derived | Instance-level override for RPM `repomd.xml` signature verification. When unset, verification is enabled iff the org has at least one RPM trust anchor in `signature_trust_anchor`. Setting `true` with no per-org anchor configured fails every resolution closed. Trust anchors are per-org and managed via Settings → Trust Anchors (or `POST /api/v1/trust-anchors`), not via an env key. |
+ | `Rpm__PrimaryMapCacheSizeLimitBytes` | `314572800` (300 MiB) | Size bound, in bytes, for the dedicated in-memory cache of parsed `primary.xml.gz` package maps. Kept separate from the shared metadata cache because a Fedora/EPEL-scale primary map (tens to 100+ MB) would otherwise evict the rest of that cache, or silently fail to insert if it exceeds the shared budget. Size up for a deployment mirroring several large distro repos at once. |
+ | `Oci__ManifestTagTtl` / `Oci__TokenCacheDuration` / `Oci__UpstreamHttpTimeout` | 1h / 55m / 30m | Instance-level OCI proxy tunings. **Upstream OCI registries are no longer configured here** — they are per-org and managed in Settings → Proxy → Upstream registries (host + repository-prefix routing + auth type), like every other ecosystem. Every org is seeded with Docker Hub and `mcr.microsoft.com` defaults. `ManifestTagTtl` bounds how long a cached tag → digest mapping is served before upstream is *asked* again (moving tags rebuild on the order of days/weeks, so hourly is ample and cuts Docker Hub 429 exposure ~12× vs the old 5m; lower it for faster tag pickup). A 1h TTL does **not** delay acceptance by an hour — it only spaces out the asking; whether a newly observed digest is *promoted* is governed independently by the org's `min_release_age_hours` (Settings → Proxy), measured from the digest's first local observation. The two compose; they do not stack. |
+ | `Oci__ManifestTagStaleGrace` | `1.00:00:00` (24h) | How long past its TTL a tag's last accepted digest may still be served while the upstream is unavailable (429/5xx/timeout/transport failure). Within the window the pull succeeds with `X-Cache: STALE` and the serve is audited; past it the pull fails 502. Measured from the moment the entry became stale (`last_revalidated + ManifestTagTtl`) and never extended by further failed attempts, so an outage cannot become serve-stale-forever. A genuine upstream 404 is a miss, never a stale serve. |
++| `Sbom__MaxUploadBytes` | `52428800` (50 MiB) | Instance-level ceiling, in bytes, on one uploaded SBOM/VEX/SARIF document. Checked before any byte is written to the blob store, so an oversized document is refused with `413` rather than staged and discarded. Instance-level on purpose: these are analysis documents about a team's own build, not registry artefacts, so they do not walk the per-org ecosystem/global upload-limit ladder. |
+ | `Apk__Upstream` | `https://dl-cdn.alpinelinux.org/alpine` | Upstream Alpine apk mirror seeded for new orgs. The route is 1:1 with dl-cdn's `{release}/{repo}/{arch}/{file}` layout, so a sed rewrite of `/etc/apk/repositories` is the only client-side change. Per-org registries are managed from Settings → Proxy; this value seeds the initial row. apk is proxy-only (no hosted push, like Go). |
+ | `Terraform__Upstream` | `https://registry.terraform.io` | Upstream Terraform provider registry seeded for new orgs. Its **host** is also what admits a provider to the mirror: a provider is addressed by its own source address (`{hostname}/{namespace}/{type}`), and only providers whose hostname matches a configured upstream are served — the request path never becomes the fetch host. Note this registry serves metadata only; archives come from whatever host it names in `download_url` (`releases.hashicorp.com` for HashiCorp's own providers), discovered per version rather than configured. Terraform is proxy-only (no hosted push, like Go and apk), and the client must reach the mirror over **https** — terraform rejects an `http:` mirror while parsing its CLI config. |
+ | `Apk__IndexTtl` | `00:01:00` (60s) | TTL (`TimeSpan` format) for the memory-cached passthrough of `APKINDEX.tar.gz` and other index-adjacent files (`.SIGN.RSA.*`, etc). `.apk` package blobs stay TOFU-only (see `Apk__NegativeCacheTtl` note); `APKINDEX.tar.gz` itself is signature-verified server-side — see `Apk__VerifyIndexSignature`. |
+ | `Apk__VerifyIndexSignature` | derived | Instance-level override for `APKINDEX.tar.gz` embedded RSA signature verification. When unset, verification is enabled iff the org has at least one apk `rsa` trust anchor in `signature_trust_anchor`. Setting `true` with no per-org anchor configured fails every resolution closed. `APKINDEX.tar.gz` is two concatenated gzip members — the first decompresses to a tiny tar of `.SIGN.RSA[256\|512].<keyname>` entries (raw PKCS#1v1.5 signatures over the raw compressed bytes of the second member); a failed check refuses to cache or serve the index (502). `.apk` package fetches remain TOFU regardless of this setting — only the index is verified. SHA-1 (`.SIGN.RSA.<keyname>`) signatures verify only under `Apk__AcceptSha1IndexSignatures`. Trust anchors are per-org and managed via Settings → Trust Anchors (or `POST /api/v1/trust-anchors`), not via an env key; anchor keys must clear the minimum-strength floor (RSA ≥ 2048 bits, elliptic curves ≥ 255-bit field) at import. |
+ | `Apk__AcceptSha1IndexSignatures` | `false` | Set `true` to let a SHA-1 `.SIGN.RSA.<keyname>` entry satisfy `APKINDEX.tar.gz` signature verification. The digest algorithm is named by the `.SIGN.*` entry inside the **upstream-supplied index**, so leaving SHA-1 acceptable lets the artefact under verification choose the broken arm — the reason it is **off by default**. With it off, only `.SIGN.RSA256.*` / `.SIGN.RSA512.*` entries can verify; an index that carries nothing else fails the check (reason `weak_signature_algorithm`, `dependably.apk.index_signature_failures`), and a failed check refuses to cache or serve the index. **Alpine's own mirrors still sign with SHA-1**, so an org that has pinned an apk trust anchor (or set `Apk__VerifyIndexSignature=true`) needs this opt-in to verify a stock Alpine index. Orgs with no apk trust anchor are unaffected — verification does not run at all. A warning is logged once per process the first time a SHA-1 index signature is accepted, and once the first time one is refused. |
+ | `Apk__NegativeCacheTtl` | `00:05:00` (5m) | TTL (`TimeSpan` format) for cached upstream 404s on `.apk` package fetches, so repeated misses for a missing package/arch combination don't repeat the upstream round-trip on every request. |
+ 
+ ### Observability
+ 
+ | Variable | Default | Description |
+@@ -988,20 +989,21 @@ All limiters are per-token (download/push) or per-source-IP (login/anonymous/met
+ |---|---|---|
+ | `DOWNLOAD_RATE_LIMIT_PERMITS` | `1000` | Sliding-window permits per second per token/IP for package downloads. |
+ | `DOWNLOAD_RATE_LIMIT_QUEUE` | `500` | Queue depth for the download limiter. Requests that exceed the window are queued up to this depth before returning `429`. |
+ | `PUSH_RATE_LIMIT_PERMITS` | `20` | Sliding-window permits per second per token for package publish. |
+ | `PUSH_RATE_LIMIT_QUEUE` | `100` | Queue depth for the push limiter. Requests that exceed the window are queued up to this depth before returning `429`. A publish client bursts structurally — an OCI push spends three requests per layer and runs several layers concurrently — and OCI clients do not honour `Retry-After` on a write, so a rejected request aborts the whole push. Set to `0` only to restore hard rejection. |
+ | `LOGIN_RATE_LIMIT_PERMITS` | `10` | Fixed-window permits per minute per IP for the login endpoint. Honoured by both the in-process limiter (standalone) and the Redis-backed limiter (`DEPENDABLY_DEPLOYMENT_MODE=ha`); the window itself (one minute) is not configurable in either mode. |
+ | `TOKEN_CREATE_RATE_LIMIT_PERMITS` | `60` | Fixed-window permits per hour per IP for token-creation endpoints. Honoured by both the in-process limiter (standalone) and the Redis-backed limiter (`DEPENDABLY_DEPLOYMENT_MODE=ha`); the window itself (one hour) is not configurable in either mode. |
+ | `INVITE_RATE_LIMIT_PERMITS` | `20` | Fixed-window permits per hour per IP for invite and sensitive-config write endpoints (member invites, instance email/Slack config, alert settings). Honoured by both the in-process limiter (standalone) and the Redis-backed limiter (`DEPENDABLY_DEPLOYMENT_MODE=ha`); the window itself (one hour) is not configurable in either mode. |
+ | `ANON_RATE_LIMIT_PERMITS` | `120` | Fixed-window permits per minute per IP for unauthenticated probe endpoints (`/health`, `/ready`, `/version`, `/api/v1/bootstrap`, `/api/v1/auth/methods`, `/api/v1/licenses`). |
+ | `IMPORT_RATE_LIMIT_PERMITS` | `5` | Sliding-window permits per minute per token for bulk import requests. Queue depth is `0` (burst is rejected immediately). |
++| `SBOM_UPLOAD_RATE_LIMIT_PERMITS` | `30` | Sliding-window permits per minute per token for the SBOM/VEX/SARIF upload endpoints. Deliberately above `IMPORT_RATE_LIMIT_PERMITS`: a CI run for a mono-repo pushes one document per module per kind and would `429` partway through at the import budget. Queue depth is `0` (burst is rejected immediately, with `Retry-After`). |
+ | `RESCAN_RATE_LIMIT_PERMITS` | `20` | Sliding-window permits per minute per caller (token hash → user sub → IP, same precedence as the management default) for the on-demand vulnerability rescan endpoint. The endpoint's own cooldown is per-package, so this bounds a caller fanning out across many distinct packages instead. Queue depth is `0` (burst is rejected immediately). |
+ | `MANAGEMENT_RATE_LIMIT_PERMITS` | `300` | Sliding-window permits per minute per principal for authenticated management endpoints (`/api/v1/*`) not covered by a more specific policy. `/api/v1/docs/` is exempt. |
+ | `METADATA_RATE_LIMIT_PERMITS` | `500` | Sliding-window permits per second per source IP for metadata GET endpoints (npm packument, PyPI simple index, NuGet registration). |
+ | `METADATA_RATE_LIMIT_QUEUE` | `100` | Queue depth for the metadata rate limiter. Short bursts are absorbed; sustained floods return `429` once the queue fills. |
+ | `PROTOCOL_DEFAULT_RATE_LIMIT_PERMITS` | `300` | Sliding-window permits per minute per source IP for the default-deny backstop applied by the global limiter to any protocol route that declares no explicit rate-limit policy. A route needing more throughput carries an explicit `download`/`metadata` policy; this only bounds otherwise-unmetered routes so a forgotten policy is never entirely unlimited. |
+ | `RATE_LIMIT_REDIS_FAILURE_MODE` | `open` | What the Redis-backed abuse-prevention limiters (`login`, `invite`, `token-create`) do when Redis cannot be reached, or replies with something the limiter cannot parse, and there is no counter to decide with. `open` grants the request — a Redis outage does not lock every user out, at the cost of running with no login rate limiting for its duration. `closed` denies with `429` instead (`Retry-After` = the policy's window length), keeping the abuse budget enforced through the outage at the cost of refusing legitimate logins. Either way every such decision is logged at `Warning` and counted on `dependably.rate_limit.backend_unavailable` (attributes `policy`, `decision`, and `cause` — `connection` when Redis could not be reached, `malformed_reply` when it replied but not in the shape the limiter's script expects) — alert on that counter: under `open` it is the only signal that login rate limiting is currently switched off. Applies only to the Redis-backed limiters; the in-process limiters have no such failure mode. Any value other than `open` or `closed` fails startup rather than silently resolving to the permissive default. |
+ | `RATE_LIMIT_IPV6_PREFIX` | `64` | IPv6 network prefix (bits, `1`–`128`) that per-IP rate-limit partition keys collapse to. A routed `/64` is the smallest per-subscriber allocation, so keying below it lets one attacker mint a fresh budget per source address. IPv4 always partitions at the full `/32`; audit `source_ip` fields always record the full address regardless of this setting. |
+ | `ACCOUNT_SEND_MAX_PER_WINDOW` | `5` | Account-targeted transactional emails (today: the self-serve password-reset link) permitted per **target account** per window, independent of source IP. Every per-IP limiter is blind to who the mail is addressed to, so a distributed attacker can mail-bomb one mailbox from many prefixes without ever tripping one; this budget is what stops that. Raising it weakens the mail-bomb defense; lowering it lets an attacker deny a specific user their reset link for longer. |
+ | `ACCOUNT_SEND_WINDOW_MINUTES` | `60` | Window length for `ACCOUNT_SEND_MAX_PER_WINDOW`. The budget restarts once a window elapses, so an account can be held down for at most one window past the attacker's last request. |
+ | `METADATA_REBUILD_CONCURRENCY` | `8` | Maximum number of simultaneous cache-MISS metadata rebuilds (upstream fetches that buffer a full response). Limits peak in-flight memory allocation. Cache HITs are unaffected. |
+diff --git a/src/Dependably.Core/Infrastructure/IAirGapMode.cs b/src/Dependably.Core/Infrastructure/IAirGapMode.cs
+index 9cea059a..8538b912 100644
+--- a/src/Dependably.Core/Infrastructure/IAirGapMode.cs
++++ b/src/Dependably.Core/Infrastructure/IAirGapMode.cs
+@@ -28,20 +28,21 @@ public interface IAirGapMode
+ /// <c>background_job_runs</c> rows should also appear in
+ /// <see cref="Health.HealthService.RunRowJobs"/>.
+ /// </summary>
+ internal static class BackgroundJobs
+ {
+     internal static readonly IReadOnlySet<string> Known =
+         new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+         {
+             "vuln-scan",
+             "vuln-rescan",
++            "sbom-scan",
+             "threat-feed",
+             "deprecation-refresh",
+             "healthcheck-pinger",
+             "cache-eviction",
+             "retention",
+             "orphan-reconciler",
+             "oci-staging-janitor",
+             "oci-reference-graph-backfill",
+             "oci-blob-sweep",
+             "tenant-hard-delete",
+diff --git a/src/Dependably.Core/Infrastructure/Models.cs b/src/Dependably.Core/Infrastructure/Models.cs
+index 3e405749..735cfce7 100644
+--- a/src/Dependably.Core/Infrastructure/Models.cs
++++ b/src/Dependably.Core/Infrastructure/Models.cs
+@@ -1224,10 +1224,198 @@ public class Banner
+ /// <summary>
+ /// Records that a specific user dismissed a specific banner. Server-side so dismissal
+ /// persists across devices. Cascade-deleted when the banner or user is removed.
+ /// </summary>
+ public class BannerDismissal
+ {
+     public string BannerId { get; set; } = "";
+     public string UserId { get; set; } = "";
+     public string DismissedAt { get; set; } = "";
+ }
++
++// ── Projects plane ──────────────────────────────────────────────────────────────
++// Rows describing an application a team builds and the SBOM/VEX/SARIF documents uploaded
++// about it. Nothing here is an artefact this registry serves, so no registry policy or
++// serve path reads these.
++
++/// <summary>
++/// An application or service a team builds, or a collection grouping several of them.
++/// <see cref="Kind"/> discriminates the two; a collection holds no versions and accepts no
++/// document uploads. <see cref="ParentId"/> is the containing collection, NULL at the root.
++/// </summary>
++public class Project
++{
++    public string Id { get; set; } = "";
++    public string OrgId { get; set; } = "";
++    /// <summary>The containing collection, or null at the root of the tree.</summary>
++    public string? ParentId { get; set; }
++    /// <summary><c>project</c> or <c>collection</c>.</summary>
++    public string Kind { get; set; } = "project";
++    public string Name { get; set; } = "";
++    /// <summary>CycloneDX component.type vocabulary; seeded from an uploaded SBOM's metadata.</summary>
++    public string Classifier { get; set; } = "application";
++    public string? Description { get; set; }
++    public string? CreatedBy { get; set; }
++    public DateTimeOffset CreatedAt { get; set; }
++}
++
++/// <summary>
++/// One release of a <see cref="Project"/>, labelled by an opaque version string.
++/// <see cref="IsLatest"/> is the only notion of "latest"; a partial unique index makes two
++/// latest rows for one project impossible at commit.
++/// </summary>
++public class ProjectVersion
++{
++    public string Id { get; set; } = "";
++    public string OrgId { get; set; } = "";
++    public string ProjectId { get; set; } = "";
++    public string Version { get; set; } = "";
++    public bool IsLatest { get; set; }
++    /// <summary>
++    /// <c>pass</c>, <c>warn</c> or <c>violation</c> from the last policy evaluation. Null means
++    /// the version has never been evaluated, which is not the same as passing.
++    /// </summary>
++    public string? PolicyStatus { get; set; }
++    public string? CreatedBy { get; set; }
++    public DateTimeOffset CreatedAt { get; set; }
++}
++
++/// <summary>
++/// Metadata for one uploaded SBOM/VEX/SARIF original. The bytes live verbatim in the registry
++/// blob tier under <see cref="BlobKey"/>; upload is latest-wins per (version, doc type).
++/// </summary>
++public class ProjectDocument
++{
++    public string Id { get; set; } = "";
++    public string OrgId { get; set; } = "";
++    public string ProjectVersionId { get; set; } = "";
++    /// <summary><c>sbom</c>, <c>vex</c> or <c>sarif</c>.</summary>
++    public string DocType { get; set; } = "";
++    /// <summary><c>cyclonedx-json</c>, <c>openvex-json</c> or <c>sarif-json</c>.</summary>
++    public string Format { get; set; } = "";
++    /// <summary>The document's own spec version, e.g. <c>1.6</c> or <c>2.1.0</c>.</summary>
++    public string? SpecVersion { get; set; }
++    public string? ToolName { get; set; }
++    public string? ToolVersion { get; set; }
++    public string Sha256 { get; set; } = "";
++    public long SizeBytes { get; set; }
++    /// <summary>Built by <see cref="Storage.BlobKeys.ProjectDocument"/>; registry tier.</summary>
++    public string BlobKey { get; set; } = "";
++    public string? UploadedBy { get; set; }
++    public DateTimeOffset UploadedAt { get; set; }
++}
++
++/// <summary>
++/// One component of one project version's SBOM. The verbatim <see cref="Purl"/> sits beside the
++/// parsed <see cref="Ecosystem"/>/<see cref="PurlName"/>/<see cref="Version"/> triple so registry
++/// cross-links and scan batching are equality-indexed; the parsed columns are null when the purl
++/// is absent or names a type <c>PurlNormalizer</c> does not map.
++/// </summary>
++public class SbomComponent
++{
++    public string Id { get; set; } = "";
++    public string OrgId { get; set; } = "";
++    public string ProjectVersionId { get; set; } = "";
++    /// <summary>Verbatim from the SBOM; null when the component declares none.</summary>
++    public string? Purl { get; set; }
++    public string? Ecosystem { get; set; }
++    public string? PurlName { get; set; }
++    public string? Version { get; set; }
++    public string Name { get; set; } = "";
++    /// <summary>CycloneDX components[].type.</summary>
++    public string? ComponentType { get; set; }
++    /// <summary>
++    /// The raw CycloneDX scope (<c>required</c>/<c>optional</c>/<c>excluded</c>). Display only —
++    /// unreliable in the wild, which is why it is never the dev/prod signal.
++    /// </summary>
++    public string? SbomScope { get; set; }
++    /// <summary>
++    /// The authoritative dev/prod signal (<c>dev</c>/<c>runtime</c>/<c>unknown</c>), owned by the
++    /// reachability scanner. Defaults to <c>unknown</c> so an unclassified component reads as
++    /// unclassified rather than as production.
++    /// </summary>
++    public string DependencyScope { get; set; } = "unknown";
++    /// <summary><c>direct</c>, <c>transitive</c>, <c>root</c> or <c>graph-unknown</c>.</summary>
++    public string? DependencyKind { get; set; }
++    /// <summary>JSON array of purls from the dependency root to this component.</summary>
++    public string? DependencyPath { get; set; }
++    /// <summary>SPDX expression declared by the component's licences.</summary>
++    public string? LicenseSpdx { get; set; }
++    /// <summary>Scan-pass stamp. Null keeps the row in the unscanned bucket.</summary>
++    public DateTimeOffset? VulnCheckedAt { get; set; }
++    public DateTimeOffset CreatedAt { get; set; }
++}
++
++/// <summary>
++/// Scan-result link from an <see cref="SbomComponent"/> to a row of the global
++/// <c>vulnerabilities</c> table. A table of its own rather than a third owner arm on
++/// <c>package_version_vulns</c>, so registry policy surfaces never count application inventory.
++/// Carries no org id: the row is always reached through its component, which carries one.
++/// </summary>
++public class SbomComponentVuln
++{
++    public string Id { get; set; } = "";
++    public string ComponentId { get; set; } = "";
++    public string VulnId { get; set; } = "";
++    public DateTimeOffset CheckedAt { get; set; }
++}
++
++/// <summary>
++/// The single (product, vulnerability) statement for a project version: the VEX arm and the
++/// reachability arm on one row, each written by its own ingester and by manual triage.
++/// <see cref="PurlKey"/> is the version-less canonical purl, so triage survives a component
++/// bump; <see cref="VulnKey"/> is a plain advisory id with no foreign key, because a VEX or
++/// SARIF document legitimately cites advisories the advisory feed has never served.
++/// </summary>
++public class ProjectVulnAnalysis
++{
++    public string Id { get; set; } = "";
++    public string OrgId { get; set; } = "";
++    public string ProjectVersionId { get; set; } = "";
++    /// <summary>Version-less canonical purl.</summary>
++    public string PurlKey { get; set; } = "";
++    /// <summary>Canonical advisory id, CVE preferred. Deliberately not a foreign key.</summary>
++    public string VulnKey { get; set; } = "";
++    /// <summary>CycloneDX analysis vocabulary; OpenVEX states are normalized into it on import.</summary>
++    public string? VexState { get; set; }
++    public string? VexJustification { get; set; }
++    public string? VexResponse { get; set; }
++    public string? VexDetail { get; set; }
++    /// <summary><c>upload</c> when a document set it, <c>manual</c> when an operator did.</summary>
++    public string? VexSource { get; set; }
++    /// <summary><c>reachable</c>, <c>not-observed</c>, <c>unknown</c> or <c>imported-not-called</c>.</summary>
++    public string? Reachability { get; set; }
++    /// <summary><c>high</c>, <c>medium</c> or <c>low</c>.</summary>
++    public string? Confidence { get; set; }
++    public bool SarifSuppressed { get; set; }
++    /// <summary>The SARIF security-severity property, when the producer carries one.</summary>
++    public double? SecuritySeverity { get; set; }
++    /// <summary><c>asserted</c> or <c>representative</c>.</summary>
++    public string? SeverityOrigin { get; set; }
++    /// <summary>The producer partial fingerprint this row was matched on.</summary>
++    public string? Fingerprint { get; set; }
++    public string? UpdatedBy { get; set; }
++    public DateTimeOffset UpdatedAt { get; set; }
++}
++
++/// <summary>
++/// One materialized policy violation: which evaluator arm fired, on which component, over which
++/// advisory or licence. Materialized so an alert fires once and a project list can roll findings
++/// up without fanning out per row; restamped at scan completion, on a triage change, and by the
++/// nightly pass. Nothing here denies a serve.
++/// </summary>
++public class SbomPolicyFinding
++{
++    public string Id { get; set; } = "";
++    public string OrgId { get; set; } = "";
++    public string ProjectVersionId { get; set; } = "";
++    public string ComponentId { get; set; } = "";
++    /// <summary><c>malicious</c>, <c>kev</c>, <c>epss</c>, <c>cvss</c> or <c>license</c>.</summary>
++    public string Arm { get; set; } = "";
++    /// <summary>Advisory id for the four vulnerability arms; null for the licence arm.</summary>
++    public string? VulnKey { get; set; }
++    /// <summary>Offending SPDX expression for the licence arm; null for the vulnerability arms.</summary>
++    public string? LicenseSpdx { get; set; }
++    /// <summary>JSON detail naming the threshold that was crossed.</summary>
++    public string? Detail { get; set; }
++    public DateTimeOffset CreatedAt { get; set; }
++}
+diff --git a/src/Dependably.Core/Infrastructure/OrphanBlobReconcilerService.cs b/src/Dependably.Core/Infrastructure/OrphanBlobReconcilerService.cs
+index d94f20bf..11b3ce31 100644
+--- a/src/Dependably.Core/Infrastructure/OrphanBlobReconcilerService.cs
++++ b/src/Dependably.Core/Infrastructure/OrphanBlobReconcilerService.cs
+@@ -4,24 +4,27 @@ using Dependably.Storage;
+ namespace Dependably.Infrastructure;
+ 
+ /// <summary>
+ /// Periodic reconciliation of the registry (hosted) tier: lists every blob under the
+ /// <c>hosted/</c> prefix and deletes those no metadata row references. This closes the SIGKILL
+ /// gap in <see cref="Publish.PackagePublishService"/> — the application-exception path during
+ /// publish is handled by the inline compensating delete, but a process killed between blob put
+ /// and metadata commit leaves an orphan that only this sweep can recover.
+ ///
+ /// The referenced set is <see cref="PackageRepository.StreamAllBlobKeysAsync"/>, the union of
+-/// EVERY table that can hold a hosted key — <c>package_versions</c> plus the secondary-file
+-/// tables (<c>package_version_files</c>, <c>maven_version_files</c>, <c>nuget_symbol_index</c>)
+-/// whose rows are the sole reference to a Maven <c>.pom</c>/sources jar or a PyPI sdist
+-/// published alongside a wheel. Anything short of that union deletes live artefacts.
++/// EVERY table that can hold a hosted key — <c>package_versions</c>, the secondary-file tables
++/// (<c>package_version_files</c>, <c>maven_version_files</c>, <c>nuget_symbol_index</c>) whose
++/// rows are the sole reference to a Maven <c>.pom</c>/sources jar or a PyPI sdist published
++/// alongside a wheel, and <c>project_documents</c>, whose rows are the sole reference to an
++/// uploaded SBOM/VEX/SARIF original. Anything short of that union deletes live data: a project
++/// document is not a published artefact, but <c>BlobKeys.ProjectDocument</c> deliberately keys it
++/// under the same <c>hosted/</c> prefix this sweep walks, so it is in scope by construction.
+ ///
+ /// Schedule via <c>ORPHAN_RECONCILE_SCHEDULE</c> (cron, default daily 04:00 UTC). Skipped
+ /// silently if disabled (set the schedule to a non-parseable value to opt out). A grace
+ /// window (<c>ORPHAN_RECONCILE_GRACE_MINUTES</c>, default 30) keeps in-flight publishes
+ /// out of the deletion set — any blob whose mtime/last-modified is more recent than
+ /// <c>now - grace</c> is left alone even if the matching row hasn't been committed yet. That
+ /// window, not the referenced-set read, is what makes the sweep safe against a publish
+ /// committing concurrently: a row committed after the set was read belongs to a blob written
+ /// moments earlier, so the blob is inside the grace window and is skipped regardless.
+ ///
+diff --git a/src/Dependably.Core/Infrastructure/PackageRepository.Lifecycle.cs b/src/Dependably.Core/Infrastructure/PackageRepository.Lifecycle.cs
+index 91eb6a9a..451c7f8f 100644
+--- a/src/Dependably.Core/Infrastructure/PackageRepository.Lifecycle.cs
++++ b/src/Dependably.Core/Infrastructure/PackageRepository.Lifecycle.cs
+@@ -238,20 +238,24 @@ public sealed partial class PackageRepository
+     /// <list type="bullet">
+     ///   <item><c>package_versions.blob_key</c> — the primary artefact of a version.</item>
+     ///   <item><c>package_version_files.blob_key</c> — the per-file rows of a multi-file PyPI
+     ///     release (sdist + wheels). Only the first file published lands its key on the
+     ///     <c>package_versions</c> row; every sibling file exists here alone.</item>
+     ///   <item><c>maven_version_files.blob_key</c> — the per-file rows of a Maven version (JAR +
+     ///     POM + sources + javadoc + classifiers). The <c>package_versions</c> row is shared
+     ///     across all files of the version and carries only the first-published file's key.</item>
+     ///   <item><c>nuget_symbol_index.snupkg_blob_key</c> — the stored <c>.snupkg</c> holding an
+     ///     indexed Portable PDB.</item>
++    ///   <item><c>project_documents.blob_key</c> — the verbatim SBOM/VEX/SARIF a team uploaded
++    ///     about one of its own builds. <c>BlobKeys.ProjectDocument</c> puts these under the same
++    ///     <c>hosted/</c> prefix the reconciler walks, and this row is their only reference, so
++    ///     omitting the arm would delete every uploaded document on the next sweep.</item>
+     /// </list>
+     /// <c>oci_blobs</c> and <c>cache_artifact</c> are deliberately absent: their keys carry the
+     /// <c>oci/</c> and <c>proxy/</c> prefixes, outside the <c>hosted/</c> prefix the reconciler
+     /// walks. Proxy-origin rows within the tables above (a proxy-cached version's <c>proxy/</c>
+     /// key, a cache-artifact-owned Maven file row) stream back too; they match no <c>hosted/</c>
+     /// blob and are inert in the set.
+     /// <para>
+     /// UNION ALL, not UNION: cross-arm duplicates (a <c>.snupkg</c> key is in both
+     /// <c>package_versions</c> and <c>nuget_symbol_index</c>) are collapsed by the caller's
+     /// hash set, whereas UNION would make the database sort and materialize the whole result,
+@@ -268,20 +272,22 @@ public sealed partial class PackageRepository
+         await foreach (string key in conn.QueryUnbufferedAsync<string>(
+             // plane-ok: orphan reconciler walks only the hosted/ blob prefix; cache_artifact/oci_blobs keys carry proxy//oci/ prefixes and are deliberately out of scope.
+             """
+             SELECT blob_key FROM package_versions
+             UNION ALL
+             SELECT blob_key FROM package_version_files
+             UNION ALL
+             SELECT blob_key FROM maven_version_files
+             UNION ALL
+             SELECT snupkg_blob_key FROM nuget_symbol_index
++            UNION ALL
++            SELECT blob_key FROM project_documents
+             """,
+             commandTimeout: 0))
+         {
+             if (ct.IsCancellationRequested)
+             {
+                 yield break;
+             }
+ 
+             yield return key;
+         }
+diff --git a/src/Dependably.Core/Infrastructure/Privacy/PersonalDataTables.cs b/src/Dependably.Core/Infrastructure/Privacy/PersonalDataTables.cs
+index 23727f44..2250e708 100644
+--- a/src/Dependably.Core/Infrastructure/Privacy/PersonalDataTables.cs
++++ b/src/Dependably.Core/Infrastructure/Privacy/PersonalDataTables.cs
+@@ -114,12 +114,22 @@ public static class PersonalDataTables
+             ["email_outbox"] =
+                 "Queued outbound alert mail. `recipients` is the org's configured alert-delivery list " +
+                 "snapshotted when the alert was raised, not the subject's own address, and one row is " +
+                 "addressed to several recipients at once — returning it to one of them would disclose " +
+                 "the others. Storage limitation is discharged instead: RetentionService prunes terminal " +
+                 "rows past EMAIL_OUTBOX_TERMINAL_RETENTION_DAYS, non-terminal rows expire at their own " +
+                 "retention ceiling, and the org_id FK cascades the whole backlog away with its tenant.",
+             ["banners"] =
+                 "Operator/admin-authored org or instance announcement; created_by is authorship provenance, " +
+                 "not the subject's personal data. (The subject's own dismissals ARE exported, via banner_dismissals.)",
++            ["projects"] =
++                "Org application inventory; created_by is an authorship-provenance stamp on an org-owned row. " +
++                "The row describes the org's software, not the subject.",
++            ["project_versions"] =
++                "One release of an org-owned project; created_by is an authorship-provenance stamp. Exporting it " +
++                "would hand a subject the org's release history rather than the subject's own data.",
++            ["project_documents"] =
++                "Metadata for an SBOM/VEX/SARIF the org uploaded about its own software; uploaded_by is an " +
++                "authorship-provenance stamp on an org-owned row. Classified explicitly even though uploaded_by " +
++                "is outside PersonalDataColumns, so the decision is recorded rather than resting on a column name.",
+         };
+ }
+diff --git a/src/Dependably.Core/Infrastructure/SchemaInitializer.ColumnMigrations.cs b/src/Dependably.Core/Infrastructure/SchemaInitializer.ColumnMigrations.cs
+index 41f34675..819cac2c 100644
+--- a/src/Dependably.Core/Infrastructure/SchemaInitializer.ColumnMigrations.cs
++++ b/src/Dependably.Core/Infrastructure/SchemaInitializer.ColumnMigrations.cs
+@@ -1015,20 +1015,24 @@ public sealed partial class SchemaInitializer
+             // the CREATE TABLE block; upgraded databases rely on controller-side validation
+             // (SQLite ALTER cannot add a CHECK), the same treatment license_enforcement_mode got.
+             "ALTER TABLE license_allowlist ADD COLUMN disposition TEXT NOT NULL DEFAULT 'allowed'",
+             // Operator rationale on a policy row. Nullable: every pre-existing entry was recorded
+             // without one, and an absent note is honestly "nobody wrote one down" rather than a
+             // value to invent.
+             "ALTER TABLE license_allowlist ADD COLUMN note TEXT",
+             "ALTER TABLE license_allowlist ADD COLUMN created_by TEXT",
+             "ALTER TABLE license_blocklist ADD COLUMN note TEXT",
+             "ALTER TABLE license_blocklist ADD COLUMN created_by TEXT",
++            // Third alert-raising gate, structurally mirroring quarantine_alerts_enabled and
++            // vuln_alerts_enabled: raises an alert when a project version's SBOM policy
++            // evaluation records a violation. Defaults on, like the other two.
++            "ALTER TABLE alert_settings ADD COLUMN sbom_policy_alerts_enabled INTEGER NOT NULL DEFAULT 1",
+     };
+ 
+     private async Task RunAdditiveMigrationsAsync(DbConnection conn)
+     {
+         foreach (string? ddl in BuildAdditiveMigrations())
+         {
+             await ApplyAdditiveAsync(conn, ddl);
+         }
+ 
+         // org_settings.storage_used_bytes is dormant capacity: nothing in this release reads or
+diff --git a/src/Dependably.Core/Infrastructure/SchemaInitializer.cs b/src/Dependably.Core/Infrastructure/SchemaInitializer.cs
+index fb18aa0d..964c6bc2 100644
+--- a/src/Dependably.Core/Infrastructure/SchemaInitializer.cs
++++ b/src/Dependably.Core/Infrastructure/SchemaInitializer.cs
+@@ -367,20 +367,27 @@ public sealed partial class SchemaInitializer
+         // is not a serving difference — an unbound row falls back to the same shared values the
+         // backfill would have copied — but it would leave the schema comments claiming a coverage
+         // the ledger does not give.
+         await RunOnceAsync(
+             conn, "backfill_tenant_artifact_access_binding", BackfillTenantArtifactAccessBindingAsync);
+ 
+         // metadata_cache was never wired to a reader or writer (upstream-metadata caching lives
+         // in memory instead); drop it so the schema doesn't advertise a TTL sweep that doesn't exist.
+         await RunOnceAsync(conn, "drop_metadata_cache_table", DropMetadataCacheTableAsync);
+ 
++        // Widen alert.type's closed CHECK to admit 'sbom_policy_violation'. Fresh installs get the
++        // wider set from the CREATE TABLE blocks; this brings existing databases in line. Same
++        // shape and same reasoning as expand_role_check_with_auditor above — transactional: false
++        // because the SQLite branch drives PRAGMA writable_schema and a schema_version bump, and
++        // idempotent on both providers so an un-recorded partial run repeats harmlessly.
++        await RunOnceAsync(conn, "expand_alert_type_check_sbom_policy", ExpandAlertTypeCheckAsync, transactional: false);
++
+         // Reclaim packages rows left cataloguing nothing by the two background reclaimers, which
+         // remove a package's last version without GC'ing its parent row (SchemaInitializer
+         // .EmptyPackageSweep.cs). Ordered after every plane migration above: those move versions
+         // between package_versions and cache_artifact, and a sweep placed ahead of them would read
+         // a mid-migration package as empty and delete a row whose versions were about to land.
+         await RunOnceAsync(conn, "delete_empty_package_rows", DeleteEmptyPackageRowsAsync);
+ 
+ 
+         // Last, after every migration: the view bodies can only be created once every table and
+         // column they reference is guaranteed to exist.
+@@ -1151,20 +1158,72 @@ public sealed partial class SchemaInitializer
+             await conn.ExecuteAsync(
+                 "PRAGMA schema_version = " + (version + 1).ToString(CultureInfo.InvariantCulture));
+         }
+         finally
+         {
+             await conn.ExecuteAsync("PRAGMA writable_schema = RESET");
+         }
+         await conn.ExecuteAsync("PRAGMA integrity_check");
+     }
+ 
++    // Extend the alert.type CHECK constraint to include 'sbom_policy_violation', the alert an
++    // SBOM policy evaluation raises. New databases pick this up from the CREATE TABLE statements
++    // in Schema.sql / Schema.pg.sql; this migration brings existing databases in line.
++    //
++    // Postgres: drop + re-add the auto-named CHECK constraint. IF EXISTS covers an install that
++    // never carried one.
++    //
++    // SQLite: rewrite the stored CREATE TABLE text in place via the writable_schema pattern. The
++    // literal REPLACE is exact because the stored text is verbatim what Schema.sql emitted, and it
++    // is a no-op on any database whose alert table does not carry the narrower clause.
++    private Task ExpandAlertTypeCheckAsync(DbConnection conn)
++    {
++        return _db.Provider == DbProvider.Postgres
++            ? conn.ExecuteAsync("""
++                ALTER TABLE alert DROP CONSTRAINT IF EXISTS alert_type_check;
++                ALTER TABLE alert ADD  CONSTRAINT alert_type_check
++                    CHECK (type IN ('quarantine_new', 'vuln_severity', 'sbom_policy_violation'));
++                """)
++            : ExpandAlertTypeCheckSqliteAsync(conn);
++    }
++
++    [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "S2077:Formatted SQL queries should be reviewed",
++        Justification = "PRAGMA schema_version cannot be parameter-bound — SQLite's PRAGMA grammar does not " +
++                        "accept ? / @name placeholders for the right-hand side. The interpolated value is a " +
++                        "long we just read from PRAGMA schema_version itself; it never touches user input.")]
++    private static async Task ExpandAlertTypeCheckSqliteAsync(DbConnection conn)
++    {
++        const string oldCheck = "CHECK (type IN ('quarantine_new', 'vuln_severity'))";
++        const string newCheck = "CHECK (type IN ('quarantine_new', 'vuln_severity', 'sbom_policy_violation'))";
++
++        // Bumping schema_version forces SQLite to reload the schema on the next read so existing
++        // connections stop enforcing the old CHECK; writable_schema = RESET both disables write
++        // mode and forces the reload. See ExpandRoleCheckSqliteAsync for the full rationale.
++        await conn.ExecuteAsync("PRAGMA writable_schema = ON");
++        try
++        {
++            await conn.ExecuteAsync("""
++                UPDATE sqlite_schema
++                SET sql = REPLACE(sql, @old, @new)
++                WHERE type = 'table' AND name = 'alert'
++                """, new { old = oldCheck, @new = newCheck });
++            long version = await conn.ExecuteScalarAsync<long>("PRAGMA schema_version");
++            await conn.ExecuteAsync(
++                "PRAGMA schema_version = " + (version + 1).ToString(CultureInfo.InvariantCulture));
++        }
++        finally
++        {
++            await conn.ExecuteAsync("PRAGMA writable_schema = RESET");
++        }
++        await conn.ExecuteAsync("PRAGMA integrity_check");
++    }
++
+     // Rewrite legacy 'block' policy rows to 'block_all'. The old single 'block' value denied
+     // every request for a deprecated version — both new fetches and already-cached artifacts —
+     // which is exactly the new 'block_all' semantics, so observable behaviour is unchanged.
+     // Runs after the CHECK widen so 'block_all' is a permitted value.
+     // xtenant: one-shot data migration, runs across every tenant on the instance.
+     private static Task MigrateBlockDeprecatedToBlockAllAsync(DbConnection conn) =>
+         conn.ExecuteAsync(
+             "UPDATE org_settings SET block_deprecated = 'block_all' WHERE block_deprecated = 'block'");
+ 
+     // Backfill account_type for users JIT-provisioned via SAML before the column existed.
+diff --git a/src/Dependably.Core/Infrastructure/Startup/AuthStartupExtensions.cs b/src/Dependably.Core/Infrastructure/Startup/AuthStartupExtensions.cs
+index f23a03bf..4a6d35f2 100644
+--- a/src/Dependably.Core/Infrastructure/Startup/AuthStartupExtensions.cs
++++ b/src/Dependably.Core/Infrastructure/Startup/AuthStartupExtensions.cs
+@@ -237,20 +237,40 @@ internal static class AuthStartupExtensions
+             string key = RateLimitPartitions.GetPartitionKey(httpContext, ipv6Prefix);
+             return RateLimitPartition.GetSlidingWindowLimiter(key,
+                 _ => new SlidingWindowRateLimiterOptions
+                 {
+                     PermitLimit = importLimit,
+                     Window = TimeSpan.FromMinutes(1),
+                     SegmentsPerWindow = RateLimitWindowSegments,
+                     QueueLimit = 0,
+                 });
+         });
++
++        // SBOM/VEX/SARIF document upload. Sized above the import ceiling on purpose: import's
++        // 5/min assumes one operator batch, whereas a CI run for a mono-repo pushes one document
++        // per module per kind and would 429 partway through at that budget. Each upload still
++        // parses a whole document and rewrites a version's derived rows, so it stays well below
++        // the push and download ceilings. Queue depth is 0 — a CI client that exceeds the budget
++        // should see the 429 and its Retry-After rather than sit in a queue.
++        int sbomUploadLimit = int.TryParse(cfg["SBOM_UPLOAD_RATE_LIMIT_PERMITS"], out int sp) ? sp : 30;
++        o.AddPolicy("sbom-upload", httpContext =>
++        {
++            string key = RateLimitPartitions.GetPartitionKey(httpContext, ipv6Prefix);
++            return RateLimitPartition.GetSlidingWindowLimiter(key,
++                _ => new SlidingWindowRateLimiterOptions
++                {
++                    PermitLimit = sbomUploadLimit,
++                    Window = TimeSpan.FromMinutes(1),
++                    SegmentsPerWindow = RateLimitWindowSegments,
++                    QueueLimit = 0,
++                });
++        });
+     }
+ 
+     // Metadata limiter: guards npm packument, PyPI simple index, and NuGet registration GETs.
+     // Partitioned by the real source IP (not token-hash) because these endpoints are hit both
+     // by authenticated clients and anonymous proxies, and a token-hash partition would give
+     // an attacker an unbounded number of fresh buckets via forged Authorization headers.
+     // When TRUSTED_PROXIES is unset the remote IP is the socket peer (fail-closed), so the
+     // partition key is always a reliable proxy for the source.
+     // Default: 500 permits/s sliding window, queue depth 100 so a brief CI startup burst
+     // (multiple parallel install processes hitting one packument) is absorbed without 429s.
+diff --git a/src/Dependably.Core/Infrastructure/schema/Schema.pg.sql b/src/Dependably.Core/Infrastructure/schema/Schema.pg.sql
+index e6dae36e..50bec313 100644
+--- a/src/Dependably.Core/Infrastructure/schema/Schema.pg.sql
++++ b/src/Dependably.Core/Infrastructure/schema/Schema.pg.sql
+@@ -717,21 +717,21 @@ CREATE TABLE IF NOT EXISTS quarantine (
+ );
+ 
+ CREATE INDEX IF NOT EXISTS idx_quarantine_org_state ON quarantine(org_id, state, updated_at DESC);
+ CREATE INDEX IF NOT EXISTS idx_quarantine_version ON quarantine(package_version_id);
+ CREATE INDEX IF NOT EXISTS idx_quarantine_decided_by ON quarantine(decided_by);
+ 
+ -- Per-tenant alert center. See Schema.sql for the full rationale.
+ CREATE TABLE IF NOT EXISTS alert (
+     id           TEXT PRIMARY KEY,
+     org_id       TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+-    type         TEXT NOT NULL CHECK (type IN ('quarantine_new', 'vuln_severity')),
++    type         TEXT NOT NULL CHECK (type IN ('quarantine_new', 'vuln_severity', 'sbom_policy_violation')),
+     severity     TEXT,
+     source_ref   TEXT NOT NULL,
+     ecosystem    TEXT,
+     purl         TEXT,
+     title        TEXT NOT NULL,
+     detail       TEXT,
+     state        TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'dismissed')),
+     dismissed_by TEXT REFERENCES users(id),
+     dismissed_at TEXT
+         CHECK (dismissed_at IS NULL OR dismissed_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+@@ -768,20 +768,22 @@ CREATE INDEX IF NOT EXISTS idx_alert_dismissed_by ON alert(dismissed_by);
+ -- backcompat-ok: alert_settings.email_smtp_username — same contract step; no supported blue-green
+ -- peer reads it.
+ -- backcompat-ok: alert_settings.email_smtp_password — same contract step; envelope-encrypted
+ -- credential, already scrubbed to NULL on any database that passed through the previous release.
+ -- backcompat-ok: alert_settings.email_smtp_from — same contract step; no supported blue-green peer
+ -- reads it.
+ CREATE TABLE IF NOT EXISTS alert_settings (
+     org_id                     TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
+     quarantine_alerts_enabled INTEGER NOT NULL DEFAULT 1,
+     vuln_alerts_enabled       INTEGER NOT NULL DEFAULT 1,
++    -- Raises an alert on an SBOM policy violation. Defaults on, like the other gates.
++    sbom_policy_alerts_enabled INTEGER NOT NULL DEFAULT 1,
+     vuln_min_severity         TEXT NOT NULL DEFAULT 'HIGH' CHECK (vuln_min_severity IN ('LOW', 'MEDIUM', 'HIGH', 'CRITICAL')),
+     slack_enabled              INTEGER NOT NULL DEFAULT 0,
+     slack_webhook_url          TEXT,
+     slack_last_delivery_at     TEXT
+         CHECK (slack_last_delivery_at IS NULL OR slack_last_delivery_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+     slack_last_status          TEXT,
+     slack_consecutive_failures INTEGER NOT NULL DEFAULT 0,
+     slack_failing_since        TEXT
+         CHECK (slack_failing_since IS NULL OR slack_failing_since ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+     slack_last_error           TEXT,
+@@ -1766,14 +1768,172 @@ CREATE INDEX IF NOT EXISTS idx_webhook_sub_org_enabled ON webhook_subscription(o
+ CREATE TABLE IF NOT EXISTS instance_lock (
+     id           TEXT PRIMARY KEY,
+     instance_id  TEXT NOT NULL,
+     hostname     TEXT,
+     heartbeat_at TEXT NOT NULL
+         CHECK (heartbeat_at IS NULL OR heartbeat_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+     acquired_at  TEXT NOT NULL
+         CHECK (acquired_at IS NULL OR acquired_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$')
+ );
+ 
++-- ── Projects plane ──────────────────────────────────────────────────────────────
++-- Applications a team builds, the SBOM/VEX/SARIF documents uploaded about them, and everything
++-- derived from those documents. See Schema.sql for the full rationale.
++
++-- An application or service, plus the collections that group several of them. Name uniqueness
++-- is two partial unique indexes because both providers treat NULLs as distinct.
++-- personal-data: excluded — created_by is an authorship-provenance stamp on an org-owned row.
++CREATE TABLE IF NOT EXISTS projects (
++    id          TEXT PRIMARY KEY,
++    org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
++    parent_id   TEXT REFERENCES projects(id) ON DELETE CASCADE,
++    kind        TEXT NOT NULL DEFAULT 'project' CHECK (kind IN ('project','collection')),
++    name        TEXT NOT NULL,
++    classifier  TEXT NOT NULL DEFAULT 'application',
++    description TEXT,
++    created_by  TEXT,
++    created_at  TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
++        CHECK (created_at IS NULL OR created_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$')
++);
++CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_org_root_name
++    ON projects (org_id, name) WHERE parent_id IS NULL;
++CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_org_parent_name
++    ON projects (org_id, parent_id, name) WHERE parent_id IS NOT NULL;
++CREATE INDEX IF NOT EXISTS idx_projects_org ON projects(org_id);
++CREATE INDEX IF NOT EXISTS idx_projects_parent ON projects(parent_id);
++
++-- One release of a project. is_latest is the only notion of "latest"; the partial unique index
++-- makes a double-latest impossible at commit. policy_status NULL = never evaluated.
++-- personal-data: excluded — created_by is an authorship-provenance stamp on an org-owned row.
++CREATE TABLE IF NOT EXISTS project_versions (
++    id            TEXT PRIMARY KEY,
++    org_id        TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
++    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
++    version       TEXT NOT NULL,
++    is_latest     INTEGER NOT NULL DEFAULT 0,
++    policy_status TEXT CHECK (policy_status IN ('pass','warn','violation')),
++    created_by    TEXT,
++    created_at    TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
++        CHECK (created_at IS NULL OR created_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
++    UNIQUE (project_id, version)
++);
++CREATE UNIQUE INDEX IF NOT EXISTS idx_project_versions_latest
++    ON project_versions (project_id) WHERE is_latest = 1;
++CREATE INDEX IF NOT EXISTS idx_project_versions_org ON project_versions(org_id);
++
++-- Metadata for one uploaded SBOM/VEX/SARIF original, stored verbatim in the registry blob
++-- tier. Latest-wins per (project_version_id, doc_type); blob_key is the sole reference that
++-- keeps the blob out of the orphan sweep.
++-- personal-data: excluded — uploaded_by is an authorship-provenance stamp on an org-owned row.
++CREATE TABLE IF NOT EXISTS project_documents (
++    id                 TEXT PRIMARY KEY,
++    org_id             TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
++    project_version_id TEXT NOT NULL REFERENCES project_versions(id) ON DELETE CASCADE,
++    doc_type           TEXT NOT NULL CHECK (doc_type IN ('sbom','vex','sarif')),
++    format             TEXT NOT NULL CHECK (format IN ('cyclonedx-json','openvex-json','sarif-json')),
++    spec_version       TEXT,
++    tool_name          TEXT,
++    tool_version       TEXT,
++    sha256             TEXT NOT NULL,
++    size_bytes         INTEGER NOT NULL DEFAULT 0,
++    blob_key           TEXT NOT NULL,
++    uploaded_by        TEXT,
++    uploaded_at        TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
++        CHECK (uploaded_at IS NULL OR uploaded_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
++    UNIQUE (project_version_id, doc_type)
++);
++CREATE INDEX IF NOT EXISTS idx_project_documents_org ON project_documents(org_id);
++
++-- One component of one project version's SBOM, with the parsed purl triple beside the verbatim
++-- purl. sbom_scope is raw CycloneDX and display-only; dependency_scope is the authoritative
++-- dev/prod signal. See Schema.sql.
++CREATE TABLE IF NOT EXISTS sbom_components (
++    id                 TEXT PRIMARY KEY,
++    org_id             TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
++    project_version_id TEXT NOT NULL REFERENCES project_versions(id) ON DELETE CASCADE,
++    purl               TEXT,
++    ecosystem          TEXT,
++    purl_name          TEXT,
++    version            TEXT,
++    name               TEXT NOT NULL,
++    component_type     TEXT,
++    sbom_scope         TEXT CHECK (sbom_scope IN ('required','optional','excluded')),
++    dependency_scope   TEXT NOT NULL DEFAULT 'unknown'
++                       CHECK (dependency_scope IN ('dev','runtime','unknown')),
++    dependency_kind    TEXT CHECK (dependency_kind IN ('direct','transitive','root','graph-unknown')),
++    dependency_path    TEXT,
++    license_spdx       TEXT,
++    vuln_checked_at    TEXT
++        CHECK (vuln_checked_at IS NULL OR vuln_checked_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
++    created_at         TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
++        CHECK (created_at IS NULL OR created_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$')
++);
++CREATE UNIQUE INDEX IF NOT EXISTS idx_sbom_components_pv_purl
++    ON sbom_components (project_version_id, purl) WHERE purl IS NOT NULL;
++CREATE INDEX IF NOT EXISTS idx_sbom_components_pv ON sbom_components(project_version_id);
++CREATE INDEX IF NOT EXISTS idx_sbom_components_org_eco_name
++    ON sbom_components(org_id, ecosystem, purl_name);
++CREATE INDEX IF NOT EXISTS idx_sbom_components_scan
++    ON sbom_components(vuln_checked_at) WHERE ecosystem IS NOT NULL;
++
++-- Scan-result link from an SBOM component to the global vulnerabilities table. A table of its
++-- own rather than a third owner_kind arm on package_version_vulns. See Schema.sql.
++CREATE TABLE IF NOT EXISTS sbom_component_vulns (
++    id           TEXT PRIMARY KEY,
++    component_id TEXT NOT NULL REFERENCES sbom_components(id) ON DELETE CASCADE,
++    vuln_id      TEXT NOT NULL REFERENCES vulnerabilities(id) ON DELETE CASCADE,
++    checked_at   TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
++        CHECK (checked_at IS NULL OR checked_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
++    UNIQUE (component_id, vuln_id)
++);
++CREATE INDEX IF NOT EXISTS idx_sbom_component_vulns_vuln ON sbom_component_vulns(vuln_id);
++
++-- The single (product, vulnerability) statement row: VEX arm and reachability arm side by side,
++-- keyed on the version-less purl. vuln_key deliberately carries no FK. See Schema.sql.
++CREATE TABLE IF NOT EXISTS project_vuln_analysis (
++    id                 TEXT PRIMARY KEY,
++    org_id             TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
++    project_version_id TEXT NOT NULL REFERENCES project_versions(id) ON DELETE CASCADE,
++    purl_key           TEXT NOT NULL,
++    vuln_key           TEXT NOT NULL,
++    vex_state          TEXT CHECK (vex_state IN ('in_triage','exploitable','resolved',
++                           'resolved_with_pedigree','false_positive','not_affected')),
++    vex_justification  TEXT,
++    vex_response       TEXT,
++    vex_detail         TEXT,
++    vex_source         TEXT CHECK (vex_source IN ('upload','manual')),
++    reachability       TEXT CHECK (reachability IN ('reachable','not-observed','unknown','imported-not-called')),
++    confidence         TEXT CHECK (confidence IN ('high','medium','low')),
++    sarif_suppressed   INTEGER NOT NULL DEFAULT 0,
++    security_severity  REAL,
++    severity_origin    TEXT CHECK (severity_origin IN ('asserted','representative')),
++    fingerprint        TEXT,
++    updated_by         TEXT,
++    updated_at         TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
++        CHECK (updated_at IS NULL OR updated_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
++    UNIQUE (project_version_id, purl_key, vuln_key)
++);
++CREATE INDEX IF NOT EXISTS idx_project_vuln_analysis_org ON project_vuln_analysis(org_id);
++
++-- Materialized policy violations for a project version — which arm fired, on which component,
++-- over which advisory or licence. Nothing here denies a serve. See Schema.sql.
++CREATE TABLE IF NOT EXISTS sbom_policy_findings (
++    id                 TEXT PRIMARY KEY,
++    org_id             TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
++    project_version_id TEXT NOT NULL REFERENCES project_versions(id) ON DELETE CASCADE,
++    component_id       TEXT NOT NULL REFERENCES sbom_components(id) ON DELETE CASCADE,
++    arm                TEXT NOT NULL
++                       CHECK (arm IN ('malicious','kev','epss','cvss','license')),
++    vuln_key           TEXT,
++    license_spdx       TEXT,
++    detail             TEXT,
++    created_at         TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
++        CHECK (created_at IS NULL OR created_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$')
++);
++CREATE INDEX IF NOT EXISTS idx_sbom_policy_findings_pv ON sbom_policy_findings(project_version_id);
++CREATE INDEX IF NOT EXISTS idx_sbom_policy_findings_org ON sbom_policy_findings(org_id);
++CREATE INDEX IF NOT EXISTS idx_sbom_policy_findings_component ON sbom_policy_findings(component_id);
++
+ -- NOTE: SchemaInitializer also runs ALTER TABLE statements for the columns above.
+ -- Those are no-ops on fresh installs (IF NOT EXISTS). They exist solely to add the
+ -- columns to databases created before those columns were included in the CREATE TABLE
+ -- blocks. Schema.pg.sql is the authoritative complete schema.
+diff --git a/src/Dependably.Core/Infrastructure/schema/Schema.sql b/src/Dependably.Core/Infrastructure/schema/Schema.sql
+index 051a4b85..efdf7fb2 100644
+--- a/src/Dependably.Core/Infrastructure/schema/Schema.sql
++++ b/src/Dependably.Core/Infrastructure/schema/Schema.sql
+@@ -595,21 +595,21 @@ CREATE INDEX IF NOT EXISTS idx_quarantine_org_state ON quarantine(org_id, state,
+ -- natural key and the conflict is a no-op, so a repeat trigger never produces a second alert.
+ -- source_ref is type-specific: the quarantine row id for 'quarantine_new', or
+ -- "vulnId:ecosystem:packageName" for 'vuln_severity' (one alert per advisory-per-package, not
+ -- per version). state is a single shared active/dismissed flag — all admins in an org see and
+ -- dismiss the same list. slack_status/slack_error and email_status/email_error record the
+ -- terminal outcome of the async Slack/email delivery attempts; they never gate whether the alert
+ -- itself is visible in the panel.
+ CREATE TABLE IF NOT EXISTS alert (
+     id           TEXT PRIMARY KEY,
+     org_id       TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+-    type         TEXT NOT NULL CHECK (type IN ('quarantine_new', 'vuln_severity')),
++    type         TEXT NOT NULL CHECK (type IN ('quarantine_new', 'vuln_severity', 'sbom_policy_violation')),
+     severity     TEXT,           -- CRITICAL | HIGH | MEDIUM | LOW | NULL (quarantine alerts carry no CVSS severity)
+     source_ref   TEXT NOT NULL,  -- dedup key body; see table comment for the per-type shape
+     ecosystem    TEXT,
+     purl         TEXT,
+     title        TEXT NOT NULL,
+     detail       TEXT,           -- JSON detail, same convention as quarantine.detail
+     state        TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'dismissed')),
+     dismissed_by TEXT REFERENCES users(id),
+     dismissed_at TEXT
+         CHECK (dismissed_at IS NULL OR dismissed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR dismissed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR dismissed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+@@ -662,20 +662,23 @@ CREATE INDEX IF NOT EXISTS idx_alert_dismissed_by ON alert(dismissed_by);
+ -- backcompat-ok: alert_settings.email_smtp_username — same contract step; no supported blue-green
+ -- peer reads it.
+ -- backcompat-ok: alert_settings.email_smtp_password — same contract step; envelope-encrypted
+ -- credential, already scrubbed to NULL on any database that passed through the previous release.
+ -- backcompat-ok: alert_settings.email_smtp_from — same contract step; no supported blue-green peer
+ -- reads it.
+ CREATE TABLE IF NOT EXISTS alert_settings (
+     org_id                     TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
+     quarantine_alerts_enabled INTEGER NOT NULL DEFAULT 1,
+     vuln_alerts_enabled       INTEGER NOT NULL DEFAULT 1,
++    -- Raises an alert when a project version's SBOM policy evaluation records a violation.
++    -- Defaults on, matching the other two gates.
++    sbom_policy_alerts_enabled INTEGER NOT NULL DEFAULT 1,
+     vuln_min_severity         TEXT NOT NULL DEFAULT 'HIGH' CHECK (vuln_min_severity IN ('LOW', 'MEDIUM', 'HIGH', 'CRITICAL')),
+     slack_enabled              INTEGER NOT NULL DEFAULT 0,
+     slack_webhook_url          TEXT,   -- enc:v1: envelope-encrypted; NULL when Slack is disabled/unset
+     slack_last_delivery_at     TEXT
+         CHECK (slack_last_delivery_at IS NULL OR slack_last_delivery_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR slack_last_delivery_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR slack_last_delivery_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+     slack_last_status          TEXT,   -- 'ok' | 'failed' | NULL (never delivered)
+     slack_consecutive_failures INTEGER NOT NULL DEFAULT 0,
+     slack_failing_since        TEXT
+         CHECK (slack_failing_since IS NULL OR slack_failing_since GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR slack_failing_since GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR slack_failing_since GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+     slack_last_error           TEXT,
+@@ -2133,14 +2136,265 @@ CREATE TABLE IF NOT EXISTS instance_lock (
+     -- Operator-facing label for the holder (container hostname) in the takeover error message.
+     hostname     TEXT,
+     -- ISO 8601 UTC of the last heartbeat refresh; freshness is measured against this.
+     heartbeat_at TEXT NOT NULL
+         CHECK (heartbeat_at IS NULL OR heartbeat_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR heartbeat_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR heartbeat_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+     -- ISO 8601 UTC of when this holder first acquired the lock.
+     acquired_at  TEXT NOT NULL
+         CHECK (acquired_at IS NULL OR acquired_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR acquired_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR acquired_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
+ );
+ 
++-- ── Projects plane ──────────────────────────────────────────────────────────────
++-- The seven tables below hold applications a team builds, the SBOM/VEX/SARIF documents
++-- uploaded about them, and everything derived from those documents. They are a plane of
++-- their own: rows here describe somebody's application inventory, never an artefact this
++-- registry serves, so no registry policy or serve path reads them.
++
++-- An application or service a team builds, plus the collections that group several of them
++-- (a mono-repo). kind discriminates the two: a 'collection' holds no versions and accepts no
++-- document uploads, and parent_id gives the tree. "The parent must be a collection" is a
++-- cross-row invariant, so it is enforced on the write path rather than by a CHECK.
++-- classifier carries the CycloneDX component.type vocabulary, seeded from an uploaded SBOM's
++-- metadata.component.type.
++--
++-- Name uniqueness is two PARTIAL unique indexes rather than one composite UNIQUE: both
++-- providers treat NULLs as distinct, so UNIQUE(org_id, parent_id, name) would silently admit
++-- duplicate root-level names.
++-- personal-data: excluded — created_by is an authorship-provenance stamp on an org-owned row.
++CREATE TABLE IF NOT EXISTS projects (
++    id          TEXT PRIMARY KEY,
++    org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
++    -- The containing collection. NULL at the root of the tree.
++    parent_id   TEXT REFERENCES projects(id) ON DELETE CASCADE,
++    kind        TEXT NOT NULL DEFAULT 'project' CHECK (kind IN ('project','collection')),
++    name        TEXT NOT NULL,
++    -- CycloneDX component.type vocabulary.
++    classifier  TEXT NOT NULL DEFAULT 'application',
++    description TEXT,
++    created_by  TEXT,
++    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
++        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
++);
++CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_org_root_name
++    ON projects (org_id, name) WHERE parent_id IS NULL;
++CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_org_parent_name
++    ON projects (org_id, parent_id, name) WHERE parent_id IS NOT NULL;
++CREATE INDEX IF NOT EXISTS idx_projects_org ON projects(org_id);
++CREATE INDEX IF NOT EXISTS idx_projects_parent ON projects(parent_id);
++
++-- One release of a project, carrying an opaque version label the uploader chooses.
++--
++-- is_latest is the only notion of "latest" — never a magic version string. Promotion clears
++-- the flag and sets it again inside one transaction, and the partial unique index below makes
++-- a double-latest impossible at commit: two concurrent promoters cannot both win, the loser
++-- gets a constraint violation and retries.
++--
++-- policy_status is the materialized verdict of the last policy evaluation. NULL means the
++-- version has never been evaluated, which is deliberately distinct from 'pass'.
++-- personal-data: excluded — created_by is an authorship-provenance stamp on an org-owned row.
++CREATE TABLE IF NOT EXISTS project_versions (
++    id            TEXT PRIMARY KEY,
++    org_id        TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
++    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
++    -- Opaque label; never parsed for an ordering.
++    version       TEXT NOT NULL,
++    is_latest     INTEGER NOT NULL DEFAULT 0,
++    -- NULL = never evaluated, which is not the same as 'pass'.
++    policy_status TEXT CHECK (policy_status IN ('pass','warn','violation')),
++    created_by    TEXT,
++    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
++        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
++    UNIQUE (project_id, version)
++);
++CREATE UNIQUE INDEX IF NOT EXISTS idx_project_versions_latest
++    ON project_versions (project_id) WHERE is_latest = 1;
++CREATE INDEX IF NOT EXISTS idx_project_versions_org ON project_versions(org_id);
++
++-- Metadata for one uploaded document, whose bytes live verbatim in the registry (durable) blob
++-- tier under the key BlobKeys.ProjectDocument builds. UNIQUE(project_version_id, doc_type)
++-- makes upload latest-wins: one active SBOM, one VEX and one SARIF per version, with no
++-- history rows. A re-upload rewrites this row, re-ingests the derived rows, and only then
++-- deletes the superseded blob, so a metadata row never points at bytes that are already gone.
++--
++-- blob_key is the sole reference keeping that blob alive: OrphanBlobReconcilerService's
++-- referenced-key union reads this column, and a key missing from that union is a blob the
++-- sweep deletes.
++-- personal-data: excluded — uploaded_by is an authorship-provenance stamp on an org-owned row.
++CREATE TABLE IF NOT EXISTS project_documents (
++    id                 TEXT PRIMARY KEY,
++    org_id             TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
++    project_version_id TEXT NOT NULL REFERENCES project_versions(id) ON DELETE CASCADE,
++    doc_type           TEXT NOT NULL CHECK (doc_type IN ('sbom','vex','sarif')),
++    format             TEXT NOT NULL CHECK (format IN ('cyclonedx-json','openvex-json','sarif-json')),
++    -- '1.6' for CycloneDX, '2.1.0' for SARIF, and so on.
++    spec_version       TEXT,
++    -- CycloneDX metadata.tools / SARIF tool.driver.
++    tool_name          TEXT,
++    tool_version       TEXT,
++    sha256             TEXT NOT NULL,
++    size_bytes         INTEGER NOT NULL DEFAULT 0,
++    -- Built by BlobKeys.ProjectDocument; registry tier.
++    blob_key           TEXT NOT NULL,
++    uploaded_by        TEXT,
++    uploaded_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
++        CHECK (uploaded_at IS NULL OR uploaded_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR uploaded_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR uploaded_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
++    UNIQUE (project_version_id, doc_type)
++);
++CREATE INDEX IF NOT EXISTS idx_project_documents_org ON project_documents(org_id);
++
++-- One component of one project version's SBOM. The verbatim purl is kept alongside the parsed
++-- ecosystem/purl_name/version triple so registry cross-links and advisory scan batching are
++-- equality-indexed rather than LIKE-parsed; the parsed columns are NULL when the purl is
++-- absent or names a type PurlNormalizer does not map.
++--
++-- The two scope columns are deliberately NOT merged, because their producers refuse to merge
++-- them. sbom_scope is the CycloneDX components[].scope value verbatim — unreliable in the
++-- wild, so it is display-only. dependency_scope is the reachability scanner's answer to "does
++-- this ship in the running application" and is the authoritative dev/prod signal; it defaults
++-- to 'unknown' so a component nothing has classified reads as unclassified rather than as
++-- production. A production view is therefore
++-- dependency_scope != 'dev' AND COALESCE(sbom_scope,'') != 'excluded'.
++--
++-- license_spdx is a fact on the row (the shape oci_blobs uses), not a
++-- package_version_licenses entry: that table describes registry package_versions and is the
++-- wrong owner for a component of somebody else's application.
++CREATE TABLE IF NOT EXISTS sbom_components (
++    id                 TEXT PRIMARY KEY,
++    org_id             TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
++    project_version_id TEXT NOT NULL REFERENCES project_versions(id) ON DELETE CASCADE,
++    -- Verbatim from the SBOM; NULL when the component declares none.
++    purl               TEXT,
++    -- Parsed from the purl; NULL when its type has no registry mapping.
++    ecosystem          TEXT,
++    -- Normalized per ecosystem by PurlNormalizer.
++    purl_name          TEXT,
++    version            TEXT,
++    name               TEXT NOT NULL,
++    -- CycloneDX components[].type.
++    component_type     TEXT,
++    -- Raw CycloneDX scope; display only.
++    sbom_scope         TEXT CHECK (sbom_scope IN ('required','optional','excluded')),
++    -- The authoritative dev/prod signal, owned by the reachability scanner.
++    dependency_scope   TEXT NOT NULL DEFAULT 'unknown'
++                       CHECK (dependency_scope IN ('dev','runtime','unknown')),
++    dependency_kind    TEXT CHECK (dependency_kind IN ('direct','transitive','root','graph-unknown')),
++    -- JSON array of purls from the dependency root to this component.
++    dependency_path    TEXT,
++    -- SPDX expression declared by the component's licences.
++    license_spdx       TEXT,
++    -- Scan-pass stamp. NULL keeps the row in the unscanned bucket.
++    vuln_checked_at    TEXT
++        CHECK (vuln_checked_at IS NULL OR vuln_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR vuln_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR vuln_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
++    created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
++        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
++);
++CREATE UNIQUE INDEX IF NOT EXISTS idx_sbom_components_pv_purl
++    ON sbom_components (project_version_id, purl) WHERE purl IS NOT NULL;
++CREATE INDEX IF NOT EXISTS idx_sbom_components_pv ON sbom_components(project_version_id);
++-- Registry cross-link and blast-radius reverse lookup.
++CREATE INDEX IF NOT EXISTS idx_sbom_components_org_eco_name
++    ON sbom_components(org_id, ecosystem, purl_name);
++-- Work queue for the component vulnerability scan pass.
++CREATE INDEX IF NOT EXISTS idx_sbom_components_scan
++    ON sbom_components(vuln_checked_at) WHERE ecosystem IS NOT NULL;
++
++-- Scan-result link from an SBOM component to a row of the global vulnerabilities table.
++-- Joining the global table is what earns KEV, EPSS and every later advisory enrichment for
++-- free, with no copied advisory fields to keep in step.
++--
++-- This is a table of its own rather than a third owner_kind arm on package_version_vulns.
++-- Every consumer of that table filters on its two arms, so a third arm would make each of them
++-- silently wrong by default; a separate table keeps the registry policy surfaces right by
++-- default and costs the projects surface one deliberate join. Application inventory is not a
++-- registry artefact, and registry policy must never count it.
++--
++-- No org_id: the row is always reached through sbom_components, which carries one. This
++-- mirrors package_version_vulns.
++CREATE TABLE IF NOT EXISTS sbom_component_vulns (
++    id           TEXT PRIMARY KEY,
++    component_id TEXT NOT NULL REFERENCES sbom_components(id) ON DELETE CASCADE,
++    vuln_id      TEXT NOT NULL REFERENCES vulnerabilities(id) ON DELETE CASCADE,
++    checked_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
++        CHECK (checked_at IS NULL OR checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
++    UNIQUE (component_id, vuln_id)
++);
++CREATE INDEX IF NOT EXISTS idx_sbom_component_vulns_vuln ON sbom_component_vulns(vuln_id);
++
++-- The single (product, vulnerability) statement for a project version: the VEX arm and the
++-- reachability arm side by side on one row, each upserted by its own ingester and by the
++-- manual triage editor.
++--
++-- purl_key is the version-less canonical purl, which is also what the reachability scanner
++-- fingerprints, so triage survives a component version bump and an SBOM re-upload. vuln_key is
++-- the canonical advisory id (CVE preferred) and deliberately carries NO foreign key: a VEX or
++-- SARIF document legitimately cites advisories the OSV feed has never served, and a foreign
++-- key would force ingest to drop exactly the statements a reader most needs to see. Unmatched
++-- ids render as their own rows; the join to vulnerabilities happens at read time through
++-- osv_id and aliases.
++--
++-- Keying on the version rather than on the document is what makes re-uploading an SBOM or a
++-- SARIF leave manual and vendor triage intact.
++CREATE TABLE IF NOT EXISTS project_vuln_analysis (
++    id                 TEXT PRIMARY KEY,
++    org_id             TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
++    project_version_id TEXT NOT NULL REFERENCES project_versions(id) ON DELETE CASCADE,
++    -- Version-less canonical purl.
++    purl_key           TEXT NOT NULL,
++    -- Canonical advisory id. TEXT with no FK, by design.
++    vuln_key           TEXT NOT NULL,
++    -- VEX arm, in the CycloneDX analysis vocabulary. OpenVEX states are normalized into it on
++    -- import so one editor and one renderer serve both formats.
++    vex_state          TEXT CHECK (vex_state IN ('in_triage','exploitable','resolved',
++                           'resolved_with_pedigree','false_positive','not_affected')),
++    vex_justification  TEXT,
++    vex_response       TEXT,
++    vex_detail         TEXT,
++    vex_source         TEXT CHECK (vex_source IN ('upload','manual')),
++    -- Reachability arm, from an uploaded SARIF. A producer carrying less fills less.
++    reachability       TEXT CHECK (reachability IN ('reachable','not-observed','unknown','imported-not-called')),
++    confidence         TEXT CHECK (confidence IN ('high','medium','low')),
++    sarif_suppressed   INTEGER NOT NULL DEFAULT 0,
++    -- The SARIF security-severity property, when the producer carries one.
++    security_severity  REAL,
++    severity_origin    TEXT CHECK (severity_origin IN ('asserted','representative')),
++    -- The producer partial fingerprint this row was matched on.
++    fingerprint        TEXT,
++    updated_by         TEXT,
++    updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
++        CHECK (updated_at IS NULL OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
++    UNIQUE (project_version_id, purl_key, vuln_key)
++);
++CREATE INDEX IF NOT EXISTS idx_project_vuln_analysis_org ON project_vuln_analysis(org_id);
++
++-- One materialized policy violation: which evaluator arm fired, on which component, over which
++-- advisory or licence. Findings are materialized — unlike effective priority, which stays a
++-- read-time pure function — because an alert must fire once rather than once per read, and a
++-- project list cannot fan out per finding. They are restamped at scan completion, on a triage
++-- change, and by the nightly pass, so advisory-feed drift is bounded rather than permanent.
++--
++-- Nothing here denies a serve. A component is an observation about an application that is
++-- already built; quarantine remains a registry concept.
++CREATE TABLE IF NOT EXISTS sbom_policy_findings (
++    id                 TEXT PRIMARY KEY,
++    org_id             TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
++    project_version_id TEXT NOT NULL REFERENCES project_versions(id) ON DELETE CASCADE,
++    component_id       TEXT NOT NULL REFERENCES sbom_components(id) ON DELETE CASCADE,
++    -- The evaluator arm that produced the finding.
++    arm                TEXT NOT NULL
++                       CHECK (arm IN ('malicious','kev','epss','cvss','license')),
++    -- Advisory id for the four vulnerability arms; NULL for the licence arm.
++    vuln_key           TEXT,
++    -- Offending SPDX expression for the licence arm; NULL for the vulnerability arms.
++    license_spdx       TEXT,
++    -- JSON detail naming the threshold that was crossed.
++    detail             TEXT,
++    created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
++        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
++);
++CREATE INDEX IF NOT EXISTS idx_sbom_policy_findings_pv ON sbom_policy_findings(project_version_id);
++CREATE INDEX IF NOT EXISTS idx_sbom_policy_findings_org ON sbom_policy_findings(org_id);
++CREATE INDEX IF NOT EXISTS idx_sbom_policy_findings_component ON sbom_policy_findings(component_id);
++
+ -- NOTE: SchemaInitializer also runs ALTER TABLE statements for the columns above.
+ -- Those are no-ops on fresh installs (duplicate column error is swallowed / IF NOT EXISTS).
+ -- They exist solely to add the columns to databases created before those columns were
+ -- included in the CREATE TABLE blocks. Schema.sql is the authoritative complete schema.
+diff --git a/src/Dependably.Core/Security/Capabilities.cs b/src/Dependably.Core/Security/Capabilities.cs
+index e83c9541..5a22f972 100644
+--- a/src/Dependably.Core/Security/Capabilities.cs
++++ b/src/Dependably.Core/Security/Capabilities.cs
+@@ -52,20 +52,27 @@ public static class Capabilities
+     // spans several — there is no ecosystem to scope the grant to at the point the decision is
+     // made. A leaf would also be inert rather than merely narrow: Grants only widens (a wildcard
+     // grants its leaves, never the reverse), so an `import:<ecosystem>` token would satisfy
+     // neither route while reading as a working import credential.
+     public const string ImportAll = "import:*";
+ 
+     // OCI also needs a "pull" capability for the proxy path — pure read of a public-repo
+     // image doesn't need publish. read:artifact already covers this for other ecosystems.
+     public const string PullOci = "pull:oci";
+ 
++    // ── SBOM / VEX / SARIF upload ───────────────────────────────────────────────
++    // Its own grant rather than a reuse of import:* + tenant:configure, which together let a
++    // token rewrite tenant configuration and ingest registry artefacts — far more than a CI job
++    // publishing a document about its own build needs. Like import:*, it has no leaves: one
++    // upload names its document kind in the route, and all three kinds describe the same build.
++    public const string SbomUpload = "sbom:upload";
++
+     // ── Yank (per-ecosystem and wildcard) ───────────────────────────────────────
+     public const string YankNpm = "yank:npm";
+     public const string YankPypi = "yank:pypi";
+     public const string YankNuget = "yank:nuget";
+     public const string YankMaven = "yank:maven";
+     public const string YankRpm = "yank:rpm";
+     public const string YankOci = "yank:oci";
+     public const string YankCargo = "yank:cargo";
+     public const string YankAll = "yank:*";
+ 
+@@ -104,47 +111,47 @@ public static class Capabilities
+     private static readonly IReadOnlySet<string> ClaimManagerCaps = new HashSet<string>(ReaderCaps)
+     {
+         ClaimManage
+     };
+ 
+     private static readonly IReadOnlySet<string> AuditorCaps = new HashSet<string>
+     {
+         ReadAudit, ManageOwnTokens
+     };
+ 
+-    // admin = publisher + claim-manager + read:tenant + read:audit + tenant:configure.
++    // admin = publisher + claim-manager + read:tenant + read:audit + tenant:configure + sbom:upload.
+     // The owner-only privilege is tenant:admin (added below) — the only capability that
+     // distinguishes owner from admin within the tenant. read:* is added alongside the
+     // enumerated read leaves (rather than replacing them) so admin/owner can mint a single
+     // "read-everything" token via TryNormalizeAndAuthorize without widening their own
+     // effective access — they already hold every individual read:* leaf.
+     private static readonly IReadOnlySet<string> AdminCaps =
+         new HashSet<string>(PublisherCaps.Concat(ClaimManagerCaps))
+         {
+-            ReadTenant, ReadAudit, TenantConfigure, ReadAll
++            ReadTenant, ReadAudit, TenantConfigure, SbomUpload, ReadAll
+         };
+ 
+     private static readonly IReadOnlySet<string> TenantAdminCaps = new HashSet<string>(AdminCaps)
+     {
+         TenantAdmin
+     };
+ 
+     private static readonly IReadOnlySet<string> PlatformAdminCaps = new HashSet<string>
+     {
+         PlatformAll, ReadMetadata, ReadArtifact, ReadPackages, ReadClaims, ReadAudit, ReadTenant,
+         ReadAll, ManageOwnTokens
+     };
+ 
+     /// <summary>
+     /// Returns the capability set granted by the user's tenant role. Existing roles map as:
+     /// <c>member</c> → reader caps,
+-    /// <c>admin</c> → publisher + claim-manager + read:tenant + read:audit + tenant:configure,
++    /// <c>admin</c> → publisher + claim-manager + read:tenant + read:audit + tenant:configure + sbom:upload,
+     /// <c>owner</c> → admin caps + tenant:admin (everything within the tenant),
+     /// <c>auditor</c> → audit-read + manage-own-tokens.
+     /// Unknown roles get the empty set.
+     /// </summary>
+     public static IReadOnlySet<string> ForRole(string role) => role switch
+     {
+         "member" => ReaderCaps,
+         "admin" => AdminCaps,
+         "owner" => TenantAdminCaps,
+         "auditor" => AuditorCaps,
+@@ -189,20 +196,21 @@ public static class Capabilities
+     /// The closed vocabulary of capability strings a client may request when minting a
+     /// token. Excludes the global and platform wildcards (system-internal only). Family
+     /// wildcards <c>publish:*</c> / <c>import:*</c> / <c>yank:*</c> are allowed so admin
+     /// callers can mint broad publisher tokens without enumerating every ecosystem.
+     /// </summary>
+     public static readonly IReadOnlySet<string> Requestable = new HashSet<string>(StringComparer.Ordinal)
+     {
+         ReadMetadata, ReadArtifact, ReadPackages, ReadClaims, ReadAudit, ReadTenant, ReadAll,
+         PublishNpm, PublishPypi, PublishNuget, PublishMaven, PublishRpm, PublishOci, PublishCargo, PublishAll,
+         ImportAll,
++        SbomUpload,
+         YankNpm, YankPypi, YankNuget, YankMaven, YankRpm, YankOci, YankCargo, YankAll,
+         PullOci,
+         ClaimManage, TenantConfigure, TenantAdmin, ManageOwnTokens,
+     };
+ 
+     /// <summary>
+     /// The trust-boundary pipeline for token issuance. Parses, validates, and authorizes a
+     /// requested capability list in one step. Returns canonical JSON (sorted, deduped) on
+     /// success; on failure populates <paramref name="error"/> and <paramref name="field"/>
+     /// with a single offending field name so the controller can return a 400 with the same
+diff --git a/src/Dependably.Core/Storage/BlobKeys.cs b/src/Dependably.Core/Storage/BlobKeys.cs
+index 5dd369e1..16289810 100644
+--- a/src/Dependably.Core/Storage/BlobKeys.cs
++++ b/src/Dependably.Core/Storage/BlobKeys.cs
+@@ -53,20 +53,49 @@ public static partial class BlobKeys
+     /// boundary — the same path-traversal defence <see cref="Proxy"/> applies.
+     /// </remarks>
+     public static string HostedArtifact(
+         string orgId, string ecosystem, string purlName, string version, string sha256, string filename)
+     {
+         return !Sha256HexRegex().IsMatch(sha256)
+             ? throw new ArgumentException("sha256 must be 64 lowercase hex characters", nameof(sha256))
+             : $"hosted/{orgId}/{ecosystem}/{purlName}/{version}/{sha256}/{filename}";
+     }
+ 
++    /// <summary>
++    /// Org-scoped, content-addressed key for an uploaded project document — the verbatim SBOM,
++    /// VEX, or SARIF a team pushed about one of its own builds. Registry (durable) tier: these
++    /// are the operator's own records, never an evictable copy of somebody else's artefact.
++    /// </summary>
++    /// <remarks>
++    /// The key sits under the same <c>hosted/</c> prefix as published artefacts, which is what
++    /// puts it inside <c>OrphanBlobReconcilerService</c>'s sweep — so <c>project_documents</c> is
++    /// part of that sweep's referenced-key union, and a document whose metadata row is gone is
++    /// reclaimed by the same pass that reclaims an abandoned publish.
++    ///
++    /// <paramref name="docType"/> is one of <c>sbom</c>, <c>vex</c>, or <c>sarif</c>, and
++    /// <paramref name="sha256"/> is validated as 64 lowercase hex characters — the same
++    /// path-traversal defence at the BlobKeys boundary that <see cref="Proxy"/> and
++    /// <see cref="HostedArtifact"/> apply. Content-addressing the last segment means a re-upload
++    /// of identical bytes addresses the same key and a re-upload of different bytes addresses a
++    /// different one, so the metadata row's <c>(blob_key, sha256)</c> pair is self-consistent with
++    /// no ordering constraint between the blob write and the metadata write.
++    /// </remarks>
++    public static string ProjectDocument(
++        string orgId, string projectId, string projectVersionId, string docType, string sha256)
++    {
++        return docType is not ("sbom" or "vex" or "sarif")
++            ? throw new ArgumentException("docType must be one of sbom, vex, sarif", nameof(docType))
++            : !Sha256HexRegex().IsMatch(sha256)
++                ? throw new ArgumentException("sha256 must be 64 lowercase hex characters", nameof(sha256))
++                : $"hosted/{orgId}/projects/{projectId}/{projectVersionId}/{docType}/{sha256}.json";
++    }
++
+     /// <summary>
+     /// Content-addressed key for RPM repodata proxy files. Hash-prefixed metadata
+     /// files (e.g. <c>{sha256}-primary.xml.gz</c>) are cached forever keyed by their
+     /// SHA-256 prefix, which is the content-address. Lives on the Cache tier.
+     /// </summary>
+     public static string RpmRepodataProxy(string sha256) => $"proxy/rpm-repodata/{sha256}";
+ 
+     /// <summary>
+     /// Content-addressed key for OCI manifests and blobs. The Distribution Spec
+     /// stores both manifests and layers under their digest <c>{algo}:{hex}</c>; we collapse
+diff --git a/src/Dependably/appsettings.json b/src/Dependably/appsettings.json
+index c606e554..afbe871d 100644
+--- a/src/Dependably/appsettings.json
++++ b/src/Dependably/appsettings.json
+@@ -20,18 +20,21 @@
+     "Upstream": null,
+     "UpstreamMode": "passthrough",
+     "RepomdTtl": "00:01:00",
+     "GpgKeyTtl": "1.00:00:00",
+     "NegativeCacheTtl": "00:05:00",
+     "UpstreamCredentials": {
+       "Username": null,
+       "Password": null
+     }
+   },
++  "Sbom": {
++    "MaxUploadBytes": 52428800
++  },
+   "Oci": {
+     "ManifestTagTtl": "01:00:00",
+     "ManifestTagStaleGrace": "1.00:00:00",
+     "TokenCacheDuration": "00:55:00",
+     "UpstreamHttpTimeout": "00:30:00",
+     "CatalogEnabled": false
+   }
+ }
+diff --git a/tests/Dependably.Tests/Compliance/BackgroundJobEgressComplianceTests.cs b/tests/Dependably.Tests/Compliance/BackgroundJobEgressComplianceTests.cs
+index 48bd4c5b..8222a44c 100644
+--- a/tests/Dependably.Tests/Compliance/BackgroundJobEgressComplianceTests.cs
++++ b/tests/Dependably.Tests/Compliance/BackgroundJobEgressComplianceTests.cs
+@@ -13,21 +13,21 @@ namespace Dependably.Tests.Compliance;
+ /// (OSV.dev, CISA KEV, FIRST.org EPSS, npm/PyPI/NuGet deprecation feeds) against the public
+ /// internet the instant the host starts. The same wiring also registers
+ /// <c>LicenseBackfillService</c> (<c>license-backfill</c>) with <c>RunOnStartup = true</c>; it
+ /// makes no outbound call, but mutates the shared <c>cache_artifact.license_checked_at</c> column
+ /// under a leader lock on every boot — its own source of cross-test non-determinism independent
+ /// of egress. <c>OciBlobSweepService</c> (<c>oci-blob-sweep</c>) is the same category one step
+ /// further: it DELETES <c>oci_blobs</c> rows no manifest references, which is exactly what a test
+ /// pushing a bare blob creates, so a tick landing mid-test lowers <c>org_storage_bytes</c> and
+ /// hands the tenant quota headroom it should not have — a 413 assertion sees 201. Its cron is
+ /// hourly at :17, so it surfaces only in whichever run straddles that minute.
+-/// A factory names all six job values in <c>DISABLE_BACKGROUND_JOBS</c>, or sets
++/// A factory names all seven job values in <c>DISABLE_BACKGROUND_JOBS</c>, or sets
+ /// <c>AIR_GAPPED=true</c> (which subsumes every job), or this gate fails. A factory that boots
+ /// without either silently reintroduces the outbound egress (or the shared-state boot mutation)
+ /// this gate exists to catch, and a factory that sets <c>DISABLE_BACKGROUND_JOBS</c> to some other
+ /// job name (vacuous coverage) is caught too, since the required job names are checked
+ /// individually rather than just the setting key's presence.
+ ///
+ /// <para>
+ /// Limitation: an intermediate base class (<c>class X : SomeBase</c> where
+ /// <c>SomeBase : WebApplicationFactory&lt;…&gt;</c>) is invisible to this scanner — only a class
+ /// declared directly against <c>WebApplicationFactory&lt;…&gt;</c> (bare or namespace-qualified,
+@@ -44,36 +44,38 @@ namespace Dependably.Tests.Compliance;
+ [Trait("Category", "Compliance")]
+ public sealed partial class BackgroundJobEgressComplianceTests
+ {
+     private readonly ITestOutputHelper _output;
+     public BackgroundJobEgressComplianceTests(ITestOutputHelper output) => _output = output;
+ 
+     // This file's own name, so the real scan (EveryWebApplicationFactorySubclassDisablesTheRequiredJobs)
+     // can exclude it — see the comment at that exclusion for why.
+     private const string SelfFileName = nameof(BackgroundJobEgressComplianceTests) + ".cs";
+ 
+-    // The six job names every factory in tests/ must disable. vuln-scan/vuln-rescan
+-    // (VulnerabilityScanService), threat-feed (ThreatFeedRefreshService), and
++    // The seven job names every factory in tests/ must disable. vuln-scan/vuln-rescan
++    // (VulnerabilityScanService), sbom-scan (the project-component scan pass over uploaded SBOMs),
++    // threat-feed (ThreatFeedRefreshService), and
+     // deprecation-refresh (DeprecationRefreshService) fire a real outbound HTTP request at boot;
+     // license-backfill (LicenseBackfillService) makes no outbound call but mutates the shared
+     // cache_artifact.license_checked_at column under a leader lock at boot, its own source of
+     // cross-test non-determinism. oci-blob-sweep (OciBlobSweepService) deletes oci_blobs rows no
+     // manifest references — which is what every test pushing a bare blob creates — so a tick
+     // landing mid-test lowers org_storage_bytes and hands the tenant quota headroom it should not
+     // have. Kept in sync by hand with the four Infrastructure/*.cs
+     // factories' DISABLE_BACKGROUND_JOBS value; a job added to that set without updating this
+     // list would under-check new violations, so the two are also cross-checked directly in
+     // RequiredJobListMatchesTheFourCanonicalFactories below.
+     private static readonly string[] JobsDisabledInTests =
+     [
+         "vuln-scan",
+         "vuln-rescan",
++        "sbom-scan",
+         "threat-feed",
+         "deprecation-refresh",
+         "license-backfill",
+         "oci-blob-sweep",
+     ];
+ 
+     // Matches a class declared directly against WebApplicationFactory<…>, bare or
+     // namespace-qualified (e.g. Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactory<…> or
+     // Mvc.Testing.WebApplicationFactory<…>) — a fully-qualified reference is real usage in this
+     // repo (see the WebApplicationFactoryClientOptions call sites) even though no factory
+@@ -189,21 +191,21 @@ public sealed partial class BackgroundJobEgressComplianceTests
+     public void Scan_AcceptsNamespaceQualifiedFactoryDeclarationThatDisablesTheRequiredJobs()
+     {
+         string fixture = Fixture(
+             "public sealed class QualifiedButCompliantFactory",
+             "    : Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactory<Program>",
+             "{",
+             "    protected override IHost CreateHost(IHostBuilder _)",
+             "    {",
+             "        builder.WebHost.UseSetting(",
+             "            \"DISABLE_BACKGROUND_JOBS\",",
+-            "            \"vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep\");",
++            "            \"vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep\");",
+             "    }",
+             "}");
+ 
+         var violations = ScanText("fixture.cs", fixture);
+ 
+         Assert.Empty(violations);
+     }
+ 
+     [Fact]
+     public void Scan_ExtractionOverrunIntoASiblingDeclaration_FailsClosedInsteadOfSilentlyAbsorbingItsSetting()
+@@ -221,21 +223,21 @@ public sealed partial class BackgroundJobEgressComplianceTests
+             "    {",
+             "        private const string Weird = \"{\";",
+             "    }",
+             "",
+             "    class SecondFactory : WebApplicationFactory<Program>",
+             "    {",
+             "        private static void Configure()",
+             "        {",
+             "            builder.WebHost.UseSetting(",
+             "                \"DISABLE_BACKGROUND_JOBS\",",
+-            "                \"vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep\");",
++            "                \"vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep\");",
+             "        }",
+             "    }",
+             "}");
+ 
+         var violations = ScanText("fixture.cs", fixture);
+ 
+         Assert.Single(violations);
+         Assert.Contains("LeakyBraceFactory", violations[0], StringComparison.Ordinal);
+         Assert.DoesNotContain("SecondFactory", violations[0], StringComparison.Ordinal);
+     }
+diff --git a/tests/Dependably.Tests/Infrastructure/DependablyFactory.cs b/tests/Dependably.Tests/Infrastructure/DependablyFactory.cs
+index 97294479..9f39e883 100644
+--- a/tests/Dependably.Tests/Infrastructure/DependablyFactory.cs
++++ b/tests/Dependably.Tests/Infrastructure/DependablyFactory.cs
+@@ -303,21 +303,21 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
+         // because the quota gate derives usage from that sum rather than a counter, the tenant
+         // silently regains headroom it should not have — an assertion expecting 413 sees 201. It
+         // runs on the hour at :17, so this surfaces as a test that passes all day and fails in
+         // whichever run happens to straddle that minute. Nothing depends on the scheduled pass:
+         // OciBlobReclaimTests drives OciBlobReclaimer directly.
+         //
+         // Naming these job names here keeps the proxy-passthrough path (MockUpstream below)
+         // intact — this disables only these six, not every background job.
+         builder.WebHost.UseSetting(
+             "DISABLE_BACKGROUND_JOBS",
+-            "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
++            "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+ 
+         builder.WebHost.UseSetting("PyPI:Upstream", MockUpstream.Urls[0]);
+         builder.WebHost.UseSetting("Npm:Upstream", MockUpstream.Urls[0]);
+         builder.WebHost.UseSetting("NuGet:Upstream", MockUpstream.Urls[0]);
+         builder.WebHost.UseSetting("Go:Upstream", MockUpstream.Urls[0]);
+         builder.WebHost.UseSetting("Cargo:Upstream", MockUpstream.Urls[0]);
+         // Go checksum-database passthrough: point the single supported sumdb at the WireMock
+         // host so /go/sumdb/{host}/... proxies to the mock. The requested sumdb name in tests is
+         // the WireMock host (matched case-insensitively against this value's host).
+         builder.WebHost.UseSetting("Go:SumDb", MockUpstream.Urls[0]);
+diff --git a/tests/Dependably.Tests/Infrastructure/DependablyMultiFactory.cs b/tests/Dependably.Tests/Infrastructure/DependablyMultiFactory.cs
+index a0348667..df7ad8cd 100644
+--- a/tests/Dependably.Tests/Infrastructure/DependablyMultiFactory.cs
++++ b/tests/Dependably.Tests/Infrastructure/DependablyMultiFactory.cs
+@@ -87,21 +87,21 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
+         // pass on four hosted services: VulnerabilityScanService (job names vuln-scan,
+         // vuln-rescan), ThreatFeedRefreshService (threat-feed), and DeprecationRefreshService
+         // (deprecation-refresh) each make a real outbound HTTP request (OSV.dev, CISA KEV,
+         // FIRST.org EPSS, npm/PyPI/NuGet deprecation feeds) against the public internet;
+         // LicenseBackfillService (license-backfill) makes no outbound call but mutates the shared
+         // cache_artifact.license_checked_at column under a leader lock on every boot, its own
+         // source of cross-test non-determinism. Naming all five job names here disables only
+         // these five, not every background job.
+         builder.WebHost.UseSetting(
+             "DISABLE_BACKGROUND_JOBS",
+-            "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
++            "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+ 
+         builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
+         // TestServer requests share one "unknown" rate-limit partition (no remote IP);
+         // keep shared-fixture tests out of each other's login/anon/management budgets.
+         builder.WebHost.UseSetting("LOGIN_RATE_LIMIT_PERMITS", "100000");
+         builder.WebHost.UseSetting("ANON_RATE_LIMIT_PERMITS", "100000");
+         builder.WebHost.UseSetting("MANAGEMENT_RATE_LIMIT_PERMITS", "100000");
+ 
+         var app = builder.Build();
+         Program.ConfigureApp(app);
+diff --git a/tests/Dependably.Tests/Infrastructure/DependablyMultiUpstreamFactory.cs b/tests/Dependably.Tests/Infrastructure/DependablyMultiUpstreamFactory.cs
+index 3022940e..ca45e870 100644
+--- a/tests/Dependably.Tests/Infrastructure/DependablyMultiUpstreamFactory.cs
++++ b/tests/Dependably.Tests/Infrastructure/DependablyMultiUpstreamFactory.cs
+@@ -83,21 +83,21 @@ public sealed class DependablyMultiUpstreamFactory : WebApplicationFactory<Progr
+         // vuln-rescan), ThreatFeedRefreshService (threat-feed), and DeprecationRefreshService
+         // (deprecation-refresh) each make a real outbound HTTP request (OSV.dev, CISA KEV,
+         // FIRST.org EPSS, npm/PyPI/NuGet deprecation feeds) against the public internet rather
+         // than the in-process WireMock upstream; LicenseBackfillService (license-backfill) makes
+         // no outbound call but mutates the shared cache_artifact.license_checked_at column under
+         // a leader lock on every boot, its own source of cross-test non-determinism. Naming all
+         // five job names here keeps the proxy-passthrough path (MockUpstream below) intact — this
+         // disables only these five, not every background job.
+         builder.WebHost.UseSetting(
+             "DISABLE_BACKGROUND_JOBS",
+-            "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
++            "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+ 
+         builder.WebHost.UseSetting("PyPI:Upstream", MockUpstream.Urls[0]);
+         builder.WebHost.UseSetting("Npm:Upstream", MockUpstream.Urls[0]);
+         builder.WebHost.UseSetting("NuGet:Upstream", MockUpstream.Urls[0]);
+         builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
+         // TestServer requests share one "unknown" rate-limit partition (no remote IP); keep the
+         // shared fixture clear of its own login/anon/management/metadata budgets.
+         builder.WebHost.UseSetting("LOGIN_RATE_LIMIT_PERMITS", "100000");
+         builder.WebHost.UseSetting("ANON_RATE_LIMIT_PERMITS", "100000");
+         builder.WebHost.UseSetting("MANAGEMENT_RATE_LIMIT_PERMITS", "100000");
+diff --git a/tests/Dependably.Tests/Infrastructure/EdgeFactory.cs b/tests/Dependably.Tests/Infrastructure/EdgeFactory.cs
+index 3124111d..d42f5413 100644
+--- a/tests/Dependably.Tests/Infrastructure/EdgeFactory.cs
++++ b/tests/Dependably.Tests/Infrastructure/EdgeFactory.cs
+@@ -117,21 +117,21 @@ public sealed class EdgeFactory : WebApplicationFactory<EdgeProgram>, IAsyncLife
+         // CISA KEV, FIRST.org EPSS) against the public internet rather than the in-process
+         // WireMock master. deprecation-refresh and license-backfill are also named here for
+         // parity with the four canonical factories even though the edge composition root never
+         // registers DeprecationRefreshService or LicenseBackfillService (Management-only
+         // services) — naming all five keeps the proxy-passthrough path (MockUpstream below)
+         // intact and this disables only these jobs, not every background job. Edge mode's
+         // allowlist inversion already force-disables all five; the explicit list keeps the guard
+         // in place even if that allowlist changes.
+         builder.WebHost.UseSetting(
+             "DISABLE_BACKGROUND_JOBS",
+-            "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
++            "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+ 
+         builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
+         builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
+         builder.WebHost.UseSetting("ANON_RATE_LIMIT_PERMITS", "100000");
+         builder.WebHost.UseSetting("METADATA_RATE_LIMIT_PERMITS", "100000");
+         builder.WebHost.UseSetting("DOWNLOAD_RATE_LIMIT_PERMITS", "1000000");
+ 
+         var app = builder.Build();
+         EdgeProgram.ConfigureApp(app);
+         app.Start();
+diff --git a/tests/Dependably.Tests/Integration/AirGapObservabilityTests.cs b/tests/Dependably.Tests/Integration/AirGapObservabilityTests.cs
+index 3b820b8e..ea25b5b1 100644
+--- a/tests/Dependably.Tests/Integration/AirGapObservabilityTests.cs
++++ b/tests/Dependably.Tests/Integration/AirGapObservabilityTests.cs
+@@ -229,21 +229,21 @@ public sealed class AirGapObservabilityTests : IAsyncLifetime
+             builder.Services.RemoveAll<IMetadataStore>();
+             builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+             builder.Services.AddSingleton<IStartupFilter, LoopbackRemoteIpFilter>();
+ 
+             builder.WebHost.UseTestServer();
+             // Boots a real host via Program.ConfigureBuilder; disable the background jobs
+             // that egress or mutate shared state at boot (see Infrastructure/DependablyFactory.cs
+             // for the full rationale).
+             builder.WebHost.UseSetting(
+                 "DISABLE_BACKGROUND_JOBS",
+-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
++                "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+             builder.WebHost.UseSetting("METRICS_ENABLED", "0");
+             builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
+             builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
+ 
+             var app = builder.Build();
+             Program.ConfigureApp(app);
+             app.Start();
+             return app;
+         }
+ 
+@@ -287,21 +287,21 @@ public sealed class AirGapObservabilityTests : IAsyncLifetime
+             builder.Services.RemoveAll<IMetadataStore>();
+             builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+             builder.Services.AddSingleton<IStartupFilter, LoopbackRemoteIpFilter>();
+ 
+             builder.WebHost.UseTestServer();
+             // Boots a real host via Program.ConfigureBuilder; disable the background jobs
+             // that egress or mutate shared state at boot (see Infrastructure/DependablyFactory.cs
+             // for the full rationale).
+             builder.WebHost.UseSetting(
+                 "DISABLE_BACKGROUND_JOBS",
+-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
++                "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+             builder.WebHost.UseSetting("METRICS_ALLOWED_IPS", "10.0.0.0/8");
+             builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
+             builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
+ 
+             var app = builder.Build();
+             Program.ConfigureApp(app);
+             app.Start();
+             return app;
+         }
+ 
+diff --git a/tests/Dependably.Tests/Integration/HostFilteringTests.cs b/tests/Dependably.Tests/Integration/HostFilteringTests.cs
+index 34df66e2..68bb6e5d 100644
+--- a/tests/Dependably.Tests/Integration/HostFilteringTests.cs
++++ b/tests/Dependably.Tests/Integration/HostFilteringTests.cs
+@@ -290,21 +290,21 @@ public sealed class HostFilteringTests
+             builder.Services.AddSingleton(new TieredBlobStorage(new InMemoryBlobStore(), new InMemoryBlobStore()));
+             builder.Services.RemoveAll<IMetadataStore>();
+             builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+ 
+             builder.WebHost.UseTestServer();
+             // Boots a real host via Program.ConfigureBuilder; disable the background jobs
+             // that egress or mutate shared state at boot (see Infrastructure/DependablyFactory.cs
+             // for the full rationale).
+             builder.WebHost.UseSetting(
+                 "DISABLE_BACKGROUND_JOBS",
+-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
++                "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+             builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
+             builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
+             builder.WebHost.UseSetting("LOGIN_RATE_LIMIT_PERMITS", "100000");
+             builder.WebHost.UseSetting("ANON_RATE_LIMIT_PERMITS", "100000");
+             builder.WebHost.UseSetting("MANAGEMENT_RATE_LIMIT_PERMITS", "100000");
+ 
+             var app = builder.Build();
+             Program.ConfigureApp(app);
+             app.Start();
+             return app;
+diff --git a/tests/Dependably.Tests/Integration/KestrelConnectionCeilingTests.cs b/tests/Dependably.Tests/Integration/KestrelConnectionCeilingTests.cs
+index 4a7cf73c..60502fa5 100644
+--- a/tests/Dependably.Tests/Integration/KestrelConnectionCeilingTests.cs
++++ b/tests/Dependably.Tests/Integration/KestrelConnectionCeilingTests.cs
+@@ -138,21 +138,21 @@ public sealed class KestrelConnectionCeilingTests
+             builder.Services.AddSingleton(new TieredBlobStorage(new InMemoryBlobStore(), new InMemoryBlobStore()));
+             builder.Services.RemoveAll<IMetadataStore>();
+             builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+ 
+             builder.WebHost.UseTestServer();
+             // Boots a real host via Program.ConfigureBuilder; disable the background jobs
+             // that egress or mutate shared state at boot (see Infrastructure/DependablyFactory.cs
+             // for the full rationale).
+             builder.WebHost.UseSetting(
+                 "DISABLE_BACKGROUND_JOBS",
+-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
++                "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+             builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
+             builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
+             builder.WebHost.UseSetting("LOGIN_RATE_LIMIT_PERMITS", "100000");
+             builder.WebHost.UseSetting("ANON_RATE_LIMIT_PERMITS", "100000");
+             builder.WebHost.UseSetting("MANAGEMENT_RATE_LIMIT_PERMITS", "100000");
+ 
+             var app = builder.Build();
+             Program.ConfigureApp(app);
+             app.Start();
+             return app;
+diff --git a/tests/Dependably.Tests/Integration/LoginEnrollmentRequiredTests.cs b/tests/Dependably.Tests/Integration/LoginEnrollmentRequiredTests.cs
+index 194cc788..22fc8bb6 100644
+--- a/tests/Dependably.Tests/Integration/LoginEnrollmentRequiredTests.cs
++++ b/tests/Dependably.Tests/Integration/LoginEnrollmentRequiredTests.cs
+@@ -394,21 +394,21 @@ public sealed class SystemLoginEnrollmentRequiredTests : IAsyncLifetime
+             builder.Services.AddSingleton(new TieredBlobStorage(_blob, _blob));
+             builder.Services.RemoveAll<IMetadataStore>();
+             builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+ 
+             builder.WebHost.UseTestServer();
+             // Boots a real host via Program.ConfigureBuilder; disable the background jobs
+             // that egress or mutate shared state at boot (see Infrastructure/DependablyFactory.cs
+             // for the full rationale).
+             builder.WebHost.UseSetting(
+                 "DISABLE_BACKGROUND_JOBS",
+-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
++                "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+             builder.WebHost.UseSetting("REQUIRE_MFA", "true");
+             builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
+             builder.WebHost.UseSetting("LOGIN_RATE_LIMIT_PERMITS", "100000");
+ 
+             var app = builder.Build();
+             Program.ConfigureApp(app);
+             app.Start();
+             return app;
+         }
+ 
+diff --git a/tests/Dependably.Tests/Integration/MetadataRateLimitTests.cs b/tests/Dependably.Tests/Integration/MetadataRateLimitTests.cs
+index 23e9f58e..6e4b1519 100644
+--- a/tests/Dependably.Tests/Integration/MetadataRateLimitTests.cs
++++ b/tests/Dependably.Tests/Integration/MetadataRateLimitTests.cs
+@@ -323,21 +323,21 @@ public sealed class MetadataRateLimitTests
+             // that default when an explicit X-Test-Remote-Ip header is present.
+             builder.Services.AddSingleton<IStartupFilter, LoopbackStartupFilter>();
+             builder.Services.AddSingleton<IStartupFilter, HeaderRemoteIpFilter>();
+ 
+             builder.WebHost.UseTestServer();
+             // Boots a real host via Program.ConfigureBuilder; disable the background jobs
+             // that egress or mutate shared state at boot (see Infrastructure/DependablyFactory.cs
+             // for the full rationale).
+             builder.WebHost.UseSetting(
+                 "DISABLE_BACKGROUND_JOBS",
+-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
++                "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+             builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
+             builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
+             // Keep unrelated limiters out of the way.
+             builder.WebHost.UseSetting("LOGIN_RATE_LIMIT_PERMITS", "100000");
+             builder.WebHost.UseSetting("ANON_RATE_LIMIT_PERMITS", "100000");
+             builder.WebHost.UseSetting("MANAGEMENT_RATE_LIMIT_PERMITS", "100000");
+ 
+             foreach (var (key, value) in _settings)
+             {
+                 builder.WebHost.UseSetting(key, value);
+diff --git a/tests/Dependably.Tests/Integration/MetricsAccessPropagationTests.cs b/tests/Dependably.Tests/Integration/MetricsAccessPropagationTests.cs
+index 01b6ba24..346c7ebb 100644
+--- a/tests/Dependably.Tests/Integration/MetricsAccessPropagationTests.cs
++++ b/tests/Dependably.Tests/Integration/MetricsAccessPropagationTests.cs
+@@ -274,21 +274,21 @@ public sealed class MetricsAccessPropagationTests
+             // Inject the caller IP for every /metrics request.
+             builder.Services.AddSingleton<IStartupFilter>(
+                 new ConfigurableRemoteIpFilter(() => RemoteIp));
+ 
+             builder.WebHost.UseTestServer();
+             // Boots a real host via Program.ConfigureBuilder; disable the background jobs
+             // that egress or mutate shared state at boot (see Infrastructure/DependablyFactory.cs
+             // for the full rationale).
+             builder.WebHost.UseSetting(
+                 "DISABLE_BACKGROUND_JOBS",
+-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
++                "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+             builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
+             builder.WebHost.UseSetting("LOGIN_RATE_LIMIT_PERMITS", "100000");
+             builder.WebHost.UseSetting("ANON_RATE_LIMIT_PERMITS", "100000");
+             builder.WebHost.UseSetting("MANAGEMENT_RATE_LIMIT_PERMITS", "100000");
+ 
+             var app = builder.Build();
+             Program.ConfigureApp(app);
+             app.Start();
+             return app;
+         }
+@@ -384,21 +384,21 @@ public sealed class MetricsAccessPropagationTests
+ 
+             builder.Services.AddSingleton<IStartupFilter>(
+                 new ConfigurableRemoteIpFilter(() => RemoteIp));
+ 
+             builder.WebHost.UseTestServer();
+             // Boots a real host via Program.ConfigureBuilder; disable the background jobs
+             // that egress or mutate shared state at boot (see Infrastructure/DependablyFactory.cs
+             // for the full rationale).
+             builder.WebHost.UseSetting(
+                 "DISABLE_BACKGROUND_JOBS",
+-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
++                "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+             builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
+             builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
+             builder.WebHost.UseSetting("LOGIN_RATE_LIMIT_PERMITS", "100000");
+             builder.WebHost.UseSetting("ANON_RATE_LIMIT_PERMITS", "100000");
+             builder.WebHost.UseSetting("MANAGEMENT_RATE_LIMIT_PERMITS", "100000");
+ 
+             var app = builder.Build();
+             Program.ConfigureApp(app);
+             app.Start();
+             return app;
+diff --git a/tests/Dependably.Tests/Integration/MetricsAllowlistForwardedIpTests.cs b/tests/Dependably.Tests/Integration/MetricsAllowlistForwardedIpTests.cs
+index aa77d1aa..870231ad 100644
+--- a/tests/Dependably.Tests/Integration/MetricsAllowlistForwardedIpTests.cs
++++ b/tests/Dependably.Tests/Integration/MetricsAllowlistForwardedIpTests.cs
+@@ -160,21 +160,21 @@ public sealed class MetricsAllowlistForwardedIpTests
+             builder.Services.AddSingleton(new SsrfConnectCallback(_ => false));
+ 
+             builder.Services.AddSingleton<IStartupFilter>(new FixedRemoteIpFilter(ProxyPeerIp));
+ 
+             builder.WebHost.UseTestServer();
+             // Boots a real host via Program.ConfigureBuilder; disable the background jobs
+             // that egress or mutate shared state at boot (see Infrastructure/DependablyFactory.cs
+             // for the full rationale).
+             builder.WebHost.UseSetting(
+                 "DISABLE_BACKGROUND_JOBS",
+-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
++                "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+             builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
+             builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
+             builder.WebHost.UseSetting("ANON_RATE_LIMIT_PERMITS", "100000");
+             builder.WebHost.UseSetting("MANAGEMENT_RATE_LIMIT_PERMITS", "100000");
+ 
+             var app = builder.Build();
+             Program.ConfigureApp(app);
+             app.Start();
+             return app;
+         }
+diff --git a/tests/Dependably.Tests/Integration/MetricsScrapeDeniedAuditTests.cs b/tests/Dependably.Tests/Integration/MetricsScrapeDeniedAuditTests.cs
+index d46c40cb..521a0cac 100644
+--- a/tests/Dependably.Tests/Integration/MetricsScrapeDeniedAuditTests.cs
++++ b/tests/Dependably.Tests/Integration/MetricsScrapeDeniedAuditTests.cs
+@@ -331,21 +331,21 @@ internal sealed class SystemScopeAuditFactory : WebApplicationFactory<Program>,
+         builder.Services.AddSingleton<TimeProvider>(Clock);
+ 
+         builder.Services.AddSingleton<IStartupFilter, LoopbackRemoteIpFilter>();
+ 
+         builder.WebHost.UseTestServer();
+         // Boots a real host via Program.ConfigureBuilder; disable the background jobs
+         // that egress or mutate shared state at boot (see Infrastructure/DependablyFactory.cs
+         // for the full rationale).
+         builder.WebHost.UseSetting(
+             "DISABLE_BACKGROUND_JOBS",
+-            "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
++            "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+         builder.WebHost.UseSetting("METRICS_ALLOWED_IPS", "10.0.0.0/8");
+         builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
+         builder.WebHost.UseSetting("LOGIN_RATE_LIMIT_PERMITS", "100000");
+         builder.WebHost.UseSetting("ANON_RATE_LIMIT_PERMITS", "100000");
+         builder.WebHost.UseSetting("MANAGEMENT_RATE_LIMIT_PERMITS", "100000");
+ 
+         var app = builder.Build();
+         Program.ConfigureApp(app);
+         app.Start();
+         return app;
+@@ -466,21 +466,21 @@ internal sealed class TenantScopeAuditFactory : WebApplicationFactory<Program>,
+         builder.Services.AddSingleton<TimeProvider>(Clock);
+ 
+         builder.Services.AddSingleton<IStartupFilter, LoopbackRemoteIpFilter>();
+ 
+         builder.WebHost.UseTestServer();
+         // Boots a real host via Program.ConfigureBuilder; disable the background jobs
+         // that egress or mutate shared state at boot (see Infrastructure/DependablyFactory.cs
+         // for the full rationale).
+         builder.WebHost.UseSetting(
+             "DISABLE_BACKGROUND_JOBS",
+-            "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
++            "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+         builder.WebHost.UseSetting("METRICS_ALLOWED_IPS", "10.0.0.0/8");
+         builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
+         builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
+         builder.WebHost.UseSetting("LOGIN_RATE_LIMIT_PERMITS", "100000");
+         builder.WebHost.UseSetting("ANON_RATE_LIMIT_PERMITS", "100000");
+         builder.WebHost.UseSetting("MANAGEMENT_RATE_LIMIT_PERMITS", "100000");
+ 
+         var app = builder.Build();
+         Program.ConfigureApp(app);
+         app.Start();
+diff --git a/tests/Dependably.Tests/Integration/MfaRequirePolicyTests.cs b/tests/Dependably.Tests/Integration/MfaRequirePolicyTests.cs
+index 3f3e5408..39704ab3 100644
+--- a/tests/Dependably.Tests/Integration/MfaRequirePolicyTests.cs
++++ b/tests/Dependably.Tests/Integration/MfaRequirePolicyTests.cs
+@@ -428,21 +428,21 @@ public sealed class MfaRequireEnforcedSettingsTests : IAsyncLifetime
+             builder.Services.AddSingleton(new TieredBlobStorage(_blob, _blob));
+             builder.Services.RemoveAll<IMetadataStore>();
+             builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+ 
+             builder.WebHost.UseTestServer();
+             // Boots a real host via Program.ConfigureBuilder; disable the background jobs
+             // that egress or mutate shared state at boot (see Infrastructure/DependablyFactory.cs
+             // for the full rationale).
+             builder.WebHost.UseSetting(
+                 "DISABLE_BACKGROUND_JOBS",
+-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
++                "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+             builder.WebHost.UseSetting("REQUIRE_MFA", "true");
+             builder.WebHost.UseSetting("OSV_MODE", "local");
+             builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
+             builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
+ 
+             var app = builder.Build();
+             Program.ConfigureApp(app);
+             app.Start();
+             return app;
+         }
+@@ -717,21 +717,21 @@ public sealed class SystemMfaRequirePolicyTests : IAsyncLifetime
+             builder.Services.AddSingleton(new TieredBlobStorage(_blob, _blob));
+             builder.Services.RemoveAll<IMetadataStore>();
+             builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+ 
+             builder.WebHost.UseTestServer();
+             // Boots a real host via Program.ConfigureBuilder; disable the background jobs
+             // that egress or mutate shared state at boot (see Infrastructure/DependablyFactory.cs
+             // for the full rationale).
+             builder.WebHost.UseSetting(
+                 "DISABLE_BACKGROUND_JOBS",
+-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
++                "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+             builder.WebHost.UseSetting("REQUIRE_MFA", "true");
+             builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
+             builder.WebHost.UseSetting("LOGIN_RATE_LIMIT_PERMITS", "100000");
+             builder.WebHost.UseSetting("MANAGEMENT_RATE_LIMIT_PERMITS", "100000");
+ 
+             var app = builder.Build();
+             Program.ConfigureApp(app);
+             app.Start();
+             return app;
+         }
+diff --git a/tests/Dependably.Tests/Integration/OciReadMissStatusTests.cs b/tests/Dependably.Tests/Integration/OciReadMissStatusTests.cs
+index a032753c..4ca35352 100644
+--- a/tests/Dependably.Tests/Integration/OciReadMissStatusTests.cs
++++ b/tests/Dependably.Tests/Integration/OciReadMissStatusTests.cs
+@@ -233,21 +233,21 @@ public sealed class OciReadMissStatusTests
+             builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+ 
+             builder.WebHost.UseTestServer();
+             builder.WebHost.UseSetting("AIR_GAPPED", "true");
+             builder.WebHost.UseSetting("OSV_MODE", "local");
+             builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
+             builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
+             builder.WebHost.UseSetting("ANON_RATE_LIMIT_PERMITS", "100000");
+             builder.WebHost.UseSetting(
+                 "DISABLE_BACKGROUND_JOBS",
+-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
++                "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+ 
+             var app = builder.Build();
+             Program.ConfigureApp(app);
+             app.Start();
+             return app;
+         }
+ 
+         public Task InitializeAsync()
+         {
+             _ = CreateClient();
+diff --git a/tests/Dependably.Tests/Integration/OpenApi/ManagementDocsGateTests.cs b/tests/Dependably.Tests/Integration/OpenApi/ManagementDocsGateTests.cs
+index e86ab08f..d6023b8c 100644
+--- a/tests/Dependably.Tests/Integration/OpenApi/ManagementDocsGateTests.cs
++++ b/tests/Dependably.Tests/Integration/OpenApi/ManagementDocsGateTests.cs
+@@ -202,21 +202,21 @@ public sealed class ManagementDocsGateTests : IAsyncLifetime
+             // Inject loopback as the connection IP — default allowlist (127.0.0.1/::1)
+             // permits it, so management docs are reachable.
+             builder.Services.AddSingleton<IStartupFilter, LoopbackRemoteIpFilter>();
+ 
+             builder.WebHost.UseTestServer();
+             // Boots a real host via Program.ConfigureBuilder; disable the background jobs
+             // that egress or mutate shared state at boot (see Infrastructure/DependablyFactory.cs
+             // for the full rationale).
+             builder.WebHost.UseSetting(
+                 "DISABLE_BACKGROUND_JOBS",
+-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
++                "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+             builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
+             builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
+ 
+             var app = builder.Build();
+             Program.ConfigureApp(app);
+             app.Start();
+             return app;
+         }
+ 
+         public Task InitializeAsync() { _ = CreateClient(); return Task.CompletedTask; }
+@@ -306,21 +306,21 @@ public sealed class ManagementDocsGateTests : IAsyncLifetime
+             // to a CIDR that excludes loopback — so management docs return 403
+             // while protocol docs (no IP gate) return 200.
+             builder.Services.AddSingleton<IStartupFilter, LoopbackRemoteIpFilter>();
+ 
+             builder.WebHost.UseTestServer();
+             // Boots a real host via Program.ConfigureBuilder; disable the background jobs
+             // that egress or mutate shared state at boot (see Infrastructure/DependablyFactory.cs
+             // for the full rationale).
+             builder.WebHost.UseSetting(
+                 "DISABLE_BACKGROUND_JOBS",
+-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
++                "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+             builder.WebHost.UseSetting("METRICS_ALLOWED_IPS", NonLoopbackAllowlist);
+             builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
+             builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
+ 
+             var app = builder.Build();
+             Program.ConfigureApp(app);
+             app.Start();
+             return app;
+         }
+ 
+diff --git a/tests/Dependably.Tests/Integration/PasswordResetRateLimitTests.cs b/tests/Dependably.Tests/Integration/PasswordResetRateLimitTests.cs
+index 4064ac9c..024a926f 100644
+--- a/tests/Dependably.Tests/Integration/PasswordResetRateLimitTests.cs
++++ b/tests/Dependably.Tests/Integration/PasswordResetRateLimitTests.cs
+@@ -110,21 +110,21 @@ public sealed class PasswordResetRateLimitTests
+             builder.Services.AddSingleton(new SsrfConnectCallback(_ => false));
+ 
+             builder.Services.AddSingleton<Microsoft.AspNetCore.Hosting.IStartupFilter, LoopbackStartupFilter>();
+ 
+             builder.WebHost.UseTestServer();
+             // Boots a real host via Program.ConfigureBuilder; disable the background jobs
+             // that egress or mutate shared state at boot (see Infrastructure/DependablyFactory.cs
+             // for the full rationale).
+             builder.WebHost.UseSetting(
+                 "DISABLE_BACKGROUND_JOBS",
+-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
++                "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+             builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
+             builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
+             builder.WebHost.UseSetting("ANON_RATE_LIMIT_PERMITS", "100000");
+             builder.WebHost.UseSetting("MANAGEMENT_RATE_LIMIT_PERMITS", "100000");
+ 
+             foreach ((string key, string value) in _settings)
+             {
+                 builder.WebHost.UseSetting(key, value);
+             }
+ 
+diff --git a/tests/Dependably.Tests/Integration/PerAccountResetThrottleTests.cs b/tests/Dependably.Tests/Integration/PerAccountResetThrottleTests.cs
+index ed07f37e..4163ab5a 100644
+--- a/tests/Dependably.Tests/Integration/PerAccountResetThrottleTests.cs
++++ b/tests/Dependably.Tests/Integration/PerAccountResetThrottleTests.cs
+@@ -229,21 +229,21 @@ public sealed class PerAccountResetThrottleTests
+             builder.Services.RemoveAll<IUpstreamUrlValidator>();
+             builder.Services.AddSingleton<IUpstreamUrlValidator, PermissiveUpstreamUrlValidator>();
+             builder.Services.RemoveAll<SsrfConnectCallback>();
+             builder.Services.AddSingleton(new SsrfConnectCallback(_ => false));
+ 
+             builder.Services.AddSingleton<Microsoft.AspNetCore.Hosting.IStartupFilter, ClientIpStartupFilter>();
+ 
+             builder.WebHost.UseTestServer();
+             builder.WebHost.UseSetting(
+                 "DISABLE_BACKGROUND_JOBS",
+-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
++                "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+             builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
+             builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
+             builder.WebHost.UseSetting("ANON_RATE_LIMIT_PERMITS", "100000");
+             builder.WebHost.UseSetting("MANAGEMENT_RATE_LIMIT_PERMITS", "100000");
+ 
+             foreach ((string key, string value) in _settings)
+             {
+                 builder.WebHost.UseSetting(key, value);
+             }
+ 
+diff --git a/tests/Dependably.Tests/Integration/PipelineHardeningTests.cs b/tests/Dependably.Tests/Integration/PipelineHardeningTests.cs
+index 044c34ca..ec1c7fd9 100644
+--- a/tests/Dependably.Tests/Integration/PipelineHardeningTests.cs
++++ b/tests/Dependably.Tests/Integration/PipelineHardeningTests.cs
+@@ -347,21 +347,21 @@ public sealed class PipelineHardeningTests
+             builder.Services.RemoveAll<IMetadataStore>();
+             builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+             builder.Services.AddSingleton<IStartupFilter, HeaderRemoteIpFilter>();
+ 
+             builder.WebHost.UseTestServer();
+             // Boots a real host via Program.ConfigureBuilder; disable the background jobs
+             // that egress or mutate shared state at boot (see Infrastructure/DependablyFactory.cs
+             // for the full rationale).
+             builder.WebHost.UseSetting(
+                 "DISABLE_BACKGROUND_JOBS",
+-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
++                "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+             builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
+             builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
+             foreach (var (key, value) in _settings)
+             {
+                 builder.WebHost.UseSetting(key, value);
+             }
+ 
+             var app = builder.Build();
+             Program.ConfigureApp(app);
+             app.Start();
+diff --git a/tests/Dependably.Tests/Integration/ProxyFetchSoakTests.cs b/tests/Dependably.Tests/Integration/ProxyFetchSoakTests.cs
+index 464b8041..483c43f8 100644
+--- a/tests/Dependably.Tests/Integration/ProxyFetchSoakTests.cs
++++ b/tests/Dependably.Tests/Integration/ProxyFetchSoakTests.cs
+@@ -295,21 +295,21 @@ public sealed class ProxyFetchSoakTests
+                     b.PrimaryHandler = _handler;
+                     b.AdditionalHandlers.Clear();
+                 }));
+ 
+             builder.WebHost.UseTestServer();
+             // Boots a real host via Program.ConfigureBuilder; disable the background jobs
+             // that egress or mutate shared state at boot (see Infrastructure/DependablyFactory.cs
+             // for the full rationale).
+             builder.WebHost.UseSetting(
+                 "DISABLE_BACKGROUND_JOBS",
+-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
++                "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+             builder.WebHost.UseSetting("Npm:Upstream", "http://upstream.invalid");
+             builder.WebHost.UseSetting("PROXY_STAGING_PATH", _stagingDir);
+             builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
+             builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
+ 
+             var app = builder.Build();
+             Program.ConfigureApp(app);
+ 
+             app.Start();
+             return app;
+diff --git a/tests/Dependably.Tests/Integration/PushRateLimitQueueTests.cs b/tests/Dependably.Tests/Integration/PushRateLimitQueueTests.cs
+index 2f859781..51bcec6a 100644
+--- a/tests/Dependably.Tests/Integration/PushRateLimitQueueTests.cs
++++ b/tests/Dependably.Tests/Integration/PushRateLimitQueueTests.cs
+@@ -147,21 +147,21 @@ public sealed class PushRateLimitQueueTests
+             builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+ 
+             builder.Services.AddSingleton<IStartupFilter, LoopbackStartupFilter>();
+ 
+             builder.WebHost.UseTestServer();
+             // Boots a real host via Program.ConfigureBuilder; disable the background jobs
+             // that egress or mutate shared state at boot (see Infrastructure/DependablyFactory.cs
+             // for the full rationale).
+             builder.WebHost.UseSetting(
+                 "DISABLE_BACKGROUND_JOBS",
+-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
++                "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+             builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
+             // Pinned rather than inherited: an ambient DEPLOYMENT_MODE=multi in the developer's
+             // shell otherwise flips the host into subdomain routing, and the bare-host token
+             // mint below fails to resolve the default org. What is under test here — the push
+             // limiter's queue — is identical in both modes, so pinning removes a source of
+             // local-only failure without narrowing coverage.
+             builder.WebHost.UseSetting("DEPLOYMENT_MODE", "single");
+             builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
+             // Keep every limiter except `push` out of the way.
+             builder.WebHost.UseSetting("LOGIN_RATE_LIMIT_PERMITS", "100000");
+diff --git a/tests/Dependably.Tests/Integration/RescanRateLimitTests.cs b/tests/Dependably.Tests/Integration/RescanRateLimitTests.cs
+index 70d096dc..f20ba005 100644
+--- a/tests/Dependably.Tests/Integration/RescanRateLimitTests.cs
++++ b/tests/Dependably.Tests/Integration/RescanRateLimitTests.cs
+@@ -144,21 +144,21 @@ public sealed class RescanRateLimitTests
+ 
+             builder.Services.AddSingleton<IStartupFilter, LoopbackStartupFilter>();
+ 
+             builder.WebHost.UseTestServer();
+             // Boots a real host via Program.ConfigureBuilder; disable the background jobs that
+             // egress or mutate shared state at boot (see Infrastructure/DependablyFactory.cs for
+             // the full rationale). vuln-rescan in particular would otherwise race this test's own
+             // on-demand rescans.
+             builder.WebHost.UseSetting(
+                 "DISABLE_BACKGROUND_JOBS",
+-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
++                "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+             builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
+             builder.WebHost.UseSetting("DEPLOYMENT_MODE", "single");
+             builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
+             // Keep every limiter except `rescan` out of the way.
+             builder.WebHost.UseSetting("LOGIN_RATE_LIMIT_PERMITS", "100000");
+             builder.WebHost.UseSetting("ANON_RATE_LIMIT_PERMITS", "100000");
+             builder.WebHost.UseSetting("MANAGEMENT_RATE_LIMIT_PERMITS", "100000");
+             builder.WebHost.UseSetting("METADATA_RATE_LIMIT_PERMITS", "100000");
+             builder.WebHost.UseSetting("DOWNLOAD_RATE_LIMIT_PERMITS", "100000");
+             builder.WebHost.UseSetting("PUSH_RATE_LIMIT_PERMITS", "100000");
+diff --git a/tests/Dependably.Tests/Integration/SsrfBlockedDownloadPathTests.cs b/tests/Dependably.Tests/Integration/SsrfBlockedDownloadPathTests.cs
+index 63db1ccf..ed2dc803 100644
+--- a/tests/Dependably.Tests/Integration/SsrfBlockedDownloadPathTests.cs
++++ b/tests/Dependably.Tests/Integration/SsrfBlockedDownloadPathTests.cs
+@@ -177,21 +177,21 @@ public sealed class SsrfBlockedDownloadPathTests : IAsyncLifetime
+             // real production wiring pattern used elsewhere for this style of test host.
+             builder.Services.RemoveAll<SsrfConnectCallback>();
+             builder.Services.AddSingleton(new SsrfConnectCallback(_ => false));
+ 
+             builder.WebHost.UseTestServer();
+             // Boots a real host via Program.ConfigureBuilder; disable the background jobs
+             // that egress or mutate shared state at boot (see Infrastructure/DependablyFactory.cs
+             // for the full rationale).
+             builder.WebHost.UseSetting(
+                 "DISABLE_BACKGROUND_JOBS",
+-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
++                "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+             builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
+             builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
+             // UpstreamRegistrySeeder seeds this as the default org's pypi upstream_registry row
+             // at first boot. When the validator blocks (BlockAll=true) it is never dereferenced;
+             // when it doesn't, the simple-index request reaches this WireMock instance.
+             builder.WebHost.UseSetting("PyPI:Upstream", _mock.Urls[0]);
+ 
+             var app = builder.Build();
+             Program.ConfigureApp(app);
+             app.Start();
+diff --git a/tests/Dependably.Tests/Integration/SsrfRedirectHandlerWiringTests.cs b/tests/Dependably.Tests/Integration/SsrfRedirectHandlerWiringTests.cs
+index 768149c2..136dfce5 100644
+--- a/tests/Dependably.Tests/Integration/SsrfRedirectHandlerWiringTests.cs
++++ b/tests/Dependably.Tests/Integration/SsrfRedirectHandlerWiringTests.cs
+@@ -163,21 +163,21 @@ public sealed class SsrfRedirectHandlerWiringTests : IAsyncLifetime
+             // version so WireMock on 127.0.0.1 is reachable from the named clients.
+             builder.Services.RemoveAll<SsrfConnectCallback>();
+             builder.Services.AddSingleton(new SsrfConnectCallback(_ => false));
+ 
+             builder.WebHost.UseTestServer();
+             // Boots a real host via Program.ConfigureBuilder; disable the background jobs
+             // that egress or mutate shared state at boot (see Infrastructure/DependablyFactory.cs
+             // for the full rationale).
+             builder.WebHost.UseSetting(
+                 "DISABLE_BACKGROUND_JOBS",
+-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
++                "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+             builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
+             builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
+             builder.WebHost.UseSetting("PyPI:Upstream", _mock.Urls[0]);
+             builder.WebHost.UseSetting("Npm:Upstream", _mock.Urls[0]);
+             builder.WebHost.UseSetting("NuGet:Upstream", _mock.Urls[0]);
+ 
+             var app = builder.Build();
+             Program.ConfigureApp(app);
+             app.Start();
+             return app;
+diff --git a/tests/Dependably.Tests/Security/ForwardedHeadersFailClosedTests.cs b/tests/Dependably.Tests/Security/ForwardedHeadersFailClosedTests.cs
+index fc183b1b..18ba902d 100644
+--- a/tests/Dependably.Tests/Security/ForwardedHeadersFailClosedTests.cs
++++ b/tests/Dependably.Tests/Security/ForwardedHeadersFailClosedTests.cs
+@@ -177,21 +177,21 @@ public sealed class ForwardedHeadersFailClosedTests : IAsyncLifetime
+             // denies it without an XFF rewrite. Tests that set TRUSTED_PROXIES to this
+             // address rely on XFF to rewrite it to loopback.
+             builder.Services.AddSingleton<IStartupFilter>(new FixedRemoteIpFilter(IPAddress.Parse(SocketPeerIp)));
+ 
+             builder.WebHost.UseTestServer();
+             // Boots a real host via Program.ConfigureBuilder; disable the background jobs
+             // that egress or mutate shared state at boot (see Infrastructure/DependablyFactory.cs
+             // for the full rationale).
+             builder.WebHost.UseSetting(
+                 "DISABLE_BACKGROUND_JOBS",
+-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
++                "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+             builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
+             builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
+             builder.WebHost.UseSetting("LOGIN_RATE_LIMIT_PERMITS", "100000");
+             builder.WebHost.UseSetting("ANON_RATE_LIMIT_PERMITS", "100000");
+             builder.WebHost.UseSetting("MANAGEMENT_RATE_LIMIT_PERMITS", "100000");
+ 
+             if (_trustedProxies is not null)
+             {
+                 builder.WebHost.UseSetting("TRUSTED_PROXIES", _trustedProxies);
+             }
+diff --git a/tests/Dependably.Tests/Unit/AlertTypeCheckMigrationTests.cs b/tests/Dependably.Tests/Unit/AlertTypeCheckMigrationTests.cs
+new file mode 100644
+index 00000000..7b21b4b5
+--- /dev/null
++++ b/tests/Dependably.Tests/Unit/AlertTypeCheckMigrationTests.cs
+@@ -0,0 +1,100 @@
++using Dapper;
++using Dependably.Infrastructure;
++using Dependably.Tests.Infrastructure;
++using Microsoft.Data.Sqlite;
++
++namespace Dependably.Tests.Unit;
++
++/// <summary>
++/// Widening <c>alert.type</c>'s closed CHECK for <c>sbom_policy_violation</c>. Fresh installs pick
++/// the wider set up from the <c>CREATE TABLE</c> block; a database created before it needs the
++/// stored constraint rewritten, or the first SBOM policy alert an upgraded instance raises fails
++/// its INSERT. Mirrors <see cref="BlockDeprecatedMigrationTests"/>.
++/// </summary>
++[Trait("Category", "Unit")]
++public sealed class AlertTypeCheckMigrationTests : IAsyncLifetime
++{
++    private readonly TestMetadataStore _db = new();
++    public Task InitializeAsync() => Task.CompletedTask;
++    public async Task DisposeAsync() => await _db.DisposeAsync();
++
++    [Fact]
++    public async Task LegacySchemaWithNarrowCheck_IsWidenedInPlace_AndStillRefusesUnknownTypes()
++    {
++        await new SchemaInitializer(_db).InitializeAsync();
++        await using (var setup = await _db.OpenAsync())
++        {
++            await setup.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o1','acme')");
++            await setup.ExecuteAsync("DROP TABLE IF EXISTS alert");
++            // Stand-in carrying the exact narrow CHECK text the SQLite rewrite targets; the
++            // additive ALTERs re-add the remaining columns on re-init.
++            await setup.ExecuteAsync(
++                "CREATE TABLE alert (\n" +
++                "    id           TEXT PRIMARY KEY,\n" +
++                "    org_id       TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,\n" +
++                "    type         TEXT NOT NULL CHECK (type IN ('quarantine_new', 'vuln_severity')),\n" +
++                "    source_ref   TEXT NOT NULL,\n" +
++                "    title        TEXT NOT NULL,\n" +
++                "    state        TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'dismissed'))\n" +
++                ")");
++            await setup.ExecuteAsync(
++                "INSERT INTO alert (id, org_id, type, source_ref, title) " +
++                "VALUES ('a-old', 'o1', 'vuln_severity', 'pkg:npm/left-pad', 'Existing alert')");
++            await setup.ExecuteAsync(
++                "DELETE FROM _applied_migrations WHERE name = 'expand_alert_type_check_sbom_policy'");
++
++            // Sanity: without the widen, the new type is refused — so this test would fail on a
++            // build that ships the schema change without the migration.
++            var ex = await Assert.ThrowsAsync<SqliteException>(() => setup.ExecuteAsync(
++                "INSERT INTO alert (id, org_id, type, source_ref, title) " +
++                "VALUES ('a-x', 'o1', 'sbom_policy_violation', 'x', 'Nope')"));
++            Assert.Contains("CHECK", ex.Message);
++        }
++
++        await new SchemaInitializer(_db).InitializeAsync();
++
++        await using var verify = await _db.OpenAsync();
++
++        await verify.ExecuteAsync(
++            "INSERT INTO alert (id, org_id, type, source_ref, title) " +
++            "VALUES ('a-new', 'o1', 'sbom_policy_violation', 'pkg:npm/left-pad', 'Policy violation')");
++        Assert.Equal(1, await verify.ExecuteScalarAsync<long>(
++            "SELECT COUNT(*) FROM alert WHERE type = 'sbom_policy_violation'"));
++
++        // The reshape changes the accepted set, never the rows: the pre-existing alert survives.
++        Assert.Equal(1, await verify.ExecuteScalarAsync<long>(
++            "SELECT COUNT(*) FROM alert WHERE id = 'a-old'"));
++
++        // Widening is not the same as removing: an unregistered type is still refused.
++        await Assert.ThrowsAsync<SqliteException>(() => verify.ExecuteAsync(
++            "INSERT INTO alert (id, org_id, type, source_ref, title) " +
++            "VALUES ('a-bad', 'o1', 'made_up_type', 'x', 'Nope')"));
++    }
++
++    /// <summary>
++    /// The one-shot is idempotent, so a second boot after a crash that lost the ledger entry
++    /// repeats it harmlessly rather than corrupting the stored CREATE text.
++    /// </summary>
++    [Fact]
++    public async Task ReRunningTheWiden_IsANoOp()
++    {
++        await new SchemaInitializer(_db).InitializeAsync();
++        await using (var reset = await _db.OpenAsync())
++        {
++            await reset.ExecuteAsync(
++                "DELETE FROM _applied_migrations WHERE name = 'expand_alert_type_check_sbom_policy'");
++        }
++
++        await new SchemaInitializer(_db).InitializeAsync();
++
++        await using var verify = await _db.OpenAsync();
++        await verify.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o1','acme')");
++        await verify.ExecuteAsync(
++            "INSERT INTO alert (id, org_id, type, source_ref, title) " +
++            "VALUES ('a1', 'o1', 'sbom_policy_violation', 'x', 'Policy violation')");
++        await Assert.ThrowsAsync<SqliteException>(() => verify.ExecuteAsync(
++            "INSERT INTO alert (id, org_id, type, source_ref, title) " +
++            "VALUES ('a2', 'o1', 'made_up_type', 'x', 'Nope')"));
++        Assert.Equal("ok", await verify.ExecuteScalarAsync<string>("PRAGMA integrity_check"));
++    }
++}
+diff --git a/tests/Dependably.Tests/Unit/Infrastructure/OrphanBlobReconcilerServiceTests.cs b/tests/Dependably.Tests/Unit/Infrastructure/OrphanBlobReconcilerServiceTests.cs
+index b6bb0067..7679e15e 100644
+--- a/tests/Dependably.Tests/Unit/Infrastructure/OrphanBlobReconcilerServiceTests.cs
++++ b/tests/Dependably.Tests/Unit/Infrastructure/OrphanBlobReconcilerServiceTests.cs
+@@ -253,20 +253,92 @@ public sealed class OrphanBlobReconcilerServiceTests : IAsyncLifetime
+         // proxy/ keys even when they're unreferenced. The "hosted/" prefix gate enforces it.
+         _cache.SeedWithLastModified("proxy/deadbeef", new byte[] { 1 },
+             _clock.GetUtcNow().AddDays(-365));
+ 
+         var summary = await _sut.RunOnceAsync();
+ 
+         Assert.Equal(0, summary.OrphansDeleted);
+         Assert.True(await _cache.ExistsAsync("proxy/deadbeef"));
+     }
+ 
++    /// <summary>
++    /// Seeds a project + version + document row and the document blob it references.
++    /// BlobKeys.ProjectDocument keys under hosted/, which is exactly why project_documents has to
++    /// be in the reconciler's referenced-key union: the sweep walks that prefix, and this row is
++    /// the blob's only reference.
++    /// </summary>
++    private async Task<string> SeedProjectDocumentAsync(
++        string projectId, string versionId, string docType, string sha256, DateTimeOffset lastModified)
++    {
++        string key = BlobKeys.ProjectDocument("o1", projectId, versionId, docType, sha256);
++        await using var conn = await _db.OpenAsync();
++        await conn.ExecuteAsync(
++            "INSERT INTO projects (id, org_id, name) VALUES (@id, 'o1', @name)",
++            new { id = projectId, name = projectId });
++        await conn.ExecuteAsync(
++            "INSERT INTO project_versions (id, org_id, project_id, version, is_latest) " +
++            "VALUES (@id, 'o1', @projectId, '1.0.0', 1)",
++            new { id = versionId, projectId });
++        await conn.ExecuteAsync(
++            "INSERT INTO project_documents " +
++            "(id, org_id, project_version_id, doc_type, format, sha256, size_bytes, blob_key) " +
++            "VALUES (@id, 'o1', @pvId, @docType, 'cyclonedx-json', @sha, 2, @key)",
++            new { id = Guid.NewGuid().ToString("N"), pvId = versionId, docType, sha = sha256, key });
++        _registry.SeedWithLastModified(key, new byte[] { 1, 2 }, lastModified);
++        return key;
++    }
++
++    /// <summary>
++    /// The catch this arm exists for: an uploaded SBOM/VEX/SARIF original lives under the same
++    /// hosted/ prefix the sweep walks, so a referenced-key union that omits project_documents
++    /// deletes every uploaded document on the first pass after the grace window — silently, with
++    /// the metadata row left pointing at bytes that are gone.
++    /// </summary>
++    [Fact]
++    public async Task ReferencedProjectDocument_IsLeftAlone()
++    {
++        var ancient = _clock.GetUtcNow().AddDays(-365);
++        string key = await SeedProjectDocumentAsync(
++            "proj1", "pv1", "sbom", new string('a', 64), ancient);
++
++        var summary = await _sut.RunOnceAsync();
++
++        Assert.Equal(0, summary.OrphansDeleted);
++        Assert.True(await _registry.ExistsAsync(key), "a referenced project document must survive");
++    }
++
++    /// <summary>
++    /// Partial-failure shape over the projects plane specifically: within ONE pass, a document
++    /// blob whose metadata row exists survives while a document-shaped blob whose row was already
++    /// deleted is reclaimed. A union that omits project_documents loses the first; a sweep scoped
++    /// away from the prefix keeps the second forever. Both must hold at once.
++    /// </summary>
++    [Fact]
++    public async Task MixedProjectDocuments_ReferencedKept_UnreferencedReclaimed()
++    {
++        var old = _clock.GetUtcNow().AddMinutes(-10);
++        string referenced = await SeedProjectDocumentAsync(
++            "proj-keep", "pv-keep", "sbom", new string('b', 64), old);
++
++        // Same key shape, no metadata row — a document whose project version was deleted.
++        string abandoned = BlobKeys.ProjectDocument(
++            "o1", "proj-gone", "pv-gone", "sarif", new string('c', 64));
++        _registry.SeedWithLastModified(abandoned, new byte[] { 9, 9, 9 }, old);
++
++        var summary = await _sut.RunOnceAsync();
++
++        Assert.Equal(1, summary.OrphansDeleted);
++        Assert.Equal(3, summary.BytesFreed);
++        Assert.True(await _registry.ExistsAsync(referenced), "referenced document must survive");
++        Assert.False(await _registry.ExistsAsync(abandoned), "abandoned document must be reclaimed");
++    }
++
+     [Fact]
+     public async Task MixedSet_ReferencedAreKept_OrphansAreDeleted_FreshOrphansSurvive()
+     {
+         // End-to-end: one of each kind in the same pass.
+         string refKey = BlobKeys.Hosted("o1", "npm", "keep", "1.0.0", "keep-1.0.0.tgz");
+         await SeedReferencedAsync("1.0.0", refKey, new byte[] { 1, 2 },
+             _clock.GetUtcNow().AddDays(-1));
+ 
+         string oldOrphan = BlobKeys.Hosted("o1", "npm", "old", "1.0.0", "old-1.0.0.tgz");
+         _registry.SeedWithLastModified(oldOrphan, new byte[] { 3, 4, 5 },
+diff --git a/tests/Dependably.Tests/Unit/Infrastructure/ProjectsPlaneSchemaTests.cs b/tests/Dependably.Tests/Unit/Infrastructure/ProjectsPlaneSchemaTests.cs
+new file mode 100644
+index 00000000..d62844ad
+--- /dev/null
++++ b/tests/Dependably.Tests/Unit/Infrastructure/ProjectsPlaneSchemaTests.cs
+@@ -0,0 +1,359 @@
++using Dapper;
++using Dependably.Infrastructure;
++using Dependably.Tests.Infrastructure;
++using Microsoft.Data.Sqlite;
++
++namespace Dependably.Tests.Unit.Infrastructure;
++
++/// <summary>
++/// Behavioural coverage for the projects plane's DDL, against a real SQLite database built by the
++/// real <see cref="SchemaInitializer"/>. The static schema gates prove the two provider files agree
++/// and that every temporal column carries its CHECK; these prove the constraints that actually
++/// protect the data do what the design says — the two partial unique indexes that make duplicate
++/// names and double-latest impossible, the enum CHECKs, and the FK cascade that makes an org
++/// hard-delete reach every table on the plane.
++/// </summary>
++[Trait("Category", "Schema")]
++public sealed class ProjectsPlaneSchemaTests : IAsyncLifetime
++{
++    private readonly TestMetadataStore _db = new();
++
++    public async Task InitializeAsync()
++    {
++        await new SchemaInitializer(_db).InitializeAsync();
++        await using var conn = await _db.OpenAsync();
++        await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o1', 'acme'), ('o2', 'other')");
++    }
++
++    public async Task DisposeAsync() => await _db.DisposeAsync();
++
++    private async Task InsertProjectAsync(
++        System.Data.Common.DbConnection conn, string id, string orgId, string name, string? parentId = null,
++        string kind = "project")
++        => await conn.ExecuteAsync(
++            "INSERT INTO projects (id, org_id, name, parent_id, kind) VALUES (@id, @orgId, @name, @parentId, @kind)",
++            new { id, orgId, name, parentId, kind });
++
++    private async Task InsertVersionAsync(
++        System.Data.Common.DbConnection conn, string id, string projectId, string version, int isLatest)
++        => await conn.ExecuteAsync(
++            "INSERT INTO project_versions (id, org_id, project_id, version, is_latest) " +
++            "VALUES (@id, 'o1', @projectId, @version, @isLatest)",
++            new { id, projectId, version, isLatest });
++
++    /// <summary>
++    /// A plain <c>UNIQUE(org_id, parent_id, name)</c> would admit this pair, because both providers
++    /// treat two NULL parents as distinct. The partial index on <c>parent_id IS NULL</c> is what
++    /// actually refuses it.
++    /// </summary>
++    [Fact]
++    public async Task TwoRootProjects_WithTheSameName_AreRefused()
++    {
++        await using var conn = await _db.OpenAsync();
++        await InsertProjectAsync(conn, "p1", "o1", "web");
++
++        var ex = await Assert.ThrowsAsync<SqliteException>(
++            () => InsertProjectAsync(conn, "p2", "o1", "web"));
++        Assert.Contains("UNIQUE", ex.Message, StringComparison.OrdinalIgnoreCase);
++    }
++
++    [Fact]
++    public async Task TheSameRootProjectName_InAnotherOrg_IsAllowed()
++    {
++        await using var conn = await _db.OpenAsync();
++        await InsertProjectAsync(conn, "p1", "o1", "web");
++        await InsertProjectAsync(conn, "p2", "o2", "web");
++
++        Assert.Equal(2, await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM projects"));
++    }
++
++    [Fact]
++    public async Task TwoChildrenOfOneCollection_WithTheSameName_AreRefused()
++    {
++        await using var conn = await _db.OpenAsync();
++        await InsertProjectAsync(conn, "c1", "o1", "monorepo", kind: "collection");
++        await InsertProjectAsync(conn, "p1", "o1", "api", parentId: "c1");
++
++        var ex = await Assert.ThrowsAsync<SqliteException>(
++            () => InsertProjectAsync(conn, "p2", "o1", "api", parentId: "c1"));
++        Assert.Contains("UNIQUE", ex.Message, StringComparison.OrdinalIgnoreCase);
++    }
++
++    [Fact]
++    public async Task TheSameChildName_UnderTwoDifferentCollections_IsAllowed()
++    {
++        await using var conn = await _db.OpenAsync();
++        await InsertProjectAsync(conn, "c1", "o1", "repo-a", kind: "collection");
++        await InsertProjectAsync(conn, "c2", "o1", "repo-b", kind: "collection");
++        await InsertProjectAsync(conn, "p1", "o1", "api", parentId: "c1");
++        await InsertProjectAsync(conn, "p2", "o1", "api", parentId: "c2");
++
++        Assert.Equal(2, await conn.ExecuteScalarAsync<long>(
++            "SELECT COUNT(*) FROM projects WHERE name = 'api'"));
++    }
++
++    [Fact]
++    public async Task AnUnknownProjectKind_IsRefused()
++    {
++        await using var conn = await _db.OpenAsync();
++        await Assert.ThrowsAsync<SqliteException>(
++            () => InsertProjectAsync(conn, "p1", "o1", "web", kind: "folder"));
++    }
++
++    /// <summary>
++    /// The partial unique index on <c>is_latest = 1</c> is the backstop that makes a lost-update
++    /// double-latest impossible at commit rather than merely unlikely: the losing promoter gets a
++    /// constraint violation and retries.
++    /// </summary>
++    [Fact]
++    public async Task TwoLatestVersions_OfOneProject_AreRefused()
++    {
++        await using var conn = await _db.OpenAsync();
++        await InsertProjectAsync(conn, "p1", "o1", "web");
++        await InsertVersionAsync(conn, "v1", "p1", "1.0.0", isLatest: 1);
++
++        var ex = await Assert.ThrowsAsync<SqliteException>(
++            () => InsertVersionAsync(conn, "v2", "p1", "2.0.0", isLatest: 1));
++        Assert.Contains("UNIQUE", ex.Message, StringComparison.OrdinalIgnoreCase);
++    }
++
++    [Fact]
++    public async Task ManyNonLatestVersions_OfOneProject_AreAllowed()
++    {
++        await using var conn = await _db.OpenAsync();
++        await InsertProjectAsync(conn, "p1", "o1", "web");
++        await InsertVersionAsync(conn, "v1", "p1", "1.0.0", isLatest: 0);
++        await InsertVersionAsync(conn, "v2", "p1", "2.0.0", isLatest: 0);
++        await InsertVersionAsync(conn, "v3", "p1", "3.0.0", isLatest: 1);
++
++        Assert.Equal(3, await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM project_versions"));
++    }
++
++    /// <summary>
++    /// Never-evaluated has to be distinguishable from evaluated-and-passing, which is why NULL is
++    /// permitted and 'pass' is not the column default.
++    /// </summary>
++    [Fact]
++    public async Task PolicyStatus_DefaultsToNull_AndRefusesAnUnknownValue()
++    {
++        await using var conn = await _db.OpenAsync();
++        await InsertProjectAsync(conn, "p1", "o1", "web");
++        await InsertVersionAsync(conn, "v1", "p1", "1.0.0", isLatest: 1);
++
++        Assert.Null(await conn.ExecuteScalarAsync<string?>(
++            "SELECT policy_status FROM project_versions WHERE id = 'v1'"));
++
++        await Assert.ThrowsAsync<SqliteException>(() => conn.ExecuteAsync(
++            "UPDATE project_versions SET policy_status = 'blocked' WHERE id = 'v1'"));
++    }
++
++    /// <summary>
++    /// The two scope vocabularies are deliberately kept apart: a CycloneDX value must not be
++    /// storable in the dev/prod column, and vice versa, so a future reader cannot conflate them.
++    /// </summary>
++    [Theory]
++    [InlineData("required", "runtime", true)]
++    [InlineData("excluded", "dev", true)]
++    [InlineData(null, "unknown", true)]
++    // 'dev' is not a CycloneDX scope, and 'required' is not a dependency scope.
++    [InlineData("dev", "runtime", false)]
++    [InlineData("required", "required", false)]
++    public async Task ScopeColumns_AcceptOnlyTheirOwnVocabulary(
++        string? sbomScope, string dependencyScope, bool accepted)
++    {
++        await using var conn = await _db.OpenAsync();
++        await InsertProjectAsync(conn, "p1", "o1", "web");
++        await InsertVersionAsync(conn, "v1", "p1", "1.0.0", isLatest: 1);
++
++        Task Insert() => conn.ExecuteAsync(
++            "INSERT INTO sbom_components (id, org_id, project_version_id, name, sbom_scope, dependency_scope) " +
++            "VALUES ('c1', 'o1', 'v1', 'left-pad', @sbomScope, @dependencyScope)",
++            new { sbomScope, dependencyScope });
++
++        if (accepted)
++        {
++            await Insert();
++            Assert.Equal(1, await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM sbom_components"));
++        }
++        else
++        {
++            await Assert.ThrowsAsync<SqliteException>(Insert);
++        }
++    }
++
++    [Fact]
++    public async Task DependencyScope_DefaultsToUnknown_NotToProduction()
++    {
++        await using var conn = await _db.OpenAsync();
++        await InsertProjectAsync(conn, "p1", "o1", "web");
++        await InsertVersionAsync(conn, "v1", "p1", "1.0.0", isLatest: 1);
++        await conn.ExecuteAsync(
++            "INSERT INTO sbom_components (id, org_id, project_version_id, name) " +
++            "VALUES ('c1', 'o1', 'v1', 'left-pad')");
++
++        Assert.Equal("unknown", await conn.ExecuteScalarAsync<string>(
++            "SELECT dependency_scope FROM sbom_components WHERE id = 'c1'"));
++    }
++
++    /// <summary>
++    /// A component with no purl is legitimate and must not collide with any other; only the ones
++    /// that DO declare a purl are deduped, which is what the partial unique index expresses.
++    /// </summary>
++    [Fact]
++    public async Task ComponentsWithoutAPurl_DoNotCollide_ButDuplicatePurlsDo()
++    {
++        await using var conn = await _db.OpenAsync();
++        await InsertProjectAsync(conn, "p1", "o1", "web");
++        await InsertVersionAsync(conn, "v1", "p1", "1.0.0", isLatest: 1);
++
++        await conn.ExecuteAsync(
++            "INSERT INTO sbom_components (id, org_id, project_version_id, name) VALUES " +
++            "('c1', 'o1', 'v1', 'anonymous-a'), ('c2', 'o1', 'v1', 'anonymous-b')");
++        await conn.ExecuteAsync(
++            "INSERT INTO sbom_components (id, org_id, project_version_id, name, purl) " +
++            "VALUES ('c3', 'o1', 'v1', 'left-pad', 'pkg:npm/left-pad@1.3.0')");
++
++        await Assert.ThrowsAsync<SqliteException>(() => conn.ExecuteAsync(
++            "INSERT INTO sbom_components (id, org_id, project_version_id, name, purl) " +
++            "VALUES ('c4', 'o1', 'v1', 'left-pad', 'pkg:npm/left-pad@1.3.0')"));
++    }
++
++    /// <summary>
++    /// vuln_key deliberately has no foreign key: a VEX or SARIF document legitimately cites
++    /// advisories the OSV feed has never served, and dropping those statements would hide exactly
++    /// what a reader needs. This pins that the row stores such an id rather than rejecting it.
++    /// </summary>
++    [Fact]
++    public async Task AnalysisRow_AcceptsAnAdvisoryIdWithNoVulnerabilitiesRow()
++    {
++        await using var conn = await _db.OpenAsync();
++        await InsertProjectAsync(conn, "p1", "o1", "web");
++        await InsertVersionAsync(conn, "v1", "p1", "1.0.0", isLatest: 1);
++
++        await conn.ExecuteAsync(
++            "INSERT INTO project_vuln_analysis (id, org_id, project_version_id, purl_key, vuln_key, vex_state, vex_source) " +
++            "VALUES ('a1', 'o1', 'v1', 'pkg:npm/left-pad', 'CVE-2099-99999', 'not_affected', 'upload')");
++
++        Assert.Equal(0, await conn.ExecuteScalarAsync<long>(
++            "SELECT COUNT(*) FROM vulnerabilities WHERE osv_id = 'CVE-2099-99999'"));
++        Assert.Equal(1, await conn.ExecuteScalarAsync<long>(
++            "SELECT COUNT(*) FROM project_vuln_analysis WHERE vuln_key = 'CVE-2099-99999'"));
++    }
++
++    [Fact]
++    public async Task AnalysisRow_IsUniquePerVersionPurlAndAdvisory()
++    {
++        await using var conn = await _db.OpenAsync();
++        await InsertProjectAsync(conn, "p1", "o1", "web");
++        await InsertVersionAsync(conn, "v1", "p1", "1.0.0", isLatest: 1);
++
++        await conn.ExecuteAsync(
++            "INSERT INTO project_vuln_analysis (id, org_id, project_version_id, purl_key, vuln_key) " +
++            "VALUES ('a1', 'o1', 'v1', 'pkg:npm/left-pad', 'CVE-2024-1')");
++
++        await Assert.ThrowsAsync<SqliteException>(() => conn.ExecuteAsync(
++            "INSERT INTO project_vuln_analysis (id, org_id, project_version_id, purl_key, vuln_key) " +
++            "VALUES ('a2', 'o1', 'v1', 'pkg:npm/left-pad', 'CVE-2024-1')"));
++    }
++
++    [Fact]
++    public async Task OneActiveDocument_PerVersionAndDocType()
++    {
++        await using var conn = await _db.OpenAsync();
++        await InsertProjectAsync(conn, "p1", "o1", "web");
++        await InsertVersionAsync(conn, "v1", "p1", "1.0.0", isLatest: 1);
++
++        await conn.ExecuteAsync(
++            "INSERT INTO project_documents (id, org_id, project_version_id, doc_type, format, sha256, blob_key) " +
++            "VALUES ('d1', 'o1', 'v1', 'sbom', 'cyclonedx-json', 'aa', 'k1'), " +
++            "       ('d2', 'o1', 'v1', 'sarif', 'sarif-json', 'bb', 'k2')");
++
++        await Assert.ThrowsAsync<SqliteException>(() => conn.ExecuteAsync(
++            "INSERT INTO project_documents (id, org_id, project_version_id, doc_type, format, sha256, blob_key) " +
++            "VALUES ('d3', 'o1', 'v1', 'sbom', 'cyclonedx-json', 'cc', 'k3')"));
++    }
++
++    /// <summary>
++    /// Org hard-delete is pure FK cascade, so every table on the plane has to hang off <c>orgs</c>
++    /// either directly or through a parent that does. A table that survives the cascade leaks a
++    /// deleted tenant's application inventory.
++    /// </summary>
++    [Fact]
++    public async Task DeletingTheOrg_CascadesThroughEveryTableOnThePlane()
++    {
++        await using var conn = await _db.OpenAsync();
++        await conn.ExecuteAsync("PRAGMA foreign_keys = ON");
++        await InsertProjectAsync(conn, "c1", "o1", "monorepo", kind: "collection");
++        await InsertProjectAsync(conn, "p1", "o1", "web", parentId: "c1");
++        await InsertVersionAsync(conn, "v1", "p1", "1.0.0", isLatest: 1);
++        await conn.ExecuteAsync(
++            "INSERT INTO project_documents (id, org_id, project_version_id, doc_type, format, sha256, blob_key) " +
++            "VALUES ('d1', 'o1', 'v1', 'sbom', 'cyclonedx-json', 'aa', 'k1')");
++        await conn.ExecuteAsync(
++            "INSERT INTO sbom_components (id, org_id, project_version_id, name, purl) " +
++            "VALUES ('cm1', 'o1', 'v1', 'left-pad', 'pkg:npm/left-pad@1.3.0')");
++        await conn.ExecuteAsync(
++            "INSERT INTO vulnerabilities (id, osv_id, ecosystem, package_name) " +
++            "VALUES ('vu1', 'GHSA-x', 'npm', 'left-pad')");
++        await conn.ExecuteAsync(
++            "INSERT INTO sbom_component_vulns (id, component_id, vuln_id) VALUES ('scv1', 'cm1', 'vu1')");
++        await conn.ExecuteAsync(
++            "INSERT INTO project_vuln_analysis (id, org_id, project_version_id, purl_key, vuln_key) " +
++            "VALUES ('a1', 'o1', 'v1', 'pkg:npm/left-pad', 'GHSA-x')");
++        await conn.ExecuteAsync(
++            "INSERT INTO sbom_policy_findings (id, org_id, project_version_id, component_id, arm, vuln_key) " +
++            "VALUES ('f1', 'o1', 'v1', 'cm1', 'kev', 'GHSA-x')");
++
++        await conn.ExecuteAsync("DELETE FROM orgs WHERE id = 'o1'");
++
++        foreach (string table in new[]
++                 {
++                     "projects", "project_versions", "project_documents", "sbom_components",
++                     "sbom_component_vulns", "project_vuln_analysis", "sbom_policy_findings",
++                 })
++        {
++            // rawsql: the table name comes from this test's own literal list, never from input.
++            long remaining = await conn.ExecuteScalarAsync<long>($"SELECT COUNT(*) FROM {table}");
++            Assert.Equal(0, remaining);
++        }
++
++        // The advisory itself is global and must survive its last component link.
++        Assert.Equal(1, await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM vulnerabilities"));
++    }
++
++    /// <summary>
++    /// The alert seam this plane raises through. A fresh install must accept the new type from the
++    /// CREATE TABLE block alone, and must still refuse an unregistered one — a CHECK widened into a
++    /// free-text column would be no gate at all.
++    /// </summary>
++    [Fact]
++    public async Task AlertType_AcceptsSbomPolicyViolation_AndStillRefusesAnUnknownType()
++    {
++        await using var conn = await _db.OpenAsync();
++        await conn.ExecuteAsync(
++            "INSERT INTO alert (id, org_id, type, source_ref, title) " +
++            "VALUES ('al1', 'o1', 'sbom_policy_violation', 'pkg:npm/left-pad', 'Policy violation')");
++
++        Assert.Equal(1, await conn.ExecuteScalarAsync<long>(
++            "SELECT COUNT(*) FROM alert WHERE type = 'sbom_policy_violation'"));
++
++        await Assert.ThrowsAsync<SqliteException>(() => conn.ExecuteAsync(
++            "INSERT INTO alert (id, org_id, type, source_ref, title) " +
++            "VALUES ('al2', 'o1', 'made_up_type', 'x', 'Nope')"));
++    }
++
++    [Fact]
++    public async Task SbomPolicyAlertGate_DefaultsOn_LikeTheOtherTwo()
++    {
++        await using var conn = await _db.OpenAsync();
++        await conn.ExecuteAsync("INSERT INTO alert_settings (org_id) VALUES ('o1')");
++
++        var (quarantine, vuln, sbom) = await conn.QuerySingleAsync<(long Quarantine, long Vuln, long Sbom)>(
++            "SELECT quarantine_alerts_enabled AS Quarantine, vuln_alerts_enabled AS Vuln, " +
++            "sbom_policy_alerts_enabled AS Sbom FROM alert_settings WHERE org_id = 'o1'");
++
++        Assert.Equal(1, quarantine);
++        Assert.Equal(1, vuln);
++        Assert.Equal(1, sbom);
++    }
++}
+diff --git a/tests/Dependably.Tests/Unit/SbomSeamsTests.cs b/tests/Dependably.Tests/Unit/SbomSeamsTests.cs
+new file mode 100644
+index 00000000..1de4fbdf
+--- /dev/null
++++ b/tests/Dependably.Tests/Unit/SbomSeamsTests.cs
+@@ -0,0 +1,155 @@
++using Dependably.Infrastructure;
++using Dependably.Security;
++using Dependably.Storage;
++using Microsoft.Extensions.Configuration;
++using Microsoft.Extensions.Logging.Abstractions;
++
++namespace Dependably.Tests.Unit;
++
++/// <summary>
++/// The cross-cutting seams the projects plane hangs off: the document blob key, the
++/// <c>sbom:upload</c> capability, and the <c>sbom-scan</c> background-job name. Each is a
++/// contract several other surfaces bind to, so each is pinned here rather than left to the first
++/// caller that happens to exercise it.
++/// </summary>
++[Trait("Category", "Unit")]
++public sealed class SbomSeamsTests
++{
++    private const string Sha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
++
++    [Fact]
++    public void ProjectDocumentKey_IsOrgScopedUnderTheHostedPrefix()
++    {
++        string key = BlobKeys.ProjectDocument("org1", "proj1", "ver1", "sbom", Sha);
++
++        Assert.Equal($"hosted/org1/projects/proj1/ver1/sbom/{Sha}.json", key);
++        // The hosted/ prefix is load-bearing: it is what puts the blob inside
++        // OrphanBlobReconcilerService's sweep, which is why project_documents is in that sweep's
++        // referenced-key union.
++        Assert.StartsWith("hosted/org1/", key, StringComparison.Ordinal);
++    }
++
++    [Theory]
++    [InlineData("sbom")]
++    [InlineData("vex")]
++    [InlineData("sarif")]
++    public void ProjectDocumentKey_AcceptsEachDocumentKind(string docType)
++    {
++        string key = BlobKeys.ProjectDocument("org1", "proj1", "ver1", docType, Sha);
++        Assert.Contains($"/{docType}/", key, StringComparison.Ordinal);
++    }
++
++    [Theory]
++    [InlineData("spdx")]
++    [InlineData("../../etc")]
++    [InlineData("")]
++    public void ProjectDocumentKey_RefusesAnUnknownDocumentKind(string docType)
++        => Assert.Throws<ArgumentException>(
++            () => BlobKeys.ProjectDocument("org1", "proj1", "ver1", docType, Sha));
++
++    [Theory]
++    [InlineData("not-a-digest")]
++    [InlineData("../../../etc/passwd")]
++    [InlineData("0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef")]
++    public void ProjectDocumentKey_RefusesANonCanonicalDigest(string sha256)
++        => Assert.Throws<ArgumentException>(
++            () => BlobKeys.ProjectDocument("org1", "proj1", "ver1", "sbom", sha256));
++
++    /// <summary>
++    /// A capability that is not in <see cref="Capabilities.Requestable"/> is rejected by the token
++    /// issuance pipeline as unknown, so a half-wired constant reads as a working grant in code and
++    /// fails at runtime for every caller trying to mint it.
++    /// </summary>
++    [Fact]
++    public void SbomUpload_IsARequestableCapability()
++        => Assert.Contains(Capabilities.SbomUpload, Capabilities.Requestable);
++
++    [Fact]
++    public void SbomUpload_IsGrantedToAdminAndOwner_ButNotToMemberOrAuditor()
++    {
++        Assert.Contains(Capabilities.SbomUpload, Capabilities.ForRole("admin"));
++        Assert.Contains(Capabilities.SbomUpload, Capabilities.ForRole("owner"));
++        Assert.DoesNotContain(Capabilities.SbomUpload, Capabilities.ForRole("member"));
++        Assert.DoesNotContain(Capabilities.SbomUpload, Capabilities.ForRole("auditor"));
++    }
++
++    /// <summary>
++    /// The point of a separate grant: an <c>sbom:upload</c> token must not be satisfiable by, or
++    /// satisfy, the far broader import credential it replaces.
++    /// </summary>
++    [Fact]
++    public void SbomUpload_IsNeitherGrantedByNorGrantsTheImportCredential()
++    {
++        var sbomOnly = new HashSet<string> { Capabilities.SbomUpload };
++        var importOnly = new HashSet<string> { Capabilities.ImportAll, Capabilities.TenantConfigure };
++
++        Assert.False(Capabilities.Grants(importOnly, Capabilities.SbomUpload));
++        Assert.False(Capabilities.Grants(sbomOnly, Capabilities.ImportAll));
++        Assert.False(Capabilities.Grants(sbomOnly, Capabilities.TenantConfigure));
++        Assert.True(Capabilities.Grants(sbomOnly, Capabilities.SbomUpload));
++    }
++
++    [Fact]
++    public void AnAdminCanMintAnSbomUploadToken()
++    {
++        bool ok = Capabilities.TryNormalizeAndAuthorize(
++            [Capabilities.SbomUpload],
++            Capabilities.ForRole("admin"),
++            out string canonicalJson, out string[] capabilities, out string? error, out _);
++
++        Assert.True(ok, error);
++        Assert.Equal([Capabilities.SbomUpload], capabilities);
++        Assert.Equal("""["sbom:upload"]""", canonicalJson);
++    }
++
++    [Fact]
++    public void AMemberCannotMintAnSbomUploadToken()
++    {
++        bool ok = Capabilities.TryNormalizeAndAuthorize(
++            [Capabilities.SbomUpload],
++            Capabilities.ForRole("member"),
++            out _, out _, out string? error, out string? field);
++
++        Assert.False(ok);
++        Assert.Equal("capabilities", field);
++        Assert.Contains("exceed your role", error);
++    }
++
++    /// <summary>
++    /// An unregistered job name is accepted by <c>DISABLE_BACKGROUND_JOBS</c> but warned about, so
++    /// a name missing from the registry reads as a working disable while the operator's intent is
++    /// only ever visible in a log line.
++    /// </summary>
++    [Fact]
++    public void SbomScan_IsDisableableWithoutAnUnknownJobWarning()
++    {
++        var cfg = new ConfigurationBuilder()
++            .AddInMemoryCollection(new Dictionary<string, string?>
++            {
++                ["DISABLE_BACKGROUND_JOBS"] = "sbom-scan",
++            })
++            .Build();
++
++        var airGap = new AirGapMode(cfg, NullLogger<AirGapMode>.Instance);
++
++        Assert.True(airGap.IsJobDisabled("sbom-scan"));
++        Assert.False(airGap.IsJobDisabled("vuln-scan"));
++    }
++
++    /// <summary>
++    /// A scan pass over uploaded components queries the advisory feed, so an edge node — which
++    /// creates nothing authoritative — must not run it.
++    /// </summary>
++    [Fact]
++    public void SbomScan_IsForceDisabledOnAnEdgeNode()
++    {
++        var cfg = new ConfigurationBuilder()
++            .AddInMemoryCollection(new Dictionary<string, string?>
++            {
++                ["DEPLOYMENT_MODE"] = "edge",
++            })
++            .Build();
++
++        Assert.True(new AirGapMode(cfg).IsJobDisabled("sbom-scan"));
++    }
++}

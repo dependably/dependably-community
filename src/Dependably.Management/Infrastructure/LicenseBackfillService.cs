@@ -19,6 +19,11 @@ namespace Dependably.Infrastructure;
 /// Runs on the <c>LICENSE_BACKFILL_SCHEDULE</c> cron (default daily off-peak). Reads only the
 /// cache tier, never fetches upstream, and mutates the shared cache plane — so the per-tick leader
 /// lock (see <see cref="RequiresLeaderLock"/>) ensures a single replica runs each pass in HA mode.
+///
+/// suspension-ok: this pass reads <c>cache_artifact</c> rows off the shared, content-addressed
+/// cache tier the same way <c>CacheEvictionService</c> does (see that class's own marker) — the
+/// rows have no single tenant owner, the pass never fetches upstream (no egress), and it makes
+/// no third-party delivery. There is no per-org axis to gate on.
 /// </summary>
 public sealed class LicenseBackfillService : ScheduledBackgroundService
 {

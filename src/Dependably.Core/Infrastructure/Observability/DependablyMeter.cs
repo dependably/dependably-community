@@ -108,6 +108,32 @@ public static class DependablyMeter
             unit: "s",
             description: "Outbound healthcheck ping duration in seconds.");
 
+    // ── Project-document ingest counters ─────────────────────────────────────
+
+    /// <summary>
+    /// Accepted SBOM, VEX and SARIF uploads. Deliberately unattributed: the interesting
+    /// breakdowns here are tenant and project, both of which are unbounded caller-controlled
+    /// cardinality, and a document-kind attribute would answer a question the activity feed
+    /// already answers per row.
+    /// </summary>
+    public static readonly Counter<long> SbomUploads =
+        Meter.CreateCounter<long>(
+            "dependably.sbom.uploads",
+            description: "Project documents accepted by the SBOM, VEX and SARIF upload endpoints.");
+
+    /// <summary>
+    /// SBOM component vulnerability-scan attempts. <c>outcome=deferred</c> is the fail-closed
+    /// branch: the advisory source was unreachable, so the component's <c>vuln_checked_at</c> is
+    /// left unstamped and it stays in the unscanned bucket rather than reading as clean. That
+    /// branch was previously log-only, so an OSV outage degrading SBOM coverage surfaced only as
+    /// a wall of warn versions or the health page's 36-hour staleness signal — this counter makes
+    /// it visible immediately and lets an alert fire on the deferral rate directly.
+    /// </summary>
+    public static readonly Counter<long> ScanComponents =
+        Meter.CreateCounter<long>(
+            "dependably.sbom.scan_components",
+            description: "SBOM component vulnerability-scan attempts. Attributes: outcome (scanned|deferred).");
+
     // ── Cache-plane counters ─────────────────────────────────────────────────
 
     public static readonly Counter<long> CacheLookups =
@@ -217,6 +243,21 @@ public static class DependablyMeter
             description: "Vuln scans deferred because the advisory source was unreachable. Attributes: pass.");
 
     /// <summary>
+    /// Advisories left unenriched because the vulnerability tracker was not reached (outage,
+    /// timeout, refused credential, or a quota refusal — which is a refusal to answer, not an
+    /// answer of "nothing found"). Deliberately separate from <see cref="ScanDeferred"/>: those
+    /// artefacts were never screened at all, whereas these are fully screened and merely missing
+    /// the NVD-band / SSVC overlay, which is a different operator situation and a different fix.
+    /// A deferred advisory keeps its previous enrichment and its previous stamps — nothing is
+    /// advanced, so the staleness horizon still governs it honestly.
+    /// Attributes: <c>pass</c> (scan|rescan).
+    /// </summary>
+    public static readonly Counter<long> EnrichmentDeferred =
+        Meter.CreateCounter<long>(
+            "dependably.enrichment.deferred",
+            description: "Advisories left unenriched because the vulnerability tracker was unreachable. Attributes: pass.");
+
+    /// <summary>
     /// Requests rejected by the download / push rate limiters. Attributes:
     /// <c>policy</c> (download|push|...) and <c>partition</c>, the bounded partition
     /// <em>kind</em> (<c>token</c>|<c>user</c>|<c>ip</c>|<c>unknown</c>). The partition key
@@ -303,6 +344,23 @@ public static class DependablyMeter
             description: "Downloads blocked by the block_malicious proxy policy. Attributes: ecosystem.");
 
     /// <summary>
+    /// Artefacts SERVED that an arm in <c>warn</c> mode would have refused. Deliberately a
+    /// separate instrument from the <c>*_blocks</c> counters rather than an outcome on them:
+    /// those count refusals, and folding warnings in would silently change what every existing
+    /// dashboard and alert built on them means.
+    ///
+    /// <para>
+    /// This is the number that makes graduated adoption possible — it answers "what would this
+    /// gate refuse if I turned it on?" without refusing anything. Attributes: <c>ecosystem</c>
+    /// and <c>reason</c> (the arm's wire token, the same vocabulary the refusal header uses).
+    /// </para>
+    /// </summary>
+    public static readonly Counter<long> GateWarnings =
+        Meter.CreateCounter<long>(
+            "dependably.security.gate_warnings",
+            description: "Artefacts served that a warn-mode gate arm would have refused. Attributes: ecosystem, reason.");
+
+    /// <summary>
     /// Downloads blocked because an advisory aliases a CISA-KEV-listed CVE and the tenant's
     /// <c>block_kev</c> policy is 'block'. Attributes: <c>ecosystem</c>.
     /// </summary>
@@ -320,6 +378,31 @@ public static class DependablyMeter
         Meter.CreateCounter<long>(
             "dependably.upstream.queue_sheds",
             description: "Upstream requests shed by the queue-depth throttle (503 returned immediately).");
+
+    /// <summary>
+    /// Downloads blocked by one of the three arms that carry no counter of their own —
+    /// <c>kev_ransomware</c>, <c>ssvc_exploitation</c>, <c>epss_percentile</c>. One counter
+    /// discriminated by <c>reason</c> rather than three near-identical ones, matching the shape
+    /// <see cref="GateWarnings"/> already uses. Attributes: <c>ecosystem</c>, <c>reason</c>.
+    /// </summary>
+    public static readonly Counter<long> EnrichmentGateBlocks =
+        Meter.CreateCounter<long>(
+            "dependably.security.enrichment_gate_blocks",
+            description: "Downloads blocked by the kev_ransomware, ssvc_exploitation or epss_percentile arm. Attributes: ecosystem, reason.");
+
+    /// <summary>
+    /// Gate evaluations of a version carrying vulnerability-tracker enrichment older than the
+    /// operator's staleness horizon. Stale values are dropped by the aggregate query, so the NVD
+    /// score fallback silently sees nothing and the CVSS ceiling compares OSV's own score
+    /// instead — a return to the pre-overlay baseline, and this counter is what keeps it visible.
+    /// (The SSVC arm handles its own staleness by refusing under a 'block' mode, so a non-zero
+    /// rate here does not by itself mean anything was refused.) A sustained non-zero rate means
+    /// the tracker is behind. Attributes: <c>ecosystem</c>.
+    /// </summary>
+    public static readonly Counter<long> StaleEnrichmentEvaluations =
+        Meter.CreateCounter<long>(
+            "dependably.security.stale_enrichment_evaluations",
+            description: "Enforcing enrichment arms evaluated against enrichment past the staleness horizon. Attributes: ecosystem.");
 
     /// <summary>
     /// Downloads blocked because the version's maximum EPSS exploitation probability exceeds

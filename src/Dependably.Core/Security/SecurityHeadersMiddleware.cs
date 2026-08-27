@@ -71,6 +71,14 @@ public sealed class SecurityHeadersMiddleware
             headers.ContentSecurityPolicy = FrontendCsp;
         }
 
+        // Stash a copy for ResponseHeaderPreserver to fall back to. These headers are set
+        // synchronously above so they're present even if the handler starts streaming its own
+        // response — but that leaves them exposed to any later Response.Clear(), including one
+        // ASP.NET Core's own exception-handler middleware issues before TerminalExceptionHandler
+        // ever runs. The stash in HttpContext.Items survives that clear because Response.Clear()
+        // never touches HttpContext.Items.
+        ResponseHeaderPreserver.CaptureIntoItems(ctx);
+
         await _next(ctx);
     }
 

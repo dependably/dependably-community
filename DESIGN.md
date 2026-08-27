@@ -684,6 +684,9 @@ Required sprite IDs (all must exist in `web/public/icons.svg`):
 | `#icon-chevron-down`| Sort indicator in table headers                   |
 | `#icon-external`    | Links to osv.dev, signature artifacts, SBOM       |
 | `#icon-search`      | Search bar leading icon                           |
+| `#icon-download`    | Export menu items and document download actions   |
+| `#icon-hierarchy`   | Collection badge / project hierarchy affordances  |
+| `#icon-layers`      | Projects nav item                                 |
 
 ---
 

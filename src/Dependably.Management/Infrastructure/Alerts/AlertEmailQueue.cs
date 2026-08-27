@@ -75,10 +75,14 @@ public sealed class AlertEmailQueue : IAlertNotifier
     /// alert, by falling through to a fresh enqueue.
     /// </para>
     /// </summary>
-    public async Task NotifyAsync(AlertRecord alert, CancellationToken ct = default)
+    public Task NotifyAsync(AlertRecord alert, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(alert);
+        return NotifyCoreAsync(alert, ct);
+    }
 
+    private async Task NotifyCoreAsync(AlertRecord alert, CancellationToken ct)
+    {
         string[]? resolved = await ResolveChannelAsync(alert, ct);
         if (resolved is null)
         {
@@ -157,7 +161,7 @@ public sealed class AlertEmailQueue : IAlertNotifier
         try
         {
             await _alerts.RecordEmailOutcomeAsync(
-                alert.OrgId, alert.Id, "coalesced",
+                alert.OrgId, alert.Id, AlertEmailStatuses.Coalesced,
                 $"Folded into a pending digest ({occurrenceCount} occurrence(s)); the digest's own "
                 + "delivery outcome lands on the alert that opened it.",
                 ct);
@@ -208,7 +212,8 @@ public sealed class AlertEmailQueue : IAlertNotifier
 
         try
         {
-            await _alerts.RecordEmailOutcomeAsync(alert.OrgId, alert.Id, "failed", reason, ct);
+            await _alerts.RecordEmailOutcomeAsync(
+                alert.OrgId, alert.Id, AlertEmailStatuses.Failed, reason, ct);
             await _settings.RecordEmailFailureAsync(alert.OrgId, reason, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

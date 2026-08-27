@@ -84,9 +84,7 @@ public sealed class QuarantineRepository
         // Substring search over the queue's human-readable columns. The wildcards a package name
         // can legitimately contain are escaped first: PyPI names routinely carry '_', which LIKE
         // reads as "any single character", so an unescaped 'my_pkg' also matches 'myXpkg'.
-        string? escapedSearch = query.Search
-            ?.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
-        string? searchPattern = escapedSearch is not null ? $"%{escapedSearch.ToLowerInvariant()}%" : null;
+        string? searchPattern = LikePattern.ContainsLower(query.Search);
 
         var sqlParams = new
         {

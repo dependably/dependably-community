@@ -6,8 +6,10 @@
   import SettingsInstanceEmail from '../lib/settings/SettingsInstanceEmail.svelte'
   import SettingsRelayHealth from '../lib/settings/SettingsRelayHealth.svelte'
   import SystemSlackConfig from '../lib/settings/SystemSlackConfig.svelte'
+  import SettingsVulnTracker from '../lib/settings/SettingsVulnTracker.svelte'
+  import SettingsVulnTrackerHealth from '../lib/settings/SettingsVulnTrackerHealth.svelte'
 
-  let activeTab = 'instance'  // 'instance' | 'metrics' | 'email' | 'slack'
+  let activeTab = 'instance'  // 'instance' | 'metrics' | 'email' | 'slack' | 'vulnTracker'
 </script>
 
 <div class="page">
@@ -27,6 +29,9 @@
     <button class="tab" class:active={activeTab === 'slack'}
             role="tab" aria-selected={activeTab === 'slack'}
             on:click={() => activeTab = 'slack'}>{$t('system.settings.tabs.slack')}</button>
+    <button class="tab" class:active={activeTab === 'vulnTracker'}
+            role="tab" aria-selected={activeTab === 'vulnTracker'}
+            on:click={() => activeTab = 'vulnTracker'}>{$t('system.settings.tabs.vulnTracker')}</button>
   </div>
 
   {#if activeTab === 'instance'}
@@ -40,8 +45,17 @@
       testSend={systemApi.testEmailConfig}
     />
     <SettingsRelayHealth getHealth={systemApi.getEmailHealth} />
-  {:else}
+  {:else if activeTab === 'slack'}
     <SystemSlackConfig />
+  {:else}
+    <SettingsVulnTracker
+      getConfig={systemApi.getVulnTrackerConfig}
+      updateConfig={systemApi.updateVulnTrackerConfig}
+    />
+    <SettingsVulnTrackerHealth
+      getHealth={systemApi.getVulnTrackerHealth}
+      testConnection={systemApi.testVulnTrackerConfig}
+    />
   {/if}
 </div>
 

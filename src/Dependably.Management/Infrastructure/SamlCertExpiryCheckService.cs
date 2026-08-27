@@ -18,6 +18,19 @@ namespace Dependably.Infrastructure;
 ///   SAML_CERT_EXPIRY_WARN_DAYS — comma-separated list of day thresholds (default "30,14,7,1")
 ///   SAML_CERT_EXPIRY_SCHEDULE  — cron expression in standard format (default "0 6 * * *", 06:00 UTC)
 ///   SAML_CERT_EXPIRY_JITTER_SECONDS — max random jitter added to the scheduled time (default 1800)
+///
+/// suspension-ok: this sweep does not skip a suspended/archived/deleting org (see TenantLifecycle
+/// for the rule every other per-tenant scheduled job follows), on the same reasoning as
+/// SiemForwarderQueue's own exemption — the audience for the alert this pass emits is the
+/// operator, not the tenant: it is an audit_log write platform admins read cross-tenant, and this
+/// class doc already calls the alert stages "operator notifications". A suspended tenant is
+/// exactly who the operator most needs a warning about — their IdP signing cert can still expire
+/// while they are locked out, and reinstating them re-enables SSO immediately; skipping the sweep
+/// would silence that warning and let SSO break at reinstatement with no prior signal, which is
+/// the opposite of what suspending a tenant for abuse or non-payment is supposed to buy an
+/// operator. Excluding a soft-deleted org (o.deleted_at IS NULL, still applied in
+/// SamlConfigRepository.GetAllCertRowsAsync) is unaffected by this: a tenant pending hard-delete
+/// genuinely has no reinstatement path this alert could be warning about.
 /// </summary>
 public sealed class SamlCertExpiryCheckService : BackgroundService
 {

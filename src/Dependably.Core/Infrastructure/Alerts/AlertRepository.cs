@@ -203,15 +203,19 @@ public sealed class AlertRepository
             """
             SELECT quarantine_alerts_enabled AS QuarantineAlertsEnabled,
                    vuln_alerts_enabled AS VulnAlertsEnabled,
+                   sbom_policy_alerts_enabled AS SbomPolicyAlertsEnabled,
                    vuln_min_severity AS VulnMinSeverity
             FROM alert_settings WHERE org_id = @orgId
             """,
             new { orgId });
 
         return row is null
-            ? new AlertRaiseSettings(QuarantineAlertsEnabled: true, VulnAlertsEnabled: true, VulnMinSeverity: "HIGH")
+            ? new AlertRaiseSettings(
+                QuarantineAlertsEnabled: true, VulnAlertsEnabled: true,
+                SbomPolicyAlertsEnabled: true, VulnMinSeverity: "HIGH")
             : new AlertRaiseSettings(
-                row.QuarantineAlertsEnabled != 0, row.VulnAlertsEnabled != 0, row.VulnMinSeverity);
+                row.QuarantineAlertsEnabled != 0, row.VulnAlertsEnabled != 0,
+                row.SbomPolicyAlertsEnabled != 0, row.VulnMinSeverity);
     }
 
     // Integer columns bind as long, and [ExplicitConstructor] is what lets one signature serve
@@ -220,7 +224,7 @@ public sealed class AlertRepository
     // DapperPositionalRecordComplianceTests. Converted to bool in GetRaiseSettingsAsync.
     [method: ExplicitConstructor]
     private sealed record RawRaiseSettings(
-        long QuarantineAlertsEnabled, long VulnAlertsEnabled, string VulnMinSeverity);
+        long QuarantineAlertsEnabled, long VulnAlertsEnabled, long SbomPolicyAlertsEnabled, string VulnMinSeverity);
 }
 
 /// <summary>Fields required to raise a new alert (before the id/state/timestamps are assigned).</summary>
@@ -257,4 +261,4 @@ public sealed record AlertRecord(
 
 /// <summary>The subset of <c>alert_settings</c> that gates whether raising happens at all.</summary>
 public sealed record AlertRaiseSettings(
-    bool QuarantineAlertsEnabled, bool VulnAlertsEnabled, string VulnMinSeverity);
+    bool QuarantineAlertsEnabled, bool VulnAlertsEnabled, bool SbomPolicyAlertsEnabled, string VulnMinSeverity);

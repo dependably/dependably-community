@@ -14,7 +14,7 @@ public static partial class RpmArtifactValidator
     public const int MinimumValidSize = 96 + 16; // lead + header intro
     public static readonly Regex NameRegex = NameRegexCompiled();
 
-    [GeneratedRegex(@"^[A-Za-z0-9._+\-]+$")]
+    [GeneratedRegex(@"^[A-Za-z0-9._+\-]+\z")]
     private static partial Regex NameRegexCompiled();
 
     /// <summary>

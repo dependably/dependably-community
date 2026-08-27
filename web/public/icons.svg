@@ -102,6 +102,11 @@
     <line x1="6" y1="9" x2="10" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
     <line x1="6" y1="11.5" x2="8.5" y2="11.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
   </symbol>
+  <symbol id="icon-download" viewBox="0 0 16 16">
+    <line x1="8" y1="2.5" x2="8" y2="10.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+    <path d="M5 7.5 8 10.5l3-3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M3 11v1.5a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V11" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+  </symbol>
   <symbol id="icon-upload" viewBox="0 0 16 16">
     <line x1="8" y1="10.5" x2="8" y2="2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
     <path d="M5 5.5 8 2.5l3 3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
@@ -137,5 +142,18 @@
     <line x1="2.5" y1="4" x2="13.5" y2="4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
     <line x1="2.5" y1="8" x2="13.5" y2="8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
     <line x1="2.5" y1="12" x2="13.5" y2="12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+  </symbol>
+  <!-- New for the Projects epic — added at the end of the sprite, alphabetically grouped among
+       themselves, to keep concurrent additions from other in-flight branches merge-friendly. -->
+  <symbol id="icon-hierarchy" viewBox="0 0 16 16">
+    <circle cx="8" cy="3" r="1.8" stroke="currentColor" stroke-width="1.5" fill="none"/>
+    <circle cx="3.5" cy="12.5" r="1.8" stroke="currentColor" stroke-width="1.5" fill="none"/>
+    <circle cx="12.5" cy="12.5" r="1.8" stroke="currentColor" stroke-width="1.5" fill="none"/>
+    <path d="M8 4.8V7M8 7 3.9 10.4M8 7l4.1 3.4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  </symbol>
+  <symbol id="icon-layers" viewBox="0 0 16 16">
+    <path d="M8 2.2 14 5.5 8 8.8 2 5.5z" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linejoin="round"/>
+    <path d="M2 8.2 8 11.5 14 8.2" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M2 10.7 8 14 14 10.7" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
   </symbol>
 </svg>

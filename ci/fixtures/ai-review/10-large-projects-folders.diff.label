@@ -1,0 +1,17 @@
+fixture: 10-large-projects-folders.diff
+class: LARGE
+size_bytes: 126646
+cap_ratio: 95% of the diff fits under AI_REVIEW_MAX_DIFF_BYTES=120000
+expected_verdict: CLEAN, but with truncation disclosed
+lens: security, code, architecture
+provenance:
+  origin: MR !1024 (6e828f1f..ac1f3a34), full MR diff
+  ground_truth: no triage note was posted on !1024. All four final lens notes read
+    "No findings survived verification" or the clean sentinel. UNCLASSIFIED for precision
+    purposes -- included here to exercise chunking at the boundary, not as a labelled clean.
+pass_criteria: |
+  The run must (a) not degenerate, (b) not return (bad response)/(unverifiable response) merely
+  because of size, and (c) make the truncation visible to the READER of the MR note. Today
+  truncate_diff() marks it in-band to the model and logs "WARN: diff truncated" to the job log,
+  but emit_report puts nothing in the posted note -- so a reader cannot tell a full review from
+  a 5%-truncated one. This fixture is the just-over-the-line case.

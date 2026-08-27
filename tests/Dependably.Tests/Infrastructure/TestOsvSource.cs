@@ -4,16 +4,23 @@ using NSubstitute;
 namespace Dependably.Tests.Infrastructure;
 
 /// <summary>
-/// Factory for <see cref="IOsvSource"/> test doubles that configures ALL FOUR members —
-/// <c>QueryAsync</c>, <c>QueryBatchAsync</c>, and the reachability-reporting
-/// <c>TryQueryAsync</c>/<c>TryQueryBatchAsync</c> pair — from one advisory selector.
+/// Factory for <see cref="IOsvSource"/> test doubles that configures ALL FIVE members —
+/// <c>QueryAsync</c>, <c>QueryBatchAsync</c>, the reachability-reporting
+/// <c>TryQueryAsync</c>/<c>TryQueryBatchAsync</c> pair, and <c>HasCoverageFor</c> — from one
+/// advisory selector.
 ///
-/// Configuring only the non-<c>Try</c> pair is a silent trap: <see cref="IOsvSource"/> declares
-/// the <c>Try</c> variants as default interface implementations, NSubstitute intercepts them like
-/// any other virtual member, and an unconfigured call answers a null
-/// <see cref="OsvQueryResult"/> — which <see cref="Dependably.Infrastructure.VulnerabilityScanService"/>
-/// correctly treats as "source not reached" and refuses to record as a scan. Every double goes
-/// through here so the reachability signal is always explicit.
+/// Configuring only a subset is a silent trap: <see cref="IOsvSource"/> declares
+/// <c>TryQueryAsync</c>/<c>TryQueryBatchAsync</c>/<c>HasCoverageFor</c> as default interface
+/// implementations, NSubstitute intercepts them like any other virtual member, and an
+/// unconfigured call does **not** fall through to the interface's own default body — it answers
+/// NSubstitute's auto-value for the return type instead (<see langword="null"/> for a reference
+/// type, <see langword="false"/> for <c>Task&lt;bool&gt;</c>'s inner value). Left unconfigured,
+/// <c>HasCoverageFor</c> would silently answer <see langword="false"/> for every ecosystem on
+/// every test double built here — <see cref="Dependably.Infrastructure.VulnerabilityScanService"/>
+/// reads that as "no dynamic coverage" and skips persistence entirely, which is indistinguishable
+/// from a real regression until a scan-pass assertion mysteriously finds nothing written. Every
+/// double goes through here so the reachability signal — and now the coverage signal — is always
+/// explicit.
 /// </summary>
 public static class TestOsvSource
 {
@@ -41,6 +48,14 @@ public static class TestOsvSource
         osv.TryQueryBatchAsync(Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>())
             .Returns(call => Task.FromResult(
                 new OsvBatchQueryResult(Batch(call.ArgAt<IReadOnlyList<string>>(0), select), reached)));
+
+        // Mirrors OsvClient's real behaviour (defer entirely to the static gate) rather than
+        // LocalOsvSource's RPM-specific dynamic narrowing — this double models a generic working
+        // source, and a test that needs to pin the dynamic no-coverage case exercises a real
+        // LocalOsvSource against a temp dump directory instead (see
+        // VulnerabilityScanRpmLocalCoverageTests), where the behaviour actually lives.
+        osv.HasCoverageFor(Arg.Any<string?>())
+            .Returns(call => Task.FromResult(OsvFeedCoverage.HasAdvisoryFeed(call.ArgAt<string?>(0))));
 
         return osv;
     }

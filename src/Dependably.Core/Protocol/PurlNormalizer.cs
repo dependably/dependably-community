@@ -63,18 +63,58 @@ public static partial class PurlNormalizer
         => $"pkg:maven/{groupId}/{artifactId}@{version}";
 
     /// <summary>
-    /// Canonical RPM PURL: <c>pkg:rpm/{name}@{version}-{release}?arch={arch}[&amp;epoch={n}]</c>.
-    /// Name is lowercased (rpm package names are case-insensitive); epoch is omitted from
-    /// the qualifier list when zero so the most common (non-epoch) form stays terse.
+    /// Canonical RPM PURL: <c>pkg:rpm/{name}@{version}-{release}?arch={arch}[&amp;epoch={n}]</c>,
+    /// or, when <paramref name="distroNamespace"/> is supplied,
+    /// <c>pkg:rpm/{distroNamespace}/{name}@{version}-{release}?arch={arch}[&amp;epoch={n}]</c> —
+    /// the purl-spec namespace segment OSV.dev's RPM ecosystems require to resolve a query at all
+    /// (see <see cref="RpmVendorDistroResolver"/> for how the namespace is derived and the source
+    /// grounding for the segment placement). Name is lowercased (rpm package names are
+    /// case-insensitive); epoch is omitted from the qualifier list when zero so the most common
+    /// (non-epoch) form stays terse. <paramref name="distroNamespace"/> is null for every caller
+    /// that cannot determine the artefact's distro lineage — the bare, unnamespaced form this
+    /// method has always produced.
     /// </summary>
-    public static string Rpm(string name, string version, string release, string arch, int epoch = 0)
+    public static string Rpm(
+        string name, string version, string release, string arch, int epoch = 0,
+        string? distroNamespace = null)
     {
         string normalizedName = name.ToLowerInvariant();
         string versionRelease = $"{version}-{release}";
         string qualifiers = epoch != 0
             ? $"arch={arch}&epoch={epoch}"
             : $"arch={arch}";
-        return $"pkg:rpm/{normalizedName}@{versionRelease}?{qualifiers}";
+        string namespaceSegment = string.IsNullOrEmpty(distroNamespace) ? "" : $"{distroNamespace}/";
+        return $"pkg:rpm/{namespaceSegment}{normalizedName}@{versionRelease}?{qualifiers}";
+    }
+
+    /// <summary>
+    /// True when an RPM purl carries a namespace segment matching one of OSV.dev's registered RPM
+    /// distro namespaces (<see cref="RpmVendorDistroResolver.KnownNamespaces"/>) — a pure
+    /// string-shape check on the purl itself, requiring no data access, because the
+    /// distro-or-unknown decision was already made when the purl was constructed (see
+    /// <see cref="Rpm"/>). Used to gate vulnerability-scan stamping: an RPM purl with no
+    /// resolvable namespace queries OSV.dev exactly as unresolvably as a bare <c>pkg:rpm/...</c>
+    /// purl always has, so it must not be treated as genuinely screened.
+    /// </summary>
+    public static bool RpmHasKnownDistro(string purl)
+    {
+        const string prefix = "pkg:rpm/";
+        if (string.IsNullOrEmpty(purl) || !purl.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        string rest = purl[prefix.Length..];
+        int atIndex = rest.IndexOf('@');
+        int slashIndex = rest.IndexOf('/');
+        if (slashIndex < 0 || (atIndex >= 0 && slashIndex > atIndex))
+        {
+            // No namespace segment before the version delimiter: the bare pkg:rpm/{name}@... form.
+            return false;
+        }
+
+        string namespaceSegment = rest[..slashIndex];
+        return RpmVendorDistroResolver.KnownNamespaces.Contains(namespaceSegment, StringComparer.Ordinal);
     }
 
     /// <summary>

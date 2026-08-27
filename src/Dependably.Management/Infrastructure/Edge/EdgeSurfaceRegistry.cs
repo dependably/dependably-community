@@ -53,12 +53,18 @@ public static class EdgeSurfaceRegistry
         typeof(Api.ClaimsController),
         typeof(Api.NameGrantsController),
         typeof(Api.VulnerabilityController),
+        typeof(Api.SbomScanController),
         typeof(Api.LicenseController),
         typeof(Api.LicensesController),
         typeof(Api.SpdxLicenseController),
         typeof(Api.PackageNoteController),
+        typeof(Api.ProjectsController),
 
         typeof(Api.RemediationController),
+        typeof(Api.SbomController),
+        typeof(Api.SbomAnalysisController),
+        typeof(Api.BlastRadiusController),
+        typeof(Api.SbomExportController),
     };
 
     /// <summary>

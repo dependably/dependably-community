@@ -261,6 +261,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         {
             keep_versions = settings?.KeepVersions,
             keep_days = settings?.KeepDays,
+            keep_project_versions = settings?.KeepProjectVersions,
             activity_retention_days = settings?.ActivityRetentionDays,
             purge_unlisted_after_days = settings?.PurgeUnlistedAfterDays,
             // Unlike the other three, a NULL activity_retention_days is NOT unlimited — it
@@ -290,7 +291,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
 
         string orgId = CurrentTenantId();
         await _settings.UpsertRetentionAsync(orgId, req.KeepVersions, req.KeepDays, req.ActivityRetentionDays,
-            req.PurgeUnlistedAfterDays, ct);
+            req.PurgeUnlistedAfterDays, req.KeepProjectVersions, ct);
 
         // Only the fields the caller actually sent. Logging all four would record an absent
         // field as an explicit null — i.e. claim the operator set it to unlimited when the write
@@ -300,6 +301,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         AddIfPresent(changed, "keep_days", req.KeepDays);
         AddIfPresent(changed, "activity_retention_days", req.ActivityRetentionDays);
         AddIfPresent(changed, "purge_unlisted_after_days", req.PurgeUnlistedAfterDays);
+        AddIfPresent(changed, "keep_project_versions", req.KeepProjectVersions);
 
         await _audit.LogAsync("retention_updated", orgId, GetUserId(),
             detail: System.Text.Json.JsonSerializer.Serialize(
@@ -328,7 +330,9 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                     ? _problems.ValidationErrorActionKey("activity_retention_days", "error.settings.retentionRange")
                     : Negative(req.PurgeUnlistedAfterDays)
                         ? _problems.ValidationErrorActionKey("purge_unlisted_after_days", "error.settings.retentionRange")
-                        : null;
+                        : Negative(req.KeepProjectVersions)
+                            ? _problems.ValidationErrorActionKey("keep_project_versions", "error.settings.retentionRange")
+                            : null;
 
     // An absent field is not a value and cannot be out of range; an explicit null clears the
     // dimension and is always legal. Only a present, negative number is rejected.
@@ -357,6 +361,9 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
             block_revoked = settings?.BlockRevoked ?? "warn",
             block_malicious = settings?.BlockMalicious ?? "block",
             block_kev = settings?.BlockKev ?? "off",
+            block_kev_ransomware = settings?.BlockKevRansomware ?? "off",
+            block_ssvc_exploitation = settings?.BlockSsvcExploitation ?? "off",
+            max_epss_percentile_tolerance = settings?.MaxEpssPercentileTolerance,
             max_epss_tolerance = settings?.MaxEpssTolerance,
             block_install_scripts = settings?.BlockInstallScripts ?? "off",
             verify_npm_signatures = settings?.VerifyNpmSignatures ?? "off",
@@ -421,7 +428,8 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
 
         var blockPolicyError = ValidateBlockPolicyFields(req,
             out string? blockMalicious, out string? blockKev, out string? blockInstallScripts,
-            out string? blockRevoked);
+            out string? blockRevoked, out string? blockKevRansomware,
+            out string? blockSsvcExploitation);
         if (blockPolicyError is not null)
         {
             return blockPolicyError;
@@ -441,7 +449,10 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                 blockDeprecated, blockMalicious, blockKev, req.MaxEpssTolerance, blockInstallScripts,
                 sigVerify.VerifyNpmSignatures, sigVerify.VerifyNuGetSignatures, sigVerify.VerifyPyPiAttestations,
                 sigVerify.VerifyRpmSignatures, sigVerify.VerifyMavenSignatures, blockRevoked,
-                sigVerify.VerifyTerraformSignatures),
+                sigVerify.VerifyTerraformSignatures,
+                BlockKevRansomware: blockKevRansomware,
+                MaxEpssPercentileTolerance: req.MaxEpssPercentileTolerance,
+                BlockSsvcExploitation: blockSsvcExploitation),
             ct);
 
         // The block/verify gates and thresholds just persisted can flip the advertised state of
@@ -469,6 +480,10 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                 block_revoked = blockRevoked,
                 block_malicious = blockMalicious,
                 block_kev = blockKev,
+                block_kev_ransomware = blockKevRansomware,
+                block_ssvc_exploitation = blockSsvcExploitation,
+                max_epss_percentile_tolerance = req.MaxEpssPercentileTolerance.IsPresent
+                    ? req.MaxEpssPercentileTolerance.Value : null,
                 max_epss_tolerance = AuditProxySettingValue(req.MaxEpssTolerance),
                 block_install_scripts = blockInstallScripts,
                 verify_npm_signatures = sigVerify.VerifyNpmSignatures,
@@ -569,10 +584,13 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
     private IActionResult? ValidateBlockPolicyFields(
         UpdateProxySettingsRequest req,
         out string? blockMalicious, out string? blockKev, out string? blockInstallScripts,
-        out string? blockRevoked)
+        out string? blockRevoked, out string? blockKevRansomware,
+        out string? blockSsvcExploitation)
     {
         blockMalicious = req.BlockMalicious;
         blockKev = req.BlockKev;
+        blockKevRansomware = req.BlockKevRansomware;
+        blockSsvcExploitation = req.BlockSsvcExploitation;
         blockInstallScripts = req.BlockInstallScripts;
         blockRevoked = req.BlockRevoked;
 
@@ -584,6 +602,18 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         if (blockKev is not (null or "off" or "warn" or "block"))
         {
             return _problems.ValidationErrorActionKey("block_kev", "error.settings.offWarnBlock");
+        }
+
+        if (blockKevRansomware is not (null or "off" or "warn" or "block"))
+        {
+            return _problems.ValidationErrorActionKey(
+                "block_kev_ransomware", "error.settings.offWarnBlock");
+        }
+
+        if (blockSsvcExploitation is not (null or "off" or "warn" or "block"))
+        {
+            return _problems.ValidationErrorActionKey(
+                "block_ssvc_exploitation", "error.settings.offWarnBlock");
         }
 
         if (blockInstallScripts is not (null or "off" or "warn" or "block"))

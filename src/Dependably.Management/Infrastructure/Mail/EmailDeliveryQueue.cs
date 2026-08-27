@@ -28,6 +28,16 @@ namespace Dependably.Infrastructure.Mail;
 /// (<see cref="IEmailDeliveryJob.RecordSuccessAsync"/> /
 /// <see cref="IEmailDeliveryJob.RecordFailureAsync"/>) — this queue only decides when to call them.
 /// </para>
+///
+/// <para>
+/// suspension-ok: <see cref="IEmailDeliveryJob"/> is deliberately org-agnostic — it resolves its
+/// own transport and recipients and carries no OrgId this queue could check. New work can only
+/// reach this queue through a request TenantStatusEnforcementMiddleware has already refused for a
+/// non-active org (login, password reset, email-change are all behind the lockout, none on the
+/// exempt-path allowlist), so the residual is bounded to whatever was already in flight the
+/// instant suspension landed — the same one-shot, individually re-requestable credential the class
+/// doc above already treats as acceptable to lose entirely, let alone delay.
+/// </para>
 /// </summary>
 public sealed class EmailDeliveryQueue : BackgroundService
 {

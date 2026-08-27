@@ -235,6 +235,228 @@ public sealed class PackageAnalyticsRepositoryTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Coverage_counts_scanned_and_unscanned_across_both_planes_and_treats_deferred_as_unscanned()
+    {
+        await using var conn = await _db.OpenAsync();
+
+        // Uploaded plane: one scanned, one never scanned (vuln_checked_at NULL by omission).
+        await conn.ExecuteAsync(
+            "INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy) VALUES ('p1','o1','npm','mine','mine',0)");
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO package_versions (id, package_id, version, purl, blob_key, origin, vuln_checked_at) VALUES
+              ('v-scanned',   'p1','1.0.0','pkg:npm/mine@1.0.0','registry/v1','uploaded','2026-06-15T12:00:00Z'),
+              ('v-unscanned', 'p1','2.0.0','pkg:npm/mine@2.0.0','registry/v2','uploaded',NULL)
+            """);
+
+        // Proxy plane, org-scoped via tenant_artifact_access: one scanned, one deferred (also NULL —
+        // VulnerabilityScanService leaves it NULL rather than stamping a false "scanned" when the
+        // OSV source was unreachable, so a deferred row must read identically to a never-scanned one).
+        // purl is set on both — the scanned/unscanned buckets now require it, matching the
+        // scanner's own domain (a purl-NULL row is a separate, structural exclusion — see the
+        // dedicated test below).
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash, purl, vuln_checked_at) VALUES
+              ('ca-scanned', 'npm','left-pad','1.0.0','left-pad-1.0.0.tgz','proxy/a','a-hash','pkg:npm/left-pad@1.0.0','2026-06-15T12:00:00Z'),
+              ('ca-deferred','npm','right-pad','1.0.0','right-pad-1.0.0.tgz','proxy/b','b-hash','pkg:npm/right-pad@1.0.0',NULL)
+            """);
+        await conn.ExecuteAsync(
+            "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES ('o1','ca-scanned'), ('o1','ca-deferred')");
+
+        // Another tenant's coverage must not leak into o1's counts — on BOTH planes. The uploaded
+        // plane alone cannot discriminate a query that dropped the tenant_artifact_access
+        // join/filter and counted the global cache_artifact table directly; ca-other is what does.
+        await conn.ExecuteAsync(
+            "INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy) VALUES ('p2','o2','npm','theirs','theirs',0)");
+        await conn.ExecuteAsync(
+            "INSERT INTO package_versions (id, package_id, version, purl, blob_key, origin, vuln_checked_at) " +
+            "VALUES ('v-other','p2','1.0.0','pkg:npm/theirs@1.0.0','registry/other','uploaded','2026-06-15T12:00:00Z')");
+        await conn.ExecuteAsync(
+            "INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash, purl, vuln_checked_at) " +
+            "VALUES ('ca-other','npm','their-pad','1.0.0','their-pad-1.0.0.tgz','proxy/c','c-hash','pkg:npm/their-pad@1.0.0','2026-06-15T12:00:00Z')");
+        await conn.ExecuteAsync(
+            "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES ('o2','ca-other')");
+
+        var stats = await new PackageAnalyticsRepository(_db).GetOrgStatsAsync("o1");
+
+        Assert.Equal(2, stats.ScannedVersionCount);    // v-scanned, ca-scanned (o2's ca-other excluded)
+        Assert.Equal(2, stats.UnscannedVersionCount);  // v-unscanned (never scanned), ca-deferred (deferred)
+        Assert.Equal(0, stats.NoFeedVersionCount);
+    }
+
+    [Fact]
+    public async Task Coverage_reads_zero_zero_for_an_org_with_no_versions_on_either_plane()
+    {
+        var stats = await new PackageAnalyticsRepository(_db).GetOrgStatsAsync("o1");
+
+        Assert.Equal(0, stats.ScannedVersionCount);
+        Assert.Equal(0, stats.UnscannedVersionCount);
+        Assert.Equal(0, stats.NoFeedVersionCount);
+    }
+
+    // The regression this pins: an org whose only artefacts are in a NoFeedEcosystems ecosystem
+    // (OCI here) must never read as "unscanned" — vuln_checked_at is permanently NULL for those
+    // rows (VulnerabilityScanService's own scan-pass query excludes them), so folding them into
+    // "unscanned" would show 0% scanned forever with no operator action able to move the number.
+    [Fact]
+    public async Task Coverage_buckets_a_no_feed_ecosystem_version_separately_from_scanned_or_unscanned()
+    {
+        await using var conn = await _db.OpenAsync();
+
+        await conn.ExecuteAsync(
+            "INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy) VALUES ('p1','o1','oci','image','image',0)");
+        await conn.ExecuteAsync(
+            "INSERT INTO package_versions (id, package_id, version, purl, blob_key, origin, vuln_checked_at) " +
+            "VALUES ('v-oci','p1','1.0.0','pkg:oci/image@1.0.0','registry/v1','uploaded',NULL)");
+
+        // A scannable npm row alongside it, so the test also pins that the no-feed row does not
+        // leak into either of the other two buckets.
+        await conn.ExecuteAsync(
+            "INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy) VALUES ('p2','o1','npm','mine','mine',0)");
+        await conn.ExecuteAsync(
+            "INSERT INTO package_versions (id, package_id, version, purl, blob_key, origin, vuln_checked_at) " +
+            "VALUES ('v-npm','p2','1.0.0','pkg:npm/mine@1.0.0','registry/v2','uploaded','2026-06-15T12:00:00Z')");
+
+        var stats = await new PackageAnalyticsRepository(_db).GetOrgStatsAsync("o1");
+
+        Assert.Equal(1, stats.ScannedVersionCount);    // v-npm only
+        Assert.Equal(0, stats.UnscannedVersionCount);  // v-oci must NOT land here
+        Assert.Equal(1, stats.NoFeedVersionCount);     // v-oci
+    }
+
+    // A cache_artifact whose purl hasn't resolved yet is a structural non-participant in the
+    // scanner's own domain (VulnerabilityScanService's cache-plane arm requires purl IS NOT NULL) —
+    // it must not inflate any of the three buckets, including no-feed (its ecosystem here has a
+    // feed; the exclusion is purl, not ecosystem).
+    [Fact]
+    public async Task Coverage_excludes_a_purl_null_cache_artifact_from_every_bucket()
+    {
+        await using var conn = await _db.OpenAsync();
+
+        await conn.ExecuteAsync(
+            "INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash, vuln_checked_at) " +
+            "VALUES ('ca-nopurl','npm','unresolved','1.0.0','unresolved-1.0.0.tgz','proxy/z','z-hash','2026-06-15T12:00:00Z')");
+        await conn.ExecuteAsync(
+            "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES ('o1','ca-nopurl')");
+
+        var stats = await new PackageAnalyticsRepository(_db).GetOrgStatsAsync("o1");
+
+        Assert.Equal(0, stats.ScannedVersionCount);
+        Assert.Equal(0, stats.UnscannedVersionCount);
+        Assert.Equal(0, stats.NoFeedVersionCount);
+    }
+
+    [Fact]
+    public async Task Active_overrides_counts_approved_rows_and_reports_the_oldest_ones_age_in_whole_days()
+    {
+        var clock = TestTime.Frozen(); // now = 2026-06-15T12:00:00Z
+        await using var conn = await _db.OpenAsync();
+
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO quarantine (id, org_id, ecosystem, purl, gate, state, decided_at) VALUES
+              ('q-old',     'o1', 'npm', 'pkg:npm/old@1',     'malicious',  'approved', '2026-06-10T12:00:00Z'),
+              ('q-newer',   'o1', 'npm', 'pkg:npm/newer@1',   'kev',        'approved', '2026-06-14T12:00:00Z'),
+              ('q-pending', 'o1', 'npm', 'pkg:npm/pending@1', 'epss',       'pending',  NULL),
+              ('q-denied',  'o1', 'npm', 'pkg:npm/denied@1',  'epss',       'denied',   '2026-06-01T12:00:00Z')
+            """);
+        // Another tenant's approved override must not leak into o1's count or oldest-age figure.
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO quarantine (id, org_id, ecosystem, purl, gate, state, decided_at) VALUES
+              ('q-other', 'o2', 'npm', 'pkg:npm/other@1', 'malicious', 'approved', '2020-01-01T00:00:00Z')
+            """);
+
+        var stats = await new PackageAnalyticsRepository(_db, time: clock).GetOrgStatsAsync("o1");
+
+        Assert.Equal(2, stats.ActiveOverrideCount);           // q-old, q-newer (pending/denied/other-tenant excluded)
+        Assert.Equal(5, stats.OldestActiveOverrideDays);      // q-old decided 5 days before the frozen clock
+    }
+
+    [Fact]
+    public async Task Active_overrides_reads_zero_and_null_oldest_age_when_none_are_approved()
+    {
+        var stats = await new PackageAnalyticsRepository(_db).GetOrgStatsAsync("o1");
+
+        Assert.Equal(0, stats.ActiveOverrideCount);
+        Assert.Null(stats.OldestActiveOverrideDays);
+    }
+
+    [Fact]
+    public async Task Projects_tile_counts_by_latest_version_policy_status_and_totals_all_projects()
+    {
+        // Three projects: one pass, one warn, one never evaluated (a project_versions.policy_status
+        // NULL, which must be its own bucket — never folded into 'pass'). A fourth project has a
+        // superseded (is_latest=0) violation version, which must not count: only the is_latest row
+        // is the one the tile and the projects list agree on.
+        await SeedProjectAsync("o1", "p-pass", "1.0.0", isLatest: true, policyStatus: "pass");
+        await SeedProjectAsync("o1", "p-warn", "1.0.0", isLatest: true, policyStatus: "warn");
+        await SeedProjectAsync("o1", "p-unevaluated", "1.0.0", isLatest: true, policyStatus: null);
+        string supersededProjectId = await SeedProjectAsync(
+            "o1", "p-superseded", "1.0.0", isLatest: false, policyStatus: "violation");
+        await SeedVersionAsync("o1", supersededProjectId, "2.0.0", isLatest: true, policyStatus: "pass");
+
+        // A collection (folder) holds no versions and so contributes nothing to the
+        // policy-status breakdown — it must also be excluded from the headline total, or the
+        // tile's own parts stop summing to its own headline.
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO projects (id, org_id, name, kind) VALUES (@id, 'o1', 'a-folder', 'collection')",
+                new { id = Guid.NewGuid().ToString("N") });
+        }
+
+        // Another tenant's projects must not leak into o1's tile (org_id scoping).
+        await SeedProjectAsync("o2", "other-project", "1.0.0", isLatest: true, policyStatus: "violation");
+
+        var stats = await new PackageAnalyticsRepository(_db).GetOrgStatsAsync("o1");
+
+        var byStatus = stats.ProjectVersionPolicyStatus!.ToDictionary(s => s.Status, s => s.Count);
+        Assert.Equal(2, byStatus["pass"]); // p-pass, and p-superseded's own is_latest=1.0.0→2.0.0 row
+        Assert.Equal(1, byStatus["warn"]);
+        Assert.Equal(1, byStatus["unevaluated"]);
+        Assert.False(byStatus.ContainsKey("violation")); // the superseded row must not surface at all
+
+        // The headline is the sum of its own sub-line, collection excluded — a reader must be
+        // able to reconcile the tile without a caveat.
+        Assert.Equal(4, stats.TotalProjects);
+        Assert.Equal(stats.TotalProjects, byStatus.Values.Sum());
+    }
+
+    private async Task<string> SeedProjectAsync(
+        string orgId, string projectName, string version, bool isLatest, string? policyStatus)
+    {
+        string projectId = Guid.NewGuid().ToString("N");
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "INSERT INTO projects (id, org_id, name) VALUES (@id, @orgId, @name)",
+            new { id = projectId, orgId, name = projectName });
+        await SeedVersionAsync(orgId, projectId, version, isLatest, policyStatus);
+        return projectId;
+    }
+
+    private async Task SeedVersionAsync(
+        string orgId, string projectId, string version, bool isLatest, string? policyStatus)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO project_versions (id, org_id, project_id, version, is_latest, policy_status)
+            VALUES (@id, @orgId, @projectId, @version, @isLatest, @policyStatus)
+            """,
+            new
+            {
+                id = Guid.NewGuid().ToString("N"),
+                orgId,
+                projectId,
+                version,
+                isLatest = isLatest ? 1 : 0,
+                policyStatus,
+            });
+    }
+
+    [Fact]
     public async Task Storage_quota_is_null_when_unset_and_breakdowns_empty()
     {
         var stats = await new PackageAnalyticsRepository(_db).GetOrgStatsAsync("o1");

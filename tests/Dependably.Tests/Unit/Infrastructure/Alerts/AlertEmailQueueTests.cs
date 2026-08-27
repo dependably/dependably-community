@@ -174,8 +174,8 @@ public sealed class AlertEmailQueueTests : IAsyncLifetime
         var resolvedBreaker = breaker ?? BuildBreaker(clock);
 
         var worker = new EmailOutboxDeliveryService(
-            outbox, resolvedPolicy, resolvedBreaker, resolvedInstance, sender, alerts, settings, clock,
-            NullLogger<EmailOutboxDeliveryService>.Instance);
+                         new EmailOutboxDeliveryServices(
+                         outbox, resolvedPolicy, resolvedBreaker, resolvedInstance, sender, alerts, settings, new OrgRepository(_db), clock, NullLogger<EmailOutboxDeliveryService>.Instance));
 
         var writer = new AlertEmailQueue(
             outbox, resolvedPolicy, worker, settings, alerts, RealLocalizer(),

@@ -93,7 +93,16 @@ export default defineConfig({
       // not unlimited: a runaway loop in a spec should still be bounded.
       MANAGEMENT_RATE_LIMIT_PERMITS: '100000',
       ANON_RATE_LIMIT_PERMITS: '100000',
-      DISABLE_BACKGROUND_JOBS: 'vuln-scan,vuln-rescan,deprecation-refresh,threat-feed',
+      // The SBOM specs upload a document trio per test against one admin principal, which is
+      // most of the 30/min default in a single burst. Lifted for the same bounded-internal-client
+      // reason as the management budget above; the limiter itself is not what those specs pin.
+      SBOM_UPLOAD_RATE_LIMIT_PERMITS: '100000',
+      // sbom-scan is disabled alongside the package scanners: it queries the OSV advisory feed
+      // over the network, and every severity, CVSS and priority the project-version detail page
+      // renders is derived from what it finds. Left enabled, an upload's derived state depends on
+      // whether the runner has egress and on when the drain loop lands — the specs assert exact
+      // rows and buckets, so the fixture documents have to be the only input.
+      DISABLE_BACKGROUND_JOBS: 'vuln-scan,vuln-rescan,deprecation-refresh,threat-feed,sbom-scan',
     },
   } : undefined,
   globalSetup: './global-setup.ts',

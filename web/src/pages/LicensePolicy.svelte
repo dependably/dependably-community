@@ -111,8 +111,8 @@
                 <td class="note-cell">{e.note || '—'}</td>
                 <td>
                   <div class="badges">
-                    {#if d?.isOsiApproved}<span class="badge osi" title="OSI Approved">OSI</span>{/if}
-                    {#if d?.isFsfLibre}<span class="badge fsf" title="FSF Free/Libre">FSF</span>{/if}
+                    {#if d?.isOsiApproved}<span class="badge osi" title={$t('spdx.osiApproved')}>OSI</span>{/if}
+                    {#if d?.isFsfLibre}<span class="badge fsf" title={$t('spdx.fsfLibre')}>FSF</span>{/if}
                     {#if d?.copyleft && d.copyleft !== 'unclassified'}
                       <span class="badge cl-{d.copyleft}">{copyleftLabel(d.copyleft)}</span>
                     {/if}
@@ -165,8 +165,8 @@
                 <td class="note-cell">{e.note || $t('licensePolicy.conditional.noCondition')}</td>
                 <td>
                   <div class="badges">
-                    {#if d?.isOsiApproved}<span class="badge osi" title="OSI Approved">OSI</span>{/if}
-                    {#if d?.isFsfLibre}<span class="badge fsf" title="FSF Free/Libre">FSF</span>{/if}
+                    {#if d?.isOsiApproved}<span class="badge osi" title={$t('spdx.osiApproved')}>OSI</span>{/if}
+                    {#if d?.isFsfLibre}<span class="badge fsf" title={$t('spdx.fsfLibre')}>FSF</span>{/if}
                     {#if d?.copyleft && d.copyleft !== 'unclassified'}
                       <span class="badge cl-{d.copyleft}">{copyleftLabel(d.copyleft)}</span>
                     {/if}
@@ -216,8 +216,8 @@
                 <td class="note-cell">{e.note || '—'}</td>
                 <td>
                   <div class="badges">
-                    {#if d?.isOsiApproved}<span class="badge osi" title="OSI Approved">OSI</span>{/if}
-                    {#if d?.isFsfLibre}<span class="badge fsf" title="FSF Free/Libre">FSF</span>{/if}
+                    {#if d?.isOsiApproved}<span class="badge osi" title={$t('spdx.osiApproved')}>OSI</span>{/if}
+                    {#if d?.isFsfLibre}<span class="badge fsf" title={$t('spdx.fsfLibre')}>FSF</span>{/if}
                     {#if d?.copyleft && d.copyleft !== 'unclassified'}
                       <span class="badge cl-{d.copyleft}">{copyleftLabel(d.copyleft)}</span>
                     {/if}

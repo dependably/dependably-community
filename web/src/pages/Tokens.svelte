@@ -121,7 +121,7 @@
       <td class="t-sm" title={tok.description || ''}>{tok.description || '—'}</td>
       <td>
         <span class="badge {label}">{label === '—' ? '—' : $t('tokenScopes.' + label)}</span>
-        <span class="cap-list t-mono">{caps}</span>
+        {#if label === 'custom'}<span class="cap-list t-mono">{caps}</span>{/if}
       </td>
       <td class="text-muted">{$formatDateShort(tok.createdAt)}</td>
       <td>
@@ -162,9 +162,11 @@
 {/if}
 
 <style>
-  /* The badge is shorthand; this is the credential's actual grant. Rendered rather than
-     tucked into a title attribute because "what can this token do" is the question the
-     page exists to answer, and a tooltip is invisible to anyone comparing two rows. */
+  /* Shown only for a 'custom' badge — a token whose stored capabilities don't exactly match
+     any preset (an API-minted fine-grained grant, or a legacy token predating a preset's
+     current definition). A preset match already names the grant; the raw list would just be
+     restating it. Rendered rather than tucked into a title attribute because a tooltip is
+     invisible to anyone comparing two rows. */
   .cap-list {
     display: block;
     margin-top: 2px;

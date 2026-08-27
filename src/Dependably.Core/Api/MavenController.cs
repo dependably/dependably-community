@@ -1095,7 +1095,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
 
         EvictMavenMetadataCacheAfterPublish(orgId, coords);
 
-        Response.Headers["X-Dependably-PURL"] = purl;
+        Response.Headers["X-Dependably-PURL"] = HeaderSanitizer.Sanitize(purl);
         return StatusCode(StatusCodes.Status201Created);
     }
 

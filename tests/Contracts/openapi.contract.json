@@ -400,6 +400,36 @@
         }
       }
     },
+    "/api/v1/blast-radius/advisory": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/blast-radius/counts": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/blast-radius/package": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/api/v1/blocklist": {
       "operations": {
         "get": {
@@ -540,6 +570,42 @@
           "requiredParams": [],
           "responseCodes": [
             "204"
+          ]
+        }
+      }
+    },
+    "/api/v1/instance/vuln-tracker-config": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "put": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/instance/vuln-tracker-config/test": {
+      "operations": {
+        "post": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/instance/vuln-tracker-health": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
           ]
         }
       }
@@ -947,6 +1013,172 @@
         }
       }
     },
+    "/api/v1/projects": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "post": {
+          "requiredParams": [],
+          "responseCodes": [
+            "201"
+          ]
+        }
+      }
+    },
+    "/api/v1/projects/collections": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/projects/{projectId}": {
+      "operations": {
+        "delete": {
+          "requiredParams": [
+            "projectId"
+          ],
+          "responseCodes": [
+            "204"
+          ]
+        },
+        "get": {
+          "requiredParams": [
+            "projectId"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "patch": {
+          "requiredParams": [
+            "projectId"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/projects/{projectId}/export/sbom": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "projectId"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/projects/{projectId}/versions/{versionId}": {
+      "operations": {
+        "delete": {
+          "requiredParams": [
+            "projectId",
+            "versionId"
+          ],
+          "responseCodes": [
+            "204"
+          ]
+        }
+      }
+    },
+    "/api/v1/projects/{projectId}/versions/{versionId}/analysis": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "projectId",
+            "versionId"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "put": {
+          "requiredParams": [
+            "projectId",
+            "versionId"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/projects/{projectId}/versions/{versionId}/documents": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "projectId",
+            "versionId"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/projects/{projectId}/versions/{versionId}/export/sbom": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "projectId",
+            "versionId"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/projects/{projectId}/versions/{versionId}/export/vex": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "projectId",
+            "versionId"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/projects/{projectId}/versions/{versionId}/promote-latest": {
+      "operations": {
+        "post": {
+          "requiredParams": [
+            "projectId",
+            "versionId"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/projects/{projectId}/versions/{versionId}/rescan": {
+      "operations": {
+        "post": {
+          "requiredParams": [
+            "projectId",
+            "versionId"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/api/v1/proxy-settings": {
       "operations": {
         "get": {
@@ -1077,6 +1309,38 @@
           "requiredParams": [],
           "responseCodes": [
             "204"
+          ]
+        }
+      }
+    },
+    "/api/v1/sarif": {
+      "operations": {
+        "put": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/sbom": {
+      "operations": {
+        "put": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/sbom-documents/{documentId}/original": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "documentId"
+          ],
+          "responseCodes": [
+            "200"
           ]
         }
       }
@@ -1675,6 +1939,42 @@
         }
       }
     },
+    "/api/v1/system/vuln-tracker-config": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "put": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/system/vuln-tracker-config/test": {
+      "operations": {
+        "post": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/system/vuln-tracker-health": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/api/v1/tokens": {
       "operations": {
         "get": {
@@ -1865,6 +2165,16 @@
           ],
           "responseCodes": [
             "204"
+          ]
+        }
+      }
+    },
+    "/api/v1/vex": {
+      "operations": {
+        "put": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
           ]
         }
       }

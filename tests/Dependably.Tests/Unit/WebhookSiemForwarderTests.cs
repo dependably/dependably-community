@@ -220,6 +220,12 @@ public sealed class WebhookSiemForwarderTests
         public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
             new TaskCompletionSource<int>().Task;
 
+        // The overload a real caller reaches through CopyToAsync/ReadAsync(Memory<>). Without it the
+        // base class bridges to the array form above, so the stand-in still hangs — but it hangs by
+        // accident of the bridge rather than by construction.
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+            new(new TaskCompletionSource<int>().Task);
+
         public override void Flush() => throw new NotSupportedException();
         public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
         public override void SetLength(long value) => throw new NotSupportedException();

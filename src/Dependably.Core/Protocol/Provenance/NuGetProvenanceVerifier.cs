@@ -154,7 +154,7 @@ public sealed class NuGetProvenanceVerifier : IArtifactProvenanceVerifier
         }
 
         buffer.Position = 0;
-        using var zip = new ZipArchive(buffer, ZipArchiveMode.Read);
+        using var zip = SafeZipArchive.Open(buffer);
         var entry = zip.GetEntry(SignatureEntryName);
         if (entry is null)
         {

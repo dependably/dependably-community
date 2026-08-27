@@ -176,25 +176,34 @@ internal static class NuGetRegistrationHelpers
                 continue;
             }
 
-            pageNode["@id"] = LocalPageId(pageNode, normalizedId, baseUrl);
+            RewritePage(pageNode, leaves, normalizedId, baseUrl, upstreamGate);
+        }
+    }
 
-            for (int i = leaves.Count - 1; i >= 0; i--)
-            {
-                bool keep = leaves[i] is JsonObject leafNode
-                    && RewriteLeafNode(leafNode, normalizedId, baseUrl)
-                    && IsUpstreamLeafServable(leafNode, upstreamGate);
-                if (!keep)
-                {
-                    leaves.RemoveAt(i);
-                }
-            }
+    // Rewrites one page's @id and every leaf it carries, dropping the leaves this registry will
+    // not serve.
+    private static void RewritePage(
+        JsonObject pageNode, JsonArray leaves, string normalizedId, string baseUrl,
+        (BlockPolicy Policy, DateTimeOffset Now)? upstreamGate)
+    {
+        pageNode["@id"] = LocalPageId(pageNode, normalizedId, baseUrl);
 
-            // `count` states how many leaves the page carries; dropping one without updating it
-            // leaves a document that contradicts itself.
-            if (pageNode["count"] is not null)
+        for (int i = leaves.Count - 1; i >= 0; i--)
+        {
+            bool keep = leaves[i] is JsonObject leafNode
+                && RewriteLeafNode(leafNode, normalizedId, baseUrl)
+                && IsUpstreamLeafServable(leafNode, upstreamGate);
+            if (!keep)
             {
-                pageNode["count"] = leaves.Count;
+                leaves.RemoveAt(i);
             }
+        }
+
+        // `count` states how many leaves the page carries; dropping one without updating it
+        // leaves a document that contradicts itself.
+        if (pageNode["count"] is not null)
+        {
+            pageNode["count"] = leaves.Count;
         }
     }
 

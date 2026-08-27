@@ -245,23 +245,25 @@ public sealed class OrgSettingsRepositoryTests : IClassFixture<InMemoryDbFixture
     {
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"ret-{Guid.NewGuid():N}");
         await _repo.UpsertRetentionAsync(orgId, Optional<int?>.Of(10), Optional<int?>.Of(30),
-            Optional<int?>.Of(90), Optional<int?>.Of(45));
+            Optional<int?>.Of(90), Optional<int?>.Of(45), Optional<int?>.Of(5));
         var first = (await _repo.GetSettingsAsync(orgId))!;
         Assert.Equal(10, first.KeepVersions);
         Assert.Equal(30, first.KeepDays);
         Assert.Equal(90, first.ActivityRetentionDays);
         Assert.Equal(45, first.PurgeUnlistedAfterDays);
+        Assert.Equal(5, first.KeepProjectVersions);
 
         // Update path — ON CONFLICT DO UPDATE branch. Each field is PRESENT and explicitly null,
         // which must still clear the column: leave-unchanged applies to absence, never to a
         // deliberate reset to unlimited.
         await _repo.UpsertRetentionAsync(orgId, Optional<int?>.Of(null), Optional<int?>.Of(7),
-            Optional<int?>.Of(null), Optional<int?>.Of(null));
+            Optional<int?>.Of(null), Optional<int?>.Of(null), Optional<int?>.Of(null));
         var second = (await _repo.GetSettingsAsync(orgId))!;
         Assert.Null(second.KeepVersions);
         Assert.Equal(7, second.KeepDays);
         Assert.Null(second.ActivityRetentionDays);
         Assert.Null(second.PurgeUnlistedAfterDays);
+        Assert.Null(second.KeepProjectVersions);
     }
 
     /// <summary>
@@ -276,17 +278,18 @@ public sealed class OrgSettingsRepositoryTests : IClassFixture<InMemoryDbFixture
     {
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"ret-partial-{Guid.NewGuid():N}");
         await _repo.UpsertRetentionAsync(orgId, Optional<int?>.Of(10), Optional<int?>.Of(30),
-            Optional<int?>.Of(90), Optional<int?>.Of(45));
+            Optional<int?>.Of(90), Optional<int?>.Of(45), Optional<int?>.Of(5));
 
         // Touch only keep_days, the way a partial PUT body would.
         await _repo.UpsertRetentionAsync(orgId, Optional<int?>.Absent, Optional<int?>.Of(7),
-            Optional<int?>.Absent, Optional<int?>.Absent);
+            Optional<int?>.Absent, Optional<int?>.Absent, Optional<int?>.Absent);
 
         var after = (await _repo.GetSettingsAsync(orgId))!;
         Assert.Equal(7, after.KeepDays);
         Assert.Equal(10, after.KeepVersions);
         Assert.Equal(90, after.ActivityRetentionDays);
         Assert.Equal(45, after.PurgeUnlistedAfterDays);
+        Assert.Equal(5, after.KeepProjectVersions);
     }
 
     // ── UpsertProxySettingsAsync ─────────────────────────────────────────────

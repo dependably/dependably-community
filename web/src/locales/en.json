@@ -2,6 +2,18 @@
   "banner": {
     "dismiss": "Dismiss"
   },
+  "licenses": {
+    "title": "Open source notices",
+    "devStub": "Notices are populated during the Docker build. They are not available when running locally with:",
+    "meta": "{count, plural, one {# component} other {# components}}",
+    "metaGenerated": "{count, plural, one {# component} other {# components}} · generated {date}",
+    "columns": {
+      "package": "Package",
+      "version": "Version",
+      "license": "Licence",
+      "copyright": "Copyright"
+    }
+  },
   "nav": {
     "brand": "Dependably",
     "packages": "Packages",
@@ -16,7 +28,7 @@
     "settings": "Settings",
     "vulnerabilities": "Vulnerabilities",
     "quarantine": "Quarantine",
-    "licensePolicy": "Licenses",
+    "licensePolicy": "Licences",
     "lookup": "Lookup",
     "setup": "Setup",
     "admin": "Admin",
@@ -29,14 +41,17 @@
     "expand": "Expand sidebar",
     "openMenu": "Open menu",
     "notifications": "Notifications",
-    "risk": "Risk"
+    "risk": "Risk",
+    "projects": "Projects"
   },
   "globalSearch": {
-    "placeholder": "Search packages",
+    "placeholder": "Search packages, projects, vulnerabilities",
     "loading": "Searching…",
     "empty": "No results",
     "groups": {
-      "packages": "Packages"
+      "packages": "Packages",
+      "projects": "Projects",
+      "vulnerabilities": "Vulnerabilities"
     }
   },
   "alerts": {
@@ -51,6 +66,7 @@
   },
   "common": {
     "actions": {
+      "close": "Close",
       "save": "Save",
       "saving": "Saving…",
       "cancel": "Cancel",
@@ -191,6 +207,10 @@
       "label": "Malicious",
       "help": "This package has a version flagged as known-malicious (OSV MAL- advisory)."
     },
+    "kev": {
+      "label": "KEV",
+      "help": "This package has a version linked to a vulnerability in the CISA Known Exploited Vulnerabilities Catalog."
+    },
     "abandoned": {
       "label": "Abandoned",
       "help": "No new release published upstream in over a year."
@@ -202,6 +222,94 @@
       "inheritOrgDefault": "Inherit (org default)"
     },
     "empty": "No packages found"
+  },
+  "projects": {
+    "title": "Projects",
+    "searchPlaceholder": "Search projects…",
+    "empty": "No projects yet. Packages are the artefacts you serve — projects are the applications you build with them. Upload an SBOM to get started.",
+    "emptySearch": "No projects match your search.",
+    "collection": "Collection",
+    "breadcrumb": "Breadcrumb",
+    "folders": {
+      "newFolder": "New folder",
+      "newFolderTitle": "New folder",
+      "editProjectTitle": "Edit project",
+      "editFolderTitle": "Edit folder",
+      "nameLabel": "Name",
+      "namePlaceholder": "e.g. Platform",
+      "descriptionLabel": "Description (optional)",
+      "parentLabel": "Folder",
+      "rootOption": "Top level",
+      "currentFolder": "Current folder",
+      "parentHint": "Folders group projects. A folder holds no versions of its own.",
+      "targetsFailed": "Folders could not be loaded, so this project cannot be moved right now: {message}",
+      "actionsMenu": "Actions for {name}",
+      "edit": "Edit…"
+    },
+    "columns": {
+      "name": "Name",
+      "components": "Components",
+      "severity": "Severity",
+      "policy": "Policy",
+      "latest": "Latest",
+      "lastUpload": "Last upload"
+    },
+    "severity": {
+      "critical": "{count} critical",
+      "high": "{count} high",
+      "medium": "{count} medium",
+      "low": "{count} low",
+      "unscored": "{count} unscored",
+      "kev": "{count} known exploited",
+      "none": "No known vulnerabilities"
+    },
+    "policy": {
+      "pass": "Pass",
+      "warn": "Warn",
+      "violation": "Violation",
+      "unscanned": "Not scanned"
+    },
+    "noVersion": "—",
+    "unevaluatedOf": "{count} of {total} not evaluated",
+    "loadFailed": "Failed to load projects: {message}",
+    "detail": {
+      "collectionBadge": "Collection",
+      "stat": {
+        "versions": "Versions",
+        "components": "Components (latest)",
+        "policy": "Policy (latest)",
+        "children": "Children",
+        "subtreeProjects": "Projects (all levels)",
+        "subtreeComponents": "Components (rolled up)",
+        "subtreeSeverity": "Findings (rolled up)",
+        "subtreePolicy": "Policy (rolled up)"
+      },
+      "versionsTitle": "Versions",
+      "childrenTitle": "Projects in this collection",
+      "versionsEmpty": "No versions uploaded yet.",
+      "childrenEmpty": "No projects in this collection yet.",
+      "columns": {
+        "version": "Version",
+        "components": "Components",
+        "policy": "Policy",
+        "uploaded": "Uploaded",
+        "name": "Name",
+        "latest": "Latest version"
+      },
+      "isLatest": "Latest",
+      "promote": "Promote to latest",
+      "promoting": "Promoting…",
+      "deleteVersion": "Delete",
+      "deleteVersionConfirm": "Delete version {version}? This removes its uploaded documents and components.",
+      "deleteProjectConfirm": "Delete \"{name}\" and all its versions? This cannot be undone.",
+      "deleteCollectionConfirm": "Delete the folder \"{name}\" and everything inside it — every project it contains and all their versions? This cannot be undone.",
+      "loadFailed": "Failed to load project: {message}",
+      "exportHint": "Every project in this folder, each at its latest version. Projects with no SBOM are listed and marked."
+    },
+    "versionDetail": {
+      "placeholderTitle": "Version detail",
+      "placeholder": "Component inventory and analysis for this version are on their way."
+    }
   },
   "claims": {
     "title": "Name claims",
@@ -245,6 +353,15 @@
     "empty": "No claims for this tenant yet.",
     "loadFailed": "Failed to load claims: {message}"
   },
+  "spdx": {
+    "searchPlaceholder": "Search SPDX identifier or name…",
+    "noMatches": "No matches.",
+    "lookupFailed": "Lookup failed.",
+    "osiApproved": "OSI Approved",
+    "fsfLibre": "FSF Free/Libre",
+    "deprecated": "Deprecated SPDX identifier",
+    "alreadyListed": "Already on a list"
+  },
   "upload": {
     "title": "Upload Packages",
     "description": "Select package for upload",
@@ -272,6 +389,56 @@
       "serverValidationNote": "Per-file outcomes (ecosystem detection, claim gate, dedup, hash) are evaluated server-side after upload."
     }
   },
+  "sbomUpload": {
+    "title": "Upload SBOM, VEX, or SARIF",
+    "button": "Upload",
+    "hint": "CycloneDX 1.4–1.6 JSON, OpenVEX, and SARIF 2.1.0 are accepted. VEX and SARIF enrich the SBOM already uploaded for this version.",
+    "drop": "Drop files here, or click to choose",
+    "kindLabel": "Detected document type",
+    "kind": {
+      "sbom": "SBOM",
+      "vex": "VEX",
+      "sarif": "SARIF",
+      "unknown": "Unrecognized"
+    },
+    "project": {
+      "label": "Project",
+      "choose": "Choose a project…",
+      "newPlaceholder": "New project name",
+      "chooseExisting": "Choose an existing project instead",
+      "createNew": "Create a new project instead",
+      "intoFolder": "Uploads land in {folder}. Picking an existing project lists only that folder's projects; a new one is created inside it."
+    },
+    "version": {
+      "label": "Version",
+      "placeholder": "e.g. 1.4.0"
+    },
+    "autoCreate": "Create project/version if missing",
+    "isLatest": "Mark this version as latest",
+    "submit": "Upload",
+    "uploading": "Uploading…",
+    "collectionNotice": "Collections don't accept uploads. Upload to one of the collection's member projects instead.",
+    "notAllowed": "Only organization admins and owners can upload documents from this interface. Use an API token from CI instead.",
+    "outcome": {
+      "file": "File",
+      "type": "Type",
+      "status": "Status",
+      "detailColumn": "Detail",
+      "accepted": "Accepted",
+      "rejected": "Rejected",
+      "detail": {
+        "sbom": "{added} added, {removed} removed, {unchanged} unchanged (of {total} total)",
+        "sbomNoop": "No changes — already up to date ({total} components)",
+        "vex": "{applied} of {total} statements applied ({unmatched} unmatched)",
+        "sarif": "{applied} of {total} results applied ({unmatched} unmatched)",
+        "generic": "Uploaded.",
+        "error": "Upload failed: {message}"
+      }
+    },
+    "curl": {
+      "summary": "Show CI curl command"
+    }
+  },
   "versionDetail": {
     "meta": {
       "homepage": "Homepage",
@@ -285,7 +452,7 @@
       "checksum": "Checksum",
       "size": "Size",
       "pushed": "Pushed",
-      "license": "License",
+      "license": "Licence",
       "downloads": "Downloads",
       "vulnScan": "Vuln Scan",
       "origin": "Origin",
@@ -317,10 +484,10 @@
       "symbolsHelp": "This version ships a symbol package; {count} Portable PDB(s) are indexed and resolvable by debug-id from the symbol server.",
       "symbolsUnindexed": "symbols not indexed",
       "symbolsUnindexedHelp": "A symbol package is stored for this version but no Portable PDB was indexed, so its PDBs do not resolve by debug-id. Native/Windows PDBs are not indexable; if the package does contain Portable PDBs, re-index the version.",
-      "licenseBlockedHelp": "This license is on the org's license blocklist.",
+      "licenseBlockedHelp": "This licence is on the org's licence blocklist.",
       "licenseUnknown": "unknown",
-      "licenseUnknownHelp": "No license was extracted for this version.",
-      "licenseReviewHelp": "This license is permitted with a condition. See the license policy page."
+      "licenseUnknownHelp": "No licence was extracted for this version.",
+      "licenseReviewHelp": "This licence is permitted with a condition. See the licence policy page."
     },
     "status": {
       "blocked": "Blocked",
@@ -330,7 +497,7 @@
       "clean": "No advisories",
       "unscanned": "Unscanned",
       "no_feed": "No advisory feed",
-      "noFeedHelp": "OSV publishes no advisory feed for this ecosystem, so this artifact has never been screened against one. It is not known to be clean.",
+      "noFeedHelp": "OSV publishes no advisory feed for this ecosystem, so this artefact has never been screened against one. It is not known to be clean.",
       "malicious": "Malicious",
       "maliciousHelp": "Linked to a known-malicious package advisory (OSV MAL-)."
     },
@@ -354,11 +521,11 @@
     },
     "pillars": {
       "security": "Security",
-      "license": "License",
+      "license": "Licence",
       "operational": "Operational",
       "noAdvisories": "No advisories",
       "licenseClean": "No risk",
-      "licenseBlocked": "Blocked license",
+      "licenseBlocked": "Blocked licence",
       "licenseUndeclared": "Not declared",
       "subject": "For version",
       "licenseReview": "Review"
@@ -403,6 +570,12 @@
         "sha512-b64": "Upstream SHA-512 (base64)",
         "shasum": "Upstream SHA-1 (shasum)"
       }
+    },
+    "blastRadius": {
+      "summary": "{count, plural, one {# application ships this} other {# applications ship this}}",
+      "help": "The latest version of each application whose SBOM lists this package. Older releases are not counted — they are not what you ship, and their component scans are not kept current.",
+      "ships": "ships {version}",
+      "more": "and {count} more"
     }
   },
   "activity": {
@@ -432,7 +605,7 @@
       "blockedRevoked": "Blocked (revoked)",
       "blockedProvenance": "Blocked (provenance)",
       "blockedInstallScript": "Blocked (install script)",
-      "blockedLicense": "Blocked (license)",
+      "blockedLicense": "Blocked (licence)",
       "loginSuccess": "Login (success)",
       "loginFailure": "Login (failure)",
       "loginLocked": "Login (locked)",
@@ -486,7 +659,7 @@
       "tokens": "Tokens",
       "usersInvites": "Users & invites",
       "lists": "Allow/Block lists",
-      "licenses": "License policy",
+      "licenses": "Licence policy",
       "claims": "Package claims",
       "supplyChain": "Supply chain",
       "upstream": "Upstream"
@@ -527,11 +700,11 @@
       "saml.config_deleted": "SAML config deleted",
       "saml.signing_cert_expiring": "SAML signing cert expiring",
       "saml.signing_cert_expired": "SAML signing cert expired",
-      "license_policy_mode_changed": "License policy mode changed",
-      "license_allowlist_added": "License allowlist entry added",
-      "license_allowlist_removed": "License allowlist entry removed",
-      "license_blocklist_added": "License blocklist entry added",
-      "license_blocklist_removed": "License blocklist entry removed",
+      "license_policy_mode_changed": "Licence policy mode changed",
+      "license_allowlist_added": "Licence allowlist entry added",
+      "license_allowlist_removed": "Licence allowlist entry removed",
+      "license_blocklist_added": "Licence blocklist entry added",
+      "license_blocklist_removed": "Licence blocklist entry removed",
       "claim.create": "Claim created",
       "claim.transition": "Claim transitioned",
       "claim.release": "Claim released",
@@ -540,8 +713,8 @@
       "upstream_response_too_large": "Upstream response too large",
       "ssrf_blocked": "SSRF blocked",
       "checksum_failure": "Upstream checksum mismatch",
-      "license_allowlist_updated": "License allowlist entry updated",
-      "license_blocklist_updated": "License blocklist entry updated",
+      "license_allowlist_updated": "Licence allowlist entry updated",
+      "license_blocklist_updated": "Licence blocklist entry updated",
       "package_note_added": "Package note added",
       "package_note_updated": "Package note updated",
       "package_note_removed": "Package note removed"
@@ -553,6 +726,7 @@
     "pull": "pull only",
     "push": "push only",
     "both": "push & pull",
+    "sbom": "SBOM upload",
     "admin": "admin",
     "audit": "audit",
     "custom": "custom"
@@ -617,7 +791,7 @@
       "gates": "Gates",
       "signatures": "Signatures",
       "namespaces": "Namespaces",
-      "licenses": "Licenses",
+      "licenses": "Licences",
       "serviceTokens": "Service tokens",
       "integrations": "Integrations",
       "alerts": "Alerts",
@@ -670,11 +844,12 @@
         "package.import": "Import",
         "package.unlist": "Unlist",
         "package.yank": "Yank",
-        "package.vulnerability": "Vulnerability"
+        "package.vuln": "Vulnerability",
+        "package.blocked": "Blocked"
       }
     },
     "alerts": {
-      "section": "Alert center",
+      "section": "Alert centre",
       "hint": "Alerts fire on a new quarantine review item and on a vulnerability meeting the severity floor below.",
       "quarantineEnabled": "Alert on new quarantine items",
       "vulnEnabled": "Alert on vulnerabilities",
@@ -764,6 +939,92 @@
       "testFail": "Test email failed.",
       "masterKeyHint": "DEPENDABLY_MASTER_KEY must be configured before a password can be stored."
     },
+    "vulnTracker": {
+      "title": "Vulnerability tracker",
+      "hint": "Connection to the external vulnerability tracker that supplies the NVD-band and SSVC enrichment overlay. One connection serves the whole deployment; each organization sets its own thresholds for what to do with the signals.",
+      "scopeNote": "This connection is instance-wide. Every organization on this deployment is enriched over it, and no organization can see or override it.",
+      "enabled": "Enabled",
+      "enabledHint": "Turns enrichment on and off without discarding the connection. The base URL and token stay stored while it is paused.",
+      "baseUrl": "Base URL",
+      "baseUrlHint": "Absolute http or https URL of the tracker. Leave it empty to turn the connection off entirely.",
+      "token": "Token",
+      "tokenSetHint": "Optional. A tracker that needs no credential works without one; a tracker that does answers 401, and enrichment is then recorded as unknown rather than clean.",
+      "tokenRotateHint": "A token is stored. Enter a new value to rotate it, or leave blank to keep the current one.",
+      "masterKeyHint": "DEPENDABLY_MASTER_KEY must be configured before a token can be stored.",
+      "maxStalenessHours": "Maximum staleness (hours)",
+      "maxStalenessHint": "Enrichment older than this is treated as unknown rather than clean. 1 to 8760 hours; default 168 (7 days).",
+      "batchSize": "Batch size",
+      "batchSizeHint": "PURLs per lookup request. 1 to 1000; default 100. The producer refuses a larger batch outright rather than truncating it.",
+      "state": {
+        "active": "Active",
+        "paused": "Paused",
+        "notConfigured": "Not configured"
+      },
+      "clearDiscardsToken": "Clearing the base URL turns the connection off for every organization and discards the stored token. You will have to enter the token again to reconnect.",
+      "errors": {
+        "baseUrl": "Enter an absolute http or https URL, or leave the field empty to turn the connection off.",
+        "staleness": "Maximum staleness must be a whole number of hours between 1 and 8760.",
+        "batchSize": "Batch size must be a whole number between 1 and 1000."
+      }
+    },
+    "vulnTrackerHealth": {
+      "title": "Connection health",
+      "hint": "What the scan pass's tracker lookups actually did. Health is observed, never written back to the configuration above — a failing tracker is never switched off for you.",
+      "notConfigured": "No tracker connection is configured, so there is nothing to report yet.",
+      "state": {
+        "ok": "Reaching the tracker",
+        "failed": "Not reaching the tracker",
+        "neverAttempted": "No lookup attempted yet",
+        "notConfigured": "Not configured"
+      },
+      "kind": {
+        "scan": "Scan",
+        "probe": "Test"
+      },
+      "reason": {
+        "none": "Reached",
+        "notConfigured": "No connection configured",
+        "emptyRequest": "Nothing to look up",
+        "batchTooLarge": "Batch exceeded the producer's cap",
+        "transport": "Could not connect",
+        "timeout": "Timed out",
+        "unauthorized": "Credential rejected",
+        "rateLimited": "Refused on quota or rate limit",
+        "serverError": "Tracker returned a server error",
+        "refused": "Tracker refused the request",
+        "malformedResponse": "Tracker's response could not be read",
+        "exception": "Client fault",
+        "unknown": "Unrecognized refusal"
+      },
+      "test": "Test connection",
+      "testing": "Testing…",
+      "refresh": "Refresh",
+      "pausedHint": "The connection is paused, so no lookups are made and it cannot be tested. Enable it above to test.",
+      "probeReached": "Reached the tracker in {ms} ms.",
+      "probeFailed": "Did not reach the tracker: {reason}.",
+      "lastSuccess": "Last reached",
+      "consecutiveFailures": "Consecutive failures",
+      "failingSince": "Failing since",
+      "enrichedAdvisories": "Enriched advisories",
+      "staleAdvisories": "Past the horizon",
+      "nvdAsOf": "NVD current to",
+      "ssvcAsOf": "SSVC current to",
+      "never": "Never",
+      "none": "None",
+      "notAsserted": "Not asserted",
+      "horizonHint": "Enrichment older than {hours} h is treated as stale and stops counting as a usable signal.",
+      "recentFetches": "Recent lookups",
+      "noFetches": "No lookups recorded yet.",
+      "outcomeOk": "Reached",
+      "col": {
+        "when": "When",
+        "kind": "Kind",
+        "outcome": "Outcome",
+        "purls": "Purls",
+        "advisories": "Advisories",
+        "duration": "ms"
+      }
+    },
     "relayHealth": {
       "title": "SMTP relay health",
       "hint": "Aggregate delivery health of the shared SMTP relay across every tenant, plus the durable alert-email queue's backlog.",
@@ -780,6 +1041,7 @@
       "none": "—"
     },
     "auth": {
+      "claimMapKeyPlaceholder": "e.g. Admins",
       "methodsTitle": "Sign-in methods",
       "methodsIntro": "Choose which methods are offered on this tenant's sign-in page. Changes save immediately.",
       "formsLogin": "Forms login (email + password)",
@@ -905,7 +1167,7 @@
         "colLabel": "Label",
         "colAdded": "Added",
         "unsupportedPair": "unsupported — never validated",
-        "unsupportedPairTitle": "This anchor's ecosystem and kind combination has no validator, so its key material was never checked. Verify it is still needed before removing it — removing the only anchor for an ecosystem with signature verification set to block denies every artifact of that ecosystem.",
+        "unsupportedPairTitle": "This anchor's ecosystem and kind combination has no validator, so its key material was never checked. Verify it is still needed before removing it — removing the only anchor for an ecosystem with signature verification set to block denies every artefact of that ecosystem.",
         "modal": {
           "title": "Add trust anchor",
           "ecosystem": "Ecosystem",
@@ -949,8 +1211,8 @@
       "airGappedHint": "When on, Dependably makes no outbound network requests for this organization: upstream proxy fetches are disabled (uncached packages return 404), and vulnerability and deprecation-metadata scans skip this organization. Use for isolated / air-gapped deployments.",
       "airGappedEnforcedNote": "Enforced instance-wide by the operator (AIR_GAPPED); can't be changed here.",
       "airGappedWarning": "Outbound requests are disabled for this organization: uncached upstream packages return 404, and vulnerability and deprecation scans skip it.",
-      "requireMfa": "Require MFA enrollment",
-      "requireMfaHint": "When on, all users in this organization must complete MFA enrollment before accessing any API endpoints. The instance REQUIRE_MFA env var enforces this across every organization.",
+      "requireMfa": "Require MFA enrolment",
+      "requireMfaHint": "When on, all users in this organization must complete MFA enrolment before accessing any API endpoints. The instance REQUIRE_MFA env var enforces this across every organization.",
       "requireMfaEnforcedNote": "Enforced instance-wide by the operator (REQUIRE_MFA); can't be changed here."
     },
     "uploadLimits": {
@@ -967,6 +1229,8 @@
       "keepDays": "Keep days (proxy blobs)",
       "activityDays": "Activity retention days",
       "purgeUnlistedDays": "Purge unlisted after (days)",
+      "keepProjectVersions": "Keep project versions",
+      "keepProjectVersionsHint": "Caps the SBOM/VEX/SARIF versions kept per project and releases the documents of the ones it removes. The latest version of a project is never removed, whatever its age.",
       "unlimited": "unlimited",
       "instanceDefault": "instance default: {days} days",
       "activityDaysHint": "Unlike the limits above, empty is not unlimited here: activity rows carry per-download IP data, so they are bounded by the ACTIVITY_RETENTION_DAYS instance default."
@@ -1005,7 +1269,7 @@
       "blockMaliciousWarn": "Warn — flag only",
       "blockMaliciousBlock": "Block — refuse flagged versions",
       "blockKev": "Known-exploited (KEV) policy",
-      "blockKevHint": "How versions are handled when one of their advisories aliases a CVE in the CISA Known Exploited Vulnerabilities catalog — confirmed exploited in the wild, independent of CVSS score. The catalog is refreshed daily by the threat-feed job. Block returns 403 on fetch and serve; Warn surfaces the KEV flag in the vulnerability report only. A per-version manual allow override still wins.",
+      "blockKevHint": "How versions are handled when one of their advisories aliases a CVE in the CISA Known Exploited Vulnerabilities Catalog — confirmed exploited in the wild, independent of CVSS score. The catalogue is refreshed daily by the threat-feed job. Block returns 403 on fetch and serve; Warn surfaces the KEV flag in the vulnerability report only. A per-version manual allow override still wins.",
       "blockKevOff": "Off — ignore KEV listings",
       "blockKevWarn": "Warn — flag only",
       "blockKevBlock": "Block — refuse exploited-in-the-wild",
@@ -1039,7 +1303,7 @@
       "verifyRpmSignaturesBlock": "Block — refuse unverified",
       "verifyRpmSignaturesNoKey": "No RPM trust anchors are configured. Add the repository's signing key in Settings → Signatures → Trust anchors to enable signature verification.",
       "verifyMavenSignatures": "Maven signature verification",
-      "verifyMavenSignaturesHint": "Verify the detached OpenPGP signature (.asc sidecar) for each proxied Maven artifact against pinned trust anchors. Block fails closed — a version whose .asc fails verification or that carries none is refused (never cached or served); Warn records the outcome without blocking. Applies to proxy-fetched versions only. Configure keys in Settings → Signatures → Trust anchors.",
+      "verifyMavenSignaturesHint": "Verify the detached OpenPGP signature (.asc sidecar) for each proxied Maven artefact against pinned trust anchors. Block fails closed — a version whose .asc fails verification or that carries none is refused (never cached or served); Warn records the outcome without blocking. Applies to proxy-fetched versions only. Configure keys in Settings → Signatures → Trust anchors.",
       "verifyMavenSignaturesOff": "Off — do not verify",
       "verifyMavenSignaturesWarn": "Warn — verify, flag only",
       "verifyMavenSignaturesBlock": "Block — refuse unverified",
@@ -1117,16 +1381,29 @@
             "mirror": "Network mirror"
           }
         }
-      }
+      },
+      "blockKevRansomware": "Ransomware-linked exploited CVEs",
+      "blockKevRansomwareHint": "Narrower than the exploited-CVE gate above: applies only to CVEs CISA marks as used in ransomware campaigns. Leave the gate above at Off and set this to Block to refuse only the ransomware-linked ones rather than the whole catalogue. Acts only on an explicit CISA verdict — CVEs it has not assessed are covered by the broader gate, not this one.",
+      "blockKevRansomwareOff": "Off",
+      "blockKevRansomwareWarn": "Warn",
+      "blockKevRansomwareBlock": "Block",
+      "blockSsvcExploitation": "Actively exploited (CISA assessment)",
+      "blockSsvcExploitationHint": "Acts on CISA's Vulnrichment exploitation assessment, which grades far more CVEs than the exploited-CVE catalogue above and so catches exploitation CISA has evidence for but has not catalogued. Requires the vulnerability tracker connection; without one, no advisory carries an assessment and this gate never fires however it is set.",
+      "blockSsvcExploitationOff": "Off",
+      "blockSsvcExploitationWarn": "Warn",
+      "blockSsvcExploitationBlock": "Block",
+      "maxEpssPercentile": "EPSS percentile ceiling",
+      "maxEpssPercentileHint": "Blocks when an advisory ranks above this percentile (0.00–1.00). A rank keeps its meaning when FIRST recalibrates the model, where the probability ceiling above tracks absolute risk. Set either or both — whichever trips first blocks. Empty to disable.",
+      "maxEpssPercentilePlaceholder": "e.g. 0.95"
     },
     "licenses": {
-      "intro": "Govern which SPDX licenses are permitted for packages in this tenant. License metadata is extracted on publish and on proxy cache fill.",
-      "blockEmptyWarn": "Enforcement is set to Block but no licenses are allowed. Every publish and proxy fetch will be rejected until you approve at least one license below.",
+      "intro": "Govern which SPDX licences are permitted for packages in this tenant. Licence metadata is extracted on publish and on proxy cache fill.",
+      "blockEmptyWarn": "Enforcement is set to Block but no licences are allowed. Every publish and proxy fetch will be rejected until you approve at least one licence below.",
       "mode": {
         "title": "Enforcement mode",
         "off": {
           "label": "Off",
-          "hint": "License metadata is recorded but no policy is enforced."
+          "hint": "Licence metadata is recorded but no policy is enforced."
         },
         "warn": {
           "label": "Warn",
@@ -1134,13 +1411,13 @@
         },
         "block": {
           "label": "Block",
-          "hint": "Versions whose license violates this policy are blocked at download."
+          "hint": "Versions whose licence violates this policy are blocked at download."
         }
       },
       "review": {
         "title": "Review",
-        "intro": "Licenses observed during ingestion that are on neither the allow- nor block-list. Approve or block each one to drive the enforcement policy.",
-        "empty": "No licenses awaiting review.",
+        "intro": "Licences observed during ingestion that are on neither the allow- nor block-list. Approve or block each one to drive the enforcement policy.",
+        "empty": "No licences awaiting review.",
         "includeDeprecated": "Include deprecated SPDX identifiers",
         "approve": "Approve",
         "block": "Block",
@@ -1155,14 +1432,14 @@
         "conditional": "Conditional"
       },
       "allow": {
-        "title": "Allowed licenses",
-        "addEntry": "Add license",
-        "empty": "No allowed licenses configured. When the allowlist is empty, only the blocklist applies."
+        "title": "Allowed licences",
+        "addEntry": "Add licence",
+        "empty": "No allowed licences configured. When the allowlist is empty, only the blocklist applies."
       },
       "block": {
-        "title": "Blocked licenses",
-        "addEntry": "Add license",
-        "empty": "No blocked licenses configured."
+        "title": "Blocked licences",
+        "addEntry": "Add licence",
+        "empty": "No blocked licences configured."
       },
       "columns": {
         "spdx": "SPDX identifier",
@@ -1170,28 +1447,28 @@
         "note": "Note",
         "condition": "Condition"
       },
-      "removeConfirm": "Remove this license entry?",
+      "removeConfirm": "Remove this licence entry?",
       "modal": {
-        "addAllowTitle": "Add allowed license",
-        "addBlockTitle": "Add blocked license",
+        "addAllowTitle": "Add allowed licence",
+        "addBlockTitle": "Add blocked licence",
         "spdxLabel": "SPDX identifier",
         "spdxPlaceholder": "Search SPDX identifier or name…",
         "spdxHint": "Pick from the seeded SPDX 3.28.0 list. Deprecated identifiers are hidden by default.",
-        "addConditionalTitle": "Add conditional license",
-        "conditionalHint": "The license will serve normally. Add the condition as a note once it is in the list."
+        "addConditionalTitle": "Add conditional licence",
+        "conditionalHint": "The licence will serve normally. Add the condition as a note once it is in the list."
       },
       "addNote": "Add a note",
-      "notePlaceholder": "Why is this license allowed?",
-      "blockNotePlaceholder": "Why is this license refused?",
-      "conditionPlaceholder": "What makes this license acceptable, and when?",
+      "notePlaceholder": "Why is this licence allowed?",
+      "blockNotePlaceholder": "Why is this licence refused?",
+      "conditionPlaceholder": "What makes this licence acceptable, and when?",
       "conditionMissing": "No condition recorded",
       "makeConditional": "Make conditional",
       "makeAllowed": "Make allowed",
       "conditional": {
-        "title": "Conditional licenses",
-        "addEntry": "Add license",
-        "empty": "No conditional licenses configured.",
-        "intro": "Licenses that are acceptable only in some contexts. They are served and published like allowed licenses; the difference is that every package carrying one is listed under License risk for review. Record the condition in the note so the next person does not have to ask."
+        "title": "Conditional licences",
+        "addEntry": "Add licence",
+        "empty": "No conditional licences configured.",
+        "intro": "Licences that are acceptable only in some contexts. They are served and published like allowed licences; the difference is that every package carrying one is listed under Licence risk for review. Record the condition in the note so the next person does not have to ask."
       }
     }
   },
@@ -1361,22 +1638,45 @@
     "window30d": "30d",
     "activeUsers": "Active users (7d)",
     "totalDownloads": "Downloads (30d)",
+    "totalProjects": "Projects",
+    "projectsSub": "{pass} pass · {warn} warn · {violation} violation · {unevaluated} unevaluated",
     "blockedPulls": "Blocked pulls (30d)",
     "blockedMalicious": "Malicious blocked (30d)",
+    "blockedKev": "KEV blocked (30d)",
     "operationalRisk": "Operational risk",
     "operationalRiskSub": "≥ {threshold} versions behind",
-    "licenseRisk": "License risk",
+    "licenseRisk": "Licence risk",
     "quarantinePending": "Quarantine pending",
+    "activeOverrides": "Active overrides",
+    "activeOverridesSub": "{days, plural, one {oldest # day} other {oldest # days}}",
     "hostedProxied": "{hosted} hosted · {proxied} proxied",
     "quotaUsage": "of {total} quota",
+    "coverage": {
+      "title": "Scan coverage",
+      "percent": "{percent}%",
+      "none": "No coverage yet",
+      "sub": "{scanned} scanned · {unscanned} unscanned",
+      "noFeed": "{count} no advisory feed"
+    },
+    "prevention": {
+      "title": "Prevention (30d)",
+      "empty": "0 pulls blocked in the last 30 days",
+      "emptyServed": "{count, plural, one {# pull was served in this window and no gate refused it.} other {# pulls were served in this window and no gate refused any of them.}} Enforcement modes are set in Settings → Gates.",
+      "emptyNoTraffic": "No pulls were served in this window, so there was nothing to evaluate."
+    },
     "gates": {
       "deprecated": "deprecated",
       "release_age": "release age",
       "malicious": "malicious",
       "kev": "KEV",
+      "kev_ransomware": "KEV · ransomware",
       "epss": "EPSS",
       "vuln_score": "vuln score",
-      "manual": "manual"
+      "manual": "manual",
+      "license": "licence",
+      "install_script": "install script",
+      "provenance": "provenance",
+      "revoked": "revoked"
     },
     "packages": "Packages",
     "diskUsed": "Disk used",
@@ -1387,7 +1687,16 @@
     "samlCertExpiryCard": "SAML cert expiring",
     "samlCertExpiredCard": "SAML cert expired",
     "samlCertDays": "{days, plural, one {# day remaining} other {# days remaining}}",
-    "samlCertNotAfter": "Expires {notAfter}"
+    "samlCertNotAfter": "Expires {notAfter}",
+    "trends": {
+      "title": "Trends (30d)",
+      "empty": "Not enough history yet",
+      "emptyHint": "Trends appear once two daily snapshots have been recorded.",
+      "vulnerabilities": "Vulnerabilities",
+      "blockedPulls": "Blocked pulls",
+      "downloads": "Downloads",
+      "vs7d": "{delta} vs 7d ago"
+    }
   },
   "quarantine": {
     "title": "Quarantine",
@@ -1415,10 +1724,11 @@
       "release_age": "release age",
       "malicious": "malicious",
       "kev": "KEV",
+      "kev_ransomware": "KEV ransomware",
       "epss": "EPSS",
       "vuln_score": "vuln score",
       "revoked": "revoked",
-      "license": "license",
+      "license": "licence",
       "install_script": "install script",
       "provenance": "provenance"
     },
@@ -1433,22 +1743,34 @@
       "menuLabel": "Change decision",
       "resetToPending": "Reset to pending"
     },
+    "decisionAge": "{verb} {days, plural, one {# day ago} other {# days ago}}",
     "detail": {
       "policyDetail": "Policy detail",
       "created": "Created",
       "decidedBy": "Decided by",
       "decidedAt": "Decided at",
       "note": "Note"
+    },
+    "blastRadius": {
+      "summary": "{count, plural, one {# app} other {# apps}}",
+      "help": "Applications whose latest version ships this package. Denying it here affects them.",
+      "unavailable": "apps unavailable",
+      "unavailableHelp": "The affected-application count could not be loaded. This is not a count of zero."
     }
   },
   "vulnerabilities": {
+    "noCvssTitle": "No CVSS score",
+    "searchPlaceholder": "Search package, OSV ID, summary…",
     "title": "Vulnerabilities",
     "malicious": "MALICIOUS",
     "revoked": "revoked",
     "revokedOnly": "Revoked only",
     "revokedHelp": "Removed from the upstream registry on {at}; can no longer be re-fetched. A distinct lifecycle signal, not a vulnerability.",
     "kev": "KEV",
-    "kevHelp": "Listed in the CISA Known Exploited Vulnerabilities catalog — confirmed exploited in the wild, independent of CVSS score.",
+    "kevHelp": "Listed in the CISA Known Exploited Vulnerabilities Catalog — confirmed exploited in the wild, independent of CVSS score.",
+    "kevRansomware": "KEV · Ransomware",
+    "kevRansomwareHelp": "Listed in the CISA Known Exploited Vulnerabilities Catalog with confirmed use in ransomware campaigns — the highest-urgency KEV entries.",
+    "ageOpen": "{days, plural, one {open # day} other {open # days}}",
     "severityFilter": {
       "label": "Filter by severity",
       "all": "All",
@@ -1466,7 +1788,9 @@
       "summary": "Summary",
       "published": "Published",
       "checkedAt": "Checked at",
-      "epss": "EPSS"
+      "epss": "EPSS",
+      "apps": "Apps",
+      "age": "Age"
     },
     "detail": {
       "modified": "Modified",
@@ -1494,13 +1818,28 @@
         "fixedIn": "Fixed in",
         "copyBrief": "Copy remediation brief",
         "copyBriefHelp": "A self-contained summary you can paste into any AI assistant or a ticket."
+      },
+      "affectedApps": "Applications affected",
+      "affectedAppsNone": "No application's latest version ships a component this advisory affects.",
+      "affectedAppsShips": "ships {version}",
+      "affectedAppsMore": "and {count} more",
+      "links": {
+        "osvDev": "OSV.dev",
+        "nvd": "NVD",
+        "view": "View"
       }
     },
-    "empty": "No vulnerable packages found"
+    "empty": "No vulnerable packages found",
+    "apps": {
+      "help": "Applications whose latest version ships a component this advisory affects.",
+      "noneHelp": "No application's latest version ships a component this advisory affects.",
+      "unavailable": "—",
+      "unavailableHelp": "The affected-application count could not be loaded. This is not a count of zero."
+    }
   },
   "lookup": {
     "title": "Check a package",
-    "intro": "Check a candidate package for malware, known CVEs, and license policy before you add it. Nothing is downloaded, cached, or installed.",
+    "intro": "Check a candidate package for malware, known CVEs, and licence policy before you add it. Nothing is downloaded, cached, or installed.",
     "form": {
       "ecosystem": "Ecosystem",
       "name": "Package name",
@@ -1533,31 +1872,31 @@
       "epss": "EPSS {value}"
     },
     "license": {
-      "title": "License",
+      "title": "Licence",
       "policy": "Policy: {mode}",
       "unavailable": "Not determinable from upstream metadata for this ecosystem.",
       "allowed": "Allowed by policy",
       "blocked": "Not allowed by policy ({spdx})",
-      "informational": "Recorded informationally — license policy is off.",
-      "conditional": "Permitted with a condition ({spdx}). Check the license policy before adopting."
+      "informational": "Recorded informationally — licence policy is off.",
+      "conditional": "Permitted with a condition ({spdx}). Check the licence policy before adopting."
     },
     "unavailableChecks": {
       "title": "Not checked at lookup time",
       "release_age": "Release-age hold",
       "deprecated": "Deprecation status",
-      "license": "License",
+      "license": "Licence",
       "vulnerabilities": "Vulnerability scan"
     },
-    "airGapped": "Air-gapped — upstream metadata was not checked; advisories and license came from the local mirror only.",
+    "airGapped": "Air-gapped — upstream metadata was not checked; advisories and licence came from the local mirror only.",
     "notFound": {
       "title": "No such package",
       "hint": "{registry} has no package named {name}. Check the spelling.",
       "versionHint": "{registry} has no {name} at version {version}."
     },
-    "empty": "Enter a package above to check its malware, CVE, and license status before you add it."
+    "empty": "Enter a package above to check its malware, CVE, and licence status before you add it."
   },
   "licensePolicy": {
-    "title": "License policy",
+    "title": "Licence policy",
     "mode": "Enforcement",
     "modes": {
       "off": "Off",
@@ -1565,17 +1904,17 @@
       "block": "Block"
     },
     "intro": {
-      "off": "Your tenant records the SPDX license of every package but does not enforce policy. The lists below show what would be allowed or blocked if enforcement were enabled.",
-      "warn": "Your tenant logs license-policy violations to audit but still serves packages. Use the lists below to understand which licenses an admin has allowed or blocked.",
-      "block": "Your tenant blocks publish and proxy fetch for packages whose license isn't allowed below or appears on the block list."
+      "off": "Your tenant records the SPDX licence of every package but does not enforce policy. The lists below show what would be allowed or blocked if enforcement were enabled.",
+      "warn": "Your tenant logs licence-policy violations to audit but still serves packages. Use the lists below to understand which licences an admin has allowed or blocked.",
+      "block": "Your tenant blocks publish and proxy fetch for packages whose licence isn't allowed below or appears on the block list."
     },
     "allow": {
-      "title": "Allowed licenses",
-      "empty": "No licenses on the allow list."
+      "title": "Allowed licences",
+      "empty": "No licences on the allow list."
     },
     "block": {
-      "title": "Blocked licenses",
-      "empty": "No licenses on the block list."
+      "title": "Blocked licences",
+      "empty": "No licences on the block list."
     },
     "columns": {
       "spdx": "SPDX",
@@ -1585,9 +1924,9 @@
       "condition": "Condition"
     },
     "conditional": {
-      "title": "Conditional licenses",
-      "empty": "No licenses are marked conditional.",
-      "intro": "These licenses are permitted, but your organization recorded a condition on each. Read the condition before depending on a package that carries one.",
+      "title": "Conditional licences",
+      "empty": "No licences are marked conditional.",
+      "intro": "These licences are permitted, but your organization recorded a condition on each. Read the condition before depending on a package that carries one.",
       "noCondition": "No condition recorded — ask an administrator."
     }
   },
@@ -1599,12 +1938,12 @@
     "public-domain": "public domain"
   },
   "licenseText": {
-    "title": "License text",
-    "loading": "Loading license text…",
-    "notAvailable": "The bundled text for this license is not available.",
+    "title": "Licence text",
+    "loading": "Loading licence text…",
+    "notAvailable": "The bundled text for this licence is not available.",
     "viewUpstream": "View upstream",
     "close": "Close",
-    "open": "View license text"
+    "open": "View licence text"
   },
   "profile": {
     "title": "Profile",
@@ -1711,6 +2050,13 @@
         "registry": "Registry",
         "total": "{total} total"
       },
+      "enrichmentCoverage": {
+        "title": "Enrichment coverage",
+        "notConfigured": "No tracker configured",
+        "none": "No advisories to enrich",
+        "percent": "{percent}% enriched",
+        "sub": "{enriched} of {total} advisories carry an NVD band or SSVC decision"
+      },
       "recentJobs": {
         "title": "Recent background jobs",
         "empty": "No background-job runs recorded yet.",
@@ -1740,7 +2086,7 @@
         "trustAnchors": {
           "suspect": "{count} trust anchor was never validated",
           "suspectPlural": "{count} trust anchors were never validated",
-          "detail": "These anchors were stored under an ecosystem and kind combination that has no validator, so their key material was never checked. Review each one in its tenant's Settings → Security before removing it: removing the only anchor for an ecosystem whose signature verification is set to block denies every artifact of that ecosystem."
+          "detail": "These anchors were stored under an ecosystem and kind combination that has no validator, so their key material was never checked. Review each one in its tenant's Settings → Security before removing it: removing the only anchor for an ecosystem whose signature verification is set to block denies every artefact of that ecosystem."
         },
         "overallSummary": {
           "healthy": "All systems healthy",
@@ -1825,6 +2171,7 @@
         "slug": "Tenant",
         "status": "Status",
         "health": "Health",
+        "enrichment": "Enrichment",
         "users": "Users",
         "storage": "Storage",
         "quota": "Storage quota",
@@ -1842,6 +2189,7 @@
           "storage_quota_near": "Storage quota near limit",
           "stats_stale": "Stats snapshot stale",
           "stats_missing": "Stats snapshot missing",
+          "stats_frozen_non_active": "Stats frozen (tenant not active)",
           "quarantine_pending": "Packages pending quarantine review"
         }
       },
@@ -1864,9 +2212,9 @@
       "deleteModalTitle": "Soft-delete tenant",
       "deleteConfirm": "Soft-delete tenant {slug}? It will be inaccessible immediately and hard-deleted after the grace period (default 30 days).",
       "disableModalTitle": "Disable tenant",
-      "disableConfirm": "Disable {slug}? Pushes and uploads will be refused until re-enabled. Existing data is preserved.",
+      "disableConfirm": "Disable {slug}? The tenant will be fully locked out — protocol access, downloads, the management API, and login — until re-enabled. Existing data is preserved.",
       "enableModalTitle": "Re-enable tenant",
-      "enableConfirm": "Re-enable {slug}? Writes will resume immediately.",
+      "enableConfirm": "Re-enable {slug}? Protocol access, downloads, the management API, and login will resume immediately.",
       "statusUpdating": "Updating…",
       "modal": {
         "title": "Create tenant",
@@ -1916,11 +2264,12 @@
         "noStats": "No statistics snapshot yet.",
         "healthOk": "No issues detected.",
         "reasonDetail": {
-          "suspended": "Tenant is suspended — writes are rejected.",
+          "suspended": "Tenant is suspended — all access is refused (protocol, management API, and login).",
           "storage_quota_exceeded": "Storage quota exceeded.",
           "storage_quota_near": "Storage near quota limit.",
           "stats_stale": "Statistics snapshot is stale.",
           "stats_missing": "No statistics snapshot yet.",
+          "stats_frozen_non_active": "Statistics snapshot is frozen because the tenant is not active — it resumes once the tenant is reinstated.",
           "quarantine_pending": "{count} packages pending quarantine review."
         }
       }
@@ -1982,6 +2331,7 @@
       }
     },
     "userLookup": {
+      "mfaEnabled": "MFA enabled",
       "title": "User lookup",
       "email": "Email",
       "tenantSlug": "Tenant",
@@ -2060,7 +2410,8 @@
         "instance": "Instance settings",
         "metrics": "Metrics access",
         "email": "Email (SMTP)",
-        "slack": "Slack"
+        "slack": "Slack",
+        "vulnTracker": "Vulnerability tracker"
       },
       "labels": {
         "maxUploadBytes": "Max upload size — global",
@@ -2198,15 +2549,21 @@
     "title": "Risk",
     "tabs": {
       "operational": "Operational risk",
-      "license": "License risk"
+      "license": "Licence risk"
     },
     "intro": {
       "operational": "Versions that have fallen at least {threshold} stable releases behind upstream. Open a row to review the package and, if needed, block the version.",
-      "license": "Versions carrying a license on your blocklist, or with no license we could extract at all. Open a row to review the package and, if needed, block the version."
+      "license": "Versions carrying a licence on your blocklist, or with no licence we could extract at all. Open a row to review the package and, if needed, block the version."
+    },
+    "enrichment": {
+      "notConfigured": "Vulnerability-tracker connection not configured",
+      "none": "No advisories to enrich",
+      "percent": "{percent}% enrichment coverage",
+      "detail": "{enriched} of {total} advisories carry an NVD band or SSVC decision"
     },
     "summary": {
       "operational": "{packages} packages · {versions} versions at least {threshold} behind",
-      "license": "{count} versions at license risk"
+      "license": "{count} versions at licence risk"
     },
     "filters": {
       "ecosystem": "Ecosystem",
@@ -2217,14 +2574,14 @@
       "version": "Version",
       "versionsBehind": "Behind",
       "latest": "Latest upstream",
-      "licenses": "Licenses",
+      "licenses": "Licences",
       "reason": "Reason",
       "origin": "Origin",
       "published": "Published"
     },
     "reason": {
       "blocklisted": "Blocklisted",
-      "unknown": "No license",
+      "unknown": "No licence",
       "conditional": "conditional"
     },
     "reasonFilter": {
@@ -2236,7 +2593,7 @@
     },
     "empty": {
       "operational": "No versions are behind upstream by that margin.",
-      "license": "No versions are at license risk."
+      "license": "No versions are at licence risk."
     }
   },
   "error": {
@@ -2252,7 +2609,7 @@
   },
   "packageNotes": {
     "title": "Notes",
-    "intro": "Compliance notes an administrator has left on this package — including why it was accepted under a conditional license.",
+    "intro": "Compliance notes an administrator has left on this package — including why it was accepted under a conditional licence.",
     "empty": "No notes on this package.",
     "placeholder": "Add a note about this package",
     "add": "Add note",
@@ -2260,5 +2617,247 @@
     "scopedToPackage": "All versions",
     "scopedToVersion": "Version {version}",
     "unknownAuthor": "Unknown author"
+  },
+  "sbomAnalysis": {
+    "title": "Project version",
+    "searchPlaceholder": "Search component, version, PURL…",
+    "empty": "No components match these filters.",
+    "copyPurl": "Copy PURL",
+    "noAdvisories": "No advisories",
+    "licenseUndeclared": "Undeclared",
+    "licenseUndeclaredHelp": "The SBOM declared no SPDX licence for this component. An undeclared licence is an unknown one, not a permissive one.",
+    "suppressedHidden": "{count} suppressed advisories hidden. Turn on Show suppressed to see them.",
+    "violationsOnly": "Policy violations only",
+    "showSuppressed": "Show suppressed",
+    "columns": {
+      "component": "Component",
+      "version": "Version",
+      "type": "Type",
+      "dependency": "Dependency",
+      "scope": "Scope",
+      "dep": "Dep",
+      "licenses": "Licences",
+      "vulns": "Vulns",
+      "priority": "Priority",
+      "reach": "Reach"
+    },
+    "dependencyKind": {
+      "direct": "direct",
+      "transitive": "transitive"
+    },
+    "scopeFilter": {
+      "label": "Filter by scope",
+      "all": "All",
+      "prod": "Prod",
+      "dev": "Dev"
+    },
+    "severityFilter": {
+      "label": "Filter by severity",
+      "all": "All",
+      "critical": "Critical",
+      "high": "High",
+      "medium": "Medium",
+      "low": "Low"
+    },
+    "reachFilter": {
+      "label": "Filter by reachability",
+      "all": "Any reachability"
+    },
+    "scope": {
+      "dev": "dev",
+      "devHelp": "A development-only dependency. It is not shipped in the running application.",
+      "runtime": "runtime",
+      "runtimeHelp": "A runtime dependency, shipped with the application.",
+      "unknown": "unknown",
+      "unknownHelp": "No scan classified this component as development or runtime. It stays visible under Prod because an unclassified dependency may well ship.",
+      "required": "required",
+      "requiredHelp": "The SBOM declared this component as required.",
+      "optional": "optional",
+      "optionalHelp": "The SBOM declared this component as optional.",
+      "excluded": "excluded",
+      "excludedHelp": "The SBOM declared this component as excluded from the build."
+    },
+    "reach": {
+      "reachable": "reachable",
+      "imported-not-called": "imported, not called",
+      "not-observed": "not observed",
+      "unknown": "unknown"
+    },
+    "priority": {
+      "act": "Act",
+      "attend": "Attend",
+      "track": "Track",
+      "suppressed": "Suppressed",
+      "none": "No advisories",
+      "help": "Priority combines CVSS, KEV listing, EPSS, the recorded VEX state and reachability. It is computed on the server and never derived here."
+    },
+    "policy": {
+      "pass": "Pass",
+      "warn": "Warn",
+      "unevaluated": "Not evaluated",
+      "violations": "{count} policy violations",
+      "ribbon": {
+        "pass": "Policy: pass",
+        "warn": "Policy: warn",
+        "unevaluated": "Policy: not evaluated"
+      }
+    },
+    "rollup": {
+      "components": "components",
+      "prod": "prod",
+      "dev": "dev",
+      "unknownScope": "unknown scope",
+      "unscannable": "unscannable — no advisory feed",
+      "unscannableHelp": "No advisory feed covers these components: the purl is unparseable or the ecosystem has no feed. No scan can ever answer for them, and they do not hold this version at warn.",
+      "unscannableWarnHelp": "No advisory feed covers these components, and waiting will not change that. This version's warn comes from deferred scans, which resolve once the advisory source is reachable again — not from these components.",
+      "excludedByScope": "excluded from build",
+      "excludedByScopeHelp": "The SBOM's own producer marked these components excluded from the assembled deliverable. The four vulnerability arms exempt them; the licence arm still evaluates them.",
+      "lastScan": "Last scanned {at}",
+      "neverScanned": "Never scanned",
+      "notInRegistry": "never served here",
+      "notInRegistryHelp": "Components this application ships that your registry has never served. Nothing it enforces has ever applied to them. Select to list them.",
+      "registryUnknown": "no coordinate",
+      "registryUnknownHelp": "Components carrying no PURL your registry could be asked about. Not a clean result and not a blind spot — an unanswerable question. Select to list them."
+    },
+    "pillars": {
+      "security": "Security",
+      "license": "Licence",
+      "policy": "Policy",
+      "noAdvisories": "No advisories",
+      "licenseFlagged": "{count} to review",
+      "licenseClean": "No licence findings",
+      "licenseBreakdown": "Top licences"
+    },
+    "rescan": {
+      "button": "Rescan",
+      "scanning": "Rescanning…",
+      "cooldown": "Cooldown: {minutes}m remaining",
+      "title": "Scan this version's components for vulnerabilities"
+    },
+    "export": {
+      "button": "Export",
+      "hint": "Freshly rendered documents. Originals are in the Documents panel below.",
+      "inventory": "SBOM — inventory (CycloneDX)",
+      "vdr": "SBOM — with vulnerabilities (VDR)",
+      "vex": "VEX document"
+    },
+    "documents": {
+      "title": "Documents",
+      "help": "The uploads exactly as they arrived. Downloading one returns those bytes, digest and all.",
+      "empty": "No documents have been uploaded for this version.",
+      "type": "Type",
+      "format": "Format",
+      "tool": "Tool",
+      "digest": "SHA-256",
+      "size": "Size",
+      "uploaded": "Uploaded",
+      "download": "Download original",
+      "copyDigest": "Copy digest"
+    },
+    "orphans": {
+      "title": "Unmatched analysis",
+      "help": "VEX statements and SARIF results whose package identifier matches no component in this version's SBOM. Shown rather than dropped — a statement nobody can see is a statement nobody can correct.",
+      "purlKey": "Package",
+      "vulnKey": "Advisory",
+      "detailsToggle": "Details"
+    },
+    "panel": {
+      "purl": "PURL",
+      "dependencyPath": "Dependency path",
+      "noAdvisories": "No advisories recorded against this component.",
+      "allSuppressed": "Every advisory on this component is suppressed. Turn on Show suppressed to review them.",
+      "unscored": "UNSCORED",
+      "unscoredHelp": "No source assigned this advisory a severity. Unscored is an open question, not a low severity.",
+      "cvss": "CVSS",
+      "noCvss": "NO CVSS",
+      "noCvssHelp": "No CVSS base score was recorded for this advisory.",
+      "epss": "EPSS",
+      "epssHelp": "FIRST.org EPSS — probability of exploitation in the wild within the next 30 days.",
+      "kev": "KEV",
+      "kevHelp": "Listed in the CISA Known Exploited Vulnerabilities Catalog — confirmed exploited in the wild, independent of CVSS score.",
+      "kevRansomware": "KEV · Ransomware",
+      "kevRansomwareHelp": "Listed in the CISA Known Exploited Vulnerabilities Catalog with confirmed use in ransomware campaigns — the highest-urgency KEV entries.",
+      "reachability": "Reachability",
+      "noReachabilityHelp": "No SARIF analysis has reported on this advisory, so reachability is unstated — which is not the same as an analyzer reporting it unknown.",
+      "confidence": "Confidence",
+      "securitySeverity": "SARIF severity",
+      "severityOrigin": "Severity from",
+      "sarifSuppressed": "SARIF",
+      "sarifSuppressedHelp": "The uploaded SARIF marked this result as suppressed.",
+      "aliases": "Aliases",
+      "policyVerdict": "Policy",
+      "blockedBy": "Blocked by: {arm}",
+      "otherViolations": "Additional policy findings",
+      "inherited": "Inherited, decided {at}",
+      "inheritedHelp": "This decision was carried forward from an earlier version rather than made for this release.",
+      "remediation": {
+        "toggle": "Remediation guidance",
+        "loading": "Loading guidance…",
+        "error": "Guidance could not be loaded.",
+        "fixedIn": "Fixed in",
+        "noFixedVersion": "The advisory names no release that fixes the version this application ships.",
+        "skills": "Remediation skills"
+      }
+    },
+    "vex": {
+      "title": "Analysis",
+      "noState": "No state recorded",
+      "none": "None",
+      "edit": "Edit analysis",
+      "justification": "Justification",
+      "justificationHint": "CycloneDX attaches a justification to not_affected only.",
+      "response": "Response",
+      "detail": "Detail",
+      "state": {
+        "label": "State",
+        "in_triage": "In triage",
+        "exploitable": "Exploitable",
+        "resolved": "Resolved",
+        "resolved_with_pedigree": "Resolved with pedigree",
+        "false_positive": "False positive",
+        "not_affected": "Not affected"
+      },
+      "justificationValue": {
+        "code_not_present": "Code not present",
+        "code_not_reachable": "Code not reachable",
+        "requires_configuration": "Requires configuration",
+        "requires_dependency": "Requires dependency",
+        "requires_environment": "Requires environment",
+        "protected_by_compiler": "Protected by compiler",
+        "protected_at_runtime": "Protected at runtime",
+        "protected_at_perimeter": "Protected at perimeter",
+        "protected_by_mitigating_control": "Protected by mitigating control"
+      },
+      "responseValue": {
+        "can_not_fix": "Cannot fix",
+        "will_not_fix": "Will not fix",
+        "update": "Update",
+        "rollback": "Roll back",
+        "workaround_available": "Workaround available"
+      },
+      "provenance": {
+        "manual": "Set by {actor} on {at}.",
+        "manualPlain": "Set manually in Dependably.",
+        "sarif": "From an uploaded SARIF report.",
+        "uploaded": "From an uploaded VEX document.",
+        "none": "No analysis recorded."
+      }
+    },
+    "registry": {
+      "blocked": "blocked here",
+      "blockedHelp": "This exact version is manually blocked in your registry. Anything installing it from here is refused.",
+      "blockedOther": "blocked (other version)",
+      "blockedOtherHelp": "Another version of this package is manually blocked in your registry — not the one this application ships, or the two version spellings could not be matched.",
+      "deprecated": "deprecated upstream",
+      "deprecatedHelp": "Upstream has marked this exact version deprecated.",
+      "deprecatedOther": "deprecated (other version)",
+      "deprecatedOtherHelp": "Upstream has deprecated another version of this package — not the one this application ships, or the two version spellings could not be matched.",
+      "outdated": "behind {latest}",
+      "outdatedHelp": "Your registry knows of {latest} upstream; this application ships {shipped}.",
+      "latestKnown": "latest known {latest}",
+      "latestKnownHelp": "Your registry knows of {latest} upstream. This ecosystem has no version ordering here, so whether the shipped version is behind it is unknown — not confirmed current.",
+      "notInRegistry": "not in your registry",
+      "notInRegistryHelp": "Your registry has never served this coordinate, so nothing it enforces — block state, licence policy, provenance, the advisory scan — has ever applied to these bytes."
+    }
   }
 }

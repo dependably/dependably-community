@@ -1,0 +1,18 @@
+fixture: 01-real-go-gate-n-plus-one.diff
+class: REAL_FINDING
+expected_verdict: FINDING
+lens: architecture (primary), code (secondary)
+expected_finding: |
+  IsGoZipBlockedAsync resolves one version by calling PackageRepository.GetVersionsAsync(pkg.Id)
+  and then FirstOrDefault over the result -- every version of a Go module is materialised to
+  answer a question about one version, on the per-.zip-download hot path. A module with
+  hundreds of versions pays for all of them on every download.
+provenance:
+  origin: reverse of commit 2d96a19b ("perf(go): resolve the gated version with a targeted lookup"), src/ only
+  mr: !1005 (defect introduced by !1004 commit 6f942395)
+  ground_truth: TRUE POSITIVE -- ai-review-architecture DID report this on !1005 and the
+    triage note records it as the only FIXED lens finding in the 50-MR sample.
+notes: |
+  POSITIVE CONTROL. This is the one finding in 50 merged MRs that a lens produced and a human
+  accepted and fixed. A lens configuration that cannot reproduce this has regressed below the
+  measured historical baseline. Sub-cap (22 KB), so no truncation confound.

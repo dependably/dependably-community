@@ -14,6 +14,10 @@ namespace Dependably.Infrastructure;
 /// fixed interval (STATS_REFRESH_INTERVAL_SECONDS env var, default 60s). Large multi-tenant
 /// instances where the aggregate pass is expensive can raise the interval to trade dashboard
 /// freshness for less background query load.
+///
+/// Each pass also upserts today's row in the append-only <c>org_stats_history</c> table (last
+/// write of the day wins) and folds the recent window back into the snapshot it caches as the
+/// <see cref="OrgStats.Trend"/> series the dashboard renders deltas/sparklines from.
 /// </summary>
 public sealed class StatsRefreshService : BackgroundService
 {
@@ -24,7 +28,11 @@ public sealed class StatsRefreshService : BackgroundService
     private static readonly TimeSpan RefreshLockTtl = TimeSpan.FromMinutes(5);
     private const string RefreshLockName = "stats-refresh:sweep";
 
+    // Trend series length embedded on the snapshot's Trend field — the last 30 daily points.
+    private const int TrendWindowDays = 30;
+
     private readonly StatsSnapshotRepository _snapshots;
+    private readonly OrgStatsHistoryRepository _history;
     private readonly PackageAnalyticsRepository _analytics;
     private readonly IConfiguration _config;
     private readonly IAirGapMode _airGap;
@@ -34,6 +42,7 @@ public sealed class StatsRefreshService : BackgroundService
 
     public StatsRefreshService(
         StatsSnapshotRepository snapshots,
+        OrgStatsHistoryRepository history,
         PackageAnalyticsRepository analytics,
         IConfiguration config,
         IAirGapMode airGap,
@@ -42,6 +51,7 @@ public sealed class StatsRefreshService : BackgroundService
         TimeProvider time)
     {
         _snapshots = snapshots;
+        _history = history;
         _analytics = analytics;
         _config = config;
         _airGap = airGap;
@@ -190,8 +200,26 @@ public sealed class StatsRefreshService : BackgroundService
                     var stats = await _analytics.GetOrgStatsAsync(orgId, leaseCt);
                     orgSw.Stop();
 
-                    string json = JsonSerializer.Serialize(stats, JsonContracts.Web);
-                    string computedAt = _time.GetUtcNow().ToUtcIso();
+                    var now = _time.GetUtcNow();
+                    string computedAt = now.ToUtcIso();
+
+                    // Append today's trend point (last write of the day wins), then fold the
+                    // recent window back into the stats this pass caches — so the snapshot's own
+                    // Trend field always reflects the row just written, not last pass's read.
+                    var historyPoint = new OrgStatsHistoryPoint
+                    {
+                        TotalVulnerabilities = stats.VulnsByEcosystemAndSeverity.Sum(v => v.Count),
+                        BlockedPulls30d = stats.BlockedPulls30d,
+                        TotalDownloads30d = stats.TotalDownloads30d,
+                    };
+                    string day = now.UtcDateTime.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+                    string historyJson = JsonSerializer.Serialize(historyPoint, JsonContracts.Web);
+                    await _history.UpsertAsync(orgId, day, historyJson, computedAt, leaseCt);
+
+                    var trend = await BuildTrendAsync(orgId, leaseCt);
+                    var statsWithTrend = stats with { Trend = trend };
+
+                    string json = JsonSerializer.Serialize(statsWithTrend, JsonContracts.Web);
                     await _snapshots.UpsertSnapshotAsync(orgId, json, computedAt, orgSw.ElapsedMilliseconds, leaseCt);
                     refreshed++;
                 }
@@ -228,6 +256,45 @@ public sealed class StatsRefreshService : BackgroundService
             // The lease owns the handle: stopping the heartbeat and releasing the lock are one step.
             await lease.DisposeAsync();
         }
+    }
+
+    // Folds org_stats_history's recent rows into the dashboard trend series. A malformed row
+    // (a hand-edited DB, or a shape written by a since-changed OrgStatsHistoryPoint) is skipped
+    // rather than aborting the whole pass — the same "corrupt row must not break the refresh"
+    // posture RunRefreshPassInnerAsync already takes for the snapshot's own deserialize.
+    private async Task<IReadOnlyList<StatsTrendPoint>> BuildTrendAsync(string orgId, CancellationToken ct)
+    {
+        var rows = await _history.GetRecentAsync(orgId, TrendWindowDays, ct);
+        var points = new List<StatsTrendPoint>(rows.Count);
+        foreach (var row in rows)
+        {
+            OrgStatsHistoryPoint? parsed;
+            try
+            {
+                parsed = JsonSerializer.Deserialize<OrgStatsHistoryPoint>(row.TrendJson, JsonContracts.Web);
+            }
+            catch (JsonException ex)
+            {
+                _logger.LogWarning(ex,
+                    "Discarding malformed stats history row for org {OrgId} on {Day}.", orgId, row.Day);
+                continue;
+            }
+
+            if (parsed is null)
+            {
+                continue;
+            }
+
+            points.Add(new StatsTrendPoint
+            {
+                Day = row.Day,
+                TotalVulnerabilities = parsed.TotalVulnerabilities,
+                BlockedPulls30d = parsed.BlockedPulls30d,
+                TotalDownloads30d = parsed.TotalDownloads30d,
+            });
+        }
+
+        return points;
     }
 
     // Signals "the sweep lease was lost mid-pass" from RunRefreshPassInnerAsync up to

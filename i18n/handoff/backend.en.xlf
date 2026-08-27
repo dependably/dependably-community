@@ -49,7 +49,7 @@ Consultez cette alerte dans les paramètres Alertes de Dependably.
       </notes>
       <segment state="translated">
         <source>Dependably alert: {0} ({1} occurrences)</source>
-        <target>Alerte Dependably : {0} ({1} occurrences)</target>
+        <target>Alerte Dependably : {0} ({1} occurrences)</target>
       </segment>
     </unit>
     <unit id="email.alert.subject">
@@ -58,7 +58,7 @@ Consultez cette alerte dans les paramètres Alertes de Dependably.
       </notes>
       <segment state="translated">
         <source>Dependably alert: {0}</source>
-        <target>Alerte Dependably : {0}</target>
+        <target>Alerte Dependably : {0}</target>
       </segment>
     </unit>
     <unit id="email.emailChange.body">
@@ -563,6 +563,51 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
         <target>targetRole doit être l&apos;une des valeurs suivantes : all, member, admin, owner, auditor.</target>
       </segment>
     </unit>
+    <unit id="error.blastRadius.ecosystemRequired">
+      <notes>
+        <note category="translator">422 detail when a blast-radius package query omits the ecosystem half of the coordinate.</note>
+      </notes>
+      <segment state="translated">
+        <source>An ecosystem is required.</source>
+        <target>Un écosystème est requis.</target>
+      </segment>
+    </unit>
+    <unit id="error.blastRadius.kindInvalid">
+      <notes>
+        <note category="translator">422 detail for the blast-radius counts key space. The quoted values are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be &apos;advisory&apos; or &apos;package&apos;.</source>
+        <target>Doit être « advisory » ou « package ».</target>
+      </segment>
+    </unit>
+    <unit id="error.blastRadius.nameRequired">
+      <notes>
+        <note category="translator">422 detail when a blast-radius package query omits the name half of the coordinate.</note>
+      </notes>
+      <segment state="translated">
+        <source>A package name is required.</source>
+        <target>Un nom de paquet est requis.</target>
+      </segment>
+    </unit>
+    <unit id="error.blastRadius.osvIdRequired">
+      <notes>
+        <note category="translator">422 detail when a blast-radius advisory query omits the OSV id.</note>
+      </notes>
+      <segment state="translated">
+        <source>An advisory identifier is required.</source>
+        <target>Un identifiant d&apos;avis de sécurité est requis.</target>
+      </segment>
+    </unit>
+    <unit id="error.blastRadius.tooManyKeys">
+      <notes>
+        <note category="translator">422 detail when a blast-radius counts batch exceeds the ceiling. {0} is that ceiling.</note>
+      </notes>
+      <segment state="translated">
+        <source>At most {0} keys may be counted in one request.</source>
+        <target>Au plus {0} clés peuvent être comptées en une seule requête.</target>
+      </segment>
+    </unit>
     <unit id="error.common.bodyRequired">
       <notes>
         <note category="translator">422 detail for endpoints that received no JSON body.</note>
@@ -650,7 +695,7 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       </notes>
       <segment state="translated">
         <source>Must be &apos;starttls&apos;, &apos;ssl&apos;, or &apos;none&apos;.</source>
-        <target>Doit être « starttls », « ssl » ou « none ».</target>
+        <target>Doit être « starttls », « ssl » ou « none ».</target>
       </segment>
     </unit>
     <unit id="error.email.masterKeyRequired">
@@ -677,7 +722,7 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       </notes>
       <segment state="translated">
         <source>Test email failed: {0}</source>
-        <target>Échec du courriel de test : {0}</target>
+        <target>Échec du courriel de test : {0}</target>
       </segment>
     </unit>
     <unit id="error.email.testFailedGeneric">
@@ -713,7 +758,7 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       </notes>
       <segment state="translated">
         <source>The request could not be completed because of an unexpected server error. The failure has been logged; quote the correlation id when reporting it.</source>
-        <target>La requête n&apos;a pas pu aboutir en raison d&apos;une erreur inattendue du serveur. L&apos;incident a été journalisé ; indiquez l&apos;identifiant de corrélation lors de son signalement.</target>
+        <target>La requête n&apos;a pas pu aboutir en raison d&apos;une erreur inattendue du serveur. L&apos;incident a été journalisé; indiquez l&apos;identifiant de corrélation lors de son signalement.</target>
       </segment>
     </unit>
     <unit id="error.internal.title">
@@ -920,7 +965,7 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       </notes>
       <segment state="translated">
         <source>Maven name must be a &quot;groupId:artifactId&quot; coordinate.</source>
-        <target>Le nom Maven doit être une coordonnée « groupId:artifactId ».</target>
+        <target>Le nom Maven doit être une coordonnée « groupId:artifactId ».</target>
       </segment>
     </unit>
     <unit id="error.lookup.nameInvalid">
@@ -947,7 +992,7 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       </notes>
       <segment state="translated">
         <source>The upstream registry for &apos;{0}&apos; is temporarily unavailable. Try again shortly.</source>
-        <target>La source amont pour « {0} » est temporairement indisponible. Réessayez sous peu.</target>
+        <target>La source amont pour « {0} » est temporairement indisponible. Réessayez sous peu.</target>
       </segment>
     </unit>
     <unit id="error.lookup.versionInvalid">
@@ -965,7 +1010,7 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       </notes>
       <segment state="translated">
         <source>version is required for ecosystem &apos;{0}&apos;.</source>
-        <target>version est obligatoire pour l&apos;écosystème « {0} ».</target>
+        <target>version est obligatoire pour l&apos;écosystème « {0} ».</target>
       </segment>
     </unit>
     <unit id="error.member.lastOwnerDemote">
@@ -1019,7 +1064,7 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       </notes>
       <segment state="translated">
         <source>No publisher is bound to that package name in this organization, so a co-publish grant would have no effect.</source>
-        <target>Aucun éditeur n&apos;est lié à ce nom de paquet dans cette organisation ; une autorisation de copublication n&apos;aurait donc aucun effet.</target>
+        <target>Aucun éditeur n&apos;est lié à ce nom de paquet dans cette organisation; une autorisation de copublication n&apos;aurait donc aucun effet.</target>
       </segment>
     </unit>
     <unit id="error.nameGrant.nameRequired">
@@ -1076,6 +1121,24 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
         <target>L&apos;écosystème et le nom du paquet sont requis.</target>
       </segment>
     </unit>
+    <unit id="error.packageNote.ecosystemTooLong">
+      <notes>
+        <note category="translator">422 detail: package-note ecosystem over the length cap. {0} = the cap.</note>
+      </notes>
+      <segment state="translated">
+        <source>Ecosystem must be {0} characters or fewer.</source>
+        <target>L&apos;écosystème doit compter au plus {0} caractères.</target>
+      </segment>
+    </unit>
+    <unit id="error.packageNote.nameTooLong">
+      <notes>
+        <note category="translator">422 detail: package-note name over the length cap. {0} = the cap.</note>
+      </notes>
+      <segment state="translated">
+        <source>Name must be {0} characters or fewer.</source>
+        <target>Le nom doit compter au plus {0} caractères.</target>
+      </segment>
+    </unit>
     <unit id="error.packageNote.noteRequired">
       <notes>
         <note category="translator">422 detail: a package note with no text.</note>
@@ -1119,6 +1182,87 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       <segment state="translated">
         <source>Payload Too Large</source>
         <target>Charge utile trop volumineuse</target>
+      </segment>
+    </unit>
+    <unit id="error.project.descriptionTooLong">
+      <notes>
+        <note category="translator">422 detail on project create. {0} = the character limit. &apos;description&apos; is the API field name - keep it verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>description must be {0} characters or fewer.</source>
+        <target>description doit contenir au plus {0} caractères.</target>
+      </segment>
+    </unit>
+    <unit id="error.project.isCollection">
+      <notes>
+        <note category="translator">409 detail returned when a version-scoped operation targets a collection.</note>
+      </notes>
+      <segment state="translated">
+        <source>That project is a collection. Collections hold no versions.</source>
+        <target>Ce projet est une collection. Les collections ne contiennent aucune version.</target>
+      </segment>
+    </unit>
+    <unit id="error.project.nameRequired">
+      <notes>
+        <note category="translator">422 detail on project create. &apos;name&apos; is the API field name - keep it verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>name is required.</source>
+        <target>name est obligatoire.</target>
+      </segment>
+    </unit>
+    <unit id="error.project.nameTaken">
+      <notes>
+        <note category="translator">409 detail: the name is already used at the same level of the project tree.</note>
+      </notes>
+      <segment state="translated">
+        <source>A project with that name already exists here.</source>
+        <target>Un projet portant ce nom existe déjà à cet endroit.</target>
+      </segment>
+    </unit>
+    <unit id="error.project.nameTooLong">
+      <notes>
+        <note category="translator">422 detail on project create. {0} = the character limit. &apos;name&apos; is the API field name - keep it verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>name must be {0} characters or fewer.</source>
+        <target>name doit contenir au plus {0} caractères.</target>
+      </segment>
+    </unit>
+    <unit id="error.project.parentIsDescendant">
+      <notes>
+        <note category="translator">422 detail on project relocate: the move would detach the subtree into a cycle. &apos;parentId&apos; is the API field name - keep it verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>parentId names a collection inside the project being moved. Pick a destination outside it.</source>
+        <target>parentId désigne une collection située à l&apos;intérieur du projet déplacé. Choisissez une destination en dehors de celui-ci.</target>
+      </segment>
+    </unit>
+    <unit id="error.project.parentIsSelf">
+      <notes>
+        <note category="translator">422 detail on project relocate: parentId named the project being moved.</note>
+      </notes>
+      <segment state="translated">
+        <source>A project cannot be moved inside itself.</source>
+        <target>Un projet ne peut pas être déplacé à l&apos;intérieur de lui-même.</target>
+      </segment>
+    </unit>
+    <unit id="error.project.parentNotACollection">
+      <notes>
+        <note category="translator">422 detail on project create. &apos;parentId&apos; is the API field name - keep it verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>parentId names a project. Only a collection can contain other projects.</source>
+        <target>parentId désigne un projet. Seule une collection peut contenir d&apos;autres projets.</target>
+      </segment>
+    </unit>
+    <unit id="error.project.parentNotFound">
+      <notes>
+        <note category="translator">422 detail. Deliberately does not distinguish &quot;no such project&quot; from &quot;belongs to another organization&quot;. &apos;parentId&apos; is the API field name - keep it verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>parentId does not name a collection in this organization.</source>
+        <target>parentId ne désigne aucune collection de cette organisation.</target>
       </segment>
     </unit>
     <unit id="error.quarantine.alreadyPending">
@@ -1238,6 +1382,285 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
         <target>nameIdFormat est obligatoire.</target>
       </segment>
     </unit>
+    <unit id="error.sbom.ambiguousProject">
+      <notes>
+        <note category="translator">409 detail when a project name matches more than one row. {0} is the name, {1} the match count. &apos;parentId&apos; is the API field name - keep it verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>{1} projects are named &quot;{0}&quot;. A project name is unique within its folder, not across the organization - pass parentId to say which one.</source>
+        <target>{1} projets portent le nom « {0} ». Un nom de projet est unique dans son dossier, pas dans toute l&apos;organisation; indiquez parentId pour préciser lequel.</target>
+      </segment>
+    </unit>
+    <unit id="error.sbom.analysisRowNotFound">
+      <notes>
+        <note category="translator">404 detail for the rare case where the manual-triage row cannot be re-read immediately after the write.</note>
+      </notes>
+      <segment state="translated">
+        <source>The triage decision could not be read back after being saved.</source>
+        <target>La décision de tri n&apos;a pas pu être relue après son enregistrement.</target>
+      </segment>
+    </unit>
+    <unit id="error.sbom.collectionTarget">
+      <notes>
+        <note category="translator">Conflict returned when a document upload targets a collection project rather than a project.</note>
+      </notes>
+      <segment state="translated">
+        <source>A collection holds no components, so it cannot receive a document.</source>
+        <target>Une collection ne contient aucun composant et ne peut donc pas recevoir de document.</target>
+      </segment>
+    </unit>
+    <unit id="error.sbom.dirInvalid">
+      <notes>
+        <note category="translator">422 detail for the analysis sort-direction parameter. The quoted values are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be &apos;asc&apos; or &apos;desc&apos;.</source>
+        <target>Doit être « asc » ou « desc ».</target>
+      </segment>
+    </unit>
+    <unit id="error.sbom.export.invalidVariant">
+      <notes>
+        <note category="translator">422 detail for the SBOM export endpoint&apos;s variant query parameter. The quoted values are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be &apos;inventory&apos; or &apos;vdr&apos;.</source>
+        <target>Doit être « inventory » ou « vdr ».</target>
+      </segment>
+    </unit>
+    <unit id="error.sbom.justificationRequiresNotAffected">
+      <notes>
+        <note category="translator">422 detail when a justification is sent for a state other than not_affected. The quoted value is an API literal.</note>
+      </notes>
+      <segment state="translated">
+        <source>CycloneDX defines a justification only for the &apos;not_affected&apos; state.</source>
+        <target>CycloneDX ne définit une justification que pour l&apos;état « not_affected ».</target>
+      </segment>
+    </unit>
+    <unit id="error.sbom.malformed">
+      <notes>
+        <note category="translator">Validation error returned when an uploaded document is not well-formed JSON.</note>
+      </notes>
+      <segment state="translated">
+        <source>The uploaded document could not be read as JSON.</source>
+        <target>Le document téléversé n&apos;a pas pu être lu comme du JSON.</target>
+      </segment>
+    </unit>
+    <unit id="error.sbom.parentNotACollection">
+      <notes>
+        <note category="translator">Conflict returned when a document upload names a parent that exists but is not a collection.</note>
+      </notes>
+      <segment state="translated">
+        <source>The named parent is a project, not a collection.</source>
+        <target>L&apos;élément parent nommé est un projet, pas une collection.</target>
+      </segment>
+    </unit>
+    <unit id="error.sbom.parentNotFound">
+      <notes>
+        <note category="translator">Returned when a document upload names a parent collection that does not exist.</note>
+      </notes>
+      <segment state="translated">
+        <source>The named parent collection does not exist.</source>
+        <target>La collection parente nommée n&apos;existe pas.</target>
+      </segment>
+    </unit>
+    <unit id="error.sbom.projectNameRequired">
+      <notes>
+        <note category="translator">Validation error returned when a document upload omits the project name.</note>
+      </notes>
+      <segment state="translated">
+        <source>A projectName query parameter is required.</source>
+        <target>Un paramètre de requête projectName est requis.</target>
+      </segment>
+    </unit>
+    <unit id="error.sbom.projectNotFound">
+      <notes>
+        <note category="translator">Returned when a document upload names a project or version that does not exist and was not created.</note>
+      </notes>
+      <segment state="translated">
+        <source>No such project version.</source>
+        <target>Cette version de projet n&apos;existe pas.</target>
+      </segment>
+    </unit>
+    <unit id="error.sbom.projectVersionRequired">
+      <notes>
+        <note category="translator">Validation error returned when a document upload omits the project version label.</note>
+      </notes>
+      <segment state="translated">
+        <source>A projectVersion query parameter is required.</source>
+        <target>Un paramètre de requête projectVersion est requis.</target>
+      </segment>
+    </unit>
+    <unit id="error.sbom.purlKeyRequired">
+      <notes>
+        <note category="translator">422 detail when a manual VEX triage body omits the purlKey that addresses the component.</note>
+      </notes>
+      <segment state="translated">
+        <source>A component identifier is required.</source>
+        <target>Un identifiant de composant est requis.</target>
+      </segment>
+    </unit>
+    <unit id="error.sbom.reachInvalid">
+      <notes>
+        <note category="translator">422 detail for the analysis reachability filter. The quoted values are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be &apos;reachable&apos;, &apos;not-observed&apos;, &apos;unknown&apos; or &apos;imported-not-called&apos;.</source>
+        <target>Doit être « reachable », « not-observed », « unknown » ou « imported-not-called ».</target>
+      </segment>
+    </unit>
+    <unit id="error.sbom.registryInvalid">
+      <notes>
+        <note category="translator">422 detail for the analysis registry cross-link filter. The quoted values are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be &apos;all&apos;, &apos;present&apos;, &apos;absent&apos; or &apos;unknown&apos;.</source>
+        <target>Doit être « all », « present », « absent » ou « unknown ».</target>
+      </segment>
+    </unit>
+    <unit id="error.sbom.scopeInvalid">
+      <notes>
+        <note category="translator">422 detail for the analysis dependency-scope filter. The quoted values are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be &apos;all&apos;, &apos;prod&apos; or &apos;dev&apos;.</source>
+        <target>Doit être « all », « prod » ou « dev ».</target>
+      </segment>
+    </unit>
+    <unit id="error.sbom.severityInvalid">
+      <notes>
+        <note category="translator">422 detail for the analysis severity filter. The quoted values are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be &apos;critical&apos;, &apos;high&apos;, &apos;medium&apos;, &apos;low&apos; or &apos;unscored&apos;.</source>
+        <target>Doit être « critical », « high », « medium », « low » ou « unscored ».</target>
+      </segment>
+    </unit>
+    <unit id="error.sbom.sortInvalid">
+      <notes>
+        <note category="translator">422 detail for the analysis sort parameter. The quoted values are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be &apos;priority&apos;, &apos;name&apos;, &apos;version&apos;, &apos;severity&apos; or &apos;scope&apos;.</source>
+        <target>Doit être « priority », « name », « version », « severity » ou « scope ».</target>
+      </segment>
+    </unit>
+    <unit id="error.sbom.tooLarge">
+      <notes>
+        <note category="translator">Returned when an uploaded SBOM, VEX or SARIF document is larger than the configured cap. {0} is the cap in bytes.</note>
+      </notes>
+      <segment state="translated">
+        <source>The document exceeds the {0}-byte upload limit for this instance.</source>
+        <target>Le document dépasse la limite de téléversement de {0} octets de cette instance.</target>
+      </segment>
+    </unit>
+    <unit id="error.sbom.tooManyComponents">
+      <notes>
+        <note category="translator">Validation error returned when an SBOM exceeds the per-upload component ceiling. {0} is the ceiling.</note>
+      </notes>
+      <segment state="translated">
+        <source>The document declares more than {0} components.</source>
+        <target>Le document déclare plus de {0} composants.</target>
+      </segment>
+    </unit>
+    <unit id="error.sbom.tooManyResults">
+      <notes>
+        <note category="translator">Validation error returned when a SARIF log exceeds the per-upload result ceiling. {0} is the ceiling.</note>
+      </notes>
+      <segment state="translated">
+        <source>The log declares more than {0} results.</source>
+        <target>Le journal déclare plus de {0} résultats.</target>
+      </segment>
+    </unit>
+    <unit id="error.sbom.tooManyStatements">
+      <notes>
+        <note category="translator">Validation error returned when a VEX or SBOM document exceeds the per-upload analysis-statement ceiling, which counts one statement per component it names. {0} is the ceiling.</note>
+      </notes>
+      <segment state="translated">
+        <source>The document declares more than {0} analysis statements against components.</source>
+        <target>Le document déclare plus de {0} énoncés d&apos;analyse visant des composants.</target>
+      </segment>
+    </unit>
+    <unit id="error.sbom.triageEmpty">
+      <notes>
+        <note category="translator">422 detail when a manual VEX triage body names a row but changes none of its fields.</note>
+      </notes>
+      <segment state="translated">
+        <source>Include at least one analysis field to change.</source>
+        <target>Indiquez au moins un champ d&apos;analyse à modifier.</target>
+      </segment>
+    </unit>
+    <unit id="error.sbom.unsupportedSpecVersion">
+      <notes>
+        <note category="translator">Validation error returned for a CycloneDX version outside 1.4-1.6 or a SARIF version other than 2.1.0. {0} is the version the document declared.</note>
+      </notes>
+      <segment state="translated">
+        <source>Specification version {0} is not supported.</source>
+        <target>La version {0} de la spécification n&apos;est pas prise en charge.</target>
+      </segment>
+    </unit>
+    <unit id="error.sbom.versionNotFound">
+      <notes>
+        <note category="translator">404 detail when a project version id (or the &apos;latest&apos; alias) resolves to nothing in the caller&apos;s organization.</note>
+      </notes>
+      <segment state="translated">
+        <source>That project version does not exist.</source>
+        <target>Cette version de projet n&apos;existe pas.</target>
+      </segment>
+    </unit>
+    <unit id="error.sbom.vexDetailTooLong">
+      <notes>
+        <note category="translator">422 detail when a manual VEX triage rationale exceeds the stored length limit.</note>
+      </notes>
+      <segment state="translated">
+        <source>The rationale is too long.</source>
+        <target>La justification est trop longue.</target>
+      </segment>
+    </unit>
+    <unit id="error.sbom.vexJustificationInvalid">
+      <notes>
+        <note category="translator">422 detail when a manual VEX triage sends a justification outside the CycloneDX vocabulary.</note>
+      </notes>
+      <segment state="translated">
+        <source>Not a CycloneDX analysis justification.</source>
+        <target>Cette justification d&apos;analyse n&apos;existe pas dans CycloneDX.</target>
+      </segment>
+    </unit>
+    <unit id="error.sbom.vexResponseInvalid">
+      <notes>
+        <note category="translator">422 detail when a manual VEX triage sends a response outside the CycloneDX vocabulary.</note>
+      </notes>
+      <segment state="translated">
+        <source>Not a CycloneDX analysis response.</source>
+        <target>Cette réponse d&apos;analyse n&apos;existe pas dans CycloneDX.</target>
+      </segment>
+    </unit>
+    <unit id="error.sbom.vexStateInvalid">
+      <notes>
+        <note category="translator">422 detail when a manual VEX triage sends a state outside the CycloneDX vocabulary.</note>
+      </notes>
+      <segment state="translated">
+        <source>Not a CycloneDX analysis state.</source>
+        <target>Cet état d&apos;analyse n&apos;existe pas dans CycloneDX.</target>
+      </segment>
+    </unit>
+    <unit id="error.sbom.vulnKeyRequired">
+      <notes>
+        <note category="translator">422 detail when a manual VEX triage body omits the vulnKey that addresses the advisory.</note>
+      </notes>
+      <segment state="translated">
+        <source>An advisory identifier is required.</source>
+        <target>Un identifiant d&apos;avis de sécurité est requis.</target>
+      </segment>
+    </unit>
+    <unit id="error.sbom.wrongDocumentKind">
+      <notes>
+        <note category="translator">Validation error returned when a document is well-formed JSON but not the expected kind, for example a SARIF log sent to the SBOM endpoint.</note>
+      </notes>
+      <segment state="translated">
+        <source>The uploaded document is not the format this endpoint accepts.</source>
+        <target>Le document téléversé n&apos;est pas du format accepté par ce point de terminaison.</target>
+      </segment>
+    </unit>
     <unit id="error.serviceUnavailable.title">
       <notes>
         <note category="translator">Title of the HTTP 503 problem response (a dependency the request needs is temporarily unreachable).</note>
@@ -1316,7 +1739,7 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       </notes>
       <segment state="translated">
         <source>Must be null (inherit the instance default), &apos;passthrough&apos;, or &apos;merged&apos;.</source>
-        <target>Doit être null (hérite de la valeur par défaut de l&apos;instance), « passthrough » ou « merged ».</target>
+        <target>Doit être null (hérite de la valeur par défaut de l&apos;instance), « passthrough » ou « merged ».</target>
       </segment>
     </unit>
     <unit id="error.system.lookupQueryRequired">
@@ -1370,7 +1793,7 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       </notes>
       <segment state="translated">
         <source>Slack test message failed: {0}</source>
-        <target>Échec du message de test Slack : {0}</target>
+        <target>Échec du message de test Slack : {0}</target>
       </segment>
     </unit>
     <unit id="error.system.slackTestFailedGeneric">
@@ -1433,7 +1856,7 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       </notes>
       <segment state="translated">
         <source>Unrecognised timezone &apos;{0}&apos;. Use an IANA zone name, for example America/Toronto.</source>
-        <target>Fuseau horaire non reconnu « {0} ». Utilisez un nom de zone IANA, par exemple America/Toronto.</target>
+        <target>Fuseau horaire non reconnu « {0} ». Utilisez un nom de zone IANA, par exemple America/Toronto.</target>
       </segment>
     </unit>
     <unit id="error.token.limitReached">
@@ -1445,6 +1868,15 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
         <target>Limite de jetons actifs ({0}) atteinte pour ce locataire. Révoquez des jetons inutilisés avant d&apos;en créer de nouveaux.</target>
       </segment>
     </unit>
+    <unit id="error.token.nameInvalidChars">
+      <notes>
+        <note category="translator">422 detail: service-token name carrying control characters.</note>
+      </notes>
+      <segment state="translated">
+        <source>Name must not contain control characters.</source>
+        <target>Le nom ne doit pas contenir de caractères de contrôle.</target>
+      </segment>
+    </unit>
     <unit id="error.token.nameRequired">
       <notes>
         <note category="translator">Creating a service token without a display name.</note>
@@ -1452,6 +1884,15 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       <segment state="translated">
         <source>Name is required.</source>
         <target>Le nom est obligatoire.</target>
+      </segment>
+    </unit>
+    <unit id="error.token.nameTooLong">
+      <notes>
+        <note category="translator">422 detail: service-token name over the length cap. {0} = the cap.</note>
+      </notes>
+      <segment state="translated">
+        <source>Name must be {0} characters or fewer.</source>
+        <target>Le nom doit compter au plus {0} caractères.</target>
       </segment>
     </unit>
     <unit id="error.token.scopeRetired">
@@ -1472,6 +1913,15 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
         <target>Trop de requêtes</target>
       </segment>
     </unit>
+    <unit id="error.trustAnchor.labelTooLong">
+      <notes>
+        <note category="translator">422 detail: trust-anchor label over the length cap. {0} = the cap.</note>
+      </notes>
+      <segment state="translated">
+        <source>Label must be {0} characters or fewer.</source>
+        <target>L&apos;étiquette doit compter au plus {0} caractères.</target>
+      </segment>
+    </unit>
     <unit id="error.trustAnchor.materialEmpty">
       <notes>
         <note category="translator">422 detail. &apos;material&apos; is the JSON field name - keep it verbatim.</note>
@@ -1481,13 +1931,22 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
         <target>material ne doit pas être vide.</target>
       </segment>
     </unit>
+    <unit id="error.trustAnchor.materialTooLong">
+      <notes>
+        <note category="translator">422 detail: trust-anchor material over the length cap. {0} = the cap.</note>
+      </notes>
+      <segment state="translated">
+        <source>Material must be {0} characters or fewer.</source>
+        <target>Le matériel doit compter au plus {0} caractères.</target>
+      </segment>
+    </unit>
     <unit id="error.trustAnchor.unsupportedAnchorKindForEcosystem">
       <notes>
         <note category="translator">422 detail when the (ecosystem, anchorKind) pair has no registered material validator. {0} = the rejected anchorKind, {1} = the ecosystem, {2} = comma-joined allowed anchorKind values for that ecosystem (API literals).</note>
       </notes>
       <segment state="translated">
         <source>anchorKind &quot;{0}&quot; is not supported for ecosystem &quot;{1}&quot;. Supported anchorKind values for {1}: {2}.</source>
-        <target>anchorKind « {0} » n&apos;est pas pris en charge pour ecosystem « {1} ». Valeurs anchorKind prises en charge pour {1} : {2}.</target>
+        <target>anchorKind « {0} » n&apos;est pas pris en charge pour ecosystem « {1} ». Valeurs anchorKind prises en charge pour {1} : {2}.</target>
       </segment>
     </unit>
     <unit id="error.unauthorized.title">
@@ -1580,6 +2039,15 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
         <target>DEPENDABLY_MASTER_KEY doit être configurée pour stocker un secret d&apos;amont au repos.</target>
       </segment>
     </unit>
+    <unit id="error.upstream.nameTooLong">
+      <notes>
+        <note category="translator">422 detail: upstream-registry name over the length cap. {0} = the cap.</note>
+      </notes>
+      <segment state="translated">
+        <source>Name must be {0} characters or fewer.</source>
+        <target>Le nom doit compter au plus {0} caractères.</target>
+      </segment>
+    </unit>
     <unit id="error.upstream.ociAuthTypeInvalid">
       <notes>
         <note category="translator">422 detail. The field name and values are API literals.</note>
@@ -1622,7 +2090,7 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       </notes>
       <segment state="translated">
         <source>protocol must be omitted or &quot;{0}&quot;.</source>
-        <target>protocol doit être omis ou « {0} ».</target>
+        <target>protocol doit être omis ou « {0} ».</target>
       </segment>
     </unit>
     <unit id="error.upstream.protocolTerraformOnly">
@@ -1631,7 +2099,7 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       </notes>
       <segment state="translated">
         <source>protocol is only valid for ecosystem=terraform.</source>
-        <target>protocol n’est valide que pour ecosystem=terraform.</target>
+        <target>protocol n&apos;est valide que pour ecosystem=terraform.</target>
       </segment>
     </unit>
     <unit id="error.upstream.rpmAnonymousOnly">
@@ -1641,6 +2109,15 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       <segment state="translated">
         <source>Authenticated upstreams are not supported for ecosystem=rpm.</source>
         <target>Les amonts authentifiés ne sont pas pris en charge pour ecosystem=rpm.</target>
+      </segment>
+    </unit>
+    <unit id="error.upstream.tooManyIds">
+      <notes>
+        <note category="translator">422 detail: reorder payload over the cardinality cap. {0} = the cap.</note>
+      </notes>
+      <segment state="translated">
+        <source>At most {0} entries may be reordered in one request.</source>
+        <target>Au plus {0} entrées peuvent être réordonnées en une seule requête.</target>
       </segment>
     </unit>
     <unit id="error.user.emailChangeThrottled">
@@ -1695,6 +2172,69 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       <segment state="translated">
         <source>Validation Error</source>
         <target>Erreur de validation</target>
+      </segment>
+    </unit>
+    <unit id="error.vulnTracker.hostBlocked">
+      <notes>
+        <note category="translator">422 detail for the baseUrl field on the vulnerability-tracker config PUT when its host is an IP literal in a blocked SSRF range.</note>
+      </notes>
+      <segment state="translated">
+        <source>Vulnerability tracker host is in the cloud instance-metadata range, which is never a valid tracker address.</source>
+        <target>L&apos;hôte du suivi des vulnérabilités se trouve dans la plage de métadonnées d&apos;instance infonuagique, qui n&apos;est jamais une adresse de suivi valide.</target>
+      </segment>
+    </unit>
+    <unit id="error.vulnTracker.invalidBaseUrl">
+      <notes>
+        <note category="translator">422 detail for the baseUrl field on the vulnerability-tracker config PUT. The two schemes are URL literals - keep them verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be an absolute http:// or https:// URL.</source>
+        <target>Doit être une URL absolue http:// ou https://.</target>
+      </segment>
+    </unit>
+    <unit id="error.vulnTracker.invalidBatchSize">
+      <notes>
+        <note category="translator">422 detail for the batchSize field on the vulnerability-tracker config PUT. 1000 is the tracker&apos;s published per-request cap.</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be between 1 and 1000.</source>
+        <target>Doit être compris entre 1 et 1000.</target>
+      </segment>
+    </unit>
+    <unit id="error.vulnTracker.invalidStaleness">
+      <notes>
+        <note category="translator">422 detail for the maxStalenessHours field on the vulnerability-tracker config PUT. 8760 hours is one year.</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be between 1 and 8760 hours.</source>
+        <target>Doit être compris entre 1 et 8760 heures.</target>
+      </segment>
+    </unit>
+    <unit id="error.vulnTracker.masterKeyRequired">
+      <notes>
+        <note category="translator">422 detail returned when a vulnerability-tracker config PUT supplies a token with no master key configured. DEPENDABLY_MASTER_KEY is an environment variable name - keep it verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>DEPENDABLY_MASTER_KEY must be configured to store a vulnerability-tracker token at rest.</source>
+        <target>DEPENDABLY_MASTER_KEY doit être configuré pour stocker un jeton de suivi des vulnérabilités.</target>
+      </segment>
+    </unit>
+    <unit id="error.vulnTracker.notActive">
+      <notes>
+        <note category="translator">422 detail for the baseUrl field on the vulnerability-tracker test POST when no connection is configured, or one is configured but switched off. Deliberately distinct from a reached:false result, which is a 200 — an unbuilt integration is not a broken one.</note>
+      </notes>
+      <segment state="translated">
+        <source>No vulnerability-tracker connection is enabled. Save a base URL and enable the connection before testing it.</source>
+        <target>Aucune connexion au suivi des vulnérabilités n&apos;est activée. Enregistrez une URL de base et activez la connexion avant de la tester.</target>
+      </segment>
+    </unit>
+    <unit id="error.webhook.descriptionTooLong">
+      <notes>
+        <note category="translator">422 detail: webhook description over the length cap. {0} = the cap.</note>
+      </notes>
+      <segment state="translated">
+        <source>Description must be {0} characters or fewer.</source>
+        <target>La description doit compter au plus {0} caractères.</target>
       </segment>
     </unit>
     <unit id="error.webhook.eventTypeRequired">
@@ -1757,7 +2297,7 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       </notes>
       <segment state="translated">
         <source>Dependably [system]: operator account created by {0}</source>
-        <target>Dependably [système] : compte opérateur créé par {0}</target>
+        <target>Dependably [système] : compte opérateur créé par {0}</target>
       </segment>
     </unit>
     <unit id="system.slack.adminDeleted">
@@ -1766,7 +2306,7 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       </notes>
       <segment state="translated">
         <source>Dependably [system]: operator account deleted by {0}</source>
-        <target>Dependably [système] : compte opérateur supprimé par {0}</target>
+        <target>Dependably [système] : compte opérateur supprimé par {0}</target>
       </segment>
     </unit>
     <unit id="system.slack.genericEvent">
@@ -1775,7 +2315,7 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       </notes>
       <segment state="translated">
         <source>Dependably [system]: {0}</source>
-        <target>Dependably [système] : {0}</target>
+        <target>Dependably [système] : {0}</target>
       </segment>
     </unit>
     <unit id="system.slack.tenantCreated">
@@ -1784,7 +2324,7 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       </notes>
       <segment state="translated">
         <source>Dependably [system]: tenant &apos;{0}&apos; created by {1}</source>
-        <target>Dependably [système] : locataire « {0} » créé par {1}</target>
+        <target>Dependably [système] : locataire « {0} » créé par {1}</target>
       </segment>
     </unit>
     <unit id="system.slack.tenantDeleted">
@@ -1793,7 +2333,7 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       </notes>
       <segment state="translated">
         <source>Dependably [system]: tenant &apos;{0}&apos; deleted by {1}</source>
-        <target>Dependably [système] : locataire « {0} » supprimé par {1}</target>
+        <target>Dependably [système] : locataire « {0} » supprimé par {1}</target>
       </segment>
     </unit>
     <unit id="system.slack.tenantHardDeleted">
@@ -1802,7 +2342,7 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       </notes>
       <segment state="translated">
         <source>Dependably [system]: tenant &apos;{0}&apos; hard-deleted (retention grace period expired)</source>
-        <target>Dependably [système] : locataire « {0} » supprimé définitivement (délai de grâce de rétention expiré)</target>
+        <target>Dependably [système] : locataire « {0} » supprimé définitivement (délai de grâce de rétention expiré)</target>
       </segment>
     </unit>
     <unit id="system.slack.tenantRestored">
@@ -1811,7 +2351,7 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       </notes>
       <segment state="translated">
         <source>Dependably [system]: tenant &apos;{0}&apos; restored by {1}</source>
-        <target>Dependably [système] : locataire « {0} » restauré par {1}</target>
+        <target>Dependably [système] : locataire « {0} » restauré par {1}</target>
       </segment>
     </unit>
     <unit id="system.slack.tenantStatusChanged">
@@ -1820,7 +2360,7 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       </notes>
       <segment state="translated">
         <source>Dependably [system]: tenant &apos;{0}&apos; status changed by {1}</source>
-        <target>Dependably [système] : statut du locataire « {0} » modifié par {1}</target>
+        <target>Dependably [système] : statut du locataire « {0} » modifié par {1}</target>
       </segment>
     </unit>
   </file>

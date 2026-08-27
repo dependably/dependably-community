@@ -654,7 +654,7 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
         var mockClient = BuildPartialFailureClient();
 
         var queue = new WebhookDispatchQueue(
-            repo, mockClient, Clock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance,
+            repo, mockClient, new OrgRepository(_db), Clock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance,
             NoBackoff);
         using var cts = new CancellationTokenSource();
         _ = queue.StartAsync(cts.Token);
@@ -715,7 +715,7 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
         var client = new WebhookDeliveryClient(http);
 
         var queue = new WebhookDispatchQueue(
-            repo, client, webhookClock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance);
+            repo, client, new OrgRepository(_db), webhookClock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance);
         using var cts = new CancellationTokenSource();
         _ = queue.StartAsync(cts.Token);
 
@@ -795,7 +795,7 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
         var client = new WebhookDeliveryClient(http);
 
         var queue = new WebhookDispatchQueue(
-            repo, client, Clock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance);
+            repo, client, new OrgRepository(_db), Clock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance);
         var delivery = new WebhookSubscriptionDelivery(
             sub.Id, "org1", sub.Url, Secret: null, sub.EventTypes, sub.ConsecutiveFailures, sub.FailingSince);
 
@@ -846,7 +846,7 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
         }
 
         var queue = new WebhookDispatchQueue(
-            repo, client, Clock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance,
+            repo, client, new OrgRepository(_db), Clock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance,
             NoBackoff);
         var delivery = new WebhookSubscriptionDelivery(
             sub.Id, "org1", sub.Url, Secret: null, sub.EventTypes,
@@ -935,7 +935,7 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
 
         var mockClient = BuildPartialFailureClient();
         var queue = new WebhookDispatchQueue(
-            repo, mockClient, Clock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance);
+            repo, mockClient, new OrgRepository(_db), Clock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance);
 
         // Buffer the envelope before the worker ever starts reading.
         queue.Dispatch(SampleEnvelope(eventType: "package.publish", orgId: "org1"));
@@ -975,7 +975,7 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
 
         var mockClient = BuildPartialFailureClient();
         var queue = new WebhookDispatchQueue(
-            repo, mockClient, Clock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance,
+            repo, mockClient, new OrgRepository(_db), Clock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance,
             NoBackoff);
 
         // Both subscriptions match the same event type, so one Dispatch fans out to both — one
@@ -1035,7 +1035,7 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
         var handler = new HangingDelegatingHandler();
         var client = new WebhookDeliveryClient(new HttpClient(handler));
         var queue = new WebhookDispatchQueue(
-            repo, client, Clock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance);
+            repo, client, new OrgRepository(_db), Clock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance);
 
         using var cts = new CancellationTokenSource();
         _ = queue.StartAsync(cts.Token);
@@ -1086,7 +1086,7 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
         var handler = new HangingDelegatingHandler();
         var client = new WebhookDeliveryClient(new HttpClient(handler));
         var queue = new WebhookDispatchQueue(
-            repo, client, Clock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance,
+            repo, client, new OrgRepository(_db), Clock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance,
             NoBackoff);
 
         using var cts = new CancellationTokenSource();
@@ -1136,7 +1136,7 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
             "https://good.example.com/hook", ["package.publish"], Secret: null, Description: null));
 
         var queue = new WebhookDispatchQueue(
-            repo, BuildPartialFailureClient(), Clock, BuildCfg(),
+            repo, BuildPartialFailureClient(), new OrgRepository(_db), Clock, BuildCfg(),
             NullLogger<WebhookDispatchQueue>.Instance);
 
         bool completed = await queue.FanOutAsyncForTests(SampleEnvelope(), new CancellationToken(canceled: true));
@@ -1183,7 +1183,7 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
             .Build();
 
         var queue = new WebhookDispatchQueue(
-            repo, client, Clock, cfg, NullLogger<WebhookDispatchQueue>.Instance);
+            repo, client, new OrgRepository(_db), Clock, cfg, NullLogger<WebhookDispatchQueue>.Instance);
 
         await queue.FanOutAsyncForTests(SampleEnvelope(), cts.Token);
 
@@ -1283,7 +1283,7 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
             .Build();
 
         var queue = new WebhookDispatchQueue(
-            repo, client, webhookClock, cfg, NullLogger<WebhookDispatchQueue>.Instance);
+            repo, client, new OrgRepository(_db), webhookClock, cfg, NullLogger<WebhookDispatchQueue>.Instance);
 
         // Both envelopes are queued before any worker runs, so both are drained rather than served.
         queue.Dispatch(SampleEnvelope(orgId: "org1", orgSlug: "acme"));
@@ -1330,7 +1330,7 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
         var handler = new HangingDelegatingHandler(parkOnlyFirstRequest: true);
         var client = new WebhookDeliveryClient(new HttpClient(handler));
         var queue = new WebhookDispatchQueue(
-            repo, client, Clock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance);
+            repo, client, new OrgRepository(_db), Clock, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance);
 
         using var cts = new CancellationTokenSource();
         var executeTask = queue.ExecuteAsyncForTests(cts.Token);
@@ -1370,7 +1370,7 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
             .Build();
 
         var queue = new WebhookDispatchQueue(
-            repo, BuildPartialFailureClient(), Clock, cfg, NullLogger<WebhookDispatchQueue>.Instance);
+            repo, BuildPartialFailureClient(), new OrgRepository(_db), Clock, cfg, NullLogger<WebhookDispatchQueue>.Instance);
 
         using var cts = new CancellationTokenSource();
         _ = queue.StartAsync(cts.Token);
@@ -1399,7 +1399,7 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
             .AddInMemoryCollection(new Dictionary<string, string?> { ["WEBHOOK_QUEUE_CAPACITY"] = "1" })
             .Build();
 
-        var queue = new WebhookDispatchQueue(repo, client, Clock, cfg,
+        var queue = new WebhookDispatchQueue(repo, client, new OrgRepository(_db), Clock, cfg,
             NullLogger<WebhookDispatchQueue>.Instance);
 
         // Enqueue 5 without starting the consumer (queue depth = 1 per org)
@@ -1433,7 +1433,7 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
             .Build();
 
         // Never started: nothing is dequeued, so org1's single slot stays occupied.
-        var queue = new WebhookDispatchQueue(repo, client, Clock, cfg,
+        var queue = new WebhookDispatchQueue(repo, client, new OrgRepository(_db), Clock, cfg,
             NullLogger<WebhookDispatchQueue>.Instance);
 
         for (int i = 0; i < 5; i++)

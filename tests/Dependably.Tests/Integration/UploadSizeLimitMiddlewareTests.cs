@@ -34,6 +34,25 @@ public sealed class UploadSizeLimitMiddlewareTests : IClassFixture<DependablyFac
         Assert.Equal("application/problem+json", resp.Content.Headers.ContentType?.MediaType);
         string body = await resp.Content.ReadAsStringAsync();
         Assert.Contains($"Upload exceeds the {ecosystem} limit of {Cap} bytes", body);
+
+        // UploadSizeLimitMiddleware short-circuits (returns without calling _next) and never
+        // calls Response.Clear() — the one refusal shape ResponseHeaderPreserverComplianceTests
+        // cannot see, because there is no Response.Clear() call for it to pair against. The gate
+        // for this shape is registration order: SecurityHeadersMiddleware must run before this
+        // middleware so its headers are already on the response when the short-circuit happens.
+        // Every route this helper is called from is a registry path (SecurityHeadersMiddleware.
+        // IsRegistryPath), so the full registry header set — not just nosniff — is expected.
+        Assert.Equal("nosniff", Assert.Single(resp.Headers.GetValues("X-Content-Type-Options")));
+        Assert.Equal("DENY", Assert.Single(resp.Headers.GetValues("X-Frame-Options")));
+        Assert.True(resp.Headers.Contains("Referrer-Policy"));
+        Assert.True(resp.Headers.Contains("Permissions-Policy"));
+        Assert.True(resp.Headers.Contains("Content-Security-Policy"));
+        string csp = Assert.Single(resp.Headers.GetValues("Content-Security-Policy"));
+        Assert.Contains("default-src 'none'", csp);
+        Assert.True(
+            resp.Headers.CacheControl?.NoStore,
+            "a registry-path 413 must carry Cache-Control: no-store — a bare error status is " +
+            "heuristically cacheable (RFC 9111 §4.2.2) without it");
     }
 
     [Theory]

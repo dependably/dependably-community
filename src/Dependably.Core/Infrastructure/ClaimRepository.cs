@@ -42,7 +42,7 @@ public sealed class ClaimRepository
               AND deleted_at IS NULL
               AND (@ecosystem IS NULL OR ecosystem = @ecosystem)
               AND (@state IS NULL OR state = @state)
-              AND (@search IS NULL OR name LIKE @searchPattern)
+              AND (@search IS NULL OR name LIKE @searchPattern ESCAPE '\')
             ORDER BY ecosystem, name
             LIMIT @limit
             """, new
@@ -51,7 +51,7 @@ public sealed class ClaimRepository
             ecosystem,
             state,
             search,
-            searchPattern = search is null ? null : $"%{search}%",
+            searchPattern = LikePattern.Contains(search),
             limit
         });
         return rows.AsList();

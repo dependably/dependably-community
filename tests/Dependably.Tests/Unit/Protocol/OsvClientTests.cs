@@ -487,6 +487,35 @@ public sealed class OsvClientTests : IDisposable
         Assert.False(anyVulnsCall);
     }
 
+    // ── HasCoverageFor (remote path is unaffected by #608) ─────────────────────
+    // The remote client makes no HTTP call for this member at all — coverage is exactly the
+    // static OsvFeedCoverage gate, unlike LocalOsvSource's dynamic per-dump signal for RPM. These
+    // pin that the fix for #608 (scoped to OSV_MODE=local) leaves the remote path's own RPM
+    // behaviour — always query, always stamp on a reached answer — completely unchanged.
+
+    [Fact]
+    public async Task HasCoverageFor_Rpm_AlwaysTrue()
+    {
+        // RPM keeps scanning and stamping via the remote path exactly as before this fix: the
+        // live osv.dev API resolves pkg:rpm purls against its own distro feeds server-side, with
+        // no dump-coverage question on this end.
+        Assert.True(await _sut.HasCoverageFor("rpm"));
+    }
+
+    [Fact]
+    public async Task HasCoverageFor_NpmAndOtherFeedEcosystems_AreTrue()
+    {
+        Assert.True(await _sut.HasCoverageFor("npm"));
+        Assert.True(await _sut.HasCoverageFor("pypi"));
+    }
+
+    [Fact]
+    public async Task HasCoverageFor_StaticNoFeedEcosystems_AreFalse()
+    {
+        Assert.False(await _sut.HasCoverageFor("oci"));
+        Assert.False(await _sut.HasCoverageFor("terraform"));
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────
 
     /// <summary>

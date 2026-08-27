@@ -35,6 +35,7 @@ internal static class BackgroundJobs
         {
             "vuln-scan",
             "vuln-rescan",
+            "sbom-scan",
             "threat-feed",
             "deprecation-refresh",
             "healthcheck-pinger",
@@ -58,6 +59,13 @@ internal static class BackgroundJobs
     /// in this set is force-disabled. A cache node needs only disk-bounding, staging cleanup, the
     /// size gauge, and the healthcheck ping — all the tenant-management, scanning, and refresh
     /// jobs are inert on a node that creates nothing authoritative.
+    ///
+    /// <para>One deliberate exception, because a job name gates a job's <i>outbound</i> half only:
+    /// <c>sbom-scan</c> disables OSV scanning, and the same pass's local SBOM policy re-evaluation
+    /// keeps running. That half reads stored components, stored advisory rows and the tenant's own
+    /// settings and makes no network call, so neither air-gap nor edge mode has a reason to stop
+    /// it — and stopping it would freeze a security verdict rather than suppress a request. On an
+    /// edge node the projects tables are dormant, so it costs one query returning no rows.</para>
     /// </summary>
     internal static readonly IReadOnlySet<string> EdgeAllowed =
         new HashSet<string>(StringComparer.OrdinalIgnoreCase)

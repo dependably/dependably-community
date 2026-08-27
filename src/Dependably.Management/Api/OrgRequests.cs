@@ -63,6 +63,7 @@ public sealed record UpdateRetentionRequest
     public Optional<int?> KeepDays { get; init; }
     public Optional<int?> ActivityRetentionDays { get; init; }
     public Optional<int?> PurgeUnlistedAfterDays { get; init; }
+    public Optional<int?> KeepProjectVersions { get; init; }
 }
 
 // ProxyPassthroughEnabled and MaxOsvScoreTolerance are nullable so a partial PUT can omit them
@@ -90,6 +91,12 @@ public sealed record UpdateProxySettingsRequest(
     string? BlockDeprecated = null,
     string? BlockMalicious = null,
     string? BlockKev = null,
+    string? BlockKevRansomware = null,
+    /// <summary>
+    /// Tenant policy for the CISA Vulnrichment SSVC exploitation assessment: 'off' | 'warn' |
+    /// 'block'. Absent = leave the stored value unchanged, like every other field on this PUT.
+    /// </summary>
+    string? BlockSsvcExploitation = null,
     string? BlockInstallScripts = null,
     string? VerifyNpmSignatures = null,
     string? VerifyNuGetSignatures = null,
@@ -101,6 +108,13 @@ public sealed record UpdateProxySettingsRequest(
 {
     public Optional<int?> MinReleaseAgeHours { get; init; }
     public Optional<double?> MaxEpssTolerance { get; init; }
+
+    /// <summary>
+    /// EPSS percentile ceiling (0.0–1.0), the rank sibling of <see cref="MaxEpssTolerance"/>.
+    /// <see cref="Optional{T}"/> for the same reason: SQL NULL is this field's "off" value, so an
+    /// omitted field and an explicit null have to stay distinguishable end to end.
+    /// </summary>
+    public Optional<double?> MaxEpssPercentileTolerance { get; init; }
 }
 
 // Scope is retained as a nullable field purely so the controller can detect callers still

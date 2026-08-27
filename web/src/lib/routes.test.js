@@ -85,6 +85,60 @@ describe('routes — tenant table', () => {
   it('searchFor returns "" for version-detail — its params live in the path', () => {
     expect(searchFor('version-detail', { ecosystem: 'npm', name: 'foo' })).toBe('')
   })
+
+  it('projects is not admin-only — read visibility for every member', () => {
+    expect(ADMIN_ONLY_PAGES.has('projects')).toBe(false)
+    expect(ADMIN_ONLY_PAGES.has('project-detail')).toBe(false)
+    expect(ADMIN_ONLY_PAGES.has('project-version')).toBe(false)
+  })
+
+  it('pathFor round-trips the projects list', () => {
+    expect(pathFor('projects')).toBe('/projects')
+    expect(routeFor('/projects')).toEqual({ page: 'projects', params: {} })
+  })
+
+  it('pathFor builds the project-detail path with a URL-encoded GUID', () => {
+    expect(pathFor('project-detail', { id: 'a b/c' })).toBe('/project/a%20b%2Fc')
+  })
+
+  it('pathFor builds the project-version path with two URL-encoded GUID segments', () => {
+    expect(pathFor('project-version', { id: 'proj-1', versionId: 'ver-1' }))
+      .toBe('/project/proj-1/version/ver-1')
+  })
+
+  it('pathFor("project-version") accepts the literal "latest" alias for versionId', () => {
+    expect(pathFor('project-version', { id: 'proj-1', versionId: 'latest' }))
+      .toBe('/project/proj-1/version/latest')
+  })
+
+  it('pathFor falls back to empty segments for project-detail/project-version with no params', () => {
+    expect(pathFor('project-detail')).toBe('/project/')
+    expect(pathFor('project-version')).toBe('/project//version/')
+  })
+
+  it('routeFor parses project-detail paths and decodes the id', () => {
+    expect(routeFor('/project/proj-1')).toEqual({ page: 'project-detail', params: { id: 'proj-1' } })
+    expect(routeFor('/project/a%20b')).toEqual({ page: 'project-detail', params: { id: 'a b' } })
+  })
+
+  it('routeFor parses project-version paths and decodes both ids', () => {
+    expect(routeFor('/project/proj-1/version/ver-1')).toEqual({
+      page: 'project-version',
+      params: { id: 'proj-1', versionId: 'ver-1' },
+    })
+  })
+
+  it('routeFor parses project-version with the literal "latest" versionId', () => {
+    expect(routeFor('/project/proj-1/version/latest')).toEqual({
+      page: 'project-version',
+      params: { id: 'proj-1', versionId: 'latest' },
+    })
+  })
+
+  it('searchFor returns "" for project-detail and project-version — their params live in the path', () => {
+    expect(searchFor('project-detail', { id: 'proj-1' })).toBe('')
+    expect(searchFor('project-version', { id: 'proj-1', versionId: 'latest' })).toBe('')
+  })
 })
 
 describe('routes — system table', () => {
@@ -108,6 +162,12 @@ describe('routes — system table', () => {
   it('routeFor("/package/...") in system mode falls through to static lookup', () => {
     // Exercises the `activeTable === 'tenant'` guard around the version-detail regex.
     expect(routeFor('/package/npm/foo')).toBeNull()
+  })
+
+  it('project-detail/project-version do not resolve in system mode', () => {
+    expect(routeFor('/project/proj-1')).toBeNull()
+    expect(routeFor('/project/proj-1/version/ver-1')).toBeNull()
+    expect(pathFor('project-detail', { id: 'proj-1' })).toBe('/')
   })
 })
 

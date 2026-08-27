@@ -133,7 +133,7 @@ public sealed class EmailHealthMultiModeTests : IClassFixture<DependablyMultiFac
     public Task InitializeAsync() => ((IAsyncLifetime)_factory).InitializeAsync();
     public Task DisposeAsync() => Task.CompletedTask;
 
-    private async Task<(string TenantId, string OwnerId, string OwnerJwt, string Host)> CreateTenantOwnerAsync(
+    private static async Task<(string TenantId, string OwnerId, string OwnerJwt, string Host)> CreateTenantOwnerAsync(
         DependablyMultiFactory factory)
     {
         string slug = "eh-" + Guid.NewGuid().ToString("N")[..8];

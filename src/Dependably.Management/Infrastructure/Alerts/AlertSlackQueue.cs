@@ -2,6 +2,16 @@ using System.Diagnostics;
 
 namespace Dependably.Infrastructure.Alerts;
 
+/// <summary>Injected dependencies, bundled so the constructor stays within S107.</summary>
+public sealed record AlertSlackQueueServices(
+    AlertSettingsRepository Settings,
+    AlertRepository Alerts,
+    SlackWebhookClient Client,
+    OrgRepository Orgs,
+    TimeProvider Time,
+    IConfiguration Config,
+    ILogger<AlertSlackQueue> Logger);
+
 /// <summary>
 /// Per-org queue + background worker pool for Slack delivery of freshly-raised alerts.
 /// Mirrors <see cref="Webhooks.WebhookDispatchQueue"/>: <see cref="Notify"/> is non-blocking and
@@ -58,6 +68,7 @@ public sealed class AlertSlackQueue : BackgroundService, IAlertNotifier
     private readonly AlertSettingsRepository _settings;
     private readonly AlertRepository _alerts;
     private readonly SlackWebhookClient _client;
+    private readonly OrgRepository _orgs;
     private readonly TimeProvider _time;
     private readonly ILogger<AlertSlackQueue> _logger;
     private readonly TimeSpan[] _backoffSchedule;
@@ -67,14 +78,8 @@ public sealed class AlertSlackQueue : BackgroundService, IAlertNotifier
     private long _deliveredCount;
     private long _failedCount;
 
-    public AlertSlackQueue(
-        AlertSettingsRepository settings,
-        AlertRepository alerts,
-        SlackWebhookClient client,
-        TimeProvider time,
-        IConfiguration config,
-        ILogger<AlertSlackQueue> logger)
-        : this(settings, alerts, client, time, config, logger, backoffSchedule: null)
+    public AlertSlackQueue(AlertSlackQueueServices services)
+        : this(services, backoffSchedule: null)
     {
     }
 
@@ -94,19 +99,15 @@ public sealed class AlertSlackQueue : BackgroundService, IAlertNotifier
     /// intervals, or on the per-item budget that runs on the same injected clock, keep the real
     /// schedule and drive the clock.
     /// </summary>
-    internal AlertSlackQueue(
-        AlertSettingsRepository settings,
-        AlertRepository alerts,
-        SlackWebhookClient client,
-        TimeProvider time,
-        IConfiguration config,
-        ILogger<AlertSlackQueue> logger,
-        TimeSpan[]? backoffSchedule)
+    internal AlertSlackQueue(AlertSlackQueueServices services, TimeSpan[]? backoffSchedule)
     {
+        var (settings, alerts, client, orgs, time, config, logger) = services;
+
         _backoffSchedule = backoffSchedule ?? DefaultBackoffSchedule;
         _settings = settings;
         _alerts = alerts;
         _client = client;
+        _orgs = orgs;
         _time = time;
         _logger = logger;
 
@@ -231,29 +232,82 @@ public sealed class AlertSlackQueue : BackgroundService, IAlertNotifier
     /// </summary>
     internal async Task<bool> DeliverAsync(AlertRecord alert, CancellationToken ct)
     {
-        string? webhookUrl;
+        var destination = await ResolveDestinationAsync(alert, ct);
+        return destination.Url is null
+            ? destination.Reached
+            : await SendWithRetriesAsync(alert, destination.Url, ct);
+    }
+
+    /// <summary>
+    /// Where this alert should go, if anywhere. A null <see cref="SlackDestination.Url"/> means
+    /// there is nothing to attempt; <see cref="SlackDestination.Reached"/> then says whether that
+    /// is a conclusion (true) or cancellation ending the pass early (false).
+    /// </summary>
+    private readonly record struct SlackDestination(string? Url, bool Reached);
+
+    /// <summary>
+    /// Resolves the org's webhook, refusing delivery for an org that must not reach third-party
+    /// egress at all.
+    ///
+    /// <para>A suspended/archived/deleting org (see <see cref="TenantLifecycle"/>) never reaches its
+    /// own Slack webhook: that URL is tenant-supplied, exactly the third-party egress the suspension
+    /// is meant to stop. Checked here rather than at enqueue time — NotifyAsync is synchronous and
+    /// cannot do the DB read — so an alert queued moments before suspension still sees the current
+    /// status at delivery time. Treated as a reached conclusion, not a retry: there is nothing to
+    /// retry, the org is locked out.</para>
+    /// </summary>
+    private async Task<SlackDestination> ResolveDestinationAsync(AlertRecord alert, CancellationToken ct)
+    {
+        Org? org;
         try
         {
-            webhookUrl = await _settings.GetDecryptedSlackWebhookUrlAsync(alert.OrgId, ct);
+            org = await _orgs.GetByIdAsync(alert.OrgId, ct);
         }
         catch (OperationCanceledException)
         {
-            return false;
+            return new SlackDestination(null, Reached: false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to resolve org {OrgId} while delivering alert {AlertId}; skipping delivery.",
+                alert.OrgId, alert.Id);
+            return new SlackDestination(null, Reached: true);
+        }
+
+        if (!TenantLifecycle.IsActive(org))
+        {
+            _logger.LogInformation(
+                "Slack alert delivery skipped for alert {AlertId}: org {OrgId} is {Status} (deleted={Deleted}).",
+                alert.Id, alert.OrgId, org?.Status ?? "unknown", org?.DeletedAt is not null);
+            return new SlackDestination(null, Reached: true);
+        }
+
+        try
+        {
+            // Null here is Slack disabled or never configured for this org — nothing to attempt.
+            return new SlackDestination(
+                await _settings.GetDecryptedSlackWebhookUrlAsync(alert.OrgId, ct), Reached: true);
+        }
+        catch (OperationCanceledException)
+        {
+            return new SlackDestination(null, Reached: false);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex,
                 "Failed to load Slack settings for org {OrgId}; skipping delivery for alert {AlertId}.",
                 alert.OrgId, alert.Id);
-            return true;
+            return new SlackDestination(null, Reached: true);
         }
+    }
 
-        if (webhookUrl is null)
-        {
-            // Slack disabled or never configured for this org — nothing to attempt.
-            return true;
-        }
-
+    /// <summary>
+    /// POSTs the message, retrying on the configured backoff schedule. Returns false only for
+    /// cancellation, which hands the alert back to the shutdown drain.
+    /// </summary>
+    private async Task<bool> SendWithRetriesAsync(AlertRecord alert, string webhookUrl, CancellationToken ct)
+    {
         string text = BuildMessage(alert);
         Exception? lastEx = null;
 
@@ -320,7 +374,7 @@ public sealed class AlertSlackQueue : BackgroundService, IAlertNotifier
     // detail (when present) is appended as a second line for extra context.
     private static string BuildMessage(AlertRecord alert)
     {
-        string prefix = alert.Type == AlertTypes.VulnSeverity ? ":rotating_light:" : ":package:";
+        string prefix = alert.Type is AlertTypes.VulnSeverity or AlertTypes.VulnKev ? ":rotating_light:" : ":package:";
         return string.IsNullOrEmpty(alert.Detail)
             ? $"{prefix} Dependably alert: {alert.Title}"
             : $"{prefix} Dependably alert: {alert.Title}\n{alert.Detail}";

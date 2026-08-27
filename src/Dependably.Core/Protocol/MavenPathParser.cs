@@ -36,7 +36,7 @@ public static partial class MavenPathParser
 
     public static readonly string[] ChecksumExtensions = [".sha512", ".sha256", ".sha1", ".md5"];
 
-    [GeneratedRegex(@"^(?<ts>\d{8}\.\d{6})-(?<bn>\d+)$")]
+    [GeneratedRegex(@"^(?<ts>\d{8}\.\d{6})-(?<bn>\d+)\z")]
     private static partial Regex SnapshotTimestampRegex();
 
     /// <summary>
@@ -266,17 +266,24 @@ public static partial class MavenPathParser
     // genuinely ambiguous from the path alone — the segment before the filename is either a
     // version or an artifactId, and nothing in the path says which.
     //
-    // A Maven version effectively always begins with a digit; an artifactId effectively never
-    // does. Testing the FIRST character rather than any character is what separates them:
-    // "contains a digit anywhere" classifies commons-lang3, log4j-core, slf4j-api and every other
-    // artifactId carrying a version-ish suffix as a version, which makes their artifact-level
-    // metadata unreachable — the document Maven resolves ranges and LATEST/RELEASE through.
+    // The SNAPSHOT marker is the whole test, because the version-level document only ever exists
+    // for a SNAPSHOT version. Maven Central answers 404 for a release coordinate's version-level
+    // maven-metadata.xml (com/google/guava/guava/33.4.0-jre/maven-metadata.xml and
+    // org/apache/commons/commons-lang3/3.14.0/maven-metadata.xml both 404 while the artifact-level
+    // document 200s), and Dependably's own hosted plane agrees — MavenMetadataBuilder's only
+    // version-level builder is BuildSnapshotVersion, which is SNAPSHOT-only by construction. So no
+    // arm beyond the marker carries traffic on either plane.
     //
-    // SNAPSHOT is kept as a second arm because a snapshot version is not required to start with a
-    // digit, and the marker is unambiguous wherever it appears.
+    // Every shape test tried in that missing arm's place has instead misread artifactIds as
+    // versions and made their artifact-level document — the one Maven resolves ranges and
+    // LATEST/RELEASE through — unreachable. "Contains a digit anywhere" took out commons-lang3,
+    // log4j-core and slf4j-api; "begins with a digit" narrowed that to artifactIds starting with a
+    // digit, which is a real population because WebJars mirrors npm names (3d-view, 3dmol, 7.css,
+    // 98.css all resolve on Central today). A shape test also has a false-negative side: it read
+    // Guava's r03–r09 releases as artifactIds. Dropping it costs nothing that exists and closes
+    // both directions.
     private static bool LooksLikeVersion(string segment)
-        => (segment.Length > 0 && char.IsDigit(segment[0]))
-            || segment.Contains("SNAPSHOT", StringComparison.OrdinalIgnoreCase);
+        => segment.Contains("SNAPSHOT", StringComparison.OrdinalIgnoreCase);
 }
 
 /// <summary>

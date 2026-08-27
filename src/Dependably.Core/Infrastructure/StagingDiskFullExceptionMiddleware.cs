@@ -45,8 +45,15 @@ public sealed class StagingDiskFullExceptionMiddleware
                 ex.AvailableBytes,
                 ex.FloorBytes);
 
+            var headerSnapshot = ResponseHeaderPreserver.Capture(context);
             context.Response.Clear();
             context.Response.StatusCode = StatusCodes.Status507InsufficientStorage;
+
+            // Response.Clear() drops the request-derived headers SecurityHeadersMiddleware set
+            // on the way in, restored from the snapshot above. This refusal is reachable by an
+            // anonymous caller, so the JSON body must still be sniff-proof.
+            ResponseHeaderPreserver.Restore(context, headerSnapshot);
+            context.Response.Headers.XContentTypeOptions = "nosniff";
             context.Response.ContentType = "application/problem+json";
 
             string payload = JsonSerializer.Serialize(new

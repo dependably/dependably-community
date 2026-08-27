@@ -20,7 +20,7 @@ namespace Dependably.Tests.Compliance;
 /// pushing a bare blob creates, so a tick landing mid-test lowers <c>org_storage_bytes</c> and
 /// hands the tenant quota headroom it should not have — a 413 assertion sees 201. Its cron is
 /// hourly at :17, so it surfaces only in whichever run straddles that minute.
-/// A factory names all six job values in <c>DISABLE_BACKGROUND_JOBS</c>, or sets
+/// A factory names all seven job values in <c>DISABLE_BACKGROUND_JOBS</c>, or sets
 /// <c>AIR_GAPPED=true</c> (which subsumes every job), or this gate fails. A factory that boots
 /// without either silently reintroduces the outbound egress (or the shared-state boot mutation)
 /// this gate exists to catch, and a factory that sets <c>DISABLE_BACKGROUND_JOBS</c> to some other
@@ -51,8 +51,9 @@ public sealed partial class BackgroundJobEgressComplianceTests
     // can exclude it — see the comment at that exclusion for why.
     private const string SelfFileName = nameof(BackgroundJobEgressComplianceTests) + ".cs";
 
-    // The six job names every factory in tests/ must disable. vuln-scan/vuln-rescan
-    // (VulnerabilityScanService), threat-feed (ThreatFeedRefreshService), and
+    // The seven job names every factory in tests/ must disable. vuln-scan/vuln-rescan
+    // (VulnerabilityScanService), sbom-scan (the project-component scan pass over uploaded SBOMs),
+    // threat-feed (ThreatFeedRefreshService), and
     // deprecation-refresh (DeprecationRefreshService) fire a real outbound HTTP request at boot;
     // license-backfill (LicenseBackfillService) makes no outbound call but mutates the shared
     // cache_artifact.license_checked_at column under a leader lock at boot, its own source of
@@ -67,6 +68,7 @@ public sealed partial class BackgroundJobEgressComplianceTests
     [
         "vuln-scan",
         "vuln-rescan",
+        "sbom-scan",
         "threat-feed",
         "deprecation-refresh",
         "license-backfill",
@@ -196,7 +198,7 @@ public sealed partial class BackgroundJobEgressComplianceTests
             "    {",
             "        builder.WebHost.UseSetting(",
             "            \"DISABLE_BACKGROUND_JOBS\",",
-            "            \"vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep\");",
+            "            \"vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep\");",
             "    }",
             "}");
 
@@ -228,7 +230,7 @@ public sealed partial class BackgroundJobEgressComplianceTests
             "        {",
             "            builder.WebHost.UseSetting(",
             "                \"DISABLE_BACKGROUND_JOBS\",",
-            "                \"vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep\");",
+            "                \"vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep\");",
             "        }",
             "    }",
             "}");

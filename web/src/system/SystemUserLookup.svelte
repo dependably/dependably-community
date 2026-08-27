@@ -118,7 +118,7 @@
             <td>{r.accountStatus}{r.mustChangePassword ? $t('system.userLookup.mustRotateSuffix') : ''}</td>
             <td>
               {#if r.mfaEnabled}
-                <svg width="14" height="14" aria-hidden="true" aria-label="MFA enabled"><use href="/icons.svg#icon-check"/></svg>
+                <svg width="14" height="14" aria-hidden="true" aria-label={$t('system.userLookup.mfaEnabled')}><use href="/icons.svg#icon-check"/></svg>
               {:else}
                 —
               {/if}

@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte'
   import { t } from 'svelte-i18n'
+  import { formatTime } from '../format.js'
 
   // Instance-wide settings editor, shared by the multi-mode system SPA and the single-mode
   // tenant Settings page. The caller passes the load/save fns so the same form drives both the
@@ -98,7 +99,7 @@
     <button class="primary" type="submit" disabled={saving}>
       {saving ? $t('system.settings.saving') : $t('system.settings.save')}
     </button>
-    {#if savedAt}<span class="saved">{$t('system.settings.savedAt', { values: { time: savedAt.toLocaleTimeString() } })}</span>{/if}
+    {#if savedAt}<span class="saved">{$t('system.settings.savedAt', { values: { time: $formatTime(savedAt) } })}</span>{/if}
   </form>
 {/if}
 

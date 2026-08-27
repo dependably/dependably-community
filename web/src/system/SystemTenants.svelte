@@ -146,6 +146,7 @@
       case 'storage_quota_near': return $t('system.tenants.detail.reasonDetail.storage_quota_near')
       case 'stats_stale': return $t('system.tenants.detail.reasonDetail.stats_stale')
       case 'stats_missing': return $t('system.tenants.detail.reasonDetail.stats_missing')
+      case 'stats_frozen_non_active': return $t('system.tenants.detail.reasonDetail.stats_frozen_non_active')
       case 'quarantine_pending': {
         const count = stats?.quarantinePending ?? 0
         return $t('system.tenants.detail.reasonDetail.quarantine_pending', { values: { count } })
@@ -293,6 +294,7 @@
     { key: 'slug',    label: $t('system.tenants.columns.slug'),    sortable: true },
     { key: 'status',  label: $t('system.tenants.columns.status'),  sortable: true },
     { key: 'health',  label: $t('system.tenants.columns.health'),  sortable: true, width: '90px' },
+    { key: 'enrichment', label: $t('system.tenants.columns.enrichment'), sortable: true, width: '100px' },
     { key: 'users',   label: $t('system.tenants.columns.users'),   sortable: true, width: '90px' },
     { key: 'storage', label: $t('system.tenants.columns.storage'), sortable: true, width: '110px' },
     { key: 'quota',   label: $t('system.tenants.columns.quota'),   sortable: false, width: '140px' },
@@ -325,10 +327,19 @@
       .join(', ')
   }
 
+  // Enrichment %: same never-fabricate-0% discipline as the dashboard tiles — an unconfigured
+  // tracker or a zero advisory total is unset, not a fabricated 0%, and sorts to the bottom.
+  function enrichmentPercent(ten) {
+    const s = ten.stats
+    if (!s?.trackerConfigured || !s?.totalAdvisoryCount) return null
+    return Math.round((s.enrichedAdvisoryCount / s.totalAdvisoryCount) * 100)
+  }
+
   const comparators = {
     slug:    (a, b) => (a.slug ?? '').localeCompare(b.slug ?? ''),
     status:  (a, b) => effectiveStatus(a).localeCompare(effectiveStatus(b)),
     health:  (a, b) => healthRank(a) - healthRank(b),
+    enrichment: (a, b) => (enrichmentPercent(a) ?? -1) - (enrichmentPercent(b) ?? -1),
     users:   (a, b) => (a.memberCount ?? 0) - (b.memberCount ?? 0),
     storage: (a, b) => (a.storageBytes ?? 0) - (b.storageBytes ?? 0),
     created: (a, b) => dateAsc(a.createdAt, b.createdAt),
@@ -394,6 +405,9 @@
       <td>
         <span class="health-dot health-dot-{ten.health?.status ?? 'ok'}"
               title={healthTitle(ten)}></span>
+      </td>
+      <td class="num">
+        {#if enrichmentPercent(ten) !== null}{enrichmentPercent(ten)}%{:else}—{/if}
       </td>
       <td class="num">{ten.memberCount ?? 0}</td>
       <td class="num">{fmtBytes(ten.storageBytes ?? 0)}</td>

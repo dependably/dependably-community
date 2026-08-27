@@ -490,6 +490,215 @@ public sealed class InstanceController : ControllerBase
         return Ok(new { jobs = jobStatuses });
     }
 
+    // ── Vulnerability-tracker connection ──────────────────────────────────────
+    //
+    // Single-mode counterpart of the apex /api/v1/system/vuln-tracker-config. Validation, the
+    // write, and response shaping are shared with SystemController.VulnTrackerConfig via
+    // VulnTrackerConfigEditing so the two surfaces cannot drift.
+    //
+    // One connection serves the whole deployment. In single mode the org *is* the deployment, so
+    // a tenant admin holding tenant:configure edits it here; in multi mode these routes 404 and
+    // the operator uses the apex surface behind the separate system_admin identity. Either way
+    // there is exactly one connection and no per-org override.
+
+    /// <summary>
+    /// GET /api/v1/instance/vuln-tracker-config — the resolved vulnerability-tracker connection.
+    /// The token is never echoed, only a computed <c>hasToken</c> boolean.
+    /// </summary>
+    [HttpGet("api/v1/instance/vuln-tracker-config")]
+    public async Task<IActionResult> GetVulnTrackerConfig(
+        [FromServices] Dependably.Infrastructure.VulnTracker.InstanceVulnTrackerConfig tracker,
+        [FromServices] Dependably.Infrastructure.Identity.EnvelopeProtector envelope,
+        CancellationToken ct)
+    {
+        if (_isMultiMode)
+        {
+            return NotFound();
+        }
+
+        var deny = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
+        if (deny is not null)
+        {
+            return deny;
+        }
+
+        var resolved = await tracker.ResolveAsync(ct);
+        return Ok(Dependably.Infrastructure.VulnTracker.VulnTrackerConfigEditing.BuildView(
+            resolved, envelope.IsConfigured));
+    }
+
+    /// <summary>
+    /// PUT /api/v1/instance/vuln-tracker-config — updates the vulnerability-tracker connection.
+    /// A non-empty <c>token</c> requires <c>EnvelopeProtector.IsConfigured</c>, otherwise 422
+    /// (<c>error.vulnTracker.masterKeyRequired</c>) — <c>SetInstanceSettingAsync</c> would
+    /// otherwise silently store the bearer credential in plaintext. An IP-literal host in the
+    /// base URL is rejected when it falls in a blocked SSRF range unless
+    /// <c>WEBHOOK_ALLOW_PRIVATE=true</c>; the authoritative, DNS-rebinding-aware gate is the
+    /// connect-time guard the tracker client runs on every request. Audits the non-secret fields
+    /// only.
+    /// </summary>
+    [HttpPut("api/v1/instance/vuln-tracker-config")]
+    public async Task<IActionResult> UpdateVulnTrackerConfig(
+        [FromBody] Dependably.Infrastructure.VulnTracker.VulnTrackerConfigRequest req,
+        [FromServices] Dependably.Infrastructure.VulnTracker.InstanceVulnTrackerConfig tracker,
+        [FromServices] Dependably.Infrastructure.Identity.EnvelopeProtector envelope,
+        [FromServices] ProblemResults problems,
+        CancellationToken ct)
+    {
+        if (_isMultiMode)
+        {
+            return NotFound();
+        }
+
+        var deny = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
+        if (deny is not null)
+        {
+            return deny;
+        }
+
+        if (req is null)
+        {
+            return problems.ValidationErrorActionKey("body", "error.common.requestBodyRequired");
+        }
+
+        var (field, resourceKey) = Dependably.Infrastructure.VulnTracker.VulnTrackerConfigEditing.Validate(req);
+        if (field is not null)
+        {
+            return problems.ValidationErrorActionKey(field, resourceKey!);
+        }
+
+        if (!string.IsNullOrEmpty(req.Token) && !envelope.IsConfigured)
+        {
+            return problems.ValidationErrorActionKey("token", "error.vulnTracker.masterKeyRequired");
+        }
+
+        // Operator-endpoint predicate — see the apex counterpart in
+        // SystemController.VulnTrackerConfig for why this is not the tenant-facing one and not
+        // gated on WEBHOOK_ALLOW_PRIVATE.
+        if (Dependably.Infrastructure.VulnTracker.VulnTrackerConfigEditing.IsHostBlocked(
+                req.BaseUrl, SsrfGuard.IsBlockedIpForOperatorEndpoint))
+        {
+            return problems.ValidationErrorActionKey("baseUrl", "error.vulnTracker.hostBlocked");
+        }
+
+        await Dependably.Infrastructure.VulnTracker.VulnTrackerConfigEditing.ApplyAsync(_orgs, req, ct);
+        tracker.Invalidate();
+
+        // Resolved before auditing so the audited state is the connection that actually resulted,
+        // not the request body: a save that omits the token keeps the stored one, and a save that
+        // clears the base URL discards it, neither of which the body alone tells you.
+        var resolved = await tracker.ResolveAsync(ct);
+
+        string? actor = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
+            ?? User.FindFirst("sub")?.Value;
+        await _audit.LogSystemAsync(
+            action: "instance_vuln_tracker_config_updated",
+            actorId: actor,
+            detail: System.Text.Json.JsonSerializer.Serialize(new
+            {
+                enabled = resolved.Enabled,
+                baseUrl = resolved.Connection.BaseUrl,
+                maxStalenessHours = resolved.Connection.MaxStalenessHours,
+                batchSize = resolved.Connection.BatchSize,
+                tokenRotated = !string.IsNullOrEmpty(req.Token),
+                hasToken = !string.IsNullOrEmpty(resolved.Connection.Token),
+                configured = resolved.Configured,
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            ct: ct);
+
+        return Ok(Dependably.Infrastructure.VulnTracker.VulnTrackerConfigEditing.BuildView(
+            resolved, envelope.IsConfigured));
+    }
+
+    /// <summary>
+    /// POST /api/v1/instance/vuln-tracker-config/test — single-mode counterpart of the apex
+    /// <c>/api/v1/system/vuln-tracker-config/test</c>, sharing the probe itself through
+    /// <see cref="Dependably.Infrastructure.VulnTracker.VulnTrackerProbe"/> so the two surfaces
+    /// cannot report differently about the same connection.
+    ///
+    /// <para>
+    /// An unreached tracker is a 200 carrying <c>reached: false</c>; only a connection with
+    /// nothing to dial is a 422. Rate-limited like the invite send path, because it is an
+    /// authenticated trigger for an outbound request.
+    /// </para>
+    ///
+    /// <para>
+    /// Also fires the tracker's identity handshake alongside the probe — see the apex
+    /// counterpart's remarks; the two surfaces cannot drift on this either.
+    /// </para>
+    /// </summary>
+    [HttpPost("api/v1/instance/vuln-tracker-config/test")]
+    [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("invite")]
+    public async Task<IActionResult> TestVulnTrackerConfig(
+        [FromServices] Dependably.Infrastructure.VulnTracker.InstanceVulnTrackerConfig tracker,
+        [FromServices] Dependably.Protocol.IVulnerabilityEnrichmentSource enrichment,
+        [FromServices] Dependably.Infrastructure.VulnTracker.VulnTrackerEnrichmentClient enrichmentClient,
+        [FromServices] Dependably.Infrastructure.VulnTracker.VulnTrackerHealthRepository health,
+        [FromServices] TimeProvider time,
+        [FromServices] ProblemResults problems,
+        CancellationToken ct)
+    {
+        if (_isMultiMode)
+        {
+            return NotFound();
+        }
+
+        var deny = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
+        if (deny is not null)
+        {
+            return deny;
+        }
+
+        var probe = await Dependably.Infrastructure.VulnTracker.VulnTrackerProbe.TryProbeAsync(
+            tracker, enrichment, health, time, ct);
+
+        if (probe is not null)
+        {
+            bool handshakeSent = await enrichmentClient.TryHandshakeAsync(ct);
+
+            // Same reasoning as the apex counterpart: the fetch log records that a probe
+            // happened, and only this records who ran it.
+            await _audit.LogSystemAsync(
+                action: "instance_vuln_tracker_config_tested",
+                actorId: User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
+                    ?? User.FindFirst("sub")?.Value,
+                detail: System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    reached = probe.Reached,
+                    reason = probe.Reason,
+                    latencyMs = probe.LatencyMs,
+                    handshakeSent,
+                }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+                ct: ct);
+        }
+
+        // Null means there was nothing to dial — see the apex counterpart for why that is a 422
+        // rather than a reached:false 200.
+        return probe is null
+            ? problems.ValidationErrorActionKey("baseUrl", "error.vulnTracker.notActive")
+            : Ok(Dependably.Infrastructure.VulnTracker.VulnTrackerConfigEditing.BuildProbeView(probe));
+    }
+
+    /// <summary>
+    /// GET /api/v1/instance/vuln-tracker-health — single-mode counterpart of the apex
+    /// <c>/api/v1/system/vuln-tracker-health</c>, reading the same aggregator so the two surfaces
+    /// cannot report differently about the same connection. Counts and instants only.
+    /// </summary>
+    [HttpGet("api/v1/instance/vuln-tracker-health")]
+    public async Task<IActionResult> GetVulnTrackerHealth(
+        [FromServices] Dependably.Infrastructure.VulnTracker.VulnTrackerHealthAggregator health,
+        CancellationToken ct)
+    {
+        if (_isMultiMode)
+        {
+            return NotFound();
+        }
+
+        var deny = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
+        return deny ?? Ok(Dependably.Infrastructure.VulnTracker.VulnTrackerHealthAggregator.BuildView(
+            await health.GetAsync(ct)));
+    }
+
     // The legacy /api/v1/admin/users, /api/v1/admin/users/{id}/role, and /api/v1/admin/audit
     // endpoints are removed: the instance_admin flag no longer exists, and these surfaces are
     // either redundant under the strict-tenant model (admin/users) or moved to the system

@@ -69,6 +69,9 @@ public sealed class BlockGateService
     private readonly IPerOrgTrustAnchorStore _anchors;
     private readonly ILogger<BlockGateService> _logger;
     private readonly TimeProvider _time;
+    private readonly OrgRepository _orgs;
+    private readonly Infrastructure.Webhooks.IPackageEventSink _eventSink;
+    private readonly BlockRefusalWebhookThrottle _webhookThrottle;
 
 #pragma warning disable S107 // DI constructor — each dependency is a distinct policy-arm collaborator.
     public BlockGateService(
@@ -80,7 +83,10 @@ public sealed class BlockGateService
         LicenseRepository licenses,
         IPerOrgTrustAnchorStore anchors,
         ILogger<BlockGateService> logger,
-        TimeProvider time)
+        TimeProvider time,
+        OrgRepository orgs,
+        Infrastructure.Webhooks.IPackageEventSink eventSink,
+        BlockRefusalWebhookThrottle webhookThrottle)
 #pragma warning restore S107
     {
         _vulns = vulns;
@@ -92,6 +98,9 @@ public sealed class BlockGateService
         _anchors = anchors;
         _logger = logger;
         _time = time;
+        _orgs = orgs;
+        _eventSink = eventSink;
+        _webhookThrottle = webhookThrottle;
     }
 
     /// <summary>
@@ -178,6 +187,58 @@ public sealed class BlockGateService
         await QueueForReviewAsync(request, "content_divergence", detail, ct);
     }
 
+    /// <summary>
+    /// Single emission site for the <c>package.blocked</c> webhook event, called from every
+    /// per-arm side-effect method (and the inline manual case in <see cref="ApplySideEffectsAsync"/>)
+    /// once that arm's audit/activity/quarantine rows are already written. Both the cache-hit
+    /// serve path (via <see cref="ApplySideEffectsAsync"/>) and the cache-miss first-fetch path
+    /// (the deprecated and provenance arms are called directly by <c>ProxyFetchService</c>) land
+    /// here through the same per-arm helper, so the two paths emit one consistent event shape.
+    ///
+    /// Best-effort and throttled: <see cref="BlockRefusalWebhookThrottle"/> coalesces repeated
+    /// refusals of the same (org, purl, arm) inside its window before this method ever resolves
+    /// the org or builds the envelope, and any failure resolving the org or dispatching is
+    /// logged and swallowed — a lost webhook notification must never turn a correct 403 into a
+    /// 500, and it never rolls back the audit/activity/quarantine rows already written above it.
+    /// </summary>
+    private async Task EmitBlockWebhookEventAsync(
+        BlockGateRequest request, string arm, string? severity, CancellationToken ct)
+    {
+        if (!_webhookThrottle.ShouldDispatch(request.OrgId, request.Purl, arm))
+        {
+            return;
+        }
+
+        try
+        {
+            var parsed = PurlParser.TryParse(request.Purl);
+            string name = parsed?.Name ?? request.Purl;
+            string version = parsed?.Version ?? "";
+            var data = new Infrastructure.Audit.Events.PackageEvents.Blocked(
+                request.Ecosystem, name, version, request.Purl, arm, severity);
+            var org = await _orgs.GetByIdAsync(request.OrgId, ct);
+            string orgSlug = org?.Slug ?? request.OrgId;
+            _eventSink.Dispatch(new Infrastructure.Webhooks.PackageEventEnvelope(
+                EventType: Infrastructure.Audit.Events.PackageEvents.TypeBlocked,
+                OrgId: request.OrgId,
+                OrgSlug: orgSlug,
+                Ecosystem: request.Ecosystem,
+                Name: name,
+                Version: version,
+                Purl: request.Purl,
+                ArtifactHash: null,
+                Actor: request.AuditActorId,
+                OccurredAt: _time.GetUtcNow(),
+                DataJson: data.ToJson()));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to dispatch block webhook for {Purl} (org {OrgId}, arm {Arm}); skipped.",
+                request.Purl, request.OrgId, arm);
+        }
+    }
+
     public async Task<BlockOutcome> EvaluateAsync(BlockGateRequest request, CancellationToken ct = default)
     {
         // Surfaced regardless of the eventual Allowed/Blocked verdict below — divergence itself,
@@ -227,11 +288,8 @@ public sealed class BlockGateService
             Deprecated: request.Deprecated,
             PublishedAt: request.PublishedAt,
             Scanned: request.VulnCheckedAt is not null,
-            // Download path: use the aggregate signals flag (HasMalicious), not the row flag.
-            HasMalicious: signals?.HasMalicious ?? false,
-            HasKev: signals?.HasKev ?? false,
-            MaxEpss: signals?.MaxEpss,
-            MaxCvss: signals?.MaxCvss,
+            // Download path: use the aggregate signals' own malicious flag, not a row flag.
+            Vulnerability: ProjectVulnFacts(signals),
             Origin: request.Origin,
             HasInstallScript: request.HasInstallScript,
             ProvenanceStatus: provenanceStatus,
@@ -244,10 +302,15 @@ public sealed class BlockGateService
             BlockMaliciousMode: request.BlockMaliciousMode,
             BlockKevMode: request.BlockKevMode,
             MaxEpssTolerance: request.MaxEpssTolerance,
+            BlockKevRansomwareMode: request.BlockKevRansomwareMode,
+            BlockSsvcExploitationMode: request.BlockSsvcExploitationMode,
+            MaxEpssPercentileTolerance: request.MaxEpssPercentileTolerance,
             MaxOsvScoreTolerance: request.MaxOsvScoreTolerance,
             BlockInstallScriptsMode: request.BlockInstallScriptsMode,
             VerifyProvenanceMode: request.VerifyProvenanceMode,
             BlockRevokedMode: request.BlockRevokedMode);
+
+        NoteStaleEnrichment(signals, request.Ecosystem);
 
         var verdict = Evaluate(facts, policy, _time.GetUtcNow());
 
@@ -270,10 +333,59 @@ public sealed class BlockGateService
         // ('block'), the operator has not manually allowed the version (that override wins),
         // and nothing above blocked. Under 'off'/'warn', a manual allow, or an already-blocked
         // verdict, no license row is ever read, so the hot path pays zero extra DB cost.
-        return request.LicenseEnforcementMode == "block" && request.ManualState != "allowed" &&
-               await EvaluateLicenseArmAsync(request, ct) == BlockDecision.Blocked
-            ? new BlockOutcome(BlockDecision.Blocked, BlockArm.License)
-            : BlockOutcome.Allow();
+        if (request.LicenseEnforcementMode == "block" && request.ManualState != "allowed" &&
+            await EvaluateLicenseArmAsync(request, ct) == BlockDecision.Blocked)
+        {
+            return new BlockOutcome(BlockDecision.Blocked, BlockArm.License);
+        }
+
+        // Recorded here rather than beside the pure core, because only at this point is the
+        // artefact known to be SERVED: the licence arm above can still refuse it, and a refusal
+        // subsumes the warning. Recording earlier would report "would have blocked" for an
+        // artefact that was in fact blocked, by a different arm.
+        await RecordWarnAsync(request, verdict.WarnArm, ct);
+        return BlockOutcome.Allow();
+    }
+
+    /// <summary>
+    /// Records that an arm in <c>warn</c> mode <em>would</em> have refused this artefact, which
+    /// was nonetheless served.
+    ///
+    /// <para>
+    /// One event type rather than a <c>warned_*</c> family mirroring the seven <c>blocked_*</c>
+    /// ones: the question an operator asks is "what would my gates have refused?", which is one
+    /// filter over one event type with the arm as structured detail — not seven filters they
+    /// have to know to union. The arm is not lost; it is in the detail and on the metric.
+    /// </para>
+    ///
+    /// <para>
+    /// Deliberately does <b>not</b> queue a quarantine review row, unlike every block path. The
+    /// review queue exists so an operator can approve something that was <em>refused</em>; a warn
+    /// refuses nothing, so there is no decision to make and queueing would fill the queue with
+    /// items that need none.
+    /// </para>
+    /// </summary>
+    private async Task RecordWarnAsync(BlockGateRequest request, BlockArm warnArm, CancellationToken ct)
+    {
+        if (warnArm == BlockArm.None)
+        {
+            return;
+        }
+
+        string? reason = new BlockOutcome(BlockDecision.Blocked, warnArm).ReasonToken;
+
+        DependablyMeter.GateWarnings.Add(1,
+            new KeyValuePair<string, object?>("ecosystem", request.Ecosystem),
+            new KeyValuePair<string, object?>("reason", reason));
+
+        await _audit.LogActivityAsync(
+            request.OrgId, request.Ecosystem, request.Purl,
+            "gate_warned", request.AuditActorId, actorKind: request.ActorKind,
+            actorLabel: request.AuditActorLabel,
+            detail: System.Text.Json.JsonSerializer.Serialize(
+                new { arm = reason },
+                Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: request.SourceIp, ct: ct);
     }
 
     /// <summary>
@@ -392,11 +504,59 @@ public sealed class BlockGateService
             detail: detail,
             sourceIp: request.SourceIp, ct: ct);
         await QueueForReviewAsync(request, "license", offendingLeaf, ct);
+        await EmitBlockWebhookEventAsync(request, "license", severity: null, ct);
     }
+
+    /// <summary>
+    /// Counts gate evaluations of a version whose enrichment is past the operator's staleness
+    /// horizon, so the softening that staleness causes stays visible.
+    ///
+    /// <para>
+    /// The horizon is applied in the aggregate query, not at the arms, which means a stale value
+    /// simply is not there by the time policy runs. For the SSVC arm that absence is caught and
+    /// refused — <see cref="SsvcExploitationTriggers"/> fires on staleness as well as on an active
+    /// assessment. For the CVSS ceiling it is not: the NVD fallback drops out and OSV's own score
+    /// is compared, which is a complete signal rather than an unknown one. That second case is a
+    /// return to the pre-overlay baseline rather than a degradation, and this counter is how an
+    /// operator sees it happening. A sustained non-zero rate means the tracker is behind.
+    /// </para>
+    /// </summary>
+    private static void NoteStaleEnrichment(VulnGateSignals? signals, string ecosystem)
+    {
+        if (signals?.HasStaleEnrichment == true)
+        {
+            DependablyMeter.StaleEnrichmentEvaluations.Add(1,
+                new KeyValuePair<string, object?>("ecosystem", ecosystem));
+        }
+    }
+
+    /// <summary>
+    /// Projects one call site's aggregate <see cref="VulnGateSignals"/> into the
+    /// <see cref="VulnFacts"/> the arm ladder reads, folding the NVD fallback into
+    /// <see cref="VulnFacts.Cvss"/> so the ladder itself has one score to compare rather than a
+    /// two-source split it would otherwise have to re-resolve on every read. No signals (an
+    /// unscanned version) projects to <see cref="VulnFacts.None"/>.
+    /// </summary>
+    /// <param name="maliciousOverride">
+    /// The index/listing path reads a pre-computed row flag (<c>package_versions.is_malicious</c>)
+    /// rather than the aggregate signal — see <see cref="IsHardBlockedByStoredState"/>. Omitted,
+    /// the aggregate's own malicious flag is used, matching every other call site.
+    /// </param>
+    private static VulnFacts ProjectVulnFacts(VulnGateSignals? signals, bool? maliciousOverride = null) =>
+        (signals?.Facts ?? VulnFacts.None) with
+        {
+            IsMalicious = maliciousOverride ?? signals?.HasMalicious ?? false,
+            Cvss = signals?.EffectiveMaxCvss,
+        };
 
     // Performs the audit-log, meter, and quarantine side effects for each blocking arm.
     // Called only when the pure core signals a block; routes to the matching side-effect
     // body preserving all existing meter names, event types, and detail JSON shapes.
+    //
+    // Every arm that can refuse must have a case here: an arm wired into the policy core but not
+    // into this switch still refuses the artefact, it just refuses it invisibly — no activity
+    // row, no quarantine entry, no webhook — and nothing fails, because there is no default arm.
+    // BlockArmSideEffectComplianceTests is what makes that a gate rather than a convention.
     private async Task ApplySideEffectsAsync(
         BlockArm arm, BlockGateRequest request, VulnGateSignals? signals, CancellationToken ct)
     {
@@ -408,6 +568,7 @@ public sealed class BlockGateService
                     "blocked_manual", request.AuditActorId, actorKind: request.ActorKind, actorLabel: request.AuditActorLabel,
                     sourceIp: request.SourceIp, ct: ct);
                 // Manual block is a human decision — no quarantine row needed.
+                await EmitBlockWebhookEventAsync(request, "manual", severity: null, ct);
                 break;
 
             case BlockArm.Deprecated:
@@ -434,8 +595,20 @@ public sealed class BlockGateService
                 await RecordKevBlockAsync(request, ct);
                 break;
 
+            case BlockArm.KevRansomware:
+                await RecordKevRansomwareBlockAsync(request, ct);
+                break;
+
+            case BlockArm.SsvcExploitation:
+                await RecordSsvcExploitationBlockAsync(request, signals!, ct);
+                break;
+
             case BlockArm.Epss:
                 await RecordEpssBlockAsync(request, signals!, ct);
+                break;
+
+            case BlockArm.EpssPercentile:
+                await RecordEpssPercentileBlockAsync(request, signals!, ct);
                 break;
 
             case BlockArm.VulnScore:
@@ -466,6 +639,7 @@ public sealed class BlockGateService
             detail: ageDetail,
             sourceIp: request.SourceIp, ct: ct);
         await QueueForReviewAsync(request, "release_age", ageDetail, ct);
+        await EmitBlockWebhookEventAsync(request, "release_age", severity: null, ct);
     }
 
     // Side effects for the malicious arm: fetches the OSV advisory ids (only on the block
@@ -487,6 +661,7 @@ public sealed class BlockGateService
             detail: malDetail,
             sourceIp: request.SourceIp, ct: ct);
         await QueueForReviewAsync(request, "malicious", malDetail, ct);
+        await EmitBlockWebhookEventAsync(request, "malicious", severity: null, ct);
     }
 
     // Side effects for the KEV arm: fetches advisory ids (block path only), increments the
@@ -506,6 +681,7 @@ public sealed class BlockGateService
             detail: kevDetail,
             sourceIp: request.SourceIp, ct: ct);
         await QueueForReviewAsync(request, "kev", kevDetail, ct);
+        await EmitBlockWebhookEventAsync(request, "kev", severity: null, ct);
     }
 
     // Side effects for the EPSS arm: formats the probability + tolerance detail JSON,
@@ -524,6 +700,75 @@ public sealed class BlockGateService
             detail: epssDetail,
             sourceIp: request.SourceIp, ct: ct);
         await QueueForReviewAsync(request, "epss", epssDetail, ct);
+        await EmitBlockWebhookEventAsync(request, "epss", severity: null, ct);
+    }
+
+    // Side effects for the narrow KEV arm. Shares the broad arm's advisory-id lookup — a
+    // ransomware-flagged CVE is by construction a KEV-listed one — but records its own reason,
+    // so the review queue distinguishes "exploited" from "used in ransomware campaigns".
+    private async Task RecordKevRansomwareBlockAsync(BlockGateRequest request, CancellationToken ct)
+    {
+        DependablyMeter.EnrichmentGateBlocks.Add(1,
+            new KeyValuePair<string, object?>("ecosystem", request.Ecosystem),
+            new KeyValuePair<string, object?>("reason", "kev_ransomware"));
+        var kevIds = request.CacheArtifactId is not null
+            ? await _vulns.GetKevOsvIdsForCacheArtifactAsync(request.CacheArtifactId, ct)
+            : await _vulns.GetKevOsvIdsForVersionAsync(request.VersionId, ct);
+        string detail = System.Text.Json.JsonSerializer.Serialize(
+            new { kev_osv_ids = kevIds }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
+        await _audit.LogActivityAsync(
+            request.OrgId, request.Ecosystem, request.Purl,
+            "blocked_kev_ransomware", request.AuditActorId, actorKind: request.ActorKind, actorLabel: request.AuditActorLabel,
+            detail: detail,
+            sourceIp: request.SourceIp, ct: ct);
+        await QueueForReviewAsync(request, "kev_ransomware", detail, ct);
+        await EmitBlockWebhookEventAsync(request, "kev_ransomware", severity: null, ct);
+    }
+
+    // Side effects for the SSVC exploitation arm. The detail names the assessment rather than a
+    // list of advisory ids: the value is an overlay attribute of the linked advisories, and the
+    // aggregate that fired the arm does not carry which of them supplied it.
+    private async Task RecordSsvcExploitationBlockAsync(
+        BlockGateRequest request, VulnGateSignals signals, CancellationToken ct)
+    {
+        DependablyMeter.EnrichmentGateBlocks.Add(1,
+            new KeyValuePair<string, object?>("ecosystem", request.Ecosystem),
+            new KeyValuePair<string, object?>("reason", "ssvc_exploitation"));
+        // Two different operator problems: "CISA assesses this as actively exploited" is resolved
+        // by a policy decision about the package, "we can no longer tell" by fixing the tracker.
+        string detail = signals.HasSsvcActiveExploitation
+            ? "{\"ssvc_exploitation\":\"active\"}"
+            : "{\"ssvc_exploitation\":\"stale\"}";
+        await _audit.LogActivityAsync(
+            request.OrgId, request.Ecosystem, request.Purl,
+            "blocked_ssvc_exploitation", request.AuditActorId, actorKind: request.ActorKind, actorLabel: request.AuditActorLabel,
+            detail: detail,
+            sourceIp: request.SourceIp, ct: ct);
+        await QueueForReviewAsync(request, "ssvc_exploitation", detail, ct);
+        await EmitBlockWebhookEventAsync(request, "ssvc_exploitation", severity: null, ct);
+    }
+
+    // Side effects for the EPSS percentile arm: the rank sibling of RecordEpssBlockAsync, kept
+    // separate so the recorded detail names the ceiling the operator actually set.
+    private async Task RecordEpssPercentileBlockAsync(
+        BlockGateRequest request, VulnGateSignals signals, CancellationToken ct)
+    {
+        DependablyMeter.EnrichmentGateBlocks.Add(1,
+            new KeyValuePair<string, object?>("ecosystem", request.Ecosystem),
+            new KeyValuePair<string, object?>("reason", "epss_percentile"));
+        double maxPercentile = signals.MaxEpssPercentile!.Value;
+        double tolerance = request.MaxEpssPercentileTolerance!.Value;
+        string detail = string.Format(
+            CultureInfo.InvariantCulture,
+            "{{\"max_epss_percentile\":{0},\"tolerance\":{1}}}",
+            maxPercentile, tolerance);
+        await _audit.LogActivityAsync(
+            request.OrgId, request.Ecosystem, request.Purl,
+            "blocked_epss_percentile", request.AuditActorId, actorKind: request.ActorKind, actorLabel: request.AuditActorLabel,
+            detail: detail,
+            sourceIp: request.SourceIp, ct: ct);
+        await QueueForReviewAsync(request, "epss_percentile", detail, ct);
+        await EmitBlockWebhookEventAsync(request, "epss_percentile", severity: null, ct);
     }
 
     // Side effects for the CVSS-score arm: formats the max-score + tolerance detail JSON,
@@ -531,7 +776,7 @@ public sealed class BlockGateService
     private async Task RecordVulnScoreBlockAsync(
         BlockGateRequest request, VulnGateSignals signals, CancellationToken ct)
     {
-        double maxScore = signals.MaxCvss!.Value;
+        double maxScore = signals.EffectiveMaxCvss!.Value;
         string scoreDetail = $"{{\"max_score\":{maxScore},\"tolerance\":{request.MaxOsvScoreTolerance}}}";
         await _audit.LogActivityAsync(
             request.OrgId, request.Ecosystem, request.Purl,
@@ -539,6 +784,9 @@ public sealed class BlockGateService
             detail: scoreDetail,
             sourceIp: request.SourceIp, ct: ct);
         await QueueForReviewAsync(request, "vuln_score", scoreDetail, ct);
+        // Vuln-score is the one arm whose block reason is itself a CVSS score, so severity is
+        // meaningful here in a way it isn't for the OSV-id-only malicious/KEV arms above.
+        await EmitBlockWebhookEventAsync(request, "vuln_score", OsvScoring.CvssScoreToSeverity(maxScore), ct);
     }
 
     // Side effects for the install-script arm: formats the script-kind detail JSON,
@@ -555,6 +803,7 @@ public sealed class BlockGateService
             detail: scriptDetail,
             sourceIp: request.SourceIp, ct: ct);
         await QueueForReviewAsync(request, "install_script", scriptDetail, ct);
+        await EmitBlockWebhookEventAsync(request, "install_script", severity: null, ct);
     }
 
     /// <summary>
@@ -612,6 +861,7 @@ public sealed class BlockGateService
             detail: provDetail,
             sourceIp: request.SourceIp, ct: ct);
         await QueueForReviewAsync(request, "provenance", provDetail, ct);
+        await EmitBlockWebhookEventAsync(request, "provenance", severity: null, ct);
     }
 
     // Single home for the deprecated-block side effects (meter + activity row + review row) so
@@ -627,6 +877,7 @@ public sealed class BlockGateService
             detail: detail,
             sourceIp: request.SourceIp, ct: ct);
         await QueueForReviewAsync(request, "deprecated", detail, ct);
+        await EmitBlockWebhookEventAsync(request, "deprecated", severity: null, ct);
         return BlockDecision.Blocked;
     }
 
@@ -645,6 +896,7 @@ public sealed class BlockGateService
             detail: detail,
             sourceIp: request.SourceIp, ct: ct);
         await QueueForReviewAsync(request, "revoked", detail, ct);
+        await EmitBlockWebhookEventAsync(request, "revoked", severity: null, ct);
     }
 
     // 'block_all' denies on every request (cache hit or miss). Legacy 'block' predates the
@@ -695,10 +947,7 @@ public sealed class BlockGateService
             PublishedAt: v.PublishedAt,
             Scanned: v.VulnCheckedAt is not null,
             // Index path: use the pre-computed row flag (IsMalicious), not the aggregate signal.
-            HasMalicious: v.IsMalicious,
-            HasKev: signals?.HasKev ?? false,
-            MaxEpss: signals?.MaxEpss,
-            MaxCvss: signals?.MaxCvss,
+            Vulnerability: ProjectVulnFacts(signals, maliciousOverride: v.IsMalicious),
             Origin: v.Origin,
             HasInstallScript: v.HasInstallScript,
             ProvenanceStatus: v.ProvenanceStatus,
@@ -711,6 +960,9 @@ public sealed class BlockGateService
             BlockMaliciousMode: settings.BlockMalicious,
             BlockKevMode: settings.BlockKev,
             MaxEpssTolerance: settings.MaxEpssTolerance,
+            BlockKevRansomwareMode: settings.BlockKevRansomware,
+            BlockSsvcExploitationMode: settings.BlockSsvcExploitation,
+            MaxEpssPercentileTolerance: settings.MaxEpssPercentileTolerance,
             MaxOsvScoreTolerance: settings.MaxOsvScoreTolerance,
             BlockInstallScriptsMode: settings.BlockInstallScripts,
             // The provenance policy is per-ecosystem (npm vs nuget have independent toggles), so
@@ -743,10 +995,7 @@ public sealed class BlockGateService
             // CacheArtifactIndexFacts.ToPackageVersionSynthetic — so vuln_checked_at and the
             // malicious/KEV/EPSS/CVSS signals are read unmasked here regardless of divergence.
             Scanned: entry.VulnCheckedAt is not null,
-            HasMalicious: signals?.HasMalicious ?? false,
-            HasKev: signals?.HasKev ?? false,
-            MaxEpss: signals?.MaxEpss,
-            MaxCvss: signals?.MaxCvss,
+            Vulnerability: ProjectVulnFacts(signals),
             Origin: "proxy",
             HasInstallScript: entry.EffectiveHasInstallScript,
             ProvenanceStatus: entry.EffectiveProvenanceStatus,
@@ -759,6 +1008,9 @@ public sealed class BlockGateService
             BlockMaliciousMode: settings.BlockMalicious,
             BlockKevMode: settings.BlockKev,
             MaxEpssTolerance: settings.MaxEpssTolerance,
+            BlockKevRansomwareMode: settings.BlockKevRansomware,
+            BlockSsvcExploitationMode: settings.BlockSsvcExploitation,
+            MaxEpssPercentileTolerance: settings.MaxEpssPercentileTolerance,
             MaxOsvScoreTolerance: settings.MaxOsvScoreTolerance,
             BlockInstallScriptsMode: settings.BlockInstallScripts,
             VerifyProvenanceMode: settings.VerifyProvenanceMode(EcosystemFromPurl(entry.Purl ?? string.Empty)),
@@ -782,6 +1034,19 @@ public sealed class BlockGateService
     /// </summary>
     public static BlockVerdict Evaluate(VersionFacts facts, BlockPolicy policy, DateTimeOffset now)
     {
+        var verdict = EvaluateBlocking(facts, policy, now);
+
+        // A refusal subsumes any warning: the artefact was not served, so "what would have
+        // refused it" is already answered by the arm that did. Only a servable verdict carries a
+        // warn, which is also what keeps `Arm != None` meaning exactly "blocked" for every
+        // existing consumer.
+        return verdict.Servable
+            ? verdict with { WarnArm = FirstWarnArm(facts, policy) }
+            : verdict;
+    }
+
+    private static BlockVerdict EvaluateBlocking(VersionFacts facts, BlockPolicy policy, DateTimeOffset now)
+    {
         // Arm 1: manual block — always wins.
         if (facts.ManualState == "blocked")
         {
@@ -797,7 +1062,7 @@ public sealed class BlockGateService
         // Arm 2: deprecated block_all / legacy block — only modes that deny the serve path.
         // block_new is intentionally excluded: it only fires on the first-fetch path and
         // lets already-cached deprecated versions keep serving (and stay listed).
-        if (facts.Deprecated is not null && IsBlockAll(policy.BlockDeprecatedMode))
+        if (DeprecatedTriggers(facts) && IsBlockAll(policy.BlockDeprecatedMode))
         {
             return new BlockVerdict(Servable: false, Arm: BlockArm.Deprecated);
         }
@@ -806,7 +1071,7 @@ public sealed class BlockGateService
         // signal a compromised release). Only 'block' denies; 'warn'/'off'/null surface the badge
         // but keep serving. A revoked version cannot be first-fetched (it is gone upstream), so
         // this is a serve-path / listing gate only.
-        if (facts.RevokedAt is not null && policy.BlockRevokedMode == "block")
+        if (RevokedTriggers(facts) && policy.BlockRevokedMode == "block")
         {
             return new BlockVerdict(Servable: false, Arm: BlockArm.Revoked);
         }
@@ -835,9 +1100,7 @@ public sealed class BlockGateService
         // Unverifiable is the caller-synthesized "enforcement on, no trust anchor configured"
         // marker, never a stored value. 'warn'/'off'/null and a NULL status (verification not
         // applicable) all pass.
-        if (policy.VerifyProvenanceMode == "block" &&
-            facts.ProvenanceStatus is ProvenanceStatuses.Failed or ProvenanceStatuses.Unsigned
-                or ProvenanceStatuses.Unverifiable)
+        if (ProvenanceTriggers(facts) && policy.VerifyProvenanceMode == "block")
         {
             return new BlockVerdict(Servable: false, Arm: BlockArm.Provenance);
         }
@@ -847,11 +1110,74 @@ public sealed class BlockGateService
         // not the version has been scanned, but only when no stronger arm above already blocked.
         // The allowlist exemption takes effect here: a package on the per-org install-script
         // allowlist is treated as if it has no install script for this arm only.
-        return facts.HasInstallScript && policy.BlockInstallScriptsMode == "block"
-               && !facts.InstallScriptAllowlisted
+        return InstallScriptTriggers(facts) && policy.BlockInstallScriptsMode == "block"
             ? new BlockVerdict(Servable: false, Arm: BlockArm.InstallScript)
             : vulnVerdict;
     }
+
+    // ── Arm trigger predicates ────────────────────────────────────────────────
+    //
+    // One predicate per warn-capable arm, used by BOTH the blocking pass and the warning pass.
+    // That sharing is the point: a warn pass with its own copy of each condition is a second
+    // copy of the policy, which drifts silently — the same hazard the pre-filter rule guards
+    // against, where the safe direction is "may only drop rows Evaluate would also reject".
+    // Here the invariant is tighter: warn and block must trigger on exactly the same facts, and
+    // differ only in what the tenant's mode says to do about them.
+
+    private static bool DeprecatedTriggers(VersionFacts f) => f.Deprecated is not null;
+
+    private static bool RevokedTriggers(VersionFacts f) => f.RevokedAt is not null;
+
+    // The vuln arms additionally require a scanned row: unscanned is fail-open, so an unscanned
+    // version must not warn either — a warning implies a judgement that was never made.
+    private static bool MaliciousTriggers(VersionFacts f) => f.Scanned && f.Vulnerability.IsMalicious;
+
+    private static bool KevRansomwareTriggers(VersionFacts f) =>
+        f.Scanned && f.Vulnerability.IsKevRansomware == true;
+
+    private static bool KevTriggers(VersionFacts f) => f.Scanned && f.Vulnerability.IsKev;
+
+    private static bool SsvcExploitationTriggers(VersionFacts f) =>
+        f.Scanned && (f.Vulnerability.SsvcExploitation == "active" || f.Vulnerability.HasStaleEnrichment);
+
+    private static bool ProvenanceTriggers(VersionFacts f) =>
+        f.ProvenanceStatus is ProvenanceStatuses.Failed or ProvenanceStatuses.Unsigned
+            or ProvenanceStatuses.Unverifiable;
+
+    private static bool InstallScriptTriggers(VersionFacts f) =>
+        f.HasInstallScript && !f.InstallScriptAllowlisted;
+
+    private static bool IsWarn(string? mode) => mode == "warn";
+
+    /// <summary>
+    /// The highest-priority arm whose fact is present and whose tenant mode is <c>warn</c>, or
+    /// <see cref="BlockArm.None"/>. Walks the same order as the blocking pass, using the same
+    /// trigger predicates, so an arm cannot be enforced-but-not-warned or the reverse.
+    ///
+    /// <para>
+    /// A manual allow silences warnings as well as blocks. The override means "an operator has
+    /// judged this version acceptable"; continuing to report what would have refused it would
+    /// generate a permanent stream of records for a decision already made.
+    /// </para>
+    /// </summary>
+    private static BlockArm FirstWarnArm(VersionFacts facts, BlockPolicy policy) =>
+        facts.ManualState == "allowed"
+            ? BlockArm.None
+            // Priority order, mirroring the blocking pass exactly. Written as a null-coalescing
+            // chain rather than a sequence of ifs so the order is one readable list, and rather
+            // than an array so the serve path allocates nothing per evaluation.
+            : Warned(DeprecatedTriggers(facts), policy.BlockDeprecatedMode, BlockArm.Deprecated)
+              ?? Warned(RevokedTriggers(facts), policy.BlockRevokedMode, BlockArm.Revoked)
+              ?? Warned(MaliciousTriggers(facts), policy.BlockMaliciousMode, BlockArm.Malicious)
+              ?? Warned(KevRansomwareTriggers(facts), policy.BlockKevRansomwareMode, BlockArm.KevRansomware)
+              ?? Warned(KevTriggers(facts), policy.BlockKevMode, BlockArm.Kev)
+              ?? Warned(SsvcExploitationTriggers(facts), policy.BlockSsvcExploitationMode, BlockArm.SsvcExploitation)
+              ?? Warned(ProvenanceTriggers(facts), policy.VerifyProvenanceMode, BlockArm.Provenance)
+              ?? Warned(InstallScriptTriggers(facts), policy.BlockInstallScriptsMode, BlockArm.InstallScript)
+              ?? BlockArm.None;
+
+    private static BlockArm? Warned(bool triggered, string? mode, BlockArm arm) =>
+        triggered && IsWarn(mode) ? arm : null;
 
     // Arm 3 predicate: true when the version is upstream-derived, a positive cooldown is
     // configured, PublishedAt is known, and that timestamp is still within the cooldown window.
@@ -880,32 +1206,64 @@ public sealed class BlockGateService
 
         // Arm 4: malicious advisory. Runs before score comparison; MAL- advisories usually
         // carry no CVSS score so the score gate alone would let known malware through.
-        if (facts.HasMalicious && policy.BlockMaliciousMode == "block")
+        if (MaliciousTriggers(facts) && policy.BlockMaliciousMode == "block")
         {
             return new BlockVerdict(Servable: false, Arm: BlockArm.Malicious);
         }
 
-        // Arms 5–7 need aggregate signals; null signals means no linked advisories — all pass.
-        // When HasKev is false and MaxEpss/MaxCvss are both null, no score arm can fire.
-        if (!facts.HasKev && facts.MaxEpss is null && facts.MaxCvss is null)
+        // The exploitation/score arms need aggregate signals; null signals means no linked
+        // advisories — all pass. Every fact those arms read must appear here: a signal missing
+        // from this guard makes its arm unreachable rather than merely unused, and the arm still
+        // looks correct at its own call site. IsKevRansomware implies IsKev and so is covered
+        // by it, but is named anyway so the guard stays honest if that ever stops holding.
+        if (!facts.Vulnerability.IsKev && facts.Vulnerability.IsKevRansomware != true
+            && facts.Vulnerability.SsvcExploitation != "active" && !facts.Vulnerability.HasStaleEnrichment
+            && facts.Vulnerability.Epss is null && facts.Vulnerability.EpssPercentile is null
+            && facts.Vulnerability.Cvss is null)
         {
             return new BlockVerdict(Servable: true, Arm: BlockArm.None);
         }
 
+        // Arm 5a: the narrow KEV gate, evaluated BEFORE the broad one. The two are independent
+        // settings and the useful combination is block_kev='warn' with this at 'block' — which
+        // only produces a block if the narrow arm is reached first. Ordering it second would let
+        // the broad arm's 'warn' fall through and lose the ransomware attribution entirely.
+        if (KevRansomwareTriggers(facts) && policy.BlockKevRansomwareMode == "block")
+        {
+            return new BlockVerdict(Servable: false, Arm: BlockArm.KevRansomware);
+        }
+
         // Arm 5: KEV gate — exploited-in-the-wild beats score-based reasoning.
-        if (facts.HasKev && policy.BlockKevMode == "block")
+        if (KevTriggers(facts) && policy.BlockKevMode == "block")
         {
             return new BlockVerdict(Servable: false, Arm: BlockArm.Kev);
         }
 
+        // Arm 5b: SSVC exploitation. Sits below both KEV arms because KEV is CISA's curated,
+        // higher-confidence list, and above the score arms for the same reason KEV is: evidence
+        // that something is being exploited outranks an estimate that it might be.
+        if (SsvcExploitationTriggers(facts) && policy.BlockSsvcExploitationMode == "block")
+        {
+            return new BlockVerdict(Servable: false, Arm: BlockArm.SsvcExploitation);
+        }
+
         // Arm 6: EPSS probability ceiling, pass-on-equal.
-        if (policy.MaxEpssTolerance is { } epssTol && facts.MaxEpss is { } maxEpss && maxEpss > epssTol)
+        if (policy.MaxEpssTolerance is { } epssTol && facts.Vulnerability.Epss is { } maxEpss && maxEpss > epssTol)
         {
             return new BlockVerdict(Servable: false, Arm: BlockArm.Epss);
         }
 
+        // Arm 6a: EPSS percentile ceiling, pass-on-equal. Independent of the probability ceiling
+        // above rather than an alternative spelling of it: absolute risk and relative rank are
+        // different policies, both may be set, and either tripping is enough.
+        if (policy.MaxEpssPercentileTolerance is { } pctTol
+            && facts.Vulnerability.EpssPercentile is { } maxPct && maxPct > pctTol)
+        {
+            return new BlockVerdict(Servable: false, Arm: BlockArm.EpssPercentile);
+        }
+
         // Arm 7: CVSS score ceiling, pass-on-equal.
-        return facts.MaxCvss is { } maxCvss && maxCvss > policy.MaxOsvScoreTolerance
+        return facts.Vulnerability.Cvss is { } maxCvss && maxCvss > policy.MaxOsvScoreTolerance
             ? new BlockVerdict(Servable: false, Arm: BlockArm.VulnScore)
             : new BlockVerdict(Servable: true, Arm: BlockArm.None);
     }
@@ -915,13 +1273,25 @@ public sealed class BlockGateService
 /// Identifies which policy arm triggered a block verdict. <see cref="None"/> means the
 /// version is servable (no arm fired).
 /// </summary>
-public enum BlockArm { None, Manual, Deprecated, Revoked, ReleaseAge, Malicious, Provenance, Kev, Epss, VulnScore, InstallScript, License }
+public enum BlockArm { None, Manual, Deprecated, Revoked, ReleaseAge, Malicious, Provenance, Kev, KevRansomware, SsvcExploitation, Epss, EpssPercentile, VulnScore, InstallScript, License }
 
 /// <summary>
 /// Outcome of the pure policy core: whether the version is servable and, if not, which arm
 /// triggered the block.
 /// </summary>
-public readonly record struct BlockVerdict(bool Servable, BlockArm Arm);
+/// <param name="WarnArm">
+/// The arm that <em>would</em> have blocked had its mode been <c>block</c> — the highest-priority
+/// arm whose fact is present and whose tenant mode is <c>warn</c>. Meaningful only when
+/// <paramref name="Servable"/> is true: a refusal subsumes any warning, because the artefact was
+/// not served and there is nothing left to warn about.
+///
+/// <para>
+/// Deliberately a separate field rather than reusing <paramref name="Arm"/> on a servable
+/// verdict. Every existing consumer reads "<c>Arm != None</c>" as "blocked", so widening that
+/// field's meaning would have turned warnings into refusals everywhere at once.
+/// </para>
+/// </param>
+public readonly record struct BlockVerdict(bool Servable, BlockArm Arm, BlockArm WarnArm = BlockArm.None);
 
 /// <summary>
 /// Immutable projection of the per-version facts that every policy arm reads. Built from
@@ -933,10 +1303,17 @@ public readonly record struct VersionFacts(
     string? Deprecated,
     DateTimeOffset? PublishedAt,
     bool Scanned,
-    bool HasMalicious,
-    bool HasKev,
-    double? MaxEpss,
-    double? MaxCvss,
+    /// <summary>
+    /// Every exploitation/decision-support signal the version's linked advisories carry, in the
+    /// vocabulary shared with the SBOM inventory and the projects-plane priority derivation. A
+    /// required field rather than a defaulted one — the record threads a dozen policy modes and
+    /// a comparable number of facts, and a signal omitted at a call site must fail to compile
+    /// rather than silently read as "no vulnerabilities". <see cref="VulnFacts.Cvss"/> here
+    /// carries whichever score the constructing call site already resolved as the ceiling arm's
+    /// input (the NVD fallback is folded in at construction for the callers that apply it — see
+    /// each call site) rather than the two-source split <see cref="VulnFacts"/> otherwise allows.
+    /// </summary>
+    VulnFacts Vulnerability,
     string? Origin = null,
     bool HasInstallScript = false,
     /// <summary>
@@ -979,10 +1356,7 @@ public readonly record struct VersionFacts(
             Deprecated: deprecated,
             PublishedAt: publishedAt,
             Scanned: false,
-            HasMalicious: false,
-            HasKev: false,
-            MaxEpss: null,
-            MaxCvss: null);
+            Vulnerability: VulnFacts.None);
 }
 
 /// <summary>
@@ -1010,7 +1384,27 @@ public readonly record struct BlockPolicy(
     /// 'block' denies a version removed upstream; 'warn'/'off'/null surface the badge but keep
     /// serving. Three values (no <c>block_new</c> analog — revocation is always a full removal).
     /// </summary>
-    string? BlockRevokedMode = null);
+    string? BlockRevokedMode = null,
+    /// <summary>
+    /// Tenant policy from <c>org_settings.block_kev_ransomware</c>: 'off' | 'warn' | 'block'.
+    /// The narrow companion to <see cref="BlockKevMode"/>, matching only advisories CISA marks as
+    /// used in ransomware campaigns. Independent rather than a mode on the broad arm, so
+    /// <c>BlockKevMode = "warn"</c> with this at <c>"block"</c> is expressible.
+    /// </summary>
+    string? BlockKevRansomwareMode = null,
+    /// <summary>
+    /// Tenant policy from <c>org_settings.max_epss_percentile_tolerance</c> (0.0–1.0), the rank
+    /// sibling of <see cref="MaxEpssTolerance"/>. NULL = off. Both may be set; either tripping
+    /// blocks.
+    /// </summary>
+    double? MaxEpssPercentileTolerance = null,
+    /// <summary>
+    /// Tenant policy from <c>org_settings.block_ssvc_exploitation</c>: 'off' | 'warn' | 'block'.
+    /// Acts on <c>VersionFacts.Vulnerability.SsvcExploitation == "active"</c>. Independent of
+    /// <see cref="BlockKevMode"/> — the two read different catalogues and either may be the
+    /// stricter one for a given tenant.
+    /// </summary>
+    string? BlockSsvcExploitationMode = null);
 
 public enum BlockDecision
 {
@@ -1051,7 +1445,10 @@ public readonly record struct BlockOutcome(BlockDecision Decision, BlockArm Arm)
         BlockArm.Malicious => "malicious",
         BlockArm.Provenance => "provenance",
         BlockArm.Kev => "kev",
+        BlockArm.KevRansomware => "kev_ransomware",
+        BlockArm.SsvcExploitation => "ssvc_exploitation",
         BlockArm.Epss => "epss",
+        BlockArm.EpssPercentile => "epss_percentile",
         BlockArm.VulnScore => "vuln_score",
         BlockArm.InstallScript => "install_script",
         BlockArm.License => "license",
@@ -1102,6 +1499,23 @@ public sealed record BlockGateRequest(
     /// version's maximum EPSS exploitation probability exceeds it. Null = policy off.
     /// </summary>
     double? MaxEpssTolerance = null,
+    /// <summary>
+    /// Tenant policy from <c>org_settings.block_kev_ransomware</c>: 'off' | 'warn' | 'block'.
+    /// Narrow companion to <see cref="BlockKevMode"/> — matches only advisories CISA marks as
+    /// used in ransomware campaigns, and is independent of the broad arm so the two compose.
+    /// </summary>
+    string? BlockKevRansomwareMode = null,
+    /// <summary>
+    /// Tenant ceiling from <c>org_settings.max_epss_percentile_tolerance</c> (0.0–1.0), the rank
+    /// sibling of <see cref="MaxEpssTolerance"/>. Null = policy off.
+    /// </summary>
+    double? MaxEpssPercentileTolerance = null,
+    /// <summary>
+    /// Tenant policy from <c>org_settings.block_ssvc_exploitation</c>: 'off' | 'warn' | 'block'.
+    /// Acts on the vulnerability-tracker overlay's CISA Vulnrichment assessment; inert on a
+    /// deployment with no tracker configured, because no advisory carries an SSVC value there.
+    /// </summary>
+    string? BlockSsvcExploitationMode = null,
     /// <summary>
     /// Version origin from <c>package_versions.origin</c>: 'proxy' (default), 'hosted',
     /// 'local_only', or 'mixed'. The release-age cooldown applies only to upstream-derived
@@ -1209,6 +1623,9 @@ public sealed record BlockGateRequest(
             BlockMaliciousMode: settings?.BlockMalicious,
             BlockKevMode: settings?.BlockKev,
             MaxEpssTolerance: settings?.MaxEpssTolerance,
+            BlockKevRansomwareMode: settings?.BlockKevRansomware,
+            BlockSsvcExploitationMode: settings?.BlockSsvcExploitation,
+            MaxEpssPercentileTolerance: settings?.MaxEpssPercentileTolerance,
             Origin: version.Origin,
             HasInstallScript: version.HasInstallScript,
             InstallScriptKind: version.InstallScriptKind,
@@ -1252,6 +1669,9 @@ public sealed record BlockGateRequest(
             BlockMaliciousMode: settings?.BlockMalicious,
             BlockKevMode: settings?.BlockKev,
             MaxEpssTolerance: settings?.MaxEpssTolerance,
+            BlockKevRansomwareMode: settings?.BlockKevRansomware,
+            BlockSsvcExploitationMode: settings?.BlockSsvcExploitation,
+            MaxEpssPercentileTolerance: settings?.MaxEpssPercentileTolerance,
             Origin: "proxy",
             HasInstallScript: caFacts.EffectiveHasInstallScript,
             InstallScriptKind: caFacts.EffectiveInstallScriptKind,

@@ -1,0 +1,11 @@
+fixture: 05-clean-fr-i18n-strings.diff
+class: CLEAN
+expected_verdict: CLEAN
+lens: security, code, architecture
+expected_finding: none
+provenance:
+  origin: MR !1025 (fb09db3b..baf5247e), full MR diff
+  ground_truth: CLEAN, human-confirmed. Triage note: "Clean is expected here: the diff is four
+    French string literals and the regenerated handoff XLIFF, with no code path touched."
+    All four lenses clean, none degraded.
+notes: 8 KB. Any finding on this fixture is a false positive.

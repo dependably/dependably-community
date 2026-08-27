@@ -52,6 +52,25 @@ test.describe('Tokens', () => {
     await expect(main.locator('table')).toBeVisible()
   })
 
+  // The sbom preset (tokenCapabilities.js PRESET_CAPS.sbom) mints a token carrying sbom:upload
+  // only — CI uploading an SBOM/VEX/SARIF document, nothing else. Distinct from `push`, which
+  // must not also grant it (see tokenCapabilities.test.js's mutant-discriminating twin).
+  test('the SBOM-upload preset mints a token scoped to sbom:upload alone', async ({ adminPage }) => {
+    await adminPage.locator('nav.sidebar button.nav-link', { hasText: 'Tokens' }).click()
+    await adminPage.locator('.page-header button.primary', { hasText: 'New token' }).click()
+    await expect(adminPage.locator('.modal-backdrop .modal')).toBeVisible()
+
+    await adminPage.locator('.modal select').selectOption('sbom')
+
+    const created = adminPage.waitForResponse(res =>
+      res.request().method() === 'POST' && res.url().includes('/tokens') && res.status() === 200)
+    await adminPage.locator('.modal button.primary', { hasText: 'Create' }).click()
+    const body = await (await created).json()
+
+    expect(JSON.parse(body.record.capabilities)).toEqual(['sbom:upload'])
+    await expect(adminPage.locator('.copy-block')).toBeVisible({ timeout: 5_000 })
+  })
+
   // Regression: #37 — clicking a different sortable header must move the arrow.
   // The bug was that sortIndicator() read sortCol/sortDir only inside its function
   // body, so Svelte 5 (legacy mode) never wrapped them as signals and the indicator

@@ -77,6 +77,7 @@ public sealed class WebhookDispatchQueue : BackgroundService, IPackageEventSink
     private readonly OrgFairDispatcher<PackageEventEnvelope> _dispatcher;
     private readonly WebhookSubscriptionRepository _subscriptions;
     private readonly WebhookDeliveryClient _client;
+    private readonly OrgRepository _orgs;
     private readonly TimeProvider _time;
     private readonly ILogger<WebhookDispatchQueue> _logger;
     private readonly int _workers;
@@ -90,10 +91,11 @@ public sealed class WebhookDispatchQueue : BackgroundService, IPackageEventSink
     public WebhookDispatchQueue(
         WebhookSubscriptionRepository subscriptions,
         WebhookDeliveryClient client,
+        OrgRepository orgs,
         TimeProvider time,
         IConfiguration config,
         ILogger<WebhookDispatchQueue> logger)
-        : this(subscriptions, client, time, config, logger, backoffSchedule: null)
+        : this(subscriptions, client, orgs, time, config, logger, backoffSchedule: null)
     {
     }
 
@@ -115,6 +117,7 @@ public sealed class WebhookDispatchQueue : BackgroundService, IPackageEventSink
     internal WebhookDispatchQueue(
         WebhookSubscriptionRepository subscriptions,
         WebhookDeliveryClient client,
+        OrgRepository orgs,
         TimeProvider time,
         IConfiguration config,
         ILogger<WebhookDispatchQueue> logger,
@@ -123,6 +126,7 @@ public sealed class WebhookDispatchQueue : BackgroundService, IPackageEventSink
         _backoffSchedule = backoffSchedule ?? DefaultBackoffSchedule;
         _subscriptions = subscriptions;
         _client = client;
+        _orgs = orgs;
         _time = time;
         _logger = logger;
 
@@ -253,6 +257,37 @@ public sealed class WebhookDispatchQueue : BackgroundService, IPackageEventSink
     /// </summary>
     private async Task<bool> FanOutAsync(PackageEventEnvelope envelope, CancellationToken ct)
     {
+        // A suspended/archived/deleting org (see TenantLifecycle) never reaches its own
+        // subscription URLs: those are tenant-owned third-party endpoints, exactly the egress the
+        // suspension is meant to stop. Checked here rather than at enqueue time — Dispatch is
+        // synchronous and cannot do the DB read — so an envelope queued moments before suspension
+        // still gets the current status at delivery time. Treated as a reached conclusion (true),
+        // not a retry: there is nothing to retry, the org is locked out.
+        Org? org;
+        try
+        {
+            org = await _orgs.GetByIdAsync(envelope.OrgId, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to resolve org {OrgId} while fanning out event {EventType}; skipping fan-out.",
+                envelope.OrgId, envelope.EventType);
+            return true;
+        }
+
+        if (!TenantLifecycle.IsActive(org))
+        {
+            _logger.LogInformation(
+                "Webhook fan-out skipped for event {EventType}: org {OrgId} is {Status} (deleted={Deleted}).",
+                envelope.EventType, envelope.OrgId, org?.Status ?? "unknown", org?.DeletedAt is not null);
+            return true;
+        }
+
         IReadOnlyList<WebhookSubscriptionDelivery> subs;
         try
         {

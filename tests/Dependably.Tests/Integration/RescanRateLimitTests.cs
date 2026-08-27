@@ -151,7 +151,7 @@ public sealed class RescanRateLimitTests
             // on-demand rescans.
             builder.WebHost.UseSetting(
                 "DISABLE_BACKGROUND_JOBS",
-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+                "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
             builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
             builder.WebHost.UseSetting("DEPLOYMENT_MODE", "single");
             builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");

@@ -27,6 +27,19 @@ namespace Dependably.Infrastructure;
 /// Eviction always cascades: deleting a <c>cache_artifact</c> row drops the FK-cascade
 /// <c>tenant_artifact_access</c> rows automatically (keep/cascade decision: cascade by
 /// default; usage history without a backing artifact is dead weight).
+///
+/// <para>
+/// suspension-ok: this pass does not skip a suspended/archived/deleting org (see
+/// TenantLifecycle for the rule every other per-tenant scheduled job follows). A
+/// <c>cache_artifact</c> row is shared and content-addressed — reachable through potentially
+/// many orgs' <c>tenant_artifact_access</c> bindings at once, some active and some not — so it
+/// has no single tenant owner a per-org skip could apply to, and this pass makes no outbound
+/// egress or third-party delivery on any org's behalf. <see cref="EvictOciAsync"/>'s correctness
+/// additionally depends on releasing every holder's own <c>oci_blobs</c> claim
+/// (<c>ReleaseOciDigestClaimAsync</c>) before the shared row is dropped, regardless of that
+/// holder's status: skipping a suspended holder there would strand its claim rather than reclaim
+/// it — the exact orphan this eviction path exists to prevent.
+/// </para>
 /// </summary>
 public sealed class CacheEvictionService : ScheduledBackgroundService
 {

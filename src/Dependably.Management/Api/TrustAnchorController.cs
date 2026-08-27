@@ -28,6 +28,12 @@ namespace Dependably.Api;
 [Authorize]
 public sealed class TrustAnchorController : OrgScopedControllerBase
 {
+    // A PEM bundle, PGP key ring or trusted-publisher descriptor; generous for all three.
+    private const int MaterialMaxLength = 64 * 1024;
+
+    /// <summary>Operator-facing label shown in the Settings -> Trust Anchors list.</summary>
+    private const int LabelMaxLength = 200;
+
     private readonly TrustAnchorRepository _anchors;
     private readonly IPerOrgTrustAnchorStore _store;
     private readonly OrgAccessGuard _guard;
@@ -287,8 +293,23 @@ public sealed class TrustAnchorController : OrgScopedControllerBase
             return _problems.ValidationErrorActionKey("material", "error.trustAnchor.materialEmpty");
         }
 
+        // Bounds the bytes handed to the per-ecosystem crypto parsers below. The only existing
+        // backstop is Kestrel's request-body limit, which is a transport bound, not a code-level
+        // one: a PEM bundle or key ring is small, and nothing legitimate approaches this.
+        if (material.Length > MaterialMaxLength)
+        {
+            return _problems.ValidationErrorActionKey(
+                "material", "error.trustAnchor.materialTooLong", MaterialMaxLength);
+        }
+
         string orgId = CurrentTenantId();
         string? label = string.IsNullOrWhiteSpace(req.Label) ? null : req.Label.Trim();
+        if (label is not null && label.Length > LabelMaxLength)
+        {
+            return _problems.ValidationErrorActionKey(
+                "label", "error.trustAnchor.labelTooLong", LabelMaxLength);
+        }
+
         string? keyId = string.IsNullOrWhiteSpace(req.KeyId) ? null : req.KeyId.Trim();
 
         // Apply per-ecosystem material normalizers before validation. Normalizers transform the

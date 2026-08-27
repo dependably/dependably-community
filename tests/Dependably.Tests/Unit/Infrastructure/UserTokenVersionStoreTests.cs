@@ -131,6 +131,71 @@ public sealed class UserTokenVersionStoreTests : IClassFixture<InMemoryDbFixture
         Assert.Equal(before + 1, observed);
     }
 
+    [Fact]
+    public async Task DbOpenThrowsAfterGuardIsMinted_DoesNotRetainItsFillGuard()
+    {
+        // GuardFor mints the guard BEFORE the DB open/read. UserTokenVersionStore is registered
+        // Singleton, so the guard map is process-lifetime — if the open or read throws with no
+        // cache entry ever installed to tie the guard's lifetime to, the guard must not survive
+        // the throw. Fails on the pre-fix code (no try/finally around the read), passes once the
+        // throwing branch retires the just-minted guard.
+        using var memCache = new MemoryCache(new MemoryCacheOptions());
+        var store = new UserTokenVersionStore(new ThrowingAfterGuardStore(), memCache);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => store.GetCurrentVersionAsync($"user-{Guid.NewGuid():N}"));
+
+        Assert.Equal(0, store.FillGuardCount);
+    }
+
+    [Fact]
+    public async Task RacingFillReusesAboutToRetireGuard_ItsInstalledEntryDoesNotSurviveTheDelayedEviction()
+    {
+        // Async post-eviction-callback race, the "only cache the found case" shape:
+        // MemoryCache dispatches TieToEntryLifetime's callback on a thread-pool task, not
+        // synchronously with eviction, so a concurrent fill can call GuardFor and receive the
+        // about-to-retire generation before that callback ever runs. The hook fires the FIRST
+        // entry's captured eviction callback (simulating that delayed dispatch, deterministically
+        // rather than by timing) between the SECOND fill's DB read and its cache write. Fails on a
+        // callback that only compare-removes from the map; passes once it also cancels the
+        // generation, which is what keeps the SECOND (racing) entry from ever installing.
+        string userId = await SeedUserAsync();
+        var wrappedCache = new PostEvictionCallbackCapturingMemoryCache(new MemoryCache(new MemoryCacheOptions()));
+        var hooked = new AfterDbReadHookStore(_fixture.Store);
+        var store = new UserTokenVersionStore(hooked, wrappedCache);
+        string cacheKey = "user-token-version:" + userId;
+
+        // Entry 1: a normal fill installs a real cache entry bound to G1 and captures its
+        // post-eviction callback — not fired yet, simulating "logically expired, physical
+        // eviction still pending" the way a naturally-elapsed TTL would leave it.
+        await store.GetCurrentVersionAsync(userId);
+
+        hooked.AfterRead = () =>
+        {
+            wrappedCache.FireCapturedEvictionCallbacks(cacheKey);
+            return Task.CompletedTask;
+        };
+
+        // Force the second fill to observe a cache miss; G1 is still in the store's own
+        // _fillGuards map (nothing has retired it yet), so GuardFor hands back the SAME instance.
+        wrappedCache.Remove(cacheKey);
+        await store.GetCurrentVersionAsync(userId);
+
+        // Killer assertion: entry 2 — installed by the racing fill, bound to the same G1 the hook
+        // cancelled mid-read — must not survive; MemoryCache installs it as expired-on-insert.
+        Assert.False(wrappedCache.TryGetValue(cacheKey, out _));
+    }
+
+    private sealed class ThrowingAfterGuardStore : IMetadataStore
+    {
+        public DbProvider Provider => DbProvider.Sqlite;
+
+        public Task<DbConnection> OpenAsync(CancellationToken ct = default) =>
+            throw new InvalidOperationException(
+                "Simulates a cancelled/refused/exhausted DB open after GetCurrentVersionAsync has " +
+                "already minted the fill guard.");
+    }
+
     // ── Test seam: fires a one-shot hook after each scalar read, before the caller sees it ──
 
     private sealed class AfterReadHookMetadataStore(IMetadataStore inner) : IMetadataStore

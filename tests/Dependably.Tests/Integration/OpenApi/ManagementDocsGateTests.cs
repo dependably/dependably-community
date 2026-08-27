@@ -209,7 +209,7 @@ public sealed class ManagementDocsGateTests : IAsyncLifetime
             // for the full rationale).
             builder.WebHost.UseSetting(
                 "DISABLE_BACKGROUND_JOBS",
-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+                "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
             builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
             builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
 
@@ -313,7 +313,7 @@ public sealed class ManagementDocsGateTests : IAsyncLifetime
             // for the full rationale).
             builder.WebHost.UseSetting(
                 "DISABLE_BACKGROUND_JOBS",
-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+                "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
             builder.WebHost.UseSetting("METRICS_ALLOWED_IPS", NonLoopbackAllowlist);
             builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
             builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");

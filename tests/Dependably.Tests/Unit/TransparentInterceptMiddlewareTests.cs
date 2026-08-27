@@ -1,4 +1,5 @@
 using Dependably.Infrastructure;
+using Dependably.Security;
 using Microsoft.AspNetCore.Http;
 
 namespace Dependably.Tests.Unit;
@@ -173,5 +174,35 @@ public class TransparentInterceptMiddlewareTests
 
         // PathString normalises trailing "/" away, so "/npm/" surfaces as "/npm" on the next hop.
         Assert.Equal("/npm", seen[0]);
+    }
+
+    /// <summary>
+    /// Pins the registration-order invariant both composition roots depend on:
+    /// <c>SecurityHeadersMiddleware</c> must run strictly AFTER
+    /// <c>TransparentInterceptMiddleware</c>, because it classifies CSP/Cache-Control off
+    /// <c>Request.Path</c> before calling <c>_next</c>, and the intercept is what rewrites that
+    /// path to carry the ecosystem prefix. Hoisting the header middleware above the intercept
+    /// once silently regressed registry CSP: <c>Host: registry.npmjs.org</c> + <c>GET /lodash</c>
+    /// classified on the pre-rewrite path, fell through to the frontend CSP, and lost
+    /// <c>Cache-Control: no-store</c>. Chains the two middlewares directly (no TestServer): a
+    /// bare-host proxied request must classify on the ecosystem-prefixed path, not the original.
+    /// </summary>
+    [Fact]
+    public async Task MappedHost_SecurityHeadersClassifyOnRewrittenPath_NotTheOriginalHostRelativePath()
+    {
+        var map = new HostEcosystemMap(new Dictionary<string, string> { ["registry.npmjs.org"] = "npm" });
+        RequestDelegate terminal = _ => Task.CompletedTask;
+        var securityHeaders = new SecurityHeadersMiddleware(terminal);
+        var intercept = new TransparentInterceptMiddleware(securityHeaders.InvokeAsync, map);
+
+        var ctx = Request("registry.npmjs.org", "/lodash");
+
+        await intercept.InvokeAsync(ctx);
+
+        Assert.Equal("/npm/lodash", ctx.Request.Path.Value);
+        string? csp = ctx.Response.Headers.ContentSecurityPolicy.ToString();
+        Assert.Contains("default-src 'none'", csp);
+        Assert.DoesNotContain("script-src 'self'", csp); // the frontend CSP this regressed to
+        Assert.Equal("no-store", ctx.Response.Headers.CacheControl.ToString());
     }
 }

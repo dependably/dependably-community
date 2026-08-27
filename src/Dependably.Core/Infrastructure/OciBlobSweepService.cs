@@ -17,6 +17,13 @@ namespace Dependably.Infrastructure;
 /// (<see cref="OciBlobReclaimer.IsOrgClosureCompleteAsync"/>), so a tenant whose backfill has not
 /// finished simply reclaims nothing rather than deleting on partial evidence. Leader-gated: the work
 /// is shared-state only, so one replica per tick is both sufficient and cheaper.
+///
+/// suspension-ok: this sweep only ever deletes rows nothing references — it makes no outbound
+/// egress and no third-party delivery on any org's behalf, so it carries none of the harm the
+/// suspension rule (see TenantLifecycle) exists to stop. Reclaiming a suspended org's orphaned
+/// blob rows is the same "desirable, not harmful" storage reclaim CacheEvictionService performs;
+/// gating it here would only let bytes accumulate for a suspended tenant with no compensating
+/// benefit.
 /// </summary>
 public sealed class OciBlobSweepService : ScheduledBackgroundService
 {

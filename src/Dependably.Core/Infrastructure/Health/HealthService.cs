@@ -23,6 +23,7 @@ public sealed class HealthService
         {
             ["vuln-scan"] = TimeSpan.FromHours(36),
             ["vuln-rescan"] = TimeSpan.FromHours(36),
+            ["sbom-scan"] = TimeSpan.FromHours(36),
             ["threat-feed"] = TimeSpan.FromHours(36),
             ["deprecation-refresh"] = TimeSpan.FromHours(36),
             ["stats-refresh"] = TimeSpan.FromMinutes(30),
@@ -56,6 +57,7 @@ public sealed class HealthService
         {
             "vuln-scan",
             "vuln-rescan",
+            "sbom-scan",
             "threat-feed",
             "deprecation-refresh",
             "stats-refresh",

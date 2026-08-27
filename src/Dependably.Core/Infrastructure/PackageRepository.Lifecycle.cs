@@ -245,6 +245,12 @@ public sealed partial class PackageRepository
     ///     across all files of the version and carries only the first-published file's key.</item>
     ///   <item><c>nuget_symbol_index.snupkg_blob_key</c> — the stored <c>.snupkg</c> holding an
     ///     indexed Portable PDB.</item>
+    ///   <item><c>project_documents.blob_key</c> — the verbatim SBOM/VEX/SARIF a team uploaded
+    ///     about one of its own builds. <c>BlobKeys.ProjectDocument</c> puts these under the same
+    ///     <c>hosted/</c> prefix the reconciler walks, and this row is their only reference, so
+    ///     omitting the arm would delete every uploaded document on the next sweep. The arm is
+    ///     load-bearing in both directions: the upload path deletes nothing inline, so the row
+    ///     dropping a key on re-upload is also what makes the superseded document collectable.</item>
     /// </list>
     /// <c>oci_blobs</c> and <c>cache_artifact</c> are deliberately absent: their keys carry the
     /// <c>oci/</c> and <c>proxy/</c> prefixes, outside the <c>hosted/</c> prefix the reconciler
@@ -275,6 +281,8 @@ public sealed partial class PackageRepository
             SELECT blob_key FROM maven_version_files
             UNION ALL
             SELECT snupkg_blob_key FROM nuget_symbol_index
+            UNION ALL
+            SELECT blob_key FROM project_documents
             """,
             commandTimeout: 0))
         {
@@ -456,6 +464,9 @@ public sealed partial class PackageRepository
     {
         string threshold = time.GetUtcNow().AddHours(-ageHours).ToUtcIso();
         await using var conn = await _db.OpenAsync(ct);
+        // A suspended/archived/deleting org (see TenantLifecycle) is excluded the same way a
+        // soft-deleted/air-gapped one already is — this pass fetches upstream metadata on the
+        // org's behalf, same as the cache-plane arm in ListGroupsNeedingDeprecationRefreshAsync.
         var rows = await conn.QueryAsync<(string Ecosystem, string Name, string OrgId)>(
             """
             SELECT p.ecosystem AS Ecosystem, p.purl_name AS Name, p.org_id AS OrgId
@@ -466,6 +477,7 @@ public sealed partial class PackageRepository
               AND p.upstream_latest_checked_at IS NOT NULL
               AND p.upstream_latest_checked_at < @threshold
               AND o.deleted_at IS NULL
+              AND o.status = 'active'
               AND COALESCE(os.air_gapped, 0) = 0
               AND EXISTS (SELECT 1 FROM package_versions pv
                           WHERE pv.package_id = p.id AND pv.origin = 'uploaded')

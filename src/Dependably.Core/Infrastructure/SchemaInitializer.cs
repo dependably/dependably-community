@@ -136,6 +136,26 @@ public sealed partial class SchemaInitializer
         // drop is what makes the two converge. See DropAlertSettingsRetiredSmtpColumnsAsync.
         await DropAlertSettingsRetiredSmtpColumnsAsync(conn);
 
+        // Folds stored project_vuln_analysis.purl_key values onto the canonical form every reader
+        // derives, so a triage decision keyed on a client's own spelling stops being invisible to
+        // the policy evaluator. Runs before the case-variant reconciliation below, so a row it
+        // merges onto a canonical key is available for that pass to collapse in the same boot.
+        // See SchemaInitializer.VulnAnalysisPurlKeys.cs.
+        await NormalizeVulnAnalysisPurlKeysAsync(conn);
+
+        // Collapses case-variant duplicate project_vuln_analysis rows onto the one row every reader
+        // already resolves to, merging both arms. Unledgered for a third reason again: the
+        // remaining duplicate-producing race is a runtime one under Postgres, so the repair has to
+        // be able to run after any boot, not once per database. A grouped probe makes it free on a
+        // database that holds none. See SchemaInitializer.VulnAnalysisReconciliation.cs.
+        await ReconcileVulnAnalysisCaseVariantsAsync(conn);
+
+        // Rewrites the one vex_justification spelling that is not a CycloneDX value onto the one
+        // that is. Unledgered for the blue-green reason: a previous-release slot serving against
+        // this database still admits the retired spelling, so a one-shot recorded as applied would
+        // leave cutover-window rows wrong forever. See SchemaInitializer.VexJustificationVocabulary.cs.
+        await NormalizeVexJustificationVocabularyAsync(conn);
+
         await RunOnceAsync(conn, "reset_nuget_vuln_checked_at", ResetNuGetVulnCheckedAtAsync);
         await RunOnceAsync(conn, "fix_npm_purl_encoding", FixNpmPurlEncodingAsync);
         await RunOnceAsync(conn, "fix_npm_purl_name_unencoded", FixNpmPurlNameUnencodedAsync);
@@ -374,13 +394,28 @@ public sealed partial class SchemaInitializer
         // in memory instead); drop it so the schema doesn't advertise a TTL sweep that doesn't exist.
         await RunOnceAsync(conn, "drop_metadata_cache_table", DropMetadataCacheTableAsync);
 
+        // Widen alert.type's closed CHECK to admit 'sbom_policy_violation'. Fresh installs get the
+        // wider set from the CREATE TABLE blocks; this brings existing databases in line. Same
+        // shape and same reasoning as expand_role_check_with_auditor above — transactional: false
+        // because the SQLite branch drives PRAGMA writable_schema and a schema_version bump, and
+        // idempotent on both providers so an un-recorded partial run repeats harmlessly.
+        await RunOnceAsync(conn, "expand_alert_type_check_sbom_policy", ExpandAlertTypeCheckAsync, transactional: false);
+
+        // Widen alert.type's CHECK a second time to admit 'vuln_kev', the KEV-independent alert
+        // raised alongside (never instead of) 'vuln_severity'. A distinct migration under a new
+        // ledger key: expand_alert_type_check_sbom_policy above is already recorded done on every
+        // database that ran it, so RunOnceAsync would never re-run it if its old/new string pair
+        // were edited in place — every already-migrated database would keep the narrower 3-value
+        // CHECK forever and the first vuln_kev insert would throw. Same shape and reasoning as
+        // both widenings above.
+        await RunOnceAsync(conn, "expand_alert_type_check_vuln_kev", ExpandAlertTypeCheckVulnKevAsync, transactional: false);
+
         // Reclaim packages rows left cataloguing nothing by the two background reclaimers, which
         // remove a package's last version without GC'ing its parent row (SchemaInitializer
         // .EmptyPackageSweep.cs). Ordered after every plane migration above: those move versions
         // between package_versions and cache_artifact, and a sweep placed ahead of them would read
         // a mid-migration package as empty and delete a row whose versions were about to land.
         await RunOnceAsync(conn, "delete_empty_package_rows", DeleteEmptyPackageRowsAsync);
-
 
         // Last, after every migration: the view bodies can only be created once every table and
         // column they reference is guaranteed to exist.
@@ -400,6 +435,20 @@ public sealed partial class SchemaInitializer
         // Not ledger-gated: idempotency is the per-column pg_constraint probe, which is also what
         // makes a temporal column added by a future release get retrofitted with no new code.
         await RetrofitTemporalChecksAsync(conn, sql);
+
+        // Converges first_seen_at on package_version_vulns/sbom_component_vulns from checked_at —
+        // deliberately NOT a RunOnceAsync migration, the same posture as
+        // NormalizeLegacyDateTimeOffsetColumnsAsync above and for the identical reason: a blue-green
+        // cutover leaves the OLD binary's LinkVersionVulnAsync/LinkCacheArtifactVulnAsync/
+        // LinkComponentVulnAsync running against the NEW schema for the whole window, inserting
+        // (registry plane) or upserting (SBOM plane, whose conflict clause never touches
+        // first_seen_at) rows with no first_seen_at value. A one-shot, ledger-gated backfill would
+        // apply once during green's own boot and then never run again, permanently stranding every
+        // row blue writes after that point at NULL. Running the sweep every boot instead converges
+        // blue's writes the next time either binary boots, for the lifetime of the deployment. The
+        // UPDATE is idempotent (WHERE first_seen_at IS NULL) and index-free but cheap: it matches
+        // nothing once every row already carries a value.
+        await BackfillFindingsFirstSeenAtAsync(conn);
     }
 
     // Projects oci_blobs.license_spdx onto whichever catalogue row the image cast — the
@@ -1146,6 +1195,116 @@ public sealed partial class SchemaInitializer
                 UPDATE sqlite_schema
                 SET sql = REPLACE(sql, @old, @new)
                 WHERE type = 'table' AND name = 'org_settings'
+                """, new { old = oldCheck, @new = newCheck });
+            long version = await conn.ExecuteScalarAsync<long>("PRAGMA schema_version");
+            await conn.ExecuteAsync(
+                "PRAGMA schema_version = " + (version + 1).ToString(CultureInfo.InvariantCulture));
+        }
+        finally
+        {
+            await conn.ExecuteAsync("PRAGMA writable_schema = RESET");
+        }
+        await conn.ExecuteAsync("PRAGMA integrity_check");
+    }
+
+    // Extend the alert.type CHECK constraint to include 'sbom_policy_violation', the alert an
+    // SBOM policy evaluation raises. New databases pick this up from the CREATE TABLE statements
+    // in Schema.sql / Schema.pg.sql; this migration brings existing databases in line.
+    //
+    // Postgres: drop + re-add the auto-named CHECK constraint. IF EXISTS covers an install that
+    // never carried one.
+    //
+    // SQLite: rewrite the stored CREATE TABLE text in place via the writable_schema pattern. The
+    // literal REPLACE is exact because the stored text is verbatim what Schema.sql emitted, and it
+    // is a no-op on any database whose alert table does not carry the narrower clause.
+    private Task ExpandAlertTypeCheckAsync(DbConnection conn)
+    {
+        return _db.Provider == DbProvider.Postgres
+            ? conn.ExecuteAsync("""
+                ALTER TABLE alert DROP CONSTRAINT IF EXISTS alert_type_check;
+                ALTER TABLE alert ADD  CONSTRAINT alert_type_check
+                    CHECK (type IN ('quarantine_new', 'vuln_severity', 'sbom_policy_violation'));
+                """)
+            : ExpandAlertTypeCheckSqliteAsync(conn);
+    }
+
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "S2077:Formatted SQL queries should be reviewed",
+        Justification = "PRAGMA schema_version cannot be parameter-bound — SQLite's PRAGMA grammar does not " +
+                        "accept ? / @name placeholders for the right-hand side. The interpolated value is a " +
+                        "long we just read from PRAGMA schema_version itself; it never touches user input.")]
+    private static async Task ExpandAlertTypeCheckSqliteAsync(DbConnection conn)
+    {
+        const string oldCheck = "CHECK (type IN ('quarantine_new', 'vuln_severity'))";
+        const string newCheck = "CHECK (type IN ('quarantine_new', 'vuln_severity', 'sbom_policy_violation'))";
+
+        // Bumping schema_version forces SQLite to reload the schema on the next read so existing
+        // connections stop enforcing the old CHECK; writable_schema = RESET both disables write
+        // mode and forces the reload. See ExpandRoleCheckSqliteAsync for the full rationale.
+        await conn.ExecuteAsync("PRAGMA writable_schema = ON");
+        try
+        {
+            await conn.ExecuteAsync("""
+                UPDATE sqlite_schema
+                SET sql = REPLACE(sql, @old, @new)
+                WHERE type = 'table' AND name = 'alert'
+                """, new { old = oldCheck, @new = newCheck });
+            long version = await conn.ExecuteScalarAsync<long>("PRAGMA schema_version");
+            await conn.ExecuteAsync(
+                "PRAGMA schema_version = " + (version + 1).ToString(CultureInfo.InvariantCulture));
+        }
+        finally
+        {
+            await conn.ExecuteAsync("PRAGMA writable_schema = RESET");
+        }
+        await conn.ExecuteAsync("PRAGMA integrity_check");
+    }
+
+    // Extend the alert.type CHECK constraint a second time to include 'vuln_kev', the alert
+    // raised when a scanned advisory is listed in the CISA Known Exploited Vulnerabilities
+    // catalog, independent of its CVSS severity. New databases pick this up from the CREATE
+    // TABLE statements in Schema.sql / Schema.pg.sql; this migration brings existing databases
+    // in line. Registered under its own RunOnceAsync key rather than editing
+    // ExpandAlertTypeCheckAsync's old/new pair in place — that key is already recorded done on
+    // every database that ran it, so editing it in place would leave those databases stuck on
+    // the narrower CHECK forever.
+    //
+    // Postgres: drop + re-add the auto-named CHECK constraint. IF EXISTS covers an install that
+    // never carried one.
+    //
+    // SQLite: rewrite the stored CREATE TABLE text in place via the writable_schema pattern. The
+    // literal REPLACE is exact because the stored text is verbatim what the previous migration
+    // (or a fresh Schema.sql) emitted, and it is a no-op on any database whose alert table does
+    // not carry the narrower clause.
+    private Task ExpandAlertTypeCheckVulnKevAsync(DbConnection conn)
+    {
+        return _db.Provider == DbProvider.Postgres
+            ? conn.ExecuteAsync("""
+                ALTER TABLE alert DROP CONSTRAINT IF EXISTS alert_type_check;
+                ALTER TABLE alert ADD  CONSTRAINT alert_type_check
+                    CHECK (type IN ('quarantine_new', 'vuln_severity', 'sbom_policy_violation', 'vuln_kev'));
+                """)
+            : ExpandAlertTypeCheckVulnKevSqliteAsync(conn);
+    }
+
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "S2077:Formatted SQL queries should be reviewed",
+        Justification = "PRAGMA schema_version cannot be parameter-bound — SQLite's PRAGMA grammar does not " +
+                        "accept ? / @name placeholders for the right-hand side. The interpolated value is a " +
+                        "long we just read from PRAGMA schema_version itself; it never touches user input.")]
+    private static async Task ExpandAlertTypeCheckVulnKevSqliteAsync(DbConnection conn)
+    {
+        const string oldCheck = "CHECK (type IN ('quarantine_new', 'vuln_severity', 'sbom_policy_violation'))";
+        const string newCheck = "CHECK (type IN ('quarantine_new', 'vuln_severity', 'sbom_policy_violation', 'vuln_kev'))";
+
+        // Bumping schema_version forces SQLite to reload the schema on the next read so existing
+        // connections stop enforcing the old CHECK; writable_schema = RESET both disables write
+        // mode and forces the reload. See ExpandRoleCheckSqliteAsync for the full rationale.
+        await conn.ExecuteAsync("PRAGMA writable_schema = ON");
+        try
+        {
+            await conn.ExecuteAsync("""
+                UPDATE sqlite_schema
+                SET sql = REPLACE(sql, @old, @new)
+                WHERE type = 'table' AND name = 'alert'
                 """, new { old = oldCheck, @new = newCheck });
             long version = await conn.ExecuteScalarAsync<long>("PRAGMA schema_version");
             await conn.ExecuteAsync(

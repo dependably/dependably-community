@@ -10,6 +10,10 @@ public static class FixtureManifest
     public static string FixturesRoot { get; } =
         Path.Combine(AppContext.BaseDirectory, "Fixtures", "packages");
 
+    /// <summary>Absolute path to the Fixtures/sbom/ directory of CycloneDX, OpenVEX and SARIF documents.</summary>
+    public static string SbomFixturesRoot { get; } =
+        Path.Combine(AppContext.BaseDirectory, "Fixtures", "sbom");
+
     // PyPI
     public const string MypyExtensionsWheelSha256 =
         "4392f6c0eb8a5668a69e23d168ffa70f0be9ccfd32b5cc2d26a34ae5b844552d";

@@ -87,7 +87,7 @@ public static class EcosystemDetector
         bool hasRootNuspec;
         bool hasDistInfo;
         bool hasEggInfo;
-        using (var zip = new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: true))
+        using (var zip = SafeZipArchive.Open(stream, leaveOpen: true))
         {
             hasRootNuspec = zip.Entries.Any(e =>
                 e.Name.EndsWith(".nuspec", StringComparison.OrdinalIgnoreCase)

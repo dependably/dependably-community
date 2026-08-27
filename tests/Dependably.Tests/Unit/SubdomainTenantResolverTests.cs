@@ -1,9 +1,13 @@
+using System.Data.Common;
 using Dapper;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Startup;
 using Dependably.Tests.Infrastructure;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Primitives;
 
 namespace Dependably.Tests.Unit;
@@ -258,6 +262,37 @@ public class SubdomainTenantResolverTests : IAsyncLifetime
         Assert.Equal(0, r.FillGuardCount);
     }
 
+    [Fact]
+    public async Task DbOpenThrowsAfterGuardIsMinted_DoesNotRetainItsFillGuard()
+    {
+        // GuardFor mints the guard BEFORE the DB open/read. Under the Singleton registration the
+        // guard map is process-lifetime, so if the open or read throws — a cancelled connection
+        // (client RST mid-open), a busy/exhausted pool, a transient DB error — with no cache entry
+        // ever installed to tie the guard's lifetime to, the guard must not survive the throw. This
+        // path is reachable pre-auth and pre-rate-limit (SubdomainTenantMiddleware runs before
+        // both) with a caller-controlled, unbounded slug space, so an unretired guard here leaks
+        // one CancellationTokenSource per distinct failed label at full anonymous request rate —
+        // the exact amplifier CacheFillGuard's own doc names this resolver as reachable through.
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        var throwing = new ThrowingAfterGuardStore();
+        var r = new SubdomainTenantResolver(throwing, Cfg(("BASE_URL", "https://example.com")), cache);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => r.ResolveAsync(WithHost("acme.example.com")));
+
+        // Killer assertion: the guard GuardFor minted right before the throw must not leak.
+        Assert.Equal(0, r.FillGuardCount);
+    }
+
+    private sealed class ThrowingAfterGuardStore : IMetadataStore
+    {
+        public DbProvider Provider => DbProvider.Sqlite;
+
+        public Task<DbConnection> OpenAsync(CancellationToken ct = default) =>
+            throw new InvalidOperationException(
+                "Simulates a cancelled/refused/exhausted DB open after ResolveAsync has already minted the fill guard.");
+    }
+
     // MemoryCache fires post-eviction callbacks on a thread-pool task, so poll briefly for the
     // asynchronous retire rather than assuming it has already run.
     private static async Task WaitForFillGuardsToDrain(Func<int> count)
@@ -266,5 +301,137 @@ public class SubdomainTenantResolverTests : IAsyncLifetime
         {
             await Task.Delay(10);
         }
+    }
+
+    // Builds the resolver through the real DI wiring (AuthStartupExtensions.AddDependablyTenantResolution)
+    // rather than `new SubdomainTenantResolver(...)`, so these tests exercise the actual
+    // registration lifetime — the lifetime boundary the single-instance tests above cannot cross.
+    // DEPLOYMENT_MODE=multi with a real (non-localhost) BASE_URL selects SubdomainTenantResolver.
+    //
+    // WebApplication.CreateBuilder() layers ambient process environment variables underneath the
+    // in-memory overrides below (same as HaDeploymentValidationTests' NewBuilder), which is why
+    // every config key the resolver reads gets an explicit override here — an ambient
+    // RESERVED_SUBDOMAINS on the machine or CI runner must not leak into what "reserved" means for
+    // these tests. This does touch the filesystem (content root/appsettings discovery), so it is
+    // not strictly no-I/O; kept under Category=Unit anyway, following the precedent
+    // HaDeploymentValidationTests already set for exercising a WebApplicationBuilder-based startup
+    // extension directly rather than through a live Kestrel host.
+    private static WebApplicationBuilder NewMultiModeBuilder(IMetadataStore db)
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["DEPLOYMENT_MODE"] = "multi",
+            ["BASE_URL"] = "https://example.com",
+            ["RESERVED_SUBDOMAINS"] = "",
+        });
+        builder.Services.AddMemoryCache();
+        builder.Services.AddSingleton(db);
+        builder.AddDependablyTenantResolution();
+        return builder;
+    }
+
+    [Fact]
+    public void ITenantResolverAndITenantSlugCacheInvalidator_ResolveToTheSameSingletonInstance()
+    {
+        // The whole fix rests on this identity holding: InvalidateSlug — resolved via
+        // ITenantSlugCacheInvalidator, the shape SystemController uses from its own request
+        // scope — must land on the exact object whose fill-guard map a DIFFERENT request's
+        // ResolveAsync (resolved via ITenantResolver) is filling. Proven by reference identity
+        // across three independently created DI scopes rather than assumed from the
+        // registration lines alone.
+        var builder = NewMultiModeBuilder(_db);
+        using var provider = builder.Services.BuildServiceProvider();
+
+        using var scopeA = provider.CreateScope();
+        using var scopeB = provider.CreateScope();
+        using var scopeC = provider.CreateScope();
+
+        var resolverA = scopeA.ServiceProvider.GetRequiredService<ITenantResolver>();
+        var resolverB = scopeB.ServiceProvider.GetRequiredService<ITenantResolver>();
+        var invalidatorC = scopeC.ServiceProvider.GetRequiredService<ITenantSlugCacheInvalidator>();
+
+        Assert.Same(resolverA, resolverB);
+        Assert.Same(resolverA, invalidatorC);
+    }
+
+    [Fact]
+    public async Task CrossScope_InvalidateFromDifferentScopeRacesInFlightFill_DoesNotServeStaleContext()
+    {
+        // Cross-request twin of InvalidateSlugThatRacesAnInFlightResolve_DoesNotServeThePreLifecycleContext
+        // above. That test drives ONE resolver instance directly, so InvalidateSlug and the racing
+        // fill share a map by construction — it cannot observe the DI-lifetime defect, only the
+        // generation-token logic. Here the fill runs on the resolver instance one request's scope
+        // resolves, and the racing InvalidateSlug runs through ITenantSlugCacheInvalidator resolved
+        // from a SECOND, independent scope — the actual shape of SystemController racing an
+        // in-flight ResolveAsync from a concurrent request. Deterministically sequenced (not timed):
+        // the DB-read hook fires the status flip + InvalidateSlug in the exact window between the
+        // fill's read and its cache write, so this is not an unsequenced concurrency test.
+        //
+        // On the pre-fix Scoped registration the two scopes are handed two different resolver
+        // instances, each with its own empty fill-guard map, so the second scope's InvalidateSlug
+        // cancels nothing the first scope's fill is holding and the stale context survives the
+        // full TTL — this must fail there and pass once both scopes share the same Singleton.
+        var hooked = new AfterDbReadHookStore(_db);
+        var builder = NewMultiModeBuilder(hooked);
+        using var provider = builder.Services.BuildServiceProvider();
+
+        using var requestScope = provider.CreateScope();
+        using var adminScope = provider.CreateScope();
+
+        var resolver = requestScope.ServiceProvider.GetRequiredService<ITenantResolver>();
+
+        hooked.AfterRead = async () =>
+        {
+            await using var conn = await _db.OpenAsync();
+            await conn.ExecuteAsync(
+                "UPDATE orgs SET deleted_at = @d WHERE slug = 'acme'",
+                new { d = "2026-02-01T00:00:00Z" });
+
+            // Simulates SystemController handling the status-flip request in its own DI scope.
+            var invalidator = adminScope.ServiceProvider.GetRequiredService<ITenantSlugCacheInvalidator>();
+            invalidator.InvalidateSlug("acme");
+        };
+
+        var first = await resolver.ResolveAsync(WithHost("acme.example.com"));
+        Assert.True(first.IsTenant); // legitimately read the pre-delete row
+
+        // Killer assertion: the next resolve — including one served from the SAME requesting
+        // scope's resolver, since that resolver is the one whose fill raced the invalidation —
+        // must reflect the soft-delete, not a stale active context the race let through.
+        var second = await resolver.ResolveAsync(WithHost("acme.example.com"));
+        Assert.True(second.IsUninitialized);
+    }
+
+    [Fact]
+    public async Task CrossScope_NeverExistentSlug_FillGuardVisibleAndDrainsAcrossScopes()
+    {
+        // Cross-request twin of NeverExistentSlug_DoesNotRetainItsFillGuard above: the fill runs
+        // through one scope's resolver, and both "is the guard visible" and "did it drain" are
+        // observed through a SECOND scope's resolver instance — proving the guard map, and its
+        // unbounded-growth drain, is genuinely shared state rather than per-scope. The drain
+        // concern is moot under the pre-fix per-request lifetime (each scope's map is already
+        // empty and discarded at end of request) and becomes live again under the fix, which is
+        // exactly why it needs re-pinning here rather than left to the single-instance test.
+        var builder = NewMultiModeBuilder(_db);
+        using var provider = builder.Services.BuildServiceProvider();
+
+        using var scopeA = provider.CreateScope();
+        using var scopeB = provider.CreateScope();
+
+        var resolverA = (SubdomainTenantResolver)scopeA.ServiceProvider.GetRequiredService<ITenantResolver>();
+        var resolverB = (SubdomainTenantResolver)scopeB.ServiceProvider.GetRequiredService<ITenantResolver>();
+
+        var ctx = await resolverA.ResolveAsync(WithHost("nobody.example.com"));
+        Assert.True(ctx.IsUninitialized); // no such tenant, but the negative result was still cached
+
+        // Visible from a different scope's resolver instance, not just the one that did the fill.
+        Assert.Equal(1, resolverB.FillGuardCount);
+
+        var cache = (MemoryCache)scopeA.ServiceProvider.GetRequiredService<IMemoryCache>();
+        cache.Compact(1.0);
+
+        await WaitForFillGuardsToDrain(() => resolverB.FillGuardCount);
+        Assert.Equal(0, resolverB.FillGuardCount);
     }
 }

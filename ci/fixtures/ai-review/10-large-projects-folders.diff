@@ -1,0 +1,2884 @@
+diff --git a/i18n/handoff/backend.en.xlf b/i18n/handoff/backend.en.xlf
+index 16df4508..c9651ba4 100644
+--- a/i18n/handoff/backend.en.xlf
++++ b/i18n/handoff/backend.en.xlf
+@@ -1159,20 +1159,38 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
+     </unit>
+     <unit id="error.project.nameTooLong">
+       <notes>
+         <note category="translator">422 detail on project create. {0} = the character limit. &apos;name&apos; is the API field name - keep it verbatim.</note>
+       </notes>
+       <segment state="translated">
+         <source>name must be {0} characters or fewer.</source>
+         <target>name doit contenir au plus {0} caractères.</target>
+       </segment>
+     </unit>
++    <unit id="error.project.parentIsDescendant">
++      <notes>
++        <note category="translator">422 detail on project relocate: the move would detach the subtree into a cycle. &apos;parentId&apos; is the API field name - keep it verbatim.</note>
++      </notes>
++      <segment state="translated">
++        <source>parentId names a collection inside the project being moved. Pick a destination outside it.</source>
++        <target>parentId désigne une collection située à l’intérieur du projet déplacé. Choisissez une destination en dehors de celui-ci.</target>
++      </segment>
++    </unit>
++    <unit id="error.project.parentIsSelf">
++      <notes>
++        <note category="translator">422 detail on project relocate: parentId named the project being moved.</note>
++      </notes>
++      <segment state="translated">
++        <source>A project cannot be moved inside itself.</source>
++        <target>Un projet ne peut pas être déplacé à l’intérieur de lui-même.</target>
++      </segment>
++    </unit>
+     <unit id="error.project.parentNotACollection">
+       <notes>
+         <note category="translator">422 detail on project create. &apos;parentId&apos; is the API field name - keep it verbatim.</note>
+       </notes>
+       <segment state="translated">
+         <source>parentId names a project. Only a collection can contain other projects.</source>
+         <target>parentId désigne un projet. Seule une collection peut contenir d&apos;autres projets.</target>
+       </segment>
+     </unit>
+     <unit id="error.project.parentNotFound">
+diff --git a/i18n/handoff/frontend.en.xlf b/i18n/handoff/frontend.en.xlf
+index 09dd7b63..8ad73822 100644
+--- a/i18n/handoff/frontend.en.xlf
++++ b/i18n/handoff/frontend.en.xlf
+@@ -3300,20 +3300,26 @@
+         <source>Light</source>
+         <target>Clair</target>
+       </segment>
+     </unit>
+     <unit id="profile.title">
+       <segment state="translated">
+         <source>Profile</source>
+         <target>Profil</target>
+       </segment>
+     </unit>
++    <unit id="projects.breadcrumb">
++      <segment state="translated">
++        <source>Breadcrumb</source>
++        <target>Fil d’Ariane</target>
++      </segment>
++    </unit>
+     <unit id="projects.collection">
+       <segment state="translated">
+         <source>Collection</source>
+         <target>Collection</target>
+       </segment>
+     </unit>
+     <unit id="projects.columns.components">
+       <segment state="translated">
+         <source>Components</source>
+         <target>Composants</target>
+@@ -3492,20 +3498,104 @@
+         <source>No projects yet. Packages are the artifacts you serve — projects are the applications you build with them. Upload an SBOM to get started.</source>
+         <target>Aucun projet pour l&apos;instant. Les paquets sont les artefacts que vous diffusez — les projets sont les applications que vous construisez avec eux. Téléversez un SBOM pour commencer.</target>
+       </segment>
+     </unit>
+     <unit id="projects.emptySearch">
+       <segment state="translated">
+         <source>No projects match your search.</source>
+         <target>Aucun projet ne correspond à votre recherche.</target>
+       </segment>
+     </unit>
++    <unit id="projects.folders.actionsMenu">
++      <segment state="translated">
++        <source>Actions for {name}</source>
++        <target>Actions pour {name}</target>
++      </segment>
++    </unit>
++    <unit id="projects.folders.currentFolder">
++      <segment state="translated">
++        <source>Current folder</source>
++        <target>Dossier actuel</target>
++      </segment>
++    </unit>
++    <unit id="projects.folders.descriptionLabel">
++      <segment state="translated">
++        <source>Description (optional)</source>
++        <target>Description (facultatif)</target>
++      </segment>
++    </unit>
++    <unit id="projects.folders.edit">
++      <segment state="translated">
++        <source>Edit…</source>
++        <target>Modifier…</target>
++      </segment>
++    </unit>
++    <unit id="projects.folders.editFolderTitle">
++      <segment state="translated">
++        <source>Edit folder</source>
++        <target>Modifier le dossier</target>
++      </segment>
++    </unit>
++    <unit id="projects.folders.editProjectTitle">
++      <segment state="translated">
++        <source>Edit project</source>
++        <target>Modifier le projet</target>
++      </segment>
++    </unit>
++    <unit id="projects.folders.nameLabel">
++      <segment state="translated">
++        <source>Name</source>
++        <target>Nom</target>
++      </segment>
++    </unit>
++    <unit id="projects.folders.namePlaceholder">
++      <segment state="translated">
++        <source>e.g. Platform</source>
++        <target>ex. Plateforme</target>
++      </segment>
++    </unit>
++    <unit id="projects.folders.newFolder">
++      <segment state="translated">
++        <source>New folder</source>
++        <target>Nouveau dossier</target>
++      </segment>
++    </unit>
++    <unit id="projects.folders.newFolderTitle">
++      <segment state="translated">
++        <source>New folder</source>
++        <target>Nouveau dossier</target>
++      </segment>
++    </unit>
++    <unit id="projects.folders.parentHint">
++      <segment state="translated">
++        <source>Folders group projects. A folder holds no versions of its own.</source>
++        <target>Les dossiers regroupent les projets. Un dossier ne contient aucune version.</target>
++      </segment>
++    </unit>
++    <unit id="projects.folders.parentLabel">
++      <segment state="translated">
++        <source>Folder</source>
++        <target>Dossier</target>
++      </segment>
++    </unit>
++    <unit id="projects.folders.rootOption">
++      <segment state="translated">
++        <source>Top level</source>
++        <target>Niveau racine</target>
++      </segment>
++    </unit>
++    <unit id="projects.folders.targetsFailed">
++      <segment state="translated">
++        <source>Folders could not be loaded, so this project cannot be moved right now: {message}</source>
++        <target>Impossible de charger les dossiers ; ce projet ne peut pas être déplacé pour l’instant : {message}</target>
++      </segment>
++    </unit>
+     <unit id="projects.loadFailed">
+       <segment state="translated">
+         <source>Failed to load projects: {message}</source>
+         <target>Échec du chargement des projets : {message}</target>
+       </segment>
+     </unit>
+     <unit id="projects.noVersion">
+       <segment state="translated">
+         <source>—</source>
+         <target>—</target>
+diff --git a/src/Dependably.Core/Infrastructure/ProjectModels.cs b/src/Dependably.Core/Infrastructure/ProjectModels.cs
+index 59beeaff..191bc453 100644
+--- a/src/Dependably.Core/Infrastructure/ProjectModels.cs
++++ b/src/Dependably.Core/Infrastructure/ProjectModels.cs
+@@ -111,20 +111,41 @@ public sealed class ProjectVersionSummary
+     public string Id { get; set; } = "";
+     public string Version { get; set; } = "";
+     public bool IsLatest { get; set; }
+ 
+     /// <summary>Null means never evaluated, which is not the same as passing.</summary>
+     public string? PolicyStatus { get; set; }
+     public int ComponentCount { get; set; }
+     public DateTimeOffset CreatedAt { get; set; }
+ }
+ 
++/// <summary>
++/// One ancestor on a project's root-to-parent path. The breadcrumb surfaces render this chain so a
++/// reader nested inside a collection can climb back out; a root-level project's chain is empty.
++/// </summary>
++public sealed class ProjectPathEntry
++{
++    public string Id { get; set; } = "";
++    public string Name { get; set; } = "";
++}
++
++/// <summary>
++/// One collection the org holds, flat and unpaged. This backs the relocation picker, which needs
++/// every collection at once (it renders each as a full path) rather than one page of root rows.
++/// </summary>
++public sealed class ProjectCollectionRow
++{
++    public string Id { get; set; } = "";
++    public string Name { get; set; } = "";
++    public string? ParentId { get; set; }
++}
++
+ /// <summary>One child row on a collection's detail surface.</summary>
+ public sealed class ProjectChildSummary
+ {
+     public string Id { get; set; } = "";
+     public string Name { get; set; } = "";
+     public string Kind { get; set; } = ProjectKinds.Project;
+     public string? LatestVersion { get; set; }
+     public string? PolicyStatus { get; set; }
+ }
+ 
+@@ -153,20 +174,32 @@ public enum ProjectResolutionReason
+     NotFound,
+ 
+     /// <summary>The resolved project is a collection, which holds no versions — 409.</summary>
+     CollectionTarget,
+ 
+     /// <summary>The named parent exists but is a project rather than a collection — 409.</summary>
+     ParentNotACollection,
+ 
+     /// <summary>The named parent does not exist and auto-create was not requested — 404.</summary>
+     ParentNotFound,
++
++    /// <summary>A relocation named the project itself as its own parent — 422.</summary>
++    ParentIsSelf,
++
++    /// <summary>
++    /// A relocation named one of the project's own descendants as its parent, which would detach
++    /// the whole subtree into a cycle unreachable from the root — 422.
++    /// </summary>
++    ParentIsDescendant,
++
++    /// <summary>The target parent scope already holds a different project of this name — 409.</summary>
++    NameTaken,
+ }
+ 
+ /// <summary>
+ /// Raised when a project coordinate cannot be resolved or created. <see cref="Reason"/> is the
+ /// discriminator callers switch on; the message is diagnostic text, never a response body — API
+ /// callers render a localized problem detail from the reason.
+ /// </summary>
+ public sealed class ProjectResolutionException : Exception
+ {
+     public ProjectResolutionException(ProjectResolutionReason reason, string message)
+diff --git a/src/Dependably.Core/Infrastructure/ProjectRepository.cs b/src/Dependably.Core/Infrastructure/ProjectRepository.cs
+index 92c692d5..dc99c5af 100644
+--- a/src/Dependably.Core/Infrastructure/ProjectRepository.cs
++++ b/src/Dependably.Core/Infrastructure/ProjectRepository.cs
+@@ -29,20 +29,27 @@ public sealed class ProjectRepository
+     /// <summary>
+     /// Bound on the clear-then-set promotion retry. A promoter loses to a concurrent one either on
+     /// the partial unique index (Postgres) or on the write lock (SQLite); both are resolved by
+     /// re-reading the committed state, which the next attempt does.
+     /// </summary>
+     private const int MaxPromotionAttempts = 8;
+ 
+     /// <summary>Bound on the resolve-or-create retry, which loses the same two races on insert.</summary>
+     private const int MaxResolveAttempts = 4;
+ 
++    /// <summary>
++    /// Bound on every walk up the parent chain (breadcrumb reads, relocation cycle checks). The
++    /// tree is nested collections, so real depths are single digits; the bound exists so a chain
++    /// that a bug or a lost race has made cyclic terminates the walk instead of spinning.
++    /// </summary>
++    private const int MaxTreeDepth = 64;
++
+     private readonly IMetadataStore _db;
+     private readonly TimeProvider _time;
+ 
+     public ProjectRepository(IMetadataStore db, TimeProvider time)
+     {
+         _db = db;
+         _time = time;
+     }
+ 
+     // ── Reads ────────────────────────────────────────────────────────────────────────────────
+@@ -187,20 +194,82 @@ public sealed class ProjectRepository
+                        lv.version AS LatestVersion, lv.policy_status AS PolicyStatus
+                 FROM projects c
+                 LEFT JOIN project_versions lv
+                        ON lv.project_id = c.id AND lv.org_id = c.org_id AND lv.is_latest = 1
+                 WHERE c.org_id = @orgId AND c.parent_id = @projectId
+                 ORDER BY LOWER(c.name), c.id
+                 """,
+                 new { orgId, projectId }, cancellationToken: ct))).AsList();
+     }
+ 
++    /// <summary>
++    /// The project's ancestors, root first, excluding the project itself. Empty for a root-level
++    /// project and for a project id this org does not hold.
++    ///
++    /// Walked one level at a time rather than through a recursive CTE: the chain is a handful of
++    /// rows deep, every hop re-asserts <c>org_id</c> (a CTE seeded in one org could otherwise
++    /// follow a <c>parent_id</c> into another), and the visited set plus
++    /// <see cref="MaxTreeDepth"/> make a cyclic chain terminate rather than hang.
++    /// </summary>
++    public async Task<IReadOnlyList<ProjectPathEntry>> ListAncestorsAsync(
++        string orgId, string projectId, CancellationToken ct = default)
++    {
++        await using var conn = await _db.OpenAsync(ct);
++
++        var self = await GetAsync(conn, null, orgId, projectId);
++        if (self is null)
++        {
++            return [];
++        }
++
++        var chain = new List<ProjectPathEntry>();
++        var seen = new HashSet<string>(StringComparer.Ordinal) { self.Id };
++
++        string? cursor = self.ParentId;
++        while (cursor is not null && chain.Count < MaxTreeDepth && seen.Add(cursor))
++        {
++            ct.ThrowIfCancellationRequested();
++            var ancestor = await GetAsync(conn, null, orgId, cursor);
++            if (ancestor is null)
++            {
++                break;
++            }
++
++            chain.Add(new ProjectPathEntry { Id = ancestor.Id, Name = ancestor.Name });
++            cursor = ancestor.ParentId;
++        }
++
++        chain.Reverse();
++        return chain;
++    }
++
++    /// <summary>
++    /// Every collection the org holds, flat and capped at <paramref name="limit"/>. The relocation
++    /// picker needs the whole set at once — it renders each target as a full path — which is why
++    /// this is not the paged, root-only shape <see cref="ListAsync"/> returns.
++    /// </summary>
++    public async Task<IReadOnlyList<ProjectCollectionRow>> ListCollectionsAsync(
++        string orgId, int limit, CancellationToken ct = default)
++    {
++        await using var conn = await _db.OpenAsync(ct);
++        return (await conn.QueryAsync<ProjectCollectionRow>(
++            new CommandDefinition(
++                """
++                SELECT c.id AS Id, c.name AS Name, c.parent_id AS ParentId
++                FROM projects c
++                WHERE c.org_id = @orgId AND c.kind = 'collection'
++                ORDER BY LOWER(c.name), c.id
++                LIMIT @limit
++                """,
++                new { orgId, limit }, cancellationToken: ct))).AsList();
++    }
++
+     /// <summary>Loads one version by id, scoped to its org and project. Null when absent.</summary>
+     public async Task<ProjectVersion?> GetVersionAsync(
+         string orgId, string projectId, string versionId, CancellationToken ct = default)
+     {
+         await using var conn = await _db.OpenAsync(ct);
+         return await GetVersionAsync(conn, null, orgId, projectId, versionId);
+     }
+ 
+     /// <summary>
+     /// Resolves a <c>{versionId}</c> path segment to a concrete version id. The literal
+@@ -282,20 +351,129 @@ public sealed class ProjectRepository
+     {
+         await using var conn = await _db.OpenAsync(ct);
+         if (parentId is not null)
+         {
+             await RequireCollectionParentAsync(conn, null, orgId, parentId);
+         }
+ 
+         return await InsertProjectAsync(conn, null, orgId, name, kind, classifier, description, parentId, actorId);
+     }
+ 
++    /// <summary>
++    /// Renames, re-describes, re-classifies and/or relocates one project. Every field is a resolved
++    /// final value — the caller has already folded "leave unchanged" into the row's current value —
++    /// so this method always writes all four columns.
++    ///
++    /// Relocation is why the whole thing runs inside one transaction. The three cross-row facts a
++    /// move has to respect (the target is a collection, the target is not the project itself, the
++    /// target is not one of the project's own descendants) are read here and the UPDATE lands
++    /// against the same snapshot, so two concurrent moves cannot each observe a legal tree and
++    /// commit into a cycle — which no CHECK or index can express, and which would detach the whole
++    /// subtree from the root permanently.
++    ///
++    /// Returns null when the project does not exist in this org, which the API renders as 404.
++    /// </summary>
++    /// <exception cref="ProjectResolutionException">
++    /// <see cref="ProjectResolutionReason.ParentNotFound"/> / <see cref="ProjectResolutionReason.ParentNotACollection"/>
++    /// / <see cref="ProjectResolutionReason.ParentIsSelf"/> / <see cref="ProjectResolutionReason.ParentIsDescendant"/>
++    /// for an illegal move, and <see cref="ProjectResolutionReason.NameTaken"/> when the target
++    /// scope already holds a different project of this name.
++    /// </exception>
++    public async Task<Project?> UpdateAsync(
++        string orgId,
++        string projectId,
++        string name,
++        string classifier,
++        string? description,
++        string? parentId,
++        CancellationToken ct = default)
++    {
++        int attempt = 0;
++        while (true)
++        {
++            attempt++;
++            await using var conn = await _db.OpenAsync(ct);
++
++            var current = await GetAsync(conn, null, orgId, projectId);
++            if (current is null)
++            {
++                return null;
++            }
++
++            await using var tx = await conn.BeginTransactionAsync(ct);
++            try
++            {
++                bool relocating = !string.Equals(current.ParentId, parentId, StringComparison.Ordinal);
++                if (relocating && parentId is not null)
++                {
++                    if (string.Equals(parentId, projectId, StringComparison.Ordinal))
++                    {
++                        throw new ProjectResolutionException(
++                            ProjectResolutionReason.ParentIsSelf,
++                            "A project cannot be its own parent.");
++                    }
++
++                    await RequireCollectionParentAsync(conn, tx, orgId, parentId);
++                    await RequireNotDescendantAsync(conn, tx, orgId, projectId, parentId, ct);
++                }
++
++                var clash = await GetByNameAsync(conn, tx, orgId, parentId, name);
++                if (clash is not null && !string.Equals(clash.Id, projectId, StringComparison.Ordinal))
++                {
++                    throw new ProjectResolutionException(
++                        ProjectResolutionReason.NameTaken,
++                        "The target scope already holds a project of this name.");
++                }
++
++                int affected = await conn.ExecuteAsync(new CommandDefinition(
++                    """
++                    UPDATE projects
++                       SET name = @name, classifier = @classifier,
++                           description = @description, parent_id = @parentId
++                     WHERE org_id = @orgId AND id = @projectId
++                    """,
++                    new { orgId, projectId, name, classifier, description, parentId },
++                    tx, cancellationToken: ct));
++
++                if (affected == 0)
++                {
++                    await tx.RollbackAsync(ct);
++                    return null;
++                }
++
++                await tx.CommitAsync(ct);
++
++                return new Project
++                {
++                    Id = current.Id,
++                    OrgId = current.OrgId,
++                    ParentId = parentId,
++                    Kind = current.Kind,
++                    Name = name,
++                    Classifier = classifier,
++                    Description = description,
++                    CreatedBy = current.CreatedBy,
++                    CreatedAt = current.CreatedAt,
++                };
++            }
++            catch (ProjectResolutionException)
++            {
++                await SafeRollbackAsync(tx, ct);
++                throw;
++            }
++            catch (Exception ex) when (IsRetryableWriteConflict(ex) && attempt < MaxPromotionAttempts)
++            {
++                await SafeRollbackAsync(tx, ct);
++            }
++        }
++    }
++
+     /// <summary>
+     /// Deletes a project and, by FK cascade, its subtree, versions, documents and derived rows.
+     /// Returns false when nothing matched, which the API renders as a 404 rather than a 204.
+     /// </summary>
+     public async Task<bool> DeleteAsync(string orgId, string projectId, CancellationToken ct = default)
+     {
+         await using var conn = await _db.OpenAsync(ct);
+         int affected = await conn.ExecuteAsync(new CommandDefinition(
+             "DELETE FROM projects WHERE org_id = @orgId AND id = @projectId",
+             new { orgId, projectId }, cancellationToken: ct));
+@@ -662,20 +840,44 @@ public sealed class ProjectRepository
+                 ProjectResolutionReason.ParentNotFound, "The named parent collection does not exist.");
+ 
+         if (!string.Equals(parent.Kind, ProjectKinds.Collection, StringComparison.Ordinal))
+         {
+             throw new ProjectResolutionException(
+                 ProjectResolutionReason.ParentNotACollection,
+                 "The named parent is a project, not a collection.");
+         }
+     }
+ 
++    // Walks up from the proposed parent looking for the project being moved. Finding it means the
++    // "parent" sits inside the subtree that is moving, so the move would cut that subtree loose
++    // from the root — every row still reachable from itself and from nothing else.
++    private static async Task RequireNotDescendantAsync(
++        DbConnection conn, DbTransaction? tx, string orgId, string projectId, string parentId,
++        CancellationToken ct)
++    {
++        var seen = new HashSet<string>(StringComparer.Ordinal);
++        string? cursor = parentId;
++
++        for (int depth = 0; cursor is not null && depth < MaxTreeDepth && seen.Add(cursor); depth++)
++        {
++            ct.ThrowIfCancellationRequested();
++            if (string.Equals(cursor, projectId, StringComparison.Ordinal))
++            {
++                throw new ProjectResolutionException(
++                    ProjectResolutionReason.ParentIsDescendant,
++                    "The named parent is inside the subtree being moved.");
++            }
++
++            cursor = (await GetAsync(conn, tx, orgId, cursor))?.ParentId;
++        }
++    }
++
+     private async Task<Project> InsertProjectAsync(
+         DbConnection conn, DbTransaction? tx, string orgId, string name, string kind,
+         string? classifier, string? description, string? parentId, string? actorId)
+     {
+         var row = new Project
+         {
+             Id = Guid.NewGuid().ToString("N"),
+             OrgId = orgId,
+             ParentId = parentId,
+             Kind = kind,
+diff --git a/src/Dependably.Core/Resources/SharedResource.fr.resx b/src/Dependably.Core/Resources/SharedResource.fr.resx
+index a6aa2323..01c24252 100644
+--- a/src/Dependably.Core/Resources/SharedResource.fr.resx
++++ b/src/Dependably.Core/Resources/SharedResource.fr.resx
+@@ -674,20 +674,26 @@ Si vous n'êtes pas à l'origine de ce changement, contactez immédiatement votr
+   </data>
+   <data name="error.project.nameTaken" xml:space="preserve">
+     <value>Un projet portant ce nom existe déjà à cet endroit.</value>
+   </data>
+   <data name="error.project.parentNotFound" xml:space="preserve">
+     <value>parentId ne désigne aucune collection de cette organisation.</value>
+   </data>
+   <data name="error.project.parentNotACollection" xml:space="preserve">
+     <value>parentId désigne un projet. Seule une collection peut contenir d'autres projets.</value>
+   </data>
++  <data name="error.project.parentIsSelf" xml:space="preserve">
++    <value>Un projet ne peut pas être déplacé à l’intérieur de lui-même.</value>
++  </data>
++  <data name="error.project.parentIsDescendant" xml:space="preserve">
++    <value>parentId désigne une collection située à l’intérieur du projet déplacé. Choisissez une destination en dehors de celui-ci.</value>
++  </data>
+   <data name="error.project.isCollection" xml:space="preserve">
+     <value>Ce projet est une collection. Les collections ne contiennent aucune version.</value>
+   </data>
+   <data name="error.sbom.versionNotFound" xml:space="preserve">
+     <value>Cette version de projet n’existe pas.</value>
+   </data>
+   <data name="error.sbom.analysisRowNotFound" xml:space="preserve">
+     <value>La décision de tri n’a pas pu être relue après son enregistrement.</value>
+   </data>
+   <data name="error.sbom.sortInvalid" xml:space="preserve">
+diff --git a/src/Dependably.Core/Resources/SharedResource.resx b/src/Dependably.Core/Resources/SharedResource.resx
+index 59594a41..47ec4236 100644
+--- a/src/Dependably.Core/Resources/SharedResource.resx
++++ b/src/Dependably.Core/Resources/SharedResource.resx
+@@ -866,20 +866,28 @@ If you did not make this change, contact your administrator immediately — your
+     <comment>409 detail: the name is already used at the same level of the project tree.</comment>
+   </data>
+   <data name="error.project.parentNotFound" xml:space="preserve">
+     <value>parentId does not name a collection in this organization.</value>
+     <comment>422 detail. Deliberately does not distinguish "no such project" from "belongs to another organization". 'parentId' is the API field name - keep it verbatim.</comment>
+   </data>
+   <data name="error.project.parentNotACollection" xml:space="preserve">
+     <value>parentId names a project. Only a collection can contain other projects.</value>
+     <comment>422 detail on project create. 'parentId' is the API field name - keep it verbatim.</comment>
+   </data>
++  <data name="error.project.parentIsSelf" xml:space="preserve">
++    <value>A project cannot be moved inside itself.</value>
++    <comment>422 detail on project relocate: parentId named the project being moved.</comment>
++  </data>
++  <data name="error.project.parentIsDescendant" xml:space="preserve">
++    <value>parentId names a collection inside the project being moved. Pick a destination outside it.</value>
++    <comment>422 detail on project relocate: the move would detach the subtree into a cycle. 'parentId' is the API field name - keep it verbatim.</comment>
++  </data>
+   <data name="error.project.isCollection" xml:space="preserve">
+     <value>That project is a collection. Collections hold no versions.</value>
+     <comment>409 detail returned when a version-scoped operation targets a collection.</comment>
+   </data>
+   <data name="error.sbom.versionNotFound" xml:space="preserve">
+     <value>That project version does not exist.</value>
+     <comment>404 detail when a project version id (or the 'latest' alias) resolves to nothing in the caller's organization.</comment>
+   </data>
+   <data name="error.sbom.analysisRowNotFound" xml:space="preserve">
+     <value>The triage decision could not be read back after being saved.</value>
+diff --git a/src/Dependably.Management/Api/ProjectsController.cs b/src/Dependably.Management/Api/ProjectsController.cs
+index e2d86abe..977cbbe8 100644
+--- a/src/Dependably.Management/Api/ProjectsController.cs
++++ b/src/Dependably.Management/Api/ProjectsController.cs
+@@ -33,20 +33,27 @@ public sealed class ProjectsController : OrgScopedControllerBase
+ {
+     /// <summary>Ceiling on the list page size, matching the other inventory list surfaces.</summary>
+     private const int MaxPageSize = 200;
+ 
+     /// <summary>Ceiling on a project name, and on the free-text search over names.</summary>
+     private const int MaxNameLength = 200;
+ 
+     /// <summary>Ceiling on a project description.</summary>
+     private const int MaxDescriptionLength = 2000;
+ 
++    /// <summary>
++    /// Ceiling on the unpaged collections listing. Collections are a filing structure a person
++    /// maintains by hand, so this is a runaway guard rather than a paging boundary — a truncated
++    /// page would silently hide relocation targets, which is why it sits far above any real tree.
++    /// </summary>
++    private const int MaxCollections = 1000;
++
+     private readonly ProjectRepository _projects;
+     private readonly OrgAccessGuard _guard;
+     private readonly AuditRepository _audit;
+     private readonly ProblemResults _problems;
+     private readonly ITenantStorageResolver _storage;
+     private readonly ILogger<ProjectsController> _logger;
+ 
+     public ProjectsController(
+         ProjectRepository projects,
+         OrgAccessGuard guard,
+@@ -112,23 +119,56 @@ public sealed class ProjectsController : OrgScopedControllerBase
+                 parentName = r.ParentName,
+                 latestVersion = r.LatestVersion,
+                 componentCount = r.ComponentCount,
+                 severityCounts = SeverityPayload(r.SeverityCounts),
+                 policyStatus = r.PolicyStatus,
+                 lastUploadAt = r.LastUploadAt,
+             }),
+         });
+     }
+ 
++    /// <summary>
++    /// GET /api/v1/projects/collections
++    /// Every collection the org holds, flat and unpaged, each carrying its own <c>parentId</c>.
++    /// This backs the relocation picker, which offers the root plus every collection as a target
++    /// and renders each as a full path — a use that needs the whole set, not one page of roots.
++    ///
++    /// The literal segment takes precedence over the <c>{projectId}</c> route below (ASP.NET
++    /// matches literals ahead of parameters), and a project id is a GUID, so no real project is
++    /// ever shadowed by this path.
++    /// </summary>
++    // Read-only: accepts a PAT/service token carrying read:packages.
++    [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
++    [HttpGet("api/v1/projects/collections")]
++    public async Task<IActionResult> ListCollections(CancellationToken ct = default)
++    {
++        var authResult = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.ReadPackages, ct);
++        if (authResult is not null)
++        {
++            return authResult;
++        }
++
++        var rows = await _projects.ListCollectionsAsync(CurrentTenantId(), MaxCollections, ct);
++
++        return Ok(new
++        {
++            total = rows.Count,
++            limit = MaxCollections,
++            items = rows.Select(r => new { id = r.Id, name = r.Name, parentId = r.ParentId }),
++        });
++    }
++
+     /// <summary>
+     /// GET /api/v1/projects/{projectId}
+-    /// One project with its versions and, for a collection, its direct children.
++    /// One project with its versions and, for a collection, its direct children. <c>ancestors</c>
++    /// is the root-first chain of containing collections (empty at the root), which is what the
++    /// breadcrumb climbs — the caller never has to walk <c>parentId</c> a request at a time.
+     /// </summary>
+     // Read-only: accepts a PAT/service token carrying read:packages.
+     [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
+     [HttpGet("api/v1/projects/{projectId}")]
+     public async Task<IActionResult> Get(string projectId, CancellationToken ct = default)
+     {
+         var authResult = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.ReadPackages, ct);
+         if (authResult is not null)
+         {
+             return authResult;
+@@ -136,29 +176,31 @@ public sealed class ProjectsController : OrgScopedControllerBase
+ 
+         string orgId = CurrentTenantId();
+         var project = await _projects.GetAsync(orgId, projectId, ct);
+         if (project is null)
+         {
+             return NotFound();
+         }
+ 
+         var versions = await _projects.ListVersionsAsync(orgId, projectId, ct);
+         var children = await _projects.ListChildrenAsync(orgId, projectId, ct);
++        var ancestors = await _projects.ListAncestorsAsync(orgId, projectId, ct);
+ 
+         return Ok(new
+         {
+             id = project.Id,
+             name = project.Name,
+             kind = project.Kind,
+             classifier = project.Classifier,
+             description = project.Description,
+             parentId = project.ParentId,
++            ancestors = ancestors.Select(a => new { id = a.Id, name = a.Name }),
+             createdAt = project.CreatedAt,
+             versions = versions.Select(VersionPayload),
+             children = children.Select(c => new
+             {
+                 id = c.Id,
+                 name = c.Name,
+                 kind = c.Kind,
+                 latestVersion = c.LatestVersion,
+                 policyStatus = c.PolicyStatus,
+             }),
+@@ -248,20 +290,140 @@ public sealed class ProjectsController : OrgScopedControllerBase
+             id = created.Id,
+             name = created.Name,
+             kind = created.Kind,
+             classifier = created.Classifier,
+             description = created.Description,
+             parentId = created.ParentId,
+             createdAt = created.CreatedAt,
+         });
+     }
+ 
++    /// <summary>
++    /// PATCH /api/v1/projects/{projectId}
++    /// Renames, re-describes, re-classifies and/or relocates a project or collection.
++    ///
++    /// Every field is leave-unchanged-on-absent, the same posture the proxy-settings endpoint
++    /// takes: a surface that edits only the name must not blank the description just because its
++    /// form never rendered one. <c>description</c>, <c>classifier</c> and <c>parentId</c> are
++    /// <see cref="Optional{T}"/> rather than plain nullables because null is a legitimate VALUE
++    /// for all three — <c>parentId: null</c> is precisely how a caller moves a project back to the
++    /// root, which a plain nullable could not tell apart from not mentioning the field at all.
++    ///
++    /// <c>kind</c> is deliberately not editable. Flipping a project to a collection would strand
++    /// its versions (collections hold none) and flipping a collection to a project would strand its
++    /// children (a project contains none); either is a data migration, not a field edit.
++    /// </summary>
++    [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
++    [HttpPatch("api/v1/projects/{projectId}")]
++    public async Task<IActionResult> Update(
++        string projectId, [FromBody] UpdateProjectRequest req, CancellationToken ct = default)
++    {
++        var authResult = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
++        if (authResult is not null)
++        {
++            return authResult;
++        }
++
++        string orgId = CurrentTenantId();
++        var current = await _projects.GetAsync(orgId, projectId, ct);
++        if (current is null)
++        {
++            return NotFound();
++        }
++
++        string name = req.Name is null ? current.Name : req.Name.Trim();
++        if (name.Length == 0)
++        {
++            return _problems.ValidationErrorActionKey("name", "error.project.nameRequired");
++        }
++
++        if (name.Length > MaxNameLength)
++        {
++            return _problems.ValidationErrorActionKey("name", "error.project.nameTooLong", MaxNameLength);
++        }
++
++        string classifier = current.Classifier;
++        if (req.Classifier.IsPresent)
++        {
++            string? requested = string.IsNullOrWhiteSpace(req.Classifier.Value)
++                ? null : req.Classifier.Value!.Trim();
++            if (requested is not null && !ProjectClassifiers.IsKnown(requested))
++            {
++                return _problems.ValidationErrorActionKey(
++                    "classifier", "error.common.mustBeOneOf", string.Join(", ", ProjectClassifiers.All));
++            }
++
++            classifier = requested ?? ProjectClassifiers.Default;
++        }
++
++        string? description = current.Description;
++        if (req.Description.IsPresent)
++        {
++            description = string.IsNullOrWhiteSpace(req.Description.Value)
++                ? null : req.Description.Value!.Trim();
++            if (description is { Length: > MaxDescriptionLength })
++            {
++                return _problems.ValidationErrorActionKey(
++                    "description", "error.project.descriptionTooLong", MaxDescriptionLength);
++            }
++        }
++
++        string? parentId = current.ParentId;
++        if (req.ParentId.IsPresent)
++        {
++            parentId = string.IsNullOrWhiteSpace(req.ParentId.Value) ? null : req.ParentId.Value!.Trim();
++        }
++
++        Project? updated;
++        try
++        {
++            updated = await _projects.UpdateAsync(orgId, projectId, name, classifier, description, parentId, ct);
++        }
++        catch (ProjectResolutionException ex)
++        {
++            return ProblemForResolution(ex);
++        }
++
++        if (updated is null)
++        {
++            return NotFound();
++        }
++
++        string detail = JsonSerializer.Serialize(
++            new
++            {
++                projectId = updated.Id,
++                name = updated.Name,
++                kind = updated.Kind,
++                renamedFrom = string.Equals(current.Name, updated.Name, StringComparison.Ordinal)
++                    ? null : current.Name,
++                movedFrom = string.Equals(current.ParentId, updated.ParentId, StringComparison.Ordinal)
++                    ? null : current.ParentId ?? "",
++                parentId = updated.ParentId,
++            },
++            Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
++        await _audit.LogAsync(
++            "project.updated", orgId, GetUserId(), ActorKinds.User, null, null, detail,
++            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
++
++        return Ok(new
++        {
++            id = updated.Id,
++            name = updated.Name,
++            kind = updated.Kind,
++            classifier = updated.Classifier,
++            description = updated.Description,
++            parentId = updated.ParentId,
++            createdAt = updated.CreatedAt,
++        });
++    }
++
+     /// <summary>
+     /// DELETE /api/v1/projects/{projectId}
+     /// Removes the project and, by FK cascade, its subtree, versions, documents and derived rows.
+     /// </summary>
+     [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
+     [HttpDelete("api/v1/projects/{projectId}")]
+     [ProducesResponseType(StatusCodes.Status204NoContent)]
+     public async Task<IActionResult> Delete(string projectId, CancellationToken ct = default)
+     {
+         var authResult = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
+@@ -433,30 +595,63 @@ public sealed class ProjectsController : OrgScopedControllerBase
+                 orgId, blobKeys.Count, ex.GetType().Name, ex.Message);
+         }
+     }
+ 
+     private IActionResult ProblemForResolution(ProjectResolutionException ex) => ex.Reason switch
+     {
+         ProjectResolutionReason.ParentNotACollection =>
+             _problems.ValidationErrorActionKey("parentId", "error.project.parentNotACollection"),
+         ProjectResolutionReason.CollectionTarget =>
+             _problems.ConflictActionKey("error.project.isCollection"),
++        ProjectResolutionReason.ParentIsSelf =>
++            _problems.ValidationErrorActionKey("parentId", "error.project.parentIsSelf"),
++        ProjectResolutionReason.ParentIsDescendant =>
++            _problems.ValidationErrorActionKey("parentId", "error.project.parentIsDescendant"),
++        ProjectResolutionReason.NameTaken =>
++            _problems.ConflictActionKey("error.project.nameTaken"),
+         _ => _problems.ValidationErrorActionKey("parentId", "error.project.parentNotFound"),
+     };
+ }
+ 
+ /// <summary>
+ /// Body of <c>POST /api/v1/projects</c>. Every field is validated inline in
+ /// <see cref="ProjectsController.Create"/>; MVC binds with
+ /// <c>JsonUnmappedMemberHandling.Disallow</c>, so a field not listed here is a 400.
+ /// </summary>
+ /// <param name="Name">Required. Unique within the parent scope.</param>
+ /// <param name="Kind"><c>project</c> (default) or <c>collection</c>.</param>
+ /// <param name="Classifier">CycloneDX <c>component.type</c>; defaults to <c>application</c>.</param>
+ /// <param name="Description">Free text.</param>
+ /// <param name="ParentId">The containing collection, or absent for a root-level project.</param>
+ public sealed record CreateProjectRequest(
+     string? Name,
+     string? Kind = null,
+     string? Classifier = null,
+     string? Description = null,
+     string? ParentId = null);
++
++/// <summary>
++/// Body of <c>PATCH /api/v1/projects/{projectId}</c>. Every field is optional and absent means
++/// leave unchanged; MVC binds with <c>JsonUnmappedMemberHandling.Disallow</c>, so a field not
++/// listed here — <c>kind</c> included — is a 400 rather than a silently ignored key.
++/// </summary>
++/// Declared as init-only properties rather than constructor parameters, the same shape
++/// <c>UpdateRetentionRequest</c> uses and for the same reason: the OpenAPI exporter serializes a
++/// parameter's default value into the schema, and a custom struct's <c>default</c> throws there —
++/// 500ing <c>/openapi/management.json</c> for the whole document, not just this route.
++public sealed record UpdateProjectRequest
++{
++    /// <summary>The new name. Absent (or null) leaves it alone; a blank name is a 422.</summary>
++    public string? Name { get; init; }
++
++    /// <summary>CycloneDX <c>component.type</c>. Explicit null resets it to the default.</summary>
++    public Optional<string> Classifier { get; init; }
++
++    /// <summary>Free text. Explicit null (or blank) clears it.</summary>
++    public Optional<string> Description { get; init; }
++
++    /// <summary>
++    /// The containing collection. Explicit null moves the project to the root — which is why this
++    /// is <see cref="Optional{T}"/> and not a plain nullable.
++    /// </summary>
++    public Optional<string> ParentId { get; init; }
++}
+diff --git a/tests/Contracts/openapi.contract.json b/tests/Contracts/openapi.contract.json
+index 13b6e4ba..9e015e52 100644
+--- a/tests/Contracts/openapi.contract.json
++++ b/tests/Contracts/openapi.contract.json
+@@ -956,37 +956,55 @@
+           ]
+         },
+         "post": {
+           "requiredParams": [],
+           "responseCodes": [
+             "201"
+           ]
+         }
+       }
+     },
++    "/api/v1/projects/collections": {
++      "operations": {
++        "get": {
++          "requiredParams": [],
++          "responseCodes": [
++            "200"
++          ]
++        }
++      }
++    },
+     "/api/v1/projects/{projectId}": {
+       "operations": {
+         "delete": {
+           "requiredParams": [
+             "projectId"
+           ],
+           "responseCodes": [
+             "204"
+           ]
+         },
+         "get": {
+           "requiredParams": [
+             "projectId"
+           ],
+           "responseCodes": [
+             "200"
+           ]
++        },
++        "patch": {
++          "requiredParams": [
++            "projectId"
++          ],
++          "responseCodes": [
++            "200"
++          ]
+         }
+       }
+     },
+     "/api/v1/projects/{projectId}/versions/{versionId}": {
+       "operations": {
+         "delete": {
+           "requiredParams": [
+             "projectId",
+             "versionId"
+           ],
+diff --git a/tests/Dependably.Tests/Integration/ProjectFolderApiTests.cs b/tests/Dependably.Tests/Integration/ProjectFolderApiTests.cs
+new file mode 100644
+index 00000000..e61e8cb7
+--- /dev/null
++++ b/tests/Dependably.Tests/Integration/ProjectFolderApiTests.cs
+@@ -0,0 +1,383 @@
++using System.Net;
++using System.Net.Http.Headers;
++using System.Net.Http.Json;
++using System.Text;
++using System.Text.Json;
++using Dapper;
++using Dependably.Infrastructure;
++using Dependably.Tests.Infrastructure;
++using Microsoft.Extensions.DependencyInjection;
++
++namespace Dependably.Tests.Integration;
++
++/// <summary>
++/// The folder-filing surface of the projects plane: creating a collection, the flat collection
++/// listing the relocation picker reads, the root-first ancestor chain the breadcrumb climbs, and
++/// <c>PATCH /api/v1/projects/{id}</c>'s rename/relocate semantics.
++///
++/// Two properties get an adversarial twin rather than a single happy-path probe, because both
++/// fail silently in the direction that matters:
++/// <list type="bullet">
++///   <item>a refused move must also leave the tree exactly as it was — a refusal that still wrote
++///   would strand the subtree in a cycle no read can reach; and</item>
++///   <item>leave-unchanged-on-absent must actually leave the untouched columns alone — a PATCH
++///   that blanks a description nobody edited looks identical to a successful rename.</item>
++/// </list>
++/// </summary>
++[Trait("Category", "Integration")]
++public sealed class ProjectFolderApiTests : IClassFixture<DependablyFactory>, IAsyncLifetime
++{
++    private readonly DependablyFactory _factory;
++
++    public ProjectFolderApiTests(DependablyFactory factory) => _factory = factory;
++
++    public Task InitializeAsync() => ((IAsyncLifetime)_factory).InitializeAsync();
++
++    public Task DisposeAsync() => Task.CompletedTask;
++
++    // ── Create ───────────────────────────────────────────────────────────────────────────────
++
++    [Fact]
++    public async Task NewFolder_IsCreatedAsACollectionAtTheRoot()
++    {
++        using var client = await AdminClient();
++
++        var created = await CreateFolderAsync(client, Unique("platform"));
++
++        Assert.Equal("collection", created.GetProperty("kind").GetString());
++        Assert.True(created.GetProperty("parentId").ValueKind == JsonValueKind.Null);
++    }
++
++    [Fact]
++    public async Task ListCollections_ReturnsFoldersAndNotPlainProjects()
++    {
++        using var client = await AdminClient();
++        string folderName = Unique("folder");
++        string projectName = Unique("plain");
++        var folder = await CreateFolderAsync(client, folderName);
++        await CreateProjectAsync(client, projectName);
++
++        using var resp = await client.GetAsync("/api/v1/projects/collections");
++        resp.EnsureSuccessStatusCode();
++        var items = (await ReadJsonAsync(resp)).GetProperty("items").EnumerateArray().ToList();
++
++        Assert.Contains(items, i => i.GetProperty("id").GetString() == folder.GetProperty("id").GetString());
++        Assert.DoesNotContain(items, i => i.GetProperty("name").GetString() == projectName);
++    }
++
++    // ── Ancestors (the breadcrumb's input) ───────────────────────────────────────────────────
++
++    [Fact]
++    public async Task ProjectDetail_CarriesTheAncestorChainRootFirst()
++    {
++        using var client = await AdminClient();
++        var outer = await CreateFolderAsync(client, Unique("outer"));
++        var inner = await CreateFolderAsync(client, Unique("inner"), ParentOf(outer));
++        var project = await CreateProjectAsync(client, Unique("api"), ParentOf(inner));
++
++        var detail = await GetProjectAsync(client, IdOf(project));
++        string[] chain = detail.GetProperty("ancestors").EnumerateArray()
++            .Select(a => a.GetProperty("id").GetString()!).ToArray();
++
++        Assert.Equal([IdOf(outer), IdOf(inner)], chain);
++    }
++
++    [Fact]
++    public async Task ProjectDetail_ForARootProject_CarriesAnEmptyAncestorChain()
++    {
++        using var client = await AdminClient();
++        var project = await CreateProjectAsync(client, Unique("standalone"));
++
++        var detail = await GetProjectAsync(client, IdOf(project));
++
++        Assert.Empty(detail.GetProperty("ancestors").EnumerateArray());
++    }
++
++    // ── Relocate ─────────────────────────────────────────────────────────────────────────────
++
++    [Fact]
++    public async Task Patch_MovesAProjectIntoAFolderAndBackToTheRoot()
++    {
++        using var client = await AdminClient();
++        var folder = await CreateFolderAsync(client, Unique("platform"));
++        var project = await CreateProjectAsync(client, Unique("api"));
++
++        var moved = await PatchAsync(client, IdOf(project), $$"""{"parentId":"{{IdOf(folder)}}"}""");
++        Assert.Equal(HttpStatusCode.OK, moved.Status);
++        Assert.Equal(IdOf(folder), moved.Body.GetProperty("parentId").GetString());
++
++        // An explicit null is the only way back to the root — the whole reason parentId is
++        // tri-state rather than a plain nullable.
++        var home = await PatchAsync(client, IdOf(project), """{"parentId":null}""");
++        Assert.Equal(HttpStatusCode.OK, home.Status);
++        Assert.Equal(JsonValueKind.Null, home.Body.GetProperty("parentId").ValueKind);
++        Assert.Empty((await GetProjectAsync(client, IdOf(project))).GetProperty("ancestors").EnumerateArray());
++    }
++
++    [Fact]
++    public async Task Patch_IntoOwnDescendant_IsRefusedAndTheTreeIsUnchanged()
++    {
++        using var client = await AdminClient();
++        var outer = await CreateFolderAsync(client, Unique("outer"));
++        var inner = await CreateFolderAsync(client, Unique("inner"), ParentOf(outer));
++
++        var result = await PatchAsync(client, IdOf(outer), $$"""{"parentId":"{{IdOf(inner)}}"}""");
++
++        Assert.Equal(HttpStatusCode.UnprocessableEntity, result.Status);
++        // The adversarial half: outer must still be at the root and inner still inside it. A
++        // refusal that wrote anyway would leave both rows reachable only from each other.
++        Assert.Equal(JsonValueKind.Null, (await GetProjectAsync(client, IdOf(outer))).GetProperty("parentId").ValueKind);
++        Assert.Equal(IdOf(outer), (await GetProjectAsync(client, IdOf(inner))).GetProperty("parentId").GetString());
++    }
++
++    [Fact]
++    public async Task Patch_IntoItself_IsRefused()
++    {
++        using var client = await AdminClient();
++        var folder = await CreateFolderAsync(client, Unique("platform"));
++
++        var result = await PatchAsync(client, IdOf(folder), $$"""{"parentId":"{{IdOf(folder)}}"}""");
++
++        Assert.Equal(HttpStatusCode.UnprocessableEntity, result.Status);
++        Assert.Equal(JsonValueKind.Null, (await GetProjectAsync(client, IdOf(folder))).GetProperty("parentId").ValueKind);
++    }
++
++    [Fact]
++    public async Task Patch_IntoAPlainProject_IsRefused()
++    {
++        using var client = await AdminClient();
++        var host = await CreateProjectAsync(client, Unique("host"));
++        var project = await CreateProjectAsync(client, Unique("api"));
++
++        var result = await PatchAsync(client, IdOf(project), $$"""{"parentId":"{{IdOf(host)}}"}""");
++
++        Assert.Equal(HttpStatusCode.UnprocessableEntity, result.Status);
++    }
++
++    [Fact]
++    public async Task Patch_IntoAnUnknownFolder_IsRefused()
++    {
++        using var client = await AdminClient();
++        var project = await CreateProjectAsync(client, Unique("api"));
++
++        var result = await PatchAsync(
++            client, IdOf(project), $$"""{"parentId":"{{Guid.NewGuid():N}}"}""");
++
++        Assert.Equal(HttpStatusCode.UnprocessableEntity, result.Status);
++    }
++
++    // ── Rename, and the leave-unchanged posture ──────────────────────────────────────────────
++
++    [Fact]
++    public async Task Patch_RenamingLeavesTheDescriptionAndFolderAlone()
++    {
++        using var client = await AdminClient();
++        var folder = await CreateFolderAsync(client, Unique("platform"));
++        string original = Unique("api");
++        var project = await CreateProjectAsync(client, original, ParentOf(folder), description: "the edge api");
++
++        string renamed = Unique("gateway");
++        var result = await PatchAsync(client, IdOf(project), $$"""{"name":"{{renamed}}"}""");
++
++        Assert.Equal(HttpStatusCode.OK, result.Status);
++        var detail = await GetProjectAsync(client, IdOf(project));
++        Assert.Equal(renamed, detail.GetProperty("name").GetString());
++        // Both untouched fields, not just one: a PATCH that defaulted absent fields would blank
++        // the description AND move the project to the root, and either alone reads as a bug in
++        // the other feature.
++        Assert.Equal("the edge api", detail.GetProperty("description").GetString());
++        Assert.Equal(IdOf(folder), detail.GetProperty("parentId").GetString());
++    }
++
++    [Fact]
++    public async Task Patch_ExplicitNullDescription_ClearsIt()
++    {
++        using var client = await AdminClient();
++        var project = await CreateProjectAsync(client, Unique("api"), description: "to be cleared");
++
++        var result = await PatchAsync(client, IdOf(project), """{"description":null}""");
++
++        Assert.Equal(HttpStatusCode.OK, result.Status);
++        var detail = await GetProjectAsync(client, IdOf(project));
++        Assert.Equal(JsonValueKind.Null, detail.GetProperty("description").ValueKind);
++    }
++
++    [Fact]
++    public async Task Patch_ToANameAlreadyTakenInTheTargetScope_Conflicts()
++    {
++        using var client = await AdminClient();
++        string taken = Unique("billing");
++        await CreateProjectAsync(client, taken);
++        var project = await CreateProjectAsync(client, Unique("api"));
++
++        var result = await PatchAsync(client, IdOf(project), $$"""{"name":"{{taken}}"}""");
++
++        Assert.Equal(HttpStatusCode.Conflict, result.Status);
++    }
++
++    [Fact]
++    public async Task Patch_BlankName_IsRefused()
++    {
++        using var client = await AdminClient();
++        var project = await CreateProjectAsync(client, Unique("api"));
++
++        var result = await PatchAsync(client, IdOf(project), """{"name":"   "}""");
++
++        Assert.Equal(HttpStatusCode.UnprocessableEntity, result.Status);
++    }
++
++    [Fact]
++    public async Task Patch_Kind_IsNotAnEditableField()
++    {
++        using var client = await AdminClient();
++        var folder = await CreateFolderAsync(client, Unique("platform"));
++
++        // Binding runs with JsonUnmappedMemberHandling.Disallow, so an unmodelled field is a 400
++        // rather than a silently ignored key. Flipping kind would strand the subtree.
++        var result = await PatchAsync(client, IdOf(folder), """{"kind":"project"}""");
++
++        Assert.Equal(HttpStatusCode.BadRequest, result.Status);
++        Assert.Equal("collection", (await GetProjectAsync(client, IdOf(folder))).GetProperty("kind").GetString());
++    }
++
++    // ── Tenancy ──────────────────────────────────────────────────────────────────────────────
++
++    [Fact]
++    public async Task Patch_AnotherOrgsProject_IsReportedAbsent()
++    {
++        using var client = await AdminClient();
++        var db = _factory.Services.GetRequiredService<IMetadataStore>();
++
++        string foreignOrg = "org-" + Guid.NewGuid().ToString("N")[..8];
++        string foreignProject = Guid.NewGuid().ToString("N");
++        await using (var conn = await db.OpenAsync())
++        {
++            await conn.ExecuteAsync(
++                "INSERT INTO orgs (id, slug) VALUES (@id, @slug)",
++                new { id = foreignOrg, slug = foreignOrg });
++            await conn.ExecuteAsync(
++                """
++                INSERT INTO projects (id, org_id, kind, name, classifier, created_at)
++                VALUES (@id, @orgId, 'project', 'their-api', 'application',
++                        strftime('%Y-%m-%dT%H:%M:%SZ','now'))
++                """,
++                new { id = foreignProject, orgId = foreignOrg });
++        }
++
++        var result = await PatchAsync(client, foreignProject, """{"name":"hijacked"}""");
++
++        // 404, not 403 — ids stay unenumerable.
++        Assert.Equal(HttpStatusCode.NotFound, result.Status);
++        await using (var conn = await db.OpenAsync())
++        {
++            Assert.Equal("their-api", await conn.ExecuteScalarAsync<string>(
++                "SELECT name FROM projects WHERE id = @id", new { id = foreignProject }));
++        }
++    }
++
++    [Fact]
++    public async Task ListCollections_DoesNotLeakAnotherOrgsFolders()
++    {
++        using var client = await AdminClient();
++        var db = _factory.Services.GetRequiredService<IMetadataStore>();
++
++        string foreignOrg = "org-" + Guid.NewGuid().ToString("N")[..8];
++        string foreignFolder = Guid.NewGuid().ToString("N");
++        await using (var conn = await db.OpenAsync())
++        {
++            await conn.ExecuteAsync(
++                "INSERT INTO orgs (id, slug) VALUES (@id, @slug)",
++                new { id = foreignOrg, slug = foreignOrg });
++            await conn.ExecuteAsync(
++                """
++                INSERT INTO projects (id, org_id, kind, name, classifier, created_at)
++                VALUES (@id, @orgId, 'collection', 'their-folder', 'application',
++                        strftime('%Y-%m-%dT%H:%M:%SZ','now'))
++                """,
++                new { id = foreignFolder, orgId = foreignOrg });
++        }
++
++        using var resp = await client.GetAsync("/api/v1/projects/collections");
++        resp.EnsureSuccessStatusCode();
++        var items = (await ReadJsonAsync(resp)).GetProperty("items").EnumerateArray().ToList();
++
++        Assert.DoesNotContain(items, i => i.GetProperty("id").GetString() == foreignFolder);
++    }
++
++    // ── Helpers ──────────────────────────────────────────────────────────────────────────────
++
++    private async Task<HttpClient> AdminClient()
++    {
++        string jwt = await _factory.CreateAdminJwt();
++        var client = _factory.CreateClient();
++        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
++        return client;
++    }
++
++    // The default org is shared across every test in the class, and project names are unique per
++    // parent scope — a fixed literal would make two tests collide on a 409 depending on order.
++    private static string Unique(string stem) => $"{stem}-{Guid.NewGuid().ToString("N")[..8]}";
++
++    private static string IdOf(JsonElement project) => project.GetProperty("id").GetString()!;
++
++    private static string ParentOf(JsonElement folder) => IdOf(folder);
++
++    private static async Task<JsonElement> ReadJsonAsync(HttpResponseMessage resp)
++    {
++        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
++        return doc.RootElement.Clone();
++    }
++
++    private static async Task<JsonElement> CreateFolderAsync(
++        HttpClient client, string name, string? parentId = null)
++    {
++        using var resp = await client.PostAsJsonAsync("/api/v1/projects", new
++        {
++            name,
++            kind = "collection",
++            parentId,
++        });
++        resp.EnsureSuccessStatusCode();
++        return await ReadJsonAsync(resp);
++    }
++
++    private static async Task<JsonElement> CreateProjectAsync(
++        HttpClient client, string name, string? parentId = null, string? description = null)
++    {
++        using var resp = await client.PostAsJsonAsync("/api/v1/projects", new
++        {
++            name,
++            kind = "project",
++            parentId,
++            description,
++        });
++        resp.EnsureSuccessStatusCode();
++        return await ReadJsonAsync(resp);
++    }
++
++    private static async Task<JsonElement> GetProjectAsync(HttpClient client, string id)
++    {
++        using var resp = await client.GetAsync($"/api/v1/projects/{id}");
++        resp.EnsureSuccessStatusCode();
++        return await ReadJsonAsync(resp);
++    }
++
++    // Raw JSON rather than an anonymous object, because the whole point of several of these
++    // cases is the difference between an ABSENT key and one explicitly set to null — a shape
++    // a serialized C# object cannot express without extra converter ceremony.
++    private static async Task<PatchResult> PatchAsync(HttpClient client, string id, string json)
++    {
++        using var content = new StringContent(json, Encoding.UTF8, "application/json");
++        using var resp = await client.PatchAsync($"/api/v1/projects/{id}", content);
++        string text = await resp.Content.ReadAsStringAsync();
++        if (string.IsNullOrWhiteSpace(text))
++        {
++            return new PatchResult(resp.StatusCode, default);
++        }
++
++        using var doc = JsonDocument.Parse(text);
++        return new PatchResult(resp.StatusCode, doc.RootElement.Clone());
++    }
++
++    private sealed record PatchResult(HttpStatusCode Status, JsonElement Body);
++}
+diff --git a/tests/Dependably.Tests/Unit/ProjectRepositoryTests.cs b/tests/Dependably.Tests/Unit/ProjectRepositoryTests.cs
+index 90cc228d..8ae9bd45 100644
+--- a/tests/Dependably.Tests/Unit/ProjectRepositoryTests.cs
++++ b/tests/Dependably.Tests/Unit/ProjectRepositoryTests.cs
+@@ -1,20 +1,21 @@
+ using Dapper;
+ using Dependably.Infrastructure;
+ using Dependably.Tests.Infrastructure;
+ 
+ namespace Dependably.Tests.Unit;
+ 
+ /// <summary>
+ /// Repository-level coverage for the projects plane: the collection invariants, the
+-/// resolve-or-create seam the upload pipeline binds to, and the promotion transaction whose whole
+-/// job is to survive concurrent promoters.
++/// resolve-or-create seam the upload pipeline binds to, the promotion transaction whose whole job
++/// is to survive concurrent promoters, and the rename/relocate write whose job is to refuse the
++/// moves that would cut a subtree loose from the root.
+ /// </summary>
+ [Trait("Category", "Unit")]
+ public sealed class ProjectRepositoryTests : IAsyncLifetime
+ {
+     private const string OrgA = "org-a";
+     private const string OrgB = "org-b";
+ 
+     private readonly TestMetadataStore _db = new();
+     private readonly Microsoft.Extensions.Time.Testing.FakeTimeProvider _clock = TestTime.Frozen();
+ 
+@@ -23,20 +24,226 @@ public sealed class ProjectRepositoryTests : IAsyncLifetime
+     public async Task InitializeAsync()
+     {
+         await new SchemaInitializer(_db).InitializeAsync();
+         await using var conn = await _db.OpenAsync();
+         await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES (@id, @slug)", new { id = OrgA, slug = "acme" });
+         await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES (@id, @slug)", new { id = OrgB, slug = "globex" });
+     }
+ 
+     public async Task DisposeAsync() => await _db.DisposeAsync();
+ 
++    // ── Ancestors and the folder listing ─────────────────────────────────────────────────────
++
++    [Fact]
++    public async Task ListAncestors_ReturnsTheChainRootFirst()
++    {
++        var repo = Repo;
++        var platform = await repo.CreateAsync(OrgA, "platform", ProjectKinds.Collection, null, null, null, "u1");
++        var payments = await repo.CreateAsync(OrgA, "payments", ProjectKinds.Collection, null, null, platform.Id, "u1");
++        var api = await repo.CreateAsync(OrgA, "api", ProjectKinds.Project, null, null, payments.Id, "u1");
++
++        var chain = await repo.ListAncestorsAsync(OrgA, api.Id);
++
++        Assert.Equal(["platform", "payments"], chain.Select(c => c.Name));
++        Assert.Equal([platform.Id, payments.Id], chain.Select(c => c.Id));
++    }
++
++    [Fact]
++    public async Task ListAncestors_ForRootProject_IsEmpty()
++    {
++        var repo = Repo;
++        var root = await repo.CreateAsync(OrgA, "standalone", ProjectKinds.Project, null, null, null, "u1");
++
++        Assert.Empty(await repo.ListAncestorsAsync(OrgA, root.Id));
++    }
++
++    [Fact]
++    public async Task ListAncestors_ForAnotherOrgsProject_IsEmpty()
++    {
++        var repo = Repo;
++        var folder = await repo.CreateAsync(OrgB, "monorepo", ProjectKinds.Collection, null, null, null, "u2");
++        var child = await repo.CreateAsync(OrgB, "web", ProjectKinds.Project, null, null, folder.Id, "u2");
++
++        // Not "the chain minus what org A may see" — the whole read is scoped, so a caller in the
++        // wrong org learns nothing about the tree, not even its depth.
++        Assert.Empty(await repo.ListAncestorsAsync(OrgA, child.Id));
++    }
++
++    [Fact]
++    public async Task ListCollections_ReturnsOnlyThisOrgsCollections()
++    {
++        var repo = Repo;
++        var platform = await repo.CreateAsync(OrgA, "platform", ProjectKinds.Collection, null, null, null, "u1");
++        await repo.CreateAsync(OrgA, "api", ProjectKinds.Project, null, null, platform.Id, "u1");
++        await repo.CreateAsync(OrgB, "other-folder", ProjectKinds.Collection, null, null, null, "u2");
++
++        var rows = await repo.ListCollectionsAsync(OrgA, 100);
++
++        Assert.Equal([platform.Id], rows.Select(r => r.Id));
++    }
++
++    // ── Rename and relocate ──────────────────────────────────────────────────────────────────
++
++    [Fact]
++    public async Task Update_MovesProjectIntoCollection()
++    {
++        var repo = Repo;
++        var folder = await repo.CreateAsync(OrgA, "platform", ProjectKinds.Collection, null, null, null, "u1");
++        var api = await repo.CreateAsync(OrgA, "api", ProjectKinds.Project, null, null, null, "u1");
++
++        var moved = await repo.UpdateAsync(
++            OrgA, api.Id, "api", ProjectClassifiers.Default, null, folder.Id);
++
++        Assert.Equal(folder.Id, moved!.ParentId);
++        Assert.Equal([folder.Id], (await repo.ListAncestorsAsync(OrgA, api.Id)).Select(c => c.Id));
++    }
++
++    [Fact]
++    public async Task Update_WithNullParent_MovesProjectBackToRoot()
++    {
++        var repo = Repo;
++        var folder = await repo.CreateAsync(OrgA, "platform", ProjectKinds.Collection, null, null, null, "u1");
++        var api = await repo.CreateAsync(OrgA, "api", ProjectKinds.Project, null, null, folder.Id, "u1");
++
++        var moved = await repo.UpdateAsync(OrgA, api.Id, "api", ProjectClassifiers.Default, null, null);
++
++        Assert.Null(moved!.ParentId);
++        Assert.Empty(await repo.ListAncestorsAsync(OrgA, api.Id));
++    }
++
++    [Fact]
++    public async Task Update_IntoOwnDescendant_IsRefusedAndLeavesTheTreeIntact()
++    {
++        var repo = Repo;
++        var outer = await repo.CreateAsync(OrgA, "outer", ProjectKinds.Collection, null, null, null, "u1");
++        var middle = await repo.CreateAsync(OrgA, "middle", ProjectKinds.Collection, null, null, outer.Id, "u1");
++        var inner = await repo.CreateAsync(OrgA, "inner", ProjectKinds.Collection, null, null, middle.Id, "u1");
++
++        var ex = await Assert.ThrowsAsync<ProjectResolutionException>(() => repo.UpdateAsync(
++            OrgA, outer.Id, "outer", ProjectClassifiers.Default, null, inner.Id));
++
++        Assert.Equal(ProjectResolutionReason.ParentIsDescendant, ex.Reason);
++        // The adversarial half: a refusal that still wrote would leave outer/middle/inner in a
++        // cycle reachable from nothing, which no later read could distinguish from "deleted".
++        Assert.Null((await repo.GetAsync(OrgA, outer.Id))!.ParentId);
++        Assert.Equal(outer.Id, (await repo.GetAsync(OrgA, middle.Id))!.ParentId);
++    }
++
++    [Fact]
++    public async Task Update_IntoItself_IsRefused()
++    {
++        var repo = Repo;
++        var folder = await repo.CreateAsync(OrgA, "platform", ProjectKinds.Collection, null, null, null, "u1");
++
++        var ex = await Assert.ThrowsAsync<ProjectResolutionException>(() => repo.UpdateAsync(
++            OrgA, folder.Id, "platform", ProjectClassifiers.Default, null, folder.Id));
++
++        Assert.Equal(ProjectResolutionReason.ParentIsSelf, ex.Reason);
++        Assert.Null((await repo.GetAsync(OrgA, folder.Id))!.ParentId);
++    }
++
++    [Fact]
++    public async Task Update_IntoAProject_IsRefused()
++    {
++        var repo = Repo;
++        var host = await repo.CreateAsync(OrgA, "host", ProjectKinds.Project, null, null, null, "u1");
++        var api = await repo.CreateAsync(OrgA, "api", ProjectKinds.Project, null, null, null, "u1");
++
++        var ex = await Assert.ThrowsAsync<ProjectResolutionException>(() => repo.UpdateAsync(
++            OrgA, api.Id, "api", ProjectClassifiers.Default, null, host.Id));
++
++        Assert.Equal(ProjectResolutionReason.ParentNotACollection, ex.Reason);
++    }
++
++    [Fact]
++    public async Task Update_IntoAnotherOrgsCollection_ReportsParentNotFound()
++    {
++        var repo = Repo;
++        var foreign = await repo.CreateAsync(OrgB, "monorepo", ProjectKinds.Collection, null, null, null, "u2");
++        var api = await repo.CreateAsync(OrgA, "api", ProjectKinds.Project, null, null, null, "u1");
++
++        var ex = await Assert.ThrowsAsync<ProjectResolutionException>(() => repo.UpdateAsync(
++            OrgA, api.Id, "api", ProjectClassifiers.Default, null, foreign.Id));
++
++        Assert.Equal(ProjectResolutionReason.ParentNotFound, ex.Reason);
++        Assert.Null((await repo.GetAsync(OrgA, api.Id))!.ParentId);
++    }
++
++    [Fact]
++    public async Task Update_ToANameAlreadyTakenInTheTargetScope_IsRefused()
++    {
++        var repo = Repo;
++        await repo.CreateAsync(OrgA, "billing", ProjectKinds.Project, null, null, null, "u1");
++        var api = await repo.CreateAsync(OrgA, "api", ProjectKinds.Project, null, null, null, "u1");
++
++        var ex = await Assert.ThrowsAsync<ProjectResolutionException>(() => repo.UpdateAsync(
++            OrgA, api.Id, "billing", ProjectClassifiers.Default, null, null));
++
++        Assert.Equal(ProjectResolutionReason.NameTaken, ex.Reason);
++        Assert.Equal("api", (await repo.GetAsync(OrgA, api.Id))!.Name);
++    }
++
++    [Fact]
++    public async Task Update_ToANameTakenOnlyInAnotherScope_Succeeds()
++    {
++        var repo = Repo;
++        var folder = await repo.CreateAsync(OrgA, "platform", ProjectKinds.Collection, null, null, null, "u1");
++        await repo.CreateAsync(OrgA, "api", ProjectKinds.Project, null, null, folder.Id, "u1");
++        var rootApi = await repo.CreateAsync(OrgA, "gateway", ProjectKinds.Project, null, null, null, "u1");
++
++        // Each collection is its own name namespace, so "api" at the root is free even though the
++        // folder already holds one.
++        var renamed = await repo.UpdateAsync(
++            OrgA, rootApi.Id, "api", ProjectClassifiers.Default, null, null);
++
++        Assert.Equal("api", renamed!.Name);
++    }
++
++    [Fact]
++    public async Task Update_RenamingInPlace_DoesNotCollideWithItself()
++    {
++        var repo = Repo;
++        var api = await repo.CreateAsync(OrgA, "api", ProjectKinds.Project, null, "notes", null, "u1");
++
++        var updated = await repo.UpdateAsync(
++            OrgA, api.Id, "api", ProjectClassifiers.Default, "notes", null);
++
++        Assert.Equal("api", updated!.Name);
++        Assert.Equal("notes", updated.Description);
++    }
++
++    [Fact]
++    public async Task Update_ForAnotherOrgsProject_ReportsAbsent()
++    {
++        var repo = Repo;
++        var foreign = await repo.CreateAsync(OrgB, "api", ProjectKinds.Project, null, null, null, "u2");
++
++        Assert.Null(await repo.UpdateAsync(
++            OrgA, foreign.Id, "hijacked", ProjectClassifiers.Default, null, null));
++        Assert.Equal("api", (await repo.GetAsync(OrgB, foreign.Id))!.Name);
++    }
++
++    [Fact]
++    public async Task Update_MovingACollection_CarriesItsChildrenWithIt()
++    {
++        var repo = Repo;
++        var outer = await repo.CreateAsync(OrgA, "outer", ProjectKinds.Collection, null, null, null, "u1");
++        var moving = await repo.CreateAsync(OrgA, "moving", ProjectKinds.Collection, null, null, null, "u1");
++        var leaf = await repo.CreateAsync(OrgA, "leaf", ProjectKinds.Project, null, null, moving.Id, "u1");
++
++        await repo.UpdateAsync(OrgA, moving.Id, "moving", ProjectClassifiers.Default, null, outer.Id);
++
++        Assert.Equal(
++            [outer.Id, moving.Id],
++            (await repo.ListAncestorsAsync(OrgA, leaf.Id)).Select(c => c.Id));
++    }
++
+     // ── Collection invariants ────────────────────────────────────────────────────────────────
+ 
+     [Fact]
+     public async Task Create_WithProjectAsParent_IsRefused()
+     {
+         var repo = Repo;
+         var parent = await repo.CreateAsync(
+             OrgA, "payments-api", ProjectKinds.Project, null, null, null, "u1");
+ 
+         var ex = await Assert.ThrowsAsync<ProjectResolutionException>(() => repo.CreateAsync(
+diff --git a/web/e2e/specs/project-folders.spec.ts b/web/e2e/specs/project-folders.spec.ts
+new file mode 100644
+index 00000000..442dc632
+--- /dev/null
++++ b/web/e2e/specs/project-folders.spec.ts
+@@ -0,0 +1,153 @@
++import type { APIRequestContext } from '@playwright/test'
++import { randomUUID } from 'crypto'
++import { test, expect } from '../fixtures/index.js'
++import { loginAsAdmin } from '../helpers/api-client.js'
++import { seedProjectVersion } from '../helpers/sbom-seed.js'
++
++/**
++ * Filing projects into folders, and climbing back out of one.
++ *
++ * A "folder" is a `kind: 'collection'` project. Both halves of this feature are invisible to
++ * every other layer of the suite: the vitest tests cover `lib/projectPaths.js` in isolation (this
++ * repo has no Svelte component-render harness), and the backend tests cover PATCH's semantics
++ * without ever rendering a row. Whether the kebab actually reaches the endpoint, and whether the
++ * breadcrumb the detail pages build from `ancestors` actually navigates, are only observable here.
++ *
++ * Each test creates its own randomly-named tree, so nothing depends on run order or on a
++ * previous run's leftovers in a local database.
++ */
++
++// en.json: projects.folders.newFolder / .nameLabel / .parentLabel / .rootOption / .edit,
++// projects.collection = "Collection", common.actions.save = "Save".
++
++/** A folder name unique to this run, so two runs against one database never collide on 409. */
++function uniqueName(stem: string): string {
++  return `e2e-${stem}-${randomUUID().slice(0, 8)}`
++}
++
++async function openProjectsPage(page: import('@playwright/test').Page) {
++  await page.locator('nav.sidebar button.nav-link', { hasText: 'Projects' }).click()
++  const main = page.locator('main.main-content')
++  await expect(main.locator('h1.page-title')).toContainText('Projects', { timeout: 10_000 })
++  return main
++}
++
++test.describe('Project folders', () => {
++  let api: APIRequestContext
++
++  test.beforeAll(async ({ baseURL }) => {
++    api = await loginAsAdmin(baseURL!)
++  })
++
++  test.afterAll(async () => {
++    await api.dispose()
++  })
++
++  test('New folder creates a collection that lists with its badge', async ({ adminPage }) => {
++    const main = await openProjectsPage(adminPage)
++    const folderName = uniqueName('folder')
++
++    await main.getByRole('button', { name: 'New folder' }).click()
++    const dialog = adminPage.getByRole('dialog')
++    await expect(dialog).toBeVisible()
++    await dialog.locator('input[type="text"]').first().fill(folderName)
++    await dialog.getByRole('button', { name: 'Save', exact: true }).click()
++
++    await expect(dialog).toBeHidden()
++    const row = main.locator('tr', { hasText: folderName })
++    await expect(row).toBeVisible({ timeout: 10_000 })
++    // Not merely "a row appeared" — a collection is what was created, and the badge is the only
++    // thing on the row that distinguishes one from a plain project.
++    await expect(row.locator('.badge', { hasText: 'Collection' })).toBeVisible()
++  })
++
++  test('the row kebab relocates a project into a folder and back to the top level', async ({ adminPage }) => {
++    const folderName = uniqueName('destination')
++    const projectName = uniqueName('movable')
++    const folder = await api.post('/api/v1/projects', {
++      data: { name: folderName, kind: 'collection' },
++    })
++    expect(folder.status(), await folder.text()).toBe(201)
++    const project = await api.post('/api/v1/projects', {
++      data: { name: projectName, kind: 'project' },
++    })
++    expect(project.status(), await project.text()).toBe(201)
++    const projectId = (await project.json()).id as string
++
++    const main = await openProjectsPage(adminPage)
++    const projectRow = main.locator('tr', { hasText: projectName })
++    await expect(projectRow).toBeVisible({ timeout: 10_000 })
++
++    await projectRow.locator('button.kebab-btn').click()
++    await adminPage.getByRole('menu').getByRole('button', { name: 'Edit…' }).click()
++
++    const dialog = adminPage.getByRole('dialog')
++    await expect(dialog).toBeVisible()
++    // The select is disabled until the folder list and the project's own record have both
++    // loaded, so selecting the option is itself the wait for that hydration.
++    await dialog.locator('select').selectOption({ label: folderName })
++    await dialog.getByRole('button', { name: 'Save', exact: true }).click()
++    await expect(dialog).toBeHidden()
++
++    // The unfiltered list is root-level only, so a moved project leaves it entirely. Asserting
++    // the row is gone is what proves the move landed rather than the dialog merely closing.
++    await expect(main.locator('tr', { hasText: projectName })).toHaveCount(0, { timeout: 10_000 })
++
++    // And the round trip: back to the top level, where the row returns.
++    await adminPage.goto(`/project/${projectId}`)
++    await expect(adminPage.locator('main.main-content h1.page-title')).toContainText(projectName)
++    const back = await api.patch(`/api/v1/projects/${projectId}`, { data: { parentId: null } })
++    expect(back.status(), await back.text()).toBe(200)
++    const returned = await openProjectsPage(adminPage)
++    await expect(returned.locator('tr', { hasText: projectName })).toBeVisible({ timeout: 10_000 })
++  })
++
++  test('the detail breadcrumb climbs out of a nested folder', async ({ adminPage }) => {
++    const outerName = uniqueName('outer')
++    const innerName = uniqueName('inner')
++    const projectName = uniqueName('nested')
++
++    const outer = await api.post('/api/v1/projects', { data: { name: outerName, kind: 'collection' } })
++    const outerId = (await outer.json()).id as string
++    const inner = await api.post('/api/v1/projects', {
++      data: { name: innerName, kind: 'collection', parentId: outerId },
++    })
++    const innerId = (await inner.json()).id as string
++    const project = await api.post('/api/v1/projects', {
++      data: { name: projectName, kind: 'project', parentId: innerId },
++    })
++    const projectId = (await project.json()).id as string
++
++    await adminPage.goto(`/project/${projectId}`)
++    const crumbs = adminPage.locator('nav.breadcrumbs')
++    await expect(crumbs).toBeVisible({ timeout: 10_000 })
++    // Root first, every containing folder, then the page itself — and the last crumb is text,
++    // not a link, so a reader never clicks through to the page they are already on.
++    // Each non-terminal crumb carries its own trailing separator span, which Playwright's
++    // normalized text renders as " /".
++    await expect(crumbs.locator('li')).toHaveText([
++      'Projects /', `${outerName} /`, `${innerName} /`, projectName,
++    ])
++    await expect(crumbs.locator('a')).toHaveCount(3)
++
++    await crumbs.getByRole('link', { name: outerName }).click()
++    await expect(adminPage).toHaveURL(new RegExp(`/project/${outerId}$`))
++    await expect(adminPage.locator('main.main-content h1.page-title')).toContainText(outerName)
++  })
++
++  test('the version breadcrumb goes back to the project versions table', async ({ adminPage }) => {
++    const seeded = await seedProjectVersion(api, 'breadcrumb')
++
++    await adminPage.goto(seeded.detailPath())
++    const crumbs = adminPage.locator('nav.breadcrumbs')
++    await expect(crumbs).toBeVisible({ timeout: 15_000 })
++    await expect(crumbs.locator('li').last()).toHaveText(seeded.versionLabel)
++
++    // This is the affordance the page had none of: from a deep link there is no history entry to
++    // go back to, so the project crumb is the only route back to the versions table.
++    await crumbs.getByRole('link', { name: seeded.projectName }).click()
++    await expect(adminPage).toHaveURL(new RegExp(`/project/${seeded.projectId}$`))
++    // en.json: projects.detail.versionsTitle = "Versions"
++    await expect(adminPage.locator('main.main-content h2.section-h')).toContainText('Versions')
++  })
++})
+diff --git a/web/src/lib/Breadcrumbs.svelte b/web/src/lib/Breadcrumbs.svelte
+new file mode 100644
+index 00000000..d0ad9184
+--- /dev/null
++++ b/web/src/lib/Breadcrumbs.svelte
+@@ -0,0 +1,72 @@
++<!--
++  Breadcrumb trail for the projects plane: Projects / <containing folders…> / <project> / <version>.
++
++  Every crumb but the last is a real anchor carrying the SPA path, so middle-click and copy-link
++  behave; the click handler calls navigate() to keep the transition client-side. The last crumb is
++  the page you are on and renders as plain text — a link back to the current page is a dead
++  control, and marking it aria-current is what tells a screen reader where the trail ends.
++
++  Consumers pass fully-formed crumbs rather than ids, because only the page knows which of them
++  it is currently sitting on and how each label is translated.
++-->
++<script>
++  import { navigate } from './store.js'
++  import { pathFor } from './routes.js'
++
++  /**
++   * The trail, root first. Each entry is `{ label, page?, params? }`; an entry with no `page`
++   * renders as plain text (used for the trailing current-page crumb, and for a folder the reader
++   * has no permission to open).
++   * @type {Array<{ label: string, page?: string, params?: Record<string, any> }>}
++   */
++  export let crumbs = []
++
++  /** Accessible name for the nav landmark — the caller supplies it translated. */
++  export let ariaLabel = 'Breadcrumb'
++
++  function go(crumb, e) {
++    if (!crumb.page) return
++    // Let the browser handle modified clicks (new tab/window) — the href is already correct.
++    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return
++    e.preventDefault()
++    navigate(crumb.page, crumb.params ?? {})
++  }
++</script>
++
++{#if crumbs.length > 0}
++  <nav class="breadcrumbs" aria-label={ariaLabel}>
++    <ol>
++      {#each crumbs as crumb, i (i)}
++        <li>
++          {#if crumb.page && i < crumbs.length - 1}
++            <a href={pathFor(crumb.page, crumb.params ?? {})} on:click={(e) => go(crumb, e)}>{crumb.label}</a>
++          {:else}
++            <span aria-current={i === crumbs.length - 1 ? 'page' : undefined}>{crumb.label}</span>
++          {/if}
++          {#if i < crumbs.length - 1}
++            <span class="sep" aria-hidden="true">/</span>
++          {/if}
++        </li>
++      {/each}
++    </ol>
++  </nav>
++{/if}
++
++<style>
++  .breadcrumbs { margin: 0 0 6px; }
++  .breadcrumbs ol {
++    display: flex;
++    flex-wrap: wrap;
++    align-items: center;
++    gap: 4px;
++    margin: 0;
++    padding: 0;
++    list-style: none;
++    font-size: 12px;
++  }
++  .breadcrumbs li { display: flex; align-items: center; gap: 4px; min-width: 0; }
++  .breadcrumbs a { color: var(--text2); text-decoration: none; }
++  .breadcrumbs a:hover { color: var(--text); text-decoration: underline; }
++  .breadcrumbs span[aria-current='page'] { color: var(--text2); }
++  .sep { color: var(--border); }
++</style>
+diff --git a/web/src/lib/ProjectEditModal.svelte b/web/src/lib/ProjectEditModal.svelte
+new file mode 100644
+index 00000000..012e86d6
+--- /dev/null
++++ b/web/src/lib/ProjectEditModal.svelte
+@@ -0,0 +1,254 @@
++<!--
++  Create-a-folder / edit-a-project modal for the projects plane.
++
++  One component covers both because they are the same form: a folder IS a project with
++  `kind: 'collection'`, and "relocate" is just the folder field of an edit. Splitting them would
++  duplicate the picker, which is the only non-trivial part.
++
++  Mode is inferred from `project`:
++    project == null  → create, POSTing `kind: 'collection'` (the "New folder" entry point)
++    project != null  → edit, PATCHing only the fields that actually changed
++
++  The PATCH is deliberately sparse. The endpoint is leave-unchanged-on-absent, so sending an
++  untouched field back is harmless but sending `parentId` when the reader never opened the folder
++  select would make a stale option value silently relocate the project. Only changed keys go.
++
++  Events:
++    on:saved  detail: the created/updated project payload. The parent reloads its own list.
++    on:close  Escape, backdrop, or Cancel. Ignored mid-save.
++-->
++<script>
++  import { createEventDispatcher, onMount } from 'svelte'
++  import { t } from 'svelte-i18n'
++  import { api } from './api.js'
++  import { extractErrorMessage } from './form.js'
++  import { relocationTargets } from './projectPaths.js'
++  import ErrorBanner from './ErrorBanner.svelte'
++
++  /**
++   * The row being edited, or null to create a new folder.
++   * @type {{ id: string, name: string, description?: string | null, parentId?: string | null, kind?: string } | null}
++   */
++  export let project = null
++
++  const dispatch = createEventDispatcher()
++
++  const isEdit = project !== null
++  const isCollection = project?.kind === 'collection'
++
++  // The list row this modal is opened from carries no description (the list API does not project
++  // one), so an edit re-reads the project. Without that, the field would render empty for a
++  // project that has a description — and an empty field that looks authoritative invites someone
++  // to submit a change they believe is a rename and is silently also a description edit.
++  let baseline = { name: project?.name ?? '', description: '', parentId: project?.parentId ?? '' }
++
++  let name = baseline.name
++  let description = baseline.description
++  // '' is the root. A select's option values are strings, so the root cannot be modelled as null
++  // here; it is converted back to an explicit null on submit, which is what moves a row to root.
++  let parentId = baseline.parentId
++
++  let targets = []
++  let loading = true
++  let targetsError = ''
++  let saving = false
++  let error = ''
++
++  $: canSubmit = name.trim().length > 0 && !saving && !loading
++
++  onMount(async () => {
++    const collections = api.listProjectCollections()
++    const detail = project ? api.getProject(project.id) : Promise.resolve(null)
++
++    try {
++      const full = await detail
++      if (full) {
++        baseline = {
++          name: full.name ?? baseline.name,
++          description: full.description ?? '',
++          parentId: full.parentId ?? '',
++        }
++        name = baseline.name
++        description = baseline.description
++        parentId = baseline.parentId
++      }
++    } catch (e) {
++      error = extractErrorMessage(e)
++    }
++
++    try {
++      const data = await collections
++      targets = relocationTargets(data.items ?? [], project?.id ?? null)
++    } catch (e) {
++      // A folder list that will not load must not block a rename. The select is disabled and
++      // says so; the rest of the form still submits, and an untouched select sends no parentId.
++      targetsError = extractErrorMessage(e)
++      targets = []
++    } finally {
++      loading = false
++    }
++  })
++
++  // The current parent may be absent from the picker — a failed load leaves `targets` empty, and
++  // the exclusion rule itself never removes a project's own parent. Falling through to the root
++  // option would then quietly offer to move the project out of its folder, so the current folder
++  // is rendered as its own option instead.
++  $: parentMissing = parentId !== '' && !loading && !targets.some((x) => x.id === parentId)
++
++  async function submit() {
++    if (!canSubmit) return
++    saving = true
++    error = ''
++    try {
++      const trimmedName = name.trim()
++      const trimmedDescription = description.trim()
++
++      if (!project) {
++        const created = await api.createProject({
++          name: trimmedName,
++          kind: 'collection',
++          description: trimmedDescription || null,
++          parentId: parentId || null,
++        })
++        dispatch('saved', created)
++        return
++      }
++
++      /** @type {Record<string, any>} */
++      const patch = {}
++      if (trimmedName !== baseline.name) patch.name = trimmedName
++      if (trimmedDescription !== baseline.description) patch.description = trimmedDescription || null
++      if (parentId !== baseline.parentId) patch.parentId = parentId || null
++
++      const updated = Object.keys(patch).length === 0
++        ? project
++        : await api.updateProject(project.id, patch)
++      dispatch('saved', updated)
++    } catch (e) {
++      error = extractErrorMessage(e)
++    } finally {
++      saving = false
++    }
++  }
++
++  function close() { if (!saving) dispatch('close') }
++  function onKeydown(e) { if (e.key === 'Escape') close() }
++  function onBackdropClick(e) { if (e.target === e.currentTarget) close() }
++
++  $: title = isEdit
++    ? (isCollection ? $t('projects.folders.editFolderTitle') : $t('projects.folders.editProjectTitle'))
++    : $t('projects.folders.newFolderTitle')
++</script>
++
++<svelte:window on:keydown={onKeydown} />
++
++<div class="overlay" on:click={onBackdropClick} role="presentation">
++  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="project-edit-title">
++    <header>
++      <h2 id="project-edit-title">{title}</h2>
++      <button class="close" on:click={close} aria-label={$t('common.actions.cancel')}>×</button>
++    </header>
++
++    <div class="body">
++      <ErrorBanner message={error} />
++
++      <label>
++        {$t('projects.folders.nameLabel')}
++        <!-- svelte-ignore a11y-autofocus -->
++        <input
++          type="text"
++          bind:value={name}
++          maxlength="200"
++          autofocus
++          placeholder={$t('projects.folders.namePlaceholder')}
++          disabled={saving || loading}
++        />
++      </label>
++
++      <label>
++        {$t('projects.folders.descriptionLabel')}
++        <input type="text" bind:value={description} maxlength="2000" disabled={saving || loading} />
++      </label>
++
++      <label>
++        {$t('projects.folders.parentLabel')}
++        <select bind:value={parentId} disabled={saving || loading || !!targetsError}>
++          <option value="">{$t('projects.folders.rootOption')}</option>
++          {#if parentMissing}
++            <option value={parentId}>{$t('projects.folders.currentFolder')}</option>
++          {/if}
++          {#each targets as target (target.id)}
++            <option value={target.id}>{target.label}</option>
++          {/each}
++        </select>
++      </label>
++      {#if targetsError}
++        <p class="hint error-hint">{$t('projects.folders.targetsFailed', { values: { message: targetsError } })}</p>
++      {:else}
++        <p class="hint">{$t('projects.folders.parentHint')}</p>
++      {/if}
++    </div>
++
++    <footer>
++      <button type="button" on:click={close} disabled={saving}>{$t('common.actions.cancel')}</button>
++      <button type="button" class="primary" on:click={submit} disabled={!canSubmit}>
++        {saving ? $t('common.actions.saving') : $t('common.actions.save')}
++      </button>
++    </footer>
++  </div>
++</div>
++
++<style>
++  .overlay {
++    position: fixed;
++    inset: 0;
++    background: var(--overlay-scrim);
++    display: flex;
++    align-items: center;
++    justify-content: center;
++    z-index: 100;
++    padding: 24px;
++  }
++  .dialog {
++    background: var(--bg);
++    border: 1px solid var(--border);
++    border-radius: 8px;
++    width: 100%;
++    max-width: 460px;
++    max-height: 90vh;
++    display: flex;
++    flex-direction: column;
++    overflow: hidden;
++    box-shadow: var(--shadow);
++  }
++  header {
++    display: flex;
++    align-items: center;
++    justify-content: space-between;
++    padding: 12px 20px;
++    border-bottom: 1px solid var(--border);
++  }
++  h2 { margin: 0; font-size: 16px; font-weight: 600; }
++  .close {
++    background: transparent;
++    border: 0;
++    font-size: 22px;
++    line-height: 1;
++    color: var(--text2);
++    cursor: pointer;
++    padding: 4px 8px;
++    min-height: 0;
++  }
++  .close:hover { color: var(--text); }
++  .body { padding: 16px 20px; overflow-y: auto; }
++  .body label { display: block; margin-bottom: 12px; }
++  .hint { margin: -6px 0 0; font-size: 12px; color: var(--text2); }
++  .error-hint { color: var(--badge-red-text); }
++  footer {
++    display: flex;
++    justify-content: flex-end;
++    gap: 8px;
++    padding: 12px 20px;
++    border-top: 1px solid var(--border);
++  }
++</style>
+diff --git a/web/src/lib/api.js b/web/src/lib/api.js
+index b90c009e..694729ad 100644
+--- a/web/src/lib/api.js
++++ b/web/src/lib/api.js
+@@ -284,21 +284,28 @@ export const api = {
+   downloadVersion: (eco, name, ver, file) =>
+     downloadBlob(`/packages/${eco}/${name.replaceAll('/', '%2F')}/${ver}/download`, file ? { file } : {}, file || `${name}-${ver}`),
+ 
+   // Projects (SBOM/VEX/SARIF hierarchy) — read visibility for every role, mutations gated
+   // in-page to admin/owner. Paginated with limit/offset (not page), per the projects API.
+   listProjects: (params = {}) => {
+     const q = qs({ limit: 50, offset: 0, ...params })
+     return req('GET', `/projects?${q}`)
+   },
+   getProject: (id) => req('GET', `/projects/${encodeURIComponent(id)}`),
++  // Every collection in the org, flat and unpaged — the relocation picker renders each target as
++  // a full path, so it needs the whole set rather than the root-only page listProjects returns.
++  listProjectCollections: () => req('GET', '/projects/collections'),
+   createProject: (body) => req('POST', '/projects', body),
++  // PATCH is leave-unchanged-on-absent server-side: send only the fields being edited. An
++  // explicit `parentId: null` is how a project moves back to the root, which is why callers must
++  // send that key deliberately rather than letting an unset field stand in for it.
++  updateProject: (id, patch) => req('PATCH', `/projects/${encodeURIComponent(id)}`, patch),
+   deleteProject: (id) => req('DELETE', `/projects/${encodeURIComponent(id)}`),
+   deleteProjectVersion: (projectId, versionId) =>
+     req('DELETE', `/projects/${encodeURIComponent(projectId)}/versions/${encodeURIComponent(versionId)}`),
+   promoteLatest: (projectId, versionId) =>
+     req('POST', `/projects/${encodeURIComponent(projectId)}/versions/${encodeURIComponent(versionId)}/promote-latest`),
+ 
+   // Activity
+   getActivity: (params = {}) => {
+     const q = qs({ limit: 50, page: 1, ...params })
+     return req('GET', `/activity?${q}`)
+diff --git a/web/src/lib/projectPaths.js b/web/src/lib/projectPaths.js
+new file mode 100644
+index 00000000..c2c30ac1
+--- /dev/null
++++ b/web/src/lib/projectPaths.js
+@@ -0,0 +1,69 @@
++// Folder-path helpers for the projects plane. A "folder" in the UI is a `kind: 'collection'`
++// project — the same row shape, distinguished only by the discriminator — so the picker and the
++// breadcrumb both work off the flat collection list `GET /api/v1/projects/collections` returns.
++//
++// Kept apart from the DOM so the two rules that matter can be unit-tested directly: a path label
++// is built by walking parentId to the root, and a project can never be relocated into its own
++// subtree (the server refuses that too, but the picker must not offer the move in the first
++// place — an option that always errors is worse than an absent one).
++
++/** The separator between path segments, matching the breadcrumb's own visual separator. */
++export const PATH_SEPARATOR = ' / '
++
++/**
++ * Full root-to-leaf label for one collection, e.g. `Platform / Payments`.
++ *
++ * @param {string} id collection id to label
++ * @param {Map<string, { id: string, name: string, parentId?: string | null }>} byId
++ * @returns {string} the joined path, or the bare name when an ancestor is missing from `byId`
++ */
++export function collectionPath(id, byId) {
++  const segments = []
++  const seen = new Set()
++  /** @type {string | null} */
++  let cursor = id
++  // A cycle is impossible through the API, but this runs against whatever the server sent — a
++  // bounded walk degrades to a shorter label instead of hanging the tab.
++  while (cursor && !seen.has(cursor)) {
++    seen.add(cursor)
++    const node = byId.get(cursor)
++    if (!node) break
++    segments.unshift(node.name)
++    cursor = node.parentId ?? null
++  }
++  return segments.join(PATH_SEPARATOR)
++}
++
++/**
++ * The collections offered as relocation targets for `projectId`, each with its full path label,
++ * sorted by that label. The root itself is NOT included — callers render it as their own first
++ * option, because its label is a translated string this module has no business owning.
++ *
++ * `projectId` and every collection beneath it are excluded: moving a folder into itself or into
++ * one of its own descendants would cut the whole subtree loose from the root.
++ *
++ * @param {Array<{ id: string, name: string, parentId?: string | null }>} collections
++ * @param {string | null} projectId the project being moved, or null when creating a new one
++ * @returns {Array<{ id: string, label: string }>}
++ */
++export function relocationTargets(collections, projectId) {
++  const byId = new Map(collections.map((c) => [c.id, c]))
++
++  const excluded = (id) => {
++    if (!projectId) return false
++    const seen = new Set()
++    /** @type {string | null} */
++    let cursor = id
++    while (cursor && !seen.has(cursor)) {
++      if (cursor === projectId) return true
++      seen.add(cursor)
++      cursor = byId.get(cursor)?.parentId ?? null
++    }
++    return false
++  }
++
++  return collections
++    .filter((c) => !excluded(c.id))
++    .map((c) => ({ id: c.id, label: collectionPath(c.id, byId) }))
++    .sort((a, b) => a.label.localeCompare(b.label))
++}
+diff --git a/web/src/lib/projectPaths.test.js b/web/src/lib/projectPaths.test.js
+new file mode 100644
+index 00000000..2e492932
+--- /dev/null
++++ b/web/src/lib/projectPaths.test.js
+@@ -0,0 +1,99 @@
++import { describe, it, expect } from 'vitest'
++import { collectionPath, relocationTargets, PATH_SEPARATOR } from './projectPaths.js'
++
++/**
++ * Tree used throughout:
++ *   platform            (root)
++ *     └── payments
++ *           └── ledger
++ *   infra               (root)
++ */
++const COLLECTIONS = [
++  { id: 'platform', name: 'Platform', parentId: null },
++  { id: 'payments', name: 'Payments', parentId: 'platform' },
++  { id: 'ledger', name: 'Ledger', parentId: 'payments' },
++  { id: 'infra', name: 'Infra', parentId: null },
++]
++
++const byId = new Map(COLLECTIONS.map((c) => [c.id, c]))
++
++describe('collectionPath', () => {
++  it('joins the whole chain root-first', () => {
++    expect(collectionPath('ledger', byId)).toBe(`Platform${PATH_SEPARATOR}Payments${PATH_SEPARATOR}Ledger`)
++  })
++
++  it('returns the bare name for a root collection', () => {
++    expect(collectionPath('platform', byId)).toBe('Platform')
++  })
++
++  it('degrades to the known suffix when an ancestor is missing', () => {
++    const partial = new Map([['ledger', { id: 'ledger', name: 'Ledger', parentId: 'gone' }]])
++    expect(collectionPath('ledger', partial)).toBe('Ledger')
++  })
++
++  it('terminates on a cyclic chain instead of hanging', () => {
++    const cyclic = new Map([
++      ['a', { id: 'a', name: 'A', parentId: 'b' }],
++      ['b', { id: 'b', name: 'B', parentId: 'a' }],
++    ])
++    expect(collectionPath('a', cyclic)).toBe(`B${PATH_SEPARATOR}A`)
++  })
++
++  it('returns empty for an unknown id', () => {
++    expect(collectionPath('nope', byId)).toBe('')
++  })
++})
++
++describe('relocationTargets', () => {
++  it('offers every collection when creating (no project to exclude)', () => {
++    const labels = relocationTargets(COLLECTIONS, null).map((t) => t.label)
++    expect(labels).toEqual([
++      'Infra',
++      'Platform',
++      `Platform${PATH_SEPARATOR}Payments`,
++      `Platform${PATH_SEPARATOR}Payments${PATH_SEPARATOR}Ledger`,
++    ])
++  })
++
++  it('excludes the folder being moved and every folder beneath it', () => {
++    // Moving `payments`: itself and `ledger` are out; `platform` (its own parent) stays, because
++    // "leave it where it is" must remain selectable, and `infra` is a legal destination.
++    const ids = relocationTargets(COLLECTIONS, 'payments').map((t) => t.id)
++    expect(ids).toEqual(['infra', 'platform'])
++  })
++
++  it('excludes a deep descendant, not just a direct child', () => {
++    const ids = relocationTargets(COLLECTIONS, 'platform').map((t) => t.id)
++    expect(ids).toEqual(['infra'])
++  })
++
++  it('keeps every collection when the moved project is a leaf that contains none', () => {
++    // Path order, so each folder is immediately followed by its own children.
++    const ids = relocationTargets(COLLECTIONS, 'some-plain-project').map((t) => t.id)
++    expect(ids).toEqual(['infra', 'platform', 'payments', 'ledger'])
++  })
++
++  it('sorts by the full path, not by the bare name', () => {
++    // 'Alpha' nested under 'Zulu' must sort after root-level 'Beta' — a bare-name sort would
++    // put it first and scatter each folder's children away from it in the list.
++    const nested = [
++      { id: 'zulu', name: 'Zulu', parentId: null },
++      { id: 'alpha', name: 'Alpha', parentId: 'zulu' },
++      { id: 'beta', name: 'Beta', parentId: null },
++    ]
++    expect(relocationTargets(nested, null).map((t) => t.label)).toEqual([
++      'Beta',
++      'Zulu',
++      `Zulu${PATH_SEPARATOR}Alpha`,
++    ])
++  })
++
++  it('does not hang on a cyclic chain while testing exclusion', () => {
++    const cyclic = [
++      { id: 'a', name: 'A', parentId: 'b' },
++      { id: 'b', name: 'B', parentId: 'a' },
++    ]
++    // Both survive with a truncated label ('A / B' and 'B / A'), which is what sorts b ahead of a.
++    expect(relocationTargets(cyclic, 'c').map((t) => t.id)).toEqual(['b', 'a'])
++  })
++})
+diff --git a/web/src/locales/en.json b/web/src/locales/en.json
+index fd8a512c..d1565cd6 100644
+--- a/web/src/locales/en.json
++++ b/web/src/locales/en.json
+@@ -203,20 +203,37 @@
+       "inheritOrgDefault": "Inherit (org default)"
+     },
+     "empty": "No packages found"
+   },
+   "projects": {
+     "title": "Projects",
+     "searchPlaceholder": "Search projects…",
+     "empty": "No projects yet. Packages are the artifacts you serve — projects are the applications you build with them. Upload an SBOM to get started.",
+     "emptySearch": "No projects match your search.",
+     "collection": "Collection",
++    "breadcrumb": "Breadcrumb",
++    "folders": {
++      "newFolder": "New folder",
++      "newFolderTitle": "New folder",
++      "editProjectTitle": "Edit project",
++      "editFolderTitle": "Edit folder",
++      "nameLabel": "Name",
++      "namePlaceholder": "e.g. Platform",
++      "descriptionLabel": "Description (optional)",
++      "parentLabel": "Folder",
++      "rootOption": "Top level",
++      "currentFolder": "Current folder",
++      "parentHint": "Folders group projects. A folder holds no versions of its own.",
++      "targetsFailed": "Folders could not be loaded, so this project cannot be moved right now: {message}",
++      "actionsMenu": "Actions for {name}",
++      "edit": "Edit…"
++    },
+     "columns": {
+       "name": "Name",
+       "components": "Components",
+       "severity": "Severity",
+       "policy": "Policy",
+       "latest": "Latest",
+       "lastUpload": "Last upload"
+     },
+     "severity": {
+       "critical": "{count} critical",
+@@ -2469,21 +2486,21 @@
+       "unscannableWarnHelp": "No advisory feed covers these components, and waiting will not change that. This version's warn comes from deferred scans, which resolve once the advisory source is reachable again — not from these components.",
+       "lastScan": "Last scanned {at}",
+       "neverScanned": "Never scanned"
+     },
+     "pillars": {
+       "security": "Security",
+       "license": "License",
+       "policy": "Policy",
+       "noAdvisories": "No advisories",
+       "licenseFlagged": "{count} to review",
+-    "licenseScopeHelp": "Counted over the components on this page. The analysis rollup does not report a version-wide license count.",
++      "licenseScopeHelp": "Counted over the components on this page. The analysis rollup does not report a version-wide license count.",
+       "licenseClean": "No license findings"
+     },
+     "export": {
+       "button": "Export",
+       "hint": "Freshly rendered documents. Originals are in the Documents panel below.",
+       "inventory": "SBOM — inventory (CycloneDX)",
+       "vdr": "SBOM — with vulnerabilities (VDR)",
+       "vex": "VEX document"
+     },
+     "documents": {
+diff --git a/web/src/locales/fr.json b/web/src/locales/fr.json
+index 24dba0c4..d0082908 100644
+--- a/web/src/locales/fr.json
++++ b/web/src/locales/fr.json
+@@ -203,20 +203,37 @@
+       "inheritOrgDefault": "Hériter (valeur par défaut de l'organisation)"
+     },
+     "empty": "Aucun paquet trouvé"
+   },
+   "projects": {
+     "title": "Projets",
+     "searchPlaceholder": "Rechercher des projets…",
+     "empty": "Aucun projet pour l'instant. Les paquets sont les artefacts que vous diffusez — les projets sont les applications que vous construisez avec eux. Téléversez un SBOM pour commencer.",
+     "emptySearch": "Aucun projet ne correspond à votre recherche.",
+     "collection": "Collection",
++    "breadcrumb": "Fil d’Ariane",
++    "folders": {
++      "newFolder": "Nouveau dossier",
++      "newFolderTitle": "Nouveau dossier",
++      "editProjectTitle": "Modifier le projet",
++      "editFolderTitle": "Modifier le dossier",
++      "nameLabel": "Nom",
++      "namePlaceholder": "ex. Plateforme",
++      "descriptionLabel": "Description (facultatif)",
++      "parentLabel": "Dossier",
++      "rootOption": "Niveau racine",
++      "currentFolder": "Dossier actuel",
++      "parentHint": "Les dossiers regroupent les projets. Un dossier ne contient aucune version.",
++      "targetsFailed": "Impossible de charger les dossiers ; ce projet ne peut pas être déplacé pour l’instant : {message}",
++      "actionsMenu": "Actions pour {name}",
++      "edit": "Modifier…"
++    },
+     "columns": {
+       "name": "Nom",
+       "components": "Composants",
+       "severity": "Gravité",
+       "policy": "Politique",
+       "latest": "Dernière version",
+       "lastUpload": "Dernier téléversement"
+     },
+     "severity": {
+       "critical": "{count} critique",
+@@ -2469,21 +2486,21 @@
+       "unscannableWarnHelp": "Aucun flux d'avis ne couvre ces composants, et attendre n'y changera rien. L'avertissement de cette version vient d'analyses différées, qui se résolvent dès que la source d'avis redevient joignable — pas de ces composants.",
+       "lastScan": "Dernière analyse le {at}",
+       "neverScanned": "Jamais analysée"
+     },
+     "pillars": {
+       "security": "Sécurité",
+       "license": "Licence",
+       "policy": "Politique",
+       "noAdvisories": "Aucun avis",
+       "licenseFlagged": "{count} à réviser",
+-    "licenseScopeHelp": "Compté sur les composants de cette page. Le sommaire d'analyse ne fournit pas de décompte de licences pour la version entière.",
++      "licenseScopeHelp": "Compté sur les composants de cette page. Le sommaire d'analyse ne fournit pas de décompte de licences pour la version entière.",
+       "licenseClean": "Aucun constat de licence"
+     },
+     "export": {
+       "button": "Exporter",
+       "hint": "Documents régénérés à l'instant. Les originaux se trouvent dans le panneau Documents ci-dessous.",
+       "inventory": "SBOM — inventaire (CycloneDX)",
+       "vdr": "SBOM — avec vulnérabilités (VDR)",
+       "vex": "Document VEX"
+     },
+     "documents": {
+diff --git a/web/src/pages/ProjectDetail.svelte b/web/src/pages/ProjectDetail.svelte
+index c8c4acf1..2448fbb6 100644
+--- a/web/src/pages/ProjectDetail.svelte
++++ b/web/src/pages/ProjectDetail.svelte
+@@ -10,20 +10,21 @@
+   row carries componentCount/policyStatus, and each child row carries latestVersion/policyStatus.
+   The stat-card row here is built from those, not from data the endpoint does not send.
+ -->
+ <script>
+   import { t } from 'svelte-i18n'
+   import { api } from '../lib/api.js'
+   import ErrorBanner from '../lib/ErrorBanner.svelte'
+   import { navigate, user } from '../lib/store.js'
+   import { reportPageLoad } from '../lib/pageLoad.js'
+   import { formatDate } from '../lib/format.js'
++  import Breadcrumbs from '../lib/Breadcrumbs.svelte'
+ 
+   /** The route params this page was mounted for, supplied by RouteView. @type {Record<string, any>} */
+   export let params = {}
+ 
+   /** The route transition this page was mounted for, supplied by RouteView. @type {number | null} */
+   export let pageToken = null
+ 
+   let project = null, loading = true, error = ''
+   let promotingId = null, deletingId = null, deletingProject = false
+ 
+@@ -38,20 +39,31 @@
+     } catch (e) {
+       error = $t('projects.detail.loadFailed', { values: { message: e.message } })
+     } finally {
+       loading = false
+     }
+   }
+ 
+   $: if (params.id) load()
+   $: reportPageLoad(pageToken, loading)
+ 
++  // Projects / <containing folders, root first> / <this project>. `ancestors` comes from the
++  // detail payload already resolved, so the trail costs no extra request and is correct at any
++  // nesting depth. The trailing crumb is this page and carries no link.
++  $: crumbs = [
++    { label: $t('projects.title'), page: 'projects' },
++    ...(project?.ancestors ?? []).map((a) => ({
++      label: a.name, page: 'project-detail', params: { id: a.id },
++    })),
++    { label: project?.name ?? '' },
++  ]
++
+   // The version the stat-card row summarizes: is_latest wins; falls back to the first row so a
+   // project mid-scan (no version promoted yet) still has something to show.
+   $: statVersion = (project?.versions ?? []).find((v) => v.isLatest) ?? (project?.versions ?? [])[0] ?? null
+ 
+   function openChild(child) {
+     navigate('project-detail', { id: child.id })
+   }
+ 
+   function openVersion(ver) {
+     navigate('project-version', { id: params.id, versionId: ver.id })
+@@ -93,24 +105,21 @@
+     } catch (e) {
+       error = e.message
+       deletingProject = false
+     }
+   }
+ </script>
+ 
+ <div class="page">
+   <div class="page-header">
+     <div>
+-      <button on:click={() => {
+-        if ((window.history.state?.idx ?? 0) > 0) window.history.back()
+-        else navigate('projects', {}, { replace: true })
+-      }} class="mb-2">{$t('common.actions.back')}</button>
++      <Breadcrumbs {crumbs} ariaLabel={$t('projects.breadcrumb')} />
+       <h1 class="page-title">
+         {project?.name ?? ''}
+         {#if project?.classifier}
+           <span class="badge">{project.classifier}</span>
+         {/if}
+         {#if isCollection}
+           <span class="badge has-icon">
+             <svg width="12" height="12" aria-hidden="true"><use href="/icons.svg#icon-hierarchy"/></svg>
+             {$t('projects.detail.collectionBadge')}
+           </span>
+diff --git a/web/src/pages/ProjectVersionDetail.svelte b/web/src/pages/ProjectVersionDetail.svelte
+index 6bec420d..e08bfa4b 100644
+--- a/web/src/pages/ProjectVersionDetail.svelte
++++ b/web/src/pages/ProjectVersionDetail.svelte
+@@ -1,20 +1,21 @@
+ <script>
+   import { t } from 'svelte-i18n'
+   import { api } from '../lib/api.js'
+   import { currentOrg, navigate, user } from '../lib/store.js'
+   import { reportPageLoad } from '../lib/pageLoad.js'
+   import { formatBytes, formatDate } from '../lib/format.js'
+   import { copyToClipboard } from '../lib/clipboard.js'
+   import { readQuery, writeQuery } from '../lib/tableState.js'
+   import { pathFor } from '../lib/routes.js'
+   import { ECO_LABEL } from '../lib/ecosystems.js'
++  import Breadcrumbs from '../lib/Breadcrumbs.svelte'
+   import DataTable from '../lib/DataTable.svelte'
+   import ErrorBanner from '../lib/ErrorBanner.svelte'
+   import Pagination from '../lib/Pagination.svelte'
+   import RiskPillars from '../lib/RiskPillars.svelte'
+   import SearchInput from '../lib/SearchInput.svelte'
+   import Toggle from '../lib/Toggle.svelte'
+   import SbomUploadModal from '../lib/sbom/SbomUploadModal.svelte'
+   import ComponentAdvisoryPanel from '../lib/sbom/ComponentAdvisoryPanel.svelte'
+   import {
+     DEFAULT_TABLE_STATE,
+@@ -194,20 +195,32 @@
+   // `versionId` is named in both statements on purpose: it is what changes when a reader moves
+   // between two versions of the same project, and a statement that does not reference it would
+   // keep showing the version it first mounted with.
+   $: if (org && projectId && versionId) {
+     loadProject()
+     loadDocuments()
+     loadLicensePolicy()
+   }
+   $: if (org && projectId && versionId) load()
+ 
++  // Projects / <containing folders> / <project> / <version>. The project crumb is this page's way
++  // back to the versions table — landing here from a deep link means there is no history entry to
++  // go back to, so an up-trail is the only affordance that always works.
++  $: crumbs = [
++    { label: $t('projects.title'), page: 'projects' },
++    ...(project?.ancestors ?? []).map((a) => ({
++      label: a.name, page: 'project-detail', params: { id: a.id },
++    })),
++    { label: project?.name ?? '', page: 'project-detail', params: { id: projectId } },
++    { label: versionLabel || $t('projects.detail.isLatest') },
++  ]
++
+   function reload() { page = 1; sync(); load() }
+   function onPageChange(e) { page = e.detail.page; sync(); load() }
+   function onLimitChange(e) { limit = e.detail.limit; page = 1; sync(); load() }
+   function onSortChange(e) { sortCol = e.detail.col; sortDir = e.detail.dir; page = 1; sync(); load() }
+   function setScope(value) { scope = value; reload() }
+   function setSeverity(value) { severity = value; reload() }
+ 
+   function toggleRow(item) {
+     expandedId = expandedId === item.componentId ? null : item.componentId
+   }
+@@ -354,23 +367,26 @@
+     { key: 'severity', label: $t('sbomAnalysis.columns.vulns'),     sortable: true,  width: '130px', defaultDir: 'desc' },
+     { key: 'priority', label: $t('sbomAnalysis.columns.priority'),  sortable: true,  width: '100px', defaultDir: 'desc' },
+     { key: 'reach',    label: $t('sbomAnalysis.columns.reach'),     sortable: false, width: '120px' },
+   ]
+ </script>
+ 
+ <svelte:window on:click={closeExport} />
+ 
+ <div class="page">
+   <div class="page-header">
+-    <div class="header-id">
+-      <h1 class="page-title">{project?.name ?? $t('sbomAnalysis.title')}</h1>
+-      {#if versionLabel}<span class="badge version-badge mono">{versionLabel}</span>{/if}
++    <div class="header-id-block">
++      <Breadcrumbs {crumbs} ariaLabel={$t('projects.breadcrumb')} />
++      <div class="header-id">
++        <h1 class="page-title">{project?.name ?? $t('sbomAnalysis.title')}</h1>
++        {#if versionLabel}<span class="badge version-badge mono">{versionLabel}</span>{/if}
++      </div>
+     </div>
+     <div class="header-actions">
+       {#if isAdmin}
+         <button type="button" class="primary" on:click={() => uploadOpen = true}>
+           <svg width="13" height="13" aria-hidden="true"><use href="/icons.svg#icon-upload"/></svg>
+           {$t('sbomAnalysis.upload')}
+         </button>
+       {/if}
+       <span class="export-menu">
+         <button type="button" on:click|stopPropagation={() => exportOpen = !exportOpen} aria-haspopup="true" aria-expanded={exportOpen}>
+@@ -735,20 +751,22 @@
+     <SbomUploadModal
+       presetProjectId={projectId}
+       presetProjectName={project?.name ?? ''}
+       presetVersionLabel={versionLabel}
+       on:close={() => { uploadOpen = false; loadDocuments(); load() }}
+     />
+   {/if}
+ </div>
+ 
+ <style>
++  /* The trail stacks above the title; the title and its version badge stay on one line. */
++  .header-id-block { min-width: 0; }
+   .header-id { display: flex; align-items: center; gap: 10px; }
+   .version-badge { font-size: 12px; }
+   .header-actions { display: flex; align-items: center; gap: 8px; }
+   .header-actions button { display: inline-flex; align-items: center; gap: 6px; }
+ 
+   /* Export menu — the popover contract the row-actions menu established, anchored to the
+      button rather than positioned against the viewport. */
+   .export-menu { position: relative; display: inline-flex; }
+   .export-popover {
+     position: absolute;
+diff --git a/web/src/pages/Projects.svelte b/web/src/pages/Projects.svelte
+index 5cbb4947..804706b4 100644
+--- a/web/src/pages/Projects.svelte
++++ b/web/src/pages/Projects.svelte
+@@ -1,34 +1,44 @@
+ <!--
+   Projects list — root-level projects (parent == null) with per-row rollups from the list API.
+   Search flattens: a matched child at any depth renders indented directly under its parent (a
+   real row when the parent matched too, a synthesized header when it did not) — grouped rows,
+   no tree widget. Grouping itself lives in lib/projectGrouping.js so it can be unit-tested apart
+   from the DOM.
+ 
+-  Mutations (create/delete/promote) are role-gated inside ProjectDetail.svelte, not here — this
+-  page is read visibility for every member (see routes.js ADMIN_ONLY_PAGES / Sidebar.svelte).
++  Filing lives here: "New folder" creates a `kind: 'collection'` project, and each row's kebab
++  offers Edit (rename/re-describe/relocate) and Delete. Version-scoped mutations (promote, delete
++  a version) stay on ProjectDetail.svelte. Every mutation is admin/owner-gated in-page, same
++  `isAdmin` idiom as the detail page; read visibility is every member's
++  (see routes.js ADMIN_ONLY_PAGES / Sidebar.svelte).
+ -->
+ <script>
+   import { t } from 'svelte-i18n'
+   import { api } from '../lib/api.js'
+   import ErrorBanner from '../lib/ErrorBanner.svelte'
+   import DataTable from '../lib/DataTable.svelte'
+   import Pagination from '../lib/Pagination.svelte'
+   import SearchInput from '../lib/SearchInput.svelte'
+   import { currentOrg, navigate, user } from '../lib/store.js'
+   import SbomUploadModal from '../lib/sbom/SbomUploadModal.svelte'
++  import ProjectEditModal from '../lib/ProjectEditModal.svelte'
++  import RowActionsMenu from '../lib/RowActionsMenu.svelte'
+   import { reportPageLoad } from '../lib/pageLoad.js'
+   import { formatDateShort } from '../lib/format.js'
++  import { extractErrorMessage } from '../lib/form.js'
+ 
+   $: isAdmin = $user?.role === 'admin' || $user?.role === 'owner'
+   let uploadOpen = false
++  // null = closed. `{ project: null }` is the create-a-folder mode; `{ project: row }` edits.
++  let editTarget = null
++  let openActionsId = null
++  let deletingId = null
+   import { readQuery, writeQuery } from '../lib/tableState.js'
+   import { buildProjectDisplayRows } from '../lib/projectGrouping.js'
+ 
+   // Table state lives in the URL query string, same convention as Packages.svelte — it survives
+   // navigating into a project's detail page and back, plus reloads and copied links. The API
+   // paginates with limit/offset (not page), so `page` here is a display concept only; it is
+   // converted to `offset` right before the request.
+   const DEFAULTS = { q: '', page: 1, limit: 50 }
+   const init = readQuery(DEFAULTS)
+ 
+@@ -84,37 +94,72 @@
+   // grouping pass above depends on that order being kept intact) — every comparator is a no-op
+   // so DataTable's stable local sort never reshuffles it.
+   const NOOP_CMP = () => 0
+   $: columns = [
+     { key: 'name',        label: $t('projects.columns.name'),       sortable: false },
+     { key: 'components',  label: $t('projects.columns.components'), sortable: false, width: '110px', align: 'right' },
+     { key: 'severity',    label: $t('projects.columns.severity'),   sortable: false, width: '170px' },
+     { key: 'policy',      label: $t('projects.columns.policy'),     sortable: false, width: '110px' },
+     { key: 'latest',      label: $t('projects.columns.latest'),     sortable: false, width: '120px' },
+     { key: 'lastUpload',  label: $t('projects.columns.lastUpload'), sortable: false, width: '130px' },
++    // Header-less trailing column: the kebab needs a cell, and a labelled one would read as data.
++    ...(isAdmin ? [{ key: 'actions', label: '', sortable: false, width: '48px' }] : []),
+   ]
+   const comparators = {
+     name: NOOP_CMP, components: NOOP_CMP, severity: NOOP_CMP,
+-    policy: NOOP_CMP, latest: NOOP_CMP, lastUpload: NOOP_CMP,
++    policy: NOOP_CMP, latest: NOOP_CMP, lastUpload: NOOP_CMP, actions: NOOP_CMP,
+   }
+ 
+   function openProject(row) {
+     if (row.isHeader) return
+     navigate('project-detail', { id: row.id })
+   }
++
++  function startEdit(row) {
++    openActionsId = null
++    editTarget = { project: row }
++  }
++
++  function startNewFolder() {
++    editTarget = { project: null }
++  }
++
++  function onSaved() {
++    editTarget = null
++    load()
++  }
++
++  async function remove(row) {
++    openActionsId = null
++    if (!confirm($t('projects.detail.deleteProjectConfirm', { values: { name: row.name } }))) return
++    deletingId = row.id
++    error = ''
++    try {
++      await api.deleteProject(row.id)
++      await load()
++    } catch (e) {
++      error = extractErrorMessage(e)
++    } finally {
++      deletingId = null
++    }
++  }
+ </script>
+ 
+ <div class="page">
+   <div class="page-header">
+     <h1 class="page-title">{$t('projects.title')}</h1>
+     {#if isAdmin}
+       <div class="header-actions">
++        <button type="button" on:click={startNewFolder}>
++          <svg width="13" height="13" aria-hidden="true"><use href="/icons.svg#icon-hierarchy"/></svg>
++          {$t('projects.folders.newFolder')}
++        </button>
+         <button type="button" class="primary" on:click={() => (uploadOpen = true)}>
+           <svg width="13" height="13" aria-hidden="true"><use href="/icons.svg#icon-upload"/></svg>
+           {$t('sbomUpload.title')}
+         </button>
+       </div>
+     {/if}
+   </div>
+ 
+   <div class="page-toolbar">
+     <SearchInput placeholder={$t('projects.searchPlaceholder')} bind:value={search} on:search={handleSearch} class="toolbar-search" />
+@@ -161,43 +206,79 @@
+         </td>
+         <td class="nowrap">
+           {#if row.policyStatus}
+             <span class="badge policy-{row.policyStatus}">{$t(`projects.policy.${row.policyStatus}`)}</span>
+           {:else}
+             <span class="text-muted">{$t('projects.policy.unscanned')}</span>
+           {/if}
+         </td>
+         <td class="mono nowrap">{row.latestVersion ?? $t('projects.noVersion')}</td>
+         <td class="nowrap text-muted">{row.lastUploadAt ? $formatDateShort(row.lastUploadAt) : $t('projects.noVersion')}</td>
++        {#if isAdmin}
++          <td class="actions-cell" on:click|stopPropagation>
++            <div class="row-actions">
++              <RowActionsMenu
++                id={row.id}
++                bind:openId={openActionsId}
++                ariaLabel={$t('projects.folders.actionsMenu', { values: { name: row.name } })}
++              >
++                <button class="popover-item" on:click|stopPropagation={() => startEdit(row)}>
++                  {$t('projects.folders.edit')}
++                </button>
++                <div class="popover-divider"></div>
++                <button
++                  class="popover-item danger"
++                  disabled={deletingId === row.id}
++                  on:click|stopPropagation={() => remove(row)}
++                >
++                  {$t('common.actions.delete')}
++                </button>
++              </RowActionsMenu>
++            </div>
++          </td>
++        {/if}
+       </tr>
+     {/if}
+   </DataTable>
+ 
+   <Pagination {total} {page} {limit}
+     on:pagechange={onPageChange}
+     on:limitchange={onLimitChange} />
+ 
+   {#if uploadOpen}
+     <SbomUploadModal on:close={() => (uploadOpen = false)} on:uploaded={() => load()} />
+   {/if}
++
++  {#if editTarget}
++    <ProjectEditModal
++      project={editTarget.project}
++      on:saved={onSaved}
++      on:close={() => (editTarget = null)}
++    />
++  {/if}
+ </div>
+ 
+ <style>
+   .nowrap { white-space: nowrap; }
+   .vuln-cell { white-space: nowrap; }
+   .name-cell { overflow-wrap: anywhere; }
+   /* .badge.has-icon is global (app.css) — reused as-is. */
+   .ml-1 { margin-left: 6px; }
+ 
+   /* Grouped/indented rows on search — no tree widget. row-indent is an empty inline spacer
+      rather than padding on the cell, so the strong/badge that follows still starts flush after
+      it instead of the whole cell's text shifting including its title tooltip anchor. */
+   .row-indent { display: inline-block; width: 0; }
+   .row-indent.visible { width: 20px; }
++  /* The kebab popover escapes the cell, so the cell must not clip it. Row actions live in their
++     own wrapper div — never display:flex directly on the td. */
++  .actions-cell { overflow: visible; white-space: nowrap; text-align: right; }
++  .row-actions { display: flex; gap: 6px; align-items: center; justify-content: flex-end; }
++
+   .group-header td {
+     color: var(--text2);
+     font-size: 12px;
+     font-weight: 600;
+     background: var(--bg2);
+     cursor: default;
+   }
+ </style>

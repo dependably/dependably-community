@@ -77,6 +77,48 @@ public static class SsrfGuard
         Candidates(ip).Any(candidate => AlwaysBlockedRanges.Any(range => range.Contains(candidate)));
 
     /// <summary>
+    /// Ranges blocked even for an endpoint the <em>operator</em> declared — see
+    /// <see cref="IsBlockedIpForOperatorEndpoint"/>. Deliberately far narrower than
+    /// <see cref="AlwaysBlockedRanges"/>: loopback and RFC 1918 are removed, because a
+    /// self-hosted sidecar on the same host or the same private network is the normal shape for
+    /// an operator-declared endpoint rather than an attack on one.
+    ///
+    /// <para>
+    /// What stays blocked is the range where a request forged through this path would be a real
+    /// escalation rather than a self-inflicted one: the cloud instance-metadata endpoint
+    /// (<c>169.254.169.254</c> and the rest of link-local), which hands out credentials to
+    /// anything that can reach it. No legitimate tracker lives there.
+    /// </para>
+    /// </summary>
+    private static readonly IPAddressRange[] OperatorEndpointBlockedRanges =
+    [
+        IPAddressRange.Parse("169.254.0.0/16"),  // cloud instance metadata (IMDS)
+        IPAddressRange.Parse("fe80::/10"),       // IPv6 link-local, including IMDS over IPv6
+    ];
+
+    /// <summary>
+    /// Block predicate for an endpoint supplied by the <em>deployment operator</em> rather than
+    /// by a tenant or an artifact: the instance-level vulnerability-tracker connection, which is
+    /// apex-only, system-scoped, and one per deployment.
+    ///
+    /// <para>
+    /// The SSRF guard exists to stop an <em>attacker-influenced</em> URL reaching an internal
+    /// resource. This URL is not one. An operator pointing it at their own loopback or private
+    /// network gains nothing they do not already have — the same principal can rotate the JWT
+    /// signing key and read every instance setting — while blocking those ranges makes the
+    /// feature unusable in the shape it is designed for, a sidecar on a private network.
+    /// </para>
+    ///
+    /// <para>
+    /// The IPv6 transitional decodings still apply, so metadata cannot be smuggled through a
+    /// 6to4/Teredo/NAT64 wrapper here any more than anywhere else.
+    /// </para>
+    /// </summary>
+    public static bool IsBlockedIpForOperatorEndpoint(IPAddress ip) =>
+        Candidates(ip).Any(candidate =>
+            OperatorEndpointBlockedRanges.Any(range => range.Contains(candidate)));
+
+    /// <summary>
     /// Yields every address form to check a candidate IP against the blocklists: the address
     /// itself (or its IPv4-mapped collapse), plus — when the address is one of the IPv6
     /// transitional/embedding encodings below — the IPv4 address it carries. Checking both the

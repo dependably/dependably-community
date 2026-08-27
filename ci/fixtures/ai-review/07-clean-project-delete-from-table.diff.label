@@ -1,0 +1,10 @@
+fixture: 07-clean-project-delete-from-table.diff
+class: CLEAN
+expected_verdict: CLEAN
+lens: security, code, architecture
+expected_finding: none
+provenance:
+  origin: MR !1028 (55ed22b3..ce4a877f), full MR diff
+  ground_truth: CLEAN. Triage note records all four clean, none degraded, and confirms by hand
+    that nothing became undeletable and that authorization is unchanged (no .cs file touched).
+notes: 20 KB, Svelte + e2e only. Any authorization finding here is a false positive.

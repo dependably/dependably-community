@@ -258,7 +258,12 @@ public sealed class VersionOverwriteTombstoneTests : IAsyncLifetime
             _clock,
             new OrgRepository(_db),
             Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(TimeProvider.System),
-            TestAlerts.NoOp(_db, _clock)));
+            TestAlerts.NoOp(_db, _clock),
+            new SbomComponentVulnRepository(_db, _clock),
+            new SbomComponentScanner(TestOsvSource.Create(), new VulnerabilityRepository(_db, _clock), new SbomComponentVulnRepository(_db, _clock), NullLogger<SbomComponentScanner>.Instance),
+            Dependably.Tests.Infrastructure.TestSbomPolicy.Service(_db, _clock),
+            Dependably.Tests.Infrastructure.TestEnrichment.Unused(),
+            Dependably.Tests.Infrastructure.TestEnrichment.NoConnection()));
         return new PackagePublishService(
             packages, new PackageVersionFilesRepository(_db), new OrgRepository(_db), storage,
             new PublishGate(cfg, resolver),

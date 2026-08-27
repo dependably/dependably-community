@@ -54,6 +54,49 @@ These terms must not be translated when they appear as literal values that a mac
 
 ---
 
+## English source conventions
+
+The English source is **Canadian English** (`en-CA`). It is the authoritative copy every other
+locale is translated from, so its variant is a project decision rather than an author's habit.
+
+There is one English string store, so `en-CA` is the spelling every English reader sees regardless
+of their region — `en-GB` and `en-US` readers get Canadian spelling with their own date, time and
+number formatting (see [README.md](README.md) → Locale tags). Splitting the copy per region would
+mean maintaining parallel English catalogues for a handful of words, which is not worth it; the
+formatting is where the regional difference actually matters.
+
+| Rule | Use | Not |
+|------|-----|-----|
+| `-re` endings | centre, metre | center, meter |
+| `-our` endings | behaviour, colour, favour | behavior, color, favor |
+| `-ment` after a doubled-L verb | enrolment, instalment | enrollment, installment |
+| Latin `-fact` | artefact | artifact |
+| `-ize` / `-yze` (Canadian, not British `-ise`/`-yse`) | organization, analyze, authorize | organisation, analyse, authorise |
+| `licence` (noun) / `license` (verb) | licence policy, blocked licences | license policy, blocked licenses |
+
+The `-ize` row is where Canadian and British English part company, and it is deliberate: `-ize`
+matches the API and database field names (`organization`, `license_*`), so prose and payload stay
+spelled the same way.
+
+The `licence` row is the one place prose deliberately departs from the payload: SPDX, the API,
+and the schema all spell the field `license`, but in en-CA prose the noun is `licence` — the UI
+writes "licence policy" over an API that says `license_policy_mode_changed`. Machine-readable
+contexts are exempt: an SPDX field name, a `license_*` column, an API enum value, or a code
+snippet quoting one is a literal and keeps `license` exactly as the machine spells it.
+
+Three categories deliberately keep their non-Canadian spelling, because they are names rather
+than prose:
+
+- **`license`** in machine-readable contexts — the SPDX field name and the API/DB column name,
+  whenever the string quotes the literal rather than writing prose.
+- **"CISA Known Exploited Vulnerabilities Catalog"** — the proper name of the CISA catalog.
+- **"analyzer"** in SARIF contexts — SARIF's own term for the tool that produced a result.
+
+**Apostrophes** are the ASCII `'` (U+0027), in every locale. Both stores settled on it, and a mix
+means the same word renders two ways on adjacent screens. Enforced by `i18n-validate.js`.
+
+---
+
 ## French preferred terms
 
 Use the following French terms consistently. When a term is listed here, it supersedes any alternative a CAT tool might suggest.
@@ -100,6 +143,6 @@ Use the following French terms consistently. When a term is listed here, it supe
 
 **Placeholders:** String placeholders such as `{user}`, `{org}`, `{count}` must be preserved exactly as-is in translated strings. Do not translate placeholder names.
 
-**Punctuation:** The French locale targets Canadian French (OQLF conventions): a non-breaking space (U+00A0, never a regular space) before `:` and inside guillemets (`« … »`), and **no** space before `;`, `!`, or `?`. This differs from France-French typography, which spaces all four marks — configure CAT tools for fr-CA accordingly.
+**Punctuation:** The French locale targets Canadian French (OQLF conventions): a non-breaking space (U+00A0, never a regular space) before `:` and inside guillemets (`« … »`), and **no** space before `;`, `!`, or `?`. This differs from France-French typography, which spaces all four marks — configure CAT tools for fr-CA accordingly. `i18n-validate.js` enforces all three rules: a NBSP and a plain space are indistinguishable in a diff, so this is not a rule review can be expected to catch.
 
 **Capitalization:** French uses significantly less title-case than English. Page titles and navigation items should use sentence case in French. Example: "Paramètres de l'organisation" not "Paramètres De L'Organisation".

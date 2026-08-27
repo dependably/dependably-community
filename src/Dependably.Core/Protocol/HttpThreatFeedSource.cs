@@ -44,7 +44,7 @@ public sealed class HttpThreatFeedSource : IThreatFeedSource
         _logger = logger;
     }
 
-    public async Task<IReadOnlySet<string>> GetKevCveIdsAsync(CancellationToken ct = default)
+    public async Task<IReadOnlyDictionary<string, KevEntry>> GetKevCatalogAsync(CancellationToken ct = default)
     {
         string url = _config["KEV_FEED_URL"] ?? DefaultKevFeedUrl;
         var http = _httpFactory.CreateClient("threatfeed");
@@ -56,8 +56,9 @@ public sealed class HttpThreatFeedSource : IThreatFeedSource
         byte[] body = await UpstreamClient.ReadBodyCappedAsync(response, MaxFeedResponseBytes, url, ct);
         using var doc = JsonDocument.Parse(body);
 
-        var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var entries = new Dictionary<string, KevEntry>(StringComparer.OrdinalIgnoreCase);
         int skipped = 0;
+        int ransomware = 0;
         if (doc.RootElement.TryGetProperty("vulnerabilities", out var vulns)
             && vulns.ValueKind == JsonValueKind.Array)
         {
@@ -68,7 +69,18 @@ public sealed class HttpThreatFeedSource : IThreatFeedSource
                     && cve.ValueKind == JsonValueKind.String
                     && !string.IsNullOrWhiteSpace(cve.GetString()))
                 {
-                    ids.Add(cve.GetString()!.Trim());
+                    var parsed = new KevEntry(
+                        ParseRansomwareUse(entry),
+                        ReadDate(entry, "dateAdded"),
+                        ReadDate(entry, "dueDate"),
+                        ReadString(entry, "requiredAction"),
+                        ReadCwes(entry),
+                        ReadString(entry, "notes"));
+                    entries[cve.GetString()!.Trim()] = parsed;
+                    if (parsed.KnownRansomwareCampaignUse == true)
+                    {
+                        ransomware++;
+                    }
                 }
                 else
                 {
@@ -82,7 +94,74 @@ public sealed class HttpThreatFeedSource : IThreatFeedSource
             _logger.LogWarning("KEV feed contained {Skipped} entries without a usable cveID; skipped.", skipped);
         }
 
-        _logger.LogInformation("KEV feed loaded: {Count} CVE ids.", ids.Count);
+        _logger.LogInformation(
+            "KEV feed loaded: {Count} CVE ids, {Ransomware} marked as known ransomware-campaign use.",
+            entries.Count, ransomware);
+        return entries;
+    }
+
+    /// <summary>
+    /// Maps CISA's <c>knownRansomwareCampaignUse</c> to the tri-state the column stores.
+    /// <c>Known</c> is true and <c>Unknown</c> is false — "Unknown" is CISA asserting no known
+    /// use, which is an answer. Anything else, including the field being absent, is null: no
+    /// assertion at all. Deliberately not a truthy-string check, so a value this code has never
+    /// seen reads as "no assertion" rather than being guessed at.
+    /// </summary>
+    private static bool? ParseRansomwareUse(JsonElement entry)
+    {
+        if (!entry.TryGetProperty("knownRansomwareCampaignUse", out var flag)
+            || flag.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+
+        string? value = flag.GetString()?.Trim();
+        return string.Equals(value, "Known", StringComparison.OrdinalIgnoreCase) ? true
+            : string.Equals(value, "Unknown", StringComparison.OrdinalIgnoreCase) ? false
+            : null;
+    }
+
+    // KEV publishes calendar dates (YYYY-MM-DD), not instants. Stored as given rather than
+    // normalised to a UTC timestamp, because inventing a time of day would be fabricating
+    // precision the source does not have.
+    private static string? ReadDate(JsonElement entry, string property) =>
+        entry.TryGetProperty(property, out var value)
+        && value.ValueKind == JsonValueKind.String
+        && !string.IsNullOrWhiteSpace(value.GetString())
+            ? value.GetString()!.Trim()
+            : null;
+
+    // requiredAction and notes are free-text prose fields. Same fail-soft posture as
+    // ReadDate/ParseRansomwareUse: a missing or non-string field yields null rather than
+    // throwing, and an all-whitespace value is treated as absent rather than a coerced "".
+    private static string? ReadString(JsonElement entry, string property) =>
+        entry.TryGetProperty(property, out var value)
+        && value.ValueKind == JsonValueKind.String
+        && !string.IsNullOrWhiteSpace(value.GetString())
+            ? value.GetString()!.Trim()
+            : null;
+
+    // cwes is an array of CWE classification ids. Absence of the property entirely is distinct
+    // from the property being present with zero elements — null vs. an empty (non-null) list —
+    // so callers can tell "CISA never asked" from "CISA recorded zero classifications". A
+    // malformed entry (wrong shape, or an array containing something other than a non-blank
+    // string) is skipped without failing the whole catalogue entry, matching this parser's
+    // posture elsewhere: a strange field never aborts the pass.
+    private static IReadOnlyList<string>? ReadCwes(JsonElement entry)
+    {
+        if (!entry.TryGetProperty("cwes", out var cwes) || cwes.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        var ids = new List<string>();
+        foreach (var item in cwes.EnumerateArray())
+        {
+            if (item.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(item.GetString()))
+            {
+                ids.Add(item.GetString()!.Trim());
+            }
+        }
         return ids;
     }
 
@@ -92,7 +171,7 @@ public sealed class HttpThreatFeedSource : IThreatFeedSource
         string baseUrl = _config["EPSS_API_URL"] ?? DefaultEpssApiUrl;
         var http = _httpFactory.CreateClient("threatfeed");
 
-        var scores = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+        var scores = new Dictionary<string, EpssScore>(StringComparer.OrdinalIgnoreCase);
         var queried = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (string[] batch in cveIds.Distinct(StringComparer.OrdinalIgnoreCase).Chunk(EpssBatchSize))
@@ -133,8 +212,10 @@ public sealed class HttpThreatFeedSource : IThreatFeedSource
 
     // Iterates the EPSS "data" array and populates the scores dictionary.
     // EPSS encodes scores as strings ("0.97558"); entries missing either property
-    // or carrying a non-numeric value are skipped silently.
-    private static void ParseEpssDataArray(JsonElement data, Dictionary<string, double> scores)
+    // or carrying a non-numeric value are skipped silently. The percentile is optional in the
+    // same sense: a row without a usable one still yields a score, with a null percentile, rather
+    // than being dropped — the probability is the field the existing gate arm depends on.
+    private static void ParseEpssDataArray(JsonElement data, Dictionary<string, EpssScore> scores)
     {
         foreach (var entry in data.EnumerateArray())
         {
@@ -154,7 +235,20 @@ public sealed class HttpThreatFeedSource : IThreatFeedSource
             {
                 continue;
             }
-            scores[cve.GetString()!] = score;
+
+            scores[cve.GetString()!] = new EpssScore(score, ParsePercentile(entry));
         }
     }
+
+    // EPSS encodes the percentile as a string, like the probability. Out-of-range values are
+    // dropped rather than clamped: a percentile outside 0..1 means the feed changed shape, and
+    // recording a guess would put a wrong number behind a gate threshold.
+    private static double? ParsePercentile(JsonElement entry) =>
+        entry.TryGetProperty("percentile", out var percentile)
+        && percentile.ValueKind == JsonValueKind.String
+        && double.TryParse(
+            percentile.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out double value)
+        && value is >= 0.0 and <= 1.0
+            ? value
+            : null;
 }

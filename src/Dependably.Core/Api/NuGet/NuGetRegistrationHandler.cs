@@ -138,39 +138,57 @@ public sealed class NuGetRegistrationHandler(
         foreach (var source in bases)
         {
             string upstreamUrl = $"{source.Url}/{variant}/{normalizedId}/{version.ToLowerInvariant()}.json";
-            try
+            string? rewritten = await TryFetchRewrittenLeafAsync(
+                upstreamUrl, source.AuthorizationHeader, normalizedId, baseUrl, ct);
+            if (rewritten is not null)
             {
-                using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
-                var resp = await upstream.GetOrFetchMetadataAsync(upstreamUrl, source.AuthorizationHeader, linkedCts.Token);
-                if (resp.IsSuccessStatusCode)
-                {
-                    string? rewritten = NuGetRegistrationHelpers.RewriteRegistrationLeafUrls(
-                        resp.BodyAsString(), normalizedId, baseUrl);
-                    if (rewritten is null)
-                    {
-                        // No usable version on the leaf, so its download URL cannot be pointed at
-                        // this instance. Serving it verbatim would route the client past the
-                        // proxy's verification and gate, so the leaf is refused, not forwarded.
-                        // RenderedCompactJsonFormatter JSON-encodes {Url}.
-                        logger.LogWarning(
-                            "NuGet upstream registration leaf carries no usable version; refusing to "
-                            + "serve its upstream-controlled download URL for {Url}", upstreamUrl);
-                        continue;
-                    }
-
-                    return new ContentResult { Content = rewritten, ContentType = "application/json" };
-                }
-                // RenderedCompactJsonFormatter JSON-encodes {Url}.
-                logger.LogWarning("NuGet upstream registration leaf fetch failed: {Status} for {Url}", resp.StatusCode, upstreamUrl);
-            }
-            catch (Exception ex)
-            {
-                // RenderedCompactJsonFormatter JSON-encodes {Url}.
-                logger.LogWarning(ex, "NuGet upstream registration leaf fetch threw for {Url}", upstreamUrl);
+                return new ContentResult { Content = rewritten, ContentType = "application/json" };
             }
         }
+
         return new NotFoundResult();
+    }
+
+    // One upstream's leaf, rewritten to point at this instance, or null when that upstream cannot
+    // supply a servable one — a non-success status, a throw, or a leaf carrying no usable version.
+    // Every arm is a reason to try the next upstream rather than to fail the request.
+    private async Task<string?> TryFetchRewrittenLeafAsync(
+        string upstreamUrl, string? authorizationHeader, string normalizedId, string baseUrl,
+        CancellationToken ct)
+    {
+        try
+        {
+            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+            var resp = await upstream.GetOrFetchMetadataAsync(upstreamUrl, authorizationHeader, linkedCts.Token);
+            if (!resp.IsSuccessStatusCode)
+            {
+                // RenderedCompactJsonFormatter JSON-encodes {Url}.
+                logger.LogWarning("NuGet upstream registration leaf fetch failed: {Status} for {Url}", resp.StatusCode, upstreamUrl);
+                return null;
+            }
+
+            string? rewritten = NuGetRegistrationHelpers.RewriteRegistrationLeafUrls(
+                resp.BodyAsString(), normalizedId, baseUrl);
+            if (rewritten is null)
+            {
+                // No usable version on the leaf, so its download URL cannot be pointed at
+                // this instance. Serving it verbatim would route the client past the
+                // proxy's verification and gate, so the leaf is refused, not forwarded.
+                // RenderedCompactJsonFormatter JSON-encodes {Url}.
+                logger.LogWarning(
+                    "NuGet upstream registration leaf carries no usable version; refusing to "
+                    + "serve its upstream-controlled download URL for {Url}", upstreamUrl);
+            }
+
+            return rewritten;
+        }
+        catch (Exception ex)
+        {
+            // RenderedCompactJsonFormatter JSON-encodes {Url}.
+            logger.LogWarning(ex, "NuGet upstream registration leaf fetch threw for {Url}", upstreamUrl);
+            return null;
+        }
     }
 
     private async Task<IActionResult> RegistrationIndexCoreAsync(

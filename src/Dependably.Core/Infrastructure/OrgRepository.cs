@@ -19,7 +19,7 @@ public sealed class OrgRepository
     // smtp_password and system_slack_webhook_url are written only via their dedicated
     // email/Slack-config endpoints, never the generic instance-settings PUT.
     internal static readonly HashSet<string> SecretKeys =
-        ["jwt_secret", "mfa_encryption_key", "smtp_password", "system_slack_webhook_url"];
+        ["jwt_secret", "mfa_encryption_key", "smtp_password", "system_slack_webhook_url", "vuln_tracker_token"];
 
     private readonly IMetadataStore _db;
     private readonly IMemoryCache? _cache;
@@ -81,6 +81,7 @@ public sealed class OrgRepository
                max_upload_bytes_oci as MaxUploadBytesOci,
                max_upload_bytes_cargo as MaxUploadBytesCargo,
                keep_versions as KeepVersions, keep_days as KeepDays,
+               keep_project_versions as KeepProjectVersions,
                activity_retention_days as ActivityRetentionDays,
                purge_unlisted_after_days as PurgeUnlistedAfterDays,
                COALESCE(license_enforcement_mode, 'off') as LicenseEnforcementMode,
@@ -98,6 +99,9 @@ public sealed class OrgRepository
                COALESCE(block_revoked, 'warn') as BlockRevoked,
                COALESCE(block_malicious, 'block') as BlockMalicious,
                COALESCE(block_kev, 'off') as BlockKev,
+               COALESCE(block_kev_ransomware, 'off') as BlockKevRansomware,
+               COALESCE(block_ssvc_exploitation, 'off') as BlockSsvcExploitation,
+               max_epss_percentile_tolerance as MaxEpssPercentileTolerance,
                max_epss_tolerance as MaxEpssTolerance,
                COALESCE(block_install_scripts, 'off') as BlockInstallScripts,
                COALESCE(verify_npm_signatures, 'off') as VerifyNpmSignatures,

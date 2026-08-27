@@ -1,0 +1,361 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:c2e8f1a6-7d3b-45c9-8e0f-1a4b6d9c3e72",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-08-02T11:00:00Z",
+    "tools": {
+      "components": [
+        {
+          "type": "application",
+          "name": "cyclonedx-npm",
+          "version": "1.19.3"
+        }
+      ]
+    },
+    "component": {
+      "type": "application",
+      "bom-ref": "shipyard-api@3.4.1",
+      "name": "shipyard-api",
+      "version": "3.4.1"
+    }
+  },
+  "components": [
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/lodash@4.17.21",
+      "name": "lodash",
+      "version": "4.17.21",
+      "purl": "pkg:npm/lodash@4.17.21",
+      "scope": "required",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40babel/core@7.24.7",
+      "name": "@babel/core",
+      "version": "7.24.7",
+      "purl": "pkg:npm/%40babel/core@7.24.7",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/base64-js@1.5.1",
+      "name": "base64-js",
+      "version": "1.5.1",
+      "purl": "pkg:npm/base64-js@1.5.1",
+      "scope": "required",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/minimist@1.2.5",
+      "name": "minimist",
+      "version": "1.2.5",
+      "purl": "pkg:npm/minimist@1.2.5",
+      "scope": "required",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/qs@6.10.2",
+      "name": "qs",
+      "version": "6.10.2",
+      "purl": "pkg:npm/qs@6.10.2",
+      "scope": "required",
+      "licenses": [
+        {
+          "expression": "BSD-3-Clause"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/eslint@8.57.0",
+      "name": "eslint",
+      "version": "8.57.0",
+      "purl": "pkg:npm/eslint@8.57.0",
+      "scope": "optional",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/requests@2.28.1",
+      "name": "requests",
+      "version": "2.28.1",
+      "purl": "pkg:pypi/requests@2.28.1",
+      "scope": "required",
+      "licenses": [
+        {
+          "expression": "Apache-2.0"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/urllib3@1.26.8",
+      "name": "urllib3",
+      "version": "1.26.8",
+      "purl": "pkg:pypi/urllib3@1.26.8",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/certifi@2022.12.7",
+      "name": "certifi",
+      "version": "2022.12.7",
+      "purl": "pkg:pypi/certifi@2022.12.7",
+      "scope": "required",
+      "licenses": [
+        {
+          "expression": "MPL-2.0"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/charset-normalizer@2.1.1",
+      "name": "charset-normalizer",
+      "version": "2.1.1",
+      "purl": "pkg:pypi/charset-normalizer@2.1.1"
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:nuget/Newtonsoft.Json@12.0.3",
+      "name": "Newtonsoft.Json",
+      "version": "12.0.3",
+      "purl": "pkg:nuget/Newtonsoft.Json@12.0.3",
+      "scope": "required",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:nuget/System.Text.Encodings.Web@4.7.1",
+      "name": "System.Text.Encodings.Web",
+      "version": "4.7.1",
+      "purl": "pkg:nuget/System.Text.Encodings.Web@4.7.1",
+      "scope": "required",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:nuget/Serilog@2.12.0",
+      "name": "Serilog",
+      "version": "2.12.0",
+      "purl": "pkg:nuget/Serilog@2.12.0",
+      "scope": "excluded",
+      "licenses": [
+        {
+          "expression": "Apache-2.0"
+        }
+      ]
+    }
+  ],
+  "dependencies": [
+    {
+      "ref": "shipyard-api@3.4.1",
+      "dependsOn": [
+        "pkg:npm/lodash@4.17.21",
+        "pkg:npm/%40babel/core@7.24.7",
+        "pkg:npm/qs@6.10.2",
+        "pkg:npm/eslint@8.57.0",
+        "pkg:pypi/requests@2.28.1",
+        "pkg:nuget/Newtonsoft.Json@12.0.3",
+        "pkg:nuget/Serilog@2.12.0"
+      ]
+    },
+    {
+      "ref": "pkg:npm/lodash@4.17.21",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40babel/core@7.24.7",
+      "dependsOn": [
+        "pkg:npm/base64-js@1.5.1"
+      ]
+    },
+    {
+      "ref": "pkg:npm/base64-js@1.5.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/eslint@8.57.0",
+      "dependsOn": [
+        "pkg:npm/minimist@1.2.5"
+      ]
+    },
+    {
+      "ref": "pkg:npm/minimist@1.2.5",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/qs@6.10.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:pypi/requests@2.28.1",
+      "dependsOn": [
+        "pkg:pypi/urllib3@1.26.8",
+        "pkg:pypi/certifi@2022.12.7",
+        "pkg:pypi/charset-normalizer@2.1.1"
+      ]
+    },
+    {
+      "ref": "pkg:pypi/urllib3@1.26.8",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:pypi/certifi@2022.12.7",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:pypi/charset-normalizer@2.1.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:nuget/Newtonsoft.Json@12.0.3",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:nuget/Serilog@2.12.0",
+      "dependsOn": [
+        "pkg:nuget/System.Text.Encodings.Web@4.7.1"
+      ]
+    },
+    {
+      "ref": "pkg:nuget/System.Text.Encodings.Web@4.7.1",
+      "dependsOn": []
+    }
+  ],
+  "vulnerabilities": [
+    {
+      "id": "CVE-2022-24999",
+      "source": {
+        "name": "NVD",
+        "url": "https://nvd.nist.gov/vuln/detail/CVE-2022-24999"
+      },
+      "ratings": [
+        {
+          "source": {
+            "name": "NVD"
+          },
+          "score": 7.5,
+          "severity": "high",
+          "method": "CVSSv31",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
+        }
+      ],
+      "analysis": {
+        "state": "exploitable",
+        "response": [
+          "update"
+        ],
+        "detail": "qs.parse is called on unauthenticated request bodies in the public API surface."
+      },
+      "affects": [
+        {
+          "ref": "pkg:npm/qs@6.10.2"
+        }
+      ]
+    },
+    {
+      "id": "CVE-2023-32681",
+      "source": {
+        "name": "NVD",
+        "url": "https://nvd.nist.gov/vuln/detail/CVE-2023-32681"
+      },
+      "ratings": [
+        {
+          "source": {
+            "name": "NVD"
+          },
+          "score": 6.1,
+          "severity": "medium",
+          "method": "CVSSv31",
+          "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N"
+        }
+      ],
+      "analysis": {
+        "state": "not_affected",
+        "justification": "code_not_reachable",
+        "detail": "No proxied HTTPS request follows a cross-host redirect in this service."
+      },
+      "affects": [
+        {
+          "ref": "pkg:pypi/requests@2.28.1"
+        }
+      ]
+    },
+    {
+      "id": "GHSA-5crp-9r3c-p9vr",
+      "source": {
+        "name": "GitHub Advisories",
+        "url": "https://github.com/advisories/GHSA-5crp-9r3c-p9vr"
+      },
+      "ratings": [
+        {
+          "source": {
+            "name": "GitHub Advisories"
+          },
+          "score": 7.5,
+          "severity": "high",
+          "method": "CVSSv31",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
+        }
+      ],
+      "analysis": {
+        "state": "in_triage"
+      },
+      "affects": [
+        {
+          "ref": "pkg:nuget/Newtonsoft.Json@12.0.3"
+        }
+      ]
+    }
+  ]
+}

@@ -47,6 +47,7 @@ public static class PackageEvents
     public const string TypeUnlist = "package.unlist";
     public const string TypeYank = "package.yank";
     public const string TypeVuln = "package.vuln";
+    public const string TypeBlocked = "package.blocked";
 
     public sealed record Publish(
         string Ecosystem,
@@ -124,4 +125,30 @@ public static class PackageEvents
 
     /// <summary>Advisory summary: id + severity only.</summary>
     public sealed record VulnAdvisory(string Id, string? Severity);
+
+    /// <summary>
+    /// Block-gate-refusal payload: package identity, the refusing arm (the same
+    /// <c>manual</c>/<c>deprecated</c>/<c>revoked</c>/<c>release_age</c>/<c>malicious</c>/
+    /// <c>provenance</c>/<c>kev</c>/<c>epss</c>/<c>vuln_score</c>/<c>install_script</c>/<c>license</c>
+    /// vocabulary <see cref="Dependably.Protocol.BlockOutcome.ReasonToken"/> already uses on the wire), and
+    /// severity where meaningful — populated from CVSS for the vuln-score arm, null for arms with
+    /// no natural severity (deprecated, manual, license, and the others). Bounded body — no
+    /// advisory prose — matching <see cref="Vuln"/>'s posture.
+    ///
+    /// Repeated refusals of the same (org, purl, arm) are burst-throttled ahead of dispatch by
+    /// <see cref="Dependably.Protocol.BlockRefusalWebhookThrottle"/>, a process-local coalescing window: a CI
+    /// loop retrying a blocked artefact produces one dispatched <c>package.blocked</c> event per
+    /// window, not one per request. The throttle narrows webhook dispatch only — every refusal
+    /// still gets its own audit/activity/quarantine rows regardless of whether this event fires.
+    /// </summary>
+    public sealed record Blocked(
+        string Ecosystem,
+        string Name,
+        string Version,
+        string Purl,
+        string Arm,
+        string? Severity)
+    {
+        public string ToJson() => JsonSerializer.Serialize(this, EventJsonOptions.Snake);
+    }
 }

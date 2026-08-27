@@ -1,8 +1,13 @@
 <script>
+  import { t } from 'svelte-i18n'
+  import { get } from 'svelte/store'
   import { createEventDispatcher, onDestroy } from 'svelte'
   import { api } from './api.js'
 
-  export let placeholder = 'Search SPDX identifier or name…'
+  // Null means "use the component's own default"; the default is resolved through $t rather
+  // than baked into the prop, or it would freeze at whatever locale was active on first import.
+  /** @type {string | null} */
+  export let placeholder = null
   export let includeDeprecated = false
   // Optional set (array or Set) of identifiers to grey-out as "already added" — the picker
   // still emits them on select; the parent decides whether to ignore.
@@ -33,7 +38,7 @@
       highlight = results.length > 0 ? 0 : -1
       open = true
     } catch (e) {
-      error = e.message ?? 'lookup failed'
+      error = e.message ?? get(t)('spdx.lookupFailed')
     } finally {
       loading = false
     }
@@ -92,7 +97,7 @@
     aria-activedescendant={highlight >= 0 ? `spdx-opt-${highlight}` : undefined}
     aria-haspopup="listbox"
     aria-autocomplete="list"
-    {placeholder}
+    placeholder={placeholder ?? $t('spdx.searchPlaceholder')}
     bind:value={query}
     on:input={onInput}
     on:focus={onFocus}
@@ -106,7 +111,7 @@
       {:else if error}
         <div class="hint err">{error}</div>
       {:else if results.length === 0}
-        <div class="hint">No matches.</div>
+        <div class="hint">{$t('spdx.noMatches')}</div>
       {:else}
         {#each results as r, i (r.identifier)}
           <button
@@ -124,11 +129,11 @@
             <span class="ident">{r.identifier}</span>
             <span class="name">{r.name}</span>
             <span class="badges">
-              {#if r.isOsiApproved}<span class="badge osi" title="OSI Approved">OSI</span>{/if}
-              {#if r.isFsfLibre}<span class="badge fsf" title="FSF Free/Libre">FSF</span>{/if}
+              {#if r.isOsiApproved}<span class="badge osi" title={$t('spdx.osiApproved')}>OSI</span>{/if}
+              {#if r.isFsfLibre}<span class="badge fsf" title={$t('spdx.fsfLibre')}>FSF</span>{/if}
               {#if r.copyleft !== 'unclassified'}<span class="badge cl-{r.copyleft}">{copyleftLabel(r.copyleft)}</span>{/if}
-              {#if r.isDeprecated}<span class="badge dep" title="Deprecated SPDX identifier">deprecated</span>{/if}
-              {#if excludeSet.has(r.identifier)}<span class="badge already" title="Already on a list">added</span>{/if}
+              {#if r.isDeprecated}<span class="badge dep" title={$t('spdx.deprecated')}>deprecated</span>{/if}
+              {#if excludeSet.has(r.identifier)}<span class="badge already" title={$t('spdx.alreadyListed')}>added</span>{/if}
             </span>
           </button>
         {/each}

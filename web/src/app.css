@@ -80,6 +80,48 @@
   --badge-purple-bg:  light-dark(#f3e8ff, #1e0a3b);  --badge-purple-text:  light-dark(#6b21a8, #c4b5fd);
   --badge-sky-bg:     light-dark(#e0f2fe, #0a1e2d);  --badge-sky-text:     light-dark(#075985, #7dd3fc);
   --error-bg:         light-dark(#fee2e2, #3b0c0c);
+
+  /* ── SBOM analysis badge palettes ────────────────────────────────────────────
+   Four vocabularies the project-version analysis surface renders, all decided
+   server-side and only coloured here: effective priority, reachability, the two
+   independent scope facts, and the CycloneDX VEX state. Every value carries a visible
+   label — none of these is colour alone — and `unknown` is always drawn rather than
+   left blank, because a blank cell reads as "fine" and an unclassified component is
+   not fine, it is unclassified. */
+  /* Priority: act is the danger palette, attend the warning one, track neutral, and a
+     suppressed finding recedes without disappearing. */
+  --badge-prio-act-bg:        light-dark(#fee2e2, #3b0c0c);  --badge-prio-act-text:        light-dark(#991b1b, #fca5a5);
+  --badge-prio-attend-bg:     light-dark(#fef3c7, #2d1a00);  --badge-prio-attend-text:     light-dark(#92400e, #fcd34d);
+  --badge-prio-track-bg:      light-dark(#e2e8f0, #1e293b);  --badge-prio-track-text:      light-dark(#334155, #cbd5e1);
+  --badge-prio-suppressed-bg: light-dark(#f1f5f9, #17202e);  --badge-prio-suppressed-text: light-dark(#64748b, #94a3b8);
+
+  /* Reachability: reachable is the loud one; the other three are informational. */
+  --badge-reach-reachable-bg:           light-dark(#fee2e2, #3b0c0c);  --badge-reach-reachable-text:           light-dark(#991b1b, #fca5a5);
+  --badge-reach-imported-not-called-bg: light-dark(#fef3c7, #2d1a00);  --badge-reach-imported-not-called-text: light-dark(#92400e, #fcd34d);
+  --badge-reach-not-observed-bg:        light-dark(#dcfce7, #0a2e18);  --badge-reach-not-observed-text:        light-dark(#166534, #86efac);
+  --badge-reach-unknown-bg:             light-dark(#e2e8f0, #1e293b);  --badge-reach-unknown-text:             light-dark(#334155, #cbd5e1);
+
+  /* Scope: dev is the loud one (a dev-only finding is a different conversation), and
+     unknown is deliberately legible rather than muted into invisibility. */
+  --badge-scope-dev-bg:      light-dark(#fef3c7, #2d1a00);  --badge-scope-dev-text:      light-dark(#92400e, #fcd34d);
+  --badge-scope-runtime-bg:  light-dark(#dcfce7, #0a2e18);  --badge-scope-runtime-text:  light-dark(#166534, #86efac);
+  --badge-scope-unknown-bg:  light-dark(#e2e8f0, #1e293b);  --badge-scope-unknown-text:  light-dark(#334155, #cbd5e1);
+  --badge-scope-required-bg: light-dark(#e0f2fe, #0a1e2d);  --badge-scope-required-text: light-dark(#075985, #7dd3fc);
+  --badge-scope-optional-bg: light-dark(#f1f5f9, #17202e);  --badge-scope-optional-text: light-dark(#64748b, #94a3b8);
+  --badge-scope-excluded-bg: light-dark(#f3e8ff, #1e0a3b);  --badge-scope-excluded-text: light-dark(#6b21a8, #c4b5fd);
+
+  /* VEX state (CycloneDX vocabulary), grouped by what the state means for the reader
+     rather than one hue per value: still under review, confirmed live, closed out,
+     ruled out. */
+  --badge-vex-open-bg:      light-dark(#fef3c7, #2d1a00);  --badge-vex-open-text:      light-dark(#92400e, #fcd34d);
+  --badge-vex-active-bg:    light-dark(#fee2e2, #3b0c0c);  --badge-vex-active-text:    light-dark(#991b1b, #fca5a5);
+  --badge-vex-cleared-bg:   light-dark(#dcfce7, #0a2e18);  --badge-vex-cleared-text:   light-dark(#166534, #86efac);
+  --badge-vex-dismissed-bg: light-dark(#e2e8f0, #1e293b);  --badge-vex-dismissed-text: light-dark(#334155, #cbd5e1);
+
+  /* Document type on the receipts panel. */
+  --badge-doc-sbom-bg:  light-dark(#e0f2fe, #0a1e2d);  --badge-doc-sbom-text:  light-dark(#075985, #7dd3fc);
+  --badge-doc-vex-bg:   light-dark(#f3e8ff, #1e0a3b);  --badge-doc-vex-text:   light-dark(#6b21a8, #c4b5fd);
+  --badge-doc-sarif-bg: light-dark(#cffafe, #052e36);  --badge-doc-sarif-text: light-dark(#155e75, #67e8f9);
 }
 
 [data-theme="light"] { color-scheme: light; }
@@ -248,6 +290,16 @@ tr:hover td { background: var(--bg2); }
    exploited in the wild, independent of CVSS score. Red-tint pill like revoked; the filled-red
    treatment stays reserved for the malicious verdict. */
 .badge.kev { background: var(--badge-red-bg); color: var(--badge-red-text); font-weight: 700; }
+/* KEV + confirmed ransomware campaign use (vulnerabilities.kev_known_ransomware). Same red-tint
+   base as plain KEV, but bordered and uppercase to read as one step more urgent — CISA's own
+   ransomware flag on a KEV entry, not just "known exploited". The filled-solid `--danger`
+   treatment stays reserved for the malicious verdict above, so the hierarchy reads
+   malicious (filled) > kev.ransomware (bordered tint) > kev (plain tint) > severity chips. */
+.badge.kev.ransomware {
+  border: 1px solid var(--danger-border);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
 .badge.install-script { background: var(--badge-purple-bg); color: var(--badge-purple-text); }
 .badge.prov-verified { background: var(--success-soft);     color: var(--success); }
 .badge.prov-failed   { background: var(--badge-red-bg);     color: var(--badge-red-text); }
@@ -274,6 +326,13 @@ tr:hover td { background: var(--bg2); }
 .badge.mode-off   { background: var(--bg3);          color: var(--text2); }
 .badge.mode-warn  { background: var(--warning-soft); color: var(--warning); }
 .badge.mode-block { background: var(--danger-soft);  color: var(--danger); }
+/* Project/project-version policy status (sbom_policy_findings rollup) — pass/warn/violation,
+   reusing the same success/warning/danger token pairs as the license-policy pills above rather
+   than minting a parallel set for the same three-value semantics. NULL (never evaluated) gets
+   no class here — callers render it as neutral/unscanned text instead. */
+.badge.policy-pass      { background: var(--success-soft); color: var(--success); }
+.badge.policy-warn      { background: var(--warning-soft); color: var(--warning); }
+.badge.policy-violation { background: var(--danger-soft);  color: var(--danger); }
 /* License attribute badges */
 .badge.osi { background: var(--badge-sky-bg);    color: var(--badge-sky-text); }
 .badge.fsf { background: var(--badge-hosted-bg); color: var(--badge-hosted-text); }
@@ -1009,3 +1068,35 @@ table td, .copy-block { font-variant-numeric: tabular-nums; }
   color: var(--text);
   font-weight: 600;
 }
+
+.badge.prio-act        { background: var(--badge-prio-act-bg);        color: var(--badge-prio-act-text); }
+.badge.prio-attend     { background: var(--badge-prio-attend-bg);     color: var(--badge-prio-attend-text); }
+.badge.prio-track      { background: var(--badge-prio-track-bg);      color: var(--badge-prio-track-text); }
+.badge.prio-suppressed { background: var(--badge-prio-suppressed-bg); color: var(--badge-prio-suppressed-text); }
+
+.badge.reach-reachable           { background: var(--badge-reach-reachable-bg);           color: var(--badge-reach-reachable-text); }
+.badge.reach-imported-not-called { background: var(--badge-reach-imported-not-called-bg); color: var(--badge-reach-imported-not-called-text); }
+.badge.reach-not-observed        { background: var(--badge-reach-not-observed-bg);        color: var(--badge-reach-not-observed-text); }
+.badge.reach-unknown             { background: var(--badge-reach-unknown-bg);             color: var(--badge-reach-unknown-text); }
+
+.badge.scope-dev      { background: var(--badge-scope-dev-bg);      color: var(--badge-scope-dev-text); }
+.badge.scope-runtime  { background: var(--badge-scope-runtime-bg);  color: var(--badge-scope-runtime-text); }
+.badge.scope-unknown  { background: var(--badge-scope-unknown-bg);  color: var(--badge-scope-unknown-text); }
+.badge.scope-required { background: var(--badge-scope-required-bg); color: var(--badge-scope-required-text); }
+.badge.scope-optional { background: var(--badge-scope-optional-bg); color: var(--badge-scope-optional-text); }
+.badge.scope-excluded { background: var(--badge-scope-excluded-bg); color: var(--badge-scope-excluded-text); }
+
+.badge.vex-in_triage              { background: var(--badge-vex-open-bg);      color: var(--badge-vex-open-text); }
+.badge.vex-exploitable            { background: var(--badge-vex-active-bg);    color: var(--badge-vex-active-text); }
+.badge.vex-resolved               { background: var(--badge-vex-cleared-bg);   color: var(--badge-vex-cleared-text); }
+.badge.vex-resolved_with_pedigree { background: var(--badge-vex-cleared-bg);   color: var(--badge-vex-cleared-text); }
+.badge.vex-not_affected           { background: var(--badge-vex-dismissed-bg); color: var(--badge-vex-dismissed-text); }
+.badge.vex-false_positive         { background: var(--badge-vex-dismissed-bg); color: var(--badge-vex-dismissed-text); }
+
+/* Decision-support overlay chips, rendered only when an advisory carries them. */
+.badge.overlay-ssvc { background: var(--badge-purple-bg); color: var(--badge-purple-text); }
+.badge.overlay-band { background: var(--badge-sky-bg);    color: var(--badge-sky-text); }
+
+.badge.doc-sbom  { background: var(--badge-doc-sbom-bg);  color: var(--badge-doc-sbom-text); }
+.badge.doc-vex   { background: var(--badge-doc-vex-bg);   color: var(--badge-doc-vex-text); }
+.badge.doc-sarif { background: var(--badge-doc-sarif-bg); color: var(--badge-doc-sarif-text); }

@@ -69,6 +69,35 @@ public sealed class MavenMetadataDigitArtifactIdTests : IClassFixture<Dependably
     }
 
     /// <summary>
+    /// The residual population the first-character test still misread: an artifactId that BEGINS
+    /// with a digit. <c>org/webjars/npm/3d-view/maven-metadata.xml</c> resolved as version-level
+    /// metadata for groupId <c>org.webjars</c>, artifactId <c>npm</c>, and answered 404 for a
+    /// coordinate this org holds.
+    /// </summary>
+    [Theory]
+    [InlineData("org.webjars.npm", "3d-view", "org/webjars/npm/3d-view")]
+    [InlineData("org.webjars", "3rdwavemedia-themes-developer", "org/webjars/3rdwavemedia-themes-developer")]
+    public async Task Metadata_ForArtifactIdBeginningWithADigit_ListsItsVersions(
+        string groupId, string artifactId, string pathPrefix)
+    {
+        await _factory.PushMavenArtifact(groupId, artifactId, "1.0.0");
+        await _factory.PushMavenArtifact(groupId, artifactId, "2.0.0");
+
+        string token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(token);
+
+        var resp = await client.GetAsync($"/maven/{pathPrefix}/maven-metadata.xml");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+
+        var doc = XDocument.Parse(await resp.Content.ReadAsStringAsync());
+        Assert.Equal(groupId, doc.Root!.Element("groupId")!.Value);
+        Assert.Equal(artifactId, doc.Root!.Element("artifactId")!.Value);
+        var versions = doc.Descendants("version").Select(v => v.Value).ToList();
+        Assert.Contains("1.0.0", versions);
+        Assert.Contains("2.0.0", versions);
+    }
+
+    /// <summary>
     /// The control that keeps the fix honest in the other direction: a genuine version-level
     /// SNAPSHOT request must still resolve, or the narrowed check has simply broken SNAPSHOT
     /// metadata instead.

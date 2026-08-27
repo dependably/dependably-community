@@ -121,5 +121,24 @@ public static class PersonalDataTables
             ["banners"] =
                 "Operator/admin-authored org or instance announcement; created_by is authorship provenance, " +
                 "not the subject's personal data. (The subject's own dismissals ARE exported, via banner_dismissals.)",
+            ["projects"] =
+                "Org application inventory; created_by is an authorship-provenance stamp on an org-owned row. " +
+                "The row describes the org's software, not the subject.",
+            ["project_versions"] =
+                "One release of an org-owned project; created_by is an authorship-provenance stamp. Exporting it " +
+                "would hand a subject the org's release history rather than the subject's own data.",
+            ["project_documents"] =
+                "Metadata for an SBOM/VEX/SARIF the org uploaded about its own software; uploaded_by is an " +
+                "authorship-provenance stamp on an org-owned row. Classified explicitly even though uploaded_by " +
+                "is outside PersonalDataColumns, so the decision is recorded rather than resting on a column name.",
+            ["vuln_tracker_health"] =
+                "Observed health of the operator's one vulnerability-tracker connection. Instance-global " +
+                "infrastructure telemetry: counts and instants only, with no actor, no address and no tenant " +
+                "identifier, so there is no data subject for it to belong to.",
+            ["vuln_tracker_fetch_log"] =
+                "Bounded log of recent lookups against that same connection. Classified explicitly rather than " +
+                "left unannotated so the deliberate no-purl, no-actor projection is recorded: a purl would name " +
+                "a package a tenant holds, which is why the columns are counts. Storage limitation is discharged " +
+                "by the ring bound on write, not by a retention sweep.",
         };
 }

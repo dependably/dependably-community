@@ -27,6 +27,9 @@ public sealed class PackageNoteController : ControllerBase
     // megabytes of prose on a row every package view reads.
     internal const int MaxNoteLength = 4000;
 
+    // Generous against every ecosystem's own name limit (npm's 214 is the longest).
+    private const int MaxCoordinateLength = 512;
+
     private readonly PackageNoteRepository _notes;
     private readonly OrgAccessGuard _guard;
     private readonly ProblemResults _problems;
@@ -88,6 +91,22 @@ public sealed class PackageNoteController : ControllerBase
         if (string.IsNullOrWhiteSpace(req.Ecosystem) || string.IsNullOrWhiteSpace(req.Name))
         {
             return _problems.ValidationErrorActionKey("name", "error.packageNote.coordinateRequired");
+        }
+
+        // Note is capped below; its sibling coordinate fields were not. Length only, deliberately
+        // no ecosystem allowlist: a second hand-maintained ecosystem list is the exact drift class
+        // EcosystemHardcodedListComplianceTests exists to catch, and this value is rendered text on
+        // an admin-only surface, not a routing or storage decision.
+        if (req.Ecosystem.Length > MaxCoordinateLength)
+        {
+            return _problems.ValidationErrorActionKey(
+                "ecosystem", "error.packageNote.ecosystemTooLong", MaxCoordinateLength);
+        }
+
+        if (req.Name.Length > MaxCoordinateLength)
+        {
+            return _problems.ValidationErrorActionKey(
+                "name", "error.packageNote.nameTooLong", MaxCoordinateLength);
         }
 
         if (string.IsNullOrWhiteSpace(req.Note))

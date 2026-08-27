@@ -77,7 +77,7 @@ internal static class NuGetNupkgProxyHelper
             totalRead += read;
         }
         ms.Position = 0;
-        using var zip = new ZipArchive(ms, ZipArchiveMode.Read);
+        using var zip = SafeZipArchive.Open(ms);
         var nuspecEntry = zip.Entries.FirstOrDefault(e =>
             e.Name.EndsWith(".nuspec", StringComparison.OrdinalIgnoreCase) &&
             !e.FullName.Contains('/'));

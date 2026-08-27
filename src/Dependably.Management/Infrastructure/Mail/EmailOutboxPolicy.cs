@@ -57,6 +57,15 @@ public sealed class EmailOutboxPolicy
     /// <summary>How many due rows one drain pass claims and attempts.</summary>
     public const int DrainBatchSize = 50;
 
+    /// <summary>
+    /// How many stale alert projections one pass repairs. Larger than
+    /// <see cref="DrainBatchSize"/> because the work is one local <c>UPDATE</c> per row rather
+    /// than an SMTP round trip, and because the backlog it drains is a repair queue that should
+    /// clear promptly once the condition that produced it is over. It is still a hard bound: a
+    /// pass never materialises the whole terminal backlog, and successive passes walk it.
+    /// </summary>
+    public const int ReconcileBatchSize = 200;
+
     /// <summary>How often the delivery worker polls for due rows when nothing wakes it sooner.</summary>
     public static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(5);
 

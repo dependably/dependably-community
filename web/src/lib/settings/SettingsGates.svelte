@@ -103,6 +103,22 @@
     </select>
   </div>
   <div class="form-row">
+    <label class="label-row" for="block-kev-ransomware">{$t('settings.proxy.blockKevRansomware')} <InfoTip text={$t('settings.proxy.blockKevRansomwareHint')} /></label>
+    <select id="block-kev-ransomware" bind:value={proxySettings.block_kev_ransomware}>
+      <option value="off">{$t('settings.proxy.blockKevRansomwareOff')}</option>
+      <option value="warn">{$t('settings.proxy.blockKevRansomwareWarn')}</option>
+      <option value="block">{$t('settings.proxy.blockKevRansomwareBlock')}</option>
+    </select>
+  </div>
+  <div class="form-row">
+    <label class="label-row" for="block-ssvc-exploitation">{$t('settings.proxy.blockSsvcExploitation')} <InfoTip text={$t('settings.proxy.blockSsvcExploitationHint')} /></label>
+    <select id="block-ssvc-exploitation" bind:value={proxySettings.block_ssvc_exploitation}>
+      <option value="off">{$t('settings.proxy.blockSsvcExploitationOff')}</option>
+      <option value="warn">{$t('settings.proxy.blockSsvcExploitationWarn')}</option>
+      <option value="block">{$t('settings.proxy.blockSsvcExploitationBlock')}</option>
+    </select>
+  </div>
+  <div class="form-row">
     <label class="label-row">{$t('settings.proxy.osvTolerance')} <InfoTip text={$t('settings.proxy.osvToleranceHint')} /></label>
     <input
       type="text"
@@ -137,6 +153,17 @@
       pattern="[0-9]*(\.[0-9]+)?"
       placeholder={$t('settings.proxy.maxEpssTolerancePlaceholder')}
       bind:value={proxySettings.max_epss_tolerance}
+    />
+  </div>
+  <div class="form-row">
+    <label class="label-row" for="max-epss-percentile">{$t('settings.proxy.maxEpssPercentile')} <InfoTip text={$t('settings.proxy.maxEpssPercentileHint')} /></label>
+    <input
+      id="max-epss-percentile"
+      type="text"
+      inputmode="decimal"
+      pattern="[0-9]*(\.[0-9]+)?"
+      placeholder={$t('settings.proxy.maxEpssPercentilePlaceholder')}
+      bind:value={proxySettings.max_epss_percentile_tolerance}
     />
   </div>
   <div class="form-row">

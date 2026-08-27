@@ -10,6 +10,11 @@ namespace Dependably.Infrastructure.Observability;
 ///
 /// <para>Default poll interval is 60 seconds (env
 /// <c>TENANT_COUNT_POLL_INTERVAL_SECONDS</c>); set <c>0</c> to disable.</para>
+///
+/// suspension-ok: not per-tenant. Writes one fleet-wide aggregate count; there is no per-org
+/// selection point a suspension check could apply to, and status is orthogonal to the count
+/// (a suspended org is still counted, the same as an active one — this metric answers "how many
+/// tenants exist", not "how many are usable").
 /// </summary>
 public sealed class TenantCountPoller : BackgroundService
 {

@@ -126,8 +126,10 @@ public sealed class PyPiSimpleIndexHandler(
     private async Task<IActionResult> ServeProxySimpleIndexAsync(SimpleIndexRequest req, CancellationToken ct)
     {
         // The negotiated representation is part of the key, so the JSON form is cached
-        // alongside the HTML form instead of re-fetching upstream on every request.
-        var cacheKey = new PyPiSimpleIndexKey(req.OrgId, req.PurlName) { WantsJson = req.WantsJson };
+        // alongside the HTML form instead of re-fetching upstream on every request. IsProxy keeps
+        // this merged body out of the local-only path's slot: the two render different documents
+        // at different TTLs, and a claim-state flip moves subsequent requests between them.
+        var cacheKey = new PyPiSimpleIndexKey(req.OrgId, req.PurlName) { WantsJson = req.WantsJson, IsProxy = true };
         string contentType = ContentTypeFor(req.WantsJson);
         if (cache.TryGet(cacheKey, out byte[]? proxyHit) && proxyHit is not null)
         {
@@ -158,7 +160,8 @@ public sealed class PyPiSimpleIndexHandler(
         OrgSettings settings, bool wantsJson, CancellationToken ct)
     {
         // The negotiated representation is part of the key, so both forms are cached without
-        // one ever being served under the other's content type.
+        // one ever being served under the other's content type. IsProxy stays false: this body
+        // lists only local versions, and the merged path holds its own slot.
         var localCacheKey = new PyPiSimpleIndexKey(orgId, purlName) { WantsJson = wantsJson };
         string contentType = ContentTypeFor(wantsJson);
 

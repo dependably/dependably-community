@@ -89,21 +89,32 @@ export function rowsForVersion(versions, version) {
  * @param {Array<{ purl?: string }>} rows
  * @param {Map<string, Array<{ osvId: string, severity?: string }>>} vulnsByPurl
  */
-export function worstSeverityFor(rows, vulnsByPurl) {
-  const purls = new Set()
-  for (const r of rows) {
-    if (r.purl) purls.add(r.purl)
-  }
+function distinctAdvisories(rows, vulnsByPurl) {
+  const purls = new Set(
+    /** @type {string[]} */ (rows.map(r => r.purl).filter(p => typeof p === 'string')))
   const seen = new Set()
-  let worst = null
+  const out = []
   for (const purl of purls) {
     for (const v of vulnsByPurl?.get(purl) ?? []) {
-      if (seen.has(v.osvId)) continue
-      seen.add(v.osvId)
-      const sev = v.severity || 'UNKNOWN'
-      if (worst === null || (SEVERITY_RANK[sev] ?? 5) < (SEVERITY_RANK[worst] ?? 5)) worst = sev
+      if (!seen.has(v.osvId)) {
+        seen.add(v.osvId)
+        out.push(v)
+      }
     }
   }
+  return out
+}
+
+/** @param {string} sev */
+const severityRank = (sev) => SEVERITY_RANK[sev] ?? 5
+
+export function worstSeverityFor(rows, vulnsByPurl) {
+  /** @type {string | null} */
+  let worst = null
+  for (const sev of distinctAdvisories(rows, vulnsByPurl).map(v => v.severity || 'UNKNOWN')) {
+    if (worst === null || severityRank(sev) < severityRank(worst)) worst = sev
+  }
+
   return worst
 }
 

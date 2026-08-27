@@ -50,6 +50,22 @@ dotnet_diagnostic.S3358.severity = none
 # in review, not left commented.
 dotnet_diagnostic.S125.severity = none
 
+# CA1859 "Use concrete types when possible for improved performance": the
+# remedies this rule proposes invert three deliberate conventions here, and none
+# of the flagged sites is on a hot path where devirtualization would pay for it.
+# (1) It asks that `Task`-returning repository writes become `Task<int>`, which
+# means surfacing Dapper's rows-affected count that no caller reads — a wider
+# contract carrying a number nothing is allowed to trust. (2) It asks that
+# controller and test helpers returning `IActionResult` be narrowed to
+# `OkObjectResult`/`OkResult`, which contradicts the MVC convention every other
+# action in this codebase follows and makes an added non-200 branch a signature
+# change. (3) It asks that `IReadOnlyList`/`IReadOnlyDictionary`/`IReadOnlySet`
+# parameters and fields become their mutable concrete types, discarding the
+# immutability intent those declarations exist to state. Where devirtualizing a
+# genuinely hot lookup is worth it, the concrete type is chosen deliberately at
+# that site rather than everywhere the analyzer can prove it legal.
+dotnet_diagnostic.CA1859.severity = none
+
 # === C# code-style ruleset ===
 # These IDExxxx rules are enforced as warnings, which EnforceCodeStyleInBuild
 # (Directory.Build.props) surfaces during `dotnet build` — so with the CI

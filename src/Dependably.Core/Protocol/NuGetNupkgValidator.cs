@@ -26,7 +26,7 @@ public static partial class NuGetNupkgValidator
         "http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd"
     ];
 
-    [GeneratedRegex(@"^[A-Za-z0-9_\-\.]+$")]
+    [GeneratedRegex(@"^[A-Za-z0-9_\-\.]+\z")]
     private static partial Regex IdRegex();
 
     /// <summary>
@@ -37,7 +37,7 @@ public static partial class NuGetNupkgValidator
     {
         try
         {
-            using var zip = new ZipArchive(new MemoryStream(bytes), ZipArchiveMode.Read);
+            using var zip = SafeZipArchive.Open(new MemoryStream(bytes));
             return ParseZip(zip, isSymbol);
         }
         catch (Exception ex)
@@ -55,7 +55,7 @@ public static partial class NuGetNupkgValidator
     {
         try
         {
-            using var zip = new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: true);
+            using var zip = SafeZipArchive.Open(stream, leaveOpen: true);
             return ParseZip(zip, isSymbol);
         }
         catch (Exception ex)

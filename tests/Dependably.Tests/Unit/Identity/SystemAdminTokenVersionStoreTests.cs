@@ -1,3 +1,4 @@
+using System.Data.Common;
 using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Identity;
@@ -180,5 +181,33 @@ public sealed class SystemAdminTokenVersionStoreTests : IAsyncLifetime
         // Killer assertion: the next lookup must observe the bumped version, not a stale cached
         // pre-bump value left behind by the post-eviction write.
         Assert.Equal(8L, await store.GetCurrentVersionAsync("sa1"));
+    }
+
+    // ── throwing-branch leak ──────────────────────────────────────────────────
+
+    [Fact]
+    public async Task DbOpenThrowsAfterGuardIsMinted_DoesNotRetainItsFillGuard()
+    {
+        // GuardFor mints the guard BEFORE the DB open/read. SystemAdminTokenVersionStore is
+        // registered Singleton, so the guard map is process-lifetime — if the open or read throws
+        // with no cache entry ever installed to tie the guard's lifetime to, the guard must not
+        // survive the throw. Fails on the pre-fix code (no try/finally around the read), passes
+        // once the throwing branch retires the just-minted guard.
+        var store = new SystemAdminTokenVersionStore(new ThrowingAfterGuardStore(), _cache);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => store.GetCurrentVersionAsync($"admin-{Guid.NewGuid():N}"));
+
+        Assert.Equal(0, store.FillGuardCount);
+    }
+
+    private sealed class ThrowingAfterGuardStore : IMetadataStore
+    {
+        public DbProvider Provider => DbProvider.Sqlite;
+
+        public Task<DbConnection> OpenAsync(CancellationToken ct = default) =>
+            throw new InvalidOperationException(
+                "Simulates a cancelled/refused/exhausted DB open after GetCurrentVersionAsync has " +
+                "already minted the fill guard.");
     }
 }

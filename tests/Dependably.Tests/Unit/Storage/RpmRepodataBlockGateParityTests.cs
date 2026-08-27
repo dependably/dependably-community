@@ -145,6 +145,65 @@ public sealed class RpmRepodataBlockGateParityTests : IClassFixture<InMemoryDbFi
         Assert.Single(docB.Root!.Elements(Common + "package"));
     }
 
+    // ── SQL pre-filter ⊆ BlockGateService.Evaluate ────────────────────────────
+
+    /// <summary>
+    /// The row loader pre-filters the manual and revoked arms in SQL so a large tenant does not
+    /// materialise rows the gate is about to discard. That optimisation puts two of the gate's
+    /// arms in a second place, which is the divergence the index/download parity work exists to
+    /// remove — so the property it has to hold is one-directional and exact: the predicate may
+    /// only drop rows <see cref="BlockGateService.Evaluate"/> would also reject, and may never
+    /// drop one it would serve.
+    ///
+    /// The cross-product below is what makes that checkable rather than asserted. Six rows span
+    /// manual state (unset / blocked / allowed) × revoked (no / yes), read under both
+    /// <c>block_revoked</c> postures. The load-bearing cell is allowed+revoked: a manual allow
+    /// short-circuits every automatic gate, so a naive <c>revoked_at IS NOT NULL</c> pre-filter
+    /// withholds a package the gate serves — a silent under-advertisement no other assertion here
+    /// would catch.
+    /// </summary>
+    [Theory]
+    [InlineData("warn", new[] { "allowed-revoked", "clean", "manual-allowed", "revoked" })]
+    [InlineData("block", new[] { "allowed-revoked", "clean", "manual-allowed" })]
+    public async Task LoadedRows_MatchTheGateExactly_AcrossTheManualAndRevokedCrossProduct(
+        string blockRevoked, string[] expected)
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+
+        string cleanId = await SeedPackageAsync(orgId, "clean", "1.0-1.el9");
+        string blockedId = await SeedPackageAsync(orgId, "manual-blocked", "1.0-1.el9");
+        string allowedId = await SeedPackageAsync(orgId, "manual-allowed", "1.0-1.el9");
+        string revokedId = await SeedPackageAsync(orgId, "revoked", "1.0-1.el9");
+        string blockedRevokedId = await SeedPackageAsync(orgId, "blocked-revoked", "1.0-1.el9");
+        string allowedRevokedId = await SeedPackageAsync(orgId, "allowed-revoked", "1.0-1.el9");
+
+        await SetManualStateAsync(blockedId, "blocked");
+        await SetManualStateAsync(allowedId, "allowed");
+        await SetManualStateAsync(blockedRevokedId, "blocked");
+        await SetManualStateAsync(allowedRevokedId, "allowed");
+        await SetRevokedAsync(revokedId);
+        await SetRevokedAsync(blockedRevokedId);
+        await SetRevokedAsync(allowedRevokedId);
+        Assert.NotNull(cleanId);
+
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            Assert.Equal(1, await conn.ExecuteAsync(
+                "UPDATE org_settings SET block_revoked = @mode WHERE org_id = @orgId",
+                new { mode = blockRevoked, orgId }));
+        }
+
+        var doc = XDocument.Parse(await Service().BuildPrimaryAsync(orgId, CancellationToken.None));
+        string[] names = doc.Root!.Elements(Common + "package")
+            .Select(p => p.Element(Common + "name")!.Value)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(expected, names);
+        Assert.Equal(expected.Length.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            doc.Root.Attribute("packages")!.Value);
+    }
+
     // ── helpers ───────────────────────────────────────────────────────────────
 
     private RpmRepodataService Service() => new(
@@ -178,6 +237,22 @@ public sealed class RpmRepodataBlockGateParityTests : IClassFixture<InMemoryDbFi
             """,
             new { pvId, name });
         return pvId;
+    }
+
+    private async Task SetManualStateAsync(string packageVersionId, string state)
+    {
+        await using var conn = await _fixture.Store.OpenAsync();
+        Assert.Equal(1, await conn.ExecuteAsync(
+            "UPDATE package_versions SET manual_block_state = @state WHERE id = @id",
+            new { state, id = packageVersionId }));
+    }
+
+    private async Task SetRevokedAsync(string packageVersionId)
+    {
+        await using var conn = await _fixture.Store.OpenAsync();
+        Assert.Equal(1, await conn.ExecuteAsync(
+            "UPDATE package_versions SET revoked_at = @at WHERE id = @id",
+            new { at = DateTimeOffset.UnixEpoch.ToUtcIso(), id = packageVersionId }));
     }
 
     private async Task BlockAsync(string orgId, string purlName)

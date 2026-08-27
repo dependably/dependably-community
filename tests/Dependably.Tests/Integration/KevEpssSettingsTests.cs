@@ -47,6 +47,70 @@ public sealed class KevEpssSettingsTests : IClassFixture<DependablyFactory>, IAs
         Assert.Equal(0.35, doc.RootElement.GetProperty("max_epss_tolerance").GetDouble());
     }
 
+    [Fact]
+    public async Task ProxySettings_Put_RoundTripsTheNarrowKevAndPercentileFields()
+    {
+        using var c = await AdminClient();
+        var put = await c.PutAsJsonAsync("/api/v1/proxy-settings", new
+        {
+            proxyPassthroughEnabled = true,
+            maxOsvScoreTolerance = 10.0,
+            blockKevRansomware = "block",
+            maxEpssPercentileTolerance = 0.95,
+        });
+        Assert.Equal(HttpStatusCode.NoContent, put.StatusCode);
+
+        var resp = await c.GetAsync("/api/v1/proxy-settings");
+        var doc = await JsonDocument.ParseAsync(await resp.Content.ReadAsStreamAsync());
+        Assert.Equal("block", doc.RootElement.GetProperty("block_kev_ransomware").GetString());
+        Assert.Equal(0.95, doc.RootElement.GetProperty("max_epss_percentile_tolerance").GetDouble());
+    }
+
+    [Theory]
+    // Two assignments, chosen so that every pair of fields sharing a value in one differs in the
+    // other. Six fields over a three-value vocabulary cannot all differ within a single PUT, so a
+    // single row silently lets some transpositions through — which is the exact failure this test
+    // exists to catch, and it read as comprehensive while doing it.
+    [InlineData("off", "warn", "block", "off", "warn", "block")]
+    [InlineData("off", "block", "warn", "warn", "off", "block")]
+    public async Task ProxySettings_Put_EachModeFieldLandsInItsOwnColumn(
+        string malicious, string kev, string installScripts,
+        string revoked, string kevRansomware, string ssvcExploitation)
+    {
+        // Regression guard for a real defect: the controller resolves several 'off'|'warn'|'block'
+        // fields through one helper with a list of `out string?` parameters. Because every one of
+        // them has the same type AND the same value vocabulary, two swapped at the call site
+        // compile silently, validate silently, and persist each other's value.
+        //
+        // That shipped for one push here: block_revoked received block_kev_ransomware's (absent)
+        // value, so setting block_revoked='block' stored nothing and a revoked package served —
+        // caught only because an unrelated NuGet symbol-route test asserted a revoked artefact is
+        // refused. This test asserts the mapping directly.
+        using var c = await AdminClient();
+        var put = await c.PutAsJsonAsync("/api/v1/proxy-settings", new
+        {
+            proxyPassthroughEnabled = true,
+            maxOsvScoreTolerance = 10.0,
+            blockMalicious = malicious,
+            blockKev = kev,
+            blockKevRansomware = kevRansomware,
+            blockSsvcExploitation = ssvcExploitation,
+            blockInstallScripts = installScripts,
+            blockRevoked = revoked,
+        });
+        Assert.Equal(HttpStatusCode.NoContent, put.StatusCode);
+
+        var resp = await c.GetAsync("/api/v1/proxy-settings");
+        var root = (await JsonDocument.ParseAsync(await resp.Content.ReadAsStreamAsync())).RootElement;
+
+        Assert.Equal(malicious, root.GetProperty("block_malicious").GetString());
+        Assert.Equal(kev, root.GetProperty("block_kev").GetString());
+        Assert.Equal(kevRansomware, root.GetProperty("block_kev_ransomware").GetString());
+        Assert.Equal(ssvcExploitation, root.GetProperty("block_ssvc_exploitation").GetString());
+        Assert.Equal(installScripts, root.GetProperty("block_install_scripts").GetString());
+        Assert.Equal(revoked, root.GetProperty("block_revoked").GetString());
+    }
+
     // block_kev is opt-in — pre-gate automation, which predates this field and so can never have
     // set it, must not land on a blocking mode. That guarantee holds structurally, independent of
     // whether an absent field is left unchanged or reset: the schema default is 'off' (Schema.sql),

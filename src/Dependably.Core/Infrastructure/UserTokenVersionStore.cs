@@ -74,38 +74,51 @@ public sealed class UserTokenVersionStore
         // cancelled or collected.
         var guardSource = _cache is null ? null : GuardFor(userId);
 
-        await using var conn = await _db.OpenAsync(ct);
-        // xtenant: keyed by users PK from the validated JWT's subject claim — the session's own
-        // user. Reading another tenant's row would require forging a signed token.
-        long? version = await conn.ExecuteScalarAsync<long?>(
-            "SELECT token_version FROM users WHERE id = @id", new { id = userId });
-
-        // Only cache the found case. A missing row fails the session anyway, and not caching
-        // it keeps a just-created user from being spuriously rejected for a TTL.
-        if (version is not null && _cache is not null)
+        // From here on, guardSource (when non-null) MUST end up either tied to a cache entry
+        // (TieToEntryLifetime, below) or explicitly retired in the finally — never left dangling.
+        // The map is process-lifetime (this store is registered Singleton), so a DB open/read that
+        // throws before a cache entry is installed to own the guard's lifetime would otherwise
+        // leak it for the rest of the process.
+        bool tied = false;
+        try
         {
-            var options = new MemoryCacheEntryOptions
+            await using var conn = await _db.OpenAsync(ct);
+            // xtenant: keyed by users PK from the validated JWT's subject claim — the session's own
+            // user. Reading another tenant's row would require forging a signed token.
+            long? version = await conn.ExecuteScalarAsync<long?>(
+                "SELECT token_version FROM users WHERE id = @id", new { id = userId });
+
+            // Only cache the found case. A missing row fails the session anyway, and not caching
+            // it keeps a just-created user from being spuriously rejected for a TTL.
+            if (version is not null && _cache is not null)
             {
-                AbsoluteExpirationRelativeToNow = CacheTtl,
-                Size = 1,
-            };
-            // If the guard was cancelled by a concurrent Invalidate the entry is expired on
-            // insert; if cancellation lands after the insert the registered callback evicts it.
-            options.AddExpirationToken(new CancellationChangeToken(guardSource!.Token));
-            // Tie the generation's lifetime to this entry so a naturally-expiring user session
-            // (which never calls Invalidate) does not leave its guard in the map forever.
-            CacheFillGuard.TieToEntryLifetime(options, _fillGuards, userId, guardSource);
-            _cache.Set(CacheKey(userId), version.Value, options);
-        }
-        else if (guardSource is not null)
-        {
-            // A missing user row is never cached, so the generation minted before the read is never
-            // tied to a cache entry. Retire the just-minted instance here so a deleted user's id
-            // does not leave its guard in the map forever.
-            CacheFillGuard.RetireUnbound(_fillGuards, userId, guardSource);
-        }
+                var options = new MemoryCacheEntryOptions
+                {
+                    AbsoluteExpirationRelativeToNow = CacheTtl,
+                    Size = 1,
+                };
+                // If the guard was cancelled by a concurrent Invalidate the entry is expired on
+                // insert; if cancellation lands after the insert the registered callback evicts it.
+                options.AddExpirationToken(new CancellationChangeToken(guardSource!.Token));
+                // Tie the generation's lifetime to this entry so a naturally-expiring user session
+                // (which never calls Invalidate) does not leave its guard in the map forever.
+                CacheFillGuard.TieToEntryLifetime(options, _fillGuards, userId, guardSource);
+                _cache.Set(CacheKey(userId), version.Value, options);
+                tied = true;
+            }
 
-        return version;
+            return version;
+        }
+        finally
+        {
+            if (guardSource is not null && !tied)
+            {
+                // A missing user row is never cached, so the generation minted before the read is
+                // never tied to a cache entry. Retire the just-minted instance here so a deleted
+                // user's id (or a thrown DB open/read) does not leave its guard in the map forever.
+                CacheFillGuard.RetireUnbound(_fillGuards, userId, guardSource);
+            }
+        }
     }
 
     /// <summary>

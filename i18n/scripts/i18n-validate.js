@@ -243,6 +243,102 @@ const backendSourceKeys = fs.existsSync(sourceResxPath)
 checkHandoff('frontend', path.join(REPO_ROOT, 'i18n', 'handoff', 'frontend.en.xlf'), frontendSourceKeys);
 checkHandoff('backend', path.join(REPO_ROOT, 'i18n', 'handoff', 'backend.en.xlf'), backendSourceKeys);
 
+// ── Typography validation ──────────────────────────────────────────────────────
+
+// The glossary declares the French locale as Canadian French under OQLF conventions, but
+// nothing enforced it, so half the corpus drifted to France-French spacing and the newest
+// strings introduced a second apostrophe character. These rules are mechanical and the
+// violations are invisible in review — a NBSP and a plain space render identically in a
+// diff — which is exactly the kind of rule that belongs in a gate rather than in prose.
+const NBSP = ' ';
+
+function flattenValues(obj, prefix = '') {
+  const result = {};
+  for (const [k, v] of Object.entries(obj)) {
+    const key = prefix ? `${prefix}.${k}` : k;
+    if (v !== null && typeof v === 'object' && !Array.isArray(v)) {
+      Object.assign(result, flattenValues(v, key));
+    } else {
+      result[key] = String(v);
+    }
+  }
+  return result;
+}
+
+function parseResxValues(xml) {
+  const values = {};
+  const pattern = /<data\s+name="([^"]+)"[^>]*>\s*<value>([\s\S]*?)<\/value>/g;
+  let match;
+  while ((match = pattern.exec(xml)) !== null) {
+    if (!match[1].startsWith('>>')) values[match[1]] = match[2];
+  }
+  return values;
+}
+
+// Every locale bans the typographic apostrophe: the corpus settled on the ASCII form, and a
+// mix means the same word renders two ways on adjacent screens.
+// The French rules are OQLF: NBSP (never a plain space) before ':' and inside guillemets, and
+// no space at all before ';', '!' or '?' — the last is where fr-CA parts company with fr-FR.
+// The colon rule only fires on a colon that ends a clause, so an IPv6 literal or a "host:port"
+// example is left alone.
+function checkTypography(label, values, isFrench) {
+  let found = 0;
+  for (const [key, value] of Object.entries(values)) {
+    const fail = (rule) => { error(`Typography (${label}): ${key} — ${rule}`); found++; };
+
+    if (value.includes('’')) {
+      fail("uses the typographic apostrophe U+2019; the corpus uses the ASCII apostrophe");
+    }
+    if (!isFrench) continue;
+
+    if (/[ \t]:(?=\s|$)/.test(value)) {
+      fail("a plain space precedes ':'; French requires a no-break space (U+00A0)");
+    }
+    if (/\s[;!?]/.test(value)) {
+      fail("a space precedes ';', '!' or '?'; fr-CA (OQLF) sets these tight, unlike fr-FR");
+    }
+    for (const m of value.matchAll(/«(.)|(.)»/g)) {
+      if ((m[1] ?? m[2]) !== NBSP) {
+        fail("guillemets must sit against their content with a no-break space (U+00A0)");
+        break;
+      }
+    }
+  }
+  return found;
+}
+
+console.log('\nValidating typography (apostrophes; fr-CA spacing per i18n/glossary.md)');
+console.log('─'.repeat(60));
+{
+  let checked = 0, violations = 0;
+  const jsonFiles = fs.existsSync(localesDir)
+    ? fs.readdirSync(localesDir).filter(f => f.endsWith('.json')).sort()
+    : [];
+  for (const file of jsonFiles) {
+    const locale = path.basename(file, '.json');
+    let parsed;
+    try {
+      parsed = JSON.parse(fs.readFileSync(path.join(localesDir, file), 'utf8'));
+    } catch {
+      continue; // already reported by the frontend section
+    }
+    violations += checkTypography(file, flattenValues(parsed), locale.startsWith('fr'));
+    checked++;
+  }
+  if (resourcesDir && fs.existsSync(resourcesDir)) {
+    for (const file of fs.readdirSync(resourcesDir).filter(f => /^SharedResource(\.[\w-]+)?\.resx$/.test(f)).sort()) {
+      const m = file.match(/^SharedResource\.([\w-]+)\.resx$/);
+      const locale = m ? m[1] : 'en';
+      const values = parseResxValues(fs.readFileSync(path.join(resourcesDir, file), 'utf8'));
+      violations += checkTypography(file, values, locale.startsWith('fr'));
+      checked++;
+    }
+  }
+  if (violations === 0) {
+    console.log(`  OK (${checked} file(s) clean)`);
+  }
+}
+
 // ── Summary ────────────────────────────────────────────────────────────────────
 
 console.log('\n' + '─'.repeat(60));

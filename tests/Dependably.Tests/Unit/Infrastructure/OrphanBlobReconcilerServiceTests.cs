@@ -260,6 +260,78 @@ public sealed class OrphanBlobReconcilerServiceTests : IAsyncLifetime
         Assert.True(await _cache.ExistsAsync("proxy/deadbeef"));
     }
 
+    /// <summary>
+    /// Seeds a project + version + document row and the document blob it references.
+    /// BlobKeys.ProjectDocument keys under hosted/, which is exactly why project_documents has to
+    /// be in the reconciler's referenced-key union: the sweep walks that prefix, and this row is
+    /// the blob's only reference.
+    /// </summary>
+    private async Task<string> SeedProjectDocumentAsync(
+        string projectId, string versionId, string docType, string sha256, DateTimeOffset lastModified)
+    {
+        string key = BlobKeys.ProjectDocument("o1", projectId, versionId, docType, sha256);
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "INSERT INTO projects (id, org_id, name) VALUES (@id, 'o1', @name)",
+            new { id = projectId, name = projectId });
+        await conn.ExecuteAsync(
+            "INSERT INTO project_versions (id, org_id, project_id, version, is_latest) " +
+            "VALUES (@id, 'o1', @projectId, '1.0.0', 1)",
+            new { id = versionId, projectId });
+        await conn.ExecuteAsync(
+            "INSERT INTO project_documents " +
+            "(id, org_id, project_version_id, doc_type, format, sha256, size_bytes, blob_key) " +
+            "VALUES (@id, 'o1', @pvId, @docType, 'cyclonedx-json', @sha, 2, @key)",
+            new { id = Guid.NewGuid().ToString("N"), pvId = versionId, docType, sha = sha256, key });
+        _registry.SeedWithLastModified(key, new byte[] { 1, 2 }, lastModified);
+        return key;
+    }
+
+    /// <summary>
+    /// The catch this arm exists for: an uploaded SBOM/VEX/SARIF original lives under the same
+    /// hosted/ prefix the sweep walks, so a referenced-key union that omits project_documents
+    /// deletes every uploaded document on the first pass after the grace window — silently, with
+    /// the metadata row left pointing at bytes that are gone.
+    /// </summary>
+    [Fact]
+    public async Task ReferencedProjectDocument_IsLeftAlone()
+    {
+        var ancient = _clock.GetUtcNow().AddDays(-365);
+        string key = await SeedProjectDocumentAsync(
+            "proj1", "pv1", "sbom", new string('a', 64), ancient);
+
+        var summary = await _sut.RunOnceAsync();
+
+        Assert.Equal(0, summary.OrphansDeleted);
+        Assert.True(await _registry.ExistsAsync(key), "a referenced project document must survive");
+    }
+
+    /// <summary>
+    /// Partial-failure shape over the projects plane specifically: within ONE pass, a document
+    /// blob whose metadata row exists survives while a document-shaped blob whose row was already
+    /// deleted is reclaimed. A union that omits project_documents loses the first; a sweep scoped
+    /// away from the prefix keeps the second forever. Both must hold at once.
+    /// </summary>
+    [Fact]
+    public async Task MixedProjectDocuments_ReferencedKept_UnreferencedReclaimed()
+    {
+        var old = _clock.GetUtcNow().AddMinutes(-10);
+        string referenced = await SeedProjectDocumentAsync(
+            "proj-keep", "pv-keep", "sbom", new string('b', 64), old);
+
+        // Same key shape, no metadata row — a document whose project version was deleted.
+        string abandoned = BlobKeys.ProjectDocument(
+            "o1", "proj-gone", "pv-gone", "sarif", new string('c', 64));
+        _registry.SeedWithLastModified(abandoned, new byte[] { 9, 9, 9 }, old);
+
+        var summary = await _sut.RunOnceAsync();
+
+        Assert.Equal(1, summary.OrphansDeleted);
+        Assert.Equal(3, summary.BytesFreed);
+        Assert.True(await _registry.ExistsAsync(referenced), "referenced document must survive");
+        Assert.False(await _registry.ExistsAsync(abandoned), "abandoned document must be reclaimed");
+    }
+
     [Fact]
     public async Task MixedSet_ReferencedAreKept_OrphansAreDeleted_FreshOrphansSurvive()
     {

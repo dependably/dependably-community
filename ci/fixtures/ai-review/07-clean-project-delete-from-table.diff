@@ -1,0 +1,416 @@
+diff --git a/i18n/handoff/frontend.en.xlf b/i18n/handoff/frontend.en.xlf
+index 00f73cc7..edc5d81f 100644
+--- a/i18n/handoff/frontend.en.xlf
++++ b/i18n/handoff/frontend.en.xlf
+@@ -3456,24 +3456,24 @@
+         <source>Uploaded</source>
+         <target>Téléversé</target>
+       </segment>
+     </unit>
+     <unit id="projects.detail.columns.version">
+       <segment state="translated">
+         <source>Version</source>
+         <target>Version</target>
+       </segment>
+     </unit>
+-    <unit id="projects.detail.deleteProject">
++    <unit id="projects.detail.deleteCollectionConfirm">
+       <segment state="translated">
+-        <source>Delete project</source>
+-        <target>Supprimer le projet</target>
++        <source>Delete the folder &quot;{name}&quot; and everything inside it — every project it contains and all their versions? This cannot be undone.</source>
++        <target>Supprimer le dossier « {name} » et tout ce qu&apos;il contient — chaque projet et toutes leurs versions? Cette action est irréversible.</target>
+       </segment>
+     </unit>
+     <unit id="projects.detail.deleteProjectConfirm">
+       <segment state="translated">
+         <source>Delete &quot;{name}&quot; and all its versions? This cannot be undone.</source>
+         <target>Supprimer « {name} » et toutes ses versions? Cette action est irréversible.</target>
+       </segment>
+     </unit>
+     <unit id="projects.detail.deleteVersion">
+       <segment state="translated">
+diff --git a/web/e2e/specs/project-folders.spec.ts b/web/e2e/specs/project-folders.spec.ts
+index 36916f24..a0ca381e 100644
+--- a/web/e2e/specs/project-folders.spec.ts
++++ b/web/e2e/specs/project-folders.spec.ts
+@@ -141,20 +141,85 @@ test.describe('Project folders', () => {
+     await expect(crumbs.locator('li').nth(1)).toContainText(outerName)
+     await expect(crumbs.locator('li').nth(2)).toContainText(innerName)
+     await expect(crumbs.locator('li').nth(3)).toHaveText(projectName)
+     await expect(crumbs.locator('a')).toHaveCount(3)
+ 
+     await crumbs.getByRole('link', { name: outerName }).click()
+     await expect(adminPage).toHaveURL(new RegExp(`/project/${outerId}$`))
+     await expect(adminPage.locator('main.main-content h1.page-title')).toContainText(outerName)
+   })
+ 
++  test('a child row is deleted from its folder, and the page has no delete button of its own', async ({ adminPage }) => {
++    const folderName = uniqueName('holder')
++    const doomedName = uniqueName('doomed')
++    const keeperName = uniqueName('keeper')
++    const folder = await api.post('/api/v1/projects', { data: { name: folderName, kind: 'collection' } })
++    const folderId = (await folder.json()).id as string
++    for (const name of [doomedName, keeperName]) {
++      const res = await api.post('/api/v1/projects', {
++        data: { name, kind: 'project', parentId: folderId },
++      })
++      expect(res.status(), await res.text()).toBe(201)
++    }
++
++    await adminPage.goto(`/project/${folderId}`)
++    const main = adminPage.locator('main.main-content')
++    await expect(main.locator('tr', { hasText: doomedName })).toBeVisible({ timeout: 10_000 })
++
++    // The page-level destructive button is gone: deleting a row is offered by the table that
++    // lists it, never by the page that IS it.
++    await expect(main.locator('.page-header button.danger')).toHaveCount(0)
++
++    // confirm() blocks the page, so accept it rather than letting it hang the run.
++    adminPage.once('dialog', (d) => d.accept())
++    await main.locator('tr', { hasText: doomedName }).locator('button.kebab-btn').click()
++    // Delete is the first popover item; Edit follows it after the divider.
++    await adminPage.getByRole('menu').locator('.popover-item').first().click()
++
++    await expect(main.locator('tr', { hasText: doomedName })).toHaveCount(0, { timeout: 10_000 })
++    // The adversarial half: only the row that was asked for went. A cascade that took the sibling
++    // with it would still satisfy the assertion above.
++    await expect(main.locator('tr', { hasText: keeperName })).toBeVisible()
++  })
++
++  test('deleting a child folder is confirmed in the folder wording, and declining changes nothing', async ({ adminPage }) => {
++    const outerName = uniqueName('outer')
++    const innerName = uniqueName('inner')
++    const outer = await api.post('/api/v1/projects', { data: { name: outerName, kind: 'collection' } })
++    const outerId = (await outer.json()).id as string
++    const inner = await api.post('/api/v1/projects', {
++      data: { name: innerName, kind: 'collection', parentId: outerId },
++    })
++    const innerId = (await inner.json()).id as string
++    await api.post('/api/v1/projects', {
++      data: { name: uniqueName('buried'), kind: 'project', parentId: innerId },
++    })
++
++    await adminPage.goto(`/project/${outerId}`)
++    const main = adminPage.locator('main.main-content')
++    await expect(main.locator('tr', { hasText: innerName })).toBeVisible({ timeout: 10_000 })
++
++    // Dismiss, not accept — a confirm that deleted anyway is the failure that matters here, and it
++    // is invisible to a test that only ever says yes.
++    let prompt = ''
++    adminPage.once('dialog', (d) => { prompt = d.message(); return d.dismiss() })
++    await main.locator('tr', { hasText: innerName }).locator('button.kebab-btn').click()
++    await adminPage.getByRole('menu').locator('.popover-item').first().click()
++
++    // The cascade is what makes a folder's confirmation a bigger statement than a project's, so
++    // the wording has to say so. Matched on the name it interpolates plus the em dash the folder
++    // string carries and the project string does not — neither is translated away.
++    await expect.poll(() => prompt).toContain(innerName)
++    expect(prompt).toContain('—')
++    await expect(main.locator('tr', { hasText: innerName })).toBeVisible()
++  })
++
+   test('the version breadcrumb goes back to the project versions table', async ({ adminPage }) => {
+     const seeded = await seedProjectVersion(api, 'breadcrumb')
+ 
+     await adminPage.goto(seeded.detailPath())
+     const crumbs = adminPage.locator('nav.breadcrumbs')
+     await expect(crumbs).toBeVisible({ timeout: 15_000 })
+     await expect(crumbs.locator('li').last()).toHaveText(seeded.versionLabel)
+ 
+     // This is the affordance the page had none of: from a deep link there is no history entry to
+     // go back to, so the project crumb is the only route back to the versions table.
+diff --git a/web/src/locales/en.json b/web/src/locales/en.json
+index 24012d05..6c3a73d8 100644
+--- a/web/src/locales/en.json
++++ b/web/src/locales/en.json
+@@ -287,22 +287,22 @@
+         "policy": "Policy",
+         "uploaded": "Uploaded",
+         "name": "Name",
+         "latest": "Latest version"
+       },
+       "isLatest": "Latest",
+       "promote": "Promote to latest",
+       "promoting": "Promoting…",
+       "deleteVersion": "Delete",
+       "deleteVersionConfirm": "Delete version {version}? This removes its uploaded documents and components.",
+-      "deleteProject": "Delete project",
+       "deleteProjectConfirm": "Delete \"{name}\" and all its versions? This cannot be undone.",
++      "deleteCollectionConfirm": "Delete the folder \"{name}\" and everything inside it — every project it contains and all their versions? This cannot be undone.",
+       "loadFailed": "Failed to load project: {message}"
+     },
+     "versionDetail": {
+       "placeholderTitle": "Version detail",
+       "placeholder": "Component inventory and analysis for this version are on their way."
+     }
+   },
+   "claims": {
+     "title": "Name claims",
+     "description": "Per-name policy controlling whether a tenant can publish under that name and whether the proxy serves it. Three states: unclaimed (proxy only), local_only (proxy disabled, local writes accepted), mixed (both, local wins).",
+diff --git a/web/src/locales/fr.json b/web/src/locales/fr.json
+index 5318e354..0e712ce1 100644
+--- a/web/src/locales/fr.json
++++ b/web/src/locales/fr.json
+@@ -287,22 +287,22 @@
+         "policy": "Politique",
+         "uploaded": "Téléversé",
+         "name": "Nom",
+         "latest": "Dernière version"
+       },
+       "isLatest": "Dernière",
+       "promote": "Promouvoir comme dernière version",
+       "promoting": "Promotion en cours…",
+       "deleteVersion": "Supprimer",
+       "deleteVersionConfirm": "Supprimer la version {version}? Ses documents téléversés et ses composants seront retirés.",
+-      "deleteProject": "Supprimer le projet",
+       "deleteProjectConfirm": "Supprimer « {name} » et toutes ses versions? Cette action est irréversible.",
++      "deleteCollectionConfirm": "Supprimer le dossier « {name} » et tout ce qu'il contient — chaque projet et toutes leurs versions? Cette action est irréversible.",
+       "loadFailed": "Échec du chargement du projet : {message}"
+     },
+     "versionDetail": {
+       "placeholderTitle": "Détail de la version",
+       "placeholder": "L'inventaire des composants et l'analyse de cette version seront bientôt disponibles."
+     }
+   },
+   "claims": {
+     "title": "Revendications de noms",
+     "description": "Politique par nom contrôlant si un locataire peut publier sous ce nom et si le proxy le sert. Trois états : non revendiqué (proxy uniquement), local_only (proxy désactivé, écritures locales acceptées), mixed (les deux, local prioritaire).",
+diff --git a/web/src/pages/ProjectDetail.svelte b/web/src/pages/ProjectDetail.svelte
+index 6d6dc609..64d6ecfe 100644
+--- a/web/src/pages/ProjectDetail.svelte
++++ b/web/src/pages/ProjectDetail.svelte
+@@ -9,30 +9,36 @@
+   sends: a folder sums its whole subtree, so the numbers here match what the same row shows on the
+   projects list. A plain project has no `rollup` — its cards are built from its own versions.
+ -->
+ <script>
+   import { t } from 'svelte-i18n'
+   import { api } from '../lib/api.js'
+   import ErrorBanner from '../lib/ErrorBanner.svelte'
+   import { navigate, user } from '../lib/store.js'
+   import { reportPageLoad } from '../lib/pageLoad.js'
+   import { formatDate } from '../lib/format.js'
++  import { extractErrorMessage } from '../lib/form.js'
+   import Breadcrumbs from '../lib/Breadcrumbs.svelte'
++  import ProjectEditModal from '../lib/ProjectEditModal.svelte'
++  import RowActionsMenu from '../lib/RowActionsMenu.svelte'
+ 
+   /** The route params this page was mounted for, supplied by RouteView. @type {Record<string, any>} */
+   export let params = {}
+ 
+   /** The route transition this page was mounted for, supplied by RouteView. @type {number | null} */
+   export let pageToken = null
+ 
+   let project = null, loading = true, error = ''
+-  let promotingId = null, deletingId = null, deletingProject = false
++  let promotingId = null, deletingId = null
++  // Child-row actions: the kebab whose popover is open, the child being deleted, and the child
++  // being edited (null = no dialog).
++  let openChildActionsId = null, deletingChildId = null, editChild = null
+ 
+   $: isAdmin = $user?.role === 'admin' || $user?.role === 'owner'
+   $: isCollection = project?.kind === 'collection'
+ 
+   async function load() {
+     loading = true
+     error = ''
+     try {
+       project = await api.getProject(params.id)
+     } catch (e) {
+@@ -97,32 +103,58 @@
+     try {
+       await api.deleteProjectVersion(params.id, ver.id)
+       project = { ...project, versions: project.versions.filter((v) => v.id !== ver.id) }
+     } catch (e) {
+       error = e.message
+     } finally {
+       deletingId = null
+     }
+   }
+ 
+-  async function deleteProject() {
+-    if (!project) return
+-    if (!confirm($t('projects.detail.deleteProjectConfirm', { values: { name: project.name } }))) return
+-    deletingProject = true
++  // Deleting a row is offered from the table that lists it, not from the page that IS it — the
++  // projects list for a root-level row, this children table for a nested one. That is why the
++  // page-level "Delete project" button is gone: a control that destroys the page you are standing
++  // on, sitting where every other page puts a primary action, is the easiest destructive button in
++  // the app to press by accident.
++  async function deleteChild(child) {
++    openChildActionsId = null
++    // A collection cascades to everything beneath it, which is a materially bigger statement than
++    // deleting one project — so it gets its own confirmation rather than the project wording.
++    const key = child.kind === 'collection'
++      ? 'projects.detail.deleteCollectionConfirm'
++      : 'projects.detail.deleteProjectConfirm'
++    if (!confirm($t(key, { values: { name: child.name } }))) return
++
++    deletingChildId = child.id
++    error = ''
+     try {
+-      await api.deleteProject(params.id)
+-      navigate('projects', {}, { replace: true })
++      await api.deleteProject(child.id)
++      // Reload rather than splice the row out: the collection's own rolled-up counts are computed
++      // over the subtree that just shrank, so a local removal would leave the stat cards lying.
++      await load()
+     } catch (e) {
+-      error = e.message
+-      deletingProject = false
++      error = extractErrorMessage(e)
++    } finally {
++      deletingChildId = null
+     }
+   }
++
++  function startEditChild(child) {
++    openChildActionsId = null
++    editChild = child
++  }
++
++  async function onChildSaved() {
++    editChild = null
++    // A rename or a relocation both change this table — a relocated child leaves it entirely.
++    await load()
++  }
+ </script>
+ 
+ <div class="page">
+   <div class="page-header">
+     <div>
+       <Breadcrumbs {crumbs} ariaLabel={$t('projects.breadcrumb')} />
+       <h1 class="page-title">
+         {project?.name ?? ''}
+         {#if project?.classifier}
+           <span class="badge">{project.classifier}</span>
+@@ -131,25 +163,20 @@
+           <span class="badge has-icon">
+             <svg width="12" height="12" aria-hidden="true"><use href="/icons.svg#icon-hierarchy"/></svg>
+             {$t('projects.detail.collectionBadge')}
+           </span>
+         {/if}
+       </h1>
+       {#if project?.description}
+         <p class="project-description text-muted">{project.description}</p>
+       {/if}
+     </div>
+-    {#if isAdmin && project}
+-      <button class="danger" on:click={deleteProject} disabled={deletingProject}>
+-        {$t('projects.detail.deleteProject')}
+-      </button>
+-    {/if}
+   </div>
+ 
+   <ErrorBanner message={error} />
+ 
+   {#if !loading && project}
+     <div class="stat-grid mb-3">
+       {#if isCollection}
+         <div class="stat-card">
+           <span class="eyebrow">{$t('projects.detail.stat.children')}</span>
+           <span class="stat-value">{(project.children ?? []).length}</span>
+@@ -211,20 +238,22 @@
+       <p class="text-muted">{$t('projects.detail.childrenEmpty')}</p>
+     {:else}
+       <table class="table-auto">
+         <thead>
+           <tr>
+             <th>{$t('projects.detail.columns.name')}</th>
+             <th class="text-right">{$t('projects.columns.components')}</th>
+             <th>{$t('projects.columns.severity')}</th>
+             <th>{$t('projects.detail.columns.latest')}</th>
+             <th>{$t('projects.detail.columns.policy')}</th>
++            <!-- Header-less: the kebab needs a cell, and a labelled one would read as data. -->
++            {#if isAdmin}<th class="actions-col"></th>{/if}
+           </tr>
+         </thead>
+         <tbody>
+           {#each project.children as child (child.id)}
+             <tr class="cursor-pointer" on:click={() => openChild(child)}>
+               <td>
+                 <strong>{child.name}</strong>
+                 {#if child.kind === 'collection'}
+                   <span class="badge has-icon ml-1">
+                     <svg width="11" height="11" aria-hidden="true"><use href="/icons.svg#icon-hierarchy"/></svg>
+@@ -242,27 +271,58 @@
+                 {#if !child.severityCounts || Object.values(child.severityCounts).every((n) => !n)}<span class="text-muted" aria-label={$t('projects.severity.none')}>—</span>{/if}
+               </td>
+               <td class="mono">{child.latestVersion ?? $t('projects.noVersion')}</td>
+               <td>
+                 {#if child.policyStatus}
+                   <span class="badge policy-{child.policyStatus}">{$t(`projects.policy.${child.policyStatus}`)}</span>
+                 {:else}
+                   <span class="text-muted">{$t('projects.policy.unscanned')}</span>
+                 {/if}
+               </td>
++              {#if isAdmin}
++                <td class="actions-cell" on:click|stopPropagation>
++                  <div class="row-actions">
++                    <RowActionsMenu
++                      id={child.id}
++                      bind:openId={openChildActionsId}
++                      ariaLabel={$t('projects.folders.actionsMenu', { values: { name: child.name } })}
++                    >
++                      <button
++                        class="popover-item danger"
++                        disabled={deletingChildId === child.id}
++                        on:click|stopPropagation={() => deleteChild(child)}
++                      >
++                        {$t('common.actions.delete')}
++                      </button>
++                      <div class="popover-divider"></div>
++                      <button class="popover-item" on:click|stopPropagation={() => startEditChild(child)}>
++                        {$t('projects.folders.edit')}
++                      </button>
++                    </RowActionsMenu>
++                  </div>
++                </td>
++              {/if}
+             </tr>
+           {/each}
+         </tbody>
+       </table>
+     {/if}
+   {/if}
+ 
++  {#if editChild}
++    <ProjectEditModal
++      project={editChild}
++      on:saved={onChildSaved}
++      on:close={() => (editChild = null)}
++    />
++  {/if}
++
+   {#if !loading && project && !isCollection}
+     <h2 class="section-h">{$t('projects.detail.versionsTitle')}</h2>
+     {#if (project.versions ?? []).length === 0}
+       <p class="text-muted">{$t('projects.detail.versionsEmpty')}</p>
+     {:else}
+       <table class="table-auto">
+         <thead>
+           <tr>
+             <th>{$t('projects.detail.columns.version')}</th>
+             <th class="text-right">{$t('projects.detail.columns.components')}</th>
+@@ -320,17 +380,18 @@
+      preceding badge/title text, which the shared rule intentionally leaves to callers. */
+   .badge.has-icon { margin-left: 6px; }
+   .ml-1 { margin-left: 6px; }
+   /* .mb-3 is global (app.css) — reused as-is. */
+   .project-description { margin: 6px 0 0; max-width: 70ch; }
+   /* .sev-* chips are global (app.css); the cell just must not wrap between them. */
+   .vuln-cell { white-space: nowrap; }
+   /* .stat-card is a flex column, so a badge child stretches to the card's full width and reads
+      as a progress bar rather than a status chip. Shrink it back to its content. */
+   .stat-card .badge { align-self: flex-start; }
+-  .actions-cell { overflow: visible; white-space: nowrap; }
++  .actions-cell { overflow: visible; white-space: nowrap; text-align: right; }
++  .actions-col { width: 48px; }
+   /* Row actions live in their own wrapper div, never display:flex directly on the td. */
+-  .row-actions { display: flex; gap: 6px; align-items: center; }
++  .row-actions { display: flex; gap: 6px; align-items: center; justify-content: flex-end; }
+   /* .btn-sm (padding/font-size) is global (app.css); min-height brings it to the 28px hit
+      target the row-actions convention elsewhere in the app uses (e.g. Packages.svelte). */
+   .btn-sm { min-height: 28px; }
+ </style>

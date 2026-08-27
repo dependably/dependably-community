@@ -46,7 +46,23 @@ public sealed class HeaderTenantResolver : ITenantResolver
 
     public async Task<TenantContext> ResolveAsync(HttpContext context, CancellationToken ct = default)
     {
-        string? raw = context.Request.Headers[_headerName].FirstOrDefault();
+        var values = context.Request.Headers[_headerName];
+
+        // A repeated header is refused rather than resolved. Kestrel preserves repeats in arrival
+        // order, so taking either end picks a side of a question the request does not answer: an
+        // edge proxy that APPENDS its value (nginx `add_header`, Envoy `APPEND_IF_EXISTS_OR_ADD`)
+        // rather than replacing it (`proxy_set_header`) leaves the client's own copy first, and the
+        // peer check below still passes because the peer genuinely is the trusted proxy. Taking the
+        // last value would match ForwardedHeadersMiddleware's rightmost-wins convention, but it
+        // would still serve one of two contradictory answers silently. Refusing surfaces the proxy
+        // misconfiguration instead of turning it into a cross-tenant read on the unauthenticated
+        // protocol surfaces, which have no JWT for RouteScopeFilter to cross-check.
+        if (values.Count > 1)
+        {
+            return TenantContext.Uninitialized;
+        }
+
+        string? raw = values.FirstOrDefault();
         if (string.IsNullOrWhiteSpace(raw))
         {
             return TenantContext.Uninitialized;
@@ -65,10 +81,12 @@ public sealed class HeaderTenantResolver : ITenantResolver
         }
 
         await using var conn = await _db.OpenAsync(ct);
-        var (Id, Slug) = await conn.QuerySingleOrDefaultAsync<(string Id, string Slug)>(
-            "SELECT id, slug FROM orgs WHERE slug = @slug AND deleted_at IS NULL LIMIT 1",
+        // Status flows through to TenantContext so TenantStatusEnforcementMiddleware can refuse
+        // a suspended/archived/deleting tenant the same way every other resolver strategy does.
+        var (Id, Slug, Status) = await conn.QuerySingleOrDefaultAsync<(string Id, string Slug, string Status)>(
+            "SELECT id, slug, status FROM orgs WHERE slug = @slug AND deleted_at IS NULL LIMIT 1",
             new { slug });
 
-        return Id is null ? TenantContext.Uninitialized : TenantContext.ForTenant(Id, Slug);
+        return Id is null ? TenantContext.Uninitialized : TenantContext.ForTenant(Id, Slug, Status);
     }
 }

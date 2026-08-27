@@ -64,6 +64,27 @@ public interface IOsvSource
         var advisories = await QueryAsync(purl, ct);
         return new OsvQueryResult(advisories, Reached: true);
     }
+
+    /// <summary>
+    /// True when this source's currently loaded/reachable state actually carries advisory
+    /// coverage for <paramref name="ecosystem"/> — a dynamic, source-aware refinement of
+    /// <see cref="OsvFeedCoverage.HasAdvisoryFeed"/>. The static gate is the hard,
+    /// source-independent fact ("OSV structurally publishes no feed an artefact of this
+    /// ecosystem could ever match" — OCI, Terraform); this member only ever narrows further,
+    /// never widens what the static gate already excludes, for a source whose own loaded state
+    /// can fall short of what the static gate allows. <c>LocalOsvSource</c> overrides it: a
+    /// sideloaded dump may carry no distro feeds for an ecosystem the static gate still allows
+    /// (RPM has no single OSV ecosystem — it resolves via distro feeds like "Rocky Linux" —
+    /// so a dump with none of those loaded queries empty for every RPM purl, which is
+    /// indistinguishable from a genuine clean scan unless this member says so).
+    ///
+    /// The default implementation defers entirely to the static gate, which is correct for any
+    /// source (like <see cref="OsvClient"/>) whose reachability is not ecosystem-dependent — a
+    /// live upstream either has a feed for an ecosystem or it does not, and that fact is exactly
+    /// what <see cref="OsvFeedCoverage.HasAdvisoryFeed"/> already encodes.
+    /// </summary>
+    Task<bool> HasCoverageFor(string? ecosystem) =>
+        Task.FromResult(OsvFeedCoverage.HasAdvisoryFeed(ecosystem));
 }
 
 /// <summary>

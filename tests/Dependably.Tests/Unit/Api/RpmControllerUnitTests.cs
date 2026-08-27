@@ -124,6 +124,51 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Upload_WithKnownDistroVendor_EmitsNamespacedPurl()
+    {
+        // A real-world Rocky Linux Vendor string (the RPMTAG_VENDOR the distro's own build
+        // infrastructure stamps) resolves via RpmVendorDistroResolver and threads straight into
+        // the purl this upload records — the hosted-path half of the two-call-site wiring.
+        string raw = await SeedUserTokenAsync(_orgId);
+        byte[] bytes = BuildRpm(
+            name: "tree", version: "2.1.1", release: "1.el9", arch: "x86_64",
+            vendor: "Rocky Enterprise Software Foundation");
+        SetBody(bytes, $"Bearer {raw}");
+
+        var result = await _controller.Upload(CancellationToken.None);
+
+        var status = Assert.IsType<StatusCodeResult>(result);
+        Assert.Equal(201, status.StatusCode);
+        Assert.Equal("pkg:rpm/rocky-linux/tree@2.1.1-1.el9?arch=x86_64",
+            _controller.Response.Headers["X-Dependably-PURL"]);
+
+        await using var conn = await _db.OpenAsync();
+        string? purl = await conn.ExecuteScalarAsync<string?>(
+            "SELECT purl FROM package_versions WHERE version = @v",
+            new { v = "2.1.1-1.el9" });
+        Assert.Equal("pkg:rpm/rocky-linux/tree@2.1.1-1.el9?arch=x86_64", purl);
+    }
+
+    [Fact]
+    public async Task Upload_WithUnrecognizedVendor_EmitsBarePurl()
+    {
+        // A Fedora-shaped Vendor string is deliberately not in the known-distro list (OSV.dev
+        // registers no Fedora RPM ecosystem) — falls through to the unchanged bare form, the same
+        // as every caller that supplies no Vendor at all.
+        string raw = await SeedUserTokenAsync(_orgId);
+        byte[] bytes = BuildRpm(
+            name: "tree", version: "2.1.1", release: "1.fc40", arch: "x86_64",
+            vendor: "Fedora Project");
+        SetBody(bytes, $"Bearer {raw}");
+
+        var result = await _controller.Upload(CancellationToken.None);
+
+        Assert.Equal(201, ((StatusCodeResult)result).StatusCode);
+        Assert.Equal("pkg:rpm/tree@2.1.1-1.fc40?arch=x86_64",
+            _controller.Response.Headers["X-Dependably-PURL"]);
+    }
+
+    [Fact]
     public async Task Upload_WithFedoraLicenseTag_MirrorsMappedSpdxIntoLicenseGovernance()
     {
         // The RPM header License tag ("GPLv2+") is a legacy Fedora short tag, not SPDX.
@@ -545,13 +590,19 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
 
     // ── Synthetic RPM bytes ────────────────────────────────────────────────────
 
-    internal static byte[] BuildSyntheticRpm(string name, string version, string release, string arch)
-        => BuildRpm(name, version, release, arch);
+    internal static byte[] BuildSyntheticRpm(
+        string name, string version, string release, string arch, string? vendor = null)
+        => BuildRpm(name, version, release, arch, vendor: vendor);
 
     // RPMTAG_LICENSE (1014).
     private const int TagLicense = 1014;
 
-    private static byte[] BuildRpm(string name, string version, string release, string arch, string? license = null)
+    // RPMTAG_VENDOR (1011).
+    private const int TagVendor = 1011;
+
+    private static byte[] BuildRpm(
+        string name, string version, string release, string arch,
+        string? license = null, string? vendor = null)
     {
         var tags = new List<RpmTagWrite>
         {
@@ -564,6 +615,10 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
         if (license is not null)
         {
             tags.Add(RpmTagWrite.String(TagLicense, license));
+        }
+        if (vendor is not null)
+        {
+            tags.Add(RpmTagWrite.String(TagVendor, vendor));
         }
         byte[] lead = new byte[96];
         lead[0] = 0xED; lead[1] = 0xAB; lead[2] = 0xEE; lead[3] = 0xDB;

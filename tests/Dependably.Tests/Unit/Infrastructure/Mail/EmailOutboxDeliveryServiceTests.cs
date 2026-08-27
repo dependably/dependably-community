@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using Dapper;
@@ -129,7 +130,8 @@ public sealed class EmailOutboxDeliveryServiceTests : IAsyncLifetime
         EmailOutboxPolicy Policy,
         InstanceSmtpConfig Instance,
         EmailTransportBreaker Breaker,
-        EnvelopeProtector Protector)
+        EnvelopeProtector Protector,
+        OrgRepository Orgs)
     {
         /// <summary>
         /// A fresh worker over the same store — which is exactly what a process restart looks like
@@ -139,8 +141,9 @@ public sealed class EmailOutboxDeliveryServiceTests : IAsyncLifetime
         /// passes and inspect one continuous breaker history.
         /// </summary>
         public EmailOutboxDeliveryService NewWorker(TimeProvider clock) => new(
-            Outbox, Policy, Breaker, Instance, Sender, Alerts, Settings, clock,
-            NullLogger<EmailOutboxDeliveryService>.Instance);
+            new EmailOutboxDeliveryServices(
+                Outbox, Policy, Breaker, Instance, Sender, Alerts, Settings, Orgs, clock,
+                NullLogger<EmailOutboxDeliveryService>.Instance));
     }
 
     private Harness BuildHarness(
@@ -158,8 +161,8 @@ public sealed class EmailOutboxDeliveryServiceTests : IAsyncLifetime
         var resolvedBreaker = breaker ?? Breaker();
 
         var worker = new EmailOutboxDeliveryService(
-            outbox, resolvedPolicy, resolvedBreaker, resolvedInstance, sender, alerts, settings, _clock,
-            NullLogger<EmailOutboxDeliveryService>.Instance);
+                         new EmailOutboxDeliveryServices(
+                         outbox, resolvedPolicy, resolvedBreaker, resolvedInstance, sender, alerts, settings, new OrgRepository(_db), _clock, NullLogger<EmailOutboxDeliveryService>.Instance));
 
         var writer = new AlertEmailQueue(
             outbox, resolvedPolicy, worker, settings, alerts, RealLocalizer(),
@@ -167,10 +170,10 @@ public sealed class EmailOutboxDeliveryServiceTests : IAsyncLifetime
 
         return new Harness(
             writer, outbox, sender, alerts, settings, resolvedPolicy, resolvedInstance, resolvedBreaker,
-            protector);
+            protector, new OrgRepository(_db));
     }
 
-    private async Task<AlertRecord> QueueOneAsync(Harness h, string purl = "pkg:npm/outbox-test@1.0.0")
+    private static async Task<AlertRecord> QueueOneAsync(Harness h, string purl = "pkg:npm/outbox-test@1.0.0")
     {
         await h.Settings.UpdateEmailChannelAsync("org1", new UpdateAlertEmailChannel(
             EmailEnabled: true, EmailRecipients: "ops@example.com"));
@@ -207,6 +210,56 @@ public sealed class EmailOutboxDeliveryServiceTests : IAsyncLifetime
     {
         await using var conn = await _db.OpenAsync();
         return await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM email_outbox");
+    }
+
+    /// <summary>
+    /// Seeds an extra org and turns its alert-email channel on. The class fixture only creates
+    /// org1; the reconciliation cases need several tenants in one batch.
+    /// </summary>
+    private async Task SeedOrgAsync(Harness h, string orgId, string slug)
+    {
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO orgs (id, slug) VALUES (@orgId, @slug)", new { orgId, slug });
+        }
+
+        await h.Settings.UpdateEmailChannelAsync(orgId, new UpdateAlertEmailChannel(
+            EmailEnabled: true, EmailRecipients: "ops@example.com"));
+    }
+
+    /// <summary>Raises an alert for <paramref name="orgId"/> and persists its mail to the outbox.</summary>
+    private static async Task<AlertRecord> QueueForOrgAsync(Harness h, string orgId, string purl)
+    {
+        var alert = await h.Alerts.TryInsertAsync(new NewAlert(
+            orgId, AlertTypes.QuarantineNew, Severity: null, SourceRef: Guid.NewGuid().ToString("N"),
+            Ecosystem: "npm", Purl: purl,
+            Title: $"New quarantine item: {purl}", Detail: "Held pending review."));
+
+        await h.Writer.NotifyAsync(alert!);
+        return alert!;
+    }
+
+    /// <summary>
+    /// Reproduces the divergence the reconciliation sweep exists for: the outbox row keeps its
+    /// authoritative terminal state, and the projection onto the alert is gone — exactly the
+    /// residue of a <c>RecordEmailOutcomeAsync</c> that threw, or of a process that died between
+    /// the two non-transactional writes. <c>updated_at</c> is deliberately left as it was, because
+    /// the write being simulated never happened.
+    /// </summary>
+    private async Task LoseTheProjectionAsync(string alertId)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "UPDATE alert SET email_status = NULL, email_error = NULL WHERE id = @id",
+            new { id = alertId });
+    }
+
+    private async Task SetOrgStatusAsync(string orgId, string status)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "UPDATE orgs SET status = @status WHERE id = @orgId", new { orgId, status });
     }
 
     // ── Durability: the message outlives the process that queued it ───────────
@@ -447,6 +500,12 @@ public sealed class EmailOutboxDeliveryServiceTests : IAsyncLifetime
     public void Classifier_MapsEachFailureToItsClass(Exception ex, string expected) =>
         Assert.Equal(expected, EmailOutboxFailureClassifier.Classify(ex));
 
+    // The classifier's input is an exception, so the table's first column is one by construction.
+    // A non-serializable row costs only individual-row re-run in Test Explorer; substituting a
+    // discriminator string plus a factory would hide which exception each verdict is about, which is
+    // the whole content of this table.
+    [SuppressMessage("Usage", "xUnit1045:Avoid using TheoryData type arguments that might not be serializable",
+        Justification = "The subject under test classifies exceptions; the exception instance is the test data.")]
     public static TheoryData<Exception, string> ClassificationCases() => new()
     {
         // Permanent: the protocol or the message says so.
@@ -816,5 +875,348 @@ public sealed class EmailOutboxDeliveryServiceTests : IAsyncLifetime
 
         Assert.Equal(EmailOutboxStates.Delivered, (await ReadRowAsync(alert.Id)).State);
         Assert.True((await h.Settings.GetAsync("org1")).EmailEnabled);
+    }
+
+    // ── Reconciliation of the alert-side projection ──────────────────────────
+
+    /// <summary>
+    /// The headline case. The message is delivered and the outbox row is terminal, but the second,
+    /// non-transactional write — the projection onto the alert — did not land. Nothing else in the
+    /// system would ever repair that: <c>ClaimDueAsync</c> never returns a terminal row, so the
+    /// alert would read as NULL forever, indistinguishable from mail that was never attempted. A
+    /// later pass re-derives the outcome from the outbox row, which is still authoritative.
+    /// </summary>
+    [Fact]
+    public async Task Reconcile_TerminalRowWhoseAlertDisagrees_ReProjectsTheOutcome()
+    {
+        using var ep = MakeProtector();
+        var h = BuildHarness(ep);
+        var alert = await QueueOneAsync(h);
+
+        var worker = h.NewWorker(_clock);
+        await worker.RunPassAsync(CancellationToken.None);
+        Assert.Equal(EmailOutboxStates.Delivered, (await ReadRowAsync(alert.Id)).State);
+        Assert.Equal("sent", (await h.Alerts.GetByIdAsync("org1", alert.Id))!.EmailStatus);
+
+        await LoseTheProjectionAsync(alert.Id);
+        Assert.Null((await h.Alerts.GetByIdAsync("org1", alert.Id))!.EmailStatus);
+
+        _clock.Advance(TimeSpan.FromMinutes(10));
+        var repairedAt = _clock.GetUtcNow();
+        await worker.RunPassAsync(CancellationToken.None);
+
+        var reread = await h.Alerts.GetByIdAsync("org1", alert.Id);
+        Assert.Equal("sent", reread!.EmailStatus);
+        Assert.Equal(repairedAt, reread.UpdatedAt);
+        Assert.Equal(1, worker.ReconciledCount);
+
+        // The outbox row itself is untouched by the repair — it was already correct.
+        Assert.Equal(EmailOutboxStates.Delivered, (await ReadRowAsync(alert.Id)).State);
+        Assert.Equal(1, h.Sender.Calls);
+    }
+
+    /// <summary>
+    /// The adversarial twin of the case above, and the one a sweep that re-projects unconditionally
+    /// fails. An alert that already agrees with its terminal outbox row must be left completely
+    /// alone: not re-written with the same value, not counted as reconciled, and — the observable
+    /// that discriminates the mutant — not given a fresh <c>updated_at</c>. The clock is advanced
+    /// between the delivery and the later passes precisely so an unconditional re-write would move
+    /// that column to a different, exactly-asserted instant.
+    /// </summary>
+    [Fact]
+    public async Task Reconcile_TerminalRowWhoseAlertAgrees_IsLeftUntouched()
+    {
+        using var ep = MakeProtector();
+        var h = BuildHarness(ep);
+        var alert = await QueueOneAsync(h);
+
+        var worker = h.NewWorker(_clock);
+        var deliveredAt = _clock.GetUtcNow();
+        await worker.RunPassAsync(CancellationToken.None);
+
+        var afterDelivery = await h.Alerts.GetByIdAsync("org1", alert.Id);
+        Assert.Equal("sent", afterDelivery!.EmailStatus);
+        Assert.Equal(deliveredAt, afterDelivery.UpdatedAt);
+
+        for (int i = 0; i < 3; i++)
+        {
+            _clock.Advance(TimeSpan.FromHours(1));
+            await worker.RunPassAsync(CancellationToken.None);
+        }
+
+        var reread = await h.Alerts.GetByIdAsync("org1", alert.Id);
+        Assert.Equal("sent", reread!.EmailStatus);
+        // Still the delivery instant, three hours later: nothing re-wrote this row.
+        Assert.Equal(deliveredAt, reread.UpdatedAt);
+        Assert.Equal(0, worker.ReconciledCount);
+    }
+
+    /// <summary>
+    /// The design distinction the sweep turns on. <c>alert.email_status</c> is a state and is
+    /// re-projected; the <c>alert_settings</c> delivery-health columns are accumulative
+    /// (<c>email_consecutive_failures</c> is a counter, <c>email_failing_since</c> a first-seen
+    /// instant) and are deliberately NOT replayed. Replaying them would invent failures that never
+    /// happened and could cross an operator's threshold on repair — and, because the repair itself
+    /// is retried on the next pass, it would double-count by construction.
+    ///
+    /// <para>
+    /// Every health column is asserted at its exact original instant/value after the repair, with
+    /// the clock advanced well past it, so a sweep that replays <c>RecordEmailFailureAsync</c> fails
+    /// on the counter, on the first-seen instant, and on the last-delivery instant alike.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task Reconcile_DoesNotReplayTheAccumulativeHealthCounters()
+    {
+        using var ep = MakeProtector();
+        var h = BuildHarness(ep);
+        var alert = await QueueOneAsync(h);
+
+        h.Sender.Failure = () => new SmtpCommandException(
+            SmtpErrorCode.RecipientNotAccepted, SmtpStatusCode.MailboxUnavailable, "550 no such mailbox");
+
+        var worker = h.NewWorker(_clock);
+        var failedAt = _clock.GetUtcNow();
+        await worker.RunPassAsync(CancellationToken.None);
+
+        var health = await h.Settings.GetAsync("org1");
+        Assert.Equal("failed", health.EmailLastStatus);
+        Assert.Equal(1, health.EmailConsecutiveFailures);
+        Assert.Equal(failedAt.ToUtcIso(), health.EmailFailingSince);
+        Assert.Equal(failedAt.ToUtcIso(), health.EmailLastDeliveryAt);
+
+        await LoseTheProjectionAsync(alert.Id);
+
+        _clock.Advance(TimeSpan.FromHours(6));
+        var repairedAt = _clock.GetUtcNow();
+        await worker.RunPassAsync(CancellationToken.None);
+
+        // The state is repaired…
+        var reread = await h.Alerts.GetByIdAsync("org1", alert.Id);
+        Assert.Equal("failed", reread!.EmailStatus);
+        Assert.Contains("550 no such mailbox", reread.EmailError);
+        Assert.Equal(repairedAt, reread.UpdatedAt);
+        Assert.Equal(1, worker.ReconciledCount);
+
+        // …and the accumulative health record is exactly as the one real failure left it.
+        var afterRepair = await h.Settings.GetAsync("org1");
+        Assert.Equal(1, afterRepair.EmailConsecutiveFailures);
+        Assert.Equal(failedAt.ToUtcIso(), afterRepair.EmailFailingSince);
+        Assert.Equal(failedAt.ToUtcIso(), afterRepair.EmailLastDeliveryAt);
+        Assert.Equal("failed", afterRepair.EmailLastStatus);
+
+        // Tenant configuration is untouched, the same posture the failure path itself holds.
+        Assert.True(afterRepair.EmailEnabled);
+    }
+
+    /// <summary>
+    /// A message retired at a ceiling has never had ANY projection written to its alert:
+    /// <see cref="EmailOutboxRepository.ExpireOverdueAsync"/> retires rows in one set-based sweep
+    /// with no per-row bookkeeping. Nothing is manipulated in this test — the divergence arises on
+    /// its own — and the reconciliation in the same pass is what stops a never-delivered alert from
+    /// reading as never-attempted.
+    /// </summary>
+    [Fact]
+    public async Task Reconcile_CeilingExpiredRow_ProjectsFailedOntoItsAlert()
+    {
+        using var ep = MakeProtector();
+        var h = BuildHarness(
+            ep,
+            instance: UnconfiguredInstance(),
+            policy: Policy(("EMAIL_OUTBOX_RETENTION_HOURS", "1")));
+        var alert = await QueueOneAsync(h);
+
+        var worker = h.NewWorker(_clock);
+        await worker.RunPassAsync(CancellationToken.None);
+        Assert.Equal(EmailOutboxStates.Pending, (await ReadRowAsync(alert.Id)).State);
+        Assert.Null((await h.Alerts.GetByIdAsync("org1", alert.Id))!.EmailStatus);
+
+        _clock.Advance(TimeSpan.FromHours(1) + TimeSpan.FromSeconds(1));
+        var expiredAt = _clock.GetUtcNow();
+        await worker.RunPassAsync(CancellationToken.None);
+
+        Assert.Equal(EmailOutboxStates.Expired, (await ReadRowAsync(alert.Id)).State);
+        var reread = await h.Alerts.GetByIdAsync("org1", alert.Id);
+        Assert.Equal("failed", reread!.EmailStatus);
+        Assert.Equal(expiredAt, reread.UpdatedAt);
+        Assert.Equal(0, h.Sender.Calls);
+        Assert.Equal(1, worker.ReconciledCount);
+    }
+
+    /// <summary>
+    /// Mixed partial failure across tenants in one pass, with the twin folded in. org1's row is
+    /// delivered, org2's dead-lettered, org3's delivered — all three projections then lost — and
+    /// org3 is suspended. The two active tenants are repaired to their own, different statuses; the
+    /// suspended tenant's is not touched, because a suspended org admits no per-tenant background
+    /// work. Reinstating org3 resumes its repair on the next pass, so the exclusion is a deferral
+    /// rather than a permanent loss.
+    ///
+    /// <para>
+    /// The suspension exclusion lives in the selection SQL, not in a caller-side skip, so an
+    /// excluded tenant's rows never occupy the pass's batch and cannot starve the tenants that are
+    /// active. A mutant dropping the <c>o.status = 'active'</c> join predicate repairs org3 in the
+    /// first pass and fails here.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task Reconcile_MixedTenants_RepairsActiveOnes_DefersTheSuspendedOne()
+    {
+        using var ep = MakeProtector();
+        var h = BuildHarness(ep);
+        await SeedOrgAsync(h, "org2", "beta");
+        await SeedOrgAsync(h, "org3", "gamma");
+
+        var org1Alert = await QueueOneAsync(h, purl: "pkg:npm/recon-one@1.0.0");
+        var org2Alert = await QueueForOrgAsync(h, "org2", "pkg:npm/recon-two@1.0.0");
+        var org3Alert = await QueueForOrgAsync(h, "org3", "pkg:npm/recon-three@1.0.0");
+
+        var worker = h.NewWorker(_clock);
+
+        // org2's row is dead-lettered directly, so exactly one of the three ends in a failed
+        // terminal state while the other two deliver over the same shared transport.
+        await h.Outbox.MarkDeadLetterAsync(
+            (await OutboxIdForAsync(org2Alert.Id))!, EmailOutboxFailureClasses.Permanent, "550 rejected");
+        await worker.RunPassAsync(CancellationToken.None);
+
+        Assert.Equal(EmailOutboxStates.Delivered, (await ReadRowAsync(org1Alert.Id)).State);
+        Assert.Equal(EmailOutboxStates.DeadLetter, (await ReadRowAsync(org2Alert.Id)).State);
+        Assert.Equal(EmailOutboxStates.Delivered, (await ReadRowAsync(org3Alert.Id)).State);
+
+        // org2's row was dead-lettered before this worker ever saw it, so that pass's own
+        // reconciliation already projected its outcome once. The repairs under test are counted
+        // from here, as a delta, rather than from zero.
+        long reconciledBefore = worker.ReconciledCount;
+
+        await LoseTheProjectionAsync(org1Alert.Id);
+        await LoseTheProjectionAsync(org2Alert.Id);
+        await LoseTheProjectionAsync(org3Alert.Id);
+        await SetOrgStatusAsync("org3", "suspended");
+
+        _clock.Advance(TimeSpan.FromMinutes(30));
+        await worker.RunPassAsync(CancellationToken.None);
+
+        Assert.Equal("sent", (await h.Alerts.GetByIdAsync("org1", org1Alert.Id))!.EmailStatus);
+        var org2Reread = await h.Alerts.GetByIdAsync("org2", org2Alert.Id);
+        Assert.Equal("failed", org2Reread!.EmailStatus);
+        Assert.Contains("550 rejected", org2Reread.EmailError);
+        // The must-NOT half: a suspended tenant's read model is not written by a background pass.
+        Assert.Null((await h.Alerts.GetByIdAsync("org3", org3Alert.Id))!.EmailStatus);
+        Assert.Equal(2, worker.ReconciledCount - reconciledBefore);
+
+        // Deferred, not lost: reinstating the tenant resumes the repair.
+        await SetOrgStatusAsync("org3", "active");
+        _clock.Advance(TimeSpan.FromMinutes(5));
+        var org3RepairedAt = _clock.GetUtcNow();
+        await worker.RunPassAsync(CancellationToken.None);
+
+        var org3Reread = await h.Alerts.GetByIdAsync("org3", org3Alert.Id);
+        Assert.Equal("sent", org3Reread!.EmailStatus);
+        Assert.Equal(org3RepairedAt, org3Reread.UpdatedAt);
+        Assert.Equal(3, worker.ReconciledCount - reconciledBefore);
+    }
+
+    /// <summary>
+    /// The bound. A divergent backlog larger than the batch is never materialised in one go: the
+    /// selection returns exactly <c>batchSize</c> rows, oldest terminal first, and successive calls
+    /// walk the backlog as earlier rows are repaired out of the predicate rather than re-reading its
+    /// head. A mutant dropping the <c>LIMIT</c> returns all five and fails the first assertion; one
+    /// ordering newest-first fails the identity assertions.
+    /// </summary>
+    [Fact]
+    public async Task Reconcile_DivergentBacklogLargerThanTheBatch_IsBoundedAndWalksForward()
+    {
+        using var ep = MakeProtector();
+        var h = BuildHarness(ep);
+        var worker = h.NewWorker(_clock);
+
+        // Five alerts, each delivered a minute apart so completed_at is a strict order, then every
+        // projection lost.
+        var alerts = new List<AlertRecord>();
+        for (int i = 0; i < 5; i++)
+        {
+            alerts.Add(await QueueOneAsync(h, purl: $"pkg:npm/bounded-{i}@1.0.0"));
+            await worker.RunPassAsync(CancellationToken.None);
+            _clock.Advance(TimeSpan.FromMinutes(1));
+        }
+
+        foreach (var alert in alerts)
+        {
+            await LoseTheProjectionAsync(alert.Id);
+        }
+
+        var firstBatch = await h.Outbox.FindDivergentAlertProjectionsAsync(2);
+        Assert.Equal(2, firstBatch.Count);
+        Assert.Equal(
+            new[] { alerts[0].Id, alerts[1].Id },
+            firstBatch.Select(r => r.CorrelationId).ToArray());
+
+        // Repairing the head removes it from the predicate, so the next read is the next two —
+        // progress, not a stuck head.
+        foreach (var row in firstBatch)
+        {
+            await h.Alerts.RecordEmailOutcomeAsync(row.OrgId, row.CorrelationId, "sent", null);
+        }
+
+        var secondBatch = await h.Outbox.FindDivergentAlertProjectionsAsync(2);
+        Assert.Equal(
+            new[] { alerts[2].Id, alerts[3].Id },
+            secondBatch.Select(r => r.CorrelationId).ToArray());
+
+        // A whole pass drains what is left, because the pass's own batch is far larger than five.
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await worker.RunPassAsync(CancellationToken.None);
+        Assert.Empty(
+            await h.Outbox.FindDivergentAlertProjectionsAsync(EmailOutboxPolicy.ReconcileBatchSize));
+        foreach (var alert in alerts)
+        {
+            Assert.Equal("sent", (await h.Alerts.GetByIdAsync("org1", alert.Id))!.EmailStatus);
+        }
+    }
+
+    /// <summary>
+    /// A coalesced alert carries no outbox row of its own — its occurrence was folded into another
+    /// alert's digest — so it must never be selected for repair, however long its <c>coalesced</c>
+    /// status sits there. The sweep keys on the outbox row, and the correct answer for an alert that
+    /// has none is to leave it alone rather than invent an outcome for it.
+    /// </summary>
+    [Fact]
+    public async Task Reconcile_CoalescedAlertWithNoOutboxRowOfItsOwn_IsNeverRepaired()
+    {
+        using var ep = MakeProtector();
+        var h = BuildHarness(ep);
+
+        var opener = await QueueOneAsync(h, purl: "pkg:npm/coalesce-recon@1.0.0");
+        var folded = await h.Alerts.TryInsertAsync(new NewAlert(
+            "org1", AlertTypes.QuarantineNew, Severity: null, SourceRef: Guid.NewGuid().ToString("N"),
+            Ecosystem: "npm", Purl: "pkg:npm/coalesce-recon@1.0.0",
+            Title: "New quarantine item: pkg:npm/coalesce-recon@1.0.0", Detail: "Held pending review."));
+        await h.Writer.NotifyAsync(folded!);
+
+        var foldedAt = _clock.GetUtcNow();
+        Assert.Equal(1, await CountAsync());
+        Assert.Equal("coalesced", (await h.Alerts.GetByIdAsync("org1", folded!.Id))!.EmailStatus);
+
+        var worker = h.NewWorker(_clock);
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await worker.RunPassAsync(CancellationToken.None);
+        _clock.Advance(TimeSpan.FromHours(1));
+        await worker.RunPassAsync(CancellationToken.None);
+
+        // The digest's own outcome landed on the alert that opened it, and the folded alert kept
+        // its coalesced status at the exact instant it was written.
+        Assert.Equal("sent", (await h.Alerts.GetByIdAsync("org1", opener.Id))!.EmailStatus);
+        var foldedReread = await h.Alerts.GetByIdAsync("org1", folded.Id);
+        Assert.Equal("coalesced", foldedReread!.EmailStatus);
+        Assert.Equal(foldedAt, foldedReread.UpdatedAt);
+        Assert.Equal(0, worker.ReconciledCount);
+    }
+
+    /// <summary>The outbox row id currently carrying <paramref name="correlationId"/>.</summary>
+    private async Task<string?> OutboxIdForAsync(string correlationId)
+    {
+        await using var conn = await _db.OpenAsync();
+        return await conn.ExecuteScalarAsync<string?>(
+            "SELECT id FROM email_outbox WHERE correlation_id = @correlationId",
+            new { correlationId });
     }
 }

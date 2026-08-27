@@ -617,14 +617,10 @@ public sealed class GoController : OrgScopedControllerBase
                 ? await _svc.Vulns.GetGateSignalsBatchAsync(uploaded.Select(v => v.Id).ToList(), ct)
                 : new Dictionary<string, VulnGateSignals>();
 
-            foreach (var v in uploaded)
-            {
-                if (BlockGateService.IsHardBlockedByStoredState(
-                        v, settings, signals.GetValueOrDefault(v.Id), now))
-                {
-                    blocked.Add(v.Version);
-                }
-            }
+            blocked.UnionWith(uploaded
+                .Where(v => BlockGateService.IsHardBlockedByStoredState(
+                    v, settings, signals.GetValueOrDefault(v.Id), now))
+                .Select(v => v.Version));
         }
 
         var proxyEntries = await _svc.CacheArtifacts.ListServeFactsForNameAsync(orgId, "golang", module, ct);
@@ -636,14 +632,10 @@ public sealed class GoController : OrgScopedControllerBase
         var proxySignals = await _svc.Vulns.GetGateSignalsBatchForCacheArtifactsAsync(
             proxyEntries.Select(e => e.Id).ToList(), ct);
 
-        foreach (var entry in proxyEntries)
-        {
-            if (BlockGateService.IsHardBlockedByCacheEntry(
-                    entry, settings, proxySignals.GetValueOrDefault(entry.Id), now))
-            {
-                blocked.Add(entry.Version);
-            }
-        }
+        blocked.UnionWith(proxyEntries
+            .Where(entry => BlockGateService.IsHardBlockedByCacheEntry(
+                entry, settings, proxySignals.GetValueOrDefault(entry.Id), now))
+            .Select(entry => entry.Version));
 
         return blocked;
     }

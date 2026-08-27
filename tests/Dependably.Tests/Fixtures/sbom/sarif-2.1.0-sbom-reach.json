@@ -1,0 +1,354 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "sbom-reach",
+          "semanticVersion": "0.2.0",
+          "informationUri": "https://github.com/moonlitlabs/sbom-reachability",
+          "rules": [
+            {
+              "id": "CVE-2021-44906",
+              "shortDescription": {
+                "text": "Prototype pollution in minimist"
+              },
+              "helpUri": "https://nvd.nist.gov/vuln/detail/CVE-2021-44906",
+              "properties": {
+                "security-severity": "9.8",
+                "tags": [
+                  "security",
+                  "external/cwe/cwe-1321"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2022-24999",
+              "shortDescription": {
+                "text": "Denial of service in qs via crafted array parameters"
+              },
+              "helpUri": "https://nvd.nist.gov/vuln/detail/CVE-2022-24999",
+              "properties": {
+                "security-severity": "7.5",
+                "tags": [
+                  "security",
+                  "external/cwe/cwe-1321"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2023-32681",
+              "shortDescription": {
+                "text": "Proxy-Authorization header leak in requests on cross-host redirect"
+              },
+              "helpUri": "https://nvd.nist.gov/vuln/detail/CVE-2023-32681",
+              "properties": {
+                "security-severity": "6.1",
+                "tags": [
+                  "security",
+                  "external/cwe/cwe-200"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2023-43804",
+              "shortDescription": {
+                "text": "Cookie header leak in urllib3 on cross-origin redirect"
+              },
+              "helpUri": "https://nvd.nist.gov/vuln/detail/CVE-2023-43804",
+              "properties": {
+                "security-severity": "8.1",
+                "tags": [
+                  "security",
+                  "external/cwe/cwe-200"
+                ]
+              }
+            },
+            {
+              "id": "CVE-2021-26701",
+              "shortDescription": {
+                "text": "Remote code execution in System.Text.Encodings.Web"
+              },
+              "helpUri": "https://nvd.nist.gov/vuln/detail/CVE-2021-26701",
+              "properties": {
+                "security-severity": "8.1",
+                "tags": [
+                  "security",
+                  "external/cwe/cwe-94"
+                ]
+              }
+            },
+            {
+              "id": "GHSA-5crp-9r3c-p9vr",
+              "shortDescription": {
+                "text": "Denial of service in Newtonsoft.Json via deeply nested JSON"
+              },
+              "helpUri": "https://github.com/advisories/GHSA-5crp-9r3c-p9vr",
+              "properties": {
+                "security-severity": "7.5",
+                "tags": [
+                  "security",
+                  "external/cwe/cwe-755"
+                ]
+              }
+            },
+            {
+              "id": "GHSA-mh6f-8j2x-4483",
+              "shortDescription": {
+                "text": "Malicious flatmap-stream payload injected via event-stream"
+              },
+              "helpUri": "https://github.com/advisories/GHSA-mh6f-8j2x-4483",
+              "properties": {
+                "security-severity": "9.8",
+                "tags": [
+                  "security",
+                  "external/cwe/cwe-506"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "CVE-2021-44906",
+          "ruleIndex": 0,
+          "level": "error",
+          "message": {
+            "text": "minimist@1.2.5 is vulnerable to CVE-2021-44906 (prototype pollution); the vulnerable parser is reachable from the lint toolchain entry point."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "package-lock.json"
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "sbomReach/v1": "ee971afd1c4d1b375b5431e77b14e0a23c08da706a5f8284d0dec663d5032668"
+          },
+          "properties": {
+            "purl": "pkg:npm/minimist@1.2.5",
+            "reachability": "reachable",
+            "confidence": "high",
+            "dependencyKind": "transitive",
+            "dependencyPath": [
+              "pkg:npm/eslint@8.57.0",
+              "pkg:npm/minimist@1.2.5"
+            ],
+            "dependencyScope": "dev",
+            "sbomScope": "required",
+            "security-severity": "9.8",
+            "severityScoreOrigin": "asserted"
+          }
+        },
+        {
+          "ruleId": "CVE-2022-24999",
+          "ruleIndex": 1,
+          "level": "error",
+          "message": {
+            "text": "qs@6.10.2 is vulnerable to CVE-2022-24999; qs.parse handles unauthenticated request bodies."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "package-lock.json"
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "sbomReach/v1": "42abee4d8a87a5eca986e654b1d14acff31bab2c409888078bb44c899860b7ac"
+          },
+          "properties": {
+            "purl": "pkg:npm/qs@6.10.2",
+            "reachability": "reachable",
+            "confidence": "high",
+            "dependencyKind": "direct",
+            "dependencyScope": "runtime",
+            "sbomScope": "required",
+            "security-severity": "7.5",
+            "severityScoreOrigin": "asserted",
+            "diagnostics": [
+              "call graph: src/server/http.js:41 -> qs.parse"
+            ],
+            "recommendation": "Upgrade qs to 6.10.3 or later."
+          }
+        },
+        {
+          "ruleId": "CVE-2023-32681",
+          "ruleIndex": 2,
+          "level": "warning",
+          "message": {
+            "text": "requests@2.28.1 is vulnerable to CVE-2023-32681; no call into the redirect-following path was observed."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt"
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "sbomReach/v1": "1d2b356e60ce416d76a5d610bc2509d0f9ecbbacf84683fde66ce523d2cefb78"
+          },
+          "properties": {
+            "purl": "pkg:pypi/requests@2.28.1",
+            "reachability": "not-observed",
+            "confidence": "medium",
+            "dependencyKind": "direct",
+            "dependencyScope": "runtime",
+            "sbomScope": "required",
+            "security-severity": "6.1",
+            "severityScoreOrigin": "asserted"
+          },
+          "suppressions": [
+            {
+              "kind": "external",
+              "justification": "Accepted VEX: proxy credentials are never attached to cross-host redirects in this codebase."
+            }
+          ]
+        },
+        {
+          "ruleId": "CVE-2023-43804",
+          "ruleIndex": 3,
+          "level": "warning",
+          "message": {
+            "text": "urllib3@1.26.8 is vulnerable to CVE-2023-43804; reachability is unknown because the dependency is only exercised through requests internals."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt"
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "sbomReach/v1": "02618420fc6ac63d9f38efd99beea387186efa323d41918884da473868fca3ee"
+          },
+          "properties": {
+            "purl": "pkg:pypi/urllib3@1.26.8",
+            "reachability": "unknown",
+            "confidence": "low",
+            "dependencyKind": "transitive",
+            "dependencyPath": [
+              "pkg:pypi/requests@2.28.1",
+              "pkg:pypi/urllib3@1.26.8"
+            ],
+            "dependencyScope": "runtime",
+            "security-severity": "8.1",
+            "severityScoreOrigin": "representative"
+          }
+        },
+        {
+          "ruleId": "CVE-2021-26701",
+          "ruleIndex": 4,
+          "level": "warning",
+          "message": {
+            "text": "System.Text.Encodings.Web@4.7.1 is vulnerable to CVE-2021-26701; the vulnerable encoder overload was not observed and the assembly is absent from the runtime output."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "packages.lock.json"
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "sbomReach/v1": "b0d81260dfe136879c6cff6650aacc0795273b285a54d326009b9668d38a6aac"
+          },
+          "properties": {
+            "purl": "pkg:nuget/System.Text.Encodings.Web@4.7.1",
+            "reachability": "not-observed",
+            "confidence": "medium",
+            "dependencyKind": "transitive",
+            "dependencyPath": [
+              "pkg:nuget/Serilog@2.12.0",
+              "pkg:nuget/System.Text.Encodings.Web@4.7.1"
+            ],
+            "dependencyScope": "runtime",
+            "sbomScope": "required",
+            "runtimePresent": false,
+            "security-severity": "8.1",
+            "severityScoreOrigin": "asserted"
+          }
+        },
+        {
+          "ruleId": "GHSA-5crp-9r3c-p9vr",
+          "ruleIndex": 5,
+          "level": "error",
+          "message": {
+            "text": "Newtonsoft.Json@12.0.3 is vulnerable to GHSA-5crp-9r3c-p9vr; JsonConvert.DeserializeObject is called on request payloads."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "packages.lock.json"
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "sbomReach/v1": "d752b0aca872bde4f730ad9c50a3a2bf1999c846d0a47e45b6a1b735d5fd11b8"
+          },
+          "properties": {
+            "purl": "pkg:nuget/Newtonsoft.Json@12.0.3",
+            "reachability": "reachable",
+            "confidence": "medium",
+            "dependencyKind": "direct",
+            "dependencyScope": "runtime",
+            "sbomScope": "required",
+            "runtimePresent": true,
+            "security-severity": "7.5",
+            "severityScoreOrigin": "asserted",
+            "diagnostics": [
+              "call graph: src/Shipyard.Api/Serialization/PayloadReader.cs:27 -> JsonConvert.DeserializeObject",
+              "runtime probe: Newtonsoft.Json.dll present in publish output"
+            ],
+            "recommendation": "Upgrade Newtonsoft.Json to 13.0.1 or later."
+          }
+        },
+        {
+          "ruleId": "GHSA-mh6f-8j2x-4483",
+          "ruleIndex": 6,
+          "level": "warning",
+          "message": {
+            "text": "event-stream@3.3.6 is flagged by GHSA-mh6f-8j2x-4483; the package appears in the lockfile but not in the resolved dependency graph."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "package-lock.json"
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "sbomReach/v1": "12714ecc60302ec377c529dfc9b0cb32578d80b8d4a52f7a80a9f3ed0e6885a5"
+          },
+          "properties": {
+            "purl": "pkg:npm/event-stream@3.3.6",
+            "reachability": "unknown",
+            "confidence": "low",
+            "dependencyKind": "graph-unknown",
+            "dependencyScope": "unknown",
+            "security-severity": "9.8",
+            "severityScoreOrigin": "representative"
+          }
+        }
+      ]
+    }
+  ]
+}

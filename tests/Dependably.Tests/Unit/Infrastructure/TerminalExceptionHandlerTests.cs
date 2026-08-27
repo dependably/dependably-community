@@ -216,6 +216,49 @@ public sealed class TerminalExceptionHandlerTests
     }
 
     [Fact]
+    public async Task Capture_Restore_RoundTrip_PreservesHeaders_ButNotTheAbortedContentType()
+    {
+        // Unit-level only: exercises the Capture()/Restore() round-trip in isolation, with the
+        // headers still live on the response and no framework-level clear in front of this call —
+        // i.e. calling TryHandleAsync directly, the way this test does, bypasses
+        // ExceptionHandlerMiddlewareImpl's own Response.Clear(), which in the real pipeline
+        // already runs before this handler is ever invoked (see ResponseHeaderPreserver's doc
+        // comment). This test proves the round-trip mechanism works when the live headers are
+        // still there to read; it does NOT prove headers survive the real pipeline — that is
+        // TerminalExceptionHandlerSecurityHeadersPipelineTests.UnhandledException_PreservesSecurityHeaders_
+        // EvenThoughFrameworkClearsResponseFirst, which goes through UseExceptionHandler for real.
+        var (handler, _) = BuildHandler();
+        var ctx = NewContext();
+        ctx.Response.Headers.XContentTypeOptions = "nosniff";
+        ctx.Response.Headers.XFrameOptions = "DENY";
+        ctx.Response.Headers["Referrer-Policy"] = "strict-origin-when-cross-origin";
+        ctx.Response.Headers.ContentSecurityPolicy = "default-src 'self'";
+        ctx.Response.Headers.StrictTransportSecurity = "max-age=31536000; includeSubDomains; preload";
+        ctx.Response.Headers.AccessControlAllowOrigin = "https://spa.example.com";
+        ctx.Response.Headers.AccessControlAllowCredentials = "true";
+        ctx.Response.Headers.Vary = "Origin";
+        ctx.Response.ContentType = "text/html";
+        ctx.Response.ContentLength = 777;
+
+        await handler.TryHandleAsync(ctx, BuildRealisticException(), CancellationToken.None);
+
+        Assert.Equal(StatusCodes.Status500InternalServerError, ctx.Response.StatusCode);
+        Assert.Equal("DENY", ctx.Response.Headers.XFrameOptions.ToString());
+        Assert.Equal("strict-origin-when-cross-origin", ctx.Response.Headers["Referrer-Policy"].ToString());
+        Assert.Equal("default-src 'self'", ctx.Response.Headers.ContentSecurityPolicy.ToString());
+        Assert.Equal(
+            "max-age=31536000; includeSubDomains; preload",
+            ctx.Response.Headers.StrictTransportSecurity.ToString());
+        Assert.Equal("https://spa.example.com", ctx.Response.Headers.AccessControlAllowOrigin.ToString());
+        Assert.Equal("true", ctx.Response.Headers.AccessControlAllowCredentials.ToString());
+        Assert.Equal("Origin", ctx.Response.Headers.Vary.ToString());
+
+        // The handler's own body shape, not the aborted one.
+        Assert.Equal("application/problem+json", ctx.Response.ContentType);
+        Assert.Null(ctx.Response.ContentLength);
+    }
+
+    [Fact]
     public async Task ResponseAlreadyStarted_ReportsUnhandled_ButStillLogs()
     {
         // Bytes are on the wire: appending a problem document would corrupt the body, so the

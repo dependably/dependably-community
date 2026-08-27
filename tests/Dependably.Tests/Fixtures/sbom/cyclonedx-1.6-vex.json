@@ -1,0 +1,220 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:e4a7c9d2-3f5b-41e8-b6a0-9c2d7f1e5b38",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-08-03T08:45:00Z",
+    "tools": {
+      "components": [
+        {
+          "type": "application",
+          "name": "vexctl",
+          "version": "0.3.0"
+        }
+      ]
+    }
+  },
+  "vulnerabilities": [
+    {
+      "id": "CVE-2021-44906",
+      "source": {
+        "name": "NVD",
+        "url": "https://nvd.nist.gov/vuln/detail/CVE-2021-44906"
+      },
+      "ratings": [
+        {
+          "source": {
+            "name": "NVD"
+          },
+          "score": 9.8,
+          "severity": "critical",
+          "method": "CVSSv31",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+        }
+      ],
+      "analysis": {
+        "state": "exploitable",
+        "response": [
+          "update"
+        ],
+        "detail": "Prototype pollution is reachable through the CLI argument parser."
+      },
+      "affects": [
+        {
+          "ref": "pkg:npm/minimist@1.2.5"
+        }
+      ]
+    },
+    {
+      "id": "CVE-2022-24999",
+      "source": {
+        "name": "NVD",
+        "url": "https://nvd.nist.gov/vuln/detail/CVE-2022-24999"
+      },
+      "ratings": [
+        {
+          "source": {
+            "name": "NVD"
+          },
+          "score": 7.5,
+          "severity": "high",
+          "method": "CVSSv31",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
+        }
+      ],
+      "analysis": {
+        "state": "in_triage"
+      },
+      "affects": [
+        {
+          "ref": "pkg:npm/qs@6.10.2"
+        }
+      ]
+    },
+    {
+      "id": "CVE-2023-32681",
+      "source": {
+        "name": "NVD",
+        "url": "https://nvd.nist.gov/vuln/detail/CVE-2023-32681"
+      },
+      "ratings": [
+        {
+          "source": {
+            "name": "NVD"
+          },
+          "score": 6.1,
+          "severity": "medium",
+          "method": "CVSSv31",
+          "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N"
+        }
+      ],
+      "analysis": {
+        "state": "not_affected",
+        "justification": "code_not_reachable",
+        "response": [
+          "will_not_fix"
+        ],
+        "detail": "Proxy credentials are never attached to cross-host redirects in this codebase."
+      },
+      "affects": [
+        {
+          "ref": "pkg:pypi/requests@2.28.1"
+        }
+      ]
+    },
+    {
+      "id": "CVE-2023-43804",
+      "source": {
+        "name": "NVD",
+        "url": "https://nvd.nist.gov/vuln/detail/CVE-2023-43804"
+      },
+      "ratings": [
+        {
+          "source": {
+            "name": "NVD"
+          },
+          "score": 8.1,
+          "severity": "high",
+          "method": "CVSSv31",
+          "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N"
+        }
+      ],
+      "analysis": {
+        "state": "resolved",
+        "response": [
+          "update"
+        ],
+        "detail": "urllib3 is pinned to 1.26.18 in the deployed image."
+      },
+      "affects": [
+        {
+          "ref": "pkg:pypi/urllib3@1.26.8"
+        }
+      ]
+    },
+    {
+      "id": "CVE-2023-37920",
+      "source": {
+        "name": "NVD",
+        "url": "https://nvd.nist.gov/vuln/detail/CVE-2023-37920"
+      },
+      "ratings": [
+        {
+          "source": {
+            "name": "NVD"
+          },
+          "score": 9.8,
+          "severity": "critical",
+          "method": "CVSSv31",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+        }
+      ],
+      "analysis": {
+        "state": "resolved_with_pedigree",
+        "response": [
+          "update"
+        ],
+        "detail": "The e-Tugra root certificates are removed by the hardened base-image trust store."
+      },
+      "affects": [
+        {
+          "ref": "pkg:pypi/certifi@2022.12.7"
+        }
+      ]
+    },
+    {
+      "id": "GHSA-5crp-9r3c-p9vr",
+      "source": {
+        "name": "GitHub Advisories",
+        "url": "https://github.com/advisories/GHSA-5crp-9r3c-p9vr"
+      },
+      "ratings": [
+        {
+          "source": {
+            "name": "GitHub Advisories"
+          },
+          "score": 7.5,
+          "severity": "high",
+          "method": "CVSSv31",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
+        }
+      ],
+      "analysis": {
+        "state": "false_positive",
+        "detail": "The vulnerable deeply-nested-JSON path requires attacker-controlled depth, which the request pipeline caps at 32."
+      },
+      "affects": [
+        {
+          "ref": "pkg:nuget/Newtonsoft.Json@12.0.3"
+        }
+      ]
+    },
+    {
+      "id": "GHSA-mh6f-8j2x-4483",
+      "source": {
+        "name": "GitHub Advisories",
+        "url": "https://github.com/advisories/GHSA-mh6f-8j2x-4483"
+      },
+      "ratings": [
+        {
+          "source": {
+            "name": "GitHub Advisories"
+          },
+          "score": 9.8,
+          "severity": "critical",
+          "method": "CVSSv31",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+        }
+      ],
+      "analysis": {
+        "state": "in_triage"
+      },
+      "affects": [
+        {
+          "ref": "pkg:npm/event-stream@3.3.6"
+        }
+      ]
+    }
+  ]
+}

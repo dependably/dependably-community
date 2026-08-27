@@ -100,40 +100,53 @@ public sealed class JwtRevocationRepository
         // cancelled or collected.
         var guardSource = _cache is null ? null : GuardFor(jti);
 
-        await using var conn = await _db.OpenAsync(ct);
-        string now = _time.GetUtcNow().ToUtcIso();
-        int count = await conn.ExecuteScalarAsync<int>(
-            "SELECT COUNT(*) FROM jwt_revocations WHERE jti = @jti AND expires_at > @now",
-            new { jti, now });
-        bool revoked = count > 0;
-
-        // Only cache the negative answer. A positive (revoked) result is rare and
-        // persistent — no need to cache it; let the DB carry the truth.
-        if (!revoked && _cache is not null)
+        // From here on, guardSource (when non-null) MUST end up either tied to a cache entry
+        // (TieToEntryLifetime, below) or explicitly retired in the finally — never left dangling.
+        // The map is process-lifetime (this repository is registered Singleton), so a DB open/read
+        // that throws before a cache entry is installed to own the guard's lifetime would otherwise
+        // leak it for the rest of the process.
+        bool tied = false;
+        try
         {
-            var options = new MemoryCacheEntryOptions
+            await using var conn = await _db.OpenAsync(ct);
+            string now = _time.GetUtcNow().ToUtcIso();
+            int count = await conn.ExecuteScalarAsync<int>(
+                "SELECT COUNT(*) FROM jwt_revocations WHERE jti = @jti AND expires_at > @now",
+                new { jti, now });
+            bool revoked = count > 0;
+
+            // Only cache the negative answer. A positive (revoked) result is rare and
+            // persistent — no need to cache it; let the DB carry the truth.
+            if (!revoked && _cache is not null)
             {
-                AbsoluteExpirationRelativeToNow = NegativeCacheTtl,
-                Size = 1,
-            };
-            // If the guard was cancelled by a concurrent RevokeAsync the entry is expired on
-            // insert; if cancellation lands after the insert the registered callback evicts it.
-            options.AddExpirationToken(new CancellationChangeToken(guardSource!.Token));
-            // Tie the generation's lifetime to this entry so a naturally-expiring jti (which never
-            // calls RevokeAsync) does not leave its guard in the map forever.
-            CacheFillGuard.TieToEntryLifetime(options, _fillGuards, jti, guardSource);
-            _cache.Set(CacheKey(jti), false, options);
-        }
-        else if (guardSource is not null)
-        {
-            // Revoked (positive) results are never cached, so the generation minted before the read
-            // is never tied to a cache entry. IsRevokedAsync runs on every JWT request, so a
-            // repeatedly-presented logged-out token would otherwise leak one guard per distinct
-            // revoked jti forever — retire the just-minted instance here.
-            CacheFillGuard.RetireUnbound(_fillGuards, jti, guardSource);
-        }
+                var options = new MemoryCacheEntryOptions
+                {
+                    AbsoluteExpirationRelativeToNow = NegativeCacheTtl,
+                    Size = 1,
+                };
+                // If the guard was cancelled by a concurrent RevokeAsync the entry is expired on
+                // insert; if cancellation lands after the insert the registered callback evicts it.
+                options.AddExpirationToken(new CancellationChangeToken(guardSource!.Token));
+                // Tie the generation's lifetime to this entry so a naturally-expiring jti (which
+                // never calls RevokeAsync) does not leave its guard in the map forever.
+                CacheFillGuard.TieToEntryLifetime(options, _fillGuards, jti, guardSource);
+                _cache.Set(CacheKey(jti), false, options);
+                tied = true;
+            }
 
-        return revoked;
+            return revoked;
+        }
+        finally
+        {
+            if (guardSource is not null && !tied)
+            {
+                // Revoked (positive) results are never cached, so the generation minted before the
+                // read is never tied to a cache entry. IsRevokedAsync runs on every JWT request, so
+                // a repeatedly-presented logged-out token (or a thrown DB open/read) would otherwise
+                // leak one guard per distinct jti forever — retire the just-minted instance here.
+                CacheFillGuard.RetireUnbound(_fillGuards, jti, guardSource);
+            }
+        }
     }
 
     /// <summary>Removes expired revocation entries (called by RetentionService GC pass).</summary>

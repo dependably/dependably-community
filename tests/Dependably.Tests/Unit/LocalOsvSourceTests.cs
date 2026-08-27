@@ -22,19 +22,27 @@ public sealed class LocalOsvSourceTests : IDisposable
         }
     }
 
-    private void WriteAdvisory(string id, string ecosystem, string name, string[] versions, string? severity = null)
+    private void WriteAdvisory(
+        string id, string ecosystem, string name, string[] versions,
+        string? severity = null, string[]? aliases = null)
     {
         string sevBlock = severity is null ? "" : $@",
   ""severity"": [{{ ""type"": ""CVSS_V3"", ""score"": ""{severity}"" }}]";
+        string aliasBlock = aliases is null ? "" : $@",
+  ""aliases"": [{string.Join(",", aliases.Select(a => $"\"{a}\""))}]";
         string json = $@"{{
   ""id"": ""{id}"",
-  ""summary"": ""test advisory"",
+  ""summary"": ""test advisory""{aliasBlock},
   ""affected"": [{{
     ""package"": {{ ""ecosystem"": ""{ecosystem}"", ""name"": ""{name}"" }},
     ""versions"": [{string.Join(",", versions.Select(v => $"\"{v}\""))}]
   }}]{sevBlock}
 }}";
-        File.WriteAllText(Path.Combine(_dir, $"{id}.json"), json);
+        // Advisory IDs like "RLSA-2024:1234" carry a colon, which is not a valid filename
+        // character on some filesystems — the dump directory's filenames are never significant
+        // to LocalOsvSource, so sanitize purely for the write.
+        string safeFileName = id.Replace(':', '_');
+        File.WriteAllText(Path.Combine(_dir, $"{safeFileName}.json"), json);
     }
 
     private LocalOsvSource Build() => new(_dir, NullLogger<LocalOsvSource>.Instance);
@@ -316,5 +324,138 @@ public sealed class LocalOsvSourceTests : IDisposable
 
         var hits = await src.QueryAsync("pkg:golang/golang.org/x/crypto@v0.17.0");
         Assert.Empty(hits);
+    }
+
+    // ── RPM (distro dual-bucket indexing) ───────────────────────────────────────
+    // OSV has no single "RPM" ecosystem — advisories are filed under distro-specific,
+    // release-qualified names (Rocky Linux, AlmaLinux, Red Hat, …). These pin the fix for #608:
+    // a realistic distro-filed advisory (Rocky Linux/AlmaLinux ID shape, aliased to a CVE) must
+    // be found by a bare pkg:rpm query, mirroring how Alpine's dual-bucket index already works.
+
+    [Fact]
+    public async Task Query_Rpm_RockyLinuxAdvisory_MatchesBareRpmQuery()
+    {
+        WriteAdvisory(
+            "RLSA-2024:1234", "Rocky Linux:9", "tree", ["1.8.0-3.el9"],
+            aliases: ["CVE-2024-12345"]);
+        var src = Build();
+
+        var hits = await src.QueryAsync("pkg:rpm/tree@1.8.0-3.el9?arch=x86_64");
+
+        Assert.Single(hits);
+        Assert.Equal("RLSA-2024:1234", hits[0].Id);
+        Assert.Contains("CVE-2024-12345", hits[0].Aliases);
+    }
+
+    [Fact]
+    public async Task Query_Rpm_AlmaLinuxAdvisory_MatchesBareRpmQuery()
+    {
+        WriteAdvisory(
+            "ALSA-2024:5678", "AlmaLinux:9", "openssl", ["3.0.7-27.el9_4"],
+            aliases: ["CVE-2024-56789"]);
+        var src = Build();
+
+        var hits = await src.QueryAsync("pkg:rpm/openssl@3.0.7-27.el9_4?arch=x86_64");
+
+        Assert.Single(hits);
+        Assert.Equal("ALSA-2024:5678", hits[0].Id);
+    }
+
+    [Fact]
+    public async Task Query_Rpm_VersionOutsideAdvisoryRange_ReturnsEmpty()
+    {
+        // The dual-bucket indexing must not turn version matching into a rubber stamp — a real
+        // distro advisory that does not cover the artefact's specific version is still a miss.
+        WriteAdvisory(
+            "RLSA-2024:1111", "Rocky Linux:9", "tree", ["1.8.0-3.el9"],
+            aliases: ["CVE-2024-11111"]);
+        var src = Build();
+
+        var hits = await src.QueryAsync("pkg:rpm/tree@1.9.0-1.el9?arch=x86_64");
+
+        Assert.Empty(hits);
+    }
+
+    [Fact]
+    public async Task Query_Rpm_NameMiss_ReturnsEmpty()
+    {
+        WriteAdvisory("RLSA-2024:2222", "Rocky Linux:9", "tree", ["1.8.0-3.el9"]);
+        var src = Build();
+
+        var hits = await src.QueryAsync("pkg:rpm/wget@1.8.0-3.el9?arch=x86_64");
+        Assert.Empty(hits);
+    }
+
+    [Fact]
+    public async Task Query_Rpm_DoesNotMatchNonRpmDistro()
+    {
+        // Debian (dpkg) is not an RPM-packaged distro — a Debian advisory sharing a package name
+        // must not leak into an RPM query's results the way it would if this were a blanket
+        // prefix match rather than the known-distro-name check.
+        WriteAdvisory("DSA-2024-1", "Debian:12", "tree", ["1.8.0-3"]);
+        var src = Build();
+
+        var hits = await src.QueryAsync("pkg:rpm/tree@1.8.0-3?arch=x86_64");
+        Assert.Empty(hits);
+    }
+
+    // ── RPM (HasCoverageFor — the dynamic per-source coverage signal) ──────────
+
+    [Fact]
+    public async Task HasCoverageFor_Rpm_NoDistroAdvisoriesInDump_ReturnsFalse()
+    {
+        // The dump loaded fine but carries nothing an RPM query could ever match against —
+        // stamping vuln_checked_at off that would be the exact false-clean #608 describes.
+        WriteAdvisory("GHSA-Unrelated", "npm", "left-pad", ["1.0.0"]);
+        var src = Build();
+        await src.QueryAsync("pkg:npm/left-pad@1.0.0"); // trigger the initial load
+
+        Assert.False(await src.HasCoverageFor("rpm"));
+    }
+
+    [Fact]
+    public async Task HasCoverageFor_Rpm_EmptyDump_ReturnsFalse()
+    {
+        var src = Build();
+        Assert.False(await src.HasCoverageFor("rpm"));
+    }
+
+    [Fact]
+    public async Task HasCoverageFor_Rpm_WithDistroAdvisories_ReturnsTrue()
+    {
+        // Coverage is about the ecosystem having *any* distro feed loaded, not about this one
+        // artefact's own package having a hit — that is exactly the "scanned and genuinely
+        // clean" case, which must still be reported as covered.
+        WriteAdvisory("RLSA-2024:3333", "Rocky Linux:9", "tree", ["1.8.0-3.el9"]);
+        var src = Build();
+
+        Assert.True(await src.HasCoverageFor("rpm"));
+    }
+
+    [Fact]
+    public async Task HasCoverageFor_MissingDirectory_Rpm_ReturnsFalse()
+    {
+        Directory.Delete(_dir, recursive: true);
+        var src = new LocalOsvSource(_dir, NullLogger<LocalOsvSource>.Instance);
+
+        Assert.False(await src.HasCoverageFor("rpm"));
+    }
+
+    [Fact]
+    public async Task HasCoverageFor_NonRpmEcosystemWithFeed_AlwaysTrue()
+    {
+        var src = Build();
+        Assert.True(await src.HasCoverageFor("npm"));
+    }
+
+    [Fact]
+    public async Task HasCoverageFor_StaticNoFeedEcosystem_ReturnsFalse()
+    {
+        // The static OsvFeedCoverage.HasAdvisoryFeed gate is consulted first and is never
+        // widened by anything loaded in the dump.
+        WriteAdvisory("GHSA-Terraform", "npm", "left-pad", ["1.0.0"]);
+        var src = Build();
+
+        Assert.False(await src.HasCoverageFor("terraform"));
     }
 }

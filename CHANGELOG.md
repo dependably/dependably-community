@@ -7,6 +7,152 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-26
+
+### Added
+
+- **A projects plane: SBOM, VEX and SARIF ingest, organized in folders.** Dependably now holds
+  the inventory of what your own software is built from, beside the registry that serves the
+  artefacts. Upload a CycloneDX SBOM, an OpenVEX document, or a SARIF report (`cyclonedx-json`,
+  `openvex-json`, `sarif-json`) against a project; organize projects into folders that roll up their
+  whole subtree; relocate rows, navigate by breadcrumb, and export one SBOM for an entire folder.
+
+  Components are cross-linked with the registry plane sitting beside them, so a component in an
+  uploaded SBOM resolves to the package version this instance already knows about — its advisories,
+  its licence, its block state — rather than being a name in a document. Uploaded documents are
+  retained under an explicit project retention policy, and superseded document blobs are reclaimed
+  by a bounded nightly sweep.
+
+- **An instance-level connection to a vulnerability tracker, with enrichment overlay.** Configured
+  once per deployment from Settings, the connection enriches scanned advisories with signals OSV
+  does not carry: SSVC exploitation state, an NVD score fallback, CISA ransomware-campaign use,
+  EPSS percentile, and dependency-graph reach. Requests are deduplicated before they leave, batched,
+  and the client **cannot report an outage as clean** — an unreachable tracker defers, it does not
+  record a negative.
+
+  Operators can test the connection instead of waiting for a scan, and connection health renders
+  next to the config editor. Tenants see their own enrichment coverage; instance-wide coverage
+  lives on the apex dashboard.
+
+- **Two new block-gate arms, both default off.** `block_ssvc_exploitation` gates on SSVC
+  exploitation state; ransomware-campaign use and EPSS percentile each gate independently of the
+  CVSS band. The NVD score deliberately gets **no** arm of its own — it feeds the existing
+  `max_osv_score_tolerance` ceiling as a fallback, closing a fail-open where an OSV advisory
+  carrying no severity passed the ceiling silently whatever the tenant had set.
+
+- **An enrichment staleness horizon.** Enrichment older than the horizon refuses under `block`;
+  never-enriched is inert. Those are two different facts, not two degrees of one.
+
+- **A subscribable gate-refusal webhook event**, with per-`(org, purl, arm)` burst coalescing so a
+  CI job retrying a blocked dependency produces one notification, not hundreds.
+
+- **Append-only daily org stats history**, with bounded retention and trend rendering on the
+  dashboard.
+
+- **A durable first-seen timestamp for findings** on both the registry and projects planes, so
+  "how long has this been here" is answerable after a rescan.
+
+- **KEV surfacing throughout the UI** — a KEV-blocked stat tile on the dashboard, KEV status on the
+  Packages list, a KEV chip on the Projects list, KEV/EPSS on the version-drilldown rows, and a
+  distinct badge for KEV advisories tied to a ransomware campaign. Advisories link out to OSV.dev
+  and NVD, and to this instance's own assessment; vulnerabilities are searchable globally.
+
+- **Risk-ordering in the UI** surfaces coverage, prevention, override age, and KEV/EPSS-first
+  ordering.
+
+### Fixed
+
+- **RPM artefacts were stamped scanned-clean without ever being screened — on both advisory-source
+  paths.** `pkg:rpm` purls carried no distro namespace, so an OSV query for them was structurally
+  unresolvable: OSV.dev answers it empty, and a sideloaded local dump (whose RPM advisories are
+  filed under `Rocky Linux` / `AlmaLinux` / `Red Hat`) matches nothing. Because RPM is not in the
+  no-feed set, that empty result was not reported as `no_feed` — the artefact was stamped
+  `vuln_checked_at` and rendered as *scanned, nothing found*.
+
+  `vuln_checked_at` is the flag that **enables** the malicious, KEV, EPSS and CVSS block arms, so
+  every RPM package in the catalogue armed all four over a structurally empty advisory set. Remote
+  purls now carry a distro namespace and **fail closed when none resolves**; local mode reports
+  no-feed instead of stamping.
+
+  **Action required:** every RPM artefact scanned on 0.7.1 or earlier carries a
+  `vuln_checked_at` stamp that means nothing. Clear it and rescan — until you do, those artefacts
+  read as screened when they were not.
+
+- **CVSS v4.0 vectors were unparsed, so the score-driven block arm was inert for them** — 21% of
+  npm and 19% of crates.io advisories carry a v4-only vector. `OsvScoring` accepted `CVSS:3.` and
+  returned null for everything else, which left `max_osv_score_tolerance` with nothing to compare.
+  v4.0 base scores now parse, and where an advisory carries several severity entries the
+  best-parseable one is selected.
+
+  **Action required:** advisories that scored as unscored on 0.7.1 may now exceed your configured
+  `max_osv_score_tolerance` and start refusing. Review the ceiling before upgrading if you set it
+  tightly.
+
+- **A vulnerability alert is no longer gated on the CVSS band**, so a KEV-listed advisory with no
+  parseable score raises one. Expect more alerts on the same catalogue.
+
+- **`warn` mode recorded nothing.** The block gate's `warn` disposition now records the
+  would-have-blocked decision, which is the entire point of running it before `block`.
+
+- **`kev_ransomware` and `epss_percentile` refused artefacts invisibly** — neither had a case in the
+  gate's side-effect handling, so a refusal produced no activity row. A compliance gate now pins
+  that every arm has one.
+
+- **Security hardening across the request surface.** Control characters are rejected in package
+  coordinates; `?` and `#` are rejected in an upstream proxy path segment; ZIP entry count and
+  central-directory span are bounded; `LIKE` metacharacters are escaped in every parameterized
+  search; a duplicated tenant header is refused rather than resolved to the first value; an absent
+  `tid` claim is refused in `RouteScopeFilter`; the two remaining `X-Dependably-PURL` header writes
+  are sanitized; security headers are preserved across every refusal response; and every
+  SSRF-guarded HTTP handler bypasses the ambient proxy.
+
+- **Tenant suspension is a full lockout**, enforced at one seam rather than per-surface, and
+  background jobs stop for a non-active tenant. The subdomain resolver is registered Singleton so
+  invalidation can cancel a racing cache fill.
+
+- **`NOT IN @list` failed on Postgres** with a `42601` syntax error — array-binding after `IN` is
+  not valid Npgsql. Those sites now expand through `DapperInClause`.
+
+- **The PyPI simple-index cache key had no proxy/local discriminator**, so the two planes could
+  serve each other's index.
+
+- **Alert `email_status` is reconciled from the authoritative outbox row** rather than drifting from
+  it, and a SQLite `PRAGMA` command's lifetime is bound to its scope.
+
+- **Cache generations are retired on throw**, closing an async post-eviction race.
+
+- Malicious advisories escalate to Act priority on the SBOM plane; legacy duplicate analysis rows
+  are reconciled; `vuln_key` case is folded in every analysis conflict target; unscannable
+  components are surfaced rather than silently omitted; and two zero-latest holes are closed.
+
+### Changed
+
+- **English defaults to en-CA**, and fr-CA typography is enforced. `licence` is the noun in UI
+  prose; the CISA Known Exploited Vulnerabilities Catalog is named properly.
+
+- **The vulnerability facts vocabulary and priority taxonomy are unified across both planes**, so
+  the answer to "which finding is worse" no longer depends on which plane you ask. The two
+  evaluators stay deliberately separate — the gate returns the first arm that fires because it must
+  produce one verdict, the inventory evaluator returns every arm that fires because the point is
+  review.
+
+- **The `docs/` tree is retired** and every reference repointed. Operator documentation now lives in
+  the dedicated docs repository.
+
+- **Token presets grant `read:packages` on the pull and both presets**, and the raw capability list
+  is hidden for tokens whose capabilities match a preset exactly.
+
+- Every export producer emits full signal coverage plus coverage/freshness metadata, so an export
+  states what it could and could not see.
+
+- The SBOM component table's identity columns are restructured; the Upload action moves right-most
+  on the version-detail toolbar; empty Trends and Prevention render as status lines rather than
+  placeholders; and enrichment coverage moves from the org dashboard to apex.
+
+- RPM repodata SQL pre-filters the two unconditional gate arms.
+
+- The Docker image reads its version from MSBuild rather than a drift-prone `VERSION` build-arg.
+
 ## [0.7.1] - 2026-08-19
 
 ### Fixed

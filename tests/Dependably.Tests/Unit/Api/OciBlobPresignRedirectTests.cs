@@ -489,7 +489,10 @@ public sealed class OciBlobPresignRedirectTests : IAsyncLifetime
             new LicenseRepository(_db, _clock, normalizer),
             new StubPerOrgTrustAnchorStore(),
             NullLogger<BlockGateService>.Instance,
-            _clock);
+            _clock,
+            new OrgRepository(_db),
+            NSubstitute.Substitute.For<Dependably.Infrastructure.Webhooks.IPackageEventSink>(),
+            new BlockRefusalWebhookThrottle(_clock, TimeSpan.Zero));
     }
 }
 

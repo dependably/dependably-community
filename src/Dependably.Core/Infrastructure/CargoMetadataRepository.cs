@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using Dapper;
 using Dependably.Protocol;
 
@@ -87,6 +88,9 @@ public sealed class CargoMetadataRepository
             : MergeIndexLines(localList, globalList);
     }
 
+    // Internal DTO for raw DB rows. Dapper sets props by reflection.
+    [SuppressMessage("Minor Code Smell", "S3459:Unassigned members should be removed", Justification = "Dapper sets these props by reflection; not statically visible as assigned.")]
+    [SuppressMessage("Major Code Smell", "S1144:Unused private types or members should be removed", Justification = "Dapper sets these props by reflection; not statically visible as used.")]
     private sealed class GlobalIndexLineRow
     {
         public string IndexLine { get; init; } = "";

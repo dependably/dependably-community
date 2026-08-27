@@ -45,6 +45,11 @@ namespace Dependably.Background;
 ///
 /// Schedule: <c>TENANT_HARD_DELETE_SCHEDULE</c> cron (default <c>0 4 * * *</c> — once daily,
 /// staggered 1h after the standard retention sweep).
+///
+/// suspension-ok: the suspension rule (see TenantLifecycle) does not apply here — this job's
+/// whole worklist IS non-active orgs (soft-deleted past the grace window), so "skip a non-active
+/// org" would be self-contradictory. A suspended-then-deleted org must still be reaped on
+/// schedule; suspension and soft-delete are independent axes on <c>orgs</c>.
 /// </summary>
 public sealed class TenantHardDeleteService : BackgroundService
 {

@@ -24,7 +24,7 @@ public static partial class MigrationColumnPlanner
     /// name in this path comes from <c>sqlite_master</c> / <c>information_schema</c> — never from a
     /// request or an operator argument — and is still checked against this before use.
     /// </summary>
-    [GeneratedRegex("^[A-Za-z_][A-Za-z0-9_]*$")]
+    [GeneratedRegex(@"^[A-Za-z_][A-Za-z0-9_]*\z")]
     private static partial Regex IdentifierRegex();
 
     /// <summary>Validates a catalogue-derived identifier and returns it double-quoted.</summary>

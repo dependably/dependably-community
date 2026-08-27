@@ -1,0 +1,23 @@
+fixture: 02-real-tenant-softdelete-egress.diff
+class: REAL_FINDING
+expected_verdict: FINDING
+lens: security (primary), architecture (secondary)
+expected_finding: |
+  Two HIGH-severity defects plus one MEDIUM, all reintroduced:
+  1. TenantLifecycle.IsActive checks `status` but never `deleted_at`, so a soft-deleted org
+     (SoftDeleteAsync leaves status='active') keeps egressing to its own third-party endpoints
+     through the entire 30-day restore grace window, at all four in-process call sites.
+  2. EmailOutboxDeliveryService's suspension skip calls no EmailTransportBreaker method, so a
+     suspended org's message winning the single HalfOpen probe slot leaves the probe permanently
+     unresolved -- freezing email delivery for EVERY org, including operator-scope mail, until
+     process restart.
+provenance:
+  origin: reverse of commit bcae5d52 ("fix(tenancy): close two HIGH findings..."), src/ only
+  mr: !1034
+  ground_truth: KNOWN FALSE NEGATIVE -- all four lenses that existed at the time (security,
+    code, architecture, and the since-retired docs lens) reported clean on that MR, each with
+    its exact sentinel and no degradation. Both HIGHs were found by adversarial review round 2.
+notes: |
+  The full MR diff was 279 KB against a 120,000-byte cap, so the lenses saw ~42% of it at the
+  time. This fixture is scoped to the fix commit's src/ diff (23 KB, sub-cap) precisely to
+  separate "the lens cannot see this class of defect" from "the lens never received these bytes".

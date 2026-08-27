@@ -1,0 +1,493 @@
+diff --git b/src/Dependably.Core/Infrastructure/Sbom/SbomVulnKeyComparer.cs a/src/Dependably.Core/Infrastructure/Sbom/SbomVulnKeyComparer.cs
+index 26ba8058..3c3c163f 100644
+--- b/src/Dependably.Core/Infrastructure/Sbom/SbomVulnKeyComparer.cs
++++ a/src/Dependably.Core/Infrastructure/Sbom/SbomVulnKeyComparer.cs
+@@ -10,43 +10,20 @@ namespace Dependably.Infrastructure.Sbom;
+ /// than canonicalized to one case, because advisory ids do not share one casing convention: a CVE
+ /// id is conventionally all-uppercase, but a GHSA id's alphanumeric suffix is conventionally
+ /// lowercase (<c>GHSA-xxxx-xxxx-xxxx</c>). Folding every id to one case at write time would
+ /// silently corrupt whichever convention disagreed with the chosen case, in storage and in every
+ /// surface that renders <c>vuln_key</c> back to an operator — the analysis view, and the exported
+ /// VEX document, both of which display the stored spelling verbatim. Comparing case-insensitively
+ /// instead, without ever rewriting the stored value, is what lets a VEX citing a lowercase
+ /// <c>cve-2023-1234</c> suppress the same finding a scanner recorded as <c>CVE-2023-1234</c> —
+ /// identically in the analysis view, the policy evaluator, and the export — while every surface
+ /// keeps rendering whichever spelling its own row actually holds.</para>
+-///
+-/// <para>The three writers of <c>project_vuln_analysis</c> — the VEX arm, the reachability arm
+-/// and the manual triage — apply the same rule to their <c>ON CONFLICT</c> target, which is a
+-/// plain byte-for-byte UNIQUE and would otherwise miss a conflict every reader here considers a
+-/// match. Each resolves the spelling the tenant's own row already holds
+-/// (<c>UPPER(stored.vuln_key) = UPPER(@vulnKey)</c>, lowest by ordinal sort when more than one
+-/// exists) and writes that, inside the INSERT rather than in a preceding round trip, so the
+-/// stored id stays verbatim and the conflict fires. Missing it does not merely duplicate a row:
+-/// the VEX arm's <c>vex_source &lt;&gt; 'manual'</c> refusal is expressed as the conflict
+-/// update's WHERE clause, so a statement that never conflicts is never refused, and an uploaded
+-/// document silently overrides the operator decision that guard exists to protect.</para>
+-///
+-/// <para>The retraction sweeps match their asserted key set through this comparer for the same
+-/// reason: with the writers resolving onto the stored spelling, an ordinal keep-set would fail to
+-/// recognise the row the same request had just written and retract it immediately. A database
+-/// already holding case-variant rows keeps both under that broader match, which errs toward
+-/// keeping a fact rather than deleting one.</para>
+-///
+-/// <para>Resolving inside the INSERT closes the race under SQLite, which evaluates the statement
+-/// under its single writer. Under Postgres read-committed two genuinely simultaneous writes of
+-/// one advisory in different case, with no row yet, can still each insert — neither snapshot sees
+-/// the other's uncommitted row — and the case-insensitive matching here is what keeps that pair
+-/// reading as one advisory until the next write collapses them.</para>
+ /// </summary>
+ public sealed class SbomVulnKeyComparer : IEqualityComparer<(string PurlKey, string VulnKey)>
+ {
+     public static readonly SbomVulnKeyComparer Instance = new();
+ 
+     public bool Equals((string PurlKey, string VulnKey) x, (string PurlKey, string VulnKey) y) =>
+         string.Equals(x.PurlKey, y.PurlKey, StringComparison.Ordinal)
+         && string.Equals(x.VulnKey, y.VulnKey, StringComparison.OrdinalIgnoreCase);
+ 
+     public int GetHashCode((string PurlKey, string VulnKey) obj) =>
+diff --git b/src/Dependably.Core/Infrastructure/SbomIngestRepository.cs a/src/Dependably.Core/Infrastructure/SbomIngestRepository.cs
+index ee3de461..6aefc1b3 100644
+--- b/src/Dependably.Core/Infrastructure/SbomIngestRepository.cs
++++ a/src/Dependably.Core/Infrastructure/SbomIngestRepository.cs
+@@ -1,13 +1,12 @@
+ using System.Data.Common;
+ using Dapper;
+-using Dependably.Infrastructure.Sbom;
+ 
+ namespace Dependably.Infrastructure;
+ 
+ /// <summary>A resolved (project, version) pair, as an ingest read needs it before it parses.</summary>
+ public sealed record ProjectVersionRef(
+     string ProjectId, string ProjectName, string ProjectKind, string ProjectVersionId, string VersionLabel);
+ 
+ /// <summary>
+ /// One component as an SBOM declares it. Carries only SBOM-owned facts: the dev/prod signal
+ /// lives in <c>dependency_scope</c>, which the reachability scanner owns and this record has no
+@@ -351,45 +350,30 @@ public sealed class SbomIngestRepository
+         string projectVersionId,
+         VexStatementWrite write,
+         string? actorId,
+         DateTimeOffset now,
+         CancellationToken ct = default)
+     {
+         // An operator's manual triage outranks an uploaded statement. The analysis merge is
+         // re-runnable — every SBOM upload re-applies the stored VEX — so without this guard a
+         // routine re-upload would silently revert a decision a human had already made, and the
+         // suppression it carried would come back as an alert.
+-        //
+-        // The guard IS the conflict update's WHERE clause, so it only refuses a statement that
+-        // conflicts. The insert therefore resolves the spelling the stored row holds before it
+-        // writes vuln_key — the rule SbomVulnKeyComparer documents — because a document citing
+-        // CVE-X against a row triaged as cve-x would otherwise conflict with nothing, insert
+-        // alongside the manual row, and override the decision without ever meeting the guard.
+         await using var conn = await _db.OpenAsync(ct);
+         await conn.ExecuteAsync(new CommandDefinition(
+             """
+             INSERT INTO project_vuln_analysis (
+                 id, org_id, project_version_id, purl_key, vuln_key,
+                 vex_state, vex_justification, vex_response, vex_detail, vex_source,
+                 updated_by, updated_at)
+-            SELECT @id, @orgId, @projectVersionId, @purlKey,
+-                   COALESCE((
+-                       SELECT stored.vuln_key
+-                       FROM project_vuln_analysis stored
+-                       WHERE stored.org_id = @orgId
+-                         AND stored.project_version_id = @projectVersionId
+-                         AND stored.purl_key = @purlKey
+-                         AND UPPER(stored.vuln_key) = UPPER(@vulnKey)
+-                       ORDER BY stored.vuln_key
+-                       LIMIT 1), @vulnKey),
+-                   @state, @justification, @response, @detail, 'upload', @actorId, @now
+-            WHERE true
++            VALUES (
++                @id, @orgId, @projectVersionId, @purlKey, @vulnKey,
++                @state, @justification, @response, @detail, 'upload', @actorId, @now)
+             ON CONFLICT (project_version_id, purl_key, vuln_key) DO UPDATE SET
+                 vex_state = excluded.vex_state,
+                 vex_justification = excluded.vex_justification,
+                 vex_response = excluded.vex_response,
+                 vex_detail = excluded.vex_detail,
+                 vex_source = excluded.vex_source,
+                 updated_by = excluded.updated_by,
+                 updated_at = excluded.updated_at
+             WHERE COALESCE(project_vuln_analysis.vex_source, '') <> 'manual'
+             """,
+@@ -407,85 +391,49 @@ public sealed class SbomIngestRepository
+                 actorId,
+                 now = now.ToUtcIso(),
+             },
+             cancellationToken: ct));
+     }
+ 
+     /// <summary>
+     /// Writes the reachability arm of one analysis row, leaving the VEX arm untouched — so an
+     /// uploaded SARIF never overwrites a triage decision, and a re-uploaded VEX never erases a
+     /// reachability verdict.
+-    ///
+-    /// <para>The insert resolves the spelling the stored row holds before it writes
+-    /// <c>vuln_key</c>, the rule <see cref="SbomVulnKeyComparer"/> documents, so a log citing an
+-    /// advisory in a case the VEX did not use lands its reachability facts on that advisory's
+-    /// existing row rather than on a second one. The two arms name disjoint columns on both the
+-    /// insert and the conflict update, so landing on an existing row annotates it and changes
+-    /// nothing the VEX arm owns.</para>
+-    ///
+-    /// <para><c>updated_by</c>/<c>updated_at</c> are the exception, because they are row-level
+-    /// while the two arms have different authors. They name the VEX arm's author whenever a human
+-    /// decided it, and the last document to write the row otherwise: a manual triage is the only
+-    /// thing on the row a person is accountable for and the only thing the UI attributes by name —
+-    /// the triage editor renders "set by" from these two columns — while a reachability
+-    /// observation is signed by nobody. So this writer leaves both alone on a row whose VEX arm is
+-    /// manual, and writes every SARIF-owned column regardless, which is the point of landing on
+-    /// the row at all. <see cref="RetractUnassertedSarifAsync"/> skips its own
+-    /// <c>updated_at</c> write on the same rows for the same reason.</para>
+-    ///
+-    /// <para>The cost is explicit rather than hidden: on a manually triaged row the row-level
+-    /// timestamp stops tracking the reachability arm, so "when was this row's reachability last
+-    /// observed" is not answerable per row. It stays answerable per version, from the SARIF
+-    /// document receipt in <c>project_documents</c>, which records the log's own upload time.
+-    /// Answering it per row means a second column pair owned by the reachability arm — a schema
+-    /// change with a blue-green cost and, today, no reader. A wrong name against a decision is a
+-    /// worse answer than a missing timestamp against an observation.</para>
+     /// </summary>
+     public async Task UpsertSarifAsync(
+         string orgId,
+         string projectVersionId,
+         SarifFactWrite write,
+         string? actorId,
+         DateTimeOffset now,
+         CancellationToken ct = default)
+     {
+         await using var conn = await _db.OpenAsync(ct);
+         await conn.ExecuteAsync(new CommandDefinition(
+             """
+             INSERT INTO project_vuln_analysis (
+                 id, org_id, project_version_id, purl_key, vuln_key,
+                 reachability, confidence, sarif_suppressed, security_severity,
+                 severity_origin, fingerprint, updated_by, updated_at)
+-            SELECT @id, @orgId, @projectVersionId, @purlKey,
+-                   COALESCE((
+-                       SELECT stored.vuln_key
+-                       FROM project_vuln_analysis stored
+-                       WHERE stored.org_id = @orgId
+-                         AND stored.project_version_id = @projectVersionId
+-                         AND stored.purl_key = @purlKey
+-                         AND UPPER(stored.vuln_key) = UPPER(@vulnKey)
+-                       ORDER BY stored.vuln_key
+-                       LIMIT 1), @vulnKey),
+-                   @reachability, @confidence, @suppressed, @securitySeverity,
+-                   @severityOrigin, @fingerprint, @actorId, @now
+-            WHERE true
++            VALUES (
++                @id, @orgId, @projectVersionId, @purlKey, @vulnKey,
++                @reachability, @confidence, @suppressed, @securitySeverity,
++                @severityOrigin, @fingerprint, @actorId, @now)
+             ON CONFLICT (project_version_id, purl_key, vuln_key) DO UPDATE SET
+                 reachability = excluded.reachability,
+                 confidence = excluded.confidence,
+                 sarif_suppressed = excluded.sarif_suppressed,
+                 security_severity = excluded.security_severity,
+                 severity_origin = excluded.severity_origin,
+                 fingerprint = excluded.fingerprint,
+-                updated_by = CASE WHEN COALESCE(project_vuln_analysis.vex_source, '') = 'manual'
+-                                  THEN project_vuln_analysis.updated_by ELSE excluded.updated_by END,
+-                updated_at = CASE WHEN COALESCE(project_vuln_analysis.vex_source, '') = 'manual'
+-                                  THEN project_vuln_analysis.updated_at ELSE excluded.updated_at END
++                updated_by = excluded.updated_by,
++                updated_at = excluded.updated_at
+             """,
+             new
+             {
+                 id = Guid.NewGuid().ToString("N"),
+                 orgId,
+                 projectVersionId,
+                 purlKey = write.PurlKey,
+                 vulnKey = write.VulnKey,
+                 reachability = write.Reachability,
+                 confidence = write.Confidence,
+@@ -533,54 +481,48 @@ public sealed class SbomIngestRepository
+                     dependencyPath = fact.DependencyPath,
+                 },
+                 cancellationToken: ct));
+         }
+     }
+ 
+     /// <summary>
+     /// Clears the VEX arm of every upload-sourced row for this version that
+     /// <paramref name="asserted"/> does not name, and deletes any row left carrying nothing at
+     /// all. Manually triaged rows are never touched.
+-    ///
+-    /// <para>A stored row counts as named when <paramref name="asserted"/> holds its key under
+-    /// <see cref="SbomVulnKeyComparer"/> — the same rule the writer resolved its conflict key by.
+-    /// Matching ordinally instead would have this sweep fail to recognise a row the same request
+-    /// had just written, whenever the document's spelling differs from the stored one, and
+-    /// retract it on the spot.</para>
+     /// </summary>
+     /// <returns>How many rows had their VEX arm retracted.</returns>
+     public async Task<int> RetractUnassertedVexAsync(
+         string orgId,
+         string projectVersionId,
+         IReadOnlyCollection<AnalysisRowKey> asserted,
+         DateTimeOffset now,
+         CancellationToken ct = default)
+     {
+-        var keep = BuildKeepSet(asserted);
++        var keep = new HashSet<AnalysisRowKey>(asserted);
+         await using var conn = await _db.OpenAsync(ct);
+         var candidates = (await conn.QueryAsync<AnalysisIdRow>(new CommandDefinition(
+             """
+             SELECT id AS Id, purl_key AS PurlKey, vuln_key AS VulnKey
+             FROM project_vuln_analysis
+             WHERE org_id = @orgId AND project_version_id = @projectVersionId
+               AND COALESCE(vex_source, '') = 'upload'
+             """,
+             new { orgId, projectVersionId },
+             cancellationToken: ct))).ToList();
+ 
+         int retracted = 0;
+         await using var dbTx = await conn.BeginTransactionAsync(ct);
+         try
+         {
+             foreach (var row in candidates)
+             {
+-                if (keep.Contains((row.PurlKey, row.VulnKey)))
++                if (keep.Contains(new AnalysisRowKey(row.PurlKey, row.VulnKey)))
+                 {
+                     continue;
+                 }
+ 
+                 await conn.ExecuteAsync(new CommandDefinition(
+                     """
+                     UPDATE project_vuln_analysis SET
+                         vex_state = NULL,
+                         vex_justification = NULL,
+                         vex_response = NULL,
+@@ -605,75 +547,64 @@ public sealed class SbomIngestRepository
+             throw;
+         }
+ 
+         return retracted;
+     }
+ 
+     /// <summary>
+     /// Clears the reachability arm of every row for this version that <paramref name="asserted"/>
+     /// does not name, and deletes any row left carrying nothing at all. The VEX arm is untouched,
+     /// so a triage decision survives a SARIF that no longer reports the finding.
+-    ///
+-    /// <para>Named is decided by <see cref="SbomVulnKeyComparer"/>, the rule the writer resolved
+-    /// its conflict key by, so the sweep recognises the rows this request's own log just
+-    /// annotated whatever case it cited them in.</para>
+-    ///
+-    /// <para>A manually triaged row IS a candidate here, and correctly so: every column this
+-    /// clears is SARIF-owned, and the VEX arm is untouched. The <c>updated_at</c> write is not
+-    /// SARIF-owned, so it is skipped on such a row — withdrawing a reachability verdict must not
+-    /// move the date shown beside the operator's name. See <see cref="UpsertSarifAsync"/> for the
+-    /// ownership rule and what it costs.</para>
+     /// </summary>
+     /// <returns>How many rows had their reachability arm retracted.</returns>
+     public async Task<int> RetractUnassertedSarifAsync(
+         string orgId,
+         string projectVersionId,
+         IReadOnlyCollection<AnalysisRowKey> asserted,
+         DateTimeOffset now,
+         CancellationToken ct = default)
+     {
+-        var keep = BuildKeepSet(asserted);
++        var keep = new HashSet<AnalysisRowKey>(asserted);
+         await using var conn = await _db.OpenAsync(ct);
+         var candidates = (await conn.QueryAsync<AnalysisIdRow>(new CommandDefinition(
+             """
+             SELECT id AS Id, purl_key AS PurlKey, vuln_key AS VulnKey
+             FROM project_vuln_analysis
+             WHERE org_id = @orgId AND project_version_id = @projectVersionId
+               AND (reachability IS NOT NULL OR confidence IS NOT NULL OR sarif_suppressed <> 0
+                    OR security_severity IS NOT NULL OR severity_origin IS NOT NULL
+                    OR fingerprint IS NOT NULL)
+             """,
+             new { orgId, projectVersionId },
+             cancellationToken: ct))).ToList();
+ 
+         int retracted = 0;
+         await using var dbTx = await conn.BeginTransactionAsync(ct);
+         try
+         {
+             foreach (var row in candidates)
+             {
+-                if (keep.Contains((row.PurlKey, row.VulnKey)))
++                if (keep.Contains(new AnalysisRowKey(row.PurlKey, row.VulnKey)))
+                 {
+                     continue;
+                 }
+ 
+                 await conn.ExecuteAsync(new CommandDefinition(
+                     """
+                     UPDATE project_vuln_analysis SET
+                         reachability = NULL,
+                         confidence = NULL,
+                         sarif_suppressed = 0,
+                         security_severity = NULL,
+                         severity_origin = NULL,
+                         fingerprint = NULL,
+-                        updated_at = CASE WHEN COALESCE(vex_source, '') = 'manual'
+-                                          THEN updated_at ELSE @now END
++                        updated_at = @now
+                     WHERE id = @id AND org_id = @orgId
+                     """,
+                     new { id = row.Id, orgId, now = now.ToUtcIso() },
+                     dbTx,
+                     cancellationToken: ct));
+                 retracted++;
+                 await DeleteIfEmptyAsync(conn, dbTx, orgId, row.Id, ct);
+             }
+ 
+             await dbTx.CommitAsync(ct);
+@@ -744,26 +675,20 @@ public sealed class SbomIngestRepository
+             WHERE id = @id AND org_id = @orgId
+               AND vex_state IS NULL AND vex_source IS NULL AND vex_justification IS NULL
+               AND vex_response IS NULL AND vex_detail IS NULL
+               AND reachability IS NULL AND confidence IS NULL AND sarif_suppressed = 0
+               AND security_severity IS NULL AND severity_origin IS NULL AND fingerprint IS NULL
+             """,
+             new { id, orgId },
+             dbTx,
+             cancellationToken: ct));
+ 
+-    // The asserted keys as both sweeps match them: purl_key ordinally, vuln_key case-insensitively,
+-    // through the one comparer every reader of the pair already shares.
+-    private static HashSet<(string PurlKey, string VulnKey)> BuildKeepSet(
+-        IReadOnlyCollection<AnalysisRowKey> asserted) =>
+-        new(asserted.Select(key => (key.PurlKey, key.VulnKey)), SbomVulnKeyComparer.Instance);
+-
+     private sealed class AnalysisIdRow
+     {
+         public string Id { get; set; } = "";
+         public string PurlKey { get; set; } = "";
+         public string VulnKey { get; set; } = "";
+     }
+ 
+     /// <summary>
+     /// Resolves the actor discriminator for an audit write: a token whose subject is a user row
+     /// in this tenant is a user actor, and one whose subject is a service token is a service
+diff --git b/src/Dependably.Management/Infrastructure/SbomAnalysisRepository.cs a/src/Dependably.Management/Infrastructure/SbomAnalysisRepository.cs
+index 541568be..f9c21bcf 100644
+--- b/src/Dependably.Management/Infrastructure/SbomAnalysisRepository.cs
++++ a/src/Dependably.Management/Infrastructure/SbomAnalysisRepository.cs
+@@ -170,51 +170,44 @@ public sealed class SbomAnalysisRepository
+         return rows.ToList();
+     }
+ 
+     /// <summary>
+     /// One VEX/reachability row by its natural key, or null when nobody has written it.
+     /// <paramref name="vulnKey"/> is matched case-insensitively (<c>UPPER()</c> on both sides,
+     /// portable across SQLite and Postgres) rather than by canonicalizing the stored value — the
+     /// same rule <see cref="SbomVulnKeyComparer"/> applies in memory — so a caller citing a stored
+     /// row by any case still finds it without the column ever being rewritten to a case a GHSA id's
+     /// conventionally-lowercase suffix does not use.
+-    ///
+-    /// <para>The match orders by <c>vuln_key</c> and takes one row, the same rule
+-    /// <see cref="UpsertManualTriageAsync"/> resolves its conflict key by, so the two agree on
+-    /// which spelling is the tenant's for a pair that already holds more than one — a database
+-    /// where case-variant rows exist reads deterministically instead of failing the request.</para>
+     /// </summary>
+     public async Task<AnalysisVexRow?> GetAnalysisRowAsync(
+         string orgId, string projectVersionId, string purlKey, string vulnKey, CancellationToken ct = default)
+     {
+         await using var conn = await _db.OpenAsync(ct);
+-        return await conn.QueryFirstOrDefaultAsync<AnalysisVexRow>(new CommandDefinition(
++        return await conn.QuerySingleOrDefaultAsync<AnalysisVexRow>(new CommandDefinition(
+             """
+             SELECT purl_key          AS PurlKey,
+                    vuln_key          AS VulnKey,
+                    vex_state         AS VexState,
+                    vex_justification AS VexJustification,
+                    vex_response      AS VexResponse,
+                    vex_detail        AS VexDetail,
+                    vex_source        AS VexSource,
+                    reachability      AS Reachability,
+                    confidence        AS Confidence,
+                    sarif_suppressed  AS SarifSuppressed,
+                    security_severity AS SecuritySeverity,
+                    severity_origin   AS SeverityOrigin,
+                    updated_by        AS UpdatedBy,
+                    updated_at        AS UpdatedAt
+             FROM project_vuln_analysis
+             WHERE org_id = @orgId AND project_version_id = @projectVersionId
+               AND purl_key = @purlKey AND UPPER(vuln_key) = UPPER(@vulnKey)
+-            ORDER BY vuln_key
+-            LIMIT 1
+             """,
+             new { orgId, projectVersionId, purlKey, vulnKey }, cancellationToken: ct));
+     }
+ 
+     /// <summary>Every materialized policy finding for this version.</summary>
+     public async Task<IReadOnlyList<AnalysisFindingRow>> ListPolicyFindingsAsync(
+         string orgId, string projectVersionId, CancellationToken ct = default)
+     {
+         await using var conn = await _db.OpenAsync(ct);
+         var rows = await conn.QueryAsync<AnalysisFindingRow>(new CommandDefinition(
+@@ -363,27 +356,20 @@ public sealed class SbomAnalysisRepository
+     ///
+     /// <para>Each VEX field is written through a parameterized <c>CASE WHEN @xSet = 1</c> branch
+     /// rather than <c>COALESCE</c>, because null is a legitimate VALUE for all four of them — an
+     /// operator clearing a stale justification means exactly that, and COALESCE would silently
+     /// preserve the old one. The UPDATE therefore touches only the fields the caller actually
+     /// addressed; the INSERT arm lands the supplied values with nulls for the rest.</para>
+     ///
+     /// <para><c>vex_source</c> becomes <c>manual</c> on both arms: whatever a document last said
+     /// about this pair, an operator has now overruled it, and the provenance line has to say so.
+     /// The SARIF-owned columns are never touched here.</para>
+-    ///
+-    /// <para>The INSERT resolves the spelling the tenant's own row already holds before it writes
+-    /// <c>vuln_key</c> — the rule <see cref="SbomVulnKeyComparer"/> documents, shared with the two
+-    /// ingest writers. An API client composes the advisory id itself, and a triage citing
+-    /// <c>cve-2023-32681</c> for an advisory a document recorded as <c>CVE-2023-32681</c> would
+-    /// otherwise miss the byte-for-byte conflict target and land a second row for one advisory on
+-    /// one component, which every reader here still considers a match.</para>
+     /// </summary>
+     public async Task<AnalysisVexRow?> UpsertManualTriageAsync(
+         ManualTriageWrite write, CancellationToken ct = default)
+     {
+         string now = _time.GetUtcNow().ToUtcIso();
+         await using var conn = await _db.OpenAsync(ct);
+ 
+         var parameters = new
+         {
+             id = Guid.NewGuid().ToString("N"),
+@@ -402,33 +388,24 @@ public sealed class SbomAnalysisRepository
+             updatedBy = write.ActorId,
+             updatedAt = now,
+         };
+ 
+         await conn.ExecuteAsync(new CommandDefinition(
+             """
+             INSERT INTO project_vuln_analysis (
+                 id, org_id, project_version_id, purl_key, vuln_key,
+                 vex_state, vex_justification, vex_response, vex_detail, vex_source,
+                 updated_by, updated_at)
+-            SELECT @id, @orgId, @projectVersionId, @purlKey,
+-                   COALESCE((
+-                       SELECT stored.vuln_key
+-                       FROM project_vuln_analysis stored
+-                       WHERE stored.org_id = @orgId
+-                         AND stored.project_version_id = @projectVersionId
+-                         AND stored.purl_key = @purlKey
+-                         AND UPPER(stored.vuln_key) = UPPER(@vulnKey)
+-                       ORDER BY stored.vuln_key
+-                       LIMIT 1), @vulnKey),
+-                   @vexState, @vexJustification, @vexResponse, @vexDetail, 'manual',
+-                   @updatedBy, @updatedAt
+-            WHERE true
++            VALUES (
++                @id, @orgId, @projectVersionId, @purlKey, @vulnKey,
++                @vexState, @vexJustification, @vexResponse, @vexDetail, 'manual',
++                @updatedBy, @updatedAt)
+             ON CONFLICT (project_version_id, purl_key, vuln_key) DO UPDATE SET
+                 vex_state         = CASE WHEN @vexStateSet = 1 THEN @vexState ELSE project_vuln_analysis.vex_state END,
+                 vex_justification = CASE WHEN @vexJustificationSet = 1 THEN @vexJustification ELSE project_vuln_analysis.vex_justification END,
+                 vex_response      = CASE WHEN @vexResponseSet = 1 THEN @vexResponse ELSE project_vuln_analysis.vex_response END,
+                 vex_detail        = CASE WHEN @vexDetailSet = 1 THEN @vexDetail ELSE project_vuln_analysis.vex_detail END,
+                 vex_source        = 'manual',
+                 updated_by        = @updatedBy,
+                 updated_at        = @updatedAt
+             WHERE project_vuln_analysis.org_id = @orgId
+             """,

@@ -12,7 +12,7 @@ namespace Dependably.Protocol;
 /// </summary>
 public static partial class NpmNameValidator
 {
-    [GeneratedRegex(@"^(?!node_modules$|favicon\.ico$)(?!\.|_)[a-z0-9][a-z0-9._\-]*$")]
+    [GeneratedRegex(@"^(?!node_modules\z|favicon\.ico\z)(?!\.|_)[a-z0-9][a-z0-9._\-]*\z")]
     private static partial Regex NameSegmentRegex();
 
     private const int MaxLength = 214;

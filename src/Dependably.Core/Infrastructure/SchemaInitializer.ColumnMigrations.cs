@@ -529,6 +529,24 @@ public sealed partial class SchemaInitializer
             WHERE content_hash IS NULL
             """);
 
+    // Converges first_seen_at on package_version_vulns and sbom_component_vulns rows that carry
+    // no value, using each row's existing checked_at as the best available approximation of
+    // first observation — no earlier instant was ever recorded for a link written before a
+    // caller supplied one explicitly. Called on every boot (see the call site in
+    // ApplySchemaAsync) rather than run once — a link written by the OLD binary during a
+    // blue-green cutover never sets first_seen_at (the registry arms are ON CONFLICT DO NOTHING,
+    // the SBOM upsert's conflict clause never touches the column), so a row can arrive NULL on
+    // any boot for as long as the previous release is still deployed somewhere.
+    private static async Task BackfillFindingsFirstSeenAtAsync(DbConnection conn)
+    {
+        // xtenant: converges every tenant and both owner_kind arms on every boot;
+        // package_version_vulns carries no org_id of its own (see Schema.sql).
+        await conn.ExecuteAsync(
+            "UPDATE package_version_vulns SET first_seen_at = checked_at WHERE first_seen_at IS NULL");
+        await conn.ExecuteAsync(
+            "UPDATE sbom_component_vulns SET first_seen_at = checked_at WHERE first_seen_at IS NULL");
+    }
+
     // Each DDL statement is a single additive change (column add or index create). SQLite
     // has no native "IF NOT EXISTS" guard for column additions; MigrateSqliteAsync swallows
     // error 1 (duplicate column) instead. Postgres rewrites ADD COLUMN to ADD COLUMN IF NOT EXISTS.
@@ -586,8 +604,9 @@ public sealed partial class SchemaInitializer
             // databases rely on controller validation (mirrors how users.account_status was added).
             "ALTER TABLE system_admins ADD COLUMN account_status TEXT NOT NULL DEFAULT 'active'",
             "ALTER TABLE system_admins ADD COLUMN password_reset_issued_at TEXT",
-            // Tenancy bridge-model additions. Status is the resolver gate (suspended/archived
-            // tenants are refused at write time); region is dormant capacity for future
+            // Tenancy bridge-model additions. Status is the lockout gate: a non-active tenant is
+            // refused every request — protocol, management API and login alike — by
+            // TenantStatusEnforcementMiddleware, not just writes. Region is dormant capacity for future
             // multi-region routing; features holds per-tenant entitlements as JSON (canonical
             // schema + strict binding live in enterprise). CHECK on status applies on fresh
             // installs only — upgraded databases rely on resolver validation, mirroring how
@@ -725,10 +744,49 @@ public sealed partial class SchemaInitializer
             "ALTER TABLE vulnerabilities ADD COLUMN kev_checked_at TEXT",
             "ALTER TABLE vulnerabilities ADD COLUMN epss_score REAL",
             "ALTER TABLE vulnerabilities ADD COLUMN epss_checked_at TEXT",
+            // Tracker enrichment overlay on the same shared table: the NIST NVD band/score and
+            // the three CISA Vulnrichment SSVC decision points, plus two stamps per signal class.
+            // *_checked_at is when this instance last reached the tracker; *_asserted_at is the
+            // as-of the tracker claims for the source behind that answer, and staleness is always
+            // read off the OLDER of the pair — a tracker that is reachable but internally days
+            // behind would otherwise have its stale data recorded as current.
+            //
+            // Added without CHECKs (SQLite ALTER cannot add one), matching the block_malicious
+            // precedent above: upgraded databases rely on the write path's own validation, fresh
+            // installs get the vocabulary CHECKs from Schema.sql. All NULL on existing rows, which
+            // is exactly the unenriched state, so nothing needs backfilling and no gate arm reads
+            // anything different until the overlay actually runs.
+            "ALTER TABLE vulnerabilities ADD COLUMN nvd_severity TEXT",
+            "ALTER TABLE vulnerabilities ADD COLUMN nvd_score REAL",
+            "ALTER TABLE vulnerabilities ADD COLUMN nvd_checked_at TEXT",
+            "ALTER TABLE vulnerabilities ADD COLUMN nvd_asserted_at TEXT",
+            "ALTER TABLE vulnerabilities ADD COLUMN ssvc_exploitation TEXT",
+            "ALTER TABLE vulnerabilities ADD COLUMN ssvc_automatable TEXT",
+            "ALTER TABLE vulnerabilities ADD COLUMN ssvc_technical_impact TEXT",
+            "ALTER TABLE vulnerabilities ADD COLUMN ssvc_checked_at TEXT",
+            "ALTER TABLE vulnerabilities ADD COLUMN ssvc_asserted_at TEXT",
+            // KEV catalogue context and the EPSS percentile — fields already present in the two
+            // feed responses is_kev/epss_score are parsed from, previously discarded. No CHECKs
+            // on the ALTER path (SQLite cannot add one); fresh installs take the tri-state
+            // constraint on kev_known_ransomware from Schema.sql. All NULL on existing rows,
+            // which is correct: NULL means no assertion, and the next refresh pass fills them.
+            "ALTER TABLE vulnerabilities ADD COLUMN kev_known_ransomware INTEGER",
+            "ALTER TABLE vulnerabilities ADD COLUMN kev_date_added TEXT",
+            "ALTER TABLE vulnerabilities ADD COLUMN kev_due_date TEXT",
+            "ALTER TABLE vulnerabilities ADD COLUMN epss_percentile REAL",
             // KEV/EPSS proxy-gate policies. Both default off so existing orgs see no
             // behaviour change until an operator opts in.
             "ALTER TABLE org_settings ADD COLUMN block_kev TEXT NOT NULL DEFAULT 'off'",
             "ALTER TABLE org_settings ADD COLUMN max_epss_tolerance REAL",
+            // Narrower KEV arm (ransomware-campaign use only) and the EPSS percentile ceiling.
+            // Both default off, so no existing org changes behaviour on upgrade. Added without
+            // CHECKs (SQLite ALTER cannot add one); fresh installs take the vocabulary from
+            // Schema.sql and the write path validates on both.
+            "ALTER TABLE org_settings ADD COLUMN block_kev_ransomware TEXT NOT NULL DEFAULT 'off'",
+            "ALTER TABLE org_settings ADD COLUMN max_epss_percentile_tolerance REAL",
+            // Enrichment-overlay SSVC gate. Defaults off, and inert without a configured
+            // tracker connection, so an upgraded deployment changes behaviour in no way.
+            "ALTER TABLE org_settings ADD COLUMN block_ssvc_exploitation TEXT NOT NULL DEFAULT 'off'",
             // Tracks the stage of the most recently emitted SAML IdP cert-expiry audit event
             // ('30','14','7','1','expired'). NULL = no alert emitted (or cert replaced). Reset
             // to NULL by the cert-upload/clear paths so the sweep re-evaluates on the new cert.
@@ -1022,6 +1080,40 @@ public sealed partial class SchemaInitializer
             "ALTER TABLE license_allowlist ADD COLUMN created_by TEXT",
             "ALTER TABLE license_blocklist ADD COLUMN note TEXT",
             "ALTER TABLE license_blocklist ADD COLUMN created_by TEXT",
+            // Third alert-raising gate, structurally mirroring quarantine_alerts_enabled and
+            // vuln_alerts_enabled: raises an alert when a project version's SBOM policy
+            // evaluation records a violation. Defaults on, like the other two.
+            "ALTER TABLE alert_settings ADD COLUMN sbom_policy_alerts_enabled INTEGER NOT NULL DEFAULT 1",
+            // Opt-in projects-plane retention cap: max project versions kept per project. NULL
+            // (the default an upgraded database backfills to) is unlimited, matching keep_versions
+            // and keep_days rather than materializing a cap over an existing catalogue.
+            "ALTER TABLE org_settings ADD COLUMN keep_project_versions INTEGER",
+            // Covers the nightly SBOM policy re-evaluation's DISTINCT (org_id, project_version_id).
+            // Both columns are declared in the sbom_components CREATE TABLE block, never added by
+            // a migration, so the schema files are its primary declaration site and this entry
+            // only covers a database whose sbom_components predates the index.
+            "CREATE INDEX IF NOT EXISTS idx_sbom_components_org_pv ON sbom_components(org_id, project_version_id)",
+            // Durable first-observation instant for a finding — a registry (version × advisory)
+            // link or a projects-plane (component × vuln) link. checked_at moves on every re-scan;
+            // this column must not. Added nullable (SQLite cannot add a NOT NULL column with a
+            // non-constant DEFAULT to a populated table) and converged from checked_at by
+            // BackfillFindingsFirstSeenAtAsync, called on every boot rather than once — a row
+            // written by a previous release's still-live binary during a blue-green cutover can
+            // arrive with no first_seen_at value on any given boot. The CHECK reaches fresh
+            // installs from the CREATE TABLE blocks; upgraded databases rely on the insert paths
+            // always supplying a value.
+            "ALTER TABLE package_version_vulns ADD COLUMN first_seen_at TEXT",
+            "ALTER TABLE sbom_component_vulns ADD COLUMN first_seen_at TEXT",
+            // Three more KEV catalogue fields already present in the same feed response
+            // is_kev/kev_known_ransomware are parsed from, previously discarded: CISA's
+            // prescribed remediation prose (requiredAction), the CWE classification array
+            // (cwes), and vendor advisory/patch notes (notes). All NULL on existing rows —
+            // the next refresh pass fills them, same as the other KEV columns above.
+            // kev_cwes stores the array as a JSON TEXT column, matching the `aliases`
+            // convention on this same table, rather than opaque prose.
+            "ALTER TABLE vulnerabilities ADD COLUMN kev_required_action TEXT",
+            "ALTER TABLE vulnerabilities ADD COLUMN kev_cwes TEXT",
+            "ALTER TABLE vulnerabilities ADD COLUMN kev_notes TEXT",
     };
 
     private async Task RunAdditiveMigrationsAsync(DbConnection conn)

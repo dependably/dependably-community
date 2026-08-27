@@ -58,6 +58,29 @@ public static class ManagementStartupExtensions
                 Logger: sp.GetRequiredService<ILogger<Dependably.Api.ImportController>>());
         });
 
+        // Project-document upload. Same shape as the import aggregate: the factory resolves the
+        // staging path and the byte cap so the scoped record carries plain values rather than an
+        // IConfiguration dependency.
+        builder.Services.AddScoped<Dependably.Api.SbomControllerServices>(sp =>
+        {
+            string stagingPath = sp.GetRequiredService<StagingOptions>().Path;
+            return new Dependably.Api.SbomControllerServices(
+                Guard: sp.GetRequiredService<OrgAccessGuard>(),
+                Projects: sp.GetRequiredService<ProjectRepository>(),
+                Ingest: sp.GetRequiredService<SbomIngestRepository>(),
+                Merge: sp.GetRequiredService<Dependably.Infrastructure.Sbom.SbomMergeService>(),
+                Documents: sp.GetRequiredService<Dependably.Infrastructure.Sbom.SbomDocumentStore>(),
+                DocumentRows: sp.GetRequiredService<ProjectDocumentRepository>(),
+                ScanQueue: sp.GetRequiredService<Dependably.Infrastructure.SbomScanWorker>(),
+                Audit: sp.GetRequiredService<AuditRepository>(),
+                Problems: sp.GetRequiredService<Dependably.Api.ProblemResults>(),
+                Time: sp.GetRequiredService<TimeProvider>(),
+                Options: Dependably.Infrastructure.Sbom.SbomOptions.Resolve(
+                    sp.GetRequiredService<IConfiguration>()),
+                StagingPath: stagingPath,
+                Logger: sp.GetRequiredService<ILogger<Dependably.Api.SbomController>>());
+        });
+
         // Claim REST surface. State machine + repository are registered by the Core wiring; the
         // controller services record bundles the deps.
         builder.Services.AddScoped<ClaimsControllerServices>();

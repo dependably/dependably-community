@@ -40,11 +40,15 @@ public sealed class TenantNotReadyExceptionMiddlewareTests
         Assert.Equal("application/problem+json", ctx.Response.ContentType);
         Assert.False(ctx.Response.Headers.ContainsKey("Retry-After"));
 
+        Assert.Equal("nosniff", ctx.Response.Headers.XContentTypeOptions.ToString());
+
         var body = await ReadBodyAsync(ctx);
         Assert.Equal(404, body.GetProperty("status").GetInt32());
         Assert.Equal("NotFound", body.GetProperty("reason").GetString());
-        Assert.Equal("t-missing", body.GetProperty("tenantId").GetString());
-        Assert.Equal("tenant not found", body.GetProperty("detail").GetString());
+        // No tenantId, no raw ex.Detail — this gate is reachable by an anonymous caller and must
+        // not hand out the tenant's internal id or its precise lifecycle state.
+        Assert.False(body.TryGetProperty("tenantId", out _));
+        Assert.False(body.TryGetProperty("detail", out _));
     }
 
     [Theory]
@@ -66,7 +70,49 @@ public sealed class TenantNotReadyExceptionMiddlewareTests
 
         var body = await ReadBodyAsync(ctx);
         Assert.Equal("StatusInactive", body.GetProperty("reason").GetString());
-        Assert.Contains(status, body.GetProperty("detail").GetString());
+        // reason names the class (StatusInactive covers suspended/archived/deleting alike); the
+        // body must not additionally spell out which exact status this tenant carries.
+        Assert.False(body.TryGetProperty("detail", out _));
+        Assert.False(body.TryGetProperty("tenantId", out _));
+    }
+
+    [Fact]
+    public async Task StatusInactive_PreservesSecurityAndCorsHeaders_ButNotTheAbortedContentType()
+    {
+        // Simulates what SecurityHeadersMiddleware + CorsMiddleware already wrote, and what a
+        // controller had already started assembling, before the exception unwound to this
+        // middleware and it called Response.Clear().
+        var mw = BuildThrowing(new TenantNotReadyException(
+            "t-locked", TenantNotReadyReason.StatusInactive, "status='suspended'"));
+        var ctx = NewContext();
+        ctx.Response.Headers.XContentTypeOptions = "nosniff";
+        ctx.Response.Headers.XFrameOptions = "DENY";
+        ctx.Response.Headers["Referrer-Policy"] = "strict-origin-when-cross-origin";
+        ctx.Response.Headers.ContentSecurityPolicy = "default-src 'self'";
+        ctx.Response.Headers.StrictTransportSecurity = "max-age=31536000; includeSubDomains; preload";
+        ctx.Response.Headers.AccessControlAllowOrigin = "https://spa.example.com";
+        ctx.Response.Headers.AccessControlAllowCredentials = "true";
+        ctx.Response.Headers.Vary = "Origin";
+        // The aborted response body's own shape — must not survive Clear().
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength = 999;
+
+        await mw.InvokeAsync(ctx);
+
+        Assert.Equal(StatusCodes.Status423Locked, ctx.Response.StatusCode);
+        Assert.Equal("DENY", ctx.Response.Headers.XFrameOptions.ToString());
+        Assert.Equal("strict-origin-when-cross-origin", ctx.Response.Headers["Referrer-Policy"].ToString());
+        Assert.Equal("default-src 'self'", ctx.Response.Headers.ContentSecurityPolicy.ToString());
+        Assert.Equal(
+            "max-age=31536000; includeSubDomains; preload",
+            ctx.Response.Headers.StrictTransportSecurity.ToString());
+        Assert.Equal("https://spa.example.com", ctx.Response.Headers.AccessControlAllowOrigin.ToString());
+        Assert.Equal("true", ctx.Response.Headers.AccessControlAllowCredentials.ToString());
+        Assert.Equal("Origin", ctx.Response.Headers.Vary.ToString());
+
+        // The refusal's own body shape, not the aborted one.
+        Assert.Equal("application/problem+json", ctx.Response.ContentType);
+        Assert.Null(ctx.Response.ContentLength);
     }
 
     [Fact]
@@ -163,7 +209,7 @@ public sealed class TenantNotReadyExceptionMiddlewareTests
         var body = await ReadBodyAsync(ctx);
         Assert.Equal(500, body.GetProperty("status").GetInt32());
         Assert.Equal("Tenant not ready", body.GetProperty("title").GetString());
-        Assert.Equal("t-unknown", body.GetProperty("tenantId").GetString());
+        Assert.False(body.TryGetProperty("tenantId", out _));
     }
 
     [Fact]

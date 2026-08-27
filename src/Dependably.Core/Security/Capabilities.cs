@@ -59,6 +59,13 @@ public static class Capabilities
     // image doesn't need publish. read:artifact already covers this for other ecosystems.
     public const string PullOci = "pull:oci";
 
+    // ── SBOM / VEX / SARIF upload ───────────────────────────────────────────────
+    // Its own grant rather than a reuse of import:* + tenant:configure, which together let a
+    // token rewrite tenant configuration and ingest registry artefacts — far more than a CI job
+    // publishing a document about its own build needs. Like import:*, it has no leaves: one
+    // upload names its document kind in the route, and all three kinds describe the same build.
+    public const string SbomUpload = "sbom:upload";
+
     // ── Yank (per-ecosystem and wildcard) ───────────────────────────────────────
     public const string YankNpm = "yank:npm";
     public const string YankPypi = "yank:pypi";
@@ -111,7 +118,7 @@ public static class Capabilities
         ReadAudit, ManageOwnTokens
     };
 
-    // admin = publisher + claim-manager + read:tenant + read:audit + tenant:configure.
+    // admin = publisher + claim-manager + read:tenant + read:audit + tenant:configure + sbom:upload.
     // The owner-only privilege is tenant:admin (added below) — the only capability that
     // distinguishes owner from admin within the tenant. read:* is added alongside the
     // enumerated read leaves (rather than replacing them) so admin/owner can mint a single
@@ -120,7 +127,7 @@ public static class Capabilities
     private static readonly IReadOnlySet<string> AdminCaps =
         new HashSet<string>(PublisherCaps.Concat(ClaimManagerCaps))
         {
-            ReadTenant, ReadAudit, TenantConfigure, ReadAll
+            ReadTenant, ReadAudit, TenantConfigure, SbomUpload, ReadAll
         };
 
     private static readonly IReadOnlySet<string> TenantAdminCaps = new HashSet<string>(AdminCaps)
@@ -137,7 +144,7 @@ public static class Capabilities
     /// <summary>
     /// Returns the capability set granted by the user's tenant role. Existing roles map as:
     /// <c>member</c> → reader caps,
-    /// <c>admin</c> → publisher + claim-manager + read:tenant + read:audit + tenant:configure,
+    /// <c>admin</c> → publisher + claim-manager + read:tenant + read:audit + tenant:configure + sbom:upload,
     /// <c>owner</c> → admin caps + tenant:admin (everything within the tenant),
     /// <c>auditor</c> → audit-read + manage-own-tokens.
     /// Unknown roles get the empty set.
@@ -196,6 +203,7 @@ public static class Capabilities
         ReadMetadata, ReadArtifact, ReadPackages, ReadClaims, ReadAudit, ReadTenant, ReadAll,
         PublishNpm, PublishPypi, PublishNuget, PublishMaven, PublishRpm, PublishOci, PublishCargo, PublishAll,
         ImportAll,
+        SbomUpload,
         YankNpm, YankPypi, YankNuget, YankMaven, YankRpm, YankOci, YankCargo, YankAll,
         PullOci,
         ClaimManage, TenantConfigure, TenantAdmin, ManageOwnTokens,

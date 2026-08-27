@@ -1,0 +1,14 @@
+fixture: 06-clean-maven-digit-artifactid.diff
+class: CLEAN
+expected_verdict: CLEAN
+lens: security, code, architecture
+expected_finding: none
+provenance:
+  origin: MR !1014 (ba4cf667..dadc940d), full MR diff
+  ground_truth: CLEAN. Triage note: "All four lenses reported and all four are genuinely clean --
+    each body read to confirm the classification rather than trusting marker absence."
+notes: |
+  17 KB. Harder clean than 05: this one changes a real parser heuristic (first-character-is-a-digit
+  separates Maven versions from artifactIds) with a knowingly-accepted residual gap
+  (a non-SNAPSHOT version not starting with a digit). A lens reporting THAT gap is arguably
+  correct rather than a false positive -- score it as ACCEPTABLE_FINDING, not FP, and note it.

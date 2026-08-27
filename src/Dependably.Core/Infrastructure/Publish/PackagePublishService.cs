@@ -521,9 +521,20 @@ public sealed class PackagePublishService : IPackagePublishService
     // intentionally not validated by PathSafeValidator: npm scoped names ("@scope/name")
     // legitimately contain a slash, and per-ecosystem callers do their own format
     // validation (PEP 508, NuGet id charset, npm name regex) before reaching the service.
-    // PurlName / Name still need a traversal + separator guard: '..' and NUL always reject,
-    // and path separators reject except npm's single leading '@scope/' segment — names land
-    // verbatim in the hosted blob key, so a stray '/' would inject extra key segments.
+    // PurlName / Name still need a traversal + separator + control-character guard: '..' and NUL
+    // always reject, path separators reject except npm's single leading '@scope/' segment — names
+    // land verbatim in the hosted blob key, so a stray '/' would inject extra key segments — and
+    // control characters always reject.
+    //
+    // The control-character rule is enforced HERE rather than left to the per-ecosystem validators
+    // because those are regexes, and a .NET regex anchored with '$' (rather than '\z') matches a
+    // string carrying one trailing newline. Every ecosystem's charset regex was written that way,
+    // so "pkg\n" — delivered as %0A and URL-decoded by routing before the action sees it — passed
+    // the format check. Seven ecosystems caught it anyway on an independent PathSafeValidator call;
+    // npm reaches this service with only its name regex behind it, and a name is not a
+    // PathSafeValidator-shaped value (scoped names legitimately carry a slash). A literal
+    // char.IsControl scan here does not depend on every current and future ecosystem regex staying
+    // correctly anchored, which is why it is the guard that belongs at this layer.
     private static PublishResult.Rejected? ValidatePathSafety(PublishRequest request)
     {
         foreach (var (value, kind) in new[]
@@ -546,6 +557,8 @@ public sealed class PackagePublishService : IPackagePublishService
               || HasUnsafeSeparator(request.Ecosystem, request.PurlName)
             ? new PublishResult.Rejected(422, "path_unsafe",
                 "Name must not contain path separators (npm permits a single leading '@scope/').")
+            : request.Name.Any(char.IsControl) || request.PurlName.Any(char.IsControl)
+            ? new PublishResult.Rejected(422, "path_unsafe", "Name must not contain control characters.")
             : null;
     }
 

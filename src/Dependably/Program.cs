@@ -156,6 +156,10 @@ public partial class Program
         // ingests; the block gate reads the resulting is_kev / epss_score columns.
         builder.Services.AddDependablyThreatFeeds();
 
+        // SBOM component vulnerability scanning: the upload/rescan-triggered worker. Depends on
+        // the OSV source + VulnerabilityRepository registered just above.
+        builder.Services.AddDependablySbomScanning();
+
         // ── Management wiring: first-factor auth, JWT, MFA identity, background jobs ──
         builder.AddDependablyManagementAuthServices();
         builder.AddDependablyTenantResolution();
@@ -357,9 +361,22 @@ public partial class Program
         // (fail-closed) and this middleware is a no-op: all consumers see the raw socket peer.
         app.UseForwardedHeaders();
 
+        // Translate TenantNotReadyException raised by ITenantStorageResolver.GetRegistryAsync
+        // into 404 / 423 / 503 responses instead of letting it bubble to a 500 — problem JSON on
+        // most routes, an OCI Distribution Spec error envelope on /v2/ (where StatusInactive is
+        // 403 DENIED, not 423, because docker does not parse RFC 7807).
+        // Registered early so it wraps every downstream middleware that can throw it, regardless
+        // of how deep the throw originates. TenantStatusEnforcementMiddleware does NOT reach here:
+        // it shapes its refusal through TenantNotReadyResponseWriter directly rather than throwing,
+        // so a suspended tenant's 423 never unwinds through UseSerilogRequestLogging and is not
+        // logged as a 500.
+        app.UseMiddleware<Dependably.Infrastructure.TenantNotReadyExceptionMiddleware>();
+
         // Strict-multi-tenancy: populate HttpContext.Items["TenantContext"] from the configured
         // ITenantResolver (single mode → SingleTenantResolver; multi mode → SubdomainTenantResolver).
-        // All controllers read tenant identity from this context; URLs are tenant-implicit.
+        // All controllers read tenant identity from this context; URLs are tenant-implicit. Only
+        // resolves and stashes — never refuses; see TenantStatusEnforcementMiddleware (after
+        // UseRateLimiter below) for the actual lockout gate and why it sits there instead of here.
         app.UseMiddleware<Dependably.Infrastructure.SubdomainTenantMiddleware>();
 
         // Push canonical taxonomy properties (TenantId, OrgId, RequestId, TraceId, SpanId)
@@ -376,14 +393,25 @@ public partial class Program
         // middleware: when the map is empty (default deployment) it is a no-op pass-through.
         app.UseMiddleware<Dependably.Infrastructure.TransparentInterceptMiddleware>();
 
+        // Security headers. Must sit strictly after TransparentInterceptMiddleware:
+        // SecurityHeadersMiddleware classifies its CSP/Cache-Control on Request.Path before
+        // calling _next, and TransparentInterceptMiddleware is what rewrites that path to carry
+        // the ecosystem prefix (Host: registry.npmjs.org + GET /lodash becomes /npm/lodash) —
+        // hoisted above the intercept, a proxied registry request classifies on the pre-rewrite
+        // path, falls through to the frontend CSP, and silently loses Cache-Control: no-store.
+        // Must also sit strictly before UploadSizeLimitMiddleware: that middleware can
+        // short-circuit with a bare 413 and never call _next, so anything registered after it
+        // never runs on that path — the one shape ResponseHeaderPreserverComplianceTests cannot
+        // see, because UploadSizeLimitMiddleware never calls Response.Clear() (see
+        // ResponseHeaderPreserverComplianceTests' own doc comment for the blind spot this
+        // ordering closes).
+        app.UseMiddleware<SecurityHeadersMiddleware>();
+
         // Upload size limits — reads the TenantContext resolved above (so it must sit after
         // SubdomainTenantMiddleware) and the ecosystem path prefix (so it must sit after
         // TransparentInterceptMiddleware's host→prefix rewrite), and must run before routing
         // so the max body size is set before the body is read.
         app.UseMiddleware<Dependably.Security.UploadSizeLimitMiddleware>();
-
-        // Security headers — must be first after upload limit
-        app.UseMiddleware<SecurityHeadersMiddleware>();
 
         // Metrics access restriction
         app.UseMiddleware<MetricsAccessMiddleware>();
@@ -412,12 +440,6 @@ public partial class Program
         // catch) into 502 problem-JSON. Sits adjacent to UpstreamFetchFailedExceptionMiddleware
         // so all upstream-fetch exception mappings live together in the pipeline.
         app.UseMiddleware<Dependably.Infrastructure.SsrfBlockedExceptionMiddleware>();
-
-        // Translate TenantNotReadyException raised by ITenantStorageResolver.GetRegistryAsync
-        // into 404 / 423 / 503 problem-JSON responses instead of letting it bubble to a 500.
-        // Sits adjacent to the air-gap handler so all storage-layer exception mappings live
-        // together in the pipeline.
-        app.UseMiddleware<Dependably.Infrastructure.TenantNotReadyExceptionMiddleware>();
 
         app.UseResponseCompression();
         app.UseSerilogRequestLogging(opts => opts.GetLevel = SerilogRequestLogLevel);
@@ -470,6 +492,12 @@ public partial class Program
         Dependably.Api.EdgeStatusEndpoint.Map(app, version);
 
         app.UseRateLimiter();
+
+        // The tenant lockout gate for a suspended/archived/deleting org. Deliberately sits here —
+        // after auth, CSRF, and rate limiting, not immediately after SubdomainTenantMiddleware —
+        // so none of those stages get bypassed for a cut-off tenant; see the middleware's own doc
+        // comment for the full reasoning. /health, /ready, /metrics, and /version are exempt.
+        app.UseMiddleware<Dependably.Infrastructure.TenantStatusEnforcementMiddleware>();
 
         // Serve embedded Svelte frontend. The embedded provider needs the build-time
         // wwwroot manifest; tests without a built frontend fall through to physical/null.
@@ -543,9 +571,9 @@ public partial class Program
         // RED metrics (rate/errors/duration) come automatically from
         // AddAspNetCoreInstrumentation in ConfigureOpenTelemetry. The IP
         // allowlist on /metrics is preserved by MetricsAccessMiddleware
-        // earlier in the pipeline. See docs/observability/metrics.md.
+        // earlier in the pipeline.
         // Deliberately outside the OpenAPI inventory (management and protocol documents):
-        // operator-only scrape endpoint, IP-allowlisted, documented in docs/observability.
+        // operator-only scrape endpoint, IP-allowlisted.
         app.MapPrometheusScrapingEndpoint("/metrics");
 
         // OpenAPI specs — management document is gated behind the metrics IP allowlist

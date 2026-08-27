@@ -148,7 +148,13 @@ public sealed partial class RpmController : OrgScopedControllerBase
         string filename = $"{header.Name}-{header.Version}-{header.Release}.{header.Arch}.rpm";
         string purlName = header.Name.ToLowerInvariant();
         string version = $"{header.Version}-{header.Release}";
-        string purl = PurlNormalizer.Rpm(header.Name, header.Version, header.Release, header.Arch, header.Epoch ?? 0);
+        // The header's Vendor tag is package-intrinsic (stamped by the distro's own build
+        // infrastructure) and already in scope from validation above — resolving it into an
+        // OSV distro namespace here is what makes this purl resolvable against OSV.dev's RPM
+        // ecosystems instead of the structurally-unresolvable bare pkg:rpm/... form.
+        string? distroNamespace = RpmVendorDistroResolver.Resolve(header.Vendor);
+        string purl = PurlNormalizer.Rpm(
+            header.Name, header.Version, header.Release, header.Arch, header.Epoch ?? 0, distroNamespace);
 
         // Content-addressed hosted key: the artefact's SHA-256 (computed inline while the
         // body streamed to the staging file) is a key segment, so the bytes under a key
@@ -209,7 +215,7 @@ public sealed partial class RpmController : OrgScopedControllerBase
         await _svc.Audit.LogActivityAsync(orgId, "rpm", purl, "push",
             actorId: token.AuditActorId, actorKind: token.ActorKind, actorLabel: token.AuditActorLabel, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
-        Response.Headers["X-Dependably-PURL"] = purl;
+        Response.Headers["X-Dependably-PURL"] = HeaderSanitizer.Sanitize(purl);
         return StatusCode(StatusCodes.Status201Created);
     }
 

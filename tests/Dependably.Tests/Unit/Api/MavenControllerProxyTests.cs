@@ -272,7 +272,12 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
             time,
             new OrgRepository(_db),
             Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(time),
-            Dependably.Tests.Infrastructure.TestAlerts.NoOp(_db, time)));
+            Dependably.Tests.Infrastructure.TestAlerts.NoOp(_db, time),
+            new SbomComponentVulnRepository(_db, time),
+            new SbomComponentScanner(osv, vulns, new SbomComponentVulnRepository(_db, time), NullLogger<SbomComponentScanner>.Instance),
+            Dependably.Tests.Infrastructure.TestSbomPolicy.Service(_db, time),
+            Dependably.Tests.Infrastructure.TestEnrichment.Unused(),
+            Dependably.Tests.Infrastructure.TestEnrichment.NoConnection()));
         var cacheArtifact = new CacheArtifactRepository(_db);
         var tenantAccess = new TenantArtifactAccessRepository(_db);
         var proxyVersions = new ProxyVersionRecorder(_packages, _audit, licenses, cacheArtifact,

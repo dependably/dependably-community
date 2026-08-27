@@ -211,24 +211,21 @@ Both API surfaces are documented as live OpenAPI documents served by the running
 
 The full route surface is contract-tested against [`tests/Contracts/openapi.contract.json`](tests/Contracts/openapi.contract.json) — any route change fails CI until the contract is regenerated.
 
-Per-ecosystem client guides, where a protocol's behaviour differs from the public registry it
-mirrors:
+## Documentation
 
-- [docs/terraform.md](docs/terraform.md) — Terraform provider mirror: `.terraformrc` setup, why it
-  is a network mirror rather than a registry, and what it does not cover (modules)
-- [docs/cargo.md](docs/cargo.md) — Cargo sparse registry: config, publish, yank, and why crate
-  ownership is org membership rather than `cargo owner`
+This repository carries the source, its build and contribution guides, and the live OpenAPI
+documents above. Prose documentation lives in repositories of its own:
 
-For the developer-facing remediation walkthrough — reading the vulnerability report (CVSS/EPSS/KEV), the OWASP Top 10 mapping, and the curated fix skills for Claude Code / OpenAI Codex / GitHub Copilot — see [docs/fixing-vulnerabilities.md](docs/fixing-vulnerabilities.md).
-
-Operator runbooks:
-
-- [docs/edge-node.md](docs/edge-node.md) — enrolling and running a cache-only edge node
-- [docs/sqlite-to-postgres-migration.md](docs/sqlite-to-postgres-migration.md) — moving an existing
-  standalone (SQLite) install onto Postgres for high availability, with verification and rollback
-- [docs/postgres-collate-migration.md](docs/postgres-collate-migration.md) — opting an existing
-  Postgres database into `COLLATE "C"` on its indexed temporal columns, for byte-exact ordering and
-  immunity to glibc collation-version drift
+- **[dependably-documentation](https://gitlab.northwardlabs.ca/moonlitlabs/dependably-documentation)**
+  — end-user and administrator guides. Per-ecosystem client setup (npm, PyPI, NuGet, Maven, Cargo,
+  Go, Terraform, Docker, RPM), the web console tour, diagnosing a blocked package, the vulnerability
+  remediation walkthrough, log output, and the Grafana integration.
+- **dependably-enterprise** — deployment and migration runbooks: enrolling a cache-only edge node,
+  moving a standalone SQLite install onto Postgres, the `COLLATE "C"` retrofit, HA and blue-green
+  topology, and the threat model.
+- **[dependably-community.spec](https://gitlab.northwardlabs.ca/moonlitlabs/dependably-community.spec)**
+  — design intent: architecture documents, decision records, and the per-work-item spec record.
+  Start here for *why* the system is shaped the way it is.
 
 ---
 

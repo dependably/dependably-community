@@ -73,7 +73,12 @@ public sealed class QuotaReservationTests : IAsyncLifetime
             TimeProvider.System,
             new OrgRepository(_db),
             Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(TimeProvider.System),
-            Dependably.Tests.Infrastructure.TestAlerts.NoOp(_db, TimeProvider.System)));
+            Dependably.Tests.Infrastructure.TestAlerts.NoOp(_db, TimeProvider.System),
+            new SbomComponentVulnRepository(_db, TimeProvider.System),
+            new SbomComponentScanner(osv, new VulnerabilityRepository(_db, TimeProvider.System), new SbomComponentVulnRepository(_db, TimeProvider.System), NullLogger<SbomComponentScanner>.Instance),
+            Dependably.Tests.Infrastructure.TestSbomPolicy.Service(_db, TimeProvider.System),
+            Dependably.Tests.Infrastructure.TestEnrichment.Unused(),
+            Dependably.Tests.Infrastructure.TestEnrichment.NoConnection()));
         var auditor = new Dependably.Infrastructure.Publish.PublishAuditor(audit, emitter);
         var licenses = new LicenseRepository(_db, TimeProvider.System, TestNormalizers.License(_db));
         return new PackagePublishService(packages, new PackageVersionFilesRepository(_db), _orgs, storage, gate,
@@ -312,7 +317,12 @@ public sealed class QuotaReservationTests : IAsyncLifetime
             TimeProvider.System,
             new OrgRepository(_db),
             Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(TimeProvider.System),
-            Dependably.Tests.Infrastructure.TestAlerts.NoOp(_db, TimeProvider.System)));
+            Dependably.Tests.Infrastructure.TestAlerts.NoOp(_db, TimeProvider.System),
+            new SbomComponentVulnRepository(_db, TimeProvider.System),
+            new SbomComponentScanner(osv, new VulnerabilityRepository(_db, TimeProvider.System), new SbomComponentVulnRepository(_db, TimeProvider.System), NullLogger<SbomComponentScanner>.Instance),
+            Dependably.Tests.Infrastructure.TestSbomPolicy.Service(_db, TimeProvider.System),
+            Dependably.Tests.Infrastructure.TestEnrichment.Unused(),
+            Dependably.Tests.Infrastructure.TestEnrichment.NoConnection()));
         var auditor = new Dependably.Infrastructure.Publish.PublishAuditor(audit, emitter);
         var licenses = new LicenseRepository(_db, TimeProvider.System, TestNormalizers.License(_db));
         return new PackagePublishService(packages, new PackageVersionFilesRepository(_db), _orgs, storage, gate,

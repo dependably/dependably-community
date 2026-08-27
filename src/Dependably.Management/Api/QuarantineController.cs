@@ -124,6 +124,12 @@ public sealed class QuarantineController : OrgScopedControllerBase
                 id = e.Id,
                 ecosystem = e.Ecosystem,
                 purl = e.Purl,
+                // The canonical, per-ecosystem-folded name the rest of the product keys a
+                // coordinate by, derived here rather than in the browser: PurlNormalizer is the
+                // single source of truth for that folding, and a client re-deriving it would
+                // silently disagree for scoped npm, underscored PyPI and mixed-case NuGet names.
+                // Null when the stored purl names a type with no registry mapping.
+                purl_name = Dependably.Infrastructure.Sbom.SbomPurlKey.TryParse(e.Purl)?.Name,
                 gate = e.Gate,
                 detail = e.Detail,
                 state = e.State,

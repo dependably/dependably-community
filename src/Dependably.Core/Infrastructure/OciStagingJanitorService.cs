@@ -26,6 +26,10 @@ namespace Dependably.Infrastructure;
 /// The session sweep is cross-tenant by design (fleet-wide reclaim). The per-org cap in
 /// <see cref="OrgRepository.GetActiveOciUploadCountAsync"/> is org-scoped; this sweep is
 /// the complementary fleet-wide reclaim that prevents the staging volume from filling up.
+///
+/// suspension-ok: not per-tenant, by the same design note above — both passes are fleet-wide
+/// disk/row reclaim with no per-org selection point, and neither makes an outbound call or a
+/// third-party delivery.
 /// </summary>
 public sealed class OciStagingJanitorService : ScheduledBackgroundService
 {

@@ -228,6 +228,8 @@ describe('endpoint contract', () => {
     ['updateInstanceEmailConfig', () => api.updateInstanceEmailConfig({}), 'PUT', '/api/v1/instance/email-config'],
     ['testInstanceEmail', () => api.testInstanceEmail(), 'POST', '/api/v1/instance/email-config/test'],
     ['getInstanceEmailHealth', () => api.getInstanceEmailHealth(), 'GET', '/api/v1/instance/email-health'],
+    ['getInstanceVulnTrackerConfig', () => api.getInstanceVulnTrackerConfig(), 'GET', '/api/v1/instance/vuln-tracker-config'],
+    ['updateInstanceVulnTrackerConfig', () => api.updateInstanceVulnTrackerConfig({}), 'PUT', '/api/v1/instance/vuln-tracker-config'],
     ['updateAlertSettings', () => api.updateAlertSettings({ emailEnabled: true }), 'PUT', '/api/v1/alert-settings'],
     ['testAlertEmail', () => api.testAlertEmail(), 'POST', '/api/v1/alert-settings/email/test'],
   ]
@@ -265,6 +267,8 @@ describe('systemApi contract', () => {
     ['updateEmailConfig', (s) => s.updateEmailConfig({}), 'PUT', '/api/v1/system/email-config'],
     ['testEmailConfig', (s) => s.testEmailConfig(), 'POST', '/api/v1/system/email-config/test'],
     ['getEmailHealth', (s) => s.getEmailHealth(), 'GET', '/api/v1/system/email-health'],
+    ['getVulnTrackerConfig', (s) => s.getVulnTrackerConfig(), 'GET', '/api/v1/system/vuln-tracker-config'],
+    ['updateVulnTrackerConfig', (s) => s.updateVulnTrackerConfig({}), 'PUT', '/api/v1/system/vuln-tracker-config'],
   ]
 
   it.each(systemCases)('%s — %s %s', async (_label, invoke, expectedMethod, expectedPathFragment) => {

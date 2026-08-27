@@ -9,6 +9,10 @@
   // Primary nav (all authenticated users). Ported 1:1 from the old top navbar.
   const mainItems = [
     { page: 'packages', icon: 'icon-package', label: 'nav.packages' },
+    // Read visibility for every member — mutations (create/delete/promote) gate by role
+    // inside Projects.svelte/ProjectDetail.svelte, not at the nav. Keep 'projects' out of
+    // ADMIN_ONLY_PAGES (routes.js) in sync with that.
+    { page: 'projects', icon: 'icon-layers', label: 'nav.projects' },
     { page: 'lookup', icon: 'icon-search', label: 'nav.lookup' },
     { page: 'vulnerabilities', icon: 'icon-bug', label: 'nav.vulnerabilities' },
     // Risk is deliberately not in adminItems: its endpoints gate on read:packages (the same

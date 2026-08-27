@@ -154,7 +154,7 @@ public sealed class PushRateLimitQueueTests
             // for the full rationale).
             builder.WebHost.UseSetting(
                 "DISABLE_BACKGROUND_JOBS",
-                "vuln-scan,vuln-rescan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
+                "vuln-scan,vuln-rescan,sbom-scan,threat-feed,deprecation-refresh,license-backfill,oci-blob-sweep");
             builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
             // Pinned rather than inherited: an ambient DEPLOYMENT_MODE=multi in the developer's
             // shell otherwise flips the host into subdomain routing, and the bare-host token

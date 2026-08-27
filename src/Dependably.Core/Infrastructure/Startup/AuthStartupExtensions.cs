@@ -29,15 +29,33 @@ internal static class AuthStartupExtensions
         // DEPLOYMENT_MODE=multi          → SubdomainTenantResolver (Host → tenant slug → orgs row)
         // DEPLOYMENT_MODE=header         → HeaderTenantResolver (X-Dependably-Tenant header → orgs row; intercept mode behind trusted edge proxy)
         // DEPLOYMENT_MODE=bound          → DeploymentBoundTenantResolver (BOUND_TENANT_SLUG, ignores request; intercept mode for single-tenant enterprise)
-        // Scoped lifetime so per-request DB queries don't bleed across requests.
+        // The non-caching resolvers (Single/Header/Bound) stay Scoped — they hold no state that
+        // needs to outlive a request; a fresh instance per request is fine either way.
         string tenancyMode = (builder.Configuration["DEPLOYMENT_MODE"] ?? "single").Trim().ToLowerInvariant();
         switch (tenancyMode)
         {
             case "multi":
-                builder.Services.AddScoped<ITenantResolver, SubdomainTenantResolver>();
-                // Eviction hook for tenant-lifecycle endpoints. Resolver is scoped, but the
-                // cache it touches is IMemoryCache (singleton), so any instance can evict.
-                builder.Services.AddScoped<ITenantSlugCacheInvalidator>(
+                // Singleton, not Scoped: SubdomainTenantResolver's per-slug fill-guard map
+                // (_fillGuards) must be visible to every request, the same way every other
+                // consumer of CacheFillGuard (JwtRevocationRepository, UserTokenVersionStore,
+                // SystemAdminTokenVersionStore, BlocklistRepository, ReservedNamespaceService,
+                // InstallScriptAllowlistService) is registered Singleton rather than Scoped. A
+                // Scoped registration builds a fresh, empty _fillGuards per request while the
+                // IMemoryCache it guards is process-wide, so InvalidateSlug's TryRemove always
+                // misses for a fill started by a different request — the guard can never cancel
+                // the one in-flight fill it exists to cancel. Audited safe: every dependency the
+                // constructor captures is itself request-independent — IMetadataStore is a
+                // Singleton and OpenAsync mints a brand-new connection per call (the same pattern
+                // every other Singleton repository in this codebase uses), IConfiguration is
+                // framework-Singleton, and IMemoryCache is Singleton via AddMemoryCache. No
+                // HttpContext or other per-request value is captured as a field — ResolveAsync
+                // takes HttpContext as a parameter, never stores it.
+                builder.Services.AddSingleton<ITenantResolver, SubdomainTenantResolver>();
+                // Eviction hook for tenant-lifecycle endpoints. Also Singleton so this resolves
+                // to the exact same instance as ITenantResolver above (same registration,
+                // fetched once) — required for InvalidateSlug to see the fill guards the
+                // resolver mints, not a second copy of them.
+                builder.Services.AddSingleton<ITenantSlugCacheInvalidator>(
                     sp => (SubdomainTenantResolver)sp.GetRequiredService<ITenantResolver>());
                 // Multi mode resolves tenants by subdomain under an apex host derived from BASE_URL.
                 // Without a real (non-localhost) BASE_URL host, every bare/IP/non-subdomain request
@@ -239,6 +257,26 @@ internal static class AuthStartupExtensions
                 _ => new SlidingWindowRateLimiterOptions
                 {
                     PermitLimit = importLimit,
+                    Window = TimeSpan.FromMinutes(1),
+                    SegmentsPerWindow = RateLimitWindowSegments,
+                    QueueLimit = 0,
+                });
+        });
+
+        // SBOM/VEX/SARIF document upload. Sized above the import ceiling on purpose: import's
+        // 5/min assumes one operator batch, whereas a CI run for a mono-repo pushes one document
+        // per module per kind and would 429 partway through at that budget. Each upload still
+        // parses a whole document and rewrites a version's derived rows, so it stays well below
+        // the push and download ceilings. Queue depth is 0 — a CI client that exceeds the budget
+        // should see the 429 and its Retry-After rather than sit in a queue.
+        int sbomUploadLimit = int.TryParse(cfg["SBOM_UPLOAD_RATE_LIMIT_PERMITS"], out int sp) ? sp : 30;
+        o.AddPolicy("sbom-upload", httpContext =>
+        {
+            string key = RateLimitPartitions.GetPartitionKey(httpContext, ipv6Prefix);
+            return RateLimitPartition.GetSlidingWindowLimiter(key,
+                _ => new SlidingWindowRateLimiterOptions
+                {
+                    PermitLimit = sbomUploadLimit,
                     Window = TimeSpan.FromMinutes(1),
                     SegmentsPerWindow = RateLimitWindowSegments,
                     QueueLimit = 0,

@@ -4,6 +4,7 @@ using Dependably.Infrastructure.Mail;
 using Dependably.Infrastructure.Siem;
 using Dependably.Infrastructure.Webhooks;
 using Dependably.Security;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace Dependably.Infrastructure;
 
@@ -48,7 +49,22 @@ public static class ManagementServiceCollectionExtensions
         services.AddSingleton<BannerRepository>();
         services.AddSingleton<Dependably.Infrastructure.Webhooks.WebhookSubscriptionRepository>();
         services.AddSingleton<AlertSettingsRepository>();
+        services.AddSingleton<SbomExportService>();
         services.AddSingleton<TrustedDeviceService>();
+        services.AddSingleton<SbomAnalysisRepository>();
+        services.AddSingleton<SbomBlastRadiusRepository>();
+        // Binds the manual-triage trigger to the real evaluator, so an operator's VEX decision
+        // restamps the findings immediately instead of waiting for the next scan pass.
+        services.AddSingleton<ISbomPolicyReevaluator, SbomPolicyReevaluator>();
+
+        // Projects-plane ingest. The document, ingest and merge services are management-only —
+        // the edge image hosts no upload surface — so they are registered here rather than in the
+        // core wiring, which owns the projects-plane entity lifecycle, even though the
+        // repositories themselves live in the core assembly.
+        services.AddSingleton<ProjectDocumentRepository>();
+        services.AddSingleton<SbomIngestRepository>();
+        services.AddSingleton<Sbom.SbomMergeService>();
+        services.AddSingleton<Sbom.SbomDocumentStore>();
         return services;
     }
 
@@ -98,6 +114,8 @@ public static class ManagementServiceCollectionExtensions
             services.AddHttpClient<WebhookSiemForwarder>()
                 .ConfigurePrimaryHttpMessageHandler(_ => new SocketsHttpHandler
                 {
+                    // UseProxy=false: an ambient HTTP(S)_PROXY would make ConnectCallback vet the proxy, not the target.
+                    UseProxy = false,
                     AllowAutoRedirect = false,
                     ConnectCallback = siemCallback.ConnectAsync,
                 });
@@ -188,12 +206,14 @@ public static class ManagementServiceCollectionExtensions
         services.AddSingleton<EmailTransportBreaker>();
         services.AddSingleton<EmailOutboxPolicy>();
         services.AddSingleton<EmailOutboxRepository>();
+        services.AddSingleton<EmailOutboxDeliveryServices>();
         services.AddSingleton<EmailOutboxDeliveryService>();
         services.AddHostedService(sp => sp.GetRequiredService<EmailOutboxDeliveryService>());
 
         // The operator's aggregate relay-health surface: per-tenant alert_settings health rows plus
         // the outbox backlog, read together so a single request answers "is the shared relay okay".
         services.AddSingleton<RelayHealthAggregator>();
+        services.AddSingleton<Dependably.Infrastructure.VulnTracker.VulnTrackerHealthAggregator>();
         return services;
     }
 
@@ -270,6 +290,8 @@ public static class ManagementServiceCollectionExtensions
                 client => client.Timeout = TimeSpan.FromSeconds(WebhookHttpTimeoutSeconds))
             .ConfigurePrimaryHttpMessageHandler(_ => new SocketsHttpHandler
             {
+                // UseProxy=false: an ambient HTTP(S)_PROXY would make ConnectCallback vet the proxy, not the target.
+                UseProxy = false,
                 AllowAutoRedirect = false,
                 ConnectCallback = webhookCallback.ConnectAsync,
             });
@@ -313,10 +335,13 @@ public static class ManagementServiceCollectionExtensions
                 client => client.Timeout = TimeSpan.FromSeconds(SlackHttpTimeoutSeconds))
             .ConfigurePrimaryHttpMessageHandler(_ => new SocketsHttpHandler
             {
+                // UseProxy=false: an ambient HTTP(S)_PROXY would make ConnectCallback vet the proxy, not the target.
+                UseProxy = false,
                 AllowAutoRedirect = false,
                 ConnectCallback = slackCallback.ConnectAsync,
             });
 
+        services.AddSingleton<AlertSlackQueueServices>();
         services.AddSingleton<AlertSlackQueue>();
         services.AddHostedService(sp => sp.GetRequiredService<AlertSlackQueue>());
 
@@ -345,6 +370,22 @@ public static class ManagementServiceCollectionExtensions
             sp => sp.GetRequiredService<Dependably.Infrastructure.SystemEvents.SystemSlackQueue>());
         services.AddHostedService(
             sp => sp.GetRequiredService<Dependably.Infrastructure.SystemEvents.SystemSlackQueue>());
+        return services;
+    }
+
+    /// <summary>
+    /// Registers <see cref="SbomScanWorker"/> as both a singleton (so the SBOM upload and rescan
+    /// endpoints can enqueue onto the same instance the hosted service drains) and a hosted
+    /// service. Depends on <see cref="SbomComponentVulnRepository"/>/<see cref="SbomComponentScanner"/>
+    /// and the OSV source, all registered by
+    /// <see cref="ServiceCollectionExtensions.AddDependablyVulnerabilityScanning"/> — call this
+    /// after that registration.
+    /// </summary>
+    public static IServiceCollection AddDependablySbomScanning(this IServiceCollection services)
+    {
+        services.AddSingleton<SbomScanWorkerServices>();
+        services.AddSingleton<SbomScanWorker>();
+        services.AddHostedService(sp => sp.GetRequiredService<SbomScanWorker>());
         return services;
     }
 }

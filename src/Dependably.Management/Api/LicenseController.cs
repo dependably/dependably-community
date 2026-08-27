@@ -243,7 +243,9 @@ public sealed class LicenseController : ControllerBase
 
         await _audit.LogAsync("license_allowlist_updated", orgId, GetUserId(),
             actorKind: ActorKinds.User,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { spdx = entry.LicenseSpdx, disposition = entry.Disposition, note = entry.Note }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            detail: System.Text.Json.JsonSerializer.Serialize(
+                new { spdx = entry.LicenseSpdx, disposition = entry.Disposition, note = entry.Note },
+                Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return Ok(entry);

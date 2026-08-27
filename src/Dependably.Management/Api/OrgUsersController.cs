@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Net.Mail;
 using Dependably.Infrastructure;
 using Dependably.Security;
@@ -202,6 +203,20 @@ public sealed class OrgUsersController : OrgScopedControllerBase
     /// SAML accounts are refused. The IdP is authoritative for those; a local edit would be
     /// overwritten on next login and the account would silently drift back.
     /// </summary>
+    // S3776/S107 are both refused here deliberately. The body is a flat ladder of independent
+    // refusals whose ORDER is the security property: the capability check precedes the roster
+    // lookup so an unauthorized caller cannot distinguish an existing member from an absent one,
+    // the owner tier-2 check precedes the SAML and re-auth arms, and the per-destination throttle
+    // is consumed last, immediately before the mail. Hoisting any run of those arms into a helper
+    // splits the one sequence a reviewer has to read in order, and the helper would need most of
+    // this signature to do it — trading a parameter-count finding for a worse one. The eight
+    // parameters are one route value, one body, five [FromServices] injections and the token:
+    // per-action injection is the MVC idiom this controller uses to keep its constructor to the
+    // services every action needs.
+    [SuppressMessage("Major Code Smell", "S3776:Cognitive Complexity of methods should not be too high",
+        Justification = "A flat, ordered ladder of security refusals; extracting any run of it hides the order that is the point.")]
+    [SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
+        Justification = "One route value, one body, the cancellation token and five [FromServices] injections — the MVC per-action injection idiom.")]
     [HttpPatch("api/v1/users/{userId}/email")]
     [EnableRateLimiting("invite")]
     [ProducesResponseType(StatusCodes.Status202Accepted)]

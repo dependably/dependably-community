@@ -1,5 +1,6 @@
 using System.Data.Common;
 using Dapper;
+using Dependably.Infrastructure.Alerts;
 using Dependably.Storage;
 
 namespace Dependably.Infrastructure.Mail;
@@ -61,6 +62,15 @@ public sealed record ClaimedEmailOutboxMessage(
 public sealed record EmailOutboxBacklog(int Depth, string? OldestCreatedAt, int DeadLettered, int Expired);
 
 /// <summary>
+/// A terminal alert-mail row whose alert does not carry the outcome that row implies — the outbox
+/// row is authoritative, the alert's <c>email_status</c> is the stale projection to repair.
+/// <c>LastError</c> is the outbox row's own recorded error, which is what the failed projection
+/// reports; it is already truncated to the outbox column's bound.
+/// </summary>
+public sealed record DivergentAlertProjection(
+    string Id, string OrgId, string CorrelationId, string State, string? LastError);
+
+/// <summary>
 /// A pending row eligible to absorb a fresh occurrence via burst coalescing — the same (org,
 /// coalesce_key) pair, not yet claimed for delivery. <c>OccurrenceCount</c> is <c>long</c>, not
 /// <c>int</c>, and the constructor is explicit: SQLite materialises INTEGER as Int64 while
@@ -109,14 +119,21 @@ public sealed class EmailOutboxRepository
     /// changes nothing an operator would act on.
     /// </para>
     /// </summary>
-    public async Task<bool> TryEnqueueAsync(
+    public Task<bool> TryEnqueueAsync(
         NewEmailOutboxMessage message,
         EmailOutboxPolicy policy,
         CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(message);
         ArgumentNullException.ThrowIfNull(policy);
+        return TryEnqueueCoreAsync(message, policy, ct);
+    }
 
+    private async Task<bool> TryEnqueueCoreAsync(
+        NewEmailOutboxMessage message,
+        EmailOutboxPolicy policy,
+        CancellationToken ct)
+    {
         var now = _time.GetUtcNow();
         await using var conn = await _db.OpenAsync(ct);
 
@@ -286,20 +303,28 @@ public sealed class EmailOutboxRepository
     /// <summary>
     /// Returns the row to <c>pending</c>, due at <paramref name="nextAttemptAt"/>, releasing the
     /// lease. The attempt count is not rewound — it was consumed at claim time, which is what makes
-    /// the retry ceiling hold across a crash mid-attempt.
+    /// the retry ceiling hold across a crash mid-attempt. <paramref name="failureClass"/> is
+    /// nullable: a real delivery failure passes one of <see cref="EmailOutboxFailureClasses"/>, but
+    /// a row deferred without ever being attempted (e.g. a suspended org's message, skipped rather
+    /// than sent) has no delivery failure to classify.
     /// </summary>
     public async Task ScheduleRetryAsync(
-        string id, DateTimeOffset nextAttemptAt, string failureClass, string error,
+        string id, DateTimeOffset nextAttemptAt, string? failureClass, string error,
         CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
 
+        // failure_class uses COALESCE(@failureClass, failure_class), matching SetTerminalAsync
+        // below: a null failureClass (the "deferred, never attempted" case — see this method's
+        // own doc comment) must not erase a real classification a PRIOR attempt already recorded
+        // on this row. A row that failed with a real "transient" classification and is then
+        // deferred for suspension keeps that diagnostic rather than losing it to NULL.
         // xtenant: keyed by the outbox row's own primary key.
         await conn.ExecuteAsync(new CommandDefinition(
             """
             UPDATE email_outbox
             SET state = @pending, next_attempt_at = @next, lease_expires_at = NULL,
-                failure_class = @failureClass, last_error = @error
+                failure_class = COALESCE(@failureClass, failure_class), last_error = @error
             WHERE id = @id
             """,
             new
@@ -311,6 +336,79 @@ public sealed class EmailOutboxRepository
                 id,
             },
             cancellationToken: ct));
+    }
+
+    /// <summary>
+    /// Up to <paramref name="batchSize"/> terminal alert-mail rows whose alert row does not carry
+    /// the outcome the outbox row implies — <c>delivered</c> against anything but <c>sent</c>,
+    /// <c>dead_letter</c>/<c>expired</c> against anything but <c>failed</c>, NULL included.
+    ///
+    /// <para>
+    /// Two things produce that divergence, and this one query covers both. The terminal outbox
+    /// write and the projection onto the alert are separate, non-transactional statements, so a
+    /// projection that fails (or a process that dies between them) leaves the alert reading as
+    /// never-attempted forever: the outbox row is already terminal, so the drain never returns it.
+    /// And <see cref="ExpireOverdueAsync"/> retires rows in one set-based sweep with no per-row
+    /// projection at all, so a message retired at a ceiling has never had an outcome written to
+    /// its alert.
+    /// </para>
+    ///
+    /// <para>
+    /// Bounded exactly like <see cref="ClaimDueAsync"/>: ordered oldest-terminal-first and capped
+    /// by <c>LIMIT</c>, so the whole terminal backlog is never materialised. Buffered rather than
+    /// streamed through <c>QueryUnbufferedAsync</c> deliberately — the <c>LIMIT</c> is already the
+    /// bound, and an open unbuffered reader cannot share its connection with the repair
+    /// <c>UPDATE</c> on either provider, so streaming would buy nothing and cost the caller a
+    /// second connection. Repairing rows removes them from this predicate, so successive passes
+    /// walk the backlog rather than re-reading its head.
+    /// </para>
+    ///
+    /// <para>
+    /// The window is bounded by retention, not by this query: <c>RetentionService</c> deletes
+    /// terminal rows past <c>EMAIL_OUTBOX_TERMINAL_RETENTION_DAYS</c>, and once the outbox row is
+    /// gone the divergence is unrecoverable — the evidence of what should have been projected no
+    /// longer exists. This repairs divergences younger than that window, nothing older.
+    /// </para>
+    /// </summary>
+    public async Task<IReadOnlyList<DivergentAlertProjection>> FindDivergentAlertProjectionsAsync(
+        int batchSize, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+
+        // xtenant: one worker reconciles every tenant's stale projections in one sweep over the
+        // shared outbox, the same posture as the drain and the ceiling sweep above — there is no
+        // authenticated tenant here to scope to. Both tenant-scoped tables are still joined on
+        // org_id (alert to outbox, outbox to orgs), so a row can only ever repair the alert
+        // belonging to its own org. Non-active orgs are excluded in the join rather than skipped
+        // in the caller: skipping in C# would leave their rows selected by every later pass,
+        // where they would occupy the batch forever and starve every other tenant's repairs.
+        var rows = await conn.QueryAsync<DivergentAlertProjection>(new CommandDefinition(
+            """
+            SELECT eo.id AS Id, eo.org_id AS OrgId, eo.correlation_id AS CorrelationId,
+                   eo.state AS State, eo.last_error AS LastError
+            FROM email_outbox eo
+            JOIN alert a ON a.id = eo.correlation_id AND a.org_id = eo.org_id
+            JOIN orgs o ON o.id = eo.org_id AND o.status = 'active' AND o.deleted_at IS NULL
+            WHERE eo.message_kind = @alertKind
+              AND eo.state IN (@delivered, @deadLetter, @expired)
+              AND ((eo.state = @delivered AND (a.email_status IS NULL OR a.email_status <> @sent))
+                OR (eo.state <> @delivered AND (a.email_status IS NULL OR a.email_status <> @failed)))
+            ORDER BY eo.completed_at, eo.id
+            LIMIT @batchSize
+            """,
+            new
+            {
+                alertKind = EmailOutboxMessageKinds.Alert,
+                delivered = EmailOutboxStates.Delivered,
+                deadLetter = EmailOutboxStates.DeadLetter,
+                expired = EmailOutboxStates.Expired,
+                sent = AlertEmailStatuses.Sent,
+                failed = AlertEmailStatuses.Failed,
+                batchSize,
+            },
+            cancellationToken: ct));
+
+        return rows.ToList();
     }
 
     /// <summary>Current backlog shape: non-terminal depth, oldest queued row, and terminal counts.</summary>

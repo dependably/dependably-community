@@ -10,7 +10,7 @@ namespace Dependably.Api;
 /// <see cref="IEdgeMode.IsEdge"/> — in every other deployment mode the route is never registered
 /// (a request 404s), which also keeps it out of the non-edge OpenAPI documents and the
 /// ApiContract gate. Same class as <c>/metrics</c> and <c>/version</c> — operator/ops surfaces
-/// deliberately excluded from the OpenAPI inventory and documented in <c>docs/edge-node.md</c>
+/// deliberately excluded from the OpenAPI inventory and documented in the edge-node runbook
 /// instead — so it takes no bearer/basic credential but sits behind the same
 /// <see cref="MetricsAccessConfig"/> IP allowlist those two endpoints use: an anonymous internet
 /// caller cannot fingerprint the deployed version or cache topology. The payload itself is also

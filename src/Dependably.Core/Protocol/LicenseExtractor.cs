@@ -347,7 +347,7 @@ public static class LicenseExtractor
         try
         {
             pooled.Position = 0;
-            using var zip = new ZipArchive(pooled, ZipArchiveMode.Read, leaveOpen: true);
+            using var zip = SafeZipArchive.Open(pooled, leaveOpen: true);
             var entry = zip.Entries.FirstOrDefault(e =>
                 e.Name.Equals("PKG-INFO", StringComparison.Ordinal));
             if (entry is null)
@@ -914,7 +914,7 @@ public static class LicenseExtractor
     {
         if (stream.CanSeek)
         {
-            return new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: false);
+            return SafeZipArchive.Open(stream, leaveOpen: false);
         }
 
         // Buffer the non-seekable upstream into the pool, then open the archive over
@@ -926,7 +926,7 @@ public static class LicenseExtractor
             stream.CopyTo(pooled);
             pooled.Position = 0;
             stream.Dispose();
-            return new ZipArchive(pooled, ZipArchiveMode.Read, leaveOpen: false);
+            return SafeZipArchive.Open(pooled, leaveOpen: false);
         }
         catch
         {

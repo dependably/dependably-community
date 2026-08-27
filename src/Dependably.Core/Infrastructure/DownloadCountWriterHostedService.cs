@@ -17,6 +17,11 @@ namespace Dependably.Infrastructure;
 /// Shutdown: when the host signals cancellation the channel is drained one last time so
 /// any increments queued just before SIGTERM still reach disk. The 30 s SIGTERM drain
 /// configured in Program.cs gives this plenty of headroom even at queue capacity.
+///
+/// suspension-ok: not a scheduled tenant sweep — a write-behind flush of download events that
+/// already happened. A suspended org cannot generate a new download (the protocol plane is
+/// behind TenantStatusEnforcementMiddleware), so this only ever persists counts from legitimate
+/// pre-suspension activity; nothing here initiates work on a non-active org's behalf.
 /// </summary>
 public sealed class DownloadCountWriterHostedService : BackgroundService
 {

@@ -11,10 +11,21 @@ namespace Dependably.Infrastructure;
 /// and metadata commit leaves an orphan that only this sweep can recover.
 ///
 /// The referenced set is <see cref="PackageRepository.StreamAllBlobKeysAsync"/>, the union of
-/// EVERY table that can hold a hosted key — <c>package_versions</c> plus the secondary-file
-/// tables (<c>package_version_files</c>, <c>maven_version_files</c>, <c>nuget_symbol_index</c>)
-/// whose rows are the sole reference to a Maven <c>.pom</c>/sources jar or a PyPI sdist
-/// published alongside a wheel. Anything short of that union deletes live artefacts.
+/// EVERY table that can hold a hosted key — <c>package_versions</c>, the secondary-file tables
+/// (<c>package_version_files</c>, <c>maven_version_files</c>, <c>nuget_symbol_index</c>) whose
+/// rows are the sole reference to a Maven <c>.pom</c>/sources jar or a PyPI sdist published
+/// alongside a wheel, and <c>project_documents</c>, whose rows are the sole reference to an
+/// uploaded SBOM/VEX/SARIF original. Anything short of that union deletes live data: a project
+/// document is not a published artefact, but <c>BlobKeys.ProjectDocument</c> deliberately keys it
+/// under the same <c>hosted/</c> prefix this sweep walks, so it is in scope by construction.
+///
+/// For project documents this sweep is not a backstop but the only reclamation path. A re-upload
+/// rewrites the <c>(version, kind)</c> row, and the blob it used to name simply stops being
+/// referenced; the management plane's <c>SbomDocumentStore</c> deletes nothing inline, because the blob store
+/// and the database commit independently and an inline delete can take out bytes an upload that
+/// is still in flight is about to commit a row for. The grace window below is precisely what a
+/// caller cannot reproduce, so a superseded document's bytes wait for the next pass rather than
+/// going immediately.
 ///
 /// Schedule via <c>ORPHAN_RECONCILE_SCHEDULE</c> (cron, default daily 04:00 UTC). Skipped
 /// silently if disabled (set the schedule to a non-parseable value to opt out). A grace
@@ -29,6 +40,12 @@ namespace Dependably.Infrastructure;
 /// <see cref="CacheEvictionService"/>; this service is registry-only and never touches
 /// proxy/-prefixed blobs. The <c>oci/</c>, <c>go/</c>, <c>cargo/</c>, and <c>apk/</c> key
 /// namespaces are likewise outside the <c>hosted/</c> prefix this sweep walks.
+///
+/// suspension-ok: not per-tenant. This sweep walks the whole <c>hosted/</c> prefix and the
+/// whole-fleet referenced-key set (<see cref="PackageRepository.StreamAllBlobKeysAsync"/>) in
+/// one pass — there is no per-org selection point to gate on — and it makes no outbound egress
+/// or third-party delivery. It only deletes bytes nothing references, regardless of which org
+/// last held them.
 /// </summary>
 public sealed class OrphanBlobReconcilerService : ScheduledBackgroundService
 {

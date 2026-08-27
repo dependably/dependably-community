@@ -7,9 +7,9 @@ using Microsoft.AspNetCore.Mvc;
 namespace Dependably.Api;
 
 /// <summary>
-/// Cross-entity type-ahead for the global top-bar search box. Packages-only for now
-/// (reuses the package-list name search); the grouped response shape is intentionally
-/// extensible so vulnerability/license groups can be added later without a contract change.
+/// Cross-entity type-ahead for the global top-bar search box. Packages, projects, and
+/// vulnerabilities; the grouped response shape is intentionally extensible so further groups can
+/// be added later without a contract change.
 /// </summary>
 [ApiController]
 [Authorize]
@@ -19,11 +19,15 @@ public sealed class SearchController : OrgScopedControllerBase
     private const int MaxResults = 25;
 
     private readonly PackageRepository _packages;
+    private readonly ProjectRepository _projects;
+    private readonly VulnerabilityRepository _vulns;
     private readonly OrgAccessGuard _guard;
 
-    public SearchController(PackageRepository packages, OrgAccessGuard guard)
+    public SearchController(PackageRepository packages, ProjectRepository projects, VulnerabilityRepository vulns, OrgAccessGuard guard)
     {
         _packages = packages;
+        _projects = projects;
+        _vulns = vulns;
         _guard = guard;
     }
 
@@ -68,10 +72,37 @@ public sealed class SearchController : OrgScopedControllerBase
             version = p.UpstreamLatestVersion,
         });
 
-        return Ok(new
+        var projectRows = await _projects.SearchByNameAsync(CurrentTenantId(), query, limit, ct);
+        var projectResults = projectRows.Select(p => new { p.Id, p.Name, p.Kind }).ToList();
+
+        // The vuln report matches by package name, OSV id, or summary substring and is keyed
+        // per (version, advisory) pair, so the same advisory can surface once per affected
+        // version — overfetch and dedupe by OsvId before trimming to the suggestion limit,
+        // rather than truncating the raw rows and then deduping into a short list.
+        var (vulnRows, _) = await _vulns.GetVulnReportAsync(
+            new VulnReportQuery(CurrentTenantId(), Search: query, Limit: Math.Min(limit * 5, 100)), ct);
+        var vulnResults = vulnRows
+            .GroupBy(v => v.OsvId)
+            .Select(g => g.First())
+            .Take(limit)
+            .Select(v => new { v.OsvId, v.PackageName, v.Severity, v.Summary })
+            .ToList();
+
+        // The packages group is always present, matching the endpoint's shape before project
+        // search existed — an empty result set for it is a legitimate "no packages match"
+        // answer. The projects and vulnerabilities groups are only added when they have
+        // something to say; an always-present-but-empty group would be indistinguishable from
+        // that at the type level but is otherwise pure payload noise on the common no-match case.
+        var groups = new List<object> { new { kind = "packages", results } };
+        if (projectResults.Count > 0)
         {
-            query,
-            groups = new[] { new { kind = "packages", results } },
-        });
+            groups.Add(new { kind = "projects", results = projectResults });
+        }
+        if (vulnResults.Count > 0)
+        {
+            groups.Add(new { kind = "vulnerabilities", results = vulnResults });
+        }
+
+        return Ok(new { query, groups });
     }
 }

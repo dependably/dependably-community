@@ -1,26 +1,34 @@
 <?xml version="1.0" encoding="utf-8"?>
-<root>
-  <xsd:schema id="root" xmlns="" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:msdata="urn:schemas-microsoft-com:xml-msdata">
-    <xsd:element name="root" msdata:IsDataSet="true">
-      <xsd:complexType>
-        <xsd:choice maxOccurs="unbounded">
-          <xsd:element name="data">
-            <xsd:complexType>
-              <xsd:sequence>
-                <xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" />
-              </xsd:sequence>
-              <xsd:attribute name="name" use="required" type="xsd:string" />
-              <xsd:attribute name="xml:space" default="preserve" />
-            </xsd:complexType>
-          </xsd:element>
-        </xsd:choice>
-      </xsd:complexType>
-    </xsd:element>
-  </xsd:schema>
-  <resheader name="resmimetype"><value>text/microsoft-resx</value></resheader>
-  <resheader name="version"><value>2.0</value></resheader>
-  <resheader name="reader"><value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader>
-  <resheader name="writer"><value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader>
+<root xmlns:ns1="urn:schemas-microsoft-com:xml-msdata" xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <xs:schema id="root">
+    <xs:element name="root" ns1:IsDataSet="true">
+      <xs:complexType>
+        <xs:choice maxOccurs="unbounded">
+          <xs:element name="data">
+            <xs:complexType>
+              <xs:sequence>
+                <xs:element name="value" type="xsd:string" minOccurs="0" ns1:Ordinal="1" />
+              </xs:sequence>
+              <xs:attribute name="name" use="required" type="xsd:string" />
+              <xs:attribute name="xml:space" default="preserve" />
+            </xs:complexType>
+          </xs:element>
+        </xs:choice>
+      </xs:complexType>
+    </xs:element>
+  </xs:schema>
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <resheader name="version">
+    <value>2.0</value>
+  </resheader>
+  <resheader name="reader">
+    <value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <resheader name="writer">
+    <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
   <data name="error.validation.title" xml:space="preserve">
     <value>Validation Error</value>
     <comment>Title of the HTTP 422 problem response; shown as an error heading in clients. Keep short.</comment>
@@ -360,6 +368,10 @@
   <data name="error.activity.sinceInvalid" xml:space="preserve">
     <value>Must be '24h', '7d', '30d', or '90d'.</value>
     <comment>422 detail for the activity feed's time-window filter. The quoted values are API literals.</comment>
+  </data>
+  <data name="error.sbom.export.invalidVariant" xml:space="preserve">
+    <value>Must be 'inventory' or 'vdr'.</value>
+    <comment>422 detail for the SBOM export endpoint's variant query parameter. The quoted values are API literals.</comment>
   </data>
   <data name="error.quarantine.decisionInvalid" xml:space="preserve">
     <value>Must be 'approved', 'denied', or 'pending'.</value>
@@ -836,5 +848,241 @@ If you did not make this change, contact your administrator immediately — your
   <data name="error.user.emailChangeThrottled" xml:space="preserve">
     <value>Too many verification emails have been sent to that address recently. Try again later.</value>
     <comment>Returned when the per-address send budget for account email-change verification is exhausted.</comment>
+  </data>
+  <data name="error.project.nameRequired" xml:space="preserve">
+    <value>name is required.</value>
+    <comment>422 detail on project create. 'name' is the API field name - keep it verbatim.</comment>
+  </data>
+  <data name="error.project.nameTooLong" xml:space="preserve">
+    <value>name must be {0} characters or fewer.</value>
+    <comment>422 detail on project create. {0} = the character limit. 'name' is the API field name - keep it verbatim.</comment>
+  </data>
+  <data name="error.project.descriptionTooLong" xml:space="preserve">
+    <value>description must be {0} characters or fewer.</value>
+    <comment>422 detail on project create. {0} = the character limit. 'description' is the API field name - keep it verbatim.</comment>
+  </data>
+  <data name="error.project.nameTaken" xml:space="preserve">
+    <value>A project with that name already exists here.</value>
+    <comment>409 detail: the name is already used at the same level of the project tree.</comment>
+  </data>
+  <data name="error.project.parentNotFound" xml:space="preserve">
+    <value>parentId does not name a collection in this organization.</value>
+    <comment>422 detail. Deliberately does not distinguish "no such project" from "belongs to another organization". 'parentId' is the API field name - keep it verbatim.</comment>
+  </data>
+  <data name="error.project.parentNotACollection" xml:space="preserve">
+    <value>parentId names a project. Only a collection can contain other projects.</value>
+    <comment>422 detail on project create. 'parentId' is the API field name - keep it verbatim.</comment>
+  </data>
+  <data name="error.project.parentIsSelf" xml:space="preserve">
+    <value>A project cannot be moved inside itself.</value>
+    <comment>422 detail on project relocate: parentId named the project being moved.</comment>
+  </data>
+  <data name="error.project.parentIsDescendant" xml:space="preserve">
+    <value>parentId names a collection inside the project being moved. Pick a destination outside it.</value>
+    <comment>422 detail on project relocate: the move would detach the subtree into a cycle. 'parentId' is the API field name - keep it verbatim.</comment>
+  </data>
+  <data name="error.project.isCollection" xml:space="preserve">
+    <value>That project is a collection. Collections hold no versions.</value>
+    <comment>409 detail returned when a version-scoped operation targets a collection.</comment>
+  </data>
+  <data name="error.sbom.ambiguousProject" xml:space="preserve">
+    <value>{1} projects are named "{0}". A project name is unique within its folder, not across the organization - pass parentId to say which one.</value>
+    <comment>409 detail when a project name matches more than one row. {0} is the name, {1} the match count. 'parentId' is the API field name - keep it verbatim.</comment>
+  </data>
+  <data name="error.sbom.versionNotFound" xml:space="preserve">
+    <value>That project version does not exist.</value>
+    <comment>404 detail when a project version id (or the 'latest' alias) resolves to nothing in the caller's organization.</comment>
+  </data>
+  <data name="error.sbom.analysisRowNotFound" xml:space="preserve">
+    <value>The triage decision could not be read back after being saved.</value>
+    <comment>404 detail for the rare case where the manual-triage row cannot be re-read immediately after the write.</comment>
+  </data>
+  <data name="error.sbom.sortInvalid" xml:space="preserve">
+    <value>Must be 'priority', 'name', 'version', 'severity' or 'scope'.</value>
+    <comment>422 detail for the analysis sort parameter. The quoted values are API literals.</comment>
+  </data>
+  <data name="error.sbom.dirInvalid" xml:space="preserve">
+    <value>Must be 'asc' or 'desc'.</value>
+    <comment>422 detail for the analysis sort-direction parameter. The quoted values are API literals.</comment>
+  </data>
+  <data name="error.sbom.scopeInvalid" xml:space="preserve">
+    <value>Must be 'all', 'prod' or 'dev'.</value>
+    <comment>422 detail for the analysis dependency-scope filter. The quoted values are API literals.</comment>
+  </data>
+  <data name="error.sbom.severityInvalid" xml:space="preserve">
+    <value>Must be 'critical', 'high', 'medium', 'low' or 'unscored'.</value>
+    <comment>422 detail for the analysis severity filter. The quoted values are API literals.</comment>
+  </data>
+  <data name="error.sbom.reachInvalid" xml:space="preserve">
+    <value>Must be 'reachable', 'not-observed', 'unknown' or 'imported-not-called'.</value>
+    <comment>422 detail for the analysis reachability filter. The quoted values are API literals.</comment>
+  </data>
+  <data name="error.sbom.registryInvalid" xml:space="preserve">
+    <value>Must be 'all', 'present', 'absent' or 'unknown'.</value>
+    <comment>422 detail for the analysis registry cross-link filter. The quoted values are API literals.</comment>
+  </data>
+  <data name="error.blastRadius.ecosystemRequired" xml:space="preserve">
+    <value>An ecosystem is required.</value>
+    <comment>422 detail when a blast-radius package query omits the ecosystem half of the coordinate.</comment>
+  </data>
+  <data name="error.blastRadius.nameRequired" xml:space="preserve">
+    <value>A package name is required.</value>
+    <comment>422 detail when a blast-radius package query omits the name half of the coordinate.</comment>
+  </data>
+  <data name="error.blastRadius.osvIdRequired" xml:space="preserve">
+    <value>An advisory identifier is required.</value>
+    <comment>422 detail when a blast-radius advisory query omits the OSV id.</comment>
+  </data>
+  <data name="error.blastRadius.kindInvalid" xml:space="preserve">
+    <value>Must be 'advisory' or 'package'.</value>
+    <comment>422 detail for the blast-radius counts key space. The quoted values are API literals.</comment>
+  </data>
+  <data name="error.blastRadius.tooManyKeys" xml:space="preserve">
+    <value>At most {0} keys may be counted in one request.</value>
+    <comment>422 detail when a blast-radius counts batch exceeds the ceiling. {0} is that ceiling.</comment>
+  </data>
+  <data name="error.sbom.purlKeyRequired" xml:space="preserve">
+    <value>A component identifier is required.</value>
+    <comment>422 detail when a manual VEX triage body omits the purlKey that addresses the component.</comment>
+  </data>
+  <data name="error.sbom.vulnKeyRequired" xml:space="preserve">
+    <value>An advisory identifier is required.</value>
+    <comment>422 detail when a manual VEX triage body omits the vulnKey that addresses the advisory.</comment>
+  </data>
+  <data name="error.sbom.triageEmpty" xml:space="preserve">
+    <value>Include at least one analysis field to change.</value>
+    <comment>422 detail when a manual VEX triage body names a row but changes none of its fields.</comment>
+  </data>
+  <data name="error.sbom.vexStateInvalid" xml:space="preserve">
+    <value>Not a CycloneDX analysis state.</value>
+    <comment>422 detail when a manual VEX triage sends a state outside the CycloneDX vocabulary.</comment>
+  </data>
+  <data name="error.sbom.vexJustificationInvalid" xml:space="preserve">
+    <value>Not a CycloneDX analysis justification.</value>
+    <comment>422 detail when a manual VEX triage sends a justification outside the CycloneDX vocabulary.</comment>
+  </data>
+  <data name="error.sbom.vexResponseInvalid" xml:space="preserve">
+    <value>Not a CycloneDX analysis response.</value>
+    <comment>422 detail when a manual VEX triage sends a response outside the CycloneDX vocabulary.</comment>
+  </data>
+  <data name="error.sbom.vexDetailTooLong" xml:space="preserve">
+    <value>The rationale is too long.</value>
+    <comment>422 detail when a manual VEX triage rationale exceeds the stored length limit.</comment>
+  </data>
+  <data name="error.sbom.justificationRequiresNotAffected" xml:space="preserve">
+    <value>CycloneDX defines a justification only for the 'not_affected' state.</value>
+    <comment>422 detail when a justification is sent for a state other than not_affected. The quoted value is an API literal.</comment>
+  </data>
+  <data name="error.sbom.projectNameRequired" xml:space="preserve">
+    <value>A projectName query parameter is required.</value>
+    <comment>Validation error returned when a document upload omits the project name.</comment>
+  </data>
+  <data name="error.sbom.projectVersionRequired" xml:space="preserve">
+    <value>A projectVersion query parameter is required.</value>
+    <comment>Validation error returned when a document upload omits the project version label.</comment>
+  </data>
+  <data name="error.sbom.tooLarge" xml:space="preserve">
+    <value>The document exceeds the {0}-byte upload limit for this instance.</value>
+    <comment>Returned when an uploaded SBOM, VEX or SARIF document is larger than the configured cap. {0} is the cap in bytes.</comment>
+  </data>
+  <data name="error.sbom.malformed" xml:space="preserve">
+    <value>The uploaded document could not be read as JSON.</value>
+    <comment>Validation error returned when an uploaded document is not well-formed JSON.</comment>
+  </data>
+  <data name="error.sbom.wrongDocumentKind" xml:space="preserve">
+    <value>The uploaded document is not the format this endpoint accepts.</value>
+    <comment>Validation error returned when a document is well-formed JSON but not the expected kind, for example a SARIF log sent to the SBOM endpoint.</comment>
+  </data>
+  <data name="error.sbom.unsupportedSpecVersion" xml:space="preserve">
+    <value>Specification version {0} is not supported.</value>
+    <comment>Validation error returned for a CycloneDX version outside 1.4-1.6 or a SARIF version other than 2.1.0. {0} is the version the document declared.</comment>
+  </data>
+  <data name="error.sbom.tooManyComponents" xml:space="preserve">
+    <value>The document declares more than {0} components.</value>
+    <comment>Validation error returned when an SBOM exceeds the per-upload component ceiling. {0} is the ceiling.</comment>
+  </data>
+  <data name="error.sbom.tooManyStatements" xml:space="preserve">
+    <value>The document declares more than {0} analysis statements against components.</value>
+    <comment>Validation error returned when a VEX or SBOM document exceeds the per-upload analysis-statement ceiling, which counts one statement per component it names. {0} is the ceiling.</comment>
+  </data>
+  <data name="error.sbom.tooManyResults" xml:space="preserve">
+    <value>The log declares more than {0} results.</value>
+    <comment>Validation error returned when a SARIF log exceeds the per-upload result ceiling. {0} is the ceiling.</comment>
+  </data>
+  <data name="error.sbom.projectNotFound" xml:space="preserve">
+    <value>No such project version.</value>
+    <comment>Returned when a document upload names a project or version that does not exist and was not created.</comment>
+  </data>
+  <data name="error.sbom.collectionTarget" xml:space="preserve">
+    <value>A collection holds no components, so it cannot receive a document.</value>
+    <comment>Conflict returned when a document upload targets a collection project rather than a project.</comment>
+  </data>
+  <data name="error.sbom.parentNotFound" xml:space="preserve">
+    <value>The named parent collection does not exist.</value>
+    <comment>Returned when a document upload names a parent collection that does not exist.</comment>
+  </data>
+  <data name="error.sbom.parentNotACollection" xml:space="preserve">
+    <value>The named parent is a project, not a collection.</value>
+    <comment>Conflict returned when a document upload names a parent that exists but is not a collection.</comment>
+  </data>
+  <data name="error.vulnTracker.invalidBaseUrl" xml:space="preserve">
+    <value>Must be an absolute http:// or https:// URL.</value>
+    <comment>422 detail for the baseUrl field on the vulnerability-tracker config PUT. The two schemes are URL literals - keep them verbatim.</comment>
+  </data>
+  <data name="error.vulnTracker.invalidStaleness" xml:space="preserve">
+    <value>Must be between 1 and 8760 hours.</value>
+    <comment>422 detail for the maxStalenessHours field on the vulnerability-tracker config PUT. 8760 hours is one year.</comment>
+  </data>
+  <data name="error.vulnTracker.invalidBatchSize" xml:space="preserve">
+    <value>Must be between 1 and 1000.</value>
+    <comment>422 detail for the batchSize field on the vulnerability-tracker config PUT. 1000 is the tracker's published per-request cap.</comment>
+  </data>
+  <data name="error.vulnTracker.masterKeyRequired" xml:space="preserve">
+    <value>DEPENDABLY_MASTER_KEY must be configured to store a vulnerability-tracker token at rest.</value>
+    <comment>422 detail returned when a vulnerability-tracker config PUT supplies a token with no master key configured. DEPENDABLY_MASTER_KEY is an environment variable name - keep it verbatim.</comment>
+  </data>
+  <data name="error.vulnTracker.hostBlocked" xml:space="preserve">
+    <value>Vulnerability tracker host is in the cloud instance-metadata range, which is never a valid tracker address.</value>
+    <comment>422 detail for the baseUrl field on the vulnerability-tracker config PUT when its host is an IP literal in a blocked SSRF range.</comment>
+  </data>
+  <data name="error.vulnTracker.notActive" xml:space="preserve">
+    <value>No vulnerability-tracker connection is enabled. Save a base URL and enable the connection before testing it.</value>
+    <comment>422 detail for the baseUrl field on the vulnerability-tracker test POST when no connection is configured, or one is configured but switched off. Deliberately distinct from a reached:false result, which is a 200 — an unbuilt integration is not a broken one.</comment>
+  </data>
+  <data name="error.token.nameTooLong" xml:space="preserve">
+    <value>Name must be {0} characters or fewer.</value>
+    <comment>422 detail: service-token name over the length cap. {0} = the cap.</comment>
+  </data>
+  <data name="error.token.nameInvalidChars" xml:space="preserve">
+    <value>Name must not contain control characters.</value>
+    <comment>422 detail: service-token name carrying control characters.</comment>
+  </data>
+  <data name="error.upstream.nameTooLong" xml:space="preserve">
+    <value>Name must be {0} characters or fewer.</value>
+    <comment>422 detail: upstream-registry name over the length cap. {0} = the cap.</comment>
+  </data>
+  <data name="error.upstream.tooManyIds" xml:space="preserve">
+    <value>At most {0} entries may be reordered in one request.</value>
+    <comment>422 detail: reorder payload over the cardinality cap. {0} = the cap.</comment>
+  </data>
+  <data name="error.webhook.descriptionTooLong" xml:space="preserve">
+    <value>Description must be {0} characters or fewer.</value>
+    <comment>422 detail: webhook description over the length cap. {0} = the cap.</comment>
+  </data>
+  <data name="error.packageNote.ecosystemTooLong" xml:space="preserve">
+    <value>Ecosystem must be {0} characters or fewer.</value>
+    <comment>422 detail: package-note ecosystem over the length cap. {0} = the cap.</comment>
+  </data>
+  <data name="error.packageNote.nameTooLong" xml:space="preserve">
+    <value>Name must be {0} characters or fewer.</value>
+    <comment>422 detail: package-note name over the length cap. {0} = the cap.</comment>
+  </data>
+  <data name="error.trustAnchor.materialTooLong" xml:space="preserve">
+    <value>Material must be {0} characters or fewer.</value>
+    <comment>422 detail: trust-anchor material over the length cap. {0} = the cap.</comment>
+  </data>
+  <data name="error.trustAnchor.labelTooLong" xml:space="preserve">
+    <value>Label must be {0} characters or fewer.</value>
+    <comment>422 detail: trust-anchor label over the length cap. {0} = the cap.</comment>
   </data>
 </root>

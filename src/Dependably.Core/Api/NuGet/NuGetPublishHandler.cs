@@ -347,7 +347,7 @@ public sealed class NuGetPublishHandler(
         {
             // leaveOpen:false — disposing the archive also disposes archiveSource (the buffer, or
             // the original seekable blob stream), so callers only need to track the archive.
-            zip = new ZipArchive(archiveSource, ZipArchiveMode.Read, leaveOpen: false);
+            zip = SafeZipArchive.Open(archiveSource, leaveOpen: false);
             entry = zip.GetEntry(entryPath);
         }
         catch (InvalidDataException)

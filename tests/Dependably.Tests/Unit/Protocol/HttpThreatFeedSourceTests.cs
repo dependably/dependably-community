@@ -26,6 +26,168 @@ public sealed class HttpThreatFeedSourceTests
             NullLogger<HttpThreatFeedSource>.Instance);
     }
 
+    // ── KEV entry context: the fields the catalogue carries beyond membership ──────────────
+
+    [Fact]
+    public async Task Kev_KnownRansomwareUse_IsTriState_NotABoolean()
+    {
+        // The whole point of the column. "Known" and "Unknown" are both CISA assertions; a
+        // missing field is the absence of one. Collapsing the last two would let a gate arm read
+        // "the source never said" as "the source said no", which is a fail-open.
+        var source = Build(_ => Json("""
+            {"vulnerabilities":[
+                {"cveID":"CVE-2021-44228","knownRansomwareCampaignUse":"Known"},
+                {"cveID":"CVE-2024-3094","knownRansomwareCampaignUse":"Unknown"},
+                {"cveID":"CVE-2024-0001"},
+                {"cveID":"CVE-2024-0002","knownRansomwareCampaignUse":"Maybe"},
+                {"cveID":"CVE-2024-0003","knownRansomwareCampaignUse":null}
+            ]}
+            """));
+
+        var catalog = await source.GetKevCatalogAsync();
+
+        Assert.True(catalog["CVE-2021-44228"].KnownRansomwareCampaignUse);
+        Assert.False(catalog["CVE-2024-3094"].KnownRansomwareCampaignUse);
+        Assert.Null(catalog["CVE-2024-0001"].KnownRansomwareCampaignUse);
+        // A value this code has never seen reads as "no assertion", not as a guess either way.
+        Assert.Null(catalog["CVE-2024-0002"].KnownRansomwareCampaignUse);
+        Assert.Null(catalog["CVE-2024-0003"].KnownRansomwareCampaignUse);
+    }
+
+    [Fact]
+    public async Task Kev_ParsesTheCatalogueDates()
+    {
+        var source = Build(_ => Json("""
+            {"vulnerabilities":[
+                {"cveID":"CVE-2021-44228","dateAdded":"2021-12-10","dueDate":"2021-12-24"},
+                {"cveID":"CVE-2024-3094","dateAdded":"  2024-03-29  "},
+                {"cveID":"CVE-2024-0001","dateAdded":""}
+            ]}
+            """));
+
+        var catalog = await source.GetKevCatalogAsync();
+
+        Assert.Equal("2021-12-10", catalog["CVE-2021-44228"].DateAdded);
+        Assert.Equal("2021-12-24", catalog["CVE-2021-44228"].DueDate);
+        Assert.Equal("2024-03-29", catalog["CVE-2024-3094"].DateAdded);
+        // Absent and blank both mean "no date", never an empty string in the column.
+        Assert.Null(catalog["CVE-2024-3094"].DueDate);
+        Assert.Null(catalog["CVE-2024-0001"].DateAdded);
+    }
+
+    [Fact]
+    public async Task Kev_MembershipSurvivesEntriesWithNoContextAtAll()
+    {
+        // The adversarial twin for the two tests above: parsing the new fields must not have made
+        // a bare entry — which is most of the catalogue's shape historically — fail to register.
+        var source = Build(_ => Json("""
+            {"vulnerabilities":[{"cveID":"CVE-2021-44228"}]}
+            """));
+
+        var catalog = await source.GetKevCatalogAsync();
+
+        Assert.True(catalog.ContainsKey("CVE-2021-44228"));
+        Assert.Equal(new KevEntry(null, null, null), catalog["CVE-2021-44228"]);
+    }
+
+    [Fact]
+    public async Task Kev_ParsesRequiredActionCwesAndNotes()
+    {
+        var source = Build(_ => Json("""
+            {"vulnerabilities":[
+                {"cveID":"CVE-2021-44228",
+                 "requiredAction":"Apply updates per vendor instructions.",
+                 "cwes":["CWE-502","CWE-400"],
+                 "notes":"https://vendor.example/advisory ; https://vendor.example/patch"}
+            ]}
+            """));
+
+        var catalog = await source.GetKevCatalogAsync();
+        var entry = catalog["CVE-2021-44228"];
+
+        Assert.Equal("Apply updates per vendor instructions.", entry.RequiredAction);
+        Assert.Equal(["CWE-502", "CWE-400"], entry.Cwes);
+        Assert.Equal("https://vendor.example/advisory ; https://vendor.example/patch", entry.Notes);
+    }
+
+    [Fact]
+    public async Task Kev_MissingRequiredActionCwesAndNotes_ParseAsNull_NotThrowing()
+    {
+        // A malformed or absent field on any single entry must never abort the pass — same
+        // fail-soft posture as the existing cveID/date/ransomware parsing.
+        var source = Build(_ => Json("""
+            {"vulnerabilities":[
+                {"cveID":"CVE-2021-44228"},
+                {"cveID":"CVE-2024-0001","requiredAction":123,"cwes":"not-an-array","notes":null}
+            ]}
+            """));
+
+        var catalog = await source.GetKevCatalogAsync();
+
+        Assert.Null(catalog["CVE-2021-44228"].RequiredAction);
+        Assert.Null(catalog["CVE-2021-44228"].Cwes);
+        Assert.Null(catalog["CVE-2021-44228"].Notes);
+
+        // Wrong-shaped values (a number where a string was expected, a string where an array
+        // was expected) read as absent rather than throwing or aborting the batch.
+        Assert.Null(catalog["CVE-2024-0001"].RequiredAction);
+        Assert.Null(catalog["CVE-2024-0001"].Cwes);
+        Assert.Null(catalog["CVE-2024-0001"].Notes);
+    }
+
+    [Fact]
+    public async Task Kev_EmptyCwesArray_IsDistinctFromMissingCwesField()
+    {
+        // "CISA explicitly recorded zero classifications" (empty, non-null list) is a different
+        // fact from "CISA never asked the question" (null) — the two must not collapse.
+        var source = Build(_ => Json("""
+            {"vulnerabilities":[
+                {"cveID":"CVE-2021-44228","cwes":[]},
+                {"cveID":"CVE-2024-0001"}
+            ]}
+            """));
+
+        var catalog = await source.GetKevCatalogAsync();
+
+        Assert.NotNull(catalog["CVE-2021-44228"].Cwes);
+        Assert.Empty(catalog["CVE-2021-44228"].Cwes!);
+        Assert.Null(catalog["CVE-2024-0001"].Cwes);
+    }
+
+    // ── EPSS percentile ───────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task Epss_PercentileIsOptional_AndAScoreSurvivesWithoutOne()
+    {
+        // The percentile must never gate the probability: the existing EPSS arm depends on the
+        // probability, so a feed row missing or malforming the percentile has to still yield a
+        // usable score rather than being dropped.
+        var source = Build(_ => Json("""
+            {"data":[
+                {"cve":"CVE-2024-0001","epss":"0.5","percentile":"0.97"},
+                {"cve":"CVE-2024-0002","epss":"0.4"},
+                {"cve":"CVE-2024-0003","epss":"0.3","percentile":"not-a-number"},
+                {"cve":"CVE-2024-0004","epss":"0.2","percentile":"1.5"}
+            ]}
+            """));
+
+        var result = await source.GetEpssScoresAsync(
+            ["CVE-2024-0001", "CVE-2024-0002", "CVE-2024-0003", "CVE-2024-0004"]);
+
+        Assert.Equal(0.97, result.Scores["CVE-2024-0001"].Percentile);
+        Assert.Null(result.Scores["CVE-2024-0002"].Percentile);
+        Assert.Null(result.Scores["CVE-2024-0003"].Percentile);
+        // Out of range is dropped, not clamped: a percentile of 1.5 means the feed changed shape,
+        // and recording a guess would put a wrong number behind a gate threshold.
+        Assert.Null(result.Scores["CVE-2024-0004"].Percentile);
+
+        // Every one still carries its probability.
+        Assert.Equal(0.5, result.Scores["CVE-2024-0001"].Probability);
+        Assert.Equal(0.4, result.Scores["CVE-2024-0002"].Probability);
+        Assert.Equal(0.3, result.Scores["CVE-2024-0003"].Probability);
+        Assert.Equal(0.2, result.Scores["CVE-2024-0004"].Probability);
+    }
+
     [Fact]
     public async Task Kev_ParsesCveIds_AndSkipsMalformedEntries()
     {
@@ -39,7 +201,7 @@ public sealed class HttpThreatFeedSourceTests
             ]}
             """));
 
-        var ids = await source.GetKevCveIdsAsync();
+        var ids = await source.GetKevCatalogAsync();
 
         Assert.Equal(2, ids.Count);
         Assert.Contains("CVE-2021-44228", ids);
@@ -50,7 +212,7 @@ public sealed class HttpThreatFeedSourceTests
     public async Task Kev_HttpFailure_Throws()
     {
         var source = Build(_ => new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
-        await Assert.ThrowsAsync<HttpRequestException>(() => source.GetKevCveIdsAsync());
+        await Assert.ThrowsAsync<HttpRequestException>(() => source.GetKevCatalogAsync());
     }
 
     /// <summary>
@@ -70,7 +232,7 @@ public sealed class HttpThreatFeedSourceTests
             return response;
         });
 
-        await Assert.ThrowsAsync<UpstreamResponseTooLargeException>(() => source.GetKevCveIdsAsync());
+        await Assert.ThrowsAsync<UpstreamResponseTooLargeException>(() => source.GetKevCatalogAsync());
     }
 
     /// <summary>
@@ -90,7 +252,7 @@ public sealed class HttpThreatFeedSourceTests
             Content = new PoisonContent(OverCapSize),
         });
 
-        await Assert.ThrowsAsync<UpstreamResponseTooLargeException>(() => source.GetKevCveIdsAsync());
+        await Assert.ThrowsAsync<UpstreamResponseTooLargeException>(() => source.GetKevCatalogAsync());
     }
 
     /// <summary>HttpContent that declares a Content-Length but throws if its body is ever read.</summary>
@@ -122,7 +284,10 @@ public sealed class HttpThreatFeedSourceTests
 
         var result = await source.GetEpssScoresAsync(["CVE-2024-0001", "CVE-2024-0002", "CVE-2024-0003"]);
 
-        Assert.Equal(0.97558, Assert.Contains("CVE-2024-0001", result.Scores));
+        var first = Assert.Contains("CVE-2024-0001", result.Scores);
+        Assert.Equal(0.97558, first.Probability);
+        // The percentile rides alongside the probability rather than being dropped.
+        Assert.Equal(0.99, first.Percentile);
         Assert.False(result.Scores.ContainsKey("CVE-2024-0002")); // malformed score skipped
         // All three were queried successfully — absence means "unknown to EPSS", not failure.
         Assert.Equal(3, result.Queried.Count);
@@ -151,7 +316,7 @@ public sealed class HttpThreatFeedSourceTests
         Assert.Equal(50, result.Queried.Count);
         Assert.DoesNotContain(cves[0], result.Queried);
         Assert.Contains(cves[100], result.Queried);
-        Assert.Equal(0.42, Assert.Contains(cves[100], result.Scores));
+        Assert.Equal(0.42, Assert.Contains(cves[100], result.Scores).Probability);
     }
 
     /// <summary>
@@ -186,7 +351,7 @@ public sealed class HttpThreatFeedSourceTests
         Assert.Equal(50, result.Queried.Count);
         Assert.DoesNotContain(cves[0], result.Queried);
         Assert.Contains(cves[100], result.Queried);
-        Assert.Equal(0.42, Assert.Contains(cves[100], result.Scores));
+        Assert.Equal(0.42, Assert.Contains(cves[100], result.Scores).Probability);
     }
 
     // ── plumbing ──────────────────────────────────────────────────────────────

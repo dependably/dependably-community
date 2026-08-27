@@ -33,14 +33,19 @@ public static class MetadataCacheKeys
 
     /// <summary>
     /// PyPI simple-index key. Normalizes the package name to its PEP 503 form so the
-    /// <c>my-package</c> / <c>my_package</c> spellings resolve to one entry. Two variants per
-    /// name: the <c>:json</c> suffix distinguishes the PEP 691 JSON representation from the
-    /// PEP 503 HTML one. The same URL serves both, negotiated per request from the Accept
-    /// header, so a shared key would let a client receive the other representation's bytes
-    /// under its own content type. Mutation sites evict both variants.
+    /// <c>my-package</c> / <c>my_package</c> spellings resolve to one entry. Four variants per
+    /// name: JSON × proxy. The <c>:json</c> suffix distinguishes the PEP 691 JSON representation
+    /// from the PEP 503 HTML one — the same URL serves both, negotiated per request from the
+    /// Accept header, so a shared key would let a client receive the other representation's bytes
+    /// under its own content type. The <c>:proxy</c> suffix distinguishes entries built by
+    /// <c>ServeProxySimpleIndexAsync</c> (upstream-merged) from entries built by
+    /// <c>ServeLocalSimpleIndexAsync</c> (local-only), mirroring the npm and NuGet keys: the two
+    /// paths are mutually exclusive per request but a claim-state change (a name becoming
+    /// local-only, or proxy passthrough being toggled) shifts subsequent requests between them,
+    /// and the two paths also store at different TTLs. Mutation sites evict all four variants.
     /// </summary>
     public static string PyPiSimpleIndex(PyPiSimpleIndexKey key) =>
-        $"metadata:{key.OrgId}:pypi:{PurlNormalizer.PyPiName(key.Name)}{(key.WantsJson ? ":json" : "")}";
+        $"metadata:{key.OrgId}:pypi:{PurlNormalizer.PyPiName(key.Name)}{(key.WantsJson ? ":json" : "")}{(key.IsProxy ? ":proxy" : "")}";
 
     /// <summary>
     /// npm packument key. The full (scoped) name is already canonical for npm. Two variants
@@ -93,17 +98,25 @@ public static class MetadataCacheKeys
 }
 
 /// <summary>
-/// Identifies a PyPI simple index by tenant, (raw, un-normalized) package name, and negotiated
-/// representation (see <see cref="WantsJson"/>).
+/// Identifies a PyPI simple index by tenant, (raw, un-normalized) package name, negotiated
+/// representation (see <see cref="WantsJson"/>), and cache path (local-only vs proxy-merged —
+/// see <see cref="IsProxy"/>).
 /// </summary>
 public readonly record struct PyPiSimpleIndexKey(string OrgId, string Name) : IOrgScopedCacheKey
 {
     /// <summary>
     /// <see langword="true"/> for the PEP 691 JSON representation; <see langword="false"/> for
     /// the PEP 503 HTML one. Defaults to <see langword="false"/> so HTML callsites read as the
-    /// unsuffixed key. Mutation sites evict both variants.
+    /// unsuffixed key. Mutation sites evict all four variants.
     /// </summary>
     public bool WantsJson { get; init; } = false;
+
+    /// <summary>
+    /// <see langword="true"/> when the entry was built by the passthrough (upstream-merged)
+    /// path; <see langword="false"/> when built by the local-only path. Mutation sites evict
+    /// all four variants.
+    /// </summary>
+    public bool IsProxy { get; init; } = false;
 }
 
 /// <summary>

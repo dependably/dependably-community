@@ -1,4 +1,6 @@
+using System.Diagnostics.CodeAnalysis;
 using Dapper;
+using Dependably.Protocol;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Dependably.Infrastructure;
@@ -19,17 +21,20 @@ public sealed class PackageAnalyticsRepository
     private readonly SamlConfigRepository? _samlConfig;
     private readonly TimeProvider _time;
     private readonly ILogger<PackageAnalyticsRepository> _logger;
+    private readonly Dependably.Infrastructure.VulnTracker.InstanceVulnTrackerConfig? _trackerConfig;
 
     public PackageAnalyticsRepository(
         IMetadataStore db,
         SamlConfigRepository? samlConfig = null,
         TimeProvider? time = null,
-        ILogger<PackageAnalyticsRepository>? logger = null)
+        ILogger<PackageAnalyticsRepository>? logger = null,
+        Dependably.Infrastructure.VulnTracker.InstanceVulnTrackerConfig? trackerConfig = null)
     {
         _db = db;
         _samlConfig = samlConfig;
         _time = time ?? TimeProvider.System;
         _logger = logger ?? NullLogger<PackageAnalyticsRepository>.Instance;
+        _trackerConfig = trackerConfig;
     }
 
     public async Task<OrgStats> GetOrgStatsAsync(string orgId, CancellationToken ct = default)
@@ -80,7 +85,8 @@ public sealed class PackageAnalyticsRepository
             "SELECT min_release_age_hours FROM org_settings WHERE org_id = @orgId",
             new { orgId });
 
-        var (vulnsByEcoSeverity, diskByEco, vulnPeriods, activeUsers, blockedByGate, blockedPulls, quarantinePending) =
+        var (vulnsByEcoSeverity, diskByEco, vulnPeriods, activeUsers, blockedByGate, blockedPulls, quarantinePending,
+            activeOverrideCount, oldestActiveOverrideDays) =
             await QueryVulnAndActivityStatsAsync(conn, orgId, minReleaseAgeHours, now);
 
         var (hostedPackages, proxiedPackages, storageQuotaBytes, totalDownloads30d) =
@@ -88,7 +94,32 @@ public sealed class PackageAnalyticsRepository
 
         var (operationalRiskPackages, licenseRiskVersions) = await QueryRiskPillarStatsAsync(conn, orgId);
 
+        var (scannedVersions, unscannedVersions, noFeedVersions) = await QueryCoverageStatsAsync(conn, orgId);
+
+        var (trackerConfigured, enrichedAdvisories, totalAdvisories) =
+            await QueryEnrichmentCoverageAsync(conn, orgId, ct);
+
         var samlCertExpiry = await BuildSamlCertExpiryAsync(orgId, ct);
+
+        // Projects dashboard tile. project_versions.policy_status is materialized precisely so
+        // this needs no fan-out per finding: one COUNT-GROUP-BY over each project's is_latest
+        // row gives the whole "N pass / N warn / N violation" picture. A NULL status (never
+        // evaluated) is its own bucket, not folded into 'pass'.
+        var projectPolicyStatus = (await conn.QueryAsync<ProjectPolicyStatusCount>(
+            """
+            SELECT COALESCE(pv.policy_status, 'unevaluated') AS Status, COUNT(*) AS Count
+            FROM project_versions pv
+            WHERE pv.org_id = @orgId AND pv.is_latest = 1
+            GROUP BY pv.policy_status
+            """,
+            new { orgId })).ToList();
+        // Scoped to kind='project' — a collection (folder) holds no versions and so never
+        // appears in the policy-status breakdown above. Counting every projects row here,
+        // collections included, would make the headline larger than the sum of its own
+        // pass/warn/violation/unevaluated sub-line, a tile whose parts do not add up.
+        int totalProjects = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM projects WHERE org_id = @orgId AND kind = @projectKind",
+            new { orgId, projectKind = ProjectKinds.Project });
 
         return new OrgStats(
             PackagesByEcosystem: packagesByEco,
@@ -108,7 +139,206 @@ public sealed class PackageAnalyticsRepository
             StorageQuotaBytes: storageQuotaBytes,
             OperationalRiskPackageCount: operationalRiskPackages,
             VersionsBehindThreshold: VersionsBehindDashboardThreshold,
-            LicenseRiskVersionCount: licenseRiskVersions);
+            LicenseRiskVersionCount: licenseRiskVersions,
+            ProjectVersionPolicyStatus: projectPolicyStatus,
+            TotalProjects: totalProjects,
+            ScannedVersionCount: scannedVersions,
+            UnscannedVersionCount: unscannedVersions,
+            NoFeedVersionCount: noFeedVersions,
+            ActiveOverrideCount: activeOverrideCount,
+            OldestActiveOverrideDays: oldestActiveOverrideDays,
+            TrackerConfigured: trackerConfigured,
+            EnrichedAdvisoryCount: enrichedAdvisories,
+            TotalAdvisoryCount: totalAdvisories);
+    }
+
+    // Scan-coverage tile: unions the same two planes as the risk pillars above (uploaded
+    // package_versions and proxy cache_artifact, org-scoped via tenant_artifact_access), but only
+    // over the rows VulnerabilityScanService itself would consider scanning — see that
+    // service's own scan-pass query, whose structural predicates this mirrors: origin='uploaded' on the uploaded plane
+    // (a legacy non-uploaded-origin row is a structural non-participant, not a coverage gap) and a
+    // non-null purl on the proxy plane (an artifact whose purl hasn't resolved yet has nothing to
+    // look up against OSV). Rows failing that structural filter are excluded from every bucket —
+    // scanned, unscanned, and no-feed alike — because the scanner will never touch them for either
+    // reason.
+    //
+    // Within that domain, a row's ecosystem decides the bucket: OsvFeedCoverage.NoFeedEcosystems
+    // (OCI, Terraform — OSV publishes no feed to check them against at all) is its own third
+    // bucket, never "unscanned". Folding it into "unscanned" is the bug this exists to prevent: an
+    // org that only ever pushes OCI images would read "0% scanned" forever with vuln_checked_at
+    // permanently NULL and no operator action able to change it — indistinguishable from a backlog
+    // the scanner just hasn't reached yet. The remaining rows split scanned/unscanned by whether
+    // vuln_checked_at is stamped; a deferred scan (left NULL when the OSV source was unreachable)
+    // reads identically to a version never scanned at all — both belong in "unscanned". The
+    // scanner's remaining predicates are deliberately not mirrored: org status is a per-pass
+    // concern (a suspended org cannot reach this surface at all), and the per-org air-gap
+    // setting, which leaves every row unscanned while it is on, stays in "unscanned" because —
+    // unlike no-feed — it is operator-reversible and "0% scanned" is a true statement there.
+    [SuppressMessage("Security", "S2077:Formatting SQL queries is security-sensitive",
+        Justification = "The interpolated fragment is DapperInClause.Expand's own parenthesized, " +
+                        "individually-parameterized (@noFeed0, @noFeed1, …) list, not user text — " +
+                        "see DapperInClause's own doc comment for why Dapper's own IN @list " +
+                        "auto-expansion cannot be used here (it binds a Postgres connection's " +
+                        "enumerable as a single native array parameter, valid only after " +
+                        "= ANY(...), never after IN, which is a syntax error at bind time).")]
+    private static async Task<(int Scanned, int Unscanned, int NoFeed)> QueryCoverageStatsAsync(
+        System.Data.Common.DbConnection conn, string orgId)
+    {
+        // See DapperInClause: Dapper's own IN @noFeedEcosystems auto-expansion binds the whole
+        // list as one Postgres array parameter instead of expanding the SQL text, which IN never
+        // accepts — confirmed by PostgresQuerySmokeTests against a live Postgres, not just reasoned
+        // about (a bare `IN @noFeedEcosystems` here previously passed the SQLite-only repository
+        // tests and only failed on that smoke test's real Postgres connection).
+        var (noFeedClause, parameters) = DapperInClause.Expand("noFeed", OsvFeedCoverage.NoFeedEcosystems);
+        parameters.Add("orgId", orgId);
+
+        // DapperInClause's contract makes the empty list the caller's problem: "IN ()" is invalid
+        // SQL on both engines. An empty no-feed set (every ecosystem gained a feed) degrades the
+        // classifier to a constant 0 — nothing is no-feed — instead of reaching the SQL.
+        string uploadedIsNoFeed = OsvFeedCoverage.NoFeedEcosystems.Count == 0
+            ? "0" : $"CASE WHEN p.ecosystem IN {noFeedClause} THEN 1 ELSE 0 END";
+        string proxyIsNoFeed = OsvFeedCoverage.NoFeedEcosystems.Count == 0
+            ? "0" : $"CASE WHEN ca.ecosystem IN {noFeedClause} THEN 1 ELSE 0 END";
+
+        // rawsql: noFeedClause is a DapperInClause-built parameterized (@noFeed0, @noFeed1, …) list, not user text.
+        var row = await conn.QuerySingleOrDefaultAsync<(int Scanned, int Unscanned, int NoFeed)>(
+            $"""
+            SELECT
+                COALESCE(SUM(CASE WHEN IsNoFeed = 0 AND VulnCheckedAt IS NOT NULL THEN 1 ELSE 0 END), 0) AS Scanned,
+                COALESCE(SUM(CASE WHEN IsNoFeed = 0 AND VulnCheckedAt IS NULL THEN 1 ELSE 0 END), 0) AS Unscanned,
+                COALESCE(SUM(CASE WHEN IsNoFeed = 1 THEN 1 ELSE 0 END), 0) AS NoFeed
+            FROM (
+                SELECT pv.vuln_checked_at AS VulnCheckedAt,
+                       {uploadedIsNoFeed} AS IsNoFeed
+                FROM package_versions pv
+                JOIN packages p ON p.id = pv.package_id
+                WHERE p.org_id = @orgId
+                  AND pv.origin = 'uploaded'
+                UNION ALL
+                SELECT ca.vuln_checked_at AS VulnCheckedAt,
+                       {proxyIsNoFeed} AS IsNoFeed
+                FROM cache_artifact ca
+                JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id
+                WHERE taa.org_id = @orgId
+                  AND ca.purl IS NOT NULL
+            ) u
+            """,
+            parameters);
+        return row;
+    }
+
+    /// <summary>
+    /// Vulnerability-tracker enrichment coverage for one org: of the distinct advisories affecting
+    /// its packages across both storage planes, how many carry an NVD band or SSVC decision.
+    ///
+    /// <para>
+    /// <b>Deduplicated by advisory, not counted per version.</b> The same CVE commonly affects
+    /// several of an org's package versions; counting rows would inflate both the numerator and
+    /// denominator by however many versions happen to share it, and — because <c>vulnerabilities</c>
+    /// is the shared, deployment-wide advisory store — the enrichment fact belongs to the advisory
+    /// once, not once per linking row.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>The tracker connection is instance-level, so "configured" is a fact about the deployment,
+    /// not the org.</b> With no <see cref="InstanceVulnTrackerConfig"/> resolver supplied — the
+    /// constructor's null default, matching every other optional dependency here — this returns
+    /// <c>Configured: false</c> without querying the advisory corpus at all, because there is
+    /// nothing an unconfigured connection could have enriched.
+    /// </para>
+    /// </summary>
+    private async Task<(bool Configured, int Enriched, int Total)> QueryEnrichmentCoverageAsync(
+        System.Data.Common.DbConnection conn, string orgId, CancellationToken ct)
+    {
+        if (_trackerConfig is null)
+        {
+            return (false, 0, 0);
+        }
+
+        var resolved = await _trackerConfig.ResolveAsync(ct);
+        if (!resolved.Configured)
+        {
+            return (false, 0, 0);
+        }
+
+        // xtenant: package_version_vulns.cache_artifact_id is a global-plane row; org membership
+        // for that arm is resolved through tenant_artifact_access, not a column on the row itself.
+        var row = await conn.QuerySingleAsync<EnrichmentCoverageCounts>(new CommandDefinition(
+            """
+            SELECT COUNT(DISTINCT v.id) AS Total,
+                   COUNT(DISTINCT CASE
+                       WHEN v.nvd_checked_at IS NOT NULL OR v.ssvc_checked_at IS NOT NULL
+                       THEN v.id END) AS Enriched
+            FROM (
+                SELECT pvv.vuln_id
+                FROM package_version_vulns pvv
+                JOIN package_versions pv ON pv.id = pvv.package_version_id
+                JOIN packages p ON p.id = pv.package_id
+                WHERE p.org_id = @orgId AND pvv.owner_kind = 'package_version'
+                UNION ALL
+                SELECT pvv.vuln_id
+                FROM package_version_vulns pvv
+                JOIN tenant_artifact_access taa ON taa.cache_artifact_id = pvv.cache_artifact_id
+                WHERE taa.org_id = @orgId AND pvv.owner_kind = 'cache_artifact'
+            ) u
+            JOIN vulnerabilities v ON v.id = u.vuln_id
+            """,
+            new { orgId }, cancellationToken: ct));
+
+        return (true, (int)row.Enriched, (int)row.Total);
+    }
+
+    /// <summary>
+    /// Materialization shape for <see cref="QueryEnrichmentCoverageAsync"/> and
+    /// <see cref="GetInstanceEnrichmentCoverageAsync"/>. A settable-property class, not a tuple:
+    /// <c>COUNT(DISTINCT …)</c> over an all-filtered-out group still returns 0 on both providers
+    /// (unlike <c>SUM</c>), but Dapper's tuple materializer requires an exact constructor match
+    /// and both columns are projected as 64-bit integers by SQLite.
+    /// </summary>
+    private sealed class EnrichmentCoverageCounts
+    {
+        public long Total { get; set; }
+        public long Enriched { get; set; }
+    }
+
+    /// <summary>
+    /// Vulnerability-tracker enrichment coverage across the whole deployment: the same
+    /// advisory-level completeness fact as <see cref="QueryEnrichmentCoverageAsync"/>, without
+    /// scoping to one org's packages. <c>Configured</c> is a single instance-wide fact regardless
+    /// of which org would ask, so the apex/operator dashboard and the per-tenant "Enrichment %"
+    /// column both read it from here rather than summing N per-org queries.
+    /// </summary>
+    public async Task<(bool Configured, int Enriched, int Total)> GetInstanceEnrichmentCoverageAsync(
+        CancellationToken ct = default)
+    {
+        if (_trackerConfig is null)
+        {
+            return (false, 0, 0);
+        }
+
+        var resolved = await _trackerConfig.ResolveAsync(ct);
+        if (!resolved.Configured)
+        {
+            return (false, 0, 0);
+        }
+
+        await using var conn = await _db.OpenAsync(ct);
+
+        // xtenant: apex/operator dashboard rollup, counting enrichment across every org's
+        // advisories by design — the same instance-wide-rollup posture as
+        // OrgRepository.CountByStatusAsync. TrackerConfigured is already deployment-wide above.
+        var row = await conn.QuerySingleAsync<EnrichmentCoverageCounts>(new CommandDefinition(
+            """
+            SELECT COUNT(DISTINCT v.id) AS Total,
+                   COUNT(DISTINCT CASE
+                       WHEN v.nvd_checked_at IS NOT NULL OR v.ssvc_checked_at IS NOT NULL
+                       THEN v.id END) AS Enriched
+            FROM package_version_vulns pvv
+            JOIN vulnerabilities v ON v.id = pvv.vuln_id
+            """,
+            cancellationToken: ct));
+
+        return (true, (int)row.Enriched, (int)row.Total);
     }
 
     // The two risk pillars (operational + license) each union the uploaded (package_versions) and
@@ -320,7 +550,8 @@ public sealed class PackageAnalyticsRepository
     }
 
     // Queries vuln/severity counts, disk-by-ecosystem, vuln-period buckets, active users,
-    // blocked-by-gate summary, and quarantine pending count. All org-scoped via WHERE org_id=@orgId.
+    // blocked-by-gate summary, quarantine pending count, and active-override stats. All
+    // org-scoped via WHERE org_id=@orgId.
     private static async Task<(
         List<EcoSeverityCount> VulnsByEcoSeverity,
         List<EcoDiskBytes> DiskByEco,
@@ -328,15 +559,18 @@ public sealed class PackageAnalyticsRepository
         int ActiveUsers,
         List<GateCount> BlockedByGate,
         int BlockedPulls,
-        int QuarantinePending)>
+        int QuarantinePending,
+        int ActiveOverrideCount,
+        int? OldestActiveOverrideDays)>
         QueryVulnAndActivityStatsAsync(
             System.Data.Common.DbConnection conn, string orgId,
             int? minReleaseAgeHours, DateTimeOffset now)
     {
         var (vulnsByEcoSeverity, diskByEco, vulnPeriods) = await QueryVulnDataAsync(conn, orgId, now);
-        var (activeUsers, blockedByGate, blockedPulls, quarantinePending) =
+        var (activeUsers, blockedByGate, blockedPulls, quarantinePending, activeOverrideCount, oldestActiveOverrideDays) =
             await QueryActivityDataAsync(conn, orgId, minReleaseAgeHours, now);
-        return (vulnsByEcoSeverity, diskByEco, vulnPeriods, activeUsers, blockedByGate, blockedPulls, quarantinePending);
+        return (vulnsByEcoSeverity, diskByEco, vulnPeriods, activeUsers, blockedByGate, blockedPulls, quarantinePending,
+            activeOverrideCount, oldestActiveOverrideDays);
     }
 
     // Queries vuln-by-severity, disk-by-ecosystem, and vuln-period buckets. Uses a two-plane
@@ -442,9 +676,16 @@ public sealed class PackageAnalyticsRepository
         return (vulnsByEcoSeverity, diskByEco, vulnPeriods);
     }
 
-    // Queries active-user count (7d), blocked-pull summary by gate (30d), and quarantine
-    // pending count. All org-scoped via WHERE org_id=@orgId.
-    private static async Task<(int ActiveUsers, List<GateCount> BlockedByGate, int BlockedPulls, int QuarantinePending)>
+    // Queries active-user count (7d), blocked-pull summary by gate (30d), quarantine pending
+    // count, and active-override stats (approved quarantine rows). All org-scoped via
+    // WHERE org_id=@orgId.
+    private static async Task<(
+        int ActiveUsers,
+        List<GateCount> BlockedByGate,
+        int BlockedPulls,
+        int QuarantinePending,
+        int ActiveOverrideCount,
+        int? OldestActiveOverrideDays)>
         QueryActivityDataAsync(
             System.Data.Common.DbConnection conn, string orgId,
             int? minReleaseAgeHours, DateTimeOffset now)
@@ -513,7 +754,21 @@ public sealed class PackageAnalyticsRepository
 
         int quarantinePending = nonReleaseAgePending + activeReleaseHolds;
 
-        return (activeUsers, blockedByGate, blockedPulls, quarantinePending);
+        // Active overrides: approved quarantine rows (a human decision that outranks every policy
+        // gate). The oldest one's age is what tells an operator how long a bypass has stood, in
+        // whole days from the injected clock — null when there are no approved rows.
+        var (activeOverrideCount, oldestDecidedAt) = await conn.QuerySingleOrDefaultAsync<(int Count, DateTimeOffset? OldestDecidedAt)>(
+            """
+            SELECT COUNT(*) AS Count, MIN(decided_at) AS OldestDecidedAt
+            FROM quarantine
+            WHERE org_id = @orgId AND state = 'approved'
+            """,
+            new { orgId });
+        int? oldestActiveOverrideDays = oldestDecidedAt is { } oldest
+            ? (int)Math.Floor((now - oldest).TotalDays)
+            : null;
+
+        return (activeUsers, blockedByGate, blockedPulls, quarantinePending, activeOverrideCount, oldestActiveOverrideDays);
     }
 
     // Queries package hosted/proxy counts, the org storage quota, and 30-day download total.

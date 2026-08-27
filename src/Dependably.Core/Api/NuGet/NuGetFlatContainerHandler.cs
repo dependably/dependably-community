@@ -15,6 +15,16 @@ namespace Dependably.Api.NuGetProtocol;
 /// (<c>cache_artifact</c> + <c>tenant_artifact_access</c>). Proxy-fetch helpers are in
 /// <see cref="NuGetNupkgProxyHelper"/>.
 /// </summary>
+// S1200: the three flatcontainer surfaces this handler serves — versions, download and HEAD —
+// share their dependency set rather than partitioning it. The versions surface looks separable
+// until its helpers are followed: AuthorizeNuGetReadAsync, LoadCombinedVersionsAsync and
+// LoadCombinedVulnSignalsAsync pull in tokens, inventory and vulns, leaving 11 of the 19
+// injected collaborators needed on BOTH sides of any split. A second class would therefore
+// restate most of this one's dependency list rather than reduce it, and the routes a reader
+// compares would no longer sit together. Revisit if a surface ever grows dependencies the
+// others do not share.
+[System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S1200:Classes should not be coupled to too many other classes",
+    Justification = "The three flatcontainer surfaces share 11 of 19 collaborators; splitting would duplicate the dependency list, not reduce it.")]
 public sealed class NuGetFlatContainerHandler(
     OrgRepository orgs,
     PackageRepository packages,

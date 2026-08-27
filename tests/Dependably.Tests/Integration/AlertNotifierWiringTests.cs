@@ -131,6 +131,38 @@ public sealed class AlertNotifierWiringTests : IAsyncLifetime
     }
 
     /// <summary>
+    /// Pumps the clock (the same discipline as <see cref="WaitForOutcomeAsync"/>) until the
+    /// alert's own <c>EmailStatus</c> column reflects a terminal write, rather than reading it
+    /// immediately after the outbox row's own outcome lands.
+    ///
+    /// <para>
+    /// The outbox row's <c>failure_class</c> and the alert row's <c>email_status</c> are two
+    /// separate writes on the delivery worker's terminal path — <c>WaitForOutcomeAsync</c>
+    /// returning only guarantees the first has landed. Reading the alert row right after it,
+    /// as the two callers below used to, raced the second write: it usually won, which is why
+    /// the assertion only failed intermittently rather than every run.
+    /// </para>
+    /// </summary>
+    private static async Task<AlertRecord> WaitForAlertEmailStatusAsync(
+        AlertRepository alerts, string orgId, string sourceRef, FakeTimeProvider clock)
+    {
+        // now-ok: polling deadline awaiting the background delivery worker's real async pass.
+        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(30);
+        var alert = (await alerts.ListAsync(orgId, null, 50, 0)).Items.First(a => a.SourceRef == sourceRef);
+        // now-ok: same deadline read.
+        while (alert.EmailStatus is null && DateTimeOffset.UtcNow < deadline)
+        {
+            clock.Advance(TimeSpan.FromSeconds(5));
+            await Task.Delay(50);
+            alert = (await alerts.ListAsync(orgId, null, 50, 0)).Items.First(a => a.SourceRef == sourceRef);
+        }
+
+        Assert.True(alert.EmailStatus is not null,
+            "the alert's own EmailStatus was never stamped after the outbox row reached a terminal outcome.");
+        return alert;
+    }
+
+    /// <summary>
     /// The persistence half, which is where the durability guarantee starts: by the time the raise
     /// call returns, the outbox row exists and carries everything a later delivery needs — the
     /// recipient snapshot, the rendered message, the message kind, and the coalescing key.
@@ -230,9 +262,19 @@ public sealed class AlertNotifierWiringTests : IAsyncLifetime
             Assert.Equal(["ops@example.com"], sender.Sent[0].Recipients);
 
             // A terminal outcome is stamped on the alert row; a retryable one deliberately is not.
-            var reread = (await arranged.Alerts.ListAsync(arranged.OrgId, null, 50, 0)).Items
-                .First(a => a.SourceRef == sourceRef);
-            Assert.Equal(expectedAlertEmailStatus, reread.EmailStatus);
+            // Only the terminal case waits for the stamp — the transient case's expectation is
+            // that the column never gets written at all, and there is nothing to poll for that.
+            if (expectedAlertEmailStatus is not null)
+            {
+                var reread = await WaitForAlertEmailStatusAsync(arranged.Alerts, arranged.OrgId, sourceRef, clock);
+                Assert.Equal(expectedAlertEmailStatus, reread.EmailStatus);
+            }
+            else
+            {
+                var reread = (await arranged.Alerts.ListAsync(arranged.OrgId, null, 50, 0)).Items
+                    .First(a => a.SourceRef == sourceRef);
+                Assert.Null(reread.EmailStatus);
+            }
         }
     }
 
@@ -276,8 +318,10 @@ public sealed class AlertNotifierWiringTests : IAsyncLifetime
             // Permanent means no second attempt was spent on it.
             Assert.Equal(1L, row.Attempts);
 
-            var reread = (await arranged.Alerts.ListAsync(arranged.OrgId, null, 50, 0)).Items
-                .First(a => a.SourceRef == sourceRef);
+            // The outbox row's own outcome (asserted above via WaitForOutcomeAsync) and the
+            // alert row's EmailStatus are two separate writes on the delivery worker's terminal
+            // path; wait for the second one rather than assuming it landed with the first.
+            var reread = await WaitForAlertEmailStatusAsync(arranged.Alerts, arranged.OrgId, sourceRef, clock);
             Assert.Equal("failed", reread.EmailStatus);
         }
     }

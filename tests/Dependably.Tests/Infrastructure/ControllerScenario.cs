@@ -332,7 +332,12 @@ public sealed class ControllerScenario : IAsyncDisposable
             orgs,
             noOpEventSink,
             new Dependably.Infrastructure.Redis.InProcessDistributedLock(Clock),
-            TestAlerts.NoOp(db, Clock)));
+            TestAlerts.NoOp(db, Clock),
+            new SbomComponentVulnRepository(db, Clock),
+            new SbomComponentScanner(osv, vulns, new SbomComponentVulnRepository(db, Clock), NullLogger<SbomComponentScanner>.Instance),
+            Dependably.Tests.Infrastructure.TestSbomPolicy.Service(db, Clock),
+            Dependably.Tests.Infrastructure.TestEnrichment.Unused(),
+            Dependably.Tests.Infrastructure.TestEnrichment.NoConnection()));
 
         var systemAdmins = new SystemAdminRepository(db);
         var tokens = new TokenRepository(db, Clock);
@@ -392,6 +397,20 @@ public sealed class ControllerScenario : IAsyncDisposable
             .Build();
         var upstreamRegistries = new UpstreamRegistryController(
             new UpstreamRegistryRepository(db, Clock, envelope), guard, audit, problems, envelope, upstreamConfig)
+        { ControllerContext = ctx };
+
+        // Webhooks and trust anchors: both surfaces carry hand-written field validation whose
+        // bounds had no unit-level seam to test against until they were exposed here.
+        var webhooks = new WebhookController(
+            new WebhookSubscriptionRepository(db, envelope, Clock),
+            guard, audit, problems, noOpEventSink, envelope, upstreamConfig, Clock)
+        { ControllerContext = ctx };
+
+        var trustAnchorRepo = new TrustAnchorRepository(db, Clock);
+        var trustAnchors = new TrustAnchorController(
+            trustAnchorRepo,
+            new PerOrgTrustAnchorStore(trustAnchorRepo, NullLogger<PerOrgTrustAnchorStore>.Instance),
+            guard, audit, problems, NullLogger<TrustAnchorController>.Instance)
         { ControllerContext = ctx };
 
         var packageAnalytics = new PackageAnalyticsRepository(db);
@@ -458,6 +477,9 @@ public sealed class ControllerScenario : IAsyncDisposable
             allowlist, blocklist, reservedNamespaces, installScriptAllowlist, guard, audit, problems)
         { ControllerContext = ctx };
         var orgAudit = new OrgAuditController(audit, guard, Clock, problems) { ControllerContext = ctx };
+        var packageNotes = new PackageNoteController(
+            new PackageNoteRepository(db, Clock), guard, problems, audit)
+        { ControllerContext = ctx };
         var orgAuthConfig = new OrgAuthConfigController(
             guard, samlConfig, orgs, audit, publicUrl, problems, Clock)
         { ControllerContext = ctx };
@@ -508,7 +530,7 @@ public sealed class ControllerScenario : IAsyncDisposable
                 Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Infrastructure.NuGetSymbolIndexer>.Instance),
             Logger: Microsoft.Extensions.Logging.Abstractions.NullLogger<ImportController>.Instance);
         var import = new ImportController(importSvc) { ControllerContext = ctx };
-        var search = new SearchController(packages, guard) { ControllerContext = ctx };
+        var search = new SearchController(packages, new Dependably.Infrastructure.ProjectRepository(db, Clock), vulns, guard) { ControllerContext = ctx };
 
         _built = true;
         return new ControllerScenarioResult(
@@ -527,10 +549,13 @@ public sealed class ControllerScenario : IAsyncDisposable
             orgLists,
             orgAudit,
             orgAuthConfig,
+            packageNotes,
             claims,
             siem,
             import,
             upstreamRegistries,
+            webhooks,
+            trustAnchors,
             search,
             risk,
             quarantine,
@@ -575,10 +600,13 @@ public sealed record ControllerScenarioResult(
     OrgListsController OrgListsController,
     OrgAuditController OrgAuditController,
     OrgAuthConfigController OrgAuthConfigController,
+    PackageNoteController PackageNoteController,
     ClaimsController ClaimsController,
     SiemController SiemController,
     ImportController ImportController,
     UpstreamRegistryController UpstreamRegistryController,
+    WebhookController WebhookController,
+    TrustAnchorController TrustAnchorController,
     SearchController SearchController,
     RiskController RiskController,
     QuarantineController QuarantineController,

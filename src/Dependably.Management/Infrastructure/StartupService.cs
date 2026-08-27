@@ -13,6 +13,9 @@ namespace Dependably.Infrastructure;
 ///
 /// Fail-closed: a bootstrapped instance (orgs/users exist) with no <c>jwt_secret</c> row refuses to
 /// start rather than serving with no loaded key.
+///
+/// suspension-ok: not per-tenant. Loads the one instance-wide JWT signing key before the host
+/// accepts any request; there is no per-org selection point.
 /// </summary>
 public sealed class StartupService : IHostedService
 {

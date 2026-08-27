@@ -62,15 +62,41 @@ describe('setupI18n - locale resolution', () => {
     expect(getLocaleFromNavigatorSpy).not.toHaveBeenCalled()
   })
 
-  it('falls back to navigator locale when no cookie is set', async () => {
+  it('falls back to navigator locale when no cookie is set, region intact', async () => {
     getLocaleFromNavigatorSpy.mockReturnValue('fr-CA')
+
+    const { setupI18n } = await import('./index.js')
+    setupI18n()
+
+    // The region is deliberately preserved: svelte-i18n resolves fr-CA against the registered
+    // 'fr' catalogue, and format.js needs the region to pick fr-CA over fr-FR conventions.
+    expect(initSpy).toHaveBeenCalledWith({
+      fallbackLocale: 'en',
+      initialLocale: 'fr-CA',
+    })
+  })
+
+  it('preserves an English region from the navigator rather than defaulting it', async () => {
+    getLocaleFromNavigatorSpy.mockReturnValue('en-GB')
 
     const { setupI18n } = await import('./index.js')
     setupI18n()
 
     expect(initSpy).toHaveBeenCalledWith({
       fallbackLocale: 'en',
-      initialLocale: 'fr',
+      initialLocale: 'en-GB',
+    })
+  })
+
+  it('reads a regional tag out of the culture cookie', async () => {
+    document.cookie = `.AspNetCore.Culture=${encodeURIComponent('c=en-GB|uic=en-GB')}; path=/`
+
+    const { setupI18n } = await import('./index.js')
+    setupI18n()
+
+    expect(initSpy).toHaveBeenCalledWith({
+      fallbackLocale: 'en',
+      initialLocale: 'en-GB',
     })
   })
 
@@ -109,7 +135,7 @@ describe('setupI18n - locale resolution', () => {
     // Cookie didn't parse to a uic locale, so we fell through to navigator.
     expect(initSpy).toHaveBeenCalledWith({
       fallbackLocale: 'en',
-      initialLocale: 'it',
+      initialLocale: 'it-IT',
     })
   })
 
@@ -123,7 +149,7 @@ describe('setupI18n - locale resolution', () => {
 
     expect(initSpy).toHaveBeenCalledWith({
       fallbackLocale: 'en',
-      initialLocale: 'es',
+      initialLocale: 'es-ES',
     })
   })
 
@@ -144,7 +170,7 @@ describe('setupI18n - locale resolution', () => {
     const { setupI18n } = await import('./index.js')
     setupI18n()
 
-    expect(document.documentElement.lang).toBe('fr')
+    expect(document.documentElement.lang).toBe('fr-CA')
   })
 
   it('returns the init() promise to the caller', async () => {

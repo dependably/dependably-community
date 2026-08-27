@@ -194,114 +194,161 @@ public sealed class RpmRepodataService
         return SaveGzipped(doc);
     }
 
+    /// <summary>
+    /// Uploaded RPMs: sourced from package_versions (origin='uploaded') joined through packages.
+    /// xtenant: filtered by p.org_id = @orgId.
+    /// Proxy RPMs: sourced from cache_artifact joined via tenant_artifact_access for this org,
+    /// with rpm_metadata linked via owner_kind='cache_artifact'. Excludes uploaded rows from
+    /// this arm to prevent double-counting artefacts present in both planes during the P3
+    /// transition.
+    /// xtenant: tenant_artifact_access.org_id = @orgId scopes the global cache_artifact rows.
+    ///
+    /// Both arms carry a pre-filter for the two cheapest gate arms. primary.xml is one document
+    /// containing every package a tenant holds, so this reduces the rows MATERIALISED rather
+    /// than merely the rows rendered — the whole row set, rpm_metadata blobs included, is in
+    /// memory at once.
+    ///
+    /// The pre-filter is deliberately a strict subset of what BlockGateService.Evaluate would
+    /// reject, never a re-implementation of the policy: FilterServableAsync below still runs
+    /// every arm over whatever survives, so a row this predicate keeps is still fully judged,
+    /// and only a row it drops skips the judgement. Two arms qualify because their SQL is
+    /// exactly their C#:
+    ///
+    ///   Arm 1 (manual): ManualState == "blocked" denies unconditionally, whatever the policy.
+    ///   Arm 2b (revoked): RevokedAt is not null denies only under block_revoked = 'block',
+    ///     and only when the manual arm above has not already returned allow — a manual allow
+    ///     short-circuits every automatic gate, so an 'allowed' + revoked row must survive.
+    ///
+    /// No other arm is eligible. The release-age, malicious, KEV, EPSS, CVSS, provenance and
+    /// install-script arms all need either the batched vuln signals or a wall-clock comparison
+    /// that the query cannot see, and a pre-filter that guessed at them would drop rows the
+    /// gate would have served.
+    /// </summary>
+    private const string LocalRowsSql = """
+        SELECT pv.id AS GateId,
+               'package_version' AS GatePlane,
+               pv.manual_block_state AS ManualBlockState,
+               pv.deprecated AS Deprecated,
+               pv.published_at AS PublishedAt,
+               pv.vuln_checked_at AS VulnCheckedAt,
+               -- CASE, not a bare EXISTS: Postgres types EXISTS as boolean while the
+               -- cache-plane arm below supplies an integer literal, and a UNION cannot
+               -- match the two. SQLite accepts either, so the mismatch is invisible there.
+               CASE WHEN EXISTS (SELECT 1 FROM package_version_vulns pvv
+                       JOIN vulnerabilities v ON v.id = pvv.vuln_id
+                       WHERE pvv.package_version_id = pv.id
+                         AND v.osv_id LIKE 'MAL-%') THEN 1 ELSE 0 END AS IsMalicious,
+               pv.origin AS Origin,
+               pv.provenance_status AS ProvenanceStatus,
+               pv.revoked_at AS RevokedAt,
+               p.purl_name AS PurlName,
+               pv.version  AS Version,
+               pv.checksum_sha256 AS Sha256,
+               pv.size_bytes AS SizeBytes,
+               pv.blob_key AS BlobKey,
+               pv.filename AS Filename,
+               rm.rpm_name AS Name,
+               rm.arch     AS Arch,
+               rm.epoch    AS Epoch,
+               rm.rpm_version AS RpmVersion,
+               rm.rpm_release AS RpmRelease,
+               rm.summary  AS Summary,
+               rm.description AS Description,
+               rm.build_host AS BuildHost,
+               rm.build_time AS BuildTime,
+               rm.installed_size AS InstalledSize,
+               rm.archive_size   AS ArchiveSize,
+               rm.rpm_license    AS License,
+               rm.packager       AS Packager,
+               rm.url            AS Url,
+               rm.rpm_group      AS RpmGroup,
+               rm.source_rpm     AS SourceRpm,
+               rm.header_start   AS HeaderStart,
+               rm.header_end     AS HeaderEnd,
+               rm.files_json     AS FilesJson,
+               rm.changelogs_json AS ChangelogsJson
+        FROM package_versions pv
+        JOIN packages p ON p.id = pv.package_id
+        JOIN rpm_metadata rm ON rm.package_version_id = pv.id
+                             AND rm.owner_kind = 'package_version'
+        WHERE p.org_id = @orgId AND p.ecosystem = 'rpm'
+          AND pv.origin = 'uploaded'
+          AND (pv.manual_block_state IS NULL OR pv.manual_block_state <> 'blocked')
+          AND NOT (@blockRevoked = 1 AND pv.revoked_at IS NOT NULL
+                   AND (pv.manual_block_state IS NULL OR pv.manual_block_state <> 'allowed'))
+        UNION ALL
+        SELECT ca.id AS GateId,
+               'cache_artifact' AS GatePlane,
+               taa.manual_block_state AS ManualBlockState,
+               ca.deprecated AS Deprecated,
+               ca.published_at AS PublishedAt,
+               ca.vuln_checked_at AS VulnCheckedAt,
+               0 AS IsMalicious,
+               'proxy' AS Origin,
+               ca.provenance_status AS ProvenanceStatus,
+               ca.revoked_at AS RevokedAt,
+               ca.name AS PurlName,
+               ca.version AS Version,
+               COALESCE(taa.content_hash, ca.content_hash) AS Sha256,
+               COALESCE(taa.size_bytes, ca.size_bytes) AS SizeBytes,
+               COALESCE(taa.blob_key, ca.blob_key) AS BlobKey,
+               ca.filename AS Filename,
+               rm.rpm_name AS Name,
+               rm.arch     AS Arch,
+               rm.epoch    AS Epoch,
+               rm.rpm_version AS RpmVersion,
+               rm.rpm_release AS RpmRelease,
+               rm.summary  AS Summary,
+               rm.description AS Description,
+               rm.build_host AS BuildHost,
+               rm.build_time AS BuildTime,
+               rm.installed_size AS InstalledSize,
+               rm.archive_size   AS ArchiveSize,
+               rm.rpm_license    AS License,
+               rm.packager       AS Packager,
+               rm.url            AS Url,
+               rm.rpm_group      AS RpmGroup,
+               rm.source_rpm     AS SourceRpm,
+               rm.header_start   AS HeaderStart,
+               rm.header_end     AS HeaderEnd,
+               rm.files_json     AS FilesJson,
+               rm.changelogs_json AS ChangelogsJson
+        FROM cache_artifact ca
+        JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id
+                                        AND taa.org_id = @orgId
+        JOIN rpm_metadata rm ON rm.cache_artifact_id = ca.id
+                             AND rm.owner_kind = 'cache_artifact'
+        WHERE ca.ecosystem = 'rpm'
+          AND (taa.manual_block_state IS NULL OR taa.manual_block_state <> 'blocked')
+          AND NOT (@blockRevoked = 1 AND ca.revoked_at IS NOT NULL
+                   AND (taa.manual_block_state IS NULL OR taa.manual_block_state <> 'allowed'))
+        ORDER BY PurlName, Sha256 DESC
+        """;
+
     private async Task<List<RpmPrimaryRow>> LoadLocalRowsAsync(string orgId, CancellationToken ct)
     {
-        await using var conn = await _db.OpenAsync(ct);
-        // Uploaded RPMs: sourced from package_versions (origin='uploaded') joined through packages.
-        // xtenant: filtered by p.org_id = @orgId.
-        // Proxy RPMs: sourced from cache_artifact joined via tenant_artifact_access for this org,
-        // with rpm_metadata linked via owner_kind='cache_artifact'. Excludes uploaded rows from
-        // this arm to prevent double-counting artefacts present in both planes during the P3
-        // transition.
-        // xtenant: tenant_artifact_access.org_id = @orgId scopes the global cache_artifact rows.
-        var rows = (await conn.QueryAsync<RpmPrimaryRow>(
-            """
-            SELECT pv.id AS GateId,
-                   'package_version' AS GatePlane,
-                   pv.manual_block_state AS ManualBlockState,
-                   pv.deprecated AS Deprecated,
-                   pv.published_at AS PublishedAt,
-                   pv.vuln_checked_at AS VulnCheckedAt,
-                   -- CASE, not a bare EXISTS: Postgres types EXISTS as boolean while the
-                   -- cache-plane arm below supplies an integer literal, and a UNION cannot
-                   -- match the two. SQLite accepts either, so the mismatch is invisible there.
-                   CASE WHEN EXISTS (SELECT 1 FROM package_version_vulns pvv
-                           JOIN vulnerabilities v ON v.id = pvv.vuln_id
-                           WHERE pvv.package_version_id = pv.id
-                             AND v.osv_id LIKE 'MAL-%') THEN 1 ELSE 0 END AS IsMalicious,
-                   pv.origin AS Origin,
-                   pv.provenance_status AS ProvenanceStatus,
-                   pv.revoked_at AS RevokedAt,
-                   p.purl_name AS PurlName,
-                   pv.version  AS Version,
-                   pv.checksum_sha256 AS Sha256,
-                   pv.size_bytes AS SizeBytes,
-                   pv.blob_key AS BlobKey,
-                   pv.filename AS Filename,
-                   rm.rpm_name AS Name,
-                   rm.arch     AS Arch,
-                   rm.epoch    AS Epoch,
-                   rm.rpm_version AS RpmVersion,
-                   rm.rpm_release AS RpmRelease,
-                   rm.summary  AS Summary,
-                   rm.description AS Description,
-                   rm.build_host AS BuildHost,
-                   rm.build_time AS BuildTime,
-                   rm.installed_size AS InstalledSize,
-                   rm.archive_size   AS ArchiveSize,
-                   rm.rpm_license    AS License,
-                   rm.packager       AS Packager,
-                   rm.url            AS Url,
-                   rm.rpm_group      AS RpmGroup,
-                   rm.source_rpm     AS SourceRpm,
-                   rm.header_start   AS HeaderStart,
-                   rm.header_end     AS HeaderEnd,
-                   rm.files_json     AS FilesJson,
-                   rm.changelogs_json AS ChangelogsJson
-            FROM package_versions pv
-            JOIN packages p ON p.id = pv.package_id
-            JOIN rpm_metadata rm ON rm.package_version_id = pv.id
-                                 AND rm.owner_kind = 'package_version'
-            WHERE p.org_id = @orgId AND p.ecosystem = 'rpm'
-              AND pv.origin = 'uploaded'
-            UNION ALL
-            SELECT ca.id AS GateId,
-                   'cache_artifact' AS GatePlane,
-                   taa.manual_block_state AS ManualBlockState,
-                   ca.deprecated AS Deprecated,
-                   ca.published_at AS PublishedAt,
-                   ca.vuln_checked_at AS VulnCheckedAt,
-                   0 AS IsMalicious,
-                   'proxy' AS Origin,
-                   ca.provenance_status AS ProvenanceStatus,
-                   ca.revoked_at AS RevokedAt,
-                   ca.name AS PurlName,
-                   ca.version AS Version,
-                   COALESCE(taa.content_hash, ca.content_hash) AS Sha256,
-                   COALESCE(taa.size_bytes, ca.size_bytes) AS SizeBytes,
-                   COALESCE(taa.blob_key, ca.blob_key) AS BlobKey,
-                   ca.filename AS Filename,
-                   rm.rpm_name AS Name,
-                   rm.arch     AS Arch,
-                   rm.epoch    AS Epoch,
-                   rm.rpm_version AS RpmVersion,
-                   rm.rpm_release AS RpmRelease,
-                   rm.summary  AS Summary,
-                   rm.description AS Description,
-                   rm.build_host AS BuildHost,
-                   rm.build_time AS BuildTime,
-                   rm.installed_size AS InstalledSize,
-                   rm.archive_size   AS ArchiveSize,
-                   rm.rpm_license    AS License,
-                   rm.packager       AS Packager,
-                   rm.url            AS Url,
-                   rm.rpm_group      AS RpmGroup,
-                   rm.source_rpm     AS SourceRpm,
-                   rm.header_start   AS HeaderStart,
-                   rm.header_end     AS HeaderEnd,
-                   rm.files_json     AS FilesJson,
-                   rm.changelogs_json AS ChangelogsJson
-            FROM cache_artifact ca
-            JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id
-                                            AND taa.org_id = @orgId
-            JOIN rpm_metadata rm ON rm.cache_artifact_id = ca.id
-                                 AND rm.owner_kind = 'cache_artifact'
-            WHERE ca.ecosystem = 'rpm'
-            ORDER BY PurlName, Sha256 DESC
-            """,
-            new { orgId })).ToList();
+        // Read before the query, not after it: the two cheapest gate arms are pushed into the SQL
+        // below and one of them (revoked) is policy-conditional, so the policy has to be in hand
+        // to compose the predicate. It is also the fail-closed short circuit — a missing settings
+        // row withholds everything, and doing that here avoids materialising a row set that
+        // FilterServableAsync would then discard whole.
+        var settings = await _orgs.GetSettingsAsync(orgId, ct);
+        if (settings is null)
+        {
+            return [];
+        }
 
-        return await FilterServableAsync(orgId, rows, ct);
+        // Only 'block' denies on the revoked arm; 'warn'/'off' surface the badge and keep serving.
+        // Bound as an integer rather than a bool because the predicate compares it in SQL, and
+        // Npgsql binds a C# bool as a Postgres boolean, which will not compare against 1.
+        int blockRevoked = settings.BlockRevoked == "block" ? 1 : 0;
+
+        await using var conn = await _db.OpenAsync(ct);
+        var rows = (await conn.QueryAsync<RpmPrimaryRow>(
+            LocalRowsSql,
+            new { orgId, blockRevoked })).ToList();
+
+        return await FilterServableAsync(settings, rows, ct);
     }
 
     /// <summary>
@@ -316,21 +363,19 @@ public sealed class RpmRepodataService
     /// describing the same set by construction, which a per-builder filter would have to
     /// re-establish five times.
     ///
-    /// A missing settings row withholds everything rather than filtering nothing: absent input
-    /// must not read as "no policy configured", which on a gate is an allow decision.
+    /// This is the authoritative filter and it still evaluates every arm. The SQL pre-filter in
+    /// <see cref="LoadLocalRowsAsync"/> only removes rows this method would remove anyway; it
+    /// never decides that a row is servable, so the two cannot disagree about what is served.
+    ///
+    /// The fail-closed missing-settings posture lives in the caller, which cannot compose its
+    /// predicate without the policy in hand.
     /// </summary>
     private async Task<List<RpmPrimaryRow>> FilterServableAsync(
-        string orgId, List<RpmPrimaryRow> rows, CancellationToken ct)
+        OrgSettings settings, List<RpmPrimaryRow> rows, CancellationToken ct)
     {
         if (rows.Count == 0)
         {
             return rows;
-        }
-
-        var settings = await _orgs.GetSettingsAsync(orgId, ct);
-        if (settings is null)
-        {
-            return [];
         }
 
         // Two batched loads for the whole repository, not one per package: this document lists
@@ -370,15 +415,23 @@ public sealed class RpmRepodataService
         IReadOnlyDictionary<string, VulnGateSignals> caSignals)
     {
         var signals = (row.GatePlane == "package_version" ? pvSignals : caSignals).GetValueOrDefault(row.GateId);
+        // RPM does not apply the NVD-fallback ceiling the other planes do: Cvss stays the raw
+        // aggregate score (signals?.MaxCvss), not signals?.EffectiveMaxCvss.
+        var vulnFacts = (signals?.Facts ?? VulnFacts.None) with
+        {
+            IsMalicious = row.IsMalicious != 0 || (signals?.HasMalicious ?? false),
+            Cvss = signals?.MaxCvss,
+        };
+        // vuln-facts-ok: RPM runs its own record → scan → re-read facts → gate sequence rather
+        // than routing through BlockGateService's request/index paths (ProxyServePostureComplianceTests
+        // pins that posture), so this row-projection helper is this ecosystem's equivalent of the
+        // index-path factories in BlockGateService.cs, not an inline shortcut around them.
         return new VersionFacts(
             ManualState: row.ManualBlockState,
             Deprecated: row.Deprecated,
             PublishedAt: ParseInstant(row.PublishedAt),
             Scanned: row.VulnCheckedAt is not null,
-            HasMalicious: row.IsMalicious != 0 || (signals?.HasMalicious ?? false),
-            HasKev: signals?.HasKev ?? false,
-            MaxEpss: signals?.MaxEpss,
-            MaxCvss: signals?.MaxCvss,
+            Vulnerability: vulnFacts,
             Origin: row.Origin,
             ProvenanceStatus: row.ProvenanceStatus,
             RevokedAt: ParseInstant(row.RevokedAt));

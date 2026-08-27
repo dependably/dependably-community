@@ -24,6 +24,8 @@
   import SettingsInstance from '../lib/settings/SettingsInstance.svelte'
   import SettingsMetrics from '../lib/settings/SettingsMetrics.svelte'
   import SettingsInstanceEmail from '../lib/settings/SettingsInstanceEmail.svelte'
+  import SettingsVulnTracker from '../lib/settings/SettingsVulnTracker.svelte'
+  import SettingsVulnTrackerHealth from '../lib/settings/SettingsVulnTrackerHealth.svelte'
   import SettingsRelayHealth from '../lib/settings/SettingsRelayHealth.svelte'
   import Toggle from '../lib/Toggle.svelte'
 
@@ -296,6 +298,11 @@
       : (proxySettings.min_release_age_unit === 'days' ? num * 24 : num)
     const epssRaw = String(proxySettings.max_epss_tolerance ?? '').trim()
     const maxEpssTolerance = epssRaw === '' || isNaN(Number(epssRaw)) ? null : Number(epssRaw)
+    // The percentile ceiling normalises the same way and for the same reason: an empty field is
+    // an explicit "policy off", which the API carries as a present-and-null value rather than an
+    // omitted one, so clearing it is distinguishable from not touching it.
+    const pctRaw = String(proxySettings.max_epss_percentile_tolerance ?? '').trim()
+    const maxEpssPercentileTolerance = pctRaw === '' || isNaN(Number(pctRaw)) ? null : Number(pctRaw)
     return {
       proxyPassthroughEnabled: proxySettings.proxy_passthrough_enabled,
       maxOsvScoreTolerance:    Number(proxySettings.max_osv_score_tolerance),
@@ -305,6 +312,9 @@
       blockMalicious:          proxySettings.block_malicious,
       blockKev:                proxySettings.block_kev,
       maxEpssTolerance,
+      blockKevRansomware:      proxySettings.block_kev_ransomware,
+      blockSsvcExploitation:   proxySettings.block_ssvc_exploitation,
+      maxEpssPercentileTolerance,
       blockInstallScripts:     proxySettings.block_install_scripts,
       verifyNpmSignatures:     proxySettings.verify_npm_signatures,
       verifyNuGetSignatures:   proxySettings.verify_nuget_signatures,
@@ -1003,6 +1013,14 @@
         testSend={api.testInstanceEmail}
       />
       <SettingsRelayHealth getHealth={api.getInstanceEmailHealth} />
+      <SettingsVulnTracker
+        getConfig={api.getInstanceVulnTrackerConfig}
+        updateConfig={api.updateInstanceVulnTrackerConfig}
+      />
+      <SettingsVulnTrackerHealth
+        getHealth={api.getInstanceVulnTrackerHealth}
+        testConnection={api.testInstanceVulnTrackerConfig}
+      />
 
     {:else if tab === 'metrics' && showInstanceTabs}
       <p class="tab-intro">{$t('settings.metrics.intro')}</p>

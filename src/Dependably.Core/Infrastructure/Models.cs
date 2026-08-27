@@ -17,10 +17,13 @@ public class Org
     /// </summary>
     public DateTimeOffset? DeletedAt { get; set; }
     /// <summary>
-    /// Tenant lifecycle gate. 'active' admits writes; 'suspended'/'archived'/'deleting' cause
-    /// <see cref="Storage.ITenantStorageResolver"/> to raise <see cref="Storage.TenantNotReadyException"/>.
+    /// Tenant lifecycle gate. 'active' is the only state that admits a request: a non-active
+    /// value is a full lockout — <see cref="TenantStatusEnforcementMiddleware"/> refuses every
+    /// tenant-bound request for the org (protocol plane, management API, and login alike) before
+    /// it reaches a controller, and <see cref="Storage.ITenantStorageResolver"/> applies the same
+    /// check independently as defence in depth (raising <see cref="Storage.TenantNotReadyException"/>).
     /// system_admin can toggle between 'active' and 'suspended' from the Tenants page;
-    /// 'archived' and 'deleting' are enterprise-only.
+    /// 'archived' and 'deleting' get the identical lockout but are enterprise-only.
     /// </summary>
     public string Status { get; set; } = "active";
     /// <summary>
@@ -96,6 +99,8 @@ public class OrgSettings
     public long? MaxUploadBytesCargo { get; set; }
     public int? KeepVersions { get; set; }
     public int? KeepDays { get; set; }
+    /// <summary>Max project versions retained per project. NULL is unlimited.</summary>
+    public int? KeepProjectVersions { get; set; }
     public int? ActivityRetentionDays { get; set; }
     public int? PurgeUnlistedAfterDays { get; set; }
     /// <summary>'off' | 'warn' | 'block'</summary>
@@ -194,6 +199,32 @@ public class OrgSettings
     /// <c>vulnerabilities.epss_score</c> across its advisories exceeds this value. NULL = off.
     /// </summary>
     public double? MaxEpssTolerance { get; set; }
+    /// <summary>
+    /// Narrower companion to <see cref="BlockKev"/>: fires only on advisories CISA marks as used
+    /// in ransomware campaigns. Independent of <see cref="BlockKev"/> rather than a mode on it,
+    /// so the two compose — the useful policy is often <c>BlockKev = "warn"</c> with this at
+    /// <c>"block"</c>. 'off' (default) / 'warn' / 'block'.
+    ///
+    /// <para>
+    /// Fires only on an explicit "known" verdict. A CVE CISA marks <c>Unknown</c>, and one whose
+    /// entry carries no such field at all, both leave this arm alone — see the column comment in
+    /// <c>Schema.sql</c> for why that is safe rather than a fail-open.
+    /// </para>
+    /// </summary>
+    public string BlockKevRansomware { get; set; } = "off";
+    /// <summary>
+    /// EPSS percentile ceiling (0.0–1.0), the rank sibling of <see cref="MaxEpssTolerance"/>.
+    /// Blocked when the maximum <c>vulnerabilities.epss_percentile</c> across a version's
+    /// advisories exceeds this value. NULL = off. Both may be set; either tripping is enough.
+    /// </summary>
+    public double? MaxEpssPercentileTolerance { get; set; }
+    /// <summary>
+    /// Enrichment-overlay gate for advisories CISA Vulnrichment marks as actively exploited
+    /// (<c>ssvc_exploitation = 'active'</c>). 'off' (default) / 'warn' / 'block'. Inert unless the
+    /// operator has configured the optional vulnerability-tracker connection, because nothing
+    /// else populates the column.
+    /// </summary>
+    public string BlockSsvcExploitation { get; set; } = "off";
     /// <summary>
     /// Proxy gate for artefacts that ship an install/lifecycle script
     /// (<c>package_versions.has_install_script</c>). 'off' (default) = allow through; 'warn' =
@@ -329,6 +360,10 @@ public class Package
     // True when any version of this package is linked to an OSV MAL- advisory (OpenSSF
     // malicious-packages feed). Drives the packages-list malicious indicator. Computed in SQL.
     public bool HasMaliciousVersion { get; set; }
+    // True when any version of this package is linked to a vulnerability CISA has added to the
+    // Known Exploited Vulnerabilities Catalog (v.is_kev = 1). Drives the packages-list KEV
+    // indicator. Computed in SQL.
+    public bool HasKevVersion { get; set; }
     /// <summary>
     /// Per-package same-version-push override. NULL = inherit the org <c>version_overwrite_policy</c>.
     /// 'allow' = grant overwrite permission even when the org policy is 'exception'. 'block' = deny
@@ -934,6 +969,15 @@ public class AffectedVersionRecord
     public bool IsKev { get; set; }
     /// <summary>Maximum FIRST.org EPSS exploitation probability (0..1) across the advisory's aliases; NULL = not scored by EPSS or not yet checked.</summary>
     public double? EpssScore { get; set; }
+    /// <summary>True when CISA's KEV catalog marks this advisory as known ransomware campaign use (vulnerabilities.kev_known_ransomware); NULL = not a KEV entry or not yet checked.</summary>
+    public bool? IsKevRansomware { get; set; }
+    /// <summary>
+    /// Durable first-observation instant for this (version, advisory) finding
+    /// (<c>package_version_vulns.first_seen_at</c>) — set once at link time and never moved by a
+    /// later re-scan. Distinct from <see cref="PublishedAt"/> (the advisory's own upstream
+    /// publication time) and from <see cref="VulnCheckedAt"/> (the most recent scan).
+    /// </summary>
+    public string? FirstSeenAt { get; set; }
 }
 
 // ── Rich OSV advisory detail (lazy detail endpoint) ───────────────────────────
@@ -970,7 +1014,7 @@ public sealed record OsvDetail(
 /// stored OSV JSON itself (the OSV schema has no <c>threat_intel</c> key), so round-tripping
 /// <c>osv_json</c> through <see cref="OsvDetail"/> can never populate it by accident.
 /// </summary>
-public sealed record ThreatIntel(bool IsKev, double? EpssScore);
+public sealed record ThreatIntel(bool IsKev, double? EpssScore, bool? IsKevRansomware = null);
 
 /// <summary>
 /// CWE→OWASP/skill guidance computed from <see cref="OsvDetail.DatabaseSpecific"/> and
@@ -1230,4 +1274,192 @@ public class BannerDismissal
     public string BannerId { get; set; } = "";
     public string UserId { get; set; } = "";
     public string DismissedAt { get; set; } = "";
+}
+
+// ── Projects plane ──────────────────────────────────────────────────────────────
+// Rows describing an application a team builds and the SBOM/VEX/SARIF documents uploaded
+// about it. Nothing here is an artefact this registry serves, so no registry policy or
+// serve path reads these.
+
+/// <summary>
+/// An application or service a team builds, or a collection grouping several of them.
+/// <see cref="Kind"/> discriminates the two; a collection holds no versions and accepts no
+/// document uploads. <see cref="ParentId"/> is the containing collection, NULL at the root.
+/// </summary>
+public class Project
+{
+    public string Id { get; set; } = "";
+    public string OrgId { get; set; } = "";
+    /// <summary>The containing collection, or null at the root of the tree.</summary>
+    public string? ParentId { get; set; }
+    /// <summary><c>project</c> or <c>collection</c>.</summary>
+    public string Kind { get; set; } = "project";
+    public string Name { get; set; } = "";
+    /// <summary>CycloneDX component.type vocabulary; seeded from an uploaded SBOM's metadata.</summary>
+    public string Classifier { get; set; } = "application";
+    public string? Description { get; set; }
+    public string? CreatedBy { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+}
+
+/// <summary>
+/// One release of a <see cref="Project"/>, labelled by an opaque version string.
+/// <see cref="IsLatest"/> is the only notion of "latest"; a partial unique index makes two
+/// latest rows for one project impossible at commit.
+/// </summary>
+public class ProjectVersion
+{
+    public string Id { get; set; } = "";
+    public string OrgId { get; set; } = "";
+    public string ProjectId { get; set; } = "";
+    public string Version { get; set; } = "";
+    public bool IsLatest { get; set; }
+    /// <summary>
+    /// <c>pass</c>, <c>warn</c> or <c>violation</c> from the last policy evaluation. Null means
+    /// the version has never been evaluated, which is not the same as passing.
+    /// </summary>
+    public string? PolicyStatus { get; set; }
+    public string? CreatedBy { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+}
+
+/// <summary>
+/// Metadata for one uploaded SBOM/VEX/SARIF original. The bytes live verbatim in the registry
+/// blob tier under <see cref="BlobKey"/>; upload is latest-wins per (version, doc type).
+/// </summary>
+public class ProjectDocument
+{
+    public string Id { get; set; } = "";
+    public string OrgId { get; set; } = "";
+    public string ProjectVersionId { get; set; } = "";
+    /// <summary><c>sbom</c>, <c>vex</c> or <c>sarif</c>.</summary>
+    public string DocType { get; set; } = "";
+    /// <summary><c>cyclonedx-json</c>, <c>openvex-json</c> or <c>sarif-json</c>.</summary>
+    public string Format { get; set; } = "";
+    /// <summary>The document's own spec version, e.g. <c>1.6</c> or <c>2.1.0</c>.</summary>
+    public string? SpecVersion { get; set; }
+    public string? ToolName { get; set; }
+    public string? ToolVersion { get; set; }
+    public string Sha256 { get; set; } = "";
+    public long SizeBytes { get; set; }
+    /// <summary>Built by <see cref="Storage.BlobKeys.ProjectDocument"/>; registry tier.</summary>
+    public string BlobKey { get; set; } = "";
+    public string? UploadedBy { get; set; }
+    public DateTimeOffset UploadedAt { get; set; }
+}
+
+/// <summary>
+/// One component of one project version's SBOM. The verbatim <see cref="Purl"/> sits beside the
+/// parsed <see cref="Ecosystem"/>/<see cref="PurlName"/>/<see cref="Version"/> triple so registry
+/// cross-links and scan batching are equality-indexed; the parsed columns are null when the purl
+/// is absent or names a type <c>PurlNormalizer</c> does not map.
+/// </summary>
+public class SbomComponent
+{
+    public string Id { get; set; } = "";
+    public string OrgId { get; set; } = "";
+    public string ProjectVersionId { get; set; } = "";
+    /// <summary>Verbatim from the SBOM; null when the component declares none.</summary>
+    public string? Purl { get; set; }
+    public string? Ecosystem { get; set; }
+    public string? PurlName { get; set; }
+    public string? Version { get; set; }
+    public string Name { get; set; } = "";
+    /// <summary>CycloneDX components[].type.</summary>
+    public string? ComponentType { get; set; }
+    /// <summary>
+    /// The raw CycloneDX scope (<c>required</c>/<c>optional</c>/<c>excluded</c>). Display only —
+    /// unreliable in the wild, which is why it is never the dev/prod signal.
+    /// </summary>
+    public string? SbomScope { get; set; }
+    /// <summary>
+    /// The authoritative dev/prod signal (<c>dev</c>/<c>runtime</c>/<c>unknown</c>), owned by the
+    /// reachability scanner. Defaults to <c>unknown</c> so an unclassified component reads as
+    /// unclassified rather than as production.
+    /// </summary>
+    public string DependencyScope { get; set; } = "unknown";
+    /// <summary><c>direct</c>, <c>transitive</c>, <c>root</c> or <c>graph-unknown</c>.</summary>
+    public string? DependencyKind { get; set; }
+    /// <summary>JSON array of purls from the dependency root to this component.</summary>
+    public string? DependencyPath { get; set; }
+    /// <summary>SPDX expression declared by the component's licences.</summary>
+    public string? LicenseSpdx { get; set; }
+    /// <summary>Scan-pass stamp. Null keeps the row in the unscanned bucket.</summary>
+    public DateTimeOffset? VulnCheckedAt { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+}
+
+/// <summary>
+/// Scan-result link from an <see cref="SbomComponent"/> to a row of the global
+/// <c>vulnerabilities</c> table. A table of its own rather than a third owner arm on
+/// <c>package_version_vulns</c>, so registry policy surfaces never count application inventory.
+/// Carries no org id: the row is always reached through its component, which carries one.
+/// </summary>
+public class SbomComponentVuln
+{
+    public string Id { get; set; } = "";
+    public string ComponentId { get; set; } = "";
+    public string VulnId { get; set; } = "";
+    public DateTimeOffset CheckedAt { get; set; }
+}
+
+/// <summary>
+/// The single (product, vulnerability) statement for a project version: the VEX arm and the
+/// reachability arm on one row, each written by its own ingester and by manual triage.
+/// <see cref="PurlKey"/> is the version-less canonical purl, so triage survives a component
+/// bump; <see cref="VulnKey"/> is a plain advisory id with no foreign key, because a VEX or
+/// SARIF document legitimately cites advisories the advisory feed has never served.
+/// </summary>
+public class ProjectVulnAnalysis
+{
+    public string Id { get; set; } = "";
+    public string OrgId { get; set; } = "";
+    public string ProjectVersionId { get; set; } = "";
+    /// <summary>Version-less canonical purl.</summary>
+    public string PurlKey { get; set; } = "";
+    /// <summary>Canonical advisory id, CVE preferred. Deliberately not a foreign key.</summary>
+    public string VulnKey { get; set; } = "";
+    /// <summary>CycloneDX analysis vocabulary; OpenVEX states are normalized into it on import.</summary>
+    public string? VexState { get; set; }
+    public string? VexJustification { get; set; }
+    public string? VexResponse { get; set; }
+    public string? VexDetail { get; set; }
+    /// <summary><c>upload</c> when a document set it, <c>manual</c> when an operator did.</summary>
+    public string? VexSource { get; set; }
+    /// <summary><c>reachable</c>, <c>not-observed</c>, <c>unknown</c> or <c>imported-not-called</c>.</summary>
+    public string? Reachability { get; set; }
+    /// <summary><c>high</c>, <c>medium</c> or <c>low</c>.</summary>
+    public string? Confidence { get; set; }
+    public bool SarifSuppressed { get; set; }
+    /// <summary>The SARIF security-severity property, when the producer carries one.</summary>
+    public double? SecuritySeverity { get; set; }
+    /// <summary><c>asserted</c> or <c>representative</c>.</summary>
+    public string? SeverityOrigin { get; set; }
+    /// <summary>The producer partial fingerprint this row was matched on.</summary>
+    public string? Fingerprint { get; set; }
+    public string? UpdatedBy { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+}
+
+/// <summary>
+/// One materialized policy violation: which evaluator arm fired, on which component, over which
+/// advisory or licence. Materialized so an alert fires once and a project list can roll findings
+/// up without fanning out per row; restamped at scan completion, on a triage change, and by the
+/// nightly pass. Nothing here denies a serve.
+/// </summary>
+public class SbomPolicyFinding
+{
+    public string Id { get; set; } = "";
+    public string OrgId { get; set; } = "";
+    public string ProjectVersionId { get; set; } = "";
+    public string ComponentId { get; set; } = "";
+    /// <summary><c>malicious</c>, <c>kev</c>, <c>epss</c>, <c>cvss</c> or <c>license</c>.</summary>
+    public string Arm { get; set; } = "";
+    /// <summary>Advisory id for the four vulnerability arms; null for the licence arm.</summary>
+    public string? VulnKey { get; set; }
+    /// <summary>Offending SPDX expression for the licence arm; null for the vulnerability arms.</summary>
+    public string? LicenseSpdx { get; set; }
+    /// <summary>JSON detail naming the threshold that was crossed.</summary>
+    public string? Detail { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
 }

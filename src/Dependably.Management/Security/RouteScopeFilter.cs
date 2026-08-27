@@ -94,8 +94,16 @@ public sealed class RouteScopeFilter : IAuthorizationFilter
 
         if (!ctx.IsTenant) { context.Result = new NotFoundResult(); return; }
 
+        // An ABSENT tid is refused, not waved through. Every principal this codebase mints carries
+        // one — LoginService writes new("tid", tenantId ?? "") and TokenAuthentication writes
+        // new("tid", token.OrgId) — so a tenant-scoped principal without the claim is not a shape
+        // that occurs today, and the empty-string form was already caught by the inequality. But
+        // this filter is the structural realm boundary, and the per-controller OrgAccessGuard call
+        // is documented as belt-and-suspenders — the fallback, not the gate. Treating a missing
+        // claim as "no opinion" meant one omission at any future issuing site would clear this
+        // filter on every tenant's subdomain, and clear it silently.
         string? tid = user.FindFirst("tid")?.Value;
-        if (tid is not null && tid != ctx.TenantId)
+        if (tid is null || tid != ctx.TenantId)
         {
             context.Result = new NotFoundResult();
             return;

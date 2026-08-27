@@ -46,7 +46,10 @@ public sealed class BlockGateInstallScriptAllowlistTests : IClassFixture<InMemor
             new LicenseRepository(_fixture.Store, _clock, new LicenseNormalizer(_fixture.Store, NullLogger<LicenseNormalizer>.Instance)),
             new StubPerOrgTrustAnchorStore(),
             NullLogger<BlockGateService>.Instance,
-            _clock);
+            _clock,
+            new OrgRepository(_fixture.Store),
+            NSubstitute.Substitute.For<Dependably.Infrastructure.Webhooks.IPackageEventSink>(),
+            new Dependably.Protocol.BlockRefusalWebhookThrottle(_clock, TimeSpan.Zero));
     }
 
     // ── Allowlisted package passes arm 9 ─────────────────────────────────────

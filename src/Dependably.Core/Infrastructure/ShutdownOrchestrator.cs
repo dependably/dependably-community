@@ -15,6 +15,9 @@ namespace Dependably.Infrastructure;
 /// Environment variables:
 ///   SHUTDOWN_PRESTOP_DELAY  — seconds to wait before accepting shutdown (default 0)
 ///   SHUTDOWN_GRACE_PERIOD   — passed to host ShutdownTimeout; max time for in-flight drain (default 30)
+///
+/// suspension-ok: not per-tenant. Governs this replica's own shutdown sequence; there is no org
+/// dimension at all.
 /// </summary>
 public sealed class ShutdownOrchestrator : IHostedService
 {

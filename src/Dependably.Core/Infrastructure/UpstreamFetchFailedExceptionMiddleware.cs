@@ -49,7 +49,14 @@ public sealed class UpstreamFetchFailedExceptionMiddleware
                 ex.Transient,
                 ex.Refused);
 
+            var headerSnapshot = ResponseHeaderPreserver.Capture(context);
             context.Response.Clear();
+
+            // Response.Clear() drops the request-derived headers SecurityHeadersMiddleware set
+            // on the way in, restored from the snapshot above. This refusal is reachable by an
+            // anonymous caller, so the JSON body must still be sniff-proof.
+            ResponseHeaderPreserver.Restore(context, headerSnapshot);
+            context.Response.Headers.XContentTypeOptions = "nosniff";
 
             string title;
             string detail;

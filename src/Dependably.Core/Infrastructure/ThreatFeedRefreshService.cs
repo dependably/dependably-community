@@ -12,6 +12,11 @@ namespace Dependably.Infrastructure;
 /// Runs on a cron schedule (<c>THREAT_FEED_SCHEDULE</c>, default daily at 5am UTC, offset an
 /// hour from the OSV scan so the freshly scanned advisories get enriched the same morning),
 /// with the same thundering-herd jitter shape as <see cref="VulnerabilityScanService"/>.
+///
+/// suspension-ok: not per-tenant. This pass enriches the shared, instance-wide
+/// <c>vulnerabilities</c> table (one row per advisory, not per org) from two public feeds
+/// (KEV, EPSS) and enumerates no org — there is no per-tenant selection point a suspension
+/// check could apply to, and no tenant's own egress or third-party delivery is at stake.
 /// </summary>
 public sealed class ThreatFeedRefreshService : ScheduledBackgroundService
 {
@@ -99,10 +104,10 @@ public sealed class ThreatFeedRefreshService : ScheduledBackgroundService
     private async Task<int> RunKevPassAsync(
         List<(string Id, List<string> Cves)> cvesByVuln, CancellationToken ct)
     {
-        IReadOnlySet<string> kev;
+        IReadOnlyDictionary<string, Dependably.Protocol.KevEntry> kev;
         try
         {
-            kev = await _source.GetKevCveIdsAsync(ct);
+            kev = await _source.GetKevCatalogAsync(ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -116,8 +121,35 @@ public sealed class ThreatFeedRefreshService : ScheduledBackgroundService
         foreach (var (id, cves) in cvesByVuln)
         {
             ct.ThrowIfCancellationRequested();
-            bool isKev = cves.Any(kev.Contains);
-            await _vulns.SetKevAsync(id, isKev, ct);
+
+            // One advisory can alias several CVEs, so pick the entry deliberately rather than
+            // taking whichever matched first: prefer one CISA marks as known ransomware use, then
+            // any entry carrying an assertion either way, then the first match. Without that, an
+            // advisory aliasing two KEV entries would report a ransomware verdict that depends on
+            // dictionary ordering.
+            Dependably.Protocol.KevEntry? entry = null;
+            foreach (string cve in cves)
+            {
+                if (!kev.TryGetValue(cve, out var candidate))
+                {
+                    continue;
+                }
+
+                if (candidate.KnownRansomwareCampaignUse == true)
+                {
+                    entry = candidate;
+                    break;
+                }
+
+                if (entry is null || (entry.KnownRansomwareCampaignUse is null
+                    && candidate.KnownRansomwareCampaignUse is not null))
+                {
+                    entry = candidate;
+                }
+            }
+
+            bool isKev = entry is not null;
+            await _vulns.SetKevAsync(id, isKev, entry, ct);
             if (isKev)
             {
                 flagged++;
@@ -152,16 +184,21 @@ public sealed class ThreatFeedRefreshService : ScheduledBackgroundService
                 continue;
             }
 
+            // The percentile travels with the probability it belongs to rather than being
+            // maximised separately: the pair describes one CVE, and pairing one CVE's probability
+            // with another's rank would describe nothing real.
             double? maxEpss = null;
+            double? percentile = null;
             foreach (string cve in cves)
             {
-                if (result.Scores.TryGetValue(cve, out double s) && (maxEpss is null || s > maxEpss))
+                if (result.Scores.TryGetValue(cve, out var s) && (maxEpss is null || s.Probability > maxEpss))
                 {
-                    maxEpss = s;
+                    maxEpss = s.Probability;
+                    percentile = s.Percentile;
                 }
             }
 
-            await _vulns.SetEpssAsync(id, maxEpss, ct);
+            await _vulns.SetEpssAsync(id, maxEpss, percentile, ct);
             stamped++;
             if (maxEpss is not null)
             {

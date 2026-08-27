@@ -14,11 +14,19 @@
   import SearchInput from '../lib/SearchInput.svelte'
   import { ECOSYSTEMS, ECO_LABEL } from '../lib/ecosystems.js'
   import { readQuery, writeQuery } from '../lib/tableState.js'
+  import { blastRadiusCell, overflowCount } from '../lib/blastRadius.js'
   import Toggle from '../lib/Toggle.svelte'
+  import { daysSince } from '../lib/age.js'
 
   // Table state lives in the URL query string so it survives route changes,
   // reloads, and copied links.
-  const DEFAULTS = { q: '', eco: '', sev: '', page: 1, limit: 50, sort: 'severity', dir: 'desc' }
+  //
+  // The default sort is 'risk' — a synthetic key the backend resolves to a fixed KEV-then-EPSS-
+  // then-CVSS priority order (VulnerabilityRepository.BuildVulnReportOrderBy); it names no column
+  // in `columns` below, so the header row shows no active-sort arrow for it and DataTable's local
+  // re-sort is a no-op, leaving the server's order in place. Explicit severity ordering remains one
+  // click away — see the 'severity' column.
+  const DEFAULTS = { q: '', eco: '', sev: '', page: 1, limit: 50, sort: 'risk', dir: 'desc' }
   const init = readQuery(DEFAULTS)
 
   // Severity filter chips. '' = all. Matches the lockfile/advisory vocabulary
@@ -71,13 +79,17 @@
     loading = true; error = ''
     expandedKey = null
     expandedDetail = null
+    appsKey = null
+    apps = null
     try {
       const params = { page, limit, sort: sortCol, dir: sortDir }
       if (ecosystem) params.ecosystem = ecosystem
+      if (search) params.search = search
       const data = await api.getVulnReport( params)
       if (mine !== seq) return
       items = data.items || []
       total = data.total
+      await loadBlastRadiusCounts(mine)
     } catch (e) {
       if (mine !== seq) return
       error = e.message; console.error(e)
@@ -86,17 +98,67 @@
     }
   }
 
+  // ── Blast radius ────────────────────────────────────────────────────────────
+  // How many of this tenant's applications ship a component the advisory affects — the registry
+  // report covers the hosted and proxy planes only, so without this column an advisory reaching
+  // the tenant through an application's SBOM has no visible consequence here.
+  //
+  // One request for the whole page, never one per row. A supplemental failure leaves the column
+  // blank rather than taking the report down: an unknown count is rendered as an em dash, never
+  // as a zero, because zero is a claim.
+  /** @type {Record<string, number>} */
+  let blastRadius = {}
+  let blastRadiusFailed = false
+
+  async function loadBlastRadiusCounts(mine) {
+    blastRadius = {}
+    blastRadiusFailed = false
+    const ids = [...new Set(items.map(r => r.osvId).filter(Boolean))]
+    if (ids.length === 0) return
+    try {
+      const data = await api.getBlastRadiusCounts('advisory', ids)
+      if (mine !== seq) return
+      blastRadius = data.counts ?? {}
+    } catch (e) {
+      console.error(e)
+      if (mine !== seq) return
+      blastRadiusFailed = true
+    }
+  }
+
+  // The expanded row's own affected-application list, fetched when the row opens. `total` is
+  // carried alongside the rows because the fetch is capped: rendering the capped list without
+  // saying so would present 25 of 40 affected applications as the whole answer.
+  let appsKey = null
+  let apps = null   // { loading, error, items, total } for the open row, or null
+  const AFFECTED_APPS_LIMIT = 25
+
+  async function loadAffectedApps(r, key) {
+    appsKey = key
+    apps = { loading: true, error: false, items: [], total: 0 }
+    try {
+      const data = await api.getBlastRadiusByAdvisory(r.osvId, { limit: AFFECTED_APPS_LIMIT })
+      const items = data.items ?? []
+      if (appsKey === key) apps = { loading: false, error: false, items, total: data.total ?? items.length }
+    } catch (e) {
+      console.error(e)
+      if (appsKey === key) apps = { loading: false, error: true, items: [], total: 0 }
+    }
+  }
+
   $: if (org !== undefined) load()
 
   function onPageChange(e) { page = e.detail.page; sync(); load() }
   function onLimitChange(e) { limit = e.detail.limit; page = 1; sync(); load() }
   function handleEcoChange() { page = 1; sync(); load() }
+  function handleSearch() { page = 1; sync(); load() }
   function onSortChange(e) { sortCol = e.detail.col; sortDir = e.detail.dir; page = 1; sync(); load() }
 
   async function toggleRow(r) {
     const key = `${r.purl}::${r.osvId}`
-    if (expandedKey === key) { expandedKey = null; expandedDetail = null; return }
+    if (expandedKey === key) { expandedKey = null; expandedDetail = null; appsKey = null; apps = null; return }
     expandedKey = key
+    loadAffectedApps(r, key)
 
     const cacheKey = `${r.osvId}::${r.version ?? ''}`
     const cached = detailCache.get(cacheKey)
@@ -165,7 +227,9 @@
     { key: 'score',     label: $t('vulnerabilities.columns.score'),     sortable: true,  width: '70px',  defaultDir: 'desc' },
     { key: 'epss',      label: $t('vulnerabilities.columns.epss'),      sortable: true,  width: '70px',  defaultDir: 'desc' },
     { key: 'osvId',     label: $t('vulnerabilities.columns.osvId'),     sortable: true,  width: '170px' },
+    { key: 'apps',      label: $t('vulnerabilities.columns.apps'),      sortable: false, width: '80px' },
     { key: 'summary',   label: $t('vulnerabilities.columns.summary'),   sortable: true },
+    { key: 'age',       label: $t('vulnerabilities.columns.age'),       sortable: true,  width: '110px', defaultDir: 'asc' },
     { key: 'published', label: $t('vulnerabilities.columns.published'), sortable: true,  width: '135px', defaultDir: 'desc' },
   ]
 
@@ -177,6 +241,9 @@
     epss:      (a, b) => (a.epssScore ?? -1) - (b.epssScore ?? -1),
     osvId:     (a, b) => (a.osvId ?? '').localeCompare(b.osvId ?? ''),
     summary:   (a, b) => (a.summary ?? '').localeCompare(b.summary ?? ''),
+    // Chronological, matching the backend's 'age' sort key: ascending puts the oldest (longest
+    // open) finding first, same as 'published' does for the advisory's own publish date.
+    age:       (a, b) => (a.firstSeenAt ?? '').localeCompare(b.firstSeenAt ?? ''),
     published: (a, b) => (a.publishedAt ?? '').localeCompare(b.publishedAt ?? ''),
   }
 </script>
@@ -187,7 +254,7 @@
   </div>
 
   <div class="page-toolbar">
-    <SearchInput placeholder="Search package, OSV ID, summary…" bind:value={search} on:search={sync} class="toolbar-search" />
+    <SearchInput placeholder={$t('vulnerabilities.searchPlaceholder')} bind:value={search} on:search={handleSearch} class="toolbar-search" />
     <select bind:value={ecosystem} on:change={handleEcoChange} class="eco-select">
       <option value="">{$t('common.allEcosystems')}</option>
       {#each ECOSYSTEMS as eco (eco)}
@@ -226,6 +293,7 @@
     tableClass="table-auto vulns-table"
     let:row={r}
   >
+    {@const appsCell = blastRadiusCell(blastRadius, r.osvId, blastRadiusFailed)}
     <tr
       class="vuln-row cursor-pointer"
       class:expanded-row={expandedKey === `${r.purl}::${r.osvId}`}
@@ -251,7 +319,9 @@
         {:else}
           <span class="text-muted">—</span>
         {/if}
-        {#if r.isKev}
+        {#if r.isKevRansomware === true}
+          <span class="badge kev ransomware ml-1" title={$t('vulnerabilities.kevRansomwareHelp')}>{$t('vulnerabilities.kevRansomware')}</span>
+        {:else if r.isKev}
           <span class="badge kev ml-1" title={$t('vulnerabilities.kevHelp')}>{$t('vulnerabilities.kev')}</span>
         {/if}
       </td>
@@ -264,8 +334,29 @@
       <td class="mono nowrap">
         <a href="https://osv.dev/vulnerability/{r.osvId}" target="_blank" rel="noreferrer" on:click|stopPropagation>{r.osvId}</a>
       </td>
+      <td class="nowrap apps-cell">
+        <!-- A count the query answered, versus a count it could not produce. Zero is a claim;
+             an unavailable count says so instead of quietly asserting nothing is affected. -->
+        {#if appsCell.state === 'unavailable'}
+          <span class="text-muted" title={$t('vulnerabilities.apps.unavailableHelp')}>{$t('vulnerabilities.apps.unavailable')}</span>
+        {:else if appsCell.state === 'count'}
+          <span class="badge apps-count" title={$t('vulnerabilities.apps.help')}>{appsCell.count}</span>
+        {:else}
+          <span class="text-muted" title={$t('vulnerabilities.apps.noneHelp')}>0</span>
+        {/if}
+      </td>
       <td class="summary-cell text-muted">
         <div class="summary-clamp" title={r.summary ?? ''}>{r.summary ?? '—'}</div>
+      </td>
+      <td class="nowrap text-muted t-sm">
+        <!-- firstSeenAt is durable — set once when the finding was first linked and never moved
+             by a later re-scan — but legitimately NULL on a row that predates that column, so a
+             missing value renders an em dash rather than a fabricated "open 0 days". -->
+        {#if r.firstSeenAt}
+          {$t('vulnerabilities.ageOpen', { values: { days: daysSince(r.firstSeenAt) } })}
+        {:else}
+          <span class="text-muted">—</span>
+        {/if}
       </td>
       <td class="nowrap text-muted t-sm">
         {r.publishedAt ? $formatDate(r.publishedAt) : '—'}
@@ -285,6 +376,7 @@
               {@const v = d.detail}
               {@const fixedVersion = resolvedFixedVersion(v.remediation, v.affected)}
               {@const briefKey = `${r.purl}::${r.osvId}::brief`}
+              {@const nvdCve = v.aliases?.find(a => a.startsWith('CVE-'))}
 
               {#if v.withdrawn}
                 <div class="withdrawn-notice">{$t('vulnerabilities.detail.withdrawnNotice')}</div>
@@ -337,7 +429,27 @@
                 {#if v.threatIntel?.isKev}
                   <div class="meta-item">
                     <span class="detail-label">{$t('vulnerabilities.detail.kev')}</span>
-                    <a class="badge kev" href="https://www.cisa.gov/known-exploited-vulnerabilities-catalog" target="_blank" rel="noreferrer" on:click|stopPropagation title={$t('vulnerabilities.kevHelp')}>{$t('vulnerabilities.kev')}</a>
+                    {#if v.threatIntel?.isKevRansomware === true}
+                      <a class="badge kev ransomware" href="https://www.cisa.gov/known-exploited-vulnerabilities-catalog" target="_blank" rel="noreferrer" on:click|stopPropagation title={$t('vulnerabilities.kevRansomwareHelp')}>{$t('vulnerabilities.kevRansomware')}</a>
+                    {:else}
+                      <a class="badge kev" href="https://www.cisa.gov/known-exploited-vulnerabilities-catalog" target="_blank" rel="noreferrer" on:click|stopPropagation title={$t('vulnerabilities.kevHelp')}>{$t('vulnerabilities.kev')}</a>
+                    {/if}
+                  </div>
+                {/if}
+                <div class="meta-item">
+                  <span class="detail-label">{$t('vulnerabilities.detail.links.osvDev')}</span>
+                  <a class="ext-link" href="https://osv.dev/vulnerability/{r.osvId}" target="_blank" rel="noreferrer" on:click|stopPropagation>
+                    <svg width="12" height="12" aria-hidden="true"><use href="/icons.svg#icon-external"/></svg>
+                    {$t('vulnerabilities.detail.links.view')}
+                  </a>
+                </div>
+                {#if nvdCve}
+                  <div class="meta-item">
+                    <span class="detail-label">{$t('vulnerabilities.detail.links.nvd')}</span>
+                    <a class="ext-link" href={aliasUrl(nvdCve)} target="_blank" rel="noreferrer" on:click|stopPropagation>
+                      <svg width="12" height="12" aria-hidden="true"><use href="/icons.svg#icon-external"/></svg>
+                      {$t('vulnerabilities.detail.links.view')}
+                    </a>
                   </div>
                 {/if}
               </div>
@@ -345,6 +457,34 @@
               {#if v.summary ?? r.summary}
                 <p class="detail-summary">{v.summary ?? r.summary}</p>
               {/if}
+
+              <!-- Which of this tenant's applications ship a component this advisory affects.
+                   Latest project versions only — a superseded release is not what is shipping,
+                   and the nightly component scan does not keep its advisory links current. -->
+              <div class="detail-section col">
+                <span class="detail-label">{$t('vulnerabilities.detail.affectedApps')}</span>
+                {#if !apps || apps.loading}
+                  <span class="text-muted">{$t('vulnerabilities.detail.loading')}</span>
+                {:else if apps.error}
+                  <span class="text-muted">{$t('vulnerabilities.apps.unavailableHelp')}</span>
+                {:else if apps.items.length === 0}
+                  <span class="text-muted">{$t('vulnerabilities.detail.affectedAppsNone')}</span>
+                {:else}
+                  {@const hiddenApps = overflowCount(apps.total, apps.items.length)}
+                  <ul class="apps-list">
+                    {#each apps.items as app, ai (ai)}
+                      <li>
+                        <span class="app-name">{app.projectName}</span>
+                        <span class="mono text-muted">{app.projectVersion}</span>
+                        <span class="text-muted">{$t('vulnerabilities.detail.affectedAppsShips', { values: { version: app.componentVersion ?? '—' } })}</span>
+                      </li>
+                    {/each}
+                  </ul>
+                  {#if hiddenApps > 0}
+                    <span class="text-muted t-sm">{$t('vulnerabilities.detail.affectedAppsMore', { values: { count: hiddenApps } })}</span>
+                  {/if}
+                {/if}
+              </div>
 
               {#if v.aliases?.length}
                 <div class="detail-section">
@@ -511,6 +651,15 @@
     overflow-wrap: anywhere;
   }
   .summary-cell { font-size: 13px; }
+  .apps-cell { text-align: center; }
+  .badge.apps-count {
+    background: var(--info-bg);
+    border: 1px solid var(--info-border);
+    color: var(--info-text);
+  }
+  .apps-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 2px; }
+  .apps-list li { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+  .app-name { font-weight: 600; }
 
   /* Expandable detail row — mirrors the VersionTable.svelte pattern. */
   .vuln-row { cursor: pointer; }
@@ -548,6 +697,8 @@
     gap: 6px 24px;
   }
   .meta-item { display: flex; gap: 8px; align-items: baseline; }
+  .ext-link { display: inline-flex; align-items: center; gap: 4px; }
+  .ext-link svg { flex-shrink: 0; }
 
   .detail-summary { margin: 0; color: var(--text); overflow-wrap: anywhere; }
 

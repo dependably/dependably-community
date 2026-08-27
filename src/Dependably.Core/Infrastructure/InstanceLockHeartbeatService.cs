@@ -14,6 +14,9 @@ namespace Dependably.Infrastructure;
 ///
 /// <para>Timer cadence is driven by the injected <see cref="TimeProvider"/> so tests can advance a
 /// <c>FakeTimeProvider</c> and assert the heartbeat advances without real waits.</para>
+///
+/// suspension-ok: not per-tenant. Heartbeats the process-wide SQLite instance lock; carries no
+/// org dimension at all.
 /// </summary>
 public sealed class InstanceLockHeartbeatService : BackgroundService
 {

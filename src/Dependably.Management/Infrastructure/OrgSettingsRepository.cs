@@ -126,7 +126,7 @@ public sealed class OrgSettingsRepository
     }
 
     /// <summary>
-    /// Leave-unchanged-on-absent for all four retention dimensions. Each is
+    /// Leave-unchanged-on-absent for all five retention dimensions. Each is
     /// <see cref="Optional{T}"/> rather than a plain nullable because null is a real value here
     /// ("unlimited"/"off"), so an omitted field and an explicit clear are different intents that
     /// a plain nullable cannot tell apart. A parameterized <c>CASE WHEN @xSet = 1</c> picks the
@@ -134,24 +134,28 @@ public sealed class OrgSettingsRepository
     /// "absent" and keep the old limit forever.
     ///
     /// The INSERT arm binds the value directly: a first-ever write for an org has no prior row to
-    /// preserve, so an absent field correctly lands the column default (SQL NULL for three of the
-    /// four; 90 for activity_retention_days, which is bounded by default on purpose).
+    /// preserve, so an absent field correctly lands the column default (SQL NULL for four of the
+    /// five; 90 for activity_retention_days, which is bounded by default on purpose).
     /// </summary>
     public async Task UpsertRetentionAsync(
         string orgId, Optional<int?> keepVersions, Optional<int?> keepDays,
         Optional<int?> activityRetentionDays, Optional<int?> purgeUnlistedAfterDays,
+        Optional<int?> keepProjectVersions,
         CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             """
-            INSERT INTO org_settings (org_id, keep_versions, keep_days, activity_retention_days, purge_unlisted_after_days)
-            VALUES (@orgId, @keepVersions, @keepDays, @activityDays, @purgeUnlistedAfterDays)
+            INSERT INTO org_settings (org_id, keep_versions, keep_days, activity_retention_days,
+                                      purge_unlisted_after_days, keep_project_versions)
+            VALUES (@orgId, @keepVersions, @keepDays, @activityDays, @purgeUnlistedAfterDays,
+                    @keepProjectVersions)
             ON CONFLICT(org_id) DO UPDATE SET
                 keep_versions             = CASE WHEN @keepVersionsSet = 1 THEN @keepVersions ELSE keep_versions END,
                 keep_days                 = CASE WHEN @keepDaysSet = 1 THEN @keepDays ELSE keep_days END,
                 activity_retention_days   = CASE WHEN @activityDaysSet = 1 THEN @activityDays ELSE activity_retention_days END,
-                purge_unlisted_after_days = CASE WHEN @purgeUnlistedAfterDaysSet = 1 THEN @purgeUnlistedAfterDays ELSE purge_unlisted_after_days END
+                purge_unlisted_after_days = CASE WHEN @purgeUnlistedAfterDaysSet = 1 THEN @purgeUnlistedAfterDays ELSE purge_unlisted_after_days END,
+                keep_project_versions     = CASE WHEN @keepProjectVersionsSet = 1 THEN @keepProjectVersions ELSE keep_project_versions END
             """,
             new
             {
@@ -164,6 +168,8 @@ public sealed class OrgSettingsRepository
                 activityDaysSet = activityRetentionDays.IsPresent ? 1 : 0,
                 purgeUnlistedAfterDays = purgeUnlistedAfterDays.IsPresent ? purgeUnlistedAfterDays.Value : null,
                 purgeUnlistedAfterDaysSet = purgeUnlistedAfterDays.IsPresent ? 1 : 0,
+                keepProjectVersions = keepProjectVersions.IsPresent ? keepProjectVersions.Value : null,
+                keepProjectVersionsSet = keepProjectVersions.IsPresent ? 1 : 0,
             });
         _orgs?.InvalidateSettingsCache(orgId);
     }
@@ -185,18 +191,20 @@ public sealed class OrgSettingsRepository
             INSERT INTO org_settings (
                 org_id, proxy_passthrough_enabled, max_osv_score_tolerance, min_release_age_hours,
                 block_deprecated, block_malicious, block_kev, max_epss_tolerance,
+                block_kev_ransomware, max_epss_percentile_tolerance,
                 block_install_scripts, verify_npm_signatures, verify_nuget_signatures,
                 verify_pypi_attestations, verify_rpm_signatures, verify_maven_signatures,
-                verify_terraform_signatures, block_revoked)
+                verify_terraform_signatures, block_revoked, block_ssvc_exploitation)
             VALUES (
                 @orgId, COALESCE(@proxyEnabled, 1), COALESCE(@maxScore, 10.0), @minAgeHours,
                 COALESCE(@blockDeprecated, 'off'), COALESCE(@blockMalicious, 'block'),
                 COALESCE(@blockKev, 'off'), @maxEpss,
+                COALESCE(@blockKevRansomware, 'off'), @maxEpssPercentile,
                 COALESCE(@blockInstallScripts, 'off'),
                 COALESCE(@verifyNpmSignatures, 'off'), COALESCE(@verifyNuGetSignatures, 'off'),
                 COALESCE(@verifyPyPiAttestations, 'off'), COALESCE(@verifyRpmSignatures, 'off'),
                 COALESCE(@verifyMavenSignatures, 'off'), COALESCE(@verifyTerraformSignatures, 'off'),
-                COALESCE(@blockRevoked, 'warn'))
+                COALESCE(@blockRevoked, 'warn'), COALESCE(@blockSsvcExploitation, 'off'))
             ON CONFLICT(org_id) DO UPDATE SET
                 proxy_passthrough_enabled = COALESCE(@proxyEnabled, proxy_passthrough_enabled),
                 max_osv_score_tolerance   = COALESCE(@maxScore, max_osv_score_tolerance),
@@ -206,6 +214,10 @@ public sealed class OrgSettingsRepository
                 block_malicious           = COALESCE(@blockMalicious, block_malicious),
                 block_kev                 = COALESCE(@blockKev, block_kev),
                 max_epss_tolerance        = CASE WHEN @maxEpssSet = 1 THEN @maxEpss ELSE max_epss_tolerance END,
+                block_kev_ransomware      = COALESCE(@blockKevRansomware, block_kev_ransomware),
+                block_ssvc_exploitation   = COALESCE(@blockSsvcExploitation, block_ssvc_exploitation),
+                max_epss_percentile_tolerance = CASE WHEN @maxEpssPercentileSet = 1
+                                                THEN @maxEpssPercentile ELSE max_epss_percentile_tolerance END,
                 block_install_scripts     = COALESCE(@blockInstallScripts, block_install_scripts),
                 verify_npm_signatures     = COALESCE(@verifyNpmSignatures, verify_npm_signatures),
                 verify_nuget_signatures   = COALESCE(@verifyNuGetSignatures, verify_nuget_signatures),
@@ -227,6 +239,11 @@ public sealed class OrgSettingsRepository
                 blockKev = policy.BlockKev,
                 maxEpss = policy.MaxEpssTolerance.IsPresent ? policy.MaxEpssTolerance.Value : null,
                 maxEpssSet = policy.MaxEpssTolerance.IsPresent ? 1 : 0,
+                blockKevRansomware = policy.BlockKevRansomware,
+                blockSsvcExploitation = policy.BlockSsvcExploitation,
+                maxEpssPercentile = policy.MaxEpssPercentileTolerance.IsPresent
+                    ? policy.MaxEpssPercentileTolerance.Value : null,
+                maxEpssPercentileSet = policy.MaxEpssPercentileTolerance.IsPresent ? 1 : 0,
                 blockInstallScripts = policy.BlockInstallScripts,
                 verifyNpmSignatures = policy.VerifyNpmSignatures,
                 verifyNuGetSignatures = policy.VerifyNuGetSignatures,
@@ -310,4 +327,10 @@ public sealed record ProxyPolicySettings(
     string? VerifyRpmSignatures = null,
     string? VerifyMavenSignatures = null,
     string? BlockRevoked = null,
-    string? VerifyTerraformSignatures = null);
+    string? VerifyTerraformSignatures = null,
+    // Appended rather than grouped beside their KEV/EPSS siblings on purpose: several call sites
+    // pass this record positionally, so inserting mid-record silently reassigns every argument
+    // after the insertion point. Appending keeps those call sites correct by construction.
+    string? BlockKevRansomware = null,
+    Optional<double?> MaxEpssPercentileTolerance = default,
+    string? BlockSsvcExploitation = null);

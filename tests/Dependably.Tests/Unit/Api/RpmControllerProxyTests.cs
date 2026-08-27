@@ -188,6 +188,77 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
         Assert.Equal("upstream", (string)licenseRow.source);
     }
 
+    [Fact]
+    public async Task Download_LocalMiss_KnownDistroVendor_RecordsNamespacedPurl()
+    {
+        // The proxy path parses NEVRA from the filename before any bytes exist (step 3 of
+        // ProxyDownloadAsync), so it cannot read the header's Vendor tag until after the fetch —
+        // this pins that the purl actually gets reassigned once the blob is staged, not just that
+        // the resolver function exists in isolation.
+        await EnableAnonPullAsync();
+        await SeedRpmRegistryAsync();
+        byte[] bytes = RpmControllerUnitTests.BuildSyntheticRpm(
+            "tree", "2.1.1", "1.el9", "x86_64", vendor: "Rocky Enterprise Software Foundation");
+        string sha256 = Sha256Hex(bytes);
+        string filename = "tree-2.1.1-1.el9.x86_64.rpm";
+        var resolution = new PackageResolution(
+            PackageUrl: $"https://mirror.example.com/Packages/t/{filename}",
+            Sha256: sha256,
+            Name: "tree",
+            Epoch: 0,
+            Version: "2.1.1",
+            Release: "1.el9",
+            Arch: "x86_64",
+            Summary: "A recursive directory listing command",
+            Description: "tree is a recursive...",
+            License: "GPLv2+");
+
+        await _blobs.PutAsync(BlobKeys.Proxy(sha256), new MemoryStream(bytes), default);
+
+        var ctl = BuildController(proxy: new StubProxy(resolution: resolution));
+        await ctl.Download(filename, default);
+
+        await using var conn = await _db.OpenAsync();
+        string? purl = await conn.ExecuteScalarAsync<string?>(
+            "SELECT purl FROM cache_artifact WHERE ecosystem = 'rpm' AND name = 'tree'");
+        Assert.Equal("pkg:rpm/rocky-linux/tree@2.1.1-1.el9?arch=x86_64", purl);
+    }
+
+    [Fact]
+    public async Task Download_LocalMiss_UnrecognizedVendor_RecordsBarePurl()
+    {
+        // A Fedora-shaped Vendor string falls through to null (OSV.dev registers no Fedora RPM
+        // ecosystem), leaving the purl in its unchanged bare form — the same as every fetch whose
+        // header parse fails outright (e.g. the random-byte fixtures elsewhere in this file).
+        await EnableAnonPullAsync();
+        await SeedRpmRegistryAsync();
+        byte[] bytes = RpmControllerUnitTests.BuildSyntheticRpm(
+            "tree", "2.1.1", "1.fc40", "x86_64", vendor: "Fedora Project");
+        string sha256 = Sha256Hex(bytes);
+        string filename = "tree-2.1.1-1.fc40.x86_64.rpm";
+        var resolution = new PackageResolution(
+            PackageUrl: $"https://mirror.example.com/Packages/t/{filename}",
+            Sha256: sha256,
+            Name: "tree",
+            Epoch: 0,
+            Version: "2.1.1",
+            Release: "1.fc40",
+            Arch: "x86_64",
+            Summary: "A recursive directory listing command",
+            Description: "tree is a recursive...",
+            License: "GPLv2+");
+
+        await _blobs.PutAsync(BlobKeys.Proxy(sha256), new MemoryStream(bytes), default);
+
+        var ctl = BuildController(proxy: new StubProxy(resolution: resolution));
+        await ctl.Download(filename, default);
+
+        await using var conn = await _db.OpenAsync();
+        string? purl = await conn.ExecuteScalarAsync<string?>(
+            "SELECT purl FROM cache_artifact WHERE ecosystem = 'rpm' AND name = 'tree'");
+        Assert.Equal("pkg:rpm/tree@2.1.1-1.fc40?arch=x86_64", purl);
+    }
+
     // ── First-fetch block gate ────────────────────────────────────────────────
 
     /// <summary>
@@ -420,10 +491,28 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
     {
         // The provenance arm is not the only one that never ran on first fetch: the OSV/malicious/
         // KEV/EPSS/CVSS arms all fail open while vuln_checked_at is null, so without a synchronous
-        // first-fetch scan they could not fire on the request that installs the package.
+        // first-fetch scan they could not fire on the request that installs the package. A real RPM
+        // header with a resolvable distro Vendor is required here (not the random-byte fixture used
+        // by the signature-verification tests below) — an artefact whose distro cannot be
+        // determined is legitimately left unscanned by the #633 fallback, which this test is not
+        // about; the OSV source itself is a no-op fake regardless of purl shape.
         await EnableAnonPullAsync();
         await SeedRpmRegistryAsync();
-        var (stubProxy, filename, bytes) = SeedUnsignedRpm();
+        byte[] bytes = RpmControllerUnitTests.BuildSyntheticRpm(
+            "tree", "2.1.1", "1.fc40", "x86_64", vendor: "Rocky Enterprise Software Foundation");
+        string filename = "tree-2.1.1-1.fc40.x86_64.rpm";
+        var resolution = new PackageResolution(
+            PackageUrl: $"https://mirror.example.com/Packages/t/{filename}",
+            Sha256: Sha256Hex(bytes),
+            Name: "tree",
+            Epoch: 0,
+            Version: "2.1.1",
+            Release: "1.fc40",
+            Arch: "x86_64",
+            Summary: "A recursive directory listing command",
+            Description: "tree is a recursive...",
+            License: "GPLv2+");
+        var stubProxy = new StubProxy(resolution: resolution);
         await _blobs.PutAsync(BlobKeys.Proxy(Sha256Hex(bytes)), new MemoryStream(bytes), default);
 
         var ctl = BuildController(proxy: stubProxy);

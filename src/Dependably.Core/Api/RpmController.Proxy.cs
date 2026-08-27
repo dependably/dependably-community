@@ -268,6 +268,15 @@ public sealed partial class RpmController
         // verification enabled.
         var provResult = await VerifyRpmProxySignatureAsync(orgId, settings, blobStoreKey, ct);
 
+        // 5b. Resolve the artefact's distro namespace from its RPM header, now that the header is
+        // actually readable — the blob only exists on the cache tier once step 4 has fetched it, so
+        // this cannot happen at step 3's filename-derived purl construction above. The reassignment
+        // is what threads the resolved namespace into everything below that reads `purl`: the
+        // cache-plane row, the first-fetch gate target, and the scan query.
+        purl = PurlNormalizer.Rpm(
+            name, rpmVersion, release, arch, epoch,
+            await ResolveProxyDistroNamespaceAsync(blobStoreKey, file, ct));
+
         // 6. Persist DB row (cache_artifact + rpm_metadata) on first fetch
         string dbBlobKey = $"proxy/{resolution.Sha256}/{file}"; // StoreKey strips the filename suffix
         long contentLength = await ResolveProxyContentLengthAsync(body, blobStoreKey, ct);
@@ -338,6 +347,72 @@ public sealed partial class RpmController
         {
             return await _svc.RpmProvenance.VerifyPackageAsync(orgId, blobStream, RpmSignatureVerifyCapBytes, ct);
         }
+    }
+
+    // Bound on how much of a staged RPM the distro-namespace header parse will read. The RPM
+    // lead + signature header + main header (everything RpmHeaderParser.Parse needs, including the
+    // Vendor tag) sits well within a few hundred KiB even for packages with long changelogs — this
+    // cap is generous headroom, not a tuned minimum, and stays far below the artifact's full size so
+    // resolving a distro namespace never means buffering a multi-hundred-MB RPM into memory.
+    private const long RpmDistroHeaderReadCapBytes = 16L * 1024 * 1024;
+
+    // Step 5b of ProxyDownloadAsync: opens a fresh stream from the cache tier (the blob step 4 just
+    // fetched) and parses just enough of it to read the RPM header's Vendor tag, then resolves that
+    // to an OSV distro namespace. Best-effort in both directions — a missing blob, a truncated read,
+    // or a header this parser cannot make sense of all resolve to null (unknown distro) rather than
+    // failing the download, because this is a purl-quality enrichment, not part of serving the
+    // artifact. A vendor that resolves to a known distro is exactly what turns the purl namespaced
+    // and therefore resolvable by OSV.dev; one that does not leaves the purl in its bare form, the
+    // same as it has always been.
+    private async Task<string?> ResolveProxyDistroNamespaceAsync(string blobStoreKey, string file, CancellationToken ct)
+    {
+        try
+        {
+            var headerStream = await _svc.BlobStore.Cache.GetAsync(blobStoreKey, ct);
+            if (headerStream is null)
+            {
+                return null;
+            }
+
+            await using (headerStream.ConfigureAwait(false))
+            {
+                byte[] headerBytes = await ReadCappedAsync(headerStream, RpmDistroHeaderReadCapBytes, ct);
+                var header = RpmHeaderParser.Parse(headerBytes);
+                return RpmVendorDistroResolver.Resolve(header.Vendor);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Serilog RenderedCompactJsonFormatter JSON-encodes {Filename}, neutralising newline/control-char injection.
+            Logger.LogDebug(ex,
+                "RPM proxy: distro-vendor header parse failed for {Filename}; leaving distro namespace unresolved.",
+                file);
+            return null;
+        }
+    }
+
+    // Reads up to `cap` bytes from `stream` into a buffer. A stream longer than the cap is
+    // truncated at the cap — RpmHeaderParser.Parse then either succeeds (the truncation landed
+    // past the header) or throws RpmParseException on the incomplete data, which the caller
+    // already treats as an unresolved distro rather than an error.
+    private static async Task<byte[]> ReadCappedAsync(Stream stream, long cap, CancellationToken ct)
+    {
+        using var buffer = new MemoryStream();
+        byte[] chunk = new byte[81920];
+        long total = 0;
+        int read;
+        while ((read = await stream.ReadAsync(chunk, ct)) > 0)
+        {
+            total += read;
+            if (total > cap)
+            {
+                break;
+            }
+
+            await buffer.WriteAsync(chunk.AsMemory(0, read), ct);
+        }
+
+        return buffer.ToArray();
     }
 
     // Step 6 of ProxyDownloadAsync: body.Length is only usable when the stream is seekable

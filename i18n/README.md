@@ -23,7 +23,15 @@ Dependably uses [BCP 47](https://www.rfc-editor.org/rfc/rfc5646) locale tags thr
 | `en` | English | Source language — authoritative |
 | `fr` | French | Supported |
 
-**Regional variants** (e.g. `en-US`, `fr-CA`) are not modeled separately. If a request arrives with a regional tag, it is resolved to the base language. `fr-CA` → `fr`, `en-GB` → `en`. Applications should not emit region-specific strings unless the region genuinely requires different wording.
+**Regional variants** (e.g. `en-US`, `fr-CA`) are not modeled separately **as string stores**. If a request arrives with a regional tag, it is resolved to the base language for lookup: `fr-CA` → `fr`, `en-GB` → `en`. Applications should not emit region-specific strings unless the region genuinely requires different wording.
+
+**Formatting is a separate axis, and it does carry a region.** Dates, times and numbers are rendered through `web/src/lib/format.js`, on two rules:
+
+- A tag that **names a region is honoured as-is**. `en-GB` keeps day-first dates, `en-US` keeps `AM`, `fr-CA` and `fr-FR` each keep their own conventions. The region reaches the store because `web/src/i18n/index.js` preserves it from the navigator or the culture cookie — svelte-i18n resolves `en-GB` against the registered `en` catalogue by subtag fallback, so keeping the region costs no strings.
+- A **bare** tag borrows the browser's region when the two agree on the language. `/me` returns a bare `en`/`fr` (`AuthController.Me` resolves through `TwoLetterISOLanguageName`) and `applyLocale` writes that onto `$locale` at login, so without this a signed-in `en-GB` reader would silently lose their region. A stored preference of "English" is a choice of language, not a decision to stop being in London. The region is never borrowed across languages — choosing French does not inherit `en-GB`.
+- Failing both, the tag takes this product's default: `en` → `en-CA`, `fr` → `fr-CA`. Handed the bare tag, `Intl` would instead resolve its own default region (en-US, fr-FR) and render `10:05 AM` and `10:05 UTC−4` where this product means `10:05 a.m.` and `10 h 05 HAE`.
+
+Defaulting is not overriding — flattening every region onto `en-CA` would tell a London operator their dates are Canadian. Key-parity checks cannot see either class of bug (the strings are all present and correct; only the rendered values are wrong), so `format.test.js` pins both rules directly.
 
 Adding a new locale requires updating both backend and frontend registration. See [adding-a-locale.md](adding-a-locale.md) for the full checklist.
 

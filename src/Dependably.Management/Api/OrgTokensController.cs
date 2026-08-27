@@ -205,6 +205,21 @@ public sealed class OrgTokensController : OrgScopedControllerBase
             return _problems.ValidationErrorActionKey("name", "error.token.nameRequired");
         }
 
+        // Same rules its sibling Description field already applies, and for the reason that field's
+        // comment states: operators see this string in the UI, so \r\n in a table cell breaks the
+        // row layout, and an unbounded value pads rows with megabytes of text. Name is the more
+        // visible of the two and had neither check.
+        if (req.Name.Trim().Length > MaxTokenNameLength)
+        {
+            return _problems.ValidationErrorActionKey(
+                "name", "error.token.nameTooLong", MaxTokenNameLength);
+        }
+
+        if (req.Name.Any(char.IsControl))
+        {
+            return _problems.ValidationErrorActionKey("name", "error.token.nameInvalidChars");
+        }
+
         if (req.Scope is not null)
         {
             return _problems.ValidationErrorActionKey("scope", "error.token.scopeRetired");
@@ -314,6 +329,9 @@ public sealed class OrgTokensController : OrgScopedControllerBase
     }
 
     private const int MaxDescriptionLength = 200;
+
+    /// <summary>Operator-facing token name shown in the Settings -> Tokens list.</summary>
+    private const int MaxTokenNameLength = 200;
 
     // Normalize the optional description: trim, treat empty as null, reject control chars
     // (operators see this string in the UI; \r\n in a table cell breaks the row layout) and

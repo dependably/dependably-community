@@ -94,7 +94,7 @@ public static class NuGetSymbolKey
     public static IReadOnlyList<PdbSymbol> ExtractPortablePdbs(Stream snupkgStream)
     {
         var results = new List<PdbSymbol>();
-        using var zip = new ZipArchive(snupkgStream, ZipArchiveMode.Read, leaveOpen: true);
+        using var zip = SafeZipArchive.Open(snupkgStream, leaveOpen: true);
         foreach (var entry in zip.Entries)
         {
             if (!entry.Name.EndsWith(".pdb", StringComparison.OrdinalIgnoreCase))

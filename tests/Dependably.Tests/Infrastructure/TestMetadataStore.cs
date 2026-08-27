@@ -11,22 +11,27 @@ namespace Dependably.Tests.Infrastructure;
 /// </summary>
 public sealed class TestMetadataStore : IMetadataStore, IAsyncDisposable
 {
-    private readonly string _connectionString;
     private readonly SqliteConnection _anchor;
 
     public TestMetadataStore()
     {
         string dbName = $"dependably_test_{Guid.NewGuid():N}";
-        _connectionString = $"Data Source={dbName};Mode=Memory;Cache=Shared";
-        _anchor = new SqliteConnection(_connectionString);
+        ConnectionString = $"Data Source={dbName};Mode=Memory;Cache=Shared";
+        _anchor = new SqliteConnection(ConnectionString);
         _anchor.Open();
     }
 
     public DbProvider Provider => DbProvider.Sqlite;
 
+    /// <summary>
+    /// The shared-cache connection string, so a test needing a second store against the same
+    /// database — with its own busy timeout, for instance — can open one.
+    /// </summary>
+    public string ConnectionString { get; }
+
     public async Task<DbConnection> OpenAsync(CancellationToken ct = default)
     {
-        var conn = new SqliteConnection(_connectionString);
+        var conn = new SqliteConnection(ConnectionString);
         await conn.OpenAsync(ct);
         return conn;
     }

@@ -23,6 +23,11 @@ namespace Dependably.Infrastructure;
 /// <see cref="OciReferenceGraph.RecordAsync"/> is an upsert, so overlapping passes and re-runs
 /// converge. Leader-gated, since unlike the staging janitor there is no node-local state — every
 /// replica doing the same blob reads would multiply the I/O for no benefit.
+///
+/// suspension-ok: not per-tenant. This is a fleet-wide, one-time-per-manifest backfill of an
+/// internal reference graph with no per-org selection point — the blob reads are against
+/// Dependably's own storage tier, not an upstream, so there is no outbound egress or
+/// third-party delivery for a suspension to stop.
 /// </summary>
 public sealed class OciReferenceGraphBackfillService : ScheduledBackgroundService
 {

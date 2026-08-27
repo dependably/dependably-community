@@ -220,7 +220,11 @@ public sealed partial class SchemaInitializer
                     downloadCount = row.DownloadCount,
                 });
 
-            // Step 4a: additive-twin vulns (owner_kind='cache_artifact').
+            // Step 4a: additive-twin vulns (owner_kind='cache_artifact'). The twin row's
+            // first_seen_at is left unset here rather than copied from pvv — safe only because
+            // BackfillFindingsFirstSeenAtAsync's every-boot converge runs later in this same boot
+            // (ApplySchemaAsync) and picks up every NULL it leaves, the same way it picks up a
+            // blue-green cutover's unconverged writes.
             // xtenant: INSERT pinned to caId (cache_artifact-scoped, global).
             await conn.ExecuteAsync(
                 """
@@ -368,6 +372,9 @@ public sealed partial class SchemaInitializer
         }
 
         // xtenant: DDL-only; no data query across tenants.
+        // Column list carries first_seen_at alongside the P0 additive columns — an ADD
+        // COLUMN-only migration on a table that still needs THIS reshape (missing the owner
+        // invariant CHECK) would otherwise have the column silently dropped by the recreate below.
         await WithForeignKeysOffAsync(conn, () => conn.ExecuteAsync("""
             DROP TABLE IF EXISTS package_version_vulns_new;
             CREATE TABLE package_version_vulns_new (
@@ -375,6 +382,7 @@ public sealed partial class SchemaInitializer
                 package_version_id  TEXT REFERENCES package_versions(id) ON DELETE CASCADE,
                 vuln_id             TEXT NOT NULL REFERENCES vulnerabilities(id) ON DELETE CASCADE,
                 checked_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                first_seen_at       TEXT,
                 cache_artifact_id   TEXT REFERENCES cache_artifact(id) ON DELETE CASCADE,
                 owner_kind          TEXT NOT NULL DEFAULT 'package_version'
                                     CHECK (owner_kind IN ('package_version','cache_artifact')),
@@ -385,8 +393,8 @@ public sealed partial class SchemaInitializer
                 )
             );
             INSERT INTO package_version_vulns_new
-                (id, package_version_id, vuln_id, checked_at, cache_artifact_id, owner_kind)
-            SELECT id, package_version_id, vuln_id, checked_at, cache_artifact_id, owner_kind
+                (id, package_version_id, vuln_id, checked_at, first_seen_at, cache_artifact_id, owner_kind)
+            SELECT id, package_version_id, vuln_id, checked_at, first_seen_at, cache_artifact_id, owner_kind
             FROM package_version_vulns;
             DROP TABLE package_version_vulns;
             ALTER TABLE package_version_vulns_new RENAME TO package_version_vulns;

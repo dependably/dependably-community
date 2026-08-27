@@ -48,7 +48,17 @@ public sealed class StatsSnapshotRepository
         await using var conn = await _db.OpenAsync(ct);
         // xtenant: system-wide background sweep; each org's stats are computed in isolation
         // by GetOrgStatsAsync (org-scoped) and written to that org's own snapshot row.
-        var ids = await conn.QueryAsync<string>("SELECT id FROM orgs WHERE deleted_at IS NULL");
+        // A suspended/archived/deleting org (see TenantLifecycle) is excluded the same way a
+        // soft-deleted one already is: this pass runs eight aggregate queries per org on every
+        // tick (default 60s), forever, for no reason once the tenant is locked out of
+        // /api/v1/stats — operator DB time spent on a non-active org's behalf indefinitely. This
+        // IS operator-visible: SystemController.DeriveHealthAndStats reads org_stats_snapshot
+        // cross-tenant (including non-active orgs) for the Tenants page and surfaces the frozen
+        // snapshot as its own "stats_frozen_non_active" reason, deliberately distinct from
+        // "stats_stale", so the exclusion here reads as an explained consequence of suspension
+        // rather than a health-pipeline problem.
+        var ids = await conn.QueryAsync<string>(
+            "SELECT id FROM orgs o WHERE o.deleted_at IS NULL AND o.status = 'active'");
         return ids.ToList();
     }
 }

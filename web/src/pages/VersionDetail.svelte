@@ -3,9 +3,10 @@
   import { t } from 'svelte-i18n'
   import { api } from '../lib/api.js'
   import ErrorBanner from '../lib/ErrorBanner.svelte'
-  import Skeleton from '../lib/Skeleton.svelte'
+  import RiskPillars from '../lib/RiskPillars.svelte'
   import VersionTable from '../lib/VersionTable.svelte'
   import { navigate, user } from '../lib/store.js'
+  import { overflowCount } from '../lib/blastRadius.js'
   import { reportPageLoad } from '../lib/pageLoad.js'
   import { copyToClipboard } from '../lib/clipboard.js'
   import { formatDate } from '../lib/format.js'
@@ -46,6 +47,11 @@
   let packageNotes = []
   let newNoteText = '', addingNote = false, noteError = ''
   let editingNoteId = null, editingNoteText = ''
+  // "Which of my applications ship this?" — the reverse of the SBOM component cross-link, and the
+  // question a quarantine decision on this page immediately raises. Latest project versions only.
+  // Supplemental: a failure leaves the affordance unrendered rather than asserting zero.
+  let blastRadius = null
+  let blastRadiusOpen = false
 
   $: if (params.ecosystem && params.name) load()
   $: reportPageLoad(pageToken, loading)
@@ -78,6 +84,13 @@
           .filter(e => e.disposition === 'conditional')
           .map(e => (e.licenseSpdx ?? '').toUpperCase()))
       } catch { licenseBlocklist = new Set(); licenseConditional = new Set() }
+      // Blast radius over the projects plane (supplemental — ignore errors). `pkg.purlName` is
+      // the canonical name the SBOM components are keyed by; the route's `name` may be spelled
+      // any way a client wrote it.
+      try {
+        blastRadius = await api.getBlastRadiusByPackage(
+          pkg.ecosystem, pkg.purlName ?? params.name, { limit: 25 })
+      } catch { blastRadius = null }
       await loadPackageNotes()
     } catch (e) {
       error = e.message
@@ -97,6 +110,46 @@
   $: licenseState = licenseStateFor(stateRows, licenseBlocklist, licenseConditional)
   $: versionsBehind = versionsBehindFor(stateRows)
 
+  // Descriptors for the shared strip. Reactive rather than const so the labels follow a locale
+  // change, and so every pillar re-reads its source the moment that source resolves.
+  $: riskPillars = [
+    {
+      key: 'security',
+      label: $t('versionDetail.pillars.security'),
+      // UNKNOWN is the packageRisk vocabulary for "advisories exist but none carries a score";
+      // it renders as the unscored chip rather than as a severity nobody assigned.
+      sev: worstSeverity ? (worstSeverity === 'UNKNOWN' ? 'unknown' : worstSeverity.toLowerCase()) : null,
+      text: worstSeverity
+        ? (worstSeverity === 'UNKNOWN' ? $t('dashboard.unscored') : worstSeverity)
+        : $t('versionDetail.pillars.noAdvisories'),
+      tone: worstSeverity ? '' : 'clean',
+    },
+    {
+      key: 'license',
+      label: $t('versionDetail.pillars.license'),
+      text: licenseState === 'blocked' ? $t('versionDetail.pillars.licenseBlocked')
+        // No extracted SPDX entry is an unknown licence, not a clean one — the block gate
+        // treats the two differently, so the pillar does too.
+        : licenseState === 'undeclared' ? $t('versionDetail.pillars.licenseUndeclared')
+        // Serves, but the org recorded a condition on the licence. Showing this as clean would
+        // hide the org's own note from the person about to depend on it.
+        : licenseState === 'review' ? $t('versionDetail.pillars.licenseReview')
+        : $t('versionDetail.pillars.licenseClean'),
+      tone: licenseState === 'blocked' ? 'warn'
+        : licenseState === 'undeclared' ? 'muted'
+        : licenseState === 'review' ? 'review'
+        : 'clean',
+    },
+    {
+      key: 'operational',
+      label: $t('versionDetail.pillars.operational'),
+      text: versionsBehind !== null
+        ? $t('versionDetail.behindCell.count', { values: { count: versionsBehind } })
+        : $t('versionDetail.behindCell.unscored'),
+      tone: versionsBehind === null ? 'muted' : versionsBehind > 0 ? 'warn' : 'clean',
+    },
+  ]
+
   function buildVulnMap(items) {
     const map = new SvelteMap()
     for (const r of items) {
@@ -107,7 +160,14 @@
       // vuln report returns the same advisory once per affected file. Collapse to one entry per
       // osvId so the per-version advisory list neither double-counts nor trips Svelte's keyed each.
       if (list.some(x => x.osvId === r.osvId)) continue
-      list.push({ osvId: r.osvId, severity: r.severity, summary: r.summary, cvssScore: r.cvssScore })
+      list.push({
+        osvId: r.osvId,
+        severity: r.severity,
+        summary: r.summary,
+        cvssScore: r.cvssScore,
+        isKev: r.isKev,
+        epssScore: r.epssScore
+      })
     }
     return map
   }
@@ -278,65 +338,52 @@
   <ErrorBanner message={error} />
   {#if scanError}<div class="error-msg">{scanError}</div>{/if}
 
+  <!-- Rendered only when something ships this package: nothing shipping it is a non-event, and a
+       "0 applications" line would be noise on every package in a registry with no SBOMs. -->
+  {#if blastRadius && blastRadius.total > 0}
+    <div class="blast-radius">
+      <button
+        type="button"
+        class="blast-toggle"
+        aria-expanded={blastRadiusOpen}
+        on:click={() => blastRadiusOpen = !blastRadiusOpen}
+      >
+        <svg class="chev" class:open={blastRadiusOpen} width="12" height="12" aria-hidden="true"><use href="/icons.svg#icon-chevron-down"/></svg>
+        <svg width="12" height="12" aria-hidden="true"><use href="/icons.svg#icon-layers"/></svg>
+        {$t('versionDetail.blastRadius.summary', { values: { count: blastRadius.projectCount } })}
+      </button>
+      {#if blastRadiusOpen}
+        {@const hiddenApps = overflowCount(blastRadius.total, blastRadius.items.length)}
+        <p class="form-hint">{$t('versionDetail.blastRadius.help')}</p>
+        <ul class="blast-list">
+          {#each blastRadius.items as app, ai (ai)}
+            <li>
+              <span class="app-name">{app.projectName}</span>
+              <span class="mono text-muted">{app.projectVersion}</span>
+              <span class="text-muted">{$t('versionDetail.blastRadius.ships', { values: { version: app.componentVersion ?? '—' } })}</span>
+            </li>
+          {/each}
+        </ul>
+        {#if hiddenApps > 0}
+          <p class="form-hint">{$t('versionDetail.blastRadius.more', { values: { count: hiddenApps } })}</p>
+        {/if}
+      {/if}
+    </div>
+  {/if}
+
   <!-- Three-pillar risk summary: Security / License / Operational, side by side. Signal-display
        only — no composite/weighted score across the pillars. Every pillar reports the state of
        the version named in the caption, so the strip answers "what is this package like today"
        rather than "what is the worst thing in its history" — which described a version nobody
        installs and contradicted the currency banner below it. -->
   {#if loading || (pkg && versions.length > 0)}
-    <div class="risk-pillars">
-      <div class="pillar">
-        <span class="pillar-label">{$t('versionDetail.pillars.security')}</span>
-        {#if loading}
-          <span class="pillar-value"><Skeleton width="80px" height="16px" /></span>
-        {:else if worstSeverity}
-          <span class="pillar-value sev {worstSeverity === 'UNKNOWN' ? 'sev-unknown' : 'sev-' + worstSeverity.toLowerCase()}">
-            {worstSeverity === 'UNKNOWN' ? $t('dashboard.unscored') : worstSeverity}
-          </span>
-        {:else}
-          <span class="pillar-value pillar-clean">{$t('versionDetail.pillars.noAdvisories')}</span>
-        {/if}
-      </div>
-      <div class="pillar">
-        <span class="pillar-label">{$t('versionDetail.pillars.license')}</span>
-        {#if loading}
-          <span class="pillar-value"><Skeleton width="80px" height="16px" /></span>
-        {:else if licenseState === 'blocked'}
-          <span class="pillar-value pillar-warn">{$t('versionDetail.pillars.licenseBlocked')}</span>
-        {:else if licenseState === 'undeclared'}
-          <!-- No extracted SPDX entry is an unknown licence, not a clean one — the block gate
-               treats the two differently, so the pillar does too. -->
-          <span class="pillar-value text-muted">{$t('versionDetail.pillars.licenseUndeclared')}</span>
-        {:else if licenseState === 'review'}
-          <!-- Serves, but the org recorded a condition on the licence. Showing this as clean
-               would hide the org's own note from the person about to depend on it. -->
-          <span class="pillar-value pillar-review">{$t('versionDetail.pillars.licenseReview')}</span>
-        {:else}
-          <span class="pillar-value pillar-clean">{$t('versionDetail.pillars.licenseClean')}</span>
-        {/if}
-      </div>
-      <div class="pillar">
-        <span class="pillar-label">{$t('versionDetail.pillars.operational')}</span>
-        {#if loading}
-          <span class="pillar-value"><Skeleton width="80px" height="16px" /></span>
-        {:else if versionsBehind !== null}
-          <span class="pillar-value" class:pillar-warn={versionsBehind > 0} class:pillar-clean={versionsBehind === 0}>
-            {$t('versionDetail.behindCell.count', { values: { count: versionsBehind } })}
-          </span>
-        {:else}
-          <span class="pillar-value text-muted">{$t('versionDetail.behindCell.unscored')}</span>
-        {/if}
-      </div>
-      <!-- Names the subject of all three pillars. Without it a clean headline is ambiguous:
-           a reader cannot tell a package with no advisories anywhere from one whose current
-           release is clean while older cached releases are not. -->
-      {#if !loading && stateVersion}
-        <div class="pillar pillar-subject">
-          <span class="pillar-label">{$t('versionDetail.pillars.subject')}</span>
-          <span class="pillar-value">{stateVersion}</span>
-        </div>
-      {/if}
-    </div>
+    <RiskPillars
+      {loading}
+      pillars={riskPillars}
+      subject={!loading && stateVersion
+        ? { label: $t('versionDetail.pillars.subject'), value: stateVersion }
+        : null}
+    />
   {/if}
 
   {#if !loading && versions.length === 0}
@@ -420,32 +467,6 @@
   /* Claim state badge needs a left margin to separate it from the package name in the H1. */
   .badge.has-icon { margin-left: 8px; }
 
-  /* Three-pillar risk summary: compact, side-by-side, signal-display only. */
-  .risk-pillars {
-    display: flex;
-    gap: 20px;
-    margin-bottom: 14px;
-    padding: 10px 14px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    background: var(--bg2);
-  }
-  .pillar { display: flex; flex-direction: column; gap: 2px; }
-  .pillar-label {
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.02em;
-    color: var(--text2);
-  }
-  .pillar-value { font-size: 13px; font-weight: 600; }
-  /* The version the three pillars describe, pushed to the trailing edge so it reads as the
-     strip's subject rather than a fourth pillar. */
-  .pillar-subject { margin-left: auto; text-align: right; }
-  .pillar-clean { color: var(--success); }
-  .pillar-warn { color: var(--badge-warning-text); }
-  /* Distinct from pillar-warn: the artifact is usable, the org just wrote a condition on it. */
-  .pillar-review { color: var(--badge-sky-text); }
   .package-notes { margin-top: 24px; }
   .note-add { display: flex; gap: 8px; align-items: flex-start; margin-bottom: 12px; }
   .note-add textarea { flex: 1; font: inherit; resize: vertical; }
@@ -478,4 +499,26 @@
   .pkg-link { display: inline-flex; align-items: center; gap: 4px; color: var(--accent); text-decoration: none; font-size: 13px; }
   .pkg-link:hover { text-decoration: underline; }
   .pkg-link svg { flex-shrink: 0; }
+
+  /* Blast radius — which applications ship this package. A disclosure, not a card: the count is
+     the answer most readers want and the list is what they open when it is not zero. */
+  .blast-radius { display: flex; flex-direction: column; gap: 6px; }
+  .blast-toggle {
+    align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 10px;
+    min-height: 28px;
+    font-size: 13px;
+    border: 1px solid var(--info-border);
+    border-radius: var(--radius);
+    background: var(--info-bg);
+    color: var(--info-text);
+  }
+  .blast-toggle .chev { transform: rotate(-90deg); transition: transform 120ms ease; }
+  .blast-toggle .chev.open { transform: rotate(0deg); }
+  .blast-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+  .blast-list li { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+  .app-name { font-weight: 600; }
 </style>

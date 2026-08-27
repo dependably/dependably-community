@@ -604,7 +604,7 @@
               <tbody>
                 {#each roleMappingRows as row, i (i)}
                   <tr>
-                    <td><input type="text" bind:value={row.key} placeholder="e.g. Admins" /></td>
+                    <td><input type="text" bind:value={row.key} placeholder={$t('settings.auth.claimMapKeyPlaceholder')} /></td>
                     <td>
                       <select bind:value={row.value}>
                         <option value="member">member</option>

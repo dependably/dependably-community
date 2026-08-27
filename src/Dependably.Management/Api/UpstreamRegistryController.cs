@@ -22,6 +22,12 @@ namespace Dependably.Api;
 [Authorize]
 public sealed class UpstreamRegistryController : OrgScopedControllerBase
 {
+    // Operator-facing display name, rendered in the Settings -> Proxy upstream list.
+    private const int NameMaxLength = 200;
+
+    // Far above any real per-ecosystem registry count; bounds a discarded-id flood.
+    private const int ReorderMaxIds = 500;
+
     private readonly UpstreamRegistryRepository _registries;
     private readonly OrgAccessGuard _guard;
     private readonly AuditRepository _audit;
@@ -122,6 +128,11 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
         }
 
         string? name = string.IsNullOrWhiteSpace(req.Name) ? null : req.Name.Trim();
+        if (name is not null && name.Length > NameMaxLength)
+        {
+            return _problems.ValidationErrorActionKey("name", "error.upstream.nameTooLong", NameMaxLength);
+        }
+
         var entry = await _registries.AddAsync(
             orgId, new NewUpstreamRegistry(ecosystem, url!, name, authType, username, secret, Protocol: protocol), ct);
 
@@ -288,6 +299,11 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
         }
 
         string? name = string.IsNullOrWhiteSpace(req.Name) ? null : req.Name.Trim();
+        if (name is not null && name.Length > NameMaxLength)
+        {
+            return _problems.ValidationErrorActionKey("name", "error.upstream.nameTooLong", NameMaxLength);
+        }
+
         var ociReq = new NewOciUpstreamRegistry(
             Host: host,
             AuthType: authType,
@@ -449,6 +465,15 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
         }
 
         var ids = req.Ids ?? [];
+
+        // ReorderAsync does an O(n) pass over this list before filtering it down to the org's own
+        // (small) registry set, so an unbounded array is CPU and memory spent on ids that are
+        // discarded. The cap is far above any real registry count.
+        if (ids.Count > ReorderMaxIds)
+        {
+            return _problems.ValidationErrorActionKey("ids", "error.upstream.tooManyIds", ReorderMaxIds);
+        }
+
         string orgId = CurrentTenantId();
         await _registries.ReorderAsync(orgId, eco, ids, ct);
 

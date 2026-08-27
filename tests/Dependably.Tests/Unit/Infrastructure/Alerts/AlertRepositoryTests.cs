@@ -1,3 +1,4 @@
+using Dapper;
 using Dependably.Infrastructure.Alerts;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
@@ -180,6 +181,28 @@ public sealed class AlertRepositoryTests : IClassFixture<InMemoryDbFixture>
 
         Assert.True(settings.QuarantineAlertsEnabled);
         Assert.True(settings.VulnAlertsEnabled);
+        Assert.True(settings.SbomPolicyAlertsEnabled);
         Assert.Equal("HIGH", settings.VulnMinSeverity);
+    }
+
+    /// <summary>An explicit <c>sbom_policy_alerts_enabled=0</c> row reads back false.</summary>
+    [Fact]
+    public async Task GetRaiseSettings_SbomPolicyAlertsDisabled_ReadsFalse()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"alert-l-{Guid.NewGuid():N}");
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO alert_settings (org_id, sbom_policy_alerts_enabled, created_at, updated_at)
+                VALUES (@orgId, 0, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                """,
+                new { orgId });
+        }
+
+        var settings = await _repo.GetRaiseSettingsAsync(orgId);
+
+        Assert.False(settings.SbomPolicyAlertsEnabled);
+        Assert.True(settings.QuarantineAlertsEnabled);
     }
 }

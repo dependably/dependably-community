@@ -28,6 +28,9 @@ namespace Dependably.Api;
 [Authorize]
 public sealed class WebhookController : OrgScopedControllerBase
 {
+    /// <summary>Operator-facing description shown in the subscriptions list.</summary>
+    private const int DescriptionMaxLength = 500;
+
     // Audit-detail-only options for this controller (subscription id/url pairs): the shared
     // camelCase Web contract with the relaxed encoder added so a webhook URL's query string
     // doesn't render with literal \uXXXX escapes for '&'/'+' in the audit UI.
@@ -44,7 +47,11 @@ public sealed class WebhookController : OrgScopedControllerBase
     /// </summary>
     internal const int MaxSubscriptionsPerOrg = 50;
 
-    private static readonly HashSet<string> ValidEventTypes = new(StringComparer.Ordinal)
+    // Internal (not private) so WebhookSubscriptionEventTypeParityComplianceTests can assert this
+    // set against a hardcoded copy of web/src/lib/settings/SettingsWebhooks.svelte's
+    // ALL_EVENT_TYPES literal — the two lists can't be compared cross-language at test time, so
+    // each side is pinned to the same literal set independently (see that test's own doc comment).
+    internal static readonly HashSet<string> ValidEventTypes = new(StringComparer.Ordinal)
     {
         PackageEvents.TypePublish,
         PackageEvents.TypeReplace,
@@ -52,6 +59,7 @@ public sealed class WebhookController : OrgScopedControllerBase
         PackageEvents.TypeUnlist,
         PackageEvents.TypeYank,
         PackageEvents.TypeVuln,
+        PackageEvents.TypeBlocked,
     };
 
     private readonly WebhookSubscriptionRepository _webhooks;
@@ -299,6 +307,15 @@ public sealed class WebhookController : OrgScopedControllerBase
         if (req.EventTypes is null || req.EventTypes.Count == 0)
         {
             return _problems.ValidationErrorActionKey("eventTypes", "error.webhook.eventTypeRequired");
+        }
+
+        // Operator-facing text, rendered in the Settings -> Integrations list. Up to
+        // MaxSubscriptionsPerOrg rows can carry one, so an unbounded value is stored and
+        // re-rendered on every read; SQLite ignores VARCHAR(n), so the column is not a backstop.
+        if (req.Description is not null && req.Description.Length > DescriptionMaxLength)
+        {
+            return _problems.ValidationErrorActionKey(
+                "description", "error.webhook.descriptionTooLong", DescriptionMaxLength);
         }
 
         var unknown = req.EventTypes.Where(t => !ValidEventTypes.Contains(t)).ToList();

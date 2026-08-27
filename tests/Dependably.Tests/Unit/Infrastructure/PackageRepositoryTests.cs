@@ -872,6 +872,90 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
     }
 
     [Fact]
+    public async Task ListPaginatedAsync_HasKevVersion_TrueWhenAnyVersionLinkedToKev()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "exploited");
+        // First version clean; second version carries the KEV-listed advisory.
+        await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl("1.0.0"));
+        string kevVerId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "2.0.0", Purl("2.0.0"));
+        string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
+            _fixture.Store, osvId: "GHSA-" + Guid.NewGuid().ToString("N")[..8], isKev: true);
+        await VulnerabilitySeeder.LinkAsync(_fixture.Store, kevVerId, vulnId);
+
+        var (items, _) = await _repo.ListPaginatedAsync(new PackageListQuery(orgId, Limit: 10, Offset: 0, Ecosystem: "npm"));
+        Assert.True(Assert.Single(items).HasKevVersion);
+    }
+
+    [Fact]
+    public async Task ListPaginatedAsync_HasKevVersion_FalseForNonKevPackage()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "unexploited");
+        string verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl());
+        // A non-KEV advisory does not flip the KEV flag.
+        string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
+            _fixture.Store, osvId: "GHSA-" + Guid.NewGuid().ToString("N")[..8], cvssScore: 5.0, isKev: false);
+        await VulnerabilitySeeder.LinkAsync(_fixture.Store, verId, vulnId);
+
+        var (items, _) = await _repo.ListPaginatedAsync(new PackageListQuery(orgId, Limit: 10, Offset: 0, Ecosystem: "npm"));
+        Assert.False(Assert.Single(items).HasKevVersion);
+    }
+
+    [Fact]
+    public async Task KevFlags_DoNotLeakAcrossOrgs()
+    {
+        // Org B's package shares a name with org A's KEV-linked package but has no KEV link;
+        // the flag must stay scoped to the org that actually owns the KEV-linked version.
+        string orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"orgA-{Guid.NewGuid():N}");
+        string orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"orgB-{Guid.NewGuid():N}");
+        string pkgA = await PackageSeeder.InsertAsync(_fixture.Store, orgA, "npm", "sharedkev");
+        string pkgB = await PackageSeeder.InsertAsync(_fixture.Store, orgB, "npm", "sharedkev");
+        string verA = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgA, "1.0.0", Purl("1.0.0", "a"));
+        await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgB, "1.0.0", Purl("1.0.0", "b"));
+        string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
+            _fixture.Store, osvId: "GHSA-" + Guid.NewGuid().ToString("N")[..8], isKev: true);
+        await VulnerabilitySeeder.LinkAsync(_fixture.Store, verA, vulnId);
+
+        var (itemsA, _) = await _repo.ListPaginatedAsync(new PackageListQuery(orgA, Limit: 10, Offset: 0, Ecosystem: "npm"));
+        var (itemsB, _) = await _repo.ListPaginatedAsync(new PackageListQuery(orgB, Limit: 10, Offset: 0, Ecosystem: "npm"));
+        Assert.True(Assert.Single(itemsA).HasKevVersion);
+        Assert.False(Assert.Single(itemsB).HasKevVersion);
+    }
+
+    [Fact]
+    public async Task ListPaginatedAsync_KevFlag_SpansProxyCachePlane()
+    {
+        // Proxy packages keep a per-tenant packages row but their versions and vuln links live on
+        // the global cache plane (cache_artifact + tenant_artifact_access; owner_kind='cache_artifact').
+        // The list's KEV flag must read that plane, not just package_versions.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string name = "cacheplane-kev-" + Guid.NewGuid().ToString("N")[..8];
+        await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", name, isProxy: true);
+        string caId = Guid.NewGuid().ToString("N");
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash)
+                VALUES (@caId, 'npm', @name, '1.0.0', @fn, @bk, @ch)
+                """,
+                new { caId, name, fn = name + "-1.0.0.tgz", bk = "proxy/" + caId, ch = "h-" + caId });
+            await conn.ExecuteAsync(
+                "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES (@orgId, @caId)",
+                new { orgId, caId });
+        }
+        string kev = await VulnerabilitySeeder.InsertVulnAsync(
+            _fixture.Store, osvId: "GHSA-" + Guid.NewGuid().ToString("N")[..8], isKev: true);
+        await VulnerabilitySeeder.LinkToCacheArtifactAsync(_fixture.Store, caId, kev);
+
+        var (items, _) = await _repo.ListPaginatedAsync(
+            new PackageListQuery(orgId, Limit: 10, Offset: 0, Ecosystem: "npm"));
+
+        Assert.True(Assert.Single(items).HasKevVersion); // KEV advisory on the cache plane flips the flag
+    }
+
+    [Fact]
     public async Task MaliciousFlags_DoNotLeakAcrossOrgs()
     {
         // Org B's package shares a name with org A's malicious package but has no MAL link;

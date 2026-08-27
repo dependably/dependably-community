@@ -23,10 +23,14 @@ public sealed class CompositeAlertNotifier : IAlertNotifier
         _logger = logger;
     }
 
-    public async Task NotifyAsync(AlertRecord alert, CancellationToken ct = default)
+    public Task NotifyAsync(AlertRecord alert, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(alert);
+        return NotifyCoreAsync(alert, ct);
+    }
 
+    private async Task NotifyCoreAsync(AlertRecord alert, CancellationToken ct)
+    {
         foreach (var notifier in _notifiers)
         {
             try

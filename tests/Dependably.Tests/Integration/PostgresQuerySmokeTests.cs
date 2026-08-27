@@ -102,6 +102,13 @@ public sealed class PostgresQuerySmokeTests
         // license row) are "unknown"; pv1 (MIT) and ca1 (Apache-2.0) both carry a license that is
         // on neither list, so neither counts.
         Assert.Equal(3, stats.LicenseRiskVersionCount);
+        // Coverage classification, pinned on live Postgres because the no-feed arm's expanded
+        // IN-list is exactly the fragment Dapper's own auto-expansion mishandles on Npgsql:
+        // v1 (npm, uploaded, vuln_checked_at NULL) is the one unscanned row; v2 (oci, uploaded)
+        // is no-feed; every cache_artifact row is outside the domain (purl NULL in this seed).
+        Assert.Equal(0, stats.ScannedVersionCount);
+        Assert.Equal(1, stats.UnscannedVersionCount);
+        Assert.Equal(1, stats.NoFeedVersionCount);
 
         var (opRows, opTotal, opPackageCount) = await analytics.ListOperationalRiskAsync(
             OrgId, ecosystem: null, limit: 50, offset: 0);

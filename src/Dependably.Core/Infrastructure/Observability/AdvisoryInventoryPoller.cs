@@ -12,6 +12,10 @@ namespace Dependably.Infrastructure.Observability;
 ///
 /// <para>Default poll interval is 5 minutes (env
 /// <c>ADVISORY_INVENTORY_POLL_INTERVAL_SECONDS</c>); set <c>0</c> to disable.</para>
+///
+/// suspension-ok: not per-tenant. The vulnerabilities table it polls is the instance-shared
+/// advisory catalog (no org_id column, per the class doc above), so there is no per-org
+/// selection point to gate.
 /// </summary>
 public sealed class AdvisoryInventoryPoller : BackgroundService
 {

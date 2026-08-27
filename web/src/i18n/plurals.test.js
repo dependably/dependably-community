@@ -51,6 +51,23 @@ describe('ICU plural keys', () => {
       .toContain('expire dans 14 jours (2026-07-16)')
   })
 
+  it('renders the open-source-notices component counts in both locales', () => {
+    expect(render('en', 'licenses.meta', { count: 1 })).toBe('1 component')
+    expect(render('en', 'licenses.meta', { count: 0 })).toBe('0 components')
+    expect(render('en', 'licenses.meta', { count: 42 })).toBe('42 components')
+    // French CLDR treats 0 as singular, so "0 composant" is correct and "0 composants" is not.
+    expect(render('fr', 'licenses.meta', { count: 0 })).toBe('0 composant')
+    expect(render('fr', 'licenses.meta', { count: 1 })).toBe('1 composant')
+    expect(render('fr', 'licenses.meta', { count: 42 })).toBe('42 composants')
+  })
+
+  it('keeps the generated-at suffix intact alongside the plural block', () => {
+    expect(render('en', 'licenses.metaGenerated', { count: 3, date: '2026-08-20' }))
+      .toBe('3 components · generated 2026-08-20')
+    expect(render('fr', 'licenses.metaGenerated', { count: 1, date: '2026-08-20' }))
+      .toBe('1 composant · généré le 2026-08-20')
+  })
+
   it('keeps the existing upload.selected ICU block working', () => {
     expect(render('en', 'upload.selected', { count: 0 })).toBe('No files selected')
     expect(render('fr', 'upload.selected', { count: 2 })).toBe('2 fichiers sélectionnés')

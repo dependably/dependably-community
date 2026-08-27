@@ -45,6 +45,42 @@
   // Operational only: the tile's own number (distinct packages, not versions).
   let packageCount = 0
   let threshold = 0
+
+  // Vulnerability-tracker enrichment coverage — an org-wide figure, not per-tab, so it is loaded
+  // once independently of the operational/license list rather than threaded through load()'s
+  // per-tab branches. Same OrgStats payload the Dashboard tile reads (api.getStats), so the two
+  // surfaces can never disagree about the same count.
+  let enrichmentLoaded = false
+  let trackerConfigured = false
+  let enrichedAdvisoryCount = 0
+  let totalAdvisoryCount = 0
+  // Own sequence counter, mirroring load()'s `seq` above for the same reason: an org switch
+  // fires this reactive block again before the previous fetch resolves, and a stale response
+  // landing after a newer one would show the wrong org's coverage figures.
+  let enrichmentSeq = 0
+
+  async function loadEnrichmentCoverage() {
+    const mine = ++enrichmentSeq
+    try {
+      const stats = await api.getStats()
+      if (mine !== enrichmentSeq) return
+      trackerConfigured = stats.trackerConfigured ?? false
+      enrichedAdvisoryCount = stats.enrichedAdvisoryCount ?? 0
+      totalAdvisoryCount = stats.totalAdvisoryCount ?? 0
+    } catch {
+      // A failed fetch here must not block the risk list this page exists to show — the strip
+      // simply stays unrendered, matching the "nothing to report yet" empty state rather than
+      // surfacing a second error banner for a secondary figure.
+      if (mine !== enrichmentSeq) return
+    } finally {
+      if (mine === enrichmentSeq) enrichmentLoaded = true
+    }
+  }
+
+  $: if (org) loadEnrichmentCoverage()
+  $: enrichmentPercent = totalAdvisoryCount > 0
+    ? Math.round((enrichedAdvisoryCount / totalAdvisoryCount) * 100)
+    : null
   // Request sequence — page/filter/tab changes can fire overlapping loads; a response whose
   // token no longer matches the latest issued request is stale and must not overwrite newer state.
   let seq = 0
@@ -147,6 +183,29 @@
   </div>
 
   <p class="intro">{$t(`risk.intro.${activeTab}`)}</p>
+
+  <!-- Enrichment coverage strip: not configured / no advisories / a measured percent, the same
+       three-state discipline as the Dashboard tile this mirrors — never a fabricated 0% for an
+       absent connection, never a permanent 0% for an org with nothing to enrich. -->
+  {#if enrichmentLoaded}
+    <div class="enrichment-strip">
+      {#if !trackerConfigured}
+        <span class="enrichment-empty">{$t('risk.enrichment.notConfigured')}</span>
+      {:else if totalAdvisoryCount === 0}
+        <span class="enrichment-empty">{$t('risk.enrichment.none')}</span>
+      {:else}
+        <span class="enrichment-percent">
+          {$t('risk.enrichment.percent', { values: { percent: enrichmentPercent } })}
+        </span>
+        <span class="enrichment-detail">
+          {$t('risk.enrichment.detail', { values: {
+            enriched: enrichedAdvisoryCount,
+            total: totalAdvisoryCount,
+          } })}
+        </span>
+      {/if}
+    </div>
+  {/if}
 
   <div class="toolbar">
     <!-- The toolbar stacks vertically, so hiding this line while loading dropped the filter row
@@ -268,6 +327,22 @@
   }
   .tab:hover { color: var(--text); background: none; }
   .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  .enrichment-strip {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text2);
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 6px 12px;
+    margin: 0 0 12px;
+    width: fit-content;
+  }
+  .enrichment-percent { font-weight: 600; color: var(--text); }
+  .enrichment-empty { font-style: italic; }
 
   .toolbar { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin-bottom: 12px; }
   .filters { display: flex; align-items: center; gap: 8px; }

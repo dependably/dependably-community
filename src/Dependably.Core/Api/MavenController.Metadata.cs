@@ -123,8 +123,11 @@ public sealed partial class MavenController
         // and IsSnapshot) is a different document from the artifact-level version list
         // (g/a/maven-metadata.xml) — it carries the <snapshot>/<snapshotVersions> block a
         // client needs to resolve 1.0-SNAPSHOT to the latest timestamped build. It gets its own
-        // cache key so the two flavours never collide. A release version-level request keeps
-        // the pre-existing (artifact-level) behavior — Maven clients don't fetch that path.
+        // cache key so the two flavours never collide. A version-level request is the only thing
+        // MavenPathParser sets coords.Version for on a metadata path, and it only sets it when the
+        // segment carries the SNAPSHOT marker, so the release flavour never reaches this branch —
+        // g/a/{release}/maven-metadata.xml parses as an artifact-level request for a coordinate
+        // nothing holds and 404s, which is what Maven Central answers for it too.
         bool isSnapshotVersionMetadata = coords.Version is not null && coords.IsSnapshot;
         var cacheKey = isSnapshotVersionMetadata
             ? new MavenMetadataKey(orgId, coords.GroupId, coords.ArtifactId, coords.Version)
@@ -281,13 +284,10 @@ public sealed partial class MavenController
         if (uploaded.Count > 0)
         {
             var signals = await _svc.Vulns.GetGateSignalsBatchAsync(uploaded.Select(v => v.Id).ToList(), ct);
-            foreach (var v in uploaded)
-            {
-                if (BlockGateService.IsHardBlockedByStoredState(v, settings, signals.GetValueOrDefault(v.Id), now))
-                {
-                    blocked.Add(v.Version);
-                }
-            }
+            blocked.UnionWith(uploaded
+                .Where(v => BlockGateService.IsHardBlockedByStoredState(
+                    v, settings, signals.GetValueOrDefault(v.Id), now))
+                .Select(v => v.Version));
         }
 
         if (proxyEntries.Count > 0)
@@ -298,14 +298,10 @@ public sealed partial class MavenController
             // A Maven version spans several cache rows — jar, pom, checksum sidecars — so any
             // blocked row blocks the version. maven-metadata.xml lists versions, not files, and
             // there is no way to advertise "this version, but only some of its artifacts".
-            foreach (var entry in proxyEntries)
-            {
-                if (BlockGateService.IsHardBlockedByCacheEntry(
-                        entry, settings, proxySignals.GetValueOrDefault(entry.Id), now))
-                {
-                    blocked.Add(entry.Version);
-                }
-            }
+            blocked.UnionWith(proxyEntries
+                .Where(entry => BlockGateService.IsHardBlockedByCacheEntry(
+                    entry, settings, proxySignals.GetValueOrDefault(entry.Id), now))
+                .Select(entry => entry.Version));
         }
 
         return blocked;

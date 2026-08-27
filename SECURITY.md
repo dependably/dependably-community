@@ -28,8 +28,6 @@ latest release.
 | Latest `0.4.x` | Yes — fixes released as new `0.4.x` patches |
 | Older `0.x` | No — upgrade to the latest `0.4.x` |
 
-The threat model these fixes defend is documented in [`docs/threat-model.md`](docs/threat-model.md).
-
 ## Leaked credentials
 
 If the secret-scan CI job fails, or a credential is otherwise found in this repository's source or history, treat it as compromised regardless of where it was committed from. Run the response below in order — do not stop at "remove from repo".
@@ -46,8 +44,6 @@ A leaked credential (above) is one incident class; unauthorized access to or los
 **personal data** is another and has its own notification obligations (e.g. GDPR Art. 33/34).
 Personal data an operator's instance may hold includes account emails, display names, audit
 `source_ip` values, and SAML NameIDs/attributes.
-[`docs/privacy.md`](docs/privacy.md) is the authoritative inventory — what is stored, where, for
-how long, and which of it a data subject can retrieve or have erased.
 
 ### Classification
 

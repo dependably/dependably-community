@@ -8,6 +8,8 @@ namespace Dependably.Infrastructure;
 /// Background GC worker that runs on a cron schedule (GC_SCHEDULE env var, default daily at 3am).
 /// Enforces per-org retention policies:
 ///   - keep_versions: delete oldest versions beyond the limit per package (opt-in; NULL = off)
+///   - keep_project_versions: delete oldest project versions beyond the limit per project, never
+///     the is_latest row (opt-in; NULL = off)
 ///   - keep_days: evict proxy blobs unused beyond this many days (opt-in; NULL = off)
 ///   - purge_unlisted_after_days: hard-delete long-unlisted versions (opt-in; NULL = off)
 ///   - activity_retention_days: delete old activity rows; NULL resolves to the
@@ -23,6 +25,9 @@ namespace Dependably.Infrastructure;
 ///   - mfa_trusted_devices: delete expired remembered-device rows.
 ///   - email_outbox: delete terminal rows past EMAIL_OUTBOX_TERMINAL_RETENTION_DAYS (30) — the only
 ///     delete path on the outbox, and the storage limit on the recipient addresses it holds.
+///   - org_stats_history: delete rows older than STATS_HISTORY_RETENTION_DAYS (365) — the storage
+///     limit on the dashboard's daily trend history. Observational only, same posture as the
+///     table itself: nothing downstream of this sweep gates or reports on the rows it deletes.
 ///   - JWT revocations / invites / SAML one-shots: expiry prunes.
 /// Respects the shutdown CancellationToken — stops at the next checkpoint.
 /// </summary>
@@ -46,7 +51,8 @@ public sealed class RetentionService : ScheduledBackgroundService
         IDistributedLock Locks,
         Dependably.Protocol.OciOrphanBlobDeleter OciOrphanBlobs,
         Mail.EmailOutboxRepository EmailOutbox,
-        Mail.EmailOutboxPolicy EmailOutboxPolicy);
+        Mail.EmailOutboxPolicy EmailOutboxPolicy,
+        OrgStatsHistoryRepository StatsHistory);
 
     private readonly IMetadataStore _db;
     private readonly IBlobStore _blobs;
@@ -62,6 +68,7 @@ public sealed class RetentionService : ScheduledBackgroundService
     private readonly Dependably.Protocol.OciOrphanBlobDeleter _ociOrphanBlobs;
     private readonly Mail.EmailOutboxRepository _emailOutbox;
     private readonly Mail.EmailOutboxPolicy _emailOutboxPolicy;
+    private readonly OrgStatsHistoryRepository _statsHistory;
 
     protected override string CronEnvKey => "GC_SCHEDULE";
     protected override string DefaultCron => "0 3 * * *";
@@ -90,6 +97,7 @@ public sealed class RetentionService : ScheduledBackgroundService
         _ociOrphanBlobs = deps.OciOrphanBlobs;
         _emailOutbox = deps.EmailOutbox;
         _emailOutboxPolicy = deps.EmailOutboxPolicy;
+        _statsHistory = deps.StatsHistory;
     }
 
     protected override Task RunTickAsync(CancellationToken ct) => RunGcPassAsync(ct);
@@ -118,16 +126,23 @@ public sealed class RetentionService : ScheduledBackgroundService
         // activity_retention_days resolves to the instance default below, so the per-download
         // IP/actor rows are bounded for orgs that never set an explicit window. Iterating an org
         // whose opt-in policies are all NULL costs one indexed activity DELETE.
+        //
+        // A suspended/archived/deleting org is excluded the same way a soft-deleted one already
+        // is — see TenantLifecycle for why this pass stops for a non-active org and the accepted
+        // consequence (a suspended tenant's data stops aging out for as long as it stays
+        // suspended, rather than continuing to be pruned on schedule).
         int activityDefaultDays = ResolveActivityRetentionDefaultDays();
-        var orgs = await conn.QueryAsync<(string OrgId, int? KeepVersions, int? KeepDays, int? ActivityRetentionDays, int? PurgeUnlistedAfterDays)>(
+        var orgs = await conn.QueryAsync<(string OrgId, int? KeepVersions, int? KeepDays, int? ActivityRetentionDays, int? PurgeUnlistedAfterDays, int? KeepProjectVersions)>(
             """
-            SELECT o.id, s.keep_versions, s.keep_days, s.activity_retention_days, s.purge_unlisted_after_days
+            SELECT o.id, s.keep_versions, s.keep_days, s.activity_retention_days,
+                   s.purge_unlisted_after_days, s.keep_project_versions
             FROM orgs o
             JOIN org_settings s ON s.org_id = o.id
             WHERE o.deleted_at IS NULL
+              AND o.status = 'active'
             """);
 
-        foreach (var (OrgId, KeepVersions, KeepDays, ActivityRetentionDays, PurgeUnlistedAfterDays) in orgs)
+        foreach (var (OrgId, KeepVersions, KeepDays, ActivityRetentionDays, PurgeUnlistedAfterDays, KeepProjectVersions) in orgs)
         {
             if (ct.IsCancellationRequested)
             {
@@ -150,6 +165,11 @@ public sealed class RetentionService : ScheduledBackgroundService
             if (PurgeUnlistedAfterDays.HasValue)
             {
                 await PurgeUnlistedAsync(conn, OrgId, PurgeUnlistedAfterDays.Value, ct);
+            }
+
+            if (KeepProjectVersions.HasValue)
+            {
+                await EnforceProjectVersionLimitAsync(conn, OrgId, KeepProjectVersions.Value, ct);
             }
         }
 
@@ -197,6 +217,10 @@ public sealed class RetentionService : ScheduledBackgroundService
         // inspection on purpose. This is the only delete path, and the storage-limitation bound on
         // that data.
         await PruneEmailOutboxAsync(ct);
+
+        // Delete org_stats_history rows past STATS_HISTORY_RETENTION_DAYS. Purely a storage
+        // limit on the dashboard's own trend history — nothing else reads a deleted row.
+        await PruneStatsHistoryAsync(ct);
 
         _logger.LogInformation("Retention GC pass complete.");
     }
@@ -335,6 +359,26 @@ public sealed class RetentionService : ScheduledBackgroundService
         {
             _logger.LogInformation(
                 "Retention GC: pruned {Count} terminal email_outbox row(s) older than {Days} days.",
+                deleted, retentionDays);
+        }
+    }
+
+    // Deletes org_stats_history rows older than STATS_HISTORY_RETENTION_DAYS (default 365) —
+    // the storage bound on the dashboard's daily trend history. day is a plain ISO date
+    // (yyyy-MM-dd), so the cutoff is formatted the same way rather than through ToUtcIso, which
+    // would emit a full instant that never matches the column's shape.
+    internal async Task PruneStatsHistoryAsync(CancellationToken ct)
+    {
+        int retentionDays = int.TryParse(_config["STATS_HISTORY_RETENTION_DAYS"], out int d) && d > 0
+            ? d : 365;
+        string cutoffDay = _time.GetUtcNow().UtcDateTime.AddDays(-retentionDays)
+            .ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+
+        int deleted = await _statsHistory.PruneOlderThanAsync(cutoffDay, ct);
+        if (deleted > 0)
+        {
+            _logger.LogInformation(
+                "Retention GC: pruned {Count} org_stats_history row(s) older than {Days} days.",
                 deleted, retentionDays);
         }
     }
@@ -581,6 +625,95 @@ public sealed class RetentionService : ScheduledBackgroundService
                 _logger.LogDebug("GC: evicted proxy artifact {Id} name={Name} version={Version} (blob {Key})",
                     CacheArtifactId, Name, Version, BlobKey);
             }
+        }
+    }
+
+    /// <summary>
+    /// Opt-in projects-plane cap: keeps the most recently created <paramref name="keepProjectVersions"/>
+    /// versions of each project and deletes the rest, releasing their SBOM/VEX/SARIF document blobs.
+    ///
+    /// <para>The uploaded and proxy catalogues both carry a bound; the projects plane carries none
+    /// without this, so the one-SBOM-per-build CI pattern the plane exists to serve accretes a
+    /// version row plus its whole component set on every build, permanently, with an interactive
+    /// delete as the only reclaim.</para>
+    ///
+    /// <para>The <c>is_latest</c> row is never deleted, whatever its rank or age. A project with no
+    /// latest version is a broken state rather than a small one — every <c>latest</c> route answers
+    /// 404 and the list rollup degrades to "Not scanned" — and a retention cap must not be able to
+    /// manufacture it. That row still participates in the ranking, so a project whose latest version
+    /// is also its newest sees the cap honoured exactly; a project whose operator promoted an older
+    /// version keeps one extra row, which is the safe direction to be wrong in.</para>
+    ///
+    /// <para>Blob keys are enumerated BEFORE the delete, the same ordering the interactive delete
+    /// path uses: <c>project_documents.blob_key</c> is the blob's only reference, so once the FK
+    /// cascade has removed the metadata row there is nothing left to read the key from and the bytes
+    /// are stranded on the registry tier. The orphan reconciler is a backstop for lost races, not a
+    /// substitute for naming the keys a deliberate delete releases.</para>
+    /// </summary>
+    // internal (not private) so the retention tests can drive it without the cron machinery —
+    // mirrors EnforceVersionLimitAsync above and PurgeUnlistedAsync below.
+    internal async Task EnforceProjectVersionLimitAsync(
+        System.Data.Common.DbConnection conn, string orgId, int keepProjectVersions, CancellationToken ct)
+    {
+        // Oldest-first, so a pass the shutdown token cuts short has made the progress an operator
+        // would expect it to make — the rows furthest past the cap go first — rather than a
+        // plan-order-dependent arbitrary subset.
+        var toDelete = (await conn.QueryAsync<(string VersionId, string ProjectId, string Version)>(
+            """
+            SELECT pv.id AS VersionId, pv.project_id AS ProjectId, pv.version AS Version
+            FROM project_versions pv
+            WHERE pv.org_id = @orgId
+              AND pv.is_latest = 0
+              AND pv.id NOT IN (
+                  SELECT pv2.id FROM project_versions pv2
+                  WHERE pv2.org_id = @orgId AND pv2.project_id = pv.project_id
+                  ORDER BY pv2.created_at DESC, pv2.id DESC
+                  LIMIT @keepProjectVersions
+              )
+            ORDER BY pv.created_at, pv.id
+            """,
+            new { orgId, keepProjectVersions })).AsList();
+
+        foreach (var (VersionId, ProjectId, Version) in toDelete)
+        {
+            if (ct.IsCancellationRequested) { break; }
+
+            var blobKeys = (await conn.QueryAsync<string>(
+                """
+                SELECT d.blob_key FROM project_documents d
+                WHERE d.org_id = @orgId AND d.project_version_id = @versionId
+                """,
+                new { orgId, versionId = VersionId })).AsList();
+
+            // The DELETE re-asserts is_latest = 0 rather than trusting the id the SELECT chose.
+            // The two run on one connection with no transaction between them, and a promotion —
+            // interactive, or the auto-latest a new upload takes — can land in that window and
+            // make this row the project's latest. Deleting it then manufactures exactly the
+            // zero-latest state this cap exists not to manufacture. Re-asserting the predicate
+            // costs nothing and makes the race a no-op instead of a broken project.
+            int affected = await conn.ExecuteAsync(
+                "DELETE FROM project_versions WHERE org_id = @orgId AND id = @versionId AND is_latest = 0",
+                new { orgId, versionId = VersionId });
+
+            if (affected == 0)
+            {
+                // The row was promoted out from under the sweep. Its documents are still
+                // referenced by a live version, so releasing the bytes enumerated above would
+                // strand the surviving metadata rows pointing at deleted blobs.
+                _logger.LogDebug(
+                    "GC: skipped project version {VersionId} (project {ProjectId}, version {Version}); it was promoted to latest after the sweep selected it.",
+                    VersionId, ProjectId, Version);
+                continue;
+            }
+
+            foreach (string key in blobKeys)
+            {
+                await _blobs.DeleteAsync(BlobKeys.StoreKey(key), ct);
+            }
+
+            _logger.LogDebug(
+                "GC: deleted project version {VersionId} (project {ProjectId}, version {Version}, {Documents} document(s))",
+                VersionId, ProjectId, Version, blobKeys.Count);
         }
     }
 

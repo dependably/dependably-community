@@ -6,10 +6,10 @@
 # deleted enterprise infra doc. SQLServer detector flags these as unverified.
 ^docs/aws\.md$
 
-# The SQLite-to-Postgres migration procedure documents the --target connection
-# string and the DB_CONNECTION_STRING it maps to, so a Host=...;Password=... form
-# is the thing being explained and cannot be paraphrased away. The SQLServer
-# detector flags the placeholder as unverified, same shape as docs/aws.md.
+# Connection-string placeholders (Host=...;Password=...) in the SQLite-to-Postgres
+# migration procedure, since moved to dependably-enterprise. The scan walks full
+# history across all branches, so the deleted path still needs excluding. The
+# SQLServer detector flags the placeholder as unverified, same shape as docs/aws.md.
 ^docs/sqlite-to-postgres-migration\.md$
 
 # The secret-scan walks full history across all branches. Exclude this allowlist

@@ -48,6 +48,16 @@ public static class ArchiveDecompressLimits
 /// </summary>
 public static class ZipEntryLimits
 {
+    /// <summary>
+    /// Maximum entries in one ZIP archive, mirroring <see cref="TarScanLimits.MaxEntries"/> and for
+    /// the same reason: the compressed input is bounded by the upload limits, but the entry count is
+    /// attacker-controlled independently of it. Enforced by <see cref="SafeZipArchive"/> from the
+    /// End Of Central Directory record, before <c>ZipArchive.Entries</c> allocates one object per
+    /// entry. The byte caps below bound a single *matched* entry and say nothing about the cost of
+    /// finding it.
+    /// </summary>
+    public const int MaxEntries = 100_000;
+
     /// <summary>Maximum decompressed bytes for a single metadata ZIP entry (32 MiB).</summary>
     public const long MaxMetadataEntryBytes = 32L * 1024 * 1024;
 

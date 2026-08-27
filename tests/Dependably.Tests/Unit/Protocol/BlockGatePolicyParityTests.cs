@@ -69,7 +69,7 @@ public sealed class BlockGatePolicyParityTests
     [Fact]
     public void Malicious_BlockMode_Returns_BlockedMalicious()
     {
-        var facts = BaseFacts() with { Scanned = true, HasMalicious = true };
+        var facts = BaseFacts() with { Scanned = true, Vulnerability = VulnFacts.None with { IsMalicious = true } };
         var policy = BasePolicy() with { BlockMaliciousMode = "block" };
         var verdict = BlockGateService.Evaluate(facts, policy, _now);
         Assert.False(verdict.Servable);
@@ -80,7 +80,7 @@ public sealed class BlockGatePolicyParityTests
     [Fact]
     public void Kev_BlockMode_Returns_BlockedKev()
     {
-        var facts = BaseFacts() with { Scanned = true, HasKev = true };
+        var facts = BaseFacts() with { Scanned = true, Vulnerability = VulnFacts.None with { IsKev = true } };
         var policy = BasePolicy() with { BlockKevMode = "block" };
         var verdict = BlockGateService.Evaluate(facts, policy, _now);
         Assert.False(verdict.Servable);
@@ -91,7 +91,7 @@ public sealed class BlockGatePolicyParityTests
     [Fact]
     public void Epss_OverTolerance_Returns_BlockedEpss()
     {
-        var facts = BaseFacts() with { Scanned = true, MaxEpss = 0.92 };
+        var facts = BaseFacts() with { Scanned = true, Vulnerability = VulnFacts.None with { Epss = 0.92 } };
         var policy = BasePolicy() with { MaxEpssTolerance = 0.5 };
         var verdict = BlockGateService.Evaluate(facts, policy, _now);
         Assert.False(verdict.Servable);
@@ -102,7 +102,7 @@ public sealed class BlockGatePolicyParityTests
     [Fact]
     public void Cvss_OverTolerance_Returns_BlockedVulnScore()
     {
-        var facts = BaseFacts() with { Scanned = true, MaxCvss = 9.8 };
+        var facts = BaseFacts() with { Scanned = true, Vulnerability = VulnFacts.None with { Cvss = 9.8 } };
         var policy = BasePolicy() with { MaxOsvScoreTolerance = 5.0 };
         var verdict = BlockGateService.Evaluate(facts, policy, _now);
         Assert.False(verdict.Servable);
@@ -166,7 +166,12 @@ public sealed class BlockGatePolicyParityTests
         // A version that both ships an install script and exceeds the CVSS ceiling reports the
         // stronger VulnScore arm, not InstallScript — the install-script arm only fires when no
         // higher arm blocked.
-        var facts = BaseFacts() with { Scanned = true, MaxCvss = 9.8, HasInstallScript = true };
+        var facts = BaseFacts() with
+        {
+            Scanned = true,
+            Vulnerability = VulnFacts.None with { Cvss = 9.8 },
+            HasInstallScript = true,
+        };
         var policy = BasePolicy() with { MaxOsvScoreTolerance = 5.0, BlockInstallScriptsMode = "block" };
         var verdict = BlockGateService.Evaluate(facts, policy, _now);
         Assert.False(verdict.Servable);
@@ -229,7 +234,12 @@ public sealed class BlockGatePolicyParityTests
     {
         // A version that is both malicious and fails provenance reports the stronger Malicious
         // arm — provenance sits just below malicious in priority.
-        var facts = BaseFacts() with { Scanned = true, HasMalicious = true, ProvenanceStatus = "failed" };
+        var facts = BaseFacts() with
+        {
+            Scanned = true,
+            Vulnerability = VulnFacts.None with { IsMalicious = true },
+            ProvenanceStatus = "failed",
+        };
         var policy = BasePolicy() with { BlockMaliciousMode = "block", VerifyProvenanceMode = "block" };
         var verdict = BlockGateService.Evaluate(facts, policy, _now);
         Assert.False(verdict.Servable);
@@ -259,10 +269,7 @@ public sealed class BlockGatePolicyParityTests
             Deprecated: "deprecated",
             PublishedAt: _now.AddHours(-1),
             Scanned: true,
-            HasMalicious: true,
-            HasKev: true,
-            MaxEpss: 0.99,
-            MaxCvss: 10.0);
+            Vulnerability: VulnFacts.None with { IsMalicious = true, IsKev = true, Epss = 0.99, Cvss = 10.0 });
         var policy = new BlockPolicy(
             MinReleaseAgeHours: 720,
             BlockDeprecatedMode: "block_all",
@@ -302,7 +309,11 @@ public sealed class BlockGatePolicyParityTests
     public void Unscanned_WithMaliciousSignals_IsServable()
     {
         // VulnCheckedAt null → fail-open; signals present but Scanned=false.
-        var facts = BaseFacts() with { Scanned = false, HasMalicious = true, HasKev = true, MaxEpss = 0.99, MaxCvss = 10.0 };
+        var facts = BaseFacts() with
+        {
+            Scanned = false,
+            Vulnerability = VulnFacts.None with { IsMalicious = true, IsKev = true, Epss = 0.99, Cvss = 10.0 },
+        };
         var policy = BasePolicy() with
         {
             BlockMaliciousMode = "block",
@@ -342,7 +353,7 @@ public sealed class BlockGatePolicyParityTests
     public void Cvss_ExactlyAtTolerance_IsServable()
     {
         // Pass-on-equal convention: maxCvss == tolerance is allowed.
-        var facts = BaseFacts() with { Scanned = true, MaxCvss = 5.0 };
+        var facts = BaseFacts() with { Scanned = true, Vulnerability = VulnFacts.None with { Cvss = 5.0 } };
         var policy = BasePolicy() with { MaxOsvScoreTolerance = 5.0 };
         var verdict = BlockGateService.Evaluate(facts, policy, _now);
         Assert.True(verdict.Servable);
@@ -353,7 +364,7 @@ public sealed class BlockGatePolicyParityTests
     public void Epss_ExactlyAtTolerance_IsServable()
     {
         // Pass-on-equal for EPSS matches the CVSS convention.
-        var facts = BaseFacts() with { Scanned = true, MaxEpss = 0.5 };
+        var facts = BaseFacts() with { Scanned = true, Vulnerability = VulnFacts.None with { Epss = 0.5 } };
         var policy = BasePolicy() with { MaxEpssTolerance = 0.5 };
         var verdict = BlockGateService.Evaluate(facts, policy, _now);
         Assert.True(verdict.Servable);
@@ -387,10 +398,13 @@ public sealed class BlockGatePolicyParityTests
             Deprecated: deprecated,
             PublishedAt: publishedAt,
             Scanned: scanned,
-            HasMalicious: hasMalicious,
-            HasKev: hasKev,
-            MaxEpss: maxEpss,
-            MaxCvss: maxCvss);
+            Vulnerability: VulnFacts.None with
+            {
+                IsMalicious = hasMalicious,
+                IsKev = hasKev,
+                Epss = maxEpss,
+                Cvss = maxCvss,
+            });
 
         var policy = new BlockPolicy(
             MinReleaseAgeHours: 24,
@@ -414,10 +428,7 @@ public sealed class BlockGatePolicyParityTests
         Deprecated: null,
         PublishedAt: null,
         Scanned: false,
-        HasMalicious: false,
-        HasKev: false,
-        MaxEpss: null,
-        MaxCvss: null);
+        Vulnerability: VulnFacts.None);
 
     // Baseline policy: all gates off / tolerant.
     private static BlockPolicy BasePolicy() => new(
@@ -446,7 +457,7 @@ public sealed class BlockGatePolicyParityTests
             // VulnCheckedAt non-null iff Scanned; value is arbitrary.
             VulnCheckedAt = facts.Scanned ? _now : null,
             // Index path uses IsMalicious row flag.
-            IsMalicious = facts.HasMalicious,
+            IsMalicious = facts.Vulnerability.IsMalicious,
             HasInstallScript = facts.HasInstallScript,
             ProvenanceStatus = facts.ProvenanceStatus,
         };
@@ -464,8 +475,13 @@ public sealed class BlockGatePolicyParityTests
         };
 
         // When no signals (no KEV, no EPSS, no CVSS), pass null to match current callers.
-        var signals = (facts.HasKev || facts.MaxEpss.HasValue || facts.MaxCvss.HasValue)
-            ? new VulnGateSignals(facts.MaxCvss, HasMalicious: false, facts.HasKev, facts.MaxEpss)
+        var signals = (facts.Vulnerability.IsKev || facts.Vulnerability.Epss.HasValue || facts.Vulnerability.Cvss.HasValue)
+            ? new VulnGateSignals(VulnFacts.None with
+            {
+                Cvss = facts.Vulnerability.Cvss,
+                IsKev = facts.Vulnerability.IsKev,
+                Epss = facts.Vulnerability.Epss,
+            })
             : null;
 
         return BlockGateService.IsHardBlockedByStoredState(version, settings, signals, _now);

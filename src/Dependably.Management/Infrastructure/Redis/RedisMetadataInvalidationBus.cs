@@ -23,6 +23,11 @@ namespace Dependably.Infrastructure.Redis;
 /// <para>The channel name carries the configured Redis key prefix so two deployments sharing one
 /// Redis instance do not cross-evict each other, and each message carries this process's
 /// <see cref="Origin"/> so a replica ignores its own broadcast (it evicted before publishing).</para>
+///
+/// <para>
+/// suspension-ok: not per-tenant. Broadcasts a fleet-wide cache-invalidation signal keyed by
+/// cache entry, not by org; there is no per-org selection point to gate.
+/// </para>
 /// </summary>
 public sealed class RedisMetadataInvalidationBus : IMetadataInvalidationBus, IHostedService
 {

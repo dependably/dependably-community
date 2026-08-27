@@ -402,7 +402,10 @@ public sealed class HeadRequestsHeadersOnlyTests : IAsyncLifetime
             new LicenseRepository(_db, TimeProvider.System, normalizer),
             new StubPerOrgTrustAnchorStore(),
             NullLogger<BlockGateService>.Instance,
-            TimeProvider.System);
+            TimeProvider.System,
+            new OrgRepository(_db),
+            NSubstitute.Substitute.For<Dependably.Infrastructure.Webhooks.IPackageEventSink>(),
+            new BlockRefusalWebhookThrottle(TimeProvider.System, TimeSpan.Zero));
     }
 
     private OciController BuildOciController(OciUpstreamResolver upstream)

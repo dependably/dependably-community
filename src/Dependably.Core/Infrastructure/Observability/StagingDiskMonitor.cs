@@ -14,6 +14,9 @@ namespace Dependably.Infrastructure.Observability;
 /// available space falls below this fraction of the total volume size, a Warning is
 /// logged. Errors during polling are logged and swallowed so the monitor never crashes
 /// the host.</para>
+///
+/// suspension-ok: not per-tenant. Polls one shared staging volume's free space; there is no
+/// per-org selection point to gate (explicitly "no per-tenant labels", per the class doc above).
 /// </summary>
 public sealed class StagingDiskMonitor : BackgroundService
 {

@@ -22,12 +22,12 @@ public static partial class OuterVersionLabel
     // build-metadata. Anchored to the end of the wrapper-dir, with a reluctant prefix so the
     // engine finds the leftmost dash whose suffix parses cleanly (handles names like
     // "mermaid-mermaid-11.13.0" without over-matching).
-    [GeneratedRegex(@"^.+-(\d+\.\d+\.\d+(?:-[0-9A-Za-z.+-]+)?(?:\+[0-9A-Za-z.-]+)?)$")]
+    [GeneratedRegex(@"^.+-(\d+\.\d+\.\d+(?:-[0-9A-Za-z.+-]+)?(?:\+[0-9A-Za-z.-]+)?)\z")]
     private static partial Regex SemverWrapperRegex();
 
     // PEP 440 is more permissive than semver — covers 1.0.0a1, 1.0.0.post1, 1.0.0+local, etc.
     // The leading \d gate prevents a name segment from being mistaken for a version.
-    [GeneratedRegex(@"^.+-(\d[A-Za-z0-9.!+-]*)$")]
+    [GeneratedRegex(@"^.+-(\d[A-Za-z0-9.!+-]*)\z")]
     private static partial Regex Pep440WrapperRegex();
 
     /// <summary>

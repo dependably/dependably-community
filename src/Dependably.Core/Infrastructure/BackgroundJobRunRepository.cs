@@ -92,7 +92,7 @@ public sealed class BackgroundJobRunRepository
         };
         string orderDirection = string.Equals(query.SortDir, "asc", StringComparison.OrdinalIgnoreCase) ? "ASC" : "DESC";
 
-        string? searchPattern = string.IsNullOrWhiteSpace(query.Search) ? null : $"%{query.Search.Trim().ToLowerInvariant()}%";
+        string? searchPattern = LikePattern.ContainsLower(query.Search);
         string? jobNameFilter = string.IsNullOrWhiteSpace(query.JobName) ? null : query.JobName;
         string? outcomeFilter = string.IsNullOrWhiteSpace(query.Outcome) ? null : query.Outcome;
 
@@ -100,9 +100,9 @@ public sealed class BackgroundJobRunRepository
             (@jobName IS NULL OR job_name = @jobName)
               AND (@outcome IS NULL OR outcome = @outcome)
               AND (@searchPattern IS NULL
-                   OR lower(job_name) LIKE @searchPattern
-                   OR lower(operation) LIKE @searchPattern
-                   OR lower(COALESCE(error_message, '')) LIKE @searchPattern)
+                   OR lower(job_name) LIKE @searchPattern ESCAPE '\'
+                   OR lower(operation) LIKE @searchPattern ESCAPE '\'
+                   OR lower(COALESCE(error_message, '')) LIKE @searchPattern ESCAPE '\')
             """;
 
         // rawsql: whereClause is a const with only @param placeholders (see S2077 justification above).

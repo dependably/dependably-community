@@ -130,6 +130,33 @@ async function req(method, path, body) {
   return data
 }
 
+/**
+ * PUT a raw-body SBOM/VEX/SARIF document to `/api/v1/sbom|vex|sarif` — the same shape a CI
+ * `curl --data-binary` invocation sends. `rawBody` is the uploaded file's exact text, sent
+ * verbatim: the server hashes what it receives for the idempotent-reupload no-op, so
+ * re-`JSON.stringify`-ing here (which can reorder keys or change whitespace) would silently
+ * break that check on every re-run after the first. Bypasses `req()` for the same reason
+ * `upload()` bypasses it for multipart.
+ */
+async function putRawDocument(path, rawBody) {
+  const res = await fetch(`${BASE}${path}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: rawBody,
+  })
+  if (res.status === 401) handleUnauthorized(path)
+  const data = await res.json().catch(() => null)
+  if (!res.ok) {
+    throw new ApiError(data?.detail || data?.title || res.statusText, {
+      status: res.status,
+      retryAfter: res.headers.get('Retry-After'),
+      body: data,
+    })
+  }
+  return data
+}
+
 // All tenant-scoped endpoints are now host-implicit: the server resolves the tenant from the
 // request host (multi mode) or the single-tenant resolver (single mode). The frontend no
 // longer carries `org` in URLs. System-admin endpoints are at /api/v1/system/* and only
@@ -202,6 +229,25 @@ export const api = {
   // outbox's backlog. Counts and aggregate timestamps only — never a tenant identifier.
   getInstanceEmailHealth: () => req('GET', '/instance/email-health'),
 
+  // Instance vulnerability-tracker connection (single mode; 404 in multi mode — operators use
+  // systemApi.* instead). One connection per deployment, serving every tenant; there is no
+  // per-org override. GET/PUT responses return hasToken (bool), never the raw credential, and an
+  // omitted/empty token on PUT leaves the stored one unchanged.
+  getInstanceVulnTrackerConfig: () => req('GET', '/instance/vuln-tracker-config'),
+  updateInstanceVulnTrackerConfig: (cfg) => req('PUT', '/instance/vuln-tracker-config', cfg),
+
+  // Connection test against the SAVED connection — there is deliberately no way to test an
+  // unsaved form, because an endpoint that posts a caller-supplied credential to a
+  // caller-supplied host is an SSRF and exfiltration primitive. Resolves with { reached, reason,
+  // latencyMs, freshness[] } even when the tracker did not answer: an unreached tracker is a
+  // successful call reporting a negative result. Only a connection with nothing to dial rejects.
+  testInstanceVulnTrackerConfig: () => req('POST', '/instance/vuln-tracker-config/test'),
+
+  // Observed health of that connection: the scan path's last outcomes, the producer's asserted
+  // as-of per source, and how much stored enrichment has aged past the horizon. Counts and
+  // instants only — never a purl or an advisory id.
+  getInstanceVulnTrackerHealth: () => req('GET', '/instance/vuln-tracker-health'),
+
   // Tenant settings (per-org config)
   getOrgSettings: () => req('GET', '/settings'),
   updateOrgSettings: (s) => req('PUT', '/settings', {
@@ -257,6 +303,27 @@ export const api = {
   downloadVersion: (eco, name, ver, file) =>
     downloadBlob(`/packages/${eco}/${name.replaceAll('/', '%2F')}/${ver}/download`, file ? { file } : {}, file || `${name}-${ver}`),
 
+  // Projects (SBOM/VEX/SARIF hierarchy) — read visibility for every role, mutations gated
+  // in-page to admin/owner. Paginated with limit/offset (not page), per the projects API.
+  listProjects: (params = {}) => {
+    const q = qs({ limit: 50, offset: 0, ...params })
+    return req('GET', `/projects?${q}`)
+  },
+  getProject: (id) => req('GET', `/projects/${encodeURIComponent(id)}`),
+  // Every collection in the org, flat and unpaged — the relocation picker renders each target as
+  // a full path, so it needs the whole set rather than the root-only page listProjects returns.
+  listProjectCollections: () => req('GET', '/projects/collections'),
+  createProject: (body) => req('POST', '/projects', body),
+  // PATCH is leave-unchanged-on-absent server-side: send only the fields being edited. An
+  // explicit `parentId: null` is how a project moves back to the root, which is why callers must
+  // send that key deliberately rather than letting an unset field stand in for it.
+  updateProject: (id, patch) => req('PATCH', `/projects/${encodeURIComponent(id)}`, patch),
+  deleteProject: (id) => req('DELETE', `/projects/${encodeURIComponent(id)}`),
+  deleteProjectVersion: (projectId, versionId) =>
+    req('DELETE', `/projects/${encodeURIComponent(projectId)}/versions/${encodeURIComponent(versionId)}`),
+  promoteLatest: (projectId, versionId) =>
+    req('POST', `/projects/${encodeURIComponent(projectId)}/versions/${encodeURIComponent(versionId)}/promote-latest`),
+
   // Activity
   getActivity: (params = {}) => {
     const q = qs({ limit: 50, page: 1, ...params })
@@ -299,6 +366,21 @@ export const api = {
     }
     return data
   },
+
+  // SBOM/VEX/SARIF document upload for SbomUploadModal — raw JSON body, one PUT per document,
+  // `sbom:upload` capability, admin/owner-gated in the UI. autoCreate/isLatest only apply to the
+  // SBOM PUT — a project version must already exist (from an earlier SBOM upload) before a
+  // VEX/SARIF PUT can attach to it.
+  // `parentId` names the containing folder. It is the only way to address a project nested in one:
+  // a project name is unique within its parent scope, not across the org, so the name alone is
+  // ambiguous once two folders each hold one (the server answers 409 rather than guessing).
+  // `qs` drops null/undefined, so omitting it sends nothing and the org-wide lookup applies.
+  uploadSbomDocument: (projectName, projectVersion, { autoCreate, isLatest, parentId }, rawBody) =>
+    putRawDocument(`/sbom?${qs({ projectName, projectVersion, autoCreate, isLatest, parentId })}`, rawBody),
+  uploadVexDocument: (projectName, projectVersion, parentId, rawBody) =>
+    putRawDocument(`/vex?${qs({ projectName, projectVersion, parentId })}`, rawBody),
+  uploadSarifDocument: (projectName, projectVersion, parentId, rawBody) =>
+    putRawDocument(`/sarif?${qs({ projectName, projectVersion, parentId })}`, rawBody),
 
   // Audit log (tenant scope; admin/owner only)
   getAudit: (params = {}) => {
@@ -483,6 +565,22 @@ export const api = {
     const versionQuery = version ? `?version=${encodeURIComponent(version)}` : ''
     return req('GET', `/vulnerabilities/${encodeURIComponent(osvId)}${versionQuery}`)
   },
+  // Blast radius — "which of my applications ship this?", the reverse of the SBOM component
+  // cross-link. Org-scoped server-side from the session, never from a parameter. Latest project
+  // versions only: a superseded release is not what the tenant ships, and the nightly component
+  // scan does not keep its advisory links current.
+  getBlastRadiusByPackage: (ecosystem, name, params = {}) =>
+    req('GET', `/blast-radius/package?${qs({ ecosystem, name, limit: 50, page: 1, ...params })}`),
+  getBlastRadiusByAdvisory: (osvId, params = {}) =>
+    req('GET', `/blast-radius/advisory?${qs({ osvId, limit: 50, page: 1, ...params })}`),
+  // One request per rendered page, never one per row. `keys` is an array of OSV ids
+  // (kind='advisory') or `{ecosystem}/{name}` coordinates (kind='package'); a key absent from
+  // the answer ships nowhere, which the caller renders as zero rather than as unknown.
+  getBlastRadiusCounts: (kind, keys) => {
+    const query = keys.map((k) => `key=${encodeURIComponent(k)}`).join('&')
+    return req('GET', `/blast-radius/counts?kind=${encodeURIComponent(kind)}&${query}`)
+  },
+
   rescanVersion: (eco, name, version) =>
     req('POST', `/packages/${eco}/${name.replaceAll('/', '%2F')}/${version}/rescan`),
   blockVersion: (eco, name, version) =>
@@ -515,6 +613,54 @@ export const api = {
   deleteBanner: (id) => req('DELETE', `/banners/${id}`),
   getActiveBanners: () => req('GET', '/banners/active'),
   dismissBanner: (id) => req('POST', `/banners/${id}/dismiss`),
+
+  // ── Projects: SBOM / VEX / SARIF analysis ─────────────────────────────────
+  // `versionId` accepts the literal `latest`, which the server resolves against is_latest, so a
+  // CI link can deep-link the rolling latest without knowing its GUID.
+  // The component table is paged, filtered and sorted server-side: an SBOM runs to thousands of
+  // rows, and effective priority and the policy verdicts are the server's to compute, so the
+  // browser asks for a page rather than narrowing one it already holds.
+  getProjectVersionAnalysis: (projectId, versionId, params = {}) =>
+    req('GET', `/projects/${encodeURIComponent(projectId)}/versions/${encodeURIComponent(versionId)}/analysis?${qs(params)}`),
+
+  // Manual VEX triage. The body carries only the changed fields — absent means leave unchanged.
+  putProjectVersionAnalysis: (projectId, versionId, body) =>
+    req('PUT', `/projects/${encodeURIComponent(projectId)}/versions/${encodeURIComponent(versionId)}/analysis`, body),
+
+  listProjectVersionDocuments: (projectId, versionId) =>
+    req('GET', `/projects/${encodeURIComponent(projectId)}/versions/${encodeURIComponent(versionId)}/documents`),
+
+  // On-demand component vulnerability rescan for one project version. 1-hour cooldown,
+  // enforced server-side and reported back as a 429 + Retry-After the caller reads off
+  // ApiError.retryAfter, the same shape as the package-plane rescanVersion above.
+  rescanProjectVersion: (projectId, versionId) =>
+    req('POST', `/projects/${encodeURIComponent(projectId)}/versions/${encodeURIComponent(versionId)}/rescan`),
+
+  // Exports are normalized re-renders of the version's current state, produced fresh on each
+  // request. `downloadBlob` is content-type agnostic and prefers the server's own filename.
+  // Collection-scoped: one document covering every project beneath the folder, each contributing
+  // its latest version. Collections only — a plain project id is 404 here, because it has its own
+  // version-scoped export and answering a different question would ship the wrong document.
+  exportCollectionSbom: (collectionId, variant, fallbackFilename) =>
+    downloadBlob(
+      `/projects/${encodeURIComponent(collectionId)}/export/sbom`,
+      { variant },
+      fallbackFilename,
+    ),
+  exportProjectVersionSbom: (projectId, versionId, variant, fallbackFilename) =>
+    downloadBlob(
+      `/projects/${encodeURIComponent(projectId)}/versions/${encodeURIComponent(versionId)}/export/sbom`,
+      { variant },
+      fallbackFilename),
+  exportProjectVersionVex: (projectId, versionId, fallbackFilename) =>
+    downloadBlob(
+      `/projects/${encodeURIComponent(projectId)}/versions/${encodeURIComponent(versionId)}/export/vex`,
+      {},
+      fallbackFilename),
+
+  // The receipt: the uploaded document's own bytes, not a re-render of them.
+  downloadProjectDocument: (documentId, fallbackFilename) =>
+    downloadBlob(`/sbom-documents/${encodeURIComponent(documentId)}/original`, {}, fallbackFilename),
 }
 
 // System-admin surface (apex host, multi-mode only). All routes require scope=system JWT
@@ -531,8 +677,9 @@ export const systemApi = {
   // Storage quota: pass quotaBytes=null to clear (tenant becomes unlimited).
   setTenantStorageQuota: (slug, quotaBytes) =>
     req('PATCH', `/system/tenants/${slug}/storage-quota`, { quotaBytes }),
-  // Lifecycle gate. 'active' admits writes; 'suspended' immediately blocks pushes via
-  // ITenantStorageResolver (existing data is preserved).
+  // Lifecycle gate. 'active' serves normally; any other status is a full lockout — protocol
+  // access, downloads, the management API and login all refuse, for every user in the org.
+  // Existing data is preserved, and only an operator can set the status back to 'active'.
   setTenantStatus: (slug, status) =>
     req('PATCH', `/system/tenants/${slug}/status`, { status }),
 
@@ -590,6 +737,19 @@ export const systemApi = {
   // Operator aggregate relay health — same shape as api.getInstanceEmailHealth. Counts and
   // aggregate timestamps only; the system_admin SPA never renders a tenant identifier here.
   getEmailHealth: () => req('GET', '/system/email-health'),
+
+  // Instance vulnerability-tracker connection (apex-only, scope=system). One connection per
+  // deployment, serving every tenant; no per-org override and no tenant-facing read. GET/PUT
+  // responses return hasToken (bool), never the raw credential, and an omitted/empty token on
+  // PUT leaves the stored one unchanged.
+  getVulnTrackerConfig: () => req('GET', '/system/vuln-tracker-config'),
+  updateVulnTrackerConfig: (cfg) => req('PUT', '/system/vuln-tracker-config', cfg),
+
+  // Apex counterparts of api.testInstanceVulnTrackerConfig / api.getInstanceVulnTrackerHealth —
+  // same shapes, same backing aggregator, so the two SPAs cannot report differently about the
+  // one connection.
+  testVulnTrackerConfig: () => req('POST', '/system/vuln-tracker-config/test'),
+  getVulnTrackerHealth: () => req('GET', '/system/vuln-tracker-health'),
 
   // Support flows: lock/unlock account + force password reset. The email travels in the
   // request body, never the URL path, so it never lands in request logs or trace spans.

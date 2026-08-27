@@ -15,6 +15,18 @@ namespace Dependably.Security;
 /// request, each redirect hop, and on every named client it is wired onto — it is the
 /// authoritative SSRF gate regardless of what the URL-level pre-check
 /// (<see cref="UpstreamUrlValidator"/>) saw.
+///
+/// <para>
+/// That authority holds only while the handler dials the target directly. A handler is
+/// invoked with the <em>proxy</em>'s endpoint when a proxy is in effect, so the address
+/// vetted here would be the proxy's, and the proxy would then resolve and fetch the target
+/// on this process's behalf — passing the gate while defeating it. Since
+/// <c>SocketsHttpHandler.UseProxy</c> defaults to <see langword="true"/> and a null
+/// <c>Proxy</c> falls back to <c>HttpClient.DefaultProxy</c> (built on Unix from the ambient
+/// <c>HTTP_PROXY</c>/<c>HTTPS_PROXY</c>/<c>ALL_PROXY</c> variables), every handler carrying
+/// this callback must also set <c>UseProxy = false</c>. That pairing is enforced by
+/// <c>OutboundHttpHandlerComplianceTests</c>, not left to convention.
+/// </para>
 /// </summary>
 public sealed class SsrfConnectCallback
 {

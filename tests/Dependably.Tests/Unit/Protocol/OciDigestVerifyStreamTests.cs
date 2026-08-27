@@ -199,7 +199,7 @@ public sealed class OciDigestVerifyStreamTests
             int totalRead = 0;
             while (totalRead < payload.Length)
             {
-                int n = await stream.ReadAsync(buf, totalRead, payload.Length - totalRead, CancellationToken.None);
+                int n = await stream.ReadAsync(buf.AsMemory(totalRead, payload.Length - totalRead), CancellationToken.None);
                 if (n == 0)
                 {
                     break;

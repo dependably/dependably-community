@@ -28,13 +28,13 @@ public sealed class PackageRepositoryListParityTests : IClassFixture<InMemoryDbF
 
     private static (string Id, string Name, string PurlName, string Ecosystem,
         int VersionCount, int Critical, int High, int Medium, int Low,
-        long Downloads, bool Malicious, string LatestState) Key(Package p)
+        long Downloads, bool Malicious, bool Kev, string LatestState) Key(Package p)
         => (p.Id, p.Name, p.PurlName, p.Ecosystem, p.VersionCount, p.CriticalCount,
-            p.HighCount, p.MediumCount, p.LowCount, p.TotalDownloads, p.HasMaliciousVersion, p.LatestState);
+            p.HighCount, p.MediumCount, p.LowCount, p.TotalDownloads, p.HasMaliciousVersion, p.HasKevVersion, p.LatestState);
 
     private async Task<string> SeedPackageAsync(
         string orgId, string name, string createdAt, long downloads,
-        string[] severities, bool malicious)
+        string[] severities, bool malicious, bool kev = false)
     {
         string pkgId = Guid.NewGuid().ToString("N");
         string verId = Guid.NewGuid().ToString("N");
@@ -65,6 +65,15 @@ public sealed class PackageRepositoryListParityTests : IClassFixture<InMemoryDbF
             await VulnerabilitySeeder.LinkAsync(_fixture.Store, verId, vid);
         }
 
+        if (kev)
+        {
+            // is_kev = 1 drives HasKevVersion; the seeded one also carries a MEDIUM severity so
+            // its MediumCount contribution is part of the hand-computed truth.
+            string vid = await VulnerabilitySeeder.InsertVulnAsync(
+                _fixture.Store, "GHSA-" + Guid.NewGuid().ToString("N")[..8], severity: "MEDIUM", isKev: true);
+            await VulnerabilitySeeder.LinkAsync(_fixture.Store, verId, vid);
+        }
+
         return pkgId;
     }
 
@@ -83,12 +92,12 @@ public sealed class PackageRepositoryListParityTests : IClassFixture<InMemoryDbF
     private async Task<string> SeedFixtureAsync()
     {
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
-        // (name, createdAt, downloads, severities, malicious). Distinct names, created_at, and
+        // (name, createdAt, downloads, severities, malicious, kev). Distinct names, created_at, and
         // download totals so every tested sort is a total order with no tiebreaker ambiguity.
         await SeedPackageAsync(orgId, "aa-alpha", "2026-06-01T00:00:00Z", 500, ["CRITICAL", "HIGH"], false);
         await SeedPackageAsync(orgId, "aa-beta", "2026-06-02T00:00:00Z", 25, ["LOW"], false);
         await SeedPackageAsync(orgId, "cc-gamma", "2026-06-03T00:00:00Z", 300, [], true);
-        await SeedPackageAsync(orgId, "dd-delta", "2026-06-04T00:00:00Z", 50, [], false);
+        await SeedPackageAsync(orgId, "dd-delta", "2026-06-04T00:00:00Z", 50, [], false, kev: true);
         await SeedPackageAsync(orgId, "ee-epsilon", "2026-06-05T00:00:00Z", 800, ["MEDIUM", "LOW"], false);
         await SeedPackageAsync(orgId, "ff-zeta", "2026-06-06T00:00:00Z", 999, [], false);
         await SeedPackageAsync(orgId, "gg-eta", "2026-06-07T00:00:00Z", 10, ["CRITICAL", "HIGH", "MEDIUM", "LOW"], false);
@@ -110,21 +119,21 @@ public sealed class PackageRepositoryListParityTests : IClassFixture<InMemoryDbF
             ["aa-alpha", "aa-beta", "cc-gamma", "dd-delta", "ee-epsilon", "ff-zeta", "gg-eta", "hh-theta"],
             items.Select(p => p.Name).ToArray());
 
-        // Hand-computed aggregate truth per package (name → C,H,M,L,downloads,malicious).
-        var expected = new Dictionary<string, (int C, int H, int M, int L, long D, bool Mal)>
+        // Hand-computed aggregate truth per package (name → C,H,M,L,downloads,malicious,kev).
+        var expected = new Dictionary<string, (int C, int H, int M, int L, long D, bool Mal, bool Kev)>
         {
-            ["aa-alpha"] = (1, 1, 0, 0, 500, false),
-            ["aa-beta"] = (0, 0, 0, 1, 25, false),
-            ["cc-gamma"] = (0, 1, 0, 0, 300, true),
-            ["dd-delta"] = (0, 0, 0, 0, 50, false),
-            ["ee-epsilon"] = (0, 0, 1, 1, 800, false),
-            ["ff-zeta"] = (0, 0, 0, 0, 999, false),
-            ["gg-eta"] = (1, 1, 1, 1, 10, false),
-            ["hh-theta"] = (0, 1, 0, 0, 150, false),
+            ["aa-alpha"] = (1, 1, 0, 0, 500, false, false),
+            ["aa-beta"] = (0, 0, 0, 1, 25, false, false),
+            ["cc-gamma"] = (0, 1, 0, 0, 300, true, false),
+            ["dd-delta"] = (0, 0, 1, 0, 50, false, true),
+            ["ee-epsilon"] = (0, 0, 1, 1, 800, false, false),
+            ["ff-zeta"] = (0, 0, 0, 0, 999, false, false),
+            ["gg-eta"] = (1, 1, 1, 1, 10, false, false),
+            ["hh-theta"] = (0, 1, 0, 0, 150, false, false),
         };
         foreach (var p in items)
         {
-            var (c, h, m, l, d, mal) = expected[p.Name];
+            var (c, h, m, l, d, mal, kev) = expected[p.Name];
             Assert.Equal(1, p.VersionCount);
             Assert.Equal(c, p.CriticalCount);
             Assert.Equal(h, p.HighCount);
@@ -132,6 +141,7 @@ public sealed class PackageRepositoryListParityTests : IClassFixture<InMemoryDbF
             Assert.Equal(l, p.LowCount);
             Assert.Equal(d, p.TotalDownloads);
             Assert.Equal(mal, p.HasMaliciousVersion);
+            Assert.Equal(kev, p.HasKevVersion);
             Assert.Equal("unknown", p.LatestState);
         }
 

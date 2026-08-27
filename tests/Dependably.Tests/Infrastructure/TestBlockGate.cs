@@ -1,8 +1,10 @@
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Alerts;
+using Dependably.Infrastructure.Webhooks;
 using Dependably.Protocol;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
+using NSubstitute;
 
 namespace Dependably.Tests.Infrastructure;
 
@@ -18,8 +20,21 @@ public static class TestBlockGate
     /// combination is exactly the fail-closed case, so a test asserting a serve under 'block' must
     /// pass a store seeded with an anchor for the ecosystem under test.
     /// </param>
+    /// <param name="eventSink">
+    /// Webhook dispatch seam for the <c>package.blocked</c> event. Defaults to a discarding
+    /// substitute; a test asserting on dispatch passes its own so it can inspect received calls.
+    /// </param>
+    /// <param name="webhookThrottle">
+    /// Burst throttle in front of that dispatch. Defaults to a real throttle sharing the caller's
+    /// clock with a zero window, so every refusal in a test that does not itself exercise
+    /// coalescing dispatches — tests asserting the throttle's own behaviour pass a non-zero window.
+    /// </param>
     public static BlockGateService Create(
-        IMetadataStore db, TimeProvider clock, IPerOrgTrustAnchorStore? anchors = null) =>
+        IMetadataStore db,
+        TimeProvider clock,
+        IPerOrgTrustAnchorStore? anchors = null,
+        IPackageEventSink? eventSink = null,
+        BlockRefusalWebhookThrottle? webhookThrottle = null) =>
         new(
             new VulnerabilityRepository(db, clock),
             new AuditRepository(db),
@@ -29,5 +44,8 @@ public static class TestBlockGate
             new LicenseRepository(db, clock, new LicenseNormalizer(db, NullLogger<LicenseNormalizer>.Instance)),
             anchors ?? new StubPerOrgTrustAnchorStore(),
             NullLogger<BlockGateService>.Instance,
-            clock);
+            clock,
+            new OrgRepository(db),
+            eventSink ?? Substitute.For<IPackageEventSink>(),
+            webhookThrottle ?? new BlockRefusalWebhookThrottle(clock, TimeSpan.Zero));
 }

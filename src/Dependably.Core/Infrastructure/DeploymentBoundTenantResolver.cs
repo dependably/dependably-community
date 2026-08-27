@@ -32,10 +32,12 @@ public sealed class DeploymentBoundTenantResolver : ITenantResolver
     public async Task<TenantContext> ResolveAsync(HttpContext context, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var (Id, Slug) = await conn.QuerySingleOrDefaultAsync<(string Id, string Slug)>(
-            "SELECT id, slug FROM orgs WHERE slug = @slug AND deleted_at IS NULL LIMIT 1",
+        // Status flows through to TenantContext so TenantStatusEnforcementMiddleware can refuse
+        // a suspended/archived/deleting tenant the same way every other resolver strategy does.
+        var (Id, Slug, Status) = await conn.QuerySingleOrDefaultAsync<(string Id, string Slug, string Status)>(
+            "SELECT id, slug, status FROM orgs WHERE slug = @slug AND deleted_at IS NULL LIMIT 1",
             new { slug = _boundSlug });
 
-        return Id is null ? TenantContext.Uninitialized : TenantContext.ForTenant(Id, Slug);
+        return Id is null ? TenantContext.Uninitialized : TenantContext.ForTenant(Id, Slug, Status);
     }
 }

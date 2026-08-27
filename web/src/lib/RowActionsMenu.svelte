@@ -9,7 +9,9 @@
       <button class="popover-item danger" on:click|stopPropagation={() => del(row)}>Delete</button>
     </RowActionsMenu>
 
-  The component owns the kebab button + popover positioning + click-outside dismiss. The
+  The component owns the kebab button + popover positioning (including flipping above the trigger
+  when there is no room below — it is position:fixed, so an overflowing menu is unreachable rather
+  than merely clipped) + click-outside dismiss. The
   consumer supplies the menu items via the default slot and closes the menu by either
   binding `openId` (set to null in the click handler) or letting click-outside handle it.
 
@@ -18,6 +20,8 @@
   content renders in the parent's scope. (Same trade-off VersionTable.svelte already makes.)
 -->
 <script>
+  import { tick } from 'svelte'
+
   /** Row id used to match this button against the currently-open popover. */
   export let id
   /** Two-way binding: the id of the row whose popover is open, or null. */
@@ -26,17 +30,33 @@
   export let ariaLabel = 'Open actions menu'
 
   let popoverPos = { top: 0, left: 0 }
+  let popoverEl
 
-  function toggle(e) {
+  /** Gap between the trigger and the popover, and the minimum margin off a viewport edge. */
+  const GAP = 4
+  const EDGE = 8
+
+  async function toggle(e) {
     e.stopPropagation()
     if (openId === id) { openId = null; return }
     const rect = e.currentTarget.getBoundingClientRect()
     const POPOVER_WIDTH = 180
     popoverPos = {
-      top: rect.bottom + 4,
-      left: Math.max(8, rect.right - POPOVER_WIDTH),
+      top: rect.bottom + GAP,
+      left: Math.max(EDGE, rect.right - POPOVER_WIDTH),
     }
     openId = id
+
+    // The popover is position:fixed, so a `top` past the viewport bottom puts it somewhere no
+    // amount of scrolling can reach — the menu is simply unreachable for any row low enough on a
+    // long list. Its height depends on the slotted items, so it is measured once rendered and
+    // flipped above the trigger when it does not fit below.
+    await tick()
+    if (!popoverEl || openId !== id) return
+    const height = popoverEl.getBoundingClientRect().height
+    if (popoverPos.top + height > window.innerHeight - EDGE) {
+      popoverPos = { ...popoverPos, top: Math.max(EDGE, rect.top - height - GAP) }
+    }
   }
 
   function handleWindowClick(e) {
@@ -58,7 +78,13 @@
 >⋯</button>
 
 {#if openId === id}
-  <div class="actions-popover" style:top="{popoverPos.top}px" style:left="{popoverPos.left}px" role="menu">
+  <div
+    class="actions-popover"
+    bind:this={popoverEl}
+    style:top="{popoverPos.top}px"
+    style:left="{popoverPos.left}px"
+    role="menu"
+  >
     <slot />
   </div>
 {/if}
