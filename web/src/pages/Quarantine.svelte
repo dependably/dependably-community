@@ -22,13 +22,8 @@
   import { blastRadiusCell } from '../lib/blastRadius.js'
   import { readQuery, writeQuery } from '../lib/tableState.js'
   import { daysSince } from '../lib/age.js'
+  import { BLOCK_GATES as GATES } from '../lib/gates.js'
 
-  // Every gate the block gate can record. Drives the gate filter, so a value missing here is a
-  // gate the queue cannot be narrowed to.
-  const GATES = [
-    'deprecated', 'revoked', 'release_age', 'license', 'install_script',
-    'provenance', 'malicious', 'kev', 'kev_ransomware', 'epss', 'vuln_score',
-  ]
 
   // Table state lives in the URL query string so it survives navigating into a detail page and
   // back (this component is recreated on every route change) as well as reloads and copied links.

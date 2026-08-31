@@ -181,6 +181,8 @@ public static partial class SbomAnalysisProjection
         bool isDev = string.Equals(component.DependencyScope, "dev", StringComparison.Ordinal);
         bool isExcluded = string.Equals(component.SbomScope, "excluded", StringComparison.Ordinal);
 
+        var resolvedMetadata = ComponentMetadataResolver.Resolve(component, registryFacts);
+
         return new AnalysisComponentView
         {
             ComponentId = component.Id,
@@ -198,6 +200,19 @@ public static partial class SbomAnalysisProjection
             DependencyKind = component.DependencyKind,
             DependencyPath = ParseJsonArray(component.DependencyPath),
             LicenseSpdx = component.LicenseSpdx,
+            // The registry's own record of the package wins over the uploaded document's
+            // description of it, field by field — see ComponentMetadataResolver.
+            Description = resolvedMetadata.Description,
+            Author = resolvedMetadata.Author,
+            WebsiteUrl = resolvedMetadata.WebsiteUrl,
+            VcsUrl = resolvedMetadata.VcsUrl,
+            MetadataSource = resolvedMetadata.Source,
+            // No registry equivalent exists for these, so they are the document's alone.
+            Copyright = component.Copyright,
+            Group = component.ComponentGroup,
+            IssueTrackerUrl = component.IssueTrackerUrl,
+            DistributionUrl = component.DistributionUrl,
+            Hashes = ParseJsonArray(component.ComponentHashes),
             Registry = SbomRegistryView.For(
                 component.Ecosystem, component.PurlName, component.Version, registryFacts),
             Advisories = advisoryViews,
@@ -732,6 +747,27 @@ public sealed class AnalysisComponentView
     public string? DependencyKind { get; init; }
     public JsonArray? DependencyPath { get; init; }
     public string? LicenseSpdx { get; init; }
+    /// <summary>
+    /// Presentation metadata the component's own SBOM entry carried. Every field is display-only
+    /// and null for a component whose producer omitted it — and null for every row written before
+    /// ingest recorded these, until that document is re-merged.
+    /// </summary>
+    public string? Description { get; init; }
+    public string? Author { get; init; }
+    public string? Copyright { get; init; }
+    public string? Group { get; init; }
+    public string? WebsiteUrl { get; init; }
+    public string? VcsUrl { get; init; }
+    public string? IssueTrackerUrl { get; init; }
+    public string? DistributionUrl { get; init; }
+    /// <summary>components[].hashes as parsed JSON, or null. Display and export only.</summary>
+    public JsonArray? Hashes { get; init; }
+    /// <summary>
+    /// Which source answered for the four fields both planes can describe: <c>registry</c>,
+    /// <c>sbom</c>, <c>mixed</c>, or null when neither carried anything. Rendered so a reader can
+    /// tell a fact this instance observed from one an uploaded document asserted.
+    /// </summary>
+    public string? MetadataSource { get; init; }
     /// <summary>What this tenant's own registry knows about the component's coordinate.</summary>
     public ComponentRegistryView Registry { get; init; } = ComponentRegistryView.Unknown;
     public IReadOnlyList<AnalysisAdvisoryView> Advisories { get; init; } = Array.Empty<AnalysisAdvisoryView>();

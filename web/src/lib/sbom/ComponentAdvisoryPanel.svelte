@@ -11,8 +11,10 @@
   dash rather than as "unknown" — "nobody told us" and "the analyzer said unknown" are
   different statements and the panel keeps them apart.
 
-  The SSVC and NVD/GHSA band chips render only when the payload carries them. Nothing emits
-  them yet; an unconfigured overlay produces no chips at all.
+  The SSVC and NVD/GHSA band chips, the cvelistV5 CVSS/SSVC overlay chips, the exploit-code
+  chip, the compromised-versions detail, and the still-live-malicious badge all render only when
+  the payload carries them. Nothing emits them yet; an unconfigured overlay produces no chips at
+  all.
 
   Props:
     item            one component row from the analysis payload
@@ -37,7 +39,11 @@
   import { remediationSkillIds, resolvedFixedVersion } from '../remediation.js'
   import DependencyPath from './DependencyPath.svelte'
   import VexAnalysisEditor from './VexAnalysisEditor.svelte'
-  import { isSuppressed, overlayChips, reachBadge, visibleAdvisories } from './analysis.js'
+  import {
+    compromisedVersionsChip, exploitCodeChip, isSuppressed, overlayChips, reachBadge,
+    stillLiveMaliciousBadge, visibleAdvisories,
+  } from './analysis.js'
+  import { componentLinksOf, hasComponentMetadata } from './metadata.js'
 
   /** @type {Record<string, any>} */
   export let item = {}
@@ -52,6 +58,10 @@
 
   // The analysis row is keyed by the component's PURL; the payload may name it explicitly.
   $: purlKey = item.purlKey ?? item.purl ?? ''
+  // Reactive, not a bare call: the panel is reused across rows as the table re-renders, and a
+  // plain helper() in the template would keep the first row's answer.
+  $: componentLinks = componentLinksOf(item)
+  $: hasMetadata = hasComponentMetadata(item)
   // The server resolves whether a component is served from this registry and may supply the
   // link itself; the SPA route is the fallback so the anchor always carries a real href.
   $: purlHref = item.registryLink ?? pathFor('version-detail', { ecosystem: item.ecosystem, name: item.name })
@@ -156,6 +166,62 @@
     </div>
   {/if}
 
+  <!-- What the SBOM itself said this component is. Every field is the producer's own text,
+       rendered only when present: a component whose document omitted a field, and one recorded
+       before ingest captured these at all, both correctly show nothing rather than an empty
+       label. The whole block disappears when the payload carries none of them. -->
+  {#if hasMetadata}
+    <div class="detail-section col">
+      <span class="detail-label">
+        {$t('sbomAnalysis.panel.about')}
+        <!-- Which source answered. A fact this registry observed in the artifact it fetched and a
+             fact an uploaded document asserted are different kinds of claim, so the panel says
+             which it is rather than presenting one blended answer. -->
+        {#if item.metadataSource}
+          <span class="metadata-source">{$t(`sbomAnalysis.panel.source.${item.metadataSource}`)}</span>
+        {/if}
+      </span>
+      {#if item.description}
+        <p class="component-description">{item.description}</p>
+      {/if}
+      <dl class="component-facts">
+        {#if item.author}
+          <dt>{$t('sbomAnalysis.panel.author')}</dt>
+          <dd>{item.author}</dd>
+        {/if}
+        {#if item.group}
+          <dt>{$t('sbomAnalysis.panel.group')}</dt>
+          <dd class="mono">{item.group}</dd>
+        {/if}
+        {#if item.copyright}
+          <dt>{$t('sbomAnalysis.panel.copyright')}</dt>
+          <dd>{item.copyright}</dd>
+        {/if}
+      </dl>
+      {#if componentLinks.length}
+        <div class="component-links">
+          {#each componentLinks as link (link.key)}
+            <a class="pkg-link" href={link.url} target="_blank" rel="noopener noreferrer">
+              <svg width="12" height="12" aria-hidden="true"><use href="/icons.svg#icon-external"/></svg>
+              {$t(`sbomAnalysis.panel.links.${link.key}`)}
+            </a>
+          {/each}
+        </div>
+      {/if}
+      {#if item.hashes?.length}
+        <!-- Recorded from the document, never verified against anything: the registry checks an
+             artifact it holds against the digest it computed at ingest, so a hash asserted by a
+             third-party document is shown as a claim, not as a integrity result. -->
+        <div class="component-hashes">
+          <span class="detail-label">{$t('sbomAnalysis.panel.hashes')}</span>
+          {#each item.hashes as h, hi (hi)}
+            <p class="hash-row"><span class="hash-alg">{h.alg}</span><span class="mono hash-value">{h.content}</span></p>
+          {/each}
+        </div>
+      {/if}
+    </div>
+  {/if}
+
   {#if otherViolations.length}
     <!-- Findings naming no advisory — the licence arm's shape. Rendered whether or not the
          component carries any advisory, so a licence-only violation is visible on a row the
@@ -186,6 +252,9 @@
     {@const suppressed = isSuppressed(a)}
     {@const reach = reachBadge(a.reachability)}
     {@const chips = overlayChips(a)}
+    {@const stillLive = stillLiveMaliciousBadge(a)}
+    {@const exploitCode = exploitCodeChip(a)}
+    {@const compromisedVersions = compromisedVersionsChip(a)}
     <div class="advisory" class:suppressed>
       <div class="advisory-head">
         {#if a.osvId}
@@ -198,6 +267,18 @@
           <span class="sev sev-unknown" aria-label={$t('sbomAnalysis.panel.unscoredHelp')} title={$t('sbomAnalysis.panel.unscoredHelp')}>{$t('sbomAnalysis.panel.unscored')}</span>
         {:else if a.severity}
           <span class="sev sev-{String(a.severity).toLowerCase()}" aria-label={a.severity}>{a.severity}</span>
+        {/if}
+
+        <!-- Most alarming tier on this panel: the version-precise signal wired into the live
+             block gate, so it renders even ahead of the KEV/ransomware badges below. -->
+        {#if stillLive}
+          <span
+            class="badge malicious-live"
+            title={stillLive.checkedAt
+              ? $t('sbomAnalysis.panel.malStillLiveHelp', { values: { checkedAt: stillLive.checkedAt } })
+              : $t('sbomAnalysis.panel.malStillLiveHelpNoDate')}
+            aria-label={$t('sbomAnalysis.panel.malStillLive')}
+          >{$t('sbomAnalysis.panel.malStillLive')}</span>
         {/if}
 
         {#if a.isKevRansomware === true}
@@ -217,6 +298,12 @@
         {#each chips as c (c.key)}
           <span class="badge overlay-{c.kind}" title={c.title ?? undefined} aria-label={c.value}>{c.value}</span>
         {/each}
+
+        <!-- Informational, alongside the EPSS/CVSS/KEV badges above rather than at a different
+             visual tier — a public sighting of exploit code, not a gate signal. -->
+        {#if exploitCode}
+          <span class="badge overlay-exploit-code" title={exploitCode.title ?? undefined} aria-label={exploitCode.value}>{exploitCode.value}</span>
+        {/if}
       </div>
 
       <div class="detail-meta">
@@ -266,6 +353,12 @@
           <div class="meta-item">
             <span class="detail-label">{$t('sbomAnalysis.panel.sarifSuppressed')}</span>
             <span class="detail-value">{$t('sbomAnalysis.panel.sarifSuppressedHelp')}</span>
+          </div>
+        {/if}
+        {#if compromisedVersions}
+          <div class="meta-item">
+            <span class="detail-label">{$t('sbomAnalysis.panel.malCompromisedVersions')}</span>
+            <span class="detail-value mono">{compromisedVersions.versions.join(', ')}</span>
           </div>
         {/if}
       </div>
@@ -429,6 +522,22 @@
 
   .verdict { margin: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
   .verdict-detail { color: var(--text2); font-size: 12px; overflow-wrap: anywhere; }
+
+  /* Producer prose: wrapped and width-capped rather than clamped, because the panel is the
+     surface a reader opened to read the detail. Ingest already bounds the stored length. */
+  .component-description { margin: 4px 0 8px; color: var(--text2); font-size: 12px; max-width: 80ch; overflow-wrap: anywhere; }
+  .metadata-source { font-weight: 400; color: var(--text2); opacity: 0.75; margin-left: 6px; text-transform: none; }
+  .component-facts { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 0 0 8px; font-size: 12px; }
+  .component-facts dt { color: var(--text2); opacity: 0.8; }
+  .component-facts dd { margin: 0; color: var(--text2); overflow-wrap: anywhere; }
+  .component-links { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 8px; }
+  .component-links .pkg-link { display: inline-flex; align-items: center; gap: 4px; color: var(--accent); text-decoration: none; font-size: 12px; }
+  .component-links .pkg-link:hover { text-decoration: underline; }
+  .component-hashes { display: flex; flex-direction: column; gap: 2px; }
+  .hash-row { display: flex; gap: 8px; margin: 0; font-size: 11px; align-items: baseline; }
+  .hash-alg { color: var(--text2); opacity: 0.8; min-width: 5em; }
+  /* A digest is long and must never widen the panel past its column. */
+  .hash-value { color: var(--text2); overflow-wrap: anywhere; min-width: 0; }
 
   /* Remediation guidance, fetched on demand from the advisory-detail endpoint the registry's own
      vulnerability report already uses. */

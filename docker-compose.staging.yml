@@ -41,12 +41,14 @@ services:
       DOTNET_GCHeapHardLimit: "0x60000000"
     # Bounded so a staging deploy can never starve the host's other workloads.
     mem_limit: 2g
+    # start_period covers the schema apply, not a normal boot — a migration killed mid-pass is
+    # not ledgered and repeats on every restart. See the Dockerfile HEALTHCHECK for the full note.
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/ready"]
       interval: 10s
       timeout: 5s
       retries: 3
-      start_period: 30s
+      start_period: 15m
     read_only: true
     tmpfs:
       - /tmp

@@ -118,6 +118,9 @@ public sealed class SbomDocumentStore
                 SizeBytes = write.SizeBytes,
                 BlobKey = blobKey,
                 UploadedBy = write.UploadedBy,
+                // Stamped by the build that actually applied the document, so the dedup arm can
+                // tell rows written by this projection from rows written by an older one.
+                IngestVersion = SbomIngestVersion.Current,
                 UploadedAt = write.UploadedAt,
             },
             ct);

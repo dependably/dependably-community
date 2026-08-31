@@ -1000,7 +1000,7 @@ public sealed partial class SchemaInitializer
         {
             await conn.ExecuteAsync("PRAGMA writable_schema = RESET");
         }
-        await conn.ExecuteAsync("PRAGMA integrity_check");
+        await VerifyCheckAdmitsAsync(conn, "vulnerabilities", "severity", "CRITICAL");
     }
 
     private static async Task<string> ReadSchemaAsync(DbProvider provider, CancellationToken ct)

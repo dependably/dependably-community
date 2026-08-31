@@ -219,7 +219,8 @@
       "open": "Package actions",
       "allowSameVersionPush": "Allow same-version push",
       "blockSameVersionPush": "Block same-version push",
-      "inheritOrgDefault": "Inherit (org default)"
+      "inheritOrgDefault": "Inherit (org default)",
+      "copyInstall": "Copy install command"
     },
     "empty": "No packages found"
   },
@@ -442,7 +443,8 @@
   "versionDetail": {
     "meta": {
       "homepage": "Homepage",
-      "repository": "Repository"
+      "repository": "Repository",
+      "author": "Author"
     },
     "columns": {
       "version": "Version",
@@ -569,6 +571,16 @@
         "sha512-sri": "Upstream SHA-512 (SRI)",
         "sha512-b64": "Upstream SHA-512 (base64)",
         "shasum": "Upstream SHA-1 (shasum)"
+      }
+    },
+    "install": {
+      "install": "Install",
+      "pull": "Pull",
+      "caveat": {
+        "requiresSetup": "Works once this registry is configured for the ecosystem. See Setup.",
+        "httpMirror": "This instance serves over plain HTTP, and Terraform rejects an http:// mirror URL.",
+        "dependenciesFromConfiguredRepos": "Installs this exact package. Its dependencies still resolve from your configured repositories.",
+        "insecureRegistry": "This instance serves over plain HTTP, so Docker also needs it listed under insecure-registries."
       }
     },
     "blastRadius": {
@@ -1268,6 +1280,11 @@
       "blockMaliciousOff": "Off — ignore malware advisories",
       "blockMaliciousWarn": "Warn — flag only",
       "blockMaliciousBlock": "Block — refuse flagged versions",
+      "blockMaliciousLive": "Still-live malicious version",
+      "blockMaliciousLiveHint": "Narrower than the malicious package policy above: applies only when the vulnerability tracker's version-precise check finds that this exact version is still serving compromised bytes right now, not merely that it was once flagged. Leave the gate above at Warn and set this to Block to refuse only the still-live versions rather than every flagged one. Requires the vulnerability tracker connection; without one, this gate never fires however it is set.",
+      "blockMaliciousLiveOff": "Off",
+      "blockMaliciousLiveWarn": "Warn",
+      "blockMaliciousLiveBlock": "Block",
       "blockKev": "Known-exploited (KEV) policy",
       "blockKevHint": "How versions are handled when one of their advisories aliases a CVE in the CISA Known Exploited Vulnerabilities Catalog — confirmed exploited in the wild, independent of CVSS score. The catalogue is refreshed daily by the threat-feed job. Block returns 403 on fetch and serve; Warn surfaces the KEV flag in the vulnerability report only. A per-version manual allow override still wins.",
       "blockKevOff": "Off — ignore KEV listings",
@@ -1599,9 +1616,62 @@
     }
   },
   "setup": {
-    "title": "Setup Snippets",
-    "subtitle": "Configuration snippets for connecting your tools to this registry.",
-    "moreOptions": "More setup options (project + global recipes for npm, PyPI, NuGet) →"
+    "title": "Connect a package manager",
+    "step": {
+      "token": {
+        "title": "Create a token",
+        "create": "Create token",
+        "shownOnce": "Copy this now — it is not shown again.",
+        "useExisting": "Already have a token? Manage tokens",
+        "createAnother": "Create a different token",
+        "presetMismatch": "This token is read-only, so publishing will be refused. Create a {preset} token instead."
+      },
+      "choose": {
+        "title": "Choose your package manager"
+      },
+      "config": {
+        "title": "Copy the configuration",
+        "none": "Choose a package manager above to see its configuration."
+      }
+    },
+    "axis": {
+      "ecosystem": "Package manager",
+      "operation": "I want to",
+      "scope": "Applies to",
+      "variant": "Tool"
+    },
+    "operation": {
+      "install": "Install packages",
+      "publish": "Publish packages"
+    },
+    "scope": {
+      "project": "This project",
+      "global": "My machine"
+    },
+    "proxyOnly": "{ecosystem} is install-only on this registry — publishing is not supported.",
+    "location": {
+      "repoRoot": "in your repository root",
+      "workspaceRoot": "in your workspace root",
+      "homeDir": "in your home directory",
+      "eachMachine": "on each developer's machine, not committed"
+    },
+    "file": {
+      "secretBearing": "Holds the token in clear text. Keep it out of source control and restrict its permissions (chmod 600)."
+    },
+    "token": {
+      "lineTitle": "Set the token",
+      "lineHint": "Run this in the terminal you install from — it lasts only for that terminal session.",
+      "lineHintNoToken": "Create a token in step 1 and this line will carry it."
+    },
+    "verify": {
+      "title": "Check it works"
+    },
+    "caveat": {
+      "httpMavenBlocked": "Maven 3.8.1 and later block plain-HTTP repositories outright. Serve this registry over HTTPS, or add a mirror declaring blocked=false.",
+      "httpCleartextCredentials": "This registry uses plain HTTP, so the token travels in clear text. Use it only on a trusted network.",
+      "insecureRegistry": "Docker refuses a plain-HTTP registry until the daemon opts in. Restart the daemon after editing daemon.json.",
+      "httpMirror": "Terraform rejects an http:// network mirror and there is no client-side override. This registry must be served over HTTPS before this configuration can work."
+    }
   },
   "admin": {
     "orgs": {
@@ -1660,7 +1730,6 @@
     },
     "prevention": {
       "title": "Prevention (30d)",
-      "empty": "0 pulls blocked in the last 30 days",
       "emptyServed": "{count, plural, one {# pull was served in this window and no gate refused it.} other {# pulls were served in this window and no gate refused any of them.}} Enforcement modes are set in Settings → Gates.",
       "emptyNoTraffic": "No pulls were served in this window, so there was nothing to evaluate."
     },
@@ -2600,23 +2669,7 @@
     "license": {
       "dispositionInvalid": "Disposition must be one of: allowed, conditional.",
       "noteTooLong": "Note is too long."
-    },
-    "packageNote": {
-      "coordinateRequired": "Ecosystem and package name are required.",
-      "noteRequired": "Note text is required.",
-      "noteTooLong": "Note is too long."
     }
-  },
-  "packageNotes": {
-    "title": "Notes",
-    "intro": "Compliance notes an administrator has left on this package — including why it was accepted under a conditional licence.",
-    "empty": "No notes on this package.",
-    "placeholder": "Add a note about this package",
-    "add": "Add note",
-    "removeConfirm": "Remove this note?",
-    "scopedToPackage": "All versions",
-    "scopedToVersion": "Version {version}",
-    "unknownAuthor": "Unknown author"
   },
   "sbomAnalysis": {
     "title": "Project version",
@@ -2763,6 +2816,22 @@
     },
     "panel": {
       "purl": "PURL",
+      "about": "About this component",
+      "author": "Author",
+      "group": "Group",
+      "copyright": "Copyright",
+      "hashes": "Declared hashes",
+      "source": {
+        "registry": "from your registry",
+        "sbom": "from the SBOM",
+        "mixed": "from your registry and the SBOM"
+      },
+      "links": {
+        "website": "Website",
+        "vcs": "Source",
+        "issueTracker": "Issues",
+        "distribution": "Download"
+      },
       "dependencyPath": "Dependency path",
       "noAdvisories": "No advisories recorded against this component.",
       "allSuppressed": "Every advisory on this component is suppressed. Turn on Show suppressed to review them.",
@@ -2777,6 +2846,10 @@
       "kevHelp": "Listed in the CISA Known Exploited Vulnerabilities Catalog — confirmed exploited in the wild, independent of CVSS score.",
       "kevRansomware": "KEV · Ransomware",
       "kevRansomwareHelp": "Listed in the CISA Known Exploited Vulnerabilities Catalog with confirmed use in ransomware campaigns — the highest-urgency KEV entries.",
+      "malStillLive": "Still live",
+      "malStillLiveHelp": "This exact version is still serving compromised bytes — the vulnerability tracker's version-precise check last confirmed this at {checkedAt}. This is the signal the still-live-malicious block gate acts on.",
+      "malStillLiveHelpNoDate": "This exact version is still serving compromised bytes, per the vulnerability tracker's version-precise check. This is the signal the still-live-malicious block gate acts on.",
+      "malCompromisedVersions": "Compromised versions",
       "reachability": "Reachability",
       "noReachabilityHelp": "No SARIF analysis has reported on this advisory, so reachability is unstated — which is not the same as an analyzer reporting it unknown.",
       "confidence": "Confidence",

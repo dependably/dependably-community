@@ -79,12 +79,14 @@ public sealed class CoreStartupService : IHostedService
             "dependably {Version} starting — db={DbPath} storage={Storage}",
             version, dbPath, storage);
 
-        await _schema.InitializeAsync(cancellationToken);
-
-        // Claim the shared-SQLite single-writer lock before doing any further work or accepting
-        // traffic. A live foreign holder throws here (fail-fast, message names the peer); a stale
-        // holder is taken over. No-op for Postgres and in-memory SQLite (the guard self-skips).
-        await _instanceLock.TryAcquireAsync(cancellationToken);
+        // The shared-SQLite single-writer lock is claimed from inside the schema apply, as soon as
+        // the base schema has created the instance_lock table the guard lives in and before the
+        // first one-time migration runs. Claiming it after the apply instead would leave the whole
+        // migration sequence — the longest, least interruptible stretch of startup — unguarded, so
+        // two processes pointed at one database file would both run it. A live foreign holder
+        // throws from there (fail-fast, message names the peer); a stale holder is taken over.
+        // No-op for Postgres and in-memory SQLite (the guard self-skips).
+        await _schema.InitializeAsync(cancellationToken, _instanceLock.TryAcquireAsync);
 
         await _firstBoot.RunAsync(cancellationToken);
         await MigrateSecretsToEnvelopeAsync(cancellationToken);

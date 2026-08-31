@@ -69,11 +69,29 @@ and the upgrade path, because the two paths produce different on-disk shapes:
 - **Existing databases** need the stored constraint rewritten via a `RunOnceAsync(..., transactional: false)`
   one-shot. Postgres drops + re-adds the auto-named `<table>_<col>_check` constraint (`IF EXISTS` covers
   installs that never had one); SQLite rewrites the stored `CREATE TABLE` text through the
-  `PRAGMA writable_schema` pattern, then bumps `PRAGMA schema_version` and runs `integrity_check`.
+  `PRAGMA writable_schema` pattern, then bumps `PRAGMA schema_version`, then verifies the rewrite
+  with `VerifyCheckAdmitsAsync`.
   Both branches are idempotent, which is why they opt out of the enclosing transaction.
 - **Columns added by a later `ALTER ADD COLUMN`** (rather than the original `CREATE TABLE`) carry **no**
   CHECK on upgraded databases, so those installs rely on controller-side validation — the rewrite simply
   no-ops on them.
+
+**Verify the rewrite; do not run `integrity_check` to do it.** The SQLite rewrite is an exact
+literal `REPLACE` against the stored `CREATE TABLE` text. When that literal does not match — the
+text was emitted by a release that spelled the clause differently — the statement succeeds,
+changes nothing, and `RunOnceAsync` records the migration applied, permanently. The narrow
+constraint survives, and the failure surfaces much later as an unexplained rejected `INSERT` of a
+value the release notes say is supported. `VerifyCheckAdmitsAsync` reads the stored text back and
+asserts the column's CHECK now admits the new value, which both catches that no-op and forces the
+schema re-parse that surfaces a malformed rewrite.
+
+Ending the rewrite with `PRAGMA integrity_check` instead — as these migrations used to — is a
+false economy twice over. It costs O(the entire database): it walks and cross-checks every page of
+every table and index, so a 4 GB store spent minutes per migration verifying a change to one row
+of `sqlite_schema`, and every additional CHECK widen in a release paid it again. And it never
+answered the question that matters, because a database whose rewrite silently no-opped is not
+corrupt — it reports `ok`. `SchemaIntegrityTests` still runs `integrity_check`, which is the right
+place for it: a fresh, empty database where it is cheap.
 
 Precedents: `expand_role_check_with_auditor` (adds `'auditor'` to `users.role` / `invites.role`) and
 `expand_block_deprecated_check` (widens `org_settings.block_deprecated` to `'block_new'`/`'block_all'`).

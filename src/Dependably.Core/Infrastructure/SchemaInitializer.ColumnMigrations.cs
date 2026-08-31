@@ -331,6 +331,21 @@ public sealed partial class SchemaInitializer
         await conn.ExecuteAsync("ALTER TABLE package_versions DROP COLUMN sbom");
     }
 
+    // Drops `package_note`. The package-note feature is retired: no code reads or writes the
+    // table and neither schema file declares it. Runs on every boot rather than through
+    // RunOnceAsync, because the previous release declares package_note in its own base schema and
+    // re-creates it whenever one of its slots boots against this database. A ledgered drop would
+    // record itself applied on a fresh database and then skip the boot that actually needed it.
+    private async Task DropPackageNoteTableAsync(DbConnection conn)
+    {
+        if (!await TableExistsAsync(conn, "package_note"))
+        {
+            return;
+        }
+
+        await conn.ExecuteAsync("DROP TABLE package_note");
+    }
+
     // Drops `metadata_cache`. It was created for a planned upstream-metadata cache (npm packument,
     // PyPI simple HTML, NuGet registration) with TTL revalidation via idx_metadata_cache_expires,
     // but that caching is implemented in memory instead (single-flight + TTL per ecosystem, e.g.
@@ -1114,6 +1129,66 @@ public sealed partial class SchemaInitializer
             "ALTER TABLE vulnerabilities ADD COLUMN kev_required_action TEXT",
             "ALTER TABLE vulnerabilities ADD COLUMN kev_cwes TEXT",
             "ALTER TABLE vulnerabilities ADD COLUMN kev_notes TEXT",
+            // Presentation metadata the CycloneDX component entry already carried and ingest
+            // previously discarded: what the component is, who wrote it, and where it lives.
+            // All nullable and display-only — no gate reads them. Existing rows stay NULL until
+            // their document is re-merged, which project_documents.ingest_version below forces
+            // exactly once rather than leaving to the next time a dependency happens to change.
+            "ALTER TABLE sbom_components ADD COLUMN description TEXT",
+            "ALTER TABLE sbom_components ADD COLUMN component_author TEXT",
+            "ALTER TABLE sbom_components ADD COLUMN copyright TEXT",
+            "ALTER TABLE sbom_components ADD COLUMN component_group TEXT",
+            "ALTER TABLE sbom_components ADD COLUMN website_url TEXT",
+            "ALTER TABLE sbom_components ADD COLUMN vcs_url TEXT",
+            "ALTER TABLE sbom_components ADD COLUMN issue_tracker_url TEXT",
+            "ALTER TABLE sbom_components ADD COLUMN distribution_url TEXT",
+            "ALTER TABLE sbom_components ADD COLUMN component_hashes TEXT",
+            // Which revision of the ingest projection wrote a document's rows. Defaults to 0,
+            // below every real revision, so every document stored before this column existed
+            // reads as stale and is re-merged once on its next upload — the alternative is a
+            // byte-identical re-upload short-circuiting on sha256 alone and leaving the columns
+            // above NULL for as long as a project's dependencies happen not to change.
+            "ALTER TABLE project_documents ADD COLUMN ingest_version INTEGER NOT NULL DEFAULT 0",
+            // Package-level author/publisher, from the same manifest parse that already captures
+            // homepage/repository/description at hosted publish and proxy first-fetch.
+            "ALTER TABLE packages ADD COLUMN author TEXT",
+            // Tracker enrichment overlay, second installment, on the same shared table nvd_*/ssvc_*
+            // already live on: OpenSSF malicious-packages live-status, exploit-code observation, and
+            // the CVE Program (cvelistV5) CVSS/CWE/SSVC overlay. The version-precise still-live
+            // derived signal is DELIBERATELY NOT here — see the package_version_vulns migration
+            // below for why it lives there instead. Added without CHECKs (SQLite ALTER cannot add
+            // one), matching the nvd_*/ssvc_* precedent above: upgraded databases rely on the write
+            // path's own validation, fresh installs get the vocabulary CHECKs from Schema.sql. All
+            // NULL/0 on existing rows, which is exactly the unenriched state, so nothing needs
+            // backfilling.
+            "ALTER TABLE vulnerabilities ADD COLUMN mal_compromised_versions TEXT",
+            "ALTER TABLE vulnerabilities ADD COLUMN mal_version_compromised INTEGER",
+            "ALTER TABLE vulnerabilities ADD COLUMN mal_still_live INTEGER",
+            "ALTER TABLE vulnerabilities ADD COLUMN mal_live_checked_at TEXT",
+            "ALTER TABLE vulnerabilities ADD COLUMN mal_live_versions TEXT",
+            // The version-precise still-live derived signal lives on package_version_vulns, not
+            // vulnerabilities: "is this version still live" is a fact about the (advisory, version)
+            // pair by construction (mal_compromised_versions/mal_live_versions are lists for
+            // exactly that reason), and this table is already the version-precise link between one
+            // owner and one advisory — see Schema.sql for the full rationale.
+            "ALTER TABLE package_version_vulns ADD COLUMN mal_still_live_for_version INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE vulnerabilities ADD COLUMN exploit_code_exists INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE vulnerabilities ADD COLUMN exploit_code_max_weight INTEGER",
+            "ALTER TABLE vulnerabilities ADD COLUMN exploit_code_sources TEXT",
+            "ALTER TABLE vulnerabilities ADD COLUMN cvelist_cvss_score REAL",
+            "ALTER TABLE vulnerabilities ADD COLUMN cvelist_cvss_severity TEXT",
+            "ALTER TABLE vulnerabilities ADD COLUMN cvelist_cvss_provenance TEXT",
+            "ALTER TABLE vulnerabilities ADD COLUMN cvelist_cwes TEXT",
+            "ALTER TABLE vulnerabilities ADD COLUMN cvelist_ssvc_exploitation TEXT",
+            "ALTER TABLE vulnerabilities ADD COLUMN cvelist_ssvc_automatable TEXT",
+            "ALTER TABLE vulnerabilities ADD COLUMN cvelist_ssvc_technical_impact TEXT",
+            "ALTER TABLE vulnerabilities ADD COLUMN cvelist_checked_at TEXT",
+            // Narrower companion to block_malicious — see Schema.sql. Defaults 'off' deliberately:
+            // this arm is new behaviour on an existing deployment's serving posture, so it must be
+            // opt-in on upgrade, not silently active. Added without a CHECK (SQLite ALTER cannot
+            // add one); upgraded DBs rely on controller validation, fresh installs get the CHECK
+            // from Schema.sql.
+            "ALTER TABLE org_settings ADD COLUMN block_malicious_live TEXT NOT NULL DEFAULT 'off'",
     };
 
     private async Task RunAdditiveMigrationsAsync(DbConnection conn)

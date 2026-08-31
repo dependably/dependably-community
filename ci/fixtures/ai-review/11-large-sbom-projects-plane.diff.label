@@ -1,8 +1,10 @@
 fixture: 11-large-sbom-projects-plane.diff
 class: LARGE
 size_bytes: 185077
-cap_ratio: 65% of the diff fits under AI_REVIEW_MAX_DIFF_BYTES=120000
-expected_verdict: TRUNCATED -- treat any clean claim as unsupported
+cap_ratio: fits whole under AI_REVIEW_MAX_DIFF_BYTES=200000
+expected_verdict: reviewed whole -- a clean claim here is now a real (if still fallible) review
+  result rather than an artefact of truncation. In the corpus check this fixture is scored
+  against a cap below its own size, so it still drives the truncation path on real bytes.
 lens: security, code, architecture
 provenance:
   origin: MR !1018 (a49b7979..ec271f97), full MR diff -- "feat(sbom): project-plane schema and
@@ -11,6 +13,9 @@ provenance:
     precision. Its siblings !1019 (1.16 MB, lens saw 10%, all four clean, five defects shipped)
     and !1020 (339 KB, lens saw 35%) are the same epic.
 pass_criteria: |
-  35% of this diff never reaches the model. A "clean" verdict on this fixture is therefore not
-  a review result, and the harness should say so in the note rather than only in the job log.
-  Use this fixture to test any truncation-disclosure change end to end.
+  The whole diff reaches the model, so this is the corpus's largest full-coverage run: it must
+  (a) not degenerate, (b) not return (bad response)/(unverifiable response) merely because of
+  size, and (c) carry no truncation banner. Use it to check that raising the cap did not simply
+  trade a disclosed partial review for an undisclosed shallow one. Its siblings !1019 (1.16 MB)
+  and !1020 (339 KB) remain far above any workable cap -- diffs that large need splitting, not
+  a larger window.

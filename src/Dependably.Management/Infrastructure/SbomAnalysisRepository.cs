@@ -104,6 +104,15 @@ public sealed class SbomAnalysisRepository
                    dependency_kind  AS DependencyKind,
                    dependency_path  AS DependencyPath,
                    license_spdx     AS LicenseSpdx,
+                   description        AS Description,
+                   component_author   AS ComponentAuthor,
+                   copyright          AS Copyright,
+                   component_group    AS ComponentGroup,
+                   website_url        AS WebsiteUrl,
+                   vcs_url            AS VcsUrl,
+                   issue_tracker_url  AS IssueTrackerUrl,
+                   distribution_url   AS DistributionUrl,
+                   component_hashes   AS ComponentHashes,
                    vuln_checked_at  AS VulnCheckedAt
             FROM sbom_components
             WHERE org_id = @orgId AND project_version_id = @projectVersionId
@@ -306,7 +315,15 @@ public sealed class SbomAnalysisRepository
             BlockedAnyVersion: (existing?.BlockedAnyVersion ?? false) || row.BlockedAnyVersion,
             DeprecatedThisVersion: (existing?.DeprecatedThisVersion ?? false) || row.DeprecatedThisVersion,
             DeprecatedAnyVersion: (existing?.DeprecatedAnyVersion ?? false) || row.DeprecatedAnyVersion,
-            HasInstallScriptThisVersion: (existing?.HasInstallScriptThisVersion ?? false) || row.HasInstallScriptThisVersion);
+            HasInstallScriptThisVersion: (existing?.HasInstallScriptThisVersion ?? false) || row.HasInstallScriptThisVersion,
+            // Presentation metadata is carried by the packages row, which only the hosted
+            // statement selects, so the cached statement contributes nulls here and must not
+            // erase what the other pass found — the same first-non-null fold
+            // UpstreamLatestVersion already uses.
+            Description: row.Description ?? existing?.Description,
+            Author: row.Author ?? existing?.Author,
+            Homepage: row.Homepage ?? existing?.Homepage,
+            RepositoryUrl: row.RepositoryUrl ?? existing?.RepositoryUrl);
 
     /// <summary>
     /// Hosted-plane facts. <c>packages</c> is the name-level row every hosted publish creates, and
@@ -321,6 +338,10 @@ public sealed class SbomAnalysisRepository
         """
         SELECT c.id AS ComponentId,
                p.upstream_latest_version AS UpstreamLatestVersion,
+               p.description    AS Description,
+               p.author         AS Author,
+               p.homepage       AS Homepage,
+               p.repository_url AS RepositoryUrl,
                CASE WHEN EXISTS (
                    SELECT 1 FROM package_versions pv
                    WHERE pv.package_id = p.id AND pv.manual_block_state = 'blocked'
@@ -398,6 +419,10 @@ public sealed class SbomAnalysisRepository
     {
         public string ComponentId { get; set; } = "";
         public string? UpstreamLatestVersion { get; set; }
+        public string? Description { get; set; }
+        public string? Author { get; set; }
+        public string? Homepage { get; set; }
+        public string? RepositoryUrl { get; set; }
         public bool BlockedThisVersion { get; set; }
         public bool BlockedAnyVersion { get; set; }
         public bool DeprecatedThisVersion { get; set; }
@@ -595,7 +620,11 @@ public sealed record ComponentRegistryFacts(
     bool BlockedAnyVersion,
     bool DeprecatedThisVersion,
     bool DeprecatedAnyVersion,
-    bool HasInstallScriptThisVersion = false)
+    bool HasInstallScriptThisVersion = false,
+    string? Description = null,
+    string? Author = null,
+    string? Homepage = null,
+    string? RepositoryUrl = null)
 {
     /// <summary>True when either plane serves this coordinate for this tenant.</summary>
     public bool Present => Hosted || Cached;
@@ -616,6 +645,15 @@ public sealed class AnalysisComponentRow
     public string? DependencyKind { get; set; }
     public string? DependencyPath { get; set; }
     public string? LicenseSpdx { get; set; }
+    public string? Description { get; set; }
+    public string? ComponentAuthor { get; set; }
+    public string? Copyright { get; set; }
+    public string? ComponentGroup { get; set; }
+    public string? WebsiteUrl { get; set; }
+    public string? VcsUrl { get; set; }
+    public string? IssueTrackerUrl { get; set; }
+    public string? DistributionUrl { get; set; }
+    public string? ComponentHashes { get; set; }
     public DateTimeOffset? VulnCheckedAt { get; set; }
 }
 

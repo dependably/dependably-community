@@ -100,7 +100,7 @@ variables:
     - if: $CI_PIPELINE_SOURCE == "schedule"
     - *release-tag-rule
 
-# Post-merge-only jobs: side effects on real systems (DT publish) and scans
+# Post-merge-only jobs: side effects on real systems (SBOM publish) and scans
 # scoped to main to avoid per-MR noise (sonarqube-check). Release-tag inclusion
 # stays — removing it silently weakens the release gate by skipping required
 # jobs on tag pipelines.
@@ -152,7 +152,7 @@ variables:
   - { job: e2e-api,                artifacts: false }
   - { job: sbom-backend,           artifacts: false }
   - { job: sbom-frontend,          artifacts: false }
-  - { job: dt-publish,             artifacts: false }
+  - { job: sbom-publish,           artifacts: false }
   - { job: zap-baseline,           artifacts: false }
   - { job: zap-full,               artifacts: false }
   - { job: zap-api-management,     artifacts: false }
@@ -899,6 +899,9 @@ build-ci-tools-manual:
 lint:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
+  # Reads only the source tree. Without this GitLab hands the job every prior stage's
+  # artifacts — build's 66 MB publish directory and build-web's wwwroot — which it never opens.
+  dependencies: []
   image: ${DEP_IMAGE_REGISTRY}/library/node:26-slim@sha256:ffc78385a788964bb3cbab5e434ff79a10bdc25b8ae6db03fe5fe6cb14053c09
   script:
     - npm install -g npm@12.0.1
@@ -911,6 +914,15 @@ lint:
 dotnet-format:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
+  # Compiles the solution from source and reads nothing the build stage produces, so waiting
+  # for that stage only delays it. An empty list, not one naming the validate-stage guards:
+  # a hard `needs:` edge to a job absent from the pipeline fails pipeline creation, and the
+  # validate guards are all `.runs-on-ci`, so they do not exist on the scheduled pipelines
+  # that `.runs-on-ci-or-schedule` jobs run in. Keeping every released job on the same empty
+  # form means this stays true if one of them later gains a schedule rule. The trade is
+  # deliberate: a doomed pipeline now burns test-stage runner time before a cheap guard
+  # fails it.
+  needs: []
   image: ${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
   tags: [amd64]
   script:
@@ -920,6 +932,8 @@ dotnet-format:
 csp-inline-style-guard:
   stage: test
   extends: [.runs-on-ci, .release-required]
+  # Reads only the source tree; takes no prior-stage artifact.
+  dependencies: []
   image: ${DEP_IMAGE_REGISTRY}/library/alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
   script:
     - !reference [.apk-mirror-setup, script]
@@ -938,6 +952,8 @@ csp-inline-style-guard:
 sql-interp-guard:
   stage: test
   extends: [.runs-on-ci, .release-required]
+  # Reads only the source tree; takes no prior-stage artifact.
+  dependencies: []
   image: ${DEP_IMAGE_REGISTRY}/library/alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
   script:
     - !reference [.apk-mirror-setup, script]
@@ -955,6 +971,8 @@ sql-interp-guard:
 ai-review-script-test:
   stage: test
   extends: [.runs-on-ci, .release-required]
+  # Reads only the source tree; takes no prior-stage artifact.
+  dependencies: []
   image: ${DEP_IMAGE_REGISTRY}/library/alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
   script:
     - !reference [.apk-mirror-setup, script]
@@ -967,6 +985,8 @@ ai-review-script-test:
 i18n-validate:
   stage: test
   extends: [.runs-on-ci, .release-required]
+  # Reads only the source tree; takes no prior-stage artifact.
+  dependencies: []
   image: ${DEP_IMAGE_REGISTRY}/library/node:26-slim@sha256:ffc78385a788964bb3cbab5e434ff79a10bdc25b8ae6db03fe5fe6cb14053c09
   script:
     - node i18n/scripts/i18n-validate.js
@@ -980,6 +1000,8 @@ i18n-validate:
 secret-scan:
   stage: test
   extends: [.runs-on-ci-or-schedule, .release-required]
+  # Reads only the source tree; takes no prior-stage artifact.
+  dependencies: []
   image:
     name: ${DEP_IMAGE_REGISTRY}/trufflesecurity/trufflehog:3.95.3@sha256:9cc33bb080cac0efbbf228a17667172875b529eeeab01efcc4697adfb55f568a
     entrypoint: [""]
@@ -992,6 +1014,8 @@ secret-scan:
 unit-tests:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
+  # Compiles from source and reads no build-stage artifact — released from stage ordering.
+  needs: []
   image: ${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
   tags: [amd64]
   script:
@@ -1060,6 +1084,8 @@ unit-tests:
 api-contract:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
+  # Compiles from source and reads no build-stage artifact — released from stage ordering.
+  needs: []
   image: ${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
   tags: [amd64]
   script:
@@ -1073,6 +1099,8 @@ api-contract:
 integration-tests:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
+  # Compiles from source and reads no build-stage artifact — released from stage ordering.
+  needs: []
   image: ${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
   tags: [amd64]
   script:
@@ -1099,6 +1127,8 @@ integration-tests:
 schema-integrity:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
+  # Compiles from source and reads no build-stage artifact — released from stage ordering.
+  needs: []
   image: ${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
   tags: [amd64]
   services:
@@ -1123,6 +1153,8 @@ schema-integrity:
 frontend-tests:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
+  # Reads only the source tree; takes no prior-stage artifact.
+  dependencies: []
   image: ${DEP_IMAGE_REGISTRY}/library/node:26-slim@sha256:ffc78385a788964bb3cbab5e434ff79a10bdc25b8ae6db03fe5fe6cb14053c09
   script:
     - cd web
@@ -1148,6 +1180,8 @@ frontend-tests:
 sca-backend:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci-or-schedule, .release-required]
+  # Reads only the source tree; takes no prior-stage artifact.
+  dependencies: []
   image: ${DEP_IMAGE_REGISTRY}/ci/ci-tools:latest   # glsec:ignore GL001 -- project-owned image: build-ci-tools publishes this tag only from a `main` push, so it always tracks the checked-in ci/docker/ci-tools.Dockerfile (whose base IS digest-pinned) and no unmerged branch can overwrite it; a digest pin here would go stale on every rebuild
   tags: [amd64]
   variables:
@@ -1183,6 +1217,8 @@ sca-backend:
 sca-frontend:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci-or-schedule, .release-required]
+  # Reads only the source tree; takes no prior-stage artifact.
+  dependencies: []
   image: ${DEP_IMAGE_REGISTRY}/library/node:26-slim@sha256:ffc78385a788964bb3cbab5e434ff79a10bdc25b8ae6db03fe5fe6cb14053c09
   script:
     - cd web
@@ -1195,6 +1231,8 @@ sca-frontend:
 docker-lint:
   stage: test
   extends: .runs-on-ci
+  # Reads only the source tree; takes no prior-stage artifact.
+  dependencies: []
   image:
     name: ${DEP_IMAGE_REGISTRY}/hadolint/hadolint:latest-alpine@sha256:7aba693c1442eb31c0b015c129697cb3b6cb7da589d85c7562f9deb435a6657c
     entrypoint: [""]
@@ -1214,6 +1252,8 @@ docker-lint:
 edge-closure-guard:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci]
+  # Reads only the source tree; takes no prior-stage artifact.
+  dependencies: []
   image: ${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
   script:
     - dotnet tool restore
@@ -1470,6 +1510,8 @@ integration-external:
 sbom-backend:
   stage: sbom
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
+  # Reads only the source tree; takes no prior-stage artifact.
+  dependencies: []
   image: ${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
   script:
     - dotnet tool restore
@@ -1480,7 +1522,31 @@ sbom-backend:
     # project.assets.json this restore already produced instead of re-running
     # its own restore.
     - dotnet restore src/Dependably/Dependably.csproj
-    - dotnet CycloneDX src/Dependably/Dependably.csproj -o . -fn sbom-backend.json -F json -spv 1.6 --exclude-dev --disable-package-restore
+    # -sv is required, not cosmetic: the CycloneDX .NET tool never reads the project's version
+    # for metadata.component.version and defaults it to the literal 0.0.0. It resolves the
+    # project file directly rather than evaluating MSBuild, so the <Version> that Dependably.csproj
+    # inherits from Directory.Build.props is invisible to it. Same extraction expression
+    # validate-release-tag uses, so one file stays the version's single source of truth.
+    - |
+      set -eu
+      VERSION=$(grep -oE '<Version>[^<]+</Version>' Directory.Build.props \
+        | sed -E 's|<Version>(.*)</Version>|\1|')
+      test -n "$VERSION" || { echo "ERROR: no <Version> in Directory.Build.props" >&2; exit 1; }
+      dotnet CycloneDX src/Dependably/Dependably.csproj -o . -fn sbom-backend.json -F json \
+        -spv 1.6 --exclude-dev --disable-package-restore -sv "$VERSION"
+      # A wrong version here is invisible downstream — every consumer renders whatever the
+      # document claims — so it is asserted rather than trusted. Dropping -sv makes this red
+      # instead of publishing an inventory that says the application is version 0.0.0.
+      #
+      # Anchored on the metadata component's own indentation rather than parsed: the SDK image
+      # carries neither jq nor python3, and the tool version is pinned (rollForward: false) so
+      # its layout is fixed. The important property is that this FAILS CLOSED — any layout the
+      # expression does not match yields an empty string, which then fails the equality check
+      # below rather than silently asserting nothing.
+      STAMPED=$(awk '/^    "component": \{/{inc=1} inc && /^      "version":/{sub(/^ *"version": *"/,""); sub(/",?$/,""); print; exit}' sbom-backend.json)
+      echo "Directory.Build.props: $VERSION | sbom metadata.component.version: $STAMPED"
+      test "$STAMPED" = "$VERSION" \
+        || { echo "ERROR: SBOM metadata.component.version is '$STAMPED', expected '$VERSION'" >&2; exit 1; }
   artifacts:
     paths:
       - sbom-backend.json
@@ -1489,6 +1555,8 @@ sbom-backend:
 sbom-frontend:
   stage: sbom
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
+  # Reads only the source tree; takes no prior-stage artifact.
+  dependencies: []
   image: ${DEP_IMAGE_REGISTRY}/library/node:26-slim@sha256:ffc78385a788964bb3cbab5e434ff79a10bdc25b8ae6db03fe5fe6cb14053c09
   script:
     - npm install -g npm@12.0.1
@@ -1498,10 +1566,49 @@ sbom-frontend:
       - web/sbom-frontend.json
     expire_in: 30 days
 
-dt-publish:
+# Publishes both SBOMs to every configured inventory: Dependency-Track, and the
+# instance's own projects plane (`PUT $REGISTRY_URL/api/v1/sbom`) — dogfooding the
+# ingest surface this repo ships. One job rather than one per destination: the work
+# is a handful of curl calls against artifacts already downloaded, and a second
+# alpine job spends more time starting up than uploading.
+#
+# Every configured destination is ATTEMPTED, and a failure is recorded and re-raised
+# at the end rather than aborting partway, so one unreachable inventory never hides
+# whether the other published — the property that would otherwise argue for separate
+# jobs. Each destination is independently skippable: unconfigured is not a failure,
+# so a fork pipeline publishes nowhere and fails nothing.
+#
+# Dependency-Track versions everything `latest`, which is its own convention and is
+# left alone. The Dependably side labels the moving head `main` and a release
+# pipeline by its tag, and only a tag asks for promotion (`isLatest=true`), so a
+# project's `latest` points at the newest shipped release rather than at whatever
+# merged most recently. (A project's FIRST version is latest regardless — the
+# server's rule for keeping `latest` resolvable, not a promotion this job asked for.)
+# `autoCreate=true` creates the parent collection and both child projects on the
+# first run and is inert afterwards; ingest is a merge keyed on (project, version),
+# so a re-run re-merges rather than appending and a byte-identical re-upload is a
+# no-op 200.
+#
+# Credentials, both optional (an unset one skips its destination):
+#   dependencyTrack_url / dependencyTrack_token — the DT API and its X-Api-Key.
+#   DEPENDABLY_SBOM_TOKEN — Protected + Masked, carrying `sbom:upload` ALONE (the
+#     token modal's `sbom` preset). Not REGISTRY_KEY and not REGISTRY_PUBLISH_KEY:
+#     a token's capability set is fixed at mint time and is the ceiling — an
+#     API-token principal never inherits its owner's role, `Capabilities.Grants`
+#     widens only through a same-family wildcard (`sbom:upload` has none), and the
+#     one capability migration DELETES capability-less tokens rather than
+#     backfilling them, so a token minted before a capability existed never
+#     acquires it. Beyond the 403 that guarantees, REGISTRY_KEY is deliberately
+#     unprotected — every MR pipeline sees it — while `sbom:upload` is an AdminCaps
+#     capability, so the two must not be the same credential.
+#   The upload target is $REGISTRY_URL, not a variable of its own: the registry and
+#     the projects plane are one instance, the same assumption `publish-symbols`
+#     already makes. The management API resolves the tenant from the HOST, so under
+#     DEPLOYMENT_MODE=multi that URL must be the org's own subdomain.
+sbom-publish:
   stage: sbom
   extends: [.runs-on-ci-main, .release-required]
-  # Uploads SBOMs to Dependency-Track; cancellation must not race a partial
+  # Uploads SBOMs to external inventories; cancellation must not race a partial
   # publish of the parent/child project set.
   interruptible: false
   image: ${DEP_IMAGE_REGISTRY}/library/alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
@@ -1511,48 +1618,136 @@ dt-publish:
     - job: sbom-frontend
       artifacts: true
   variables:
-    DT_PARENT_NAME: "Dependably Community"
+    # GIT_STRATEGY: none — the job uploads two artifacts and reads no repo file, so
+    # the clone is pure latency.
+    GIT_STRATEGY: none
+    # Both inventories file the two documents under the same parent, a DT project
+    # and a Dependably collection respectively.
+    SBOM_PARENT_NAME: "Dependably Community"
     DT_VERSION: "latest"
   script:
     - !reference [.apk-mirror-setup, script]
     - apk add --no-cache curl
-    - | # glsec:ignore GL020 -- curl POSTs SBOM files to the DT API; no executable is downloaded
+    - | # glsec:ignore GL020 -- curl POSTs SBOM files to the DT API; -o only captures the response body for the error branch, and nothing downloaded is executed
       set -eu
-      if [ -z "${dependencyTrack_token:-}" ] || [ -z "${dependencyTrack_url:-}" ]; then
-        echo "Dependency-Track not configured (set the dependencyTrack_token and dependencyTrack_url CI/CD variables) — skipping SBOM publish." >&2
-        exit 0
-      fi
-      AUTH="X-Api-Key: $dependencyTrack_token"
-      BASE="${dependencyTrack_url%/}"
+      failed=0
 
-      status=$(curl -sS -o /tmp/parent.out -w '%{http_code}' \
-        -X PUT "$BASE/api/v1/project" \
-        -H "$AUTH" -H 'Content-Type: application/json' \
-        -d "{\"name\":\"$DT_PARENT_NAME\",\"version\":\"$DT_VERSION\"}")
-      case "$status" in
-        201|409) echo "Parent ready (HTTP $status)";;
-        *) echo "Parent bootstrap failed (HTTP $status):" >&2; cat /tmp/parent.out >&2; exit 1;;
-      esac
+      # Emits one request's HTTP status and never aborts the shell: a transport
+      # failure reports 000 and is classified alongside a bad status code, so an
+      # unreachable destination cannot cut the run short before the other is tried.
+      dt_request() {
+        out="$1"; shift
+        status=$(curl -sS -o "$out" -w '%{http_code}' "$@") || status="000"
+        printf '%s' "$status"
+      }
 
-      upload() {
+      dt_parent() {
+        status=$(dt_request /tmp/parent.out \
+          -X PUT "$DT_BASE/api/v1/project" \
+          -H "X-Api-Key: $dependencyTrack_token" -H 'Content-Type: application/json' \
+          -d "{\"name\":\"$SBOM_PARENT_NAME\",\"version\":\"$DT_VERSION\"}")
+        case "$status" in
+          201|409) echo "  parent ready (HTTP $status)"; return 0;;
+        esac
+        echo "  parent bootstrap failed (HTTP $status):" >&2
+        cat /tmp/parent.out >&2
+        echo >&2
+        return 1
+      }
+
+      dt_upload() {
         child="$1"; file="$2"
-        echo "Publishing $child from $file"
-        status=$(curl -sS -o /tmp/bom.out -w '%{http_code}' \
-          -X POST "$BASE/api/v1/bom" \
-          -H "$AUTH" \
+        echo "  $child <- $file"
+        status=$(dt_request /tmp/bom.out \
+          -X POST "$DT_BASE/api/v1/bom" \
+          -H "X-Api-Key: $dependencyTrack_token" \
           -F "autoCreate=true" \
           -F "projectName=$child" \
           -F "projectVersion=$DT_VERSION" \
-          -F "parentName=$DT_PARENT_NAME" \
+          -F "parentName=$SBOM_PARENT_NAME" \
           -F "parentVersion=$DT_VERSION" \
           -F "bom=@$file")
-        case "$status" in
-          200) echo "  uploaded";;
-          *) echo "  upload failed (HTTP $status):" >&2; cat /tmp/bom.out >&2; exit 1;;
-        esac
+        if [ "$status" = 200 ]; then
+          echo "    uploaded"
+          return 0
+        fi
+        echo "    upload failed (HTTP $status):" >&2
+        cat /tmp/bom.out >&2
+        echo >&2
+        return 1
       }
-      upload backend  sbom-backend.json
-      upload frontend web/sbom-frontend.json
+
+      if [ -z "${dependencyTrack_token:-}" ] || [ -z "${dependencyTrack_url:-}" ]; then
+        echo "Dependency-Track not configured (set the dependencyTrack_token and dependencyTrack_url CI/CD variables) — skipping."
+      else
+        DT_BASE="${dependencyTrack_url%/}"
+        echo "Publishing to Dependency-Track, version $DT_VERSION"
+        if dt_parent; then
+          dt_upload backend  sbom-backend.json      || failed=1
+          dt_upload frontend web/sbom-frontend.json || failed=1
+        else
+          failed=1
+        fi
+      fi
+    # The Dependably arm is its own block so each destination carries exactly one
+    # rule waiver: this one names no output file (nothing is downloaded, so GL020
+    # does not apply) and is the only arm whose URL carries the ref name.
+    - | # glsec:ignore GL025 -- $CI_COMMIT_TAG lands in a QUERY value of a URL whose scheme/host/path are already fixed by $REGISTRY_URL, so it cannot redirect the request; the job only ever sees a tag through .release-tag-rule (/^v\d+\.\d+\.\d+$/) and the case guard below refuses anything outside [A-Za-z0-9._-] regardless
+      dep_upload() {
+        child="$1"; file="$2"
+        echo "  $child <- $file"
+        # Body to stdout with the status on a trailing line rather than -o: this arm
+        # writes no file, and the response is only ever read to report a failure.
+        resp=$(curl -sS -w '\n%{http_code}' \
+          -X PUT "$DEP_BASE/api/v1/sbom?projectName=$child&projectVersion=$DEP_VERSION&parentName=$DEP_PARENT&autoCreate=true&isLatest=$DEP_IS_LATEST" \
+          -H "Authorization: Bearer $DEPENDABLY_SBOM_TOKEN" \
+          -H 'Content-Type: application/json' \
+          --data-binary "@$file") || resp=""
+        status=$(printf '%s' "$resp" | tail -n 1)
+        if [ "$status" = "200" ]; then
+          echo "    uploaded"
+          return 0
+        fi
+        echo "    upload failed (HTTP ${status:-000}):" >&2
+        printf '%s\n' "$resp" | sed '$d' >&2
+        return 1
+      }
+
+      if [ -z "${DEPENDABLY_SBOM_TOKEN:-}" ]; then
+        echo "Dependably SBOM publish not configured (set the DEPENDABLY_SBOM_TOKEN CI/CD variable) — skipping."
+      else
+        # Same target as the NuGet symbol push (`PUT $REGISTRY_URL/nuget/symbols`):
+        # the registry and the projects plane are one instance, so there is no second
+        # URL to configure. REGISTRY_URL is guaranteed non-empty here — the
+        # .apk-mirror-setup block above hard-fails on an empty one before this runs.
+        # The management API resolves the tenant from the HOST, so in multi-tenant
+        # mode this must be the org's own subdomain; it already is, being the host
+        # the pipeline restores and publishes through.
+        DEP_BASE="${REGISTRY_URL%/}"
+        DEP_VERSION="${CI_COMMIT_TAG:-main}"
+        if [ -n "${CI_COMMIT_TAG:-}" ]; then DEP_IS_LATEST=true; else DEP_IS_LATEST=false; fi
+        # The parent name is the only query value carrying a space; every other one
+        # here is already URL-safe (ASCII, no reserved characters), so encoding that
+        # single character is the whole requirement.
+        DEP_PARENT=$(printf '%s' "$SBOM_PARENT_NAME" | sed 's/ /%20/g')
+        # The version label is the one query value taken from a ref name. The rule
+        # that admits a tag pipeline already constrains it to vX.Y.Z, so this refuses
+        # rather than encodes: a label outside the safe set means that rule changed,
+        # which is a thing to notice, not to paper over with escaping.
+        case "$DEP_VERSION" in
+          ''|*[!A-Za-z0-9._-]*)
+            echo "Refusing to publish: version label '$DEP_VERSION' is outside [A-Za-z0-9._-]." >&2
+            failed=1
+            ;;
+          *)
+            echo "Publishing to Dependably, version $DEP_VERSION (isLatest=$DEP_IS_LATEST)"
+            dep_upload backend  sbom-backend.json      || failed=1
+            dep_upload frontend web/sbom-frontend.json || failed=1
+            ;;
+        esac
+      fi
+
+      exit "$failed"
 
 # === ai-review ===
 
@@ -1574,6 +1769,11 @@ dt-publish:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
   # No `needs:` — run in stage order (after sbom), so the model only reviews an
   # MR whose build/test/sbom already passed instead of racing ahead at t=0.
+  # Stage ordering is wanted; the artifact download it implies is not. Running last means
+  # every prior stage has published something, so without an explicit empty list each lens
+  # pulls build's publish directory, build-web's wwwroot, and every test- and sbom-stage
+  # artifact — none of which a diff-scoped reviewer reads.
+  dependencies: []
   resource_group: ai-review
   interruptible: true
   timeout: 20 minutes
@@ -1585,10 +1785,19 @@ dt-publish:
     # at this size was the reasoning-budget bug now fixed by AI_REVIEW_THINK=false.
     OLLAMA_MODEL: "gemma4:26b-a4b-it-qat"
     GIT_DEPTH: "20"
-    AI_REVIEW_MAX_DIFF_BYTES: "120000"
-    # Must hold the ~35K-token prompt a 120000-byte diff produces plus generation
-    # room; at 16384 the prompt filled the window and the model returned no content.
-    AI_REVIEW_NUM_CTX: "49152"
+    # Sized by measured recall, not by the context ceiling. NUM_CTX below would allow
+    # ~375000 (ci/ai-review.sh keeps NUM_CTX >= MAX_DIFF_BYTES/3 + 6000), but a
+    # known-catchable finding buried mid-diff is missed 3 runs out of 3 at ~295000
+    # bytes, while the same finding in a ~207000-byte diff is found 3 of 4: past
+    # roughly this size the model stops attending to the middle, so further bytes
+    # cost recall instead of buying coverage. 200000 reviews the largest
+    # regression-corpus fixture (185077 B) whole. Diffs larger than this still
+    # truncate, and the note discloses the percentage actually reviewed.
+    AI_REVIEW_MAX_DIFF_BYTES: "200000"
+    # The model carries a 131072 baked num_ctx and stays 100% GPU-resident at that
+    # size on the review host, so the context window is not the binding constraint on
+    # coverage; MAX_DIFF_BYTES is, and it is set by recall above.
+    AI_REVIEW_NUM_CTX: "131072"
     # gemma4:* is a reasoning model; thinking burns the generation budget before any
     # answer is written. Off => the model writes the review straight to content.
     AI_REVIEW_THINK: "false"
@@ -2283,6 +2492,13 @@ publish-image:
       if echo "$CI_COMMIT_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
         VERSION="${CI_COMMIT_TAG#v}"
         VERSION_TAGS="--tag $IMAGE_REPO:$VERSION --tag $IMAGE_REPO:latest"
+        # A release image is built cold, from source and digest-pinned bases only. The
+        # cache tag below is mutable: anything able to write it becomes an unsigned input
+        # to whatever is built from it, and BuildKit verifies only that a cached blob
+        # matches the digest the cache manifest claims for it — not that the step really
+        # produced it. That is an acceptable trade for the main-branch image and not for a
+        # shipped release, so the two are deliberately asymmetric.
+        CACHE_FLAGS=""
       else
         FILE_VERSION=$(grep -oE '<Version>[^<]+</Version>' Directory.Build.props \
           | sed -E 's|<Version>(.*)</Version>|\1|')
@@ -2291,6 +2507,26 @@ publish-image:
         # leading zero is otherwise an invalid version string.
         VERSION="${FILE_VERSION}-main.g${CI_COMMIT_SHORT_SHA}"
         VERSION_TAGS="--tag $IMAGE_REPO:main --tag $IMAGE_REPO:$VERSION"
+        # A separate repository from the shipped image, not a :buildcache tag on it. A
+        # manifest pushed under a tag is catalogued: OciUploadService.ReserveAndPutManifestAsync
+        # treats any non-digest reference as a tag and writes a catalogue version, so a cache tag
+        # on the image repo would surface in the product's own images surface beside :main and
+        # :latest. Deriving the ref from $IMAGE_REPO keeps the two matrix legs — which run
+        # concurrently — on separate caches rather than fighting over one.
+        #
+        # mode=max is required, not preferred: every expensive step (npm ci, both restores,
+        # both publishes) lives in an intermediate stage, and mode=min/type=inline export
+        # only the final image's layers, which would cache nothing worth caching.
+        #
+        # image-manifest=true + oci-mediatypes=true emit a spec-compliant OCI image
+        # manifest instead of BuildKit's legacy index-of-layers shape, which registries
+        # that validate manifest structure reject.
+        #
+        # ignore-error=true because the cache lives on the instance this pipeline itself
+        # deploys. A registry hiccup must degrade to an uncached build, never fail a push
+        # that has already succeeded.
+        CACHE_FLAGS="--cache-from type=registry,ref=$IMAGE_REPO-buildcache:main"
+        CACHE_FLAGS="$CACHE_FLAGS --cache-to type=registry,ref=$IMAGE_REPO-buildcache:main,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true"
       fi
       echo "Stamping image version $VERSION"
     # The Dockerfiles' base images (NODE_IMAGE/SDK_IMAGE/RUNTIME_IMAGE) default to public
@@ -2314,6 +2550,12 @@ publish-image:
           exit 1
         fi
       done
+    # --no-cache-filter final: the runtime stage's `apk add sqlite-libs icu-libs tzdata` is
+    # deliberately unpinned, so its cache key (a digest-pinned parent plus an unchanged
+    # command) never changes once cached. Letting it hit the registry cache would freeze
+    # alpine security patches until the next base-digest bump — the one stage where a cache
+    # hit is a security regression rather than a saving. It is also the cheapest stage to
+    # rebuild, so excluding it costs almost nothing.
     - >-
       docker buildx build
       -f "$DOCKERFILE"
@@ -2326,6 +2568,8 @@ publish-image:
       --build-arg SDK_IMAGE="$SDK_IMAGE"
       --build-arg RUNTIME_IMAGE="$RUNTIME_IMAGE"
       --secret id=registry_key,src=/tmp/registry_key
+      --no-cache-filter final
+      $CACHE_FLAGS
       $VERSION_TAGS
       --push .
     # Exports the portable PDBs publish-symbols packs into the .snupkg, from the SAME

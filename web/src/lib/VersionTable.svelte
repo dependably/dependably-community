@@ -25,9 +25,10 @@
   import { sortIndicator } from './sortIndicator.js'
   import { rememberedRowCount, rememberRowCount } from './tableSize.js'
   import { fileRowKey } from './versionFiles.js'
+  import { versionInstallCommand } from './installCommand.js'
   import { compareVersions, defaultSortColumn } from './versionOrder.js'
 
-  /** @type {{ ecosystem: string, isProxy: boolean, name: string, upstreamLatestVersion?: string | null, latestState?: string, abandonedState?: string } | null} */
+  /** @type {{ ecosystem: string, isProxy: boolean, name: string, purlName?: string, upstreamLatestVersion?: string | null, latestState?: string, abandonedState?: string } | null} */
   export let pkg = null
   export let versions = []
   /** Blocklisted SPDX identifiers (uppercased) — drives the per-row license risk flag. */
@@ -53,9 +54,19 @@
   export let scanCooldownRemaining = () => 0
   /**
    * Caller's copy-to-clipboard helper (kept in the parent so tests can swap it).
-   * @type {(text: string) => void}
+   * @type {(key: string, text: string) => void}
    */
   export let copy = () => {}
+  /** Key of the copy button currently showing its acknowledgement. @type {string | null} */
+  export let copiedKey = null
+  /**
+   * Registry base URL for the install commands. Named `registryOrigin` rather than `origin`
+   * because a group row's own `origin` field means something else entirely here (proxy vs
+   * hosted). Threaded as a prop rather than read from `window`, the same way `copy` is, so
+   * this component stays free of ambient globals.
+   * @type {string}
+   */
+  export let registryOrigin = ''
 
   const dispatch = createEventDispatcher()
 
@@ -455,9 +466,32 @@
       </tr>
 
       {#if isExpanded}
+        {@const cmd = versionInstallCommand({
+          ecosystem: pkg?.ecosystem ?? '',
+          name: pkg?.purlName ?? pkg?.name ?? '',
+          version: g.version,
+          filename: g.single ? (g.files?.[0]?.filename ?? null) : null,
+          tags: g.tags,
+          origin: registryOrigin,
+        })}
         <tr class="detail-row">
           <td colspan={pkg?.ecosystem === 'oci' ? 12 : 11}>
             <div class="detail-panel">
+              <!-- First in the panel: "how do I get this exact version" outranks "what is
+                   its identifier" for a reader who just expanded the row. -->
+              {#if cmd}
+                <div class="detail-section">
+                  <span class="detail-label">{$t(`versionDetail.install.${cmd.labelKey}`)}</span>
+                  <code class="detail-value mono install-cmd">{cmd.command}</code>
+                  <button class="copy-btn" on:click={() => copy(`install-${g.key}`, cmd.command)}>
+                    {copiedKey === `install-${g.key}` ? $t('common.actions.copied') : $t('versionDetail.detail.copy')}
+                  </button>
+                </div>
+                {#if cmd.caveatKey}
+                  <p class="form-hint install-caveat">{$t(`versionDetail.install.caveat.${cmd.caveatKey}`)}</p>
+                {/if}
+              {/if}
+
               {#if !g.single}
                 <div class="files-section">
                   <span class="detail-label">{$t('versionDetail.detail.files')}</span>
@@ -482,7 +516,7 @@
                             {#if f.checksumSha256}
                               <span class="checksum-inline">
                                 <code class="mono checksum-full">{f.checksumSha256}</code>
-                                <button class="copy-btn" on:click|stopPropagation={() => copy(f.checksumSha256)}>{$t('versionDetail.detail.copy')}</button>
+                                <button class="copy-btn" on:click|stopPropagation={() => copy(`file-${fileRowKey(f)}`, f.checksumSha256)}>{copiedKey === `file-${fileRowKey(f)}` ? $t('common.actions.copied') : $t('versionDetail.detail.copy')}</button>
                               </span>
                             {:else}
                               <span class="text-muted">—</span>
@@ -513,7 +547,7 @@
               <div class="detail-section">
                 <span class="detail-label">{$t('versionDetail.detail.purl')}</span>
                 <code class="detail-value mono">{g.purl}</code>
-                <button class="copy-btn" on:click={() => copy(g.purl)}>{$t('versionDetail.detail.copy')}</button>
+                <button class="copy-btn" on:click={() => copy(`purl-${g.key}`, g.purl)}>{copiedKey === `purl-${g.key}` ? $t('common.actions.copied') : $t('versionDetail.detail.copy')}</button>
               </div>
 
               {#if g.single && g.registryPageUrl}
@@ -530,7 +564,7 @@
                 <div class="detail-section">
                   <span class="detail-label">{$t('versionDetail.detail.checksum')}</span>
                   <code class="detail-value mono">{g.checksumSha256}</code>
-                  <button class="copy-btn" on:click={() => copy(g.checksumSha256)}>{$t('versionDetail.detail.copy')}</button>
+                  <button class="copy-btn" on:click={() => copy(`sha256-${g.key}`, g.checksumSha256)}>{copiedKey === `sha256-${g.key}` ? $t('common.actions.copied') : $t('versionDetail.detail.copy')}</button>
                 </div>
               {/if}
 
@@ -540,14 +574,14 @@
                   <div class="detail-section">
                     <span class="detail-label">{$t(`versionDetail.detail.upstreamIntegrity.${g.upstreamIntegrityAlgorithm}`)}</span>
                     <code class="detail-value mono">{g.upstreamIntegrityValue}</code>
-                    <button class="copy-btn" on:click={() => copy(g.upstreamIntegrityValue)}>{$t('versionDetail.detail.copy')}</button>
+                    <button class="copy-btn" on:click={() => copy(`integrity-${g.key}`, g.upstreamIntegrityValue)}>{copiedKey === `integrity-${g.key}` ? $t('common.actions.copied') : $t('versionDetail.detail.copy')}</button>
                   </div>
                 {/if}
                 {#if showNpmShasum}
                   <div class="detail-section">
                     <span class="detail-label">{$t('versionDetail.detail.upstreamIntegrity.shasum')}</span>
                     <code class="detail-value mono">{g.checksumSha1}</code>
-                    <button class="copy-btn" on:click={() => copy(g.checksumSha1)}>{$t('versionDetail.detail.copy')}</button>
+                    <button class="copy-btn" on:click={() => copy(`sha1-${g.key}`, g.checksumSha1)}>{copiedKey === `sha1-${g.key}` ? $t('common.actions.copied') : $t('versionDetail.detail.copy')}</button>
                   </div>
                 {/if}
               {/if}
@@ -688,6 +722,9 @@
 
   .detail-row td { padding: 0; border-top: none; }
   .copy-btn { padding: 1px 6px; font-size: 11px; flex-shrink: 0; }
+  /* Fragments (Maven XML, Terraform HCL) are multi-line; wrap rather than clip. */
+  .install-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .install-caveat { margin: -4px 0 10px; }
   .upstream-link { display: inline-flex; align-items: center; gap: 4px; color: var(--accent); text-decoration: none; overflow-wrap: anywhere; }
   .upstream-link:hover { text-decoration: underline; }
   .upstream-link svg { flex-shrink: 0; }

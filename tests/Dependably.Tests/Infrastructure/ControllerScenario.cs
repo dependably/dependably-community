@@ -477,9 +477,6 @@ public sealed class ControllerScenario : IAsyncDisposable
             allowlist, blocklist, reservedNamespaces, installScriptAllowlist, guard, audit, problems)
         { ControllerContext = ctx };
         var orgAudit = new OrgAuditController(audit, guard, Clock, problems) { ControllerContext = ctx };
-        var packageNotes = new PackageNoteController(
-            new PackageNoteRepository(db, Clock), guard, problems, audit)
-        { ControllerContext = ctx };
         var orgAuthConfig = new OrgAuthConfigController(
             guard, samlConfig, orgs, audit, publicUrl, problems, Clock)
         { ControllerContext = ctx };
@@ -549,7 +546,6 @@ public sealed class ControllerScenario : IAsyncDisposable
             orgLists,
             orgAudit,
             orgAuthConfig,
-            packageNotes,
             claims,
             siem,
             import,
@@ -600,7 +596,6 @@ public sealed record ControllerScenarioResult(
     OrgListsController OrgListsController,
     OrgAuditController OrgAuditController,
     OrgAuthConfigController OrgAuthConfigController,
-    PackageNoteController PackageNoteController,
     ClaimsController ClaimsController,
     SiemController SiemController,
     ImportController ImportController,

@@ -189,6 +189,7 @@ public sealed class NuGetSymbolProxyFetcher(
                 Origin: CacheAccessOrigin.FirstFetch),
             MinReleaseAgeHours: request.Settings.MinReleaseAgeHours,
             BlockMaliciousMode: request.Settings.BlockMalicious,
+            BlockMaliciousLiveMode: request.Settings.BlockMaliciousLive,
             BlockKevMode: request.Settings.BlockKev,
             BlockRevokedMode: request.Settings.BlockRevoked,
             MaxEpssTolerance: request.Settings.MaxEpssTolerance,

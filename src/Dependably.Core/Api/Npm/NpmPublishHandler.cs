@@ -235,12 +235,13 @@ public sealed class NpmPublishHandler(
         string? homepage = fromTarball.Homepage ?? fromPackument.Homepage;
         string? repository = fromTarball.Repository ?? fromPackument.Repository;
         string? description = fromTarball.Description ?? fromPackument.Description;
+        string? author = fromTarball.Author ?? fromPackument.Author;
 
         var request = BuildNpmPublishRequest(httpContext, new NpmPublishContext(
             orgId, fullName, versionKey!, filename, attachStagingPath, stagingSize,
             token.UserId, token.ActorKind, orgSettings?.AllowVersionOverwrite ?? false, claim.State,
             manifestJson, declaredIntegrity, spdx.Count > 0 ? spdx : null,
-            homepage, repository, description)) with
+            homepage, repository, description, author)) with
         { ActorTokenId = token.Id };
         var result = await publish.StoreAndRecordAsync(request, ct);
 
@@ -317,7 +318,7 @@ public sealed class NpmPublishHandler(
         string StagingPath, long StagingSize,
         string? ActorUserId, string? ActorKind, bool AllowOverwrite, string ClaimState,
         string? ManifestJson, string? DeclaredIntegritySri, IReadOnlyList<string>? Licenses,
-        string? Homepage, string? Repository, string? Description);
+        string? Homepage, string? Repository, string? Description, string? Author);
 
     private static PublishRequest BuildNpmPublishRequest(HttpContext httpContext, NpmPublishContext ctx)
         => new()
@@ -346,6 +347,7 @@ public sealed class NpmPublishHandler(
             Homepage = ctx.Homepage,
             Repository = ctx.Repository,
             Description = ctx.Description,
+            Author = ctx.Author,
         };
 
     // stagingPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.

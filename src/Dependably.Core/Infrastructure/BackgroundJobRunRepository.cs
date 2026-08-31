@@ -72,6 +72,53 @@ public sealed class BackgroundJobRunRepository
             });
     }
 
+    /// <summary>
+    /// Deletes one bounded batch of aged run rows and returns how many went. Successes age out at
+    /// <paramref name="successCutoff"/>, everything else at the later <paramref name="failureCutoff"/> —
+    /// a non-success row is the forensic record an operator goes looking for, and there are few of them.
+    /// </summary>
+    /// <remarks>
+    /// <para>Two rows per job are protected regardless of age, because <c>HealthService</c> reads
+    /// exactly those: the latest row for each <c>job_name</c>, and the latest <c>success</c> row for
+    /// each <c>job_name</c> — the second is its fallback when the latest run is <c>cancelled</c>
+    /// (graceful-shutdown disposal mid-tick). Without the success half, retention on a job that has
+    /// been idle past the window would empty that fallback and flip a healthy job to unknown.</para>
+    /// <para>The caller loops until a batch comes back short. Deleting in batches keyed by the
+    /// primary key keeps each statement bounded: SQLite has a single writer, and on Postgres one
+    /// year-scale statement means lock duration and bloat.</para>
+    /// <para>The table carries no <c>org_id</c>: background jobs are instance-level, so this sweep
+    /// is cross-tenant by construction rather than by omission.</para>
+    /// </remarks>
+    public async Task<int> PruneAsync(
+        string successCutoff, string failureCutoff, int batchSize, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        return await conn.ExecuteAsync(new CommandDefinition(
+            """
+            DELETE FROM background_job_runs
+            WHERE id IN (
+                SELECT r.id FROM background_job_runs r
+                WHERE ((r.outcome = 'success' AND r.started_at < @successCutoff)
+                    OR (r.outcome <> 'success' AND r.started_at < @failureCutoff))
+                  AND r.id NOT IN (
+                      SELECT b.id FROM background_job_runs b
+                      WHERE b.started_at = (
+                          SELECT MAX(x.started_at) FROM background_job_runs x
+                          WHERE x.job_name = b.job_name)
+                      UNION
+                      SELECT b.id FROM background_job_runs b
+                      WHERE b.outcome = 'success'
+                        AND b.started_at = (
+                            SELECT MAX(x.started_at) FROM background_job_runs x
+                            WHERE x.job_name = b.job_name AND x.outcome = 'success')
+                  )
+                LIMIT @batchSize
+            )
+            """,
+            new { successCutoff, failureCutoff, batchSize },
+            cancellationToken: ct));
+    }
+
     [SuppressMessage("Security", "S2077:Formatting SQL queries is security-sensitive",
         Justification = "The interpolated whereClause is a const string containing only @param placeholders. " +
                         "ORDER BY column and direction are whitelisted via switch expressions that return " +

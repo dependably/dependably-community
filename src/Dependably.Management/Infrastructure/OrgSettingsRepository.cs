@@ -190,7 +190,7 @@ public sealed class OrgSettingsRepository
             """
             INSERT INTO org_settings (
                 org_id, proxy_passthrough_enabled, max_osv_score_tolerance, min_release_age_hours,
-                block_deprecated, block_malicious, block_kev, max_epss_tolerance,
+                block_deprecated, block_malicious, block_malicious_live, block_kev, max_epss_tolerance,
                 block_kev_ransomware, max_epss_percentile_tolerance,
                 block_install_scripts, verify_npm_signatures, verify_nuget_signatures,
                 verify_pypi_attestations, verify_rpm_signatures, verify_maven_signatures,
@@ -198,6 +198,7 @@ public sealed class OrgSettingsRepository
             VALUES (
                 @orgId, COALESCE(@proxyEnabled, 1), COALESCE(@maxScore, 10.0), @minAgeHours,
                 COALESCE(@blockDeprecated, 'off'), COALESCE(@blockMalicious, 'block'),
+                COALESCE(@blockMaliciousLive, 'off'),
                 COALESCE(@blockKev, 'off'), @maxEpss,
                 COALESCE(@blockKevRansomware, 'off'), @maxEpssPercentile,
                 COALESCE(@blockInstallScripts, 'off'),
@@ -212,6 +213,7 @@ public sealed class OrgSettingsRepository
                 block_deprecated          = COALESCE(@blockDeprecated, block_deprecated),
                 block_revoked             = COALESCE(@blockRevoked, block_revoked),
                 block_malicious           = COALESCE(@blockMalicious, block_malicious),
+                block_malicious_live      = COALESCE(@blockMaliciousLive, block_malicious_live),
                 block_kev                 = COALESCE(@blockKev, block_kev),
                 max_epss_tolerance        = CASE WHEN @maxEpssSet = 1 THEN @maxEpss ELSE max_epss_tolerance END,
                 block_kev_ransomware      = COALESCE(@blockKevRansomware, block_kev_ransomware),
@@ -236,6 +238,7 @@ public sealed class OrgSettingsRepository
                 blockDeprecated = policy.BlockDeprecated,
                 blockRevoked = policy.BlockRevoked,
                 blockMalicious = policy.BlockMalicious,
+                blockMaliciousLive = policy.BlockMaliciousLive,
                 blockKev = policy.BlockKev,
                 maxEpss = policy.MaxEpssTolerance.IsPresent ? policy.MaxEpssTolerance.Value : null,
                 maxEpssSet = policy.MaxEpssTolerance.IsPresent ? 1 : 0,
@@ -333,4 +336,6 @@ public sealed record ProxyPolicySettings(
     // after the insertion point. Appending keeps those call sites correct by construction.
     string? BlockKevRansomware = null,
     Optional<double?> MaxEpssPercentileTolerance = default,
-    string? BlockSsvcExploitation = null);
+    string? BlockSsvcExploitation = null,
+    // Appended for the same reason as BlockKevRansomware above.
+    string? BlockMaliciousLive = null);

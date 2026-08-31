@@ -57,7 +57,6 @@ public static class EdgeSurfaceRegistry
         typeof(Api.LicenseController),
         typeof(Api.LicensesController),
         typeof(Api.SpdxLicenseController),
-        typeof(Api.PackageNoteController),
         typeof(Api.ProjectsController),
 
         typeof(Api.RemediationController),

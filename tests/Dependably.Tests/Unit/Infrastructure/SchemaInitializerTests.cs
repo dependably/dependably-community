@@ -101,6 +101,71 @@ public sealed class SchemaInitializerTests : IAsyncLifetime
         await conn.ExecuteAsync("ALTER TABLE alert_settings ADD COLUMN email_smtp_from TEXT");
     }
 
+    private async Task<bool> TableExistsAsync(string table)
+    {
+        await using var conn = await _db.OpenAsync();
+        long count = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = @table",
+            new { table });
+        return count > 0;
+    }
+
+    /// <summary>
+    /// A database written by a release that still declares package_note carries the table, and a
+    /// slot of that release re-creates it whenever it boots against an already-migrated database.
+    /// The drop must therefore run on EVERY boot: this test recreates the table the way an older
+    /// slot would and requires the next boot to remove it again. A RunOnceAsync-ledgered drop
+    /// fails here, because a fresh database records it as applied before any table exists.
+    /// Recreating by hand is also the only way to reach the migration's table-exists branch at
+    /// all, since no current schema file declares it — without the seed this test would pass
+    /// against a no-op migration and prove nothing.
+    /// </summary>
+    [Fact]
+    public async Task DropPackageNoteTable_RemovesATableLeftByAnEarlierRelease()
+    {
+        await NewInitializer(_db).InitializeAsync();
+
+        await using (var setup = await _db.OpenAsync())
+        {
+            await ResurrectPackageNoteAsync(setup);
+        }
+
+        Assert.True(await TableExistsAsync("package_note"),
+            "setup failed: package_note was not re-created");
+
+        await NewInitializer(_db).InitializeAsync();
+
+        Assert.False(await TableExistsAsync("package_note"));
+
+        await using var verify = await _db.OpenAsync();
+        string? integrity = await verify.ExecuteScalarAsync<string>("PRAGMA integrity_check");
+        Assert.Equal("ok", integrity);
+    }
+
+    /// <summary>
+    /// A fresh database must never carry the table, on the first boot or any later one. Paired
+    /// with the resurrection test above: that one pins that the drop repeats, this one pins that
+    /// repeating it costs nothing and never re-creates what it removed.
+    /// </summary>
+    [Fact]
+    public async Task DropPackageNoteTable_FreshDatabaseNeverCarriesIt()
+    {
+        await NewInitializer(_db).InitializeAsync();
+        Assert.False(await TableExistsAsync("package_note"), "package_note exists on a fresh boot");
+
+        await NewInitializer(_db).InitializeAsync();
+        Assert.False(await TableExistsAsync("package_note"), "package_note reappeared on a later boot");
+    }
+
+    private static async Task ResurrectPackageNoteAsync(DbConnection conn)
+    {
+        await conn.ExecuteAsync(
+            "CREATE TABLE package_note (" +
+            "id TEXT PRIMARY KEY, org_id TEXT NOT NULL, ecosystem TEXT NOT NULL, " +
+            "name TEXT NOT NULL, version TEXT, note TEXT NOT NULL, created_by TEXT, " +
+            "created_at TEXT NOT NULL, updated_at TEXT NOT NULL)");
+    }
+
     private async Task<bool> AlertSettingsHasColumnAsync(string column)
     {
         await using var conn = await _db.OpenAsync();

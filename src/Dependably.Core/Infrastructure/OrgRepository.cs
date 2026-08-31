@@ -98,6 +98,7 @@ public sealed class OrgRepository
                COALESCE(block_deprecated, 'off') as BlockDeprecated,
                COALESCE(block_revoked, 'warn') as BlockRevoked,
                COALESCE(block_malicious, 'block') as BlockMalicious,
+               COALESCE(block_malicious_live, 'off') as BlockMaliciousLive,
                COALESCE(block_kev, 'off') as BlockKev,
                COALESCE(block_kev_ransomware, 'off') as BlockKevRansomware,
                COALESCE(block_ssvc_exploitation, 'off') as BlockSsvcExploitation,

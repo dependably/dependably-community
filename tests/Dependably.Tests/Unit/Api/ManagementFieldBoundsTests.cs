@@ -143,38 +143,4 @@ public sealed class ManagementFieldBoundsTests
 
         Assert.IsType<NoContentResult>(result);
     }
-
-    // Note was capped at 4000 on the same request; its coordinate siblings were not.
-    [Fact]
-    public async Task PackageNote_OverlongName_Refused()
-    {
-        await using var b = await AdminAsync();
-
-        var result = await b.PackageNoteController.Add(
-            new PackageNoteRequest("npm", Long(1000), "1.0.0", "note"), CancellationToken.None);
-
-        AssertRefused(result);
-    }
-
-    [Fact]
-    public async Task PackageNote_OverlongEcosystem_Refused()
-    {
-        await using var b = await AdminAsync();
-
-        var result = await b.PackageNoteController.Add(
-            new PackageNoteRequest(Long(1000), "left-pad", "1.0.0", "note"), CancellationToken.None);
-
-        AssertRefused(result);
-    }
-
-    [Fact]
-    public async Task PackageNote_OrdinaryCoordinate_StillAccepted()
-    {
-        await using var b = await AdminAsync();
-
-        var result = await b.PackageNoteController.Add(
-            new PackageNoteRequest("npm", "left-pad", "1.3.0", "note"), CancellationToken.None);
-
-        Assert.IsType<CreatedAtActionResult>(result);
-    }
 }

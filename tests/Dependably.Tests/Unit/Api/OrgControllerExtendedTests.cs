@@ -1,4 +1,5 @@
 using Dapper;
+using Dependably.Api.Setup;
 using Dependably.Protocol;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
@@ -18,7 +19,10 @@ namespace Dependably.Tests.Unit.Api;
 ///   • DeleteVersion — pypi + nuget yank branches, happy-path delete (blob + audit + GC),
 ///     anonymous denial.
 ///   • GetStats — anonymous denial.
-///   • GetSetup — http snippet (trusted-host branch), each ecosystem snippet shape, anonymous.
+///   • GetSetup — the plain-HTTP branch of each scheme-aware builder, the per-ecosystem
+///     recipe shape, and anonymous denial. Catalog-wide coverage and structural invariants
+///     live in SetupRecipeCatalogComplianceTests; these pin the controller's own wiring —
+///     that the request's scheme and host actually reach the builders.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class OrgControllerExtendedTests
@@ -1022,34 +1026,101 @@ public sealed class OrgControllerExtendedTests
         Assert.False(result is OkObjectResult);
     }
 
+    // The recipe assertions below reach for one cell at a time, because that is how the page
+    // reads them: a caveat or a credential that is present *somewhere* in the payload but not
+    // in the cell the reader selected is exactly the defect the flat list is meant to expose.
+    private static SetupRecipesResponse Recipes(IActionResult result) =>
+        Assert.IsType<SetupRecipesResponse>(Assert.IsType<OkObjectResult>(result).Value);
+
+    private static SetupRecipe Cell(SetupRecipesResponse payload, string operation, string scope, string variant) =>
+        Assert.Single(payload.Recipes, r =>
+            r.Operation == operation && r.Scope == scope && r.Variant == variant);
+
+    private static string Bodies(SetupRecipe recipe) =>
+        string.Join("\n", recipe.Files.Select(f => f.Body));
+
     [Fact]
-    public async Task GetSetup_PyPi_Http_IncludesTrustedHost()
+    public async Task GetSetup_PyPi_Http_WritesTrustedHostIntoTheFile_WithNoPageCaveat()
     {
-        // Scheme=http triggers the `--trusted-host` arm of the snippet generator. Scenario
-        // builder defaults to https, so we flip the scheme on the HttpContext.
+        // Scheme=http triggers the trusted-host arm. The scenario builder defaults to https,
+        // so the scheme is flipped on the HttpContext to prove the request reaches the builder.
+        //
+        // An override the recipe already writes into the file needs no page callout: the
+        // explanation rides along as a comment in the body, where the next person to open the
+        // file is, so the reader is not told twice.
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
         b.OrgController.HttpContext.Request.Scheme = "http";
 
-        var ok = Assert.IsType<OkObjectResult>(await b.OrgController.GetSetup("pypi", CancellationToken.None));
-        string snippet = (string)ok.Value!.GetType().GetProperty("snippet")!.GetValue(ok.Value)!;
-        Assert.Contains("--trusted-host", snippet);
+        var payload = Recipes(await b.OrgController.GetSetup("pypi", CancellationToken.None));
+        var recipe = Cell(payload, "install", "project", "pip");
+        string body = Bodies(recipe);
+
+        Assert.Contains("trusted-host", body, StringComparison.Ordinal);
+        Assert.Contains("plain HTTP", body, StringComparison.Ordinal);
+        Assert.Empty(recipe.Caveats);
+    }
+
+    [Theory]
+    [InlineData("maven")]
+    [InlineData("oci")]
+    [InlineData("terraform")]
+    public async Task GetSetup_Http_KeepsTheCaveatsThatDemandActionElsewhere(string eco)
+    {
+        // The inverse of the rule above. These three cannot be fixed by a line the recipe
+        // writes: Maven blocks plain-HTTP repositories outright, Docker needs a daemon edit
+        // and restart, and Terraform has no client-side override at all. Dropping their
+        // callouts would hand out configuration that fails with errors nothing on the page
+        // explains.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+        b.OrgController.HttpContext.Request.Scheme = "http";
+
+        var payload = Recipes(await b.OrgController.GetSetup(eco, CancellationToken.None));
+
+        Assert.All(payload.Recipes.Where(r => r.Operation == "install"), r => Assert.NotEmpty(r.Caveats));
     }
 
     [Fact]
-    public async Task GetSetup_PyPi_IncludesNetrcAuth()
+    public async Task GetSetup_PyPi_Https_OmitsTrustedHost()
     {
-        // Pulls require a token by default (anonymous_pull off), so the snippet must show how
-        // to authenticate — pip reads credentials from ~/.netrc.
+        // The inverse of the branch above: an HTTPS deployment must not be told to weaken
+        // anything, so neither the config line nor the caveat may appear.
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var ok = Assert.IsType<OkObjectResult>(await b.OrgController.GetSetup("pypi", CancellationToken.None));
-        string snippet = (string)ok.Value!.GetType().GetProperty("snippet")!.GetValue(ok.Value)!;
-        Assert.Contains(".netrc", snippet);
-        Assert.Contains("password <token>", snippet);
+        var payload = Recipes(await b.OrgController.GetSetup("pypi", CancellationToken.None));
+        var recipe = Cell(payload, "install", "project", "pip");
+
+        Assert.DoesNotContain("trusted-host", Bodies(recipe), StringComparison.Ordinal);
+        Assert.Empty(recipe.Caveats);
+    }
+
+    [Fact]
+    public async Task GetSetup_PyPi_CarriesCredentials_InTheIndexUrl()
+    {
+        // Pulls require a token by default (anonymous_pull off), so the recipe has to show how
+        // to authenticate. pip carries credentials in the index-url userinfo; the project-scoped
+        // file references the variable rather than the value, so it stays committable.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var payload = Recipes(await b.OrgController.GetSetup("pypi", CancellationToken.None));
+        var project = Cell(payload, "install", "project", "pip");
+        var global = Cell(payload, "install", "global", "pip");
+
+        Assert.Contains("${DEPENDABLY_TOKEN}", Bodies(project), StringComparison.Ordinal);
+        Assert.Equal("envVar", project.TokenDelivery.Kind);
+        Assert.DoesNotContain(project.Files, f => f.SecretBearing);
+
+        // The user-level file is not under source control, so it holds the literal instead.
+        Assert.Contains("<token>", Bodies(global), StringComparison.Ordinal);
+        Assert.Equal("literal", global.TokenDelivery.Kind);
+        Assert.All(global.Files, f => Assert.True(f.SecretBearing));
     }
 
     [Fact]
@@ -1059,10 +1130,14 @@ public sealed class OrgControllerExtendedTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var ok = Assert.IsType<OkObjectResult>(await b.OrgController.GetSetup("npm", CancellationToken.None));
-        string snippet = (string)ok.Value!.GetType().GetProperty("snippet")!.GetValue(ok.Value)!;
-        Assert.Contains("registry=", snippet);
-        Assert.Contains("_authToken=<token>", snippet);
+        var payload = Recipes(await b.OrgController.GetSetup("npm", CancellationToken.None));
+        var recipe = Cell(payload, "install", "project", "npm");
+        string body = Bodies(recipe);
+
+        Assert.Equal(".npmrc", Assert.Single(recipe.Files).Path);
+        Assert.Contains("registry=", body, StringComparison.Ordinal);
+        Assert.Contains("_authToken=${NPM_TOKEN}", body, StringComparison.Ordinal);
+        Assert.Equal("NPM_TOKEN", recipe.TokenDelivery.EnvVar);
     }
 
     [Fact]
@@ -1072,11 +1147,15 @@ public sealed class OrgControllerExtendedTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var ok = Assert.IsType<OkObjectResult>(await b.OrgController.GetSetup("nuget", CancellationToken.None));
-        string snippet = (string)ok.Value!.GetType().GetProperty("snippet")!.GetValue(ok.Value)!;
-        Assert.Contains("/nuget/v3/index.json", snippet);
-        Assert.Contains("packageSources", snippet);
-        Assert.Contains("packageSourceCredentials", snippet);
+        var payload = Recipes(await b.OrgController.GetSetup("nuget", CancellationToken.None));
+        string body = Bodies(Cell(payload, "install", "project", "dotnet"));
+
+        Assert.Contains("/nuget/v3/index.json", body, StringComparison.Ordinal);
+        Assert.Contains("packageSources", body, StringComparison.Ordinal);
+        Assert.Contains("packageSourceCredentials", body, StringComparison.Ordinal);
+        // NuGet interpolates %VAR%, not ${VAR} — the wrong syntax would be read as a literal
+        // password and fail authentication with no visible cause.
+        Assert.Contains("%DEPENDABLY_TOKEN%", body, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -1089,75 +1168,166 @@ public sealed class OrgControllerExtendedTests
     [InlineData("golang")]
     [InlineData("cargo")]
     [InlineData("apk")]
-    public async Task GetSetup_Snippets_OmitMaxUploadLine(string eco)
+    [InlineData("terraform")]
+    public async Task GetSetup_Recipes_OmitMaxUploadLine(string eco)
     {
-        // The setup snippets no longer advertise an upload-size limit.
+        // The setup output no longer advertises an upload-size limit.
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var ok = Assert.IsType<OkObjectResult>(await b.OrgController.GetSetup(eco, CancellationToken.None));
-        string snippet = (string)ok.Value!.GetType().GetProperty("snippet")!.GetValue(ok.Value)!;
-        Assert.DoesNotContain("Max upload", snippet);
+        var payload = Recipes(await b.OrgController.GetSetup(eco, CancellationToken.None));
+
+        Assert.All(payload.Recipes, r =>
+            Assert.DoesNotContain("Max upload", Bodies(r), StringComparison.Ordinal));
     }
 
     [Fact]
     public async Task GetSetup_Oci_Http_IncludesInsecureRegistries()
     {
-        // Scheme=http triggers the daemon.json insecure-registries block. Scenario builder
-        // defaults to https, so we flip the scheme on the HttpContext.
+        // Scheme=http triggers the daemon.json insecure-registries file. The scenario builder
+        // defaults to https, so the scheme is flipped on the HttpContext.
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
         b.OrgController.HttpContext.Request.Scheme = "http";
 
-        var ok = Assert.IsType<OkObjectResult>(await b.OrgController.GetSetup("oci", CancellationToken.None));
-        string snippet = (string)ok.Value!.GetType().GetProperty("snippet")!.GetValue(ok.Value)!;
-        Assert.Contains("insecure-registries", snippet);
-        Assert.Contains("daemon.json", snippet);
+        var payload = Recipes(await b.OrgController.GetSetup("oci", CancellationToken.None));
+        var recipe = Cell(payload, "install", "global", "docker");
+
+        Assert.Contains("insecure-registries", Bodies(recipe), StringComparison.Ordinal);
+        Assert.Contains("/etc/docker/daemon.json", recipe.Files.Select(f => f.Path));
+        Assert.Contains("insecureRegistry", recipe.Caveats);
     }
 
     [Fact]
     public async Task GetSetup_Oci_Https_OmitsInsecureRegistries()
     {
-        // HTTPS registries use the default TLS trust chain; the daemon.json block must not appear.
+        // HTTPS registries use the default TLS trust chain; the daemon.json file must not appear.
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var ok = Assert.IsType<OkObjectResult>(await b.OrgController.GetSetup("oci", CancellationToken.None));
-        string snippet = (string)ok.Value!.GetType().GetProperty("snippet")!.GetValue(ok.Value)!;
-        Assert.DoesNotContain("insecure-registries", snippet);
+        var payload = Recipes(await b.OrgController.GetSetup("oci", CancellationToken.None));
+        var recipe = Cell(payload, "install", "global", "docker");
+
+        Assert.Empty(recipe.Files);
+        Assert.Empty(recipe.Caveats);
+    }
+
+    [Fact]
+    public async Task GetSetup_Oci_HasNoProjectScope()
+    {
+        // The Distribution Spec puts the registry host in the image reference itself, so there
+        // is no per-repository file to write. The page renders the absence rather than offering
+        // a scope that resolves to nothing.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var payload = Recipes(await b.OrgController.GetSetup("oci", CancellationToken.None));
+
+        Assert.DoesNotContain(payload.Recipes, r => r.Scope == "project");
+    }
+
+    [Theory]
+    [InlineData("golang")]
+    [InlineData("apk")]
+    [InlineData("terraform")]
+    public async Task GetSetup_ProxyOnlyEcosystems_OfferNoPublishRecipe(string eco)
+    {
+        // These three have no hosted push path. Emitting a publish recipe would hand the reader
+        // a configuration that cannot work and a push token that nothing will accept.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var payload = Recipes(await b.OrgController.GetSetup(eco, CancellationToken.None));
+
+        Assert.NotEmpty(payload.Recipes);
+        Assert.DoesNotContain(payload.Recipes, r => r.Operation == "publish");
     }
 
     [Fact]
     public async Task GetSetup_Terraform_IncludesUserinfoAuth()
     {
-        // anonymous_pull defaults off, so a fresh org's mirror requires auth. The snippet must
+        // anonymous_pull defaults off, so a fresh org's mirror requires auth. The recipe must
         // carry a userinfo placeholder — the network mirror client has no separate credentials
-        // field — like every other ecosystem's setup snippet does.
+        // field.
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var ok = Assert.IsType<OkObjectResult>(await b.OrgController.GetSetup("terraform", CancellationToken.None));
-        string snippet = (string)ok.Value!.GetType().GetProperty("snippet")!.GetValue(ok.Value)!;
-        Assert.Contains("<user>:<token>@", snippet);
-        Assert.Contains("/terraform/", snippet);
+        var payload = Recipes(await b.OrgController.GetSetup("terraform", CancellationToken.None));
+        string body = Bodies(Cell(payload, "install", "global", "terraform"));
+
+        Assert.Contains(":<token>@", body, StringComparison.Ordinal);
+        Assert.Contains("/terraform/", body, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task GetSetup_Maven_IncludesGradleVariant()
+    public async Task GetSetup_Terraform_Http_FlagsTheUnfixableMirrorRejection()
     {
-        // Maven snippet bundles Groovy and Kotlin Gradle DSL blocks after the Maven XML.
+        // Terraform rejects an http:// mirror URL at config-parse time, so unlike every other
+        // ecosystem there is no client-side override. The caveat is the only honest output.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+        b.OrgController.HttpContext.Request.Scheme = "http";
+
+        var payload = Recipes(await b.OrgController.GetSetup("terraform", CancellationToken.None));
+
+        Assert.Contains("httpMirror", Cell(payload, "install", "global", "terraform").Caveats);
+    }
+
+    [Fact]
+    public async Task GetSetup_Maven_OffersGradleVariants()
+    {
+        // Maven, Gradle Groovy and Gradle Kotlin are separate recipes rather than one bundled
+        // document, so a reader sees only the build file they actually use.
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var ok = Assert.IsType<OkObjectResult>(await b.OrgController.GetSetup("maven", CancellationToken.None));
-        string snippet = (string)ok.Value!.GetType().GetProperty("snippet")!.GetValue(ok.Value)!;
-        Assert.Contains("build.gradle", snippet);
-        Assert.Contains("build.gradle.kts", snippet);
-        Assert.Contains("gradle.properties", snippet);
+        var payload = Recipes(await b.OrgController.GetSetup("maven", CancellationToken.None));
+
+        Assert.Equal(
+            ["maven", "gradle-groovy", "gradle-kotlin"],
+            payload.Variants.Select(v => v.Id));
+
+        Assert.Contains("build.gradle",
+            Cell(payload, "install", "project", "gradle-groovy").Files.Select(f => f.Path));
+        Assert.Contains("build.gradle.kts",
+            Cell(payload, "install", "project", "gradle-kotlin").Files.Select(f => f.Path));
+        Assert.Contains("~/.gradle/gradle.properties",
+            Cell(payload, "install", "global", "gradle-groovy").Files.Select(f => f.Path));
+    }
+
+    [Fact]
+    public async Task GetSetup_Maven_ProjectRecipe_KeepsTheTokenOutOfBothFiles()
+    {
+        // pom.xml is committed and ~/.m2/settings.xml is per-developer; Maven interpolates
+        // ${env.VAR} in settings.xml, so neither file needs to hold the literal value.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var payload = Recipes(await b.OrgController.GetSetup("maven", CancellationToken.None));
+        var recipe = Cell(payload, "install", "project", "maven");
+
+        Assert.Equal(["pom.xml", "~/.m2/settings.xml"], recipe.Files.Select(f => f.Path));
+        Assert.DoesNotContain(recipe.Files, f => f.SecretBearing);
+        Assert.Contains("${env.DEPENDABLY_TOKEN}", Bodies(recipe), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GetSetup_UnknownEcosystem_NotFound()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        Assert.IsType<NotFoundResult>(
+            await b.OrgController.GetSetup("not-an-ecosystem", CancellationToken.None));
     }
 }

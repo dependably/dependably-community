@@ -219,7 +219,8 @@
       "open": "Actions du paquet",
       "allowSameVersionPush": "Autoriser la publication de la même version",
       "blockSameVersionPush": "Bloquer la publication de la même version",
-      "inheritOrgDefault": "Hériter (valeur par défaut de l'organisation)"
+      "inheritOrgDefault": "Hériter (valeur par défaut de l'organisation)",
+      "copyInstall": "Copier la commande d'installation"
     },
     "empty": "Aucun paquet trouvé"
   },
@@ -442,7 +443,8 @@
   "versionDetail": {
     "meta": {
       "homepage": "Site web",
-      "repository": "Dépôt"
+      "repository": "Dépôt",
+      "author": "Auteur"
     },
     "columns": {
       "version": "Version",
@@ -569,6 +571,16 @@
         "sha512-sri": "SHA-512 amont (SRI)",
         "sha512-b64": "SHA-512 amont (base64)",
         "shasum": "SHA-1 amont (shasum)"
+      }
+    },
+    "install": {
+      "install": "Installation",
+      "pull": "Récupération",
+      "caveat": {
+        "requiresSetup": "Fonctionne une fois ce registre configuré pour l'écosystème. Voir Configuration.",
+        "httpMirror": "Cette instance est servie en HTTP simple, et Terraform rejette une URL de miroir http://.",
+        "dependenciesFromConfiguredRepos": "Installe exactement ce paquet. Ses dépendances proviennent toujours de vos dépôts configurés.",
+        "insecureRegistry": "Cette instance est servie en HTTP simple; Docker doit donc aussi la lister sous insecure-registries."
       }
     },
     "blastRadius": {
@@ -1268,6 +1280,11 @@
       "blockMaliciousOff": "Désactivé — ignorer les avis de malveillance",
       "blockMaliciousWarn": "Avertir — signaler seulement",
       "blockMaliciousBlock": "Bloquer — refuser les versions signalées",
+      "blockMaliciousLive": "Version malveillante toujours active",
+      "blockMaliciousLiveHint": "Plus restrictif que la politique des paquets malveillants ci-dessus : s'applique uniquement lorsque la vérification précise à la version du suivi des vulnérabilités constate que cette version exacte sert encore des octets compromis en ce moment, et non simplement qu'elle a déjà été signalée. Laissez la porte ci-dessus sur Avertir et réglez celle-ci sur Bloquer pour refuser seulement les versions toujours actives plutôt que toutes les versions signalées. Nécessite la connexion au suivi des vulnérabilités. Sans elle, cette porte ne se déclenche jamais, quel que soit son réglage.",
+      "blockMaliciousLiveOff": "Désactivé",
+      "blockMaliciousLiveWarn": "Avertir",
+      "blockMaliciousLiveBlock": "Bloquer",
       "blockKev": "Politique des vulnérabilités exploitées (KEV)",
       "blockKevHint": "Traitement des versions dont un avis correspond à une CVE du catalogue CISA Known Exploited Vulnerabilities — exploitation confirmée sur le terrain, indépendamment du score CVSS. Le catalogue est actualisé chaque jour par la tâche de flux de menaces. « Bloquer » renvoie une erreur 403 à la récupération et au service; « Avertir » affiche seulement l'indicateur KEV dans le rapport de vulnérabilités. Une autorisation manuelle par version reste prioritaire.",
       "blockKevOff": "Désactivé — ignorer le catalogue KEV",
@@ -1599,9 +1616,62 @@
     }
   },
   "setup": {
-    "title": "Extraits de configuration",
-    "subtitle": "Extraits de configuration pour connecter vos outils à ce registre.",
-    "moreOptions": "Plus d'options de configuration (recettes projet + globales pour npm, PyPI, NuGet) →"
+    "title": "Connecter un gestionnaire de paquets",
+    "step": {
+      "token": {
+        "title": "Créer un jeton",
+        "create": "Créer le jeton",
+        "shownOnce": "Copiez-le maintenant — il ne sera plus affiché.",
+        "useExisting": "Vous avez déjà un jeton? Gérer les jetons",
+        "createAnother": "Créer un autre jeton",
+        "presetMismatch": "Ce jeton est en lecture seule; la publication sera refusée. Créez plutôt un jeton {preset}."
+      },
+      "choose": {
+        "title": "Choisir votre gestionnaire de paquets"
+      },
+      "config": {
+        "title": "Copier la configuration",
+        "none": "Choisissez un gestionnaire de paquets ci-dessus pour voir sa configuration."
+      }
+    },
+    "axis": {
+      "ecosystem": "Gestionnaire de paquets",
+      "operation": "Je veux",
+      "scope": "S'applique à",
+      "variant": "Outil"
+    },
+    "operation": {
+      "install": "Installer des paquets",
+      "publish": "Publier des paquets"
+    },
+    "scope": {
+      "project": "Ce projet",
+      "global": "Ma machine"
+    },
+    "proxyOnly": "{ecosystem} est en installation seule sur ce registre — la publication n'est pas prise en charge.",
+    "location": {
+      "repoRoot": "à la racine de votre dépôt",
+      "workspaceRoot": "à la racine de votre espace de travail",
+      "homeDir": "dans votre répertoire personnel",
+      "eachMachine": "sur la machine de chaque développeur, non versionné"
+    },
+    "file": {
+      "secretBearing": "Contient le jeton en clair. Gardez-le hors de la gestion de version et restreignez ses permissions (chmod 600)."
+    },
+    "token": {
+      "lineTitle": "Définir le jeton",
+      "lineHint": "Exécutez ceci dans le terminal depuis lequel vous installez — cela ne dure que le temps de cette session de terminal.",
+      "lineHintNoToken": "Créez un jeton à l'étape 1 et cette ligne le contiendra."
+    },
+    "verify": {
+      "title": "Vérifier que ça fonctionne"
+    },
+    "caveat": {
+      "httpMavenBlocked": "Maven 3.8.1 et versions ultérieures bloquent les dépôts en HTTP simple. Servez ce registre en HTTPS, ou ajoutez un miroir avec blocked=false.",
+      "httpCleartextCredentials": "Ce registre utilise HTTP simple; le jeton circule donc en clair. Ne l'utilisez que sur un réseau de confiance.",
+      "insecureRegistry": "Docker refuse un registre en HTTP simple tant que le démon ne l'autorise pas. Redémarrez le démon après avoir modifié daemon.json.",
+      "httpMirror": "Terraform rejette un miroir réseau http:// et il n'existe aucun contournement côté client. Ce registre doit être servi en HTTPS pour que cette configuration fonctionne."
+    }
   },
   "admin": {
     "orgs": {
@@ -1660,7 +1730,6 @@
     },
     "prevention": {
       "title": "Prévention (30j)",
-      "empty": "0 récupération bloquée au cours des 30 derniers jours",
       "emptyServed": "{count, plural, one {# récupération a été servie durant cette période et aucun filtre ne l'a refusée.} other {# récupérations ont été servies durant cette période et aucun filtre ne les a refusées.}} Les modes d'application se configurent dans Paramètres → Filtres.",
       "emptyNoTraffic": "Aucune récupération n'a été servie durant cette période; il n'y avait donc rien à évaluer."
     },
@@ -2600,23 +2669,7 @@
     "license": {
       "dispositionInvalid": "La disposition doit être : allowed ou conditional.",
       "noteTooLong": "La note est trop longue."
-    },
-    "packageNote": {
-      "coordinateRequired": "L'écosystème et le nom du paquet sont requis.",
-      "noteRequired": "Le texte de la note est requis.",
-      "noteTooLong": "La note est trop longue."
     }
-  },
-  "packageNotes": {
-    "title": "Notes",
-    "intro": "Notes de conformité laissées par un administrateur sur ce paquet — y compris la raison pour laquelle il a été accepté sous une licence conditionnelle.",
-    "empty": "Aucune note sur ce paquet.",
-    "placeholder": "Ajouter une note sur ce paquet",
-    "add": "Ajouter une note",
-    "removeConfirm": "Supprimer cette note?",
-    "scopedToPackage": "Toutes les versions",
-    "scopedToVersion": "Version {version}",
-    "unknownAuthor": "Auteur inconnu"
   },
   "sbomAnalysis": {
     "title": "Version du projet",
@@ -2763,6 +2816,22 @@
     },
     "panel": {
       "purl": "PURL",
+      "about": "À propos de ce composant",
+      "author": "Auteur",
+      "group": "Groupe",
+      "copyright": "Droit d'auteur",
+      "hashes": "Empreintes déclarées",
+      "source": {
+        "registry": "depuis votre registre",
+        "sbom": "depuis le SBOM",
+        "mixed": "depuis votre registre et le SBOM"
+      },
+      "links": {
+        "website": "Site Web",
+        "vcs": "Source",
+        "issueTracker": "Tickets",
+        "distribution": "Téléchargement"
+      },
       "dependencyPath": "Chemin de dépendance",
       "noAdvisories": "Aucun avis enregistré pour ce composant.",
       "allSuppressed": "Tous les avis de ce composant sont supprimés. Activez Afficher les avis supprimés pour les réviser.",
@@ -2777,6 +2846,10 @@
       "kevHelp": "Répertorié dans le catalogue KEV (Known Exploited Vulnerabilities) de la CISA — exploitation confirmée en conditions réelles, indépendamment du score CVSS.",
       "kevRansomware": "KEV · Rançongiciel",
       "kevRansomwareHelp": "Répertorié dans le catalogue KEV de la CISA avec utilisation confirmée dans des campagnes de rançongiciel — les entrées KEV les plus urgentes.",
+      "malStillLive": "Toujours active",
+      "malStillLiveHelp": "Cette version exacte sert encore des octets compromis — la vérification précise à la version du suivi des vulnérabilités l'a confirmé pour la dernière fois le {checkedAt}. C'est le signal sur lequel agit la porte de blocage des versions malveillantes toujours actives.",
+      "malStillLiveHelpNoDate": "Cette version exacte sert encore des octets compromis, selon la vérification précise à la version du suivi des vulnérabilités. C'est le signal sur lequel agit la porte de blocage des versions malveillantes toujours actives.",
+      "malCompromisedVersions": "Versions compromises",
       "reachability": "Atteignabilité",
       "noReachabilityHelp": "Aucune analyse SARIF ne s'est prononcée sur cet avis; l'atteignabilité n'est donc pas énoncée — ce qui diffère d'un analyseur qui la déclare inconnue.",
       "confidence": "Confiance",

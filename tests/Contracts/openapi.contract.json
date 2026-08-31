@@ -858,42 +858,6 @@
         }
       }
     },
-    "/api/v1/package-notes": {
-      "operations": {
-        "get": {
-          "requiredParams": [],
-          "responseCodes": [
-            "200"
-          ]
-        },
-        "post": {
-          "requiredParams": [],
-          "responseCodes": [
-            "201"
-          ]
-        }
-      }
-    },
-    "/api/v1/package-notes/{id}": {
-      "operations": {
-        "delete": {
-          "requiredParams": [
-            "id"
-          ],
-          "responseCodes": [
-            "204"
-          ]
-        },
-        "put": {
-          "requiredParams": [
-            "id"
-          ],
-          "responseCodes": [
-            "200"
-          ]
-        }
-      }
-    },
     "/api/v1/packages": {
       "operations": {
         "get": {

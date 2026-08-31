@@ -42,7 +42,8 @@ public sealed class AuditEventReaperTests : IAsyncLifetime
                 new Dependably.Protocol.OciBlobKeyLock()),
             new Dependably.Infrastructure.Mail.EmailOutboxRepository(_db, clock),
             new Dependably.Infrastructure.Mail.EmailOutboxPolicy(cfg),
-            new OrgStatsHistoryRepository(_db)));
+            new OrgStatsHistoryRepository(_db),
+            new BackgroundJobRunRepository(_db)));
     }
 
     private async Task SeedEventAsync(string id, DateTimeOffset occurredAt)

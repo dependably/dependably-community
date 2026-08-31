@@ -360,6 +360,7 @@ public sealed class PyPiProxyFetcher(
             Deprecated: jsonMeta.Deprecated,
             BlockDeprecatedMode: gate.Settings.BlockDeprecated,
             BlockMaliciousMode: gate.Settings.BlockMalicious,
+            BlockMaliciousLiveMode: gate.Settings.BlockMaliciousLive,
             BlockKevMode: gate.Settings.BlockKev,
             BlockRevokedMode: gate.Settings.BlockRevoked,
             MaxEpssTolerance: gate.Settings.MaxEpssTolerance,

@@ -104,7 +104,13 @@ public sealed record UpdateProxySettingsRequest(
     string? VerifyRpmSignatures = null,
     string? VerifyMavenSignatures = null,
     string? BlockRevoked = null,
-    string? VerifyTerraformSignatures = null)
+    string? VerifyTerraformSignatures = null,
+    /// <summary>
+    /// Narrower companion to <see cref="BlockMalicious"/>: 'off' | 'warn' | 'block'. Absent =
+    /// leave the stored value unchanged, like every other field on this PUT. See
+    /// <c>OrgSettings.BlockMaliciousLive</c> for the full rationale.
+    /// </summary>
+    string? BlockMaliciousLive = null)
 {
     public Optional<int?> MinReleaseAgeHours { get; init; }
     public Optional<double?> MaxEpssTolerance { get; init; }

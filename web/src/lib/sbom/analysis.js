@@ -200,11 +200,15 @@ export function reachBadge(value) {
 }
 
 /**
- * Optional decision-support chips an advisory may carry: an SSVC decision and the NVD/GHSA
- * severity bands. Nothing emits these yet, so an advisory without them renders no chips at all
- * rather than an empty or "unknown" one — an overlay that is not configured has said nothing,
- * and the panel must not put words in its mouth. Keeping the field names in one place is what
- * makes wiring the overlay a one-function change.
+ * Optional decision-support chips an advisory may carry: an SSVC decision, the NVD/GHSA
+ * severity bands, and the cvelistV5 CVSS/SSVC overlay. Nothing emits these yet, so an advisory
+ * without them renders no chips at all rather than an empty or "unknown" one — an overlay that
+ * is not configured has said nothing, and the panel must not put words in its mouth. Keeping the
+ * field names in one place is what makes wiring the overlay a one-function change.
+ *
+ * The cvelistV5 chips are DELIBERATELY separate from the NVD/GHSA ones above, never merged: the
+ * tracker's own design doc measured 34%+ disagreement between the NVD-mirror and cvelistV5
+ * readings of the same CVE, so folding them into one chip would hide that disagreement.
  * @returns {Array<{ key: string, kind: string, value: string, title: string|null }>}
  */
 export function overlayChips(advisory) {
@@ -217,7 +221,60 @@ export function overlayChips(advisory) {
   if (nvd) chips.push({ key: 'nvd', kind: 'band', value: `NVD ${nvd}`, title: null })
   const ghsa = advisory?.ghsaSeverityBand
   if (ghsa) chips.push({ key: 'ghsa', kind: 'band', value: `GHSA ${ghsa}`, title: null })
+  const cvelistBand = advisory?.cvelistCvssSeverityBand
+  if (cvelistBand) chips.push({ key: 'cvelist-cvss', kind: 'band', value: `cvelistV5 ${cvelistBand}`, title: null })
+  const cvelistSsvc = advisory?.cvelistSsvcDecision
+  if (cvelistSsvc) {
+    chips.push({
+      key: 'cvelist-ssvc', kind: 'ssvc',
+      value: `cvelistV5 ${cvelistSsvc}`, title: advisory.cvelistSsvcVector ?? null,
+    })
+  }
   return chips
+}
+
+/**
+ * Exploit-code observation chip — informational, alongside the EPSS/CVSS/KEV badges rather than
+ * at a different visual tier. `exploitCodeExists` is never null at the source (the producer
+ * defaults it false), so this renders only when true: a package nothing has observed exploit
+ * code for says nothing, the same "no chip" convention every other optional signal here uses.
+ * @returns {{ key: string, kind: string, value: string, title: string|null }|null}
+ */
+export function exploitCodeChip(advisory) {
+  if (!advisory?.exploitCodeExists) return null
+  const sources = Array.isArray(advisory.exploitCodeSources) ? advisory.exploitCodeSources : []
+  const title = sources.length ? sources.join(', ') : null
+  const weight = advisory.exploitCodeMaxWeight
+  return {
+    key: 'exploit-code',
+    kind: 'exploit-code',
+    value: weight === null || weight === undefined ? 'Exploit code' : `Exploit code (${weight})`,
+    title,
+  }
+}
+
+/**
+ * The still-live-malicious badge — the version-precise signal wired into the live block gate
+ * (BlockGateService's MaliciousLive arm), so it is rendered as the MOST alarming tier, matching
+ * how the KEV-ransomware badge above is styled as this panel's current top tier. Distinct from
+ * the raw `malStillLive`/`malLiveVersions` pass-through (whole-package, not version-scoped) —
+ * this reads only the derived, already-version-precise flag.
+ * @returns {{ checkedAt: string|null }|null}
+ */
+export function stillLiveMaliciousBadge(advisory) {
+  if (!advisory?.malStillLive) return null
+  return { checkedAt: advisory.malLiveCheckedAt ?? null }
+}
+
+/**
+ * Compromised-versions chip — informational display of the OpenSSF malicious-packages raw
+ * pass-through. Null when the producer named no compromised versions.
+ * @returns {{ versions: string[] }|null}
+ */
+export function compromisedVersionsChip(advisory) {
+  const versions = advisory?.malCompromisedVersions
+  if (!Array.isArray(versions) || versions.length === 0) return null
+  return { versions }
 }
 
 /**

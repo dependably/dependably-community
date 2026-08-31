@@ -26,6 +26,15 @@ namespace Dependably.Protocol;
 ///   4. Release-age gate — blocks versions younger than the tenant's
 ///      <c>MinReleaseAgeHours</c> hold, measured against the upstream publish timestamp.
 ///      Fail-open when the timestamp is missing (some upstream metadata omits it).
+///   4a. Still-live-malicious gate — a narrower, higher-confidence sub-arm of 5, evaluated
+///      IMMEDIATELY BEFORE it. Blocks versions the tracker's version-precise still-live-malicious
+///      signal (<c>VulnFacts.MalStillLive</c>) marks as a compromised version that is STILL
+///      serving malicious bytes right now, when the tenant's <c>BlockMaliciousLiveMode</c> is
+///      'block'. Independent of arm 5 the same way the KEV-ransomware sub-arm (6a) is independent
+///      of the broad KEV arm — the two settings compose, and ordering this one first is what lets
+///      <c>BlockMaliciousMode = 'warn'</c> with this at 'block' actually refuse the still-live
+///      case rather than the broad arm's 'warn' swallowing it. Populated only when the operator
+///      has the tracker connection configured; a deployment without one never has this arm fire.
 ///   5. Malicious-advisory gate — blocks versions linked to an OSV <c>MAL-</c> advisory
 ///      (OpenSSF malicious-packages feed) when the tenant's <c>BlockMaliciousMode</c> is
 ///      'block'. Runs ahead of the score gate because MAL advisories usually carry no CVSS
@@ -47,9 +56,10 @@ namespace Dependably.Protocol;
 ///      Lowest priority: a vuln/KEV/malicious signal is a stronger reason to deny, so this arm
 ///      only fires when nothing above it did.
 /// Records the corresponding <c>blocked_manual</c> / <c>blocked_deprecated</c> /
-/// <c>blocked_release_age</c> / <c>blocked_malicious</c> / <c>blocked_kev</c> /
-/// <c>blocked_epss</c> / <c>blocked_vuln_score</c> / <c>blocked_install_script</c> activity row
-/// when a block fires so the dashboard can surface why a download was denied.
+/// <c>blocked_release_age</c> / <c>blocked_malicious_live</c> / <c>blocked_malicious</c> /
+/// <c>blocked_kev</c> / <c>blocked_epss</c> / <c>blocked_vuln_score</c> /
+/// <c>blocked_install_script</c> activity row when a block fires so the dashboard can surface
+/// why a download was denied.
 ///
 /// Every automatic policy block (everything except <c>blocked_manual</c>, which is already a
 /// human decision) additionally upserts a pending <c>quarantine</c> review row, best-effort —
@@ -300,6 +310,7 @@ public sealed class BlockGateService
             MinReleaseAgeHours: request.MinReleaseAgeHours,
             BlockDeprecatedMode: request.BlockDeprecatedMode,
             BlockMaliciousMode: request.BlockMaliciousMode,
+            BlockMaliciousLiveMode: request.BlockMaliciousLiveMode,
             BlockKevMode: request.BlockKevMode,
             MaxEpssTolerance: request.MaxEpssTolerance,
             BlockKevRansomwareMode: request.BlockKevRansomwareMode,
@@ -583,6 +594,10 @@ public sealed class BlockGateService
                 await RecordReleaseAgeBlockAsync(request, ct);
                 break;
 
+            case BlockArm.MaliciousLive:
+                await RecordMaliciousLiveBlockAsync(request, ct);
+                break;
+
             case BlockArm.Malicious:
                 await RecordMaliciousBlockAsync(request, ct);
                 break;
@@ -662,6 +677,30 @@ public sealed class BlockGateService
             sourceIp: request.SourceIp, ct: ct);
         await QueueForReviewAsync(request, "malicious", malDetail, ct);
         await EmitBlockWebhookEventAsync(request, "malicious", severity: null, ct);
+    }
+
+    // Side effects for the narrow still-live-malicious arm: reuses the same OSV-id fetch and
+    // detail shape as the broad malicious arm (RecordMaliciousBlockAsync) — the two arms describe
+    // the same advisory set, differing only in which version-precise signal triggered the block —
+    // but records under its own activity name and reason so the two are distinguishable in the
+    // dashboard and the audit log. Shares EnrichmentGateBlocks with the KEV-ransomware/SSVC/
+    // EPSS-percentile arms, discriminated by the "reason" tag, rather than a dedicated counter.
+    private async Task RecordMaliciousLiveBlockAsync(BlockGateRequest request, CancellationToken ct)
+    {
+        DependablyMeter.EnrichmentGateBlocks.Add(1,
+            new KeyValuePair<string, object?>("ecosystem", request.Ecosystem),
+            new KeyValuePair<string, object?>("reason", "malicious_live"));
+        var malIds = request.CacheArtifactId is not null
+            ? await _vulns.GetMaliciousOsvIdsForCacheArtifactAsync(request.CacheArtifactId, ct)
+            : await _vulns.GetMaliciousOsvIdsForVersionAsync(request.VersionId, ct);
+        string malDetail = System.Text.Json.JsonSerializer.Serialize(new { osv_ids = malIds }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
+        await _audit.LogActivityAsync(
+            request.OrgId, request.Ecosystem, request.Purl,
+            "blocked_malicious_live", request.AuditActorId, actorKind: request.ActorKind, actorLabel: request.AuditActorLabel,
+            detail: malDetail,
+            sourceIp: request.SourceIp, ct: ct);
+        await QueueForReviewAsync(request, "malicious_live", malDetail, ct);
+        await EmitBlockWebhookEventAsync(request, "malicious_live", severity: null, ct);
     }
 
     // Side effects for the KEV arm: fetches advisory ids (block path only), increments the
@@ -958,6 +997,7 @@ public sealed class BlockGateService
             MinReleaseAgeHours: settings.MinReleaseAgeHours,
             BlockDeprecatedMode: settings.BlockDeprecated,
             BlockMaliciousMode: settings.BlockMalicious,
+            BlockMaliciousLiveMode: settings.BlockMaliciousLive,
             BlockKevMode: settings.BlockKev,
             MaxEpssTolerance: settings.MaxEpssTolerance,
             BlockKevRansomwareMode: settings.BlockKevRansomware,
@@ -1006,6 +1046,7 @@ public sealed class BlockGateService
             MinReleaseAgeHours: settings.MinReleaseAgeHours,
             BlockDeprecatedMode: settings.BlockDeprecated,
             BlockMaliciousMode: settings.BlockMalicious,
+            BlockMaliciousLiveMode: settings.BlockMaliciousLive,
             BlockKevMode: settings.BlockKev,
             MaxEpssTolerance: settings.MaxEpssTolerance,
             BlockKevRansomwareMode: settings.BlockKevRansomware,
@@ -1132,6 +1173,14 @@ public sealed class BlockGateService
     // version must not warn either — a warning implies a judgement that was never made.
     private static bool MaliciousTriggers(VersionFacts f) => f.Scanned && f.Vulnerability.IsMalicious;
 
+    // Deliberately NO staleness gating, unlike SsvcExploitationTriggers' dual staleness handling
+    // below: a positive still-live result does not go stale into "safe" the way an exploitation
+    // ASSESSMENT can. The malware does not un-flag itself with the passage of time — only a fresh
+    // probe finding the version actually removed changes the answer, and that arrives as a new
+    // `false` on VulnFacts.MalStillLive, not a stale `true` that needs a horizon to discount. This
+    // is a divergence from the SSVC precedent by design, not an omission.
+    private static bool MalStillLiveTriggers(VersionFacts f) => f.Scanned && f.Vulnerability.MalStillLive;
+
     private static bool KevRansomwareTriggers(VersionFacts f) =>
         f.Scanned && f.Vulnerability.IsKevRansomware == true;
 
@@ -1168,6 +1217,7 @@ public sealed class BlockGateService
             // than an array so the serve path allocates nothing per evaluation.
             : Warned(DeprecatedTriggers(facts), policy.BlockDeprecatedMode, BlockArm.Deprecated)
               ?? Warned(RevokedTriggers(facts), policy.BlockRevokedMode, BlockArm.Revoked)
+              ?? Warned(MalStillLiveTriggers(facts), policy.BlockMaliciousLiveMode, BlockArm.MaliciousLive)
               ?? Warned(MaliciousTriggers(facts), policy.BlockMaliciousMode, BlockArm.Malicious)
               ?? Warned(KevRansomwareTriggers(facts), policy.BlockKevRansomwareMode, BlockArm.KevRansomware)
               ?? Warned(KevTriggers(facts), policy.BlockKevMode, BlockArm.Kev)
@@ -1204,6 +1254,17 @@ public sealed class BlockGateService
             return new BlockVerdict(Servable: true, Arm: BlockArm.None);
         }
 
+        // Arm 4a: the narrow still-live-malicious gate, evaluated BEFORE the broad malicious arm
+        // (arm 4) — same reasoning as the KEV-ransomware/KEV pair below: the two settings are
+        // independent, and the useful combination is block_malicious='warn' with this at 'block',
+        // which only produces a block if the narrow arm is reached first. Ordering it after arm 4
+        // would let the broad arm's 'warn' fall through and lose the still-live attribution
+        // entirely. See MalStillLiveTriggers for why this arm carries no staleness gating.
+        if (MalStillLiveTriggers(facts) && policy.BlockMaliciousLiveMode == "block")
+        {
+            return new BlockVerdict(Servable: false, Arm: BlockArm.MaliciousLive);
+        }
+
         // Arm 4: malicious advisory. Runs before score comparison; MAL- advisories usually
         // carry no CVSS score so the score gate alone would let known malware through.
         if (MaliciousTriggers(facts) && policy.BlockMaliciousMode == "block")
@@ -1216,10 +1277,15 @@ public sealed class BlockGateService
         // from this guard makes its arm unreachable rather than merely unused, and the arm still
         // looks correct at its own call site. IsKevRansomware implies IsKev and so is covered
         // by it, but is named anyway so the guard stays honest if that ever stops holding.
+        // MalStillLive is included for the same defensive reason even though arm 4a's own check
+        // above already runs unconditionally before this guard is reached: a signal this guard
+        // does not name is exactly the failure mode that made arm 4a unreachable look correct at
+        // its own call site while doing nothing, and this guard must never be the thing that
+        // silently reintroduces that bug if the arms above it are ever reordered.
         if (!facts.Vulnerability.IsKev && facts.Vulnerability.IsKevRansomware != true
             && facts.Vulnerability.SsvcExploitation != "active" && !facts.Vulnerability.HasStaleEnrichment
             && facts.Vulnerability.Epss is null && facts.Vulnerability.EpssPercentile is null
-            && facts.Vulnerability.Cvss is null)
+            && facts.Vulnerability.Cvss is null && !facts.Vulnerability.MalStillLive)
         {
             return new BlockVerdict(Servable: true, Arm: BlockArm.None);
         }
@@ -1273,7 +1339,7 @@ public sealed class BlockGateService
 /// Identifies which policy arm triggered a block verdict. <see cref="None"/> means the
 /// version is servable (no arm fired).
 /// </summary>
-public enum BlockArm { None, Manual, Deprecated, Revoked, ReleaseAge, Malicious, Provenance, Kev, KevRansomware, SsvcExploitation, Epss, EpssPercentile, VulnScore, InstallScript, License }
+public enum BlockArm { None, Manual, Deprecated, Revoked, ReleaseAge, MaliciousLive, Malicious, Provenance, Kev, KevRansomware, SsvcExploitation, Epss, EpssPercentile, VulnScore, InstallScript, License }
 
 /// <summary>
 /// Outcome of the pure policy core: whether the version is servable and, if not, which arm
@@ -1404,7 +1470,15 @@ public readonly record struct BlockPolicy(
     /// <see cref="BlockKevMode"/> — the two read different catalogues and either may be the
     /// stricter one for a given tenant.
     /// </summary>
-    string? BlockSsvcExploitationMode = null);
+    string? BlockSsvcExploitationMode = null,
+    /// <summary>
+    /// Tenant policy from <c>org_settings.block_malicious_live</c>: 'off' (default) | 'warn' |
+    /// 'block'. The narrow companion to <see cref="BlockMaliciousMode"/>, matching only the
+    /// tracker's version-precise still-live-malicious signal. Independent rather than a mode on
+    /// the broad arm, so <c>BlockMaliciousMode = "warn"</c> with this at <c>"block"</c> is
+    /// expressible.
+    /// </summary>
+    string? BlockMaliciousLiveMode = null);
 
 public enum BlockDecision
 {
@@ -1442,6 +1516,7 @@ public readonly record struct BlockOutcome(BlockDecision Decision, BlockArm Arm)
         BlockArm.Deprecated => "deprecated",
         BlockArm.Revoked => "revoked",
         BlockArm.ReleaseAge => "release_age",
+        BlockArm.MaliciousLive => "malicious_live",
         BlockArm.Malicious => "malicious",
         BlockArm.Provenance => "provenance",
         BlockArm.Kev => "kev",
@@ -1489,6 +1564,13 @@ public sealed record BlockGateRequest(
     /// Null (callers that predate the gate) behaves as 'off'.
     /// </summary>
     string? BlockMaliciousMode = null,
+    /// <summary>
+    /// Tenant policy from <c>org_settings.block_malicious_live</c>: 'off' (default) | 'warn' |
+    /// 'block'. The narrow companion to <see cref="BlockMaliciousMode"/> — fires only on the
+    /// tracker's version-precise still-live-malicious signal. Null behaves as 'off', matching the
+    /// column's own opt-in default.
+    /// </summary>
+    string? BlockMaliciousLiveMode = null,
     /// <summary>
     /// Tenant policy from <c>org_settings.block_kev</c>: 'off' | 'warn' | 'block'. Only 'block'
     /// denies versions whose advisories alias a CISA-KEV-listed CVE. Null behaves as 'off'.
@@ -1621,6 +1703,7 @@ public sealed record BlockGateRequest(
             Deprecated: version.Deprecated,
             BlockDeprecatedMode: settings?.BlockDeprecated,
             BlockMaliciousMode: settings?.BlockMalicious,
+            BlockMaliciousLiveMode: settings?.BlockMaliciousLive,
             BlockKevMode: settings?.BlockKev,
             MaxEpssTolerance: settings?.MaxEpssTolerance,
             BlockKevRansomwareMode: settings?.BlockKevRansomware,
@@ -1667,6 +1750,7 @@ public sealed record BlockGateRequest(
             Deprecated: caFacts.Deprecated,
             BlockDeprecatedMode: settings?.BlockDeprecated,
             BlockMaliciousMode: settings?.BlockMalicious,
+            BlockMaliciousLiveMode: settings?.BlockMaliciousLive,
             BlockKevMode: settings?.BlockKev,
             MaxEpssTolerance: settings?.MaxEpssTolerance,
             BlockKevRansomwareMode: settings?.BlockKevRansomware,
@@ -1745,7 +1829,8 @@ public sealed record BlockGateRequest(
         string? verifyProvenanceMode,
         string? blockRevokedMode,
         string? licenseEnforcementMode,
-        string? ownProvenanceStatus = null) =>
+        string? ownProvenanceStatus = null,
+        string? blockMaliciousLiveMode = null) =>
         new(orgId, ecosystem, caFacts.Purl ?? string.Empty, string.Empty,
             // OSV findings are keyed by package coordinate, not by bytes — see EvaluateAsync's
             // remark on VulnCheckedAt — so this is the shared row's real stamp, unmasked.
@@ -1758,6 +1843,7 @@ public sealed record BlockGateRequest(
             Deprecated: caFacts.Deprecated,
             BlockDeprecatedMode: blockDeprecatedMode,
             BlockMaliciousMode: blockMaliciousMode,
+            BlockMaliciousLiveMode: blockMaliciousLiveMode,
             BlockKevMode: blockKevMode,
             MaxEpssTolerance: maxEpssTolerance,
             Origin: "proxy",

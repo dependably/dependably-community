@@ -1915,12 +1915,6 @@
         <target>Paquets</target>
       </segment>
     </unit>
-    <unit id="dashboard.prevention.empty">
-      <segment state="translated">
-        <source>0 pulls blocked in the last 30 days</source>
-        <target>0 récupération bloquée au cours des 30 derniers jours</target>
-      </segment>
-    </unit>
     <unit id="dashboard.prevention.emptyNoTraffic">
       <segment state="translated">
         <source>No pulls were served in this window, so there was nothing to evaluate.</source>
@@ -2102,24 +2096,6 @@
       </segment>
     </unit>
     <unit id="error.license.noteTooLong">
-      <segment state="translated">
-        <source>Note is too long.</source>
-        <target>La note est trop longue.</target>
-      </segment>
-    </unit>
-    <unit id="error.packageNote.coordinateRequired">
-      <segment state="translated">
-        <source>Ecosystem and package name are required.</source>
-        <target>L&apos;écosystème et le nom du paquet sont requis.</target>
-      </segment>
-    </unit>
-    <unit id="error.packageNote.noteRequired">
-      <segment state="translated">
-        <source>Note text is required.</source>
-        <target>Le texte de la note est requis.</target>
-      </segment>
-    </unit>
-    <unit id="error.packageNote.noteTooLong">
       <segment state="translated">
         <source>Note is too long.</source>
         <target>La note est trop longue.</target>
@@ -2917,60 +2893,6 @@
         <target>Vulnérabilités</target>
       </segment>
     </unit>
-    <unit id="packageNotes.add">
-      <segment state="translated">
-        <source>Add note</source>
-        <target>Ajouter une note</target>
-      </segment>
-    </unit>
-    <unit id="packageNotes.empty">
-      <segment state="translated">
-        <source>No notes on this package.</source>
-        <target>Aucune note sur ce paquet.</target>
-      </segment>
-    </unit>
-    <unit id="packageNotes.intro">
-      <segment state="translated">
-        <source>Compliance notes an administrator has left on this package — including why it was accepted under a conditional licence.</source>
-        <target>Notes de conformité laissées par un administrateur sur ce paquet — y compris la raison pour laquelle il a été accepté sous une licence conditionnelle.</target>
-      </segment>
-    </unit>
-    <unit id="packageNotes.placeholder">
-      <segment state="translated">
-        <source>Add a note about this package</source>
-        <target>Ajouter une note sur ce paquet</target>
-      </segment>
-    </unit>
-    <unit id="packageNotes.removeConfirm">
-      <segment state="translated">
-        <source>Remove this note?</source>
-        <target>Supprimer cette note?</target>
-      </segment>
-    </unit>
-    <unit id="packageNotes.scopedToPackage">
-      <segment state="translated">
-        <source>All versions</source>
-        <target>Toutes les versions</target>
-      </segment>
-    </unit>
-    <unit id="packageNotes.scopedToVersion">
-      <segment state="translated">
-        <source>Version {version}</source>
-        <target>Version {version}</target>
-      </segment>
-    </unit>
-    <unit id="packageNotes.title">
-      <segment state="translated">
-        <source>Notes</source>
-        <target>Notes</target>
-      </segment>
-    </unit>
-    <unit id="packageNotes.unknownAuthor">
-      <segment state="translated">
-        <source>Unknown author</source>
-        <target>Auteur inconnu</target>
-      </segment>
-    </unit>
     <unit id="packages.abandoned.help">
       <segment state="translated">
         <source>No new release published upstream in over a year.</source>
@@ -2993,6 +2915,12 @@
       <segment state="translated">
         <source>Block same-version push</source>
         <target>Bloquer la publication de la même version</target>
+      </segment>
+    </unit>
+    <unit id="packages.actionsMenu.copyInstall">
+      <segment state="translated">
+        <source>Copy install command</source>
+        <target>Copier la commande d&apos;installation</target>
       </segment>
     </unit>
     <unit id="packages.actionsMenu.inheritOrgDefault">
@@ -4693,6 +4621,12 @@
         <target>Avis</target>
       </segment>
     </unit>
+    <unit id="sbomAnalysis.panel.about">
+      <segment state="translated">
+        <source>About this component</source>
+        <target>À propos de ce composant</target>
+      </segment>
+    </unit>
     <unit id="sbomAnalysis.panel.aliases">
       <segment state="translated">
         <source>Aliases</source>
@@ -4705,6 +4639,12 @@
         <target>Tous les avis de ce composant sont supprimés. Activez Afficher les avis supprimés pour les réviser.</target>
       </segment>
     </unit>
+    <unit id="sbomAnalysis.panel.author">
+      <segment state="translated">
+        <source>Author</source>
+        <target>Auteur</target>
+      </segment>
+    </unit>
     <unit id="sbomAnalysis.panel.blockedBy">
       <segment state="translated">
         <source>Blocked by: {arm}</source>
@@ -4715,6 +4655,12 @@
       <segment state="translated">
         <source>Confidence</source>
         <target>Confiance</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.copyright">
+      <segment state="translated">
+        <source>Copyright</source>
+        <target>Droit d&apos;auteur</target>
       </segment>
     </unit>
     <unit id="sbomAnalysis.panel.cvss">
@@ -4739,6 +4685,18 @@
       <segment state="translated">
         <source>FIRST.org EPSS — probability of exploitation in the wild within the next 30 days.</source>
         <target>Score EPSS de FIRST.org — probabilité d&apos;exploitation en conditions réelles au cours des 30 prochains jours.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.group">
+      <segment state="translated">
+        <source>Group</source>
+        <target>Groupe</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.hashes">
+      <segment state="translated">
+        <source>Declared hashes</source>
+        <target>Empreintes déclarées</target>
       </segment>
     </unit>
     <unit id="sbomAnalysis.panel.inherited">
@@ -4775,6 +4733,54 @@
       <segment state="translated">
         <source>Listed in the CISA Known Exploited Vulnerabilities Catalog with confirmed use in ransomware campaigns — the highest-urgency KEV entries.</source>
         <target>Répertorié dans le catalogue KEV de la CISA avec utilisation confirmée dans des campagnes de rançongiciel — les entrées KEV les plus urgentes.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.links.distribution">
+      <segment state="translated">
+        <source>Download</source>
+        <target>Téléchargement</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.links.issueTracker">
+      <segment state="translated">
+        <source>Issues</source>
+        <target>Tickets</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.links.vcs">
+      <segment state="translated">
+        <source>Source</source>
+        <target>Source</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.links.website">
+      <segment state="translated">
+        <source>Website</source>
+        <target>Site Web</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.malCompromisedVersions">
+      <segment state="translated">
+        <source>Compromised versions</source>
+        <target>Versions compromises</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.malStillLive">
+      <segment state="translated">
+        <source>Still live</source>
+        <target>Toujours active</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.malStillLiveHelp">
+      <segment state="translated">
+        <source>This exact version is still serving compromised bytes — the vulnerability tracker&apos;s version-precise check last confirmed this at {checkedAt}. This is the signal the still-live-malicious block gate acts on.</source>
+        <target>Cette version exacte sert encore des octets compromis — la vérification précise à la version du suivi des vulnérabilités l&apos;a confirmé pour la dernière fois le {checkedAt}. C&apos;est le signal sur lequel agit la porte de blocage des versions malveillantes toujours actives.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.malStillLiveHelpNoDate">
+      <segment state="translated">
+        <source>This exact version is still serving compromised bytes, per the vulnerability tracker&apos;s version-precise check. This is the signal the still-live-malicious block gate acts on.</source>
+        <target>Cette version exacte sert encore des octets compromis, selon la vérification précise à la version du suivi des vulnérabilités. C&apos;est le signal sur lequel agit la porte de blocage des versions malveillantes toujours actives.</target>
       </segment>
     </unit>
     <unit id="sbomAnalysis.panel.noAdvisories">
@@ -4883,6 +4889,24 @@
       <segment state="translated">
         <source>Severity from</source>
         <target>Gravité provenant de</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.source.mixed">
+      <segment state="translated">
+        <source>from your registry and the SBOM</source>
+        <target>depuis votre registre et le SBOM</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.source.registry">
+      <segment state="translated">
+        <source>from your registry</source>
+        <target>depuis votre registre</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.source.sbom">
+      <segment state="translated">
+        <source>from the SBOM</source>
+        <target>depuis le SBOM</target>
       </segment>
     </unit>
     <unit id="sbomAnalysis.panel.unscored">
@@ -7661,6 +7685,36 @@
         <target>Traitement des versions associées à un avis de paquet malveillant (rapports OSV MAL- du flux OpenSSF malicious-packages, collectés par l&apos;analyse de vulnérabilités habituelle). Ces avis n&apos;ont généralement pas de score CVSS, la tolérance de score OSV ne s&apos;y applique donc jamais. « Bloquer » renvoie une erreur 403 à la récupération et au service; « Avertir » affiche seulement l&apos;avis dans le rapport de vulnérabilités. Une autorisation manuelle par version reste prioritaire, comme échappatoire aux faux positifs.</target>
       </segment>
     </unit>
+    <unit id="settings.proxy.blockMaliciousLive">
+      <segment state="translated">
+        <source>Still-live malicious version</source>
+        <target>Version malveillante toujours active</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.blockMaliciousLiveBlock">
+      <segment state="translated">
+        <source>Block</source>
+        <target>Bloquer</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.blockMaliciousLiveHint">
+      <segment state="translated">
+        <source>Narrower than the malicious package policy above: applies only when the vulnerability tracker&apos;s version-precise check finds that this exact version is still serving compromised bytes right now, not merely that it was once flagged. Leave the gate above at Warn and set this to Block to refuse only the still-live versions rather than every flagged one. Requires the vulnerability tracker connection; without one, this gate never fires however it is set.</source>
+        <target>Plus restrictif que la politique des paquets malveillants ci-dessus : s&apos;applique uniquement lorsque la vérification précise à la version du suivi des vulnérabilités constate que cette version exacte sert encore des octets compromis en ce moment, et non simplement qu&apos;elle a déjà été signalée. Laissez la porte ci-dessus sur Avertir et réglez celle-ci sur Bloquer pour refuser seulement les versions toujours actives plutôt que toutes les versions signalées. Nécessite la connexion au suivi des vulnérabilités. Sans elle, cette porte ne se déclenche jamais, quel que soit son réglage.</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.blockMaliciousLiveOff">
+      <segment state="translated">
+        <source>Off</source>
+        <target>Désactivé</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.blockMaliciousLiveWarn">
+      <segment state="translated">
+        <source>Warn</source>
+        <target>Avertir</target>
+      </segment>
+    </unit>
     <unit id="settings.proxy.blockMaliciousOff">
       <segment state="translated">
         <source>Off — ignore malware advisories</source>
@@ -9451,22 +9505,196 @@ dotnet/</target>
         <target>Ping de test envoyé.</target>
       </segment>
     </unit>
-    <unit id="setup.moreOptions">
+    <unit id="setup.axis.ecosystem">
       <segment state="translated">
-        <source>More setup options (project + global recipes for npm, PyPI, NuGet) →</source>
-        <target>Plus d&apos;options de configuration (recettes projet + globales pour npm, PyPI, NuGet) →</target>
+        <source>Package manager</source>
+        <target>Gestionnaire de paquets</target>
       </segment>
     </unit>
-    <unit id="setup.subtitle">
+    <unit id="setup.axis.operation">
       <segment state="translated">
-        <source>Configuration snippets for connecting your tools to this registry.</source>
-        <target>Extraits de configuration pour connecter vos outils à ce registre.</target>
+        <source>I want to</source>
+        <target>Je veux</target>
+      </segment>
+    </unit>
+    <unit id="setup.axis.scope">
+      <segment state="translated">
+        <source>Applies to</source>
+        <target>S&apos;applique à</target>
+      </segment>
+    </unit>
+    <unit id="setup.axis.variant">
+      <segment state="translated">
+        <source>Tool</source>
+        <target>Outil</target>
+      </segment>
+    </unit>
+    <unit id="setup.caveat.httpCleartextCredentials">
+      <segment state="translated">
+        <source>This registry uses plain HTTP, so the token travels in clear text. Use it only on a trusted network.</source>
+        <target>Ce registre utilise HTTP simple; le jeton circule donc en clair. Ne l&apos;utilisez que sur un réseau de confiance.</target>
+      </segment>
+    </unit>
+    <unit id="setup.caveat.httpMavenBlocked">
+      <segment state="translated">
+        <source>Maven 3.8.1 and later block plain-HTTP repositories outright. Serve this registry over HTTPS, or add a mirror declaring blocked=false.</source>
+        <target>Maven 3.8.1 et versions ultérieures bloquent les dépôts en HTTP simple. Servez ce registre en HTTPS, ou ajoutez un miroir avec blocked=false.</target>
+      </segment>
+    </unit>
+    <unit id="setup.caveat.httpMirror">
+      <segment state="translated">
+        <source>Terraform rejects an http:// network mirror and there is no client-side override. This registry must be served over HTTPS before this configuration can work.</source>
+        <target>Terraform rejette un miroir réseau http:// et il n&apos;existe aucun contournement côté client. Ce registre doit être servi en HTTPS pour que cette configuration fonctionne.</target>
+      </segment>
+    </unit>
+    <unit id="setup.caveat.insecureRegistry">
+      <segment state="translated">
+        <source>Docker refuses a plain-HTTP registry until the daemon opts in. Restart the daemon after editing daemon.json.</source>
+        <target>Docker refuse un registre en HTTP simple tant que le démon ne l&apos;autorise pas. Redémarrez le démon après avoir modifié daemon.json.</target>
+      </segment>
+    </unit>
+    <unit id="setup.file.secretBearing">
+      <segment state="translated">
+        <source>Holds the token in clear text. Keep it out of source control and restrict its permissions (chmod 600).</source>
+        <target>Contient le jeton en clair. Gardez-le hors de la gestion de version et restreignez ses permissions (chmod 600).</target>
+      </segment>
+    </unit>
+    <unit id="setup.location.eachMachine">
+      <segment state="translated">
+        <source>on each developer&apos;s machine, not committed</source>
+        <target>sur la machine de chaque développeur, non versionné</target>
+      </segment>
+    </unit>
+    <unit id="setup.location.homeDir">
+      <segment state="translated">
+        <source>in your home directory</source>
+        <target>dans votre répertoire personnel</target>
+      </segment>
+    </unit>
+    <unit id="setup.location.repoRoot">
+      <segment state="translated">
+        <source>in your repository root</source>
+        <target>à la racine de votre dépôt</target>
+      </segment>
+    </unit>
+    <unit id="setup.location.workspaceRoot">
+      <segment state="translated">
+        <source>in your workspace root</source>
+        <target>à la racine de votre espace de travail</target>
+      </segment>
+    </unit>
+    <unit id="setup.operation.install">
+      <segment state="translated">
+        <source>Install packages</source>
+        <target>Installer des paquets</target>
+      </segment>
+    </unit>
+    <unit id="setup.operation.publish">
+      <segment state="translated">
+        <source>Publish packages</source>
+        <target>Publier des paquets</target>
+      </segment>
+    </unit>
+    <unit id="setup.proxyOnly">
+      <segment state="translated">
+        <source>{ecosystem} is install-only on this registry — publishing is not supported.</source>
+        <target>{ecosystem} est en installation seule sur ce registre — la publication n&apos;est pas prise en charge.</target>
+      </segment>
+    </unit>
+    <unit id="setup.scope.global">
+      <segment state="translated">
+        <source>My machine</source>
+        <target>Ma machine</target>
+      </segment>
+    </unit>
+    <unit id="setup.scope.project">
+      <segment state="translated">
+        <source>This project</source>
+        <target>Ce projet</target>
+      </segment>
+    </unit>
+    <unit id="setup.step.choose.title">
+      <segment state="translated">
+        <source>Choose your package manager</source>
+        <target>Choisir votre gestionnaire de paquets</target>
+      </segment>
+    </unit>
+    <unit id="setup.step.config.none">
+      <segment state="translated">
+        <source>Choose a package manager above to see its configuration.</source>
+        <target>Choisissez un gestionnaire de paquets ci-dessus pour voir sa configuration.</target>
+      </segment>
+    </unit>
+    <unit id="setup.step.config.title">
+      <segment state="translated">
+        <source>Copy the configuration</source>
+        <target>Copier la configuration</target>
+      </segment>
+    </unit>
+    <unit id="setup.step.token.create">
+      <segment state="translated">
+        <source>Create token</source>
+        <target>Créer le jeton</target>
+      </segment>
+    </unit>
+    <unit id="setup.step.token.createAnother">
+      <segment state="translated">
+        <source>Create a different token</source>
+        <target>Créer un autre jeton</target>
+      </segment>
+    </unit>
+    <unit id="setup.step.token.presetMismatch">
+      <segment state="translated">
+        <source>This token is read-only, so publishing will be refused. Create a {preset} token instead.</source>
+        <target>Ce jeton est en lecture seule; la publication sera refusée. Créez plutôt un jeton {preset}.</target>
+      </segment>
+    </unit>
+    <unit id="setup.step.token.shownOnce">
+      <segment state="translated">
+        <source>Copy this now — it is not shown again.</source>
+        <target>Copiez-le maintenant — il ne sera plus affiché.</target>
+      </segment>
+    </unit>
+    <unit id="setup.step.token.title">
+      <segment state="translated">
+        <source>Create a token</source>
+        <target>Créer un jeton</target>
+      </segment>
+    </unit>
+    <unit id="setup.step.token.useExisting">
+      <segment state="translated">
+        <source>Already have a token? Manage tokens</source>
+        <target>Vous avez déjà un jeton? Gérer les jetons</target>
       </segment>
     </unit>
     <unit id="setup.title">
       <segment state="translated">
-        <source>Setup Snippets</source>
-        <target>Extraits de configuration</target>
+        <source>Connect a package manager</source>
+        <target>Connecter un gestionnaire de paquets</target>
+      </segment>
+    </unit>
+    <unit id="setup.token.lineHint">
+      <segment state="translated">
+        <source>Run this in the terminal you install from — it lasts only for that terminal session.</source>
+        <target>Exécutez ceci dans le terminal depuis lequel vous installez — cela ne dure que le temps de cette session de terminal.</target>
+      </segment>
+    </unit>
+    <unit id="setup.token.lineHintNoToken">
+      <segment state="translated">
+        <source>Create a token in step 1 and this line will carry it.</source>
+        <target>Créez un jeton à l&apos;étape 1 et cette ligne le contiendra.</target>
+      </segment>
+    </unit>
+    <unit id="setup.token.lineTitle">
+      <segment state="translated">
+        <source>Set the token</source>
+        <target>Définir le jeton</target>
+      </segment>
+    </unit>
+    <unit id="setup.verify.title">
+      <segment state="translated">
+        <source>Check it works</source>
+        <target>Vérifier que ça fonctionne</target>
       </segment>
     </unit>
     <unit id="spdx.alreadyListed">
@@ -12889,6 +13117,42 @@ dotnet/</target>
         <target>Type</target>
       </segment>
     </unit>
+    <unit id="versionDetail.install.caveat.dependenciesFromConfiguredRepos">
+      <segment state="translated">
+        <source>Installs this exact package. Its dependencies still resolve from your configured repositories.</source>
+        <target>Installe exactement ce paquet. Ses dépendances proviennent toujours de vos dépôts configurés.</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.install.caveat.httpMirror">
+      <segment state="translated">
+        <source>This instance serves over plain HTTP, and Terraform rejects an http:// mirror URL.</source>
+        <target>Cette instance est servie en HTTP simple, et Terraform rejette une URL de miroir http://.</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.install.caveat.insecureRegistry">
+      <segment state="translated">
+        <source>This instance serves over plain HTTP, so Docker also needs it listed under insecure-registries.</source>
+        <target>Cette instance est servie en HTTP simple; Docker doit donc aussi la lister sous insecure-registries.</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.install.caveat.requiresSetup">
+      <segment state="translated">
+        <source>Works once this registry is configured for the ecosystem. See Setup.</source>
+        <target>Fonctionne une fois ce registre configuré pour l&apos;écosystème. Voir Configuration.</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.install.install">
+      <segment state="translated">
+        <source>Install</source>
+        <target>Installation</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.install.pull">
+      <segment state="translated">
+        <source>Pull</source>
+        <target>Récupération</target>
+      </segment>
+    </unit>
     <unit id="versionDetail.latestBanner.current">
       <segment state="translated">
         <source>Up to date with upstream — latest version {version} is cached.</source>
@@ -12917,6 +13181,12 @@ dotnet/</target>
       <segment state="translated">
         <source>No upstream version to compare</source>
         <target>Aucune version en amont à comparer</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.meta.author">
+      <segment state="translated">
+        <source>Author</source>
+        <target>Auteur</target>
       </segment>
     </unit>
     <unit id="versionDetail.meta.homepage">

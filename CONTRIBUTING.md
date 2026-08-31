@@ -162,14 +162,22 @@ The tests connect to `http://localhost:8080`. If the container isn't running the
 CycloneDX SBOMs are generated separately for the backend (.NET) and frontend (npm). Both are produced as CI artifacts on every pipeline run; to generate them locally:
 
 ```bash
-# backend (from repo root)
-dotnet tool restore && dotnet CycloneDX src/Dependably/Dependably.csproj -o . -fn sbom-backend.json -F json -spv 1.6
+# backend (from repo root) — -sv is required: the tool never reads the project's version and
+# defaults metadata.component.version to 0.0.0
+dotnet tool restore && dotnet CycloneDX src/Dependably/Dependably.csproj -o . -fn sbom-backend.json -F json -spv 1.6 \
+  -sv "$(grep -oE '<Version>[^<]+</Version>' Directory.Build.props | sed -E 's|<Version>(.*)</Version>|\1|')"
 
 # frontend (from web/)
 npm run sbom
 ```
 
 Output: `sbom-backend.json` (repo root) and `web/sbom-frontend.json`. Both files are gitignored.
+
+The frontend needs no equivalent flag — `cyclonedx-npm` reads `web/package.json` directly. The
+backend generator resolves the project file without evaluating MSBuild, so the `<Version>` that
+`Dependably.csproj` inherits from `Directory.Build.props` never reaches it; CI passes `-sv` and
+then asserts the stamped value, so a dropped flag fails the build instead of publishing an
+inventory that claims the application is version `0.0.0`.
 
 ---
 
@@ -235,9 +243,9 @@ The endpoint and tuning knobs are job variables on the `.ai-review` template in 
 |---|---|---|
 | `OLLAMA_URL` | `http://192.168.2.25:11434` | Ollama base URL (`/api/chat` is appended) |
 | `OLLAMA_MODEL` | `gemma4:26b-a4b-it-qat` | Model name — must be pulled on the Ollama host |
-| `AI_REVIEW_MAX_DIFF_BYTES` | `120000` | Diff is truncated to this many bytes before review; truncation is disclosed in the posted note (see above), not just the job log |
+| `AI_REVIEW_MAX_DIFF_BYTES` | `200000` | Diff is truncated to this many bytes before review; truncation is disclosed in the posted note (see above), not just the job log |
 | `AI_REVIEW_DIFF_CONTEXT` | `10` | `git diff -U` context lines — more lets the model verify a hunk instead of speculating, but grows the diff toward the byte/context caps |
-| `AI_REVIEW_NUM_CTX` | `49152` | Model context window — must hold the persona + capped diff (~3.45 bytes/token, so a 120000-byte diff ≈ 35K tokens) **and** leave room to generate; too small and the prompt fills the window, leaving no room for output (empty/near-empty review) |
+| `AI_REVIEW_NUM_CTX` | `131072` | Model context window — must hold the persona + capped diff (~3.45 bytes/token, so a 200000-byte diff ≈ 58K tokens) **and** leave room to generate; too small and the prompt fills the window, leaving no room for output (empty/near-empty review). Keep `NUM_CTX` ≳ `MAX_DIFF_BYTES`/3 + 6000. This window would allow a ~375000-byte cap, but `AI_REVIEW_MAX_DIFF_BYTES` is deliberately set far below that — see its row |
 | `AI_REVIEW_NUM_PREDICT` | `1500` | Hard cap on response length (backstops runaway generation) |
 | `AI_REVIEW_THINK` | `false` | Model "thinking". Reasoning models split output into `thinking` + `content`, and thinking burns the `NUM_PREDICT` budget — on a real diff it exhausts the budget before writing any `content`, which we read as "no content". Kept off; set `true` only with a much larger `NUM_PREDICT` |
 | `AI_REVIEW_TEMPERATURE` | `0.3` | Sampling temperature — a small non-zero value avoids greedy repetition loops |
@@ -801,6 +809,8 @@ the same on either host, since a pull-through proxy serves the upstream manifest
 | `AUDIT_DISABLE_USER_AGENT` | `false` | When true, audit events record no `user_agent` at all. A UA string is a browser/device fingerprint with little forensic value beyond "which client", so a deployment that does not want to hold one need not. |
 | `LOGIN_ATTEMPTS_RETENTION_DAYS` | `30` | Delete idle, unlocked `login_attempts` rows older than this many days. The window is far beyond any lockout duration, so an active throttle is never dropped; it bounds the email-hash membership set. |
 | `ACCOUNT_SEND_THROTTLE_RETENTION_DAYS` | `7` | Delete `account_send_throttle` rows whose window started more than this many days ago. A row that old is inert — the next request for that account restarts its window regardless — so the sweep changes no decision; it bounds the pseudonym set the same way `LOGIN_ATTEMPTS_RETENTION_DAYS` does. |
+| `JOB_RUN_RETENTION_DAYS` | `14` | Delete successful `background_job_runs` rows older than this many days. Nothing else deletes from that table and its loudest writer is a 60-second timer, so this is the only bound on it. A non-positive or unparseable value falls back to the default — there is no value that disables the sweep. The latest run per job, and the latest success per job, are kept regardless of age so `/health` can always report a job’s last outcome. |
+| `JOB_RUN_FAILURE_RETENTION_DAYS` | `90` | Delete `background_job_runs` rows whose outcome is not `success` older than this many days. Longer than `JOB_RUN_RETENTION_DAYS` on purpose: a failed or cancelled run is the forensic record an operator goes looking for, and there are few of them, so the short window is the one that removes almost all the volume. |
 | `TENANT_HARD_DELETE_GRACE_DAYS` | `30` | Days after a tenant is marked for deletion before its data is permanently removed. During the grace period the deletion can be cancelled. On permanent removal the tenant's `scope='tenant'` `audit_log` rows are erased (no FK cascade covers them), and its `audit_event` rows are pseudonymized (`source_ip`/`user_agent` cleared) rather than deleted, since `audit_event.org_id`'s `ON DELETE SET NULL` foreign key means the schema already intends those rows to outlive the tenant. |
 | `TENANT_HARD_DELETE_SCHEDULE` | `0 4 * * *` | Cron schedule for the tenant hard-delete sweep. |
 | `ORPHAN_RECONCILE_SCHEDULE` | `0 4 * * *` | Cron schedule for the orphan-blob reconciliation pass. Lists the `hosted/` prefix in the registry tier and deletes blobs that no metadata row references. The referenced set is the union of every table that can hold a hosted blob key — `package_versions`, the secondary-file tables (`package_version_files`, `maven_version_files`, `nuget_symbol_index`), whose rows are the sole reference to artefacts such as a Maven `.pom`/sources jar, a PyPI sdist published alongside a wheel, or a NuGet symbols package, and `project_documents`, the sole reference to an uploaded SBOM/VEX/SARIF original. Registry tier only: the cache tier is `CacheEvictionService`'s concern, and the `proxy/`, `oci/`, `go/`, `cargo/`, and `apk/` key namespaces fall outside the `hosted/` prefix this sweep walks. Set to a non-parseable value to disable. **Disabling has a cost beyond deferred cleanup for uploaded SBOM/VEX/SARIF documents**: this sweep is their only reclamation path — a re-upload rewrites the `(project version, kind)` row and the document it replaced simply stops being referenced, with nothing deleting it inline — so with the sweep off, every superseded document's bytes stay on the registry tier for good. The same applies when `AIR_GAPPED` or `DISABLE_BACKGROUND_JOBS` disables the job. Superseded documents are outside the per-org storage quota (`org_storage_bytes` does not count `project_documents`), so the leak shows up as registry-tier disk, not as a tenant hitting its ceiling. |

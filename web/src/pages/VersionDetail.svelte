@@ -5,11 +5,11 @@
   import ErrorBanner from '../lib/ErrorBanner.svelte'
   import RiskPillars from '../lib/RiskPillars.svelte'
   import VersionTable from '../lib/VersionTable.svelte'
-  import { navigate, user } from '../lib/store.js'
+  import { bootstrapInfo, navigate, user } from '../lib/store.js'
   import { overflowCount } from '../lib/blastRadius.js'
   import { reportPageLoad } from '../lib/pageLoad.js'
   import { copyToClipboard } from '../lib/clipboard.js'
-  import { formatDate } from '../lib/format.js'
+  import { registryOrigin } from '../lib/installCommand.js'
   import {
     licenseStateFor,
     resolveStateVersion,
@@ -42,11 +42,6 @@
   // Licences the org marked conditional. Separate from the blocklist because they serve — the
   // pillar reports them as "review", not as blocked.
   let licenseConditional = new Set()
-  // Standing compliance notes on this package — including the rationale someone recorded when
-  // accepting it under a conditional licence.
-  let packageNotes = []
-  let newNoteText = '', addingNote = false, noteError = ''
-  let editingNoteId = null, editingNoteText = ''
   // "Which of my applications ship this?" — the reverse of the SBOM component cross-link, and the
   // question a quarantine decision on this page immediately raises. Latest project versions only.
   // Supplemental: a failure leaves the affordance unrendered rather than asserting zero.
@@ -91,7 +86,6 @@
         blastRadius = await api.getBlastRadiusByPackage(
           pkg.ecosystem, pkg.purlName ?? params.name, { limit: 25 })
       } catch { blastRadius = null }
-      await loadPackageNotes()
     } catch (e) {
       error = e.message
     } finally {
@@ -230,53 +224,21 @@
     return Math.max(0, 3600000 - elapsed)
   }
 
-  function copy(text) {
-    copyToClipboard(text)
+  // Keyed so each copy button can acknowledge its own click; `copiedKey` is threaded into
+  // VersionTable so the buttons inside an expanded row behave the same as the one above it.
+  let copiedKey = null
+  async function copy(key, text) {
+    const ok = await copyToClipboard(text)
+    copiedKey = ok ? key : null
+    setTimeout(() => { if (copiedKey === key) copiedKey = null }, 2000)
   }
+
+  // The registry URL to embed in a copied command. Not reactive on window.location — it
+  // cannot change during the page's lifetime — but it does follow bootstrap, which resolves
+  // after mount and is what tells us the operator declared an HTTPS deployment.
+  $: origin = registryOrigin($bootstrapInfo, window.location)
 
   $: isAdmin = $user?.role === 'admin' || $user?.role === 'owner'
-
-  // ── Package notes ───────────────────────────────────────────────────────────
-  // Supplemental like the vuln and licence-policy fetches: a failure here must not take the
-  // package page down, so the list simply stays empty.
-  async function loadPackageNotes() {
-    try {
-      packageNotes = await api.getPackageNotes(params.ecosystem, params.name)
-    } catch { packageNotes = [] }
-  }
-
-  async function addNote() {
-    const text = newNoteText.trim()
-    if (!text) return
-    addingNote = true; noteError = ''
-    try {
-      // version null: a note left from the package page is about the package, not one release.
-      const created = await api.addPackageNote(params.ecosystem, params.name, null, text)
-      packageNotes = [created, ...packageNotes]
-      newNoteText = ''
-    } catch (e) { noteError = e.message ?? 'failed to add note' }
-    finally { addingNote = false }
-  }
-
-  async function saveNoteEdit() {
-    const text = editingNoteText.trim()
-    if (!text || !editingNoteId) return
-    noteError = ''
-    try {
-      await api.updatePackageNote(editingNoteId, text)
-      packageNotes = packageNotes.map(n => (n.id === editingNoteId ? { ...n, note: text } : n))
-      editingNoteId = null
-    } catch (e) { noteError = e.message ?? 'failed to update note' }
-  }
-
-  async function removeNote(id) {
-    if (!confirm($t('packageNotes.removeConfirm'))) return
-    noteError = ''
-    try {
-      await api.removePackageNote(id)
-      packageNotes = packageNotes.filter(n => n.id !== id)
-    } catch (e) { noteError = e.message ?? 'failed to remove note' }
-  }
 </script>
 
 <div class="page">
@@ -314,6 +276,12 @@
       <div class="pkg-meta">
         {#if pkg?.description}
           <p class="pkg-description">{pkg.description}</p>
+        {/if}
+        {#if pkg?.author}
+          <p class="pkg-author">
+            <span class="pkg-author-label">{$t('versionDetail.meta.author')}</span>
+            {pkg.author}
+          </p>
         {/if}
         {#if pkg?.homepage || pkg?.repositoryUrl}
           <div class="pkg-links">
@@ -401,6 +369,8 @@
       {loading}
       {scanCooldownRemaining}
       {copy}
+      {copiedKey}
+      registryOrigin={origin}
       on:download={(e) => downloadVersion(e.detail)}
       on:rescan={(e) => rescan(e.detail)}
       on:block={(e) => blockVersion(e.detail)}
@@ -408,83 +378,26 @@
       on:delete={(e) => deleteVersion(e.detail)}
     />
   {/if}
-
-  {#if !loading && (packageNotes.length > 0 || isAdmin)}
-    <section class="package-notes">
-      <h2 class="section-h">{$t('packageNotes.title')}</h2>
-      <p class="text-muted t-sm">{$t('packageNotes.intro')}</p>
-      {#if noteError}<div class="error-msg">{noteError}</div>{/if}
-
-      {#if isAdmin}
-        <div class="note-add">
-          <textarea rows="2" bind:value={newNoteText}
-                    aria-label={$t('packageNotes.title')}
-                    placeholder={$t('packageNotes.placeholder')}></textarea>
-          <button class="primary" disabled={addingNote || !newNoteText.trim()} on:click={addNote}>
-            {$t('packageNotes.add')}
-          </button>
-        </div>
-      {/if}
-
-      {#if packageNotes.length === 0}
-        <p class="text-muted">{$t('packageNotes.empty')}</p>
-      {:else}
-        <ul class="note-list">
-          {#each packageNotes as n (n.id)}
-            <li>
-              {#if editingNoteId === n.id}
-                <textarea rows="2" bind:value={editingNoteText}
-                          aria-label={$t('packageNotes.title')}></textarea>
-                <div class="row-actions">
-                  <button class="primary btn-sm" on:click={saveNoteEdit}>{$t('common.actions.save')}</button>
-                  <button class="btn-sm" on:click={() => editingNoteId = null}>{$t('common.actions.cancel')}</button>
-                </div>
-              {:else}
-                <p class="note-body">{n.note}</p>
-                <p class="note-meta text-muted t-sm">
-                  {#if n.version}{$t('packageNotes.scopedToVersion', { values: { version: n.version } })}{:else}{$t('packageNotes.scopedToPackage')}{/if}
-                  · {n.createdByLabel ?? $t('packageNotes.unknownAuthor')}
-                  · {$formatDate(n.createdAt)}
-                </p>
-                {#if isAdmin}
-                  <div class="row-actions">
-                    <button class="btn-sm" on:click={() => { editingNoteId = n.id; editingNoteText = n.note }}>
-                      {$t('common.actions.edit')}
-                    </button>
-                    <button class="danger btn-sm" on:click={() => removeNote(n.id)}>{$t('common.actions.remove')}</button>
-                  </div>
-                {/if}
-              {/if}
-            </li>
-          {/each}
-        </ul>
-      {/if}
-    </section>
-  {/if}
 </div>
 
 <style>
   /* Claim state badge needs a left margin to separate it from the package name in the H1. */
   .badge.has-icon { margin-left: 8px; }
 
-  .package-notes { margin-top: 24px; }
-  .note-add { display: flex; gap: 8px; align-items: flex-start; margin-bottom: 12px; }
-  .note-add textarea { flex: 1; font: inherit; resize: vertical; }
-  .note-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 12px; }
-  .note-list li {
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 10px 12px;
-  }
-  .note-list textarea { width: 100%; font: inherit; resize: vertical; margin-bottom: 6px; }
-  .note-body { margin: 0 0 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
-  .note-meta { margin: 0 0 6px; }
-  .row-actions { display: flex; gap: 6px; align-items: center; }
-
   /* Package-level metadata (homepage / repository / description) under the title. Floored at
      two clamped description lines plus the link row, and rendered whether or not the fetch has
      landed, so the risk pillars and version table sit at the same offset either way. */
   .pkg-meta { min-height: 62px; }
+  /* Sits between the description and the link row; the block above it is already floored at a
+     fixed height, so this is allowed to be absent without shifting anything below. */
+  .pkg-author {
+    margin: 0 0 6px;
+    color: var(--text2);
+    font-size: 13px;
+  }
+
+  .pkg-author-label { color: var(--text2); margin-right: 4px; opacity: 0.8; }
+
   .pkg-description {
     margin: 6px 0 8px;
     color: var(--text2);

@@ -545,6 +545,7 @@ public sealed partial class CargoController : OrgScopedControllerBase
             Homepage = presentation.Homepage,
             Repository = presentation.Repository,
             Description = presentation.Description,
+            Author = presentation.Author,
         };
 
         var result = await _publish.StoreAndRecordAsync(request, ct);

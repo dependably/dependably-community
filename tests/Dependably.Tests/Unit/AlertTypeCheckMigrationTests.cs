@@ -97,4 +97,54 @@ public sealed class AlertTypeCheckMigrationTests : IAsyncLifetime
             "VALUES ('a2', 'o1', 'made_up_type', 'x', 'Nope')"));
         Assert.Equal("ok", await verify.ExecuteScalarAsync<string>("PRAGMA integrity_check"));
     }
+
+    /// <summary>
+    /// The rewrite is an exact-substring REPLACE against the stored CREATE TABLE text, so a
+    /// database whose text is spelled differently matches nothing and keeps the narrow CHECK. The
+    /// migration must refuse rather than let <c>RunOnceAsync</c> record it applied — which is
+    /// permanent, and would surface much later as an unexplained failed INSERT of a value the
+    /// release notes say is supported.
+    /// </summary>
+    [Fact]
+    public async Task DriftedStoredText_MakesTheRewriteANoOp_AndIsRefusedRatherThanRecordedApplied()
+    {
+        await new SchemaInitializer(_db).InitializeAsync();
+        await using (var setup = await _db.OpenAsync())
+        {
+            await setup.ExecuteAsync("DROP TABLE IF EXISTS alert");
+            // The same narrow value set, spelled without the spaces after the commas that every
+            // released Schema.sql emitted. Nothing about this database is corrupt — the constraint
+            // is well-formed and the rows are fine — so a full-database integrity check reports
+            // "ok" and learns nothing about the rewrite that just failed to happen.
+            await setup.ExecuteAsync(
+                "CREATE TABLE alert (\n" +
+                "    id           TEXT PRIMARY KEY,\n" +
+                "    org_id       TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,\n" +
+                "    type         TEXT NOT NULL CHECK (type IN ('quarantine_new','vuln_severity')),\n" +
+                "    source_ref   TEXT NOT NULL,\n" +
+                "    title        TEXT NOT NULL,\n" +
+                "    state        TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'dismissed'))\n" +
+                ")");
+            await setup.ExecuteAsync(
+                "DELETE FROM _applied_migrations WHERE name = 'expand_alert_type_check_sbom_policy'");
+        }
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => new SchemaInitializer(_db).InitializeAsync());
+        Assert.Contains("alert.type", ex.Message, StringComparison.Ordinal);
+
+        await using var verify = await _db.OpenAsync();
+
+        // Not recorded applied: the next boot has to attempt it again rather than treat the
+        // surviving narrow constraint as migrated.
+        Assert.Equal(0, await verify.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM _applied_migrations WHERE name = 'expand_alert_type_check_sbom_policy'"));
+
+        // And the constraint really did survive — the refusal is reporting a real state, not a
+        // false alarm on a database that was widened after all.
+        await verify.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o1','acme')");
+        await Assert.ThrowsAsync<SqliteException>(() => verify.ExecuteAsync(
+            "INSERT INTO alert (id, org_id, type, source_ref, title) " +
+            "VALUES ('a-x', 'o1', 'sbom_policy_violation', 'x', 'Refused')"));
+    }
 }

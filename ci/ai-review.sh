@@ -12,15 +12,17 @@ REPORT_FILE="${2:?usage: ai-review.sh <persona_file> <report_file>}"
 : "${OLLAMA_MODEL:?OLLAMA_MODEL must be set}"
 : "${CI_MERGE_REQUEST_IID:?this script only runs on merge_request_event pipelines}"
 
-MAX_DIFF_BYTES="${AI_REVIEW_MAX_DIFF_BYTES:-120000}"
+MAX_DIFF_BYTES="${AI_REVIEW_MAX_DIFF_BYTES:-200000}"
 # Context window. MUST be large enough to hold the prompt (persona + the capped
-# diff, ~3.45 bytes/token => a 120000-byte diff is ~35K tokens) AND leave room to
-# generate (NUM_PREDICT). At the old 16384 a large diff filled the entire window,
-# so Ollama truncated the prompt to fit and left ~0 tokens for output: the model
-# emitted 1 token then stopped (done_reason=length) and the run reported empty /
-# near-empty content. 49152 holds the full diff cap plus the verify pass's
-# candidates-and-diff turn with headroom. Keep NUM_CTX ≳ MAX_DIFF_BYTES/3 + 6000.
-NUM_CTX="${AI_REVIEW_NUM_CTX:-49152}"
+# diff, ~3.45 bytes/token => a 200000-byte diff is ~58K tokens) AND leave room to
+# generate (NUM_PREDICT). Undersize it and a large diff fills the entire window,
+# so Ollama truncates the prompt to fit and leaves ~0 tokens for output: the model
+# emits 1 token then stops (done_reason=length) and the run reports empty /
+# near-empty content. 131072 holds the full diff cap plus the verify pass's
+# candidates-and-diff turn with room to spare. Keep NUM_CTX ≳ MAX_DIFF_BYTES/3 + 6000
+# — necessary, but not the binding constraint: MAX_DIFF_BYTES sits well below what
+# this window allows, because recall over a long diff degrades before context does.
+NUM_CTX="${AI_REVIEW_NUM_CTX:-131072}"
 # Sampling tuned to avoid BOTH degeneration modes a 30B quantized coder falls
 # into. A small non-zero temperature avoids greedy repetition loops. min_p
 # tail-cuts improbable tokens, which is the robust guard against word-salad.
@@ -105,19 +107,28 @@ BACKTICKS7="$(printf '`%.0s' 1 2 3 4 5 6 7)"
 # never drift apart into different vocabularies for the same state. "clean" and
 # "findings" carry no suffix (a healthy report reads like one); every other
 # state is visibly marked as something other than a normal review.
-declare -A AI_REVIEW_STATE_SUFFIX=(
-  [skipped]=" (skipped)"
-  [unavailable]=" (unavailable)"
-  [bad-response]=" (bad response)"
-  [degenerate]=" (low-confidence, suppressed)"
-  [no-content]=" (no content)"
-  [ambiguous]=" (unverifiable response)"
-  [clean-unconfirmed]=" (clean, unconfirmed)"
-  [clean-filtered]=" (clean, filtered)"
-  [clean]=""
-  [findings]=""
-)
-state_suffix() { printf '%s' "${AI_REVIEW_STATE_SUFFIX[$1]-}"; }
+# Written as a case rather than an associative array because `declare -A` is
+# bash 4+, and the macOS system bash is 3.2: there it is not a clean "unsupported
+# option" error but a silent one. The `[skipped]=` subscripts are evaluated
+# arithmetically, `skipped` is an unbound name under `set -u`, and the shell
+# aborts carrying the PREVIOUS command's status — so ci/ai-review-test.sh
+# sourced this, died on this line, and still exited 0. A case statement is
+# POSIX, so the suite actually runs for a developer checking a change locally
+# instead of reporting a green it never earned.
+state_suffix() {  # <state>
+  case "$1" in
+    skipped)           printf '%s' " (skipped)" ;;
+    unavailable)       printf '%s' " (unavailable)" ;;
+    bad-response)      printf '%s' " (bad response)" ;;
+    degenerate)        printf '%s' " (low-confidence, suppressed)" ;;
+    no-content)        printf '%s' " (no content)" ;;
+    ambiguous)         printf '%s' " (unverifiable response)" ;;
+    clean-unconfirmed) printf '%s' " (clean, unconfirmed)" ;;
+    clean-filtered)    printf '%s' " (clean, filtered)" ;;
+    clean|findings)    ;;  # a healthy report reads like one: no suffix
+    *)                 ;;  # unknown state carries no suffix, as the map's `-}` did
+  esac
+}
 
 # Write the final report. Used for both success and graceful skips so the
 # artifact always exists. Body is a printf arg (never the format string), so

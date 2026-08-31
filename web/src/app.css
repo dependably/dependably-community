@@ -294,9 +294,23 @@ tr:hover td { background: var(--bg2); }
    base as plain KEV, but bordered and uppercase to read as one step more urgent — CISA's own
    ransomware flag on a KEV entry, not just "known exploited". The filled-solid `--danger`
    treatment stays reserved for the malicious verdict above, so the hierarchy reads
-   malicious (filled) > kev.ransomware (bordered tint) > kev (plain tint) > severity chips. */
+   malicious-live (filled, bordered) > malicious (filled) > kev.ransomware (bordered tint) >
+   kev (plain tint) > severity chips. */
 .badge.kev.ransomware {
   border: 1px solid var(--danger-border);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+/* Still-live malicious version: the tracker's version-precise signal that this exact version is
+   STILL serving compromised bytes right now — the one signal wired into the live block gate
+   (BlockGateService's MaliciousLive arm). Reads as the single most alarming tier on this panel:
+   the same filled `--danger` fill the plain malicious verdict uses, plus the bordered/uppercase
+   treatment kev.ransomware uses to read one step more urgent than its own broader sibling. */
+.badge.malicious-live {
+  background: var(--danger-bg);
+  color: var(--danger);
+  border: 1px solid var(--danger-border);
+  font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.02em;
 }
@@ -892,16 +906,23 @@ table td, .copy-block { font-variant-numeric: tabular-nums; }
 }
 .auth-tab .status-pill.draft .dot { background: var(--warning); }
 
-/* Numbered step row — used inside .saml-group. */
-.auth-tab .step {
+/* Numbered step row — a sequence of decisions the reader makes in order. Used by the SAML
+   setup flow inside .saml-group and by the Setup page's connect flow.
+
+   The `done` / `current` state classes are for a genuinely gated sequence, where an earlier
+   step must be completed before a later one means anything — SAML cannot be tested before
+   the IdP is configured. A sequence whose steps are all readable at once takes the plain
+   form: marking progress there implies a gate that does not exist, and reads as three
+   differently-styled badges rather than one numbered list. */
+.step {
   display: grid;
   grid-template-columns: 36px 1fr;
   gap: 14px;
   padding: 18px;
   border-top: 1px solid var(--border);
 }
-.auth-tab .step:first-of-type { border-top: 0; }
-.auth-tab .step .num {
+.step:first-of-type { border-top: 0; }
+.step .num {
   width: 26px; height: 26px;
   border-radius: 50%;
   background: var(--bg3);
@@ -912,22 +933,22 @@ table td, .copy-block { font-variant-numeric: tabular-nums; }
   font-family: var(--mono, 'JetBrains Mono', ui-monospace, monospace);
   margin-top: 2px;
 }
-.auth-tab .step.done .num {
+.step.done .num {
   background: var(--accent-soft);
   border-color: var(--accent-soft);
   color: var(--accent);
 }
-.auth-tab .step.current .num {
+.step.current .num {
   background: var(--accent);
   border-color: var(--accent);
   color: var(--on-accent);
 }
-.auth-tab .step h4 {
+.step h4 {
   margin: 0 0 6px;
   font-size: 14px; font-weight: 600;
   display: flex; align-items: center; gap: 8px;
 }
-.auth-tab .step .step-hint {
+.step .step-hint {
   font-size: 12px; color: var(--text2);
   margin: 0 0 12px;
   max-width: 64ch;

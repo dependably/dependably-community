@@ -1112,51 +1112,6 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
         <target>L&apos;identifiant est manquant, réservé ou contient des caractères non valides.</target>
       </segment>
     </unit>
-    <unit id="error.packageNote.coordinateRequired">
-      <notes>
-        <note category="translator">422 detail: a package note without a package coordinate.</note>
-      </notes>
-      <segment state="translated">
-        <source>Ecosystem and package name are required.</source>
-        <target>L&apos;écosystème et le nom du paquet sont requis.</target>
-      </segment>
-    </unit>
-    <unit id="error.packageNote.ecosystemTooLong">
-      <notes>
-        <note category="translator">422 detail: package-note ecosystem over the length cap. {0} = the cap.</note>
-      </notes>
-      <segment state="translated">
-        <source>Ecosystem must be {0} characters or fewer.</source>
-        <target>L&apos;écosystème doit compter au plus {0} caractères.</target>
-      </segment>
-    </unit>
-    <unit id="error.packageNote.nameTooLong">
-      <notes>
-        <note category="translator">422 detail: package-note name over the length cap. {0} = the cap.</note>
-      </notes>
-      <segment state="translated">
-        <source>Name must be {0} characters or fewer.</source>
-        <target>Le nom doit compter au plus {0} caractères.</target>
-      </segment>
-    </unit>
-    <unit id="error.packageNote.noteRequired">
-      <notes>
-        <note category="translator">422 detail: a package note with no text.</note>
-      </notes>
-      <segment state="translated">
-        <source>Note text is required.</source>
-        <target>Le texte de la note est requis.</target>
-      </segment>
-    </unit>
-    <unit id="error.packageNote.noteTooLong">
-      <notes>
-        <note category="translator">422 detail: a package note exceeded the length cap.</note>
-      </notes>
-      <segment state="translated">
-        <source>Note is too long.</source>
-        <target>La note est trop longue.</target>
-      </segment>
-    </unit>
     <unit id="error.password.currentRequired">
       <notes>
         <note category="translator">422 detail on the operator password-change endpoint.</note>

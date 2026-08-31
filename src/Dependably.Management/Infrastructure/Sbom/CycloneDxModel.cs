@@ -33,6 +33,15 @@ public sealed record CycloneDxRootComponent(string? BomRef, string? Name, string
 /// <param name="Purl">components[].purl verbatim, null when the component declares none.</param>
 /// <param name="Scope">components[].scope, kept only when it is a value the column admits.</param>
 /// <param name="LicenseSpdx">The declared licences folded into one SPDX expression, else null.</param>
+/// <param name="Description">components[].description, clipped.</param>
+/// <param name="Author">authors[].name joined, else the 1.4-era author string, else publisher.</param>
+/// <param name="Copyright">components[].copyright, clipped.</param>
+/// <param name="Group">components[].group — an npm scope, a Maven groupId.</param>
+/// <param name="WebsiteUrl">externalReferences[] of type website.</param>
+/// <param name="VcsUrl">externalReferences[] of type vcs.</param>
+/// <param name="IssueTrackerUrl">externalReferences[] of type issue-tracker.</param>
+/// <param name="DistributionUrl">externalReferences[] of type distribution.</param>
+/// <param name="HashesJson">components[].hashes as a JSON array of {"alg","content"}, else null.</param>
 public sealed record CycloneDxComponent(
     string? BomRef,
     string Name,
@@ -40,7 +49,16 @@ public sealed record CycloneDxComponent(
     string? Type,
     string? Purl,
     string? Scope,
-    string? LicenseSpdx);
+    string? LicenseSpdx,
+    string? Description = null,
+    string? Author = null,
+    string? Copyright = null,
+    string? Group = null,
+    string? WebsiteUrl = null,
+    string? VcsUrl = null,
+    string? IssueTrackerUrl = null,
+    string? DistributionUrl = null,
+    string? HashesJson = null);
 
 /// <summary>
 /// One (product, vulnerability) analysis statement, from either a vulnerabilities-only VEX

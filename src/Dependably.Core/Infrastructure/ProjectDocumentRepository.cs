@@ -38,7 +38,7 @@ public sealed class ProjectDocumentRepository
                    doc_type AS DocType, format AS Format, spec_version AS SpecVersion,
                    tool_name AS ToolName, tool_version AS ToolVersion, sha256 AS Sha256,
                    size_bytes AS SizeBytes, blob_key AS BlobKey, uploaded_by AS UploadedBy,
-                   uploaded_at AS UploadedAt
+                   ingest_version AS IngestVersion, uploaded_at AS UploadedAt
             FROM project_documents
             WHERE org_id = @orgId AND project_version_id = @projectVersionId AND doc_type = @docType
             """,
@@ -57,7 +57,7 @@ public sealed class ProjectDocumentRepository
                    doc_type AS DocType, format AS Format, spec_version AS SpecVersion,
                    tool_name AS ToolName, tool_version AS ToolVersion, sha256 AS Sha256,
                    size_bytes AS SizeBytes, blob_key AS BlobKey, uploaded_by AS UploadedBy,
-                   uploaded_at AS UploadedAt
+                   ingest_version AS IngestVersion, uploaded_at AS UploadedAt
             FROM project_documents
             WHERE org_id = @orgId AND project_version_id = @projectVersionId
             ORDER BY doc_type
@@ -127,10 +127,12 @@ public sealed class ProjectDocumentRepository
             """
             INSERT INTO project_documents (
                 id, org_id, project_version_id, doc_type, format, spec_version,
-                tool_name, tool_version, sha256, size_bytes, blob_key, uploaded_by, uploaded_at)
+                tool_name, tool_version, sha256, size_bytes, blob_key, uploaded_by,
+                ingest_version, uploaded_at)
             VALUES (
                 @id, @orgId, @projectVersionId, @docType, @format, @specVersion,
-                @toolName, @toolVersion, @sha256, @sizeBytes, @blobKey, @uploadedBy, @uploadedAt)
+                @toolName, @toolVersion, @sha256, @sizeBytes, @blobKey, @uploadedBy,
+                @ingestVersion, @uploadedAt)
             ON CONFLICT (project_version_id, doc_type) DO UPDATE SET
                 format = excluded.format,
                 spec_version = excluded.spec_version,
@@ -140,6 +142,7 @@ public sealed class ProjectDocumentRepository
                 size_bytes = excluded.size_bytes,
                 blob_key = excluded.blob_key,
                 uploaded_by = excluded.uploaded_by,
+                ingest_version = excluded.ingest_version,
                 uploaded_at = excluded.uploaded_at
             """,
             new
@@ -156,6 +159,7 @@ public sealed class ProjectDocumentRepository
                 sizeBytes = document.SizeBytes,
                 blobKey = document.BlobKey,
                 uploadedBy = document.UploadedBy,
+                ingestVersion = document.IngestVersion,
                 uploadedAt = document.UploadedAt.ToUtcIso(),
             },
             dbTx,

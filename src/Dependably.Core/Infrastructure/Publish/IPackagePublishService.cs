@@ -161,6 +161,7 @@ public sealed record PublishRequest
     public string? Homepage { get; init; }
     public string? Repository { get; init; }
     public string? Description { get; init; }
+    public string? Author { get; init; }
 }
 
 /// <summary>Outcome of a <see cref="IPackagePublishService.StoreAndRecordAsync"/> call.</summary>

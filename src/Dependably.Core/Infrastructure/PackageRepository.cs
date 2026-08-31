@@ -55,6 +55,7 @@ public sealed partial class PackageRepository
                    p.homepage as Homepage,
                    p.repository_url as RepositoryUrl,
                    p.description as Description,
+                   p.author as Author,
                    CASE
                      WHEN p.upstream_latest_version IS NULL THEN 'unknown'
                      WHEN EXISTS (
@@ -152,9 +153,10 @@ public sealed partial class PackageRepository
     /// package id, which is already org-scoped.
     /// </summary>
     public async Task UpdateMetadataAsync(
-        string packageId, string? homepage, string? repositoryUrl, string? description, CancellationToken ct = default)
+        string packageId, string? homepage, string? repositoryUrl, string? description,
+        string? author = null, CancellationToken ct = default)
     {
-        if (homepage is null && repositoryUrl is null && description is null)
+        if (homepage is null && repositoryUrl is null && description is null && author is null)
         {
             return;
         }
@@ -166,10 +168,11 @@ public sealed partial class PackageRepository
             UPDATE packages
                SET homepage       = COALESCE(@homepage, homepage),
                    repository_url = COALESCE(@repositoryUrl, repository_url),
-                   description    = COALESCE(@description, description)
+                   description    = COALESCE(@description, description),
+                   author         = COALESCE(@author, author)
              WHERE id = @packageId
             """,
-            new { packageId, homepage, repositoryUrl, description });
+            new { packageId, homepage, repositoryUrl, description, author });
     }
 
     /// <summary>

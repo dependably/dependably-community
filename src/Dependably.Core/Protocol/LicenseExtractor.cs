@@ -37,15 +37,16 @@ public static class LicenseExtractor
     // download).  Tune only if soak-test telemetry shows LOH pressure on S3/Azure.
     private static readonly RecyclableMemoryStreamManager _streamManager = new();
 
-    // Homepage/Repository/Description are package-level presentation metadata parsed from the same
-    // manifest as the license. Optional (default null) so the many existing two-arg constructions
-    // keep compiling; only the per-ecosystem parsers that read these fields pass them.
+    // Homepage/Repository/Description/Author are package-level presentation metadata parsed from
+    // the same manifest as the license. Optional (default null) so the many existing two-arg
+    // constructions keep compiling; only the per-ecosystem parsers that read these fields pass them.
     public sealed record ExtractedMetadata(
         IReadOnlyList<string> Spdx,
         string? Deprecated,
         string? Homepage = null,
         string? Repository = null,
-        string? Description = null)
+        string? Description = null,
+        string? Author = null)
     {
         public static readonly ExtractedMetadata Empty = new(Array.Empty<string>(), null);
     }
@@ -69,8 +70,8 @@ public static class LicenseExtractor
             }
 
             string[] spdx = ParsePyPiMetadataLicense(text);
-            var (homepage, repository, description) = ParsePyPiPresentation(text);
-            return new ExtractedMetadata(spdx, null, homepage, repository, description);
+            var (homepage, repository, description, author) = ParsePyPiPresentation(text);
+            return new ExtractedMetadata(spdx, null, homepage, repository, description, author);
         }
         catch { return ExtractedMetadata.Empty; }
         finally { stream.Dispose(); }
@@ -79,9 +80,10 @@ public static class LicenseExtractor
     // Presentation metadata from the same METADATA/PKG-INFO headers: Home-page (or the
     // Project-URL "Homepage" entry), a Project-URL source/repository entry, and Summary.
     // Project-URL values are "Label, https://url"; the first matching label of each kind wins.
-    private static (string? Homepage, string? Repository, string? Description) ParsePyPiPresentation(string text)
+    private static (string? Homepage, string? Repository, string? Description, string? Author)
+        ParsePyPiPresentation(string text)
     {
-        string? homepage = null, repository = null, description = null;
+        string? homepage = null, repository = null, description = null, author = null, authorEmail = null;
         foreach (var (key, value) in ParseRfc822Headers(text))
         {
             string v = value.Trim();
@@ -97,6 +99,16 @@ public static class LicenseExtractor
             else if (key.Equals("Summary", StringComparison.OrdinalIgnoreCase))
             {
                 description ??= v;
+            }
+            else if (key.Equals("Author", StringComparison.OrdinalIgnoreCase))
+            {
+                author ??= v;
+            }
+            else if (key.Equals("Author-email", StringComparison.OrdinalIgnoreCase))
+            {
+                // Kept as the fallback rather than the preference: modern metadata often carries
+                // only Author-email, and its "Name <addr>" form still names the author.
+                authorEmail ??= v;
             }
             else if (key.Equals("Project-URL", StringComparison.OrdinalIgnoreCase))
             {
@@ -127,7 +139,11 @@ public static class LicenseExtractor
             }
         }
 
-        return (Clip(HttpUrlOrNull(homepage)), Clip(NormalizeRepositoryUrl(repository)), Clip(description));
+        return (
+            Clip(HttpUrlOrNull(homepage)),
+            Clip(NormalizeRepositoryUrl(repository)),
+            Clip(description),
+            Clip(author ?? authorEmail));
     }
 
     /// <summary>
@@ -137,12 +153,14 @@ public static class LicenseExtractor
     /// that read these fields from a structured envelope rather than a manifest (e.g. the Cargo
     /// publish frame). Returns only the three presentation fields; Spdx/Deprecated stay empty.
     /// </summary>
-    public static ExtractedMetadata PresentationOnly(string? homepage, string? repository, string? description)
+    public static ExtractedMetadata PresentationOnly(
+        string? homepage, string? repository, string? description, string? author = null)
         => new(
             Array.Empty<string>(), null,
             Clip(HttpUrlOrNull(homepage)),
             Clip(NormalizeRepositoryUrl(repository)),
-            Clip(description));
+            Clip(description),
+            Clip(author));
 
     // Presentation metadata is displayed verbatim, not parsed further: trim, null-out empties, and
     // cap length so a hostile manifest cannot store an oversized homepage/repository/description.
@@ -527,14 +545,15 @@ public static class LicenseExtractor
                 deprecated = null;
             }
 
-            var (homepage, repository, description) = ParseNpmPresentation(versionNode);
-            return new ExtractedMetadata(spdx, deprecated, homepage, repository, description);
+            var (homepage, repository, description, author) = ParseNpmPresentation(versionNode);
+            return new ExtractedMetadata(spdx, deprecated, homepage, repository, description, author);
         }
         catch { return ExtractedMetadata.Empty; }
     }
 
     // homepage is a string; repository is a string or a {type,url} object; description is a string.
-    private static (string? Homepage, string? Repository, string? Description) ParseNpmPresentation(JsonNode versionNode)
+    private static (string? Homepage, string? Repository, string? Description, string? Author)
+        ParseNpmPresentation(JsonNode versionNode)
     {
         string? homepage = SafeReadString(versionNode["homepage"]);
         string? description = SafeReadString(versionNode["description"]);
@@ -544,7 +563,19 @@ public static class LicenseExtractor
             JsonValue v => SafeReadString(v),
             _ => null,
         };
-        return (Clip(HttpUrlOrNull(homepage)), Clip(NormalizeRepositoryUrl(repository)), Clip(description));
+        // author is "Name <email> (url)" as a string, or {name,email,url}; only the name half is
+        // displayed, so the object form reads name and the string form is taken as written.
+        string? author = versionNode["author"] switch
+        {
+            JsonObject o => SafeReadString(o["name"]),
+            JsonValue v => SafeReadString(v),
+            _ => null,
+        };
+        return (
+            Clip(HttpUrlOrNull(homepage)),
+            Clip(NormalizeRepositoryUrl(repository)),
+            Clip(description),
+            Clip(author));
     }
 
     private static List<string> ParseNpmLicense(JsonNode versionNode)
@@ -696,10 +727,10 @@ public static class LicenseExtractor
                 using var ms = new MemoryStream();
                 entry.DataStream.CopyTo(ms);
                 string text = Encoding.UTF8.GetString(ms.ToArray());
-                var (license, homepage, repository, description) = ParseCargoTomlPackage(text);
+                var (license, homepage, repository, description, author) = ParseCargoTomlPackage(text);
                 return new ExtractedMetadata(
                     license is not null ? new[] { license } : Array.Empty<string>(),
-                    null, homepage, repository, description);
+                    null, homepage, repository, description, author);
             }
         }
         catch { /* malformed gzip / tar — return empty metadata, callers tolerate */ }
@@ -721,10 +752,11 @@ public static class LicenseExtractor
     // [package] table's license/homepage/repository/description values. A key encountered while any
     // other section is active (including a nested [package.metadata]) is skipped, so it can never be
     // mistaken for the crate's own value. First occurrence of each key wins.
-    private static (string? License, string? Homepage, string? Repository, string? Description) ParseCargoTomlPackage(string text)
+    private static (string? License, string? Homepage, string? Repository, string? Description, string? Author)
+        ParseCargoTomlPackage(string text)
     {
         string? currentSection = null;
-        string? license = null, homepage = null, repository = null, description = null;
+        string? license = null, homepage = null, repository = null, description = null, author = null;
         using var reader = new StringReader(text);
         while (reader.ReadLine() is { } rawLine)
         {
@@ -745,6 +777,16 @@ public static class LicenseExtractor
                 continue;
             }
 
+            // authors is an array of strings, a shape the string-assignment reader answers false
+            // for, so it is read before that check rather than inside the switch below.
+            if (author is null && TryParseTomlStringArrayAssignment(line, out string? arrayKey, out var entries)
+                && string.Equals(arrayKey, "authors", StringComparison.Ordinal)
+                && entries.Count > 0)
+            {
+                author = string.Join(", ", entries);
+                continue;
+            }
+
             if (!TryParseTomlStringAssignment(line, out string? key, out string? value))
             {
                 continue;
@@ -760,7 +802,47 @@ public static class LicenseExtractor
             }
         }
 
-        return (license, Clip(HttpUrlOrNull(homepage)), Clip(NormalizeRepositoryUrl(repository)), Clip(description));
+        return (
+            license,
+            Clip(HttpUrlOrNull(homepage)),
+            Clip(NormalizeRepositoryUrl(repository)),
+            Clip(description),
+            Clip(author));
+    }
+
+    // Reads a single-line TOML array of strings (`authors = ["A", "B"]`). Deliberately narrow: a
+    // multi-line array is left unparsed rather than half-parsed, because a partial author list
+    // reads as complete and there is no way for a viewer to tell it was truncated. A quote inside
+    // an entry ends it, which is the same tolerance the string-assignment reader already applies.
+    private static bool TryParseTomlStringArrayAssignment(
+        string line, out string? key, out List<string> entries)
+    {
+        key = null;
+        entries = [];
+
+        int equals = line.IndexOf('=');
+        if (equals <= 0)
+        {
+            return false;
+        }
+
+        string rawValue = line[(equals + 1)..].Trim();
+        if (!rawValue.StartsWith('[') || !rawValue.EndsWith(']'))
+        {
+            return false;
+        }
+
+        key = line[..equals].Trim();
+        foreach (string part in rawValue[1..^1].Split(','))
+        {
+            string entry = part.Trim().Trim('"', '\'');
+            if (entry.Length > 0)
+            {
+                entries.Add(entry);
+            }
+        }
+
+        return true;
     }
 
     // Matches a TOML "[section]" header line, extracting the section name. Returns false (and
@@ -873,9 +955,10 @@ public static class LicenseExtractor
         string? homepage = HttpUrlOrNull(metadata.Element(xns + "projectUrl")?.Value);
         string? repository = NormalizeRepositoryUrl(metadata.Element(xns + "repository")?.Attribute("url")?.Value);
         string? description = metadata.Element(xns + "description")?.Value;
+        string? author = metadata.Element(xns + "authors")?.Value;
         return new ExtractedMetadata(
             ParseNuspecSpdx(metadata, xns), null,
-            Clip(homepage), Clip(repository), Clip(description));
+            Clip(homepage), Clip(repository), Clip(description), Clip(author));
     }
 
     // Only <license type="expression"> yields an SPDX id; type="file" and legacy licenseUrl are

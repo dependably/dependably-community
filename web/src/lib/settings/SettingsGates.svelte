@@ -95,6 +95,14 @@
     </select>
   </div>
   <div class="form-row">
+    <label class="label-row" for="block-malicious-live">{$t('settings.proxy.blockMaliciousLive')} <InfoTip text={$t('settings.proxy.blockMaliciousLiveHint')} /></label>
+    <select id="block-malicious-live" bind:value={proxySettings.block_malicious_live}>
+      <option value="off">{$t('settings.proxy.blockMaliciousLiveOff')}</option>
+      <option value="warn">{$t('settings.proxy.blockMaliciousLiveWarn')}</option>
+      <option value="block">{$t('settings.proxy.blockMaliciousLiveBlock')}</option>
+    </select>
+  </div>
+  <div class="form-row">
     <label class="label-row" for="block-kev">{$t('settings.proxy.blockKev')} <InfoTip text={$t('settings.proxy.blockKevHint')} /></label>
     <select id="block-kev" bind:value={proxySettings.block_kev}>
       <option value="off">{$t('settings.proxy.blockKevOff')}</option>

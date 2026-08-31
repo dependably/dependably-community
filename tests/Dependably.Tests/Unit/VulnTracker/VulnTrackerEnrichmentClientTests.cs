@@ -422,6 +422,167 @@ public sealed class VulnTrackerEnrichmentClientTests : IDisposable
         Assert.Equal("partial", advisory.Ssvc.TechnicalImpact);
     }
 
+    // ── New fields: mal signal, exploit-code, cvelistV5 overlay ──────────────
+
+    [Fact]
+    public async Task A_reached_response_carrying_the_second_installment_fields_parses_all_of_them()
+    {
+        StubAdvisory("""
+            { "vuln_id": "GHSA-x", "canonical_cve": "CVE-2026-1000", "status": "active",
+              "mal_compromised_versions": ["1.3.0", "1.3.1"],
+              "mal_version_compromised": true,
+              "mal_still_live": true,
+              "mal_live_checked_at": "2026-06-14T03:00:00Z",
+              "mal_live_versions": ["1.3.0"],
+              "exploit_code_exists": true,
+              "exploit_code_max_weight": 5,
+              "exploit_code_sources": ["metasploit", "exploitdb"],
+              "cvelist_cvss_score": 7.4,
+              "cvelist_cvss_severity": "HIGH",
+              "cvelist_cvss_provenance": "cna",
+              "cvelist_cwes": ["CWE-79"],
+              "cvelist_ssvc_exploitation": "active",
+              "cvelist_ssvc_automatable": "yes",
+              "cvelist_ssvc_technical_impact": "total" }
+            """);
+
+        var advisory = (await Build().TryLookupBatchAsync([Target(Purl)])).Decide("CVE-2026-1000").Advisory!;
+
+        Assert.Equal(["1.3.0", "1.3.1"], advisory.Mal!.CompromisedVersions);
+        Assert.True(advisory.Mal.VersionCompromised);
+        Assert.True(advisory.Mal.StillLive);
+        Assert.Equal(new DateTimeOffset(2026, 6, 14, 3, 0, 0, TimeSpan.Zero), advisory.Mal.LiveCheckedAt);
+        Assert.Equal(["1.3.0"], advisory.Mal.LiveVersions);
+
+        Assert.True(advisory.ExploitCode!.Exists);
+        Assert.Equal(5, advisory.ExploitCode.MaxWeight);
+        Assert.Equal(["metasploit", "exploitdb"], advisory.ExploitCode.Sources);
+
+        Assert.Equal(7.4, advisory.Cvelist!.Cvss!.Score);
+        Assert.Equal("HIGH", advisory.Cvelist.Cvss.Severity);
+        Assert.Equal("cna", advisory.Cvelist.CvssProvenance);
+        Assert.Equal(["CWE-79"], advisory.Cvelist.Cwes);
+        Assert.Equal("active", advisory.Cvelist.Ssvc!.Exploitation);
+        Assert.Equal("yes", advisory.Cvelist.Ssvc.Automatable);
+        Assert.Equal("total", advisory.Cvelist.Ssvc.TechnicalImpact);
+
+        // Purl's requested version (1.3.0) IS in mal_live_versions and IS the compromised
+        // version, so the derived version-precise signal is true.
+        Assert.True(advisory.MalStillLiveForRequestedVersion);
+    }
+
+    [Fact]
+    public async Task Exploit_code_exists_defaults_false_when_the_producer_omits_it()
+    {
+        // exploit_code_exists is never null at the source — an absent field must still read as a
+        // definite false, not as a missing/unknown ExploitCodeSignal.
+        StubAdvisory("""
+            { "vuln_id": "GHSA-x", "canonical_cve": "CVE-2026-1000", "status": "active" }
+            """);
+
+        var advisory = (await Build().TryLookupBatchAsync([Target(Purl)])).Decide("CVE-2026-1000").Advisory!;
+
+        Assert.False(advisory.ExploitCode!.Exists);
+        Assert.Null(advisory.ExploitCode.MaxWeight);
+        Assert.Null(advisory.ExploitCode.Sources);
+    }
+
+    [Fact]
+    public async Task Second_installment_absent_fields_leave_mal_and_cvelist_null()
+    {
+        StubAdvisory("""
+            { "vuln_id": "GHSA-x", "canonical_cve": "CVE-2026-1000", "status": "active" }
+            """);
+
+        var advisory = (await Build().TryLookupBatchAsync([Target(Purl)])).Decide("CVE-2026-1000").Advisory!;
+
+        Assert.Null(advisory.Mal);
+        Assert.Null(advisory.Cvelist);
+        Assert.False(advisory.MalStillLiveForRequestedVersion);
+    }
+
+    [Theory]
+    [InlineData("cvelist_cvss_severity", "\"BOGUS\"")]
+    [InlineData("cvelist_ssvc_exploitation", "\"exploited\"")]
+    [InlineData("cvelist_ssvc_automatable", "\"true\"")]
+    [InlineData("cvelist_ssvc_technical_impact", "\"complete\"")]
+    public async Task Cvelist_values_outside_the_recorded_sets_are_dropped(string field, string jsonValue)
+    {
+        StubAdvisory($$"""
+            { "vuln_id": "GHSA-x", "canonical_cve": "CVE-2026-1000", "status": "active",
+              "{{field}}": {{jsonValue}} }
+            """);
+
+        var advisory = (await Build().TryLookupBatchAsync([Target(Purl)])).Decide("CVE-2026-1000").Advisory!;
+
+        Assert.Null(advisory.Cvelist);
+    }
+
+    // ── The version-precision derivation: the one piece of real business logic ──
+
+    [Fact]
+    public async Task Version_compromised_true_but_requested_version_not_in_live_versions_is_not_still_live()
+    {
+        // mal_version_compromised is scoped to the exact requested version (1.3.0) and IS true,
+        // but mal_live_versions no longer names it — the compromised version was cleaned up.
+        StubAdvisory("""
+            { "vuln_id": "GHSA-x", "canonical_cve": "CVE-2026-1000", "status": "active",
+              "mal_version_compromised": true,
+              "mal_live_versions": ["2.0.0"] }
+            """);
+
+        var advisory = (await Build().TryLookupBatchAsync([Target(Purl)])).Decide("CVE-2026-1000").Advisory!;
+
+        Assert.False(advisory.MalStillLiveForRequestedVersion);
+    }
+
+    [Fact]
+    public async Task Version_compromised_true_and_requested_version_in_live_versions_is_still_live()
+    {
+        StubAdvisory("""
+            { "vuln_id": "GHSA-x", "canonical_cve": "CVE-2026-1000", "status": "active",
+              "mal_version_compromised": true,
+              "mal_live_versions": ["1.3.0", "2.0.0"] }
+            """);
+
+        var advisory = (await Build().TryLookupBatchAsync([Target(Purl)])).Decide("CVE-2026-1000").Advisory!;
+
+        Assert.True(advisory.MalStillLiveForRequestedVersion);
+    }
+
+    [Fact]
+    public async Task Version_not_compromised_is_never_still_live_even_when_the_version_is_in_the_live_set()
+    {
+        // Defensive: mal_version_compromised is the gate. A version appearing in mal_live_versions
+        // without the producer also asserting THIS request's version is compromised must not be
+        // trusted — mal_live_versions is package-wide, not request-scoped.
+        StubAdvisory("""
+            { "vuln_id": "GHSA-x", "canonical_cve": "CVE-2026-1000", "status": "active",
+              "mal_version_compromised": false,
+              "mal_live_versions": ["1.3.0"] }
+            """);
+
+        var advisory = (await Build().TryLookupBatchAsync([Target(Purl)])).Decide("CVE-2026-1000").Advisory!;
+
+        Assert.False(advisory.MalStillLiveForRequestedVersion);
+    }
+
+    [Fact]
+    public async Task Version_compromised_absent_is_not_still_live()
+    {
+        // Tri-state: absent means "no version was requested" or "not applicable" — never coerced
+        // to a still-live verdict.
+        StubAdvisory("""
+            { "vuln_id": "GHSA-x", "canonical_cve": "CVE-2026-1000", "status": "active",
+              "mal_live_versions": ["1.3.0"] }
+            """);
+
+        var advisory = (await Build().TryLookupBatchAsync([Target(Purl)])).Decide("CVE-2026-1000").Advisory!;
+
+        Assert.Null(advisory.Mal!.VersionCompromised);
+        Assert.False(advisory.MalStillLiveForRequestedVersion);
+    }
+
     // ── Freshness: reachable is not the same as current ──────────────────────
 
     [Fact]

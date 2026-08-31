@@ -83,6 +83,22 @@ public sealed class VulnTrackerScanEnrichmentTests : IAsyncLifetime
                         new EnrichmentSourceFreshness("vulnrichment", TestTime.KnownNow.AddDays(-2))],
             reason: EnrichmentUnreachedReason.None);
 
+    /// <summary>
+    /// Like <see cref="Reached"/>, but each purl gets its OWN answer rather than the same fixed
+    /// advisory list — needed to simulate the producer answering two versions of the same flagged
+    /// package differently (one still-live, one cleaned up), which is exactly the shape
+    /// <c>VulnerabilityEnrichmentBatchResult.Results</c> carries in production and
+    /// <see cref="Reached"/> deliberately does not exercise.
+    /// </summary>
+    private static VulnerabilityEnrichmentBatchResult ReachedPerPurl(
+        IReadOnlyList<string> purls, Func<string, AdvisoryEnrichment[]> advisoriesForPurl)
+        => new(
+            results: purls.Select(p => (IReadOnlyList<AdvisoryEnrichment>)advisoriesForPurl(p)).ToList(),
+            reached: true,
+            checkedAt: TestTime.KnownNow,
+            freshness: [],
+            reason: EnrichmentUnreachedReason.None);
+
     private static VulnerabilityEnrichmentBatchResult Unreached(IReadOnlyList<string> purls)
         => new(
             results: purls.Select(_ => (IReadOnlyList<AdvisoryEnrichment>)[]).ToList(),
@@ -95,11 +111,47 @@ public sealed class VulnTrackerScanEnrichmentTests : IAsyncLifetime
         string id, string cve, EnrichmentAdvisoryStatus status = EnrichmentAdvisoryStatus.Active)
         => new(id, cve, status, new NvdBand("HIGH", 8.1), new SsvcDecision("active", "yes", "total"));
 
+    /// <summary>
+    /// An advisory carrying the mal-still-live raw pass-through plus the version-precise derived
+    /// flag a real <c>VulnTrackerEnrichmentClient</c> would have computed against the requested
+    /// purl — this harness bypasses the client, so the derived flag is supplied directly rather
+    /// than recomputed from the raw fields.
+    /// </summary>
+    private static AdvisoryEnrichment EnrichedStillLive(
+        string id, string cve, bool malStillLiveForRequestedVersion,
+        IReadOnlyList<string>? liveVersions = null)
+        => new(id, cve, EnrichmentAdvisoryStatus.Active,
+            Nvd: null, Ssvc: null,
+            Mal: new MalSignal(
+                CompromisedVersions: liveVersions,
+                VersionCompromised: true,
+                StillLive: true,
+                LiveCheckedAt: TestTime.KnownNow,
+                LiveVersions: liveVersions),
+            MalStillLiveForRequestedVersion: malStillLiveForRequestedVersion);
+
     private static IOsvSource OsvWith(params string[] cveAliases) =>
         TestOsvSource.Create(_ =>
         [
             new("GHSA-test-0001", cveAliases, "test advisory", "HIGH",
                 CvssScore: 8.1, AffectedPackages: [], Published: null, Modified: null,
+                IsHydrated: true),
+        ]);
+
+    /// <summary>
+    /// A malicious-package advisory, MAL- prefixed like a real OSV malicious-packages record —
+    /// distinct from <see cref="OsvWith"/>'s GHSA-prefixed advisory because
+    /// <c>IsMaliciousAdvisoryId</c>'s MAL- prefix check is exactly what makes
+    /// <c>EnrichBatchAsync</c> ask about every purl carrying it individually, rather than deduping
+    /// to whichever purl claims it first. A CVE alias is still attached, matching the minority of
+    /// real MAL- records that carry one — without it the advisory would be filtered out by
+    /// <c>HasCveAlias</c> before the MAL- exemption is ever reached.
+    /// </summary>
+    private static IOsvSource MaliciousOsvWith(string cve) =>
+        TestOsvSource.Create(_ =>
+        [
+            new("MAL-2024-0001", [cve], "evil package", null,
+                CvssScore: null, AffectedPackages: [], Published: null, Modified: null,
                 IsHydrated: true),
         ]);
 
@@ -199,6 +251,25 @@ public sealed class VulnTrackerScanEnrichmentTests : IAsyncLifetime
         return new EnrichmentRow(severity, score, checkedAt, assertedAt, exploitation);
     }
 
+    /// <summary>
+    /// Reads the version-precise still-live signal for ONE (owner, advisory) link — scoped by
+    /// <paramref name="cacheArtifactId"/>, not just <paramref name="osvId"/>, because the whole
+    /// point of storing this on <c>package_version_vulns</c> rather than <c>vulnerabilities</c> is
+    /// that two different owners linked to the SAME advisory can carry two different answers.
+    /// </summary>
+    private async Task<long> ReadMalStillLiveForVersionAsync(string cacheArtifactId, string osvId)
+    {
+        await using var conn = await _db.OpenAsync();
+        return await conn.ExecuteScalarAsync<long>(
+            """
+            SELECT pvv.mal_still_live_for_version
+            FROM package_version_vulns pvv
+            JOIN vulnerabilities v ON v.id = pvv.vuln_id
+            WHERE pvv.cache_artifact_id = @cacheArtifactId AND v.osv_id = @osvId
+            """,
+            new { cacheArtifactId, osvId });
+    }
+
     // ── The feature is off unless configured ─────────────────────────────────
 
     [Fact]
@@ -235,6 +306,112 @@ public sealed class VulnTrackerScanEnrichmentTests : IAsyncLifetime
         Assert.Equal(TestTime.KnownNow.ToUtcIso(), row.NvdCheckedAt);
         // The producer's asserted as-of is stored beside our own stamp, not instead of it.
         Assert.Equal(TestTime.KnownNow.AddDays(-1).ToUtcIso(), row.NvdAssertedAt);
+    }
+
+    // ── The still-live derived signal, end to end ────────────────────────────
+
+    [Fact]
+    public async Task ConfiguredConnection_PersistsTheStillLiveDerivedSignal()
+    {
+        string caId = await SeedArtifactAsync("lodash"); // version defaults to 1.0.0
+        var source = new RecordingEnrichmentSource(p =>
+            Reached(p, EnrichedStillLive("GHSA-test-0001", "CVE-2024-0001",
+                malStillLiveForRequestedVersion: true, liveVersions: ["1.0.0"])));
+
+        await BuildService(OsvWith("CVE-2024-0001"), source, TestEnrichment.ActiveConnection())
+            .RunScanPassAsync(CancellationToken.None);
+
+        Assert.Equal(1L, await ReadMalStillLiveForVersionAsync(caId, "GHSA-test-0001"));
+    }
+
+    [Fact]
+    public async Task AClearedAdvisory_ResetsTheStillLiveDerivedSignalToFalse()
+    {
+        // First pass: still live.
+        string caId = await SeedArtifactAsync("lodash");
+        var osv = OsvWith("CVE-2024-0001");
+        var tracker = TestEnrichment.ActiveConnection();
+
+        await BuildService(osv,
+                new RecordingEnrichmentSource(p => Reached(p, EnrichedStillLive(
+                    "GHSA-test-0001", "CVE-2024-0001", malStillLiveForRequestedVersion: true, liveVersions: ["1.0.0"]))),
+                tracker)
+            .RunScanPassAsync(CancellationToken.None);
+        Assert.Equal(1L, await ReadMalStillLiveForVersionAsync(caId, "GHSA-test-0001"));
+
+        // Second pass: the advisory returns withdrawn — an explicit negative status clears
+        // everything, including the derived still-live flag back to its NOT NULL DEFAULT 0.
+        _clock.Advance(TimeSpan.FromDays(2));
+        await BuildService(osv,
+                new RecordingEnrichmentSource(p => Reached(p,
+                    Enriched("GHSA-test-0001", "CVE-2024-0001", EnrichmentAdvisoryStatus.Withdrawn))),
+                tracker)
+            .RunRescanPassAsync(CancellationToken.None);
+
+        Assert.Equal(0L, await ReadMalStillLiveForVersionAsync(caId, "GHSA-test-0001"));
+    }
+
+    // ── The race this whole fix is for: two versions, one advisory, opposite answers ──
+
+    /// <summary>
+    /// The scenario the review that prompted this fix described exactly: OSV's own range-matching
+    /// links ONE MAL- advisory to every affected version of a flagged package, but only some of
+    /// those versions are still actually serving compromised bytes. If the derived signal lived on
+    /// the shared <c>vulnerabilities</c> row (keyed by advisory, not by version), whichever purl's
+    /// answer this chunk happened to write last would silently overwrite the other version's
+    /// correct answer — a false negative for whichever version processed first, or a false
+    /// positive for every OTHER version sharing the advisory, depending on write order. This test
+    /// would FAIL against that shape (both versions would read the SAME final value) and only
+    /// passes because <c>mal_still_live_for_version</c> lives on <c>package_version_vulns</c>,
+    /// scoped per (version, advisory) link.
+    /// </summary>
+    [Fact]
+    public async Task TwoVersionsOfTheSameFlaggedPackage_EachRetainTheirOwnCorrectStillLiveSignal()
+    {
+        string liveCaId = await SeedArtifactAsync("evil-pkg", "1.0.0");
+        string cleanedCaId = await SeedArtifactAsync("evil-pkg", "2.0.0");
+
+        var source = new RecordingEnrichmentSource(purls =>
+            ReachedPerPurl(purls, purl => purl.EndsWith("@1.0.0", StringComparison.Ordinal)
+                ? [EnrichedStillLive("MAL-2024-0001", "CVE-2024-0001",
+                    malStillLiveForRequestedVersion: true, liveVersions: ["1.0.0"])]
+                : [EnrichedStillLive("MAL-2024-0001", "CVE-2024-0001",
+                    malStillLiveForRequestedVersion: false, liveVersions: ["1.0.0"])]));
+
+        // Both versions resolve to the SAME osv_id/CVE, exactly like OSV's own range-matching
+        // linking one advisory to every affected version.
+        await BuildService(MaliciousOsvWith("CVE-2024-0001"), source, TestEnrichment.ActiveConnection())
+            .RunScanPassAsync(CancellationToken.None);
+
+        Assert.Equal(1L, await ReadMalStillLiveForVersionAsync(liveCaId, "MAL-2024-0001"));
+        Assert.Equal(0L, await ReadMalStillLiveForVersionAsync(cleanedCaId, "MAL-2024-0001"));
+    }
+
+    /// <summary>
+    /// The order-independence twin: seeding the cleaned-up version first (so it is more likely to
+    /// be processed/written before the still-live one) must produce the identical, correct result.
+    /// The fix is race-free by construction — each version writes its own
+    /// <c>package_version_vulns</c> row — so this passing regardless of seed/processing order is
+    /// exactly the property under test, not a coincidence of iteration order.
+    /// </summary>
+    [Fact]
+    public async Task TwoVersionsOfTheSameFlaggedPackage_OrderOfProcessingDoesNotMatter()
+    {
+        string cleanedCaId = await SeedArtifactAsync("evil-pkg", "2.0.0");
+        string liveCaId = await SeedArtifactAsync("evil-pkg", "1.0.0");
+
+        var source = new RecordingEnrichmentSource(purls =>
+            ReachedPerPurl(purls, purl => purl.EndsWith("@1.0.0", StringComparison.Ordinal)
+                ? [EnrichedStillLive("MAL-2024-0001", "CVE-2024-0001",
+                    malStillLiveForRequestedVersion: true, liveVersions: ["1.0.0"])]
+                : [EnrichedStillLive("MAL-2024-0001", "CVE-2024-0001",
+                    malStillLiveForRequestedVersion: false, liveVersions: ["1.0.0"])]));
+
+        await BuildService(MaliciousOsvWith("CVE-2024-0001"), source, TestEnrichment.ActiveConnection())
+            .RunScanPassAsync(CancellationToken.None);
+
+        Assert.Equal(1L, await ReadMalStillLiveForVersionAsync(liveCaId, "MAL-2024-0001"));
+        Assert.Equal(0L, await ReadMalStillLiveForVersionAsync(cleanedCaId, "MAL-2024-0001"));
     }
 
     // ── The disclosure property ──────────────────────────────────────────────

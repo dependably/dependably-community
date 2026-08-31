@@ -747,6 +747,7 @@ public sealed class NuGetPublishHandler(
             Homepage = extracted.Homepage,
             Repository = extracted.Repository,
             Description = extracted.Description,
+            Author = extracted.Author,
         };
 
     /// <summary>

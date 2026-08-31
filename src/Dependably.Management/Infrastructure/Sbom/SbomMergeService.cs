@@ -79,7 +79,16 @@ public sealed class SbomMergeService
                 SbomScope: component.Scope,
                 DependencyKind: position.Kind,
                 DependencyPath: position.PathJson,
-                LicenseSpdx: component.LicenseSpdx));
+                LicenseSpdx: component.LicenseSpdx,
+                Description: component.Description,
+                ComponentAuthor: component.Author,
+                Copyright: component.Copyright,
+                ComponentGroup: component.Group,
+                WebsiteUrl: component.WebsiteUrl,
+                VcsUrl: component.VcsUrl,
+                IssueTrackerUrl: component.IssueTrackerUrl,
+                DistributionUrl: component.DistributionUrl,
+                ComponentHashes: component.HashesJson));
         }
 
         return _ingest.MergeComponentsAsync(orgId, projectVersionId, upserts, now, ct);

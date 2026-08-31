@@ -530,7 +530,14 @@ public sealed class SbomController : ControllerBase
         var version = candidates[0];
 
         var current = await _svc.DocumentRows.GetAsync(orgId, version.ProjectVersionId, docType, ct);
-        return current is not null && string.Equals(current.Sha256, staged.Sha256, StringComparison.Ordinal)
+        // Identical bytes are only a no-op if the projection that applied them is the one running
+        // now. A build that widened what ingest extracts writes different rows for the same
+        // document, so a hash-only match would report "already applied" about rows this build
+        // would not have produced — and nothing would ever correct them, because the next upload
+        // of an unchanged document takes this same branch. The stored revision is the tiebreak.
+        return current is not null
+            && string.Equals(current.Sha256, staged.Sha256, StringComparison.Ordinal)
+            && current.IngestVersion == SbomIngestVersion.Current
             ? new DedupHit(current.Id, version)
             : null;
     }

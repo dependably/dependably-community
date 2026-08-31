@@ -8,6 +8,7 @@
   import { formatBytes, formatHour24, formatNumber } from '../lib/format.js'
   import { ECOSYSTEMS, ECO_LABEL } from '../lib/ecosystems.js'
   import { buildTrendMetrics } from '../lib/statsTrend.js'
+  import { buildPreventionCells } from '../lib/gates.js'
 
   /** The route transition this page was mounted for, supplied by RouteView. @type {number | null} */
   export let pageToken = null
@@ -92,6 +93,10 @@
   $: kevBlocked = blockedByGate
     .filter(g => g.gate === 'kev' || g.gate === 'kev_ransomware')
     .reduce((s, g) => s + g.count, 0)
+  // Every gate gets a pill, fired or not — a quiet window reads as a row of zeros rather than
+  // as an absent section. See buildPreventionCells for the ordering and the unknown-gate rule.
+  $: preventionCells = buildPreventionCells(blockedByGate)
+
   // Per-gate tooltip for the Blocked-pulls card, e.g. "malicious: 2 · KEV: 1".
   $: blockedBreakdown = blockedByGate
     .map(g => `${$t('dashboard.gates.' + g.gate)}: ${g.count}`)
@@ -481,86 +486,6 @@
       </div>
     </div>
 
-    <!-- ── Trends: sparkline + delta-since-7d for the dashboard's own headline figures ── -->
-    {#if stats}
-      <section class="section">
-        <h2 class="eyebrow">{$t('dashboard.trends.title')}</h2>
-        {#if hasTrend}
-          <div class="trend-grid">
-            {#each trendMetrics as m (m.key)}
-              <div class="trend-card">
-                <div class="trend-head">
-                  <span class="trend-label">{$t(m.labelKey)}</span>
-                  <span class="trend-value">{$formatNumber(m.latest)}</span>
-                </div>
-                <svg viewBox="0 0 60 20" class="trend-svg" preserveAspectRatio="none" aria-hidden="true">
-                  <polyline points={m.points} class="trend-line" />
-                </svg>
-                {#if m.delta !== null}
-                  <div class="trend-delta">
-                    {$t('dashboard.trends.vs7d', { values: { delta: m.delta > 0 ? `+${$formatNumber(m.delta)}` : $formatNumber(m.delta) } })}
-                  </div>
-                {/if}
-              </div>
-            {/each}
-          </div>
-        {:else}
-          <!-- Fewer than two daily snapshots is a pending state, not a data state: the copy names
-               the mechanism and the timeline, because "no trend" on its own leaves the operator
-               asking when one appears. Rendered as a quiet status line rather than a bordered
-               placeholder — a dashed box is this product's drop-zone chrome (see Upload). -->
-          <div class="section-empty">
-            <svg width="14" height="14" aria-hidden="true"><use href="/icons.svg#icon-info" /></svg>
-            <div>
-              <div class="section-empty-title">{$t('dashboard.trends.empty')}</div>
-              <div class="section-empty-hint">{$t('dashboard.trends.emptyHint')}</div>
-            </div>
-          </div>
-        {/if}
-      </section>
-    {/if}
-
-    <!-- ── Prevention: gate-refusal counts by arm, 30d ─────────────────────────
-         Renders the same per-gate breakdown the Blocked-pulls tile's tooltip already carries
-         (stats.blockedByGate30d) rather than recomputing it — see PackageAnalyticsRepository's
-         QueryActivityDataAsync, which matches every 'blocked%' activity event type so a newly
-         added gate is covered without a dashboard change. Zero gates over the window still
-         renders explicit "nothing blocked" copy, never a blank section. -->
-    {#if stats}
-      <section class="section">
-        <h2 class="eyebrow">{$t('dashboard.prevention.title')}</h2>
-        {#if blockedByGate.length > 0}
-          <div class="prevention-grid">
-            {#each blockedByGate as g (g.gate)}
-              <div class="prevention-item">
-                <span class="prevention-count">{$formatNumber(g.count)}</span>
-                <span class="prevention-label">{$t('dashboard.gates.' + g.gate)}</span>
-              </div>
-            {/each}
-          </div>
-        {:else}
-          <!-- A measured zero, not a missing section: the count renders as a figure, and the hint
-               separates "traffic flowed and nothing was refused" from "nothing was served at all"
-               using the same 30-day download figure the stat tiles above already show. The stats
-               payload cannot see which gates are enabled, so the copy names where enforcement
-               modes live instead of claiming the zero is protective. -->
-          <div class="section-empty">
-            <svg width="14" height="14" aria-hidden="true"><use href="/icons.svg#icon-shield" /></svg>
-            <div>
-              <div class="section-empty-title">{$t('dashboard.prevention.empty')}</div>
-              <div class="section-empty-hint">
-                {#if stats.totalDownloads30d > 0}
-                  {$t('dashboard.prevention.emptyServed', { values: { count: stats.totalDownloads30d } })}
-                {:else}
-                  {$t('dashboard.prevention.emptyNoTraffic')}
-                {/if}
-              </div>
-            </div>
-          </div>
-        {/if}
-      </section>
-    {/if}
-
     <!-- ── Package breakdown: pie + table ────────────────────────────────────── -->
     <section class="section">
       <h2 class="eyebrow">{$t('dashboard.packageBreakdown')}</h2>
@@ -673,6 +598,80 @@
         {$t('dashboard.fetchesTotal', { values: { n: $formatNumber(hourBars.reduce((s, b) => s + b.count, 0)) } })}
       </div>
     </section>
+
+    <!-- ── Trends: sparkline + delta-since-7d for the dashboard's own headline figures ── -->
+    {#if stats}
+      <section class="section">
+        <h2 class="eyebrow">{$t('dashboard.trends.title')}</h2>
+        {#if hasTrend}
+          <div class="trend-grid">
+            {#each trendMetrics as m (m.key)}
+              <div class="trend-card">
+                <div class="trend-head">
+                  <span class="trend-label">{$t(m.labelKey)}</span>
+                  <span class="trend-value">{$formatNumber(m.latest)}</span>
+                </div>
+                <svg viewBox="0 0 60 20" class="trend-svg" preserveAspectRatio="none" aria-hidden="true">
+                  <polyline points={m.points} class="trend-line" />
+                </svg>
+                {#if m.delta !== null}
+                  <div class="trend-delta">
+                    {$t('dashboard.trends.vs7d', { values: { delta: m.delta > 0 ? `+${$formatNumber(m.delta)}` : $formatNumber(m.delta) } })}
+                  </div>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        {:else}
+          <!-- Fewer than two daily snapshots is a pending state, not a data state: the copy names
+               the mechanism and the timeline, because "no trend" on its own leaves the operator
+               asking when one appears. Rendered as a quiet status line rather than a bordered
+               placeholder — a dashed box is this product's drop-zone chrome (see Upload). -->
+          <div class="section-empty">
+            <svg width="14" height="14" aria-hidden="true"><use href="/icons.svg#icon-info" /></svg>
+            <div>
+              <div class="section-empty-title">{$t('dashboard.trends.empty')}</div>
+              <div class="section-empty-hint">{$t('dashboard.trends.emptyHint')}</div>
+            </div>
+          </div>
+        {/if}
+      </section>
+    {/if}
+
+    <!-- ── Prevention: gate-refusal counts by arm, 30d ─────────────────────────
+         Renders the same per-gate breakdown the Blocked-pulls tile's tooltip already carries
+         (stats.blockedByGate30d) rather than recomputing it — see PackageAnalyticsRepository's
+         QueryActivityDataAsync, which matches every 'blocked%' activity event type so a newly
+         added gate is covered without a dashboard change. Zero gates over the window still
+         renders explicit "nothing blocked" copy, never a blank section. -->
+    {#if stats}
+      <section class="section">
+        <h2 class="eyebrow">{$t('dashboard.prevention.title')}</h2>
+        <div class="prevention-grid">
+          {#each preventionCells as g (g.gate)}
+            <div class="prevention-item" class:is-quiet={g.count === 0}>
+              <span class="prevention-count">{$formatNumber(g.count)}</span>
+              <span class="prevention-label">{$t('dashboard.gates.' + g.gate)}</span>
+            </div>
+          {/each}
+        </div>
+        {#if blockedByGate.length === 0}
+          <!-- A measured zero, not a missing section: the pills above already render it as a
+               figure per gate, so the note only has to separate "traffic flowed and nothing was
+               refused" from "nothing was served at all", using the same 30-day download figure
+               the stat tiles show. The stats payload cannot see which gates are ENABLED, so the
+               copy names where enforcement modes live rather than letting a row of zeros claim
+               to be protective on its own. -->
+          <p class="form-hint prevention-note">
+            {#if stats.totalDownloads30d > 0}
+              {$t('dashboard.prevention.emptyServed', { values: { count: stats.totalDownloads30d } })}
+            {:else}
+              {$t('dashboard.prevention.emptyNoTraffic')}
+            {/if}
+          </p>
+        {/if}
+      </section>
+    {/if}
 </div>
 
 <style>
@@ -956,4 +955,14 @@
     color: var(--text2);
     text-transform: capitalize;
   }
+  /* A gate that refused nothing still gets a pill — it is the row's whole point — but recedes,
+     so the gates that did fire read first in a mixed window. */
+  .prevention-item.is-quiet {
+    background: none;
+  }
+  .prevention-item.is-quiet .prevention-count {
+    font-weight: 400;
+    color: var(--text2);
+  }
+  .prevention-note { margin: 10px 0 0; }
 </style>

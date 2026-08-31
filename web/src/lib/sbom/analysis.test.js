@@ -3,9 +3,11 @@ import {
   DEFAULT_TABLE_STATE,
   analysisQuery,
   blindSpotNote,
+  compromisedVersionsChip,
   dependencyPathLabels,
   dependencyScopeBadge,
   excludedByScopeNote,
+  exploitCodeChip,
   exportFilename,
   hasViolation,
   isBlocklisted,
@@ -25,6 +27,7 @@ import {
   sbomScopeBadge,
   severityChips,
   shortSha,
+  stillLiveMaliciousBadge,
   suppressedCount,
   triagePatch,
   triagePatchIsEmpty,
@@ -219,6 +222,72 @@ describe('overlayChips', () => {
   it('renders each severity band that is present, independently', () => {
     expect(overlayChips({ nvdSeverityBand: 'HIGH' }).map(c => c.value)).toEqual(['NVD HIGH'])
     expect(overlayChips({ ghsaSeverityBand: 'MODERATE' }).map(c => c.value)).toEqual(['GHSA MODERATE'])
+  })
+
+  it('renders the cvelistV5 CVSS band and SSVC decision as chips SEPARATE from NVD/GHSA', () => {
+    const chips = overlayChips({
+      nvdSeverityBand: 'HIGH',
+      cvelistCvssSeverityBand: 'MEDIUM',
+      cvelistSsvcDecision: 'attend',
+      cvelistSsvcVector: 'SSVCv2/E:P/',
+    })
+    expect(chips).toEqual([
+      { key: 'nvd', kind: 'band', value: 'NVD HIGH', title: null },
+      { key: 'cvelist-cvss', kind: 'band', value: 'cvelistV5 MEDIUM', title: null },
+      { key: 'cvelist-ssvc', kind: 'ssvc', value: 'cvelistV5 attend', title: 'SSVCv2/E:P/' },
+    ])
+  })
+})
+
+describe('exploitCodeChip', () => {
+  it('renders nothing when exploit code has not been observed', () => {
+    expect(exploitCodeChip({ exploitCodeExists: false })).toBeNull()
+    expect(exploitCodeChip({})).toBeNull()
+  })
+
+  it('renders the weight and source list when exploit code exists', () => {
+    const chip = exploitCodeChip({
+      exploitCodeExists: true,
+      exploitCodeMaxWeight: 5,
+      exploitCodeSources: ['metasploit', 'exploitdb'],
+    })
+    expect(chip).toEqual({
+      key: 'exploit-code', kind: 'exploit-code',
+      value: 'Exploit code (5)', title: 'metasploit, exploitdb',
+    })
+  })
+
+  it('renders without a weight or sources when the producer sent none', () => {
+    const chip = exploitCodeChip({ exploitCodeExists: true })
+    expect(chip).toEqual({ key: 'exploit-code', kind: 'exploit-code', value: 'Exploit code', title: null })
+  })
+})
+
+describe('stillLiveMaliciousBadge', () => {
+  it('renders nothing when the version-precise still-live signal is not set', () => {
+    expect(stillLiveMaliciousBadge({ malStillLive: false })).toBeNull()
+    expect(stillLiveMaliciousBadge({})).toBeNull()
+  })
+
+  it('renders with the checked-at freshness when present', () => {
+    expect(stillLiveMaliciousBadge({ malStillLive: true, malLiveCheckedAt: '2026-06-14T03:00:00Z' }))
+      .toEqual({ checkedAt: '2026-06-14T03:00:00Z' })
+  })
+
+  it('renders with a null checked-at when the producer sent none', () => {
+    expect(stillLiveMaliciousBadge({ malStillLive: true })).toEqual({ checkedAt: null })
+  })
+})
+
+describe('compromisedVersionsChip', () => {
+  it('renders nothing when no compromised versions were named', () => {
+    expect(compromisedVersionsChip({ malCompromisedVersions: [] })).toBeNull()
+    expect(compromisedVersionsChip({})).toBeNull()
+  })
+
+  it('renders the compromised version list', () => {
+    expect(compromisedVersionsChip({ malCompromisedVersions: ['1.0.0', '1.0.1'] }))
+      .toEqual({ versions: ['1.0.0', '1.0.1'] })
   })
 })
 

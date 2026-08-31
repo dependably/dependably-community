@@ -360,6 +360,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
             block_deprecated = settings?.BlockDeprecated ?? "off",
             block_revoked = settings?.BlockRevoked ?? "warn",
             block_malicious = settings?.BlockMalicious ?? "block",
+            block_malicious_live = settings?.BlockMaliciousLive ?? "off",
             block_kev = settings?.BlockKev ?? "off",
             block_kev_ransomware = settings?.BlockKevRansomware ?? "off",
             block_ssvc_exploitation = settings?.BlockSsvcExploitation ?? "off",
@@ -429,7 +430,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         var blockPolicyError = ValidateBlockPolicyFields(req,
             out string? blockMalicious, out string? blockKev, out string? blockInstallScripts,
             out string? blockRevoked, out string? blockKevRansomware,
-            out string? blockSsvcExploitation);
+            out string? blockSsvcExploitation, out string? blockMaliciousLive);
         if (blockPolicyError is not null)
         {
             return blockPolicyError;
@@ -452,7 +453,8 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                 sigVerify.VerifyTerraformSignatures,
                 BlockKevRansomware: blockKevRansomware,
                 MaxEpssPercentileTolerance: req.MaxEpssPercentileTolerance,
-                BlockSsvcExploitation: blockSsvcExploitation),
+                BlockSsvcExploitation: blockSsvcExploitation,
+                BlockMaliciousLive: blockMaliciousLive),
             ct);
 
         // The block/verify gates and thresholds just persisted can flip the advertised state of
@@ -479,6 +481,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                 block_deprecated = blockDeprecated,
                 block_revoked = blockRevoked,
                 block_malicious = blockMalicious,
+                block_malicious_live = blockMaliciousLive,
                 block_kev = blockKev,
                 block_kev_ransomware = blockKevRansomware,
                 block_ssvc_exploitation = blockSsvcExploitation,
@@ -585,7 +588,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         UpdateProxySettingsRequest req,
         out string? blockMalicious, out string? blockKev, out string? blockInstallScripts,
         out string? blockRevoked, out string? blockKevRansomware,
-        out string? blockSsvcExploitation)
+        out string? blockSsvcExploitation, out string? blockMaliciousLive)
     {
         blockMalicious = req.BlockMalicious;
         blockKev = req.BlockKev;
@@ -593,10 +596,16 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         blockSsvcExploitation = req.BlockSsvcExploitation;
         blockInstallScripts = req.BlockInstallScripts;
         blockRevoked = req.BlockRevoked;
+        blockMaliciousLive = req.BlockMaliciousLive;
 
         if (blockMalicious is not (null or "off" or "warn" or "block"))
         {
             return _problems.ValidationErrorActionKey("block_malicious", "error.settings.offWarnBlock");
+        }
+
+        if (blockMaliciousLive is not (null or "off" or "warn" or "block"))
+        {
+            return _problems.ValidationErrorActionKey("block_malicious_live", "error.settings.offWarnBlock");
         }
 
         if (blockKev is not (null or "off" or "warn" or "block"))

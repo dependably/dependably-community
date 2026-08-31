@@ -22,6 +22,22 @@ public sealed class VulnTrackerOverlayColumnsMigrationTests : IAsyncLifetime
         "ssvc_checked_at", "ssvc_asserted_at",
     ];
 
+    // Second installment: malicious-package live-status, exploit-code observation, and the
+    // cvelistV5 CVSS/CWE/SSVC overlay. Covered by a separate list (rather than folded into
+    // OverlayColumns) so a failure names precisely which installment regressed.
+    //
+    // mal_still_live_for_version is DELIBERATELY not in this list — it does not live on
+    // vulnerabilities at all. See PackageVersionVulnsMalStillLiveColumnTests below.
+    private static readonly string[] SecondInstallmentColumns =
+    [
+        "mal_compromised_versions", "mal_version_compromised", "mal_still_live",
+        "mal_live_checked_at", "mal_live_versions",
+        "exploit_code_exists", "exploit_code_max_weight", "exploit_code_sources",
+        "cvelist_cvss_score", "cvelist_cvss_severity", "cvelist_cvss_provenance", "cvelist_cwes",
+        "cvelist_ssvc_exploitation", "cvelist_ssvc_automatable", "cvelist_ssvc_technical_impact",
+        "cvelist_checked_at",
+    ];
+
     private readonly TestMetadataStore _db = new();
     public Task InitializeAsync() => Task.CompletedTask;
     public async Task DisposeAsync() => await _db.DisposeAsync();
@@ -45,6 +61,110 @@ public sealed class VulnTrackerOverlayColumnsMigrationTests : IAsyncLifetime
         {
             Assert.Contains(column, columns);
         }
+
+        foreach (string column in SecondInstallmentColumns)
+        {
+            Assert.Contains(column, columns);
+        }
+    }
+
+    [Fact]
+    public async Task FreshSchema_AcceptsACompleteSecondInstallmentEnrichmentRow()
+    {
+        await new SchemaInitializer(_db).InitializeAsync();
+        await using var conn = await _db.OpenAsync();
+        await SeedAdvisoryAsync(conn, "v-mal-ok");
+
+        await conn.ExecuteAsync(
+            """
+            UPDATE vulnerabilities SET
+                mal_compromised_versions = '["1.0.0","1.0.1"]',
+                mal_version_compromised = 1,
+                mal_still_live = 1,
+                mal_live_checked_at = '2026-08-23T00:00:00Z',
+                mal_live_versions = '["1.0.0"]',
+                exploit_code_exists = 1,
+                exploit_code_max_weight = 5,
+                exploit_code_sources = '["metasploit"]',
+                cvelist_cvss_score = 7.4,
+                cvelist_cvss_severity = 'HIGH',
+                cvelist_cvss_provenance = 'cna',
+                cvelist_cwes = '["CWE-79"]',
+                cvelist_ssvc_exploitation = 'active',
+                cvelist_ssvc_automatable = 'yes',
+                cvelist_ssvc_technical_impact = 'total',
+                cvelist_checked_at = '2026-08-23T00:00:00Z'
+            WHERE id = 'v-mal-ok'
+            """);
+
+        Assert.Equal("HIGH", await conn.ExecuteScalarAsync<string>(
+            "SELECT cvelist_cvss_severity FROM vulnerabilities WHERE id = 'v-mal-ok'"));
+    }
+
+    [Theory]
+    [InlineData("cvelist_cvss_severity", "BOGUS")]
+    [InlineData("cvelist_cvss_severity", "high")]              // vocabulary is upper-case, same as nvd_severity
+    [InlineData("cvelist_ssvc_exploitation", "Active")]        // vocabulary is lower-case, same as ssvc_exploitation
+    [InlineData("cvelist_ssvc_automatable", "true")]
+    [InlineData("cvelist_ssvc_technical_impact", "complete")]
+    public async Task FreshSchema_RejectsASecondInstallmentValueOutsideTheVocabulary(string column, string value)
+    {
+        await new SchemaInitializer(_db).InitializeAsync();
+        await using var conn = await _db.OpenAsync();
+        await SeedAdvisoryAsync(conn, "v-mal-bad");
+
+        var ex = await Assert.ThrowsAsync<SqliteException>(() => conn.ExecuteAsync(
+            $"UPDATE vulnerabilities SET {column} = @value WHERE id = 'v-mal-bad'", new { value }));
+        Assert.Contains("CHECK", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("mal_version_compromised")]
+    [InlineData("mal_still_live")]
+    [InlineData("exploit_code_exists")]
+    public async Task FreshSchema_RejectsANonBooleanIntegerOnTheTriStateOrFlagColumns(string column)
+    {
+        await new SchemaInitializer(_db).InitializeAsync();
+        await using var conn = await _db.OpenAsync();
+        await SeedAdvisoryAsync(conn, "v-mal-bool");
+
+        var ex = await Assert.ThrowsAsync<SqliteException>(() => conn.ExecuteAsync(
+            $"UPDATE vulnerabilities SET {column} = 2 WHERE id = 'v-mal-bool'"));
+        Assert.Contains("CHECK", ex.Message);
+    }
+
+    [Fact]
+    public async Task FreshSchema_DefaultsTheExploitFlagColumnToFalse_NeverNull()
+    {
+        // exploit_code_exists is NOT NULL DEFAULT 0 — unlike the nullable tri-state pass-through
+        // columns beside it, a row that has never been enriched must read as a definite "no", not
+        // "unknown". (mal_still_live_for_version has the identical NOT NULL DEFAULT 0 discipline,
+        // but on package_version_vulns — see PackageVersionVulnsMalStillLiveColumnTests.)
+        await new SchemaInitializer(_db).InitializeAsync();
+        await using var conn = await _db.OpenAsync();
+        await SeedAdvisoryAsync(conn, "v-mal-default");
+
+        Assert.Equal(0L, await conn.ExecuteScalarAsync<long>(
+            "SELECT exploit_code_exists FROM vulnerabilities WHERE id = 'v-mal-default'"));
+    }
+
+    [Theory]
+    [InlineData("mal_live_checked_at")]
+    [InlineData("cvelist_checked_at")]
+    public async Task FreshSchema_RejectsASecondInstallmentNonCanonicalTimestamp(string column)
+    {
+        await new SchemaInitializer(_db).InitializeAsync();
+        await using var conn = await _db.OpenAsync();
+        await SeedAdvisoryAsync(conn, "v-mal-ts");
+
+        var ex = await Assert.ThrowsAsync<SqliteException>(() => conn.ExecuteAsync(
+            $"UPDATE vulnerabilities SET {column} = '2026-08-23 00:00:00+00' WHERE id = 'v-mal-ts'"));
+        Assert.Contains("CHECK", ex.Message);
+
+        await conn.ExecuteAsync(
+            $"UPDATE vulnerabilities SET {column} = '2026-08-23T00:00:00Z' WHERE id = 'v-mal-ts'");
+        Assert.Equal("2026-08-23T00:00:00Z", await conn.ExecuteScalarAsync<string>(
+            $"SELECT {column} FROM vulnerabilities WHERE id = 'v-mal-ts'"));
     }
 
     [Fact]
@@ -175,10 +295,186 @@ public sealed class VulnTrackerOverlayColumnsMigrationTests : IAsyncLifetime
             Assert.Contains(column, after);
         }
 
+        foreach (string column in SecondInstallmentColumns)
+        {
+            Assert.Contains(column, after);
+        }
+
         // The pre-existing row survives with the overlay unset, which is the correct unenriched
         // state — no backfill, and nothing for a gate arm to read differently.
         string? band = await conn.ExecuteScalarAsync<string>(
             "SELECT nvd_severity FROM vulnerabilities WHERE id = 'v-legacy'");
         Assert.Null(band);
+
+        // The NOT NULL DEFAULT column lands as a definite false on the ALTER path too, not NULL —
+        // SQLite's ADD COLUMN honours a literal DEFAULT for existing rows.
+        Assert.Equal(0L, await conn.ExecuteScalarAsync<long>(
+            "SELECT exploit_code_exists FROM vulnerabilities WHERE id = 'v-legacy'"));
+    }
+}
+
+/// <summary>
+/// The version-precise <c>package_version_vulns.mal_still_live_for_version</c> column —
+/// deliberately NOT on <c>vulnerabilities</c> (see that table's own schema comment): "is this
+/// version still live" is a fact about the (advisory, version) PAIR, not the advisory alone, so it
+/// lives on the table that is already the version-precise link between one owner and one advisory.
+/// </summary>
+[Trait("Category", "Unit")]
+public sealed class PackageVersionVulnsMalStillLiveColumnTests : IAsyncLifetime
+{
+    private readonly TestMetadataStore _db = new();
+    public Task InitializeAsync() => Task.CompletedTask;
+    public async Task DisposeAsync() => await _db.DisposeAsync();
+
+    private static async Task<string> SeedAdvisoryAsync(System.Data.Common.DbConnection conn, string id)
+    {
+        await conn.ExecuteAsync(
+            "INSERT INTO vulnerabilities (id, osv_id, ecosystem, package_name) "
+            + "VALUES (@id, @id, 'npm', 'left-pad')",
+            new { id });
+        return id;
+    }
+
+    /// <summary>Seeds a global cache_artifact row so a package_version_vulns row has an owner
+    /// with no per-org plumbing needed — mirrors the 'cache_artifact' arm's own shape.</summary>
+    private static async Task<string> SeedCacheArtifactAsync(System.Data.Common.DbConnection conn, string name)
+    {
+        string id = Guid.NewGuid().ToString("N");
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO cache_artifact
+                (id, ecosystem, name, version, filename, blob_key, content_hash, size_bytes, purl)
+            VALUES (@id, 'npm', @name, '1.0.0', @filename, @blobKey, @hash, 0, @purl)
+            """,
+            new
+            {
+                id,
+                name,
+                filename = $"{name}-1.0.0.tgz",
+                blobKey = $"proxy/npm/{name}/1.0.0/{name}-1.0.0.tgz",
+                hash = $"sha256:{Guid.NewGuid():N}",
+                purl = $"pkg:npm/{name}@1.0.0",
+            });
+        return id;
+    }
+
+    private static async Task<string> SeedLinkAsync(
+        System.Data.Common.DbConnection conn, string cacheArtifactId, string vulnId)
+    {
+        string id = Guid.NewGuid().ToString("N");
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO package_version_vulns (id, cache_artifact_id, vuln_id, owner_kind)
+            VALUES (@id, @cacheArtifactId, @vulnId, 'cache_artifact')
+            """,
+            new { id, cacheArtifactId, vulnId });
+        return id;
+    }
+
+    [Fact]
+    public async Task FreshSchema_DeclaresTheColumn()
+    {
+        await new SchemaInitializer(_db).InitializeAsync();
+        await using var conn = await _db.OpenAsync();
+
+        var columns = (await conn.QueryAsync<string>(
+            "SELECT name FROM pragma_table_info('package_version_vulns')")).ToHashSet();
+
+        Assert.Contains("mal_still_live_for_version", columns);
+    }
+
+    [Fact]
+    public async Task FreshSchema_DefaultsToFalse_NeverNull()
+    {
+        // NOT NULL DEFAULT 0 — a link that has never been enriched must read as a definite "no",
+        // not "unknown", because MalStillLiveTriggers reads it with no staleness gating.
+        await new SchemaInitializer(_db).InitializeAsync();
+        await using var conn = await _db.OpenAsync();
+        string vulnId = await SeedAdvisoryAsync(conn, "v-link-default");
+        string caId = await SeedCacheArtifactAsync(conn, "left-pad-default");
+        await SeedLinkAsync(conn, caId, vulnId);
+
+        Assert.Equal(0L, await conn.ExecuteScalarAsync<long>(
+            "SELECT mal_still_live_for_version FROM package_version_vulns WHERE vuln_id = @vulnId",
+            new { vulnId }));
+    }
+
+    [Fact]
+    public async Task FreshSchema_AcceptsAndPersistsATrueValue()
+    {
+        await new SchemaInitializer(_db).InitializeAsync();
+        await using var conn = await _db.OpenAsync();
+        string vulnId = await SeedAdvisoryAsync(conn, "v-link-true");
+        string caId = await SeedCacheArtifactAsync(conn, "left-pad-true");
+        await SeedLinkAsync(conn, caId, vulnId);
+
+        await conn.ExecuteAsync(
+            "UPDATE package_version_vulns SET mal_still_live_for_version = 1 WHERE vuln_id = @vulnId",
+            new { vulnId });
+
+        Assert.Equal(1L, await conn.ExecuteScalarAsync<long>(
+            "SELECT mal_still_live_for_version FROM package_version_vulns WHERE vuln_id = @vulnId",
+            new { vulnId }));
+    }
+
+    [Fact]
+    public async Task FreshSchema_RejectsANonBooleanInteger()
+    {
+        await new SchemaInitializer(_db).InitializeAsync();
+        await using var conn = await _db.OpenAsync();
+        string vulnId = await SeedAdvisoryAsync(conn, "v-link-bad");
+        string caId = await SeedCacheArtifactAsync(conn, "left-pad-bad");
+        await SeedLinkAsync(conn, caId, vulnId);
+
+        var ex = await Assert.ThrowsAsync<SqliteException>(() => conn.ExecuteAsync(
+            "UPDATE package_version_vulns SET mal_still_live_for_version = 2 WHERE vuln_id = @vulnId",
+            new { vulnId }));
+        Assert.Contains("CHECK", ex.Message);
+    }
+
+    [Fact]
+    public async Task ExistingDatabaseWithoutTheColumn_GainsItOnReInit()
+    {
+        // A database that predates the column: drop and recreate package_version_vulns without
+        // it, then re-run the initializer. The additive ALTER path must add it back, landing the
+        // NOT NULL DEFAULT 0 even on a pre-existing link row.
+        await new SchemaInitializer(_db).InitializeAsync();
+        string vulnId;
+        string caId;
+        await using (var setup = await _db.OpenAsync())
+        {
+            vulnId = await SeedAdvisoryAsync(setup, "v-link-legacy");
+            caId = await SeedCacheArtifactAsync(setup, "left-pad-legacy");
+
+            await setup.ExecuteAsync("DROP TABLE IF EXISTS package_version_vulns");
+            await setup.ExecuteAsync(
+                """
+                CREATE TABLE package_version_vulns (
+                    id                 TEXT PRIMARY KEY,
+                    package_version_id TEXT,
+                    vuln_id            TEXT NOT NULL,
+                    checked_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                    first_seen_at      TEXT,
+                    cache_artifact_id  TEXT,
+                    owner_kind         TEXT NOT NULL DEFAULT 'package_version'
+                )
+                """);
+            await SeedLinkAsync(setup, caId, vulnId);
+
+            var columns = (await setup.QueryAsync<string>(
+                "SELECT name FROM pragma_table_info('package_version_vulns')")).ToHashSet();
+            Assert.DoesNotContain("mal_still_live_for_version", columns);
+        }
+
+        await new SchemaInitializer(_db).InitializeAsync();
+
+        await using var conn = await _db.OpenAsync();
+        var after = (await conn.QueryAsync<string>(
+            "SELECT name FROM pragma_table_info('package_version_vulns')")).ToHashSet();
+        Assert.Contains("mal_still_live_for_version", after);
+
+        Assert.Equal(0L, await conn.ExecuteScalarAsync<long>(
+            "SELECT mal_still_live_for_version FROM package_version_vulns WHERE vuln_id = @vulnId",
+            new { vulnId }));
     }
 }

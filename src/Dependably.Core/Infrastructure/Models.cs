@@ -189,6 +189,17 @@ public class OrgSettings
     /// </summary>
     public string BlockMalicious { get; set; } = "block";
     /// <summary>
+    /// Narrower companion to <see cref="BlockMalicious"/>: fires only when the tracker's
+    /// version-precise still-live-malicious signal (<c>package_version_vulns.mal_still_live_for_version</c>)
+    /// is true for the version being evaluated — independent of <see cref="BlockMalicious"/> the
+    /// same way <see cref="BlockKevRansomware"/> is independent of <see cref="BlockKev"/>. 'off'
+    /// (default) / 'warn' / 'block'. Defaults 'off' deliberately, unlike <see cref="BlockMalicious"/>'s
+    /// 'block' default: this arm is new behaviour on an existing deployment's serving posture, so
+    /// it must be opt-in on upgrade. Inert unless the operator has configured the optional
+    /// vulnerability-tracker connection, because nothing else populates the column.
+    /// </summary>
+    public string BlockMaliciousLive { get; set; } = "off";
+    /// <summary>
     /// Proxy gate for versions whose advisories alias a CVE in the CISA Known Exploited
     /// Vulnerabilities catalog — exploited-in-the-wild, independent of CVSS score.
     /// 'off' (default) / 'warn' / 'block'. A manual per-version allow override still wins.
@@ -376,6 +387,8 @@ public class Package
     public string? Homepage { get; set; }
     public string? RepositoryUrl { get; set; }
     public string? Description { get; set; }
+    // Author/publisher as the artifact manifest names it, captured by the same parse.
+    public string? Author { get; set; }
 }
 
 public class PackageVersion
@@ -1108,23 +1121,6 @@ public class LicenseBlocklistEntry
     public DateTimeOffset CreatedAt { get; set; }
 }
 
-/// <summary>A standing operator annotation on a package coordinate. <see cref="Version"/> NULL
-/// scopes the note to every version of the package.</summary>
-public class PackageNote
-{
-    public string Id { get; set; } = "";
-    public string OrgId { get; set; } = "";
-    public string Ecosystem { get; set; } = "";
-    public string Name { get; set; } = "";
-    public string? Version { get; set; }
-    public string Note { get; set; } = "";
-    public string? CreatedBy { get; set; }
-    /// <summary>Display name of the author, resolved from users at read time; NULL when the
-    /// author row is gone or the note was written without one.</summary>
-    public string? CreatedByLabel { get; set; }
-    public DateTimeOffset CreatedAt { get; set; }
-    public DateTimeOffset UpdatedAt { get; set; }
-}
 
 public class SpdxLicense
 {
@@ -1345,6 +1341,12 @@ public class ProjectDocument
     /// <summary>Built by <see cref="Storage.BlobKeys.ProjectDocument"/>; registry tier.</summary>
     public string BlobKey { get; set; } = "";
     public string? UploadedBy { get; set; }
+    /// <summary>
+    /// The ingest projection revision that wrote this document's derived rows. Compared against
+    /// <see cref="Sbom.SbomIngestVersion.Current"/> by the dedup arm, so a widened projection
+    /// re-merges an unchanged document once instead of short-circuiting on the hash alone.
+    /// </summary>
+    public int IngestVersion { get; set; }
     public DateTimeOffset UploadedAt { get; set; }
 }
 

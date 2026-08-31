@@ -234,7 +234,12 @@ COPY --from=notices --chown=dependably:dependably /work/notices.json ./notices.j
 
 EXPOSE 8080
 
-HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 \
+# start-period covers the schema apply, not a normal boot. Applying a release's one-time
+# migrations against a large database is unbounded work that runs before /ready answers, and a
+# migration body is recorded in the ledger only once it completes — so a supervisor that kills the
+# container on a failed liveness probe mid-apply loses the whole pass and repeats it on the next
+# start, indefinitely. The grace is sized for the apply; steady-state boot answers in seconds.
+HEALTHCHECK --interval=10s --timeout=5s --start-period=15m --retries=3 \
     CMD wget -qO- http://localhost:8080/ready || exit 1
 
 VOLUME ["/data"]

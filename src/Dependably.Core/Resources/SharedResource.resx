@@ -229,18 +229,6 @@
     <value>Note is too long.</value>
     <comment>422 detail: a licence-policy note exceeded the length cap.</comment>
   </data>
-  <data name="error.packageNote.coordinateRequired" xml:space="preserve">
-    <value>Ecosystem and package name are required.</value>
-    <comment>422 detail: a package note without a package coordinate.</comment>
-  </data>
-  <data name="error.packageNote.noteRequired" xml:space="preserve">
-    <value>Note text is required.</value>
-    <comment>422 detail: a package note with no text.</comment>
-  </data>
-  <data name="error.packageNote.noteTooLong" xml:space="preserve">
-    <value>Note is too long.</value>
-    <comment>422 detail: a package note exceeded the length cap.</comment>
-  </data>
   <data name="error.saml.nameIdFormatRequired" xml:space="preserve">
     <value>nameIdFormat is required.</value>
     <comment>422 detail. 'nameIdFormat' is the JSON field name - keep it verbatim.</comment>
@@ -1068,14 +1056,6 @@ If you did not make this change, contact your administrator immediately — your
   <data name="error.webhook.descriptionTooLong" xml:space="preserve">
     <value>Description must be {0} characters or fewer.</value>
     <comment>422 detail: webhook description over the length cap. {0} = the cap.</comment>
-  </data>
-  <data name="error.packageNote.ecosystemTooLong" xml:space="preserve">
-    <value>Ecosystem must be {0} characters or fewer.</value>
-    <comment>422 detail: package-note ecosystem over the length cap. {0} = the cap.</comment>
-  </data>
-  <data name="error.packageNote.nameTooLong" xml:space="preserve">
-    <value>Name must be {0} characters or fewer.</value>
-    <comment>422 detail: package-note name over the length cap. {0} = the cap.</comment>
   </data>
   <data name="error.trustAnchor.materialTooLong" xml:space="preserve">
     <value>Material must be {0} characters or fewer.</value>

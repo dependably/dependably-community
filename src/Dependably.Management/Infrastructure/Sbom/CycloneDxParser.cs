@@ -156,6 +156,7 @@ public static class CycloneDxParser
             }
 
             string? scope = JsonRead.String(entry, "scope");
+            var refs = ReadExternalReferences(entry);
             components.Add(new CycloneDxComponent(
                 JsonRead.String(entry, "bom-ref"),
                 name,
@@ -163,10 +164,130 @@ public static class CycloneDxParser
                 JsonRead.String(entry, "type"),
                 JsonRead.String(entry, "purl"),
                 scope is not null && AcceptedScopes.Contains(scope) ? scope : null,
-                ReadLicenses(entry)));
+                ReadLicenses(entry),
+                Clip(JsonRead.String(entry, "description"), MaxDescriptionLength),
+                Clip(ReadAuthor(entry), MaxTextLength),
+                Clip(JsonRead.String(entry, "copyright"), MaxTextLength),
+                Clip(JsonRead.String(entry, "group"), MaxTextLength),
+                refs.GetValueOrDefault("website"),
+                refs.GetValueOrDefault("vcs"),
+                refs.GetValueOrDefault("issue-tracker"),
+                refs.GetValueOrDefault("distribution"),
+                ReadHashes(entry)));
         }
 
         return components;
+    }
+
+    /// <summary>
+    /// Presentation strings are clipped rather than refused. A component's description is the
+    /// producer's prose and has no specified bound, so a 50k-component document could otherwise
+    /// widen 50k rows without ever tripping the byte cap that governs the document as a whole.
+    /// Refusing the document over a long description would be worse: the field is display-only,
+    /// and losing the tail of one sentence is not a reason to reject an inventory. The verbatim
+    /// value survives in the stored blob either way.
+    /// </summary>
+    private const int MaxDescriptionLength = 1000;
+
+    /// <summary>The bound on the shorter presentation fields — author, copyright, group.</summary>
+    private const int MaxTextLength = 400;
+
+    /// <summary>The bound on the serialized hashes array.</summary>
+    private const int MaxHashesJsonLength = 2000;
+
+    /// <summary>externalReferences[].type values a component page has somewhere to render.</summary>
+    private static readonly IReadOnlySet<string> LinkedReferenceTypes =
+        new HashSet<string>(StringComparer.Ordinal) { "website", "vcs", "issue-tracker", "distribution" };
+
+    private static string? Clip(string? value, int max) =>
+        value is null || value.Length <= max ? value : value[..max];
+
+    // authors[] is the 1.5+ shape and author the string that preceded it; publisher is the
+    // organization rather than the person, so it answers last. Producers in current use write
+    // all three — cyclonedx-npm emits author, the .NET generator emits authors[] — and a
+    // component page that renders one of them and not the others would look empty for whichever
+    // half of an inventory came from the other tool.
+    private static string? ReadAuthor(JsonElement component)
+    {
+        var names = new List<string>();
+        foreach (var author in JsonRead.Array(component, "authors"))
+        {
+            string? authorName = JsonRead.String(author, "name");
+            if (authorName is not null)
+            {
+                names.Add(authorName);
+            }
+        }
+
+        return names.Count > 0
+            ? string.Join(", ", names)
+            : JsonRead.String(component, "author") ?? JsonRead.String(component, "publisher");
+    }
+
+    // The first entry of each linked type wins. A document may repeat a type — several
+    // distribution URLs for one component is ordinary — and the column holds one, so the choice
+    // is the document's own order rather than a sort this parser invents. Every entry, including
+    // the types with no column, stays in the stored blob.
+    private static Dictionary<string, string> ReadExternalReferences(JsonElement component)
+    {
+        var links = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var reference in JsonRead.Array(component, "externalReferences"))
+        {
+            string? type = JsonRead.String(reference, "type");
+            string? url = JsonRead.String(reference, "url");
+            if (type is null || url is null || !LinkedReferenceTypes.Contains(type))
+            {
+                continue;
+            }
+
+            // A reference URL is rendered as a link, so a scheme the browser would resolve
+            // against this origin — javascript:, data:, or a bare path — is dropped here rather
+            // than filtered in every renderer that reads the column.
+            if (!IsHttpUrl(url))
+            {
+                continue;
+            }
+
+            links.TryAdd(type, Clip(url, MaxTextLength)!);
+        }
+
+        return links;
+    }
+
+    private static bool IsHttpUrl(string url) =>
+        Uri.TryCreate(url, UriKind.Absolute, out var parsed)
+        && (parsed.Scheme == Uri.UriSchemeHttp || parsed.Scheme == Uri.UriSchemeHttps);
+
+    // hashes[] round-trips as JSON rather than becoming columns: a component may declare several
+    // digests and the set of algorithms is open. Display and export only — the registry verifies
+    // artifacts against the digest it computed at ingest, never against one a third-party
+    // document asserts, so nothing here is a trust input.
+    private static string? ReadHashes(JsonElement component)
+    {
+        var hashes = new List<Dictionary<string, string>>();
+        foreach (var hash in JsonRead.Array(component, "hashes"))
+        {
+            string? alg = JsonRead.String(hash, "alg");
+            string? content = JsonRead.String(hash, "content");
+            if (alg is not null && content is not null)
+            {
+                hashes.Add(new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["alg"] = alg,
+                    ["content"] = content,
+                });
+            }
+        }
+
+        if (hashes.Count == 0)
+        {
+            return null;
+        }
+
+        string json = JsonSerializer.Serialize(hashes);
+        // Clipping would produce invalid JSON, so an oversized set is dropped whole: a reader
+        // that cannot parse the column is worse than one that finds nothing in it.
+        return json.Length <= MaxHashesJsonLength ? json : null;
     }
 
     // licenses[] entries carry either an SPDX expression or a license object with an id or a

@@ -269,7 +269,7 @@
         {:else if page === 'users'}
           <Users pageToken={token} />
         {:else if page === 'setup'}
-          <Setup />
+          <Setup pageToken={token} />
         {:else if page === 'upload'}
           <Upload />
         {:else if page === 'vulnerabilities'}

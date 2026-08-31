@@ -430,7 +430,8 @@ public sealed class ProxyFetchService
                 // This request's own verdict over the bytes it just staged — strictly better
                 // evidence than the shared row's (possibly another tenant's, possibly masked)
                 // stored value when this ecosystem computes one at all.
-                ownProvenanceStatus: request.ProvenanceStatus), ct);
+                ownProvenanceStatus: request.ProvenanceStatus,
+                blockMaliciousLiveMode: request.BlockMaliciousLiveMode), ct);
 
         return new ProxyFetchResult(caDecision, sha256, blobKey, caDecision.Arm);
     }
@@ -636,7 +637,14 @@ public sealed record ProxyFetchRequest(
     /// it, so no call site can put a user's email in that column. NULL means "resolve through
     /// the existing join", which is what rows predating the column already do.
     /// </summary>
-    string? AuditActorLabel = null);
+    string? AuditActorLabel = null,
+    /// <summary>
+    /// Narrower companion to <see cref="BlockMaliciousMode"/>: tenant policy from
+    /// <c>org_settings.block_malicious_live</c>: 'off' (default) | 'warn' | 'block'. Fires only on
+    /// the tracker's version-precise still-live-malicious signal; inert without a configured
+    /// vulnerability-tracker connection.
+    /// </summary>
+    string? BlockMaliciousLiveMode = null);
 
 /// <summary>Outcome of <see cref="ProxyFetchService.RecordAndScanAsync"/>.</summary>
 public sealed record ProxyFetchResult(

@@ -860,6 +860,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
             Sha1Hex: result.Sha1,
             BlockDeprecatedMode: settings?.BlockDeprecated,
             BlockMaliciousMode: settings?.BlockMalicious,
+            BlockMaliciousLiveMode: settings?.BlockMaliciousLive,
             BlockKevMode: settings?.BlockKev,
             BlockRevokedMode: settings?.BlockRevoked,
             MaxEpssTolerance: settings?.MaxEpssTolerance,
@@ -1153,7 +1154,8 @@ public sealed partial class MavenController : OrgScopedControllerBase
 
             // The POM's <url>/<scm><url>/<description> feed the per-tenant packages presentation row.
             await _svc.Packages.UpdateMetadataAsync(
-                packageId, licenses.Homepage, licenses.Repository, licenses.Description, ct);
+                packageId, licenses.Homepage, licenses.Repository, licenses.Description,
+                licenses.Author, ct);
         }
         catch (Exception ex)
         {

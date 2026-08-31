@@ -236,7 +236,8 @@ public sealed class TenantBoundBlobReclamationTests : IAsyncLifetime
                 _db, new TieredBlobStorage(_blobs, _blobs), new Dependably.Protocol.OciBlobKeyLock()),
             new Dependably.Infrastructure.Mail.EmailOutboxRepository(_db, _clock),
             new Dependably.Infrastructure.Mail.EmailOutboxPolicy(cfg),
-            new OrgStatsHistoryRepository(_db)));
+            new OrgStatsHistoryRepository(_db),
+            new BackgroundJobRunRepository(_db)));
     }
 
     private CacheEvictionService BuildEvictionService(IDictionary<string, string?> cfg)

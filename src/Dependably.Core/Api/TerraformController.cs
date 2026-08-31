@@ -903,6 +903,7 @@ public sealed class TerraformController : OrgScopedControllerBase
             MinReleaseAgeHours: settings?.MinReleaseAgeHours,
             BlockDeprecatedMode: settings?.BlockDeprecated,
             BlockMaliciousMode: settings?.BlockMalicious,
+            BlockMaliciousLiveMode: settings?.BlockMaliciousLive,
             BlockKevMode: settings?.BlockKev,
             BlockRevokedMode: settings?.BlockRevoked,
             MaxEpssTolerance: settings?.MaxEpssTolerance,

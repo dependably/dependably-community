@@ -50,7 +50,8 @@ public sealed class RetentionPersonalDataSweepTests : IAsyncLifetime
                 new Dependably.Protocol.OciBlobKeyLock()),
             new Dependably.Infrastructure.Mail.EmailOutboxRepository(_db, _clock),
             new Dependably.Infrastructure.Mail.EmailOutboxPolicy(cfg),
-            new OrgStatsHistoryRepository(_db)));
+            new OrgStatsHistoryRepository(_db),
+            new BackgroundJobRunRepository(_db)));
     }
 
     private static string Iso(DateTimeOffset t) => t.ToUtcIso();
@@ -298,5 +299,53 @@ public sealed class RetentionPersonalDataSweepTests : IAsyncLifetime
         await using var conn = await _db.OpenAsync();
         var rows = await conn.QueryAsync<string>("SELECT id FROM email_outbox ORDER BY id");
         return rows.ToList();
+    }
+
+    /// <summary>
+    /// The activity prune deletes in bounded chunks, so the loop has to drain a backlog larger
+    /// than one chunk rather than stopping after the first pass. activity is the highest-volume
+    /// table in the schema — a backlog is what happens when retention is re-enabled after a spell
+    /// with jobs disabled, or an operator shortens the window — so a chunk loop that exits early
+    /// would leave aged personal data behind indefinitely while reporting a completed GC pass.
+    /// </summary>
+    [Fact]
+    public async Task ActivityPrune_DrainsABacklogSpanningSeveralChunks_AndSparesRowsInsideTheWindow()
+    {
+        const int aged = RetentionService.ActivityPruneBatchSize * 2 + 7;
+        string agedAt = _clock.GetUtcNow().AddDays(-30).ToUtcIsoMillis();
+        string freshAt = _clock.GetUtcNow().AddDays(-1).ToUtcIsoMillis();
+
+        await using (var seed = await _db.OpenAsync())
+        {
+            // o2 carries an explicit 10-day window, so agedAt is outside it and freshAt is inside.
+            await seed.ExecuteAsync(
+                """
+                INSERT INTO activity (id, org_id, ecosystem, event_type, created_at)
+                WITH RECURSIVE seq(n) AS (
+                    SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < @aged
+                )
+                SELECT 'bulk-old-' || n, 'o2', 'npm', 'pull', @agedAt FROM seq
+                """,
+                new { aged, agedAt });
+            await seed.ExecuteAsync(
+                """
+                INSERT INTO activity (id, org_id, ecosystem, event_type, created_at)
+                WITH RECURSIVE seq(n) AS (
+                    SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 50
+                )
+                SELECT 'bulk-new-' || n, 'o2', 'npm', 'pull', @freshAt FROM seq
+                """,
+                new { freshAt });
+        }
+
+        await Build().RunGcPassAsync(default);
+
+        // Every aged row is gone — not just the first chunk's worth.
+        Assert.Equal(0, await ScalarAsync<int>(
+            "SELECT COUNT(*) FROM activity WHERE id LIKE 'bulk-old-%'", new { }));
+
+        // And the sweep stopped at the retention boundary rather than draining the table.
+        Assert.Equal(50, await ScalarAsync<int>(
+            "SELECT COUNT(*) FROM activity WHERE id LIKE 'bulk-new-%'", new { }));
     }
 }

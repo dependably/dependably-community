@@ -20,7 +20,11 @@ namespace Dependably.Infrastructure;
 ///
 /// <para>Postgres only, mirroring <see cref="InstanceLock.AppliesToThisStore"/> from the other
 /// side. SQLite is a single-writer store and <see cref="InstanceLock"/> already refuses a second
-/// process on the same database file, so it needs no second mechanism.</para>
+/// process on the same database file, so it needs no second mechanism — but only because that
+/// claim is taken from <em>inside</em> the apply, via <c>InitializeAsync</c>'s
+/// <c>afterBaseSchema</c> hook, the moment the base schema creates the table the guard lives in.
+/// Claimed any later, the guard would begin after the migration sequence it is relied on to
+/// cover, and this exemption would be resting on an invariant that does not yet hold.</para>
 /// </summary>
 public sealed partial class SchemaInitializer
 {

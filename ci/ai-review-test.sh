@@ -24,7 +24,20 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT" || exit 1
 
 TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "$TMP_DIR"' EXIT
+# A suite that dies before its summary must never be readable as a pass. That is
+# not hypothetical: on bash 3.2 a fatal `set -u` abort inside an arithmetic array
+# subscript exits carrying the PREVIOUS command's status, so this suite exited 0
+# after running not one assertion. The exit status alone cannot be trusted to
+# carry that, so completion is tracked explicitly and the trap fails closed on
+# anything that did not reach the summary line.
+SUITE_COMPLETED=0
+trap 'rc=$?
+      if [ "${SUITE_COMPLETED:-0}" -ne 1 ]; then
+        echo "ai-review-test.sh: FATAL -- aborted before the summary (reported rc=$rc); failing closed" >&2
+        rc=1
+      fi
+      rm -rf "$TMP_DIR"
+      exit "$rc"' EXIT
 
 PASS=0
 FAIL=0
@@ -1300,7 +1313,7 @@ CORPUS_DIR="ci/fixtures/ai-review"
 
 run_corpus_checks() {
   echo "== corpus: deterministic classification-layer checks (offline, no model calls) =="
-  local f base label class size fence_count
+  local f base label class size fence_count corpus_saved_cap corpus_partial
   for f in "$CORPUS_DIR"/*.diff; do
     [ -f "$f" ] || continue
     base="$(basename "$f")"
@@ -1313,15 +1326,26 @@ run_corpus_checks() {
     truncate_diff "$size"
 
     # Truncation detection: a pure function of byte size vs MAX_DIFF_BYTES.
-    # LARGE fixtures (10, 11) are sized specifically around the cap; every
-    # other fixture is comfortably under it.
     if [ "$size" -gt "$MAX_DIFF_BYTES" ]; then
       assert_eq "1" "${DIFF_TRUNCATED:-0}" "$base: over the cap ($size > $MAX_DIFF_BYTES) must be detected as truncated"
     else
       assert_eq "0" "${DIFF_TRUNCATED:-0}" "$base: under the cap ($size <= $MAX_DIFF_BYTES) must not be marked truncated"
     fi
     if [ "$class" = "LARGE" ]; then
-      assert_eq "1" "${DIFF_TRUNCATED:-0}" "$base: labelled LARGE, must actually trigger truncation (sanity check on the fixture itself)"
+      # A LARGE fixture exists to drive the truncation path with REAL bytes, so what
+      # it must prove is a property of truncate_diff, NOT of wherever the production
+      # cap currently sits: scoring it against MAX_DIFF_BYTES retires this check
+      # silently the moment the cap is raised past the fixture, leaving the branch
+      # green because it never runs. Score it against a cap below its own size.
+      corpus_saved_cap="$MAX_DIFF_BYTES"
+      MAX_DIFF_BYTES=$(( size / 2 ))
+      truncate_diff "$size"
+      assert_eq "1" "${DIFF_TRUNCATED:-0}" "$base: labelled LARGE, must trigger truncation against a cap below its own size (sanity check on the fixture itself)"
+      corpus_partial=0
+      [ "${DIFF_PCT_SEEN:-100}" -lt 100 ] && corpus_partial=1
+      assert_eq "1" "$corpus_partial" "$base: a LARGE fixture capped at half its bytes must report a partial percentage (got ${DIFF_PCT_SEEN:-100}%)"
+      MAX_DIFF_BYTES="$corpus_saved_cap"
+      truncate_diff "$size"   # restore the real capped bytes for the fence checks below
     fi
 
     # Fence integrity: build the real user turn from this fixture's real bytes
@@ -1364,5 +1388,6 @@ run_corpus_checks
 
 # ═══════════════════════════════════════════════════════════════════════════
 echo
+SUITE_COMPLETED=1
 echo "ai-review-test.sh: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

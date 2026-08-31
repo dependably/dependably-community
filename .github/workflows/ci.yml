@@ -135,8 +135,26 @@ jobs:
       - name: Restore dotnet tools
         run: dotnet tool restore
 
+      # -sv is required, not cosmetic: the CycloneDX .NET tool never reads the project's
+      # version for metadata.component.version and defaults it to the literal 0.0.0. It
+      # resolves the project file directly rather than evaluating MSBuild, so the <Version>
+      # Dependably.csproj inherits from Directory.Build.props is invisible to it. The merge
+      # step below stamps the TOP-LEVEL component, so without this the released SBOM carries
+      # the right version on the aggregate and 0.0.0 on the backend component nested inside it.
       - name: Generate backend SBOM
-        run: dotnet CycloneDX src/Dependably/Dependably.csproj -o . -fn sbom-backend.json -F json -spv 1.6 --exclude-dev
+        run: |
+          set -euo pipefail
+          VERSION=$(grep -oE '<Version>[^<]+</Version>' Directory.Build.props \
+            | sed -E 's|<Version>(.*)</Version>|\1|')
+          test -n "$VERSION" || { echo "::error::no <Version> in Directory.Build.props"; exit 1; }
+          dotnet CycloneDX src/Dependably/Dependably.csproj -o . -fn sbom-backend.json -F json \
+            -spv 1.6 --exclude-dev -sv "$VERSION"
+          # Asserted rather than trusted — this document is signed and attached to the release,
+          # and every consumer renders whatever version it claims.
+          STAMPED=$(jq -r '.metadata.component.version' sbom-backend.json)
+          echo "Directory.Build.props: $VERSION | sbom metadata.component.version: $STAMPED"
+          test "$STAMPED" = "$VERSION" \
+            || { echo "::error::SBOM metadata.component.version is '$STAMPED', expected '$VERSION'"; exit 1; }
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:

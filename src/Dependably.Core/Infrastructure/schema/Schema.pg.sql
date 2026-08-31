@@ -116,6 +116,10 @@ CREATE TABLE IF NOT EXISTS org_settings (
     block_revoked             TEXT    NOT NULL DEFAULT 'warn' CHECK (block_revoked IN ('off', 'warn', 'block')),
     -- Policy for versions carrying a malicious-package advisory (OSV MAL- ids). See Schema.sql.
     block_malicious           TEXT    NOT NULL DEFAULT 'block' CHECK (block_malicious IN ('off', 'warn', 'block')),
+    -- Narrower companion to block_malicious: fires only on the tracker's version-precise
+    -- still-live-malicious signal. Defaults 'off' deliberately, unaffected by construction
+    -- without a configured tracker connection. See Schema.sql.
+    block_malicious_live      TEXT    NOT NULL DEFAULT 'off' CHECK (block_malicious_live IN ('off', 'warn', 'block')),
     -- Policy for CISA-KEV-listed (exploited-in-the-wild) advisories. See Schema.sql.
     block_kev                 TEXT    NOT NULL DEFAULT 'off' CHECK (block_kev IN ('off', 'warn', 'block')),
     -- EPSS exploitation-probability ceiling (0.0–1.0); NULL = policy off. See Schema.sql.
@@ -284,6 +288,7 @@ CREATE TABLE IF NOT EXISTS packages (
     homepage       TEXT,
     repository_url TEXT,
     description    TEXT,
+    author         TEXT,
     UNIQUE (org_id, ecosystem, purl_name)
 );
 
@@ -597,7 +602,41 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
     -- carried no cwes array at all; '[]' means the entry explicitly recorded zero
     -- classifications — a different fact from never having been asked.
     kev_cwes        TEXT,
-    kev_notes       TEXT
+    kev_notes       TEXT,
+    -- Tracker enrichment overlay, second installment: OpenSSF malicious-packages live-status,
+    -- exploit-code observation, and the CVE Program (cvelistV5) CVSS/CWE/SSVC overlay. The
+    -- version-precise still-live derived signal is DELIBERATELY NOT a column here — it lives on
+    -- package_version_vulns instead, because "is this version still live" is a fact about the
+    -- (advisory, version) pair, not the advisory alone. See Schema.sql for the full rationale.
+    mal_compromised_versions TEXT,     -- JSON array of version strings; same convention as `aliases`/`kev_cwes`
+    mal_version_compromised  INTEGER
+                              CHECK (mal_version_compromised IN (0,1)),
+    mal_still_live           INTEGER
+                              CHECK (mal_still_live IN (0,1)),
+    mal_live_checked_at      TEXT
+        CHECK (mal_live_checked_at IS NULL OR mal_live_checked_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    mal_live_versions        TEXT,     -- JSON array; same convention as mal_compromised_versions
+    -- Exploit-code observation (public PoC/exploit availability), independent of KEV/EPSS.
+    -- exploit_code_exists is never NULL at the source — the producer defaults it false.
+    exploit_code_exists      INTEGER NOT NULL DEFAULT 0
+                              CHECK (exploit_code_exists IN (0,1)),
+    exploit_code_max_weight  INTEGER,
+    exploit_code_sources     TEXT,     -- JSON array of source names; same convention as mal_compromised_versions
+    -- The CVE Program's own cvelistV5 CVSS/CWE/SSVC overlay. Deliberately SEPARATE columns from
+    -- nvd_*/ssvc_* above — see Schema.sql for the disagreement-hiding rationale.
+    cvelist_cvss_score       REAL,
+    cvelist_cvss_severity    TEXT
+                              CHECK (cvelist_cvss_severity IN ('CRITICAL','HIGH','MEDIUM','LOW','NONE')),
+    cvelist_cvss_provenance  TEXT,     -- free text (e.g. 'cna', 'CISA-ADP'); not a closed set, no CHECK
+    cvelist_cwes             TEXT,     -- JSON array; same convention as kev_cwes
+    cvelist_ssvc_exploitation TEXT
+                              CHECK (cvelist_ssvc_exploitation IN ('none','poc','active')),
+    cvelist_ssvc_automatable TEXT
+                              CHECK (cvelist_ssvc_automatable IN ('yes','no')),
+    cvelist_ssvc_technical_impact TEXT
+                              CHECK (cvelist_ssvc_technical_impact IN ('partial','total')),
+    cvelist_checked_at       TEXT
+        CHECK (cvelist_checked_at IS NULL OR cvelist_checked_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$')
 );
 
 -- Global shared proxy-cache index. See Schema.sql for the full rationale.
@@ -728,6 +767,12 @@ CREATE TABLE IF NOT EXISTS package_version_vulns (
     cache_artifact_id   TEXT REFERENCES cache_artifact(id) ON DELETE CASCADE,
     owner_kind          TEXT NOT NULL DEFAULT 'package_version'
                         CHECK (owner_kind IN ('package_version','cache_artifact')),
+    -- The tracker's version-precise still-live-malicious signal for THIS (version, advisory)
+    -- link. See Schema.sql for the full rationale — it lives here rather than on
+    -- vulnerabilities specifically because "is this version still live" is a fact about the
+    -- (advisory, version) pair, and this table is already the version-precise link.
+    mal_still_live_for_version INTEGER NOT NULL DEFAULT 0
+                                CHECK (mal_still_live_for_version IN (0,1)),
     -- Owner invariant: exactly one FK arm is active and matches owner_kind.
     CHECK (
         (owner_kind = 'package_version' AND package_version_id IS NOT NULL AND cache_artifact_id IS NULL)
@@ -1191,30 +1236,13 @@ CREATE TABLE IF NOT EXISTS license_blocklist (
 
 CREATE INDEX IF NOT EXISTS idx_pkg_version_licenses ON package_version_licenses(package_version_id);
 
--- Standing operator annotations on a package coordinate. Two things needed the same shape: the
--- rationale recorded when someone rules on a package whose licence is conditional, and a general
--- compliance note an admin wants left on a package regardless of any gate decision.
--- version NULL scopes the note to every version of the package; a value scopes it to one.
--- Keyed by (ecosystem, name, version) rather than an FK to package_versions because proxy
--- artifacts live on the cache_artifact plane and have no version row -- a coordinate key covers
--- both planes, which an FK to either one could not.
--- quarantine.note is unchanged and still records the decision made on a blocked artifact; this
--- table is the surface for everything that never reached a block.
--- personal-data: excluded -- created_by is an authorship stamp on an org-owned compliance note, not the subject's data
-CREATE TABLE IF NOT EXISTS package_note (
-    id          TEXT PRIMARY KEY,
-    org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-    ecosystem   TEXT NOT NULL,
-    name        TEXT NOT NULL,
-    version     TEXT,
-    note        TEXT NOT NULL,
-    created_by  TEXT REFERENCES users(id),
-    created_at  TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
-        CHECK (created_at IS NULL OR created_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
-    updated_at  TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
-        CHECK (updated_at IS NULL OR updated_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$')
-);
-CREATE INDEX IF NOT EXISTS idx_package_note_coord ON package_note(org_id, ecosystem, name);
+-- There is no package_note table. See Schema.sql for the full rationale.
+--
+-- backcompat-ok: package_note — retired feature, dropped as the contract step. The preceding
+-- release reads this table only from its own package-note endpoints, and this drop deliberately
+-- accepts that those endpoints fail for the length of a blue-green cutover from it; every other
+-- surface in that release is untouched. Owner-directed: the alternative was deferring the drop a
+-- release to keep the cutover clean.
 
 
 -- RPM metadata. See Schema.sql for full rationale.
@@ -2076,6 +2104,8 @@ CREATE TABLE IF NOT EXISTS project_documents (
     size_bytes         INTEGER NOT NULL DEFAULT 0,
     blob_key           TEXT NOT NULL,
     uploaded_by        TEXT,
+    -- Ingest projection revision. See Schema.sql for the full rationale.
+    ingest_version     INTEGER NOT NULL DEFAULT 0,
     uploaded_at        TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
         CHECK (uploaded_at IS NULL OR uploaded_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
     UNIQUE (project_version_id, doc_type)
@@ -2101,6 +2131,15 @@ CREATE TABLE IF NOT EXISTS sbom_components (
     dependency_kind    TEXT CHECK (dependency_kind IN ('direct','transitive','root','graph-unknown')),
     dependency_path    TEXT,
     license_spdx       TEXT,
+    description        TEXT,
+    component_author   TEXT,
+    copyright          TEXT,
+    component_group    TEXT,
+    website_url        TEXT,
+    vcs_url            TEXT,
+    issue_tracker_url  TEXT,
+    distribution_url   TEXT,
+    component_hashes   TEXT,
     vuln_checked_at    TEXT
         CHECK (vuln_checked_at IS NULL OR vuln_checked_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
     created_at         TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))

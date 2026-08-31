@@ -380,15 +380,15 @@ public static class DependablyMeter
             description: "Upstream requests shed by the queue-depth throttle (503 returned immediately).");
 
     /// <summary>
-    /// Downloads blocked by one of the three arms that carry no counter of their own —
-    /// <c>kev_ransomware</c>, <c>ssvc_exploitation</c>, <c>epss_percentile</c>. One counter
-    /// discriminated by <c>reason</c> rather than three near-identical ones, matching the shape
-    /// <see cref="GateWarnings"/> already uses. Attributes: <c>ecosystem</c>, <c>reason</c>.
+    /// Downloads blocked by one of the arms that carry no counter of their own —
+    /// <c>kev_ransomware</c>, <c>ssvc_exploitation</c>, <c>epss_percentile</c>, <c>malicious_live</c>.
+    /// One counter discriminated by <c>reason</c> rather than four near-identical ones, matching
+    /// the shape <see cref="GateWarnings"/> already uses. Attributes: <c>ecosystem</c>, <c>reason</c>.
     /// </summary>
     public static readonly Counter<long> EnrichmentGateBlocks =
         Meter.CreateCounter<long>(
             "dependably.security.enrichment_gate_blocks",
-            description: "Downloads blocked by the kev_ransomware, ssvc_exploitation or epss_percentile arm. Attributes: ecosystem, reason.");
+            description: "Downloads blocked by the kev_ransomware, ssvc_exploitation, epss_percentile or malicious_live arm. Attributes: ecosystem, reason.");
 
     /// <summary>
     /// Gate evaluations of a version carrying vulnerability-tracker enrichment older than the

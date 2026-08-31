@@ -33,6 +33,55 @@ namespace Dependably.Infrastructure;
 /// </summary>
 public sealed class RetentionService : ScheduledBackgroundService
 {
+
+    // Chunk size for the batched background_job_runs delete. Same reasoning as
+    // AuditEventPruneBatchSize: bounded enough that each statement releases the writer lock
+    // quickly, large enough that a months-deep backlog drains in a bounded number of round-trips.
+    // Internal so tests seed a multi-chunk backlog scaled to this value rather than a copy of it.
+    internal const int JobRunPruneBatchSize = 5000;
+
+    /// <summary>
+    /// Bounds <c>background_job_runs</c>, which nothing else deletes from. Successes age out at
+    /// JOB_RUN_RETENTION_DAYS (14), everything else at JOB_RUN_FAILURE_RETENTION_DAYS (90) — a
+    /// failed or cancelled run is the record an operator goes looking for, and there are few of
+    /// them, so the cheap window is the one that removes almost all the volume.
+    /// </summary>
+    /// <remarks>
+    /// The two rows per job that <c>HealthService</c> reads survive regardless of age; see
+    /// <see cref="BackgroundJobRunRepository.PruneAsync"/> for which and why. Deletion is batched
+    /// there, and looped here until a batch comes back short, so the first pass after an upgrade
+    /// drains a months-deep backlog without holding one long write transaction.
+    /// </remarks>
+    internal async Task PruneBackgroundJobRunsAsync(CancellationToken ct)
+    {
+        int successDays = int.TryParse(_config["JOB_RUN_RETENTION_DAYS"], out int s) && s > 0 ? s : 14;
+        int failureDays = int.TryParse(_config["JOB_RUN_FAILURE_RETENTION_DAYS"], out int f) && f > 0
+            ? f : 90;
+        var now = _time.GetUtcNow();
+        // BackgroundJobRunRepository.RecordAsync is the only writer and stamps started_at at
+        // second precision, so both cutoffs are formatted the same way — a finer-grained cutoff
+        // would sort wrong against a stored value on the boundary second.
+        string successCutoff = now.AddDays(-successDays).UtcDateTime.ToUtcIso();
+        string failureCutoff = now.AddDays(-failureDays).UtcDateTime.ToUtcIso();
+
+        int totalDeleted = 0;
+        int deletedInChunk;
+        do
+        {
+            deletedInChunk = await _jobRuns.PruneAsync(
+                successCutoff, failureCutoff, JobRunPruneBatchSize, ct);
+            totalDeleted += deletedInChunk;
+        }
+        while (deletedInChunk >= JobRunPruneBatchSize && !ct.IsCancellationRequested);
+
+        if (totalDeleted > 0)
+        {
+            _logger.LogInformation(
+                "Retention GC: deleted {Deleted} background_job_runs rows (successes older than {SuccessDays} days, other outcomes older than {FailureDays} days).",
+                totalDeleted, successDays, failureDays);
+        }
+    }
+
     /// <summary>
     /// Injected dependencies for <see cref="RetentionService"/>. Bundles all DI services into
     /// one record so the constructor stays within the parameter-count gate (S107).
@@ -52,7 +101,8 @@ public sealed class RetentionService : ScheduledBackgroundService
         Dependably.Protocol.OciOrphanBlobDeleter OciOrphanBlobs,
         Mail.EmailOutboxRepository EmailOutbox,
         Mail.EmailOutboxPolicy EmailOutboxPolicy,
-        OrgStatsHistoryRepository StatsHistory);
+        OrgStatsHistoryRepository StatsHistory,
+        BackgroundJobRunRepository JobRuns);
 
     private readonly IMetadataStore _db;
     private readonly IBlobStore _blobs;
@@ -69,6 +119,7 @@ public sealed class RetentionService : ScheduledBackgroundService
     private readonly Mail.EmailOutboxRepository _emailOutbox;
     private readonly Mail.EmailOutboxPolicy _emailOutboxPolicy;
     private readonly OrgStatsHistoryRepository _statsHistory;
+    private readonly BackgroundJobRunRepository _jobRuns;
 
     protected override string CronEnvKey => "GC_SCHEDULE";
     protected override string DefaultCron => "0 3 * * *";
@@ -98,6 +149,7 @@ public sealed class RetentionService : ScheduledBackgroundService
         _emailOutbox = deps.EmailOutbox;
         _emailOutboxPolicy = deps.EmailOutboxPolicy;
         _statsHistory = deps.StatsHistory;
+        _jobRuns = deps.JobRuns;
     }
 
     protected override Task RunTickAsync(CancellationToken ct) => RunGcPassAsync(ct);
@@ -221,6 +273,11 @@ public sealed class RetentionService : ScheduledBackgroundService
         // Delete org_stats_history rows past STATS_HISTORY_RETENTION_DAYS. Purely a storage
         // limit on the dashboard's own trend history — nothing else reads a deleted row.
         await PruneStatsHistoryAsync(ct);
+
+        // Delete aged background_job_runs rows. Nothing else deletes from that table, and its
+        // highest-volume writer is a 60-second timer, so without this sweep it grows without bound
+        // and its own readers slow down as it does.
+        await PruneBackgroundJobRunsAsync(ct);
 
         _logger.LogInformation("Retention GC pass complete.");
     }
@@ -906,6 +963,11 @@ public sealed class RetentionService : ScheduledBackgroundService
         }
     }
 
+    // Chunk size for the batched activity delete below, mirroring AuditEventPruneBatchSize.
+    // Internal (not private) so tests can seed a multi-chunk backlog scaled to this exact size
+    // rather than hardcoding a copy of the production value.
+    internal const int ActivityPruneBatchSize = 5000;
+
     private static async Task PruneActivityAsync(
         System.Data.Common.DbConnection conn, string orgId, int retentionDays, DateTimeOffset now, CancellationToken ct)
     {
@@ -914,9 +976,29 @@ public sealed class RetentionService : ScheduledBackgroundService
         // sorts wrong against it on the boundary second, since '.' (0x2E) collates before 'Z' (0x5A),
         // which would delete rows one second newer than the retention window intends.
         string cutoff = now.AddDays(-retentionDays).ToUtcIsoMillis();
-        await conn.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM activity WHERE org_id = @orgId AND created_at < @cutoff",
-            new { orgId, cutoff },
-            cancellationToken: ct));
+
+        // Deletes in bounded chunks keyed by the id primary key, the same shape
+        // PruneAuditEventsAsync uses and for the same reason: activity is the highest-volume table
+        // in the schema (one row per download), so one unbounded statement is the worst case here,
+        // not the mildest. A backlog — retention re-enabled after a spell with jobs disabled, or a
+        // window shortened by an operator — would otherwise delete millions of rows in a single
+        // transaction, holding locks and bloating the table against a live serving cluster for the
+        // whole run. The lock is released between chunks so other writers make progress.
+        int deletedInChunk;
+        do
+        {
+            deletedInChunk = await conn.ExecuteAsync(new CommandDefinition(
+                """
+                DELETE FROM activity
+                WHERE id IN (
+                    SELECT id FROM activity
+                    WHERE org_id = @orgId AND created_at < @cutoff
+                    LIMIT @batchSize
+                )
+                """,
+                new { orgId, cutoff, batchSize = ActivityPruneBatchSize },
+                cancellationToken: ct));
+        }
+        while (deletedInChunk >= ActivityPruneBatchSize && !ct.IsCancellationRequested);
     }
 }

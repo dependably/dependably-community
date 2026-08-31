@@ -346,7 +346,7 @@ public sealed class VulnTrackerEnrichmentClient : IVulnerabilityEnrichmentSource
             var advisories = new List<AdvisoryEnrichment>();
             foreach (var raw in entry?.Advisories ?? [])
             {
-                var advisory = ToEnrichment(raw);
+                var advisory = ToEnrichment(raw, targets[i].Purl);
                 if (advisory is not null)
                 {
                     advisories.Add(advisory);
@@ -369,7 +369,7 @@ public sealed class VulnTrackerEnrichmentClient : IVulnerabilityEnrichmentSource
             EnrichmentUnreachedReason.None);
     }
 
-    private AdvisoryEnrichment? ToEnrichment(AdvisoryRaw? raw)
+    private AdvisoryEnrichment? ToEnrichment(AdvisoryRaw? raw, string purl)
     {
         if (raw is null || string.IsNullOrWhiteSpace(raw.VulnId))
         {
@@ -389,7 +389,67 @@ public sealed class VulnTrackerEnrichmentClient : IVulnerabilityEnrichmentSource
             Cve: string.IsNullOrWhiteSpace(raw.CanonicalCve) ? null : raw.CanonicalCve.Trim(),
             Status: status,
             Nvd: ToBand(raw.NistBand, raw.NistScore),
-            Ssvc: ToSsvc(raw.SsvcExploitation, raw.SsvcAutomatable, raw.SsvcTechnicalImpact));
+            Ssvc: ToSsvc(raw.SsvcExploitation, raw.SsvcAutomatable, raw.SsvcTechnicalImpact),
+            Mal: ToMal(raw),
+            ExploitCode: ToExploitCode(raw),
+            Cvelist: ToCvelist(raw),
+            MalStillLiveForRequestedVersion: IsStillLiveForRequestedVersion(raw, purl));
+    }
+
+    /// <summary>
+    /// The raw OpenSSF malicious-packages pass-through, or null when the producer carried none of
+    /// its five fields at all — the same "nothing to show" convention <see cref="ToBand"/> and
+    /// <see cref="ToSsvc"/> use, rather than a record whose every member happens to be null.
+    /// </summary>
+    private static MalSignal? ToMal(AdvisoryRaw raw) =>
+        raw.MalCompromisedVersions is null && raw.MalVersionCompromised is null
+            && raw.MalStillLive is null && raw.MalLiveCheckedAt is null && raw.MalLiveVersions is null
+            ? null
+            : new MalSignal(
+                CompromisedVersions: raw.MalCompromisedVersions,
+                VersionCompromised: raw.MalVersionCompromised,
+                StillLive: raw.MalStillLive,
+                LiveCheckedAt: ParseInstant(raw.MalLiveCheckedAt),
+                LiveVersions: raw.MalLiveVersions);
+
+    private static ExploitCodeSignal ToExploitCode(AdvisoryRaw raw) =>
+        new(raw.ExploitCodeExists, raw.ExploitCodeMaxWeight, raw.ExploitCodeSources);
+
+    private static CvelistSignal? ToCvelist(AdvisoryRaw raw)
+    {
+        var cvss = ToBand(raw.CvelistCvssSeverity, raw.CvelistCvssScore);
+        var ssvc = ToSsvc(raw.CvelistSsvcExploitation, raw.CvelistSsvcAutomatable, raw.CvelistSsvcTechnicalImpact);
+        string? provenance = string.IsNullOrWhiteSpace(raw.CvelistCvssProvenance) ? null : raw.CvelistCvssProvenance.Trim();
+
+        return cvss is null && ssvc is null && provenance is null && raw.CvelistCwes is null
+            ? null
+            : new CvelistSignal(cvss, provenance, raw.CvelistCwes, ssvc);
+    }
+
+    /// <summary>
+    /// The one piece of real business logic in this client: whether the SPECIFIC version this
+    /// lookup requested is still a live malicious threat right now.
+    ///
+    /// <para>
+    /// <c>mal_still_live</c>/<c>mal_live_versions</c> describe the WHOLE flagged package (unioned
+    /// across every advisory that flags it), not the one version a purl happened to ask about.
+    /// <c>mal_version_compromised</c>, by contrast, IS already scoped to the exact requested
+    /// version — true only when that purl's <c>@version</c> is itself in the compromised list. A
+    /// package can have two compromised versions where one was cleaned up and one wasn't, so
+    /// taking <c>mal_still_live</c> at face value would either let an already-removed version
+    /// block installs forever, or — worse — fail to block a version that is genuinely still live.
+    /// </para>
+    /// </summary>
+    private static bool IsStillLiveForRequestedVersion(AdvisoryRaw raw, string purl)
+    {
+        if (raw.MalVersionCompromised != true)
+        {
+            return false;
+        }
+
+        var parsed = PurlParser.TryParse(purl);
+        return parsed is not null && !string.IsNullOrEmpty(parsed.Version)
+            && (raw.MalLiveVersions ?? []).Contains(parsed.Version, StringComparer.Ordinal);
     }
 
     /// <summary>
@@ -490,7 +550,22 @@ public sealed class VulnTrackerEnrichmentClient : IVulnerabilityEnrichmentSource
         double? NistScore,
         string? SsvcExploitation,
         string? SsvcAutomatable,
-        string? SsvcTechnicalImpact);
+        string? SsvcTechnicalImpact,
+        List<string>? MalCompromisedVersions,
+        bool? MalVersionCompromised,
+        bool? MalStillLive,
+        string? MalLiveCheckedAt,
+        List<string>? MalLiveVersions,
+        bool ExploitCodeExists,
+        int? ExploitCodeMaxWeight,
+        List<string>? ExploitCodeSources,
+        double? CvelistCvssScore,
+        string? CvelistCvssSeverity,
+        string? CvelistCvssProvenance,
+        List<string>? CvelistCwes,
+        string? CvelistSsvcExploitation,
+        string? CvelistSsvcAutomatable,
+        string? CvelistSsvcTechnicalImpact);
 
     private sealed record FreshnessRaw(string? Source, string? LastIngest);
 }

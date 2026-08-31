@@ -2,7 +2,7 @@
   import { t } from 'svelte-i18n'
   import { api } from '../lib/api.js'
   import ErrorBanner from '../lib/ErrorBanner.svelte'
-  import { currentOrg, navigate } from '../lib/store.js'
+  import { bootstrapInfo, currentOrg, navigate } from '../lib/store.js'
   import { reportPageLoad } from '../lib/pageLoad.js'
   import { formatDateShort, formatNumber } from '../lib/format.js'
   import DataTable from '../lib/DataTable.svelte'
@@ -11,6 +11,8 @@
   import RowActionsMenu from '../lib/RowActionsMenu.svelte'
   import { ECOSYSTEMS, ECO_LABEL } from '../lib/ecosystems.js'
   import { readQuery, writeQuery } from '../lib/tableState.js'
+  import { copyToClipboard } from '../lib/clipboard.js'
+  import { packageInstallCommand, registryOrigin } from '../lib/installCommand.js'
 
   // Table state lives in the URL query string so it survives navigating into a
   // package's detail page and back (this component is recreated on every route
@@ -87,9 +89,9 @@
     { key: 'latest',    label: $t('packages.columns.latest'),    sortable: false, width: '70px',  align: 'center' },
     { key: 'vulns',     label: $t('packages.columns.vulns'),     sortable: true,  width: '130px', defaultDir: 'desc' },
     { key: 'created',   label: $t('packages.columns.created'),   sortable: true,  width: '120px' },
-    ...(versionOverwritePolicy !== 'block'
-      ? [{ key: 'actions', label: '', sortable: false, width: '48px' }]
-      : []),
+    // Always present: the row menu now also carries the install command, which every viewer
+    // can use — not just the admins the same-version-push items are gated to.
+    { key: 'actions', label: '', sortable: false, width: '48px' },
   ]
   const comparators = {
     name: NOOP_CMP, ecosystem: NOOP_CMP, purl: NOOP_CMP,
@@ -115,6 +117,24 @@
 
   function openPackage(pkg) {
     navigate('version-detail', { ecosystem: pkg.ecosystem, name: pkg.purlName })
+  }
+
+  // Registry URL to embed in a copied command. Follows bootstrap, which is what tells us the
+  // operator declared an HTTPS deployment even when this browser reached the SPA over HTTP.
+  $: origin = registryOrigin($bootstrapInfo, window.location)
+
+  // Same identity RowActionsMenu keys on, so the acknowledgement lands on the row clicked.
+  const rowKey = (pkg) => `${pkg.name}/${pkg.ecosystem}`
+
+  let copiedId = null
+  async function copyInstall(pkg, command) {
+    const ok = await copyToClipboard(command)
+    if (!ok) { openActionsId = null; return }
+    // Hold the menu open briefly so the acknowledgement is actually readable.
+    copiedId = rowKey(pkg)
+    setTimeout(() => {
+      if (copiedId === rowKey(pkg)) { copiedId = null; openActionsId = null }
+    }, 1200)
   }
 
   async function setOverwrite(pkg, override) {
@@ -205,51 +225,65 @@
         {#if ((pkg.criticalCount ?? 0) + (pkg.highCount ?? 0) + (pkg.mediumCount ?? 0) + (pkg.lowCount ?? 0)) === 0}<span class="text-muted" aria-label={$t('packages.vulns.none')}>—</span>{/if}
       </td>
       <td class="nowrap text-muted">{$formatDateShort(pkg.createdAt)}</td>
-      {#if versionOverwritePolicy !== 'block'}
-        <td class="actions-cell" on:click|stopPropagation>
-          <div class="row-actions">
-            <RowActionsMenu id={pkg.name + '/' + pkg.ecosystem} bind:openId={openActionsId} ariaLabel={$t('packages.actionsMenu.open')}>
-              {#if versionOverwritePolicy === 'exception'}
-                <button
-                  class="popover-item"
-                  disabled={pkg.sameVersionPushOverride === 'allow'}
-                  on:click|stopPropagation={() => setOverwrite(pkg, 'allow')}
-                >
-                  {#if pkg.sameVersionPushOverride === 'allow'}
-                    <svg width="12" height="12" aria-hidden="true" class="menu-check"><use href="/icons.svg#icon-check"/></svg>
-                  {/if}
-                  {$t('packages.actionsMenu.allowSameVersionPush')}
-                </button>
-                <button
-                  class="popover-item"
-                  disabled={!pkg.sameVersionPushOverride}
-                  on:click|stopPropagation={() => setOverwrite(pkg, null)}
-                >
-                  {$t('packages.actionsMenu.inheritOrgDefault')}
-                </button>
-              {:else if versionOverwritePolicy === 'allow'}
-                <button
-                  class="popover-item"
-                  disabled={pkg.sameVersionPushOverride === 'block'}
-                  on:click|stopPropagation={() => setOverwrite(pkg, 'block')}
-                >
-                  {#if pkg.sameVersionPushOverride === 'block'}
-                    <svg width="12" height="12" aria-hidden="true" class="menu-check"><use href="/icons.svg#icon-check"/></svg>
-                  {/if}
-                  {$t('packages.actionsMenu.blockSameVersionPush')}
-                </button>
-                <button
-                  class="popover-item"
-                  disabled={!pkg.sameVersionPushOverride}
-                  on:click|stopPropagation={() => setOverwrite(pkg, null)}
-                >
-                  {$t('packages.actionsMenu.inheritOrgDefault')}
-                </button>
-              {/if}
-            </RowActionsMenu>
-          </div>
-        </td>
-      {/if}
+      <td class="actions-cell" on:click|stopPropagation>
+        <div class="row-actions">
+          <RowActionsMenu id={pkg.name + '/' + pkg.ecosystem} bind:openId={openActionsId} ariaLabel={$t('packages.actionsMenu.open')}>
+            <!-- Unpinned form. Omitted for the ecosystems that cannot express "latest"
+                 without a version (Maven, Terraform) or a tag (OCI) — the list carries
+                 neither, and a command that would 404 is worse than no command. -->
+            {@const installCmd = packageInstallCommand({
+              ecosystem: pkg.ecosystem, name: pkg.purlName ?? pkg.name, origin,
+            })}
+            {#if installCmd}
+              <button
+                class="popover-item"
+                on:click|stopPropagation={() => copyInstall(pkg, installCmd.command)}
+              >
+                {copiedId === rowKey(pkg)
+                  ? $t('common.actions.copied')
+                  : $t('packages.actionsMenu.copyInstall')}
+              </button>
+            {/if}
+            {#if versionOverwritePolicy === 'exception'}
+              <button
+                class="popover-item"
+                disabled={pkg.sameVersionPushOverride === 'allow'}
+                on:click|stopPropagation={() => setOverwrite(pkg, 'allow')}
+              >
+                {#if pkg.sameVersionPushOverride === 'allow'}
+                  <svg width="12" height="12" aria-hidden="true" class="menu-check"><use href="/icons.svg#icon-check"/></svg>
+                {/if}
+                {$t('packages.actionsMenu.allowSameVersionPush')}
+              </button>
+              <button
+                class="popover-item"
+                disabled={!pkg.sameVersionPushOverride}
+                on:click|stopPropagation={() => setOverwrite(pkg, null)}
+              >
+                {$t('packages.actionsMenu.inheritOrgDefault')}
+              </button>
+            {:else if versionOverwritePolicy === 'allow'}
+              <button
+                class="popover-item"
+                disabled={pkg.sameVersionPushOverride === 'block'}
+                on:click|stopPropagation={() => setOverwrite(pkg, 'block')}
+              >
+                {#if pkg.sameVersionPushOverride === 'block'}
+                  <svg width="12" height="12" aria-hidden="true" class="menu-check"><use href="/icons.svg#icon-check"/></svg>
+                {/if}
+                {$t('packages.actionsMenu.blockSameVersionPush')}
+              </button>
+              <button
+                class="popover-item"
+                disabled={!pkg.sameVersionPushOverride}
+                on:click|stopPropagation={() => setOverwrite(pkg, null)}
+              >
+                {$t('packages.actionsMenu.inheritOrgDefault')}
+              </button>
+            {/if}
+          </RowActionsMenu>
+        </div>
+      </td>
     </tr>
   </DataTable>
 

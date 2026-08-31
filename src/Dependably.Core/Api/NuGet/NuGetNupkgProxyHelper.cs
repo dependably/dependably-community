@@ -223,6 +223,7 @@ internal static class NuGetNupkgProxyHelper
             Deprecated: meta.Deprecated,
             BlockDeprecatedMode: settings.BlockDeprecated,
             BlockMaliciousMode: settings.BlockMalicious,
+            BlockMaliciousLiveMode: settings.BlockMaliciousLive,
             BlockKevMode: settings.BlockKev,
             BlockRevokedMode: settings.BlockRevoked,
             MaxEpssTolerance: settings.MaxEpssTolerance,

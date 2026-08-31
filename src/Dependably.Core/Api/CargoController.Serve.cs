@@ -556,7 +556,8 @@ public sealed partial class CargoController
                 if (pkg is not null)
                 {
                     await _packages.UpdateMetadataAsync(
-                        pkg.Id, extracted.Homepage, extracted.Repository, extracted.Description, ct);
+                        pkg.Id, extracted.Homepage, extracted.Repository, extracted.Description,
+                        extracted.Author, ct);
                 }
             }
         }

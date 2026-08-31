@@ -80,7 +80,16 @@ public sealed partial class SchemaInitializer
         _time = time ?? TimeProvider.System;
     }
 
-    public async Task InitializeAsync(CancellationToken ct = default)
+    /// <param name="afterBaseSchema">
+    /// Invoked once the base schema has been applied and before any one-time migration runs.
+    /// <see cref="CoreStartupService"/> passes the SQLite single-writer claim here rather than
+    /// taking it after the whole apply: the migration sequence is the longest and least
+    /// interruptible stretch of startup, and leaving it outside the guard is what let two
+    /// processes sharing one database file both enter it. It cannot be hoisted any earlier than
+    /// this, because the guard's own <c>instance_lock</c> table is created by the base schema.
+    /// </param>
+    public async Task InitializeAsync(
+        CancellationToken ct = default, Func<CancellationToken, Task>? afterBaseSchema = null)
     {
         string sql = await ReadSchemaAsync(_db.Provider, ct);
         await using var conn = await _db.OpenAsync(ct);
@@ -91,7 +100,7 @@ public sealed partial class SchemaInitializer
         bool locked = await TryAcquireMigrationLockAsync(conn, ct);
         try
         {
-            await ApplySchemaAsync(conn, sql, ct);
+            await ApplySchemaAsync(conn, sql, ct, afterBaseSchema);
         }
         finally
         {
@@ -102,7 +111,8 @@ public sealed partial class SchemaInitializer
         }
     }
 
-    private async Task ApplySchemaAsync(DbConnection conn, string sql, CancellationToken ct)
+    private async Task ApplySchemaAsync(
+        DbConnection conn, string sql, CancellationToken ct, Func<CancellationToken, Task>? afterBaseSchema = null)
     {
         // Table renames must happen BEFORE the CREATE TABLE IF NOT EXISTS pass — otherwise the
         // schema would create empty sibling tables under the new names alongside the original
@@ -118,6 +128,18 @@ public sealed partial class SchemaInitializer
         await RunOnceAsync(conn, "rename_cicd_tokens_to_service_tokens", RenameCicdTokensTableAsync);
 
         await conn.ExecuteAsync(sql);
+
+        // The base schema has now created instance_lock, so the single-writer guard can finally be
+        // claimed — before the one-time migrations, which are the part of startup worth guarding:
+        // they are non-idempotent, some run unwrapped by transaction, and a large database can
+        // spend minutes in them. The two table renames above stay outside the guard because they
+        // must precede the CREATE TABLE pass that makes the lock's own table exist; both are
+        // long-since ledgered on any database that has them, and on a fresh one there is nothing
+        // to rename.
+        if (afterBaseSchema is not null)
+        {
+            await afterBaseSchema(ct);
+        }
 
         await RunAdditiveMigrationsAsync(conn);
         await _spdxSeeder.RunAsync(conn, ct);
@@ -135,6 +157,14 @@ public sealed partial class SchemaInitializer
         // the live schema permanently — and invisibly — diverged from the schema file. Repeating the
         // drop is what makes the two converge. See DropAlertSettingsRetiredSmtpColumnsAsync.
         await DropAlertSettingsRetiredSmtpColumnsAsync(conn);
+
+        // Removes the retired package_note table. Unledgered for the same reason as the drop
+        // above: the previous release still declares package_note in its own base schema, so a
+        // slot of that release booting against this database re-creates it. A ledgered drop would
+        // already read as done and never run again, leaving the table behind permanently and
+        // invisibly — the backward-compatibility gate is declarative and never reads a live
+        // database. Repeating the drop is what makes the two converge.
+        await DropPackageNoteTableAsync(conn);
 
         // Folds stored project_vuln_analysis.purl_key values onto the canonical form every reader
         // derives, so a triage decision keyed on a client's own spelling stops being invisible to
@@ -910,6 +940,90 @@ public sealed partial class SchemaInitializer
         }
     }
 
+    // Verifies that a writable_schema CHECK rewrite actually took, in place of the
+    // PRAGMA integrity_check this pattern used to end with.
+    //
+    // integrity_check reads and cross-checks every page of every table and index in the
+    // database. That is O(the whole store) — minutes on a large one — spent verifying a rewrite
+    // that touches a single row of sqlite_schema, and it is paid again by every migration that
+    // uses the pattern. What it actually caught was narrow: a rewrite that produced malformed
+    // SQL, which SQLite reports the next time it re-parses the schema and so is caught by any
+    // statement that reads one. Its own corruption findings were discarded either way, since
+    // ExecuteAsync never reads the result rows the pragma reports them in.
+    //
+    // Reading the rewritten table's stored text performs that same re-parse for one row, then
+    // answers the question integrity_check never asked: did the REPLACE match anything? A
+    // literal REPLACE that matches nothing leaves the narrow constraint in place while
+    // RunOnceAsync records the migration applied for good — so the first insert of the newly
+    // permitted value fails on some later release, with nothing left to point at the cause.
+    //
+    // The assertion is that the column's CHECK admits the new VALUE, not that the clause matches
+    // an expected text. A later widen of the same column supersedes an earlier one's exact
+    // clause, so matching on text would fail the earlier migration the moment it re-ran against
+    // a database the later one had already widened.
+    //
+    // allowMissingCheck covers the one documented case where no constraint at all is the correct
+    // outcome: a column introduced by a later ALTER ADD COLUMN carries no CHECK on an upgraded
+    // database, and the rewrite is meant to no-op there.
+    private static async Task VerifyCheckAdmitsAsync(
+        DbConnection conn, string table, string column, string value, bool allowMissingCheck = false)
+    {
+        string storedSql = await conn.ExecuteScalarAsync<string?>(
+            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = @table", new { table })
+            ?? throw new InvalidOperationException(
+                $"Table '{table}' is absent from sqlite_schema after rewriting the CHECK on its "
+                + $"'{column}' column.");
+
+        // Whitespace is stripped so a database whose stored text is formatted differently is read
+        // on its meaning rather than its layout; the comparison is lowercased because a CHECK's
+        // value list is not case-normalized (vulnerabilities.severity holds upper-case literals).
+        string flat = Flatten(storedSql);
+        string marker = "check(" + Flatten(column) + "in(";
+        int open = flat.IndexOf(marker, StringComparison.Ordinal);
+
+        if (open < 0)
+        {
+            if (allowMissingCheck)
+            {
+                return;
+            }
+
+            throw new InvalidOperationException(
+                $"{table}.{column} carries no CHECK constraint after the rewrite that was supposed "
+                + $"to give it one admitting '{value}'. The literal this migration replaces no longer "
+                + $"matches the text stored in this database, so the rewrite was a silent no-op. "
+                + $"Stored definition: {storedSql}");
+        }
+
+        int close = flat.IndexOf(')', open + marker.Length);
+        string admitted = close < 0 ? flat[(open + marker.Length)..] : flat[(open + marker.Length)..close];
+
+        if (!admitted.Contains("'" + Flatten(value) + "'", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"{table}.{column}'s CHECK does not admit '{value}' after the rewrite that was "
+                + $"supposed to widen it. The literal this migration replaces no longer matches the "
+                + $"text stored in this database, so the rewrite was a silent no-op and the narrower "
+                + $"constraint survives. Stored definition: {storedSql}");
+        }
+    }
+
+    // Whitespace-free, lower-cased form used to compare stored schema text on meaning rather than
+    // on the formatting a particular release happened to emit.
+    private static string Flatten(string sql)
+    {
+        var sb = new System.Text.StringBuilder(sql.Length);
+        foreach (char c in sql)
+        {
+            if (!char.IsWhiteSpace(c))
+            {
+                sb.Append(char.ToLowerInvariant(c));
+            }
+        }
+
+        return sb.ToString();
+    }
+
     // Transaction-control statements go through raw ADO.NET, not Dapper: Dapper infers
     // CommandType.StoredProcedure for a single-word command ("BEGIN"/"COMMIT"/"ROLLBACK"), which
     // Microsoft.Data.Sqlite rejects. A raw command keeps the default CommandType.Text on both providers.
@@ -1099,8 +1213,10 @@ public sealed partial class SchemaInitializer
     // SQLite: there's no ALTER for CHECK, but the canonical writable_schema pattern lets
     // us rewrite the stored CREATE TABLE text in place. We do a literal-substring replace
     // — the CREATE TABLE text in sqlite_schema is whatever was emitted by Schema.sql, so
-    // the substring match is exact. Wrapping in writable_schema=ON/OFF with an
-    // integrity_check is the documented SQLite recipe.
+    // the substring match is exact. The rewrite is wrapped in writable_schema=ON/RESET and
+    // followed by VerifyCheckAdmitsAsync, which confirms the replace actually matched: an
+    // exact-substring replace that matches nothing is a silent no-op the ledger then records
+    // as applied forever.
     private Task ExpandRoleCheckWithAuditorAsync(DbConnection conn)
     {
         return _db.Provider == DbProvider.Postgres
@@ -1147,9 +1263,8 @@ public sealed partial class SchemaInitializer
         {
             await conn.ExecuteAsync("PRAGMA writable_schema = RESET");
         }
-        // Cheap sanity check — fails the migration if the rewrite produced malformed SQL.
-        // The SchemaInitializer caller surfaces the exception and aborts startup.
-        await conn.ExecuteAsync("PRAGMA integrity_check");
+        await VerifyCheckAdmitsAsync(conn, "users", "role", "auditor");
+        await VerifyCheckAdmitsAsync(conn, "invites", "role", "auditor");
     }
 
     // Widen the org_settings.block_deprecated CHECK from the legacy 3-value set
@@ -1204,7 +1319,10 @@ public sealed partial class SchemaInitializer
         {
             await conn.ExecuteAsync("PRAGMA writable_schema = RESET");
         }
-        await conn.ExecuteAsync("PRAGMA integrity_check");
+        // allowMissingCheck: org_settings.block_deprecated carries no CHECK on a database that
+        // gained the column through a plain ALTER ADD COLUMN, where this rewrite no-ops by design.
+        await VerifyCheckAdmitsAsync(
+            conn, "org_settings", "block_deprecated", "block_all", allowMissingCheck: true);
     }
 
     // Extend the alert.type CHECK constraint to include 'sbom_policy_violation', the alert an
@@ -1256,7 +1374,7 @@ public sealed partial class SchemaInitializer
         {
             await conn.ExecuteAsync("PRAGMA writable_schema = RESET");
         }
-        await conn.ExecuteAsync("PRAGMA integrity_check");
+        await VerifyCheckAdmitsAsync(conn, "alert", "type", "sbom_policy_violation");
     }
 
     // Extend the alert.type CHECK constraint a second time to include 'vuln_kev', the alert
@@ -1314,7 +1432,7 @@ public sealed partial class SchemaInitializer
         {
             await conn.ExecuteAsync("PRAGMA writable_schema = RESET");
         }
-        await conn.ExecuteAsync("PRAGMA integrity_check");
+        await VerifyCheckAdmitsAsync(conn, "alert", "type", "vuln_kev");
     }
 
     // Rewrite legacy 'block' policy rows to 'block_all'. The old single 'block' value denied

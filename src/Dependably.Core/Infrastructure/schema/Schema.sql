@@ -144,6 +144,22 @@ CREATE TABLE IF NOT EXISTS org_settings (
     -- advisory in the UI only; 'off' disables the gate. A manual per-version allow override
     -- still wins (false-positive escape hatch).
     block_malicious           TEXT    NOT NULL DEFAULT 'block' CHECK (block_malicious IN ('off', 'warn', 'block')),
+    -- Narrower companion to block_malicious: fires only when the tracker's version-precise
+    -- still-live-malicious signal (package_version_vulns.mal_still_live_for_version) is true for
+    -- the version being evaluated, independent of block_malicious the same way block_kev_ransomware
+    -- is independent of block_kev — the two dimensions are orthogonal, so block_malicious='warn'
+    -- with this at 'block' means "tell me about every MAL- advisory, refuse the ones still
+    -- serving compromised bytes right now".
+    --
+    -- Populated only when the operator configures the optional vulnerability-tracker connection;
+    -- a deployment without one records no mal_still_live_for_version signal at all, so this arm
+    -- never fires however it is set — unaffected by construction, same posture as
+    -- block_ssvc_exploitation below.
+    --
+    -- Defaults 'off' DELIBERATELY, unlike block_malicious's 'block' default: this column exists
+    -- alongside an existing deployment's serving posture, so introducing the arm must be an
+    -- opt-in upgrade step, not a silent behaviour change the moment the column appears.
+    block_malicious_live      TEXT    NOT NULL DEFAULT 'off' CHECK (block_malicious_live IN ('off', 'warn', 'block')),
     -- Policy for versions whose advisories alias a CVE in the CISA Known Exploited
     -- Vulnerabilities catalog: exploited-in-the-wild, independent of CVSS score. 'off'
     -- (default, back-compat) / 'warn' / 'block'. A manual per-version allow still wins.
@@ -372,6 +388,7 @@ CREATE TABLE IF NOT EXISTS packages (
     homepage       TEXT,
     repository_url TEXT,
     description    TEXT,
+    author         TEXT,
     UNIQUE (org_id, ecosystem, purl_name)
 );
 
@@ -1118,7 +1135,60 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
     -- carried no cwes array at all; '[]' means the entry explicitly recorded zero
     -- classifications — a different fact from never having been asked.
     kev_cwes        TEXT,
-    kev_notes       TEXT
+    kev_notes       TEXT,
+    -- Tracker enrichment overlay, second installment: OpenSSF malicious-packages live-status,
+    -- exploit-code observation, and the CVE Program (cvelistV5) CVSS/CWE/SSVC overlay — all
+    -- sourced from the same instance-level vulnerability-tracker connection nvd_*/ssvc_* above
+    -- are, and NULL under the identical unconfigured/unreached postures.
+    --
+    -- mal_still_live/mal_live_versions describe the WHOLE flagged package (unioned across every
+    -- advisory that flags it), not any one requested version — they are display-only raw
+    -- pass-through. mal_version_compromised, by contrast, IS scoped to the exact version this
+    -- instance last asked the tracker about for this advisory: true only when that version is
+    -- itself in the compromised list. Neither, alone or combined at read time, tells a gate arm
+    -- "is the SPECIFIC version I am evaluating right now still a live threat" — that value is
+    -- deliberately NOT a column on this table at all: unlike nvd_severity/ssvc_* (which genuinely
+    -- ARE one fact per advisory — every version legitimately shares one CVSS score), "is THIS
+    -- version still live" is a fact about the (advisory, version) PAIR by construction, which is
+    -- exactly why compromised_versions/live_versions are lists — one advisory can have one
+    -- compromised version already cleaned up and another still live. A column here would let
+    -- scanning a safe version overwrite a still-live sibling's true back to false (or the
+    -- reverse), racing across every version sharing this advisory. See
+    -- package_version_vulns.mal_still_live_for_version, which stores it correctly scoped to the
+    -- one (version, advisory) link it belongs to.
+    mal_compromised_versions TEXT,     -- JSON array of version strings; same convention as `aliases`/`kev_cwes`
+    mal_version_compromised  INTEGER
+                              CHECK (mal_version_compromised IN (0,1)),
+    mal_still_live           INTEGER
+                              CHECK (mal_still_live IN (0,1)),
+    mal_live_checked_at      TEXT
+        CHECK (mal_live_checked_at IS NULL OR mal_live_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR mal_live_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR mal_live_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    mal_live_versions        TEXT,     -- JSON array; same convention as mal_compromised_versions
+    -- Exploit-code observation (public PoC/exploit availability), independent of KEV/EPSS.
+    -- exploit_code_exists is never NULL at the source — the producer defaults it false — so it
+    -- carries no unknown state the way the nullable columns above do.
+    exploit_code_exists      INTEGER NOT NULL DEFAULT 0
+                              CHECK (exploit_code_exists IN (0,1)),
+    exploit_code_max_weight  INTEGER,
+    exploit_code_sources     TEXT,     -- JSON array of source names; same convention as mal_compromised_versions
+    -- The CVE Program's own cvelistV5 CVSS/CWE/SSVC overlay. Deliberately SEPARATE columns from
+    -- nvd_*/ssvc_* above, never merged or used as a fallback into them: the tracker's own design
+    -- doc measured 34%+ disagreement between the NVD-mirror and cvelistV5 readings of the same
+    -- CVE, and folding them into one column set would hide that disagreement from an operator
+    -- comparing the two.
+    cvelist_cvss_score       REAL,
+    cvelist_cvss_severity    TEXT
+                              CHECK (cvelist_cvss_severity IN ('CRITICAL','HIGH','MEDIUM','LOW','NONE')),
+    cvelist_cvss_provenance  TEXT,     -- free text (e.g. 'cna', 'CISA-ADP'); not a closed set, no CHECK
+    cvelist_cwes             TEXT,     -- JSON array; same convention as kev_cwes
+    cvelist_ssvc_exploitation TEXT
+                              CHECK (cvelist_ssvc_exploitation IN ('none','poc','active')),
+    cvelist_ssvc_automatable TEXT
+                              CHECK (cvelist_ssvc_automatable IN ('yes','no')),
+    cvelist_ssvc_technical_impact TEXT
+                              CHECK (cvelist_ssvc_technical_impact IN ('partial','total')),
+    cvelist_checked_at       TEXT
+        CHECK (cvelist_checked_at IS NULL OR cvelist_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR cvelist_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR cvelist_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
 );
 
 CREATE TABLE IF NOT EXISTS package_version_vulns (
@@ -1144,6 +1214,22 @@ CREATE TABLE IF NOT EXISTS package_version_vulns (
     cache_artifact_id   TEXT REFERENCES cache_artifact(id) ON DELETE CASCADE,
     owner_kind          TEXT NOT NULL DEFAULT 'package_version'
                         CHECK (owner_kind IN ('package_version','cache_artifact')),
+    -- The tracker's version-precise still-live-malicious signal for THIS (version, advisory)
+    -- link, computed client-side in VulnTrackerEnrichmentClient against the exact purl@version
+    -- requested (mal_version_compromised = true AND that version present in mal_live_versions —
+    -- see vulnerabilities.mal_still_live/mal_live_versions for the raw pass-through this is
+    -- derived from). Lives HERE, not on vulnerabilities, because "is this version still a live
+    -- threat" is a fact about the (advisory, version) pair by construction — one advisory can
+    -- have one compromised version already cleaned up and another still live, which is exactly
+    -- why mal_compromised_versions/mal_live_versions are lists. A shared vulnerabilities row
+    -- would let scanning one version overwrite a sibling version's correct answer: this table
+    -- already exists as the version-precise link (one row per (owner, vuln) pair), so storing it
+    -- here is naturally race-free with no schema redesign. Boolean, not tri-state, because
+    -- MalStillLiveTriggers reads it with no staleness gating: the malware does not un-flag
+    -- itself with time, only a fresh probe finding it removed changes the answer, and that
+    -- arrives as a new 0 rather than a stale 1.
+    mal_still_live_for_version INTEGER NOT NULL DEFAULT 0
+                                CHECK (mal_still_live_for_version IN (0,1)),
     -- Owner invariant: exactly one FK arm is active and matches owner_kind.
     CHECK (
         (owner_kind = 'package_version' AND package_version_id IS NOT NULL AND cache_artifact_id IS NULL)
@@ -1285,30 +1371,20 @@ CREATE TABLE IF NOT EXISTS license_blocklist (
 
 CREATE INDEX IF NOT EXISTS idx_pkg_version_licenses ON package_version_licenses(package_version_id);
 
--- Standing operator annotations on a package coordinate. Two things needed the same shape: the
--- rationale recorded when someone rules on a package whose licence is conditional, and a general
--- compliance note an admin wants left on a package regardless of any gate decision.
--- version NULL scopes the note to every version of the package; a value scopes it to one.
--- Keyed by (ecosystem, name, version) rather than an FK to package_versions because proxy
--- artifacts live on the cache_artifact plane and have no version row -- a coordinate key covers
--- both planes, which an FK to either one could not.
--- quarantine.note is unchanged and still records the decision made on a blocked artifact; this
--- table is the surface for everything that never reached a block.
--- personal-data: excluded -- created_by is an authorship stamp on an org-owned compliance note, not the subject's data
-CREATE TABLE IF NOT EXISTS package_note (
-    id          TEXT PRIMARY KEY,
-    org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-    ecosystem   TEXT NOT NULL,
-    name        TEXT NOT NULL,
-    version     TEXT,
-    note        TEXT NOT NULL,
-    created_by  TEXT REFERENCES users(id),
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
-        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
-    updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
-        CHECK (updated_at IS NULL OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
-);
-CREATE INDEX IF NOT EXISTS idx_package_note_coord ON package_note(org_id, ecosystem, name);
+-- There is no package_note table. The package-note feature is retired, and
+-- DropPackageNoteTableAsync removes the table from every database that still carries one. That
+-- drop runs on every boot rather than once, because the previous release declares package_note in
+-- its own base schema and re-creates it whenever one of its slots boots against this database.
+-- Licence rationale is recorded on the policy entry note, which renders on the licence policy
+-- page, and quarantine.note still records the decision made on a blocked artifact. The
+-- package_note_added/_updated/_removed audit actions remain valid: audit rows outlive the feature
+-- that wrote them.
+--
+-- backcompat-ok: package_note — retired feature, dropped as the contract step. The preceding
+-- release reads this table only from its own package-note endpoints, and this drop deliberately
+-- accepts that those endpoints fail for the length of a blue-green cutover from it; every other
+-- surface in that release is untouched. Owner-directed: the alternative was deferring the drop a
+-- release to keep the cutover clean.
 
 
 -- RPM metadata. One row per artifact carrying everything the RPM header parser pulls from
@@ -2484,6 +2560,12 @@ CREATE TABLE IF NOT EXISTS project_documents (
     -- Built by BlobKeys.ProjectDocument; registry tier.
     blob_key           TEXT NOT NULL,
     uploaded_by        TEXT,
+    -- Which revision of the ingest projection wrote this document's rows. The dedup arm
+    -- requires it to match the running build's value, so a document whose bytes are unchanged
+    -- but whose extraction has since widened is re-merged exactly once instead of being
+    -- short-circuited into keeping columns the build that stored it never populated. 0 is the
+    -- value an upgraded row backfills to, which is deliberately below every real revision.
+    ingest_version     INTEGER NOT NULL DEFAULT 0,
     uploaded_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         CHECK (uploaded_at IS NULL OR uploaded_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR uploaded_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR uploaded_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     UNIQUE (project_version_id, doc_type)
@@ -2538,6 +2620,29 @@ CREATE TABLE IF NOT EXISTS sbom_components (
     dependency_path    TEXT,
     -- SPDX expression declared by the component's licences.
     license_spdx       TEXT,
+    -- Presentation metadata carried by the component entry itself, all display-only: no gate
+    -- branches on any of them. Captured because a component the registry has never seen is
+    -- otherwise a bare name and version, and the producing SBOM already carries what it is and
+    -- where it came from. Clipped at ingest so one document cannot turn a 50k-component
+    -- inventory into unbounded row width.
+    description        TEXT,
+    -- components[].authors[].name joined, else the 1.4-era author string, else publisher.
+    component_author   TEXT,
+    -- components[].copyright.
+    copyright          TEXT,
+    -- components[].group: the namespace half of a coordinate (npm scope, Maven groupId).
+    component_group    TEXT,
+    -- externalReferences[], flattened to the four types a component page links. A type the
+    -- document repeats keeps its first entry; every other type survives only in the stored blob.
+    website_url        TEXT,
+    vcs_url            TEXT,
+    issue_tracker_url  TEXT,
+    distribution_url   TEXT,
+    -- components[].hashes as a JSON array of {"alg","content"}, matching the dependency_path
+    -- convention on this table. Display and export only: the ingest-time SHA-256 of an artifact
+    -- the registry itself holds stays the canonical integrity fact, and nothing verifies against
+    -- a hash a third-party document asserts.
+    component_hashes   TEXT,
     -- Scan-pass stamp. NULL keeps the row in the unscanned bucket.
     vuln_checked_at    TEXT
         CHECK (vuln_checked_at IS NULL OR vuln_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR vuln_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR vuln_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),

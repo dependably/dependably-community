@@ -1,8 +1,9 @@
 fixture: 10-large-projects-folders.diff
 class: LARGE
 size_bytes: 126646
-cap_ratio: 95% of the diff fits under AI_REVIEW_MAX_DIFF_BYTES=120000
-expected_verdict: CLEAN, but with truncation disclosed
+cap_ratio: fits whole under AI_REVIEW_MAX_DIFF_BYTES=200000
+expected_verdict: CLEAN, reviewed whole. In the corpus check this fixture is scored against a
+  cap below its own size, so it still drives the truncation path on real bytes.
 lens: security, code, architecture
 provenance:
   origin: MR !1024 (6e828f1f..ac1f3a34), full MR diff
@@ -10,8 +11,8 @@ provenance:
     "No findings survived verification" or the clean sentinel. UNCLASSIFIED for precision
     purposes -- included here to exercise chunking at the boundary, not as a labelled clean.
 pass_criteria: |
-  The run must (a) not degenerate, (b) not return (bad response)/(unverifiable response) merely
-  because of size, and (c) make the truncation visible to the READER of the MR note. Today
-  truncate_diff() marks it in-band to the model and logs "WARN: diff truncated" to the job log,
-  but emit_report puts nothing in the posted note -- so a reader cannot tell a full review from
-  a 5%-truncated one. This fixture is the just-over-the-line case.
+  The run must (a) not degenerate and (b) not return (bad response)/(unverifiable response)
+  merely because of size. Truncation disclosure -- the banner and the " (truncated coverage)"
+  title that let a READER tell a full review from a partial one -- is exercised by this
+  fixture through the corpus check's sub-size cap, and by the synthetic write_report /
+  truncation_banner unit and E2E tests.

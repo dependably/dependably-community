@@ -120,7 +120,17 @@ public sealed class SbomPolicyRepository
                             // does not apply the operator's staleness-horizon cutoff to the raw
                             // NVD/SSVC columns above — nothing here consults them yet, so there is
                             // no freshness question to answer. Revisit once a consumer reads them.
-                            HasStaleEnrichment: false),
+                            HasStaleEnrichment: false,
+                            // Always false on this plane, deliberately — not merely unwired. Unlike
+                            // the gate-arm aggregate (which reads package_version_vulns, the actual
+                            // version-precise link the value is scoped to), this SBOM plane's link
+                            // table is sbom_component_vulns: a component/vuln pair with no FK back
+                            // to a package_versions/cache_artifact row, so there is no version-
+                            // precise link here to read the signal off. Fabricating one from the
+                            // shared vulnerabilities row would reintroduce the exact cross-version
+                            // collapse VulnFacts.MalStillLive's own doc explains is unsafe. Revisit
+                            // only if sbom_components ever gains a registry-version FK.
+                            MalStillLive: false),
                         VexState: vexState));
                 }
             }

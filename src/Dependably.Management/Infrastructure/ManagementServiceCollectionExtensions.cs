@@ -43,7 +43,6 @@ public static class ManagementServiceCollectionExtensions
         services.AddSingleton<AccountSendThrottle>();
         services.AddSingleton<EmailChangeTokenRepository>();
         services.AddSingleton<SpdxLicenseRepository>();
-        services.AddSingleton<PackageNoteRepository>();
         services.AddSingleton<SamlConfigRepository>();
         services.AddSingleton<ExternalIdentityRepository>();
         services.AddSingleton<BannerRepository>();

@@ -351,6 +351,7 @@ public sealed class PyPiPublishHandler(
             Homepage = extracted.Homepage,
             Repository = extracted.Repository,
             Description = extracted.Description,
+            Author = extracted.Author,
         }, ct);
 
         if (result is PublishResult.Rejected rej)

@@ -1,3 +1,4 @@
+using Dependably.Api.Setup;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Caching;
 using Dependably.Protocol;
@@ -11,7 +12,7 @@ namespace Dependably.Api;
 
 /// <summary>
 /// Slim tenant-scoped controller for the resources that didn't fit a dedicated controller:
-/// packages, stats, and the setup-snippet generator. Most tenant-scoped surface has been
+/// packages, stats, and the setup-recipe endpoint. Most tenant-scoped surface has been
 /// split out into <see cref="OrgSettingsController"/>, <see cref="OrgTokensController"/>,
 /// <see cref="OrgInvitesController"/>, <see cref="OrgUsersController"/>,
 /// <see cref="OrgListsController"/>, <see cref="OrgAuditController"/>, and
@@ -825,11 +826,12 @@ public sealed class OrgController : OrgScopedControllerBase
         return Ok(stats);
     }
 
-    // ── Setup snippets ────────────────────────────────────────────────────────
+    // ── Setup recipes ─────────────────────────────────────────────────────────
 
     /// <summary>GET /api/v1/orgs/{org}/setup/{ecosystem}</summary>
-    // Read-only: accepts a PAT/service token carrying read:packages. Snippets contain
-    // host-derived URLs and a literal <token> placeholder only — no secrets.
+    // Read-only: accepts a PAT/service token carrying read:packages. Recipes contain
+    // host-derived URLs and a literal <token> placeholder only — no secrets. The page
+    // pairs them with a token it mints itself; the server never sees that pairing.
     [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [HttpGet("api/v1/setup/{ecosystem}")]
     public async Task<IActionResult> GetSetup(string ecosystem, CancellationToken ct)
@@ -841,334 +843,11 @@ public sealed class OrgController : OrgScopedControllerBase
         }
 
         // Tenant-implicit URLs: every request is already on the tenant's host (multi mode) or
-        // the single-tenant install. Snippets use the request's host directly.
+        // the single-tenant install, so the recipes use the request's host directly.
         string baseUrl = _urls.BaseUrl(HttpContext);
-        string slug = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantSlug ?? "";
 
-        string? snippet = ecosystem switch
-        {
-            "pypi" => GeneratePyPiSnippet(baseUrl, slug),
-            "npm" => GenerateNpmSnippet(baseUrl, slug),
-            "nuget" => GenerateNuGetSnippet(baseUrl, slug),
-            "maven" => GenerateMavenSnippet(baseUrl, slug),
-            "rpm" => GenerateRpmSnippet(baseUrl, slug),
-            "oci" => GenerateOciSnippet(baseUrl, slug),
-            "golang" => GenerateGoSnippet(baseUrl, slug),
-            "cargo" => GenerateCargoSnippet(baseUrl, slug),
-            "apk" => GenerateApkSnippet(baseUrl, slug),
-            "terraform" => GenerateTerraformSnippet(baseUrl, slug),
-            _ => null
-        };
-
-        return snippet is null ? NotFound() : Ok(new { ecosystem, snippet });
-    }
-
-    // Snippet generators emit tenant-implicit URLs (host-relative). The slug parameter is
-    // unused at the URL level today but kept so the future-multi-mode form `slug.apex/simple/`
-    // could be reconstructed if needed; the request's host already carries the tenant.
-    private static string GeneratePyPiSnippet(string baseUrl, string slug)
-    {
-        _ = slug;
-        var uri = new Uri(baseUrl);
-        string trustedHost = uri.Scheme == "http" ? $" --trusted-host {uri.Host}" : "";
-        string indexUrl = $"{baseUrl}/simple/";
-        return $"""
-            # pip.conf / pyproject.toml
-            [global]
-            index-url = {indexUrl}
-
-            # ~/.netrc — auth (the username is ignored; the token is the password):
-            machine {uri.Host} login <user> password <token>
-
-            # One-liner install example:
-            pip install <package>==<version> --index-url {indexUrl}{trustedHost} --no-deps
-            """;
-    }
-
-    private static string GenerateNpmSnippet(string baseUrl, string slug)
-    {
-        _ = slug;
-        string registryUrl = $"{baseUrl}/npm/";
-        // npm keys the auth token by the registry URL with the scheme stripped.
-        string authKey = registryUrl[(registryUrl.IndexOf("://", StringComparison.Ordinal) + 3)..];
-        return $"""
-            # .npmrc
-            registry={registryUrl}
-            //{authKey}:_authToken=<token>
-            """;
-    }
-
-    private static string GenerateNuGetSnippet(string baseUrl, string slug)
-    {
-        _ = slug;
-        return $"""
-            <!-- nuget.config -->
-            <configuration>
-              <packageSources>
-                <add key="dependably" value="{baseUrl}/nuget/v3/index.json" />
-              </packageSources>
-              <packageSourceCredentials>
-                <dependably>
-                  <add key="Username" value="your-username" />
-                  <add key="ClearTextPassword" value="your-token" />
-                </dependably>
-              </packageSourceCredentials>
-            </configuration>
-
-            <!-- Publish (push uses an API key, not the credentials above): -->
-            <!-- dotnet nuget push pkg.nupkg --api-key your-token --source dependably -->
-            <!-- An adjacent pkg.snupkg is pushed with it and its Portable PDBs are indexed. -->
-
-            <!-- Symbol server (SSQP). Add as a symbol source in Visual Studio under -->
-            <!-- Options > Debugging > Symbols, or pass to dotnet-symbol --server-path: -->
-            <!-- {baseUrl}/nuget/symbols -->
-            """;
-    }
-
-    // Maven snippet bundles both publish (distributionManagement, used by `mvn deploy`) and
-    // consume (repositories, used at resolution time). A Gradle variant follows the Maven XML
-    // section; credentials are stored once in gradle.properties and referenced by both DSLs.
-    private static string GenerateMavenSnippet(string baseUrl, string slug)
-    {
-        _ = slug;
-        return GenerateMavenXmlSnippet(baseUrl) + GenerateGradleFragment(baseUrl);
-    }
-
-    // Gradle DSL blocks contain literal { }, so use $$ raw strings where {{ }} are literal
-    // braces and {{baseUrl}} interpolates the variable.
-    private static string GenerateGradleFragment(string baseUrl) => $$"""
-
-
-            # --- Gradle (Groovy DSL) ---
-
-            # ~/.gradle/gradle.properties — store credentials outside build scripts:
-            dependablyUser=your-username
-            dependablyToken=your-token
-
-            # build.gradle — consume and publish:
-            repositories {
-                maven {
-                    url '{{baseUrl}}/maven/'
-                    credentials {
-                        username = findProperty('dependablyUser')
-                        password = findProperty('dependablyToken')
-                    }
-                }
-            }
-            publishing {
-                repositories {
-                    maven {
-                        url '{{baseUrl}}/maven/'
-                        credentials {
-                            username = findProperty('dependablyUser')
-                            password = findProperty('dependablyToken')
-                        }
-                    }
-                }
-            }
-
-            # --- Gradle (Kotlin DSL) ---
-
-            # build.gradle.kts — same gradle.properties credentials; only syntax differs:
-            repositories {
-                maven {
-                    url = uri("{{baseUrl}}/maven/")
-                    credentials {
-                        username = findProperty("dependablyUser") as String?
-                        password = findProperty("dependablyToken") as String?
-                    }
-                }
-            }
-            publishing {
-                repositories {
-                    maven {
-                        url = uri("{{baseUrl}}/maven/")
-                        credentials {
-                            username = findProperty("dependablyUser") as String?
-                            password = findProperty("dependablyToken") as String?
-                        }
-                    }
-                }
-            }
-            """;
-
-    private static string GenerateMavenXmlSnippet(string baseUrl) => $"""
-        <!-- ~/.m2/settings.xml — publish + consume -->
-        <settings>
-          <servers>
-            <server>
-              <id>dependably</id>
-              <username>your-username</username>
-              <password>your-token</password>
-            </server>
-          </servers>
-          <profiles>
-            <profile>
-              <id>dependably</id>
-              <repositories>
-                <repository>
-                  <id>dependably</id>
-                  <url>{baseUrl}/maven/</url>
-                </repository>
-              </repositories>
-            </profile>
-          </profiles>
-          <activeProfiles><activeProfile>dependably</activeProfile></activeProfiles>
-        </settings>
-
-        <!-- In your project pom.xml, for `mvn deploy`: -->
-        <distributionManagement>
-          <repository>
-            <id>dependably</id>
-            <url>{baseUrl}/maven/</url>
-          </repository>
-        </distributionManagement>
-        """;
-
-    // RPM .repo file pointing at the yum/dnf-compatible directory layout, plus a curl one-liner
-    // for the push side. gpgcheck=0 by default — operators turn it on once signing is wired.
-    private static string GenerateRpmSnippet(string baseUrl, string slug)
-    {
-        _ = slug;
-        return $"""
-            # /etc/yum.repos.d/dependably.repo
-            [dependably]
-            name=dependably
-            baseurl={baseUrl}/rpm/
-            enabled=1
-            gpgcheck=0
-            username=<user>
-            password=<token>
-
-            # Push an RPM:
-            curl -u <user>:<token> --upload-file pkg.rpm {baseUrl}/rpm/upload
-            """;
-    }
-
-    private static string GenerateOciSnippet(string baseUrl, string slug)
-    {
-        _ = slug;
-        var uri = new Uri(baseUrl);
-        string host = uri.Host;
-        // Plain-HTTP registries require an insecure-registries entry in the Docker daemon config;
-        // HTTPS registries use the default TLS trust chain and need no extra daemon configuration.
-        string daemonFragment = uri.Scheme == "http" ? $$"""
-
-
-            # /etc/docker/daemon.json — Docker needs this to use a plain-HTTP registry:
-            { "insecure-registries": ["{{host}}"] }
-            # Restart the daemon after editing (systemctl restart docker).
-            """ : "";
-        return $"""
-            # Docker / OCI — login, pull, push
-            docker login {host}
-            docker pull  {host}/<image>:<tag>
-            docker push  {host}/<image>:<tag>
-            """ + daemonFragment;
-    }
-
-    // Go is proxy-only (no hosted publish) — GOPROXY points the toolchain at the registry, and a
-    // .netrc entry carries credentials for authenticated proxies. GOPRIVATE/GONOSUMDB exempt a
-    // private module path from the public checksum database.
-    private static string GenerateGoSnippet(string baseUrl, string slug)
-    {
-        _ = slug;
-        string host = new Uri(baseUrl).Host;
-        return $"""
-            # Point the Go toolchain at the registry proxy:
-            export GOPROXY={baseUrl}/go
-
-            # ~/.netrc — credentials for an authenticated proxy:
-            machine {host} login <user> password <token>
-
-            # For a private module path, skip the public checksum DB:
-            export GONOSUMDB=example.com/private/*
-            export GOPRIVATE=example.com/private/*
-            """;
-    }
-
-    // Cargo snippet covers both consume (sparse index in config.toml) and publish (`cargo publish
-    // --registry dependably`).
-    private static string GenerateCargoSnippet(string baseUrl, string slug)
-    {
-        _ = slug;
-        return $"""
-            # ~/.cargo/config.toml — consume + publish
-            [registries.dependably]
-            index = "sparse+{baseUrl}/cargo/"
-
-            # Authenticate (writes the token into Cargo's credentials store):
-            cargo login --registry dependably
-            # ...or set it directly in config.toml / credentials.toml:
-            [registries.dependably]
-            token = "<token>"
-
-            # Publish a crate:
-            cargo publish --registry dependably
-            """;
-    }
-
-    // Terraform is proxy-only and is configured in the CLI configuration rather than per-project:
-    // provider_installation applies to every provider a configuration requests, so there is no
-    // per-repository file to edit and no change to required_providers blocks. The mirror URL must
-    // be https — terraform rejects an http: mirror while parsing this file, before any request is
-    // made — so a plain-HTTP deployment cannot serve this ecosystem. Credentials carry in the
-    // URL's userinfo, like the apk snippet: the network mirror client has no separate credentials
-    // field, but url.ResolveReference (used to resolve the relative archive URL from a version
-    // document) preserves userinfo, and Go's net/http emits it as an Authorization: Basic header —
-    // so one userinfo-bearing URL authenticates both the metadata and archive requests.
-    private static string GenerateTerraformSnippet(string baseUrl, string slug)
-    {
-        _ = slug;
-        var uri = new Uri(baseUrl);
-        string userinfoUrl = $"{uri.Scheme}://<user>:<token>@{uri.Authority}/terraform/";
-        // Unlike every other ecosystem, a plain-HTTP mirror URL is not merely discouraged here:
-        // Terraform rejects it while parsing this file, before any request is made, so the snippet
-        // below cannot work as-is. There is no client-side workaround (no equivalent of Docker's
-        // insecure-registries) — TLS must be terminated in front of Dependably. Say so in-product
-        // rather than letting the operator discover it as an opaque CLI config-parse error.
-        string httpWarning = uri.Scheme == "http"
-            ? "# WARNING: Terraform rejects an http:// network-mirror URL at config-parse time.\n"
-              + "# This instance is serving over plain HTTP, so terraform init will fail with\n"
-              + "# \"Cannot use ... as a URL for a network provider mirror\". Terminate TLS in front\n"
-              + "# of Dependably and use an https:// URL below before this snippet will work.\n\n"
-            : "";
-        return httpWarning + $$"""
-            # ~/.terraformrc (Linux/macOS) or %APPDATA%\terraform.rc (Windows)
-            provider_installation {
-              network_mirror {
-                url = "{{userinfoUrl}}"
-              }
-            }
-
-            # Point Terraform at that file from CI, where $HOME may not be the runner's:
-            export TF_CLI_CONFIG_FILE=/path/to/terraformrc
-
-            # Existing .terraform.lock.hcl files keep working: Terraform recomputes each
-            # provider's h1 hash from the archive it downloads and verifies it against the lock.
-            terraform init
-            """;
-    }
-
-    // apk is proxy-only (no hosted push, like Go), so the snippet is a read-only mirror
-    // rewrite: sed /etc/apk/repositories to swap dl-cdn.alpinelinux.org for this proxy, with
-    // credentials carried in the userinfo (the apk client's only auth mechanism).
-    private static string GenerateApkSnippet(string baseUrl, string slug)
-    {
-        _ = slug;
-        var uri = new Uri(baseUrl);
-        string userinfoUrl = $"{uri.Scheme}://<user>:<token>@{uri.Authority}/apk";
-        return $"""
-            # /etc/apk/repositories — point at this proxy instead of dl-cdn.alpinelinux.org
-            # (same release/repo layout, so only the host changes):
-            {userinfoUrl}/v3.22/main
-            {userinfoUrl}/v3.22/community
-
-            # One-liner rewrite of an existing repositories file:
-            sed -i "s#https://dl-cdn.alpinelinux.org/alpine#{userinfoUrl}#" /etc/apk/repositories
-
-            apk update
-            """;
+        var recipes = SetupRecipeCatalog.Build(ecosystem, baseUrl);
+        return recipes is null ? NotFound() : Ok(recipes);
     }
 
     // The UI encodes '/' as %2F for every ecosystem (npm scopes, OCI image

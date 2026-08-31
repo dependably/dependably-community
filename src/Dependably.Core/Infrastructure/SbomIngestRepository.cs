@@ -23,7 +23,16 @@ public sealed record SbomComponentUpsert(
     string? SbomScope,
     string? DependencyKind,
     string? DependencyPath,
-    string? LicenseSpdx);
+    string? LicenseSpdx,
+    string? Description = null,
+    string? ComponentAuthor = null,
+    string? Copyright = null,
+    string? ComponentGroup = null,
+    string? WebsiteUrl = null,
+    string? VcsUrl = null,
+    string? IssueTrackerUrl = null,
+    string? DistributionUrl = null,
+    string? ComponentHashes = null);
 
 /// <summary>What one merge did, for the upload response.</summary>
 public sealed record SbomComponentMergeCounts(int Total, int Added, int Removed, int Unchanged);
@@ -42,6 +51,15 @@ public sealed class SbomComponentRow
     public string? DependencyKind { get; set; }
     public string? DependencyPath { get; set; }
     public string? LicenseSpdx { get; set; }
+    public string? Description { get; set; }
+    public string? ComponentAuthor { get; set; }
+    public string? Copyright { get; set; }
+    public string? ComponentGroup { get; set; }
+    public string? WebsiteUrl { get; set; }
+    public string? VcsUrl { get; set; }
+    public string? IssueTrackerUrl { get; set; }
+    public string? DistributionUrl { get; set; }
+    public string? ComponentHashes { get; set; }
 }
 
 /// <summary>The VEX arm of one analysis row, as a document asserts it.</summary>
@@ -167,7 +185,12 @@ public sealed class SbomIngestRepository
         SELECT id AS Id, purl AS Purl, ecosystem AS Ecosystem, purl_name AS PurlName,
                version AS Version, name AS Name, component_type AS ComponentType,
                sbom_scope AS SbomScope, dependency_kind AS DependencyKind,
-               dependency_path AS DependencyPath, license_spdx AS LicenseSpdx
+               dependency_path AS DependencyPath, license_spdx AS LicenseSpdx,
+               description AS Description, component_author AS ComponentAuthor,
+               copyright AS Copyright, component_group AS ComponentGroup,
+               website_url AS WebsiteUrl, vcs_url AS VcsUrl,
+               issue_tracker_url AS IssueTrackerUrl, distribution_url AS DistributionUrl,
+               component_hashes AS ComponentHashes
         FROM sbom_components
         WHERE org_id = @orgId AND project_version_id = @projectVersionId
         """;
@@ -274,7 +297,20 @@ public sealed class SbomIngestRepository
         && row.SbomScope == component.SbomScope
         && row.DependencyKind == component.DependencyKind
         && row.DependencyPath == component.DependencyPath
-        && row.LicenseSpdx == component.LicenseSpdx;
+        && row.LicenseSpdx == component.LicenseSpdx
+        // Every column the update writes has to be compared here. A field compared nowhere is a
+        // field that never updates on a row that already exists: the merge would report the
+        // component unchanged and skip the write, so widening the projection would appear to do
+        // nothing for every component whose identity happens to be stable.
+        && row.Description == component.Description
+        && row.ComponentAuthor == component.ComponentAuthor
+        && row.Copyright == component.Copyright
+        && row.ComponentGroup == component.ComponentGroup
+        && row.WebsiteUrl == component.WebsiteUrl
+        && row.VcsUrl == component.VcsUrl
+        && row.IssueTrackerUrl == component.IssueTrackerUrl
+        && row.DistributionUrl == component.DistributionUrl
+        && row.ComponentHashes == component.ComponentHashes;
 
     // dependency_scope is absent from both statements on purpose: it is the reachability
     // scanner's column, and an insert that named it would reset a scanned component to
@@ -291,10 +327,16 @@ public sealed class SbomIngestRepository
             """
             INSERT INTO sbom_components (
                 id, org_id, project_version_id, purl, ecosystem, purl_name, version, name,
-                component_type, sbom_scope, dependency_kind, dependency_path, license_spdx, created_at)
+                component_type, sbom_scope, dependency_kind, dependency_path, license_spdx,
+                description, component_author, copyright, component_group,
+                website_url, vcs_url, issue_tracker_url, distribution_url, component_hashes,
+                created_at)
             VALUES (
                 @id, @orgId, @projectVersionId, @purl, @ecosystem, @purlName, @version, @name,
-                @componentType, @sbomScope, @dependencyKind, @dependencyPath, @licenseSpdx, @now)
+                @componentType, @sbomScope, @dependencyKind, @dependencyPath, @licenseSpdx,
+                @description, @componentAuthor, @copyright, @componentGroup,
+                @websiteUrl, @vcsUrl, @issueTrackerUrl, @distributionUrl, @componentHashes,
+                @now)
             """,
             new
             {
@@ -311,6 +353,15 @@ public sealed class SbomIngestRepository
                 dependencyKind = component.DependencyKind,
                 dependencyPath = component.DependencyPath,
                 licenseSpdx = component.LicenseSpdx,
+                description = component.Description,
+                componentAuthor = component.ComponentAuthor,
+                copyright = component.Copyright,
+                componentGroup = component.ComponentGroup,
+                websiteUrl = component.WebsiteUrl,
+                vcsUrl = component.VcsUrl,
+                issueTrackerUrl = component.IssueTrackerUrl,
+                distributionUrl = component.DistributionUrl,
+                componentHashes = component.ComponentHashes,
                 now = now.ToUtcIso(),
             },
             dbTx,
@@ -334,7 +385,16 @@ public sealed class SbomIngestRepository
                 sbom_scope = @sbomScope,
                 dependency_kind = @dependencyKind,
                 dependency_path = @dependencyPath,
-                license_spdx = @licenseSpdx
+                license_spdx = @licenseSpdx,
+                description = @description,
+                component_author = @componentAuthor,
+                copyright = @copyright,
+                component_group = @componentGroup,
+                website_url = @websiteUrl,
+                vcs_url = @vcsUrl,
+                issue_tracker_url = @issueTrackerUrl,
+                distribution_url = @distributionUrl,
+                component_hashes = @componentHashes
             WHERE id = @componentId AND org_id = @orgId
             """,
             new
@@ -350,6 +410,15 @@ public sealed class SbomIngestRepository
                 dependencyKind = component.DependencyKind,
                 dependencyPath = component.DependencyPath,
                 licenseSpdx = component.LicenseSpdx,
+                description = component.Description,
+                componentAuthor = component.ComponentAuthor,
+                copyright = component.Copyright,
+                componentGroup = component.ComponentGroup,
+                websiteUrl = component.WebsiteUrl,
+                vcsUrl = component.VcsUrl,
+                issueTrackerUrl = component.IssueTrackerUrl,
+                distributionUrl = component.DistributionUrl,
+                componentHashes = component.ComponentHashes,
             },
             dbTx,
             cancellationToken: ct));

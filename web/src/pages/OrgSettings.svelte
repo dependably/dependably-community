@@ -310,6 +310,7 @@
       blockDeprecated:         proxySettings.block_deprecated,
       blockRevoked:            proxySettings.block_revoked,
       blockMalicious:          proxySettings.block_malicious,
+      blockMaliciousLive:      proxySettings.block_malicious_live,
       blockKev:                proxySettings.block_kev,
       maxEpssTolerance,
       blockKevRansomware:      proxySettings.block_kev_ransomware,

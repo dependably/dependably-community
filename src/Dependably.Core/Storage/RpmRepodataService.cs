@@ -395,6 +395,7 @@ public sealed class RpmRepodataService
             MinReleaseAgeHours: settings.MinReleaseAgeHours,
             BlockDeprecatedMode: settings.BlockDeprecated,
             BlockMaliciousMode: settings.BlockMalicious,
+            BlockMaliciousLiveMode: settings.BlockMaliciousLive,
             BlockKevMode: settings.BlockKev,
             MaxEpssTolerance: settings.MaxEpssTolerance,
             MaxOsvScoreTolerance: settings.MaxOsvScoreTolerance,

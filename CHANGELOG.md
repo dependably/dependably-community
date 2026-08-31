@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-08-30
+
+### Added
+
+- **Copyable install commands on the package surfaces.** Every package and version row renders the
+  command a developer actually needs — `npm install`, `pip install`, `dotnet add package`, the Maven
+  coordinate block, `go get`, `cargo add`, `docker pull` — already pointed at this instance rather
+  than at the public registry, with the org's host substituted in. One click copies it.
+
+- **Component metadata from uploaded SBOMs is captured and displayed.** Author, publisher,
+  description, and supplier were already carried in the CycloneDX documents both planes ingest and
+  were being discarded on parse. They are now extracted with an explicit precedence order, stored,
+  and shown on the component panel beside the advisory and licence facts.
+
+- **`background_job_runs` is bounded by a retention sweep.** Nothing previously deleted from that
+  table while its loudest writer ran on a 60-second timer. `JOB_RUN_RETENTION_DAYS` (default `14`)
+  bounds successful runs and `JOB_RUN_FAILURE_RETENTION_DAYS` (default `90`) bounds everything else
+  — longer on purpose, because a failed or cancelled run is the forensic record an operator goes
+  looking for and there are few of them. The latest run per job, and the latest success per job, are
+  kept regardless of age so `/health` can always report a job's last outcome. There is no value that
+  disables the sweep.
+
+### Changed
+
+- **Setup is a guided connect flow.** The page walks through choosing an ecosystem, minting a token,
+  and pointing a client at the instance, instead of presenting the whole surface at once. The
+  explanatory prose was cut and the step badges now match the rest of the design system.
+
+- **The dashboard leads with what it prevented.** The panel order was reworked and the prevention
+  gates now render unconditionally — previously a gate with nothing to report was hidden, which made
+  an inactive gate and an unconfigured one look identical.
+
+### Removed
+
+- **The package-note feature is retired**, in full: the `/api/v1` endpoints, the notes section on
+  the package page, and the `package_note` table, which is dropped on boot from every database that
+  still carries one.
+
+  **Action required:** if you called the package-note endpoints, they are gone as of this release and
+  any content stored in them is deleted by the drop. Export anything you need before upgrading. The
+  drop carries a `backcompat-ok` waiver and runs on every boot rather than once, because the
+  preceding release still declares the table additively and a one-shot drop would read as done while
+  the live schema silently diverged.
+
+### Fixed
+
+- **The backend SBOM shipped a `0.0.0` root component version** instead of the version actually
+  built, so every published SBOM described an artefact that matched no release.
+
+- **A schema migration verified `CHECK` rewrites with a full-database integrity scan**, which turned
+  a cheap sanity check into minutes of boot time on a large database while the boot path held no
+  lock. The verification is now scoped to the rewritten table.
+
 ## [0.8.0] - 2026-08-26
 
 ### Added
