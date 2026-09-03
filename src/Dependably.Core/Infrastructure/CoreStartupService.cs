@@ -86,7 +86,7 @@ public sealed class CoreStartupService : IHostedService
         // two processes pointed at one database file would both run it. A live foreign holder
         // throws from there (fail-fast, message names the peer); a stale holder is taken over.
         // No-op for Postgres and in-memory SQLite (the guard self-skips).
-        await _schema.InitializeAsync(cancellationToken, _instanceLock.TryAcquireAsync);
+        await _schema.InitializeAsync(_instanceLock.TryAcquireAsync, cancellationToken);
 
         await _firstBoot.RunAsync(cancellationToken);
         await MigrateSecretsToEnvelopeAsync(cancellationToken);

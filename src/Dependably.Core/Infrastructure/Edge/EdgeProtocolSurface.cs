@@ -49,6 +49,12 @@ public static class EdgeProtocolSurface
         // with upstream_protocol='mirror' because the master serves the network mirror protocol,
         // while this controller's own default is the registry protocol. See the comment there.
         typeof(Api.TerraformController),
+        // The signed index resources are proxied from the master byte-for-byte (the master signs
+        // them under the org's own repository name, so passthrough keeps every client check
+        // intact) and the tarballs chain through ProxyFetchService like every other artifact.
+        typeof(Api.HexController),
+        // Same surface family; every write it routes is refused on an edge by EdgePublishGuard.
+        typeof(Api.HexApiController),
     };
 
     /// <summary>True when the controller is a kept protocol surface on an edge node.</summary>

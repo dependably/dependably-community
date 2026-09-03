@@ -788,6 +788,7 @@
   .slice-cargo { fill: var(--eco-cargo); }
   .slice-apk   { fill: var(--eco-apk); }
   .slice-terraform { fill: var(--eco-terraform); }
+  .slice-hex   { fill: var(--eco-hex); }
 
   .zero {
     color: var(--text2);

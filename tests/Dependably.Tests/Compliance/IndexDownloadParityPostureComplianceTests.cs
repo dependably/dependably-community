@@ -97,6 +97,12 @@ public sealed class IndexDownloadParityPostureComplianceTests
             + "fetched. OCI gates the manifest and blob paths instead, and applies release-age as a "
             + "tag-PROMOTION gate keyed on when a digest was first seen."),
 
+        new("hex", "Protocol/Hex/HexIndexBuilder.cs", true, true,
+            "The registry index is rebuilt and re-signed per org, so a blocked version is simply "
+            + "not encoded; and an upstream release carries published_at and its retirement state "
+            + "in the signed Package resource, so an upstream-only coordinate is decidable on the "
+            + "release-age and deprecation arms without fetching it."),
+
         new("apk", "Api/ApkController.cs", false, false,
             "The index is upstream APKINDEX.tar.gz streamed verbatim and signature-verified against "
             + "the org's RSA trust anchors before serving. Any rewrite invalidates the signature the "

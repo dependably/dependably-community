@@ -651,7 +651,7 @@ When a component has two independent tables (e.g. Users.svelte members and invit
 
 **Client-side vs. server-side sort**
 
-- **Server-side sort + server-side filters + pagination** (the default for a table that can outgrow one page): Packages, Quarantine.
+- **Server-side sort + server-side filters + pagination** (the default for a table that can outgrow one page): Packages, Quarantine, Risk (operational and license tabs each carry their own default sort).
 - **Client-side sort** (in-memory, all rows loaded at once): Vulnerabilities, VersionDetail, Users, Tokens, SettingsServiceTokens, OrgSettings allowlist/blocklist, Claims (server-filtered, client-sorted).
 - **Client-side sort on current page only** (acceptable for admin/audit tables): AdminOrgs, Activity.
 

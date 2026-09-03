@@ -409,6 +409,9 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
         // Cargo maps to the "crates.io" ecosystem in OSV, which is the canonical name for
         // Rust crate advisories in the RustSec and GitHub Advisory databases.
         "cargo" => "crates.io",
+        // OSV publishes a dedicated "Hex" ecosystem (the Erlang Ecosystem Foundation runs its own
+        // CNA); case-insensitive matching handles the capital.
+        "hex" => "Hex",
         // apk maps to OSV's "Alpine" ecosystem. OSV publishes release-qualified Alpine feeds
         // ("Alpine:v3.18", "Alpine:v3.19", …); apk purls carry no release qualifier, so this
         // normalises to the bare "Alpine" and MatchesEcosystemAndName does a release-qualified

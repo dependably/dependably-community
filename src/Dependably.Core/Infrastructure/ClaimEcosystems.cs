@@ -20,7 +20,7 @@ public static class ClaimEcosystems
     /// actual resolver call sites — <c>ClaimVocabularyComplianceTests</c> fails when they drift.
     /// </summary>
     public static readonly IReadOnlySet<string> Enforced =
-        new HashSet<string>(StringComparer.Ordinal) { "npm", "pypi", "nuget", "cargo" };
+        new HashSet<string>(StringComparer.Ordinal) { "npm", "pypi", "nuget", "cargo", "hex" };
 
     /// <summary>
     /// Claim-shaped ecosystems whose data paths do not consult the resolver, kept only so the
@@ -30,7 +30,7 @@ public static class ClaimEcosystems
         new HashSet<string>(StringComparer.Ordinal) { "maven", "rpm", "oci" };
 
     /// <summary>Human-readable, comma-separated list of the enforced ecosystems for API messages.</summary>
-    public const string AcceptedList = "npm, pypi, nuget, cargo";
+    public const string AcceptedList = "npm, pypi, nuget, cargo, hex";
 
     /// <summary>True when the ecosystem is claim-shaped but its data paths do not consult the resolver.</summary>
     public static bool IsClaimAware(string ecosystem) => ClaimAwareUnenforced.Contains(ecosystem);

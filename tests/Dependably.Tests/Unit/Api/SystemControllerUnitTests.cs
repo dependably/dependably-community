@@ -1123,7 +1123,7 @@ public sealed class SystemControllerUnitTests
         static Task<string?> Reader(string _, CancellationToken __) => Task.FromResult<string?>(null);
         var access = new Dependably.Security.MetricsAccessConfig(Reader, config, TimeProvider.System);
 
-        var result = await b.SystemController.UpdateMetricsAccess(
+        var result = await b.SystemObservabilityController.UpdateMetricsAccess(
             new UpdateMetricsAccessRequest(Enabled: false, AllowedIps: null),
             access,
             CancellationToken.None);
@@ -1145,7 +1145,7 @@ public sealed class SystemControllerUnitTests
         static Task<string?> Reader(string _, CancellationToken __) => Task.FromResult<string?>(null);
         var access = new Dependably.Security.MetricsAccessConfig(Reader, config, TimeProvider.System);
 
-        var result = await b.SystemController.UpdateMetricsAccess(
+        var result = await b.SystemObservabilityController.UpdateMetricsAccess(
             new UpdateMetricsAccessRequest(Enabled: null, AllowedIps: new[] { "192.168.0.0/16" }),
             access,
             CancellationToken.None);

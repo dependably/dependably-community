@@ -151,6 +151,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
             MaxUploadBytesRpm: req.MaxUploadBytesRpm,
             MaxUploadBytesOci: req.MaxUploadBytesOci,
             MaxUploadBytesCargo: req.MaxUploadBytesCargo,
+            MaxUploadBytesHex: req.MaxUploadBytesHex,
             AirGapped: req.AirGapped,
             VersionOverwritePolicy: req.VersionOverwritePolicy,
             RequireMfa: req.RequireMfa,
@@ -173,6 +174,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                 max_upload_bytes_rpm = req.MaxUploadBytesRpm,
                 max_upload_bytes_oci = req.MaxUploadBytesOci,
                 max_upload_bytes_cargo = req.MaxUploadBytesCargo,
+                max_upload_bytes_hex = req.MaxUploadBytesHex,
                 default_language = req.DefaultLanguage,
                 default_timezone = req.DefaultTimezone,
                 version_overwrite_policy = req.VersionOverwritePolicy,
@@ -427,13 +429,10 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
             return blockDeprecatedError;
         }
 
-        var blockPolicyError = ValidateBlockPolicyFields(req,
-            out string? blockMalicious, out string? blockKev, out string? blockInstallScripts,
-            out string? blockRevoked, out string? blockKevRansomware,
-            out string? blockSsvcExploitation, out string? blockMaliciousLive);
-        if (blockPolicyError is not null)
+        var blockPolicy = ValidateBlockPolicyFields(req);
+        if (blockPolicy.Error is not null)
         {
-            return blockPolicyError;
+            return blockPolicy.Error;
         }
 
         string orgId = CurrentTenantId();
@@ -447,14 +446,15 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
             orgId,
             new ProxyPolicySettings(
                 req.ProxyPassthroughEnabled, req.MaxOsvScoreTolerance, req.MinReleaseAgeHours,
-                blockDeprecated, blockMalicious, blockKev, req.MaxEpssTolerance, blockInstallScripts,
+                blockDeprecated, blockPolicy.BlockMalicious, blockPolicy.BlockKev,
+                req.MaxEpssTolerance, blockPolicy.BlockInstallScripts,
                 sigVerify.VerifyNpmSignatures, sigVerify.VerifyNuGetSignatures, sigVerify.VerifyPyPiAttestations,
-                sigVerify.VerifyRpmSignatures, sigVerify.VerifyMavenSignatures, blockRevoked,
+                sigVerify.VerifyRpmSignatures, sigVerify.VerifyMavenSignatures, blockPolicy.BlockRevoked,
                 sigVerify.VerifyTerraformSignatures,
-                BlockKevRansomware: blockKevRansomware,
+                BlockKevRansomware: blockPolicy.BlockKevRansomware,
                 MaxEpssPercentileTolerance: req.MaxEpssPercentileTolerance,
-                BlockSsvcExploitation: blockSsvcExploitation,
-                BlockMaliciousLive: blockMaliciousLive),
+                BlockSsvcExploitation: blockPolicy.BlockSsvcExploitation,
+                BlockMaliciousLive: blockPolicy.BlockMaliciousLive),
             ct);
 
         // The block/verify gates and thresholds just persisted can flip the advertised state of
@@ -479,16 +479,16 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                 max_osv_score_tolerance = req.MaxOsvScoreTolerance,
                 min_release_age_hours = AuditProxySettingValue(req.MinReleaseAgeHours),
                 block_deprecated = blockDeprecated,
-                block_revoked = blockRevoked,
-                block_malicious = blockMalicious,
-                block_malicious_live = blockMaliciousLive,
-                block_kev = blockKev,
-                block_kev_ransomware = blockKevRansomware,
-                block_ssvc_exploitation = blockSsvcExploitation,
+                block_revoked = blockPolicy.BlockRevoked,
+                block_malicious = blockPolicy.BlockMalicious,
+                block_malicious_live = blockPolicy.BlockMaliciousLive,
+                block_kev = blockPolicy.BlockKev,
+                block_kev_ransomware = blockPolicy.BlockKevRansomware,
+                block_ssvc_exploitation = blockPolicy.BlockSsvcExploitation,
                 max_epss_percentile_tolerance = req.MaxEpssPercentileTolerance.IsPresent
                     ? req.MaxEpssPercentileTolerance.Value : null,
                 max_epss_tolerance = AuditProxySettingValue(req.MaxEpssTolerance),
-                block_install_scripts = blockInstallScripts,
+                block_install_scripts = blockPolicy.BlockInstallScripts,
                 verify_npm_signatures = sigVerify.VerifyNpmSignatures,
                 verify_nuget_signatures = sigVerify.VerifyNuGetSignatures,
                 verify_pypi_attestations = sigVerify.VerifyPyPiAttestations,
@@ -584,19 +584,31 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
     // reset an enforcing gate to its default. Returns a validation error on the first invalid
     // (present-but-out-of-range) field, or null when all pass. Writes the normalized values
     // (null = unchanged) into the out parameters.
-    private IActionResult? ValidateBlockPolicyFields(
-        UpdateProxySettingsRequest req,
-        out string? blockMalicious, out string? blockKev, out string? blockInstallScripts,
-        out string? blockRevoked, out string? blockKevRansomware,
-        out string? blockSsvcExploitation, out string? blockMaliciousLive)
+    private BlockPolicyResult ValidateBlockPolicyFields(UpdateProxySettingsRequest req)
     {
-        blockMalicious = req.BlockMalicious;
-        blockKev = req.BlockKev;
-        blockKevRansomware = req.BlockKevRansomware;
-        blockSsvcExploitation = req.BlockSsvcExploitation;
-        blockInstallScripts = req.BlockInstallScripts;
-        blockRevoked = req.BlockRevoked;
-        blockMaliciousLive = req.BlockMaliciousLive;
+        string? blockMalicious = req.BlockMalicious;
+        string? blockKev = req.BlockKev;
+        string? blockKevRansomware = req.BlockKevRansomware;
+        string? blockSsvcExploitation = req.BlockSsvcExploitation;
+        string? blockInstallScripts = req.BlockInstallScripts;
+        string? blockRevoked = req.BlockRevoked;
+        string? blockMaliciousLive = req.BlockMaliciousLive;
+
+        var error = FirstBlockPolicyError(
+            blockMalicious, blockMaliciousLive, blockKev, blockKevRansomware,
+            blockSsvcExploitation, blockInstallScripts, blockRevoked);
+
+        return new BlockPolicyResult(
+            error, blockMalicious, blockKev, blockInstallScripts,
+            blockRevoked, blockKevRansomware, blockSsvcExploitation, blockMaliciousLive);
+    }
+
+    // The first invalid (present-but-out-of-range) field, or null when all pass.
+    private IActionResult? FirstBlockPolicyError(
+        string? blockMalicious, string? blockMaliciousLive, string? blockKev,
+        string? blockKevRansomware, string? blockSsvcExploitation,
+        string? blockInstallScripts, string? blockRevoked)
+    {
 
         if (blockMalicious is not (null or "off" or "warn" or "block"))
         {
@@ -697,6 +709,18 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
     // Return type for ValidateSignatureVerificationFieldsAsync. Bundles the validation error
     // (null = pass) together with the normalized field values so the method can be async.
     // A null field value means the caller omitted it and the stored value is preserved.
+    // Mirrors SigVerifyResult: Error is non-null on the first invalid field, and the normalized
+    // values (null = leave unchanged) are always present regardless of error state.
+    private sealed record BlockPolicyResult(
+        IActionResult? Error,
+        string? BlockMalicious,
+        string? BlockKev,
+        string? BlockInstallScripts,
+        string? BlockRevoked,
+        string? BlockKevRansomware,
+        string? BlockSsvcExploitation,
+        string? BlockMaliciousLive);
+
     private sealed record SigVerifyResult(
         IActionResult? Error,
         string? VerifyNpmSignatures,

@@ -343,6 +343,34 @@ describe('qs (via listPackages)', () => {
   })
 })
 
+describe('risk drill-downs', () => {
+  it('getOperationalRisk sends sort and dir alongside the filter and paging params', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { total: 0, items: [] }))
+
+    await api.getOperationalRisk({ ecosystem: 'npm', page: 2, sort: 'behind', dir: 'desc' })
+
+    const url = fetchMock.mock.calls[0][0]
+    expect(url).toContain('/risk/operational?')
+    expect(url).toContain('ecosystem=npm')
+    expect(url).toContain('page=2')
+    expect(url).toContain('sort=behind')
+    expect(url).toContain('dir=desc')
+    expect(url).toContain('limit=50') // default
+  })
+
+  it('getLicenseRisk sends sort and dir alongside the reason filter', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { total: 0, items: [] }))
+
+    await api.getLicenseRisk({ reason: 'blocklisted', sort: 'reason', dir: 'asc' })
+
+    const url = fetchMock.mock.calls[0][0]
+    expect(url).toContain('/risk/license?')
+    expect(url).toContain('reason=blocklisted')
+    expect(url).toContain('sort=reason')
+    expect(url).toContain('dir=asc')
+  })
+})
+
 describe('getQuarantine', () => {
   it('sends filter, sort, and paging params, and defaults the page window', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { total: 0, items: [] }))

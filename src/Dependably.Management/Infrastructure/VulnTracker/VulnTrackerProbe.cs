@@ -87,8 +87,7 @@ public static class VulnTrackerProbe
             return null;
         }
 
-        var startedAt = time.GetUtcNow();
-        long startTicks = time.GetTimestamp();
+        var timing = new ProbeTiming(time, time.GetUtcNow(), time.GetTimestamp());
 
         VulnerabilityEnrichmentBatchResult result;
         try
@@ -100,8 +99,7 @@ public static class VulnTrackerProbe
             // The client contracts never to throw for a remote failure. Recorded under its own
             // reason so a fault in the client is distinguishable from a refusal by the producer.
             return await FinishAsync(
-                health, time, startedAt, startTicks,
-                reached: false, VulnTrackerHealthReasons.Exception, freshness: [], ct);
+                health, timing, reached: false, VulnTrackerHealthReasons.Exception, freshness: [], ct);
         }
 
         var freshness = result.Freshness
@@ -109,21 +107,23 @@ public static class VulnTrackerProbe
             .ToList();
 
         return await FinishAsync(
-            health, time, startedAt, startTicks,
-            result.Reached, VulnTrackerHealthReasons.Normalize(result.Reason), freshness, ct);
+            health, timing, result.Reached,
+            VulnTrackerHealthReasons.Normalize(result.Reason), freshness, ct);
     }
+
+    /// <summary>When one probe started, and the clock that will measure how long it took.</summary>
+    private readonly record struct ProbeTiming(
+        TimeProvider Time, DateTimeOffset StartedAt, long StartTicks);
 
     private static async Task<VulnTrackerProbeResult> FinishAsync(
         VulnTrackerHealthRepository health,
-        TimeProvider time,
-        DateTimeOffset startedAt,
-        long startTicks,
+        ProbeTiming timing,
         bool reached,
         string reason,
         IReadOnlyList<VulnTrackerProbeFreshness> freshness,
         CancellationToken ct)
     {
-        long latencyMs = (long)time.GetElapsedTime(startTicks).TotalMilliseconds;
+        long latencyMs = (long)timing.Time.GetElapsedTime(timing.StartTicks).TotalMilliseconds;
 
         // Logged as a probe, which is what keeps it out of the health row: that row describes the
         // scan path, and a green probe must not clear a failure streak the scan is still hitting.
@@ -134,7 +134,7 @@ public static class VulnTrackerProbe
                 PurlCount: 1,
                 AdvisoryCount: 0,
                 DurationMs: latencyMs,
-                StartedAt: startedAt),
+                StartedAt: timing.StartedAt),
             ct);
 
         return new VulnTrackerProbeResult(reached, reason, latencyMs, freshness);

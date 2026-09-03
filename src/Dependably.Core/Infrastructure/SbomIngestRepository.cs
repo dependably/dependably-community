@@ -9,9 +9,13 @@ public sealed record ProjectVersionRef(
     string ProjectId, string ProjectName, string ProjectKind, string ProjectVersionId, string VersionLabel);
 
 /// <summary>
-/// One component as an SBOM declares it. Carries only SBOM-owned facts: the dev/prod signal
-/// lives in <c>dependency_scope</c>, which the reachability scanner owns and this record has no
-/// field for, so the merge cannot write it even by accident.
+/// One component as an SBOM declares it. Carries SBOM-owned facts, plus one exception:
+/// <see cref="ManifestDevDeclared"/> is the CycloneDX property taxonomy's dev-dependency marker —
+/// a MANIFEST declaration, lower confidence than a reachability scanner's own answer. It seeds
+/// <c>dependency_scope</c> (the reachability scanner's column) ONLY when that column is still at
+/// its 'unknown' default; see <see cref="SbomIngestRepository"/>'s insert/update SQL for exactly
+/// how that guard is enforced, and why a real scanner verdict can never be downgraded by a later
+/// SBOM re-upload.
 /// </summary>
 public sealed record SbomComponentUpsert(
     string? Purl,
@@ -32,7 +36,10 @@ public sealed record SbomComponentUpsert(
     string? VcsUrl = null,
     string? IssueTrackerUrl = null,
     string? DistributionUrl = null,
-    string? ComponentHashes = null);
+    string? ComponentHashes = null,
+    string? VersionRange = null,
+    bool? IsExternal = null,
+    bool? ManifestDevDeclared = null);
 
 /// <summary>What one merge did, for the upload response.</summary>
 public sealed record SbomComponentMergeCounts(int Total, int Added, int Removed, int Unchanged);
@@ -60,6 +67,11 @@ public sealed class SbomComponentRow
     public string? IssueTrackerUrl { get; set; }
     public string? DistributionUrl { get; set; }
     public string? ComponentHashes { get; set; }
+    public string? VersionRange { get; set; }
+    public bool? IsExternal { get; set; }
+    /// <summary>The reachability scanner's current answer ('dev'/'runtime'/'unknown') — read so the
+    /// merge can tell whether a manifest-declared value would fill silence or downgrade evidence.</summary>
+    public string DependencyScope { get; set; } = "unknown";
 }
 
 /// <summary>The VEX arm of one analysis row, as a document asserts it.</summary>
@@ -186,11 +198,13 @@ public sealed class SbomIngestRepository
                version AS Version, name AS Name, component_type AS ComponentType,
                sbom_scope AS SbomScope, dependency_kind AS DependencyKind,
                dependency_path AS DependencyPath, license_spdx AS LicenseSpdx,
+               dependency_scope AS DependencyScope,
                description AS Description, component_author AS ComponentAuthor,
                copyright AS Copyright, component_group AS ComponentGroup,
                website_url AS WebsiteUrl, vcs_url AS VcsUrl,
                issue_tracker_url AS IssueTrackerUrl, distribution_url AS DistributionUrl,
-               component_hashes AS ComponentHashes
+               component_hashes AS ComponentHashes,
+               version_range AS VersionRange, is_external AS IsExternal
         FROM sbom_components
         WHERE org_id = @orgId AND project_version_id = @projectVersionId
         """;
@@ -283,6 +297,11 @@ public sealed class SbomIngestRepository
     // from an unescaped purl, unlike a raw NUL byte, which reads back fine at runtime but makes
     // this file register as binary to grep/ripgrep, a reviewability cost this key never needed
     // to pay for a key that lives and dies inside one merge call.
+    //
+    // A version-range component keys on the range's purl, or on name with an empty version, so two
+    // ranges over one package (lodash ^3 and lodash ^4) collapse to one key and the first wins.
+    // That is the behaviour the unique index on (project_version_id, purl) requires: the
+    // alternative is not two rows, it is a constraint violation that fails the whole upload.
     private static string MergeKey(string? purl, string name, string? version) =>
         purl is not null
             ? "purl|" + purl
@@ -310,11 +329,19 @@ public sealed class SbomIngestRepository
         && row.VcsUrl == component.VcsUrl
         && row.IssueTrackerUrl == component.IssueTrackerUrl
         && row.DistributionUrl == component.DistributionUrl
-        && row.ComponentHashes == component.ComponentHashes;
+        && row.ComponentHashes == component.ComponentHashes
+        && row.VersionRange == component.VersionRange
+        && row.IsExternal == component.IsExternal
+        // A manifest declaration that would fill 'unknown' is a real write even though no column
+        // compared above changed — so it must not read as unchanged, or the fill never happens on
+        // a component whose other facts are already stable.
+        && (component.ManifestDevDeclared is null || row.DependencyScope != "unknown");
 
-    // dependency_scope is absent from both statements on purpose: it is the reachability
-    // scanner's column, and an insert that named it would reset a scanned component to
-    // 'unknown' every time its SBOM was re-uploaded.
+    // dependency_scope is written by both statements, but only as a fill: a manifest declaration
+    // seeds the column on insert, and on update it lands only while the column is still at its
+    // 'unknown' default. Once a reachability scanner has asserted 'dev' or 'runtime' the SBOM side
+    // never touches the column again — see the class doc comment and UpdateComponentAsync's own
+    // CASE WHEN for why a re-uploaded SBOM can never downgrade a scanner verdict.
     private static Task InsertComponentAsync(
         DbConnection conn,
         DbTransaction dbTx,
@@ -328,14 +355,18 @@ public sealed class SbomIngestRepository
             INSERT INTO sbom_components (
                 id, org_id, project_version_id, purl, ecosystem, purl_name, version, name,
                 component_type, sbom_scope, dependency_kind, dependency_path, license_spdx,
+                dependency_scope, dependency_scope_source,
                 description, component_author, copyright, component_group,
                 website_url, vcs_url, issue_tracker_url, distribution_url, component_hashes,
+                version_range, is_external,
                 created_at)
             VALUES (
                 @id, @orgId, @projectVersionId, @purl, @ecosystem, @purlName, @version, @name,
                 @componentType, @sbomScope, @dependencyKind, @dependencyPath, @licenseSpdx,
+                @dependencyScope, @dependencyScopeSource,
                 @description, @componentAuthor, @copyright, @componentGroup,
                 @websiteUrl, @vcsUrl, @issueTrackerUrl, @distributionUrl, @componentHashes,
+                @versionRange, @isExternal,
                 @now)
             """,
             new
@@ -353,6 +384,16 @@ public sealed class SbomIngestRepository
                 dependencyKind = component.DependencyKind,
                 dependencyPath = component.DependencyPath,
                 licenseSpdx = component.LicenseSpdx,
+                // A brand-new row has no scanner verdict to protect, so a manifest declaration
+                // fills the column outright; NOT NULL means the unmapped case must still be a
+                // string, never a null parameter.
+                dependencyScope = component.ManifestDevDeclared switch
+                {
+                    true => "dev",
+                    false => "runtime",
+                    null => "unknown",
+                },
+                dependencyScopeSource = component.ManifestDevDeclared is null ? null : "manifest",
                 description = component.Description,
                 componentAuthor = component.ComponentAuthor,
                 copyright = component.Copyright,
@@ -362,6 +403,8 @@ public sealed class SbomIngestRepository
                 issueTrackerUrl = component.IssueTrackerUrl,
                 distributionUrl = component.DistributionUrl,
                 componentHashes = component.ComponentHashes,
+                versionRange = component.VersionRange,
+                isExternal = component.IsExternal,
                 now = now.ToUtcIso(),
             },
             dbTx,
@@ -386,6 +429,16 @@ public sealed class SbomIngestRepository
                 dependency_kind = @dependencyKind,
                 dependency_path = @dependencyPath,
                 license_spdx = @licenseSpdx,
+                dependency_scope = CASE
+                    WHEN dependency_scope = 'unknown' AND @manifestDependencyScope IS NOT NULL
+                    THEN @manifestDependencyScope
+                    ELSE dependency_scope
+                END,
+                dependency_scope_source = CASE
+                    WHEN dependency_scope = 'unknown' AND @manifestDependencyScope IS NOT NULL
+                    THEN 'manifest'
+                    ELSE dependency_scope_source
+                END,
                 description = @description,
                 component_author = @componentAuthor,
                 copyright = @copyright,
@@ -394,7 +447,9 @@ public sealed class SbomIngestRepository
                 vcs_url = @vcsUrl,
                 issue_tracker_url = @issueTrackerUrl,
                 distribution_url = @distributionUrl,
-                component_hashes = @componentHashes
+                component_hashes = @componentHashes,
+                version_range = @versionRange,
+                is_external = @isExternal
             WHERE id = @componentId AND org_id = @orgId
             """,
             new
@@ -410,6 +465,17 @@ public sealed class SbomIngestRepository
                 dependencyKind = component.DependencyKind,
                 dependencyPath = component.DependencyPath,
                 licenseSpdx = component.LicenseSpdx,
+                // Unlike the insert, an existing row may already carry a scanner verdict, so the
+                // fill has to be conditional in the SQL itself (CASE WHEN ... = 'unknown') rather
+                // than resolved here — the read that decides "unknown" and the write that would
+                // overwrite it must be the same statement, or a concurrent SARIF upload between
+                // this method's row read and its write could race the guard.
+                manifestDependencyScope = component.ManifestDevDeclared switch
+                {
+                    true => "dev",
+                    false => "runtime",
+                    null => (string?)null,
+                },
                 description = component.Description,
                 componentAuthor = component.ComponentAuthor,
                 copyright = component.Copyright,
@@ -419,6 +485,8 @@ public sealed class SbomIngestRepository
                 issueTrackerUrl = component.IssueTrackerUrl,
                 distributionUrl = component.DistributionUrl,
                 componentHashes = component.ComponentHashes,
+                versionRange = component.VersionRange,
+                isExternal = component.IsExternal,
             },
             dbTx,
             cancellationToken: ct));
@@ -643,7 +711,11 @@ public sealed class SbomIngestRepository
     /// Folds the component-level facts of a SARIF log onto their matched component rows. The
     /// dependency-kind and dependency-path columns are written only when the log carried them,
     /// so a producer that reports reachability but not graph position leaves the SBOM's own
-    /// answer in place instead of blanking it.
+    /// answer in place instead of blanking it. dependency_scope is written unconditionally — a
+    /// scanner verdict is always authoritative over a manifest fill — and stamps
+    /// dependency_scope_source = 'scanner', which is what lets
+    /// <see cref="ResetUnnamedDependencyScopeAsync"/> tell this row apart from one only a
+    /// manifest declaration ever touched.
     /// </summary>
     public async Task ApplyComponentFactsAsync(
         string orgId, IReadOnlyList<SbomComponentFactWrite> facts, CancellationToken ct = default)
@@ -660,6 +732,7 @@ public sealed class SbomIngestRepository
                 """
                 UPDATE sbom_components SET
                     dependency_scope = @dependencyScope,
+                    dependency_scope_source = 'scanner',
                     dependency_kind = COALESCE(@dependencyKind, dependency_kind),
                     dependency_path = COALESCE(@dependencyPath, dependency_path)
                 WHERE id = @componentId AND org_id = @orgId
@@ -828,12 +901,22 @@ public sealed class SbomIngestRepository
     }
 
     /// <summary>
-    /// Returns every component of this version to <c>dependency_scope = 'unknown'</c> except the
-    /// ones <paramref name="namedComponentIds"/> lists. The scanner owns that column, so a
-    /// component the current SARIF reports nothing about has no scanner verdict — and 'unknown'
-    /// is the honest answer, not the verdict a superseded log happened to leave behind. 'unknown'
-    /// is also the safe answer under the derived filters: it reads as production, so the
-    /// component stays visible rather than quietly dropping out of the prod view.
+    /// Returns every SCANNER-sourced component of this version to <c>dependency_scope =
+    /// 'unknown'</c> except the ones <paramref name="namedComponentIds"/> lists. A component the
+    /// current SARIF reports nothing about has no scanner verdict — and 'unknown' is the honest
+    /// answer, not the verdict a superseded log happened to leave behind. 'unknown' is also the
+    /// safe answer under the derived filters: it reads as production, so the component stays
+    /// visible rather than quietly dropping out of the prod view.
+    ///
+    /// <para>Scoped to <c>dependency_scope_source = 'scanner'</c>, not merely
+    /// <c>dependency_scope &lt;&gt; 'unknown'</c>: a manifest-sourced fill is not this sweep's to
+    /// touch. Before <c>dependency_scope_source</c> existed, every non-'unknown' value
+    /// necessarily came from a named SARIF fact, so the wider condition was equivalent — the
+    /// column had exactly one writer. It gained a second one (CycloneDX ingest's manifest-decl
+    /// fill) without narrowing this sweep to match, and the result was a SARIF upload (even a
+    /// clean, zero-result one — the common case for a component with no findings, which is
+    /// exactly the class of component the fill exists for) silently wiping every manifest-filled
+    /// component back to 'unknown' on its very next reachability scan.</para>
     /// </summary>
     /// <returns>How many components were reset.</returns>
     public async Task<int> ResetUnnamedDependencyScopeAsync(
@@ -848,7 +931,7 @@ public sealed class SbomIngestRepository
             """
             SELECT id FROM sbom_components
             WHERE org_id = @orgId AND project_version_id = @projectVersionId
-              AND dependency_scope <> 'unknown'
+              AND dependency_scope_source = 'scanner'
             """,
             new { orgId, projectVersionId },
             cancellationToken: ct))).ToList();
@@ -863,7 +946,7 @@ public sealed class SbomIngestRepository
 
             await conn.ExecuteAsync(new CommandDefinition(
                 """
-                UPDATE sbom_components SET dependency_scope = 'unknown'
+                UPDATE sbom_components SET dependency_scope = 'unknown', dependency_scope_source = NULL
                 WHERE id = @componentId AND org_id = @orgId
                 """,
                 new { componentId, orgId },

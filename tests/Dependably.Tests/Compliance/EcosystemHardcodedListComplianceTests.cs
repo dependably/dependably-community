@@ -54,6 +54,7 @@ public sealed partial class EcosystemHardcodedListComplianceTests
         ["cargo"] = "/cargo/",
         ["apk"] = "/apk/",
         ["terraform"] = "/terraform/",
+        ["hex"] = "/hex/",
     };
 
     [Fact]

@@ -37,6 +37,8 @@ namespace Dependably.Protocol;
 /// shape as npm and cargo; the reserved name is the provider's source address
 /// (<c>registry.terraform.io/acme/internal</c>), which is what a dependency-confusion attempt
 /// would have to collide with.</item>
+/// <item>hex — exact or trailing-<c>*</c> glob, ordinal on lowercased names (hex.pm's package
+/// namespace is flat and lower-case by rule), the same shape as npm and cargo.</item>
 /// </list>
 ///
 /// Reads are served from a short-TTL per-org cache (same shape as
@@ -47,7 +49,7 @@ namespace Dependably.Protocol;
 /// </summary>
 public sealed partial class ReservedNamespaceService
 {
-    public static readonly IReadOnlyList<string> SupportedEcosystems = ["npm", "pypi", "nuget", "maven", "cargo", "golang", "apk", "terraform"];
+    public static readonly IReadOnlyList<string> SupportedEcosystems = ["npm", "pypi", "nuget", "maven", "cargo", "golang", "apk", "terraform", "hex"];
 
     private readonly IMetadataStore _db;
     private readonly IMemoryCache _cache;

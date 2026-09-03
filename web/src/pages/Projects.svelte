@@ -173,7 +173,7 @@
           <svg width="13" height="13" aria-hidden="true"><use href="/icons.svg#icon-hierarchy"/></svg>
           {$t('projects.folders.newFolder')}
         </button>
-        <button type="button" class="primary" on:click={() => (uploadOpen = true)}>
+        <button type="button" class="primary" data-testid="upload" on:click={() => (uploadOpen = true)}>
           <svg width="13" height="13" aria-hidden="true"><use href="/icons.svg#icon-upload"/></svg>
           {$t('sbomUpload.button')}
         </button>

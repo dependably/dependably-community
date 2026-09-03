@@ -96,6 +96,7 @@ public static class ManagementStartupExtensions
         builder.Services.AddHostedService<Dependably.Background.TenantHardDeleteService>();
         builder.Services.AddHostedService<DeprecationRefreshService>();
         builder.Services.AddHostedService<LicenseBackfillService>();
+        builder.Services.AddSingleton<StatsRefreshService.Dependencies>();
         builder.Services.AddHostedService<StatsRefreshService>();
         builder.Services.AddHostedService<SamlCertExpiryCheckService>();
 

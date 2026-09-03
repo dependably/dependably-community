@@ -122,6 +122,86 @@ public sealed class CycloneDxComponentMetadataTests
         Assert.Null(component.WebsiteUrl);
     }
 
+    private static CycloneDxComponent ParseOne17(string componentJson)
+    {
+        string document = $$"""
+            {
+              "bomFormat": "CycloneDX",
+              "specVersion": "1.7",
+              "components": [ {{componentJson}} ]
+            }
+            """;
+        var parsed = CycloneDxParser.Parse(JsonDocument.Parse(document).RootElement);
+        return Assert.Single(parsed.Components);
+    }
+
+    [Fact]
+    public void ReadsAVersionRangeComponentThatDeclaresNoVersion()
+    {
+        var component = ParseOne17("""
+            {
+              "type": "library",
+              "name": "axios",
+              "versionRange": "vers:npm/>=1.6.0|<2.0.0",
+              "purl": "pkg:npm/axios"
+            }
+            """);
+
+        // 1.7 admits versionRange INSTEAD of version, so a null version here is the document
+        // being well-formed rather than a producer omitting a field.
+        Assert.Equal("vers:npm/>=1.6.0|<2.0.0", component.VersionRange);
+        Assert.Null(component.Version);
+    }
+
+    [Theory]
+    [InlineData("true", true)]
+    [InlineData("false", false)]
+    public void ReadsIsExternalAsDeclared(string literal, bool expected)
+    {
+        var component = ParseOne17($$"""{ "name": "x", "isExternal": {{literal}} }""");
+
+        Assert.Equal(expected, component.IsExternal);
+    }
+
+    [Fact]
+    public void LeavesIsExternalNullWhenTheDocumentDoesNotDeclareIt()
+    {
+        // Null and false are different claims: every document below 1.7 is in the first group,
+        // and collapsing them would assert "not external" about a component nothing examined.
+        Assert.Null(ParseOne17("""{ "name": "x" }""").IsExternal);
+        Assert.Null(ParseOne17("""{ "name": "x", "isExternal": "yes" }""").IsExternal);
+    }
+
+    [Fact]
+    public void ReadsALicensesArrayThatMixesAnIdWithAnExpression()
+    {
+        var component = ParseOne17("""
+            {
+              "name": "Dapper",
+              "licenses": [
+                { "license": { "id": "Apache-2.0" } },
+                { "expression": "MIT OR BSD-3-Clause" }
+              ]
+            }
+            """);
+
+        // 1.6 admitted only one form per array; 1.7 allows both in one. Each entry is read on its
+        // own terms, so neither form is dropped for the other being present.
+        Assert.Equal("Apache-2.0 OR MIT OR BSD-3-Clause", component.LicenseSpdx);
+    }
+
+    [Fact]
+    public void KeepsAHashAlgorithmItDoesNotRecognise()
+    {
+        var component = ParseOne17("""
+            { "name": "x", "hashes": [ { "alg": "Streebog-256", "content": "abc123" } ] }
+            """);
+
+        // The algorithm set is open and grew in 1.7. Nothing here is a trust input, so an
+        // unrecognised algorithm round-trips rather than being filtered to nothing.
+        Assert.Contains("Streebog-256", component.HashesJson);
+    }
+
     [Fact]
     public void ClipsProseRatherThanRefusingTheDocument()
     {
@@ -134,6 +214,8 @@ public sealed class CycloneDxComponentMetadataTests
         // that governs the document as a whole. Refusing would be worse: the field is display-only.
         Assert.Equal(1000, component.Description!.Length);
         Assert.Equal(400, component.Copyright!.Length);
+        Assert.Equal(400, ParseOne17($$"""{ "name": "x", "versionRange": "{{longText}}" }""")
+            .VersionRange!.Length);
     }
 
     [Fact]
@@ -159,5 +241,7 @@ public sealed class CycloneDxComponentMetadataTests
         Assert.Null(component.Group);
         Assert.Null(component.WebsiteUrl);
         Assert.Null(component.HashesJson);
+        Assert.Null(component.VersionRange);
+        Assert.Null(component.IsExternal);
     }
 }

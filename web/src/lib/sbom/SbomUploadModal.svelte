@@ -56,7 +56,9 @@
   import { extractErrorMessage } from '../form.js'
   import { copyToClipboard } from '../clipboard.js'
   import { sniffDocumentText, DOCUMENT_KIND_ENDPOINT } from './sniff.js'
-  import { orderStagedFiles, describeSuccess, describeFailure } from './outcome.js'
+  import {
+    orderStagedFiles, describeSuccess, describeFailure, isBlockedBySbomFailure,
+  } from './outcome.js'
   import { buildCurlSnippet } from './curlSnippet.js'
 
   /** @type {string | null} */
@@ -68,11 +70,12 @@
   export let presetIsCollection = false
 
   /**
-   * The folder an upload launched from a collection page files into, and the label to show for it.
+   * The folder this upload files into, and the label to show for it: the collection page the modal
+   * was opened from, or — from a project or version page — that project's own containing folder.
    * A project name is unique within its parent scope rather than across the org, so this is what
    * makes "upload into THIS folder" expressible at all — without it the server resolves the name
-   * in the root scope and a new project silently lands at the top level instead of in the folder
-   * the operator was looking at.
+   * in the root scope, where a nested project does not exist: the upload creates a second,
+   * top-level project of the same name instead of adding a version to the one on screen.
    * @type {string | null}
    */
   export let presetParentId = null
@@ -114,12 +117,27 @@
         ? { items: (await api.getProject(parentId))?.children ?? [] }
         : await api.listProjects({ limit: 200 })
       // Collections accept no uploads (409) — keep them out of the picker entirely.
-      projects = (data?.items ?? []).filter((p) => p.kind !== 'collection')
+      projects = withPreset((data?.items ?? []).filter((p) => p.kind !== 'collection'))
     } catch (e) {
       projectsError = extractErrorMessage(e)
+      // A failed list must not also lose the selection the caller preset: the <select> renders
+      // blank for a bound value no <option> carries, which reads as "nothing is selected here".
+      projects = withPreset([])
     } finally {
       loadingProjects = false
     }
+  }
+
+  /**
+   * Guarantees the preset project is one of the options. Without it the picker silently drops the
+   * page's own project whenever the list it loaded does not happen to contain that row — the list
+   * is scoped to one parent, and a `<select>` bound to a value no `<option>` carries renders as
+   * unselected, so the operator sees the "choose a project" placeholder on a page that already
+   * knows which project this is.
+   */
+  function withPreset(items) {
+    if (!presetProjectId || items.some((p) => p.id === presetProjectId)) return items
+    return [{ id: presetProjectId, name: presetProjectName ?? '' }, ...items]
   }
 
   let versionOptions = []
@@ -186,6 +204,17 @@
     staged = staged.map((f) => (f.id === id ? { ...f, kind } : f))
   }
 
+  // Every file the batch has finished with. Resolved is the complement of in-flight rather than a
+  // list of the terminal states, so a state added later cannot silently drop out of the table.
+  $: resolvedFiles = staged.filter((f) => f.status !== 'pending' && f.status !== 'uploading')
+
+  // Status is set by this component, never by a caller, so a plain object lookup is safe here.
+  const OUTCOME_STATUS_LABEL = {
+    accepted: 'sbomUpload.outcome.accepted',
+    rejected: 'sbomUpload.outcome.rejected',
+    skipped: 'sbomUpload.outcome.skipped',
+  }
+
   $: submittableCount = staged.filter((f) => f.status !== 'accepted').length
   $: canSubmit = !uploading && submittableCount > 0
     && currentProjectName.length > 0 && versionInput.trim().length > 0
@@ -198,9 +227,33 @@
     const projectVersion = versionInput.trim()
     const ordered = orderStagedFiles(staged.filter((f) => f.status !== 'accepted'))
 
+    // Whether the target version is reachable without this batch's SBOM. `versionOptions` is the
+    // selected project's server-side version list, so an unlisted label (and every label in
+    // new-project mode, where the project itself does not exist yet) is one only the SBOM leg can
+    // create. A stale or still-loading list errs toward treating the version as new, which skips a
+    // dependent rather than firing a doomed request — and a skipped file stays staged and
+    // re-submittable, so that direction is the recoverable one.
+    const versionExisted = !newProjectMode && versionOptions.includes(projectVersion)
+    let sbomRejected = false
+
     for (const item of ordered) {
-      staged = staged.map((f) => (f.id === item.id ? { ...f, status: 'uploading' } : f))
       const submitKind = DOCUMENT_KIND_ENDPOINT[item.kind] ?? 'sbom'
+      // Ordering alone does not make the batch coherent: orderStagedFiles guarantees the SBOM goes
+      // first, but nothing downstream reads whether it succeeded. Checked before the status flips
+      // to 'uploading', so a skipped file never renders as in-flight.
+      if (isBlockedBySbomFailure(submitKind, { sbomRejected, versionExisted })) {
+        staged = staged.map((f) => (f.id === item.id
+          ? {
+              ...f,
+              status: 'skipped',
+              outcomeKey: 'sbomUpload.outcome.detail.skippedSbomRejected',
+              outcomeValues: {},
+              outcomeText: null,
+            }
+          : f))
+        continue
+      }
+      staged = staged.map((f) => (f.id === item.id ? { ...f, status: 'uploading' } : f))
       try {
         let response
         if (submitKind === 'vex') {
@@ -216,6 +269,8 @@
           ? { ...f, status: 'accepted', outcomeKey: d.key, outcomeValues: d.values, outcomeText: null }
           : f))
       } catch (e) {
+        // A failed SBOM leg is what makes every later VEX/SARIF in this batch unreachable.
+        if (submitKind === 'sbom') sbomRejected = true
         const d = describeFailure(e)
         staged = staged.map((f) => (f.id === item.id
           ? { ...f, status: 'rejected', outcomeKey: d.key, outcomeValues: d.values, outcomeText: d.text }
@@ -315,6 +370,8 @@
                 <span class="badge outcome-accepted">{$t('sbomUpload.outcome.accepted')}</span>
               {:else if item.status === 'rejected'}
                 <span class="badge outcome-rejected">{$t('sbomUpload.outcome.rejected')}</span>
+              {:else if item.status === 'skipped'}
+                <span class="badge outcome-skipped">{$t('sbomUpload.outcome.skipped')}</span>
               {:else}
                 <button
                   type="button"
@@ -393,9 +450,15 @@
         {uploading ? $t('sbomUpload.uploading') : $t('sbomUpload.submit')}
       </button>
 
-      {#if staged.some((f) => f.status === 'accepted' || f.status === 'rejected')}
+      {#if resolvedFiles.length > 0}
         <div class="result-card">
-          <table class="table-auto outcome-table">
+          <table class="outcome-table">
+            <colgroup>
+              <col class="col-file" />
+              <col class="col-type" />
+              <col class="col-status" />
+              <col class="col-detail" />
+            </colgroup>
             <thead>
               <tr>
                 <th>{$t('sbomUpload.outcome.file')}</th>
@@ -405,13 +468,13 @@
               </tr>
             </thead>
             <tbody>
-              {#each staged.filter((f) => f.status === 'accepted' || f.status === 'rejected') as item (item.id)}
+              {#each resolvedFiles as item (item.id)}
                 <tr class="outcome-row outcome-{item.status}">
                   <td class="mono file-name">{item.file.name}</td>
                   <td><span class="badge">{$t(`sbomUpload.kind.${item.kind}`)}</span></td>
                   <td>
                     <span class="badge outcome-{item.status}">
-                      {$t(item.status === 'accepted' ? 'sbomUpload.outcome.accepted' : 'sbomUpload.outcome.rejected')}
+                      {$t(OUTCOME_STATUS_LABEL[item.status])}
                     </span>
                   </td>
                   <td class="text-muted">
@@ -442,7 +505,12 @@
 </div>
 
 <style>
-  .sbom-upload-modal { width: min(640px, 92vw); }
+  /* `.modal` sets `max-width: 540px`, which clamps the used width no matter what `width`
+     resolves to — so a wider variant has to raise the cap as well as the width. */
+  .sbom-upload-modal {
+    width: min(720px, 92vw);
+    max-width: min(720px, 92vw);
+  }
 
   .dropzone {
     display: flex;
@@ -520,8 +588,24 @@
 
   .upload-submit { align-self: flex-start; }
 
-  .result-card { font-size: 13px; }
-  .outcome-table { font-size: 12px; }
+  .result-card { font-size: 13px; overflow-x: auto; }
+
+  /* Fixed layout with declared column widths: the detail cell carries the server's
+     problem-detail text on a rejection, and under auto layout that text widens the table past
+     the modal, which then scrolls sideways instead of wrapping. */
+  .outcome-table { font-size: 12px; table-layout: fixed; }
+  .col-file { width: 28%; }
+  .col-type { width: 12%; }
+  .col-status { width: 15%; }
+  .col-detail { width: 45%; }
+  .outcome-table td {
+    vertical-align: top;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .outcome-table .file-name { overflow: visible; text-overflow: clip; }
+  /* The cells wrap, but a badge is a pill — breaking its label across two lines splits the pill. */
+  .outcome-table .badge { white-space: nowrap; }
   .mono { font-family: var(--mono, monospace); }
 
   .curl-details { font-size: 13px; }

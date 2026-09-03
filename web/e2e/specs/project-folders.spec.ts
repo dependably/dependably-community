@@ -264,6 +264,59 @@ test.describe('Project folders', () => {
     await expect(dialog.locator('select')).toContainText(seeded.projectName)
   })
 
+  test('uploading from a project nested in a folder presets that project', async ({ adminPage }) => {
+    const folderName = uniqueName('nest')
+    const folder = await api.post('/api/v1/projects', { data: { name: folderName, kind: 'collection' } })
+    const folderId = (await folder.json()).id as string
+    // Seeded INSIDE the folder, which is the whole point: `listProjects` returns root-level rows
+    // only, so a root-level seed keeps the picker green over a project the list never has to find.
+    const seeded = await seedProjectVersion(api, 'nested', { parentId: folderId })
+
+    await adminPage.goto(`/project/${seeded.projectId}`)
+    await adminPage.locator('main.main-content [data-testid="upload"]').click()
+    const dialog = adminPage.getByRole('dialog')
+    await expect(dialog).toBeVisible()
+
+    // Present as an option AND actually selected — a bound value no option carries renders the
+    // placeholder, which is the failure this covers: the picker read empty on a page that already
+    // knew its project.
+    const picker = dialog.locator('select')
+    await expect(picker).toContainText(seeded.projectName)
+    await expect(picker).toHaveValue(seeded.projectId)
+
+    // The folder is named too, because it is where the upload files.
+    await expect(dialog).toContainText(folderName)
+  })
+
+  test('uploading from a nested project adds a version rather than a root twin', async ({ adminPage }) => {
+    const folderName = uniqueName('nest-upload')
+    const folder = await api.post('/api/v1/projects', { data: { name: folderName, kind: 'collection' } })
+    const folderId = (await folder.json()).id as string
+    const seeded = await seedProjectVersion(api, 'nested-upload', { parentId: folderId })
+
+    await adminPage.goto(`/project/${seeded.projectId}`)
+    await adminPage.locator('main.main-content [data-testid="upload"]').click()
+    const dialog = adminPage.getByRole('dialog')
+    await expect(dialog).toBeVisible()
+
+    await dialog.locator('input[type="file"]').setInputFiles(
+      path.join(sbomFixturesRoot(), 'cyclonedx-1.6-inventory.json'))
+    // Only the version input is a text box while the project picker is a select.
+    await dialog.locator('input[type="text"]').first().fill('9.9.9')
+    await dialog.locator('button.upload-submit').click()
+
+    // The version lands on THIS project. Sent without a parent the name resolves in the root
+    // scope, where this project does not exist, and the upload creates a second top-level one.
+    await expect.poll(async () => {
+      const body = await (await api.get(`/api/v1/projects/${seeded.projectId}`)).json()
+      return (body.versions as Array<{ version: string }>).map((v) => v.version)
+    }, { timeout: 20_000 }).toContain('9.9.9')
+
+    // The adversarial half: no same-named project appeared at the root.
+    const roots = await (await api.get('/api/v1/projects?limit=200')).json()
+    expect((roots.items as Array<{ name: string }>).map((p) => p.name)).not.toContain(seeded.projectName)
+  })
+
   test('the version breadcrumb goes back to the project versions table', async ({ adminPage }) => {
     const seeded = await seedProjectVersion(api, 'breadcrumb')
 

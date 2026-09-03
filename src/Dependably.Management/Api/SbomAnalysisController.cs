@@ -238,9 +238,17 @@ public sealed class SbomAnalysisController : OrgScopedControllerBase
     // ── Validation ───────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Clamps the paging numbers and rejects an unrecognised enumerated value. Rejecting rather
-    /// than defaulting is the point: a mistyped <c>sev=hgih</c> that silently returned every row
-    /// would read as "nothing matched that severity" and understate the version's risk.
+    /// Clamps the paging numbers and rejects an unrecognised <em>filter</em> value. Rejecting
+    /// rather than defaulting is the point for a filter: a mistyped <c>sev=hgih</c> that silently
+    /// returned every row would read as "nothing matched that severity" and understate the
+    /// version's risk.
+    ///
+    /// <para><c>sort</c> and <c>dir</c> are deliberately the other way round, matching
+    /// <see cref="ProjectsController"/>: an unrecognised value falls back to the default rather
+    /// than 422ing. A sort cannot understate risk — it orders the same rows — and these arrive
+    /// from bookmarks and shared links as often as from the UI, so a renamed column would
+    /// otherwise turn a saved URL into a permanent error page rather than a differently ordered
+    /// table. The projection's allowlist is what makes the fallback safe.</para>
     /// </summary>
     [NonAction]
     private IActionResult? ValidateProjectAnalysisFilterRequest(ProjectAnalysisFilterRequest filter)
@@ -255,10 +263,18 @@ public sealed class SbomAnalysisController : OrgScopedControllerBase
         filter.Reach = NullIfBlank(filter.Reach);
         filter.Registry = NullIfBlank(filter.Registry);
 
+        if (filter.Sort is not null && !SbomAnalysisProjection.SortKeys.Contains(filter.Sort))
+        {
+            filter.Sort = SbomAnalysisProjection.DefaultSort;
+        }
+
+        if (filter.Dir is not null && !SortDirections.Contains(filter.Dir))
+        {
+            filter.Dir = null;
+        }
+
         (string Field, string? Value, IReadOnlySet<string> Allowed, string Key)[] enumerated =
         [
-            ("sort", filter.Sort, SbomAnalysisProjection.SortKeys, "error.sbom.sortInvalid"),
-            ("dir", filter.Dir, SortDirections, "error.sbom.dirInvalid"),
             ("scope", filter.Scope, SbomAnalysisProjection.ScopeFilters, "error.sbom.scopeInvalid"),
             ("sev", filter.Sev, SbomAnalysisProjection.SeverityBuckets, "error.sbom.severityInvalid"),
             ("reach", filter.Reach, SbomAnalysisProjection.ReachabilityFilters, "error.sbom.reachInvalid"),
@@ -421,6 +437,21 @@ public sealed class SbomAnalysisController : OrgScopedControllerBase
             dependencyKind = item.DependencyKind,
             dependencyPath = item.DependencyPath,
             licenseSpdx = item.LicenseSpdx,
+            // The component's own presentation metadata. Every field is display-only, but the
+            // panel that renders them is gated on the payload carrying at least one, so omitting
+            // them here does not degrade the panel — it removes it, silently and completely.
+            description = item.Description,
+            author = item.Author,
+            copyright = item.Copyright,
+            group = item.Group,
+            websiteUrl = item.WebsiteUrl,
+            vcsUrl = item.VcsUrl,
+            issueTrackerUrl = item.IssueTrackerUrl,
+            distributionUrl = item.DistributionUrl,
+            hashes = item.Hashes,
+            versionRange = item.VersionRange,
+            isExternal = item.IsExternal,
+            metadataSource = item.MetadataSource,
             inRegistry = present,
             registryLink = present ? RegistryLink(item.Ecosystem!, item.PurlName!) : null,
             registry = RegistryPayload(item.Registry),

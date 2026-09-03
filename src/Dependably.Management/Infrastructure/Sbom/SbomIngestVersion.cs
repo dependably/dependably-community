@@ -20,9 +20,18 @@ namespace Dependably.Infrastructure.Sbom;
 public static class SbomIngestVersion
 {
     /// <summary>
-    /// Revision 1: component presentation metadata — description, author, copyright, group, the
-    /// four linked external-reference URLs, and the hashes array. Documents stored before this
-    /// column existed read as 0 and re-merge once.
+    /// Revision 3: the manifest dev-dependency declaration (<c>ManifestDevDeclared</c>) now fills
+    /// <c>dependency_scope</c> for a component still at its 'unknown' default. A document
+    /// re-uploaded byte-for-byte would otherwise leave every component that a reachability
+    /// scanner has not yet classified exactly at 'unknown' forever — precisely the common case
+    /// (a clean scan, or no SARIF uploaded yet) this revision exists to fix.
+    ///
+    /// <para>Revision 2 was the two component fields CycloneDX 1.7 added — versionRange and
+    /// isExternal. A re-merge is the only thing that fills them for a document already stored.</para>
+    ///
+    /// <para>Revision 1 was component presentation metadata — description, author, copyright,
+    /// group, the four linked external-reference URLs, and the hashes array. A document stored
+    /// under any earlier revision re-merges once on its next upload.</para>
     /// </summary>
-    public const int Current = 1;
+    public const int Current = 3;
 }

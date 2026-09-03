@@ -40,14 +40,14 @@ namespace Dependably.Tests.Compliance;
 /// </para>
 /// </summary>
 [Trait("Category", "Compliance")]
-public sealed class LikeEscapeComplianceTests
+public sealed partial class LikeEscapeComplianceTests
 {
     private const string Marker = "like-escape-ok:";
     private const int MarkerWindow = 5;
 
     /// <summary>A LIKE bound to a parameter — <c>LIKE @foo</c>, or <c>LIKE LOWER(@foo)</c>.</summary>
-    private static readonly Regex ParameterizedLike =
-        new(@"\bLIKE\s+(?:LOWER\s*\(\s*)?@\w+", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    [GeneratedRegex(@"\bLIKE\s+(?:LOWER\s*\(\s*)?@\w+", RegexOptions.IgnoreCase)]
+    private static partial Regex ParameterizedLike();
 
     private readonly ITestOutputHelper _output;
     public LikeEscapeComplianceTests(ITestOutputHelper output) => _output = output;
@@ -74,7 +74,7 @@ public sealed class LikeEscapeComplianceTests
                     continue;
                 }
 
-                if (!ParameterizedLike.IsMatch(line))
+                if (!ParameterizedLike().IsMatch(line))
                 {
                     continue;
                 }

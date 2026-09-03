@@ -150,9 +150,53 @@ public sealed class SbomAnalysisControllerTests
         Assert.Equal(StatusCodes.Status404NotFound, problem.StatusCode);
     }
 
+    /// <summary>
+    /// Every sort key the table's headers can emit is accepted. A rejected key does not mis-order
+    /// the page — it 422s the whole request, and the table state is persisted to the query string,
+    /// so the failure survives the reload.
+    /// </summary>
     [Theory]
+    [InlineData("priority")]
+    [InlineData("name")]
+    [InlineData("version")]
+    [InlineData("severity")]
+    [InlineData("scope")]
+    [InlineData("sbomScope")]
+    [InlineData("type")]
+    [InlineData("dep")]
+    [InlineData("licenses")]
+    [InlineData("reach")]
+    public async Task Analysis_AcceptsEverySortKey(string sort)
+    {
+        await using var world = await World.CreateAsync();
+        var filter = new ProjectAnalysisFilterRequest { Sort = sort };
+
+        var result = await world.Controller.Analysis(world.ProjectId, world.VersionId, filter);
+
+        Assert.IsType<OkObjectResult>(result);
+    }
+
+    /// <summary>
+    /// An unrecognised sort or direction falls back rather than 422ing. These arrive from
+    /// bookmarks as often as from the UI, and a saved link naming a retired column must still
+    /// render the table — differently ordered, never as an error page.
+    /// </summary>
+    [Theory]
+    [InlineData("sort", "depScope")]
     [InlineData("sort", "sideways")]
     [InlineData("dir", "sidewards")]
+    public async Task Analysis_FallsBackOnAnUnrecognisedSortOrDirection(string field, string value)
+    {
+        await using var world = await World.CreateAsync();
+        var filter = new ProjectAnalysisFilterRequest();
+        if (field == "sort") { filter.Sort = value; } else { filter.Dir = value; }
+
+        var result = await world.Controller.Analysis(world.ProjectId, world.VersionId, filter);
+
+        Assert.IsType<OkObjectResult>(result);
+    }
+
+    [Theory]
     [InlineData("scope", "staging")]
     [InlineData("sev", "hgih")]
     [InlineData("reach", "maybe")]
@@ -162,8 +206,6 @@ public sealed class SbomAnalysisControllerTests
         var filter = new ProjectAnalysisFilterRequest();
         switch (field)
         {
-            case "sort": filter.Sort = value; break;
-            case "dir": filter.Dir = value; break;
             case "scope": filter.Scope = value; break;
             case "sev": filter.Sev = value; break;
             default: filter.Reach = value; break;

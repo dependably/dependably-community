@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using Dependably.Api.Setup;
 
@@ -283,6 +284,133 @@ public sealed partial class SetupRecipeCatalogComplianceTests
             Assert.NotNull(built);
             Assert.NotEmpty(built.Recipes);
         }
+    }
+
+    // A username *field*, spotted by its declaration syntax rather than by its value: the
+    // <username>/--username/USERNAME= spellings, netrc's `login <name> password`, poetry's
+    // http-basic pair, curl's -u, and a URL carrying userinfo. Deliberately unlike the
+    // catalog's own whole-word match on the value, so a recipe that declares a username with
+    // some other filler value fails here instead of silently losing its caveat.
+    [GeneratedRegex(@"username|\blogin\s+\S+\s+password\b|\bhttp-basic\b|\s-u\s|://[^/\s:@]+:[^\s/@]*@",
+        RegexOptions.IgnoreCase)]
+    private static partial Regex UsernameFieldRegex();
+
+    private static bool DeclaresAUsername(SetupRecipe recipe) =>
+        recipe.Files.Any(f => UsernameFieldRegex().IsMatch(f.Body))
+        || (recipe.TokenDelivery.Command is { } command && UsernameFieldRegex().IsMatch(command));
+
+    /// <summary>
+    /// Dependably authenticates on the token alone — <c>ResolveTokenAsync</c> takes everything
+    /// after the first colon and never reads the username — so the username these recipes carry
+    /// is filler. It does not read as filler: a reader who sees <c>username = user</c> goes
+    /// looking for the account name it stands in for and does not find one. Every recipe that
+    /// shows a username therefore has to carry the caveat that says so, and no recipe without
+    /// one may cry wolf.
+    /// </summary>
+    [Theory]
+    [InlineData(HttpsBase)]
+    [InlineData(HttpBase)]
+    public void RecipesShowingAUsername_CarryTheUsernameIgnoredCaveat(string baseUrl)
+    {
+        var offenders = new List<string>();
+        foreach (string eco in Ecosystems())
+        {
+            foreach (var r in SetupRecipeCatalog.Build(eco, baseUrl)!.Recipes)
+            {
+                bool declared = DeclaresAUsername(r);
+                bool caveated = r.Caveats.Contains("usernameIgnored", StringComparer.Ordinal);
+                string id = $"{eco}/{r.Variant}/{r.Operation}/{r.Scope}";
+
+                if (declared && !caveated)
+                {
+                    offenders.Add($"{id} shows a username but carries no 'usernameIgnored' caveat");
+                }
+
+                if (!declared && caveated)
+                {
+                    offenders.Add($"{id} carries 'usernameIgnored' but shows no username");
+                }
+            }
+        }
+
+        Assert.True(offenders.Count == 0, string.Join("\n", offenders));
+    }
+
+    /// <summary>
+    /// The positive control for the pairing above. Both detectors agreeing on "no recipe shows
+    /// a username" would satisfy it green while the note never rendered anywhere, so a handful
+    /// of cells are named outright — including the two shapes that must stay uncaveated: npm
+    /// authenticates with a bearer token and Cargo with a registry token, so neither ever puts
+    /// a username on screen.
+    /// </summary>
+    [Fact]
+    public void TheUsernameIgnoredCaveat_LandsOnTheCellsThatShowAUsername()
+    {
+        var expected = new[]
+        {
+            ("pypi", "twine", "publish", "global", true),
+            ("nuget", "dotnet", "install", "project", true),
+            ("maven", "maven", "install", "global", true),
+            ("oci", "docker", "publish", "global", true),
+            ("golang", "go", "install", "global", true),
+            ("npm", "npm", "install", "project", false),
+            ("cargo", "cargo", "publish", "global", false),
+            // The credential here is gradle.properties' bare token; the build script that
+            // names a username belongs to the project-scoped recipe, not this one.
+            ("maven", "gradle-groovy", "install", "global", false),
+        };
+
+        var offenders = new List<string>();
+        foreach (var (eco, variant, operation, scope, wanted) in expected)
+        {
+            var recipe = SetupRecipeCatalog.Build(eco, HttpsBase)!.Recipes.SingleOrDefault(
+                r => r.Variant == variant && r.Operation == operation && r.Scope == scope);
+
+            Assert.True(recipe is not null, $"{eco}/{variant}/{operation}/{scope} no longer exists.");
+
+            bool caveated = recipe!.Caveats.Contains("usernameIgnored", StringComparer.Ordinal);
+            if (caveated != wanted)
+            {
+                offenders.Add(
+                    $"{eco}/{variant}/{operation}/{scope}: expected usernameIgnored={wanted}, got {caveated}");
+            }
+        }
+
+        Assert.True(offenders.Count == 0, string.Join("\n", offenders));
+    }
+
+    /// <summary>
+    /// A caveat is an identifier the client resolves to copy, so one with no entry in a
+    /// locale renders the bare key on screen — a defect that is invisible to every other test
+    /// here, all of which see only the identifier.
+    /// </summary>
+    [Theory]
+    [InlineData("en")]
+    [InlineData("fr")]
+    public void EveryCaveatIdentifier_HasCopyInEveryLocale(string locale)
+    {
+        string path = Path.Combine(SourceRoots.RepoRoot(), "web", "src", "locales", $"{locale}.json");
+        Assert.True(File.Exists(path), $"Locale catalogue not found at {path}.");
+
+        using var doc = JsonDocument.Parse(File.ReadAllText(path));
+        var caveats = doc.RootElement.GetProperty("setup").GetProperty("caveat");
+
+        var emitted = new SortedSet<string>(StringComparer.Ordinal);
+        foreach (string baseUrl in new[] { HttpsBase, HttpBase })
+        {
+            foreach (string eco in Ecosystems())
+            {
+                foreach (var r in SetupRecipeCatalog.Build(eco, baseUrl)!.Recipes)
+                {
+                    emitted.UnionWith(r.Caveats);
+                }
+            }
+        }
+
+        Assert.NotEmpty(emitted);
+        var missing = emitted.Where(id => !caveats.TryGetProperty(id, out _)).ToList();
+        Assert.True(missing.Count == 0,
+            $"setup.caveat entries missing from {locale}.json: " + string.Join(", ", missing));
     }
 
     [Fact]

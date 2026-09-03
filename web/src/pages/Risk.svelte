@@ -29,9 +29,19 @@
 
   // Tab + filter state lives in the URL query string so the dashboard tiles can deep-link
   // straight into a tab (navigate('risk', { tab: 'license' })), and so the state survives a
-  // click into version-detail and back.
-  const DEFAULTS = { tab: 'operational', eco: '', reason: '', page: 1, limit: 50 }
+  // click into version-detail and back. `sort`/`dir` are left blank in DEFAULTS rather than
+  // pinned to one table's default: the two tabs' natural orderings disagree (worst-versions-
+  // behind-first for operational, most-severe-reason-first for license), so an omitted sort
+  // resolves through tabDefaultSort() below instead of a single shared literal.
+  const DEFAULTS = { tab: 'operational', eco: '', reason: '', page: 1, limit: 50, sort: '', dir: '' }
   const init = readQuery(DEFAULTS)
+
+  // The sort applied when the caller (URL, or a tab switch) names none — kept in step with the
+  // server's own DefaultOperationalRiskSort / DefaultLicenseRiskSort so an omitted sort renders
+  // identically to an explicit one naming the default.
+  function tabDefaultSort(tab) {
+    return tab === 'license' ? { sort: 'reason', dir: 'asc' } : { sort: 'behind', dir: 'desc' }
+  }
 
   /** The route transition this page was mounted for, supplied by RouteView. @type {number | null} */
   export let pageToken = null
@@ -40,6 +50,8 @@
   let filterEco = init.eco
   let reason = init.reason
   let page = init.page, limit = init.limit
+  let sortCol = init.sort || tabDefaultSort(activeTab).sort
+  let sortDir = init.dir || tabDefaultSort(activeTab).dir
 
   let items = [], total = 0, loading = true, error = ''
   // Operational only: the tile's own number (distinct packages, not versions).
@@ -86,7 +98,7 @@
   let seq = 0
 
   function sync() {
-    writeQuery({ tab: activeTab, eco: filterEco, reason, page, limit }, DEFAULTS)
+    writeQuery({ tab: activeTab, eco: filterEco, reason, page, limit, sort: sortCol, dir: sortDir }, DEFAULTS)
   }
 
   $: org = $currentOrg
@@ -99,7 +111,7 @@
     loading = true
     error = ''
     try {
-      const params = { page, limit }
+      const params = { page, limit, sort: sortCol, dir: sortDir }
       if (filterEco) params.ecosystem = filterEco
       if (activeTab === 'operational') {
         const data = await api.getOperationalRisk(params)
@@ -133,6 +145,11 @@
     page = 1
     // `reason` only applies to the license tab — drop it so the operational URL stays clean.
     if (tab === 'operational') reason = ''
+    // The two tabs' sortable columns are disjoint sets, so a sort chosen on one tab is never a
+    // valid header to highlight on the other — reset to the incoming tab's own default.
+    const def = tabDefaultSort(tab)
+    sortCol = def.sort
+    sortDir = def.dir
     items = []
     sync()
   }
@@ -140,29 +157,41 @@
   function onFilterChange() { page = 1; sync(); load() }
   function onPageChange(e) { page = e.detail.page; sync(); load() }
   function onLimitChange(e) { limit = e.detail.limit; page = 1; sync(); load() }
+  // Sorting resets to page 1: page 4 of the old order is rarely a page of the new one.
+  function onSortChange(e) { sortCol = e.detail.col; sortDir = e.detail.dir; page = 1; sync(); load() }
 
   function openVersion(r) {
     navigate('version-detail', { ecosystem: r.ecosystem, name: r.name })
   }
 
-  // The server already returns the page in order; bypass DataTable's local sort.
+  // The list is paged, so its sort is server-side — a client-side sort would order the current
+  // page against itself while the pager counts the whole set. Every comparator is therefore a
+  // no-op: the server returns the page in the order it wants rendered, and DataTable's stable
+  // sort preserves it.
   const NOOP_CMP = () => 0
 
+  // Every column maps to a `sort=` key RiskController.Operational accepts (parity pinned by
+  // RiskSortKeyParityTests), matching PackageAnalyticsRepository.OperationalRiskSortColumns'
+  // own per-column default direction.
   $: operationalColumns = [
-    { key: 'package',   label: $t('risk.columns.package'),        sortable: false },
-    { key: 'version',   label: $t('risk.columns.version'),        sortable: false, width: '120px' },
-    { key: 'behind',    label: $t('risk.columns.versionsBehind'), sortable: false, width: '110px', align: 'right' },
-    { key: 'latest',    label: $t('risk.columns.latest'),         sortable: false, width: '120px' },
-    { key: 'origin',    label: $t('risk.columns.origin'),         sortable: false, width: '90px' },
-    { key: 'published', label: $t('risk.columns.published'),      sortable: false, width: '110px' },
+    { key: 'package',   label: $t('risk.columns.package'),        sortable: true },
+    { key: 'version',   label: $t('risk.columns.version'),        sortable: true, width: '120px' },
+    { key: 'behind',    label: $t('risk.columns.versionsBehind'), sortable: true, width: '110px', align: 'right', defaultDir: 'desc' },
+    { key: 'latest',    label: $t('risk.columns.latest'),         sortable: true, width: '120px' },
+    { key: 'origin',    label: $t('risk.columns.origin'),         sortable: true, width: '90px' },
+    { key: 'published', label: $t('risk.columns.published'),      sortable: true, width: '110px', defaultDir: 'desc' },
   ]
+  // `licenses` is deliberately not sortable: the SPDX identifiers are stitched onto the page's
+  // rows by RiskController.License AFTER paging (one lookup per owner id), so — like
+  // ProjectRepository's per-page-computed components/severity/policy columns — sorting on it
+  // would order one page against itself and disagree with the pager's own total.
   $: licenseColumns = [
-    { key: 'package',   label: $t('risk.columns.package'),   sortable: false },
-    { key: 'version',   label: $t('risk.columns.version'),   sortable: false, width: '120px' },
+    { key: 'package',   label: $t('risk.columns.package'),   sortable: true },
+    { key: 'version',   label: $t('risk.columns.version'),   sortable: true, width: '120px' },
     { key: 'licenses',  label: $t('risk.columns.licenses'),  sortable: false, width: '180px' },
-    { key: 'reason',    label: $t('risk.columns.reason'),    sortable: false, width: '110px' },
-    { key: 'origin',    label: $t('risk.columns.origin'),    sortable: false, width: '90px' },
-    { key: 'published', label: $t('risk.columns.published'), sortable: false, width: '110px' },
+    { key: 'reason',    label: $t('risk.columns.reason'),    sortable: true, width: '110px' },
+    { key: 'origin',    label: $t('risk.columns.origin'),    sortable: true, width: '90px' },
+    { key: 'published', label: $t('risk.columns.published'), sortable: true, width: '110px', defaultDir: 'desc' },
   ]
   $: comparators = Object.fromEntries(
     (activeTab === 'operational' ? operationalColumns : licenseColumns).map(c => [c.key, NOOP_CMP]))
@@ -250,6 +279,8 @@
       loadingRows={limit}
       memoryKey="risk:operational"
       emptyText={$t('risk.empty.operational')}
+      initialSort={{ key: sortCol, dir: sortDir }}
+      on:sortchange={onSortChange}
       let:row={r}
     >
       <tr class="cursor-pointer" on:click={() => openVersion(r)}>
@@ -275,6 +306,8 @@
       loadingRows={limit}
       memoryKey="risk:license"
       emptyText={$t('risk.empty.license')}
+      initialSort={{ key: sortCol, dir: sortDir }}
+      on:sortchange={onSortChange}
       let:row={r}
     >
       <tr class="cursor-pointer" on:click={() => openVersion(r)}>

@@ -186,7 +186,7 @@ public sealed class AlertServiceTests : IClassFixture<InMemoryDbFixture>
         var svc = BuildService(notifier);
 
         await svc.RaiseVulnKevAlertAsync(
-            orgId, "npm", "kev-pkg", "pkg:npm/kev-pkg@1.0.0", "GHSA-kev-unscored", null, null);
+            orgId, "npm", "kev-pkg", "pkg:npm/kev-pkg@1.0.0", new AlertService.KevAlertAdvisory("GHSA-kev-unscored", null, null));
 
         Assert.Equal(1, await _alerts.CountActiveAsync(orgId));
         await notifier.Received(1).NotifyAsync(Arg.Any<AlertRecord>(), Arg.Any<CancellationToken>());
@@ -205,7 +205,7 @@ public sealed class AlertServiceTests : IClassFixture<InMemoryDbFixture>
         var svc = BuildService(notifier);
 
         await svc.RaiseVulnKevAlertAsync(
-            orgId, "npm", "kev-pkg", "pkg:npm/kev-pkg@1.0.0", "GHSA-kev-below-floor", "MEDIUM", null);
+            orgId, "npm", "kev-pkg", "pkg:npm/kev-pkg@1.0.0", new AlertService.KevAlertAdvisory("GHSA-kev-below-floor", "MEDIUM", null));
 
         Assert.Equal(1, await _alerts.CountActiveAsync(orgId));
         var (items, _) = await _alerts.ListAsync(orgId, "active", 10, 0);
@@ -221,7 +221,7 @@ public sealed class AlertServiceTests : IClassFixture<InMemoryDbFixture>
         var svc = BuildService(notifier);
 
         await svc.RaiseVulnKevAlertAsync(
-            orgId, "npm", "kev-pkg", "pkg:npm/kev-pkg@1.0.0", "GHSA-kev-off", "CRITICAL", true);
+            orgId, "npm", "kev-pkg", "pkg:npm/kev-pkg@1.0.0", new AlertService.KevAlertAdvisory("GHSA-kev-off", "CRITICAL", true));
 
         Assert.Equal(0, await _alerts.CountActiveAsync(orgId));
         await notifier.DidNotReceive().NotifyAsync(Arg.Any<AlertRecord>(), Arg.Any<CancellationToken>());
@@ -236,9 +236,9 @@ public sealed class AlertServiceTests : IClassFixture<InMemoryDbFixture>
         var svc = BuildService(notifier);
 
         await svc.RaiseVulnKevAlertAsync(
-            orgId, "npm", "kev-pkg", "pkg:npm/kev-pkg@1.0.0", "GHSA-kev-repeat", "CRITICAL", true);
+            orgId, "npm", "kev-pkg", "pkg:npm/kev-pkg@1.0.0", new AlertService.KevAlertAdvisory("GHSA-kev-repeat", "CRITICAL", true));
         await svc.RaiseVulnKevAlertAsync(
-            orgId, "npm", "kev-pkg", "pkg:npm/kev-pkg@1.0.0", "GHSA-kev-repeat", "CRITICAL", true);
+            orgId, "npm", "kev-pkg", "pkg:npm/kev-pkg@1.0.0", new AlertService.KevAlertAdvisory("GHSA-kev-repeat", "CRITICAL", true));
 
         Assert.Equal(1, await _alerts.CountActiveAsync(orgId));
         await notifier.Received(1).NotifyAsync(Arg.Any<AlertRecord>(), Arg.Any<CancellationToken>());
@@ -258,7 +258,7 @@ public sealed class AlertServiceTests : IClassFixture<InMemoryDbFixture>
 
         await svc.RaiseVulnAlertAsync(orgId, "npm", "kev-pkg", "pkg:npm/kev-pkg@1.0.0", "GHSA-kev-both", "CRITICAL");
         await svc.RaiseVulnKevAlertAsync(
-            orgId, "npm", "kev-pkg", "pkg:npm/kev-pkg@1.0.0", "GHSA-kev-both", "CRITICAL", true);
+            orgId, "npm", "kev-pkg", "pkg:npm/kev-pkg@1.0.0", new AlertService.KevAlertAdvisory("GHSA-kev-both", "CRITICAL", true));
 
         Assert.Equal(2, await _alerts.CountActiveAsync(orgId));
         var (items, _) = await _alerts.ListAsync(orgId, "active", 10, 0);
@@ -281,7 +281,7 @@ public sealed class AlertServiceTests : IClassFixture<InMemoryDbFixture>
         var svc = BuildService(notifier);
 
         await svc.RaiseVulnKevAlertAsync(
-            orgId, "npm", "kev-pkg", "pkg:npm/kev-pkg@1.0.0", "GHSA-kev-ransomware", "HIGH", known);
+            orgId, "npm", "kev-pkg", "pkg:npm/kev-pkg@1.0.0", new AlertService.KevAlertAdvisory("GHSA-kev-ransomware", "HIGH", known));
 
         var (items, _) = await _alerts.ListAsync(orgId, "active", 10, 0);
         var alert = Assert.Single(items);
@@ -296,9 +296,9 @@ public sealed class AlertServiceTests : IClassFixture<InMemoryDbFixture>
         var notifier = Substitute.For<IAlertNotifier>();
         var svc = BuildService(notifier);
 
-        await svc.RaiseVulnKevAlertAsync(orgId, "npm", "pkg-true", "pkg:npm/pkg-true@1.0.0", "GHSA-tri-true", "HIGH", true);
-        await svc.RaiseVulnKevAlertAsync(orgId, "npm", "pkg-false", "pkg:npm/pkg-false@1.0.0", "GHSA-tri-false", "HIGH", false);
-        await svc.RaiseVulnKevAlertAsync(orgId, "npm", "pkg-null", "pkg:npm/pkg-null@1.0.0", "GHSA-tri-null", "HIGH", null);
+        await svc.RaiseVulnKevAlertAsync(orgId, "npm", "pkg-true", "pkg:npm/pkg-true@1.0.0", new AlertService.KevAlertAdvisory("GHSA-tri-true", "HIGH", true));
+        await svc.RaiseVulnKevAlertAsync(orgId, "npm", "pkg-false", "pkg:npm/pkg-false@1.0.0", new AlertService.KevAlertAdvisory("GHSA-tri-false", "HIGH", false));
+        await svc.RaiseVulnKevAlertAsync(orgId, "npm", "pkg-null", "pkg:npm/pkg-null@1.0.0", new AlertService.KevAlertAdvisory("GHSA-tri-null", "HIGH", null));
 
         var (items, _) = await _alerts.ListAsync(orgId, "active", 10, 0);
         var details = items.Select(a => a.Detail).ToHashSet();

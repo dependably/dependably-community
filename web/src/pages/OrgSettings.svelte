@@ -1173,6 +1173,7 @@
           <option value="golang">Go</option>
           <option value="apk">Alpine apk</option>
           <option value="terraform">Terraform</option>
+          <option value="hex">Hex</option>
         </select>
       </div>
       <div class="form-row">

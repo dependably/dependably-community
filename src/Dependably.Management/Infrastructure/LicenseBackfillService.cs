@@ -224,6 +224,8 @@ public sealed class LicenseBackfillService : ScheduledBackgroundService
                 return LicenseExtractor.FromPomXml(blob);
             case "cargo":
                 return LicenseExtractor.FromCrateTarball(blob);
+            case "hex":
+                return Protocol.Hex.HexLicenses.FromTarball(blob);
             default:
                 // Unreachable — the repository query filters to the ecosystems above — but
                 // dispose defensively so an unexpected row never leaks the opened stream.

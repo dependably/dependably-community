@@ -42,6 +42,22 @@ public sealed record CycloneDxRootComponent(string? BomRef, string? Name, string
 /// <param name="IssueTrackerUrl">externalReferences[] of type issue-tracker.</param>
 /// <param name="DistributionUrl">externalReferences[] of type distribution.</param>
 /// <param name="HashesJson">components[].hashes as a JSON array of {"alg","content"}, else null.</param>
+/// <param name="VersionRange">
+/// components[].versionRange, added in CycloneDX 1.7 and mutually exclusive with
+/// <paramref name="Version"/>: a component declaring a range has no concrete version, so this is
+/// what says why the version is absent rather than leaving it unexplained.
+/// </param>
+/// <param name="IsExternal">
+/// components[].isExternal, added in CycloneDX 1.7. Null when the document did not say — which
+/// every document below 1.7 is, so absence is not the same claim as false.
+/// </param>
+/// <param name="ManifestDevDeclared">
+/// The CycloneDX property taxonomy's dev-dependency marker (<c>cdx:npm:package:development</c> and
+/// the sibling per-ecosystem spellings — see <see cref="CycloneDxParser"/>), read verbatim as
+/// true/false/absent. This is a MANIFEST declaration, not a reachability verdict — it seeds
+/// <c>sbom_components.dependency_scope</c> only when nothing has verified it yet; see
+/// <see cref="SbomIngestRepository"/>'s ingest-side handling for why the two are not the same claim.
+/// </param>
 public sealed record CycloneDxComponent(
     string? BomRef,
     string Name,
@@ -58,7 +74,10 @@ public sealed record CycloneDxComponent(
     string? VcsUrl = null,
     string? IssueTrackerUrl = null,
     string? DistributionUrl = null,
-    string? HashesJson = null);
+    string? HashesJson = null,
+    string? VersionRange = null,
+    bool? IsExternal = null,
+    bool? ManifestDevDeclared = null);
 
 /// <summary>
 /// One (product, vulnerability) analysis statement, from either a vulnerabilities-only VEX

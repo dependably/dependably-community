@@ -44,7 +44,7 @@ namespace Dependably.Tests.Compliance;
 /// </para>
 /// </summary>
 [Trait("Category", "Compliance")]
-public sealed class RegexAnchorComplianceTests
+public sealed partial class RegexAnchorComplianceTests
 {
     private const string Marker = "regex-anchor-ok:";
     private const int MarkerWindow = 5;
@@ -52,9 +52,8 @@ public sealed class RegexAnchorComplianceTests
     // [GeneratedRegex(@"…")] / [GeneratedRegex("…")] / new Regex(@"…") / new Regex("…").
     // Group 'verbatim' tells us whether backslashes in the body are regex escapes or C# ones;
     // group 'body' is the pattern text.
-    private static readonly Regex PatternLiteral = new(
-        @"(?:GeneratedRegex|new\s+Regex)\s*\(\s*(?<verbatim>@)?""(?<body>(?:[^""\\]|\\.|"""")*)""",
-        RegexOptions.Compiled);
+    [GeneratedRegex(@"(?:GeneratedRegex|new\s+Regex)\s*\(\s*(?<verbatim>@)?""(?<body>(?:[^""\\]|\\.|"""")*)""")]
+    private static partial Regex PatternLiteral();
 
     private readonly ITestOutputHelper _output;
     public RegexAnchorComplianceTests(ITestOutputHelper output) => _output = output;
@@ -69,7 +68,7 @@ public sealed class RegexAnchorComplianceTests
             string text = File.ReadAllText(file);
             string rel = Path.GetRelativePath(SourceRoots.RepoRoot(), file);
 
-            foreach (Match m in PatternLiteral.Matches(text))
+            foreach (Match m in PatternLiteral().Matches(text))
             {
                 if (HasMarkerAbove(text, m.Index))
                 {

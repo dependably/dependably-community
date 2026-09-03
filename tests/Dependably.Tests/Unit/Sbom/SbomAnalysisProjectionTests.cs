@@ -32,7 +32,7 @@ public sealed class SbomAnalysisProjectionTests
             dependencyScope: "unknown", dependencyKind: "transitive", license: null),
         Component("c-serilog", "pkg:nuget/serilog@2.12.0", "nuget", "serilog", "2.12.0",
             dependencyScope: "unknown", dependencyKind: "direct", license: "Apache-2.0",
-            sbomScope: "excluded"),
+            sbomScope: "excluded", componentType: "framework"),
     ];
 
     private static List<AnalysisAdvisoryRow> Advisories() =>
@@ -254,6 +254,39 @@ public sealed class SbomAnalysisProjectionTests
     {
         var result = Run(Query(sort: "scope", dir: "asc", suppressed: true));
         Assert.Equal("dev", result.Items[0].DependencyScope);
+    }
+
+    /// <summary>
+    /// The document-declared scope is its own column and its own sort key — a component the SBOM
+    /// excluded is not a dev dependency, so ordering by one must not be served by the other.
+    /// </summary>
+    [Fact]
+    public void SbomScopeSort_GroupsByTheDocumentDeclaredScope()
+    {
+        var descending = Run(Query(sort: "sbomScope", dir: "desc", suppressed: true));
+        Assert.Equal("excluded", descending.Items[0].SbomScope);
+
+        var ascending = Run(Query(sort: "sbomScope", dir: "asc", suppressed: true));
+        Assert.Equal("excluded", ascending.Items[^1].SbomScope);
+    }
+
+    /// <summary>
+    /// Every rendered column is orderable, so each sort key must actually reorder the set rather
+    /// than fall through to the priority default — a key accepted but unimplemented reads to the
+    /// operator as a header that does nothing.
+    /// </summary>
+    [Theory]
+    [InlineData("type")]
+    [InlineData("dep")]
+    [InlineData("licenses")]
+    [InlineData("reach")]
+    public void EverySortKey_IsReversible(string sort)
+    {
+        var ascending = Run(Query(sort: sort, dir: "asc", suppressed: true)).Items.Select(i => i.ComponentId).ToList();
+        var descending = Run(Query(sort: sort, dir: "desc", suppressed: true)).Items.Select(i => i.ComponentId).ToList();
+
+        Assert.Equal(ascending.Count, descending.Count);
+        Assert.NotEqual(ascending, descending);
     }
 
     [Fact]
@@ -766,7 +799,8 @@ public sealed class SbomAnalysisProjectionTests
     private static AnalysisComponentRow Component(
         string id, string? purl, string? ecosystem, string purlName, string version,
         string dependencyScope, string dependencyKind, string? license,
-        string? sbomScope = null, string? dependencyPath = null) => new()
+        string? sbomScope = null, string? dependencyPath = null,
+        string componentType = "library") => new()
         {
             Id = id,
             Purl = purl,
@@ -774,7 +808,7 @@ public sealed class SbomAnalysisProjectionTests
             PurlName = purlName,
             Version = version,
             Name = purlName,
-            ComponentType = "library",
+            ComponentType = componentType,
             SbomScope = sbomScope,
             DependencyScope = dependencyScope,
             DependencyKind = dependencyKind,

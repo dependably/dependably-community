@@ -69,7 +69,7 @@ public sealed class VersionPrecedenceReadSurfacesTests : IClassFixture<Dependabl
     // length, crate bytes).
     private static async Task PushCargoCrateAsync(HttpClient client, string name, string version)
     {
-        byte[] crateBytes = [0x50, 0x4B, 0x03, 0x04];
+        byte[] crateBytes = CargoFixtures.BuildCrate(name, version);
         string metaJson = $"{{\"name\":\"{name}\",\"vers\":\"{version}\",\"deps\":[],\"features\":{{}},\"description\":\"test\"}}";
         byte[] metaEncoded = System.Text.Encoding.UTF8.GetBytes(metaJson);
         byte[] frame = new byte[4 + metaEncoded.Length + 4 + crateBytes.Length];

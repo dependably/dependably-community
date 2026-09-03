@@ -30,6 +30,36 @@ export function orderStagedFiles(staged) {
 }
 
 /**
+ * The two document kinds that attach to an existing project version rather than creating one.
+ * A VEX or SARIF PUT against a version the server does not know about is a 404 by design.
+ */
+const SBOM_DEPENDENT_KINDS = new Set(['vex', 'sarif'])
+
+/**
+ * Whether a staged VEX/SARIF must not be sent at all, because the SBOM that would have created
+ * its target version was rejected earlier in the same batch.
+ *
+ * Sending it anyway is what produces the misleading outcome this guards against: the server
+ * answers a truthful "No such project version", which lands on the VEX/SARIF row and reads as if
+ * that document were at fault, while the actual cause — the SBOM's own rejection — sits in a
+ * different row the operator has to connect for themselves.
+ *
+ * `versionExisted` is what keeps this from suppressing legitimate work: a VEX or SARIF for a
+ * version that already exists is unaffected by a co-submitted SBOM being rejected, so only a
+ * version this batch was going to create is treated as unreachable.
+ *
+ * @param {string} kind  the endpoint the file is submitted against ('sbom' | 'vex' | 'sarif'),
+ *                        not the sniffed kind — an unrecognised document goes to the SBOM
+ *                        endpoint and is a prerequisite like any other SBOM.
+ * @param {{ sbomRejected: boolean, versionExisted: boolean }} batch
+ * @returns {boolean}
+ */
+export function isBlockedBySbomFailure(kind, { sbomRejected, versionExisted }) {
+  if (!sbomRejected || versionExisted) return false
+  return SBOM_DEPENDENT_KINDS.has(kind)
+}
+
+/**
  * Describe a successful (HTTP 200) upload response as an i18n descriptor
  * `{ key, values }` for `$t(key, { values })`. Branches on `kind`, not on response shape,
  * because the three endpoints echo distinct count shapes (components / statements / results).

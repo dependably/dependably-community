@@ -5,7 +5,7 @@
 // client CONFIGURATION document) and a builder in lib/installCommand.js (the
 // per-artefact INVOCATION). installCommand.test.js pins its builder map against this
 // list, so a missing builder fails the suite rather than silently rendering nothing.
-export const ECOSYSTEMS = ['pypi', 'npm', 'nuget', 'maven', 'rpm', 'oci', 'golang', 'cargo', 'apk', 'terraform']
+export const ECOSYSTEMS = ['pypi', 'npm', 'nuget', 'maven', 'rpm', 'oci', 'golang', 'cargo', 'apk', 'terraform', 'hex']
 
 export const ECO_LABEL = {
   pypi:   'PyPI',
@@ -18,4 +18,5 @@ export const ECO_LABEL = {
   cargo:  'Cargo',
   apk:    'Alpine apk',
   terraform: 'Terraform',
+  hex:    'Hex',
 }

@@ -53,6 +53,7 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
     private readonly UpstreamClient _upstream;
     private readonly IUpstreamLatestVersionResolver _latestResolver;
     private readonly UpstreamRegistryResolver _registries;
+    private readonly Protocol.Hex.HexMasterKeyResolver? _hexMasterKeys;
     private readonly IAirGapMode _airGap;
     private readonly IConfiguration _config;
     private readonly ILogger<DeprecationRefreshService> _logger;
@@ -68,6 +69,8 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
     // RunOnStartup=true a rolling deploy would otherwise fire N simultaneous upstream sweeps.
     protected override bool RequiresLeaderLock => true;
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
+        Justification = "Dependency-injection constructor: the parameter list is the declared dependency set.")]
     public DeprecationRefreshService(
         PackageRepository packages,
         CacheArtifactRepository cacheArtifacts,
@@ -79,7 +82,8 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
         IConfiguration config,
         ILogger<DeprecationRefreshService> logger,
         TimeProvider time,
-        IDistributedLock locks)
+        IDistributedLock locks,
+        Protocol.Hex.HexMasterKeyResolver? hexMasterKeys = null)
         : base(config, logger, time, locks)
     {
         _packages = packages;
@@ -89,6 +93,7 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
         _latestResolver = latestResolver;
         _registries = registries;
         _airGap = airGap;
+        _hexMasterKeys = hexMasterKeys;
         _config = config;
         _logger = logger;
         _time = time;
@@ -472,7 +477,7 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
     }
 
     private static bool IsSupportedEcosystem(string ecosystem) =>
-        ecosystem is "npm" or "pypi" or "nuget" or "maven";
+        ecosystem is "npm" or "pypi" or "nuget" or "maven" or "hex";
 
     // Per-version deprecation map plus upstream's declared latest version (and, where the
     // ecosystem's metadata carries one, its publish timestamp). npm/PyPI carry a per-version
@@ -488,6 +493,7 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
             "pypi" => await FetchPyPiMetadataAsync(sources, purlName, ct),
             "nuget" or "maven" =>
                 (new Dictionary<string, string?>(), await _latestResolver.ResolveAsync(ecosystem, orgId, purlName, ct)),
+            "hex" => await FetchHexMetadataAsync(orgId, purlName, ct),
             _ => (new Dictionary<string, string?>(), UpstreamLatestVersion.None)
         };
     }
@@ -542,6 +548,35 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
     // handlers and UpstreamLatestVersionResolver use — so a private mirror and the
     // empty=disabled contract are honoured identically here rather than a hardcoded
     // public-registry default bypassing both, without a second decrypt pass over the same rows.
+    // Hex: the signed package resource carries every release's retirement status — Hex's
+    // deprecation — beside its publish time, so one verified fetch yields both the per-version
+    // deprecation map and the latest stable, non-retired release.
+    private async Task<(Dictionary<string, string?> Deprecated, UpstreamLatestVersion Latest)> FetchHexMetadataAsync(
+        string orgId, string purlName, CancellationToken ct)
+    {
+        var result = await Protocol.Hex.HexUpstreamPackageFetcher.FetchAsync(_upstream, _registries, orgId, purlName, _logger, _hexMasterKeys, ct);
+        if (result.Package is null)
+        {
+            return (new Dictionary<string, string?>(), UpstreamLatestVersion.None);
+        }
+
+        var deprecated = new Dictionary<string, string?>(StringComparer.Ordinal);
+        foreach (var release in result.Package.Releases)
+        {
+            if (release.Retired is { } retired)
+            {
+                deprecated[release.Version] = Protocol.Hex.HexIndexBuilder.RetirementAsDeprecation(retired);
+            }
+        }
+
+        var stable = Protocol.Hex.HexUpstreamPackageFetcher.StableVersionsDescending(result.Package);
+        var latestRelease = stable.Count == 0 ? null : result.Package.Releases.FirstOrDefault(r => r.Version == stable[0]);
+        var latest = stable.Count == 0
+            ? UpstreamLatestVersion.None
+            : new UpstreamLatestVersion(stable[0], latestRelease?.PublishedAt?.ToDateTimeOffset(), stable);
+        return (deprecated, latest);
+    }
+
     private async Task<(Dictionary<string, string?> Deprecated, UpstreamLatestVersion Latest)> FetchPyPiMetadataAsync(
         IReadOnlyList<UpstreamSource> sources, string purlName, CancellationToken ct)
     {

@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using static Dependably.Api.Setup.SetupVocabulary;
 
 namespace Dependably.Api.Setup;
@@ -28,27 +29,42 @@ namespace Dependably.Api.Setup;
 /// in <c>web/src/lib/installCommand.js</c>'s BASE_PATHS — a change here needs a matching
 /// change there.
 /// </summary>
-public static class SetupRecipeCatalog
+public static partial class SetupRecipeCatalog
 {
     /// <summary>
     /// The recipes for one ecosystem, or null when the ecosystem is unknown.
     /// </summary>
     /// <param name="ecosystem">Ecosystem key, matching <c>web/src/lib/ecosystems.js</c>.</param>
     /// <param name="baseUrl">Tenant-implicit base URL, with no trailing slash.</param>
-    public static SetupRecipesResponse? Build(string ecosystem, string baseUrl) => ecosystem switch
+    public static SetupRecipesResponse? Build(string ecosystem, string baseUrl) => Build(ecosystem, baseUrl, hex: null);
+
+    /// <summary>
+    /// <paramref name="hex"/> carries the tenant facts the Hex recipes embed — the org's signing
+    /// public key — which no other ecosystem's recipe needs. Null renders a placeholder that
+    /// tells the reader where the key is served, so the catalogue can still be built without a
+    /// tenant (the compliance sweep does) and a tenant whose key cannot be created yet still
+    /// gets a recipe that names the missing piece.
+    /// </summary>
+    public static SetupRecipesResponse? Build(string ecosystem, string baseUrl, HexSetupContext? hex)
     {
-        "npm" => Npm(baseUrl),
-        "pypi" => PyPi(baseUrl),
-        "nuget" => NuGet(baseUrl),
-        "maven" => Maven(baseUrl),
-        "cargo" => Cargo(baseUrl),
-        "oci" => Oci(baseUrl),
-        "golang" => Go(baseUrl),
-        "rpm" => Rpm(baseUrl),
-        "apk" => Apk(baseUrl),
-        "terraform" => Terraform(baseUrl),
-        _ => null
-    };
+        var built = ecosystem switch
+        {
+            "npm" => Npm(baseUrl),
+            "pypi" => PyPi(baseUrl),
+            "nuget" => NuGet(baseUrl),
+            "maven" => Maven(baseUrl),
+            "cargo" => Cargo(baseUrl),
+            "oci" => Oci(baseUrl),
+            "golang" => Go(baseUrl),
+            "rpm" => Rpm(baseUrl),
+            "apk" => Apk(baseUrl),
+            "terraform" => Terraform(baseUrl),
+            "hex" => Hex(baseUrl, hex),
+            _ => null
+        };
+
+        return built is null ? null : WithUsernameCaveat(built);
+    }
 
     // ── Shared helpers ────────────────────────────────────────────────────────
 
@@ -85,6 +101,49 @@ public static class SetupRecipeCatalog
     private const string CaveatCleartextCredentials = "httpCleartextCredentials";
     private const string CaveatInsecureRegistry = "insecureRegistry";
     private const string CaveatHttpMirror = "httpMirror";
+    private const string CaveatUsernameIgnored = "usernameIgnored";
+
+    /// <summary>
+    /// The Basic-auth username every credential-bearing recipe carries.
+    ///
+    /// It is filler, not an identity: <c>TokenAuthExtensions.ResolveTokenAsync</c> takes
+    /// everything after the first colon as the token and never reads the username, so any
+    /// value authenticates the same. A reader cannot tell that from a config file that says
+    /// <c>username = user</c> — it reads as a placeholder for their own account name, which
+    /// they then go looking for and do not find. <see cref="CaveatUsernameIgnored"/> is what
+    /// says so, and it is attached by <see cref="WithUsernameCaveat"/> from this constant
+    /// rather than hand-tagged, so a recipe that grows a username cannot ship without it.
+    /// </summary>
+    private const string BasicAuthUsername = "user";
+
+    /// <summary>
+    /// Attaches <see cref="CaveatUsernameIgnored"/> to every recipe that puts
+    /// <see cref="BasicAuthUsername"/> on screen, and to no other.
+    /// </summary>
+    private static SetupRecipesResponse WithUsernameCaveat(SetupRecipesResponse built) =>
+        built with
+        {
+            Recipes = built.Recipes
+                .Select(r => CarriesUsername(r)
+                    ? r with { Caveats = [.. r.Caveats, CaveatUsernameIgnored] }
+                    : r)
+                .ToArray()
+        };
+
+    /// <summary>
+    /// True when the reader will see the filler username in what this recipe renders — its
+    /// file bodies or the command that delivers the token. The verify block is excluded: it
+    /// exercises a configuration that is already written, and never names a credential.
+    /// </summary>
+    private static bool CarriesUsername(SetupRecipe recipe) =>
+        recipe.Files.Any(f => UsernameValueRegex().IsMatch(f.Body))
+        || (recipe.TokenDelivery.Command is { } command && UsernameValueRegex().IsMatch(command));
+
+    // Whole-word, so the field and variable names that merely contain the value — <username>,
+    // --username, UV_INDEX_DEPENDABLY_USERNAME — do not count; only the value itself does.
+    // Built from the constant so the two cannot drift; the value needs no regex escaping.
+    [GeneratedRegex(@"\b" + BasicAuthUsername + @"\b")]
+    private static partial Regex UsernameValueRegex();
 
     // ── npm ───────────────────────────────────────────────────────────────────
 
@@ -153,7 +212,7 @@ public static class SetupRecipeCatalog
                 Files:
                 [
                     File("pip.conf", InRepoRoot, "ini",
-                        $"[global]\nindex-url = {scheme}://user:${{DEPENDABLY_TOKEN}}@{authority}/simple/{trustedHostLine}")
+                        $"[global]\nindex-url = {scheme}://{BasicAuthUsername}:${{DEPENDABLY_TOKEN}}@{authority}/simple/{trustedHostLine}")
                 ],
                 TokenDelivery: SetupTokenDelivery.FromEnvVar("DEPENDABLY_TOKEN"),
                 // pip reads the user-level file unless pointed at this one explicitly.
@@ -164,7 +223,7 @@ public static class SetupRecipeCatalog
                 Files:
                 [
                     File("~/.config/pip/pip.conf", InHomeDir, "ini",
-                        $"[global]\nindex-url = {scheme}://user:<token>@{authority}/simple/{trustedHostLine}",
+                        $"[global]\nindex-url = {scheme}://{BasicAuthUsername}:<token>@{authority}/simple/{trustedHostLine}",
                         secretBearing: true)
                 ],
                 TokenDelivery: SetupTokenDelivery.Literal(),
@@ -179,7 +238,7 @@ public static class SetupRecipeCatalog
                     File("pyproject.toml", InRepoRoot, "toml",
                         $"[[tool.poetry.source]]\nname = \"dependably\"\nurl = \"{indexUrl}\"\npriority = \"primary\"")
                 ],
-                TokenDelivery: SetupTokenDelivery.FromCommand("poetry config http-basic.dependably user <token>"),
+                TokenDelivery: SetupTokenDelivery.FromCommand($"poetry config http-basic.dependably {BasicAuthUsername} <token>"),
                 Verify: "poetry check\npoetry add requests",
                 Caveats: []),
 
@@ -192,7 +251,7 @@ public static class SetupRecipeCatalog
                 // uv reads credentials from the environment by index name, as a pair that
                 // appears in no file — so this is an export, not a file interpolation.
                 TokenDelivery: SetupTokenDelivery.FromCommand(
-                    "export UV_INDEX_DEPENDABLY_USERNAME=user\nexport UV_INDEX_DEPENDABLY_PASSWORD=<token>"),
+                    $"export UV_INDEX_DEPENDABLY_USERNAME={BasicAuthUsername}\nexport UV_INDEX_DEPENDABLY_PASSWORD=<token>"),
                 Verify: "uv add requests",
                 Caveats: []),
 
@@ -201,7 +260,7 @@ public static class SetupRecipeCatalog
                 Files:
                 [
                     File("~/.pypirc", InHomeDir, "ini",
-                        $"[distutils]\nindex-servers = dependably\n\n[dependably]\nrepository = {baseUrl}/simple/\nusername = user\npassword = <token>",
+                        $"[distutils]\nindex-servers = dependably\n\n[dependably]\nrepository = {baseUrl}/simple/\nusername = {BasicAuthUsername}\npassword = <token>",
                         secretBearing: true)
                 ],
                 TokenDelivery: SetupTokenDelivery.Literal(),
@@ -245,7 +304,7 @@ public static class SetupRecipeCatalog
               </packageSources>
               <packageSourceCredentials>
                 <dependably>
-                  <add key="Username" value="user" />
+                  <add key="Username" value="{BasicAuthUsername}" />
                   <add key="ClearTextPassword" value="%DEPENDABLY_TOKEN%" />
                 </dependably>
               </packageSourceCredentials>
@@ -265,7 +324,7 @@ public static class SetupRecipeCatalog
             new(Variant: "dotnet", OperationInstall, ScopeGlobal, PresetPull,
                 Files: [],
                 TokenDelivery: SetupTokenDelivery.FromCommand(
-                    $"dotnet nuget add source {indexUrl} \\\n  --name dependably \\\n  --username user \\\n  --password <token> \\\n  --store-password-in-clear-text{insecureFlag}"),
+                    $"dotnet nuget add source {indexUrl} \\\n  --name dependably \\\n  --username {BasicAuthUsername} \\\n  --password <token> \\\n  --store-password-in-clear-text{insecureFlag}"),
                 Verify: "dotnet nuget list source\ndotnet add package Newtonsoft.Json",
                 Caveats: []),
 
@@ -279,7 +338,7 @@ public static class SetupRecipeCatalog
             new(Variant: "dotnet", OperationPublish, ScopeGlobal, PresetPush,
                 Files: [],
                 TokenDelivery: SetupTokenDelivery.FromCommand(
-                    $"dotnet nuget add source {indexUrl} \\\n  --name dependably \\\n  --username user \\\n  --password <token> \\\n  --store-password-in-clear-text{insecureFlag}"),
+                    $"dotnet nuget add source {indexUrl} \\\n  --name dependably \\\n  --username {BasicAuthUsername} \\\n  --password <token> \\\n  --store-password-in-clear-text{insecureFlag}"),
                 Verify: "dotnet pack -c Release\ndotnet nuget push bin/Release/*.nupkg --api-key <token> --source dependably",
                 Caveats: []),
         };
@@ -296,106 +355,6 @@ public static class SetupRecipeCatalog
         // mirror declaration rather than a per-tool flag.
         string? httpCaveat = IsPlainHttp(baseUrl) ? CaveatMavenBlocked : null;
 
-        // The <server> id must match the <repository> id — that is how Maven attaches
-        // credentials to a repository.
-        string SettingsXml(string password, string? repositories) => $"""
-            <settings>
-              <servers>
-                <server>
-                  <id>dependably</id>
-                  <username>user</username>
-                  <password>{password}</password>
-                </server>
-              </servers>{repositories}
-            </settings>
-            """;
-
-        string profileBlock = $"""
-
-              <profiles>
-                <profile>
-                  <id>dependably</id>
-                  <repositories>
-                    <repository>
-                      <id>dependably</id>
-                      <url>{repoUrl}</url>
-                    </repository>
-                  </repositories>
-                </profile>
-              </profiles>
-              <activeProfiles><activeProfile>dependably</activeProfile></activeProfiles>
-            """;
-
-        string pomRepositories = $"""
-            <repositories>
-              <repository>
-                <id>dependably</id>
-                <url>{repoUrl}</url>
-              </repository>
-            </repositories>
-            """;
-
-        string pomDistribution = $"""
-            <distributionManagement>
-              <repository>
-                <id>dependably</id>
-                <url>{repoUrl}</url>
-              </repository>
-            </distributionManagement>
-            """;
-
-        // Gradle resolves the credential from a project property first and falls back to the
-        // environment, so one build script serves both a developer's gradle.properties and CI.
-        string GradleGroovy(bool publishing) => $$"""
-            repositories {
-                maven {
-                    url '{{repoUrl}}'
-                    credentials {
-                        username = 'user'
-                        password = findProperty('dependablyToken') ?: System.getenv('DEPENDABLY_TOKEN')
-                    }
-                }
-            }
-            """ + (publishing ? $$"""
-
-            publishing {
-                repositories {
-                    maven {
-                        url '{{repoUrl}}'
-                        credentials {
-                            username = 'user'
-                            password = findProperty('dependablyToken') ?: System.getenv('DEPENDABLY_TOKEN')
-                        }
-                    }
-                }
-            }
-            """ : "");
-
-        string GradleKotlin(bool publishing) => $$"""
-            repositories {
-                maven {
-                    url = uri("{{repoUrl}}")
-                    credentials {
-                        username = "user"
-                        password = (findProperty("dependablyToken") as String?) ?: System.getenv("DEPENDABLY_TOKEN")
-                    }
-                }
-            }
-            """ + (publishing ? $$"""
-
-            publishing {
-                repositories {
-                    maven {
-                        url = uri("{{repoUrl}}")
-                        credentials {
-                            username = "user"
-                            password = (findProperty("dependablyToken") as String?) ?: System.getenv("DEPENDABLY_TOKEN")
-                        }
-                    }
-                }
-            }
-            """ : "");
-
         var recipes = new List<SetupRecipe>
         {
             // Maven interpolates ${env.VAR} in settings.xml, so the project-scoped recipe
@@ -403,15 +362,15 @@ public static class SetupRecipeCatalog
             new(Variant: "maven", OperationInstall, ScopeProject, PresetPull,
                 Files:
                 [
-                    File("pom.xml", InRepoRoot, "xml", pomRepositories),
-                    File("~/.m2/settings.xml", OnEachMachine, "xml", SettingsXml("${env.DEPENDABLY_TOKEN}", null)),
+                    File("pom.xml", InRepoRoot, "xml", MavenPomRepositories(repoUrl)),
+                    File("~/.m2/settings.xml", OnEachMachine, "xml", MavenSettingsXml("${env.DEPENDABLY_TOKEN}", null)),
                 ],
                 TokenDelivery: SetupTokenDelivery.FromEnvVar("DEPENDABLY_TOKEN"),
                 Verify: "mvn -q dependency:get -Dartifact=org.slf4j:slf4j-api:2.0.13\nmvn dependency:resolve",
                 Caveats: Caveats(httpCaveat)),
 
             new(Variant: "maven", OperationInstall, ScopeGlobal, PresetPull,
-                Files: [File("~/.m2/settings.xml", InHomeDir, "xml", SettingsXml("<token>", profileBlock), secretBearing: true)],
+                Files: [File("~/.m2/settings.xml", InHomeDir, "xml", MavenSettingsXml("<token>", MavenProfileBlock(repoUrl)), secretBearing: true)],
                 TokenDelivery: SetupTokenDelivery.Literal(),
                 Verify: "mvn -q dependency:get -Dartifact=org.slf4j:slf4j-api:2.0.13",
                 Caveats: Caveats(httpCaveat)),
@@ -419,21 +378,21 @@ public static class SetupRecipeCatalog
             new(Variant: "maven", OperationPublish, ScopeProject, PresetPush,
                 Files:
                 [
-                    File("pom.xml", InRepoRoot, "xml", pomDistribution),
-                    File("~/.m2/settings.xml", OnEachMachine, "xml", SettingsXml("${env.DEPENDABLY_TOKEN}", null)),
+                    File("pom.xml", InRepoRoot, "xml", MavenPomDistribution(repoUrl)),
+                    File("~/.m2/settings.xml", OnEachMachine, "xml", MavenSettingsXml("${env.DEPENDABLY_TOKEN}", null)),
                 ],
                 TokenDelivery: SetupTokenDelivery.FromEnvVar("DEPENDABLY_TOKEN"),
                 Verify: "mvn deploy -DskipTests",
                 Caveats: Caveats(httpCaveat)),
 
             new(Variant: "gradle-groovy", OperationInstall, ScopeProject, PresetPull,
-                Files: [File("build.gradle", InRepoRoot, "groovy", GradleGroovy(publishing: false))],
+                Files: [File("build.gradle", InRepoRoot, "groovy", GradleGroovy(repoUrl, publishing: false))],
                 TokenDelivery: SetupTokenDelivery.FromEnvVar("DEPENDABLY_TOKEN"),
                 Verify: "./gradlew dependencies --refresh-dependencies",
                 Caveats: Caveats(httpCaveat)),
 
             new(Variant: "gradle-groovy", OperationPublish, ScopeProject, PresetPush,
-                Files: [File("build.gradle", InRepoRoot, "groovy", GradleGroovy(publishing: true))],
+                Files: [File("build.gradle", InRepoRoot, "groovy", GradleGroovy(repoUrl, publishing: true))],
                 TokenDelivery: SetupTokenDelivery.FromEnvVar("DEPENDABLY_TOKEN"),
                 Verify: "./gradlew publish",
                 Caveats: Caveats(httpCaveat)),
@@ -445,13 +404,13 @@ public static class SetupRecipeCatalog
                 Caveats: Caveats(httpCaveat)),
 
             new(Variant: "gradle-kotlin", OperationInstall, ScopeProject, PresetPull,
-                Files: [File("build.gradle.kts", InRepoRoot, "kotlin", GradleKotlin(publishing: false))],
+                Files: [File("build.gradle.kts", InRepoRoot, "kotlin", GradleKotlin(repoUrl, publishing: false))],
                 TokenDelivery: SetupTokenDelivery.FromEnvVar("DEPENDABLY_TOKEN"),
                 Verify: "./gradlew dependencies --refresh-dependencies",
                 Caveats: Caveats(httpCaveat)),
 
             new(Variant: "gradle-kotlin", OperationPublish, ScopeProject, PresetPush,
-                Files: [File("build.gradle.kts", InRepoRoot, "kotlin", GradleKotlin(publishing: true))],
+                Files: [File("build.gradle.kts", InRepoRoot, "kotlin", GradleKotlin(repoUrl, publishing: true))],
                 TokenDelivery: SetupTokenDelivery.FromEnvVar("DEPENDABLY_TOKEN"),
                 Verify: "./gradlew publish",
                 Caveats: Caveats(httpCaveat)),
@@ -474,6 +433,107 @@ public static class SetupRecipeCatalog
 
         return new SetupRecipesResponse("maven", variants, recipes);
     }
+
+    // The <server> id must match the <repository> id — that is how Maven attaches
+    // credentials to a repository.
+    private static string MavenSettingsXml(string password, string? repositories) => $"""
+        <settings>
+          <servers>
+            <server>
+              <id>dependably</id>
+              <username>{BasicAuthUsername}</username>
+              <password>{password}</password>
+            </server>
+          </servers>{repositories}
+        </settings>
+        """;
+
+    private static string MavenProfileBlock(string repoUrl) => $"""
+
+          <profiles>
+            <profile>
+              <id>dependably</id>
+              <repositories>
+                <repository>
+                  <id>dependably</id>
+                  <url>{repoUrl}</url>
+                </repository>
+              </repositories>
+            </profile>
+          </profiles>
+          <activeProfiles><activeProfile>dependably</activeProfile></activeProfiles>
+        """;
+
+    private static string MavenPomRepositories(string repoUrl) => $"""
+        <repositories>
+          <repository>
+            <id>dependably</id>
+            <url>{repoUrl}</url>
+          </repository>
+        </repositories>
+        """;
+
+    private static string MavenPomDistribution(string repoUrl) => $"""
+        <distributionManagement>
+          <repository>
+            <id>dependably</id>
+            <url>{repoUrl}</url>
+          </repository>
+        </distributionManagement>
+        """;
+
+    // Gradle resolves the credential from a project property first and falls back to the
+    // environment, so one build script serves both a developer's gradle.properties and CI.
+    private static string GradleGroovy(string repoUrl, bool publishing) => $$"""
+        repositories {
+            maven {
+                url '{{repoUrl}}'
+                credentials {
+                    username = '{{BasicAuthUsername}}'
+                    password = findProperty('dependablyToken') ?: System.getenv('DEPENDABLY_TOKEN')
+                }
+            }
+        }
+        """ + (publishing ? $$"""
+
+        publishing {
+            repositories {
+                maven {
+                    url '{{repoUrl}}'
+                    credentials {
+                        username = '{{BasicAuthUsername}}'
+                        password = findProperty('dependablyToken') ?: System.getenv('DEPENDABLY_TOKEN')
+                    }
+                }
+            }
+        }
+        """ : "");
+
+    private static string GradleKotlin(string repoUrl, bool publishing) => $$"""
+        repositories {
+            maven {
+                url = uri("{{repoUrl}}")
+                credentials {
+                    username = "{{BasicAuthUsername}}"
+                    password = (findProperty("dependablyToken") as String?) ?: System.getenv("DEPENDABLY_TOKEN")
+                }
+            }
+        }
+        """ + (publishing ? $$"""
+
+        publishing {
+            repositories {
+                maven {
+                    url = uri("{{repoUrl}}")
+                    credentials {
+                        username = "{{BasicAuthUsername}}"
+                        password = (findProperty("dependablyToken") as String?) ?: System.getenv("DEPENDABLY_TOKEN")
+                    }
+                }
+            }
+        }
+        """ : "");
+
 
     // ── Cargo ─────────────────────────────────────────────────────────────────
 
@@ -563,13 +623,13 @@ public static class SetupRecipeCatalog
         {
             new(Variant: "docker", OperationInstall, ScopeGlobal, PresetPull,
                 Files: daemonFile,
-                TokenDelivery: SetupTokenDelivery.FromCommand($"echo <token> | docker login {host} --username user --password-stdin"),
+                TokenDelivery: SetupTokenDelivery.FromCommand($"echo <token> | docker login {host} --username {BasicAuthUsername} --password-stdin"),
                 Verify: $"docker pull {host}/library/alpine:3.20",
                 Caveats: Caveats(httpCaveat)),
 
             new(Variant: "docker", OperationPublish, ScopeGlobal, PresetPush,
                 Files: daemonFile,
-                TokenDelivery: SetupTokenDelivery.FromCommand($"echo <token> | docker login {host} --username user --password-stdin"),
+                TokenDelivery: SetupTokenDelivery.FromCommand($"echo <token> | docker login {host} --username {BasicAuthUsername} --password-stdin"),
                 Verify: $"docker tag <image>:<tag> {host}/<image>:<tag>\ndocker push {host}/<image>:<tag>",
                 Caveats: Caveats(httpCaveat)),
         };
@@ -588,7 +648,7 @@ public static class SetupRecipeCatalog
         // Go reads ~/.netrc regardless of scope, so even the project recipe points the
         // credential at the home directory rather than at anything committable.
         var netrc = File("~/.netrc", OnEachMachine, "ini",
-            $"machine {host} login user password <token>", secretBearing: true);
+            $"machine {host} login {BasicAuthUsername} password <token>", secretBearing: true);
 
         // Go is proxy-only — there is no hosted publish path, so no publish recipes exist.
         var recipes = new List<SetupRecipe>
@@ -628,7 +688,7 @@ public static class SetupRecipeCatalog
                 Files:
                 [
                     File("/etc/yum.repos.d/dependably.repo", null, "ini",
-                        $"[dependably]\nname=dependably\nbaseurl={baseUrl}/rpm/\nenabled=1\ngpgcheck=0\nusername=user\npassword=<token>",
+                        $"[dependably]\nname=dependably\nbaseurl={baseUrl}/rpm/\nenabled=1\ngpgcheck=0\nusername={BasicAuthUsername}\npassword=<token>",
                         secretBearing: true)
                 ],
                 TokenDelivery: SetupTokenDelivery.Literal(),
@@ -638,7 +698,7 @@ public static class SetupRecipeCatalog
             new(Variant: "dnf", OperationPublish, ScopeGlobal, PresetPush,
                 Files: [],
                 TokenDelivery: SetupTokenDelivery.FromCommand(
-                    $"curl -u user:<token> --upload-file pkg.rpm {baseUrl}/rpm/upload"),
+                    $"curl -u {BasicAuthUsername}:<token> --upload-file pkg.rpm {baseUrl}/rpm/upload"),
                 Verify: "dnf clean all\ndnf --disablerepo='*' --enablerepo=dependably list available",
                 Caveats: Caveats(httpCaveat)),
         };
@@ -652,7 +712,7 @@ public static class SetupRecipeCatalog
     {
         var uri = new Uri(baseUrl);
         // Credentials carried in the URL userinfo — the apk client's only auth mechanism.
-        string userinfoUrl = $"{uri.Scheme}://user:<token>@{uri.Authority}/apk";
+        string userinfoUrl = $"{uri.Scheme}://{BasicAuthUsername}:<token>@{uri.Authority}/apk";
         string? httpCaveat = IsPlainHttp(baseUrl) ? CaveatCleartextCredentials : null;
 
         // apk is proxy-only, so there is no publish recipe.
@@ -678,7 +738,7 @@ public static class SetupRecipeCatalog
     private static SetupRecipesResponse Terraform(string baseUrl)
     {
         var uri = new Uri(baseUrl);
-        string userinfoUrl = $"{uri.Scheme}://user:<token>@{uri.Authority}/terraform/";
+        string userinfoUrl = $"{uri.Scheme}://{BasicAuthUsername}:<token>@{uri.Authority}/terraform/";
         // Terraform rejects an http:// network-mirror URL while parsing the file, before any
         // request is made, so on a plain-HTTP deployment this recipe cannot work at all —
         // there is no client-side override, only terminating TLS in front of Dependably.
@@ -703,5 +763,72 @@ public static class SetupRecipeCatalog
         };
 
         return new SetupRecipesResponse("terraform", [new SetupVariant("terraform", "Terraform")], recipes);
+    }
+
+    // ── Hex ───────────────────────────────────────────────────────────────────
+
+    private static SetupRecipesResponse Hex(string baseUrl, HexSetupContext? hex)
+    {
+        string repoUrl = $"{baseUrl}/hex";
+        string apiUrl = $"{baseUrl}/hex/api";
+        string publicKeyPem = hex?.PublicKeyPem?.Trim()
+            ?? $"<public key: GET {repoUrl}/public_key>";
+
+        // Every Hex client verifies two things about each registry resource: the RSA signature
+        // against the public key it registered the repository with, and the repository name
+        // embedded in the signed payload against the name it registered. Dependably signs under
+        // the fixed name "dependably", so the repository must be registered under exactly that
+        // name — a different local name fails origin verification on every fetch.
+        string mixAdd =
+            $"curl -sSf {repoUrl}/public_key -o dependably-hex.pem\n"
+            + $"mix hex.repo add dependably {repoUrl} --public-key dependably-hex.pem";
+        string mixAddAuthed = mixAdd + " --auth-key <token>";
+
+        string rebarConfig = $$"""
+            {hex, [{repos, [
+              #{name => <<"dependably">>,
+                repo_url => <<"{{repoUrl}}">>,
+                api_url => <<"{{apiUrl}}">>,
+                repo_key => <<"<token>">>,
+                api_key => <<"<token>">>,
+                repo_public_key => <<"{{publicKeyPem.Replace("\n", "\\n")}}">>}
+            ]}]}.
+            """;
+
+        string mixDep = "{:my_dep, \"~> 1.0\", repo: :dependably}";
+
+        var recipes = new List<SetupRecipe>
+        {
+            new(Variant: "mix", OperationInstall, ScopeGlobal, PresetPull,
+                Files: [],
+                TokenDelivery: SetupTokenDelivery.FromCommand(mixAddAuthed),
+                Verify: $"mix hex.repo list\n# in mix.exs deps: {mixDep}\nmix deps.get",
+                Caveats: []),
+
+            new(Variant: "mix", OperationPublish, ScopeGlobal, PresetPush,
+                Files: [],
+                // Mix has one API URL, read from the environment, and one API key; the read plane
+                // stays the registered repository so resolution and publishing point at the same
+                // registry.
+                TokenDelivery: SetupTokenDelivery.FromCommand(
+                    $"{mixAddAuthed}\nexport HEX_API_URL={apiUrl}\nexport HEX_API_KEY=<token>"),
+                Verify: "mix hex.publish --yes",
+                Caveats: []),
+
+            new(Variant: "rebar3", OperationInstall, ScopeGlobal, PresetPull,
+                Files: [File("~/.config/rebar3/rebar.config", InHomeDir, "erlang", rebarConfig, secretBearing: true)],
+                TokenDelivery: SetupTokenDelivery.Literal(),
+                Verify: "rebar3 update\nrebar3 get-deps",
+                Caveats: []),
+
+            new(Variant: "rebar3", OperationPublish, ScopeGlobal, PresetPush,
+                Files: [File("~/.config/rebar3/rebar.config", InHomeDir, "erlang", rebarConfig, secretBearing: true)],
+                TokenDelivery: SetupTokenDelivery.Literal(),
+                Verify: "rebar3 hex publish --repo dependably --yes",
+                Caveats: []),
+        };
+
+        return new SetupRecipesResponse("hex",
+            [new SetupVariant("mix", "Elixir (Mix)"), new SetupVariant("rebar3", "Erlang (Rebar3)")], recipes);
     }
 }

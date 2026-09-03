@@ -31,7 +31,7 @@ public sealed class EnrichmentFreshnessCountTests : IAsyncLifetime
     public async Task InitializeAsync() => await new SchemaInitializer(_db).InitializeAsync();
     public async Task DisposeAsync() => await _db.DisposeAsync();
 
-    private InstanceVulnTrackerConfig TrackerConfig(TimeProvider time, int horizonHours) =>
+    private static InstanceVulnTrackerConfig TrackerConfig(TimeProvider time, int horizonHours) =>
         new((key, _) => Task.FromResult<string?>(key switch
         {
             "vuln_tracker_base_url" => "https://tracker.example.invalid",

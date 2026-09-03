@@ -393,22 +393,24 @@
 
   // Server sorts and pages; DataTable's local sort is neutralized so its header UI keeps
   // working without reordering the page the server already ordered.
+  // Column keys double as the API's `sort` values — the server rejects anything outside its
+  // own set, so a header key that drifts from it 422s the whole table rather than sorting it.
   const NOOP_CMP = () => 0
   const comparators = {
-    name: NOOP_CMP, version: NOOP_CMP, type: NOOP_CMP, depScope: NOOP_CMP, sbomScope: NOOP_CMP,
+    name: NOOP_CMP, version: NOOP_CMP, type: NOOP_CMP, scope: NOOP_CMP, sbomScope: NOOP_CMP,
     dep: NOOP_CMP, licenses: NOOP_CMP, severity: NOOP_CMP, priority: NOOP_CMP, reach: NOOP_CMP,
   }
   $: columns = [
     { key: 'name',      label: $t('sbomAnalysis.columns.component'),   sortable: true,  width: '190px' },
     { key: 'version',   label: $t('sbomAnalysis.columns.version'),     sortable: true,  width: '150px' },
-    { key: 'type',      label: $t('sbomAnalysis.columns.type'),        sortable: false, width: '90px' },
-    { key: 'depScope',  label: $t('sbomAnalysis.columns.dependency'),  sortable: true,  width: '110px' },
+    { key: 'type',      label: $t('sbomAnalysis.columns.type'),        sortable: true,  width: '90px' },
+    { key: 'scope',     label: $t('sbomAnalysis.columns.dependency'),  sortable: true,  width: '110px' },
     { key: 'sbomScope', label: $t('sbomAnalysis.columns.scope'),       sortable: true,  width: '110px' },
-    { key: 'dep',       label: $t('sbomAnalysis.columns.dep'),         sortable: false, width: '90px' },
-    { key: 'licenses',  label: $t('sbomAnalysis.columns.licenses'),    sortable: false, width: '140px' },
+    { key: 'dep',       label: $t('sbomAnalysis.columns.dep'),         sortable: true,  width: '90px' },
+    { key: 'licenses',  label: $t('sbomAnalysis.columns.licenses'),    sortable: true,  width: '140px' },
     { key: 'severity',  label: $t('sbomAnalysis.columns.vulns'),       sortable: true,  width: '130px', defaultDir: 'desc' },
     { key: 'priority',  label: $t('sbomAnalysis.columns.priority'),    sortable: true,  width: '100px', defaultDir: 'desc' },
-    { key: 'reach',     label: $t('sbomAnalysis.columns.reach'),       sortable: false, width: '120px' },
+    { key: 'reach',     label: $t('sbomAnalysis.columns.reach'),       sortable: true,  width: '120px' },
   ]
 </script>
 
@@ -911,10 +913,15 @@
     {/if}
   </div>
 
-  {#if uploadOpen}
+  <!-- Guarded on `project`, not on `uploadOpen` alone: the modal reads its parent target once, at
+       mount, so opening it before the detail payload resolves would freeze the folder at null and
+       file the upload into the root scope. -->
+  {#if uploadOpen && project}
     <SbomUploadModal
       presetProjectId={projectId}
-      presetProjectName={project?.name ?? ''}
+      presetProjectName={project.name}
+      presetParentId={project.parentId ?? null}
+      presetParentName={project.ancestors?.at(-1)?.name ?? null}
       presetVersionLabel={versionLabel}
       on:close={() => { uploadOpen = false; loadDocuments(); load() }}
     />

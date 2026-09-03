@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS org_settings (
     max_upload_bytes_rpm    INTEGER,           -- per-ecosystem RPM cap; falls back to max_upload_bytes
     max_upload_bytes_oci    INTEGER,           -- per-ecosystem OCI (Docker) cap; falls back to max_upload_bytes
     max_upload_bytes_cargo  INTEGER,           -- per-ecosystem Cargo cap; falls back to max_upload_bytes
+    max_upload_bytes_hex    INTEGER,           -- per-ecosystem Hex cap; falls back to max_upload_bytes
     keep_versions       INTEGER,            -- GC: max versions to retain per package per ecosystem
     keep_days           INTEGER,            -- GC: evict proxy blobs unused for this many days
     activity_retention_days INTEGER DEFAULT 90,  -- GC: delete activity rows older than this; NULL resolves to the ACTIVITY_RETENTION_DAYS instance default (90) so activity is bounded by default
@@ -879,6 +880,11 @@ CREATE TABLE IF NOT EXISTS upstream_registry (
     -- shapes differ, so a wrong value fails every fetch rather than degrading. Ignored by every
     -- other ecosystem, whose serve and fetch protocols are the same.
     upstream_protocol TEXT CHECK (upstream_protocol IS NULL OR upstream_protocol IN ('mirror')),
+    -- Hex: PEM public key of the upstream repository. Every Hex registry resource is signed, and
+    -- the proxy verifies an upstream resource against this key before it re-signs the content
+    -- under the org's own key; an upstream with no key is not consulted. Ignored by every other
+    -- ecosystem.
+    public_key_pem TEXT,
     created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     UNIQUE (org_id, ecosystem, url)
@@ -2250,6 +2256,60 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_cargo_metadata_ca
     ON cargo_metadata (cache_artifact_id)
     WHERE owner_kind = 'cache_artifact';
 
+-- Hex: the per-org RSA keypair every registry resource this org serves is signed with. Hex
+-- clients verify each resource against the public key they registered the repository with, so
+-- the private half is what makes the org's index trustworthy — it is envelope-encrypted under
+-- DEPENDABLY_MASTER_KEY and never leaves the server. Replacing the row rotates the key; there is
+-- no overlap window, because a signed resource carries exactly one signature, so every consumer
+-- re-registers the repository afterwards.
+CREATE TABLE IF NOT EXISTS hex_signing_key (
+    org_id          TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
+    private_key     TEXT NOT NULL,             -- PKCS#8 PEM, envelope ciphertext
+    public_key_pem  TEXT NOT NULL,             -- SubjectPublicKeyInfo PEM, served at /hex/public_key
+    fingerprint     TEXT NOT NULL,             -- SHA-256 of the DER public key, lower-case hex
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
+);
+
+-- Hex: the per-release facts the registry index needs that no other table carries — the inner
+-- checksum every client's tarball unpacker re-verifies, the dependency requirements the resolver
+-- reads, and the retirement state. Same polymorphic owner shape as cargo_metadata: a hosted
+-- release hangs off its package_versions row, a proxied one off the cache_artifact row that was
+-- recorded at first fetch, so the index can still be served from what this org holds when the
+-- upstream is unreachable. metadata_config is the verbatim Erlang term file of a hosted release,
+-- kept so the API plane can answer a client with exactly what was published.
+CREATE TABLE IF NOT EXISTS hex_release (
+    id                  TEXT PRIMARY KEY,
+    version_id          TEXT REFERENCES package_versions(id) ON DELETE CASCADE,
+    cache_artifact_id   TEXT REFERENCES cache_artifact(id) ON DELETE CASCADE,
+    owner_kind          TEXT NOT NULL DEFAULT 'package_version'
+                        CHECK (owner_kind IN ('package_version','cache_artifact')),
+    inner_checksum      TEXT NOT NULL,         -- upper-case hex SHA-256, the tarball's CHECKSUM entry
+    requirements_json   TEXT NOT NULL DEFAULT '[]',
+    app                 TEXT,                  -- OTP application name when it differs from the package
+    build_tools_json    TEXT,
+    elixir              TEXT,                  -- Elixir version requirement, when declared
+    retired_reason      TEXT
+                        CHECK (retired_reason IS NULL OR retired_reason IN ('other','invalid','security','deprecated','renamed')),
+    retired_message     TEXT,
+    has_docs            INTEGER NOT NULL DEFAULT 0,
+    metadata_config     TEXT,
+    -- Owner invariant: exactly one FK arm is active and matches owner_kind.
+    CHECK (
+        (owner_kind = 'package_version' AND version_id IS NOT NULL AND cache_artifact_id IS NULL)
+        OR
+        (owner_kind = 'cache_artifact' AND cache_artifact_id IS NOT NULL AND version_id IS NULL)
+    )
+);
+CREATE INDEX IF NOT EXISTS idx_hex_release_version ON hex_release(version_id);
+CREATE INDEX IF NOT EXISTS idx_hex_release_cache_artifact ON hex_release(cache_artifact_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_hex_release_pv
+    ON hex_release (version_id)
+    WHERE owner_kind = 'package_version';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_hex_release_ca
+    ON hex_release (cache_artifact_id)
+    WHERE owner_kind = 'cache_artifact';
+
 -- Install-script allowlist: packages exempt from the install-script block-gate arm (arm 9).
 -- A tenant may block install scripts globally via org_settings.block_install_scripts='block'
 -- while permitting specific known-good packages here. Each entry scopes the exemption to a
@@ -2579,11 +2639,16 @@ CREATE INDEX IF NOT EXISTS idx_project_documents_org ON project_documents(org_id
 --
 -- The two scope columns are deliberately NOT merged, because their producers refuse to merge
 -- them. sbom_scope is the CycloneDX components[].scope value verbatim — unreliable in the
--- wild, so it drives no UI ranking. dependency_scope is the reachability scanner's answer to
--- "does this ship in the running application" and is the authoritative dev/prod signal; it
--- defaults to 'unknown' so a component nothing has classified reads as unclassified rather
--- than as production. A production view is therefore
--- dependency_scope != 'dev' AND COALESCE(sbom_scope,'') != 'excluded'.
+-- wild, so it drives no UI ranking. dependency_scope is the authoritative dev/prod signal,
+-- "does this ship in the running application"; it defaults to 'unknown' so a component
+-- nothing has classified reads as unclassified rather than as production. A production view
+-- is therefore dependency_scope != 'dev' AND COALESCE(sbom_scope,'') != 'excluded'.
+--
+-- A reachability scanner's SARIF verdict is the authoritative writer and can set any of the
+-- three values outright. A CycloneDX document's own manifest dev-declaration (the
+-- cdx:*:package:development property taxonomy) is a lower-confidence fallback: SbomIngestRepository
+-- lets it fill the column only while it still reads 'unknown', and never lets it overwrite a
+-- value a scanner already asserted — see SbomComponentUpsert's doc comment for the guard.
 --
 -- sbom_scope = 'excluded' is the one value policy acts on, in SbomPolicyEvaluator: the four
 -- vulnerability arms score nothing for such a component, because the producer has said those
@@ -2612,9 +2677,16 @@ CREATE TABLE IF NOT EXISTS sbom_components (
     component_type     TEXT,
     -- Raw CycloneDX scope; display only.
     sbom_scope         TEXT CHECK (sbom_scope IN ('required','optional','excluded')),
-    -- The authoritative dev/prod signal, owned by the reachability scanner.
+    -- The authoritative dev/prod signal. A scanner verdict wins outright; a manifest
+    -- declaration only fills the 'unknown' default.
     dependency_scope   TEXT NOT NULL DEFAULT 'unknown'
                        CHECK (dependency_scope IN ('dev','runtime','unknown')),
+    -- Who last set dependency_scope away from 'unknown': NULL while it still is.
+    -- SARIF's retraction sweep (ResetUnnamedDependencyScopeAsync) reads this to decide what it
+    -- may reset — only 'scanner' rows, never 'manifest' ones, or every SARIF upload would wipe
+    -- the CycloneDX-side fill from every component the current scan happens not to name (which,
+    -- for a component with zero vulnerability findings, is every scan, forever).
+    dependency_scope_source TEXT CHECK (dependency_scope_source IN ('manifest','scanner')),
     dependency_kind    TEXT CHECK (dependency_kind IN ('direct','transitive','root','graph-unknown')),
     -- JSON array of purls from the dependency root to this component.
     dependency_path    TEXT,
@@ -2643,6 +2715,14 @@ CREATE TABLE IF NOT EXISTS sbom_components (
     -- the registry itself holds stays the canonical integrity fact, and nothing verifies against
     -- a hash a third-party document asserts.
     component_hashes   TEXT,
+    -- components[].versionRange, which CycloneDX 1.7 admits in place of a concrete version and
+    -- never alongside one. It is what explains an absent version: without it a range-declaring
+    -- component is indistinguishable from one whose producer simply omitted the field.
+    version_range      TEXT,
+    -- components[].isExternal, CycloneDX 1.7. NULL means the document did not say, which every
+    -- document below 1.7 is — absence is a weaker claim than a declared false, and collapsing
+    -- the two would assert "not external" about rows nothing ever examined.
+    is_external        INTEGER CHECK (is_external IN (0,1)),
     -- Scan-pass stamp. NULL keeps the row in the unscanned bucket.
     vuln_checked_at    TEXT
         CHECK (vuln_checked_at IS NULL OR vuln_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR vuln_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR vuln_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),

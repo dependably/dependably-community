@@ -423,13 +423,14 @@ export const api = {
   // protocol is terraform-only: null (Provider Registry Protocol, the default) or 'mirror'
   // (Provider Network Mirror Protocol); rejected by the API for every other ecosystem.
   // Only non-null/non-anonymous values are sent so the body stays minimal.
-  addUpstreamRegistry: (ecosystem, url, name, authType, username, secret, protocol) => {
+  addUpstreamRegistry: ({ ecosystem, url, name, authType, username, secret, protocol, publicKeyPem }) => {
     /** @type {Record<string, any>} */
     const body = { ecosystem, url, name }
     if (authType && authType !== 'anonymous') body.authType = authType
     if (username) body.username = username
     if (secret) body.secret = secret
     if (protocol) body.protocol = protocol
+    if (publicKeyPem) body.publicKeyPem = publicKeyPem
     return req('POST', '/upstream-registries', body)
   },
   // OCI-specific add: carries host (in url), authType, prefixes, optional username/secret/tokenEndpoint.
@@ -443,6 +444,8 @@ export const api = {
     req('PUT', `/upstream-registries/${id}/symbol-server`, { symbolServerUrl }),
 
   // Signature trust anchors — per-org public key material for signature verification.
+  getHexSigningKey: () => req('GET', '/hex/signing-key'),
+  rotateHexSigningKey: () => req('POST', '/hex/signing-key/rotate'),
   getTrustAnchors: () => req('GET', '/trust-anchors'),
   addTrustAnchor: ({ ecosystem, anchorKind, material, label, keyId }) =>
     req('POST', '/trust-anchors', { ecosystem, anchorKind, material, label: label || null, keyId: keyId || null }),

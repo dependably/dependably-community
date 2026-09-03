@@ -35,6 +35,7 @@ const BASE_PATHS = Object.freeze({
   cargo: '/cargo/',
   apk: '/apk',
   terraform: '/terraform/',
+  hex: '/hex',
 })
 
 /** @typedef {{ command: string, labelKey: 'install'|'pull', caveatKey: string|null }} InstallCommand */
@@ -65,8 +66,22 @@ export const CAVEATS = Object.freeze({
  * @param {{ origin: string, protocol: string }} loc window.location (or a stub in tests)
  * @returns {string} origin with no trailing slash
  */
+/**
+ * Drops every trailing '/' from a value. A single forward scan rather than a `/\/+$/`
+ * replace: the regex form backtracks super-linearly on a long run of slashes.
+ *
+ * @param {string | null | undefined} value
+ * @returns {string}
+ */
+function stripTrailingSlashes(value) {
+  const s = String(value ?? '')
+  let end = s.length
+  while (end > 0 && s[end - 1] === '/') end--
+  return s.slice(0, end)
+}
+
 export function registryOrigin(bootstrap, loc) {
-  const origin = (loc?.origin ?? '').replace(/\/+$/, '')
+  const origin = stripTrailingSlashes(loc?.origin ?? '')
   if (bootstrap?.insecureHttp === false && loc?.protocol === 'http:') {
     return origin.replace(/^http:/, 'https:')
   }
@@ -100,7 +115,9 @@ function isHttp(origin) {
 function shellArg(value) {
   const s = String(value ?? '')
   if (s !== '' && /^[A-Za-z0-9._@/:+=-]+$/.test(s)) return s
-  return `'${s.replaceAll("'", `'\\''`)}'`
+  // A literal single quote inside a single-quoted word: close, escape, reopen.
+  const escapedQuote = `'\\''`
+  return `'${s.replaceAll("'", escapedQuote)}'`
 }
 
 /** Maven stores "{groupId}:{artifactId}". Split on the FIRST colon — a groupId never has one. */
@@ -145,8 +162,10 @@ const BUILDERS = Object.freeze({
   npm: {
     pkg: ({ name, origin }) =>
       result(`npm install ${shellArg(name)} --registry ${origin}${BASE_PATHS.npm}`, 'install'),
-    version: ({ name, version, origin }) =>
-      result(`npm install ${shellArg(`${name}@${version}`)} --registry ${origin}${BASE_PATHS.npm}`, 'install'),
+    version: ({ name, version, origin }) => {
+      const spec = shellArg(`${name}@${version}`)
+      return result(`npm install ${spec} --registry ${origin}${BASE_PATHS.npm}`, 'install')
+    },
   },
 
   // pip normalizes names itself, so the stored PEP 503 form resolves either way.
@@ -154,8 +173,13 @@ const BUILDERS = Object.freeze({
   pypi: {
     pkg: ({ name, origin, http }) =>
       result(`pip install ${shellArg(name)} --index-url ${origin}${BASE_PATHS.pypi}${trustedHost(origin, http)}`, 'install'),
-    version: ({ name, version, origin, http }) =>
-      result(`pip install ${shellArg(`${name}==${version}`)} --index-url ${origin}${BASE_PATHS.pypi}${trustedHost(origin, http)}`, 'install'),
+    version: ({ name, version, origin, http }) => {
+      const spec = shellArg(`${name}==${version}`)
+      return result(
+        `pip install ${spec} --index-url ${origin}${BASE_PATHS.pypi}${trustedHost(origin, http)}`,
+        'install',
+      )
+    },
   },
 
   // NuGet ids are case-insensitive, so the lowercased stored name resolves fine.
@@ -195,15 +219,17 @@ const BUILDERS = Object.freeze({
       name ? result(`sudo dnf install ${shellArg(name)}`, 'install', CAVEATS.requiresSetup) : null,
     version: ({ name, version, filename, origin }) => {
       if (filename) {
+        const url = shellArg(`${origin}${BASE_PATHS.rpm}packages/${filename}`)
         return result(
-          `sudo dnf install ${shellArg(`${origin}${BASE_PATHS.rpm}packages/${filename}`)}`,
+          `sudo dnf install ${url}`,
           'install',
           CAVEATS.dependenciesFromConfiguredRepos,
         )
       }
       // version is already "{ver}-{rel}", which is a valid NVR spec.
       if (!name || !version) return null
-      return result(`sudo dnf install ${shellArg(`${name}-${version}`)}`, 'install', CAVEATS.requiresSetup)
+      const nvr = shellArg(`${name}-${version}`)
+      return result(`sudo dnf install ${nvr}`, 'install', CAVEATS.requiresSetup)
     },
   },
 
@@ -215,8 +241,9 @@ const BUILDERS = Object.freeze({
     version: ({ name, version, tags, origin, http }) => {
       const ref = ociReference(version, tags)
       if (!name || !ref) return null
+      const image = shellArg(`${hostOf(origin)}/${name}${ref}`)
       return result(
-        `docker pull ${shellArg(`${hostOf(origin)}/${name}${ref}`)}`,
+        `docker pull ${image}`,
         'pull',
         http ? CAVEATS.insecureRegistry : null,
       )
@@ -235,10 +262,11 @@ const BUILDERS = Object.freeze({
   cargo: {
     pkg: ({ name }) =>
       name ? result(`cargo add ${shellArg(name)} --registry dependably`, 'install', CAVEATS.requiresSetup) : null,
-    version: ({ name, version }) =>
-      name && version
-        ? result(`cargo add ${shellArg(`${name}@${version}`)} --registry dependably`, 'install', CAVEATS.requiresSetup)
-        : null,
+    version: ({ name, version }) => {
+      if (!name || !version) return null
+      const spec = shellArg(`${name}@${version}`)
+      return result(`cargo add ${spec} --registry dependably`, 'install', CAVEATS.requiresSetup)
+    },
   },
 
   // The self-contained `apk add -X {origin}/apk/{release}/{repo}` form cannot be built:
@@ -247,11 +275,12 @@ const BUILDERS = Object.freeze({
   apk: {
     pkg: ({ name }) =>
       name ? result(`apk add ${shellArg(name)}`, 'install', CAVEATS.requiresSetup) : null,
-    version: ({ name, version }) =>
-      // version is already "{pkgver}-r{pkgrel}", which is exactly apk's pin syntax.
-      name && version
-        ? result(`apk add ${shellArg(`${name}=${version}`)}`, 'install', CAVEATS.requiresSetup)
-        : null,
+    // version is already "{pkgver}-r{pkgrel}", which is exactly apk's pin syntax.
+    version: ({ name, version }) => {
+      if (!name || !version) return null
+      const spec = shellArg(`${name}=${version}`)
+      return result(`apk add ${spec}`, 'install', CAVEATS.requiresSetup)
+    },
   },
 
   // Provider installation is configured globally in the CLI config, by design — there is
@@ -277,6 +306,29 @@ const BUILDERS = Object.freeze({
       )
     },
   },
+
+  // A Hex dependency names the repository it resolves from, and that name is fixed by the
+  // Setup snippet (`mix hex.repo add dependably …`): the registry signs every index resource
+  // under exactly that repository name and the client refuses any other, so the dependency
+  // line cannot carry a URL. Mix and Rebar3 forms are both shown; the caret requirement is
+  // what `mix hex.info` itself suggests.
+  hex: {
+    pkg: ({ name }) =>
+      name ? result(`{:${name}, ">= 0.0.0", repo: :dependably}`, 'install', CAVEATS.requiresSetup) : null,
+    version: ({ name, version }) => {
+      if (!name || !version) return null
+      return result(
+        [
+          `# mix.exs`,
+          `{:${name}, "~> ${version}", repo: :dependably}`,
+          `# rebar.config`,
+          `{${name}, "${version}", {pkg, ${name}, {repo, dependably}}}`,
+        ].join('\n'),
+        'install',
+        CAVEATS.requiresSetup,
+      )
+    },
+  },
 })
 
 function trustedHost(origin, http) {
@@ -285,8 +337,9 @@ function trustedHost(origin, http) {
 
 function goGet({ name, origin }, ref) {
   if (!name) return null
+  const spec = shellArg(`${name}@${ref}`)
   return result(
-    `GOPROXY=${origin}${BASE_PATHS.golang} go get ${shellArg(`${name}@${ref}`)}`,
+    `GOPROXY=${origin}${BASE_PATHS.golang} go get ${spec}`,
     'install',
     null,
   )
@@ -299,7 +352,7 @@ function build(which, opts) {
   if (!builder) return null
   return builder[which]({
     name,
-    origin: origin.replace(/\/+$/, ''),
+    origin: stripTrailingSlashes(origin),
     version: opts.version ?? null,
     filename: opts.filename ?? null,
     tags: opts.tags ?? null,

@@ -68,6 +68,8 @@ public static class InstanceSettingDefaults
         "max_upload_bytes_maven",
         "max_upload_bytes_rpm",
         "max_upload_bytes_oci",
+        "max_upload_bytes_cargo",
+        "max_upload_bytes_hex",
         "gc_schedule",
         "siem_max_lookback_days",
         "default_storage_quota_bytes",

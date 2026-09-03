@@ -208,7 +208,7 @@ public sealed class StatsRefreshServiceTests
         var snapshots = new StatsSnapshotRepository(store);
         var history = new OrgStatsHistoryRepository(store);
         var analytics = new PackageAnalyticsRepository(store);
-        return new StatsRefreshService(
+        return new StatsRefreshService(new StatsRefreshService.Dependencies(
             snapshots,
             history,
             analytics,
@@ -216,7 +216,7 @@ public sealed class StatsRefreshServiceTests
             new AirGapMode(config),
             locks,
             logger ?? NullLogger<StatsRefreshService>.Instance,
-            _clock);
+            _clock));
     }
 
     /// <summary>

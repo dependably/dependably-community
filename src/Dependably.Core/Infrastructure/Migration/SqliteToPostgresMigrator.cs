@@ -199,7 +199,7 @@ public sealed class SqliteToPostgresMigrator
     private async Task InitializeTargetSchemaAsync(CancellationToken ct)
     {
         var initializer = _targetInitializer ?? new SchemaInitializer(_target);
-        await initializer.InitializeAsync(ct);
+        await initializer.InitializeAsync(ct: ct);
         _logger.LogInformation("Applied the current schema to the Postgres target");
     }
 

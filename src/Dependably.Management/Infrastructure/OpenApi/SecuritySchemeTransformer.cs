@@ -33,7 +33,8 @@ internal sealed class DocumentMetadataTransformer : IOpenApiDocumentTransformer
                 document.Info.Title = "Dependably Registry Protocols";
                 document.Info.Description =
                     "Package-registry protocol surfaces: OCI Distribution Spec v2 (/v2/), PyPI (/simple/), npm (/npm/), " +
-                    "NuGet (/nuget/v3/), Maven, RPM, Go (/go/), Cargo (/cargo/), APK (/apk/).";
+                    "NuGet (/nuget/v3/), Maven, RPM, Go (/go/), Cargo (/cargo/), APK (/apk/), Terraform (/terraform/), " +
+                    "Hex (/hex/).";
                 break;
         }
         return Task.CompletedTask;

@@ -97,6 +97,7 @@ public class OrgSettings
     public long? MaxUploadBytesRpm { get; set; }
     public long? MaxUploadBytesOci { get; set; }
     public long? MaxUploadBytesCargo { get; set; }
+    public long? MaxUploadBytesHex { get; set; }
     public int? KeepVersions { get; set; }
     public int? KeepDays { get; set; }
     /// <summary>Max project versions retained per project. NULL is unlimited.</summary>
@@ -878,6 +879,8 @@ public class UpstreamRegistryEntry
     public IReadOnlyList<string>? Prefixes { get; set; }
     /// <summary>True when a secret/password is stored for this entry (secret is never projected).</summary>
     public bool HasSecret { get; set; }
+    /// <summary>Hex: the upstream repository's signing public key (PEM), or null when it relies on a well-known key.</summary>
+    public string? PublicKeyPem { get; set; }
 
     /// <summary>
     /// NuGet-only: base URL of this upstream's symbol server. A symbol server is a different host

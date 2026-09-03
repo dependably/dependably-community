@@ -75,6 +75,15 @@ public static class TokenAuthExtensions
             }
         }
 
+        else if (!auth.Contains(' ', StringComparison.Ordinal))
+        {
+            // Hex clients send the credential as the whole header value with no scheme
+            // ("authorization: <token>", hex_core's repo_key / api_key). No other client here
+            // sends a scheme-less header, and a value with a space is some other scheme this
+            // resolver does not speak, so the bare form is accepted only when it is exactly that.
+            raw = auth.Trim();
+        }
+
         if (string.IsNullOrEmpty(raw))
         {
             Dependably.Infrastructure.Observability.DependablyMeter.TokenAuthRequests.Add(

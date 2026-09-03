@@ -24,7 +24,7 @@ namespace Dependably.Protocol;
 /// (source: <c>"upstream"</c>); deprecation message via
 /// <c>PackageRepository.UpdateDeprecatedAsync</c>.
 /// </summary>
-public static class LicenseExtractor
+public static partial class LicenseExtractor
 {
     // Maximum plausible SPDX identifier length (longest known SPDX expression fits well under 100).
     private const int MaxSpdxLength = 100;
@@ -112,30 +112,7 @@ public static class LicenseExtractor
             }
             else if (key.Equals("Project-URL", StringComparison.OrdinalIgnoreCase))
             {
-                int comma = v.IndexOf(',');
-                if (comma <= 0)
-                {
-                    continue;
-                }
-
-                string label = v[..comma].Trim();
-                string url = v[(comma + 1)..].Trim();
-                if (url.Length == 0)
-                {
-                    continue;
-                }
-
-                if (homepage is null && label.Equals("Homepage", StringComparison.OrdinalIgnoreCase))
-                {
-                    homepage = url;
-                }
-                else if (repository is null &&
-                    (label.Equals("Source", StringComparison.OrdinalIgnoreCase)
-                     || label.Equals("Repository", StringComparison.OrdinalIgnoreCase)
-                     || label.Equals("Source Code", StringComparison.OrdinalIgnoreCase)))
-                {
-                    repository = url;
-                }
+                ApplyProjectUrl(v, ref homepage, ref repository);
             }
         }
 
@@ -145,6 +122,39 @@ public static class LicenseExtractor
             Clip(description),
             Clip(author ?? authorEmail));
     }
+
+    // One "Project-URL: {label}, {url}" line. Only the two labels that answer a question no other
+    // header does are read, and only when that field is still unset — the dedicated Home-page
+    // header always wins. A malformed line (no comma, or a blank url) is skipped, not an error.
+    private static void ApplyProjectUrl(string value, ref string? homepage, ref string? repository)
+    {
+        int comma = value.IndexOf(',');
+        if (comma <= 0)
+        {
+            return;
+        }
+
+        string label = value[..comma].Trim();
+        string url = value[(comma + 1)..].Trim();
+        if (url.Length == 0)
+        {
+            return;
+        }
+
+        if (homepage is null && label.Equals("Homepage", StringComparison.OrdinalIgnoreCase))
+        {
+            homepage = url;
+        }
+        else if (repository is null && IsRepositoryLabel(label))
+        {
+            repository = url;
+        }
+    }
+
+    private static bool IsRepositoryLabel(string label) =>
+        label.Equals("Source", StringComparison.OrdinalIgnoreCase)
+        || label.Equals("Repository", StringComparison.OrdinalIgnoreCase)
+        || label.Equals("Source Code", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Normalizes raw presentation metadata (homepage / repository / description) the same way the
@@ -676,223 +686,6 @@ public static class LicenseExtractor
         }
         catch { /* malformed tarball — return empty metadata, callers tolerate */ }
         return ExtractedMetadata.Empty;
-    }
-
-    // ── Cargo ─────────────────────────────────────────────────────────────────
-
-    /// <summary>
-    /// Validates the crates.io publish-envelope <c>license</c> field (SPDX expression).
-    /// <c>license-file</c> is never modelled here — it names a file bundled in the crate
-    /// rather than carrying an SPDX expression itself, so it has no license signal to extract.
-    /// </summary>
-    public static ExtractedMetadata FromCargoPublishLicense(string? license)
-    {
-        return string.IsNullOrWhiteSpace(license) || !IsPlausibleSpdx(license)
-            ? ExtractedMetadata.Empty
-            : new ExtractedMetadata(new[] { license.Trim() }, null);
-    }
-
-    /// <summary>
-    /// Walks a Cargo <c>.crate</c> tarball (gzip tar) to the crate's root-directory manifest
-    /// (<c>{name}-{version}/Cargo.toml</c>, depth 1 — a nested <c>Cargo.toml</c> inside a
-    /// bundled subdirectory is not the crate's own manifest) and pulls the <c>license</c> key
-    /// out of the <c>[package]</c> table with a minimal line-based parser. No TOML library is
-    /// used: crates.io normalizes a published manifest's <c>[package]</c> table onto single
-    /// <c>key = "value"</c> lines, so line-based scanning is safe for this narrow case.
-    /// <c>license-file</c> is ignored — it names a file inside the crate, not an SPDX
-    /// expression — and a <c>license</c> key outside <c>[package]</c> (e.g. under
-    /// <c>[dependencies.foo]</c>) is never matched.
-    /// <para>Owns <paramref name="tarball"/> — see stream-ownership note on the class.</para>
-    /// </summary>
-    public static ExtractedMetadata FromCrateTarball(Stream tarball)
-    {
-        try
-        {
-            using var gzip = new LimitedReadStream(
-                new GZipStream(tarball, CompressionMode.Decompress, leaveOpen: false),
-                ArchiveDecompressLimits.MaxDecompressedBytes, "cargo crate tarball");
-            using var tar = new TarReader(gzip, leaveOpen: false);
-            while (tar.GetNextEntry() is { } entry)
-            {
-                if (entry.DataStream is null)
-                {
-                    continue;
-                }
-
-                if (!IsRootCargoToml(entry.Name))
-                {
-                    continue;
-                }
-
-                using var ms = new MemoryStream();
-                entry.DataStream.CopyTo(ms);
-                string text = Encoding.UTF8.GetString(ms.ToArray());
-                var (license, homepage, repository, description, author) = ParseCargoTomlPackage(text);
-                return new ExtractedMetadata(
-                    license is not null ? new[] { license } : Array.Empty<string>(),
-                    null, homepage, repository, description, author);
-            }
-        }
-        catch { /* malformed gzip / tar — return empty metadata, callers tolerate */ }
-        return ExtractedMetadata.Empty;
-    }
-
-    // True for an entry name shaped exactly "<root-dir>/Cargo.toml" — one path separator,
-    // the crate's own manifest at the tarball root. A deeper path (a Cargo.toml bundled in a
-    // subdirectory) does not match.
-    private static bool IsRootCargoToml(string entryName)
-    {
-        int slash = entryName.IndexOf('/');
-        return slash > 0
-            && entryName[(slash + 1)..].Equals("Cargo.toml", StringComparison.Ordinal)
-            && entryName.LastIndexOf('/') == slash;
-    }
-
-    // Scans a Cargo.toml body line by line, tracking the active [section] header, and returns the
-    // [package] table's license/homepage/repository/description values. A key encountered while any
-    // other section is active (including a nested [package.metadata]) is skipped, so it can never be
-    // mistaken for the crate's own value. First occurrence of each key wins.
-    private static (string? License, string? Homepage, string? Repository, string? Description, string? Author)
-        ParseCargoTomlPackage(string text)
-    {
-        string? currentSection = null;
-        string? license = null, homepage = null, repository = null, description = null, author = null;
-        using var reader = new StringReader(text);
-        while (reader.ReadLine() is { } rawLine)
-        {
-            string line = rawLine.Trim();
-            if (line.Length == 0 || line.StartsWith('#'))
-            {
-                continue;
-            }
-
-            if (TryParseTomlSectionHeader(line, out string? section))
-            {
-                currentSection = section;
-                continue;
-            }
-
-            if (!string.Equals(currentSection, "package", StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            // authors is an array of strings, a shape the string-assignment reader answers false
-            // for, so it is read before that check rather than inside the switch below.
-            if (author is null && TryParseTomlStringArrayAssignment(line, out string? arrayKey, out var entries)
-                && string.Equals(arrayKey, "authors", StringComparison.Ordinal)
-                && entries.Count > 0)
-            {
-                author = string.Join(", ", entries);
-                continue;
-            }
-
-            if (!TryParseTomlStringAssignment(line, out string? key, out string? value))
-            {
-                continue;
-            }
-
-            switch (key)
-            {
-                case "license" when license is null && IsPlausibleSpdx(value): license = value!.Trim(); break;
-                case "homepage" when homepage is null: homepage = value; break;
-                case "repository" when repository is null: repository = value; break;
-                case "description" when description is null: description = value; break;
-                default: break;
-            }
-        }
-
-        return (
-            license,
-            Clip(HttpUrlOrNull(homepage)),
-            Clip(NormalizeRepositoryUrl(repository)),
-            Clip(description),
-            Clip(author));
-    }
-
-    // Reads a single-line TOML array of strings (`authors = ["A", "B"]`). Deliberately narrow: a
-    // multi-line array is left unparsed rather than half-parsed, because a partial author list
-    // reads as complete and there is no way for a viewer to tell it was truncated. A quote inside
-    // an entry ends it, which is the same tolerance the string-assignment reader already applies.
-    private static bool TryParseTomlStringArrayAssignment(
-        string line, out string? key, out List<string> entries)
-    {
-        key = null;
-        entries = [];
-
-        int equals = line.IndexOf('=');
-        if (equals <= 0)
-        {
-            return false;
-        }
-
-        string rawValue = line[(equals + 1)..].Trim();
-        if (!rawValue.StartsWith('[') || !rawValue.EndsWith(']'))
-        {
-            return false;
-        }
-
-        key = line[..equals].Trim();
-        foreach (string part in rawValue[1..^1].Split(','))
-        {
-            string entry = part.Trim().Trim('"', '\'');
-            if (entry.Length > 0)
-            {
-                entries.Add(entry);
-            }
-        }
-
-        return true;
-    }
-
-    // Matches a TOML "[section]" header line, extracting the section name. Returns false (and
-    // section = null) for any other line shape, so the caller keeps scanning.
-    private static bool TryParseTomlSectionHeader(string line, out string? section)
-    {
-        if (!line.StartsWith('['))
-        {
-            section = null;
-            return false;
-        }
-
-        int end = line.IndexOf(']');
-        section = end > 0 ? line[1..end].Trim() : null;
-        return true;
-    }
-
-    // Matches a `key = "..."` basic-string assignment line, extracting the key and the unquoted
-    // value. Returns false for a non-string value (array, literal string, number) or a malformed
-    // line, so the caller keeps scanning.
-    private static bool TryParseTomlStringAssignment(
-        string line,
-        [NotNullWhen(true)] out string? key,
-        [NotNullWhen(true)] out string? value)
-    {
-        int eq = line.IndexOf('=');
-        if (eq <= 0)
-        {
-            key = null;
-            value = null;
-            return false;
-        }
-
-        key = line[..eq].Trim();
-        value = UnquoteTomlBasicString(line[(eq + 1)..].Trim());
-        return value is not null;
-    }
-
-    // Extracts the value of a TOML basic (double-quoted) string, ignoring any trailing inline
-    // comment. Returns null for any other value shape (literal string, array, etc.) — the
-    // narrow line-based parser only supports the form crates.io emits on publish.
-    private static string? UnquoteTomlBasicString(string value)
-    {
-        if (value.Length < 2 || value[0] != '"')
-        {
-            return null;
-        }
-
-        int closingQuote = value.IndexOf('"', 1);
-        return closingQuote > 0 ? value[1..closingQuote] : null;
     }
 
     // ── NuGet ─────────────────────────────────────────────────────────────────

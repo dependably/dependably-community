@@ -295,6 +295,10 @@ public sealed class PackageAnalyticsRepository
     /// (unlike <c>SUM</c>), but Dapper's tuple materializer requires an exact constructor match
     /// and both columns are projected as 64-bit integers by SQLite.
     /// </summary>
+    [SuppressMessage("Minor Code Smell", "S3459:Unassigned members should be removed",
+        Justification = "Dapper sets these projection properties by reflection at the SELECT mapping site.")]
+    [SuppressMessage("Major Code Smell", "S1144:Unused private types or members should be removed",
+        Justification = "Dapper sets these projection properties by reflection at the SELECT mapping site.")]
     private sealed class EnrichmentCoverageCounts
     {
         public long Total { get; set; }
@@ -465,12 +469,6 @@ public sealed class PackageAnalyticsRepository
         "SELECT COUNT(*) FROM (SELECT DISTINCT Ecosystem, Name FROM (" + OperationalRiskBody + ") u) d";
 
     // rawsql: const concatenation of compile-time-constant fragments; no runtime value interpolated.
-    private const string OperationalRiskListSql =
-        "SELECT * FROM (" + OperationalRiskBody + ") u " +
-        "ORDER BY u.VersionsBehind DESC, u.Ecosystem ASC, u.Name ASC, u.Version ASC " +
-        "LIMIT @limit OFFSET @offset";
-
-    // rawsql: const concatenation of compile-time-constant fragments; no runtime value interpolated.
     private const string LicenseRiskCountSql =
         "SELECT COUNT(*) FROM (" + LicenseRiskBody + ") u WHERE (@reason IS NULL OR u.Reason = @reason)";
 
@@ -480,11 +478,95 @@ public sealed class PackageAnalyticsRepository
         "SELECT COUNT(*) FROM (" + LicenseRiskBody + ") u " +
         "WHERE u.Reason <> 'conditional' AND (@reason IS NULL OR u.Reason = @reason)";
 
-    // rawsql: const concatenation of compile-time-constant fragments; no runtime value interpolated.
-    private const string LicenseRiskListSql =
-        "SELECT * FROM (" + LicenseRiskBody + ") u WHERE (@reason IS NULL OR u.Reason = @reason) " +
-        "ORDER BY u.Reason ASC, u.Ecosystem ASC, u.Name ASC, u.Version ASC " +
-        "LIMIT @limit OFFSET @offset";
+    // The `sort=` values the Risk page's operational table accepts, mapped to the SQL expression
+    // that orders by them plus that column's own natural default direction — a closed allowlist,
+    // never interpolated caller text. Deliberately the same set as the sortable headers
+    // Risk.svelte draws (AnalysisSortKeyParityTests-style parity is pinned in
+    // RiskSortKeyParityTests), so the accepted surface stays reviewable from either side.
+    //
+    // Each column carries its own default direction rather than one instance-wide default (the
+    // ProjectRepository.ListSortColumns shape) because "worst first" means opposite directions
+    // for different columns here: a versions-behind count wants its biggest offenders first
+    // (desc), while a package name wants A-before-Z (asc). Un-versioned string columns are
+    // lower-cased for the same cross-engine reason VulnReportSortColumns lower-cases its own
+    // (LOWER() needs no collation lookup; SQLite's COLLATE NOCASE has no Postgres equivalent).
+    private static readonly Dictionary<string, (string Expr, string DefaultDir)> OperationalRiskSortColumns =
+        new(StringComparer.Ordinal)
+        {
+            ["package"] = ("LOWER(u.DisplayName)", "asc"),
+            ["version"] = ("LOWER(u.Version)", "asc"),
+            ["behind"] = ("u.VersionsBehind", "desc"),
+            // Nullable — an ecosystem whose upstream feed carries no "latest" fact (or a version
+            // this org has never checked) sinks to the end of an ascending sort via the sentinel,
+            // rather than floating to the top under SQLite's NULLS-FIRST-on-ASC default while
+            // Postgres would put it last for the same query.
+            ["latest"] = ("LOWER(COALESCE(u.UpstreamLatestVersion, '~'))", "asc"),
+            ["origin"] = ("LOWER(u.Origin)", "asc"),
+            // Nullable for the same reason as VulnReportSortColumns["published"]; newest first by
+            // default, an unknown publish date sinking to the very end of an ascending sort.
+            ["published"] = ("COALESCE(u.PublishedAt, '9999-12-31T23:59:59Z')", "desc"),
+        };
+
+    /// <summary>The sort applied to the operational-risk list when the caller names none, or names one that is not allowed.</summary>
+    public const string DefaultOperationalRiskSort = "behind";
+
+    /// <summary>The <c>sort=</c> keys <see cref="ListOperationalRiskAsync"/> honours.</summary>
+    public static IReadOnlyCollection<string> OperationalRiskSortKeys => OperationalRiskSortColumns.Keys;
+
+    // The `sort=` values the Risk page's license table accepts. `licenses` is deliberately absent:
+    // the SPDX identifiers are stitched onto the page's rows by RiskController AFTER paging (one
+    // lookup per owner id, see ListLicenseRiskAsync's own doc comment), the same reason
+    // ProjectRepository.ListSortColumns excludes the projects list's per-page-computed columns —
+    // sorting on a value that does not exist until after the page is selected would order one
+    // page against itself and disagree with the pager's own total.
+    private static readonly Dictionary<string, (string Expr, string DefaultDir)> LicenseRiskSortColumns =
+        new(StringComparer.Ordinal)
+        {
+            ["package"] = ("LOWER(u.DisplayName)", "asc"),
+            ["version"] = ("LOWER(u.Version)", "asc"),
+            // Reason is already one of the three fixed lower-case literals the LicenseRiskBody
+            // CASE emits ('blocklisted' < 'conditional' < 'unknown'), so no LOWER() is needed.
+            ["reason"] = ("u.Reason", "asc"),
+            ["origin"] = ("LOWER(u.Origin)", "asc"),
+            ["published"] = ("COALESCE(u.PublishedAt, '9999-12-31T23:59:59Z')", "desc"),
+        };
+
+    /// <summary>The sort applied to the license-risk list when the caller names none, or names one that is not allowed.</summary>
+    public const string DefaultLicenseRiskSort = "reason";
+
+    /// <summary>The <c>sort=</c> keys <see cref="ListLicenseRiskAsync"/> honours.</summary>
+    public static IReadOnlyCollection<string> LicenseRiskSortKeys => LicenseRiskSortColumns.Keys;
+
+    private static string NormalizeSortDirection(string? requested, string defaultDir)
+    {
+        return string.Equals(requested, "asc", StringComparison.OrdinalIgnoreCase) ? "ASC"
+            : string.Equals(requested, "desc", StringComparison.OrdinalIgnoreCase) ? "DESC"
+            : string.Equals(defaultDir, "desc", StringComparison.OrdinalIgnoreCase) ? "DESC" : "ASC";
+    }
+
+    // Both fragments come from the closed *SortColumns allowlist above plus a two-value direction
+    // check, never from caller text. Ecosystem/Name/Version are the fixed tiebreaker on every
+    // sort, matching the pre-sortable default order, so a page boundary never splits or repeats a
+    // row when two rows share the sorted value.
+    private static string BuildOperationalRiskOrderBy(string? sort, string? dir)
+    {
+        if (!OperationalRiskSortColumns.TryGetValue(sort ?? "", out var col))
+        {
+            col = OperationalRiskSortColumns[DefaultOperationalRiskSort];
+        }
+
+        return $"{col.Expr} {NormalizeSortDirection(dir, col.DefaultDir)}, u.Ecosystem ASC, u.Name ASC, u.Version ASC";
+    }
+
+    private static string BuildLicenseRiskOrderBy(string? sort, string? dir)
+    {
+        if (!LicenseRiskSortColumns.TryGetValue(sort ?? "", out var col))
+        {
+            col = LicenseRiskSortColumns[DefaultLicenseRiskSort];
+        }
+
+        return $"{col.Expr} {NormalizeSortDirection(dir, col.DefaultDir)}, u.Ecosystem ASC, u.Name ASC, u.Version ASC";
+    }
 
     // Queries the two remaining risk-pillar dashboard tiles (operational + license), each
     // unioning the uploaded (package_versions) and proxy (cache_artifact) planes the same way
@@ -515,9 +597,19 @@ public sealed class PackageAnalyticsRepository
     /// over the <see cref="VersionsBehindDashboardThreshold"/>, across both storage planes.
     /// <c>PackageCount</c> is the tile's own number (distinct packages, not versions) computed from
     /// the same union, so the page can render a summary that reads exactly like the tile.
+    /// <paramref name="sort"/>/<paramref name="dir"/> are resolved through
+    /// <see cref="OperationalRiskSortColumns"/>; an unrecognised value falls back to
+    /// <see cref="DefaultOperationalRiskSort"/> rather than erroring, so a stale bookmark still
+    /// renders.
     /// </summary>
+    [SuppressMessage("Security", "S2077:Formatting SQL queries is security-sensitive",
+        Justification = "The interpolated ORDER BY fragment is composed exclusively from compile-time-constant SQL " +
+                        "expressions in OperationalRiskSortColumns plus the literal strings \"ASC\"/\"DESC\". " +
+                        "Caller-supplied sort/dir values only select which constant to use (TryGetValue + " +
+                        "case-insensitive equality against literals); they never reach the SQL string.")]
     public async Task<(IReadOnlyList<OperationalRiskRow> Items, int Total, int PackageCount)> ListOperationalRiskAsync(
-        string orgId, string? ecosystem, int limit, int offset, CancellationToken ct = default)
+        string orgId, string? ecosystem, int limit, int offset,
+        string? sort = null, string? dir = null, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
         var args = new { orgId, threshold = VersionsBehindDashboardThreshold, ecosystem, limit, offset };
@@ -526,7 +618,13 @@ public sealed class PackageAnalyticsRepository
         int total = await conn.ExecuteScalarAsync<int>(
             "SELECT COUNT(*) FROM (" + OperationalRiskBody + ") u", args);
         int packageCount = await conn.ExecuteScalarAsync<int>(OperationalRiskPackageCountSql, args);
-        var rows = await conn.QueryAsync<OperationalRiskRow>(OperationalRiskListSql, args);
+
+        string orderBy = BuildOperationalRiskOrderBy(sort, dir);
+        // rawsql: orderBy is built above from the closed OperationalRiskSortColumns allowlist plus
+        // a two-value direction check — never from caller text (see the S2077 justification above).
+        var rows = await conn.QueryAsync<OperationalRiskRow>(
+            "SELECT * FROM (" + OperationalRiskBody + $") u ORDER BY {orderBy} LIMIT @limit OFFSET @offset",
+            args);
 
         return (rows.ToList(), total, packageCount);
     }
@@ -535,16 +633,33 @@ public sealed class PackageAnalyticsRepository
     /// Lists the versions behind the license-risk drill-down tile, across both storage planes.
     /// With no <paramref name="reason"/> or <paramref name="ecosystem"/> filter the total is the
     /// tile's own count. SPDX identifiers are stitched onto the page's rows by the caller — see
-    /// <see cref="LicenseRepository.GetSpdxForVersionsAsync"/>.
+    /// <see cref="LicenseRepository.GetSpdxForVersionsAsync"/>. <paramref name="sort"/>/
+    /// <paramref name="dir"/> are resolved through <see cref="LicenseRiskSortColumns"/>; an
+    /// unrecognised value falls back to <see cref="DefaultLicenseRiskSort"/> rather than erroring.
     /// </summary>
+    [SuppressMessage("Security", "S2077:Formatting SQL queries is security-sensitive",
+        Justification = "The interpolated ORDER BY fragment is composed exclusively from compile-time-constant SQL " +
+                        "expressions in LicenseRiskSortColumns plus the literal strings \"ASC\"/\"DESC\". " +
+                        "Caller-supplied sort/dir values only select which constant to use (TryGetValue + " +
+                        "case-insensitive equality against literals); they never reach the SQL string.")]
+    [SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
+        Justification = "A paged query signature: tenant, two optional filters, limit/offset and the sort pair the endpoint binds straight from its query string.")]
     public async Task<(IReadOnlyList<LicenseRiskRow> Items, int Total)> ListLicenseRiskAsync(
-        string orgId, string? ecosystem, string? reason, int limit, int offset, CancellationToken ct = default)
+        string orgId, string? ecosystem, string? reason, int limit, int offset,
+        string? sort = null, string? dir = null, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
         var args = new { orgId, ecosystem, reason, limit, offset };
 
         int total = await conn.ExecuteScalarAsync<int>(LicenseRiskCountSql, args);
-        var rows = await conn.QueryAsync<LicenseRiskRow>(LicenseRiskListSql, args);
+
+        string orderBy = BuildLicenseRiskOrderBy(sort, dir);
+        // rawsql: orderBy is built above from the closed LicenseRiskSortColumns allowlist plus a
+        // two-value direction check — never from caller text (see the S2077 justification above).
+        var rows = await conn.QueryAsync<LicenseRiskRow>(
+            "SELECT * FROM (" + LicenseRiskBody + $") u WHERE (@reason IS NULL OR u.Reason = @reason) " +
+            $"ORDER BY {orderBy} LIMIT @limit OFFSET @offset",
+            args);
 
         return (rows.ToList(), total);
     }

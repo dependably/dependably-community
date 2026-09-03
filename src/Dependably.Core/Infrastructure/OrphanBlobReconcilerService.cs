@@ -38,8 +38,8 @@ namespace Dependably.Infrastructure;
 ///
 /// Cache-tier reconciliation is a separate concern handled by
 /// <see cref="CacheEvictionService"/>; this service is registry-only and never touches
-/// proxy/-prefixed blobs. The <c>oci/</c>, <c>go/</c>, <c>cargo/</c>, and <c>apk/</c> key
-/// namespaces are likewise outside the <c>hosted/</c> prefix this sweep walks.
+/// proxy/-prefixed blobs. The <c>oci/</c>, <c>go/</c>, <c>cargo/</c>, <c>apk/</c> and <c>hex/</c>
+/// key namespaces are likewise outside the <c>hosted/</c> prefix this sweep walks.
 ///
 /// suspension-ok: not per-tenant. This sweep walks the whole <c>hosted/</c> prefix and the
 /// whole-fleet referenced-key set (<see cref="PackageRepository.StreamAllBlobKeysAsync"/>) in

@@ -14,9 +14,9 @@
   import Skeleton from '../lib/Skeleton.svelte'
 
   // Only the ecosystems GET /api/v1/lookup accepts — a subset of the full registry vocabulary
-  // (RPM and OCI are not OSV-covered and have no wired lookup metadata source).
-  const LOOKUP_ECOSYSTEMS = ['npm', 'pypi', 'nuget', 'maven', 'golang', 'cargo']
-  const ECO_LABEL = { npm: 'npm', pypi: 'PyPI', nuget: 'NuGet', maven: 'Maven', golang: 'Go', cargo: 'Cargo' }
+  // (RPM, OCI, apk and Terraform are not OSV-covered or have no wired lookup metadata source).
+  const LOOKUP_ECOSYSTEMS = ['npm', 'pypi', 'nuget', 'maven', 'golang', 'cargo', 'hex']
+  const ECO_LABEL = { npm: 'npm', pypi: 'PyPI', nuget: 'NuGet', maven: 'Maven', golang: 'Go', cargo: 'Cargo', hex: 'Hex' }
 
   const DEFAULTS = { ecosystem: 'npm', name: '', version: '' }
   const init = readQuery(DEFAULTS)

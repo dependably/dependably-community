@@ -436,6 +436,44 @@ public sealed partial class PackageLookupService
 
     // ── Cargo ───────────────────────────────────────────────────────────────────
 
+    // Hex: one verified fetch of the signed package resource answers everything the lookup
+    // reports — every release with its publish time and retirement (Hex's deprecation). Licences
+    // live only inside the tarball, so the licence list is empty here rather than fetched.
+    private async Task<FactsOutcome> FetchHexAsync(
+        string orgId, string name, string? requestedVersion, CancellationToken ct)
+    {
+        var sources = await _registries.ResolveAsync(orgId, "hex", ct);
+        if (sources.Count == 0)
+        {
+            return FactsOutcome.NotConfigured;
+        }
+
+        var result = await Hex.HexUpstreamPackageFetcher.FetchAsync(_upstream, _registries, orgId, name, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, _hexMasterKeys, ct);
+        if (result.Package is null)
+        {
+            return result.Outcome == Hex.HexUpstreamOutcome.Fault ? FactsOutcome.Unavailable : FactsOutcome.NotFound;
+        }
+
+        string? version = requestedVersion;
+        if (version is null)
+        {
+            var stable = Hex.HexUpstreamPackageFetcher.StableVersionsDescending(result.Package);
+            version = stable.Count > 0 ? stable[0] : null;
+            if (version is null)
+            {
+                return FactsOutcome.NotFound;
+            }
+        }
+
+        var release = result.Package.Releases.FirstOrDefault(r => string.Equals(r.Version, version, StringComparison.Ordinal));
+        return release is null
+            ? FactsOutcome.NotFound
+            : FactsOutcome.Ok(version, new VersionMetadataFacts(
+                release.PublishedAt?.ToDateTimeOffset(),
+                release.Retired is { } retired ? Hex.HexIndexBuilder.RetirementAsDeprecation(retired) : null,
+                Array.Empty<string>()));
+    }
+
     private async Task<FactsOutcome> FetchCargoAsync(
         string orgId, string name, string? requestedVersion, CancellationToken ct)
     {

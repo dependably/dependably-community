@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest'
-import { orderStagedFiles, describeSuccess, describeFailure } from './outcome.js'
+import {
+  orderStagedFiles, describeSuccess, describeFailure, isBlockedBySbomFailure,
+} from './outcome.js'
 
 describe('orderStagedFiles', () => {
   it('sorts sbom files before vex/sarif files', () => {
@@ -127,5 +129,78 @@ describe('mixed partial-failure batch (SBOM + SARIF + VEX, one deliberate failur
     ])
     expect(outcomes.filter(o => o.status === 'accepted')).toHaveLength(2)
     expect(outcomes.filter(o => o.status === 'rejected')).toHaveLength(1)
+  })
+})
+
+describe('isBlockedBySbomFailure', () => {
+  const newVersion = { sbomRejected: true, versionExisted: false }
+
+  it('blocks vex and sarif once the batch SBOM was rejected for a version this batch would create', () => {
+    expect(isBlockedBySbomFailure('vex', newVersion)).toBe(true)
+    expect(isBlockedBySbomFailure('sarif', newVersion)).toBe(true)
+  })
+
+  it('never blocks the sbom leg itself', () => {
+    // The prerequisite cannot be its own dependent: a second SBOM in the same batch still gets
+    // its own attempt and its own outcome, exactly as it would have before.
+    expect(isBlockedBySbomFailure('sbom', newVersion)).toBe(false)
+  })
+
+  it('does not block anything while the SBOM leg is still fine', () => {
+    expect(isBlockedBySbomFailure('sarif', { sbomRejected: false, versionExisted: false })).toBe(false)
+    expect(isBlockedBySbomFailure('vex', { sbomRejected: false, versionExisted: true })).toBe(false)
+  })
+
+  it('does not block a dependent whose version already exists', () => {
+    // The guard exists to stop a doomed request, not to suppress a legitimate one: a SARIF for a
+    // version that is already on the server is unaffected by a co-submitted SBOM being rejected.
+    // Without this arm the guard would turn one bad outcome into two.
+    expect(isBlockedBySbomFailure('sarif', { sbomRejected: true, versionExisted: true })).toBe(false)
+    expect(isBlockedBySbomFailure('vex', { sbomRejected: true, versionExisted: true })).toBe(false)
+  })
+
+  it('treats an unrecognised kind as a non-dependent', () => {
+    // Callers pass the ENDPOINT a file is submitted against, and an unsniffable document goes to
+    // the SBOM endpoint — so anything not named here is a prerequisite, never something to skip.
+    expect(isBlockedBySbomFailure('unknown', newVersion)).toBe(false)
+    expect(isBlockedBySbomFailure('constructor', newVersion)).toBe(false)
+  })
+})
+
+describe('a batch whose SBOM is rejected for a brand-new version', () => {
+  it('reports the dependents as skipped instead of letting them 404 on their own row', () => {
+    // The regression this pins: the submit loop used to send every staged file regardless, so the
+    // server answered the SARIF with a truthful "No such project version" that read as if the
+    // SARIF were malformed — while the real cause sat two rows up.
+    const ordered = orderStagedFiles([
+      { kind: 'sarif', file: 'results.sarif.json' },
+      { kind: 'sbom', file: 'sbom.json' },
+      { kind: 'vex', file: 'vex.json' },
+    ])
+    expect(ordered.map(f => f.kind)).toEqual(['sbom', 'sarif', 'vex'])
+
+    let sbomRejected = false
+    const versionExisted = false
+    const sent = []
+    const outcomes = ordered.map((item) => {
+      if (isBlockedBySbomFailure(item.kind, { sbomRejected, versionExisted })) {
+        return { file: item.file, status: 'skipped' }
+      }
+      sent.push(item.file)
+      if (item.kind === 'sbom') {
+        sbomRejected = true
+        const d = describeFailure({ status: 422, body: { detail: 'components[4].purl is not a valid purl' } })
+        return { file: item.file, status: 'rejected', text: d.text }
+      }
+      return { file: item.file, status: 'accepted' }
+    })
+
+    expect(outcomes).toEqual([
+      { file: 'sbom.json', status: 'rejected', text: 'components[4].purl is not a valid purl' },
+      { file: 'results.sarif.json', status: 'skipped' },
+      { file: 'vex.json', status: 'skipped' },
+    ])
+    // The load-bearing half: the dependents were never put on the wire at all.
+    expect(sent).toEqual(['sbom.json'])
   })
 })

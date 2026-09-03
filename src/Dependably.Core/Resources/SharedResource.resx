@@ -286,7 +286,7 @@
     <comment>422 detail: list pattern failed regex compilation.</comment>
   </data>
   <data name="error.list.ecosystemInvalidProxy" xml:space="preserve">
-    <value>ecosystem must be one of: npm, pypi, nuget, maven, cargo, golang.</value>
+    <value>ecosystem must be one of: npm, pypi, nuget, maven, cargo, golang, apk, terraform, hex.</value>
     <comment>422 detail. The field name and values are API literals - do not translate them.</comment>
   </data>
   <data name="error.list.patternTooLong256" xml:space="preserve">
@@ -885,14 +885,6 @@ If you did not make this change, contact your administrator immediately — your
     <value>The triage decision could not be read back after being saved.</value>
     <comment>404 detail for the rare case where the manual-triage row cannot be re-read immediately after the write.</comment>
   </data>
-  <data name="error.sbom.sortInvalid" xml:space="preserve">
-    <value>Must be 'priority', 'name', 'version', 'severity' or 'scope'.</value>
-    <comment>422 detail for the analysis sort parameter. The quoted values are API literals.</comment>
-  </data>
-  <data name="error.sbom.dirInvalid" xml:space="preserve">
-    <value>Must be 'asc' or 'desc'.</value>
-    <comment>422 detail for the analysis sort-direction parameter. The quoted values are API literals.</comment>
-  </data>
   <data name="error.sbom.scopeInvalid" xml:space="preserve">
     <value>Must be 'all', 'prod' or 'dev'.</value>
     <comment>422 detail for the analysis dependency-scope filter. The quoted values are API literals.</comment>
@@ -983,7 +975,7 @@ If you did not make this change, contact your administrator immediately — your
   </data>
   <data name="error.sbom.unsupportedSpecVersion" xml:space="preserve">
     <value>Specification version {0} is not supported.</value>
-    <comment>Validation error returned for a CycloneDX version outside 1.4-1.6 or a SARIF version other than 2.1.0. {0} is the version the document declared.</comment>
+    <comment>Validation error returned for a CycloneDX version outside 1.4-1.7 or a SARIF version other than 2.1.0. {0} is the version the document declared.</comment>
   </data>
   <data name="error.sbom.tooManyComponents" xml:space="preserve">
     <value>The document declares more than {0} components.</value>
@@ -1044,6 +1036,14 @@ If you did not make this change, contact your administrator immediately — your
   <data name="error.token.nameInvalidChars" xml:space="preserve">
     <value>Name must not contain control characters.</value>
     <comment>422 detail: service-token name carrying control characters.</comment>
+  </data>
+  <data name="error.upstream.publicKeyHexOnly" xml:space="preserve">
+    <value>A repository public key applies only to Hex upstreams.</value>
+    <comment>422 detail: publicKeyPem supplied for a non-Hex upstream registry.</comment>
+  </data>
+  <data name="error.upstream.publicKeyInvalid" xml:space="preserve">
+    <value>The repository public key must be a PEM-encoded RSA public key.</value>
+    <comment>422 detail: publicKeyPem did not parse as a PEM SubjectPublicKeyInfo RSA key.</comment>
   </data>
   <data name="error.upstream.nameTooLong" xml:space="preserve">
     <value>Name must be {0} characters or fewer.</value>

@@ -273,7 +273,6 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
             new OrgRepository(_db),
             Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(time),
             Dependably.Tests.Infrastructure.TestAlerts.NoOp(_db, time),
-            new SbomComponentVulnRepository(_db, time),
             new SbomComponentScanner(osv, vulns, new SbomComponentVulnRepository(_db, time), NullLogger<SbomComponentScanner>.Instance),
             Dependably.Tests.Infrastructure.TestSbomPolicy.Service(_db, time),
             Dependably.Tests.Infrastructure.TestEnrichment.Unused(),

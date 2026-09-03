@@ -880,37 +880,22 @@ public sealed class CargoControllerTests : IClassFixture<DependablyFactory>, IAs
 
     // ── Publish ─────────────────────────────────────────────────────────────────
 
-    // Builds the binary publish frame: LE u32 metadata length, JSON metadata, LE u32 crate
-    // length, crate bytes. A declaredCrateLen override lets a test lie about the crate size
-    // to exercise the pre-storage 413 gate.
+    // Frame, envelope and content helpers live in CargoFixtures; the crates published here are
+    // real gzipped tars whose root Cargo.toml agrees with the envelope, because the publish path
+    // cross-checks the two and refuses opaque bytes.
     private static byte[] BuildPublishFrame(string metadataJson, byte[] crateBytes, uint? declaredCrateLen = null)
-    {
-        byte[] meta = System.Text.Encoding.UTF8.GetBytes(metadataJson);
-        byte[] buf = new byte[4 + meta.Length + 4 + crateBytes.Length];
-        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(buf, (uint)meta.Length);
-        meta.CopyTo(buf, 4);
-        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(
-            buf.AsSpan(4 + meta.Length), declaredCrateLen ?? (uint)crateBytes.Length);
-        crateBytes.CopyTo(buf, 4 + meta.Length + 4);
-        return buf;
-    }
+        => CargoFixtures.BuildPublishFrame(metadataJson, crateBytes, declaredCrateLen);
 
-    private static ByteArrayContent FrameContent(byte[] frame)
-    {
-        var content = new ByteArrayContent(frame);
-        content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
-        return content;
-    }
+    private static ByteArrayContent FrameContent(byte[] frame) => CargoFixtures.FrameContent(frame);
 
-    private static string MetadataJson(string name, string version) =>
-        $$"""{"name":"{{name}}","vers":"{{version}}","deps":[],"features":{},"description":"a test crate"}""";
+    private static string MetadataJson(string name, string version) => CargoFixtures.MetadataJson(name, version);
 
     [Fact]
     public async Task Publish_HappyPath_StoresVersionAndServesIndexAndDownload()
     {
         string name = $"pubcrate{Guid.NewGuid():N}"[..14].ToLowerInvariant();
         string version = "1.0.0";
-        byte[] crate = "real-crate-bytes-for-publish"u8.ToArray();
+        byte[] crate = CargoFixtures.BuildCrate(name, version);
         string expectedCksum = Convert.ToHexString(
             System.Security.Cryptography.SHA256.HashData(crate)).ToLowerInvariant();
 
@@ -961,7 +946,7 @@ public sealed class CargoControllerTests : IClassFixture<DependablyFactory>, IAs
     {
         string name = $"dupcrate{Guid.NewGuid():N}"[..14].ToLowerInvariant();
         string version = "1.0.0";
-        byte[] crate = "crate-bytes"u8.ToArray();
+        byte[] crate = CargoFixtures.BuildCrate(name, version);
 
         string token = await _factory.CreateToken("push");
         using var client = _factory.CreateClientWithBearer(token);
@@ -973,6 +958,85 @@ public sealed class CargoControllerTests : IClassFixture<DependablyFactory>, IAs
         var second = await client.PutAsync("/cargo/api/v1/crates/new",
             FrameContent(BuildPublishFrame(MetadataJson(name, version), crate)));
         Assert.Equal(HttpStatusCode.Conflict, second.StatusCode);
+    }
+
+    // ── Crate manifest cross-check ────────────────────────────────────────────
+
+    [Fact]
+    public async Task Publish_CrateManifestNameDisagreesWithEnvelope_Returns422AndStoresNothing()
+    {
+        string name = $"mismatch{Guid.NewGuid():N}"[..14].ToLowerInvariant();
+        string version = "1.0.0";
+        byte[] crate = CargoFixtures.BuildCrate(name, version, manifestName: "some-other-crate");
+
+        string token = await _factory.CreateToken("push");
+        using var client = _factory.CreateClientWithBearer(token);
+
+        var resp = await client.PutAsync("/cargo/api/v1/crates/new",
+            FrameContent(BuildPublishFrame(MetadataJson(name, version), crate)));
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
+        string body = await resp.Content.ReadAsStringAsync();
+        Assert.Contains("some-other-crate", body);
+        Assert.Contains(name, body);
+
+        await AssertNoPackageRowAsync(name);
+        var indexResp = await client.GetAsync($"/cargo/{Dependably.Api.CargoController.IndexPath(name)}");
+        Assert.Equal(HttpStatusCode.NotFound, indexResp.StatusCode);
+    }
+
+    [Fact]
+    public async Task Publish_CrateManifestVersionDisagreesWithEnvelope_Returns422()
+    {
+        string name = $"vermis{Guid.NewGuid():N}"[..14].ToLowerInvariant();
+        byte[] crate = CargoFixtures.BuildCrate(name, "1.0.0", manifestVersion: "2.0.0");
+
+        string token = await _factory.CreateToken("push");
+        using var client = _factory.CreateClientWithBearer(token);
+
+        var resp = await client.PutAsync("/cargo/api/v1/crates/new",
+            FrameContent(BuildPublishFrame(MetadataJson(name, "1.0.0"), crate)));
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
+        await AssertNoPackageRowAsync(name);
+    }
+
+    [Fact]
+    public async Task Publish_OpaqueBytesWithNoCargoToml_Returns422()
+    {
+        // The pre-cross-check contract accepted any bytes; an archive that carries no identity
+        // at all is now refused rather than trusted on the envelope's word.
+        string name = $"opaque{Guid.NewGuid():N}"[..14].ToLowerInvariant();
+        string token = await _factory.CreateToken("push");
+        using var client = _factory.CreateClientWithBearer(token);
+
+        var resp = await client.PutAsync("/cargo/api/v1/crates/new",
+            FrameContent(BuildPublishFrame(MetadataJson(name, "1.0.0"), "not-a-crate"u8.ToArray())));
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
+        await AssertNoPackageRowAsync(name);
+    }
+
+    [Fact]
+    public async Task Publish_CrateManifestAgreesWithEnvelope_Control_Returns200()
+    {
+        // Control for the three refusals above: the same builder with matching coordinates
+        // still publishes, so the cross-check discriminates rather than rejects everything.
+        string name = $"agree{Guid.NewGuid():N}"[..14].ToLowerInvariant();
+        string token = await _factory.CreateToken("push");
+        using var client = _factory.CreateClientWithBearer(token);
+
+        var resp = await client.PutAsync("/cargo/api/v1/crates/new",
+            FrameContent(BuildPublishFrame(MetadataJson(name, "1.0.0"), CargoFixtures.BuildCrate(name, "1.0.0"))));
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+    }
+
+    private async Task AssertNoPackageRowAsync(string name)
+    {
+        string orgId = await DefaultOrgIdAsync();
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        int count = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM packages WHERE org_id = @orgId AND ecosystem = 'cargo' AND name = @name",
+            new { orgId, name });
+        Assert.Equal(0, count);
     }
 
     [Fact]
@@ -1023,15 +1087,15 @@ public sealed class CargoControllerTests : IClassFixture<DependablyFactory>, IAs
 
     // ── License capture: publish envelope ───────────────────────────────────────
 
-    private static string MetadataJsonWithLicense(string name, string version, string license) =>
-        $$"""{"name":"{{name}}","vers":"{{version}}","deps":[],"features":{},"license":"{{license}}"}""";
+    private static string MetadataJsonWithLicense(string name, string version, string license)
+        => CargoFixtures.MetadataJson(name, version, license);
 
     [Fact]
     public async Task Publish_WithLicenseField_WritesPackageVersionLicenseRow()
     {
         string name = $"liccrate{Guid.NewGuid():N}"[..14].ToLowerInvariant();
         string version = "1.0.0";
-        byte[] crate = "licensed-crate-bytes"u8.ToArray();
+        byte[] crate = CargoFixtures.BuildCrate(name, version);
 
         string token = await _factory.CreateToken("push");
         using var client = _factory.CreateClientWithBearer(token);
@@ -1049,7 +1113,7 @@ public sealed class CargoControllerTests : IClassFixture<DependablyFactory>, IAs
     {
         string name = $"nolic{Guid.NewGuid():N}"[..14].ToLowerInvariant();
         string version = "1.0.0";
-        byte[] crate = "unlicensed-crate-bytes"u8.ToArray();
+        byte[] crate = CargoFixtures.BuildCrate(name, version);
 
         string token = await _factory.CreateToken("push");
         using var client = _factory.CreateClientWithBearer(token);
@@ -1076,7 +1140,7 @@ public sealed class CargoControllerTests : IClassFixture<DependablyFactory>, IAs
     {
         string name = $"yankcrate{Guid.NewGuid():N}"[..14].ToLowerInvariant();
         string version = "1.0.0";
-        byte[] crate = "yankable-crate"u8.ToArray();
+        byte[] crate = CargoFixtures.BuildCrate(name, version);
 
         string token = await _factory.CreateToken("push");
         using var client = _factory.CreateClientWithBearer(token);
@@ -1108,7 +1172,7 @@ public sealed class CargoControllerTests : IClassFixture<DependablyFactory>, IAs
 
         string token = await _factory.CreateToken("push");
         using var client = _factory.CreateClientWithBearer(token);
-        await PublishCrateAsync(client, name, version, "bytes"u8.ToArray());
+        await PublishCrateAsync(client, name, version, CargoFixtures.BuildCrate(name, version));
 
         await client.DeleteAsync($"/cargo/api/v1/crates/{name}/{version}/yank");
         var unyankResp = await client.PutAsync($"/cargo/api/v1/crates/{name}/{version}/unyank", null);

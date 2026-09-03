@@ -11,9 +11,14 @@ others cross-reference.
   form plus one component with none, and `scope` values covering `required`, `optional`,
   `excluded` and absent.
 - `cyclonedx-1.5-minimal.json` — small valid CycloneDX 1.5 SBOM; exercises the middle of the
-  accepted 1.4–1.6 spec-version range.
+  accepted 1.4–1.7 spec-version range.
 - `cyclonedx-1.4-minimal.json` — small valid CycloneDX 1.4 SBOM (array-form `metadata.tools`);
   exercises the lower bound of the accepted range.
+- `cyclonedx-1.7-minimal.json` — small valid CycloneDX 1.7 SBOM at the upper bound of the
+  accepted range, carrying the constructs only 1.7 admits: a component declaring `versionRange`
+  and no `version`, one declaring `isExternal`, a `licenses` array mixing a `license.id` entry
+  with an `expression` entry (1.6 allowed only one form per array), and a `Streebog-256` hash
+  from the algorithm set 1.7 widened.
 - `cyclonedx-1.3-unsupported.json` — CycloneDX 1.3 document; upload rejects it as an unsupported
   spec version (422).
 - `cyclonedx-1.6-vdr.json` — the same inventory plus an embedded `vulnerabilities[]` array with

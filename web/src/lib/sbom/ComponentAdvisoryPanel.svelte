@@ -197,6 +197,19 @@
           <dt>{$t('sbomAnalysis.panel.copyright')}</dt>
           <dd>{item.copyright}</dd>
         {/if}
+        <!-- A version range is what the component declares in place of a concrete version, so it
+             is shown as its own fact rather than substituted into the version column, where it
+             would read as a version this registry could resolve. -->
+        {#if item.versionRange}
+          <dt>{$t('sbomAnalysis.panel.versionRange')}</dt>
+          <dd class="mono">{item.versionRange}</dd>
+        {/if}
+        <!-- Only a declared true. Null means the document did not say, which is not a claim that
+             the component is internal. -->
+        {#if item.isExternal === true}
+          <dt>{$t('sbomAnalysis.panel.external')}</dt>
+          <dd>{$t('sbomAnalysis.panel.externalYes')}</dd>
+        {/if}
       </dl>
       {#if componentLinks.length}
         <div class="component-links">

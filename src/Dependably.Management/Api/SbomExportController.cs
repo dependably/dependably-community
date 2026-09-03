@@ -7,7 +7,7 @@ using Microsoft.AspNetCore.Mvc;
 namespace Dependably.Api;
 
 /// <summary>
-/// Normalized CycloneDX 1.6 re-renders and verbatim original-document download — two distinct
+/// Normalized CycloneDX 1.7 re-renders and verbatim original-document download — two distinct
 /// actions per the design: <c>export/sbom</c> and <c>export/vex</c> rebuild a fresh document from
 /// the database, while <c>sbom-documents/{id}/original</c> streams back the exact bytes a caller
 /// uploaded. All three are reads: <c>read:packages</c>, no activity/audit row (matching the
@@ -23,7 +23,7 @@ public sealed class SbomExportController : OrgScopedControllerBase
 {
     private static readonly HashSet<string> ValidVariants = new(StringComparer.Ordinal) { "inventory", "vdr" };
 
-    private const string CycloneDxContentType = "application/vnd.cyclonedx+json; version=1.6";
+    private const string CycloneDxContentType = "application/vnd.cyclonedx+json; version=1.7";
 
     private readonly SbomExportService _export;
     private readonly OrgAccessGuard _guard;

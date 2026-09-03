@@ -69,7 +69,7 @@ public sealed class SbomIngestVersionGateTests : IAsyncLifetime
         await conn.ExecuteAsync(sql, parameters);
     }
 
-    private async Task<string> UploadAsync(HttpClient client, string project)
+    private static async Task<string> UploadAsync(HttpClient client, string project)
     {
         var response = await client.PutAsync(
             $"/api/v1/sbom?projectName={project}&projectVersion=1.0.0&autoCreate=true", Document());

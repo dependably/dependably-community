@@ -43,6 +43,10 @@ public static class UpstreamRegistrySeeder
         // source address against: a mirror is addressed by the provider's own registry hostname,
         // and only hosts configured here are mirrored.
         ("terraform", "Terraform:Upstream", "https://registry.terraform.io"),
+        // hex.pm's repository (read plane). Every registry resource it serves is signed with
+        // hex.pm's own RSA key, which the seeded row carries as its public key so the proxy can
+        // verify what it re-signs; the API plane at https://hex.pm/api is not needed for proxying.
+        ("hex",    "Hex:Upstream",   "https://repo.hex.pm"),
     ];
 
     /// <summary>

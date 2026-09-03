@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Text.Json;
 
@@ -64,27 +65,16 @@ public sealed class HttpThreatFeedSource : IThreatFeedSource
         {
             foreach (var entry in vulns.EnumerateArray())
             {
-                if (entry.ValueKind == JsonValueKind.Object
-                    && entry.TryGetProperty("cveID", out var cve)
-                    && cve.ValueKind == JsonValueKind.String
-                    && !string.IsNullOrWhiteSpace(cve.GetString()))
-                {
-                    var parsed = new KevEntry(
-                        ParseRansomwareUse(entry),
-                        ReadDate(entry, "dateAdded"),
-                        ReadDate(entry, "dueDate"),
-                        ReadString(entry, "requiredAction"),
-                        ReadCwes(entry),
-                        ReadString(entry, "notes"));
-                    entries[cve.GetString()!.Trim()] = parsed;
-                    if (parsed.KnownRansomwareCampaignUse == true)
-                    {
-                        ransomware++;
-                    }
-                }
-                else
+                if (!TryReadKevEntry(entry, out string? cveId, out var parsed))
                 {
                     skipped++;
+                    continue;
+                }
+
+                entries[cveId] = parsed;
+                if (parsed.KnownRansomwareCampaignUse == true)
+                {
+                    ransomware++;
                 }
             }
         }
@@ -132,6 +122,35 @@ public sealed class HttpThreatFeedSource : IThreatFeedSource
             : null;
 
     // requiredAction and notes are free-text prose fields. Same fail-soft posture as
+    // One catalogue entry: an object carrying a non-blank string cveID. Anything else is a
+    // malformed record the caller counts as skipped rather than failing the whole feed on.
+    private static bool TryReadKevEntry(
+        JsonElement entry,
+        [NotNullWhen(true)] out string? cveId,
+        [NotNullWhen(true)] out KevEntry? parsed)
+    {
+        cveId = null;
+        parsed = null;
+
+        if (entry.ValueKind != JsonValueKind.Object
+            || !entry.TryGetProperty("cveID", out var cve)
+            || cve.ValueKind != JsonValueKind.String
+            || string.IsNullOrWhiteSpace(cve.GetString()))
+        {
+            return false;
+        }
+
+        cveId = cve.GetString()!.Trim();
+        parsed = new KevEntry(
+            ParseRansomwareUse(entry),
+            ReadDate(entry, "dateAdded"),
+            ReadDate(entry, "dueDate"),
+            ReadString(entry, "requiredAction"),
+            ReadCwes(entry),
+            ReadString(entry, "notes"));
+        return true;
+    }
+
     // ReadDate/ParseRansomwareUse: a missing or non-string field yields null rather than
     // throwing, and an all-whitespace value is treated as absent rather than a coerced "".
     private static string? ReadString(JsonElement entry, string property) =>
@@ -147,6 +166,10 @@ public sealed class HttpThreatFeedSource : IThreatFeedSource
     // malformed entry (wrong shape, or an array containing something other than a non-blank
     // string) is skipped without failing the whole catalogue entry, matching this parser's
     // posture elsewhere: a strange field never aborts the pass.
+    [SuppressMessage("Major Code Smell", "S1168:Empty arrays and collections should be returned instead of null",
+        Justification = "Null is a distinct documented state here: it means CISA published no cwes "
+                        + "property at all, which callers must tell apart from a present-but-empty "
+                        + "array meaning CISA recorded zero classifications.")]
     private static IReadOnlyList<string>? ReadCwes(JsonElement entry)
     {
         if (!entry.TryGetProperty("cwes", out var cwes) || cwes.ValueKind != JsonValueKind.Array)

@@ -497,6 +497,8 @@ public sealed class EmailOutboxDeliveryServiceTests : IAsyncLifetime
     /// </summary>
     [Theory]
     [MemberData(nameof(ClassificationCases))]
+    [SuppressMessage("Usage", "xUnit1045:Avoid using TheoryData type arguments that might not be serializable",
+        Justification = "The subject under test classifies exceptions; the exception instance is the test data.")]
     public void Classifier_MapsEachFailureToItsClass(Exception ex, string expected) =>
         Assert.Equal(expected, EmailOutboxFailureClassifier.Classify(ex));
 

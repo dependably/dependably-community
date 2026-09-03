@@ -76,7 +76,7 @@ public sealed class EdgeUpstreamSeederTests : IClassFixture<InMemoryDbFixture>
         int count = await read.ExecuteScalarAsync<int>(
             "SELECT COUNT(*) FROM upstream_registry WHERE org_id = @org", new { org });
         // 9 non-OCI ecosystems + 1 OCI row, no duplication after a second run.
-        Assert.Equal(10, count);
+        Assert.Equal(11, count);
     }
 
     [Fact]
@@ -101,7 +101,7 @@ public sealed class EdgeUpstreamSeederTests : IClassFixture<InMemoryDbFixture>
 
         Assert.All(urls, u => Assert.DoesNotContain("old.example", u));
         Assert.Contains("https://new.example/npm", urls);
-        Assert.Equal(10, urls.Count);
+        Assert.Equal(11, urls.Count);
     }
 
     [Fact]

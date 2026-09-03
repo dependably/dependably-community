@@ -152,7 +152,7 @@ public sealed class SbomController : ControllerBase
     private readonly string _stagingPath;
 
     /// <summary>
-    /// PUT /api/v1/sbom — ingest a CycloneDX 1.4–1.6 inventory for one project version, replacing
+    /// PUT /api/v1/sbom — ingest a CycloneDX 1.4–1.7 inventory for one project version, replacing
     /// whatever inventory that version held and re-applying its stored VEX and SARIF afterwards.
     /// </summary>
     [HttpPut("api/v1/sbom")]

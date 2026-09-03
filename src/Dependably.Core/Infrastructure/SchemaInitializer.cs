@@ -89,7 +89,7 @@ public sealed partial class SchemaInitializer
     /// this, because the guard's own <c>instance_lock</c> table is created by the base schema.
     /// </param>
     public async Task InitializeAsync(
-        CancellationToken ct = default, Func<CancellationToken, Task>? afterBaseSchema = null)
+        Func<CancellationToken, Task>? afterBaseSchema = null, CancellationToken ct = default)
     {
         string sql = await ReadSchemaAsync(_db.Provider, ct);
         await using var conn = await _db.OpenAsync(ct);
@@ -113,6 +113,16 @@ public sealed partial class SchemaInitializer
 
     private async Task ApplySchemaAsync(
         DbConnection conn, string sql, CancellationToken ct, Func<CancellationToken, Task>? afterBaseSchema = null)
+    {
+        await ApplyBaseSchemaAsync(conn, sql, afterBaseSchema, ct);
+        await ApplyOneTimeMigrationsAsync(conn);
+        await ApplyPostMigrationConvergenceAsync(conn, sql);
+    }
+
+    // Phase 1 — the renames that must precede CREATE TABLE, the declarative schema itself, the
+    // single-writer claim it makes possible, and the additive column/seed passes.
+    private async Task ApplyBaseSchemaAsync(
+        DbConnection conn, string sql, Func<CancellationToken, Task>? afterBaseSchema, CancellationToken ct)
     {
         // Table renames must happen BEFORE the CREATE TABLE IF NOT EXISTS pass — otherwise the
         // schema would create empty sibling tables under the new names alongside the original
@@ -143,6 +153,13 @@ public sealed partial class SchemaInitializer
 
         await RunAdditiveMigrationsAsync(conn);
         await _spdxSeeder.RunAsync(conn, ct);
+    }
+
+    // Phase 2 — the ledgered one-time migrations, in the order the comments below justify. The
+    // sequence is load-bearing: several entries state explicitly why they must follow the one
+    // above them, so entries are appended, never reordered.
+    private async Task ApplyOneTimeMigrationsAsync(DbConnection conn)
+    {
 
         // Canonicalize stored account emails and install the case-insensitive unique indexes.
         // Deliberately not a ledgered one-shot and deliberately not part of the base schema file:
@@ -221,6 +238,9 @@ public sealed partial class SchemaInitializer
         // mirror matches a requested provider's registry hostname against the org's configured
         // upstreams, so an org with no 'terraform' row mirrors no provider at all.
         await RunOnceAsync(conn, "seed_terraform_upstream_registries", SeedTerraformUpstreamRegistriesAsync);
+        // Same footing for Hex: the repo.hex.pm row carries the public key the re-signing proxy
+        // verifies upstream resources against, so an org without it proxies no Hex package.
+        await RunOnceAsync(conn, "seed_hex_upstream_registries", SeedHexUpstreamRegistriesAsync);
         // Seed the two default OCI upstream rows (MCR + Docker Hub) for every org that has no
         // 'oci' upstream_registry rows yet. Hardcoded defaults; does not read Oci:Upstreams config
         // (that config key is no longer used). Idempotent via the per-(org, ecosystem) existence
@@ -446,6 +466,13 @@ public sealed partial class SchemaInitializer
         // between package_versions and cache_artifact, and a sweep placed ahead of them would read
         // a mid-migration package as empty and delete a row whose versions were about to land.
         await RunOnceAsync(conn, "delete_empty_package_rows", DeleteEmptyPackageRowsAsync);
+    }
+
+    // Phase 3 — the views (which need every table and column to exist) and the convergence sweeps
+    // that deliberately run on every boot rather than once, so a blue-green cutover cannot strand
+    // rows the old binary writes during the window.
+    private async Task ApplyPostMigrationConvergenceAsync(DbConnection conn, string sql)
+    {
 
         // Last, after every migration: the view bodies can only be created once every table and
         // column they reference is guaranteed to exist.

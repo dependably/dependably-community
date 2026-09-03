@@ -32,6 +32,7 @@ public sealed record UpdateOrgSettingsRequest(
     long? MaxUploadBytesRpm = null,
     long? MaxUploadBytesOci = null,
     long? MaxUploadBytesCargo = null,
+    long? MaxUploadBytesHex = null,
     string? DefaultLanguage = null,
     // IANA zone name for rendering stored instants. null = leave unchanged.
     string? DefaultTimezone = null,
@@ -166,7 +167,10 @@ public sealed record AddUpstreamRegistryRequest(
     // Terraform-only field — which server-side protocol this upstream speaks. Null (the Provider
     // Registry Protocol) or "mirror" (the Provider Network Mirror Protocol); rejected for every
     // other ecosystem.
-    string? Protocol = null);
+    string? Protocol = null,
+    // Hex-only field — the PEM public key the upstream signs its registry resources with.
+    // Rejected for every other ecosystem; optional for the well-known hex.pm host.
+    string? PublicKeyPem = null);
 
 public sealed record ReorderUpstreamRegistryRequest(IReadOnlyList<string> Ids);
 

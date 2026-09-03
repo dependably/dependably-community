@@ -1,21 +1,8 @@
 # Security Policy
 
-To report a security vulnerability, please use [GitHub's private vulnerability reporting](https://github.com/dependably/dependably-community/security/advisories/new).
-
-Do not open a public issue for security vulnerabilities.
-
-## Disclosure SLA
-
-| Stage | Target |
-| --- | --- |
-| Acknowledge receipt | within **3 business days** |
-| Initial severity assessment | within **7 business days** |
-| Fix or documented mitigation for High/Critical | within **30 days** of confirmation |
-| Coordinated public disclosure | after a fix ships, by mutual agreement (embargo honoured) |
-
-These are targets for the maintainer team, not contractual guarantees. Please allow the
-above windows before any public disclosure so a fix and, where relevant, an operator advisory
-can land first.
+To report a vulnerability, email **security@dependably.ca**. Our Security Policy at
+<https://dependably.ca/security> defines what is in scope, what to expect from us, and the safe
+harbour for good-faith research. Do not open a public issue for security vulnerabilities.
 
 ## Supported versions
 

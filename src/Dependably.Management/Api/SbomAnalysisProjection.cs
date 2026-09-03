@@ -37,9 +37,24 @@ public static partial class SbomAnalysisProjection
     /// <summary>Page size applied when the caller names none.</summary>
     public const int DefaultPageSize = 50;
 
-    /// <summary>Sort keys the endpoint accepts.</summary>
+    /// <summary>
+    /// Sort keys the endpoint accepts — one per column the table renders, because DESIGN.md
+    /// makes every list table sortable and a rendered column that cannot be ordered is the drift.
+    /// <c>scope</c> orders by the dependency scope the <c>scope=prod|dev</c> filter also reads;
+    /// <c>sbomScope</c> orders by the separate included/excluded scope the document declared.
+    /// Ordering on <c>sbomScope</c> is a display order, not a classification: it buckets nothing
+    /// and feeds no derived signal, which is the property
+    /// <c>DESIGN-sbom-vex-sarif-projects</c> protects.
+    /// </summary>
     public static readonly IReadOnlySet<string> SortKeys =
-        new HashSet<string>(StringComparer.Ordinal) { "priority", "name", "version", "severity", "scope" };
+        new HashSet<string>(StringComparer.Ordinal)
+        {
+            "priority", "name", "version", "severity", "scope", "sbomScope",
+            "type", "dep", "licenses", "reach",
+        };
+
+    /// <summary>The sort applied when the caller names none, or names one that is not allowed.</summary>
+    public const string DefaultSort = "priority";
 
     /// <summary>Scope filters the endpoint accepts. <c>all</c> is also what an omitted value means.</summary>
     public static readonly IReadOnlySet<string> ScopeFilters =
@@ -151,7 +166,8 @@ public static partial class SbomAnalysisProjection
 
             string vulnKey = statement?.VulnKey ?? advisory.OsvId;
             advisoryViews.Add(BuildAdvisory(
-                vulnKey, advisory, identifiers, statement, componentFindings, versionCreatedAt, component, registryFacts));
+                vulnKey, advisory, identifiers, statement, componentFindings,
+                new AdvisoryComponentContext(component, registryFacts, versionCreatedAt)));
         }
 
         // A statement citing an advisory the scanner never linked to this component still belongs on
@@ -169,7 +185,8 @@ public static partial class SbomAnalysisProjection
             advisoryViews.Add(BuildAdvisory(
                 statement.VulnKey, advisory: null,
                 new HashSet<string>(StringComparer.OrdinalIgnoreCase) { statement.VulnKey },
-                statement, componentFindings, versionCreatedAt, component, registryFacts));
+                statement, componentFindings,
+                new AdvisoryComponentContext(component, registryFacts, versionCreatedAt)));
         }
 
         advisoryViews.Sort(static (x, y) =>
@@ -213,6 +230,8 @@ public static partial class SbomAnalysisProjection
             IssueTrackerUrl = component.IssueTrackerUrl,
             DistributionUrl = component.DistributionUrl,
             Hashes = ParseJsonArray(component.ComponentHashes),
+            VersionRange = component.VersionRange,
+            IsExternal = component.IsExternal,
             Registry = SbomRegistryView.For(
                 component.Ecosystem, component.PurlName, component.Version, registryFacts),
             Advisories = advisoryViews,
@@ -222,16 +241,24 @@ public static partial class SbomAnalysisProjection
         };
     }
 
+    /// <summary>The component an advisory view is being rendered against, and its registry facts.</summary>
+    private readonly record struct AdvisoryComponentContext(
+        AnalysisComponentRow Component,
+        ComponentRegistryFacts? RegistryFacts,
+        DateTimeOffset? VersionCreatedAt);
+
     private static AnalysisAdvisoryView BuildAdvisory(
         string vulnKey,
         AnalysisAdvisoryRow? advisory,
         IReadOnlySet<string> identifiers,
         AnalysisVexRow? statement,
         IReadOnlyList<AnalysisFindingRow> componentFindings,
-        DateTimeOffset? versionCreatedAt,
-        AnalysisComponentRow component,
-        ComponentRegistryFacts? registryFacts)
+        AdvisoryComponentContext ctx)
     {
+        var component = ctx.Component;
+        var registryFacts = ctx.RegistryFacts;
+        var versionCreatedAt = ctx.VersionCreatedAt;
+
         // HasStaleEnrichment is unused by Derive's rule text, so it stays at VulnFacts' unknown
         // default here rather than reaching further into `advisory`.
         var verdict = EffectivePriority.Derive(PriorityFacts.ForProjectsPlane(
@@ -488,6 +515,11 @@ public static partial class SbomAnalysisProjection
             "name" => (x, y) => string.CompareOrdinal(x.Name, y.Name),
             "version" => (x, y) => string.CompareOrdinal(x.Version ?? "", y.Version ?? ""),
             "scope" => (x, y) => string.CompareOrdinal(x.DependencyScope, y.DependencyScope),
+            "sbomScope" => (x, y) => string.CompareOrdinal(x.SbomScope ?? "", y.SbomScope ?? ""),
+            "type" => (x, y) => string.CompareOrdinal(x.ComponentType ?? "", y.ComponentType ?? ""),
+            "dep" => (x, y) => string.CompareOrdinal(x.DependencyKind ?? "", y.DependencyKind ?? ""),
+            "licenses" => (x, y) => string.CompareOrdinal(x.LicenseSpdx ?? "", y.LicenseSpdx ?? ""),
+            "reach" => (x, y) => ReachRank(x, query.IncludeSuppressed).CompareTo(ReachRank(y, query.IncludeSuppressed)),
             "severity" => (x, y) => SeverityRank(x, query.IncludeSuppressed).CompareTo(SeverityRank(y, query.IncludeSuppressed)),
             _ => (x, y) => PriorityRank(x, query.IncludeSuppressed).CompareTo(PriorityRank(y, query.IncludeSuppressed)),
         };
@@ -516,6 +548,27 @@ public static partial class SbomAnalysisProjection
             .Select(x => EffectivePriority.RankOf(x.EffectivePriority))
             .DefaultIfEmpty(0)
             .Max();
+
+    /// <summary>
+    /// The row's strongest reachability, ranked. Mirrors the frontend's <c>rowReach</c> ordering
+    /// so the column sorts by the same value the collapsed row displays — a server order derived
+    /// from a different rule than the badge would read as a broken sort.
+    /// </summary>
+    private static int ReachRank(AnalysisComponentView view, bool includeSuppressed) =>
+        view.Advisories
+            .Where(x => includeSuppressed || !x.IsSuppressed)
+            .Select(x => ReachabilityRank(EffectivePriority.NormalizeReachability(x.Reachability)))
+            .DefaultIfEmpty(0)
+            .Max();
+
+    private static int ReachabilityRank(string? reachability) => reachability switch
+    {
+        "reachable" => 4,
+        "imported-not-called" => 3,
+        "not-observed" => 2,
+        "unknown" => 1,
+        _ => 0,
+    };
 
     private static int SeverityRank(AnalysisComponentView view, bool includeSuppressed) =>
         view.Advisories
@@ -762,6 +815,18 @@ public sealed class AnalysisComponentView
     public string? DistributionUrl { get; init; }
     /// <summary>components[].hashes as parsed JSON, or null. Display and export only.</summary>
     public JsonArray? Hashes { get; init; }
+
+    /// <summary>
+    /// components[].versionRange, which CycloneDX 1.7 admits in place of a concrete version.
+    /// Non-null implies <see cref="Version"/> is null: the two are mutually exclusive.
+    /// </summary>
+    public string? VersionRange { get; init; }
+
+    /// <summary>
+    /// components[].isExternal. Null means the document did not say, which is not the same claim
+    /// as a declared false, so a renderer showing a marker keys on true rather than on truthiness.
+    /// </summary>
+    public bool? IsExternal { get; init; }
     /// <summary>
     /// Which source answered for the four fields both planes can describe: <c>registry</c>,
     /// <c>sbom</c>, <c>mixed</c>, or null when neither carried anything. Rendered so a reader can

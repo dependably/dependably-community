@@ -13,7 +13,7 @@ public static class NameBindingEcosystems
     public static readonly IReadOnlySet<string> Enforced =
         new HashSet<string>(StringComparer.Ordinal)
         {
-            "npm", "pypi", "nuget", "maven", "rpm", "oci", "cargo",
+            "npm", "pypi", "nuget", "maven", "rpm", "oci", "cargo", "hex",
         };
 
     public static bool Covers(string ecosystem) => Enforced.Contains(ecosystem);

@@ -118,7 +118,6 @@ public sealed class AlertRaisingTests : IAsyncLifetime
             Substitute.For<IPackageEventSink>(),
             new InProcessDistributedLock(TimeProvider.System),
             new AlertService(new AlertRepository(_db, TimeProvider.System), new NoOpAlertNotifier(), NullLogger<AlertService>.Instance),
-            new SbomComponentVulnRepository(_db, TimeProvider.System),
             new SbomComponentScanner(osv, new VulnerabilityRepository(_db, TimeProvider.System), new SbomComponentVulnRepository(_db, TimeProvider.System), NullLogger<SbomComponentScanner>.Instance),
             Dependably.Tests.Infrastructure.TestSbomPolicy.Service(_db, TimeProvider.System),
             Dependably.Tests.Infrastructure.TestEnrichment.Unused(),

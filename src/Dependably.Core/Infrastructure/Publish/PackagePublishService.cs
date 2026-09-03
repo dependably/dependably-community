@@ -959,9 +959,11 @@ public sealed class PackagePublishService : IPackagePublishService
     {
         try
         {
-            await _scanner.ScanVersionAsync(request.Purl, newVersion.Id, request.Ecosystem,
-                request.PurlName, request.OrgId, request.ActorUserId,
-                actorKind: request.ActorKind, sourceIp: request.SourceIp, ct: ct);
+            await _scanner.ScanVersionAsync(
+                request.Purl, newVersion.Id, request.Ecosystem, request.PurlName,
+                new ScanAttribution(
+                    request.OrgId, request.ActorUserId, request.ActorKind, request.SourceIp),
+                ct);
         }
         catch (Exception ex)
         {

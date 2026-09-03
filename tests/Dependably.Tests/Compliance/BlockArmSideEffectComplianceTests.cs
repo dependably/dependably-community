@@ -27,7 +27,7 @@ namespace Dependably.Tests.Compliance;
 /// </para>
 /// </summary>
 [Trait("Category", "Compliance")]
-public sealed class BlockArmSideEffectComplianceTests
+public sealed partial class BlockArmSideEffectComplianceTests
 {
     // Arms whose recording deliberately happens somewhere other than the switch, each paired with
     // the source fragment that proves it still does.
@@ -37,6 +37,11 @@ public sealed class BlockArmSideEffectComplianceTests
         (BlockArm.License, "QueueForReviewAsync(request, \"license\""),
     ];
 
+    // The ApplySideEffectsAsync body, from its signature to the first closing brace at method
+    // indentation.
+    [GeneratedRegex(@"private async Task ApplySideEffectsAsync\(.*?\n    \}\n", RegexOptions.Singleline)]
+    private static partial Regex SideEffectsMethodBody();
+
     [Fact]
     public void EveryRefusingArm_RecordsItsBlock()
     {
@@ -45,10 +50,7 @@ public sealed class BlockArmSideEffectComplianceTests
 
         // The switch body only — a `case BlockArm.X:` anywhere else in the file would otherwise
         // satisfy the gate without dispatching anything.
-        var switchBody = Regex.Match(
-            source,
-            @"private async Task ApplySideEffectsAsync\(.*?\n    \}\n",
-            RegexOptions.Singleline);
+        var switchBody = SideEffectsMethodBody().Match(source);
         Assert.True(switchBody.Success, "ApplySideEffectsAsync not found — the gate cannot scan it.");
 
         var exempt = RecordedElsewhere.ToDictionary(e => e.Arm, e => e.Evidence);

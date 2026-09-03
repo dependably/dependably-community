@@ -35,7 +35,7 @@ public sealed class EnrichmentStalenessHorizonTests : IClassFixture<InMemoryDbFi
 
     // A resolver over a stub setting reader, standing in for the operator's configured
     // connection. 48 hours is far from any boundary the seeds sit near.
-    private InstanceVulnTrackerConfig TrackerConfig(TimeProvider time, int horizonHours) =>
+    private static InstanceVulnTrackerConfig TrackerConfig(TimeProvider time, int horizonHours) =>
         new((key, _) => Task.FromResult<string?>(key switch
         {
             "vuln_tracker_base_url" => "https://tracker.example.invalid",

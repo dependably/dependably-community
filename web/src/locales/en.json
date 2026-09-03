@@ -393,7 +393,7 @@
   "sbomUpload": {
     "title": "Upload SBOM, VEX, or SARIF",
     "button": "Upload",
-    "hint": "CycloneDX 1.4–1.6 JSON, OpenVEX, and SARIF 2.1.0 are accepted. VEX and SARIF enrich the SBOM already uploaded for this version.",
+    "hint": "CycloneDX 1.4–1.7 JSON, OpenVEX, and SARIF 2.1.0 are accepted. VEX and SARIF enrich the SBOM already uploaded for this version.",
     "drop": "Drop files here, or click to choose",
     "kindLabel": "Detected document type",
     "kind": {
@@ -427,13 +427,15 @@
       "detailColumn": "Detail",
       "accepted": "Accepted",
       "rejected": "Rejected",
+      "skipped": "Skipped",
       "detail": {
         "sbom": "{added} added, {removed} removed, {unchanged} unchanged (of {total} total)",
         "sbomNoop": "No changes — already up to date ({total} components)",
         "vex": "{applied} of {total} statements applied ({unmatched} unmatched)",
         "sarif": "{applied} of {total} results applied ({unmatched} unmatched)",
         "generic": "Uploaded.",
-        "error": "Upload failed: {message}"
+        "error": "Upload failed: {message}",
+        "skippedSbomRejected": "Not sent — the SBOM was rejected, so this version was never created. Fix the SBOM and upload again."
       }
     },
     "curl": {
@@ -1329,6 +1331,17 @@
       "maxEpssToleranceHint": "Maximum FIRST.org EPSS exploitation probability (0.0–1.0) tolerated across a version's advisories. EPSS estimates the likelihood a CVE is exploited within 30 days; for example 0.5 blocks versions with an advisory considered more likely than not to be exploited. Scores are refreshed daily by the threat-feed job. Leave empty to disable.",
       "maxEpssTolerancePlaceholder": "Off",
       "saved": "Proxy settings saved.",
+      "hexSigningKey": {
+        "title": "Hex registry signing key",
+        "hint": "Every Hex registry resource this org serves is signed with this key. Register the repository in Mix or Rebar3 with the public key below (the Setup page embeds it). Rotating it invalidates the old key at once: every consumer must re-register the repository.",
+        "noMasterKey": "Signing is unavailable: DEPENDABLY_MASTER_KEY is not set on this instance, so no signing key can be stored and the Hex read plane answers 503.",
+        "fingerprint": "Fingerprint (SHA-256)",
+        "publicKey": "Public key (PEM)",
+        "copy": "Copy public key",
+        "copied": "Copied",
+        "rotate": "Rotate key",
+        "rotateConfirm": "Rotate the Hex signing key? Every Mix and Rebar3 client that registered this repository will fail verification until it re-registers with the new public key."
+      },
       "upstreamRegistries": {
         "section": "Upstream registries",
         "hint": "Per ecosystem, the registries this proxy fetches from, in priority order. The top entry is tried first; on a miss or unreachable upstream the next is tried. Drag a row by its handle to reorder. With no registries configured, proxying is disabled for that ecosystem — only already-cached packages are served.",
@@ -1389,6 +1402,10 @@
           "passthrough": "Passthrough (refuse hosted publish)",
           "merged": "Merged (allow hosted publish)",
           "effective": "Currently in effect: {mode}"
+        },
+        "hex": {
+          "publicKeyLabel": "Repository public key (PEM)",
+          "publicKeyHint": "Every Hex registry resource is RSA-signed. Leave empty for repo.hex.pm (its key is built in); any other upstream is consulted only when its key is stored here."
         },
         "terraform": {
           "protocolLabel": "Protocol",
@@ -1670,7 +1687,8 @@
       "httpMavenBlocked": "Maven 3.8.1 and later block plain-HTTP repositories outright. Serve this registry over HTTPS, or add a mirror declaring blocked=false.",
       "httpCleartextCredentials": "This registry uses plain HTTP, so the token travels in clear text. Use it only on a trusted network.",
       "insecureRegistry": "Docker refuses a plain-HTTP registry until the daemon opts in. Restart the daemon after editing daemon.json.",
-      "httpMirror": "Terraform rejects an http:// network mirror and there is no client-side override. This registry must be served over HTTPS before this configuration can work."
+      "httpMirror": "Terraform rejects an http:// network mirror and there is no client-side override. This registry must be served over HTTPS before this configuration can work.",
+      "usernameIgnored": "The username is ignored — any value works. Dependably authenticates on the token alone, which goes in the password field."
     }
   },
   "admin": {
@@ -2491,6 +2509,7 @@
         "maxUploadBytesRpm": "Max upload size — RPM",
         "maxUploadBytesOci": "Max upload size — Docker",
         "maxUploadBytesCargo": "Max upload size — Cargo",
+        "maxUploadBytesHex": "Max upload size — Hex",
         "gcSchedule": "GC schedule (cron)",
         "siemMaxLookbackDays": "SIEM max lookback (days)",
         "defaultStorageQuotaBytes": "Default storage quota — new tenants",
@@ -2510,6 +2529,7 @@
         "maxUploadBytesRpm": "250 MB",
         "maxUploadBytesOci": "2048 MB — fits multi-layer container images",
         "maxUploadBytesCargo": "100 MB",
+        "maxUploadBytesHex": "100 MB",
         "gcSchedule": "0 3 * * * (03:00 UTC daily)",
         "siemMaxLookbackDays": "90 days",
         "defaultStorageQuotaBytes": "unlimited (unset — no quota applied to new tenants)",
@@ -2820,6 +2840,9 @@
       "author": "Author",
       "group": "Group",
       "copyright": "Copyright",
+      "versionRange": "Version range",
+      "external": "External",
+      "externalYes": "Declared external to this build",
       "hashes": "Declared hashes",
       "source": {
         "registry": "from your registry",

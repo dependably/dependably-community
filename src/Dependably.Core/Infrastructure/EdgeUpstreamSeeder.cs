@@ -60,6 +60,7 @@ public static class EdgeUpstreamSeeder
         ("cargo",     "/cargo",     null),
         ("apk",       "/apk",       null),
         ("terraform", "/terraform", UpstreamRegistryRepository.MirrorProtocol),
+        ("hex",       "/hex",       null),
     ];
 
     /// <summary>

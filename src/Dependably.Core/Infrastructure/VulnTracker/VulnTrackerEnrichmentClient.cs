@@ -46,9 +46,9 @@ public sealed class VulnTrackerEnrichmentClient : IVulnerabilityEnrichmentSource
     /// producer's connection is instance-level (one token can back a whole multi-tenant install),
     /// so the thing identifying itself is this product, not any one tenant on it.
     /// </summary>
-    private const string ClientName = "dependably-community";
+    private const string HandshakeClientName = "dependably-community";
 
-    private static readonly string ClientVersion =
+    private static readonly string HandshakeClientVersion =
         typeof(VulnTrackerEnrichmentClient).Assembly
             .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
         ?? typeof(VulnTrackerEnrichmentClient).Assembly.GetName().Version?.ToString()
@@ -266,7 +266,7 @@ public sealed class VulnTrackerEnrichmentClient : IVulnerabilityEnrichmentSource
         var endpoint = new Uri(baseUri.AbsoluteUri.TrimEnd('/') + "/" + HandshakePath);
 #pragma warning restore S1075
 
-        string requestBody = JsonSerializer.Serialize(new HandshakeRequest(ClientName, ClientVersion), JsonOpts);
+        string requestBody = JsonSerializer.Serialize(new HandshakeRequest(HandshakeClientName, HandshakeClientVersion), JsonOpts);
 
         using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
         {

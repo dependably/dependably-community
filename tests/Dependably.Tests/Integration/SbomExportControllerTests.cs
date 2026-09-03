@@ -123,12 +123,12 @@ public sealed class SbomExportControllerTests : IClassFixture<DependablyFactory>
         var resp = await c.GetAsync(
             $"/api/v1/projects/{projectId}/versions/{versionId}/export/sbom?variant=inventory");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        Assert.Equal("application/vnd.cyclonedx+json; version=1.6", resp.Content.Headers.ContentType!.ToString());
+        Assert.Equal("application/vnd.cyclonedx+json; version=1.7", resp.Content.Headers.ContentType!.ToString());
 
         var doc = await JsonDocument.ParseAsync(await resp.Content.ReadAsStreamAsync());
         var root = doc.RootElement;
         Assert.Equal("CycloneDX", root.GetProperty("bomFormat").GetString());
-        Assert.Equal("1.6", root.GetProperty("specVersion").GetString());
+        Assert.Equal("1.7", root.GetProperty("specVersion").GetString());
         Assert.Equal(projectName, root.GetProperty("metadata").GetProperty("component").GetProperty("name").GetString());
         Assert.Equal(versionLabel, root.GetProperty("metadata").GetProperty("component").GetProperty("version").GetString());
         Assert.False(root.TryGetProperty("vulnerabilities", out _), "inventory variant must not carry a vulnerabilities array");
@@ -437,7 +437,7 @@ public sealed class SbomExportControllerTests : IClassFixture<DependablyFactory>
         using var c = await AdminClient();
         var resp = await c.GetAsync($"/api/v1/projects/{projectId}/versions/{versionId}/export/vex");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        Assert.Equal("application/vnd.cyclonedx+json; version=1.6", resp.Content.Headers.ContentType!.ToString());
+        Assert.Equal("application/vnd.cyclonedx+json; version=1.7", resp.Content.Headers.ContentType!.ToString());
 
         var doc = await JsonDocument.ParseAsync(await resp.Content.ReadAsStreamAsync());
         var vulns = doc.RootElement.GetProperty("vulnerabilities").EnumerateArray().ToList();

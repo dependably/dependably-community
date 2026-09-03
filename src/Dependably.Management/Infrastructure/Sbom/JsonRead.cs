@@ -39,6 +39,20 @@ internal static class JsonRead
             _ => null,
         };
 
+    /// <summary>
+    /// The property as a bool, or null when it is absent or not a JSON boolean. Null is a third
+    /// state the callers keep rather than collapse: a component that never declared the flag and
+    /// one that declared it false are different claims, and every document below CycloneDX 1.7
+    /// is in the first group.
+    /// </summary>
+    public static bool? Bool(JsonElement element, string name) =>
+        Property(element, name) switch
+        {
+            { ValueKind: JsonValueKind.True } => true,
+            { ValueKind: JsonValueKind.False } => false,
+            _ => null,
+        };
+
     /// <summary>The property as an object, or null.</summary>
     public static JsonElement? Object(JsonElement element, string name)
     {

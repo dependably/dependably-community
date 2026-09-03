@@ -94,62 +94,74 @@ public sealed class SbomPolicyRepository
         var results = new List<SbomComponentEvaluationInput>(components.Count);
         foreach (var component in components)
         {
-            string? purlKey = SbomPurlKey.ForComponent(component.Ecosystem, component.PurlName, component.Purl);
-            var vulns = new List<SbomComponentVulnFact>();
-
-            if (purlKey is not null && linksByComponent.TryGetValue(component.Id, out var links))
-            {
-                foreach (var link in links)
-                {
-                    string? vexState = ResolveVexState(vexByKey, purlKey, link.OsvId, link.Aliases);
-                    vulns.Add(new SbomComponentVulnFact(
-                        VulnKey: link.OsvId,
-                        Vuln: new VulnFacts(
-                            Cvss: link.CvssScore,
-                            NvdScore: link.NvdScore,
-                            IsMalicious: link.OsvId.StartsWith("MAL-", StringComparison.Ordinal),
-                            IsKev: link.IsKev,
-                            IsKevRansomware: link.KevKnownRansomware,
-                            KevDueDate: link.KevDueDate,
-                            Epss: link.EpssScore,
-                            EpssPercentile: link.EpssPercentile,
-                            SsvcExploitation: link.SsvcExploitation,
-                            SsvcAutomatable: link.SsvcAutomatable,
-                            SsvcTechnicalImpact: link.SsvcTechnicalImpact,
-                            // Unlike the gate-arm aggregate (BuildAggregateVulnFacts), this plane
-                            // does not apply the operator's staleness-horizon cutoff to the raw
-                            // NVD/SSVC columns above — nothing here consults them yet, so there is
-                            // no freshness question to answer. Revisit once a consumer reads them.
-                            HasStaleEnrichment: false,
-                            // Always false on this plane, deliberately — not merely unwired. Unlike
-                            // the gate-arm aggregate (which reads package_version_vulns, the actual
-                            // version-precise link the value is scoped to), this SBOM plane's link
-                            // table is sbom_component_vulns: a component/vuln pair with no FK back
-                            // to a package_versions/cache_artifact row, so there is no version-
-                            // precise link here to read the signal off. Fabricating one from the
-                            // shared vulnerabilities row would reintroduce the exact cross-version
-                            // collapse VulnFacts.MalStillLive's own doc explains is unsafe. Revisit
-                            // only if sbom_components ever gains a registry-version FK.
-                            MalStillLive: false),
-                        VexState: vexState));
-                }
-            }
-
-            results.Add(new SbomComponentEvaluationInput(
-                component.Id,
-                component.Purl,
-                component.LicenseSpdx,
-                new SbomComponentFacts(
-                    component.Id,
-                    component.Ecosystem,
-                    component.SbomScope,
-                    component.VulnCheckedAt,
-                    vulns,
-                    component.DependencyScope,
-                    component.DependencyKind)));
+            results.Add(BuildComponentInput(component, linksByComponent, vexByKey));
         }
 
         return results;
+    }
+
+    /// <summary>
+    /// One component's evaluation input: its own facts plus every linked advisory annotated with
+    /// the VEX state that applies to that exact (component purl, advisory) pair.
+    /// </summary>
+    private static SbomComponentEvaluationInput BuildComponentInput(
+        ComponentRow component,
+        IReadOnlyDictionary<string, List<VulnLinkRow>> linksByComponent,
+        Dictionary<(string PurlKey, string VulnKey), string?> vexByKey)
+    {
+        string? purlKey = SbomPurlKey.ForComponent(component.Ecosystem, component.PurlName, component.Purl);
+        var vulns = new List<SbomComponentVulnFact>();
+
+        if (purlKey is not null && linksByComponent.TryGetValue(component.Id, out var links))
+        {
+            foreach (var link in links)
+            {
+                string? vexState = ResolveVexState(vexByKey, purlKey, link.OsvId, link.Aliases);
+                vulns.Add(new SbomComponentVulnFact(
+                    VulnKey: link.OsvId,
+                    Vuln: new VulnFacts(
+                        Cvss: link.CvssScore,
+                        NvdScore: link.NvdScore,
+                        IsMalicious: link.OsvId.StartsWith("MAL-", StringComparison.Ordinal),
+                        IsKev: link.IsKev,
+                        IsKevRansomware: link.KevKnownRansomware,
+                        KevDueDate: link.KevDueDate,
+                        Epss: link.EpssScore,
+                        EpssPercentile: link.EpssPercentile,
+                        SsvcExploitation: link.SsvcExploitation,
+                        SsvcAutomatable: link.SsvcAutomatable,
+                        SsvcTechnicalImpact: link.SsvcTechnicalImpact,
+                        // Unlike the gate-arm aggregate (BuildAggregateVulnFacts), this plane
+                        // does not apply the operator's staleness-horizon cutoff to the raw
+                        // NVD/SSVC columns above — nothing here consults them yet, so there is
+                        // no freshness question to answer. Revisit once a consumer reads them.
+                        HasStaleEnrichment: false,
+                        // Always false on this plane, deliberately — not merely unwired. Unlike
+                        // the gate-arm aggregate (which reads package_version_vulns, the actual
+                        // version-precise link the value is scoped to), this SBOM plane's link
+                        // table is sbom_component_vulns: a component/vuln pair with no FK back
+                        // to a package_versions/cache_artifact row, so there is no version-
+                        // precise link here to read the signal off. Fabricating one from the
+                        // shared vulnerabilities row would reintroduce the exact cross-version
+                        // collapse VulnFacts.MalStillLive's own doc explains is unsafe. Revisit
+                        // only if sbom_components ever gains a registry-version FK.
+                        MalStillLive: false),
+                    VexState: vexState));
+            }
+        }
+
+        return new SbomComponentEvaluationInput(
+            component.Id,
+            component.Purl,
+            component.LicenseSpdx,
+            new SbomComponentFacts(
+                component.Id,
+                component.Ecosystem,
+                component.SbomScope,
+                component.VulnCheckedAt,
+                vulns,
+                component.DependencyScope,
+                component.DependencyKind));
     }
 
     private static string? ResolveVexState(

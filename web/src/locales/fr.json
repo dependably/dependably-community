@@ -393,7 +393,7 @@
   "sbomUpload": {
     "title": "Téléverser un SBOM, VEX ou SARIF",
     "button": "Téléverser",
-    "hint": "Les formats acceptés sont CycloneDX 1.4–1.6 JSON, OpenVEX et SARIF 2.1.0. VEX et SARIF enrichissent le SBOM déjà téléversé pour cette version.",
+    "hint": "Les formats acceptés sont CycloneDX 1.4–1.7 JSON, OpenVEX et SARIF 2.1.0. VEX et SARIF enrichissent le SBOM déjà téléversé pour cette version.",
     "drop": "Déposez des fichiers ici, ou cliquez pour en choisir",
     "kindLabel": "Type de document détecté",
     "kind": {
@@ -427,13 +427,15 @@
       "detailColumn": "Détail",
       "accepted": "Accepté",
       "rejected": "Rejeté",
+      "skipped": "Ignoré",
       "detail": {
         "sbom": "{added} ajouté(s), {removed} supprimé(s), {unchanged} inchangé(s) (sur {total} au total)",
         "sbomNoop": "Aucun changement — déjà à jour ({total} composants)",
         "vex": "{applied} déclaration(s) appliquée(s) sur {total} ({unmatched} non appariée(s))",
         "sarif": "{applied} résultat(s) appliqué(s) sur {total} ({unmatched} non apparié(s))",
         "generic": "Téléversé.",
-        "error": "Échec du téléversement : {message}"
+        "error": "Échec du téléversement : {message}",
+        "skippedSbomRejected": "Non envoyé — le SBOM a été rejeté, donc cette version n'a jamais été créée. Corrigez le SBOM et téléversez de nouveau."
       }
     },
     "curl": {
@@ -1329,6 +1331,17 @@
       "maxEpssToleranceHint": "Probabilité d'exploitation EPSS (FIRST.org) maximale tolérée (0,0–1,0) parmi les avis d'une version. EPSS estime la probabilité qu'une CVE soit exploitée sous 30 jours; par exemple 0,5 bloque les versions dont un avis est jugé plus probablement exploité qu'improbable. Les scores sont actualisés chaque jour par la tâche de flux de menaces. Laisser vide pour désactiver.",
       "maxEpssTolerancePlaceholder": "Désactivé",
       "saved": "Paramètres proxy enregistrés.",
+      "hexSigningKey": {
+        "title": "Clé de signature du registre Hex",
+        "hint": "Chaque ressource de registre Hex servie par cette organisation est signée avec cette clé. Enregistrez le dépôt dans Mix ou Rebar3 avec la clé publique ci-dessous (la page Configuration l'intègre). La rotation invalide immédiatement l'ancienne clé : chaque consommateur doit réenregistrer le dépôt.",
+        "noMasterKey": "Signature indisponible : DEPENDABLY_MASTER_KEY n'est pas défini sur cette instance; aucune clé de signature ne peut être stockée et le plan de lecture Hex répond 503.",
+        "fingerprint": "Empreinte (SHA-256)",
+        "publicKey": "Clé publique (PEM)",
+        "copy": "Copier la clé publique",
+        "copied": "Copié",
+        "rotate": "Faire pivoter la clé",
+        "rotateConfirm": "Faire pivoter la clé de signature Hex? Chaque client Mix et Rebar3 ayant enregistré ce dépôt échouera à la vérification jusqu'à ce qu'il réenregistre le dépôt avec la nouvelle clé publique."
+      },
       "upstreamRegistries": {
         "section": "Registres en amont",
         "hint": "Par écosystème, les registres interrogés par ce proxy, par ordre de priorité. La première entrée est essayée en premier; en cas d'échec ou d'indisponibilité, la suivante est tentée. Faites glisser une ligne par sa poignée pour réordonner. Sans registre configuré, le proxy est désactivé pour cet écosystème — seuls les paquets déjà en cache sont servis.",
@@ -1389,6 +1402,10 @@
           "passthrough": "Passthrough (refuser la publication hébergée)",
           "merged": "Merged (autoriser la publication hébergée)",
           "effective": "Actuellement en vigueur : {mode}"
+        },
+        "hex": {
+          "publicKeyLabel": "Clé publique du dépôt (PEM)",
+          "publicKeyHint": "Chaque ressource de registre Hex est signée en RSA. Laissez vide pour repo.hex.pm (sa clé est intégrée); toute autre source amont n'est consultée que si sa clé est enregistrée ici."
         },
         "terraform": {
           "protocolLabel": "Protocole",
@@ -1670,7 +1687,8 @@
       "httpMavenBlocked": "Maven 3.8.1 et versions ultérieures bloquent les dépôts en HTTP simple. Servez ce registre en HTTPS, ou ajoutez un miroir avec blocked=false.",
       "httpCleartextCredentials": "Ce registre utilise HTTP simple; le jeton circule donc en clair. Ne l'utilisez que sur un réseau de confiance.",
       "insecureRegistry": "Docker refuse un registre en HTTP simple tant que le démon ne l'autorise pas. Redémarrez le démon après avoir modifié daemon.json.",
-      "httpMirror": "Terraform rejette un miroir réseau http:// et il n'existe aucun contournement côté client. Ce registre doit être servi en HTTPS pour que cette configuration fonctionne."
+      "httpMirror": "Terraform rejette un miroir réseau http:// et il n'existe aucun contournement côté client. Ce registre doit être servi en HTTPS pour que cette configuration fonctionne.",
+      "usernameIgnored": "Le nom d'utilisateur est ignoré — n'importe quelle valeur fonctionne. Dependably s'authentifie uniquement avec le jeton, qui va dans le champ du mot de passe."
     }
   },
   "admin": {
@@ -2491,6 +2509,7 @@
         "maxUploadBytesRpm": "Taille max. d'envoi — RPM",
         "maxUploadBytesOci": "Taille max. d'envoi — Docker",
         "maxUploadBytesCargo": "Taille max. d'envoi — Cargo",
+        "maxUploadBytesHex": "Taille max. d'envoi — Hex",
         "gcSchedule": "Planification GC (cron)",
         "siemMaxLookbackDays": "Lookback SIEM max (jours)",
         "defaultStorageQuotaBytes": "Quota de stockage par défaut — nouveaux locataires",
@@ -2510,6 +2529,7 @@
         "maxUploadBytesRpm": "250 Mo",
         "maxUploadBytesOci": "2048 Mo — adapté aux images conteneur multicouches",
         "maxUploadBytesCargo": "100 Mo",
+        "maxUploadBytesHex": "100 Mo",
         "gcSchedule": "0 3 * * * (03:00 UTC, quotidien)",
         "siemMaxLookbackDays": "90 jours",
         "defaultStorageQuotaBytes": "illimité (non défini — aucun quota appliqué aux nouveaux locataires)",
@@ -2820,6 +2840,9 @@
       "author": "Auteur",
       "group": "Groupe",
       "copyright": "Droit d'auteur",
+      "versionRange": "Plage de versions",
+      "external": "Externe",
+      "externalYes": "Déclaré externe à cette compilation",
       "hashes": "Empreintes déclarées",
       "source": {
         "registry": "depuis votre registre",

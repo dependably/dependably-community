@@ -231,7 +231,6 @@ public sealed class SbomNightlyPolicyReevaluationTests : IAsyncLifetime
             new OrgRepository(_db),
             Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(TimeProvider.System),
             TestAlerts.NoOp(_db, _clock),
-            sbomVulns,
             new SbomComponentScanner(osv, vulns, sbomVulns, NullLogger<SbomComponentScanner>.Instance),
             TestSbomPolicy.Service(_db, _clock),
             Dependably.Tests.Infrastructure.TestEnrichment.Unused(),

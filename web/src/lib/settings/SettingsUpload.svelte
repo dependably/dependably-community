@@ -23,6 +23,7 @@
     ['maxUploadBytesRpm',  'RPM'],
     ['maxUploadBytesOci',  'Docker'],
     ['maxUploadBytesCargo','Cargo'],
+    ['maxUploadBytesHex','Hex'],
   ]
   // Iterate this array so adding an ecosystem above flows through automatically — the
   // previous hand-rolled boolean fell out of sync with the array the first time we extended it.

@@ -705,7 +705,7 @@ public partial class Program
 
     private static readonly string[] NonSpaPathPrefixes =
         ["/api/", "/simple/", "/npm/", "/nuget/", "/packages/", "/pypi/", "/maven/", "/rpm/", "/v2/", "/saml/",
-         "/docs/", "/openapi/", "/cargo/", "/go/", "/edge/", "/apk/", "/terraform/"];
+         "/docs/", "/openapi/", "/cargo/", "/go/", "/edge/", "/apk/", "/terraform/", "/hex/"];
 
     private static readonly string[] NonSpaExactPaths = ["/health", "/ready", "/metrics", "/docs", "/cargo/config.json"];
 

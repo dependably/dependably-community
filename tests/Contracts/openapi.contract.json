@@ -468,6 +468,26 @@
         }
       }
     },
+    "/api/v1/hex/signing-key": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/hex/signing-key/rotate": {
+      "operations": {
+        "post": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/api/v1/install-script-allowlist": {
       "operations": {
         "get": {
@@ -2353,6 +2373,271 @@
       "operations": {
         "get": {
           "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/hex/api/packages/{name}": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "name"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/hex/api/packages/{name}/releases": {
+      "operations": {
+        "post": {
+          "requiredParams": [
+            "name"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/hex/api/packages/{name}/releases/{version}": {
+      "operations": {
+        "delete": {
+          "requiredParams": [
+            "name",
+            "version"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "get": {
+          "requiredParams": [
+            "name",
+            "version"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/hex/api/packages/{name}/releases/{version}/docs": {
+      "operations": {
+        "delete": {
+          "requiredParams": [
+            "name",
+            "version"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "get": {
+          "requiredParams": [
+            "name",
+            "version"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "post": {
+          "requiredParams": [
+            "name",
+            "version"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/hex/api/packages/{name}/releases/{version}/retire": {
+      "operations": {
+        "delete": {
+          "requiredParams": [
+            "name",
+            "version"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "post": {
+          "requiredParams": [
+            "name",
+            "version"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/hex/api/repos/{repo}/packages/{name}": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "name",
+            "repo"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/hex/api/repos/{repo}/packages/{name}/releases": {
+      "operations": {
+        "post": {
+          "requiredParams": [
+            "name",
+            "repo"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/hex/api/repos/{repo}/packages/{name}/releases/{version}": {
+      "operations": {
+        "delete": {
+          "requiredParams": [
+            "name",
+            "repo",
+            "version"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "get": {
+          "requiredParams": [
+            "name",
+            "repo",
+            "version"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/hex/api/repos/{repo}/packages/{name}/releases/{version}/docs": {
+      "operations": {
+        "delete": {
+          "requiredParams": [
+            "name",
+            "repo",
+            "version"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "get": {
+          "requiredParams": [
+            "name",
+            "repo",
+            "version"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "post": {
+          "requiredParams": [
+            "name",
+            "repo",
+            "version"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/hex/api/repos/{repo}/packages/{name}/releases/{version}/retire": {
+      "operations": {
+        "delete": {
+          "requiredParams": [
+            "name",
+            "repo",
+            "version"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "post": {
+          "requiredParams": [
+            "name",
+            "repo",
+            "version"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/hex/api/users/me": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/hex/api/{path}": {
+      "operations": {
+        "delete": {
+          "requiredParams": [
+            "path"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "get": {
+          "requiredParams": [
+            "path"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "post": {
+          "requiredParams": [
+            "path"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "put": {
+          "requiredParams": [
+            "path"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/hex/{path}": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "path"
+          ],
           "responseCodes": [
             "200"
           ]

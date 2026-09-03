@@ -165,6 +165,21 @@ public static partial class BlobKeys
         => $"terraform/{orgId}/{hostname}/{@namespace}/{type}/{version}/{platform}.zip";
 
     /// <summary>
+    /// Org-scoped key for a proxied Hex package tarball (<c>.tar</c>). One blob per
+    /// (org, name, version); the suffix matches the <c>/tarballs/{name}-{version}.tar</c>
+    /// resource a Hex client downloads.
+    /// </summary>
+    public static string Hex(string orgId, string name, string version)
+        => $"hex/{orgId}/{name}/{version}.tar";
+
+    /// <summary>
+    /// Org-scoped key for a proxied Hex documentation tarball, served at
+    /// <c>/docs/{name}-{version}.tar.gz</c>. Kept beside the package key so the two never collide.
+    /// </summary>
+    public static string HexDocs(string orgId, string name, string version)
+        => $"hex/{orgId}/{name}/{version}.docs.tar.gz";
+
+    /// <summary>
     /// Converts a DB blob key to the actual blob store key.
     /// Proxy DB keys include a filename suffix (proxy/{sha256}/{file}) but blobs are stored at proxy/{sha256}.
     /// Hosted keys are returned unchanged.

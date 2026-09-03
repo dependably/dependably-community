@@ -333,7 +333,6 @@ public sealed class ControllerScenario : IAsyncDisposable
             noOpEventSink,
             new Dependably.Infrastructure.Redis.InProcessDistributedLock(Clock),
             TestAlerts.NoOp(db, Clock),
-            new SbomComponentVulnRepository(db, Clock),
             new SbomComponentScanner(osv, vulns, new SbomComponentVulnRepository(db, Clock), NullLogger<SbomComponentScanner>.Instance),
             Dependably.Tests.Infrastructure.TestSbomPolicy.Service(db, Clock),
             Dependably.Tests.Infrastructure.TestEnrichment.Unused(),
@@ -388,6 +387,8 @@ public sealed class ControllerScenario : IAsyncDisposable
             new ConfigurationBuilder().Build(),
             Clock, envelope, NullLogger<SystemController>.Instance,
             tenantCache: null, requireMfa: null, systemEvents: systemEvents)
+        { ControllerContext = ctx };
+        var systemObservability = new SystemObservabilityController(orgs, audit, problems, Clock)
         { ControllerContext = ctx };
         var upstreamConfig = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
@@ -538,6 +539,7 @@ public sealed class ControllerScenario : IAsyncDisposable
             instance,
             vuln,
             system,
+            systemObservability,
             org,
             orgSettings,
             orgTokens,
@@ -588,6 +590,7 @@ public sealed record ControllerScenarioResult(
     InstanceController InstanceController,
     VulnerabilityController VulnerabilityController,
     SystemController SystemController,
+    SystemObservabilityController SystemObservabilityController,
     OrgController OrgController,
     OrgSettingsController OrgSettingsController,
     OrgTokensController OrgTokensController,

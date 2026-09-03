@@ -88,7 +88,10 @@ public sealed class SbomMergeService
                 VcsUrl: component.VcsUrl,
                 IssueTrackerUrl: component.IssueTrackerUrl,
                 DistributionUrl: component.DistributionUrl,
-                ComponentHashes: component.HashesJson));
+                ComponentHashes: component.HashesJson,
+                VersionRange: component.VersionRange,
+                IsExternal: component.IsExternal,
+                ManifestDevDeclared: component.ManifestDevDeclared));
         }
 
         return _ingest.MergeComponentsAsync(orgId, projectVersionId, upserts, now, ct);

@@ -56,11 +56,16 @@ export interface SeededProjectVersion {
 export async function seedProjectVersion(
   authed: APIRequestContext,
   label: string,
-  overrides: { projectName?: string; versionLabel?: string } = {},
+  overrides: { projectName?: string; versionLabel?: string; parentId?: string } = {},
 ): Promise<SeededProjectVersion> {
   const projectName = overrides.projectName ?? `e2e-${label}-${randomUUID()}`
   const versionLabel = overrides.versionLabel ?? '1.0.0'
-  const target = `projectName=${encodeURIComponent(projectName)}&projectVersion=${versionLabel}`
+  // `parentId` files the project inside a folder. A project name resolves within its parent scope,
+  // so every PUT of the trio has to carry it — omitting it on the VEX/SARIF legs would look up the
+  // name in the root scope and miss the project the SBOM leg just created.
+  const parent = overrides.parentId ? `&parentId=${encodeURIComponent(overrides.parentId)}` : ''
+  const target =
+    `projectName=${encodeURIComponent(projectName)}&projectVersion=${versionLabel}${parent}`
   const json = { 'Content-Type': 'application/json' }
 
   const sbom = await authed.put(

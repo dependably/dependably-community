@@ -13,7 +13,8 @@ namespace Dependably.Infrastructure.Edge;
 /// delete paths that write DB rows or blobs directly — bypassing that service — call
 /// <see cref="UploadRejection"/> at the top of their action: OCI upload-initiation (POST
 /// blobs/uploads), chunk PATCH, manifest PUT and manifest DELETE; NuGet unlist; npm publish/
-/// deprecate PUT, dist-tag PUT/DELETE and unpublish DELETE; and Cargo yank/unyank. All surface
+/// deprecate PUT, dist-tag PUT/DELETE and unpublish DELETE; Cargo yank/unyank; and Hex publish,
+/// retire, docs and revert. All surface
 /// the same RFC-7807 405 with the title below, ahead of any lookup so the guard beats a 404.
 /// </summary>
 public sealed class EdgePublishGuard
@@ -45,7 +46,8 @@ public sealed class EdgePublishGuard
     /// Returns a 405 <see cref="IActionResult"/> problem for publish, mutation, and delete paths
     /// that write storage or DB rows directly rather than through the shared publish service
     /// (Maven PUT, RPM upload, OCI upload/manifest/delete, NuGet unlist, npm publish/deprecate/
-    /// dist-tag/unpublish, and Cargo yank/unyank), or <c>null</c> when publishing is allowed.
+    /// dist-tag/unpublish, Cargo yank/unyank, and Hex publish/retire/docs/revert), or <c>null</c>
+    /// when publishing is allowed.
     /// </summary>
     public IActionResult? UploadRejection() =>
         _edge.IsEdge

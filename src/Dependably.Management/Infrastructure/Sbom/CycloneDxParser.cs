@@ -20,11 +20,25 @@ public static class CycloneDxParser
 {
     /// <summary>The specVersions ingest accepts. Anything else is a 422, never a best-effort parse.</summary>
     public static readonly IReadOnlySet<string> AcceptedSpecVersions =
-        new HashSet<string>(StringComparer.Ordinal) { "1.4", "1.5", "1.6" };
+        new HashSet<string>(StringComparer.Ordinal) { "1.4", "1.5", "1.6", "1.7" };
 
     /// <summary>components[].scope values the <c>sbom_scope</c> CHECK admits.</summary>
     private static readonly IReadOnlySet<string> AcceptedScopes =
         new HashSet<string>(StringComparer.Ordinal) { "required", "optional", "excluded" };
+
+    /// <summary>
+    /// components[].properties[] names read as the manifest dev-dependency marker: the CycloneDX
+    /// taxonomy's own npm/PyPI/Go spellings (the ones a real producer like cdxgen writes), plus a
+    /// NuGet spelling of this repo's own choosing — no official taxonomy entry exists for NuGet.
+    /// </summary>
+    private static readonly IReadOnlySet<string> ManifestDevPropertyNames =
+        new HashSet<string>(StringComparer.Ordinal)
+        {
+            "cdx:npm:package:development",
+            "cdx:pypi:package:development",
+            "cdx:gomod:package:development",
+            "cdx:nuget:package:development",
+        };
 
     /// <summary>Parses the whole document, or throws <see cref="SbomParseException"/>.</summary>
     public static CycloneDxDocument Parse(JsonElement root)
@@ -173,10 +187,45 @@ public static class CycloneDxParser
                 refs.GetValueOrDefault("vcs"),
                 refs.GetValueOrDefault("issue-tracker"),
                 refs.GetValueOrDefault("distribution"),
-                ReadHashes(entry)));
+                ReadHashes(entry),
+                Clip(JsonRead.String(entry, "versionRange"), MaxTextLength),
+                JsonRead.Bool(entry, "isExternal"),
+                ReadManifestDevDeclared(entry)));
         }
 
         return components;
+    }
+
+    /// <summary>
+    /// The manifest dev-dependency marker, true/false/absent, from the first
+    /// <see cref="ManifestDevPropertyNames"/> entry a component's properties[] carries. A document
+    /// naming more than one is malformed input, not something worth a second read to reconcile —
+    /// the first match wins and the rest of the array is ignored, same tolerance policy as
+    /// everywhere else in this parser.
+    /// </summary>
+    private static bool? ReadManifestDevDeclared(JsonElement entry)
+    {
+        foreach (var property in JsonRead.Array(entry, "properties"))
+        {
+            string? name = JsonRead.String(property, "name");
+            if (name is null || !ManifestDevPropertyNames.Contains(name))
+            {
+                continue;
+            }
+
+            string? value = JsonRead.String(property, "value");
+            if (string.Equals(value, "true", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (string.Equals(value, "false", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -291,9 +340,12 @@ public static class CycloneDxParser
     }
 
     // licenses[] entries carry either an SPDX expression or a license object with an id or a
-    // free-text name. Several entries mean several licences apply as alternatives, which is how
-    // the SPDX expression grammar spells OR; one entry is stored as written so a document that
-    // already carries a compound expression round-trips unchanged.
+    // free-text name, and one array may mix the two: every entry is read on its own terms rather
+    // than the array being classified once as "the expression form" or "the licence-list form".
+    // Several entries are folded with OR, the permissive reading — an entry may itself be a
+    // compound expression, and OR is the lowest-precedence operator in the grammar, so joining at
+    // that level leaves each part's own AND/WITH structure intact. One entry is stored as written,
+    // so a document that already carries a compound expression round-trips unchanged.
     private static string? ReadLicenses(JsonElement component)
     {
         var parts = new List<string>();

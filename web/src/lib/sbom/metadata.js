@@ -39,6 +39,10 @@ export function hasComponentMetadata(item) {
     item.author ||
     item.copyright ||
     item.group ||
+    item.versionRange ||
+    // Only a declared true counts. `isExternal` is null on every document below CycloneDX 1.7,
+    // and a section that appeared for "the producer did not say" would be a heading over nothing.
+    item.isExternal === true ||
     componentLinksOf(item).length ||
     (Array.isArray(item.hashes) && item.hashes.length),
   )

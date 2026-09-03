@@ -24,4 +24,10 @@ public sealed record UpstreamSource(
     /// which endpoint shape the fetcher uses, so it cannot be inferred from the URL — the two
     /// protocols share no path and guessing wrong fails every fetch.
     /// </summary>
-    string? Protocol = null);
+    string? Protocol = null,
+    /// <summary>
+    /// Hex only: the PEM public key this upstream signs its registry resources with, or null
+    /// when none is known — in which case the Hex proxy does not consult the upstream at all,
+    /// because an unverifiable index is not one this registry will re-sign.
+    /// </summary>
+    string? PublicKeyPem = null);

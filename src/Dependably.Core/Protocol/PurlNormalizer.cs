@@ -38,7 +38,9 @@ public static partial class PurlNormalizer
         // hashicorp/random and HashiCorp/Random are the same provider. Lowercasing here keeps them
         // one identity: two spellings resolving to two rows would mean a block or an advisory
         // recorded against one spelling silently not applying to the other.
-        "npm" or "nuget" or "rpm" or "oci" or "terraform" => name.ToLowerInvariant(),
+        // Hex package names are lower-case by rule (hex.pm rejects any other spelling), so
+        // lowercasing is a no-op on a valid name and folds a stray capital into the one identity.
+        "npm" or "nuget" or "rpm" or "oci" or "terraform" or "hex" => name.ToLowerInvariant(),
         _ => name,
     };
 
@@ -166,6 +168,14 @@ public static partial class PurlNormalizer
     public static string Terraform(string hostname, string @namespace, string type, string version)
         => $"pkg:terraform/{@namespace.ToLowerInvariant()}/{type.ToLowerInvariant()}@{version}"
            + $"?registry={hostname.ToLowerInvariant()}";
+
+    /// <summary>
+    /// <c>pkg:hex/{name}@{version}</c>. Hex names are lower-case by rule; hex.pm's organization
+    /// namespace (<c>pkg:hex/acme/name</c>) is not modelled — this registry's repository is the
+    /// org itself, so a hosted or proxied package has one flat name.
+    /// </summary>
+    public static string Hex(string name, string version)
+        => $"pkg:hex/{name.ToLowerInvariant()}@{version}";
 
     public static string NuGet(string id, string version)
     {

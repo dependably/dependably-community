@@ -43,6 +43,7 @@ public static class Capabilities
     public const string PublishRpm = "publish:rpm";
     public const string PublishOci = "publish:oci";
     public const string PublishCargo = "publish:cargo";
+    public const string PublishHex = "publish:hex";
     public const string PublishAll = "publish:*";
 
     // ── Import ─────────────────────────────────────────────────────────────────
@@ -74,6 +75,8 @@ public static class Capabilities
     public const string YankRpm = "yank:rpm";
     public const string YankOci = "yank:oci";
     public const string YankCargo = "yank:cargo";
+    /// <summary>Hex calls a yank a retirement; the capability keeps the yank family's name.</summary>
+    public const string YankHex = "yank:hex";
     public const string YankAll = "yank:*";
 
     // ── Manage ─────────────────────────────────────────────────────────────────
@@ -201,10 +204,10 @@ public static class Capabilities
     public static readonly IReadOnlySet<string> Requestable = new HashSet<string>(StringComparer.Ordinal)
     {
         ReadMetadata, ReadArtifact, ReadPackages, ReadClaims, ReadAudit, ReadTenant, ReadAll,
-        PublishNpm, PublishPypi, PublishNuget, PublishMaven, PublishRpm, PublishOci, PublishCargo, PublishAll,
+        PublishNpm, PublishPypi, PublishNuget, PublishMaven, PublishRpm, PublishOci, PublishCargo, PublishHex, PublishAll,
         ImportAll,
         SbomUpload,
-        YankNpm, YankPypi, YankNuget, YankMaven, YankRpm, YankOci, YankCargo, YankAll,
+        YankNpm, YankPypi, YankNuget, YankMaven, YankRpm, YankOci, YankCargo, YankHex, YankAll,
         PullOci,
         ClaimManage, TenantConfigure, TenantAdmin, ManageOwnTokens,
     };

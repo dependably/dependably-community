@@ -846,7 +846,20 @@ public sealed class OrgController : OrgScopedControllerBase
         // the single-tenant install, so the recipes use the request's host directly.
         string baseUrl = _urls.BaseUrl(HttpContext);
 
-        var recipes = SetupRecipeCatalog.Build(ecosystem, baseUrl);
+        // Hex recipes embed the org's signing public key, which every Hex client must register
+        // the repository with. Creating the key here is the same lazy first-use path the read
+        // plane takes; when signing is impossible (no master key) the recipe carries a
+        // placeholder that names where the key would be served.
+        HexSetupContext? hex = null;
+        if (ecosystem == "hex"
+            && HttpContext.RequestServices.GetService(typeof(Infrastructure.Hex.HexSigningKeyRepository))
+                is Infrastructure.Hex.HexSigningKeyRepository hexKeys)
+        {
+            using var key = await hexKeys.GetOrCreateAsync(CurrentTenantId(), ct);
+            hex = new HexSetupContext(key?.PublicKeyPem);
+        }
+
+        var recipes = SetupRecipeCatalog.Build(ecosystem, baseUrl, hex);
         return recipes is null ? NotFound() : Ok(recipes);
     }
 

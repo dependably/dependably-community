@@ -36,9 +36,9 @@ public sealed class StatsRefreshTrendTests : IAsyncLifetime
         var history = new OrgStatsHistoryRepository(_db);
         var analytics = new PackageAnalyticsRepository(_db, time: _clock);
         var cfg = new ConfigurationBuilder().Build();
-        return new StatsRefreshService(
+        return new StatsRefreshService(new StatsRefreshService.Dependencies(
             snapshots, history, analytics, cfg, new AirGapMode(cfg),
-            new InProcessDistributedLock(_clock), NullLogger<StatsRefreshService>.Instance, _clock);
+            new InProcessDistributedLock(_clock), NullLogger<StatsRefreshService>.Instance, _clock));
     }
 
     private async Task<OrgStats> GetSnapshotStatsAsync()

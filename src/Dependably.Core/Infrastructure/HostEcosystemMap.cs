@@ -27,7 +27,7 @@ public sealed class HostEcosystemMap
 {
     private static readonly HashSet<string> KnownEcosystems = new(StringComparer.OrdinalIgnoreCase)
     {
-        "npm", "pypi", "nuget", "maven", "rpm", "oci"
+        "npm", "pypi", "nuget", "maven", "rpm", "oci", "hex"
     };
 
     // Path segments PyPI already serves unprefixed (or that already carry the /pypi segment);

@@ -43,7 +43,6 @@ public static class TestScanner
             Substitute.For<IPackageEventSink>(),
             new InProcessDistributedLock(clock),
             TestAlerts.NoOp(db, clock),
-            new SbomComponentVulnRepository(db, clock),
             new SbomComponentScanner(osv, new VulnerabilityRepository(db, clock), new SbomComponentVulnRepository(db, clock), NullLogger<SbomComponentScanner>.Instance),
             Dependably.Tests.Infrastructure.TestSbomPolicy.Service(db, clock),
             Dependably.Tests.Infrastructure.TestEnrichment.Unused(),

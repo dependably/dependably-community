@@ -224,7 +224,7 @@
     <value>Le motif n'est pas une expression régulière valide.</value>
   </data>
   <data name="error.list.ecosystemInvalidProxy" xml:space="preserve">
-    <value>ecosystem doit être l'une des valeurs suivantes : npm, pypi, nuget, maven, cargo, golang.</value>
+    <value>ecosystem doit être l'une des valeurs suivantes : npm, pypi, nuget, maven, cargo, golang, apk, terraform, hex.</value>
   </data>
   <data name="error.list.patternTooLong256" xml:space="preserve">
     <value>Le motif doit compter au plus 256 caractères.</value>
@@ -687,12 +687,6 @@ Si vous n'êtes pas à l'origine de ce changement, contactez immédiatement votr
   <data name="error.sbom.analysisRowNotFound" xml:space="preserve">
     <value>La décision de tri n'a pas pu être relue après son enregistrement.</value>
   </data>
-  <data name="error.sbom.sortInvalid" xml:space="preserve">
-    <value>Doit être « priority », « name », « version », « severity » ou « scope ».</value>
-  </data>
-  <data name="error.sbom.dirInvalid" xml:space="preserve">
-    <value>Doit être « asc » ou « desc ».</value>
-  </data>
   <data name="error.sbom.scopeInvalid" xml:space="preserve">
     <value>Doit être « all », « prod » ou « dev ».</value>
   </data>
@@ -766,7 +760,7 @@ Si vous n'êtes pas à l'origine de ce changement, contactez immédiatement votr
   </data>
   <data name="error.sbom.unsupportedSpecVersion" xml:space="preserve">
     <value>La version {0} de la spécification n'est pas prise en charge.</value>
-    <comment>Validation error returned for a CycloneDX version outside 1.4-1.6 or a SARIF version other than 2.1.0. {0} is the version the document declared.</comment>
+    <comment>Validation error returned for a CycloneDX version outside 1.4-1.7 or a SARIF version other than 2.1.0. {0} is the version the document declared.</comment>
   </data>
   <data name="error.sbom.tooManyComponents" xml:space="preserve">
     <value>Le document déclare plus de {0} composants.</value>
@@ -825,6 +819,12 @@ Si vous n'êtes pas à l'origine de ce changement, contactez immédiatement votr
   </data>
   <data name="error.token.nameInvalidChars" xml:space="preserve">
     <value>Le nom ne doit pas contenir de caractères de contrôle.</value>
+  </data>
+  <data name="error.upstream.publicKeyHexOnly" xml:space="preserve">
+    <value>Une clé publique de dépôt ne s'applique qu'aux sources amont Hex.</value>
+  </data>
+  <data name="error.upstream.publicKeyInvalid" xml:space="preserve">
+    <value>La clé publique du dépôt doit être une clé publique RSA encodée en PEM.</value>
   </data>
   <data name="error.upstream.nameTooLong" xml:space="preserve">
     <value>Le nom doit compter au plus {0} caractères.</value>

@@ -80,6 +80,12 @@ public sealed class SbomComponentVulnRepository
     /// feed for is inventory/licence data only and is never queried; the policy evaluator reads
     /// those rows as unscannable rather than unscanned.
     /// </summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "S2077:Formatting SQL queries is security-sensitive",
+        Justification = "The spliced fragment is SbomScannableComponents.BuildPredicate's own SQL, "
+                        + "whose only variable part is DapperInClause.Expand's parenthesized, "
+                        + "individually-parameterized (@sbomNoFeed0, @sbomNoFeed1, …) list — a "
+                        + "code-owned ecosystem constant set, never user text. The table alias is a "
+                        + "compile-time literal supplied by this call site.")]
     public async Task<IReadOnlyList<ScannableSbomComponent>> GetScannableComponentsForVersionAsync(
         string orgId, string projectVersionId, CancellationToken ct = default)
     {

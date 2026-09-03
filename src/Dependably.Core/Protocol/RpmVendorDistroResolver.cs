@@ -76,12 +76,9 @@ public static class RpmVendorDistroResolver
         string normalized = vendor.ToLowerInvariant();
         foreach (var (ns, keywords) in Rules)
         {
-            foreach (string keyword in keywords)
+            if (keywords.Any(keyword => normalized.Contains(keyword, StringComparison.Ordinal)))
             {
-                if (normalized.Contains(keyword, StringComparison.Ordinal))
-                {
-                    return ns;
-                }
+                return ns;
             }
         }
 

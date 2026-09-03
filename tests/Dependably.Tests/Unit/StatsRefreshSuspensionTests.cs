@@ -52,9 +52,9 @@ public sealed class StatsRefreshSuspensionTests : IAsyncLifetime
         var history = new OrgStatsHistoryRepository(_db);
         var analytics = new PackageAnalyticsRepository(_db, time: _clock);
         var cfg = new ConfigurationBuilder().Build();
-        return new StatsRefreshService(
+        return new StatsRefreshService(new StatsRefreshService.Dependencies(
             snapshots, history, analytics, cfg, new NoAirGap(), new InProcessDistributedLock(_clock),
-            NullLogger<StatsRefreshService>.Instance, _clock);
+            NullLogger<StatsRefreshService>.Instance, _clock));
     }
 
     [Theory]

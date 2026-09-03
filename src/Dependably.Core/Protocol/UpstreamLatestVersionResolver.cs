@@ -80,13 +80,16 @@ public sealed class UpstreamLatestVersionResolver : IUpstreamLatestVersionResolv
 {
     private readonly UpstreamClient _upstream;
     private readonly UpstreamRegistryResolver _registries;
+    private readonly Hex.HexMasterKeyResolver? _hexMasterKeys;
 
     public UpstreamLatestVersionResolver(
         UpstreamClient upstream,
-        UpstreamRegistryResolver registries)
+        UpstreamRegistryResolver registries,
+        Hex.HexMasterKeyResolver? hexMasterKeys = null)
     {
         _upstream = upstream;
         _registries = registries;
+        _hexMasterKeys = hexMasterKeys;
     }
 
     /// <inheritdoc />
@@ -98,6 +101,7 @@ public sealed class UpstreamLatestVersionResolver : IUpstreamLatestVersionResolv
             "nuget" => ResolveNuGetAsync(orgId, purlName, ct),
             "maven" => ResolveMavenAsync(orgId, purlName, ct),
             "cargo" => ResolveCargoAsync(orgId, purlName, ct),
+            "hex" => ResolveHexAsync(orgId, purlName, ct),
             "golang" => ResolveGoAsync(orgId, purlName, ct),
             _ => Task.FromResult(UpstreamLatestVersion.None),
         };
@@ -137,6 +141,30 @@ public sealed class UpstreamLatestVersionResolver : IUpstreamLatestVersionResolv
     /// publish time. That endpoint does not enumerate the full version set, so
     /// StableVersionsDescending stays null (unknown, not empty).
     /// </summary>
+    /// <summary>
+    /// Hex: the signed <c>/packages/NAME</c> resource enumerates every release with its retirement
+    /// status and publish time. Retired releases are excluded — a retirement is Hex's deprecation —
+    /// and the latest carries the publish time the index recorded for it.
+    /// </summary>
+    private async Task<UpstreamLatestVersion> ResolveHexAsync(string orgId, string purlName, CancellationToken ct)
+    {
+        var result = await Hex.HexUpstreamPackageFetcher.FetchAsync(
+            _upstream, _registries, orgId, purlName, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, _hexMasterKeys, ct);
+        if (result.Package is null)
+        {
+            return UpstreamLatestVersion.None;
+        }
+
+        var stable = Hex.HexUpstreamPackageFetcher.StableVersionsDescending(result.Package);
+        if (stable.Count == 0)
+        {
+            return UpstreamLatestVersion.None;
+        }
+
+        var latest = result.Package.Releases.FirstOrDefault(r => r.Version == stable[0]);
+        return new UpstreamLatestVersion(stable[0], latest?.PublishedAt?.ToDateTimeOffset(), stable);
+    }
+
     private async Task<UpstreamLatestVersion> ResolveGoAsync(string orgId, string purlName, CancellationToken ct)
     {
         string encodedModule = GoController.EncodeBangEncoding(purlName);

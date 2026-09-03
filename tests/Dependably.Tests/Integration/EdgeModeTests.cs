@@ -58,7 +58,7 @@ public sealed class EdgeModeTests
 
         var ecosystems = rows.Select(r => r.Ecosystem).OrderBy(e => e, StringComparer.Ordinal).ToList();
         Assert.Equal(
-            new[] { "apk", "cargo", "golang", "maven", "npm", "nuget", "oci", "pypi", "rpm", "terraform" },
+            new[] { "apk", "cargo", "golang", "hex", "maven", "npm", "nuget", "oci", "pypi", "rpm", "terraform" },
             ecosystems);
         Assert.All(rows, r =>
         {

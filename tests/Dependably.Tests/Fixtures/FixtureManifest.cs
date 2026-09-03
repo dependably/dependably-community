@@ -27,4 +27,12 @@ public static class FixtureManifest
     // NuGet
     public const string NewtonsoftJsonNupkgSha256 =
         "872fc189e638ab1056555b03aaa38f68bcb54286e221aa646eb1129babf63c77";
+
+    // Hex — fetched from repo.hex.pm; the signed resources verify against hexpm-public-key.pem.
+    public const string HexDecimalTarballSha256 =
+        "a4d66355cb29cb47c3cf30e71329e58361cfcb37c34235ef3bf1d7bf3773aeac";
+    public const string HexDecimalSignedPackageSha256 =
+        "a5ac1d0437fd55239ec61b69215619e57d3b0631436df653131b044c7d3cb96a";
+    public const string HexPhoenixSignedPackageSha256 =
+        "007217ae67e56099ae4d87224710ed6450ac1296f58be7a34968939c0888906f";
 }

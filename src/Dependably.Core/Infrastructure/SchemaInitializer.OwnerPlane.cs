@@ -733,7 +733,7 @@ public sealed partial class SchemaInitializer
     // twins (package_version_id NULL) survive intact.
     // The NOT LIKE 'hosted/%' guard is a second discriminator: even if backfill_hosted_origin_by_blob_key
     // has not run (e.g. ledger reset), rows whose blob_key is 'hosted/…' are not deleted.
-    // Proxy artifacts may use any of the prefixes proxy/, cargo/, go/, or oci/ — all are genuine
+    // Proxy artifacts may use any of the prefixes proxy/, cargo/, go/, hex/, or oci/ — all are genuine
     // proxy rows and must be deleted. The only hosted prefix is hosted/; any row with that prefix
     // is never a proxy artifact regardless of the origin column value.
     // xtenant: cross-tenant DELETE; scoped to the proxy discriminator and has no tenant boundary.

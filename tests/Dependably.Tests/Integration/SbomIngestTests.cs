@@ -271,6 +271,7 @@ public sealed class SbomIngestTests : IAsyncLifetime
     [Theory]
     [InlineData("cyclonedx-1.4-minimal.json", 2)]
     [InlineData("cyclonedx-1.5-minimal.json", 2)]
+    [InlineData("cyclonedx-1.7-minimal.json", 3)]
     public async Task SbomUpload_AcceptsTheWholeSupportedSpecRange(string fixture, int expected)
     {
         string project = Project("range-" + fixture);

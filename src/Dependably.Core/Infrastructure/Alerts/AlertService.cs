@@ -141,10 +141,19 @@ public sealed class AlertService
     /// deploy day.
     /// </para>
     /// </summary>
+    /// <summary>
+    /// The advisory a KEV alert is about: its id, the severity it was scored at (null = UNSCORED),
+    /// and CISA's tri-state ransomware-campaign assertion — where false ("no known use recorded")
+    /// and null ("nothing asserted") are deliberately distinct, and the alert body says so.
+    /// </summary>
+    public readonly record struct KevAlertAdvisory(
+        string VulnId, string? Severity, bool? KnownRansomwareCampaignUse);
+
     public async Task RaiseVulnKevAlertAsync(
         string orgId, string ecosystem, string packageName, string purl,
-        string vulnId, string? severity, bool? knownRansomwareCampaignUse, CancellationToken ct = default)
+        KevAlertAdvisory advisory, CancellationToken ct = default)
     {
+        (string vulnId, string? severity, bool? knownRansomwareCampaignUse) = advisory;
         try
         {
             var settings = await _alerts.GetRaiseSettingsAsync(orgId, ct);

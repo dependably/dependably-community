@@ -1059,14 +1059,17 @@ public sealed class OrgControllerExtendedTests
 
         Assert.Contains("trusted-host", body, StringComparison.Ordinal);
         Assert.Contains("plain HTTP", body, StringComparison.Ordinal);
-        Assert.Empty(recipe.Caveats);
+        // The username note is unconditional — it describes how this registry authenticates,
+        // not the scheme — so the claim here is that it is the ONLY callout, which is what
+        // makes "no page caveat for the HTTP override" an assertion rather than a wish.
+        Assert.Equal(["usernameIgnored"], recipe.Caveats);
     }
 
     [Theory]
-    [InlineData("maven")]
-    [InlineData("oci")]
-    [InlineData("terraform")]
-    public async Task GetSetup_Http_KeepsTheCaveatsThatDemandActionElsewhere(string eco)
+    [InlineData("maven", "httpMavenBlocked")]
+    [InlineData("oci", "insecureRegistry")]
+    [InlineData("terraform", "httpMirror")]
+    public async Task GetSetup_Http_KeepsTheCaveatsThatDemandActionElsewhere(string eco, string caveat)
     {
         // The inverse of the rule above. These three cannot be fixed by a line the recipe
         // writes: Maven blocks plain-HTTP repositories outright, Docker needs a daemon edit
@@ -1080,7 +1083,11 @@ public sealed class OrgControllerExtendedTests
 
         var payload = Recipes(await b.OrgController.GetSetup(eco, CancellationToken.None));
 
-        Assert.All(payload.Recipes.Where(r => r.Operation == "install"), r => Assert.NotEmpty(r.Caveats));
+        // Named rather than merely non-empty: every recipe here also carries the unconditional
+        // username note, so a NotEmpty check would stay green with the HTTP callout dropped.
+        Assert.All(
+            payload.Recipes.Where(r => r.Operation == "install"),
+            r => Assert.Contains(caveat, r.Caveats, StringComparer.Ordinal));
     }
 
     [Fact]
@@ -1096,7 +1103,7 @@ public sealed class OrgControllerExtendedTests
         var recipe = Cell(payload, "install", "project", "pip");
 
         Assert.DoesNotContain("trusted-host", Bodies(recipe), StringComparison.Ordinal);
-        Assert.Empty(recipe.Caveats);
+        Assert.Equal(["usernameIgnored"], recipe.Caveats);
     }
 
     [Fact]
@@ -1212,7 +1219,7 @@ public sealed class OrgControllerExtendedTests
         var recipe = Cell(payload, "install", "global", "docker");
 
         Assert.Empty(recipe.Files);
-        Assert.Empty(recipe.Caveats);
+        Assert.Equal(["usernameIgnored"], recipe.Caveats);
     }
 
     [Fact]

@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS org_settings (
     max_upload_bytes_rpm    INTEGER,        -- per-ecosystem RPM cap; falls back to max_upload_bytes
     max_upload_bytes_oci    INTEGER,        -- per-ecosystem OCI (Docker) cap; falls back to max_upload_bytes
     max_upload_bytes_cargo  INTEGER,        -- per-ecosystem Cargo cap; falls back to max_upload_bytes
+    max_upload_bytes_hex    INTEGER,        -- per-ecosystem Hex cap; falls back to max_upload_bytes
     keep_versions       INTEGER,            -- GC: max versions to retain per package per ecosystem
     keep_days           INTEGER,            -- GC: evict proxy blobs unused for this many days
     activity_retention_days INTEGER DEFAULT 90,  -- GC: delete activity rows older than this; NULL resolves to the ACTIVITY_RETENTION_DAYS instance default (90) so activity is bounded by default
@@ -1085,6 +1086,8 @@ CREATE TABLE IF NOT EXISTS upstream_registry (
     -- shapes differ, so a wrong value fails every fetch rather than degrading. Ignored by every
     -- other ecosystem, whose serve and fetch protocols are the same.
     upstream_protocol TEXT CHECK (upstream_protocol IS NULL OR upstream_protocol IN ('mirror')),
+    -- Hex: PEM public key of the upstream repository, verified before re-signing (see Schema.sql).
+    public_key_pem TEXT,
     created_at     TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
         CHECK (created_at IS NULL OR created_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
     UNIQUE (org_id, ecosystem, url)
@@ -1867,6 +1870,60 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_cargo_metadata_ca
     ON cargo_metadata (cache_artifact_id)
     WHERE owner_kind = 'cache_artifact';
 
+-- Hex: the per-org RSA keypair every registry resource this org serves is signed with. Hex
+-- clients verify each resource against the public key they registered the repository with, so
+-- the private half is what makes the org's index trustworthy — it is envelope-encrypted under
+-- DEPENDABLY_MASTER_KEY and never leaves the server. Replacing the row rotates the key; there is
+-- no overlap window, because a signed resource carries exactly one signature, so every consumer
+-- re-registers the repository afterwards.
+CREATE TABLE IF NOT EXISTS hex_signing_key (
+    org_id          TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
+    private_key     TEXT NOT NULL,             -- PKCS#8 PEM, envelope ciphertext
+    public_key_pem  TEXT NOT NULL,             -- SubjectPublicKeyInfo PEM, served at /hex/public_key
+    fingerprint     TEXT NOT NULL,             -- SHA-256 of the DER public key, lower-case hex
+    created_at      TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
+        CHECK (created_at IS NULL OR created_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$')
+);
+
+-- Hex: the per-release facts the registry index needs that no other table carries — the inner
+-- checksum every client's tarball unpacker re-verifies, the dependency requirements the resolver
+-- reads, and the retirement state. Same polymorphic owner shape as cargo_metadata: a hosted
+-- release hangs off its package_versions row, a proxied one off the cache_artifact row that was
+-- recorded at first fetch, so the index can still be served from what this org holds when the
+-- upstream is unreachable. metadata_config is the verbatim Erlang term file of a hosted release,
+-- kept so the API plane can answer a client with exactly what was published.
+CREATE TABLE IF NOT EXISTS hex_release (
+    id                  TEXT PRIMARY KEY,
+    version_id          TEXT REFERENCES package_versions(id) ON DELETE CASCADE,
+    cache_artifact_id   TEXT REFERENCES cache_artifact(id) ON DELETE CASCADE,
+    owner_kind          TEXT NOT NULL DEFAULT 'package_version'
+                        CHECK (owner_kind IN ('package_version','cache_artifact')),
+    inner_checksum      TEXT NOT NULL,         -- upper-case hex SHA-256, the tarball's CHECKSUM entry
+    requirements_json   TEXT NOT NULL DEFAULT '[]',
+    app                 TEXT,                  -- OTP application name when it differs from the package
+    build_tools_json    TEXT,
+    elixir              TEXT,                  -- Elixir version requirement, when declared
+    retired_reason      TEXT
+                        CHECK (retired_reason IS NULL OR retired_reason IN ('other','invalid','security','deprecated','renamed')),
+    retired_message     TEXT,
+    has_docs            INTEGER NOT NULL DEFAULT 0,
+    metadata_config     TEXT,
+    -- Owner invariant: exactly one FK arm is active and matches owner_kind.
+    CHECK (
+        (owner_kind = 'package_version' AND version_id IS NOT NULL AND cache_artifact_id IS NULL)
+        OR
+        (owner_kind = 'cache_artifact' AND cache_artifact_id IS NOT NULL AND version_id IS NULL)
+    )
+);
+CREATE INDEX IF NOT EXISTS idx_hex_release_version ON hex_release(version_id);
+CREATE INDEX IF NOT EXISTS idx_hex_release_cache_artifact ON hex_release(cache_artifact_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_hex_release_pv
+    ON hex_release (version_id)
+    WHERE owner_kind = 'package_version';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_hex_release_ca
+    ON hex_release (cache_artifact_id)
+    WHERE owner_kind = 'cache_artifact';
+
 -- Install-script allowlist: packages exempt from the install-script block-gate arm (arm 9).
 -- See Schema.sql for the full rationale.
 -- personal-data: excluded — created_by is a provenance stamp on org allowlist config
@@ -2128,6 +2185,7 @@ CREATE TABLE IF NOT EXISTS sbom_components (
     sbom_scope         TEXT CHECK (sbom_scope IN ('required','optional','excluded')),
     dependency_scope   TEXT NOT NULL DEFAULT 'unknown'
                        CHECK (dependency_scope IN ('dev','runtime','unknown')),
+    dependency_scope_source TEXT CHECK (dependency_scope_source IN ('manifest','scanner')),
     dependency_kind    TEXT CHECK (dependency_kind IN ('direct','transitive','root','graph-unknown')),
     dependency_path    TEXT,
     license_spdx       TEXT,
@@ -2140,6 +2198,8 @@ CREATE TABLE IF NOT EXISTS sbom_components (
     issue_tracker_url  TEXT,
     distribution_url   TEXT,
     component_hashes   TEXT,
+    version_range      TEXT,
+    is_external        INTEGER CHECK (is_external IN (0,1)),
     vuln_checked_at    TEXT
         CHECK (vuln_checked_at IS NULL OR vuln_checked_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
     created_at         TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))

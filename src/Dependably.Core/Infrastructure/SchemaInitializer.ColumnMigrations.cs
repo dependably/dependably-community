@@ -72,6 +72,11 @@ public sealed partial class SchemaInitializer
     private Task SeedTerraformUpstreamRegistriesAsync(DbConnection conn) =>
         SeedUpstreamRegistriesForAsync(conn, "Terraform", e => e is "terraform");
 
+    // Targeted backfill for the Hex upstream, added to the default sources after the preceding
+    // backfills had already run. Config overrides (Hex:Upstream) are honoured via ResolveDefaults.
+    private Task SeedHexUpstreamRegistriesAsync(DbConnection conn) =>
+        SeedUpstreamRegistriesForAsync(conn, "Hex", e => e is "hex");
+
     // Shared body of the targeted per-ecosystem upstream backfills above. Each seeds ONLY the
     // ecosystems its predicate selects — never the full default set — because an operator may have
     // deliberately deleted an upstream row (e.g. removed npm to disable npm proxying) since
@@ -336,7 +341,7 @@ public sealed partial class SchemaInitializer
     // RunOnceAsync, because the previous release declares package_note in its own base schema and
     // re-creates it whenever one of its slots boots against this database. A ledgered drop would
     // record itself applied on a fresh database and then skip the boot that actually needed it.
-    private async Task DropPackageNoteTableAsync(DbConnection conn)
+    private static async Task DropPackageNoteTableAsync(DbConnection conn)
     {
         if (!await TableExistsAsync(conn, "package_note"))
         {
@@ -670,6 +675,10 @@ public sealed partial class SchemaInitializer
             // cap (only the org global limit applied); this column gives it parity with every other
             // publishable ecosystem. Falls back to max_upload_bytes when null.
             "ALTER TABLE org_settings ADD COLUMN max_upload_bytes_cargo INTEGER",
+            // Hex per-ecosystem upload cap; a package tarball and its docs tarball share it.
+            "ALTER TABLE org_settings ADD COLUMN max_upload_bytes_hex INTEGER",
+            // Hex: the upstream repository's signing public key, verified before re-signing.
+            "ALTER TABLE upstream_registry ADD COLUMN public_key_pem TEXT",
             // Trailing path segment of blob_key, populated at insert time so the
             // PyPI/npm/NuGet download lookups can equality-probe an index instead of
             // running a leading-wildcard LIKE. Backfilled by
@@ -1189,6 +1198,24 @@ public sealed partial class SchemaInitializer
             // add one); upgraded DBs rely on controller validation, fresh installs get the CHECK
             // from Schema.sql.
             "ALTER TABLE org_settings ADD COLUMN block_malicious_live TEXT NOT NULL DEFAULT 'off'",
+            // The two component fields CycloneDX 1.7 added. Both nullable and display-only — no
+            // gate reads either. is_external carries no CHECK here because SQLite's ALTER cannot
+            // add one; fresh installs get CHECK (is_external IN (0,1)) from Schema.sql and
+            // upgraded databases rely on the write path, which only ever binds 0, 1 or NULL.
+            // Existing rows stay NULL until their document re-merges, which the SbomIngestVersion
+            // bump forces exactly once.
+            "ALTER TABLE sbom_components ADD COLUMN version_range TEXT",
+            "ALTER TABLE sbom_components ADD COLUMN is_external INTEGER",
+            // Provenance for dependency_scope (SPEC-650's manifest fill added a second writer to a
+            // column the SARIF retraction sweep previously assumed it owned outright). NULL on an
+            // upgraded database's existing rows is exactly correct — nothing yet recorded who set
+            // them — and the sweep in SbomIngestRepository.ResetUnnamedDependencyScopeAsync only
+            // ever resets a 'scanner' row, so an existing non-'unknown' value with no source stays
+            // put rather than being reset by a NULL-matches-nothing accident; the next SBOM or
+            // SARIF that actually asserts something for that component stamps the source honestly
+            // from then on. No CHECK here (SQLite ALTER cannot add one); fresh installs get it
+            // from Schema.sql.
+            "ALTER TABLE sbom_components ADD COLUMN dependency_scope_source TEXT",
     };
 
     private async Task RunAdditiveMigrationsAsync(DbConnection conn)

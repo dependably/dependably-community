@@ -12,17 +12,17 @@ namespace Dependably.Infrastructure;
 
 /// <summary>
 /// Renders a project version's component inventory, vulnerability disclosure and effective VEX
-/// state as fresh CycloneDX 1.6 JSON, and resolves an uploaded document's original blob coordinate
+/// state as fresh CycloneDX 1.7 JSON, and resolves an uploaded document's original blob coordinate
 /// for verbatim download. Built directly against <c>System.Text.Json</c> — CONTRACT D2 forbids a
 /// new NuGet dependency on the CycloneDX serializer, so a re-render is a re-render: it is not
-/// byte-identical to whatever was originally uploaded, only spec-valid CycloneDX 1.6 covering the
+/// byte-identical to whatever was originally uploaded, only spec-valid CycloneDX 1.7 covering the
 /// same components, licences, dependency graph and vulnerability analysis the database holds.
 ///
 /// Every query here is written directly against the schema rather than through another agent's
 /// repository, per the fleet contract's "repositories are not shared" rule — a little query
 /// duplication in exchange for a mergeable worktree.
 /// </summary>
-public sealed class SbomExportService
+public sealed partial class SbomExportService
 {
     /// <summary>
     /// Declares which version of each project an aggregate document selected. Emitted in
@@ -56,7 +56,7 @@ public sealed class SbomExportService
         => (await _tracker.ResolveAsync(ct)).IsActive;
 
     /// <summary>
-    /// Renders CycloneDX 1.6 JSON for <paramref name="variant"/> (<c>inventory</c> or <c>vdr</c>),
+    /// Renders CycloneDX 1.7 JSON for <paramref name="variant"/> (<c>inventory</c> or <c>vdr</c>),
     /// or <c>null</c> when the project or version does not resolve for this org.
     /// </summary>
     public async Task<string?> BuildSbomDocumentAsync(
@@ -78,7 +78,7 @@ public sealed class SbomExportService
         var doc = new JsonObject
         {
             ["bomFormat"] = "CycloneDX",
-            ["specVersion"] = "1.6",
+            ["specVersion"] = "1.7",
             ["serialNumber"] = $"urn:uuid:{Guid.NewGuid()}",
             ["version"] = 1,
             ["metadata"] = new JsonObject
@@ -110,7 +110,7 @@ public sealed class SbomExportService
     }
 
     /// <summary>
-    /// Renders one CycloneDX 1.6 document covering every project beneath a collection, or
+    /// Renders one CycloneDX 1.7 document covering every project beneath a collection, or
     /// <c>null</c> when the id is not a collection this org holds.
     ///
     /// <para><b>Shape.</b> Each project is a top-level <c>components[]</c> entry of its own
@@ -165,62 +165,29 @@ public sealed class SbomExportService
         var coverage = new CoverageAccumulator();
         bool trackerConfigured = await IsTrackerConfiguredAsync(ct);
 
+        var buffers = new CollectionBuffers(projectEntries, dependencies, vulnerabilities);
         foreach (var project in subtree)
         {
             string projectRef = $"{rootRef}/project:{project.ProjectId}";
             rootDependsOn.Add(projectRef);
 
-            var entry = new JsonObject
+            if (!await AppendCollectionProjectAsync(
+                    conn, new CollectionProjectExport(orgId, variant, projectRef),
+                    project, buffers, coverage, ct))
             {
-                ["type"] = project.Classifier,
-                ["bom-ref"] = projectRef,
-                ["name"] = project.Name,
-            };
-            if (project.VersionLabel is not null)
-            {
-                entry["version"] = project.VersionLabel;
-            }
-
-            if (project.ProjectVersionId is null)
-            {
-                // Listed, marked, and empty. Dropping it would make the document claim the folder
-                // holds only the projects someone has uploaded for.
                 withoutSbom++;
-                entry["properties"] = new JsonArray(
-                    new JsonObject { ["name"] = "dependably:noSbom", ["value"] = "true" });
-                projectEntries.Add(entry);
-                dependencies.Add(new JsonObject { ["ref"] = projectRef, ["dependsOn"] = new JsonArray() });
-                continue;
             }
-
-            await AppendProjectAsync(
-                conn,
-                new ProjectExport(orgId, project.ProjectVersionId, projectRef, variant),
-                entry,
-                new CollectionBuffers(projectEntries, dependencies, vulnerabilities),
-                coverage,
-                ct);
         }
 
         dependencies.Insert(0, new JsonObject { ["ref"] = rootRef, ["dependsOn"] = rootDependsOn });
 
-        var metadataProperties = new JsonArray(
-            new JsonObject { ["name"] = "dependably:aggregate", ["value"] = "collection" },
-            new JsonObject { ["name"] = "dependably:selection", ["value"] = LatestPerProjectSelection },
-            new JsonObject { ["name"] = "dependably:projectCount", ["value"] = subtree.Count.ToString(CultureInfo.InvariantCulture) },
-            new JsonObject { ["name"] = "dependably:projectsWithoutSbom", ["value"] = withoutSbom.ToString(CultureInfo.InvariantCulture) });
-        // DeepClone: a JsonNode can only ever have one parent, and coverage.ToProperties() returns
-        // an array whose own entries are already parented to it — appending the nodes themselves
-        // (rather than clones) throws the moment the second entry is added.
-        foreach (var prop in coverage.ToProperties(trackerConfigured))
-        {
-            metadataProperties.Add(prop!.DeepClone());
-        }
+        var metadataProperties = BuildCollectionMetadataProperties(
+            subtree.Count, withoutSbom, coverage, trackerConfigured);
 
         var doc = new JsonObject
         {
             ["bomFormat"] = "CycloneDX",
-            ["specVersion"] = "1.6",
+            ["specVersion"] = "1.7",
             ["serialNumber"] = $"urn:uuid:{Guid.NewGuid()}",
             ["version"] = 1,
             ["metadata"] = new JsonObject
@@ -249,135 +216,66 @@ public sealed class SbomExportService
     }
 
     /// <summary>
-    /// Renders a vulnerabilities-only CycloneDX 1.6 VEX document of the current effective
-    /// analysis state — both upload-sourced and manually triaged rows — or <c>null</c> when the
-    /// project or version does not resolve for this org.
+    /// Renders one subtree project into the collection document's buffers. Returns false when the
+    /// project has no SBOM: it is still listed and marked, because dropping it would make the
+    /// document claim the folder holds only the projects someone has uploaded for.
     /// </summary>
-    public async Task<string?> BuildVexDocumentAsync(
-        string orgId, string projectId, string versionId, CancellationToken ct)
+    private static async Task<bool> AppendCollectionProjectAsync(
+        DbConnection conn,
+        CollectionProjectExport export,
+        ProjectSubtreeEntry project,
+        CollectionBuffers buffers,
+        CoverageAccumulator coverage,
+        CancellationToken ct)
     {
-        await using var conn = await _db.OpenAsync(ct);
-        var resolved = await ResolveProjectVersionAsync(conn, orgId, projectId, versionId, ct);
-        if (resolved is null)
+        var entry = new JsonObject
         {
-            return null;
-        }
-
-        var analysisRows = await LoadAnalysisAsync(conn, orgId, resolved.ProjectVersionId, ct);
-        // A row a SARIF-only merge wrote (reachability/confidence, no VEX opinion) has nothing
-        // to say in a VEX document — only rows carrying an actual analysis state are exported.
-        var withState = analysisRows.Where(a => a.VexState is not null).ToList();
-
-        var components = await LoadComponentsAsync(conn, orgId, resolved.ProjectVersionId, ct);
-        bool trackerConfigured = await IsTrackerConfiguredAsync(ct);
-
-        // A standalone VEX document is keyed by (purl_key, vuln_key), not by sbom_components.id, so
-        // dependency-graph position and install-script presence — both component facts — are
-        // recovered here the same way BuildVulnerabilitiesArray recovers an analysis row for a
-        // component: by computing each component's own purl_key with the identical
-        // SbomPurlKey.ForComponent rule the ingest writers used to key project_vuln_analysis.
-        var componentByPurlKey = new Dictionary<string, ComponentRow>(StringComparer.Ordinal);
-        foreach (var c in components)
-        {
-            string? key = SbomPurlKey.ForComponent(c.Ecosystem, c.PurlName, c.Purl);
-            if (key is not null)
-            {
-                componentByPurlKey[key] = c;
-            }
-        }
-
-        var installScriptFacts = await LoadInstallScriptFactsAsync(conn, orgId, resolved.ProjectVersionId, ct);
-
-        var vulns = new JsonArray();
-        if (withState.Count > 0)
-        {
-            var osvIds = withState.Select(a => a.VulnKey).Distinct(StringComparer.Ordinal).ToList();
-            var (osvIdsClause, osvIdsParameters) = DapperInClause.Expand("osv", osvIds);
-            // rawsql: osvIdsClause is a parameterized IN (@osv0, @osv1, …) list built in C#, not user text.
-            // xtenant: vulnerabilities is the global OSV advisory cache, not a tenant table —
-            // resolved by advisory id only, for best-effort source/rating/enrichment lookup.
-            var known = (await conn.QueryAsync<VulnLookupRow>(new CommandDefinition(
-                """
-                SELECT osv_id AS OsvId, severity AS Severity, cvss_score AS CvssScore,
-                       nvd_score AS NvdScore, nvd_checked_at AS NvdCheckedAt, nvd_asserted_at AS NvdAssertedAt,
-                       is_kev AS IsKev, kev_known_ransomware AS IsKevRansomware,
-                       kev_due_date AS KevDueDate, kev_date_added AS KevDateAdded,
-                       kev_required_action AS KevRequiredAction, kev_cwes AS KevCwes, kev_notes AS KevNotes,
-                       epss_score AS EpssScore, epss_percentile AS EpssPercentile,
-                       ssvc_exploitation AS SsvcExploitation, ssvc_automatable AS SsvcAutomatable,
-                       ssvc_technical_impact AS SsvcTechnicalImpact,
-                       ssvc_checked_at AS SsvcCheckedAt, ssvc_asserted_at AS SsvcAssertedAt,
-                       osv_id LIKE 'MAL-%' AS IsMalicious
-                FROM vulnerabilities WHERE osv_id IN
-                """ + " " + osvIdsClause,
-                osvIdsParameters, cancellationToken: ct)))
-                .ToDictionary(v => v.OsvId, StringComparer.Ordinal);
-            var affectedApps = await CountAffectedApplicationsAsync(conn, orgId, osvIds, ct);
-
-            foreach (var a in withState)
-            {
-                known.TryGetValue(a.VulnKey, out var lookup);
-                componentByPurlKey.TryGetValue(a.PurlKey, out var component);
-                var entry = new JsonObject
-                {
-                    ["bom-ref"] = $"vuln-{a.VulnKey}-{a.PurlKey}",
-                    ["id"] = a.VulnKey,
-                    ["source"] = BuildSource(a.VulnKey),
-                };
-                var ratings = BuildRatings(lookup?.Severity, lookup?.CvssScore);
-                if (ratings is not null)
-                {
-                    entry["ratings"] = ratings;
-                }
-
-                entry["analysis"] = BuildAnalysis(a);
-                entry["affects"] = new JsonArray(new JsonObject { ["ref"] = a.PurlKey });
-                entry["properties"] = BuildVulnProperties(
-                    new VulnSignalFacts(
-                        lookup?.CvssScore,
-                        lookup?.NvdScore,
-                        lookup?.NvdCheckedAt,
-                        lookup?.NvdAssertedAt,
-                        lookup?.IsKev ?? false,
-                        lookup?.IsKevRansomware,
-                        lookup?.KevDueDate,
-                        lookup?.KevDateAdded,
-                        lookup?.KevRequiredAction,
-                        lookup?.KevCwes,
-                        lookup?.KevNotes,
-                        lookup?.EpssScore,
-                        lookup?.EpssPercentile,
-                        lookup?.SsvcExploitation,
-                        lookup?.SsvcAutomatable,
-                        lookup?.SsvcTechnicalImpact,
-                        lookup?.SsvcCheckedAt,
-                        lookup?.SsvcAssertedAt,
-                        component?.DependencyKind,
-                        component?.DependencyScope,
-                        component is not null && installScriptFacts.GetValueOrDefault(component.Id),
-                        affectedApps.GetValueOrDefault(a.VulnKey),
-                        lookup?.IsMalicious ?? false),
-                    a.VexState,
-                    a.Reachability);
-                vulns.Add(entry);
-            }
-        }
-
-        var doc = new JsonObject
-        {
-            ["bomFormat"] = "CycloneDX",
-            ["specVersion"] = "1.6",
-            ["serialNumber"] = $"urn:uuid:{Guid.NewGuid()}",
-            ["version"] = 1,
-            ["metadata"] = new JsonObject
-            {
-                ["timestamp"] = _time.GetUtcNow().ToUtcIso(),
-                ["properties"] = BuildCoverageProperties(components, trackerConfigured),
-            },
-            ["vulnerabilities"] = vulns,
+            ["type"] = project.Classifier,
+            ["bom-ref"] = export.ProjectRef,
+            ["name"] = project.Name,
         };
+        if (project.VersionLabel is not null)
+        {
+            entry["version"] = project.VersionLabel;
+        }
 
-        return doc.ToJsonString();
+        if (project.ProjectVersionId is null)
+        {
+            entry["properties"] = new JsonArray(
+                new JsonObject { ["name"] = "dependably:noSbom", ["value"] = "true" });
+            buffers.Projects.Add(entry);
+            buffers.Dependencies.Add(new JsonObject { ["ref"] = export.ProjectRef, ["dependsOn"] = new JsonArray() });
+            return false;
+        }
+
+        await AppendProjectAsync(
+            conn,
+            new ProjectExport(export.OrgId, project.ProjectVersionId, export.ProjectRef, export.Variant),
+            entry,
+            buffers,
+            coverage,
+            ct);
+        return true;
+    }
+
+    /// <summary>The collection document's metadata properties: the aggregate facts plus coverage.</summary>
+    private static JsonArray BuildCollectionMetadataProperties(
+        int projectCount, int withoutSbom, CoverageAccumulator coverage, bool trackerConfigured)
+    {
+        var metadataProperties = new JsonArray(
+            new JsonObject { ["name"] = "dependably:aggregate", ["value"] = "collection" },
+            new JsonObject { ["name"] = "dependably:selection", ["value"] = LatestPerProjectSelection },
+            new JsonObject { ["name"] = "dependably:projectCount", ["value"] = projectCount.ToString(CultureInfo.InvariantCulture) },
+            new JsonObject { ["name"] = "dependably:projectsWithoutSbom", ["value"] = withoutSbom.ToString(CultureInfo.InvariantCulture) });
+        // DeepClone: a JsonNode can only ever have one parent, and coverage.ToProperties() returns
+        // an array whose own entries are already parented to it — appending the nodes themselves
+        // (rather than clones) throws the moment the second entry is added.
+        foreach (var prop in coverage.ToProperties(trackerConfigured))
+        {
+            metadataProperties.Add(prop!.DeepClone());
+        }
+
+        return metadataProperties;
     }
 
     /// <summary>
@@ -456,6 +354,7 @@ public sealed class SbomExportService
                    component_type AS ComponentType, sbom_scope AS SbomScope,
                    dependency_kind AS DependencyKind, dependency_scope AS DependencyScope,
                    dependency_path AS DependencyPath, license_spdx AS LicenseSpdx,
+                   version_range AS VersionRange, is_external AS IsExternal,
                    vuln_checked_at AS VulnCheckedAt
             FROM sbom_components
             WHERE project_version_id = @pvId AND org_id = @orgId
@@ -560,41 +459,6 @@ public sealed class SbomExportService
         return result;
     }
 
-    /// <summary>
-    /// How many of this tenant's applications ship each of <paramref name="osvIds"/> on their
-    /// latest version — the same query shape as
-    /// <c>SbomBlastRadiusRepository.CountProjectsByAdvisoryAsync</c>, written directly here per the
-    /// fleet contract. <b>Scoped to <c>is_latest = 1</c></b>, matching that repository's own
-    /// documented reasoning: an older release is not something an operator can remediate today, and
-    /// only <c>is_latest</c> versions get their advisory links refreshed nightly, so counting a
-    /// superseded version would mix a current answer with a stale one under one number.
-    /// </summary>
-    private static async Task<Dictionary<string, int>> CountAffectedApplicationsAsync(
-        System.Data.Common.DbConnection conn, string orgId, IReadOnlyList<string> osvIds, CancellationToken ct)
-    {
-        if (osvIds.Count == 0)
-        {
-            return new Dictionary<string, int>(StringComparer.Ordinal);
-        }
-
-        var (keysClause, parameters) = DapperInClause.Expand("osv", osvIds);
-        parameters.Add("orgId", orgId);
-        // rawsql: keysClause is a parameterized IN (@osv0, @osv1, …) list built in C#, not user text.
-        var rows = await conn.QueryAsync<AffectedApplicationsRow>(new CommandDefinition(
-            """
-            SELECT v.osv_id AS OsvId, COUNT(DISTINCT pv.project_id) AS Count
-            FROM sbom_component_vulns scv
-            JOIN vulnerabilities v ON v.id = scv.vuln_id
-            JOIN sbom_components c ON c.id = scv.component_id
-            JOIN project_versions pv ON pv.id = c.project_version_id AND pv.org_id = c.org_id
-            WHERE c.org_id = @orgId AND pv.is_latest = 1 AND v.osv_id IN
-            """ + " " + keysClause + " GROUP BY v.osv_id",
-            parameters, cancellationToken: ct));
-        return rows.ToDictionary(r => r.OsvId, r => r.Count, StringComparer.Ordinal);
-    }
-
-    // ── Document/graph rendering ─────────────────────────────────────────────
-
     private static JsonArray BuildComponentsArray(
         IReadOnlyList<ComponentRow> components, string? refPrefix = null,
         IReadOnlyDictionary<string, bool>? installScriptByComponentId = null)
@@ -602,63 +466,91 @@ public sealed class SbomExportService
         var arr = new JsonArray();
         foreach (var c in components)
         {
-            var obj = new JsonObject
-            {
-                ["type"] = c.ComponentType ?? "library",
-                ["bom-ref"] = RefOf(c, refPrefix),
-                ["name"] = c.Name,
-            };
-            if (c.Version is not null)
-            {
-                obj["version"] = c.Version;
-            }
-
-            if (c.Purl is not null)
-            {
-                obj["purl"] = c.Purl;
-            }
-
-            // CONTRACT D1: component scope is written ONLY from sbom_scope (raw CycloneDX
-            // scope, display-only) — never from dependency_scope, the SARIF-owned dev/prod
-            // signal CycloneDX has no vocabulary for. Conflating them here is exactly what the
-            // producer split exists to prevent.
-            if (c.SbomScope is not null)
-            {
-                obj["scope"] = c.SbomScope;
-            }
-
-            if (c.LicenseSpdx is not null)
-            {
-                obj["licenses"] = new JsonArray(new JsonObject { ["expression"] = c.LicenseSpdx });
-            }
-
-            var properties = new JsonArray();
-            if (c.DependencyKind is not null)
-            {
-                properties.Add(Prop(DependablyExportProperties.DependencyKind, c.DependencyKind));
-            }
-
-            if (c.DependencyScope is not null)
-            {
-                properties.Add(Prop(DependablyExportProperties.DependencyScope, c.DependencyScope));
-            }
-
-            // Positive-only: a miss (no dictionary, or a false/absent entry) means "unknown to
-            // this registry", never "verified clean" — see DependablyExportProperties.InstallScript.
-            if (installScriptByComponentId is not null && installScriptByComponentId.GetValueOrDefault(c.Id))
-            {
-                properties.Add(Prop(DependablyExportProperties.InstallScript, DependablyExportProperties.TrueValue));
-            }
-
-            if (properties.Count > 0)
-            {
-                obj["properties"] = properties;
-            }
-
-            arr.Add(obj);
+            arr.Add(BuildComponentObject(c, refPrefix, installScriptByComponentId));
         }
 
         return arr;
+    }
+
+    /// <summary>One CycloneDX component object.</summary>
+    private static JsonObject BuildComponentObject(
+        ComponentRow c, string? refPrefix,
+        IReadOnlyDictionary<string, bool>? installScriptByComponentId)
+    {
+        var obj = new JsonObject
+        {
+            ["type"] = c.ComponentType ?? "library",
+            ["bom-ref"] = RefOf(c, refPrefix),
+            ["name"] = c.Name,
+        };
+        // versionRange is what a component declares INSTEAD of a version; the specification
+        // forbids both on one component, so the two arms exclude each other rather than both
+        // being written.
+        if (c.Version is not null)
+        {
+            obj["version"] = c.Version;
+        }
+        else if (c.VersionRange is not null)
+        {
+            obj["versionRange"] = c.VersionRange;
+        }
+
+        if (c.IsExternal is bool isExternal)
+        {
+            obj["isExternal"] = isExternal;
+        }
+
+        if (c.Purl is not null)
+        {
+            obj["purl"] = c.Purl;
+        }
+
+        // CONTRACT D1: component scope is written ONLY from sbom_scope (raw CycloneDX
+        // scope, display-only) — never from dependency_scope, the SARIF-owned dev/prod
+        // signal CycloneDX has no vocabulary for. Conflating them here is exactly what the
+        // producer split exists to prevent.
+        if (c.SbomScope is not null)
+        {
+            obj["scope"] = c.SbomScope;
+        }
+
+        if (c.LicenseSpdx is not null)
+        {
+            obj["licenses"] = new JsonArray(new JsonObject { ["expression"] = c.LicenseSpdx });
+        }
+
+        var properties = BuildComponentProperties(c, installScriptByComponentId);
+        if (properties.Count > 0)
+        {
+            obj["properties"] = properties;
+        }
+
+        return obj;
+    }
+
+    /// <summary>The dependably: namespaced properties a component carries, if any.</summary>
+    private static JsonArray BuildComponentProperties(
+        ComponentRow c, IReadOnlyDictionary<string, bool>? installScriptByComponentId)
+    {
+        var properties = new JsonArray();
+        if (c.DependencyKind is not null)
+        {
+            properties.Add(Prop(DependablyExportProperties.DependencyKind, c.DependencyKind));
+        }
+
+        if (c.DependencyScope is not null)
+        {
+            properties.Add(Prop(DependablyExportProperties.DependencyScope, c.DependencyScope));
+        }
+
+        // Positive-only: a miss (no dictionary, or a false/absent entry) means "unknown to
+        // this registry", never "verified clean" — see DependablyExportProperties.InstallScript.
+        if (installScriptByComponentId is not null && installScriptByComponentId.GetValueOrDefault(c.Id))
+        {
+            properties.Add(Prop(DependablyExportProperties.InstallScript, DependablyExportProperties.TrueValue));
+        }
+
+        return properties;
     }
 
     /// <summary>
@@ -1102,6 +994,10 @@ public sealed class SbomExportService
     private readonly record struct CollectionBuffers(
         JsonArray Projects, JsonArray Dependencies, JsonArray Vulnerabilities);
 
+    /// <summary>The loop-invariant half of one subtree project's export coordinates.</summary>
+    private readonly record struct CollectionProjectExport(
+        string OrgId, string Variant, string ProjectRef);
+
     private static async Task AppendProjectAsync(
         DbConnection conn, ProjectExport export, JsonObject entry, CollectionBuffers buffers,
         CoverageAccumulator coverage, CancellationToken ct)
@@ -1268,6 +1164,8 @@ public sealed class SbomExportService
         public string? DependencyScope { get; set; }
         public string? DependencyPath { get; set; }
         public string? LicenseSpdx { get; set; }
+        public string? VersionRange { get; set; }
+        public bool? IsExternal { get; set; }
         public DateTimeOffset? VulnCheckedAt { get; set; }
     }
 

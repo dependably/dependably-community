@@ -30,6 +30,8 @@ internal static partial class InfrastructureStartupExtensions
         builder.Services.AddSingleton<GoLatestFetchCoordinator>();
         builder.Services.AddScoped<GoControllerServices>();
         builder.Services.AddScoped<TerraformControllerServices>();
+        builder.Services.AddScoped<HexControllerServices>();
+        builder.Services.AddScoped<HexApiControllerServices>();
         builder.Services.AddSingleton<ApkIndexFetchCoordinator>();
         builder.Services.AddScoped(sp =>
         {

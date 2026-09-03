@@ -41,7 +41,7 @@ namespace Dependably.Tests.Compliance;
 /// </para>
 /// </summary>
 [Trait("Category", "Compliance")]
-public sealed class ZipArchiveConstructionComplianceTests
+public sealed partial class ZipArchiveConstructionComplianceTests
 {
     private const string Marker = "zip-open-ok:";
     private const int MarkerWindow = 5;
@@ -49,10 +49,12 @@ public sealed class ZipArchiveConstructionComplianceTests
     /// <summary>The single file permitted to construct a <c>ZipArchive</c> directly.</summary>
     private const string FactoryFileName = "SafeZipArchive.cs";
 
-    private static readonly Regex RawConstruction = new(@"new\s+ZipArchive\s*\(", RegexOptions.Compiled);
+    [GeneratedRegex(@"new\s+ZipArchive\s*\(")]
+    private static partial Regex RawConstruction();
 
     // ZipFile.OpenRead/Open hand back a ZipArchive without passing through the factory.
-    private static readonly Regex ZipFileOpen = new(@"\bZipFile\s*\.\s*Open(?:Read)?\s*\(", RegexOptions.Compiled);
+    [GeneratedRegex(@"\bZipFile\s*\.\s*Open(?:Read)?\s*\(")]
+    private static partial Regex ZipFileOpen();
 
     private readonly ITestOutputHelper _output;
     public ZipArchiveConstructionComplianceTests(ITestOutputHelper output) => _output = output;
@@ -73,7 +75,7 @@ public sealed class ZipArchiveConstructionComplianceTests
             string rel = Path.GetRelativePath(SourceRoots.RepoRoot(), file);
 
             foreach (var (pattern, what) in
-                     new[] { (RawConstruction, "new ZipArchive(...)"), (ZipFileOpen, "ZipFile.Open/OpenRead(...)") })
+                     new[] { (RawConstruction(), "new ZipArchive(...)"), (ZipFileOpen(), "ZipFile.Open/OpenRead(...)") })
             {
                 foreach (Match m in pattern.Matches(text))
                 {

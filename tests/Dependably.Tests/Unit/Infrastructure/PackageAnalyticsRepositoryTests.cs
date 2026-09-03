@@ -1036,6 +1036,111 @@ public sealed class PackageAnalyticsRepositoryTests : IAsyncLifetime
             "('ll5','lca2','LGPL-3.0-only','cache_artifact')");
     }
 
+    // ── Risk.svelte sortable headers (issue #653) ───────────────────────────────────────────────
+
+    [Fact]
+    public async Task Operational_risk_list_defaults_to_versions_behind_worst_first()
+    {
+        await SeedOperationalRiskAsync();
+        var repo = new PackageAnalyticsRepository(_db);
+
+        // No sort/dir named at all — the endpoint's own default (behind, desc) applies.
+        var (items, _, _) = await repo.ListOperationalRiskAsync("o1", null, limit: 50, offset: 0);
+
+        Assert.Equal(["proxy-over", "at-threshold"], items.Select(r => r.Name));
+    }
+
+    [Fact]
+    public async Task Operational_risk_list_honours_an_allowlisted_sort_key_and_direction()
+    {
+        await SeedOperationalRiskAsync();
+        var repo = new PackageAnalyticsRepository(_db);
+
+        // Same two rows as the default-sort test above, flipped by naming the column and the
+        // opposite direction explicitly — pinning that sort/dir actually reach the ORDER BY.
+        var (asc, _, _) = await repo.ListOperationalRiskAsync(
+            "o1", null, limit: 50, offset: 0, sort: "behind", dir: "asc");
+        Assert.Equal(["at-threshold", "proxy-over"], asc.Select(r => r.Name));
+
+        // "package" sorts by display name, independent of the versions-behind count.
+        var (byName, _, _) = await repo.ListOperationalRiskAsync(
+            "o1", null, limit: 50, offset: 0, sort: "package", dir: "asc");
+        Assert.Equal(["at-threshold", "proxy-over"], byName.Select(r => r.Name));
+    }
+
+    [Fact]
+    public async Task Operational_risk_list_falls_back_to_the_default_sort_on_an_unrecognized_key()
+    {
+        await SeedOperationalRiskAsync();
+        var repo = new PackageAnalyticsRepository(_db);
+
+        // An unrecognised sort key must not throw, and must render exactly the default ordering —
+        // matching ProjectsController's "a renamed column should not turn a saved URL into an
+        // error page" contract. dir is left unset too, so the fallback column's own default
+        // direction (desc) applies rather than a caller-supplied one.
+        var (items, _, _) = await repo.ListOperationalRiskAsync(
+            "o1", null, limit: 50, offset: 0, sort: "does-not-exist");
+
+        Assert.Equal(["proxy-over", "at-threshold"], items.Select(r => r.Name));
+    }
+
+    [Fact]
+    public async Task Operational_risk_list_falls_back_to_the_columns_own_default_direction_on_an_unrecognized_dir()
+    {
+        await SeedOperationalRiskAsync();
+        var repo = new PackageAnalyticsRepository(_db);
+
+        // "behind"'s own default direction is desc (worst first); an unrecognised dir value must
+        // not silently coerce to asc.
+        var (items, _, _) = await repo.ListOperationalRiskAsync(
+            "o1", null, limit: 50, offset: 0, sort: "behind", dir: "sideways");
+
+        Assert.Equal(["proxy-over", "at-threshold"], items.Select(r => r.Name));
+    }
+
+    [Fact]
+    public async Task License_risk_list_honours_an_allowlisted_sort_key_and_direction()
+    {
+        await SeedLicenseRiskAsync();
+        var repo = new PackageAnalyticsRepository(_db);
+
+        // Default (reason asc): blocklisted before unknown, tiebroken by name within a reason.
+        var (byReasonAsc, _) = await repo.ListLicenseRiskAsync(
+            "o1", null, null, limit: 50, offset: 0, sort: "reason", dir: "asc");
+        Assert.Equal(["gpl-pkg", "proxy-gpl", "no-license-pkg"], byReasonAsc.Select(r => r.Name));
+
+        // Flipping dir puts the unknown row first.
+        var (byReasonDesc, _) = await repo.ListLicenseRiskAsync(
+            "o1", null, null, limit: 50, offset: 0, sort: "reason", dir: "desc");
+        Assert.Equal(["no-license-pkg", "gpl-pkg", "proxy-gpl"], byReasonDesc.Select(r => r.Name));
+
+        // "package" sorts by display name across reasons.
+        var (byName, _) = await repo.ListLicenseRiskAsync(
+            "o1", null, null, limit: 50, offset: 0, sort: "package", dir: "asc");
+        Assert.Equal(["gpl-pkg", "no-license-pkg", "proxy-gpl"], byName.Select(r => r.Name));
+    }
+
+    [Fact]
+    public async Task License_risk_list_falls_back_to_the_default_sort_on_an_unrecognized_key_or_dir()
+    {
+        await SeedLicenseRiskAsync();
+        var repo = new PackageAnalyticsRepository(_db);
+
+        var (items, _) = await repo.ListLicenseRiskAsync(
+            "o1", null, null, limit: 50, offset: 0, sort: "does-not-exist", dir: "sideways");
+
+        // Same as the endpoint's own default (reason asc) — never a thrown exception.
+        Assert.Equal(["gpl-pkg", "proxy-gpl", "no-license-pkg"], items.Select(r => r.Name));
+    }
+
+    // "licenses" carries no sort key at all: the SPDX identifiers are stitched onto the page's
+    // rows by RiskController AFTER paging, so there is no column for the allowlist to name.
+    [Fact]
+    public void License_risk_sort_keys_do_not_include_the_post_page_computed_licenses_column()
+    {
+        Assert.DoesNotContain("licenses", PackageAnalyticsRepository.LicenseRiskSortKeys);
+    }
+
     private async Task SeedLicenseRiskAsync()
     {
         await using var conn = await _db.OpenAsync();

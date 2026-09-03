@@ -9,6 +9,7 @@
 <script>
   import { t } from 'svelte-i18n'
   import SettingsTrustAnchors from './SettingsTrustAnchors.svelte'
+  import SettingsHexSigningKey from './SettingsHexSigningKey.svelte'
   import InfoTip from '../InfoTip.svelte'
 
   export let proxySettings
@@ -17,6 +18,8 @@
 </script>
 
 <SettingsTrustAnchors />
+
+<SettingsHexSigningKey />
 
 <div class="card card-narrow mt-4">
   <div class="form-row">

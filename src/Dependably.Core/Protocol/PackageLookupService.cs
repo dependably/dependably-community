@@ -41,14 +41,14 @@ public sealed partial class PackageLookupService
 {
     /// <summary>Ecosystems this endpoint accepts — the OSV-covered set named by the feature.</summary>
     public static readonly IReadOnlyList<string> SupportedEcosystems =
-        ["npm", "pypi", "nuget", "maven", "golang", "cargo"];
+        ["npm", "pypi", "nuget", "maven", "golang", "cargo", "hex"];
 
     // Ecosystems with a wired upstream metadata fetch (deprecation/publish-date/license and
     // "no version given -> evaluate latest stable"). Which facts each one yields varies — see the
     // per-ecosystem summary on the class — but every member can resolve a latest version, so an
     // omitted version is a hard failure only when no fetch is permitted at all (air-gap).
     private static readonly HashSet<string> MetadataSupportedEcosystems =
-        ["npm", "pypi", "nuget", "maven", "cargo", "golang"];
+        ["npm", "pypi", "nuget", "maven", "cargo", "golang", "hex"];
 
     private readonly OrgRepository _orgs;
     private readonly UpstreamRegistryResolver _registries;
@@ -60,6 +60,7 @@ public sealed partial class PackageLookupService
     private readonly IAirGapMode _airGap;
     private readonly TimeProvider _time;
     private readonly PackageLookupCache _cache;
+    private readonly Hex.HexMasterKeyResolver? _hexMasterKeys;
 
     // Each parameter is a distinct DI-registered collaborator this read-only lookup depends
     // on directly; grouping them into a wrapper type would just move the coupling without
@@ -75,7 +76,8 @@ public sealed partial class PackageLookupService
         LicenseRepository licenses,
         IAirGapMode airGap,
         TimeProvider time,
-        PackageLookupCache cache)
+        PackageLookupCache cache,
+        Hex.HexMasterKeyResolver? hexMasterKeys = null)
 #pragma warning restore S107
     {
         _orgs = orgs;
@@ -88,6 +90,7 @@ public sealed partial class PackageLookupService
         _airGap = airGap;
         _time = time;
         _cache = cache;
+        _hexMasterKeys = hexMasterKeys;
     }
 
     public async Task<PackageLookupOutcome> LookupAsync(PackageLookupRequest request, CancellationToken ct = default)
@@ -401,6 +404,7 @@ public sealed partial class PackageLookupService
         "maven" => BuildMavenPurl(name, version),
         "golang" => PurlNormalizer.Golang(name, version),
         "cargo" => PurlNormalizer.Cargo(name, version),
+        "hex" => PurlNormalizer.Hex(name, version),
         _ => throw new ArgumentOutOfRangeException(nameof(ecosystem), ecosystem, "unsupported ecosystem"),
     };
 
@@ -516,6 +520,7 @@ public sealed partial class PackageLookupService
             "maven" => FetchMavenAsync(orgId, name, requestedVersion, ct),
             "cargo" => FetchCargoAsync(orgId, name, requestedVersion, ct),
             "golang" => FetchGoAsync(orgId, name, requestedVersion, ct),
+            "hex" => FetchHexAsync(orgId, name, requestedVersion, ct),
             _ => throw new ArgumentOutOfRangeException(nameof(ecosystem), ecosystem, "no metadata fetch wired"),
         };
 

@@ -177,20 +177,31 @@ export function compareVersions(a, b) {
 
   if (pa.epoch !== pb.epoch) return pa.epoch < pb.epoch ? -1 : 1
 
+  // A null walk means the tokens are exhausted and equal, so these are the same version
+  // however they were spelled — "1.0" and "1.0.0", "v1.2.3" and "1.2.3", "1.0.0+build.1"
+  // and "1.0.0". Reporting 0 is the correct answer rather than a tie to break: the sort is
+  // stable, so equal versions keep the order the API returned them in.
+  return walkTokens(pa.tokens, pb.tokens) ?? 0
+}
+
+/**
+ * Walks two token lists in step, returning the first decisive verdict or null when both run
+ * out without one.
+ */
+function walkTokens(tokensA, tokensB) {
   // Tracked rather than assumed, because the pre-release boundary is only known part-way
   // through the walk — see compareAgainstExhausted.
   let inPreRelease = false
 
-  const len = Math.max(pa.tokens.length, pb.tokens.length)
+  const len = Math.max(tokensA.length, tokensB.length)
   for (let i = 0; i < len; i++) {
-    const ta = pa.tokens[i]
-    const tb = pb.tokens[i]
+    const ta = tokensA[i]
+    const tb = tokensB[i]
 
     if (ta === undefined || tb === undefined) {
-      const exhaustedIsA = ta === undefined
-      const verdict = compareAgainstExhausted(exhaustedIsA ? tb : ta, inPreRelease)
-      if (verdict === null) continue
-      return exhaustedIsA ? verdict : -verdict
+      const verdict = compareExhausted(ta, tb, inPreRelease)
+      if (verdict !== null) return verdict
+      continue
     }
 
     if (isPreRelease(ta) || isPreRelease(tb)) inPreRelease = true
@@ -199,11 +210,18 @@ export function compareVersions(a, b) {
     if (verdict !== null) return verdict
   }
 
-  // Tokens are exhausted and equal, so these are the same version however they
-  // were spelled — "1.0" and "1.0.0", "v1.2.3" and "1.2.3", "1.0.0+build.1" and
-  // "1.0.0". Reporting 0 is the correct answer rather than a tie to break: the
-  // sort is stable, so equal versions keep the order the API returned them in.
-  return 0
+  return null
+}
+
+/**
+ * One side has run out of tokens. The surviving token decides, and the verdict is flipped
+ * when it is the second list that survived.
+ */
+function compareExhausted(ta, tb, inPreRelease) {
+  const exhaustedIsA = ta === undefined
+  const verdict = compareAgainstExhausted(exhaustedIsA ? tb : ta, inPreRelease)
+  if (verdict === null) return null
+  return exhaustedIsA ? verdict : -verdict
 }
 
 /**

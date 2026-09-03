@@ -68,10 +68,11 @@ public sealed class OrgSettingsRepository
             INSERT INTO org_settings (org_id, anonymous_pull, allowlist_mode,
                 max_upload_bytes, max_upload_bytes_pypi, max_upload_bytes_npm, max_upload_bytes_nuget,
                 max_upload_bytes_maven, max_upload_bytes_rpm, max_upload_bytes_oci, max_upload_bytes_cargo,
+                max_upload_bytes_hex,
                 default_language, default_timezone, allow_version_overwrite, version_overwrite_policy,
                 air_gapped, require_mfa, rpm_upstream_mode)
             VALUES (@orgId, COALESCE(@anonPull, 0), COALESCE(@allowlist, 0), @maxBytes, @maxBytesPyPi, @maxBytesNpm, @maxBytesNuGet,
-                @maxBytesMaven, @maxBytesRpm, @maxBytesOci, @maxBytesCargo,
+                @maxBytesMaven, @maxBytesRpm, @maxBytesOci, @maxBytesCargo, @maxBytesHex,
                 COALESCE(@lang, 'en'), COALESCE(@timezone, 'UTC'), COALESCE(@legacyOverwrite, 0),
                 COALESCE(@policy, 'block'), COALESCE(@airGapped, 0), COALESCE(@requireMfa, 0),
                 COALESCE(@rpmUpstreamMode, 'passthrough'))
@@ -86,6 +87,7 @@ public sealed class OrgSettingsRepository
                 max_upload_bytes_rpm   = @maxBytesRpm,
                 max_upload_bytes_oci   = @maxBytesOci,
                 max_upload_bytes_cargo = @maxBytesCargo,
+                max_upload_bytes_hex   = @maxBytesHex,
                 default_language    = COALESCE(@lang, default_language),
                 default_timezone    = COALESCE(@timezone, default_timezone),
                 version_overwrite_policy = COALESCE(@policy, version_overwrite_policy),
@@ -108,6 +110,7 @@ public sealed class OrgSettingsRepository
                 maxBytesRpm = Clamp(update.MaxUploadBytesRpm, update.InstanceMaxUploadBytes),
                 maxBytesOci = Clamp(update.MaxUploadBytesOci, update.InstanceMaxUploadBytes),
                 maxBytesCargo = Clamp(update.MaxUploadBytesCargo, update.InstanceMaxUploadBytes),
+                maxBytesHex = Clamp(update.MaxUploadBytesHex, update.InstanceMaxUploadBytes),
                 lang,
                 timezone,
                 legacyOverwrite,

@@ -100,6 +100,46 @@ public sealed class RiskControllerTests
         Assert.Equal(0, Prop<int>(ok, "offset"));    // page floored at 1
     }
 
+    [Fact]
+    public async Task Operational_drill_down_honours_sort_and_falls_back_on_an_unrecognized_key()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+        await SeedOperationalAsync(b.Db, b.PrimaryOrgId);
+
+        // Ascending flips the default (worst-first) ordering.
+        var asc = (OkObjectResult)await b.RiskController.Operational(sort: "behind", dir: "asc");
+        var ascNames = Prop<System.Collections.IEnumerable>(asc, "items").Cast<object>()
+            .Select(r => (string)Get(r, "name")!).ToList();
+        Assert.Equal(["behind", "proxy-behind"], ascNames);
+
+        // A sort key the endpoint does not recognise must render — not 422 or throw — as the
+        // endpoint's own default (behind, desc), matching ProjectsController's fallback contract.
+        var fallback = (OkObjectResult)await b.RiskController.Operational(sort: "does-not-exist");
+        var fallbackNames = Prop<System.Collections.IEnumerable>(fallback, "items").Cast<object>()
+            .Select(r => (string)Get(r, "name")!).ToList();
+        Assert.Equal(["proxy-behind", "behind"], fallbackNames);
+    }
+
+    [Fact]
+    public async Task License_drill_down_honours_sort_and_falls_back_on_an_unrecognized_dir()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+        await SeedLicenseAsync(b.Db, b.PrimaryOrgId);
+
+        // An unrecognised dir must not throw or 422 — it falls back to the "reason" column's own
+        // default (asc), which is also the endpoint-wide default when sort is omitted entirely.
+        var ok = (OkObjectResult)await b.RiskController.License(sort: "reason", dir: "sideways");
+        var names = Prop<System.Collections.IEnumerable>(ok, "items").Cast<object>()
+            .Select(r => (string)Get(r, "name")!).ToList();
+        Assert.Equal(["gpl-pkg", "no-license"], names);
+    }
+
     private static T Prop<T>(OkObjectResult ok, string name) => (T)Get(ok.Value!, name)!;
 
     private static object? Get(object target, string name) =>

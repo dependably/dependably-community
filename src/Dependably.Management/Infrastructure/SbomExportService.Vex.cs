@@ -1,0 +1,257 @@
+using System.Data.Common;
+using System.Diagnostics.CodeAnalysis;
+using System.Text.Json.Nodes;
+using Dapper;
+using Dependably.Infrastructure.Sbom;
+
+namespace Dependably.Infrastructure;
+
+/// <summary>
+/// The VEX half of <see cref="SbomExportService"/>: a vulnerabilities-only CycloneDX document of
+/// one project version's current effective analysis state, upload-sourced and manually triaged
+/// rows alike.
+///
+/// <para>Separated from the SBOM/VDR renderers by file only — one partial class, one
+/// lifetime.</para>
+///
+/// <para>A standalone VEX document is keyed by (purl_key, vuln_key), not by
+/// <c>sbom_components.id</c>, which is why the component facts each entry carries are recovered
+/// through <see cref="SbomPurlKey.ForComponent"/> — the identical rule the ingest writers keyed
+/// <c>project_vuln_analysis</c> with, never re-derived locally.</para>
+/// </summary>
+public sealed partial class SbomExportService
+{
+    /// <summary>
+    /// Renders a vulnerabilities-only CycloneDX 1.7 VEX document of the current effective
+    /// analysis state — both upload-sourced and manually triaged rows — or <c>null</c> when the
+    /// project or version does not resolve for this org.
+    /// </summary>
+    [SuppressMessage("Security", "S2077:Formatting SQL queries is security-sensitive",
+        Justification = "The spliced fragment is DapperInClause.Expand's own parenthesized, "
+                        + "individually-parameterized (@osv0, @osv1, …) list built from advisory ids "
+                        + "this method already read out of the database, not user text — see "
+                        + "DapperInClause's doc comment for why Dapper's own IN @list auto-expansion "
+                        + "cannot be used (it binds a Postgres connection's enumerable as one native "
+                        + "array parameter, valid only after = ANY(...), never after IN).")]
+    public async Task<string?> BuildVexDocumentAsync(
+        string orgId, string projectId, string versionId, CancellationToken ct)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        var resolved = await ResolveProjectVersionAsync(conn, orgId, projectId, versionId, ct);
+        if (resolved is null)
+        {
+            return null;
+        }
+
+        var analysisRows = await LoadAnalysisAsync(conn, orgId, resolved.ProjectVersionId, ct);
+        // A row a SARIF-only merge wrote (reachability/confidence, no VEX opinion) has nothing
+        // to say in a VEX document — only rows carrying an actual analysis state are exported.
+        var withState = analysisRows.Where(a => a.VexState is not null).ToList();
+
+        var components = await LoadComponentsAsync(conn, orgId, resolved.ProjectVersionId, ct);
+        bool trackerConfigured = await IsTrackerConfiguredAsync(ct);
+
+        // A standalone VEX document is keyed by (purl_key, vuln_key), not by sbom_components.id, so
+        // dependency-graph position and install-script presence — both component facts — are
+        // recovered here the same way BuildVulnerabilitiesArray recovers an analysis row for a
+        // component: by computing each component's own purl_key with the identical
+        // SbomPurlKey.ForComponent rule the ingest writers used to key project_vuln_analysis.
+        var componentByPurlKey = IndexComponentsByPurlKey(components);
+
+        var installScriptFacts = await LoadInstallScriptFactsAsync(conn, orgId, resolved.ProjectVersionId, ct);
+
+        var vulns = await BuildVexVulnerabilitiesAsync(
+            conn, orgId, withState, componentByPurlKey, installScriptFacts, ct);
+
+        var doc = new JsonObject
+        {
+            ["bomFormat"] = "CycloneDX",
+            ["specVersion"] = "1.7",
+            ["serialNumber"] = $"urn:uuid:{Guid.NewGuid()}",
+            ["version"] = 1,
+            ["metadata"] = new JsonObject
+            {
+                ["timestamp"] = _time.GetUtcNow().ToUtcIso(),
+                ["properties"] = BuildCoverageProperties(components, trackerConfigured),
+            },
+            ["vulnerabilities"] = vulns,
+        };
+
+        return doc.ToJsonString();
+    }
+
+    /// <summary>
+    /// The VEX document's <c>vulnerabilities</c> array. Empty when no row carries an analysis
+    /// state — the advisory lookup and the affected-application count are both skipped in that
+    /// case rather than issuing two queries whose result nothing reads.
+    /// </summary>
+    [SuppressMessage("Security", "S2077:Formatting SQL queries is security-sensitive",
+        Justification = "The spliced fragment is DapperInClause.Expand's own parenthesized, "
+                        + "individually-parameterized (@osv0, @osv1, …) list built from advisory ids "
+                        + "this method already read out of the database, not user text — see "
+                        + "DapperInClause's doc comment for why Dapper's own IN @list auto-expansion "
+                        + "cannot be used (it binds a Postgres connection's enumerable as one native "
+                        + "array parameter, valid only after = ANY(...), never after IN).")]
+    private static async Task<JsonArray> BuildVexVulnerabilitiesAsync(
+        DbConnection conn,
+        string orgId,
+        IReadOnlyList<AnalysisRow> withState,
+        IReadOnlyDictionary<string, ComponentRow> componentByPurlKey,
+        IReadOnlyDictionary<string, bool> installScriptFacts,
+        CancellationToken ct)
+    {
+        var vulns = new JsonArray();
+        if (withState.Count == 0)
+        {
+            return vulns;
+        }
+
+        var osvIds = withState.Select(a => a.VulnKey).Distinct(StringComparer.Ordinal).ToList();
+        var (osvIdsClause, osvIdsParameters) = DapperInClause.Expand("osv", osvIds);
+        // rawsql: osvIdsClause is a parameterized IN (@osv0, @osv1, …) list built in C#, not user text.
+        // xtenant: vulnerabilities is the global OSV advisory cache, not a tenant table —
+        // resolved by advisory id only, for best-effort source/rating/enrichment lookup.
+        var known = (await conn.QueryAsync<VulnLookupRow>(new CommandDefinition(
+            """
+            SELECT osv_id AS OsvId, severity AS Severity, cvss_score AS CvssScore,
+                   nvd_score AS NvdScore, nvd_checked_at AS NvdCheckedAt, nvd_asserted_at AS NvdAssertedAt,
+                   is_kev AS IsKev, kev_known_ransomware AS IsKevRansomware,
+                   kev_due_date AS KevDueDate, kev_date_added AS KevDateAdded,
+                   kev_required_action AS KevRequiredAction, kev_cwes AS KevCwes, kev_notes AS KevNotes,
+                   epss_score AS EpssScore, epss_percentile AS EpssPercentile,
+                   ssvc_exploitation AS SsvcExploitation, ssvc_automatable AS SsvcAutomatable,
+                   ssvc_technical_impact AS SsvcTechnicalImpact,
+                   ssvc_checked_at AS SsvcCheckedAt, ssvc_asserted_at AS SsvcAssertedAt,
+                   osv_id LIKE 'MAL-%' AS IsMalicious
+            FROM vulnerabilities WHERE osv_id IN
+            """ + " " + osvIdsClause,
+            osvIdsParameters, cancellationToken: ct)))
+            .ToDictionary(v => v.OsvId, StringComparer.Ordinal);
+        var affectedApps = await CountAffectedApplicationsAsync(conn, orgId, osvIds, ct);
+        foreach (var a in withState)
+        {
+            vulns.Add(BuildVexEntry(a, known, componentByPurlKey, installScriptFacts, affectedApps));
+        }
+
+        return vulns;
+    }
+
+    /// <summary>One VEX entry: the advisory's identity, ratings, analysis state and signal properties.</summary>
+    private static JsonObject BuildVexEntry(
+        AnalysisRow a,
+        IReadOnlyDictionary<string, VulnLookupRow> known,
+        IReadOnlyDictionary<string, ComponentRow> componentByPurlKey,
+        IReadOnlyDictionary<string, bool> installScriptFacts,
+        IReadOnlyDictionary<string, int> affectedApps)
+    {
+        known.TryGetValue(a.VulnKey, out var lookup);
+        componentByPurlKey.TryGetValue(a.PurlKey, out var component);
+        var entry = new JsonObject
+        {
+            ["bom-ref"] = $"vuln-{a.VulnKey}-{a.PurlKey}",
+            ["id"] = a.VulnKey,
+            ["source"] = BuildSource(a.VulnKey),
+        };
+        var ratings = BuildRatings(lookup?.Severity, lookup?.CvssScore);
+        if (ratings is not null)
+        {
+            entry["ratings"] = ratings;
+        }
+
+        entry["analysis"] = BuildAnalysis(a);
+        entry["affects"] = new JsonArray(new JsonObject { ["ref"] = a.PurlKey });
+        entry["properties"] = BuildVulnProperties(
+            new VulnSignalFacts(
+                lookup?.CvssScore,
+                lookup?.NvdScore,
+                lookup?.NvdCheckedAt,
+                lookup?.NvdAssertedAt,
+                lookup?.IsKev ?? false,
+                lookup?.IsKevRansomware,
+                lookup?.KevDueDate,
+                lookup?.KevDateAdded,
+                lookup?.KevRequiredAction,
+                lookup?.KevCwes,
+                lookup?.KevNotes,
+                lookup?.EpssScore,
+                lookup?.EpssPercentile,
+                lookup?.SsvcExploitation,
+                lookup?.SsvcAutomatable,
+                lookup?.SsvcTechnicalImpact,
+                lookup?.SsvcCheckedAt,
+                lookup?.SsvcAssertedAt,
+                component?.DependencyKind,
+                component?.DependencyScope,
+                component is not null && installScriptFacts.GetValueOrDefault(component.Id),
+                affectedApps.GetValueOrDefault(a.VulnKey),
+                lookup?.IsMalicious ?? false),
+            a.VexState,
+            a.Reachability);
+        return entry;
+    }
+
+    /// <summary>
+    /// Components keyed by their own <see cref="SbomPurlKey.ForComponent"/> value — the identical
+    /// rule the ingest writers used to key <c>project_vuln_analysis</c>, which is what lets a
+    /// standalone VEX document (keyed by purl_key, not by sbom_components.id) recover each
+    /// advisory's component facts. A component with no derivable key is not indexable and is
+    /// skipped.
+    /// </summary>
+    private static Dictionary<string, ComponentRow> IndexComponentsByPurlKey(
+        IReadOnlyList<ComponentRow> components)
+    {
+        var byKey = new Dictionary<string, ComponentRow>(StringComparer.Ordinal);
+        foreach (var c in components)
+        {
+            string? key = SbomPurlKey.ForComponent(c.Ecosystem, c.PurlName, c.Purl);
+            if (key is not null)
+            {
+                byKey[key] = c;
+            }
+        }
+
+        return byKey;
+    }
+
+    /// <summary>
+    /// How many of this tenant's applications ship each of <paramref name="osvIds"/> on their
+    /// latest version — the same query shape as
+    /// <c>SbomBlastRadiusRepository.CountProjectsByAdvisoryAsync</c>, written directly here per the
+    /// fleet contract. <b>Scoped to <c>is_latest = 1</c></b>, matching that repository's own
+    /// documented reasoning: an older release is not something an operator can remediate today, and
+    /// only <c>is_latest</c> versions get their advisory links refreshed nightly, so counting a
+    /// superseded version would mix a current answer with a stale one under one number.
+    /// </summary>
+    [SuppressMessage("Security", "S2077:Formatting SQL queries is security-sensitive",
+        Justification = "The spliced fragment is DapperInClause.Expand's own parenthesized, "
+                        + "individually-parameterized (@osv0, @osv1, …) list built from advisory ids "
+                        + "this method already read out of the database, not user text — see "
+                        + "DapperInClause's doc comment for why Dapper's own IN @list auto-expansion "
+                        + "cannot be used (it binds a Postgres connection's enumerable as one native "
+                        + "array parameter, valid only after = ANY(...), never after IN).")]
+    private static async Task<Dictionary<string, int>> CountAffectedApplicationsAsync(
+        System.Data.Common.DbConnection conn, string orgId, IReadOnlyList<string> osvIds, CancellationToken ct)
+    {
+        if (osvIds.Count == 0)
+        {
+            return new Dictionary<string, int>(StringComparer.Ordinal);
+        }
+
+        var (keysClause, parameters) = DapperInClause.Expand("osv", osvIds);
+        parameters.Add("orgId", orgId);
+        // rawsql: keysClause is a parameterized IN (@osv0, @osv1, …) list built in C#, not user text.
+        var rows = await conn.QueryAsync<AffectedApplicationsRow>(new CommandDefinition(
+            """
+            SELECT v.osv_id AS OsvId, COUNT(DISTINCT pv.project_id) AS Count
+            FROM sbom_component_vulns scv
+            JOIN vulnerabilities v ON v.id = scv.vuln_id
+            JOIN sbom_components c ON c.id = scv.component_id
+            JOIN project_versions pv ON pv.id = c.project_version_id AND pv.org_id = c.org_id
+            WHERE c.org_id = @orgId AND pv.is_latest = 1 AND v.osv_id IN
+            """ + " " + keysClause + " GROUP BY v.osv_id",
+            parameters, cancellationToken: ct));
+        return rows.ToDictionary(r => r.OsvId, r => r.Count, StringComparer.Ordinal);
+    }
+
+    // ── Document/graph rendering ─────────────────────────────────────────────
+}

@@ -80,6 +80,7 @@ public sealed class OrgRepository
                max_upload_bytes_rpm as MaxUploadBytesRpm,
                max_upload_bytes_oci as MaxUploadBytesOci,
                max_upload_bytes_cargo as MaxUploadBytesCargo,
+               max_upload_bytes_hex as MaxUploadBytesHex,
                keep_versions as KeepVersions, keep_days as KeepDays,
                keep_project_versions as KeepProjectVersions,
                activity_retention_days as ActivityRetentionDays,
@@ -362,6 +363,7 @@ public sealed class OrgRepository
             "rpm" => settings?.MaxUploadBytesRpm,
             "oci" => settings?.MaxUploadBytesOci,
             "cargo" => settings?.MaxUploadBytesCargo,
+            "hex" => settings?.MaxUploadBytesHex,
             _ => null,
         };
         if (orgEco is { } orgEcoLimit)
@@ -383,6 +385,7 @@ public sealed class OrgRepository
             "rpm" => "max_upload_bytes_rpm",
             "oci" => "max_upload_bytes_oci",
             "cargo" => "max_upload_bytes_cargo",
+            "hex" => "max_upload_bytes_hex",
             _ => null,
         };
         if (instanceKey is null)
@@ -911,6 +914,7 @@ public sealed record OrgSettingsUpdate(
     long? MaxUploadBytesRpm = null,
     long? MaxUploadBytesOci = null,
     long? MaxUploadBytesCargo = null,
+    long? MaxUploadBytesHex = null,
     // Per-tenant air-gap posture. null = leave unchanged.
     bool? AirGapped = null,
     // Tri-state same-version-push policy. null = leave unchanged. 'block' | 'exception' | 'allow'.

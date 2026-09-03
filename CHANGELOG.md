@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-03
+
+### Added
+
+- **Hex joins the upstream-metadata surfaces.** The daily deprecation refresh reads a Hex
+  package's retirements and latest release from the signed upstream resource (so
+  "versions behind" and the deprecated arm work for proxied Hex packages), the licence backfill
+  reads `metadata.config` licences out of cached tarballs, and the Lookup page accepts `hex`.
+  One shared verified fetcher applies the same trust rules everywhere: an upstream without a
+  known public key is never consulted, and a resource that fails verification is a fault.
+
+- **Hex (Elixir / Erlang) ecosystem, read plane and proxy.** `/hex/` serves the Hex repository
+  protocol Mix and Rebar3 resolve from: `names`, `versions`, `packages/NAME` and the new
+  per-org `public_key`, plus package and documentation tarballs. Every registry resource is
+  rebuilt from what the org holds and a signature-verified upstream answer, then signed with
+  the org's own RSA key under the repository name `dependably`, because a Hex client checks both
+  the signature and the repository name embedded in each resource and a relabelled upstream
+  byte stream can satisfy neither. Tarballs are verified against the outer checksum the
+  upstream's signed index vouched for, recorded on the cache plane, scanned and gated before
+  a byte is served. The block gate's release-age and deprecation arms decide upstream-only
+  releases at index time from the publish timestamp and retirement state the Hex index
+  carries; the advisories this registry knows about are projected into the index's native
+  `SecurityAdvisory` entries. Requires `DEPENDABLY_MASTER_KEY`, which protects the org's
+  signing key at rest. Per-org upload cap `max_upload_bytes_hex`; upstream rows carry a
+  `public_key_pem`, pre-filled for hex.pm.
+
+- **Hex API plane, operator surfaces and policy.** `/hex/api/` is what `mix hex.publish`,
+  `rebar3 hex publish` and `mix hex.retire` talk to: publish a tarball (its `metadata.config`
+  must name the addressed package; the release then appears in the signed index and serves
+  from the hosted plane), retire and unretire (recorded on the index entry and, as a
+  deprecation, on the version so the deprecated block arm applies), upload and remove
+  documentation, revert a release, and `users/me`. Replies are Erlang terms when the client
+  asks for them — hex_core has no JSON decoder. Settings → Signatures shows the org's Hex
+  signing key with its fingerprint and a rotate action; a Hex upstream row accepts the
+  repository's PEM public key. `/hex/repos/dependably/policies/dependably` projects the org's
+  block-gate posture — advisory severity ceiling, retirement reasons, release-age cooldown
+  and a `DENY` override per blocklisted held package — as a signed Hex policy that opted-in
+  clients enforce before resolution. New capabilities `publish:hex` and `yank:hex`.
+
+- **CycloneDX 1.7 on ingest and export.** Uploaded documents are accepted across CycloneDX
+  1.4–1.7, and the two fields 1.7 adds are recorded and displayed: `components[].versionRange`,
+  which 1.7 admits in place of a concrete version, and `components[].isExternal`. Both are
+  nullable — NULL means the document did not say, which every document below 1.7 is, and absence
+  is a weaker claim than a declared `false`. A document declaring a version outside 1.4–1.7 is
+  refused with a validation error naming the version it declared.
+
+- **Dev-dependency scope seeded from a CycloneDX manifest.** A component the manifest marks as a
+  dev dependency (the CycloneDX property taxonomy's dev-declaration) now seeds
+  `dependency_scope`, so a dev dependency is classified as one before any reachability scan has
+  run. It is a fill, not an override: once the reachability scanner has asserted `dev` or
+  `runtime`, the manifest declaration no longer touches the column.
+
+### Fixed
+
+- **A Cargo publish whose `.crate` disagrees with the frame is refused.** The archive's embedded
+  `Cargo.toml` is cross-checked against the publish frame on `name`, `version` and the archive's
+  root directory — the way npm cross-checks `package.json` and PyPI cross-checks `METADATA`.
+  The frame's name and version are what this registry records, scans and builds SBOMs from,
+  while the archive is what `cargo build` actually compiles; a mismatch between them is now a
+  `422` instead of a stored crate whose recorded identity is not the one it compiles as. (#642)
+
+- **Both Risk tables are sortable.** The licence table's sortable columns now match the keys the
+  endpoint accepts, as do the analysis table's. (#653)
+
+- **SBOM ingest fixes.** A batch's VEX and SARIF are skipped when its SBOM was rejected rather
+  than applied to a document that never landed; SARIF retraction no longer wipes the manifest
+  `dependency_scope` fill; the project picker presets correctly for a project inside a folder;
+  and the upload modal no longer overflows its outcome table.
+
+- **Setup copy** says explicitly that the Basic-auth username is ignored.
+
 ## [0.8.1] - 2026-08-30
 
 ### Added

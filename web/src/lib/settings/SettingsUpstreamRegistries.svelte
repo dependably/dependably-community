@@ -16,7 +16,7 @@
   // The subset of the shared ecosystem vocabulary whose upstreams are configurable through the
   // per-org `upstream_registry` table — mirrors UpstreamRegistryRepository.SupportedEcosystems.
   const DB_UPSTREAM_ECOSYSTEMS = new Set([
-    'pypi', 'npm', 'nuget', 'maven', 'rpm', 'cargo', 'golang', 'oci', 'apk', 'terraform',
+    'pypi', 'npm', 'nuget', 'maven', 'rpm', 'cargo', 'golang', 'oci', 'apk', 'terraform', 'hex',
   ])
   const ECOSYSTEMS = ECO_VOCAB
     .filter(key => DB_UPSTREAM_ECOSYSTEMS.has(key))
@@ -56,6 +56,10 @@
   // the default (Provider Registry Protocol, sent as null); 'mirror' selects the Provider
   // Network Mirror Protocol. No other ecosystem reads this field.
   let terraformProtocol = ''
+  // Hex-only: the PEM public key the upstream signs its registry resources with. Empty means
+  // the well-known hex.pm key when the host is repo.hex.pm, and no key (upstream not consulted)
+  // for any other host.
+  let hexPublicKey = ''
 
   // Drag state
   let dragEco = null, dragFrom = -1
@@ -110,6 +114,7 @@
     nonOciUsername = ''
     nonOciSecret = ''
     terraformProtocol = ''
+    hexPublicKey = ''
     error = ''
     showAdd = true
   }
@@ -153,7 +158,17 @@
         const username = (addEco !== 'rpm' && nonOciAuthType === 'basic' && nonOciUsername.trim()) ? nonOciUsername.trim() : undefined
         const secret = (addEco !== 'rpm' && nonOciAuthType !== 'anonymous' && nonOciSecret) ? nonOciSecret : undefined
         const protocol = (addEco === 'terraform' && terraformProtocol) ? terraformProtocol : undefined
-        entry = await api.addUpstreamRegistry(addEco, newUrl.trim(), newName.trim() || null, authType, username, secret, protocol)
+        const publicKeyPem = (addEco === 'hex' && hexPublicKey.trim()) ? hexPublicKey.trim() : undefined
+        entry = await api.addUpstreamRegistry({
+          ecosystem: addEco,
+          url: newUrl.trim(),
+          name: newName.trim() || null,
+          authType,
+          username,
+          secret,
+          protocol,
+          publicKeyPem,
+        })
       }
       byEco[addEco] = [...byEco[addEco], entry]
       byEco = byEco
@@ -471,6 +486,13 @@
               <option value="mirror">{$t('settings.proxy.upstreamRegistries.terraform.protocol.mirror')}</option>
             </select>
             <div class="form-hint">{$t('settings.proxy.upstreamRegistries.terraform.protocolHint')}</div>
+          </div>
+        {/if}
+        {#if addEco === 'hex'}
+          <div class="form-row">
+            <label for="ur-hex-public-key">{$t('settings.proxy.upstreamRegistries.hex.publicKeyLabel')}</label>
+            <textarea id="ur-hex-public-key" rows="6" bind:value={hexPublicKey} placeholder="-----BEGIN PUBLIC KEY-----"></textarea>
+            <div class="form-hint">{$t('settings.proxy.upstreamRegistries.hex.publicKeyHint')}</div>
           </div>
         {/if}
         {#if addEco !== 'rpm'}

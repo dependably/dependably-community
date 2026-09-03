@@ -110,6 +110,7 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
         // fetches, so the field has nothing to discriminate and a stray value would silently do
         // nothing (ADR-terraform-provider-network-mirror).
         string? protocol = string.IsNullOrWhiteSpace(req.Protocol) ? null : req.Protocol.Trim().ToLowerInvariant();
+        string? publicKeyPem = string.IsNullOrWhiteSpace(req.PublicKeyPem) ? null : req.PublicKeyPem.Trim() + "\n";
         // Parse auth_type. Non-OCI supports anonymous (default), bearer (Authorization: Bearer
         // <secret>), and basic (Authorization: Basic base64(user:secret)).
         string authType = (req.AuthType ?? "anonymous").Trim().ToLowerInvariant();
@@ -119,6 +120,7 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
         var validationProblem = ValidateNonOciUrl(url)
             ?? ValidateNonOciRpmAuth(ecosystem, req)
             ?? ValidateNonOciProtocol(ecosystem, protocol)
+            ?? ValidateNonOciPublicKey(ecosystem, publicKeyPem)
             ?? ValidateNonOciAuthFields(authType, username, secret)
             ?? ValidateNonOciCredentialTransport(url, authType)
             ?? ValidateNonOciSecretPrecondition(secret);
@@ -134,7 +136,7 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
         }
 
         var entry = await _registries.AddAsync(
-            orgId, new NewUpstreamRegistry(ecosystem, url!, name, authType, username, secret, Protocol: protocol), ct);
+            orgId, new NewUpstreamRegistry(ecosystem, url!, name, authType, username, secret, Protocol: protocol, PublicKeyPem: publicKeyPem), ct);
 
         // secret is write-only: log authType/hasSecret only, never the value.
         await _audit.LogAsync("upstream_registry_added", orgId, GetUserId(),
@@ -148,6 +150,7 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
                 authType,
                 hasSecret = entry.HasSecret,
                 protocol = entry.Protocol,
+                hasPublicKey = entry.PublicKeyPem is not null,
             }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
@@ -157,6 +160,32 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
     // Basic URL shape, plus: reject plaintext http:// upstreams unless the instance opts in. An
     // http upstream lets an on-path attacker rewrite the artifact and its declared checksum
     // together, defeating the proxy's content-addressing integrity story.
+    // The signing public key is a Hex concept — every Hex registry resource is signed and the
+    // proxy verifies before it re-signs — so any other ecosystem carrying one is a mistaken
+    // form, and a key that is not a PEM RSA public key can never verify anything.
+    private IActionResult? ValidateNonOciPublicKey(string ecosystem, string? publicKeyPem)
+    {
+        if (publicKeyPem is null)
+        {
+            return null;
+        }
+
+        if (ecosystem != "hex")
+        {
+            return _problems.ValidationErrorActionKey("publicKeyPem", "error.upstream.publicKeyHexOnly");
+        }
+
+        try
+        {
+            using var parsed = Dependably.Protocol.Hex.HexRegistrySigner.ParsePublicKeyPem(publicKeyPem);
+            return null;
+        }
+        catch (Dependably.Protocol.Hex.HexProtocolException)
+        {
+            return _problems.ValidationErrorActionKey("publicKeyPem", "error.upstream.publicKeyInvalid");
+        }
+    }
+
     private IActionResult? ValidateNonOciUrl(string? url)
     {
         string? urlProblem = UpstreamUrlValidator.ValidateUrl(url);

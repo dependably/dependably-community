@@ -40,24 +40,31 @@ public sealed class StatsRefreshService : BackgroundService
     private readonly ILogger<StatsRefreshService> _logger;
     private readonly TimeProvider _time;
 
-    public StatsRefreshService(
-        StatsSnapshotRepository snapshots,
-        OrgStatsHistoryRepository history,
-        PackageAnalyticsRepository analytics,
-        IConfiguration config,
-        IAirGapMode airGap,
-        IDistributedLock locks,
-        ILogger<StatsRefreshService> logger,
-        TimeProvider time)
+    /// <summary>
+    /// Injected dependencies for <see cref="StatsRefreshService"/>. Bundles the DI services so the
+    /// constructor stays within the parameter-count gate (S107), matching
+    /// <c>VulnerabilityScanService.Dependencies</c>.
+    /// </summary>
+    public sealed record Dependencies(
+        StatsSnapshotRepository Snapshots,
+        OrgStatsHistoryRepository History,
+        PackageAnalyticsRepository Analytics,
+        IConfiguration Config,
+        IAirGapMode AirGap,
+        IDistributedLock Locks,
+        ILogger<StatsRefreshService> Logger,
+        TimeProvider Time);
+
+    public StatsRefreshService(Dependencies deps)
     {
-        _snapshots = snapshots;
-        _history = history;
-        _analytics = analytics;
-        _config = config;
-        _airGap = airGap;
-        _locks = locks;
-        _logger = logger;
-        _time = time;
+        _snapshots = deps.Snapshots;
+        _history = deps.History;
+        _analytics = deps.Analytics;
+        _config = deps.Config;
+        _airGap = deps.AirGap;
+        _locks = deps.Locks;
+        _logger = deps.Logger;
+        _time = deps.Time;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)

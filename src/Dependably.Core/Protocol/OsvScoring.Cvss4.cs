@@ -9,6 +9,8 @@
 // neighbouring MacroVectors — so this file transcribes FIRST's own table and algorithm rather
 // than re-deriving one from the specification prose.
 
+using System.Diagnostics.CodeAnalysis;
+
 namespace Dependably.Protocol;
 
 public static partial class OsvScoring
@@ -484,6 +486,14 @@ public static partial class OsvScoring
     }
 
     /// <summary>cvss_score.js's macroVector(): reduces the vector to its six-digit MacroVector.</summary>
+    [SuppressMessage("Critical Code Smell", "S3776:Cognitive Complexity of methods should not be too high",
+        Justification = "A faithful, line-by-line port of FIRST.org's reference calculator "
+                        + "(cvss_score.js, BSD-2-Clause — see the file header). CVSS v4.0 has no "
+                        + "closed-form equation, so correctness here IS correspondence with "
+                        + "upstream: the shape is what lets a reviewer diff this against the "
+                        + "reference and what lets an upstream fix be re-applied. Restructuring "
+                        + "it into helpers would trade a checkable transcription for an "
+                        + "unverifiable rewrite of a security score.")]
     private static string Cvss4MacroVector(Dictionary<string, string> metrics)
     {
         string av = Cvss4M(metrics, "AV")!;
@@ -537,6 +547,22 @@ public static partial class OsvScoring
     /// cvss_score.js's interpolation step: score of the MacroVector minus the mean proportional
     /// distance from the neighbouring lower MacroVectors, rounded to one decimal place.
     /// </summary>
+    [SuppressMessage("Critical Code Smell", "S3776:Cognitive Complexity of methods should not be too high",
+        Justification = "A faithful, line-by-line port of FIRST.org's reference calculator "
+                        + "(cvss_score.js, BSD-2-Clause — see the file header). CVSS v4.0 has no "
+                        + "closed-form equation, so correctness here IS correspondence with "
+                        + "upstream: the shape is what lets a reviewer diff this against the "
+                        + "reference and what lets an upstream fix be re-applied. Restructuring "
+                        + "it into helpers would trade a checkable transcription for an "
+                        + "unverifiable rewrite of a security score.")]
+    [SuppressMessage("Major Code Smell", "S138:Functions should not have too many lines",
+        Justification = "A faithful, line-by-line port of FIRST.org's reference calculator "
+                        + "(cvss_score.js, BSD-2-Clause — see the file header). CVSS v4.0 has no "
+                        + "closed-form equation, so correctness here IS correspondence with "
+                        + "upstream: the shape is what lets a reviewer diff this against the "
+                        + "reference and what lets an upstream fix be re-applied. Restructuring "
+                        + "it into helpers would trade a checkable transcription for an "
+                        + "unverifiable rewrite of a security score.")]
     private static double Cvss4Interpolate(Dictionary<string, string> metrics, string macroVector, double value)
     {
         int eq1 = macroVector[0] - '0';

@@ -48,7 +48,7 @@ namespace Dependably.Tests.Compliance;
 /// </para>
 /// </summary>
 [Trait("Category", "Compliance")]
-public sealed class OutboundHttpHandlerComplianceTests
+public sealed partial class OutboundHttpHandlerComplianceTests
 {
     private const string Marker = "egress-ok:";
     private const int MarkerWindow = 5;
@@ -60,16 +60,16 @@ public sealed class OutboundHttpHandlerComplianceTests
         ("AllowAutoRedirect", "false"),
     ];
 
-    private static readonly Regex HandlerCtor =
-        new(@"new\s+(?:[\w.]+\.)?SocketsHttpHandler\b", RegexOptions.Compiled);
+    [GeneratedRegex(@"new\s+(?:[\w.]+\.)?SocketsHttpHandler\b")]
+    private static partial Regex HandlerCtor();
 
-    private static readonly Regex HttpClientHandlerCtor =
-        new(@"new\s+(?:[\w.]+\.)?HttpClientHandler\b", RegexOptions.Compiled);
+    [GeneratedRegex(@"new\s+(?:[\w.]+\.)?HttpClientHandler\b")]
+    private static partial Regex HttpClientHandlerCtor();
 
     // AddHttpClient( or AddHttpClient<T>( — deliberately not AddHttpClientInstrumentation, which is
     // OpenTelemetry wiring and registers no handler.
-    private static readonly Regex AddHttpClientCall =
-        new(@"\.AddHttpClient\s*(?:<[^>]*>\s*)?\(", RegexOptions.Compiled);
+    [GeneratedRegex(@"\.AddHttpClient\s*(?:<[^>]*>\s*)?\(")]
+    private static partial Regex AddHttpClientCall();
 
     private readonly ITestOutputHelper _output;
     public OutboundHttpHandlerComplianceTests(ITestOutputHelper output) => _output = output;
@@ -84,7 +84,7 @@ public sealed class OutboundHttpHandlerComplianceTests
             string text = File.ReadAllText(file);
             string rel = Path.GetRelativePath(SourceRoots.RepoRoot(), file);
 
-            foreach (Match m in HandlerCtor.Matches(text))
+            foreach (Match m in HandlerCtor().Matches(text))
             {
                 if (HasMarkerAbove(text, m.Index))
                 {
@@ -119,7 +119,7 @@ public sealed class OutboundHttpHandlerComplianceTests
 
             // HttpClientHandler cannot carry a ConnectCallback at all, so it can never satisfy the
             // invariant. None exists today; the check keeps it that way.
-            foreach (Match m in HttpClientHandlerCtor.Matches(text))
+            foreach (Match m in HttpClientHandlerCtor().Matches(text))
             {
                 if (!HasMarkerAbove(text, m.Index))
                 {
@@ -143,7 +143,7 @@ public sealed class OutboundHttpHandlerComplianceTests
             string text = File.ReadAllText(file);
             string rel = Path.GetRelativePath(SourceRoots.RepoRoot(), file);
 
-            foreach (Match m in AddHttpClientCall.Matches(text))
+            foreach (Match m in AddHttpClientCall().Matches(text))
             {
                 if (HasMarkerAbove(text, m.Index))
                 {

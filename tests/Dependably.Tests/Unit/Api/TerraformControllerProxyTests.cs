@@ -1218,7 +1218,6 @@ public sealed class TerraformControllerProxyTests : IAsyncLifetime
             new OrgRepository(_db), Substitute.For<IPackageEventSink>(),
             new InProcessDistributedLock(TimeProvider.System),
             TestAlerts.NoOp(_db, TimeProvider.System),
-            new SbomComponentVulnRepository(_db, TimeProvider.System),
             new SbomComponentScanner(TestOsvSource.Create(), vulns, new SbomComponentVulnRepository(_db, TimeProvider.System), NullLogger<SbomComponentScanner>.Instance),
             Dependably.Tests.Infrastructure.TestSbomPolicy.Service(_db, TimeProvider.System),
             Dependably.Tests.Infrastructure.TestEnrichment.Unused(),

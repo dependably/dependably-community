@@ -261,16 +261,76 @@ public sealed class TrustAnchorController : OrgScopedControllerBase
             return authResult;
         }
 
+        var shape = ValidateAnchorShape(req);
+        if (shape.Error is not null)
+        {
+            return shape.Error;
+        }
+
+        var anchor = PrepareAnchorMaterial(shape);
+        if (anchor.Error is not null)
+        {
+            return anchor.Error;
+        }
+
+        string orgId = CurrentTenantId();
+        var entry = await _anchors.AddAsync(
+            orgId,
+            new NewTrustAnchor(
+                anchor.Ecosystem, anchor.AnchorKind, anchor.Material,
+                anchor.KeyId, anchor.Label, GetUserId()),
+            ct);
+        _store.InvalidateTrustAnchorCache(orgId);
+
+        await _audit.LogAsync(
+            "trust_anchor_added", orgId, GetUserId(),
+            actorKind: ActorKinds.User,
+            ecosystem: anchor.Ecosystem,
+            detail: System.Text.Json.JsonSerializer.Serialize(new
+            {
+                id = entry.Id,
+                ecosystem = anchor.Ecosystem,
+                anchorKind = anchor.AnchorKind,
+                label = anchor.Label,
+                keyId = anchor.KeyId,
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+
+        return CreatedAtAction(nameof(List), null, entry);
+    }
+
+    /// <summary>
+    /// A candidate anchor: either the first validation error, or the normalized fields. Error and
+    /// the fields are mutually exclusive — a non-null Error means nothing else was derived.
+    /// </summary>
+    private readonly record struct AnchorCandidate(
+        IActionResult? Error,
+        string Ecosystem = "",
+        string AnchorKind = "",
+        string Material = "",
+        string? KeyId = null,
+        string? Label = null);
+
+    /// <summary>
+    /// The shape checks that need no crypto: a supported ecosystem, an allowed anchor kind, a
+    /// registered pairing of the two, and material/label within bounds.
+    /// </summary>
+    private AnchorCandidate ValidateAnchorShape(AddTrustAnchorRequest req)
+    {
         string ecosystem = req.Ecosystem?.Trim().ToLowerInvariant() ?? "";
         if (!TrustAnchorRepository.IsSupportedEcosystem(ecosystem))
         {
-            return _problems.ValidationErrorActionKey("ecosystem", "error.common.mustBeOneOf", string.Join(", ", TrustAnchorRepository.SupportedEcosystems));
+            return new AnchorCandidate(_problems.ValidationErrorActionKey(
+                "ecosystem", "error.common.mustBeOneOf",
+                string.Join(", ", TrustAnchorRepository.SupportedEcosystems)));
         }
 
         string anchorKind = req.AnchorKind?.Trim().ToLowerInvariant() ?? "";
         if (!TrustAnchorRepository.IsAllowedAnchorKind(anchorKind))
         {
-            return _problems.ValidationErrorActionKey("anchorKind", "error.common.mustBeOneOf", string.Join(", ", TrustAnchorRepository.AllowedAnchorKinds));
+            return new AnchorCandidate(_problems.ValidationErrorActionKey(
+                "anchorKind", "error.common.mustBeOneOf",
+                string.Join(", ", TrustAnchorRepository.AllowedAnchorKinds)));
         }
 
         // Reject any (ecosystem, anchorKind) combination outside TrustAnchorPairs.Registered
@@ -282,15 +342,14 @@ public sealed class TrustAnchorController : OrgScopedControllerBase
         // registered anchorKind, so the allowed-list below is never empty for a valid ecosystem.
         if (!TrustAnchorPairs.IsRegistered(ecosystem, anchorKind))
         {
-            return _problems.ValidationErrorActionKey(
-                "anchorKind", "error.trustAnchor.unsupportedAnchorKindForEcosystem",
-                anchorKind, ecosystem, string.Join(", ", TrustAnchorPairs.AnchorKindsFor(ecosystem)));
+            return new AnchorCandidate(UnsupportedPair(ecosystem, anchorKind));
         }
 
         string? material = req.Material?.Trim();
         if (string.IsNullOrEmpty(material))
         {
-            return _problems.ValidationErrorActionKey("material", "error.trustAnchor.materialEmpty");
+            return new AnchorCandidate(
+                _problems.ValidationErrorActionKey("material", "error.trustAnchor.materialEmpty"));
         }
 
         // Bounds the bytes handed to the per-ecosystem crypto parsers below. The only existing
@@ -298,30 +357,41 @@ public sealed class TrustAnchorController : OrgScopedControllerBase
         // one: a PEM bundle or key ring is small, and nothing legitimate approaches this.
         if (material.Length > MaterialMaxLength)
         {
-            return _problems.ValidationErrorActionKey(
-                "material", "error.trustAnchor.materialTooLong", MaterialMaxLength);
+            return new AnchorCandidate(_problems.ValidationErrorActionKey(
+                "material", "error.trustAnchor.materialTooLong", MaterialMaxLength));
         }
 
-        string orgId = CurrentTenantId();
         string? label = string.IsNullOrWhiteSpace(req.Label) ? null : req.Label.Trim();
         if (label is not null && label.Length > LabelMaxLength)
         {
-            return _problems.ValidationErrorActionKey(
-                "label", "error.trustAnchor.labelTooLong", LabelMaxLength);
+            return new AnchorCandidate(_problems.ValidationErrorActionKey(
+                "label", "error.trustAnchor.labelTooLong", LabelMaxLength));
         }
 
         string? keyId = string.IsNullOrWhiteSpace(req.KeyId) ? null : req.KeyId.Trim();
+        return new AnchorCandidate(null, ecosystem, anchorKind, material, keyId, label);
+    }
+
+    /// <summary>
+    /// Normalizes the material to its canonical storage form, parses it with the pair's own
+    /// validator (which also derives the key id), and applies the minimum-strength floor.
+    /// </summary>
+    private AnchorCandidate PrepareAnchorMaterial(AnchorCandidate shape)
+    {
+        string material = shape.Material;
 
         // Apply per-ecosystem material normalizers before validation. Normalizers transform the
         // raw material into a canonical storage form (e.g. trusted_publisher always stores the
         // match field explicitly). A normalization error is reported as a 400 validation error.
-        if (MaterialNormalizers.TryGetValue((ecosystem, anchorKind), out var normalize))
+        if (MaterialNormalizers.TryGetValue((shape.Ecosystem, shape.AnchorKind), out var normalize))
         {
             var (normalized, normalizeError) = normalize(material);
             if (normalizeError is not null)
             {
-                return _problems.ValidationErrorAction("material", normalizeError);
+                return new AnchorCandidate(
+                    _problems.ValidationErrorAction("material", normalizeError));
             }
+
             material = normalized!;
         }
 
@@ -332,50 +402,32 @@ public sealed class TrustAnchorController : OrgScopedControllerBase
         // A registered pair always has a validator (TrustAnchorPairsTests pins the two sets
         // equal). An absent one denies rather than falling through, so a pair added to the
         // shared set without its validator can never store unvalidated material.
-        if (!EcosystemValidators.TryGetValue((ecosystem, anchorKind), out var validate))
+        if (!EcosystemValidators.TryGetValue((shape.Ecosystem, shape.AnchorKind), out var validate))
         {
-            return _problems.ValidationErrorActionKey(
-                "anchorKind", "error.trustAnchor.unsupportedAnchorKindForEcosystem",
-                anchorKind, ecosystem, string.Join(", ", TrustAnchorPairs.AnchorKindsFor(ecosystem)));
+            return new AnchorCandidate(UnsupportedPair(shape.Ecosystem, shape.AnchorKind));
         }
 
         var (derivedKeyId, validationError) = validate(material, _logger);
         if (validationError is not null)
         {
-            return _problems.ValidationErrorAction("material", validationError);
+            return new AnchorCandidate(
+                _problems.ValidationErrorAction("material", validationError));
         }
-        keyId ??= derivedKeyId;
 
         // Minimum-strength floor, applied per anchor_kind once the material is known to parse.
         // A trust anchor bounds the strength of every signature verdict derived from it, so the
         // floor is a hard one rather than an opt-in — and it is enforced here, at import, where
         // the operator is present to act on the rejection. Anchors already stored keep verifying.
-        string? strengthError = TrustAnchorKeyStrength.Validate(anchorKind, material);
-        if (strengthError is not null)
-        {
-            return _problems.ValidationErrorAction("material", strengthError);
-        }
-
-        var entry = await _anchors.AddAsync(
-            orgId, new NewTrustAnchor(ecosystem, anchorKind, material, keyId, label, GetUserId()), ct);
-        _store.InvalidateTrustAnchorCache(orgId);
-
-        await _audit.LogAsync(
-            "trust_anchor_added", orgId, GetUserId(),
-            actorKind: ActorKinds.User,
-            ecosystem: ecosystem,
-            detail: System.Text.Json.JsonSerializer.Serialize(new
-            {
-                id = entry.Id,
-                ecosystem,
-                anchorKind,
-                label,
-                keyId,
-            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
-            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
-
-        return CreatedAtAction(nameof(List), null, entry);
+        string? strengthError = TrustAnchorKeyStrength.Validate(shape.AnchorKind, material);
+        return strengthError is not null
+            ? new AnchorCandidate(_problems.ValidationErrorAction("material", strengthError))
+            : shape with { Material = material, KeyId = shape.KeyId ?? derivedKeyId };
     }
+
+    private IActionResult UnsupportedPair(string ecosystem, string anchorKind) =>
+        _problems.ValidationErrorActionKey(
+            "anchorKind", "error.trustAnchor.unsupportedAnchorKindForEcosystem",
+            anchorKind, ecosystem, string.Join(", ", TrustAnchorPairs.AnchorKindsFor(ecosystem)));
 
     /// <summary>DELETE /api/v1/trust-anchors/{id} — remove a trust anchor.</summary>
     [HttpDelete("api/v1/trust-anchors/{id}")]

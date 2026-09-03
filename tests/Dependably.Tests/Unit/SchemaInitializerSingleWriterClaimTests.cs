@@ -27,7 +27,7 @@ public sealed class SchemaInitializerSingleWriterClaimTests : IAsyncLifetime
         bool instanceLockTableExisted = false;
         bool lateMigrationAlreadyRun = true;
 
-        await new SchemaInitializer(_db).InitializeAsync(default, async ct =>
+        await new SchemaInitializer(_db).InitializeAsync(async ct =>
         {
             await using var probe = await _db.OpenAsync(ct);
 

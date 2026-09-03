@@ -31,7 +31,7 @@ public static class ProjectClassifiers
     /// <summary>The classifier a project gets when nothing names one.</summary>
     public const string Default = "application";
 
-    /// <summary>CycloneDX 1.6 <c>component.type</c>.</summary>
+    /// <summary>CycloneDX <c>component.type</c>. The vocabulary is unchanged from 1.4 through 1.7.</summary>
     public static readonly IReadOnlyList<string> All =
     [
         "application", "framework", "library", "container", "platform", "operating-system",

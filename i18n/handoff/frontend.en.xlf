@@ -4687,6 +4687,18 @@
         <target>Score EPSS de FIRST.org — probabilité d&apos;exploitation en conditions réelles au cours des 30 prochains jours.</target>
       </segment>
     </unit>
+    <unit id="sbomAnalysis.panel.external">
+      <segment state="translated">
+        <source>External</source>
+        <target>Externe</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.externalYes">
+      <segment state="translated">
+        <source>Declared external to this build</source>
+        <target>Déclaré externe à cette compilation</target>
+      </segment>
+    </unit>
     <unit id="sbomAnalysis.panel.group">
       <segment state="translated">
         <source>Group</source>
@@ -4919,6 +4931,12 @@
       <segment state="translated">
         <source>No source assigned this advisory a severity. Unscored is an open question, not a low severity.</source>
         <target>Aucune source n&apos;a attribué de gravité à cet avis. Non coté est une question ouverte, pas une gravité faible.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.panel.versionRange">
+      <segment state="translated">
+        <source>Version range</source>
+        <target>Plage de versions</target>
       </segment>
     </unit>
     <unit id="sbomAnalysis.pillars.license">
@@ -5673,8 +5691,8 @@
     </unit>
     <unit id="sbomUpload.hint">
       <segment state="translated">
-        <source>CycloneDX 1.4–1.6 JSON, OpenVEX, and SARIF 2.1.0 are accepted. VEX and SARIF enrich the SBOM already uploaded for this version.</source>
-        <target>Les formats acceptés sont CycloneDX 1.4–1.6 JSON, OpenVEX et SARIF 2.1.0. VEX et SARIF enrichissent le SBOM déjà téléversé pour cette version.</target>
+        <source>CycloneDX 1.4–1.7 JSON, OpenVEX, and SARIF 2.1.0 are accepted. VEX and SARIF enrich the SBOM already uploaded for this version.</source>
+        <target>Les formats acceptés sont CycloneDX 1.4–1.7 JSON, OpenVEX et SARIF 2.1.0. VEX et SARIF enrichissent le SBOM déjà téléversé pour cette version.</target>
       </segment>
     </unit>
     <unit id="sbomUpload.isLatest">
@@ -5755,6 +5773,12 @@
         <target>Aucun changement — déjà à jour ({total} composants)</target>
       </segment>
     </unit>
+    <unit id="sbomUpload.outcome.detail.skippedSbomRejected">
+      <segment state="translated">
+        <source>Not sent — the SBOM was rejected, so this version was never created. Fix the SBOM and upload again.</source>
+        <target>Non envoyé — le SBOM a été rejeté, donc cette version n&apos;a jamais été créée. Corrigez le SBOM et téléversez de nouveau.</target>
+      </segment>
+    </unit>
     <unit id="sbomUpload.outcome.detail.vex">
       <segment state="translated">
         <source>{applied} of {total} statements applied ({unmatched} unmatched)</source>
@@ -5777,6 +5801,12 @@
       <segment state="translated">
         <source>Rejected</source>
         <target>Rejeté</target>
+      </segment>
+    </unit>
+    <unit id="sbomUpload.outcome.skipped">
+      <segment state="translated">
+        <source>Skipped</source>
+        <target>Ignoré</target>
       </segment>
     </unit>
     <unit id="sbomUpload.outcome.status">
@@ -7787,6 +7817,60 @@
         <target>Avertir</target>
       </segment>
     </unit>
+    <unit id="settings.proxy.hexSigningKey.copied">
+      <segment state="translated">
+        <source>Copied</source>
+        <target>Copié</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.hexSigningKey.copy">
+      <segment state="translated">
+        <source>Copy public key</source>
+        <target>Copier la clé publique</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.hexSigningKey.fingerprint">
+      <segment state="translated">
+        <source>Fingerprint (SHA-256)</source>
+        <target>Empreinte (SHA-256)</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.hexSigningKey.hint">
+      <segment state="translated">
+        <source>Every Hex registry resource this org serves is signed with this key. Register the repository in Mix or Rebar3 with the public key below (the Setup page embeds it). Rotating it invalidates the old key at once: every consumer must re-register the repository.</source>
+        <target>Chaque ressource de registre Hex servie par cette organisation est signée avec cette clé. Enregistrez le dépôt dans Mix ou Rebar3 avec la clé publique ci-dessous (la page Configuration l&apos;intègre). La rotation invalide immédiatement l&apos;ancienne clé : chaque consommateur doit réenregistrer le dépôt.</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.hexSigningKey.noMasterKey">
+      <segment state="translated">
+        <source>Signing is unavailable: DEPENDABLY_MASTER_KEY is not set on this instance, so no signing key can be stored and the Hex read plane answers 503.</source>
+        <target>Signature indisponible : DEPENDABLY_MASTER_KEY n&apos;est pas défini sur cette instance; aucune clé de signature ne peut être stockée et le plan de lecture Hex répond 503.</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.hexSigningKey.publicKey">
+      <segment state="translated">
+        <source>Public key (PEM)</source>
+        <target>Clé publique (PEM)</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.hexSigningKey.rotate">
+      <segment state="translated">
+        <source>Rotate key</source>
+        <target>Faire pivoter la clé</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.hexSigningKey.rotateConfirm">
+      <segment state="translated">
+        <source>Rotate the Hex signing key? Every Mix and Rebar3 client that registered this repository will fail verification until it re-registers with the new public key.</source>
+        <target>Faire pivoter la clé de signature Hex? Chaque client Mix et Rebar3 ayant enregistré ce dépôt échouera à la vérification jusqu&apos;à ce qu&apos;il réenregistre le dépôt avec la nouvelle clé publique.</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.hexSigningKey.title">
+      <segment state="translated">
+        <source>Hex registry signing key</source>
+        <target>Clé de signature du registre Hex</target>
+      </segment>
+    </unit>
     <unit id="settings.proxy.installScriptAllowlistHint">
       <segment state="translated">
         <source>Packages exempt from the install-script block gate. When the policy above is &apos;Block&apos;, versions listed here are served normally regardless of whether they ship an install/lifecycle script. Use this to permit known-good build tools (e.g. esbuild, node-gyp) while keeping the gate active for everything else.</source>
@@ -7971,6 +8055,18 @@
       <segment state="translated">
         <source>No upstream registries — proxying is disabled for {ecosystem}.</source>
         <target>Aucun registre en amont — le proxy est désactivé pour {ecosystem}.</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.upstreamRegistries.hex.publicKeyHint">
+      <segment state="translated">
+        <source>Every Hex registry resource is RSA-signed. Leave empty for repo.hex.pm (its key is built in); any other upstream is consulted only when its key is stored here.</source>
+        <target>Chaque ressource de registre Hex est signée en RSA. Laissez vide pour repo.hex.pm (sa clé est intégrée); toute autre source amont n&apos;est consultée que si sa clé est enregistrée ici.</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.upstreamRegistries.hex.publicKeyLabel">
+      <segment state="translated">
+        <source>Repository public key (PEM)</source>
+        <target>Clé publique du dépôt (PEM)</target>
       </segment>
     </unit>
     <unit id="settings.proxy.upstreamRegistries.hint">
@@ -9551,6 +9647,12 @@ dotnet/</target>
       <segment state="translated">
         <source>Docker refuses a plain-HTTP registry until the daemon opts in. Restart the daemon after editing daemon.json.</source>
         <target>Docker refuse un registre en HTTP simple tant que le démon ne l&apos;autorise pas. Redémarrez le démon après avoir modifié daemon.json.</target>
+      </segment>
+    </unit>
+    <unit id="setup.caveat.usernameIgnored">
+      <segment state="translated">
+        <source>The username is ignored — any value works. Dependably authenticates on the token alone, which goes in the password field.</source>
+        <target>Le nom d&apos;utilisateur est ignoré — n&apos;importe quelle valeur fonctionne. Dependably s&apos;authentifie uniquement avec le jeton, qui va dans le champ du mot de passe.</target>
       </segment>
     </unit>
     <unit id="setup.file.secretBearing">
@@ -11167,6 +11269,12 @@ dotnet/</target>
         <target>100 Mo</target>
       </segment>
     </unit>
+    <unit id="system.settings.defaults.maxUploadBytesHex">
+      <segment state="translated">
+        <source>100 MB</source>
+        <target>100 Mo</target>
+      </segment>
+    </unit>
     <unit id="system.settings.defaults.maxUploadBytesMaven">
       <segment state="translated">
         <source>100 MB</source>
@@ -11237,6 +11345,12 @@ dotnet/</target>
       <segment state="translated">
         <source>Max upload size — Cargo</source>
         <target>Taille max. d&apos;envoi — Cargo</target>
+      </segment>
+    </unit>
+    <unit id="system.settings.labels.maxUploadBytesHex">
+      <segment state="translated">
+        <source>Max upload size — Hex</source>
+        <target>Taille max. d&apos;envoi — Hex</target>
       </segment>
     </unit>
     <unit id="system.settings.labels.maxUploadBytesMaven">

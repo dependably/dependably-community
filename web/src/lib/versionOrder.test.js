@@ -6,7 +6,7 @@ const newestFirst = list => [...list].sort((a, b) => -compareVersions(a, b))
 
 describe('defaultSortColumn', () => {
   it('defaults to the version column so the newest release is on top', () => {
-    for (const eco of ['npm', 'pypi', 'nuget', 'maven', 'go', 'cargo', 'rpm']) {
+    for (const eco of ['npm', 'pypi', 'nuget', 'maven', 'go', 'cargo', 'rpm', 'hex']) {
       expect(defaultSortColumn(eco)).toBe('version')
     }
   })

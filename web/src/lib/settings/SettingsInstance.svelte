@@ -27,6 +27,7 @@
     // OCI images routinely run multi-GB (ML/CUDA bases); 500 MB triggers opaque push failures.
     { key: 'max_upload_bytes_oci',   labelKey: 'system.settings.labels.maxUploadBytesOci',   kind: 'mb',     default: '2048', defaultHumanKey: 'system.settings.defaults.maxUploadBytesOci' },
     { key: 'max_upload_bytes_cargo', labelKey: 'system.settings.labels.maxUploadBytesCargo', kind: 'mb',     default: '100',  defaultHumanKey: 'system.settings.defaults.maxUploadBytesCargo' },
+    { key: 'max_upload_bytes_hex',   labelKey: 'system.settings.labels.maxUploadBytesHex',   kind: 'mb',     default: '100',  defaultHumanKey: 'system.settings.defaults.maxUploadBytesHex' },
     { key: 'gc_schedule',            labelKey: 'system.settings.labels.gcSchedule',          kind: 'string', default: '0 3 * * *', defaultHumanKey: 'system.settings.defaults.gcSchedule' },
     { key: 'siem_max_lookback_days',            labelKey: 'system.settings.labels.siemMaxLookbackDays',           kind: 'number', default: '90',   defaultHumanKey: 'system.settings.defaults.siemMaxLookbackDays' },
     { key: 'default_storage_quota_bytes',       labelKey: 'system.settings.labels.defaultStorageQuotaBytes',      kind: 'mb',     default: '',     defaultHumanKey: 'system.settings.defaults.defaultStorageQuotaBytes' },

@@ -100,6 +100,7 @@ public sealed class UploadSizeLimitMiddleware
         _ when StartsWithSegment(path, "/maven") => "maven",
         _ when StartsWithSegment(path, "/rpm") => "rpm",
         _ when StartsWithSegment(path, "/cargo") => "cargo",
+        _ when StartsWithSegment(path, "/hex") => "hex",
         // OCI Distribution Spec mandates /v2/ — the path differs from the ecosystem key.
         _ when StartsWithSegment(path, "/v2") => "oci",
         _ => null,

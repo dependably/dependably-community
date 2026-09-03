@@ -97,5 +97,6 @@ public sealed class SecurityHeadersMiddleware
         path.StartsWith("/rpm/", StringComparison.OrdinalIgnoreCase) ||
         path.StartsWith("/cargo/", StringComparison.OrdinalIgnoreCase) ||
         path.StartsWith("/go/", StringComparison.OrdinalIgnoreCase) ||
-        path.StartsWith("/apk/", StringComparison.OrdinalIgnoreCase);
+        path.StartsWith("/apk/", StringComparison.OrdinalIgnoreCase) ||
+        path.StartsWith("/hex/", StringComparison.OrdinalIgnoreCase);
 }

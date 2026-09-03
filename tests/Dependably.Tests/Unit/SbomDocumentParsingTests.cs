@@ -173,8 +173,20 @@ public sealed class SbomDocumentParsingTests
     }
 
     [Theory]
-    [InlineData("1.3")]
+    [InlineData("1.4")]
+    [InlineData("1.5")]
+    [InlineData("1.6")]
     [InlineData("1.7")]
+    public void CycloneDx_AcceptsEverySupportedSpecVersion(string specVersion)
+    {
+        string raw = $$"""{"bomFormat":"CycloneDX","specVersion":"{{specVersion}}","components":[]}""";
+
+        Assert.Equal(specVersion, CycloneDxParser.Parse(Json(raw)).SpecVersion);
+    }
+
+    [Theory]
+    [InlineData("1.3")]
+    [InlineData("1.8")]
     [InlineData("2.0")]
     public void CycloneDx_RefusesASpecVersionOutsideTheSupportedRange(string specVersion)
     {

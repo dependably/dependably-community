@@ -493,6 +493,21 @@ public sealed partial class CargoController : OrgScopedControllerBase
         }
 
         byte[] crateBytes = CargoPublishFrame.SliceCrate(body, header);
+
+        // The frame's name/version are what this registry records, scans and SBOMs; the
+        // archive's own Cargo.toml is what `cargo build` compiles. Refuse the publish when they
+        // disagree, before any blob or row is written, so a coordinate can never describe bytes
+        // that carry a different identity. Bounded by TarScanLimits like every other tar parse.
+        var manifestCheck = CargoCrateValidator.Validate(new MemoryStream(crateBytes), name, version);
+        if (!manifestCheck.IsValid)
+        {
+            return UnprocessableEntity(new ProblemDetails
+            {
+                Detail = manifestCheck.Message,
+                Status = StatusCodes.Status422UnprocessableEntity,
+            });
+        }
+
         string cksum = ComputeSha256Hex(crateBytes);
         string filename = $"{name}-{version}.crate";
 

@@ -101,7 +101,6 @@ public sealed class VulnTrackerScanHealthTests : IAsyncLifetime
             Substitute.For<IPackageEventSink>(),
             new Dependably.Infrastructure.Redis.InProcessDistributedLock(TimeProvider.System),
             TestAlerts.NoOp(_db, _clock),
-            new SbomComponentVulnRepository(_db, _clock),
             new SbomComponentScanner(osv, new VulnerabilityRepository(_db, _clock),
                 new SbomComponentVulnRepository(_db, _clock), NullLogger<SbomComponentScanner>.Instance),
             TestSbomPolicy.Service(_db, _clock),

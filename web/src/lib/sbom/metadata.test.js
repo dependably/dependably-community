@@ -40,11 +40,24 @@ describe('hasComponentMetadata', () => {
     ['group', { group: '@scoped' }],
     ['a link', { vcsUrl: 'https://example.com/repo' }],
     ['hashes alone', { hashes: [{ alg: 'SHA-256', content: 'abc' }] }],
+    ['a version range', { versionRange: 'vers:npm/>=1.6.0|<2.0.0' }],
+    ['a declared isExternal', { isExternal: true }],
   ])('is true when the row carries %s', (_label, item) => {
     expect(hasComponentMetadata(item)).toBe(true)
   })
 
   it('is false for an empty hashes array', () => {
     expect(hasComponentMetadata({ hashes: [] })).toBe(false)
+  })
+
+  it.each([
+    ['null', null],
+    ['undefined', undefined],
+    ['a declared false', false],
+  ])('is false when isExternal is %s', (_label, isExternal) => {
+    // Every document below CycloneDX 1.7 leaves this unset, so treating absence as a fact to
+    // render would open the section on essentially every row in an existing inventory. A
+    // declared false is not worth a section either: it is the specification's own default.
+    expect(hasComponentMetadata({ isExternal })).toBe(false)
   })
 })

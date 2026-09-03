@@ -431,7 +431,7 @@ public sealed class InstanceVulnTrackerConfigEndpointTests : IClassFixture<Depen
 
         var root = await ReadJson(resp);
         Assert.False(root.GetProperty("configured").GetBoolean());
-        Assert.True(root.GetProperty("health").ValueKind == JsonValueKind.Null);
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("health").ValueKind);
     }
 
     [Fact]
@@ -454,7 +454,7 @@ public sealed class InstanceVulnTrackerConfigEndpointTests : IClassFixture<Depen
         var root = await ReadJson(resp);
 
         Assert.True(root.GetProperty("configured").GetBoolean());
-        Assert.True(root.GetProperty("health").ValueKind == JsonValueKind.Null);
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("health").ValueKind);
         Assert.Equal(0, root.GetProperty("recentFetches").GetArrayLength());
 
         // Clean up so a later test in this shared-factory class sees "not configured" again.

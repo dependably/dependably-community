@@ -113,6 +113,8 @@ public sealed class SbomAnalysisRepository
                    issue_tracker_url  AS IssueTrackerUrl,
                    distribution_url   AS DistributionUrl,
                    component_hashes   AS ComponentHashes,
+                   version_range      AS VersionRange,
+                   is_external        AS IsExternal,
                    vuln_checked_at  AS VulnCheckedAt
             FROM sbom_components
             WHERE org_id = @orgId AND project_version_id = @projectVersionId
@@ -654,6 +656,8 @@ public sealed class AnalysisComponentRow
     public string? IssueTrackerUrl { get; set; }
     public string? DistributionUrl { get; set; }
     public string? ComponentHashes { get; set; }
+    public string? VersionRange { get; set; }
+    public bool? IsExternal { get; set; }
     public DateTimeOffset? VulnCheckedAt { get; set; }
 }
 

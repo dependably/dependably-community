@@ -418,7 +418,7 @@ public sealed class ProxyVersionReadSurfacesTests : IClassFixture<DependablyFact
             // Publish an uploaded Cargo crate so the package row exists.
             string token = await _factory.CreateToken("push");
             using var pushClient = _factory.CreateClientWithBearer(token);
-            byte[] crateBytes = [0x50, 0x4B, 0x03, 0x04];
+            byte[] crateBytes = CargoFixtures.BuildCrate(name, uploadedVersion);
             string metaJson = $"{{\"name\":\"{name}\",\"vers\":\"{uploadedVersion}\",\"deps\":[],\"features\":{{}},\"description\":\"test\"}}";
             byte[] metaEncoded = System.Text.Encoding.UTF8.GetBytes(metaJson);
             byte[] frame = new byte[4 + metaEncoded.Length + 4 + crateBytes.Length];

@@ -883,8 +883,8 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
         <note category="translator">422 detail. The field name and values are API literals - do not translate them.</note>
       </notes>
       <segment state="translated">
-        <source>ecosystem must be one of: npm, pypi, nuget, maven, cargo, golang.</source>
-        <target>ecosystem doit être l&apos;une des valeurs suivantes : npm, pypi, nuget, maven, cargo, golang.</target>
+        <source>ecosystem must be one of: npm, pypi, nuget, maven, cargo, golang, apk, terraform, hex.</source>
+        <target>ecosystem doit être l&apos;une des valeurs suivantes : npm, pypi, nuget, maven, cargo, golang, apk, terraform, hex.</target>
       </segment>
     </unit>
     <unit id="error.list.nameRequired">
@@ -1364,15 +1364,6 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
         <target>Une collection ne contient aucun composant et ne peut donc pas recevoir de document.</target>
       </segment>
     </unit>
-    <unit id="error.sbom.dirInvalid">
-      <notes>
-        <note category="translator">422 detail for the analysis sort-direction parameter. The quoted values are API literals.</note>
-      </notes>
-      <segment state="translated">
-        <source>Must be &apos;asc&apos; or &apos;desc&apos;.</source>
-        <target>Doit être « asc » ou « desc ».</target>
-      </segment>
-    </unit>
     <unit id="error.sbom.export.invalidVariant">
       <notes>
         <note category="translator">422 detail for the SBOM export endpoint&apos;s variant query parameter. The quoted values are API literals.</note>
@@ -1490,15 +1481,6 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
         <target>Doit être « critical », « high », « medium », « low » ou « unscored ».</target>
       </segment>
     </unit>
-    <unit id="error.sbom.sortInvalid">
-      <notes>
-        <note category="translator">422 detail for the analysis sort parameter. The quoted values are API literals.</note>
-      </notes>
-      <segment state="translated">
-        <source>Must be &apos;priority&apos;, &apos;name&apos;, &apos;version&apos;, &apos;severity&apos; or &apos;scope&apos;.</source>
-        <target>Doit être « priority », « name », « version », « severity » ou « scope ».</target>
-      </segment>
-    </unit>
     <unit id="error.sbom.tooLarge">
       <notes>
         <note category="translator">Returned when an uploaded SBOM, VEX or SARIF document is larger than the configured cap. {0} is the cap in bytes.</note>
@@ -1546,7 +1528,7 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
     </unit>
     <unit id="error.sbom.unsupportedSpecVersion">
       <notes>
-        <note category="translator">Validation error returned for a CycloneDX version outside 1.4-1.6 or a SARIF version other than 2.1.0. {0} is the version the document declared.</note>
+        <note category="translator">Validation error returned for a CycloneDX version outside 1.4-1.7 or a SARIF version other than 2.1.0. {0} is the version the document declared.</note>
       </notes>
       <segment state="translated">
         <source>Specification version {0} is not supported.</source>
@@ -2055,6 +2037,24 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       <segment state="translated">
         <source>protocol is only valid for ecosystem=terraform.</source>
         <target>protocol n&apos;est valide que pour ecosystem=terraform.</target>
+      </segment>
+    </unit>
+    <unit id="error.upstream.publicKeyHexOnly">
+      <notes>
+        <note category="translator">422 detail: publicKeyPem supplied for a non-Hex upstream registry.</note>
+      </notes>
+      <segment state="translated">
+        <source>A repository public key applies only to Hex upstreams.</source>
+        <target>Une clé publique de dépôt ne s&apos;applique qu&apos;aux sources amont Hex.</target>
+      </segment>
+    </unit>
+    <unit id="error.upstream.publicKeyInvalid">
+      <notes>
+        <note category="translator">422 detail: publicKeyPem did not parse as a PEM SubjectPublicKeyInfo RSA key.</note>
+      </notes>
+      <segment state="translated">
+        <source>The repository public key must be a PEM-encoded RSA public key.</source>
+        <target>La clé publique du dépôt doit être une clé publique RSA encodée en PEM.</target>
       </segment>
     </unit>
     <unit id="error.upstream.rpmAnonymousOnly">

@@ -39,9 +39,6 @@ public sealed partial class SystemController : ControllerBase
     // Random byte count for generated admin passwords (produces a base64 string ≈ 22 chars).
     private const int GeneratedPasswordByteLength = 16;
 
-    // Number of recent diagnostic events surfaced on the diagnostics endpoint.
-    private const int DiagnosticsRecentEventCount = 50;
-
     private readonly OrgRepository _orgs;
     private readonly SystemAdminRepository _systemAdmins;
     private readonly IMetadataStore _db;
@@ -961,162 +958,6 @@ public sealed partial class SystemController : ControllerBase
 
         return NoContent();
     }
-
-    // ── /metrics access config + sysadmin observability page ───────────────────
-
-    /// <summary>
-    /// GET /api/v1/system/metrics-access — current resolved /metrics
-    /// access config (enable + IP allowlist) plus which source each
-    /// knob is coming from. Used by the sysadmin UI to show the
-    /// "locked by env" badges.
-    /// </summary>
-    [HttpGet("metrics-access")]
-    public async Task<IActionResult> GetMetricsAccess(
-        [FromServices] Dependably.Security.MetricsAccessConfig access,
-        [FromServices] Dependably.Security.ScrapeDiagnostics diagnostics,
-        CancellationToken ct)
-    {
-        var resolved = await access.ResolveAsync(ct);
-        return Ok(Dependably.Security.MetricsAccessView.Build(resolved, diagnostics));
-    }
-
-    /// <summary>
-    /// PUT /api/v1/system/metrics-access — update the /metrics access
-    /// config in instance_settings. Returns 409 when the corresponding
-    /// env var locks the knob (no silent DB write behind an env
-    /// override). Validates each CIDR; rejects malformed with 400.
-    /// Accepts and warns on broad /0 entries.
-    /// </summary>
-    [HttpPut("metrics-access")]
-    public async Task<IActionResult> UpdateMetricsAccess(
-        [FromBody] UpdateMetricsAccessRequest req,
-        [FromServices] Dependably.Security.MetricsAccessConfig access,
-        CancellationToken ct)
-    {
-        if (req is null)
-        {
-            return _problems.ValidationErrorActionKey("body", "error.common.requestBodyRequired");
-        }
-
-        var resolved = await access.ResolveAsync(ct);
-
-        if (req.Enabled.HasValue && resolved.EnabledLockedByEnv)
-        {
-            return Conflict(Dependably.Security.MetricsAccessEditing.EnvLockedConflictBody("metrics_enabled", "METRICS_ENABLED"));
-        }
-
-        if (req.AllowedIps is not null && resolved.AllowlistLockedByEnv)
-        {
-            return Conflict(Dependably.Security.MetricsAccessEditing.EnvLockedConflictBody("metrics_allowed_ips", "METRICS_ALLOWED_IPS"));
-        }
-
-        var warnings = new List<string>();
-        if (req.AllowedIps is not null)
-        {
-            string? invalid = Dependably.Security.MetricsAccessEditing.FindInvalidEntry(req.AllowedIps, warnings);
-            if (invalid is not null)
-            {
-                return _problems.ValidationErrorActionKey("allowedIps", "error.common.invalidIpOrCidr", invalid);
-            }
-        }
-
-        if (req.Enabled.HasValue)
-        {
-            await _orgs.SetInstanceSettingAsync("metrics_enabled", req.Enabled.Value ? "1" : "0", ct);
-        }
-
-        if (req.AllowedIps is not null)
-        {
-            await _orgs.SetInstanceSettingAsync(
-                "metrics_allowed_ips",
-                System.Text.Json.JsonSerializer.Serialize(req.AllowedIps),
-                ct);
-        }
-
-        access.Invalidate();
-
-        string? actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
-            ?? User.FindFirst("sub")?.Value;
-        await _audit.LogSystemAsync(
-            action: "system_admin.metrics_access_updated",
-            actorId: actor,
-            detail: System.Text.Json.JsonSerializer.Serialize(new
-            {
-                enabled = req.Enabled,
-                allowedIps = req.AllowedIps,
-            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
-            ct: ct);
-
-        return Ok(new { warnings });
-    }
-
-    /// <summary>
-    /// GET /api/v1/system/observability — Tier 1 in-app operator view.
-    /// Reads in-memory snapshot + scrape diagnostics + metrics-access
-    /// config; no DB hits, no OTel introspection. Counters are labelled
-    /// "since startup" — rates and percentiles stay in Grafana.
-    /// </summary>
-    [HttpGet("observability")]
-    public async Task<IActionResult> GetObservability(
-        [FromServices] Dependably.Infrastructure.Observability.MetricsSnapshotProvider snapshots,
-        [FromServices] Dependably.Security.ScrapeDiagnostics diagnostics,
-        [FromServices] Dependably.Security.MetricsAccessConfig access,
-        CancellationToken ct)
-    {
-        var snap = snapshots.Capture();
-        var (allowedTotal, deniedIpTotal, deniedDisabledTotal) = diagnostics.LifetimeCounts();
-        var resolved = await access.ResolveAsync(ct);
-        var now = _time.GetUtcNow();
-
-        return Ok(new
-        {
-            numbers = new
-            {
-                activeTenants = snap.ActiveTenants,
-                blobStoreSizesByTier = snap.BlobStoreSizesByTier,
-                backgroundJobs = snap.BackgroundJobLastSuccessUnixSeconds.ToDictionary(
-                    kv => kv.Key,
-                    kv => new
-                    {
-                        lastSuccessUnixSeconds = kv.Value,
-                        ageSeconds = now.ToUnixTimeSeconds() - kv.Value,
-                    }),
-                sinceStartup = new
-                {
-                    publishes = snap.PublishCountSinceStartup,
-                    proxyFetches = snap.ProxyFetchCountSinceStartup,
-                    cacheHits = snap.CacheHitsSinceStartup,
-                    cacheMisses = snap.CacheMissesSinceStartup,
-                },
-                capturedAt = snap.CapturedAt,
-            },
-            scrapeDiagnostics = new
-            {
-                recent = diagnostics.Recent(DiagnosticsRecentEventCount).Select(e => new
-                {
-                    timestamp = e.Timestamp,
-                    remoteIp = e.RemoteIp,
-                    outcome = e.Outcome.ToString().ToLowerInvariant(),
-                }),
-                lifetimeCounts = new
-                {
-                    allowed = allowedTotal,
-                    deniedIp = deniedIpTotal,
-                    deniedDisabled = deniedDisabledTotal,
-                },
-            },
-            metricsAccess = new
-            {
-                enabled = resolved.Enabled,
-                enabledSource = resolved.EnabledSource.ToString().ToLowerInvariant(),
-                allowedIps = resolved.AllowedRaw,
-                allowlistSource = resolved.AllowlistSource.ToString().ToLowerInvariant(),
-                enabledLockedByEnv = resolved.EnabledLockedByEnv,
-                allowlistLockedByEnv = resolved.AllowlistLockedByEnv,
-            },
-        });
-    }
-
 }
 
 public sealed record SetAccountStatusRequest(string Email, string AccountStatus, string TenantSlug);
@@ -1127,8 +968,6 @@ public sealed record SetStorageQuotaRequest(long? QuotaBytes);
 public sealed record SetTenantStatusRequest(string Status);
 public sealed record CreateAdminRequest(string Email);
 public sealed record SetAdminAccountStatusRequest(string AccountStatus);
-
-public sealed record UpdateMetricsAccessRequest(bool? Enabled, IReadOnlyList<string>? AllowedIps);
 
 /// <summary>
 /// Query-string binding for GET /api/v1/system/background-jobs. ASP.NET binds record properties

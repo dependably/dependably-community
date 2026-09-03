@@ -177,7 +177,6 @@ public sealed class VulnTrackerScanEnrichmentTests : IAsyncLifetime
             new OrgRepository(_db),
             Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(TimeProvider.System),
             TestAlerts.NoOp(_db, _clock),
-            new SbomComponentVulnRepository(_db, _clock),
             new SbomComponentScanner(osv, new VulnerabilityRepository(_db, _clock),
                 new SbomComponentVulnRepository(_db, _clock), NullLogger<SbomComponentScanner>.Instance),
             TestSbomPolicy.Service(_db, _clock),
@@ -698,7 +697,8 @@ public sealed class VulnTrackerScanEnrichmentTests : IAsyncLifetime
             TestEnrichment.ActiveConnection());
 
         await service.ScanVersionAsync(
-            "pkg:npm/lodash@1.0.0", versionId, "npm", "lodash", orgId, ct: CancellationToken.None);
+            "pkg:npm/lodash@1.0.0", versionId, "npm", "lodash",
+            new ScanAttribution(orgId), CancellationToken.None);
 
         // Reaching here is the assertion: the advisory was scanned, and nothing asked the tracker.
         Assert.Null((await ReadEnrichmentAsync("GHSA-test-0001")).NvdCheckedAt);

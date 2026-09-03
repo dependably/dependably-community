@@ -35,7 +35,7 @@ public sealed class UpstreamRegistryRepository
     /// <c>TerraformController</c> mirrors only providers whose hostname matches a row here.
     /// </summary>
     public static readonly IReadOnlyList<string> SupportedEcosystems =
-        ["pypi", "npm", "nuget", "maven", "rpm", "cargo", "golang", "oci", "apk", "terraform"];
+        ["pypi", "npm", "nuget", "maven", "rpm", "cargo", "golang", "oci", "apk", "terraform", "hex"];
 
     public static bool IsSupportedEcosystem(string? ecosystem) =>
         ecosystem is not null && SupportedEcosystems.Contains(ecosystem);
@@ -68,6 +68,7 @@ public sealed class UpstreamRegistryRepository
                    token_endpoint AS TokenEndpoint, prefixes AS PrefixesJson,
                    symbol_server_url AS SymbolServerUrl,
                    upstream_protocol AS UpstreamProtocol,
+                   public_key_pem AS PublicKeyPem,
                    CASE WHEN secret IS NOT NULL THEN 1 ELSE 0 END AS HasSecret
             FROM upstream_registry
             WHERE org_id = @orgId
@@ -91,7 +92,8 @@ public sealed class UpstreamRegistryRepository
         var rows = await conn.QueryAsync<RawRegistryRow>(
             """
             SELECT url AS Url, auth_type AS AuthType, username AS Username, secret AS Secret,
-                   symbol_server_url AS SymbolServerUrl, upstream_protocol AS UpstreamProtocol
+                   symbol_server_url AS SymbolServerUrl, upstream_protocol AS UpstreamProtocol,
+                   public_key_pem AS PublicKeyPem
             FROM upstream_registry
             WHERE org_id = @orgId AND ecosystem = @ecosystem
             ORDER BY position, created_at
@@ -99,11 +101,15 @@ public sealed class UpstreamRegistryRepository
             new { orgId, ecosystem });
 
         return rows.Select(r => new UpstreamSource(
-            r.Url ?? "",
-            BuildUpstreamAuthHeader(
+            Url: r.Url ?? "",
+            AuthorizationHeader: BuildUpstreamAuthHeader(
                 r.AuthType, r.Username, r.Secret is null ? null : _envelope.Unprotect(r.Secret)),
-            r.SymbolServerUrl,
-            r.UpstreamProtocol))
+            SymbolServerUrl: r.SymbolServerUrl,
+            Protocol: r.UpstreamProtocol,
+            // A row with no stored key falls back to the well-known key of a public repository
+            // this registry ships with (hex.pm's); any other host stays keyless and is not
+            // consulted by the Hex proxy.
+            PublicKeyPem: r.PublicKeyPem ?? Protocol.Hex.HexWellKnownRepositories.PublicKeyPemFor(r.Url)))
             .ToList();
     }
 
@@ -167,9 +173,9 @@ public sealed class UpstreamRegistryRepository
         await conn.ExecuteAsync(
             """
             INSERT INTO upstream_registry
-                (id, org_id, ecosystem, name, url, position, auth_type, username, secret, symbol_server_url, upstream_protocol)
+                (id, org_id, ecosystem, name, url, position, auth_type, username, secret, symbol_server_url, upstream_protocol, public_key_pem)
             VALUES
-                (@id, @orgId, @ecosystem, @name, @url, @position, @authType, @username, @secret, @symbolServerUrl, @protocol)
+                (@id, @orgId, @ecosystem, @name, @url, @position, @authType, @username, @secret, @symbolServerUrl, @protocol, @publicKeyPem)
             ON CONFLICT DO NOTHING
             """,
             new
@@ -187,6 +193,7 @@ public sealed class UpstreamRegistryRepository
                 // having to know the symbol host; NULL (no symbol proxying) for anything else.
                 symbolServerUrl = req.SymbolServerUrl ?? NuGetSymbolServers.DefaultFor(ecosystem, url),
                 protocol = req.Protocol,
+                publicKeyPem = req.PublicKeyPem,
             });
 
         return new UpstreamRegistryEntry
@@ -203,6 +210,7 @@ public sealed class UpstreamRegistryRepository
             HasSecret = storedSecret is not null,
             SymbolServerUrl = req.SymbolServerUrl ?? NuGetSymbolServers.DefaultFor(ecosystem, url),
             Protocol = req.Protocol,
+            PublicKeyPem = req.PublicKeyPem,
         };
     }
 
@@ -381,6 +389,7 @@ public sealed class UpstreamRegistryRepository
         HasSecret = r.HasSecret,
         SymbolServerUrl = r.SymbolServerUrl,
         Protocol = r.UpstreamProtocol,
+        PublicKeyPem = r.PublicKeyPem,
     };
 
     private static List<string> ParsePrefixes(string? json)
@@ -441,6 +450,8 @@ public sealed class UpstreamRegistryRepository
         public string? SymbolServerUrl { get; set; }
         // Terraform: 'mirror' when this upstream speaks the network mirror protocol.
         public string? UpstreamProtocol { get; set; }
+        // Hex: the upstream repository's signing public key (PEM).
+        public string? PublicKeyPem { get; set; }
     }
 }
 
@@ -466,4 +477,6 @@ public sealed record NewUpstreamRegistry(
     string? Username = null,
     string? Secret = null,
     string? SymbolServerUrl = null,
-    string? Protocol = null);
+    string? Protocol = null,
+    // Hex only: the PEM public key the upstream signs its registry resources with.
+    string? PublicKeyPem = null);

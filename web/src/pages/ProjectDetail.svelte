@@ -459,13 +459,17 @@
   <!-- What the upload targets is decided by the page it was opened from, not by the form: on a
        collection it files into THIS folder (a new project, or an existing one picked from the
        folder's own children); on a project it adds a version to THAT project. Neither needs the
-       operator to re-state where they already are. -->
+       operator to re-state where they already are.
+
+       A nested project passes its OWN containing folder as the parent, because that is the scope
+       its name resolves in: sent without one, the upload addresses the root scope, where this
+       project does not exist, and lands a second top-level project of the same name. -->
   {#if uploadOpen && project}
     <SbomUploadModal
       presetProjectId={isCollection ? null : project.id}
       presetProjectName={isCollection ? null : project.name}
-      presetParentId={isCollection ? project.id : null}
-      presetParentName={isCollection ? project.name : null}
+      presetParentId={isCollection ? project.id : (project.parentId ?? null)}
+      presetParentName={isCollection ? project.name : (project.ancestors?.at(-1)?.name ?? null)}
       on:close={() => (uploadOpen = false)}
       on:uploaded={() => load()}
     />

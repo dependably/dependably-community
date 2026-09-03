@@ -364,7 +364,7 @@ public sealed class CargoGoIndexParityTests : IClassFixture<DependablyFactory>, 
         string token = await _factory.CreateToken("push");
         using var client = _factory.CreateClientWithBearer(token);
 
-        byte[] crate = System.Text.Encoding.UTF8.GetBytes($"crate-bytes-{name}-{version}");
+        byte[] crate = CargoFixtures.BuildCrate(name, version);
         string metadata =
             $$"""{"name":"{{name}}","vers":"{{version}}","deps":[],"features":{},"description":"parity fixture"}""";
 

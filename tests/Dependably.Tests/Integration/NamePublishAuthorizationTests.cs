@@ -278,7 +278,7 @@ public sealed class NamePublishAuthorizationTests
     {
         string metadata = $$"""{"name":"{{name}}","vers":"{{version}}","deps":[],"features":{},"description":"test"}""";
         byte[] meta = Encoding.UTF8.GetBytes(metadata);
-        byte[] crate = Encoding.UTF8.GetBytes($"crate-bytes-{name}-{version}");
+        byte[] crate = CargoFixtures.BuildCrate(name, version);
         byte[] buf = new byte[4 + meta.Length + 4 + crate.Length];
         System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(buf, (uint)meta.Length);
         meta.CopyTo(buf, 4);

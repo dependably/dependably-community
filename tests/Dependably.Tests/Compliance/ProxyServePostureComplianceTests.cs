@@ -91,6 +91,12 @@ public sealed class ProxyServePostureComplianceTests
             + "The pinned authority is the resolved REGISTRY base, not the archive's download_url: "
             + "the registry protocol hands out a shared release-CDN URL that names no provider "
             + "identity, so pinning on it would bind every provider to one authority."),
+        new("hex", "Api/HexController.Serve.cs", true, true,
+            "One repository per org's upstream row (repo.hex.pm by default) and a flat package "
+            + "namespace, the same single-upstream shape as npm. Routing through the shared service "
+            + "is what gives a package tarball its first-fetch gating: the bytes are hash-and-staged "
+            + "and verified against the outer checksum the upstream's own signed index vouched for "
+            + "before any reach the client. The pinned authority is the repository base URL."),
     ];
 
     private sealed record PostureEntry(
@@ -322,7 +328,7 @@ public sealed class ProxyServePostureComplianceTests
     public void ThePostureTable_CoversEveryProxyCapableEcosystem()
     {
         foreach (string ecosystem in new[]
-                 { "npm", "pypi", "nuget", "maven", "rpm", "go", "cargo", "apk", "oci", "terraform" })
+                 { "npm", "pypi", "nuget", "maven", "rpm", "go", "cargo", "apk", "oci", "terraform", "hex" })
         {
             Assert.Contains(Posture, p => p.Ecosystem == ecosystem);
         }

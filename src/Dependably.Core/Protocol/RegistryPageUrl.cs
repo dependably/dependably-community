@@ -57,6 +57,9 @@ public static class RegistryPageUrl
             // registry that owns the page. Deriving from the name also means a provider from a
             // third-party registry links to that registry rather than to HashiCorp's.
             "terraform" => TerraformRegistryUrl(displayName, version),
+            // repo.hex.pm/tarballs/… (hex.pm's repository host) → the hex.pm package page.
+            "hex" when HostIs(host, "repo.hex.pm")
+                => $"https://hex.pm/packages/{displayName}/{version}",
             _ => null,
         };
     }
