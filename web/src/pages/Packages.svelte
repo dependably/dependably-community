@@ -80,18 +80,21 @@
   // is bypassed here by returning 0 for every comparator — the stable sort
   // preserves the server order regardless of which column is "active".
   const NOOP_CMP = () => 0
+  // The fixed columns sum to 722px so the purl — the one flexible column — keeps a usable share
+  // of a laptop content column; `created` leaves under 1100px, where it would otherwise starve
+  // the purl into wrapping. Latest holds two 14px icons, their 8px gap and the cell padding.
   $: columns = [
-    { key: 'name',      label: $t('packages.columns.name'),      sortable: true,  width: '200px' },
-    { key: 'ecosystem', label: $t('packages.columns.ecosystem'), sortable: true,  width: '90px' },
+    { key: 'name',      label: $t('packages.columns.name'),      sortable: true,  width: '180px' },
+    { key: 'ecosystem', label: $t('packages.columns.ecosystem'), sortable: true,  width: '80px' },
     { key: 'purl',      label: $t('packages.columns.purl'),      sortable: true },
-    { key: 'versions',  label: $t('packages.columns.versions'),  sortable: true,  width: '80px',  align: 'right' },
-    { key: 'downloads', label: $t('packages.columns.downloads'), sortable: true,  width: '100px', defaultDir: 'desc', align: 'right' },
-    { key: 'latest',    label: $t('packages.columns.latest'),    sortable: false, width: '70px',  align: 'center' },
-    { key: 'vulns',     label: $t('packages.columns.vulns'),     sortable: true,  width: '130px', defaultDir: 'desc' },
-    { key: 'created',   label: $t('packages.columns.created'),   sortable: true,  width: '120px' },
+    { key: 'versions',  label: $t('packages.columns.versions'),  sortable: true,  width: '64px',  align: 'right' },
+    { key: 'downloads', label: $t('packages.columns.downloads'), sortable: true,  width: '88px',  defaultDir: 'desc', align: 'right' },
+    { key: 'latest',    label: $t('packages.columns.latest'),    sortable: false, width: '64px',  align: 'center' },
+    { key: 'vulns',     label: $t('packages.columns.vulns'),     sortable: true,  width: '110px', defaultDir: 'desc' },
+    { key: 'created',   label: $t('packages.columns.created'),   sortable: true,  width: '96px',  hideBelow: 1100 },
     // Always present: the row menu now also carries the install command, which every viewer
     // can use — not just the admins the same-version-push items are gated to.
-    { key: 'actions', label: '', sortable: false, width: '48px' },
+    { key: 'actions', label: '', sortable: false, width: '40px' },
   ]
   const comparators = {
     name: NOOP_CMP, ecosystem: NOOP_CMP, purl: NOOP_CMP,
@@ -137,6 +140,22 @@
     }, 1200)
   }
 
+  // The latest-version bubble is position:fixed so the table's horizontal scroller cannot clip
+  // it and it floats above the sticky topbar. A fixed element has no relation to its trigger, so
+  // the trigger's viewport rectangle is read as the pointer arrives and the bubble is placed
+  // under it; any scroll dismisses it rather than leaving it detached from its row.
+  let tip = null
+  function showTip(e, text) {
+    const r = e.currentTarget.getBoundingClientRect()
+    tip = { top: r.bottom + 6, left: r.left + r.width / 2, text }
+  }
+  function hideTip() { tip = null }
+  // No bubble for a package whose upstream latest is unknown: the icon alone already says so.
+  function showLatestTip(e, pkg) {
+    if (!pkg.upstreamLatestVersion) return
+    showTip(e, $t('packages.latest.versionLabel', { values: { version: pkg.upstreamLatestVersion } }))
+  }
+
   async function setOverwrite(pkg, override) {
     openActionsId = null
     try {
@@ -147,6 +166,12 @@
     }
   }
 </script>
+
+<svelte:window on:scroll|capture={hideTip} />
+
+{#if tip}
+  <span class="latest-tip-bubble" role="tooltip" style:top="{tip.top}px" style:left="{tip.left}px">{tip.text}</span>
+{/if}
 
 <div class="page">
   <div class="page-header">
@@ -175,6 +200,7 @@
     emptyText={$t('packages.empty')}
     on:sortchange={onSortChange}
     let:row={pkg}
+    let:hidden
   >
     <tr class="cursor-pointer" on:click={() => openPackage(pkg)}>
       <td class="name-cell" title={pkg.name}>
@@ -195,8 +221,14 @@
       <td class="nowrap text-right text-muted">{$formatNumber(pkg.totalDownloads)}</td>
       <td class="nowrap text-center latest-cell">
         <!-- Instant hover bubble (no native `title` delay) reveals the upstream latest
-             version number; mirrors InfoTip.svelte's bubble. -->
-        <span class="latest-tip-wrap">
+             version number. -->
+        <!-- The wrappers are layout only (the icons carry their own labels), hence presentation. -->
+        <span
+          class="latest-tip-wrap"
+          role="presentation"
+          on:mouseenter={(e) => showLatestTip(e, pkg)}
+          on:mouseleave={hideTip}
+        >
           {#if pkg.latestState === 'current'}
             <svg class="latest-yes" width="14" height="14" role="img" aria-label={$t('packages.latest.current')}><use href="/icons.svg#icon-check"/></svg>
           {:else if pkg.latestState === 'stale'}
@@ -204,16 +236,17 @@
           {:else}
             <span class="text-muted" aria-label={$t('packages.latest.unknown')}>—</span>
           {/if}
-          {#if pkg.upstreamLatestVersion}
-            <span class="latest-tip-bubble" role="tooltip">{$t('packages.latest.versionLabel', { values: { version: pkg.upstreamLatestVersion } })}</span>
-          {/if}
         </span>
         {#if pkg.abandonedState === 'abandoned'}
           <!-- Never rendered for 'unknown' — an unknown publish timestamp is not evidence
                of abandonment. -->
-          <span class="latest-tip-wrap">
+          <span
+            class="latest-tip-wrap"
+            role="presentation"
+            on:mouseenter={(e) => showTip(e, $t('packages.abandoned.help'))}
+            on:mouseleave={hideTip}
+          >
             <svg class="abandoned-icon" width="14" height="14" role="img" aria-label={$t('packages.abandoned.label')}><use href="/icons.svg#icon-alert"/></svg>
-            <span class="latest-tip-bubble" role="tooltip">{$t('packages.abandoned.help')}</span>
           </span>
         {/if}
       </td>
@@ -224,7 +257,9 @@
         {#if (pkg.lowCount ?? 0) > 0}<span class="sev sev-low" aria-label="{pkg.lowCount} low">{pkg.lowCount}</span>{/if}
         {#if ((pkg.criticalCount ?? 0) + (pkg.highCount ?? 0) + (pkg.mediumCount ?? 0) + (pkg.lowCount ?? 0)) === 0}<span class="text-muted" aria-label={$t('packages.vulns.none')}>—</span>{/if}
       </td>
-      <td class="nowrap text-muted">{$formatDateShort(pkg.createdAt)}</td>
+      {#if !hidden.has('created')}
+        <td class="nowrap text-muted">{$formatDateShort(pkg.createdAt)}</td>
+      {/if}
       <td class="actions-cell" on:click|stopPropagation>
         <div class="row-actions">
           <RowActionsMenu id={pkg.name + '/' + pkg.ecosystem} bind:openId={openActionsId} ariaLabel={$t('packages.actionsMenu.open')}>
@@ -295,27 +330,24 @@
 <style>
   .nowrap { white-space: nowrap; }
   .vuln-cell { white-space: nowrap; }
-  /* The global `td { overflow: hidden }` (cell ellipsis) would clip the absolutely
-     positioned hover bubble, which pops up out of the cell, down to a thin sliver.
-     This cell holds only a small icon, so it never needs ellipsis clipping. */
-  .latest-cell { font-weight: 600; overflow: visible; }
+  .latest-cell { font-weight: 600; }
   .latest-yes { color: var(--success); }
   .latest-no { color: var(--danger); }
   .abandoned-icon { color: var(--warning); }
 
-  /* Instant hover tooltip for the upstream latest version — mirrors InfoTip.svelte's
-     bubble so there's no native `title` reveal delay. */
   .latest-tip-wrap {
-    position: relative;
     display: inline-flex;
     vertical-align: middle;
   }
+  /* The latest-state icon and the abandoned icon sit side by side in a centred cell; without a
+     gap the two glyphs read as one. */
+  .latest-tip-wrap + .latest-tip-wrap { margin-left: 8px; }
+  /* Instant hover tooltip, fixed to the viewport (positioned from the script) so it opens below
+     its icon, clear of the table's scroll clipping and above the sticky topbar. */
   .latest-tip-bubble {
-    position: absolute;
-    bottom: calc(100% + 6px);
-    left: 50%;
+    position: fixed;
     transform: translateX(-50%);
-    z-index: 10;
+    z-index: 45;
     width: max-content;
     max-width: 240px;
     padding: 6px 9px;
@@ -328,18 +360,14 @@
     line-height: 1.4;
     white-space: nowrap;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
-    opacity: 0;
-    visibility: hidden;
     pointer-events: none;
   }
-  .latest-tip-wrap:hover .latest-tip-bubble,
-  .latest-tip-wrap:focus-within .latest-tip-bubble {
-    opacity: 1;
-    visibility: visible;
-  }
   .name-cell { overflow-wrap: anywhere; }
-  .purl-cell { font-size: 12px; color: var(--text2); overflow-wrap: anywhere; }
-  .actions-cell { overflow: visible; width: 48px; }
+  /* The floor is what stops the flexible column collapsing: with `overflow-wrap: anywhere` its
+     minimum width is one character, so without it the fixed columns take the whole row at 1024
+     and the purl wraps one glyph per line rather than the table scrolling. */
+  .purl-cell { font-size: 12px; color: var(--text2); overflow-wrap: anywhere; min-width: 160px; }
+  .actions-cell { overflow: visible; width: 40px; }
   .row-actions { display: flex; justify-content: center; }
   .menu-check { color: var(--success); margin-right: 4px; vertical-align: middle; }
 </style>

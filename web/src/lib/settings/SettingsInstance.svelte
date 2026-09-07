@@ -78,7 +78,7 @@
 {#if loading}
   <span class="spinner"></span>
 {:else}
-  <form on:submit|preventDefault={save}>
+  <form class="card-narrow" on:submit|preventDefault={save}>
     {#each SETTING_KEYS as k (k.key)}
       <div class="form-row">
         <label for="set-{k.key}">{$t(k.labelKey)}</label>
@@ -105,7 +105,7 @@
 {/if}
 
 <style>
-  form { display: flex; flex-direction: column; gap: 16px; max-width: 560px; }
+  form { display: flex; flex-direction: column; gap: 16px; }
   .form-row { display: grid; grid-template-columns: 1fr 240px; gap: 12px; align-items: start; }
   .form-row label { font-size: 13px; color: var(--text2); padding-top: 8px; }
   .field { display: flex; flex-direction: column; gap: 4px; }

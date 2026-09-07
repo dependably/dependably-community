@@ -10,6 +10,7 @@
   import { reportPageLoad } from '../lib/pageLoad.js'
   import { copyToClipboard } from '../lib/clipboard.js'
   import { registryOrigin } from '../lib/installCommand.js'
+  import { ECO_LABEL } from '../lib/ecosystems.js'
   import {
     licenseStateFor,
     resolveStateVersion,
@@ -239,6 +240,9 @@
   $: origin = registryOrigin($bootstrapInfo, window.location)
 
   $: isAdmin = $user?.role === 'admin' || $user?.role === 'owner'
+
+  // The title's ecosystem badge follows the route until the package lands, then the package.
+  $: ecosystem = pkg?.ecosystem ?? params.ecosystem
 </script>
 
 <div class="page">
@@ -252,10 +256,16 @@
       }} class="mb-2">{$t('common.actions.back')}</button>
       <!-- Ecosystem and name come from the route, so the title stands before the package
            fetch resolves and the table below it does not shift down when it lands. The
-           fetched display name replaces the purl name in place. -->
+           fetched display name replaces the purl name in place. Origin (hosted or proxy) is
+           a package-level fact, so it is shown once here rather than on every version row. -->
       <h1 class="page-title">
-        <span class="badge {pkg?.ecosystem ?? params.ecosystem}">{pkg?.ecosystem ?? params.ecosystem}</span>
+        <span class="badge {ecosystem}">{ECO_LABEL[ecosystem] ?? ecosystem}</span>
         {pkg?.name ?? params.name}
+        {#if pkg}
+          <span class="badge {pkg.isProxy ? 'proxy' : 'hosted'}">
+            {pkg.isProxy ? $t('packages.proxy') : $t('packages.hosted')}
+          </span>
+        {/if}
         {#if claim && (claim.state === 'local_only' || claim.state === 'mixed')}
           <span
             class="badge has-icon state-{claim.state}"
@@ -270,10 +280,10 @@
           </span>
         {/if}
       </h1>
-      <!-- Rendered in both states and floored at two clamped description lines plus the link
-           row, so the risk pillars and table below sit at the same offset before and after
-           the fetch resolves. -->
-      <div class="pkg-meta">
+      <!-- Rendered in both states, and floored at two clamped description lines plus the link
+           row only while loading, so the risk pillars and table below do not jump when the
+           fetch lands metadata — and a package with none does not carry blank space. -->
+      <div class="pkg-meta" class:loading>
         {#if pkg?.description}
           <p class="pkg-description">{pkg.description}</p>
         {/if}
@@ -309,7 +319,7 @@
   <!-- Rendered only when something ships this package: nothing shipping it is a non-event, and a
        "0 applications" line would be noise on every package in a registry with no SBOMs. -->
   {#if blastRadius && blastRadius.total > 0}
-    <div class="blast-radius">
+    <div class="blast-radius" class:open={blastRadiusOpen}>
       <button
         type="button"
         class="blast-toggle"
@@ -322,7 +332,6 @@
       </button>
       {#if blastRadiusOpen}
         {@const hiddenApps = overflowCount(blastRadius.total, blastRadius.items.length)}
-        <p class="form-hint">{$t('versionDetail.blastRadius.help')}</p>
         <ul class="blast-list">
           {#each blastRadius.items as app, ai (ai)}
             <li>
@@ -381,13 +390,15 @@
 </div>
 
 <style>
-  /* Claim state badge needs a left margin to separate it from the package name in the H1. */
-  .badge.has-icon { margin-left: 8px; }
+  /* The title is a flex row so the 11px badges centre on the 20px name instead of hanging
+     off its baseline; the gap spaces the ecosystem, origin and claim badges. */
+  .page-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
   /* Package-level metadata (homepage / repository / description) under the title. Floored at
-     two clamped description lines plus the link row, and rendered whether or not the fetch has
-     landed, so the risk pillars and version table sit at the same offset either way. */
-  .pkg-meta { min-height: 62px; }
+     two clamped description lines plus the link row while the fetch is in flight, so the risk
+     pillars and version table do not shift when metadata lands; once loaded it takes the
+     height of whatever the package has, which is often nothing. */
+  .pkg-meta.loading { min-height: 62px; }
   /* Sits between the description and the link row; the block above it is already floored at a
      fixed height, so this is allowed to be absent without shifting anything below. */
   .pkg-author {
@@ -415,7 +426,8 @@
 
   /* Blast radius — which applications ship this package. A disclosure, not a card: the count is
      the answer most readers want and the list is what they open when it is not zero. */
-  .blast-radius { display: flex; flex-direction: column; gap: 6px; }
+  .blast-radius { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+  .blast-radius.open { margin-bottom: 22px; }
   .blast-toggle {
     align-self: flex-start;
     display: inline-flex;
@@ -431,7 +443,8 @@
   }
   .blast-toggle .chev { transform: rotate(-90deg); transition: transform 120ms ease; }
   .blast-toggle .chev.open { transform: rotate(0deg); }
-  .blast-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
-  .blast-list li { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+  .blast-list { margin: 0; padding-left: 20px; font-size: 13px; list-style: disc; }
+  .blast-list li { display: list-item; margin-bottom: 2px; }
+  .blast-list li > span + span { margin-left: 8px; }
   .app-name { font-weight: 600; }
 </style>

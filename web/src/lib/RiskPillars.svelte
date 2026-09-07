@@ -78,6 +78,9 @@
     color: var(--text2);
   }
   .pillar-value { font-size: 13px; font-weight: 600; }
+  /* Rendered as a severity chip: keep the global chip size so it matches the same chip in
+     the table below, and stop the column from stretching it to the pillar's width. */
+  .pillar-value.sev { font-size: 11px; align-self: flex-start; }
   /* The subject the pillars describe, pushed to the trailing edge so it reads as the strip's
      subject rather than an extra pillar. */
   .pillar-subject { margin-left: auto; text-align: right; }

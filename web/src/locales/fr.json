@@ -253,7 +253,8 @@
       "severity": "Gravité",
       "policy": "Politique",
       "latest": "Dernière version",
-      "lastUpload": "Dernier téléversement"
+      "lastUpload": "Dernier téléversement",
+      "active": "Actif"
     },
     "severity": {
       "critical": "{count} critique",
@@ -295,7 +296,8 @@
         "policy": "Politique",
         "uploaded": "Téléversé",
         "name": "Nom",
-        "latest": "Dernière version"
+        "latest": "Dernière version",
+        "active": "Actif"
       },
       "isLatest": "Dernière",
       "promote": "Promouvoir comme dernière version",
@@ -305,11 +307,23 @@
       "deleteProjectConfirm": "Supprimer « {name} » et toutes ses versions? Cette action est irréversible.",
       "deleteCollectionConfirm": "Supprimer le dossier « {name} » et tout ce qu'il contient — chaque projet et toutes leurs versions? Cette action est irréversible.",
       "loadFailed": "Échec du chargement du projet : {message}",
-      "exportHint": "Tous les projets de ce dossier, chacun à sa dernière version. Les projets sans SBOM sont listés et signalés."
+      "exportHint": "Tous les projets de ce dossier, chacun à sa dernière version. Les projets sans SBOM sont listés et signalés.",
+      "retire": "Retirer",
+      "reinstate": "Réactiver"
     },
     "versionDetail": {
       "placeholderTitle": "Détail de la version",
       "placeholder": "L'inventaire des composants et l'analyse de cette version seront bientôt disponibles."
+    },
+    "status": {
+      "active": "Actif",
+      "retired": "Retiré",
+      "retiredLatest": "Retiré (dernière)",
+      "retiredLatestHint": "Toujours comptée : la dernière version est toujours en service.",
+      "retiredHint": "Les applications retirées sont exclues des décomptes de rayon d'impact.",
+      "activeLabel": "Actif",
+      "projectHint": "Le retrait exclut cette application des décomptes de rayon d'impact et arrête son analyse quotidienne.",
+      "collectionHint": "Le retrait exclut toutes les applications de ce dossier des décomptes de rayon d'impact."
     }
   },
   "claims": {
@@ -374,6 +388,12 @@
     "summary": "Lot {batchId} : {accepted} acceptés, {rejected} rejetés.",
     "outcome": {
       "accepted": "Accepté",
+      "columns": {
+        "detail": "Détail",
+        "ecosystem": "Écosystème",
+        "file": "Fichier",
+        "status": "Statut"
+      },
       "rejected": "Rejeté",
       "would_accept": "Serait accepté",
       "would_reject": "Serait rejeté"
@@ -587,7 +607,6 @@
     },
     "blastRadius": {
       "summary": "{count, plural, one {# application livre ce paquet} other {# applications livrent ce paquet}}",
-      "help": "La dernière version de chaque application dont le SBOM liste ce paquet. Les versions antérieures ne sont pas comptées : elles ne sont pas ce que vous livrez, et leurs analyses de composants ne sont pas tenues à jour.",
       "ships": "livre {version}",
       "more": "et {count} de plus"
     }
@@ -648,7 +667,6 @@
   },
   "audit": {
     "title": "Audit",
-    "forbidden": "Le journal d'audit est accessible aux administrateurs uniquement.",
     "tabs": {
       "lifecycle": "Activité",
       "adminActions": "Configuration"
@@ -709,6 +727,7 @@
       "member_removed": "Membre supprimé",
       "invite_created": "Invitation créée",
       "invite_deleted": "Invitation supprimée",
+      "invite_accept_blocked": "Acceptation d'invitation bloquée (SSO uniquement)",
       "saml.config_updated": "Configuration SAML mise à jour",
       "saml.metadata_uploaded": "Métadonnées SAML téléversées",
       "saml.config_deleted": "Configuration SAML supprimée",
@@ -1244,7 +1263,7 @@
       "activityDays": "Jours de rétention des activités",
       "purgeUnlistedDays": "Purger les versions retirées après (jours)",
       "keepProjectVersions": "Conserver les versions de projet",
-      "keepProjectVersionsHint": "Limite le nombre de versions SBOM/VEX/SARIF conservées par projet et libère les documents de celles qui sont supprimées. La dernière version d'un projet n'est jamais supprimée, quel que soit son âge.",
+      "keepProjectVersionsHint": "Limite le nombre de versions SBOM/VEX/SARIF conservées par projet et libère les documents de celles qui sont supprimées. La dernière version d'un projet, et toute version marquée active, ne sont jamais supprimées, quel que soit leur âge.",
       "unlimited": "illimité",
       "instanceDefault": "valeur par défaut de l'instance : {days} jours",
       "activityDaysHint": "Contrairement aux limites ci-dessus, un champ vide n'est pas illimité ici : les lignes d'activité contiennent des adresses IP par téléchargement, elles sont donc limitées par la valeur ACTIVITY_RETENTION_DAYS de l'instance."
@@ -1633,10 +1652,10 @@
     }
   },
   "setup": {
-    "title": "Connecter un gestionnaire de paquets",
+    "title": "Configuration",
     "step": {
       "token": {
-        "title": "Créer un jeton",
+        "title": "Choisissez votre objectif et créez un jeton",
         "create": "Créer le jeton",
         "shownOnce": "Copiez-le maintenant — il ne sera plus affiché.",
         "useExisting": "Vous avez déjà un jeton? Gérer les jetons",
@@ -1689,6 +1708,36 @@
       "insecureRegistry": "Docker refuse un registre en HTTP simple tant que le démon ne l'autorise pas. Redémarrez le démon après avoir modifié daemon.json.",
       "httpMirror": "Terraform rejette un miroir réseau http:// et il n'existe aucun contournement côté client. Ce registre doit être servi en HTTPS pour que cette configuration fonctionne.",
       "usernameIgnored": "Le nom d'utilisateur est ignoré — n'importe quelle valeur fonctionne. Dependably s'authentifie uniquement avec le jeton, qui va dans le champ du mot de passe."
+    },
+    "tabs": {
+      "connect": "Connecter un gestionnaire de paquets",
+      "skills": "Compétences de correction"
+    },
+    "skillAlternative": {
+      "title": "Ou configurez-le avec un assistant IA",
+      "assistantLabel": "Choisissez votre assistant IA",
+      "hint": "Installez la compétence dédiée à ce gestionnaire de paquets, puis demandez à votre assistant de l'exécuter. Il vous demandera l'URL du registre et un jeton."
+    },
+    "skills": {
+      "intro": "Recettes sélectionnées pour corriger une vulnérabilité signalée par ce registre. Installez-en une dans votre assistant IA, puis dirigez-le vers la découverte que vous traitez.",
+      "assistantLabel": "Choisissez votre assistant IA",
+      "none": "Cette instance ne fournit aucune compétence de correction.",
+      "allTitle": "Tout installer",
+      "downloadAll": "Tout télécharger (.zip)",
+      "allHint": "La commande installe chaque compétence à l'endroit où votre assistant la cherche. L'archive zip sert à emporter l'ensemble là où ce registre n'est pas accessible."
+    }
+  },
+  "skills": {
+    "assistantLabel": "Choisissez votre assistant IA",
+    "installLabel": "Installer la compétence",
+    "promptLabel": "Invite",
+    "readTitle": "Lire cette compétence",
+    "modal": {
+      "eyebrow": "Compétence sélectionnée",
+      "loading": "Chargement de la compétence…",
+      "copy": "Copier le Markdown",
+      "download": "Télécharger SKILL.md",
+      "close": "Fermer"
     }
   },
   "admin": {
@@ -1840,7 +1889,7 @@
     },
     "blastRadius": {
       "summary": "{count, plural, one {# appli} other {# applis}}",
-      "help": "Applications dont la dernière version livre ce paquet. Le refuser ici les touche.",
+      "help": "Applications exécutant une version qui livre ce paquet. Le refuser ici les touche.",
       "unavailable": "applis indisponibles",
       "unavailableHelp": "Le nombre d'applications touchées n'a pas pu être chargé. Ce n'est pas un décompte nul."
     }

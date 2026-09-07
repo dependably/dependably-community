@@ -1073,6 +1073,15 @@
           "responseCodes": [
             "204"
           ]
+        },
+        "patch": {
+          "requiredParams": [
+            "projectId",
+            "versionId"
+          ],
+          "responseCodes": [
+            "200"
+          ]
         }
       }
     },
@@ -1409,6 +1418,38 @@
       "operations": {
         "get": {
           "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/skills": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/skills/bundle": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/skills/{skillId}": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "skillId"
+          ],
           "responseCodes": [
             "200"
           ]

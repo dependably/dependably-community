@@ -523,6 +523,12 @@
         <target>Conflit résolu</target>
       </segment>
     </unit>
+    <unit id="audit.actions.invite_accept_blocked">
+      <segment state="translated">
+        <source>Invite accept blocked (SSO-only)</source>
+        <target>Acceptation d&apos;invitation bloquée (SSO uniquement)</target>
+      </segment>
+    </unit>
     <unit id="audit.actions.invite_created">
       <segment state="translated">
         <source>Invite created</source>
@@ -809,12 +815,6 @@
       <segment state="translated">
         <source>Export CSV</source>
         <target>Exporter CSV</target>
-      </segment>
-    </unit>
-    <unit id="audit.forbidden">
-      <segment state="translated">
-        <source>Audit log is only accessible to org admins.</source>
-        <target>Le journal d&apos;audit est accessible aux administrateurs uniquement.</target>
       </segment>
     </unit>
     <unit id="audit.groups.auth">
@@ -3481,6 +3481,12 @@
         <target>Collection</target>
       </segment>
     </unit>
+    <unit id="projects.columns.active">
+      <segment state="translated">
+        <source>Active</source>
+        <target>Actif</target>
+      </segment>
+    </unit>
     <unit id="projects.columns.components">
       <segment state="translated">
         <source>Components</source>
@@ -3533,6 +3539,12 @@
       <segment state="translated">
         <source>Collection</source>
         <target>Collection</target>
+      </segment>
+    </unit>
+    <unit id="projects.detail.columns.active">
+      <segment state="translated">
+        <source>Active</source>
+        <target>Actif</target>
       </segment>
     </unit>
     <unit id="projects.detail.columns.components">
@@ -3623,6 +3635,18 @@
       <segment state="translated">
         <source>Promoting…</source>
         <target>Promotion en cours…</target>
+      </segment>
+    </unit>
+    <unit id="projects.detail.reinstate">
+      <segment state="translated">
+        <source>Reinstate</source>
+        <target>Réactiver</target>
+      </segment>
+    </unit>
+    <unit id="projects.detail.retire">
+      <segment state="translated">
+        <source>Retire</source>
+        <target>Retirer</target>
       </segment>
     </unit>
     <unit id="projects.detail.stat.children">
@@ -3865,6 +3889,54 @@
         <target>{count} non évaluée</target>
       </segment>
     </unit>
+    <unit id="projects.status.active">
+      <segment state="translated">
+        <source>Active</source>
+        <target>Actif</target>
+      </segment>
+    </unit>
+    <unit id="projects.status.activeLabel">
+      <segment state="translated">
+        <source>Active</source>
+        <target>Actif</target>
+      </segment>
+    </unit>
+    <unit id="projects.status.collectionHint">
+      <segment state="translated">
+        <source>Retiring excludes every application in this folder from blast-radius counts.</source>
+        <target>Le retrait exclut toutes les applications de ce dossier des décomptes de rayon d&apos;impact.</target>
+      </segment>
+    </unit>
+    <unit id="projects.status.projectHint">
+      <segment state="translated">
+        <source>Retiring excludes this application from blast-radius counts and stops its nightly rescan.</source>
+        <target>Le retrait exclut cette application des décomptes de rayon d&apos;impact et arrête son analyse quotidienne.</target>
+      </segment>
+    </unit>
+    <unit id="projects.status.retired">
+      <segment state="translated">
+        <source>Retired</source>
+        <target>Retiré</target>
+      </segment>
+    </unit>
+    <unit id="projects.status.retiredHint">
+      <segment state="translated">
+        <source>Retired applications are excluded from blast-radius counts.</source>
+        <target>Les applications retirées sont exclues des décomptes de rayon d&apos;impact.</target>
+      </segment>
+    </unit>
+    <unit id="projects.status.retiredLatest">
+      <segment state="translated">
+        <source>Retired (latest)</source>
+        <target>Retiré (dernière)</target>
+      </segment>
+    </unit>
+    <unit id="projects.status.retiredLatestHint">
+      <segment state="translated">
+        <source>Still counted: the latest release is always in service.</source>
+        <target>Toujours comptée : la dernière version est toujours en service.</target>
+      </segment>
+    </unit>
     <unit id="projects.title">
       <segment state="translated">
         <source>Projects</source>
@@ -3909,8 +3981,8 @@
     </unit>
     <unit id="quarantine.blastRadius.help">
       <segment state="translated">
-        <source>Applications whose latest version ships this package. Denying it here affects them.</source>
-        <target>Applications dont la dernière version livre ce paquet. Le refuser ici les touche.</target>
+        <source>Applications running a version that ships this package. Denying it here affects them.</source>
+        <target>Applications exécutant une version qui livre ce paquet. Le refuser ici les touche.</target>
       </segment>
     </unit>
     <unit id="quarantine.blastRadius.summary">
@@ -8595,8 +8667,8 @@ dotnet/</target>
     </unit>
     <unit id="settings.retention.keepProjectVersionsHint">
       <segment state="translated">
-        <source>Caps the SBOM/VEX/SARIF versions kept per project and releases the documents of the ones it removes. The latest version of a project is never removed, whatever its age.</source>
-        <target>Limite le nombre de versions SBOM/VEX/SARIF conservées par projet et libère les documents de celles qui sont supprimées. La dernière version d&apos;un projet n&apos;est jamais supprimée, quel que soit son âge.</target>
+        <source>Caps the SBOM/VEX/SARIF versions kept per project and releases the documents of the ones it removes. A project&apos;s latest version, and any version marked active, are never removed whatever their age.</source>
+        <target>Limite le nombre de versions SBOM/VEX/SARIF conservées par projet et libère les documents de celles qui sont supprimées. La dernière version d&apos;un projet, et toute version marquée active, ne sont jamais supprimées, quel que soit leur âge.</target>
       </segment>
     </unit>
     <unit id="settings.retention.keepVersions">
@@ -9715,6 +9787,60 @@ dotnet/</target>
         <target>Ce projet</target>
       </segment>
     </unit>
+    <unit id="setup.skillAlternative.assistantLabel">
+      <segment state="translated">
+        <source>Choose your AI assistant</source>
+        <target>Choisissez votre assistant IA</target>
+      </segment>
+    </unit>
+    <unit id="setup.skillAlternative.hint">
+      <segment state="translated">
+        <source>Install the curated skill for this package manager, then ask your assistant to run it. It will prompt you for the registry URL and a token.</source>
+        <target>Installez la compétence dédiée à ce gestionnaire de paquets, puis demandez à votre assistant de l&apos;exécuter. Il vous demandera l&apos;URL du registre et un jeton.</target>
+      </segment>
+    </unit>
+    <unit id="setup.skillAlternative.title">
+      <segment state="translated">
+        <source>Or configure it with an AI assistant</source>
+        <target>Ou configurez-le avec un assistant IA</target>
+      </segment>
+    </unit>
+    <unit id="setup.skills.allHint">
+      <segment state="translated">
+        <source>The command installs every skill where your assistant looks for it. The zip is for taking the whole set somewhere this registry cannot reach.</source>
+        <target>La commande installe chaque compétence à l&apos;endroit où votre assistant la cherche. L&apos;archive zip sert à emporter l&apos;ensemble là où ce registre n&apos;est pas accessible.</target>
+      </segment>
+    </unit>
+    <unit id="setup.skills.allTitle">
+      <segment state="translated">
+        <source>Install all of them</source>
+        <target>Tout installer</target>
+      </segment>
+    </unit>
+    <unit id="setup.skills.assistantLabel">
+      <segment state="translated">
+        <source>Choose your AI assistant</source>
+        <target>Choisissez votre assistant IA</target>
+      </segment>
+    </unit>
+    <unit id="setup.skills.downloadAll">
+      <segment state="translated">
+        <source>Download all (.zip)</source>
+        <target>Tout télécharger (.zip)</target>
+      </segment>
+    </unit>
+    <unit id="setup.skills.intro">
+      <segment state="translated">
+        <source>Curated recipes for fixing a vulnerability this registry surfaced. Install one into your AI assistant, then point it at the finding you are working on.</source>
+        <target>Recettes sélectionnées pour corriger une vulnérabilité signalée par ce registre. Installez-en une dans votre assistant IA, puis dirigez-le vers la découverte que vous traitez.</target>
+      </segment>
+    </unit>
+    <unit id="setup.skills.none">
+      <segment state="translated">
+        <source>This instance ships no remediation skills.</source>
+        <target>Cette instance ne fournit aucune compétence de correction.</target>
+      </segment>
+    </unit>
     <unit id="setup.step.choose.title">
       <segment state="translated">
         <source>Choose your package manager</source>
@@ -9759,8 +9885,8 @@ dotnet/</target>
     </unit>
     <unit id="setup.step.token.title">
       <segment state="translated">
-        <source>Create a token</source>
-        <target>Créer un jeton</target>
+        <source>Choose what you are doing, and create a token</source>
+        <target>Choisissez votre objectif et créez un jeton</target>
       </segment>
     </unit>
     <unit id="setup.step.token.useExisting">
@@ -9769,10 +9895,22 @@ dotnet/</target>
         <target>Vous avez déjà un jeton? Gérer les jetons</target>
       </segment>
     </unit>
-    <unit id="setup.title">
+    <unit id="setup.tabs.connect">
       <segment state="translated">
         <source>Connect a package manager</source>
         <target>Connecter un gestionnaire de paquets</target>
+      </segment>
+    </unit>
+    <unit id="setup.tabs.skills">
+      <segment state="translated">
+        <source>Remediation skills</source>
+        <target>Compétences de correction</target>
+      </segment>
+    </unit>
+    <unit id="setup.title">
+      <segment state="translated">
+        <source>Setup</source>
+        <target>Configuration</target>
       </segment>
     </unit>
     <unit id="setup.token.lineHint">
@@ -9797,6 +9935,60 @@ dotnet/</target>
       <segment state="translated">
         <source>Check it works</source>
         <target>Vérifier que ça fonctionne</target>
+      </segment>
+    </unit>
+    <unit id="skills.assistantLabel">
+      <segment state="translated">
+        <source>Choose your AI assistant</source>
+        <target>Choisissez votre assistant IA</target>
+      </segment>
+    </unit>
+    <unit id="skills.installLabel">
+      <segment state="translated">
+        <source>Install skill</source>
+        <target>Installer la compétence</target>
+      </segment>
+    </unit>
+    <unit id="skills.modal.close">
+      <segment state="translated">
+        <source>Close</source>
+        <target>Fermer</target>
+      </segment>
+    </unit>
+    <unit id="skills.modal.copy">
+      <segment state="translated">
+        <source>Copy Markdown</source>
+        <target>Copier le Markdown</target>
+      </segment>
+    </unit>
+    <unit id="skills.modal.download">
+      <segment state="translated">
+        <source>Download SKILL.md</source>
+        <target>Télécharger SKILL.md</target>
+      </segment>
+    </unit>
+    <unit id="skills.modal.eyebrow">
+      <segment state="translated">
+        <source>Curated skill</source>
+        <target>Compétence sélectionnée</target>
+      </segment>
+    </unit>
+    <unit id="skills.modal.loading">
+      <segment state="translated">
+        <source>Loading skill…</source>
+        <target>Chargement de la compétence…</target>
+      </segment>
+    </unit>
+    <unit id="skills.promptLabel">
+      <segment state="translated">
+        <source>Prompt</source>
+        <target>Invite</target>
+      </segment>
+    </unit>
+    <unit id="skills.readTitle">
+      <segment state="translated">
+        <source>Read this skill</source>
+        <target>Lire cette compétence</target>
       </segment>
     </unit>
     <unit id="spdx.alreadyListed">
@@ -12505,6 +12697,30 @@ dotnet/</target>
         <target>Accepté</target>
       </segment>
     </unit>
+    <unit id="upload.outcome.columns.detail">
+      <segment state="translated">
+        <source>Detail</source>
+        <target>Détail</target>
+      </segment>
+    </unit>
+    <unit id="upload.outcome.columns.ecosystem">
+      <segment state="translated">
+        <source>Ecosystem</source>
+        <target>Écosystème</target>
+      </segment>
+    </unit>
+    <unit id="upload.outcome.columns.file">
+      <segment state="translated">
+        <source>File</source>
+        <target>Fichier</target>
+      </segment>
+    </unit>
+    <unit id="upload.outcome.columns.status">
+      <segment state="translated">
+        <source>Status</source>
+        <target>Statut</target>
+      </segment>
+    </unit>
     <unit id="upload.outcome.rejected">
       <segment state="translated">
         <source>Rejected</source>
@@ -13001,12 +13217,6 @@ dotnet/</target>
       <segment state="translated">
         <source>Unknown — no upstream version data to compare (hosted-only, air-gapped, or not yet refreshed).</source>
         <target>Inconnu — aucune donnée de version en amont à comparer (hébergé uniquement, air-gapped, ou pas encore actualisé).</target>
-      </segment>
-    </unit>
-    <unit id="versionDetail.blastRadius.help">
-      <segment state="translated">
-        <source>The latest version of each application whose SBOM lists this package. Older releases are not counted — they are not what you ship, and their component scans are not kept current.</source>
-        <target>La dernière version de chaque application dont le SBOM liste ce paquet. Les versions antérieures ne sont pas comptées : elles ne sont pas ce que vous livrez, et leurs analyses de composants ne sont pas tenues à jour.</target>
       </segment>
     </unit>
     <unit id="versionDetail.blastRadius.more">

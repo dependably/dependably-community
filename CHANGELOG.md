@@ -7,6 +7,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-07
+
+### Security
+
+- **SSO-only is now enforced by the server, not only by the sign-in page.** Switching a tenant to
+  SSO-only (`forms_login_enabled=false`) hid the password form, but `POST /api/v1/auth/login` never
+  read the setting: a correct local password kept minting sessions, bypassing every control the IdP
+  enforces (its MFA, conditional access, deprovisioning). The 0.9.0 entry below that revokes
+  password-backed sessions on the flip assumed the grant itself was already closed; it was not.
+  The login endpoint now refuses password logins on an SSO-only tenant with the same generic 401
+  as a wrong password, and records the refusal (audit `login.failure` with
+  `reason=forms_login_disabled`, activity, SIEM event) against the same lockout budget, answering
+  429 once that budget locks — so a spray against an SSO-only tenant is as visible as one against a
+  password-backed one. `POST /api/v1/invites/accept`, which stores a local password and mints a
+  session on its own, refuses on an SSO-only tenant with 409 (audited as `invite_accept_blocked`)
+  without consuming the invite, so it works again if forms login is re-enabled. "SSO-only" means
+  what the ACS callback means by "configured": IdP entity id, SSO URL, and a signing certificate
+  from metadata **or** an admin-pinned override — a tenant with `forms_login_enabled=false` but no
+  usable IdP still accepts passwords, so a stray config row cannot lock every user out. The admin
+  guard that lets a tenant switch to SSO-only reads the same predicate, and IdP metadata whose
+  `SingleSignOnService` location is not an absolute http(s) URL is rejected at upload instead of
+  being stored as a config no SAML login could ever complete.
+
+### Added
+
+- **Applications and releases can be retired.** A project and a project version each carry an
+  `is_active` flag, editable from the project edit modal and the release list
+  (`PATCH /api/v1/projects/{projectId}/versions/{versionId}`). Retiring a release is the
+  statement "we no longer run this", which drops it out of the blast radius, out of the
+  nightly policy re-evaluation, and out of the exported VEX — the number an operator reads as
+  "N applications ship this component" now counts what the tenant actually ships rather than
+  everything it has ever uploaded. Retirement is independent of "latest": a release still
+  running after a partial rollout stays counted while a newer one leads. Nothing is derived
+  from activity — every existing project and version is active, so the flag changes no counts
+  until an operator sets one. One predicate (`ProjectLifecycle.InServiceFilter`) governs the
+  blast radius, the nightly re-evaluation, retention's version cap and the VEX export, and a
+  new compliance gate fails if those four drift apart — a narrower filter in retention would
+  silently delete a counted version, and a narrower one in the re-evaluation would present a
+  frozen count beside current ones.
+- **Curated skills are readable before you install one.** A skill's name on the Setup page is
+  now a link that opens the document in place, rendered rather than raw, with buttons to copy
+  the Markdown or download the `SKILL.md`. Installing a skill writes it straight into an AI
+  assistant's directory, so this is the one moment a reader would want to see what they are
+  about to run. It applies to both surfaces that list a skill — the Skills tab and the
+  configure-with-an-assistant alternative in step 3.
+- **Install or download the whole set at once.** The Skills tab carries one command that
+  installs every skill where the selected assistant looks for it, and a `Download all (.zip)`
+  button backed by `GET /api/v1/skills/bundle` (optionally `?family=config|remediation`). The
+  archive is laid out as `<id>/SKILL.md`, so unpacking it into `~/.claude/skills/` lands every
+  file where it belongs, and its entry timestamps are pinned so the same corpus always produces
+  the same bytes.
+
+
+- **The Setup page serves the skills this instance ships.** Setup is now two tabs: the
+  package-manager wizard, and a Skills tab listing the nine curated remediation skills with a
+  per-assistant install one-liner (Claude Code / OpenAI Codex / GitHub Copilot), which were
+  previously reachable only from an advisory that happened to map to one. Step 3 of the wizard
+  additionally offers the client-config skill covering the selected package manager and scope,
+  as an alternative to copying the configuration by hand.
+- **`GET /api/v1/skills` and `/api/v1/skills/{id}`** serve every curated skill anonymously,
+  each tagged with its family (and, for the client-config family, its ecosystem and scope).
+  The 17 client-config skills are now embedded in the binary, so an air-gapped install can
+  hand them out without reaching the source repository — previously only the nine remediation
+  skills were. The existing `/api/v1/remediation/skills` routes are unchanged and still return
+  exactly the nine, so install one-liners already copied out of a running instance keep working.
+- **Client-config skills for RPM, Alpine apk, Terraform and Hex.** Those four ecosystems had
+  Setup recipes with no skill behind them. A new gate asserts the skill set and the Setup
+  recipe matrix cover exactly the same (ecosystem, scope) cells, in both directions.
+
+### Changed
+
+- **The Setup wizard asks what you are doing before it mints a token.** The "I want to"
+  choice moves into step 1 beside the token, because it is the only axis that selects the
+  token's capability preset; "Applies to" and "Tool" move into step 3 beside the configuration
+  they reshape. Step 2 is the package-manager choice alone. The auto-generated token
+  description now names the operation rather than the package manager, which is chosen below it.
+
+### Fixed
+
+- **Auditors can open the Audit page in the web console.** The `auditor` role holds
+  `read:audit`, which is all `GET /api/v1/audit` and `/activity` gate on, but the console hid
+  the Audit link behind an admin/owner check and bounced the role off the `/audit` URL. Page
+  access is now a per-page allowed-roles map (`RESTRICTED_PAGES` in `routes.js`) shared by the
+  sidebar, the route guards, and the dashboard's blocked-pull drill-downs; `audit` admits
+  `auditor`, the other restricted pages stay admin/owner-only. The unused `audit.forbidden`
+  string is removed.
+- **OSV advisory timestamps are stored in the canonical precise shape.** OSV serves `published`
+  and `modified` with nanosecond precision, which the schema's timestamp `CHECK` does not admit;
+  they are now normalized on the way in, so an advisory whose upstream record carries sub-second
+  precision stores its dates instead of dropping them.
+- **Layout fixes at laptop widths.** A visual pass at narrower viewports fixed overlap and
+  spacing across the console, added the column floors that keep a table readable once its
+  horizontal scroll engages, gave the upload outcome table fixed column widths so `Detail` wraps
+  inside its card rather than past it, bulleted the blast-radius application list, and
+  interpolated the `{threshold}` placeholder that was rendering literally in the Risk page intro.
+
 ## [0.9.0] - 2026-09-03
 
 ### Added

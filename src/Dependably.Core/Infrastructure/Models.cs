@@ -1297,6 +1297,12 @@ public class Project
     /// <summary>CycloneDX component.type vocabulary; seeded from an uploaded SBOM's metadata.</summary>
     public string Classifier { get; set; } = "application";
     public string? Description { get; set; }
+    /// <summary>
+    /// Whether this application is still in service. A retired project contributes nothing to the
+    /// blast radius however many of its releases are active — see
+    /// <see cref="ProjectLifecycle"/> for the predicate the two flags combine into.
+    /// </summary>
+    public bool IsActive { get; set; } = true;
     public string? CreatedBy { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
 }
@@ -1313,6 +1319,12 @@ public class ProjectVersion
     public string ProjectId { get; set; } = "";
     public string Version { get; set; } = "";
     public bool IsLatest { get; set; }
+    /// <summary>
+    /// Whether this release is still deployed somewhere. Orthogonal to <see cref="IsLatest"/>:
+    /// a release can be latest and retired (nothing runs the newest build yet) or active and
+    /// superseded (an older build still serving traffic).
+    /// </summary>
+    public bool IsActive { get; set; } = true;
     /// <summary>
     /// <c>pass</c>, <c>warn</c> or <c>violation</c> from the last policy evaluation. Null means
     /// the version has never been evaluated, which is not the same as passing.

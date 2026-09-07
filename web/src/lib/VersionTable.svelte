@@ -1,9 +1,14 @@
 <!--
   Version table extracted from VersionDetail.svelte. Owns the table's local UI
-  state — sort col/dir, which row is expanded, which row's actions popover is open,
-  popover position — and renders the row + the expanded detail panel + the actions
-  popover itself. Parent passes the data and the action handlers and supplies the
-  copy helper.
+  state — sort col/dir, which row is expanded, which row's actions menu is open —
+  and renders the row + the expanded detail panel. The actions menu itself is
+  RowActionsMenu, which owns the kebab trigger and the popover's positioning.
+  Parent passes the data and the action handlers and supplies the copy helper.
+
+  The row keeps the columns a reader scans across versions (latest, size, pushed,
+  licence, downloads, status); the per-version receipts — checksum, versions
+  behind, integrity — live in the expanded panel, and the package's origin (hosted
+  or proxy) is a package-level fact shown once in the page title.
 
   Rows are grouped by version. Most ecosystems map a version to a single artifact, so
   a group holds one file and renders as a flat row. Maven (jar + pom + sidecars) and
@@ -21,6 +26,7 @@
   import { SvelteMap } from 'svelte/reactivity'
   import { t } from 'svelte-i18n'
   import VulnerabilityRow from './VulnerabilityRow.svelte'
+  import RowActionsMenu from './RowActionsMenu.svelte'
   import { formatDate, formatBytes, formatNumber } from './format.js'
   import { sortIndicator } from './sortIndicator.js'
   import { rememberedRowCount, rememberRowCount } from './tableSize.js'
@@ -80,7 +86,6 @@
   $: if (!sortTouched && pkg) sortCol = defaultSortColumn(pkg.ecosystem)
   let expandedKey = null
   let openActionsId = null
-  let popoverPos = { top: 0, left: 0 }
 
   // Worst-first rank for collapsing several files' statuses into the version's overall status.
   // no_feed outranks unscanned: an unscanned artefact is waiting for the next pass, one whose
@@ -178,7 +183,6 @@
     if (sortCol === 'version')  cmp = compareVersions(a.version, b.version)
     else if (sortCol === 'size')      cmp = a.sizeBytes - b.sizeBytes
     else if (sortCol === 'pushed')    cmp = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-    else if (sortCol === 'checksum')  cmp = (a.checksumSha256 ?? '').localeCompare(b.checksumSha256 ?? '')
     else if (sortCol === 'license')   cmp = (a.licenses?.join(', ') ?? '').localeCompare(b.licenses?.join(', ') ?? '')
     else if (sortCol === 'downloads') cmp = (a.downloadCount ?? 0) - (b.downloadCount ?? 0)
     else if (sortCol === 'status')    cmp = (a.status ?? '').localeCompare(b.status ?? '')
@@ -206,7 +210,7 @@
   // OCI hosted images are keyed by their manifest digest; the full `sha256:…` string
   // is 71 unbreakable characters that blow out the version column and squish the tag
   // column beside it. Show a short digest in the cell (full value on hover); the tag
-  // column, the checksum column, and the expanded row's PURL/SHA-256 carry the rest.
+  // column and the expanded row's PURL/SHA-256 carry the rest.
   function shortVersion(version) {
     if (pkg?.ecosystem === 'oci' && /^sha256:[0-9a-f]{64}$/i.test(version)) {
       return version.slice(0, 19) + '…'
@@ -247,31 +251,15 @@
     return { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 }[s] ?? 4
   }
 
-  function toggleActions(id, e) {
-    e.stopPropagation()
-    if (openActionsId === id) { openActionsId = null; return }
-    const rect = e.currentTarget.getBoundingClientRect()
-    const POPOVER_WIDTH = 160
-    popoverPos = {
-      top: rect.bottom + 4,
-      left: Math.max(8, rect.right - POPOVER_WIDTH),
-    }
-    openActionsId = id
-  }
-
-  function handleWindowClick(e) {
-    if (openActionsId === null) return
-    if (e.target?.closest && (e.target.closest('.actions-popover') || e.target.closest('.kebab-btn'))) return
-    openActionsId = null
-  }
-
   function fire(name, payload) {
     openActionsId = null
     dispatch(name, payload)
   }
-</script>
 
-<svelte:window on:click={handleWindowClick} />
+  // Column count for the full-width placeholder and detail rows: version, latest, size,
+  // pushed, licence, downloads, status, actions — plus the tag column for OCI.
+  $: colCount = pkg?.ecosystem === 'oci' ? 9 : 8
+</script>
 
 <!-- Package-level upstream-currency banner. The per-row "Latest" column can only mark which
      cached version IS the upstream latest; when the package is stale that version isn't cached
@@ -298,14 +286,12 @@
   </div>
 {/if}
 
+<div class="table-scroll">
 <table class="table-auto versions-table">
   <colgroup>
     <col class="col-version">
     {#if pkg?.ecosystem === 'oci'}<col class="col-tag">{/if}
     <col class="col-latest">
-    <col class="col-behind">
-    <col class="col-origin">
-    <col class="col-checksum">
     <col class="col-size">
     <col class="col-pushed">
     <col class="col-license">
@@ -318,9 +304,6 @@
       <th class="sortable" on:click={() => toggleSort('version')}>{$t('versionDetail.columns.version')}{sortIndicator('version', sortCol, sortDir)}</th>
       {#if pkg?.ecosystem === 'oci'}<th>{$t('versionDetail.columns.tag')}</th>{/if}
       <th class="text-center">{$t('versionDetail.columns.latest')}</th>
-      <th class="text-center">{$t('versionDetail.columns.behind')}</th>
-      <th>{$t('versionDetail.columns.origin')}</th>
-      <th class="sortable" on:click={() => toggleSort('checksum')}>{$t('versionDetail.columns.checksum')}{sortIndicator('checksum', sortCol, sortDir)}</th>
       <th class="sortable" on:click={() => toggleSort('size')}>{$t('versionDetail.columns.size')}{sortIndicator('size', sortCol, sortDir)}</th>
       <th class="sortable" on:click={() => toggleSort('pushed')}>{$t('versionDetail.columns.pushed')}{sortIndicator('pushed', sortCol, sortDir)}</th>
       <th class="sortable" on:click={() => toggleSort('license')}>{$t('versionDetail.columns.license')}{sortIndicator('license', sortCol, sortDir)}</th>
@@ -332,7 +315,7 @@
   {#if showPlaceholder}
     <tbody aria-hidden="true">
       {#each [...Array(placeholderRows).keys()] as i (i)}
-        <tr class="skeleton-row"><td colspan={pkg?.ecosystem === 'oci' ? 12 : 11}><span class="skeleton"></span></td></tr>
+        <tr class="skeleton-row"><td colspan={colCount}><span class="skeleton"></span></td></tr>
       {/each}
     </tbody>
   {:else}
@@ -341,6 +324,8 @@
       {@const vulns = (vulnsByPurl.get(g.purl) ?? []).slice().sort((a, b) => severityOrder(a.severity) - severityOrder(b.severity))}
       {@const isExpanded = expandedKey === g.key}
       {@const verShort = shortVersion(g.version)}
+      {@const hasFlags = !g.single || g.yanked || g.deprecated || g.revokedAt || g.hasInstallScript
+        || g.provenanceStatus !== null || g.hasSymbolPackage || vulns.length > 0}
       <tr
         class:first-fetch-row={g.firstFetch}
         class:expanded-row={isExpanded}
@@ -349,27 +334,33 @@
       >
         <td class="version-cell">
           <strong class:mono={verShort !== g.version} title={verShort === g.version ? null : g.version}>{verShort}</strong>
-          {#if !g.single}<span class="badge files-badge ml-1">{$t('versionDetail.fileCount', { values: { count: g.fileCount } })}</span>{/if}
-          {#if g.yanked}<span class="badge yanked ml-1">{$t('versionDetail.badges.yanked')}</span>{/if}
-          {#if g.deprecated}<span class="badge deprecated ml-1" title={g.deprecated}>{$t('versionDetail.badges.deprecated')}</span>{/if}
-          {#if g.revokedAt}<span class="badge revoked ml-1" title={$t('versionDetail.badges.revokedHelp')}><svg width="11" height="11" aria-hidden="true"><use href="/icons.svg#icon-alert"/></svg>{$t('versionDetail.badges.revoked')}</span>{/if}
-          {#if g.hasInstallScript}<span class="badge install-script ml-1" title={$t('versionDetail.badges.installScriptHelp', { values: { kind: g.installScriptKind || '' } })}>{$t('versionDetail.badges.installScript')}</span>{/if}
-          {#if g.provenanceStatus === 'verified'}<span class="badge prov-verified ml-1" title={$t('versionDetail.badges.provenanceVerifiedHelp', { values: { signer: g.provenanceSigner || '' } })}>{$t('versionDetail.badges.provenanceVerified')}</span>{/if}
-          {#if g.provenanceStatus === 'failed'}<span class="badge prov-failed ml-1" title={$t('versionDetail.badges.provenanceFailedHelp')}>{$t('versionDetail.badges.provenanceFailed')}</span>{/if}
-          {#if g.provenanceStatus === 'unsigned'}<span class="badge prov-unsigned ml-1" title={$t('versionDetail.badges.provenanceUnsignedHelp')}>{$t('versionDetail.badges.provenanceUnsigned')}</span>{/if}
-          {#if g.hasSymbolPackage && g.indexedPdbCount > 0}<span class="badge symbols ml-1" title={$t('versionDetail.badges.symbolsHelp', { values: { count: g.indexedPdbCount } })}><svg width="11" height="11" aria-hidden="true"><use href="/icons.svg#icon-bug"/></svg>{$t('versionDetail.badges.symbols', { values: { count: g.indexedPdbCount } })}</span>{/if}
-          {#if g.hasSymbolPackage && g.indexedPdbCount === 0}<span class="badge symbols-unindexed ml-1" title={$t('versionDetail.badges.symbolsUnindexedHelp')}><svg width="11" height="11" aria-hidden="true"><use href="/icons.svg#icon-alert"/></svg>{$t('versionDetail.badges.symbolsUnindexed')}</span>{/if}
-          {#if vulns.length > 0}
-            {@const critical = vulns.filter(v => v.severity === 'CRITICAL').length}
-            {@const high     = vulns.filter(v => v.severity === 'HIGH').length}
-            {@const medium   = vulns.filter(v => v.severity === 'MEDIUM').length}
-            {@const low      = vulns.filter(v => v.severity === 'LOW').length}
-            <span class="inline-vulns">
-              {#if critical > 0}<span class="sev sev-critical" aria-label="{critical} critical">{critical}</span>{/if}
-              {#if high > 0}<span class="sev sev-high" aria-label="{high} high">{high}</span>{/if}
-              {#if medium > 0}<span class="sev sev-medium" aria-label="{medium} medium">{medium}</span>{/if}
-              {#if low > 0}<span class="sev sev-low" aria-label="{low} low">{low}</span>{/if}
-            </span>
+          <!-- The flags wrap on their own line under the version so a row with none stays a
+               single line; a row carrying several stays compact rather than ragged. -->
+          {#if hasFlags}
+            <div class="version-flags">
+              {#if !g.single}<span class="badge files-badge">{$t('versionDetail.fileCount', { values: { count: g.fileCount } })}</span>{/if}
+              {#if g.yanked}<span class="badge yanked">{$t('versionDetail.badges.yanked')}</span>{/if}
+              {#if g.deprecated}<span class="badge deprecated" title={g.deprecated}>{$t('versionDetail.badges.deprecated')}</span>{/if}
+              {#if g.revokedAt}<span class="badge revoked" title={$t('versionDetail.badges.revokedHelp')}><svg width="11" height="11" aria-hidden="true"><use href="/icons.svg#icon-alert"/></svg>{$t('versionDetail.badges.revoked')}</span>{/if}
+              {#if g.hasInstallScript}<span class="badge install-script" title={$t('versionDetail.badges.installScriptHelp', { values: { kind: g.installScriptKind || '' } })}>{$t('versionDetail.badges.installScript')}</span>{/if}
+              {#if g.provenanceStatus === 'verified'}<span class="badge prov-verified" title={$t('versionDetail.badges.provenanceVerifiedHelp', { values: { signer: g.provenanceSigner || '' } })}>{$t('versionDetail.badges.provenanceVerified')}</span>{/if}
+              {#if g.provenanceStatus === 'failed'}<span class="badge prov-failed" title={$t('versionDetail.badges.provenanceFailedHelp')}>{$t('versionDetail.badges.provenanceFailed')}</span>{/if}
+              {#if g.provenanceStatus === 'unsigned'}<span class="badge prov-unsigned" title={$t('versionDetail.badges.provenanceUnsignedHelp')}>{$t('versionDetail.badges.provenanceUnsigned')}</span>{/if}
+              {#if g.hasSymbolPackage && g.indexedPdbCount > 0}<span class="badge symbols" title={$t('versionDetail.badges.symbolsHelp', { values: { count: g.indexedPdbCount } })}><svg width="11" height="11" aria-hidden="true"><use href="/icons.svg#icon-bug"/></svg>{$t('versionDetail.badges.symbols', { values: { count: g.indexedPdbCount } })}</span>{/if}
+              {#if g.hasSymbolPackage && g.indexedPdbCount === 0}<span class="badge symbols-unindexed" title={$t('versionDetail.badges.symbolsUnindexedHelp')}><svg width="11" height="11" aria-hidden="true"><use href="/icons.svg#icon-alert"/></svg>{$t('versionDetail.badges.symbolsUnindexed')}</span>{/if}
+              {#if vulns.length > 0}
+                {@const critical = vulns.filter(v => v.severity === 'CRITICAL').length}
+                {@const high     = vulns.filter(v => v.severity === 'HIGH').length}
+                {@const medium   = vulns.filter(v => v.severity === 'MEDIUM').length}
+                {@const low      = vulns.filter(v => v.severity === 'LOW').length}
+                <span class="inline-vulns">
+                  {#if critical > 0}<span class="sev sev-critical" aria-label="{critical} critical">{critical}</span>{/if}
+                  {#if high > 0}<span class="sev sev-high" aria-label="{high} high">{high}</span>{/if}
+                  {#if medium > 0}<span class="sev sev-medium" aria-label="{medium} medium">{medium}</span>{/if}
+                  {#if low > 0}<span class="sev sev-low" aria-label="{low} low">{low}</span>{/if}
+                </span>
+              {/if}
+            </div>
           {/if}
         </td>
         {#if pkg?.ecosystem === 'oci'}
@@ -394,32 +385,6 @@
             <span class="text-muted" aria-label={$t('versionDetail.latestCell.unknown')}>—</span>
           {/if}
         </td>
-        <td class="text-center behind-cell">
-          <!-- Operational-risk signal: the count of upstream STABLE versions strictly newer than
-               this one. NULL (unknown — hosted-only, air-gapped, or not yet refreshed) renders
-               UNSCORED, never 0. -->
-          {#if g.versionsBehind !== null}
-            <span
-              class="behind-count"
-              class:behind-count-current={g.versionsBehind === 0}
-              title={$t('versionDetail.behindCell.help')}
-            >{$t('versionDetail.behindCell.count', { values: { count: g.versionsBehind } })}</span>
-          {:else}
-            <span class="text-muted" title={$t('versionDetail.behindCell.unscoredHelp')}>{$t('versionDetail.behindCell.unscored')}</span>
-          {/if}
-        </td>
-        <td class="nowrap">
-          {#if pkg}
-            <span class="badge {pkg.isProxy ? 'proxy' : 'hosted'}">
-              {pkg.isProxy ? $t('packages.proxy') : $t('packages.hosted')}
-            </span>
-          {/if}
-        </td>
-        {#if g.single}
-          <td class="mono checksum-cell nowrap" title={g.checksumSha256 ?? ''}>{g.checksumSha256?.slice(0,8) ?? '—'}…</td>
-        {:else}
-          <td class="checksum-cell nowrap text-muted" title={$t('versionDetail.multiFileHint')}>—</td>
-        {/if}
         <td class="nowrap">{$formatBytes(g.sizeBytes)}</td>
         <td class="nowrap text-muted">{$formatDate(g.createdAt)}</td>
         <td class="license-cell">
@@ -452,15 +417,39 @@
             >{$t(`versionDetail.status.${g.status}`)}</span>
           {/if}
         </td>
-        <td>
+        <td class="actions-cell">
           {#if isAdmin || g.single}
-            <button
-              class="kebab-btn"
-              on:click={(e) => toggleActions(g.id, e)}
-              aria-label={$t('versionDetail.actionsMenu.open')}
-              aria-haspopup="true"
-              aria-expanded={openActionsId === g.id}
-            >⋯</button>
+            <RowActionsMenu id={g.id} bind:openId={openActionsId} ariaLabel={$t('versionDetail.actionsMenu.open')}>
+              <!-- Download is available to every viewer. For a multi-file version each file
+                   downloads from its own row in the expanded panel, so the version-level menu
+                   only offers download when the version maps to a single file. -->
+              {#if g.single}
+                <button class="popover-item" on:click|stopPropagation={() => fire('download', { version: g.version })}>{$t('versionDetail.actionsMenu.download')}</button>
+              {/if}
+              {#if isAdmin}
+                {#if g.single}<div class="popover-divider"></div>{/if}
+                <button
+                  class="popover-item"
+                  on:click|stopPropagation={() => fire('rescan', g)}
+                  disabled={scanningId === g.id || scanCooldownRemaining(g) > 0}
+                  title={scanCooldownRemaining(g) > 0 ? $t('versionDetail.rescanCooldown', { values: { minutes: Math.ceil(scanCooldownRemaining(g)/60000) } }) : $t('versionDetail.rescanTitle')}
+                >{scanningId === g.id ? $t('versionDetail.rescanning') : $t('versionDetail.actionsMenu.rescan')}</button>
+                <button
+                  class="popover-item"
+                  on:click|stopPropagation={() => fire('block', g)}
+                  disabled={g.status === 'blocked'}
+                  title={g.status === 'blocked' ? $t('versionDetail.blockDisabledTitle') : ''}
+                >{$t('versionDetail.actionsMenu.block')}</button>
+                <button
+                  class="popover-item"
+                  on:click|stopPropagation={() => fire('unblock', g)}
+                  disabled={g.status !== 'blocked'}
+                  title={g.status !== 'blocked' ? $t('versionDetail.unblockDisabledTitle') : ''}
+                >{$t('versionDetail.actionsMenu.unblock')}</button>
+                <div class="popover-divider"></div>
+                <button class="popover-item danger" on:click|stopPropagation={() => fire('delete', g)}>{$t('versionDetail.actionsMenu.delete')}</button>
+              {/if}
+            </RowActionsMenu>
           {/if}
         </td>
       </tr>
@@ -475,7 +464,7 @@
           origin: registryOrigin,
         })}
         <tr class="detail-row">
-          <td colspan={pkg?.ecosystem === 'oci' ? 12 : 11}>
+          <td colspan={colCount}>
             <div class="detail-panel">
               <!-- First in the panel: "how do I get this exact version" outranks "what is
                    its identifier" for a reader who just expanded the row. -->
@@ -495,6 +484,7 @@
               {#if !g.single}
                 <div class="files-section">
                   <span class="detail-label">{$t('versionDetail.detail.files')}</span>
+                  <div class="table-scroll">
                   <table class="files-table">
                     <thead>
                       <tr>
@@ -541,6 +531,7 @@
                       {/each}
                     </tbody>
                   </table>
+                  </div>
                 </div>
               {/if}
 
@@ -594,6 +585,22 @@
               </div>
 
               <div class="detail-section">
+                <span class="detail-label">{$t('versionDetail.columns.behind')}</span>
+                <!-- Operational-risk signal: the count of upstream STABLE versions strictly newer
+                     than this one. NULL (unknown — hosted-only, air-gapped, or not yet refreshed)
+                     renders UNSCORED, never 0. -->
+                {#if g.versionsBehind !== null}
+                  <span
+                    class="detail-value behind-count"
+                    class:behind-count-current={g.versionsBehind === 0}
+                    title={$t('versionDetail.behindCell.help')}
+                  >{$t('versionDetail.behindCell.count', { values: { count: g.versionsBehind } })}</span>
+                {:else}
+                  <span class="detail-value text-muted" title={$t('versionDetail.behindCell.unscoredHelp')}>{$t('versionDetail.behindCell.unscored')}</span>
+                {/if}
+              </div>
+
+              <div class="detail-section">
                 <span class="detail-label">{$t('versionDetail.detail.vulnScan')}</span>
                 <span class="detail-value text-muted">
                   {g.vulnCheckedAt ? $formatDate(g.vulnCheckedAt) : $t('versionDetail.vulnNever')}
@@ -620,52 +627,17 @@
   </tbody>
   {/if}
 </table>
-
-{#if openActionsId !== null}
-  {@const g = groups.find(v => v.id === openActionsId)}
-  {#if g}
-    <div class="actions-popover" style:top="{popoverPos.top}px" style:left="{popoverPos.left}px">
-      <!-- Download is available to every viewer. For a multi-file version each file downloads
-           from its own row in the expanded panel, so the version-level menu only offers
-           download when the version maps to a single file. -->
-      {#if g.single}
-        <button class="popover-item" on:click|stopPropagation={() => fire('download', { version: g.version })}>{$t('versionDetail.actionsMenu.download')}</button>
-      {/if}
-      {#if isAdmin}
-        {#if g.single}<div class="popover-divider"></div>{/if}
-        <button
-          class="popover-item"
-          on:click|stopPropagation={() => fire('rescan', g)}
-          disabled={scanningId === g.id || scanCooldownRemaining(g) > 0}
-          title={scanCooldownRemaining(g) > 0 ? $t('versionDetail.rescanCooldown', { values: { minutes: Math.ceil(scanCooldownRemaining(g)/60000) } }) : $t('versionDetail.rescanTitle')}
-        >{scanningId === g.id ? $t('versionDetail.rescanning') : $t('versionDetail.actionsMenu.rescan')}</button>
-        <button
-          class="popover-item"
-          on:click|stopPropagation={() => fire('block', g)}
-          disabled={g.status === 'blocked'}
-          title={g.status === 'blocked' ? $t('versionDetail.blockDisabledTitle') : ''}
-        >{$t('versionDetail.actionsMenu.block')}</button>
-        <button
-          class="popover-item"
-          on:click|stopPropagation={() => fire('unblock', g)}
-          disabled={g.status !== 'blocked'}
-          title={g.status !== 'blocked' ? $t('versionDetail.unblockDisabledTitle') : ''}
-        >{$t('versionDetail.actionsMenu.unblock')}</button>
-        <div class="popover-divider"></div>
-        <button class="popover-item danger" on:click|stopPropagation={() => fire('delete', g)}>{$t('versionDetail.actionsMenu.delete')}</button>
-      {/if}
-    </div>
-  {/if}
-{/if}
+</div>
 
 <style>
   .first-fetch-row td { background: var(--badge-warning-bg) !important; color: var(--badge-warning-text); }
-  .expanded-row td { background: var(--surface2); }
 
+  /* Flags sit on their own line under the version, wrapping as a compact chip row. */
+  .version-flags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+  .version-flags .badge { margin: 0; }
   .inline-vulns {
     display: inline-flex;
     gap: 3px;
-    margin-left: 6px;
     vertical-align: middle;
     white-space: nowrap;
   }
@@ -673,7 +645,6 @@
   .nowrap { white-space: nowrap; }
   .version-cell { overflow-wrap: anywhere; }
   .version-cell .mono { font-size: 12px; }
-  .checksum-cell { font-size: 11px; color: var(--text2); }
   .license-cell { font-size: 12px; overflow-wrap: anywhere; }
   .license-blocked { color: var(--badge-red-text); font-weight: 600; }
   .license-risk-icon { color: var(--danger); margin-left: 3px; vertical-align: middle; }
@@ -683,14 +654,11 @@
   .versions-table .col-version   { width: 180px; }
   .versions-table .col-tag       { width: 140px; }
   .versions-table .col-latest    { width: 70px; }
-  .versions-table .col-behind    { width: 90px; }
-  .versions-table .col-origin    { width: 90px; }
-  .versions-table .col-checksum  { width: 100px; }
   .versions-table .col-size      { width: 80px; }
   .versions-table .col-pushed    { width: 150px; }
   .versions-table .col-license   { width: 120px; }
   .versions-table .col-downloads { width: 100px; }
-  .versions-table .col-status    { width: 100px; }
+  .versions-table .col-status    { width: 120px; }
   .versions-table .col-actions   { width: 60px; }
   .num-col { text-align: right; font-variant-numeric: tabular-nums; }
   .text-right { text-align: right; }
@@ -701,7 +669,6 @@
   .latest-yes { color: var(--success); }
   .latest-no { color: var(--danger); }
   .abandoned-icon { color: var(--warning); }
-  .behind-cell { font-size: 12px; }
   .behind-count { font-weight: 600; color: var(--badge-warning-text); }
   .behind-count-current { color: var(--success); font-weight: 400; }
 
@@ -732,7 +699,8 @@
 
   /* Per-file breakdown for multi-file versions (Maven jar/pom/sidecars, PyPI wheel/sdist). */
   .files-section { margin-bottom: 12px; }
-  .files-table { width: 100%; border-collapse: collapse; margin-top: 4px; font-size: 12px; }
+  /* Auto layout, unlike the global fixed default, honours the checksum cell's floor below. */
+  .files-table { width: 100%; border-collapse: collapse; margin-top: 4px; font-size: 12px; table-layout: auto; }
   .files-table th {
     text-align: left;
     font-weight: 600;
@@ -745,10 +713,13 @@
   }
   .files-table td { padding: 4px 8px; border-bottom: 1px solid var(--border); }
   .files-table tr:last-child td { border-bottom: none; }
-  .filename-cell { overflow-wrap: anywhere; }
+  .filename-cell { overflow-wrap: anywhere; min-width: 160px; }
   /* Full per-file checksum with an inline copy button; the hash wraps rather than truncating. */
   .checksum-inline { display: inline-flex; align-items: center; gap: 6px; }
   .checksum-full { font-size: 11px; color: var(--text2); overflow-wrap: anywhere; }
+  /* A hash needs a readable measure; the files table scrolls rather than wrapping it one
+     character per line inside a narrow auto-sized column. */
+  .files-table .checksum-cell { min-width: 240px; }
   .file-type {
     font-size: 10px;
     text-transform: uppercase;
@@ -759,6 +730,7 @@
   .file-dl-btn { padding: 2px 10px; font-size: 11px; white-space: nowrap; }
 
   .status-badge {
+    white-space: nowrap;
     display: inline-flex;
     align-items: center;
     gap: 3px;
@@ -784,46 +756,4 @@
     margin-right: 4px;
   }
   .status-th { white-space: nowrap; }
-
-  .kebab-btn {
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: 4px;
-    padding: 2px 8px;
-    font-size: 16px;
-    line-height: 1;
-    cursor: pointer;
-    color: var(--text2);
-  }
-  .kebab-btn:hover { background: var(--bg3); color: var(--text); }
-
-  .actions-popover {
-    position: fixed;
-    z-index: 1000;
-    min-width: 160px;
-    background: var(--bg2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    box-shadow: var(--shadow);
-    padding: 4px 0;
-  }
-  .popover-item {
-    display: block;
-    width: 100%;
-    text-align: left;
-    background: transparent;
-    border: none;
-    padding: 6px 12px;
-    font-size: 13px;
-    color: var(--text);
-    cursor: pointer;
-  }
-  .popover-item:hover:not(:disabled) { background: var(--bg3); }
-  .popover-item:disabled { color: var(--text2); cursor: not-allowed; }
-  .popover-item.danger { color: var(--badge-red-text); }
-  .popover-divider {
-    height: 1px;
-    margin: 4px 0;
-    background: var(--border);
-  }
 </style>

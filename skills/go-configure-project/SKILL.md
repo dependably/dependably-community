@@ -1,7 +1,7 @@
 ---
 name: go-configure-project
 description: Scope a dependably GOPROXY to a single Go repo via a committed .envrc / CI env
-ecosystem: go
+ecosystem: golang
 scope: project
 inputs:
   - DEPENDABLY_BASE_URL

@@ -67,14 +67,16 @@
 
   // The "scope" column displays a label derived from capabilities, so sort by that
   // derived label when the user clicks the header. Other columns sort by the raw field.
+  // Description is the one human-readable column and the only flexible one, so the fixed set is
+  // kept to 620px and Last used leaves under 1100px.
   $: columns = [
-    { key: 'id',          label: $t('tokens.columns.id'),          sortable: false, width: '100px' },
+    { key: 'id',          label: $t('tokens.columns.id'),          sortable: false, width: '90px' },
     { key: 'description', label: $t('tokens.columns.description'), sortable: true },
     { key: 'scope',       label: $t('tokens.columns.scope'),       sortable: true,  width: '120px' },
     { key: 'createdAt',   label: $t('tokens.columns.created'),     sortable: true,  width: '110px', defaultDir: 'desc' },
-    { key: 'expiresAt',   label: $t('tokens.columns.expires'),     sortable: true,  width: '130px' },
-    { key: 'lastUsedAt',  label: $t('tokens.columns.lastUsed'),    sortable: true,  width: '130px' },
-    { key: 'actions',     label: '',                               sortable: false, width: '90px' },
+    { key: 'expiresAt',   label: $t('tokens.columns.expires'),     sortable: true,  width: '110px' },
+    { key: 'lastUsedAt',  label: $t('tokens.columns.lastUsed'),    sortable: true,  width: '110px', hideBelow: 1100 },
+    { key: 'actions',     label: '',                               sortable: false, width: '80px' },
   ]
   const comparators = {
     scope: (a, b) => capabilitiesToLabel(a.capabilities).localeCompare(capabilitiesToLabel(b.capabilities))
@@ -113,6 +115,7 @@
     emptyText={$t('tokens.empty')}
     tableClass="tokens-table"
     let:row={tok}
+    let:hidden
   >
     {@const label = capabilitiesToLabel(tok.capabilities)}
     {@const caps = capabilitiesToText(tok.capabilities)}
@@ -128,7 +131,9 @@
         {#if expired(tok)}<span class="badge expired">{$t('tokens.expired')}</span>
         {:else}{tok.expiresAt ? $formatDateShort(tok.expiresAt) : '—'}{/if}
       </td>
-      <td class="text-muted">{tok.lastUsedAt ? $formatDateShort(tok.lastUsedAt) : $t('tokens.never')}</td>
+      {#if !hidden.has('lastUsedAt')}
+        <td class="text-muted">{tok.lastUsedAt ? $formatDateShort(tok.lastUsedAt) : $t('tokens.never')}</td>
+      {/if}
       <td><button class="danger btn-sm" on:click={() => revoke(tok.id)}>{$t('common.actions.revoke')}</button></td>
     </tr>
   </DataTable>

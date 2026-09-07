@@ -1,6 +1,10 @@
 <script>
   /**
-   * Step 1 — mint the access token every client needs to authenticate.
+   * Step 1 — what the reader is doing, and the token that lets them do it.
+   *
+   * The operation lives here rather than with the other axes because it is the only one that
+   * changes the credential: install mints a read-only token, publish a push one. Asking it
+   * anywhere below the mint button would put the question after the answer.
    *
    * The token is held in this component's state and handed upward, never persisted: it is
    * shown once, exactly as the Tokens page shows it, and the page pairs it with the recipe
@@ -14,6 +18,8 @@
   import ErrorBanner from '../ErrorBanner.svelte'
   import { copyToClipboard } from '../clipboard.js'
   import { presetToCapabilities } from '../tokenCapabilities.js'
+  import { ECO_LABEL } from '../ecosystems.js'
+  import { availableOperations } from './recipes.js'
 
   /** Preset the recipe below needs — 'pull' for install, 'push' for publish. */
   export let preset = 'pull'
@@ -21,6 +27,18 @@
   export let autoDescription = ''
   /** The minted secret, bound by the page so later steps can use it. */
   export let token = null
+  /** The server payload for the selected ecosystem, or null while it is in flight. */
+  export let payload = null
+  /** Selected ecosystem — named only to explain an absent publish option. */
+  export let ecosystem = ''
+  /** What the reader is doing. Bound by the page; the only axis that selects the preset. */
+  export let operation = 'install'
+
+  $: operations = availableOperations(payload)
+
+  // Publish is absent for the proxy-only ecosystems. Saying why beats an option that
+  // silently is not there.
+  $: proxyOnly = payload !== null && operations.length > 0 && !operations.includes('publish')
 
   const dispatch = createEventDispatcher()
 
@@ -72,6 +90,26 @@
   <div>
     <h4>{$t('setup.step.token.title')}</h4>
 
+    {#if operations.length > 0}
+      <div class="axis">
+        <span class="axis-label" id="setup-operation-label">{$t('setup.axis.operation')}</span>
+        <div class="tabs inline-tabs" role="tablist" aria-labelledby="setup-operation-label">
+          {#each operations as op (op)}
+            <button
+              class="tab"
+              class:active={operation === op}
+              role="tab"
+              aria-selected={operation === op}
+              on:click={() => (operation = op)}
+            >{$t('setup.operation.' + op)}</button>
+          {/each}
+        </div>
+        {#if proxyOnly}
+          <p class="form-hint">{$t('setup.proxyOnly', { values: { ecosystem: ECO_LABEL[ecosystem] ?? ecosystem } })}</p>
+        {/if}
+      </div>
+    {/if}
+
     <ErrorBanner message={error} />
 
     {#if token}
@@ -102,6 +140,25 @@
 </div>
 
 <style>
+  .axis { margin-bottom: 16px; }
+
+  .axis-label {
+    display: block;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text2);
+    margin-bottom: 6px;
+  }
+
+  /* The page-level .tabs rule spans the full width under a bottom border, which reads as
+     page navigation. These are inline controls inside a step, so they shrink to their
+     content and drop the rule. */
+  .inline-tabs {
+    display: inline-flex;
+    border-bottom: 0;
+    margin-bottom: 0;
+  }
+
   /* The mint button and the escape hatch for an existing token sit on one row. */
   .mint-row {
     display: flex;

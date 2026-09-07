@@ -107,7 +107,8 @@
 </div>
 
 <style>
-  .card-narrow { max-width: 480px; margin-top: 12px; }
+  /* Sits under the Integrations sub-tab strip; the extra gap keeps the card off the strip. */
+  .card-narrow { margin-top: 12px; }
   /* .form-row is a column flex box by default; the inline variant turns the row back into a
      left-aligned label + right-edge control, matching the other settings tabs. */
   .form-row-inline { flex-direction: row; align-items: center; gap: 12px; }

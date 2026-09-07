@@ -105,6 +105,12 @@ public sealed class PackageAnalyticsRepository
         // this needs no fan-out per finding: one COUNT-GROUP-BY over each project's is_latest
         // row gives the whole "N pass / N warn / N violation" picture. A NULL status (never
         // evaluated) is its own bucket, not folded into 'pass'.
+        //
+        // Deliberately is_latest and NOT ProjectLifecycle.InServiceFilter, unlike the blast
+        // radius: this tile counts PROJECTS, one verdict each, and its sub-line has to add up to
+        // the headline total beside it. Admitting every active version would count a project once
+        // per concurrently-deployed release and produce a breakdown larger than the number of
+        // projects it claims to describe — a tile whose parts do not add up.
         var projectPolicyStatus = (await conn.QueryAsync<ProjectPolicyStatusCount>(
             """
             SELECT COALESCE(pv.policy_status, 'unevaluated') AS Status, COUNT(*) AS Count

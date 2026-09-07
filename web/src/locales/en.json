@@ -253,7 +253,8 @@
       "severity": "Severity",
       "policy": "Policy",
       "latest": "Latest",
-      "lastUpload": "Last upload"
+      "lastUpload": "Last upload",
+      "active": "Active"
     },
     "severity": {
       "critical": "{count} critical",
@@ -295,7 +296,8 @@
         "policy": "Policy",
         "uploaded": "Uploaded",
         "name": "Name",
-        "latest": "Latest version"
+        "latest": "Latest version",
+        "active": "Active"
       },
       "isLatest": "Latest",
       "promote": "Promote to latest",
@@ -305,11 +307,23 @@
       "deleteProjectConfirm": "Delete \"{name}\" and all its versions? This cannot be undone.",
       "deleteCollectionConfirm": "Delete the folder \"{name}\" and everything inside it — every project it contains and all their versions? This cannot be undone.",
       "loadFailed": "Failed to load project: {message}",
-      "exportHint": "Every project in this folder, each at its latest version. Projects with no SBOM are listed and marked."
+      "exportHint": "Every project in this folder, each at its latest version. Projects with no SBOM are listed and marked.",
+      "retire": "Retire",
+      "reinstate": "Reinstate"
     },
     "versionDetail": {
       "placeholderTitle": "Version detail",
       "placeholder": "Component inventory and analysis for this version are on their way."
+    },
+    "status": {
+      "active": "Active",
+      "retired": "Retired",
+      "retiredLatest": "Retired (latest)",
+      "retiredLatestHint": "Still counted: the latest release is always in service.",
+      "retiredHint": "Retired applications are excluded from blast-radius counts.",
+      "activeLabel": "Active",
+      "projectHint": "Retiring excludes this application from blast-radius counts and stops its nightly rescan.",
+      "collectionHint": "Retiring excludes every application in this folder from blast-radius counts."
     }
   },
   "claims": {
@@ -374,6 +388,12 @@
     "summary": "Batch {batchId}: {accepted} accepted, {rejected} rejected.",
     "outcome": {
       "accepted": "Accepted",
+      "columns": {
+        "detail": "Detail",
+        "ecosystem": "Ecosystem",
+        "file": "File",
+        "status": "Status"
+      },
       "rejected": "Rejected",
       "would_accept": "Would accept",
       "would_reject": "Would reject"
@@ -587,7 +607,6 @@
     },
     "blastRadius": {
       "summary": "{count, plural, one {# application ships this} other {# applications ship this}}",
-      "help": "The latest version of each application whose SBOM lists this package. Older releases are not counted — they are not what you ship, and their component scans are not kept current.",
       "ships": "ships {version}",
       "more": "and {count} more"
     }
@@ -648,7 +667,6 @@
   },
   "audit": {
     "title": "Audit",
-    "forbidden": "Audit log is only accessible to org admins.",
     "tabs": {
       "lifecycle": "Activity",
       "adminActions": "Configuration"
@@ -709,6 +727,7 @@
       "member_removed": "Member removed",
       "invite_created": "Invite created",
       "invite_deleted": "Invite deleted",
+      "invite_accept_blocked": "Invite accept blocked (SSO-only)",
       "saml.config_updated": "SAML config updated",
       "saml.metadata_uploaded": "SAML metadata uploaded",
       "saml.config_deleted": "SAML config deleted",
@@ -1244,7 +1263,7 @@
       "activityDays": "Activity retention days",
       "purgeUnlistedDays": "Purge unlisted after (days)",
       "keepProjectVersions": "Keep project versions",
-      "keepProjectVersionsHint": "Caps the SBOM/VEX/SARIF versions kept per project and releases the documents of the ones it removes. The latest version of a project is never removed, whatever its age.",
+      "keepProjectVersionsHint": "Caps the SBOM/VEX/SARIF versions kept per project and releases the documents of the ones it removes. A project's latest version, and any version marked active, are never removed whatever their age.",
       "unlimited": "unlimited",
       "instanceDefault": "instance default: {days} days",
       "activityDaysHint": "Unlike the limits above, empty is not unlimited here: activity rows carry per-download IP data, so they are bounded by the ACTIVITY_RETENTION_DAYS instance default."
@@ -1633,10 +1652,10 @@
     }
   },
   "setup": {
-    "title": "Connect a package manager",
+    "title": "Setup",
     "step": {
       "token": {
-        "title": "Create a token",
+        "title": "Choose what you are doing, and create a token",
         "create": "Create token",
         "shownOnce": "Copy this now — it is not shown again.",
         "useExisting": "Already have a token? Manage tokens",
@@ -1689,6 +1708,36 @@
       "insecureRegistry": "Docker refuses a plain-HTTP registry until the daemon opts in. Restart the daemon after editing daemon.json.",
       "httpMirror": "Terraform rejects an http:// network mirror and there is no client-side override. This registry must be served over HTTPS before this configuration can work.",
       "usernameIgnored": "The username is ignored — any value works. Dependably authenticates on the token alone, which goes in the password field."
+    },
+    "tabs": {
+      "connect": "Connect a package manager",
+      "skills": "Remediation skills"
+    },
+    "skillAlternative": {
+      "title": "Or configure it with an AI assistant",
+      "assistantLabel": "Choose your AI assistant",
+      "hint": "Install the curated skill for this package manager, then ask your assistant to run it. It will prompt you for the registry URL and a token."
+    },
+    "skills": {
+      "intro": "Curated recipes for fixing a vulnerability this registry surfaced. Install one into your AI assistant, then point it at the finding you are working on.",
+      "assistantLabel": "Choose your AI assistant",
+      "none": "This instance ships no remediation skills.",
+      "allTitle": "Install all of them",
+      "downloadAll": "Download all (.zip)",
+      "allHint": "The command installs every skill where your assistant looks for it. The zip is for taking the whole set somewhere this registry cannot reach."
+    }
+  },
+  "skills": {
+    "assistantLabel": "Choose your AI assistant",
+    "installLabel": "Install skill",
+    "promptLabel": "Prompt",
+    "readTitle": "Read this skill",
+    "modal": {
+      "eyebrow": "Curated skill",
+      "loading": "Loading skill…",
+      "copy": "Copy Markdown",
+      "download": "Download SKILL.md",
+      "close": "Close"
     }
   },
   "admin": {
@@ -1840,7 +1889,7 @@
     },
     "blastRadius": {
       "summary": "{count, plural, one {# app} other {# apps}}",
-      "help": "Applications whose latest version ships this package. Denying it here affects them.",
+      "help": "Applications running a version that ships this package. Denying it here affects them.",
       "unavailable": "apps unavailable",
       "unavailableHelp": "The affected-application count could not be loaded. This is not a count of zero."
     }

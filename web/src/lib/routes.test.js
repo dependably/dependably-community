@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { useRouter, pathFor, searchFor, routeFor, routesEqual, ADMIN_ONLY_PAGES } from './routes.js'
+import { useRouter, pathFor, searchFor, routeFor, routesEqual, RESTRICTED_PAGES, canAccessPage } from './routes.js'
 
 describe('routes — tenant table', () => {
   beforeEach(() => useRouter('tenant'))
@@ -9,10 +9,11 @@ describe('routes — tenant table', () => {
     expect(routeFor('/risk')).toEqual({ page: 'risk', params: {} })
   })
 
-  it('risk is not admin-only — every role can open the rows behind a tile it can see', () => {
+  it('risk is not role-restricted — every role can open the rows behind a tile it can see', () => {
     // The drill-down endpoints gate on read:packages, the same capability that serves the
-    // dashboard tiles. Adding 'risk' here would bounce members off their own risk data.
-    expect(ADMIN_ONLY_PAGES.has('risk')).toBe(false)
+    // dashboard tiles. Listing 'risk' would bounce members off their own risk data.
+    expect(RESTRICTED_PAGES.has('risk')).toBe(false)
+    expect(canAccessPage('risk', 'member')).toBe(true)
   })
 
   it('deep-links the risk tabs and the blocked-pull audit window the dashboard tiles use', () => {
@@ -86,10 +87,12 @@ describe('routes — tenant table', () => {
     expect(searchFor('version-detail', { ecosystem: 'npm', name: 'foo' })).toBe('')
   })
 
-  it('projects is not admin-only — read visibility for every member', () => {
-    expect(ADMIN_ONLY_PAGES.has('projects')).toBe(false)
-    expect(ADMIN_ONLY_PAGES.has('project-detail')).toBe(false)
-    expect(ADMIN_ONLY_PAGES.has('project-version')).toBe(false)
+  it('projects is not role-restricted — read visibility for every member', () => {
+    expect(RESTRICTED_PAGES.has('projects')).toBe(false)
+    expect(RESTRICTED_PAGES.has('project-detail')).toBe(false)
+    expect(RESTRICTED_PAGES.has('project-version')).toBe(false)
+    expect(canAccessPage('projects', 'member')).toBe(true)
+    expect(canAccessPage('project-detail', 'auditor')).toBe(true)
   })
 
   it('pathFor round-trips the projects list', () => {
@@ -168,6 +171,52 @@ describe('routes — system table', () => {
     expect(routeFor('/project/proj-1')).toBeNull()
     expect(routeFor('/project/proj-1/version/ver-1')).toBeNull()
     expect(pathFor('project-detail', { id: 'proj-1' })).toBe('/')
+  })
+})
+
+describe('canAccessPage — role-restricted pages', () => {
+  const restricted = ['quarantine', 'users', 'audit', 'upload', 'settings']
+
+  it('restricts exactly the five pages the sidebar files under the Admin section', () => {
+    expect([...RESTRICTED_PAGES.keys()].sort()).toEqual([...restricted].sort())
+  })
+
+  it('admits admin and owner to every restricted page', () => {
+    for (const page of restricted) {
+      expect(canAccessPage(page, 'admin'), page).toBe(true)
+      expect(canAccessPage(page, 'owner'), page).toBe(true)
+    }
+  })
+
+  it('keeps members off every restricted page', () => {
+    for (const page of restricted) expect(canAccessPage(page, 'member'), page).toBe(false)
+  })
+
+  it('admits the auditor to the audit log and nothing else', () => {
+    // AuditorCaps (Capabilities.cs) is read:audit + tokens:manage_own, and GET /api/v1/audit
+    // and /activity gate on read:audit alone — so the audit page is the one restricted page an
+    // auditor can actually use. The other four need capabilities the role does not hold.
+    expect(canAccessPage('audit', 'auditor')).toBe(true)
+    for (const page of restricted.filter((p) => p !== 'audit')) {
+      expect(canAccessPage(page, 'auditor'), page).toBe(false)
+    }
+  })
+
+  it('denies a missing or unknown role on a restricted page — no default-allow', () => {
+    expect(canAccessPage('audit', undefined)).toBe(false)
+    expect(canAccessPage('audit', null)).toBe(false)
+    expect(canAccessPage('settings', 'system_admin')).toBe(false)
+  })
+
+  it('opens unlisted pages to every role, including one that is not yet resolved', () => {
+    expect(canAccessPage('packages', 'member')).toBe(true)
+    expect(canAccessPage('packages', undefined)).toBe(true)
+    expect(canAccessPage('dashboard', 'auditor')).toBe(true)
+    expect(canAccessPage('setup', 'member')).toBe(true)
+  })
+
+  it('the allow-lists are frozen — a page cannot be widened by mutation at a call site', () => {
+    for (const roles of RESTRICTED_PAGES.values()) expect(Object.isFrozen(roles)).toBe(true)
   })
 })
 

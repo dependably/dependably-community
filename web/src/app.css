@@ -169,12 +169,39 @@ button.primary {
   color: var(--on-accent);
 }
 button.primary:hover { background: var(--accent-hover); }
+/* An anchor that acts as a primary action (the SSO sign-in link beside the Sign in button) takes
+   the whole button box, not just the colours — button.primary is element-qualified, so without
+   this the anchor renders as bare accent text. */
+a.primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 12px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  min-height: 36px;
+  font-size: 14px;
+  background: var(--accent);
+  color: var(--on-accent);
+}
+a.primary:hover { background: var(--accent-hover); text-decoration: none; }
 button.danger {
   background: var(--danger);
   border-color: var(--danger);
   color: var(--on-accent);
 }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Compact control family. The 36px minimum above is the page-level hit target; these in-row
+   and inline controls carry an explicit size of their own instead of inheriting it, so a row
+   action is 28px, a copy chip 24px and a page button 32px — what their padding says, and what a
+   row of them beside a table cell or a 12px mono value needs. A component that adds another
+   compact button resets min-height in its own style block. */
+.btn-sm, .btn-row button, .kebab-btn, .copy-btn, .copy-block .copy-btn, .file-dl-btn,
+.page-btn, .tab, .http-banner-close { min-height: 0; }
+.btn-sm, .btn-row button, .kebab-btn { min-height: 28px; }
+.copy-btn, .copy-block .copy-btn, .file-dl-btn { min-height: 24px; }
+.page-btn { min-height: 32px; }
 
 input, select, textarea {
   background: var(--bg);
@@ -185,6 +212,11 @@ input, select, textarea {
   font-size: 14px;
   width: 100%;
 }
+/* Text fields and selects share the button's 36px control height, so a toolbar, a modal action
+   row or a page header lines up top and bottom whether a given control is a field or a button.
+   Checkbox, radio, range, file and colour inputs keep their native box. */
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="color"]),
+select { min-height: 36px; }
 /* Style option items explicitly so the open dropdown matches the active theme.
    color-scheme alone is not always honored by every browser for option rendering. */
 select option {
@@ -222,7 +254,18 @@ td {
   vertical-align: middle;
   overflow: hidden;
 }
-tr:hover td { background: var(--bg2); }
+/* :where() keeps this at the specificity of a plain `tr:hover td`, so a component's own row
+   tint still wins over it exactly as before; the exclusions stop the hover from repainting an
+   opened row or the receipts panel under it while the reader is looking at them. */
+tr:where(:not(.detail-row):not(.expanded-row)):hover td { background: var(--bg2); }
+tr.expanded-row td, tr.detail-row td { background: var(--surface2); }
+
+/* S1 — one horizontal scroll container around every list table. A table whose fixed column sum
+   passes the content column scrolls inside this box instead of pushing the page sideways.
+   Popovers are position:fixed, so they escape it; anything anchored to a row (a hover bubble)
+   has to be too, or open below the row. */
+.table-scroll { overflow-x: auto; scrollbar-width: thin; }
+.table-scroll > table { min-width: 100%; }
 
 .badge {
   display: inline-block;
@@ -418,8 +461,22 @@ tr:hover td { background: var(--bg2); }
 .page { padding: 24px; }
 .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
 .page-title { font-size: 20px; font-weight: 700; margin: 0; }
+/* Buttons beside the title (a New-folder / Upload pair, an Export). */
+.header-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.header-actions button { display: inline-flex; align-items: center; gap: 6px; }
+/* Section heading inside a page or settings tab (Children, Versions, Allowed, Blocked…); the
+   page-header variant drops its bottom margin so it centres against the buttons beside it. */
+.section-h { font-size: 14px; font-weight: 600; margin: 0 0 8px; }
+.page-header .section-h { margin: 0; }
+/* Muted one-paragraph intro under a tab strip or page title. */
+.tab-intro { color: var(--text2); font-size: 13px; margin: 0 0 16px; max-width: 640px; }
+/* Width-constrained settings card: one measure for every panel on a settings tab. */
+.card-narrow { max-width: 480px; }
 
-.tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 20px; }
+/* The strip wraps rather than overflowing: an owner on a single-tenant deployment sees up to
+   fourteen settings tabs, more than a laptop column holds. Each wrapped row keeps the active
+   underline on the strip's bottom border through the tab's -1px margin. */
+.tabs { display: flex; flex-wrap: wrap; gap: 0; row-gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 20px; }
 .tab {
   padding: 8px 16px;
   cursor: pointer;
@@ -427,6 +484,7 @@ tr:hover td { background: var(--bg2); }
   background: none;
   color: var(--text2);
   font-size: 14px;
+  min-height: 0;
   border-bottom: 2px solid transparent;
   margin-bottom: -1px;
 }
@@ -576,7 +634,7 @@ tr:hover td { background: var(--bg2); }
 
 .modal-backdrop {
   position: fixed; inset: 0;
-  background: rgba(0,0,0,0.5);
+  background: var(--overlay-scrim);
   display: flex; align-items: center; justify-content: center;
   z-index: 100;
 }
@@ -591,7 +649,7 @@ tr:hover td { background: var(--bg2); }
   box-shadow: 0 8px 32px rgba(0,0,0,0.2);
 }
 .modal h3 { margin: 0 0 16px; font-size: 16px; }
-.modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+.modal-actions { display: flex; align-items: center; gap: 8px; justify-content: flex-end; margin-top: 16px; }
 .modal.scrollable { max-height: 85vh; overflow-y: auto; }
 
 /* Modal layout variant — width + flex-column layout used in Claims and Upload modals.
@@ -668,7 +726,7 @@ table td, .copy-block { font-variant-numeric: tabular-nums; }
 
 /* In-row action buttons — min 28px hit target */
 .btn-row { display: inline-flex; align-items: center; gap: 4px; }
-.btn-row button { padding: 2px 8px; font-size: 12px; min-height: 28px; }
+.btn-row button { padding: 2px 8px; font-size: 12px; }
 
 /* Stat card & alert card (§5.6) */
 .stat-card, .alert-card {

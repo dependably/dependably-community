@@ -51,6 +51,53 @@ public static class ProjectClassifiers
 }
 
 /// <summary>
+/// The one place "is this project version still something the tenant ships" is written down.
+///
+/// <para>Two independent flags decide it. <c>projects.is_active</c> retires a whole application —
+/// decommissioned, handed to another team, deleted in everything but name — and <c>
+/// project_versions.is_active</c> retires one release of an application that is still running.
+/// A version is in service when its project is active AND the version is either the project's
+/// latest or has been kept active; both flags default to on, so nothing an operator has not
+/// triaged silently drops out of a security count.</para>
+///
+/// <para><b>Why <c>is_latest</c> stays in the predicate at all.</b> Dropping it would make the
+/// answer depend entirely on a flag an operator has to maintain, and the release nobody has
+/// touched yet is exactly the one an SBOM upload just created. Latest is the floor: the current
+/// build is in service whether or not anyone has said so.</para>
+///
+/// <para>The SQL fragments are constants rather than repeated literals because the predicate has
+/// to hold identically across the blast-radius reads, the nightly re-evaluation sweep and the
+/// retention cap. Those three disagreeing is not a cosmetic drift — it is a version that is
+/// counted but never rescanned (a stale number on a security surface), or one that is counted
+/// and then deleted out from under the count.</para>
+/// </summary>
+public static class ProjectLifecycle
+{
+    /// <summary>
+    /// The in-service predicate, written for a query that has joined <c>projects</c> as
+    /// <c>p</c> and <c>project_versions</c> as <c>pv</c>. Callers concatenate it into a WHERE
+    /// clause; it binds no parameters.
+    /// </summary>
+    public const string InServiceFilter =
+        "p.is_active = 1 AND (pv.is_latest = 1 OR pv.is_active = 1)";
+
+    /// <summary>
+    /// The join a query needs before <see cref="InServiceFilter"/> can be applied, for the reads
+    /// that previously reached <c>project_versions</c> without touching <c>projects</c> at all.
+    /// Carries the tenant column so the join cannot widen the org scope the caller established.
+    /// </summary>
+    public const string ProjectJoin =
+        "JOIN projects p ON p.id = pv.project_id AND p.org_id = pv.org_id";
+
+    /// <summary>
+    /// True when a version with these flags is one the tenant still ships. The C# mirror of
+    /// <see cref="InServiceFilter"/>, for callers holding rows rather than writing SQL.
+    /// </summary>
+    public static bool IsInService(bool projectActive, bool versionIsLatest, bool versionActive) =>
+        projectActive && (versionIsLatest || versionActive);
+}
+
+/// <summary>
 /// Advisory findings for one project version, bucketed by severity. An advisory carrying no CVSS
 /// classification lands in <see cref="Unscored"/> rather than being folded into a severity it was
 /// never assigned — the security surfaces render that as UNSCORED, never as a blank or a guess.
@@ -184,6 +231,9 @@ public sealed class ProjectListRow
     public string? ParentId { get; set; }
     public string? ParentName { get; set; }
 
+    /// <summary>Whether the application is still in service. Retiring it empties its blast radius.</summary>
+    public bool IsActive { get; set; } = true;
+
     /// <summary>The <c>is_latest</c> version's id; null when the project has no versions.</summary>
     public string? LatestVersionId { get; set; }
     public string? LatestVersion { get; set; }
@@ -221,6 +271,9 @@ public sealed class ProjectVersionSummary
     public string Id { get; set; } = "";
     public string Version { get; set; } = "";
     public bool IsLatest { get; set; }
+
+    /// <summary>Whether this release is still deployed. Independent of <see cref="IsLatest"/>.</summary>
+    public bool IsActive { get; set; } = true;
 
     /// <summary>Null means never evaluated, which is not the same as passing.</summary>
     public string? PolicyStatus { get; set; }
@@ -275,6 +328,10 @@ public sealed class ProjectChildSummary
     public string Id { get; set; } = "";
     public string Name { get; set; } = "";
     public string Kind { get; set; } = ProjectKinds.Project;
+
+    /// <summary>Whether the child application is still in service.</summary>
+    public bool IsActive { get; set; } = true;
+
     public string? LatestVersion { get; set; }
     public string? PolicyStatus { get; set; }
 

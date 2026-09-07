@@ -6,7 +6,7 @@
   import { reportPageLoad } from '../lib/pageLoad.js'
   import { formatDate } from '../lib/format.js'
   import { copyToClipboard } from '../lib/clipboard.js'
-  import { ASSISTANTS, remediationBrief, remediationSkillIds, resolvedFixedVersion, skillInstallCommand, skillPrompt } from '../lib/remediation.js'
+  import { ASSISTANTS, readStoredAssistant, remediationBrief, remediationSkillIds, resolvedFixedVersion, skillInstallCommand, skillPrompt, storeAssistant } from '../lib/remediation.js'
   import { aliasUrl } from '../lib/advisories.js'
   import Pagination from '../lib/Pagination.svelte'
   import ErrorBanner from '../lib/ErrorBanner.svelte'
@@ -197,14 +197,12 @@
     setTimeout(() => { remediationCopyState[stateKey] = ''; remediationCopyState = remediationCopyState }, 2000)
   }
 
-  // Which AI assistant the install command and prompt target. Persisted per browser —
-  // a developer uses one assistant, not one per advisory.
-  const ASSISTANT_STORAGE_KEY = 'remediationAssistant'
-  const storedAssistant = localStorage.getItem(ASSISTANT_STORAGE_KEY) ?? ''
-  let assistant = ASSISTANTS.some(a => a.id === storedAssistant) ? storedAssistant : 'claude'
+  // Which AI assistant the install command and prompt target. Persisted per browser and
+  // shared with the Setup page — a developer uses one assistant, not one per surface.
+  let assistant = readStoredAssistant()
   function setAssistant(id) {
     assistant = id
-    localStorage.setItem(ASSISTANT_STORAGE_KEY, id)
+    storeAssistant(id)
   }
 
   const SEVERITY_RANK = { critical: 4, high: 3, medium: 2, low: 1 }
@@ -220,17 +218,20 @@
       || r.version?.toLowerCase().includes(q)
   })
 
+  // Summary is the one prose column and the only flexible one; its floor lives on the cell
+  // (`.summary-cell`), and EPSS and Age leave under 1440px so the floor is met on a laptop
+  // column without the table scrolling.
   $: columns = [
-    { key: 'package',   label: $t('vulnerabilities.columns.package'),   sortable: true,  width: '200px' },
+    { key: 'package',   label: $t('vulnerabilities.columns.package'),   sortable: true,  width: '180px' },
     { key: 'version',   label: $t('vulnerabilities.columns.version'),   sortable: true,  width: '110px' },
     { key: 'severity',  label: $t('vulnerabilities.columns.severity'),  sortable: true,  width: '90px',  defaultDir: 'desc' },
     { key: 'score',     label: $t('vulnerabilities.columns.score'),     sortable: true,  width: '70px',  defaultDir: 'desc' },
-    { key: 'epss',      label: $t('vulnerabilities.columns.epss'),      sortable: true,  width: '70px',  defaultDir: 'desc' },
-    { key: 'osvId',     label: $t('vulnerabilities.columns.osvId'),     sortable: true,  width: '170px' },
+    { key: 'epss',      label: $t('vulnerabilities.columns.epss'),      sortable: true,  width: '70px',  defaultDir: 'desc', hideBelow: 1440 },
+    { key: 'osvId',     label: $t('vulnerabilities.columns.osvId'),     sortable: true,  width: '150px' },
     { key: 'apps',      label: $t('vulnerabilities.columns.apps'),      sortable: false, width: '80px' },
     { key: 'summary',   label: $t('vulnerabilities.columns.summary'),   sortable: true },
-    { key: 'age',       label: $t('vulnerabilities.columns.age'),       sortable: true,  width: '110px', defaultDir: 'asc' },
-    { key: 'published', label: $t('vulnerabilities.columns.published'), sortable: true,  width: '135px', defaultDir: 'desc' },
+    { key: 'age',       label: $t('vulnerabilities.columns.age'),       sortable: true,  width: '110px', defaultDir: 'asc', hideBelow: 1440 },
+    { key: 'published', label: $t('vulnerabilities.columns.published'), sortable: true,  width: '110px', defaultDir: 'desc' },
   ]
 
   const comparators = {
@@ -261,20 +262,25 @@
         <option value={eco}>{ECO_LABEL[eco]}</option>
       {/each}
     </select>
-    <div class="sev-filter" role="group" aria-label={$t('vulnerabilities.severityFilter.label')}>
-      <button class="sev-chip" class:active={severityFilter === ''} on:click={() => setSeverity('')}>
-        {$t('vulnerabilities.severityFilter.all')}
-      </button>
-      {#each SEVERITIES as s (s)}
-        <button class="sev-chip" class:active={severityFilter === s} on:click={() => setSeverity(s)}>
-          <span class="sev-dot sev-{s}" aria-hidden="true"></span>{$t(`vulnerabilities.severityFilter.${s}`)}
+    <!-- One wrapping group for the severity chips and the revoked toggle: when the toolbar
+         breaks into two lines, the whole group moves together, so the second line reads as the
+         filters rather than the toggle stranded alone under the search box. -->
+    <div class="filter-group">
+      <div class="sev-filter" role="group" aria-label={$t('vulnerabilities.severityFilter.label')}>
+        <button class="sev-chip" class:active={severityFilter === ''} on:click={() => setSeverity('')}>
+          {$t('vulnerabilities.severityFilter.all')}
         </button>
-      {/each}
+        {#each SEVERITIES as s (s)}
+          <button class="sev-chip" class:active={severityFilter === s} on:click={() => setSeverity(s)}>
+            <span class="sev-dot sev-{s}" aria-hidden="true"></span>{$t(`vulnerabilities.severityFilter.${s}`)}
+          </button>
+        {/each}
+      </div>
+      <span class="revoked-filter">
+        <Toggle bind:checked={revokedOnly} ariaLabel={$t('vulnerabilities.revokedOnly')} />
+        {$t('vulnerabilities.revokedOnly')}
+      </span>
     </div>
-    <span class="revoked-filter">
-      <Toggle bind:checked={revokedOnly} ariaLabel={$t('vulnerabilities.revokedOnly')} />
-      {$t('vulnerabilities.revokedOnly')}
-    </span>
   </div>
 
   <ErrorBanner message={error} />
@@ -292,6 +298,7 @@
     emptyText={$t('vulnerabilities.empty')}
     tableClass="table-auto vulns-table"
     let:row={r}
+    let:hidden
   >
     {@const appsCell = blastRadiusCell(blastRadius, r.osvId, blastRadiusFailed)}
     <tr
@@ -305,7 +312,7 @@
           <span class="mono pkg-name" title={r.packageName}>{r.packageName}</span>
         </div>
       </td>
-      <td class="mono nowrap" title={r.purl}>
+      <td class="mono nowrap version-cell" title={r.purl}>
         {r.version}
         {#if r.revokedAt}<span class="badge revoked ml-1" title={$t('vulnerabilities.revokedHelp', { values: { at: $formatDate(r.revokedAt) } })}><svg width="10" height="10" aria-hidden="true"><use href="/icons.svg#icon-alert"/></svg>{$t('vulnerabilities.revoked')}</span>{/if}
       </td>
@@ -328,9 +335,11 @@
       <td class="mono nowrap text-muted">
         {r.cvssScore !== null && r.cvssScore !== undefined ? r.cvssScore.toFixed(1) : '—'}
       </td>
-      <td class="mono nowrap text-muted">
-        {r.epssScore !== null && r.epssScore !== undefined ? `${(r.epssScore * 100).toFixed(1)}%` : '—'}
-      </td>
+      {#if !hidden.has('epss')}
+        <td class="mono nowrap text-muted">
+          {r.epssScore !== null && r.epssScore !== undefined ? `${(r.epssScore * 100).toFixed(1)}%` : '—'}
+        </td>
+      {/if}
       <td class="mono nowrap">
         <a href="https://osv.dev/vulnerability/{r.osvId}" target="_blank" rel="noreferrer" on:click|stopPropagation>{r.osvId}</a>
       </td>
@@ -348,16 +357,18 @@
       <td class="summary-cell text-muted">
         <div class="summary-clamp" title={r.summary ?? ''}>{r.summary ?? '—'}</div>
       </td>
-      <td class="nowrap text-muted t-sm">
-        <!-- firstSeenAt is durable — set once when the finding was first linked and never moved
-             by a later re-scan — but legitimately NULL on a row that predates that column, so a
-             missing value renders an em dash rather than a fabricated "open 0 days". -->
-        {#if r.firstSeenAt}
-          {$t('vulnerabilities.ageOpen', { values: { days: daysSince(r.firstSeenAt) } })}
-        {:else}
-          <span class="text-muted">—</span>
-        {/if}
-      </td>
+      {#if !hidden.has('age')}
+        <td class="nowrap text-muted t-sm">
+          <!-- firstSeenAt is durable — set once when the finding was first linked and never moved
+               by a later re-scan — but legitimately NULL on a row that predates that column, so a
+               missing value renders an em dash rather than a fabricated "open 0 days". -->
+          {#if r.firstSeenAt}
+            {$t('vulnerabilities.ageOpen', { values: { days: daysSince(r.firstSeenAt) } })}
+          {:else}
+            <span class="text-muted">—</span>
+          {/if}
+        </td>
+      {/if}
       <td class="nowrap text-muted t-sm">
         {r.publishedAt ? $formatDate(r.publishedAt) : '—'}
       </td>
@@ -366,7 +377,7 @@
     {#if expandedKey === `${r.purl}::${r.osvId}`}
       {@const d = expandedDetail}
       <tr class="detail-row">
-        <td colspan={columns.length}>
+        <td colspan={columns.length - hidden.size}>
           <div class="detail-panel">
             {#if !d || d.loading}
               <div class="detail-status">{$t('vulnerabilities.detail.loading')}</div>
@@ -650,7 +661,11 @@
     overflow: hidden;
     overflow-wrap: anywhere;
   }
-  .summary-cell { font-size: 13px; }
+  .summary-cell { font-size: 13px; min-width: 200px; }
+  /* The version cell cannot wrap (it may also carry the revoked badge), so an OCI digest or a
+     long pre-release string ends in an ellipsis rather than a cut glyph. */
+  .version-cell { text-overflow: ellipsis; }
+  .filter-group { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
   .apps-cell { text-align: center; }
   .badge.apps-count {
     background: var(--info-bg);
@@ -663,8 +678,7 @@
 
   /* Expandable detail row — mirrors the VersionTable.svelte pattern. */
   .vuln-row { cursor: pointer; }
-  .expanded-row td { background: var(--surface2); }
-  .detail-row td { padding: 0; border-top: none; background: var(--surface2); }
+  .detail-row td { padding: 0; border-top: none; }
 
   .detail-panel {
     display: flex;

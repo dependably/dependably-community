@@ -27,7 +27,7 @@
 
   /**
    * The row being edited, or null to create a new folder.
-   * @type {{ id: string, name: string, description?: string | null, parentId?: string | null, kind?: string } | null}
+   * @type {{ id: string, name: string, description?: string | null, parentId?: string | null, kind?: string, isActive?: boolean } | null}
    */
   export let project = null
 
@@ -40,10 +40,19 @@
   // one), so an edit re-reads the project. Without that, the field would render empty for a
   // project that has a description — and an empty field that looks authoritative invites someone
   // to submit a change they believe is a rename and is silently also a description edit.
-  let baseline = { name: project?.name ?? '', description: '', parentId: project?.parentId ?? '' }
+  // isActive defaults to true for a row that predates the field rather than to false: the modal
+  // sends only what changed, and a checkbox that rendered unchecked for an active project would
+  // let a plain rename retire it.
+  let baseline = {
+    name: project?.name ?? '',
+    description: '',
+    parentId: project?.parentId ?? '',
+    isActive: project?.isActive ?? true,
+  }
 
   let name = baseline.name
   let description = baseline.description
+  let isActive = baseline.isActive
   // '' is the root. A select's option values are strings, so the root cannot be modelled as null
   // here; it is converted back to an explicit null on submit, which is what moves a row to root.
   let parentId = baseline.parentId
@@ -67,10 +76,12 @@
           name: full.name ?? baseline.name,
           description: full.description ?? '',
           parentId: full.parentId ?? '',
+          isActive: full.isActive ?? true,
         }
         name = baseline.name
         description = baseline.description
         parentId = baseline.parentId
+        isActive = baseline.isActive
       }
     } catch (e) {
       error = extractErrorMessage(e)
@@ -119,6 +130,7 @@
       if (trimmedName !== baseline.name) patch.name = trimmedName
       if (trimmedDescription !== baseline.description) patch.description = trimmedDescription || null
       if (parentId !== baseline.parentId) patch.parentId = parentId || null
+      if (isActive !== baseline.isActive) patch.isActive = isActive
 
       const updated = Object.keys(patch).length === 0
         ? project
@@ -187,6 +199,18 @@
       {:else}
         <p class="hint">{$t('projects.folders.parentHint')}</p>
       {/if}
+
+      <!-- Offered on an edit only: a project is created active, and a create form that opened with
+           the box already ticked would present a state nobody chose as a decision they made. -->
+      {#if isEdit}
+        <label class="check-row">
+          <input type="checkbox" bind:checked={isActive} disabled={saving || loading} />
+          <span>{$t('projects.status.activeLabel')}</span>
+        </label>
+        <p class="hint">
+          {isCollection ? $t('projects.status.collectionHint') : $t('projects.status.projectHint')}
+        </p>
+      {/if}
     </div>
 
     <footer>
@@ -199,6 +223,15 @@
 </div>
 
 <style>
+  /* Checkbox and its label on one baseline; the block `label` rule above stacks them otherwise. */
+  .body label.check-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+  }
+  .body label.check-row input { width: auto; }
+
   .overlay {
     position: fixed;
     inset: 0;

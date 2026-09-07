@@ -79,4 +79,37 @@ public class UtcTimestampTests
 
         Assert.False(UtcTimestamp.TryNormalize(null, out _));
     }
+
+    [Fact]
+    public void PreciseNormalizationKeepsSixDigitsOfANanosecondInstant()
+    {
+        // The advisory feed's `modified` shape: nine fractional digits, which no temporal CHECK
+        // accepts. Six survive; the rest are truncated rather than rounded or refused.
+        Assert.True(UtcTimestamp.TryNormalizePrecise("2026-07-08T18:29:36.682352320Z", out string normalized));
+        Assert.Equal("2026-07-08T18:29:36.682352Z", normalized);
+    }
+
+    [Fact]
+    public void PreciseNormalizationPadsAWholeSecondInstantToSixDigits()
+    {
+        // One shape per column: a value declared without fractional digits still carries six.
+        Assert.True(UtcTimestamp.TryNormalizePrecise("2022-01-06T20:30:46Z", out string normalized));
+        Assert.Equal("2022-01-06T20:30:46.000000Z", normalized);
+    }
+
+    [Fact]
+    public void PreciseNormalizationConvertsAnOffsetToUtc()
+    {
+        Assert.True(UtcTimestamp.TryNormalizePrecise("2026-07-25T14:00:00.5+02:00", out string normalized));
+        Assert.Equal("2026-07-25T12:00:00.500000Z", normalized);
+    }
+
+    [Fact]
+    public void PreciseNormalizationRejectsUnparseableInput()
+    {
+        Assert.False(UtcTimestamp.TryNormalizePrecise("yesterday", out string normalized));
+        Assert.Equal(string.Empty, normalized);
+
+        Assert.False(UtcTimestamp.TryNormalizePrecise(null, out _));
+    }
 }

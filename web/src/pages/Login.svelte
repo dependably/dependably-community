@@ -333,15 +333,9 @@
   h1 { margin: 0 0 4px; font-size: 24px; }
   .login-brand { display: flex; justify-content: center; margin-bottom: 18px; }
   .login-subtitle { color: var(--text2); margin-bottom: 20px; }
+  /* Both sign-in controls take the global primary-button box (a.primary and button.primary
+     share it); the page only stretches them to the card width. */
   .login-action { width: 100%; }
-  .sso-action {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    text-decoration: none;
-    text-align: center;
-    box-sizing: border-box;
-  }
   .login-divider {
     display: flex;
     align-items: center;

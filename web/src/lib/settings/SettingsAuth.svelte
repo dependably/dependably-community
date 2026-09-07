@@ -689,7 +689,6 @@
   .cert-active-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .cert-input { width: 100%; font-family: var(--mono, monospace); font-size: 12px; resize: vertical; }
   .role-map-table input { width: 100%; }
-  .btn-sm { padding: 4px 8px; font-size: 13px; }
   .field-group { margin-top: 16px; }
   .field-group h4 { margin: 0 0 4px 0; font-size: 14px; }
 </style>

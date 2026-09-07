@@ -39,8 +39,11 @@
 </header>
 
 <style>
+  /* Three-track grid so the search box sits on the column's true centre: the outer tracks share
+     the leftover space equally, whatever width the actions on the right take. */
   .topbar {
-    display: flex;
+    display: grid;
+    grid-template-columns: 1fr minmax(0, 440px) 1fr;
     align-items: center;
     gap: 12px;
     height: 48px;
@@ -53,13 +56,9 @@
   }
 
   /* The search box (input + overlay) is owned by GlobalSearch.svelte. */
-  .topbar-search {
-    flex: 1;
-    max-width: 440px;
-    margin: 0 auto;
-  }
+  .topbar-search { grid-column: 2; min-width: 0; }
 
-  .nav-actions { display: flex; gap: 6px; align-items: center; }
+  .nav-actions { display: flex; gap: 6px; align-items: center; grid-column: 3; justify-self: end; }
 
   .nav-link {
     display: inline-flex;
@@ -76,8 +75,11 @@
   .nav-link:hover { background: var(--bg3); color: var(--text); }
   .nav-link.active { color: var(--accent); background: var(--bg); }
 
+  /* Narrow shells drop the centring: the search box takes all the room the actions leave. */
   @media (max-width: 720px) {
+    .topbar { grid-template-columns: minmax(0, 1fr) auto; }
+    .topbar-search { grid-column: 1; }
+    .nav-actions { grid-column: 2; }
     .nav-actions-label { display: none; }
-    .topbar-search { max-width: none; }
   }
 </style>

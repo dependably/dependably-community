@@ -326,10 +326,13 @@ public sealed class OrgAuthConfigController : ControllerBase
             return _problems.ValidationErrorActionKey("formsLoginEnabled", "error.saml.formsLoginRequiresSaml");
         }
 
-        bool samlReady = existing is not null
-            && !string.IsNullOrWhiteSpace(existing.IdpEntityId)
-            && (!string.IsNullOrWhiteSpace(existing.IdpSigningCert) || !string.IsNullOrWhiteSpace(existing.IdpSigningCertOverride));
-        if (!samlReady)
+        // Readiness is SamlController.IsSamlConfigured — the same predicate the ACS callback
+        // uses to decide whether an assertion can be validated and AuthController uses to decide
+        // whether the password grant is closed. A local copy that omits any one field lets an
+        // admin turn on SSO-only against a config SAML cannot actually serve: the switch reports
+        // success and the password grant silently stays live, which is the fail-open shape this
+        // guard exists to prevent.
+        if (!SamlController.IsSamlConfigured(existing))
         {
             return _problems.ValidationErrorActionKey("formsLoginEnabled", "error.saml.formsLoginNeedsMetadata");
         }

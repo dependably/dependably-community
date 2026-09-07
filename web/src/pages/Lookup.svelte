@@ -267,7 +267,7 @@
   .field { display: flex; flex-direction: column; gap: 4px; }
   .field-grow { flex: 1 1 240px; }
   .field label { font-size: 12px; color: var(--text2); }
-  .lookup-form button.primary { display: inline-flex; align-items: center; gap: 6px; height: 34px; }
+  .lookup-form button.primary { display: inline-flex; align-items: center; gap: 6px; }
 
   .verdict-panel {
     display: flex;
@@ -305,7 +305,7 @@
     gap: 12px;
   }
   .check-card {
-    background: var(--bg1);
+    background: var(--bg);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     padding: 12px;

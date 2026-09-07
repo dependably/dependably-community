@@ -12,7 +12,7 @@ namespace Dependably.Infrastructure;
 /// from a package an operator has just quarantined, or an advisory that just landed, and answers
 /// "which of my applications are affected". The hops are all indexed —
 /// <c>vulnerabilities → sbom_component_vulns(vuln_id) → sbom_components(org_id, ecosystem,
-/// purl_name) → project_versions(is_latest) → projects</c> — and
+/// purl_name) → project_versions → projects</c> — and
 /// <c>idx_sbom_components_org_eco_name</c> exists for exactly this direction.</para>
 ///
 /// <para><b>Read-time join, never a materialized link.</b> A stored "this package is used by N
@@ -21,14 +21,23 @@ namespace Dependably.Infrastructure;
 /// nothing on the registry plane. The join is cheap and always current; the flag would be neither.
 /// </para>
 ///
-/// <para><b>Latest versions only.</b> Every query here filters <c>project_versions.is_latest = 1</c>.
-/// The question being asked is "what am I shipping now", and an older release of an application is
-/// not something an operator can remediate — the fix lands in the next release, not in a version
-/// already cut. There is a correctness reason too: the nightly component scan only refreshes the
-/// advisory links of <c>is_latest</c> versions, so a superseded version's
-/// <c>sbom_component_vulns</c> rows are a snapshot of whenever it last was latest. Counting them
-/// would mix a current answer with a stale one under a single number and give an operator no way
-/// to tell which was which.</para>
+/// <para><b>In-service versions only.</b> Every query here filters
+/// <c>p.is_active = 1 AND (pv.is_latest = 1 OR pv.is_active = 1)</c> — the predicate
+/// <see cref="ProjectLifecycle.InServiceFilter"/> spells out and
+/// <c>ProjectLifecycleFilterComplianceTests</c> pins across every surface that must agree on it.
+/// The question being asked is "what am I shipping now", and that is a superset of "latest": a
+/// superseded release still running somewhere is still something an operator has to remediate,
+/// and a decommissioned application is not, however current its last build was. Both flags
+/// default to active, so a catalogue nobody has triaged answers exactly as it did when this
+/// filter was <c>is_latest = 1</c> alone.</para>
+///
+/// <para>The predicate is only sound because the nightly passes moved with it.
+/// <c>VulnerabilityScanService.ReevaluatePoliciesAsync</c> re-evaluates the same in-service set,
+/// so an active superseded version's advisory links are as current as the latest one's, and
+/// <c>RetentionService.EnforceProjectVersionLimitAsync</c> spares an active version the way it
+/// already spared the latest. Counting a version that neither of those covers would put a
+/// knowingly stale number on a security surface — the exact failure the old latest-only rule
+/// existed to avoid, reintroduced one release later.</para>
 /// </summary>
 public sealed class SbomBlastRadiusRepository
 {
@@ -49,7 +58,7 @@ public sealed class SbomBlastRadiusRepository
     public SbomBlastRadiusRepository(IMetadataStore db) => _db = db;
 
     /// <summary>
-    /// The latest versions of this tenant's applications whose SBOM lists
+    /// The in-service versions of this tenant's applications whose SBOM lists
     /// <paramref name="ecosystem"/>/<paramref name="purlName"/>, plus both totals.
     /// </summary>
     public async Task<BlastRadiusPage> ListByCoordinateAsync(
@@ -62,8 +71,9 @@ public sealed class SbomBlastRadiusRepository
             SELECT COUNT(*) AS RowTotal, COUNT(DISTINCT pv.project_id) AS ProjectTotal
             FROM sbom_components c
             JOIN project_versions pv ON pv.id = c.project_version_id AND pv.org_id = c.org_id
+            JOIN projects p ON p.id = pv.project_id AND p.org_id = pv.org_id
             WHERE c.org_id = @orgId AND c.ecosystem = @ecosystem AND c.purl_name = @purlName
-              AND pv.is_latest = 1
+              AND p.is_active = 1 AND (pv.is_latest = 1 OR pv.is_active = 1)
             """,
             parameters, cancellationToken: ct));
 
@@ -82,7 +92,7 @@ public sealed class SbomBlastRadiusRepository
             JOIN project_versions pv ON pv.id = c.project_version_id AND pv.org_id = c.org_id
             JOIN projects p ON p.id = pv.project_id AND p.org_id = pv.org_id
             WHERE c.org_id = @orgId AND c.ecosystem = @ecosystem AND c.purl_name = @purlName
-              AND pv.is_latest = 1
+              AND p.is_active = 1 AND (pv.is_latest = 1 OR pv.is_active = 1)
             ORDER BY p.name, pv.version, c.id
             LIMIT @limit OFFSET @offset
             """,
@@ -91,8 +101,8 @@ public sealed class SbomBlastRadiusRepository
     }
 
     /// <summary>
-    /// The latest versions of this tenant's applications carrying a component the scan has linked
-    /// to <paramref name="osvId"/>, plus the total for paging.
+    /// The in-service versions of this tenant's applications carrying a component the scan has
+    /// linked to <paramref name="osvId"/>, plus the total for paging.
     ///
     /// <para><c>vulnerabilities</c> is the shared instance-global advisory store reached through an
     /// FK; the tenant filter sits on <c>sbom_components</c>, the only row in the join that carries
@@ -110,7 +120,9 @@ public sealed class SbomBlastRadiusRepository
             JOIN vulnerabilities v ON v.id = scv.vuln_id
             JOIN sbom_components c ON c.id = scv.component_id
             JOIN project_versions pv ON pv.id = c.project_version_id AND pv.org_id = c.org_id
-            WHERE c.org_id = @orgId AND v.osv_id = @osvId AND pv.is_latest = 1
+            JOIN projects p ON p.id = pv.project_id AND p.org_id = pv.org_id
+            WHERE c.org_id = @orgId AND v.osv_id = @osvId
+              AND p.is_active = 1 AND (pv.is_latest = 1 OR pv.is_active = 1)
             """,
             parameters, cancellationToken: ct));
 
@@ -130,7 +142,8 @@ public sealed class SbomBlastRadiusRepository
             JOIN sbom_components c ON c.id = scv.component_id
             JOIN project_versions pv ON pv.id = c.project_version_id AND pv.org_id = c.org_id
             JOIN projects p ON p.id = pv.project_id AND p.org_id = pv.org_id
-            WHERE c.org_id = @orgId AND v.osv_id = @osvId AND pv.is_latest = 1
+            WHERE c.org_id = @orgId AND v.osv_id = @osvId
+              AND p.is_active = 1 AND (pv.is_latest = 1 OR pv.is_active = 1)
             ORDER BY p.name, pv.version, c.id
             LIMIT @limit OFFSET @offset
             """,
@@ -164,7 +177,10 @@ public sealed class SbomBlastRadiusRepository
             JOIN vulnerabilities v ON v.id = scv.vuln_id
             JOIN sbom_components c ON c.id = scv.component_id
             JOIN project_versions pv ON pv.id = c.project_version_id AND pv.org_id = c.org_id
-            WHERE c.org_id = @orgId AND pv.is_latest = 1 AND v.osv_id IN
+            JOIN projects p ON p.id = pv.project_id AND p.org_id = pv.org_id
+            WHERE c.org_id = @orgId
+              AND p.is_active = 1 AND (pv.is_latest = 1 OR pv.is_active = 1)
+              AND v.osv_id IN
             """ + " " + keysClause + " GROUP BY v.osv_id",
             parameters, cancellationToken: ct));
         return rows.ToDictionary(r => r.Key, r => r.Count, StringComparer.Ordinal);
@@ -206,7 +222,10 @@ public sealed class SbomBlastRadiusRepository
             SELECT c.ecosystem AS Ecosystem, c.purl_name AS Name, COUNT(DISTINCT pv.project_id) AS Count
             FROM sbom_components c
             JOIN project_versions pv ON pv.id = c.project_version_id AND pv.org_id = c.org_id
-            WHERE c.org_id = @orgId AND pv.is_latest = 1 AND c.ecosystem IN
+            JOIN projects p ON p.id = pv.project_id AND p.org_id = pv.org_id
+            WHERE c.org_id = @orgId
+              AND p.is_active = 1 AND (pv.is_latest = 1 OR pv.is_active = 1)
+              AND c.ecosystem IN
             """
             + " " + ecoClause + " AND c.purl_name IN " + nameClause
             + " GROUP BY c.ecosystem, c.purl_name",

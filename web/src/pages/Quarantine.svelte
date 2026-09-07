@@ -130,9 +130,9 @@
   $: columns = [
     { key: 'package',   label: $t('quarantine.columns.package'),   sortable: true },
     { key: 'gate',      label: $t('quarantine.columns.gate'),      sortable: true,  width: '130px' },
-    { key: 'detail',    label: $t('quarantine.columns.detail'),    sortable: false, width: '220px' },
-    { key: 'decidedBy', label: $t('quarantine.columns.decidedBy'), sortable: true,  width: '180px' },
-    { key: 'updated',   label: $t('quarantine.columns.updated'),   sortable: true,  width: '150px', defaultDir: 'desc' },
+    { key: 'detail',    label: $t('quarantine.columns.detail'),    sortable: false, width: '160px' },
+    { key: 'decidedBy', label: $t('quarantine.columns.decidedBy'), sortable: true,  width: '140px' },
+    { key: 'updated',   label: $t('quarantine.columns.updated'),   sortable: true,  width: '120px', defaultDir: 'desc' },
     { key: 'actions',   label: '',                                 sortable: false, width: '180px' },
   ]
   const comparators = {
@@ -230,7 +230,7 @@
     memoryKey="quarantine"
     initialSort={{ key: sortCol, dir: sortDir }}
     emptyText={$t('quarantine.empty')}
-    tableClass=""
+    tableClass="table-auto"
     on:sortchange={onSortChange}
     let:row={e}
   >
@@ -240,7 +240,7 @@
       class:expanded-row={expandedId === e.id}
       on:click={() => toggleRow(e)}
     >
-      <td class="t-mono" title={e.purl}>
+      <td class="t-mono pkg-cell" title={e.purl}>
         <span class="badge {e.ecosystem}">{e.ecosystem}</span>
         {e.purl}
         <!-- The consequence of the decision on this row. A real zero renders nothing — "0
@@ -383,7 +383,10 @@
 
   /* Column widths, the placeholder rows, and the empty row are DataTable's now — the widths ride
      on the `columns` definitions, which is also what keeps the actions column from collapsing to
-     the global th:empty{width:90px} and clipping its buttons. */
+     the global th:empty{width:90px} and clipping its buttons. The table is auto-layout so the
+     package column takes what the fixed columns leave, and a purl longer than that wraps at any
+     character rather than being clipped. */
+  .pkg-cell { overflow-wrap: anywhere; }
 
   /* An email overruns its column sooner than the other cells do; the full value is on the title
      attribute either way. */
@@ -406,8 +409,7 @@
   .chev.open { transform: rotate(180deg); }
 
   /* Expandable detail row — mirrors the Vulnerabilities.svelte pattern. */
-  .expanded-row td { background: var(--surface2); }
-  .detail-row td { padding: 0; border-top: none; background: var(--surface2); }
+  .detail-row td { padding: 0; border-top: none; }
 
   .detail-panel {
     display: flex;

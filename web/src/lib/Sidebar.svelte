@@ -1,6 +1,7 @@
 <script>
   import { t } from 'svelte-i18n'
   import { activeRoute, user, bootstrapInfo, navigate, sidebarCollapsed, noticesOpen } from './store.js'
+  import { canAccessPage } from './routes.js'
 
   // Highlighting follows the route the user asked for, not the one on screen: a deferred
   // navigation holds the outgoing page while the next one loads, and a link that stays unlit
@@ -11,19 +12,21 @@
     { page: 'packages', icon: 'icon-package', label: 'nav.packages' },
     // Read visibility for every member — mutations (create/delete/promote) gate by role
     // inside Projects.svelte/ProjectDetail.svelte, not at the nav. Keep 'projects' out of
-    // ADMIN_ONLY_PAGES (routes.js) in sync with that.
+    // RESTRICTED_PAGES (routes.js) in sync with that.
     { page: 'projects', icon: 'icon-layers', label: 'nav.projects' },
     { page: 'lookup', icon: 'icon-search', label: 'nav.lookup' },
     { page: 'vulnerabilities', icon: 'icon-bug', label: 'nav.vulnerabilities' },
-    // Risk is deliberately not in adminItems: its endpoints gate on read:packages (the same
+    // Risk is deliberately not in restrictedItems: its endpoints gate on read:packages (the same
     // capability that serves the dashboard tiles), so every role can open it.
     { page: 'risk', icon: 'icon-shield', label: 'nav.risk' },
     { page: 'license-policy', icon: 'icon-license', label: 'nav.licensePolicy' },
     { page: 'tokens', icon: 'icon-key', label: 'nav.tokens' },
   ]
-  // Admin/owner-only. Same gate as the old navbar. The page names here must stay in sync with
-  // ADMIN_ONLY_PAGES in routes.js, which App.svelte uses to bounce non-admins off these routes.
-  const adminItems = [
+  // Role-restricted section. Each link renders only for the roles RESTRICTED_PAGES (routes.js)
+  // allows on its page — admin/owner for all of them, plus auditor for the audit log — and
+  // App.svelte uses the same map to bounce other roles off these routes. The page names here must
+  // stay in sync with that map (navAccess.parity.test.js pins the two sets against each other).
+  const restrictedItems = [
     { page: 'quarantine', icon: 'icon-quarantine', label: 'nav.quarantine' },
     { page: 'users', icon: 'icon-users', label: 'nav.users' },
     { page: 'audit', icon: 'icon-audit', label: 'nav.audit' },
@@ -32,7 +35,7 @@
   ]
   const setupItem = { page: 'setup', icon: 'icon-setup', label: 'nav.setup' }
 
-  $: isAdmin = $user?.role === 'admin' || $user?.role === 'owner'
+  $: visibleRestrictedItems = restrictedItems.filter((item) => canAccessPage(item.page, $user?.role))
 
   // Web build version (Vite define). Show major.minor only when collapsed.
   const version = __APP_VERSION__
@@ -88,11 +91,11 @@
       {/each}
     </div>
 
-    {#if isAdmin}
+    {#if visibleRestrictedItems.length > 0}
       <div class="nav-section">
         <span class="nav-section-label nav-label">{$t('nav.adminSection')}</span>
         <div class="nav-links">
-          {#each adminItems as item (item.page)}
+          {#each visibleRestrictedItems as item (item.page)}
             <button
               class="nav-link"
               class:active={$activeRoute.page === item.page}
@@ -145,7 +148,9 @@
     padding: 8px;
     gap: 2px;
     overflow-y: auto;
-    transition: width 160ms ease;
+    /* The rail snaps between widths: the labels leave the flow instantly, so an animated width
+       would show an empty strip with icons sliding for the duration. */
+    transition: none;
   }
   .sidebar.collapsed { width: 56px; }
 

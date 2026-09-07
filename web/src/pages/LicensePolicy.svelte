@@ -61,7 +61,7 @@
 
 <div class="page">
   <header class="page-header">
-    <h1>{$t('licensePolicy.title')}</h1>
+    <h1 class="page-title">{$t('licensePolicy.title')}</h1>
     <div class="mode-line">
       <span class="mode-label">{$t('licensePolicy.mode')}:</span>
       <span class="badge mode-{mode}">{$t(`licensePolicy.modes.${mode}`)}</span>
@@ -240,21 +240,10 @@
 {/if}
 
 <style>
-  /* Tighter vertical padding than the global .page gutter. Width is deliberately
-     untouched — the page shell is full-bleed and never re-caps itself. */
-  .page { padding: 20px 24px; }
-  .page-header {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 16px;
-    margin-bottom: 12px;
-  }
-  h1 { margin: 0; font-size: 20px; font-weight: 600; }
+  /* .page, .page-header, .page-title and .section-h are global (app.css). */
   .mode-line { font-size: 13px; color: var(--text2); }
   .mode-label { margin-right: 6px; }
   .intro { color: var(--text2); font-size: 13px; margin: 0 0 20px; max-width: 780px; }
-  .section-h { font-size: 14px; font-weight: 600; margin: 0 0 8px; }
   .empty { font-size: 13px; }
   .mt-4 { margin-top: 24px; }
   .badges { display: flex; gap: 4px; flex-wrap: wrap; }

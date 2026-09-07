@@ -1,3 +1,4 @@
+using System.Globalization;
 using Dapper;
 using Dependably.Api;
 using Dependably.Infrastructure;
@@ -6,6 +7,7 @@ using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Localization;
 using NSubstitute;
 
 namespace Dependably.Tests.Unit.Api;
@@ -87,7 +89,9 @@ public sealed class AuthControllerPasswordPolicyContextTests : IAsyncLifetime
         const string weakInContextOnly = "Xk7$pQwacmeuTz2v9Lm";
 
         var result = await controller.AcceptInvite(
-            new AcceptInviteRequest(rawToken, weakInContextOnly), invites, CancellationToken.None);
+            new AcceptInviteRequest(rawToken, weakInContextOnly), invites,
+            new SamlConfigRepository(_fixture.Store, TestTime.Frozen()),
+            new ProblemResults(new EchoLocalizer()), CancellationToken.None);
 
         var bad = Assert.IsType<BadRequestObjectResult>(result);
         string json = System.Text.Json.JsonSerializer.Serialize(bad.Value);
@@ -128,5 +132,15 @@ public sealed class AuthControllerPasswordPolicyContextTests : IAsyncLifetime
         var bad = Assert.IsType<BadRequestObjectResult>(result);
         string json = System.Text.Json.JsonSerializer.Serialize(bad.Value);
         Assert.Contains("\"field\":\"newPassword\"", json);
+    }
+
+    // Echoes the resource key back as its value; these tests never reach the localized 409
+    // path, so the real .resx contents are irrelevant here.
+    private sealed class EchoLocalizer : IStringLocalizer<SharedResource>
+    {
+        public LocalizedString this[string name] => new(name, name, resourceNotFound: false);
+        public LocalizedString this[string name, params object[] arguments]
+            => new(name, string.Format(CultureInfo.InvariantCulture, name, arguments), resourceNotFound: false);
+        public IEnumerable<LocalizedString> GetAllStrings(bool includeParentCultures) => [];
     }
 }

@@ -106,6 +106,25 @@ function handleUnauthorized(path) {
   navigate(path.startsWith('/system/') ? 'system-login' : 'login', {}, { replace: true })
 }
 
+/**
+ * GETs an endpoint that answers with text rather than JSON — the curated skill documents are
+ * served as `text/markdown`, so `req()`'s `res.json()` would throw on every successful call.
+ * Shares req()'s credential and unauthorized handling so a session expiring mid-read behaves
+ * the same here as anywhere else.
+ * @param {string} path Path below `/api/v1`.
+ * @returns {Promise<string>}
+ */
+async function reqText(path) {
+  const res = await fetch(BASE + path, { credentials: 'include' })
+  if (!res.ok) {
+    if (res.status === 401) {
+      handleUnauthorized(path)
+    }
+    throw new ApiError(res.statusText, { status: res.status, retryAfter: res.headers.get('Retry-After') })
+  }
+  return res.text()
+}
+
 async function req(method, path, body) {
   /** @type {RequestInit} */
   const opts = {
@@ -323,6 +342,9 @@ export const api = {
     req('DELETE', `/projects/${encodeURIComponent(projectId)}/versions/${encodeURIComponent(versionId)}`),
   promoteLatest: (projectId, versionId) =>
     req('POST', `/projects/${encodeURIComponent(projectId)}/versions/${encodeURIComponent(versionId)}/promote-latest`),
+  setProjectVersionActive: (projectId, versionId, isActive) =>
+    req('PATCH', `/projects/${encodeURIComponent(projectId)}/versions/${encodeURIComponent(versionId)}`,
+      { isActive }),
 
   // Activity
   getActivity: (params = {}) => {
@@ -589,6 +611,8 @@ export const api = {
   // Raw SKILL.md content is fetched by the user's own agent via the copyable curl one-liner,
   // not by this frontend.
   getRemediationSkills: () => req('GET', '/remediation/skills'),
+  getSkills: () => req('GET', '/skills'),
+  getSkillMarkdown: (skillId) => reqText(`/skills/${encodeURIComponent(skillId)}`),
 
   // Risk drill-downs — the rows behind the dashboard's operational- and license-risk tiles.
   // Read-only, gated on read:packages (not admin-only). Both totals reproduce the tile they

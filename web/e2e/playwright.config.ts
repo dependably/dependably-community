@@ -83,7 +83,13 @@ export default defineConfig({
       STORAGE_BACKEND: 'local',
       ASPNETCORE_URLS: serverUrl,
       FIRST_BOOT_ADMIN_PASSWORD: 'E2eTestPassword123!',
-      LOGIN_RATE_LIMIT_PERMITS: '100',
+      // Every spec signs in through the adminPage fixture, and the login limiter is a fixed
+      // one-minute window per IP. On an idle runner the chromium project finishes its ~90 logins
+      // (plus global-setup and the retry of any failed spec) inside a single window, so the last
+      // specs to run are refused with "Too many attempts" and time out waiting for the sidebar.
+      // Lifted to the .app_boot value for the same bounded-internal-client reason as the budgets
+      // below; no spec pins the login limiter itself.
+      LOGIN_RATE_LIMIT_PERMITS: '100000',
       TOKEN_CREATE_RATE_LIMIT_PERMITS: '1000',
       // The whole suite authenticates as one admin from one IP, so every browser session shares
       // a single per-principal bucket — the shape RateLimitCeilings calls out as the bounded

@@ -42,9 +42,9 @@ public sealed partial class ProjectRepository
     }
 
     /// <summary>
-    /// Renames, re-describes, re-classifies and/or relocates one project. Every field is a resolved
-    /// final value — the caller has already folded "leave unchanged" into the row's current value —
-    /// so this method always writes all four columns.
+    /// Renames, re-describes, re-classifies, retires-or-reinstates and/or relocates one project.
+    /// Every field is a resolved final value — the caller has already folded "leave unchanged" into
+    /// the row's current value — so this method always writes all five columns.
     ///
     /// Relocation is why the whole thing runs inside one transaction. The three cross-row facts a
     /// move has to respect (the target is a collection, the target is not the project itself, the
@@ -68,6 +68,7 @@ public sealed partial class ProjectRepository
         string classifier,
         string? description,
         string? parentId,
+        bool isActive,
         CancellationToken ct = default)
     {
         int attempt = 0;
@@ -91,10 +92,11 @@ public sealed partial class ProjectRepository
                     """
                     UPDATE projects
                        SET name = @name, classifier = @classifier,
-                           description = @description, parent_id = @parentId
+                           description = @description, parent_id = @parentId,
+                           is_active = @isActive
                      WHERE org_id = @orgId AND id = @projectId
                     """,
-                    new { orgId, projectId, name, classifier, description, parentId },
+                    new { orgId, projectId, name, classifier, description, parentId, isActive },
                     tx, cancellationToken: ct));
 
                 if (affected == 0)
@@ -114,6 +116,7 @@ public sealed partial class ProjectRepository
                     Name = name,
                     Classifier = classifier,
                     Description = description,
+                    IsActive = isActive,
                     CreatedBy = current.CreatedBy,
                     CreatedAt = current.CreatedAt,
                 };
@@ -188,7 +191,7 @@ public sealed partial class ProjectRepository
     /// transaction. A bare delete leaves the project permanently latest-less, which is not a
     /// cosmetic gap: every <c>latest</c> route 404s, the project list renders a null version label,
     /// and the rollup counts the project as unevaluated — degrading its whole ancestor chain to
-    /// "Not scanned". The nightly policy sweep is bounded to <c>is_latest</c> rows, so such a
+    /// "Not scanned". The nightly policy sweep is bounded to in-service rows, so such a
     /// project also stops being re-evaluated entirely, and on an air-gapped instance it has no
     /// evaluation path left at all. This mirrors the first-version auto-latest rule in
     /// <see cref="ResolveOrCreateAsync"/>, from the same premise: a project holding versions always
@@ -257,6 +260,38 @@ public sealed partial class ProjectRepository
             await SafeRollbackAsync(tx, ct);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Retires or reinstates one release. Returns the updated row, or null when the version does
+    /// not exist in this org and project.
+    ///
+    /// <para>Deliberately a plain single-row UPDATE with none of the promotion machinery around it.
+    /// <c>is_active</c> has no cross-row invariant to protect — any number of a project's releases
+    /// may be active at once, and none need be — so there is no clear-then-set, no partial unique
+    /// index to contend on, and nothing for a concurrent writer to lose a race to. Two operators
+    /// retiring two different releases both succeed; two retiring the same one converge on the
+    /// same value.</para>
+    ///
+    /// <para><b>Retiring the latest release is allowed and changes nothing about what is counted.</b>
+    /// <see cref="ProjectLifecycle.InServiceFilter"/> treats latest as a floor, so the current build
+    /// stays in the blast radius whatever this flag says. The flag is still stored and still shown,
+    /// because "we have cut this release but nothing runs it yet" is a true statement an operator
+    /// may want recorded — it just is not one that removes the release from a security count.</para>
+    /// </summary>
+    public async Task<ProjectVersion?> SetVersionActiveAsync(
+        string orgId, string projectId, string versionId, bool isActive, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+
+        int affected = await conn.ExecuteAsync(new CommandDefinition(
+            """
+            UPDATE project_versions SET is_active = @isActive
+            WHERE org_id = @orgId AND project_id = @projectId AND id = @versionId
+            """,
+            new { orgId, projectId, versionId, isActive }, cancellationToken: ct));
+
+        return affected == 0 ? null : await GetVersionAsync(conn, null, orgId, projectId, versionId);
     }
 
     /// <summary>
@@ -508,7 +543,7 @@ public sealed partial class ProjectRepository
         var version = await conn.QuerySingleOrDefaultAsync<ProjectVersion>(new CommandDefinition(
             """
             SELECT v.id AS Id, v.org_id AS OrgId, v.project_id AS ProjectId, v.version AS Version,
-                   v.is_latest AS IsLatest, v.policy_status AS PolicyStatus,
+                   v.is_latest AS IsLatest, v.is_active AS IsActive, v.policy_status AS PolicyStatus,
                    v.created_by AS CreatedBy, v.created_at AS CreatedAt
             FROM project_versions v
             WHERE v.org_id = @orgId AND v.project_id = @projectId AND v.version = @version

@@ -280,11 +280,16 @@ redefine them in component `<style>` blocks.
 | —       | `.modal-flex`                                              | Width + flex-column modal body layout           | Claims.svelte, Upload.svelte    |
 | —       | `.warning-card`, `.info-card`                              | Inline tinted note cards inside modal bodies    | Claims.svelte, Upload.svelte    |
 | —       | `.list-header`                                             | Section sub-header above per-section lists      | Settings panels, OrgSettings    |
+| —       | `.section-h`                                               | 14px/600 section heading inside a page or settings tab; `.page-header .section-h` drops its margin to centre against buttons | ProjectDetail, LicensePolicy, OrgSettings, settings panels |
+| —       | `.tab-intro`                                               | Muted 13px intro paragraph under a tab strip or title, 640px measure | Lookup, Quarantine, OrgSettings |
+| —       | `.header-actions`                                          | Button group beside `.page-title` (inline-flex buttons, icon centred) | Projects, ProjectDetail, ProjectVersionDetail |
+| —       | `.card-narrow`                                             | `.card` capped at the 480px form measure         | Settings panels                 |
+| —       | `.table-scroll`                                            | Horizontal scroll container around a list table (`DataTable` adds it) | All list pages |
 | —       | `.page-toolbar`                                            | Search + filter row above tables                | All list pages                  |
-| —       | `.tabs` / `.tab`                                           | Tab navigation                                  | Multiple                        |
+| —       | `.tabs` / `.tab`                                           | Tab navigation; the strip wraps when the tabs outgrow the column | Multiple                        |
 | —       | `.form-row` / `.form-hint`                                 | Form layout                                     | Multiple                        |
 | —       | `button`, `button.primary`, `button.danger`                | Actions                                         | Multiple                        |
-| —       | `input` / `select` / `textarea`                            | Form inputs                                     | Multiple                        |
+| —       | `input` / `select` / `textarea`                            | Form inputs; text fields and selects share the 36px control height | Multiple                        |
 | —       | `table` / `th` / `td`                                      | Data tables                                     | Multiple                        |
 | —       | `.copy-block`, `.copy-btn`                                 | Copyable code/hash blocks                       | Multiple                        |
 | —       | `.modal`, `.modal-backdrop`, `.modal-actions`              | Modal dialogs                                   | Multiple                        |
@@ -296,8 +301,10 @@ redefine them in component `<style>` blocks.
 | —       | `.page-error`                                              | Top-of-page fetch failure banner                | All data pages                  |
 | —       | `.page-header`, `.page-title`                              | Page chrome                                     | All pages                       |
 | —       | `.first-fetch-row`                                         | Amber highlight for first-seen packages         | Packages.svelte                 |
-| —       | `.expanded-row`                                            | Table row expanded state                        | VersionDetail.svelte            |
-| —       | `.btn-row`                                                 | Compact in-row action button (28–32px tall)     | VersionDetail.svelte            |
+| —       | `.expanded-row`, `.detail-row`                             | Opened table row and its receipts row: `--surface2`, exempt from the hover tint | VersionTable, Vulnerabilities, Quarantine, ProjectVersionDetail |
+| —       | `.btn-row`, `.btn-sm`, `.kebab-btn`                        | Compact in-row action buttons, 28px             | List pages                      |
+| —       | `.copy-btn`, `.file-dl-btn`                                | 24px inline chips beside mono values            | Receipts panel                  |
+| —       | `.page-btn`                                                | 32px pagination buttons                         | Pagination.svelte               |
 
 **`.skeleton`** — shimmer placeholder for table rows / single text
 lines during the initial fetch. Do not mix with `.spinner` on the same
@@ -576,7 +583,20 @@ Every `detail-value` with copyable content carries an inline `.copy-btn`.
 
 ### 5.8 Data tables
 
-All data tables use `table-layout: fixed`. This prevents column widths from shifting when sort indicators appear and avoids content-driven layout thrash.
+`DataTable` renders `table-layout: auto` by default (`tableClass="table-auto"`); pass `tableClass=""` only for a table whose columns are all fixed, where the fixed layout stops widths shifting when sort indicators appear.
+
+**Column widths are budgeted for a laptop.** With the sidebar expanded the content column is about 745px at 1024 and 1000px at 1280, so a table whose fixed widths sum past that pushes the page sideways or starves its one flexible column. Keep the fixed sum under ~700px, leave the prose column (name, purl, summary) flexible with a `min-width`, and mark a column that only matters on a wide screen with `hideBelow: <px>` — `DataTable` drops it from the header and colgroup under that viewport width and hands the page a `hidden` set so it skips the matching `<td>`:
+
+```svelte
+<DataTable {columns} {rows} let:row let:hidden>
+  <tr>
+    <td>{row.name}</td>
+    {#if !hidden.has('created')}<td>{$formatDate(row.createdAt)}</td>{/if}
+  </tr>
+</DataTable>
+```
+
+`DataTable` also wraps every table in `.table-scroll`, so residual overflow scrolls inside the table rather than the page. That is the backstop, not the plan: a table that needs it at 1280 has too many fixed columns. Anything anchored to a row from inside the scroller (a hover bubble) is clipped by it unless it is `position: fixed`; row-action menus already are, via `RowActionsMenu`.
 
 **Build every list table out of `DataTable.svelte`.** It owns the sort state, the header row, the `<colgroup>`, the loading placeholders, and the empty row; the page supplies `columns` and one `<tr>` per row through the default slot. A page that hand-rolls `<thead>` re-implements all five and drifts from the rest of the site — that is how a table ends up unsortable. Two shapes are exempt, and only these two:
 
@@ -717,9 +737,13 @@ Required sprite IDs (all must exist in `web/public/icons.svg`):
 - Focus rings: 2px `--accent` outline, `outline-offset: -1px` on inputs. Never remove.
 - Hit targets:
   - **≥ 36px** for primary actions, page-level buttons, and any control
-    on a full-page surface.
-  - **≥ 28px** for in-row table actions (`.btn-row`), where row density
-    would otherwise be sacrificed.
+    on a full-page surface. Text inputs and selects share the 36px, so a
+    button beside a field lines up top and bottom.
+  - **≥ 28px** for in-row table actions (`.btn-row`, `.btn-sm`,
+    `.kebab-btn`), where row density would otherwise be sacrificed. The
+    compact family sets its height explicitly in `app.css`; a new compact
+    button resets `min-height` in its own style block rather than
+    inheriting the 36px.
   - **≥ 44px** on touch.
 - Every badge carries a `title` attribute and an `aria-label` (state
   isn't only color). Example: `aria-label="3 critical vulnerabilities"`.

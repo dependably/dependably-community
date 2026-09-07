@@ -122,7 +122,7 @@
     on:keydown={onKeydown}
     on:focus={() => { if (flat.length) open = true }}
     on:blur={onBlur}
-    type="search"
+    type="text"
     class="gs-input"
     placeholder={$t('globalSearch.placeholder')}
     aria-label={$t('globalSearch.placeholder')}
@@ -207,6 +207,10 @@
     font-family: var(--font-mono, monospace);
     pointer-events: none;
   }
+  /* The shortcut hint is only useful before the field is in use: it leaves once the input has
+     focus or text, so the text end never shows a hint beside what the user typed. */
+  .gs:focus-within .gs-kbd,
+  .gs:has(.gs-input:not(:placeholder-shown)) .gs-kbd { display: none; }
 
   .gs-overlay {
     position: absolute;

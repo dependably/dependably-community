@@ -160,7 +160,7 @@
     { labelKey: 'audit.groups.mfa',          actions: ['mfa.enrolled', 'mfa.disabled', 'mfa.recovery_codes_regenerated', 'mfa.trusted_device_added'] },
     { labelKey: 'audit.groups.saml',         actions: ['saml.config_updated', 'saml.metadata_uploaded', 'saml.config_deleted', 'auth.saml.login.success', 'auth.saml.login.failure', 'auth.saml.user_linked', 'auth.saml.user_provisioned', 'auth.saml.test.success'] },
     { labelKey: 'audit.groups.tokens',       actions: ['token_created', 'token_revoked', 'service_token_created', 'service_token_revoked'] },
-    { labelKey: 'audit.groups.usersInvites', actions: ['member_role_changed', 'member_removed', 'invite_created', 'invite_deleted'] },
+    { labelKey: 'audit.groups.usersInvites', actions: ['member_role_changed', 'member_removed', 'invite_created', 'invite_deleted', 'invite_accept_blocked'] },
     { labelKey: 'audit.groups.lists',        actions: ['allowlist_added', 'allowlist_removed', 'blocklist_added', 'blocklist_removed'] },
     { labelKey: 'audit.groups.licenses',     actions: ['license_policy_mode_changed', 'license_allowlist_added', 'license_allowlist_updated', 'license_allowlist_removed', 'license_blocklist_added', 'license_blocklist_updated', 'license_blocklist_removed', 'package_note_added', 'package_note_updated', 'package_note_removed'] },
     { labelKey: 'audit.groups.claims',       actions: ['claim.create', 'claim.transition', 'claim.release'] },
@@ -274,7 +274,7 @@
         <option value="30d">{$t('activity.window.30d')}</option>
         <option value="90d">{$t('activity.window.90d')}</option>
       </select>
-      <button type="button" class="btn-sm" on:click={lcExport}>{$t('activity.export')}</button>
+      <button type="button" on:click={lcExport}>{$t('activity.export')}</button>
     </div>
 
     <ErrorBanner message={lcError} />
@@ -321,7 +321,7 @@
           </optgroup>
         {/each}
       </select>
-      <button type="button" class="btn-sm" on:click={adExport}>{$t('audit.export')}</button>
+      <button type="button" on:click={adExport}>{$t('audit.export')}</button>
     </div>
 
     <ErrorBanner message={adError} />
@@ -353,28 +353,19 @@
 </div>
 
 <style>
-  .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
-  .tab {
-    border: none;
-    background: none;
-    color: var(--text2);
-    padding: 8px 14px;
-    font-size: 13px;
-    cursor: pointer;
-    border-bottom: 2px solid transparent;
-    margin-bottom: -1px;
-  }
-  .tab:hover { color: var(--text); }
-  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
-
   .first-fetch-row td { background: var(--badge-warning-bg) !important; color: var(--badge-warning-text); }
   .nowrap { white-space: nowrap; }
-  .purl-cell { font-size: 12px; overflow-wrap: anywhere; }
-  .detail-cell { overflow-wrap: anywhere; }
+  /* Floors keep the flexible columns from collapsing to one character per line once the fixed
+     columns take the row at 1024; past them the table scrolls inside DataTable's container.
+     The table-level floors are global because the class lands on DataTable's own element. */
+  :global(table.activity-table) { min-width: 840px; }
+  :global(table.audit-table) { min-width: 900px; }
+  .purl-cell { font-size: 12px; overflow-wrap: anywhere; min-width: 160px; }
+  .detail-cell { overflow-wrap: anywhere; min-width: 200px; }
   .actor-cell { overflow-wrap: anywhere; }
   .event-select { width: auto; }
   :global(.badge.vuln-scan) { background: var(--badge-sky-bg); color: var(--badge-sky-text); }
 
   code { background: var(--bg); padding: 2px 6px; border-radius: 3px; font-size: 12px; }
-  .audit-detail-cell { font-family: var(--font-mono, monospace); font-size: 12px; color: var(--text2); white-space: pre-wrap; word-break: break-word; }
+  .audit-detail-cell { font-family: var(--font-mono, monospace); font-size: 12px; color: var(--text2); white-space: pre-wrap; word-break: break-word; min-width: 200px; }
 </style>

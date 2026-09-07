@@ -112,7 +112,7 @@
   .dialog {
     background: var(--bg);
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--radius);
     width: 100%;
     max-width: 960px;
     max-height: 90vh;
@@ -150,8 +150,9 @@
     font-size: 13px;
     padding: 16px;
     border: 1px dashed var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius);
   }
+  .nowrap { white-space: nowrap; }
   .licenses-table .col-version { width: 120px; }
   .licenses-table .col-license { width: 140px; }
 </style>

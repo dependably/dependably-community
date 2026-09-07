@@ -56,6 +56,5 @@
 </div>
 
 <style>
-  .card-narrow { max-width: 480px; }
   .hint { font-size: 11px; color: var(--text2); }
 </style>

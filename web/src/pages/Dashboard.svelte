@@ -4,6 +4,7 @@
   import ErrorBanner from '../lib/ErrorBanner.svelte'
   import Skeleton from '../lib/Skeleton.svelte'
   import { currentOrg, navigate, user } from '../lib/store.js'
+  import { canAccessPage } from '../lib/routes.js'
   import { reportPageLoad } from '../lib/pageLoad.js'
   import { formatBytes, formatHour24, formatNumber } from '../lib/format.js'
   import { ECOSYSTEMS, ECO_LABEL } from '../lib/ecosystems.js'
@@ -102,11 +103,13 @@
     .map(g => `${$t('dashboard.gates.' + g.gate)}: ${g.count}`)
     .join(' · ')
   $: quarantinePending = stats?.quarantinePending ?? 0
-  // Quarantine and Audit are admin/owner-only surfaces (see Sidebar, ADMIN_ONLY_PAGES). Non-admins
-  // see those counts as read-only stats — the cards are not links, because the page behind them
-  // would bounce them straight back here. The two risk tiles have no such gate: their drill-down
-  // needs only read:packages, so they link for every role.
+  // Quarantine and Audit are role-restricted surfaces (see Sidebar, RESTRICTED_PAGES in routes.js).
+  // A role that may not open the page behind a card sees its count as a read-only stat — the card
+  // is not a link, because the page would bounce them straight back here. Quarantine is admin/
+  // owner-only; Audit also admits the auditor role. The two risk tiles have no such gate: their
+  // drill-down needs only read:packages, so they link for every role.
   $: isAdmin = $user?.role === 'admin' || $user?.role === 'owner'
+  $: canOpenAudit = canAccessPage('audit', $user?.role)
   $: hostedPackages = stats?.hostedPackages ?? 0
   $: proxiedPackages = stats?.proxiedPackages ?? 0
   $: storageQuotaBytes = stats?.storageQuotaBytes ?? null
@@ -266,7 +269,8 @@
         </span>
       </button>
     {:else}
-      <!-- Same box as the loaded ribbon, so the page header does not change height. -->
+      <!-- Same box as the loaded ribbon; the ribbon's height floor is what keeps the page header
+           at one height whether it holds the placeholder or the loaded line. -->
       <span class="ribbon" aria-hidden="true"><Skeleton width="240px" height="14px" /></span>
     {/if}
   </div>
@@ -333,10 +337,10 @@
           {/if}
         </div>
       </button>
-      <!-- The two blocked tiles drill into the Audit page's lifecycle feed, scoped to the same
-           30-day window they count. That page is admin-only (ADMIN_ONLY_PAGES), so only an
-           admin/owner gets the link — everyone else keeps the count as a read-only stat. -->
-      {#if isAdmin}
+      <!-- The blocked tiles drill into the Audit page's lifecycle feed, scoped to the same
+           30-day window they count. That page is role-restricted (RESTRICTED_PAGES), so only a
+           role that may open it gets the link — everyone else keeps the count as a read-only stat. -->
+      {#if canOpenAudit}
         <button
           class="stat-card stat-link"
           title={blockedBreakdown}
@@ -352,7 +356,7 @@
           <div class="stat-value" class:warn={stats?.blockedPulls30d > 0}>{#if stats}{$formatNumber(stats.blockedPulls30d)}{:else}<Skeleton width="72px" height="28px" />{/if}</div>
         </div>
       {/if}
-      {#if isAdmin}
+      {#if canOpenAudit}
         <button
           class="stat-card stat-link"
           on:click={() => navigate('audit', { tab: 'lifecycle', type: 'blocked_malicious', since: '30d' })}
@@ -372,7 +376,7 @@
            is the sole prefix-matching special case). The search param does a substring match
            across event_type instead, so 'blocked_kev' as a search term catches both
            'blocked_kev' and 'blocked_kev_ransomware' without under-linking the drill-down. -->
-      {#if isAdmin}
+      {#if canOpenAudit}
         <button
           class="stat-card stat-link"
           on:click={() => navigate('audit', { tab: 'lifecycle', q: 'blocked_kev', since: '30d' })}
@@ -424,7 +428,7 @@
         </div>
       {/if}
       <!-- Active overrides: approved quarantine rows. Same admin-gated link posture as the
-           pending-count tile above — Quarantine is an admin-only surface (ADMIN_ONLY_PAGES). -->
+           pending-count tile above — Quarantine is an admin/owner-only surface (RESTRICTED_PAGES). -->
       {#if isAdmin}
         <button
           class="stat-card stat-link"
@@ -678,6 +682,10 @@
   /* SAML cert-expiry detail line */
   .saml-cert-detail { color: var(--text2); font-size: 13px; }
 
+  /* The loaded ribbon's 13px bold splits make a taller line than the 14px placeholder; the floor
+     is the loaded height, so the header stands still while the stats arrive. */
+  .ribbon { min-height: 31px; }
+
   /* Stat grid bottom margin */
   .stat-grid { margin-bottom: 32px; }
 
@@ -761,9 +769,12 @@
     border-radius: 50%;
   }
 
-  /* Ecosystem table */
+  /* Ecosystem table. `min-width: 0` overrides the flex item's implicit min-content width, so
+     the table stays beside the donut on a laptop column and scrolls inside its wrapper instead
+     of wrapping under the chart. */
   .eco-table-wrap {
-    flex: 1;
+    flex: 1 1 360px;
+    min-width: 0;
     overflow-x: auto;
   }
 
@@ -823,12 +834,14 @@
     margin-top: 4px;
   }
 
+  /* Only every fourth cell carries a label, so a label wider than its cell borrows the empty
+     neighbours' room rather than losing its trailing digit. */
   .bar-label-cell {
     flex: 1;
     font-size: 10px;
     color: var(--text2);
     white-space: nowrap;
-    overflow: hidden;
+    overflow: visible;
   }
 
   .chart-legend {
@@ -846,7 +859,7 @@
 
   .trend-card {
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--radius);
     padding: 12px 14px;
   }
 

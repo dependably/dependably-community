@@ -12,6 +12,10 @@ instance. Pick the cell in the table that matches your ecosystem and scope.
 | **Go**    | [go-configure-project](./go-configure-project/SKILL.md)     | [go-configure-global](./go-configure-global/SKILL.md)     |
 | **Cargo** | [cargo-configure-project](./cargo-configure-project/SKILL.md) | [cargo-configure-global](./cargo-configure-global/SKILL.md) |
 | **Docker / OCI** | — (host-level login, no project scope) | [docker-configure-global](./docker-configure-global/SKILL.md) |
+| **RPM (dnf/yum)** | — (machine-level repo file, no project scope) | [rpm-configure-global](./rpm-configure-global/SKILL.md) |
+| **Alpine apk** | — (machine-level repo file, no project scope) | [apk-configure-global](./apk-configure-global/SKILL.md) |
+| **Terraform** | — (CLI-level provider installation, no project scope) | [terraform-configure-global](./terraform-configure-global/SKILL.md) |
+| **Hex (Mix / Rebar3)** | — (client registers the repo per user, no project scope) | [hex-configure-global](./hex-configure-global/SKILL.md) |
 
 Each skill prompts for two inputs, in order:
 
@@ -29,6 +33,11 @@ Each skill prompts for two inputs, in order:
 > Each skill calls out the per-tool flag (`strict-ssl=false`, `trusted-host`,
 > `allowInsecureConnections`) needed to make this work.
 
+The table mirrors the `(ecosystem, scope)` cells the in-app Setup page serves —
+five ecosystems are machine-level only, because a repository file has nowhere to
+sit. `SkillCatalogTests` asserts the two sets are equal, so a new ecosystem or a
+newly added scope fails the build until its skill lands here.
+
 > **Never commit tokens.** Project-level files are checked into source control.
 > Each skill shows how to reference an environment variable instead of pasting
 > the literal value. The variable name differs by ecosystem on purpose: the npm
@@ -39,8 +48,17 @@ Each skill prompts for two inputs, in order:
 
 - [Configuring package managers](../README.md#configuring-package-managers) in the top-level README.
 - The in-app **Setup** page generates the same snippets pre-filled for the
-  current org. Skills are useful when you want a deeper recipe (Poetry, uv,
-  global config, etc.) than the one-snippet Setup page covers.
+  current org, and offers the matching skill below as an alternative to copying
+  them by hand. Skills are useful when you want a deeper recipe (Poetry, uv,
+  global config, etc.) than the one-snippet Setup page covers, or when you would
+  rather hand the job to an AI assistant.
+- Every skill on this page is served by a running instance at
+  `GET /api/v1/skills` (index), `GET /api/v1/skills/{id}` (raw markdown) and
+  `GET /api/v1/skills/bundle` (the whole corpus as a zip, optionally narrowed
+  with `?family=config|remediation`), anonymously — so an air-gapped install can
+  hand them out without reaching this repository. The bundle is laid out as
+  `<id>/SKILL.md`, so `unzip dependably-skills.zip -d ~/.claude/skills/` puts
+  every file where an assistant already looks for it.
 
 ## Remediation skills
 
@@ -48,9 +66,11 @@ Each skill prompts for two inputs, in order:
 vulnerability the dependably vuln report surfaced, not for configuring a
 client. The Vulnerabilities detail panel links each finding to the
 applicable skill(s) below and gives a one-liner to install one into
-`~/.claude/skills/`; they are also served directly from a running instance
-at `GET /api/v1/remediation/skills/{id}` (anonymous, so the install
-one-liner works air-gapped, without a token).
+`~/.claude/skills/`, and the **Setup** page lists them all on its Skills
+tab. They are served from a running instance at `GET /api/v1/skills/{id}`
+alongside the client-config skills, and also from the original
+`GET /api/v1/remediation/skills/{id}` — both anonymous, so the install
+one-liner works air-gapped, without a token.
 
 | Skill | Covers |
 |-------|--------|

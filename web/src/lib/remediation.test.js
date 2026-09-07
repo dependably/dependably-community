@@ -118,7 +118,7 @@ describe('skillInstallCommand', () => {
   it('builds a mkdir + curl one-liner scoped to the skill id and instance origin', () => {
     const cmd = skillInstallCommand('fix-xss', 'https://repo.example.com')
     expect(cmd).toBe(
-      'mkdir -p ~/.claude/skills/fix-xss && curl -fsSL https://repo.example.com/api/v1/remediation/skills/fix-xss -o ~/.claude/skills/fix-xss/SKILL.md',
+      'mkdir -p ~/.claude/skills/fix-xss && curl -fsSL https://repo.example.com/api/v1/skills/fix-xss -o ~/.claude/skills/fix-xss/SKILL.md',
     )
   })
 
@@ -133,7 +133,7 @@ describe('skillInstallCommand', () => {
     expect(cmd).toContain(window.location.origin)
     expect(cmd).not.toContain('undefined')
     expect(cmd).toBe(
-      `mkdir -p ~/.claude/skills/fix-xss && curl -fsSL ${window.location.origin}/api/v1/remediation/skills/fix-xss -o ~/.claude/skills/fix-xss/SKILL.md`,
+      `mkdir -p ~/.claude/skills/fix-xss && curl -fsSL ${window.location.origin}/api/v1/skills/fix-xss -o ~/.claude/skills/fix-xss/SKILL.md`,
     )
   })
 
@@ -147,13 +147,13 @@ describe('skillInstallCommand', () => {
 
   it('targets ~/.codex/prompts/<id>.md for Codex', () => {
     expect(skillInstallCommand('fix-xss', 'https://repo.example.com', 'codex')).toBe(
-      'mkdir -p ~/.codex/prompts && curl -fsSL https://repo.example.com/api/v1/remediation/skills/fix-xss -o ~/.codex/prompts/fix-xss.md',
+      'mkdir -p ~/.codex/prompts && curl -fsSL https://repo.example.com/api/v1/skills/fix-xss -o ~/.codex/prompts/fix-xss.md',
     )
   })
 
   it('targets the repo-level .github/prompts/<id>.prompt.md for Copilot', () => {
     expect(skillInstallCommand('fix-xss', 'https://repo.example.com', 'copilot')).toBe(
-      'mkdir -p .github/prompts && curl -fsSL https://repo.example.com/api/v1/remediation/skills/fix-xss -o .github/prompts/fix-xss.prompt.md',
+      'mkdir -p .github/prompts && curl -fsSL https://repo.example.com/api/v1/skills/fix-xss -o .github/prompts/fix-xss.prompt.md',
     )
   })
 

@@ -93,7 +93,6 @@
 </div>
 
 <style>
-  .card-narrow { max-width: 480px; }
   .input-row { display: flex; align-items: center; gap: 6px; }
   .input-row input {
     flex: 1;

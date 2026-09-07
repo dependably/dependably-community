@@ -100,22 +100,24 @@ public sealed class SbomNightlyPolicyReevaluationTests : IAsyncLifetime
     }
 
     /// <summary>
-    /// The nightly sweep is bounded to each project's <c>is_latest</c> version. A superseded
-    /// version's documents are frozen and no surface reads its verdict, so re-reading its whole
-    /// component set every night buys nothing and scales with the entire release history — a CI
-    /// pattern of one SBOM per build makes it arbitrarily expensive. The adversarial half is what
-    /// makes this test worth anything: the latest version must still be evaluated in the same pass,
-    /// so a sweep that simply stopped working would fail here rather than read as a win.
+    /// The nightly sweep is bounded to the in-service set — <c>ProjectLifecycle.InServiceFilter</c>.
+    /// A superseded AND retired version's documents are frozen and no surface reads its verdict, so
+    /// re-reading its whole component set every night buys nothing and scales with the entire
+    /// release history; a CI pattern of one SBOM per build makes that arbitrarily expensive. The
+    /// adversarial half is what makes this test worth anything: the latest version must still be
+    /// evaluated in the same pass, so a sweep that simply stopped working fails here rather than
+    /// reading as a win.
     /// </summary>
     [Fact]
-    public async Task Pass_SupersededVersion_IsNotReevaluated()
+    public async Task Pass_RetiredSupersededVersion_IsNotReevaluated()
     {
         string orgId = await OrgSeeder.InsertAsync(_db, $"nightly-super-{Guid.NewGuid():N}");
         await SetBlockKevAsync(orgId);
 
         string projectId = await InsertProjectAsync(orgId);
         var superseded = await SeedScannedComponentAsync(
-            orgId, "CVE-2100-1003", isKev: true, projectId: projectId, versionLabel: "1.0.0", isLatest: false);
+            orgId, "CVE-2100-1003", isKev: true, projectId: projectId, versionLabel: "1.0.0",
+            isLatest: false, isActive: false);
         var latest = await SeedScannedComponentAsync(
             orgId, "CVE-2100-1004", isKev: true, projectId: projectId, versionLabel: "2.0.0", isLatest: true);
 
@@ -124,6 +126,56 @@ public sealed class SbomNightlyPolicyReevaluationTests : IAsyncLifetime
         Assert.Equal("violation", await PolicyStatusAsync(latest.ProjectVersionId));
         Assert.Null(await PolicyStatusAsync(superseded.ProjectVersionId));
         Assert.Equal(0, await FindingCountAsync(superseded.ProjectVersionId));
+    }
+
+    /// <summary>
+    /// The discriminating twin: an active superseded version IS re-evaluated. This is the half the
+    /// blast radius depends on — it counts an active superseded release, so if this sweep skipped
+    /// one, that count would be built on advisory links frozen at whenever the version last was
+    /// latest, presented beside freshly-evaluated rows under a single number with nothing saying
+    /// which is which.
+    /// </summary>
+    [Fact]
+    public async Task Pass_ActiveSupersededVersion_IsReevaluated()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"nightly-active-{Guid.NewGuid():N}");
+        await SetBlockKevAsync(orgId);
+
+        string projectId = await InsertProjectAsync(orgId);
+        var stillDeployed = await SeedScannedComponentAsync(
+            orgId, "CVE-2100-1005", isKev: true, projectId: projectId, versionLabel: "1.0.0",
+            isLatest: false, isActive: true);
+
+        await BuildService(TestOsvSource.Create(reached: true)).RunSbomScanPassAsync(CancellationToken.None);
+
+        Assert.Equal("violation", await PolicyStatusAsync(stillDeployed.ProjectVersionId));
+        Assert.Equal(1, await FindingCountAsync(stillDeployed.ProjectVersionId));
+    }
+
+    /// <summary>
+    /// A retired project's versions are skipped whatever their own flags say — the project half of
+    /// the predicate, which the two version-level cases above cannot distinguish.
+    /// </summary>
+    [Fact]
+    public async Task Pass_RetiredProjectsLatestVersion_IsNotReevaluated()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"nightly-retired-{Guid.NewGuid():N}");
+        await SetBlockKevAsync(orgId);
+
+        string projectId = await InsertProjectAsync(orgId);
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "UPDATE projects SET is_active = 0 WHERE id = @projectId", new { projectId });
+        }
+
+        var latest = await SeedScannedComponentAsync(
+            orgId, "CVE-2100-1006", isKev: true, projectId: projectId, versionLabel: "1.0.0", isLatest: true);
+
+        await BuildService(TestOsvSource.Create(reached: true)).RunSbomScanPassAsync(CancellationToken.None);
+
+        Assert.Null(await PolicyStatusAsync(latest.ProjectVersionId));
+        Assert.Equal(0, await FindingCountAsync(latest.ProjectVersionId));
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -156,7 +208,8 @@ public sealed class SbomNightlyPolicyReevaluationTests : IAsyncLifetime
     /// </summary>
     private async Task<SeededVersion> SeedScannedComponentAsync(
         string orgId, string osvId, bool isKev, string? projectId = null,
-        string versionLabel = "1.0.0", bool isLatest = true, TimeSpan scannedAge = default)
+        string versionLabel = "1.0.0", bool isLatest = true, TimeSpan scannedAge = default,
+        bool isActive = true)
     {
         projectId ??= await InsertProjectAsync(orgId);
         string projectVersionId = Guid.NewGuid().ToString("N");
@@ -169,10 +222,18 @@ public sealed class SbomNightlyPolicyReevaluationTests : IAsyncLifetime
         await using var conn = await _db.OpenAsync();
         await conn.ExecuteAsync(
             """
-            INSERT INTO project_versions (id, org_id, project_id, version, is_latest)
-            VALUES (@projectVersionId, @orgId, @projectId, @versionLabel, @isLatest)
+            INSERT INTO project_versions (id, org_id, project_id, version, is_latest, is_active)
+            VALUES (@projectVersionId, @orgId, @projectId, @versionLabel, @isLatest, @isActive)
             """,
-            new { projectVersionId, orgId, projectId, versionLabel, isLatest = isLatest ? 1 : 0 });
+            new
+            {
+                projectVersionId,
+                orgId,
+                projectId,
+                versionLabel,
+                isLatest = isLatest ? 1 : 0,
+                isActive = isActive ? 1 : 0,
+            });
         await conn.ExecuteAsync(
             """
             INSERT INTO sbom_components

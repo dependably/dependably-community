@@ -194,13 +194,19 @@
           rejected: lastResult.rejected,
         }})}
       </div>
-      <table class="table-auto outcome-table">
+      <table class="outcome-table">
+        <colgroup>
+          <col class="col-file" />
+          <col class="col-ecosystem" />
+          <col class="col-status" />
+          <col class="col-detail" />
+        </colgroup>
         <thead>
           <tr>
-            <th>File</th>
-            <th>Ecosystem</th>
-            <th>Status</th>
-            <th>Detail</th>
+            <th>{$t('upload.outcome.columns.file')}</th>
+            <th>{$t('upload.outcome.columns.ecosystem')}</th>
+            <th>{$t('upload.outcome.columns.status')}</th>
+            <th>{$t('upload.outcome.columns.detail')}</th>
           </tr>
         </thead>
         <tbody>
@@ -382,7 +388,24 @@
     margin-bottom: 8px;
     font-weight: 500;
   }
-  .outcome-table { font-size: 13px; }
+  /* Fixed layout with declared column widths: under auto layout the nowrap filename column
+     claims most of the width and starves Detail — which carries the server's error code and
+     message — into a tall thin ribbon that overhangs the card's 720px edge. */
+  .outcome-table { font-size: 13px; table-layout: fixed; }
+  .col-file { width: 28%; }
+  .col-ecosystem { width: 14%; }
+  .col-status { width: 14%; }
+  .col-detail { width: 44%; }
+  .outcome-table td {
+    vertical-align: top;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .outcome-table .file-name { overflow: visible; text-overflow: clip; }
+  /* The cells wrap, but a badge is a pill and the claim button is a control — breaking either
+     label across two lines splits it. */
+  .outcome-table .badge,
+  .outcome-table .action-btn { white-space: nowrap; }
   .mono { font-family: var(--mono, monospace); }
 
   .action-btn { padding: 3px 8px; font-size: 11px; min-height: 26px; margin-left: 6px; }

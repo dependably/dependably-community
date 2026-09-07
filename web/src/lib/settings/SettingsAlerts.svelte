@@ -105,7 +105,6 @@
 {/if}
 
 <style>
-  .card-narrow { max-width: 480px; }
   /* .form-row is a column flex box by default; the inline variant turns the row back into a
      left-aligned label + right-edge control. Without the explicit row direction the shared
      align-items lands on the cross axis and centres every control. */

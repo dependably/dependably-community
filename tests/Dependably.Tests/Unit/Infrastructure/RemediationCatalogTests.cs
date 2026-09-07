@@ -73,7 +73,7 @@ public sealed class RemediationCatalogTests
     {
         foreach (string skillId in RemediationCatalog.CweToSkillId.Values)
         {
-            Assert.Contains(skillId, RemediationSkillCatalog.KnownSkillIds);
+            Assert.Contains(skillId, SkillCatalog.RemediationSkillIds);
         }
     }
 

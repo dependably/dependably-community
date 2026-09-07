@@ -117,4 +117,28 @@ public static class UtcTimestamp
         normalized = string.Empty;
         return false;
     }
+
+    /// <summary>
+    /// <see cref="TryNormalize"/> at microsecond precision, for an instant an upstream source
+    /// declared with sub-second digits. The advisory feed is the case: OSV emits <c>modified</c>
+    /// with nine fractional digits, which no temporal CHECK accepts and which the second-precision
+    /// form would flatten; this keeps six, the most the canonical shapes carry. A value with more
+    /// digits is truncated, never rejected — the instant is the advisory's, and losing its last
+    /// three digits is nothing beside losing the advisory.
+    /// </summary>
+    public static bool TryNormalizePrecise(string? raw, out string normalized)
+    {
+        if (DateTimeOffset.TryParse(
+                raw,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.RoundtripKind | DateTimeStyles.AssumeUniversal,
+                out var parsed))
+        {
+            normalized = parsed.ToUtcIsoPrecise();
+            return true;
+        }
+
+        normalized = string.Empty;
+        return false;
+    }
 }

@@ -108,6 +108,5 @@
 </div>
 
 <style>
-  .card-narrow { max-width: 480px; }
   .mt-4 { margin-top: 24px; }
 </style>

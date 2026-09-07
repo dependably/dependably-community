@@ -35,6 +35,5 @@
 <SettingsUpstreamRegistries />
 
 <style>
-  .card-narrow { max-width: 480px; }
   .form-row-inline { flex-direction: row; align-items: center; gap: 12px; }
 </style>

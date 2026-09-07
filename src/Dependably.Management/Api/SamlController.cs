@@ -552,9 +552,12 @@ public sealed class SamlController : ControllerBase
     /// Single source of truth for "SAML is fully configured" — i.e. IdP metadata is uploaded
     /// and parseable. The three fields are written together by <c>UpsertMetadataAsync</c>;
     /// requiring all three matches the actual write path and prevents partial-state drift.
-    /// Distinct from <c>Enabled</c> (the publish-on-sign-in toggle).
+    /// Distinct from <c>Enabled</c> (the publish-on-sign-in toggle). Internal (not private) so
+    /// <see cref="Dependably.Api.AuthController"/>'s server-side forms-login enforcement reads the
+    /// same predicate this class uses to accept an assertion, instead of drifting into a second
+    /// definition of "configured".
     /// </summary>
-    private static bool IsSamlConfigured(TenantSamlConfig? cfg) =>
+    internal static bool IsSamlConfigured(TenantSamlConfig? cfg) =>
         cfg is not null
         && !string.IsNullOrWhiteSpace(cfg.IdpEntityId)
         && !string.IsNullOrWhiteSpace(cfg.IdpSsoUrl)
@@ -811,6 +814,19 @@ public static class IdpMetadataParser
             ?? throw new InvalidOperationException("Metadata is missing a usable SingleSignOnService endpoint.");
         string ssoUrl = ssoNode.Attributes?["Location"]?.Value
             ?? throw new InvalidOperationException("SingleSignOnService is missing Location.");
+
+        // Location must be an absolute http(s) URL. Two things break when it is not: the sign-in
+        // redirect is built with new Uri(IdpSsoUrl) and throws at login time, and — because a
+        // stored-but-unusable endpoint still looks like uploaded metadata — every "is SAML
+        // configured" reader downstream reads a tenant as SSO-capable when no SAML login can
+        // ever complete. Rejecting at the upload keeps the persisted config and the reachable
+        // config the same thing. The scheme check also keeps a non-network scheme out of a value
+        // the SP hands to the browser as a redirect target.
+        if (!Uri.TryCreate(ssoUrl, UriKind.Absolute, out var ssoUri)
+            || (ssoUri.Scheme != Uri.UriSchemeHttps && ssoUri.Scheme != Uri.UriSchemeHttp))
+        {
+            throw new InvalidOperationException("SingleSignOnService Location is not an absolute http(s) URL.");
+        }
 
         // Prefer KeyDescriptor with use='signing'; otherwise the first KeyDescriptor.
         var certNode = idpDescriptor.SelectSingleNode(

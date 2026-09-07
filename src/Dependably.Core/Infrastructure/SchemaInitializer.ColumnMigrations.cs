@@ -1216,6 +1216,22 @@ public sealed partial class SchemaInitializer
             // from then on. No CHECK here (SQLite ALTER cannot add one); fresh installs get it
             // from Schema.sql.
             "ALTER TABLE sbom_components ADD COLUMN dependency_scope_source TEXT",
+            // Whether an application, and each of its releases, is still in service. Both backfill
+            // to 1 on an upgraded database, which is the only honest value: the blast radius
+            // counted every latest version before this column existed, so defaulting to active
+            // preserves what those installs already reported instead of silently retiring a
+            // catalogue nobody has triaged yet. Neither carries a CHECK — SQLite ALTER cannot add
+            // one, and the write paths bind 0 or 1 and nothing else.
+            "ALTER TABLE projects ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE project_versions ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1",
+            // The ONLY declaration site for this index, deliberately absent from Schema.sql and
+            // Schema.pg.sql: those run in full before this pass, so an index naming is_active
+            // there resolves against the table shape that predates the ALTER above and throws on
+            // every upgrade boot. It covers the active-but-not-latest arm of the in-service
+            // predicate, and is partial because those rows are the minority in any catalogue that
+            // retires anything. Fresh installs are covered too — this pass runs unconditionally.
+            // It moves into the schema files a release after is_active ships.
+            "CREATE INDEX IF NOT EXISTS idx_project_versions_active ON project_versions (project_id) WHERE is_active = 1",
     };
 
     private async Task RunAdditiveMigrationsAsync(DbConnection conn)

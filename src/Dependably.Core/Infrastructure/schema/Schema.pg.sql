@@ -2114,6 +2114,8 @@ CREATE TABLE IF NOT EXISTS projects (
     name        TEXT NOT NULL,
     classifier  TEXT NOT NULL DEFAULT 'application',
     description TEXT,
+    -- Whether this application is still in service. See Schema.sql for the full rationale.
+    is_active   INTEGER NOT NULL DEFAULT 1,
     created_by  TEXT,
     created_at  TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
         CHECK (created_at IS NULL OR created_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$')
@@ -2134,6 +2136,8 @@ CREATE TABLE IF NOT EXISTS project_versions (
     project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     version       TEXT NOT NULL,
     is_latest     INTEGER NOT NULL DEFAULT 0,
+    -- Whether this release is still deployed. Independent of is_latest; see Schema.sql.
+    is_active     INTEGER NOT NULL DEFAULT 1,
     policy_status TEXT CHECK (policy_status IN ('pass','warn','violation')),
     created_by    TEXT,
     created_at    TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))

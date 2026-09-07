@@ -91,12 +91,12 @@
   <p class="subtitle">{$t('system.settings.metrics.subtitle')}</p>
 
   {#if access.enabledLockedByEnv || access.allowlistLockedByEnv}
-    <div class="env-banner">{$t('system.settings.metrics.envLocked')}</div>
+    <div class="env-banner card-narrow">{$t('system.settings.metrics.envLocked')}</div>
   {/if}
 
   {#if accessError}<div class="page-error">{accessError}</div>{/if}
 
-  <form on:submit|preventDefault={saveAccess}>
+  <form class="card-narrow" on:submit|preventDefault={saveAccess}>
     <div class="form-row">
       <label for="metrics-enabled">{$t('system.settings.metrics.enabled')}</label>
       <div class="field">
@@ -149,7 +149,7 @@
   </form>
 
   {#if recentDeniedIps.length > 0}
-    <div class="denied-section">
+    <div class="denied-section card-narrow">
       <h4 class="denied-title">{$t('system.settings.metrics.recentDenied.title')}</h4>
       <p class="denied-hint">{$t('system.settings.metrics.recentDenied.hint')}</p>
       <ul class="denied-list">
@@ -177,7 +177,7 @@
 
 <style>
   .subtitle { color: var(--text2); font-size: 13px; margin: 0 0 16px; }
-  form { display: flex; flex-direction: column; gap: 16px; max-width: 560px; }
+  form { display: flex; flex-direction: column; gap: 16px; }
   .form-row { display: grid; grid-template-columns: 1fr 240px; gap: 12px; align-items: start; }
   .form-row label { font-size: 13px; color: var(--text2); padding-top: 8px; }
   .field { display: flex; flex-direction: column; gap: 4px; }
@@ -202,7 +202,6 @@
     padding: 8px 12px;
     border-radius: var(--radius);
     margin-bottom: 12px;
-    max-width: 560px;
     font-size: 13px;
   }
   .warn-box {
@@ -212,7 +211,6 @@
     border-radius: var(--radius);
     margin-top: 8px;
     font-size: 12px;
-    max-width: 560px;
   }
   .source-tag {
     font-size: 10px;
@@ -226,7 +224,7 @@
   .source-tag-db { background: var(--bg3); color: var(--text); border: 1px solid var(--border); }
   .source-tag-default { background: var(--bg); color: var(--text2); border: 1px solid var(--border); }
 
-  .denied-section { margin-top: 24px; max-width: 560px; }
+  .denied-section { margin-top: 24px; }
   .denied-title { font-size: 13px; font-weight: 600; margin: 0 0 4px; color: var(--text); }
   .denied-hint { font-size: 11px; color: var(--text2); margin: 0 0 8px; }
   .denied-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 4px; }

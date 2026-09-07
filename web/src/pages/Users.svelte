@@ -244,7 +244,8 @@
 
 <style>
   .row-actions { display: flex; gap: 6px; align-items: center; }
-  .role-select { padding: 2px 6px; }
+  /* Matches the 28px .btn-sm Save / Cancel buttons beside it in the row. */
+  .role-select { min-height: 28px; height: 28px; padding: 0 6px; font-size: 12px; }
   .mfa-cell { text-align: center; }
   .mfa-check { display: inline-block; color: var(--success); vertical-align: middle; }
   /* Dates read as one token — never wrap "May 18, 2026" onto two lines. */

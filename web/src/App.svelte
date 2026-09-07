@@ -3,7 +3,7 @@
   import { t, isLoading } from 'svelte-i18n'
   import { route, user, navigate, restoreScroll, bootstrapInfo, pendingRoute, noticesOpen,
            activeRoute, cancelTransition, transitionPending } from './lib/store.js'
-  import { useRouter, routeFor, ADMIN_ONLY_PAGES } from './lib/routes.js'
+  import { useRouter, routeFor, canAccessPage } from './lib/routes.js'
   import { api } from './lib/api.js'
   import { setupI18n } from './i18n/index.js'
   import { applyUserContext } from './lib/userContext.js'
@@ -75,16 +75,15 @@
     navigate('profile', {}, { replace: true })
   }
 
-  // Guard: admin/owner-only pages must not render for other roles. The sidebar hides these
-  // links, but a non-admin can still deep-link or bookmark the URL — without this bounce the
-  // page mounts, fires its API call, and surfaces a raw backend 403. Send them to the dashboard
-  // instead. Runs after the rotation/MFA guards so those keep priority; the backend remains the
-  // real authority (this is UX, not the security boundary). Apex mode is exempt: SystemApp owns
-  // its own page names and never uses these.
+  // Guard: role-restricted pages (RESTRICTED_PAGES in routes.js) must not render for a role
+  // outside their allow-list. The sidebar hides these links, but a user can still deep-link or
+  // bookmark the URL — without this bounce the page mounts, fires its API call, and surfaces a
+  // raw backend 403. Send them to the dashboard instead. Runs after the rotation/MFA guards so
+  // those keep priority; the backend remains the real authority (this is UX, not the security
+  // boundary). Apex mode is exempt: SystemApp owns its own page names and never uses these.
   $: if ($user
-        && !($user.role === 'admin' || $user.role === 'owner')
         && !($bootstrapInfo?.mode === 'multi' && $bootstrapInfo?.isApex)
-        && ADMIN_ONLY_PAGES.has($activeRoute.page)) {
+        && !canAccessPage($activeRoute.page, $user.role)) {
     navigate('dashboard', {}, { replace: true })
   }
 
@@ -152,10 +151,9 @@
       finalPage = 'profile'
     } else if (intended.page === 'login') {
       finalPage = 'dashboard'
-    } else if (ADMIN_ONLY_PAGES.has(intended.page)
-        && !(me.role === 'admin' || me.role === 'owner')) {
-      // Non-admin deep-linked/bookmarked an admin-only page — land on the dashboard so the
-      // admin page never mounts. The reactive guard above covers runtime navigations.
+    } else if (!canAccessPage(intended.page, me.role)) {
+      // Deep-linked/bookmarked a page this role may not open — land on the dashboard so the
+      // restricted page never mounts. The reactive guard above covers runtime navigations.
       finalPage = 'dashboard'
     } else {
       finalPage = intended.page
@@ -223,7 +221,7 @@
           <svg width="12" height="12" aria-hidden="true"><use href="/icons.svg#icon-alert"/></svg>
           {$t('nav.insecureHttpHint')}
         </span>
-        <button class="http-banner-close" on:click={() => { httpBannerDismissed = true; localStorage.setItem('httpBannerDismissed', '1') }} aria-label="Dismiss">&#215;</button>
+        <button class="http-banner-close" on:click={() => { httpBannerDismissed = true; localStorage.setItem('httpBannerDismissed', '1') }} aria-label={$t('common.actions.dismiss')}>&#215;</button>
       </div>
     {/if}
 
@@ -357,7 +355,12 @@
     color: var(--warning-text);
     font-size: 20px;
     line-height: 1;
-    padding: 2px 6px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
     cursor: pointer;
     opacity: 0.7;
   }

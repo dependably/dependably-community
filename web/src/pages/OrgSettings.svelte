@@ -665,7 +665,7 @@
         </span>
       </div>
       <p class="section-hint">{$t('settings.licenses.review.intro')}</p>
-      <table class="list-table">
+      <table class="list-table review-table">
         <colgroup>
           <col><!-- spdx -->
           <col><!-- name -->
@@ -707,22 +707,24 @@
               <td>
                 {#if r.isDeprecated}<span class="badge danger">{$t('settings.licenses.review.deprecated')}</span>{/if}
               </td>
-              <td class="t-actions">
-                <button class="primary btn-sm"
-                        disabled={!!licenseReviewBusy[r.licenseSpdx]}
-                        on:click={() => approveReview(r.licenseSpdx)}>
-                  {$t('settings.licenses.review.approve')}
-                </button>
-                <button class="btn-sm"
-                        disabled={!!licenseReviewBusy[r.licenseSpdx]}
-                        on:click={() => conditionalReview(r.licenseSpdx)}>
-                  {$t('settings.licenses.review.conditional')}
-                </button>
-                <button class="danger btn-sm"
-                        disabled={!!licenseReviewBusy[r.licenseSpdx]}
-                        on:click={() => blockReview(r.licenseSpdx)}>
-                  {$t('settings.licenses.review.block')}
-                </button>
+              <td>
+                <div class="row-actions">
+                  <button class="primary btn-sm"
+                          disabled={!!licenseReviewBusy[r.licenseSpdx]}
+                          on:click={() => approveReview(r.licenseSpdx)}>
+                    {$t('settings.licenses.review.approve')}
+                  </button>
+                  <button class="btn-sm"
+                          disabled={!!licenseReviewBusy[r.licenseSpdx]}
+                          on:click={() => conditionalReview(r.licenseSpdx)}>
+                    {$t('settings.licenses.review.conditional')}
+                  </button>
+                  <button class="danger btn-sm"
+                          disabled={!!licenseReviewBusy[r.licenseSpdx]}
+                          on:click={() => blockReview(r.licenseSpdx)}>
+                    {$t('settings.licenses.review.block')}
+                  </button>
+                </div>
               </td>
             </tr>
           {/each}
@@ -892,7 +894,11 @@
                 {/if}
               </td>
               <td class="text-muted">{$formatDateShort(e.createdAt)}</td>
-              <td><button class="danger btn-sm" on:click={() => removeLicenseBlock(e.licenseSpdx)}>{$t('common.actions.remove')}</button></td>
+              <td>
+                <div class="row-actions">
+                  <button class="danger btn-sm" on:click={() => removeLicenseBlock(e.licenseSpdx)}>{$t('common.actions.remove')}</button>
+                </div>
+              </td>
             </tr>
           {/each}
           {#if licenseBlockEntries.length === 0}
@@ -982,11 +988,11 @@
                   <td><span class="badge badge-{b.severity}">{b.severity}</span></td>
                   <td class="banner-body-cell">{b.body}</td>
                   <td>{b.targetRole}</td>
-                  <td class="banner-window-cell">{b.startsAt} &ndash; {b.endsAt}</td>
+                  <td class="banner-window-cell"><span>{b.startsAt}</span> &ndash; <span>{b.endsAt}</span></td>
                   <td>{b.enabled ? $t('settings.banners.yes') : $t('settings.banners.no')}</td>
                   <td>
                     <div class="row-actions">
-                      <button class="danger" on:click={() => deleteBanner(b.id)}>{$t('common.actions.delete')}</button>
+                      <button class="danger btn-sm" on:click={() => deleteBanner(b.id)}>{$t('common.actions.delete')}</button>
                     </div>
                   </td>
                 </tr>
@@ -1056,13 +1062,17 @@
   /* .list-header margin-bottom is global — see app.css */
   .list-table .col-added   { width: 110px; }
   .list-table .col-actions { width: 90px; }
-  .list-table .col-review-actions { width: 230px; }
+  /* The review table sizes to its content: the three action buttons wrap onto a second row on a
+     laptop column instead of the fixed layout squeezing the identifier and name columns. */
+  .review-table { table-layout: auto; }
+  .list-table .col-review-actions { width: 250px; }
+  .review-table .col-review-actions { width: 200px; }
   .list-table .col-spdx { width: 220px; }
   .list-table .col-policy-actions { width: 210px; }
-  .t-actions { white-space: nowrap; }
   /* Wrapper, never display:flex on the td itself — a flexed cell drops out of the table's
-     column sizing and the row loses its alignment. */
-  .row-actions { display: flex; gap: 6px; align-items: center; }
+     column sizing and the row loses its alignment. Wraps so a three-button review row
+     (Approve / Conditional / Block) survives longer French labels without clipping. */
+  .row-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
   /* The note cell is a click target across its whole width so the empty state is discoverable. */
   .note-cell {
     text-align: left;
@@ -1091,14 +1101,16 @@
   .link:hover:not(:disabled) { text-decoration: underline; background: none; }
   .link:disabled { color: var(--text2); cursor: default; }
 
-  /* Licenses tab — mode picker as a 2-col table: label+hint on the left, radio on the right.
-     Matches the visual rhythm of the allow/block tables below. */
-  .tab-intro {
+  /* Muted one-paragraph hint directly under a section heading; tighter than the global
+     .tab-intro because the heading above already carries the spacing. */
+  .section-hint {
     color: var(--text2);
     font-size: 13px;
-    margin: 0 0 16px;
+    margin: 0 0 12px;
     max-width: 640px;
   }
+  /* Licenses tab — mode picker as a 2-col table: label+hint on the left, radio on the right.
+     Matches the visual rhythm of the allow/block tables below. */
   .mode-table { margin-bottom: 24px; }
   .mode-table .col-mode-radio { width: 60px; }
   .mode-table tr.active .mode-label { color: var(--accent); }
@@ -1110,6 +1122,22 @@
   .banner-create-form { max-width: 640px; margin-bottom: 24px; }
   .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
   .checkbox-row { margin-bottom: 12px; }
+  /* Toggle + label pair sitting in a list header, beside the section heading. */
+  .checkbox-inline { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; }
+  .banner-tab-error { color: var(--danger); }
+  .banner-tab-success { color: var(--success); }
+  .empty-state { color: var(--text2); font-size: 13px; margin: 0; }
+  /* Banner list: sized by content rather than the global fixed layout, so the message body
+     takes the slack and the short cells (severity, role, window) stay on one line. */
+  .banner-table { table-layout: auto; }
+  /* The message keeps a readable measure; the window breaks between its two timestamps rather
+     than holding one long line that would squeeze the message to a few characters per row. */
+  .banner-body-cell { overflow-wrap: anywhere; min-width: 220px; }
+  .banner-window-cell { font-variant-numeric: tabular-nums; font-size: 12px; }
+  .banner-window-cell span { white-space: nowrap; }
+  .badge.badge-info  { background: var(--badge-sky-bg);     color: var(--badge-sky-text); }
+  .badge.badge-warn  { background: var(--badge-warning-bg); color: var(--badge-warning-text); }
+  .badge.badge-alert { background: var(--badge-red-bg);     color: var(--badge-red-text); }
   .checkbox-label {
     display: flex;
     align-items: center;

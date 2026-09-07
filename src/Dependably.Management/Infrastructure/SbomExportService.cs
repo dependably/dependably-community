@@ -126,9 +126,17 @@ public sealed partial class SbomExportService
     /// disagreed with the numbers rendered beside its button would be worse than no export. The
     /// rule is stated in <c>metadata.properties</c> rather than left implicit, and a project with
     /// no version at all is still listed, as an empty entry, so the document never reads as
-    /// exhaustive when it is not. Several concurrently-live versions per project is a real shape
-    /// this deliberately does not model yet; it needs a per-version label, not a second
-    /// <c>is_latest</c>-like flag, and nothing has asked for it.</para>
+    /// exhaustive when it is not.</para>
+    ///
+    /// <para>This is deliberately NARROWER than <c>ProjectLifecycle.InServiceFilter</c>, which the
+    /// blast radius and the VEX affected-count both use and which admits several concurrently
+    /// active versions per project. The two answer different questions: that filter asks "what is
+    /// still running", while a CycloneDX document needs one component per project — emitting a
+    /// project twice, once per active release, produces two entries a consumer cannot tell apart
+    /// without a per-version label the format gives no place to put. Selecting <c>is_latest</c>
+    /// keeps the document's contents matching the rollup counts rendered beside its own button,
+    /// which is the property that makes the export legible. Exporting every active version is a
+    /// real shape and still needs that label; nothing has asked for it.</para>
     ///
     /// <para><b>No deduplication.</b> A library shipped by three projects appears three times, once
     /// under each. VEX analysis is per-project — the same advisory can be not-affected in one and

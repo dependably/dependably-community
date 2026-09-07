@@ -62,6 +62,7 @@ public static class EdgeSurfaceRegistry
         typeof(Api.ProjectsController),
 
         typeof(Api.RemediationController),
+        typeof(Api.SkillsController),
         typeof(Api.SbomController),
         typeof(Api.SbomAnalysisController),
         typeof(Api.BlastRadiusController),

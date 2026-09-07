@@ -34,11 +34,32 @@ const TENANT_STATIC = [
   ['dashboard',         '/dashboard'], // alias — canonical is '/'
 ]
 
-// Pages whose nav links the sidebar exposes only to admin/owner (Sidebar.svelte adminItems).
-// App.svelte consults this to bounce other roles that deep-link or bookmark one of these URLs,
-// so an admin-only page never mounts and surfaces a raw backend 403. Keep in sync with the
-// sidebar's adminItems list. (setup is intentionally excluded — it is shown to every user.)
-export const ADMIN_ONLY_PAGES = new Set(['quarantine', 'users', 'audit', 'upload', 'settings'])
+// Role-restricted pages: page → the roles allowed to open it. Any page not listed here is open
+// to every authenticated role. Sidebar.svelte renders a listed page's nav link only for those
+// roles (restrictedItems), and App.svelte bounces any other role that deep-links or bookmarks one
+// of these URLs to the dashboard, so a restricted page never mounts and surfaces a raw backend 403.
+// The role sets mirror the backend capability grants (Capabilities.cs): 'audit' admits 'auditor'
+// because AuditorCaps carries read:audit, which is all GET /api/v1/audit and /activity gate on;
+// the other four stay admin/owner-only (member holds ReaderCaps, auditor read:audit — neither
+// reaches quarantine, users, upload, or settings). This is UX routing, not the security
+// boundary — the backend remains the authority. Keep the page set
+// in sync with the sidebar's restrictedItems (navAccess.parity.test.js pins it). (setup is
+// intentionally excluded — it is shown to every user.)
+const ADMIN_ROLES = Object.freeze(['admin', 'owner'])
+export const RESTRICTED_PAGES = new Map([
+  ['quarantine', ADMIN_ROLES],
+  ['users', ADMIN_ROLES],
+  ['audit', Object.freeze([...ADMIN_ROLES, 'auditor'])],
+  ['upload', ADMIN_ROLES],
+  ['settings', ADMIN_ROLES],
+])
+
+// canAccessPage: may a user with `role` open `page`? Unlisted pages are open to every role; a
+// listed page requires an exact role match, so a missing/unknown role is denied there.
+export function canAccessPage(page, role) {
+  const roles = RESTRICTED_PAGES.get(page)
+  return roles === undefined || roles.includes(role)
+}
 
 const SYSTEM_STATIC = [
   ['system-dashboard',     '/'],

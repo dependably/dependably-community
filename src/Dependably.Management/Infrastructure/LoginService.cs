@@ -12,6 +12,8 @@ public sealed class LoginService
 {
     private const int MaxFailedAttempts = 10;
     private const int LockoutMinutes = 15;
+    /// <summary>The 429 detail for an account whose lockout is in force — shared by every door.</summary>
+    public const string LockedAccountError = "Account locked due to too many failed attempts.";
 
     /// <summary>
     /// Valid bcrypt (cost 12) hash of a random, unguessable, immediately-discarded value,
@@ -147,6 +149,70 @@ public sealed class LoginService
     }
 
     /// <summary>
+    /// Records a tenant password-login attempt that was refused before any credential check
+    /// because the tenant is SAML-only (<c>forms_login_enabled=false</c> with a usable IdP).
+    /// The refusal short-circuits <see cref="BeginTenantLoginAsync"/>, so without this call the
+    /// attempt would leave no trace at all: password spraying against exactly the population
+    /// SSO-only exists to protect — including with a correct credential the IdP has since
+    /// deprovisioned — would be invisible to <c>audit_log</c>, to the SIEM auth feed, and to the
+    /// lockout counter. It writes the same rows the invalid-credential path writes, marked
+    /// <c>reason=forms_login_disabled</c> so the two are distinguishable downstream, and it
+    /// charges the same (realm, tenant, email) lockout budget: a refused attempt is still an
+    /// attempt, and locking that budget denies nothing to a legitimate user, whose SAML sign-in
+    /// does not consult it. When that budget is already locked the attempt is recorded as a
+    /// lockout hit instead — the same <c>lockout.triggered</c> row and retry-after the
+    /// credential path produces — and the returned value is the seconds until the lock lifts,
+    /// so the caller answers 429 exactly as it would for a locked password-backed account
+    /// rather than letting an SSO-only tenant hide a spray behind an endless run of 401s.
+    /// Logging the refusal is not an enumeration oracle — the tenant's SSO-only status is
+    /// already public via <c>GET /api/v1/auth/methods</c>, and the emitted row carries the hashed
+    /// email, never the address.
+    /// </summary>
+    /// <returns>
+    /// <c>null</c> when the refusal was recorded as a failed attempt; otherwise the
+    /// <c>Retry-After</c> seconds of the lockout already in force for this account.
+    /// </returns>
+    public async Task<int?> RecordTenantFormsLoginBlockedAsync(
+        string email, string tenantId, string? sourceIp = null, CancellationToken ct = default)
+    {
+        string lockoutKey = HashLockoutKey("tenant", tenantId, email);
+        string emailHash = HashEmail(email);
+        var (_, lockedUntil) = await _lockout.GetAsync(lockoutKey, ct);
+        if (lockedUntil.HasValue && _time.GetUtcNow() < lockedUntil.Value)
+        {
+            return await RecordTenantLockoutHitAsync(tenantId, emailHash, lockedUntil.Value, sourceIp, ct);
+        }
+
+        await RecordFailureAsync(
+            new LoginFailureTarget(lockoutKey, emailHash, "tenant", tenantId),
+            sourceIp, "forms_login_disabled", ct);
+        return null;
+    }
+
+    /// <summary>
+    /// Records an attempt against a tenant account whose lockout is already in force — the
+    /// <c>lockout.triggered</c> audit row, the <c>login.locked</c> activity row, and the SIEM
+    /// lockout event — and returns the <c>Retry-After</c> seconds the caller reports. Shared by
+    /// the credential path and the SSO-only refusal so a locked account is recorded identically
+    /// whichever door the attempt came through.
+    /// </summary>
+    private async Task<int> RecordTenantLockoutHitAsync(
+        string tenantId, string emailHash, DateTimeOffset lockedUntil, string? sourceIp, CancellationToken ct)
+    {
+        int retryAfter = (int)(lockedUntil - _time.GetUtcNow()).TotalSeconds + 1;
+        await _audit.LogAsync("lockout.triggered", orgId: tenantId,
+            detail: System.Text.Json.JsonSerializer.Serialize(new { email_hash = emailHash, realm = "tenant" }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: sourceIp, ct: ct);
+        await _audit.LogActivityAsync(tenantId, "auth", purl: null, "login.locked",
+            sourceIp: sourceIp, ct: ct);
+        await _auditEmitter.EmitAsync(
+            Dependably.Infrastructure.Audit.Events.AuthEvents.TypeLockout,
+            tenantId, "system", null, "rejected",
+            new Dependably.Infrastructure.Audit.Events.AuthEvents.Lockout("tenant", emailHash).ToJson(), ct);
+        return retryAfter;
+    }
+
+    /// <summary>
     /// Authenticates a tenant user. The user must be a member of <paramref name="tenantId"/> —
     /// in single mode this is the one tenant; in multi mode it's the tenant whose subdomain
     /// the request hit. Returns a tenant-scoped JWT (<c>scope=tenant</c>) on success.
@@ -191,17 +257,8 @@ public sealed class LoginService
         var (_, lockedUntil) = await _lockout.GetAsync(lockoutKey, ct);
         if (lockedUntil.HasValue && _time.GetUtcNow() < lockedUntil.Value)
         {
-            int retryAfter = (int)(lockedUntil.Value - _time.GetUtcNow()).TotalSeconds + 1;
-            await _audit.LogAsync("lockout.triggered", orgId: tenantId,
-                detail: System.Text.Json.JsonSerializer.Serialize(new { email_hash = emailHash, realm = "tenant" }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
-                sourceIp: sourceIp, ct: ct);
-            await _audit.LogActivityAsync(tenantId, "auth", purl: null, "login.locked",
-                sourceIp: sourceIp, ct: ct);
-            await _auditEmitter.EmitAsync(
-                Dependably.Infrastructure.Audit.Events.AuthEvents.TypeLockout,
-                tenantId, "system", null, "rejected",
-                new Dependably.Infrastructure.Audit.Events.AuthEvents.Lockout("tenant", emailHash).ToJson(), ct);
-            return new TenantFirstFactorResult(null, null, null, 0, false, null, "Account locked due to too many failed attempts.", retryAfter);
+            int retryAfter = await RecordTenantLockoutHitAsync(tenantId, emailHash, lockedUntil.Value, sourceIp, ct);
+            return new TenantFirstFactorResult(null, null, null, 0, false, null, LockedAccountError, retryAfter);
         }
 
         await using var conn = await _db.OpenAsync(ct);

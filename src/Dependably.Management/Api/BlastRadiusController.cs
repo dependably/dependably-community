@@ -27,9 +27,10 @@ namespace Dependably.Api;
 /// what a coordinate nobody ships returns, so the endpoint cannot be used to probe for another
 /// org's inventory either.</para>
 ///
-/// <para><b>Latest versions only</b>, for the reason
-/// <see cref="SbomBlastRadiusRepository"/> documents: a superseded release is neither what the
-/// operator ships nor something the nightly scan keeps current.</para>
+/// <para><b>In-service versions only</b>, for the reason
+/// <see cref="SbomBlastRadiusRepository"/> documents: a release the tenant no longer runs is
+/// neither what the operator ships nor something the nightly scan keeps current, while a
+/// superseded release still marked active is both.</para>
 /// </summary>
 [ApiController]
 [Authorize]

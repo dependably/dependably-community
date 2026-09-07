@@ -214,13 +214,14 @@ public sealed partial class SbomExportService
     }
 
     /// <summary>
-    /// How many of this tenant's applications ship each of <paramref name="osvIds"/> on their
-    /// latest version — the same query shape as
+    /// How many of this tenant's applications ship each of <paramref name="osvIds"/> on a version
+    /// they still run — the same query shape as
     /// <c>SbomBlastRadiusRepository.CountProjectsByAdvisoryAsync</c>, written directly here per the
-    /// fleet contract. <b>Scoped to <c>is_latest = 1</c></b>, matching that repository's own
-    /// documented reasoning: an older release is not something an operator can remediate today, and
-    /// only <c>is_latest</c> versions get their advisory links refreshed nightly, so counting a
-    /// superseded version would mix a current answer with a stale one under one number.
+    /// fleet contract. <b>Scoped to <see cref="ProjectLifecycle.InServiceFilter"/></b>, matching
+    /// that repository verbatim and for the same reason. The two agreeing is not cosmetic: this
+    /// number is exported inside a VEX document an operator hands to a customer, so a wider or
+    /// narrower count here than the UI shows is a published contradiction of the tenant's own
+    /// dashboard.
     /// </summary>
     [SuppressMessage("Security", "S2077:Formatting SQL queries is security-sensitive",
         Justification = "The spliced fragment is DapperInClause.Expand's own parenthesized, "
@@ -247,7 +248,10 @@ public sealed partial class SbomExportService
             JOIN vulnerabilities v ON v.id = scv.vuln_id
             JOIN sbom_components c ON c.id = scv.component_id
             JOIN project_versions pv ON pv.id = c.project_version_id AND pv.org_id = c.org_id
-            WHERE c.org_id = @orgId AND pv.is_latest = 1 AND v.osv_id IN
+            JOIN projects p ON p.id = pv.project_id AND p.org_id = pv.org_id
+            WHERE c.org_id = @orgId
+              AND p.is_active = 1 AND (pv.is_latest = 1 OR pv.is_active = 1)
+              AND v.osv_id IN
             """ + " " + keysClause + " GROUP BY v.osv_id",
             parameters, cancellationToken: ct));
         return rows.ToDictionary(r => r.OsvId, r => r.Count, StringComparer.Ordinal);

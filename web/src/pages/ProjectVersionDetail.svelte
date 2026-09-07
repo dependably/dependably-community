@@ -397,20 +397,25 @@
   // own set, so a header key that drifts from it 422s the whole table rather than sorting it.
   const NOOP_CMP = () => 0
   const comparators = {
-    name: NOOP_CMP, version: NOOP_CMP, type: NOOP_CMP, scope: NOOP_CMP, sbomScope: NOOP_CMP,
-    dep: NOOP_CMP, licenses: NOOP_CMP, severity: NOOP_CMP, priority: NOOP_CMP, reach: NOOP_CMP,
+    name: NOOP_CMP, version: NOOP_CMP, scope: NOOP_CMP, sbomScope: NOOP_CMP, dep: NOOP_CMP,
+    licenses: NOOP_CMP, severity: NOOP_CMP, priority: NOOP_CMP, reach: NOOP_CMP,
   }
+  // Dependency scope and document-declared scope stay two columns with two sort keys: folding
+  // them would make a component the SBOM excluded indistinguishable from a dev dependency. The
+  // component type is a classification, not a verdict, so it rides under the component name as
+  // a chip rather than taking a column. Priority is the row's verdict and always shows; reach
+  // leaves the table below 1440px (the width at which every fixed column fits beside an expanded
+  // sidebar) because the expanded advisory panel repeats it, so nothing is lost on a laptop.
   $: columns = [
-    { key: 'name',      label: $t('sbomAnalysis.columns.component'),   sortable: true,  width: '190px' },
-    { key: 'version',   label: $t('sbomAnalysis.columns.version'),     sortable: true,  width: '150px' },
-    { key: 'type',      label: $t('sbomAnalysis.columns.type'),        sortable: true,  width: '90px' },
+    { key: 'name',      label: $t('sbomAnalysis.columns.component'),   sortable: true,  width: '180px' },
+    { key: 'version',   label: $t('sbomAnalysis.columns.version'),     sortable: true,  width: '140px' },
     { key: 'scope',     label: $t('sbomAnalysis.columns.dependency'),  sortable: true,  width: '110px' },
     { key: 'sbomScope', label: $t('sbomAnalysis.columns.scope'),       sortable: true,  width: '110px' },
     { key: 'dep',       label: $t('sbomAnalysis.columns.dep'),         sortable: true,  width: '90px' },
     { key: 'licenses',  label: $t('sbomAnalysis.columns.licenses'),    sortable: true,  width: '140px' },
     { key: 'severity',  label: $t('sbomAnalysis.columns.vulns'),       sortable: true,  width: '130px', defaultDir: 'desc' },
     { key: 'priority',  label: $t('sbomAnalysis.columns.priority'),    sortable: true,  width: '100px', defaultDir: 'desc' },
-    { key: 'reach',     label: $t('sbomAnalysis.columns.reach'),       sortable: true,  width: '120px' },
+    { key: 'reach',     label: $t('sbomAnalysis.columns.reach'),       sortable: true,  width: '120px', hideBelow: 1440 },
   ]
 </script>
 
@@ -618,6 +623,7 @@
     emptyText={$t('sbomAnalysis.empty')}
     on:sortchange={onSortChange}
     let:row={item}
+    let:hidden={hiddenCols}
   >
     {@const depBadge = dependencyScopeBadge(item)}
     {@const sbomBadge = sbomScopeBadge(item)}
@@ -635,8 +641,15 @@
       <td class="name-cell">
         <div class="stacked">
           <span class="mono comp-name" title={item.name}>{item.name}</span>
-          {#if item.ecosystem}
-            <span class="badge {item.ecosystem}">{ECO_LABEL[item.ecosystem] ?? item.ecosystem}</span>
+          {#if item.ecosystem || item.componentType}
+            <span class="name-chips">
+              {#if item.ecosystem}
+                <span class="badge {item.ecosystem}">{ECO_LABEL[item.ecosystem] ?? item.ecosystem}</span>
+              {/if}
+              {#if item.componentType}
+                <span class="badge type-chip" title={$t('sbomAnalysis.columns.type')}>{item.componentType}</span>
+              {/if}
+            </span>
           {/if}
         </div>
       </td>
@@ -660,7 +673,6 @@
           </span>
         {/if}
       </td>
-      <td class="text-muted t-sm">{item.componentType ?? '—'}</td>
       <td class="scope-cell">
         <span class="badge {depBadge.cls}" title={$t(depBadge.titleKey)} aria-label={$t(depBadge.labelKey)}>{$t(depBadge.labelKey)}</span>
       </td>
@@ -715,20 +727,22 @@
           <span class="text-muted" aria-label={$t('sbomAnalysis.priority.none')}>—</span>
         {/if}
       </td>
-      <td class="nowrap">
-        {#if reachValue}
-          <span class="badge {reachValue.cls}" aria-label={reachValue.labelKey ? $t(reachValue.labelKey) : reachValue.raw}>
-            {reachValue.labelKey ? $t(reachValue.labelKey) : reachValue.raw}
-          </span>
-        {:else}
-          <span class="text-muted" title={$t('sbomAnalysis.panel.noReachabilityHelp')} aria-label={$t('sbomAnalysis.panel.noReachabilityHelp')}>—</span>
-        {/if}
-      </td>
+      {#if !hiddenCols.has('reach')}
+        <td class="nowrap">
+          {#if reachValue}
+            <span class="badge {reachValue.cls}" aria-label={reachValue.labelKey ? $t(reachValue.labelKey) : reachValue.raw}>
+              {reachValue.labelKey ? $t(reachValue.labelKey) : reachValue.raw}
+            </span>
+          {:else}
+            <span class="text-muted" title={$t('sbomAnalysis.panel.noReachabilityHelp')} aria-label={$t('sbomAnalysis.panel.noReachabilityHelp')}>—</span>
+          {/if}
+        </td>
+      {/if}
     </tr>
 
     {#if expandedId === item.componentId}
       <tr class="detail-row">
-        <td colspan={columns.length}>
+        <td colspan={columns.length - hiddenCols.size}>
           <div class="detail-panel">
             <ComponentAdvisoryPanel
               {item}
@@ -933,8 +947,6 @@
   .header-id-block { min-width: 0; }
   .header-id { display: flex; align-items: center; gap: 10px; }
   .version-badge { font-size: 12px; }
-  .header-actions { display: flex; align-items: center; gap: 8px; }
-  .header-actions button { display: inline-flex; align-items: center; gap: 6px; }
 
   /* Export menu — the popover contract the row-actions menu established, anchored to the
      button rather than positioned against the viewport. */
@@ -1045,7 +1057,10 @@
     background: var(--accent-soft);
   }
   .scope-cell { white-space: normal; }
-  .scope-cell .badge { margin-right: 4px; }
+  .name-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+  /* The raw CycloneDX component type (library, application, …) reads as a plain chip beside
+     the ecosystem badge: a classification, not a verdict. */
+  .type-chip { font-weight: 500; }
   .license-cell { overflow-wrap: anywhere; }
   .license { font-size: 12px; color: var(--text2); margin-right: 4px; }
   .license.blocked { color: var(--danger); font-weight: 600; }
@@ -1070,8 +1085,9 @@
   .row-actions { display: flex; justify-content: flex-end; }
 
   .component-row { cursor: pointer; }
-  .expanded-row td { background: var(--surface2); }
-  .detail-row td { padding: 0; border-top: none; background: var(--surface2); }
+  /* The tint is global; the panel cell itself carries no padding so the advisory panel runs
+     edge to edge under the row that opened it. */
+  .detail-row td { padding: 0; border-top: none; }
 
   .orphan-card, .documents-card { margin-top: 24px; }
   .card-title { font-size: 15px; font-weight: 700; margin: 0 0 4px; }

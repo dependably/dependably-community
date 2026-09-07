@@ -3,9 +3,11 @@
   markup via the default slot (one <tr> per visible row).
 
   Props:
-    columns      array of { key, label, sortable?, defaultDir?, width?, align? } (width applied via
-                 colgroup; align: 'right' | 'center' right/center-aligns the header to match a
-                 right/center-aligned value column — anything else defaults to left)
+    columns      array of { key, label, sortable?, defaultDir?, width?, align?, hideBelow? } (width
+                 applied via colgroup; align: 'right' | 'center' right/center-aligns the header to
+                 match a right/center-aligned value column — anything else defaults to left;
+                 hideBelow: viewport width in px under which the column is dropped from the
+                 colgroup and header — the parent skips the matching <td> when `hidden` has the key)
     rows         the source array
     comparators  optional map of { [key]: (a, b) => number }; missing keys fall back to
                  string compare on row[key] (or just-render — keys without comparators
@@ -18,6 +20,10 @@
   Slot props (default slot):
     row          the current row (already sorted)
     i            its index
+    hidden       Set of column keys currently dropped by `hideBelow`; wrap the matching <td> in
+                 `{#if !hidden.has(key)}` so the row keeps the same cell count as the header.
+                 A page that already has its own `hidden` binds it under another name
+                 (`let:hidden={hiddenCols}`)
 
   Two-way `sortCol` / `sortDir` are not bound — sort state lives inside. Use
   `on:sortchange={e => ...}` to react if you also need to drive other UI.
@@ -27,7 +33,7 @@
   import { sortIndicator } from './sortIndicator.js'
   import { rememberedRowCount, rememberRowCount } from './tableSize.js'
 
-  /** @type {Array<{ key: string, label: string, sortable?: boolean, defaultDir?: string, width?: string, align?: string }>} */
+  /** @type {Array<{ key: string, label: string, sortable?: boolean, defaultDir?: string, width?: string, align?: string, hideBelow?: number }>} */
   export let columns = []
   /** @type {any[]} */
   export let rows = []
@@ -75,6 +81,14 @@
   // with nothing to show yet.
   $: showPlaceholder = loading && rows.length === 0
 
+  // A column that carries `hideBelow` leaves the table entirely under that viewport width —
+  // colgroup, header and (via the `hidden` slot prop) the parent's cell — so a wide fixed-width
+  // set fits a laptop column without the page scrolling sideways. Seeded from the live width so
+  // the first render already matches; the window binding keeps it current on resize.
+  let viewportWidth = typeof window === 'undefined' ? 0 : window.innerWidth
+  $: visibleColumns = columns.filter(c => !c.hideBelow || viewportWidth === 0 || viewportWidth >= c.hideBelow)
+  $: hidden = new Set(columns.filter(c => !visibleColumns.includes(c)).map(c => c.key))
+
   let sortCol = initialSort?.key ?? columns.find(c => c.sortable)?.key ?? ''
   let sortDir = initialSort?.dir ?? columns.find(c => c.key === sortCol)?.defaultDir ?? 'asc'
 
@@ -106,17 +120,20 @@
   })
 </script>
 
+<svelte:window bind:innerWidth={viewportWidth} />
+
+<div class="table-scroll">
 <table class={tableClass} aria-busy={loading || undefined}>
-  {#if columns.some(c => c.width)}
+  {#if visibleColumns.some(c => c.width)}
     <colgroup>
-      {#each columns as c (c.key)}
+      {#each visibleColumns as c (c.key)}
         <col style:width={c.width ?? ''} />
       {/each}
     </colgroup>
   {/if}
   <thead>
     <tr>
-      {#each columns as c (c.key)}
+      {#each visibleColumns as c (c.key)}
         {#if c.sortable}
           <th class="sortable" class:text-right={c.align === 'right'} class:text-center={c.align === 'center'} on:click={() => toggleSort(c.key)}>
             {c.label}{sortIndicator(c.key, sortCol, sortDir)}
@@ -131,21 +148,22 @@
     <tbody aria-hidden="true">
       {#each [...Array(placeholderRows).keys()] as i (i)}
         <tr class="skeleton-row" style:height={loadingRowHeight}>
-          <td colspan={columns.length}><span class="skeleton"></span></td>
+          <td colspan={visibleColumns.length}><span class="skeleton"></span></td>
         </tr>
       {/each}
     </tbody>
   {:else}
     <tbody>
       {#each sorted as row, i (row.id ?? i)}
-        <slot {row} {i} />
+        <slot {row} {i} {hidden} />
       {/each}
       {#if sorted.length === 0 && emptyText}
-        <tr><td colspan={columns.length} class="text-center text-muted">{emptyText}</td></tr>
+        <tr><td colspan={visibleColumns.length} class="text-center text-muted">{emptyText}</td></tr>
       {/if}
     </tbody>
   {/if}
 </table>
+</div>
 
 <style>
   /* The row height is the reserved height, so pin it on the cell too: a <tr> height is advisory

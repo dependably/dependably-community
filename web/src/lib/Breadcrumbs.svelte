@@ -68,5 +68,5 @@
   .breadcrumbs a { color: var(--text2); text-decoration: none; }
   .breadcrumbs a:hover { color: var(--text); text-decoration: underline; }
   .breadcrumbs span[aria-current='page'] { color: var(--text2); }
-  .sep { color: var(--border); }
+  .sep { color: var(--text2); opacity: .6; }
 </style>

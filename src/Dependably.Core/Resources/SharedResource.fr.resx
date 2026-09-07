@@ -65,6 +65,9 @@
   <data name="error.auth.forbidden" xml:space="preserve">
     <value>Portée du jeton insuffisante.</value>
   </data>
+  <data name="error.auth.inviteAcceptSsoOnly" xml:space="preserve">
+    <value>Cette organisation se connecte par authentification unique. Utilisez le bouton SSO de la page de connexion; aucun mot de passe n'est requis.</value>
+  </data>
   <data name="error.org.slugInvalid" xml:space="preserve">
     <value>L'identifiant est manquant, réservé ou contient des caractères non valides.</value>
   </data>

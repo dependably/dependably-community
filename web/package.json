@@ -1,7 +1,7 @@
 {
   "name": "web",
   "private": true,
-  "version": "0.9.0",
+  "version": "0.10.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -75,6 +75,8 @@
     "@zxcvbn-ts/core": "3.0.4",
     "@zxcvbn-ts/language-common": "3.0.4",
     "@zxcvbn-ts/language-en": "3.0.2",
+    "dompurify": "3.4.14",
+    "marked": "18.0.11",
     "svelte-i18n": "4.0.1"
   }
 }

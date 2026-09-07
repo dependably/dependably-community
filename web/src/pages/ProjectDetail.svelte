@@ -31,7 +31,7 @@
   export let pageToken = null
 
   let project = null, loading = true, error = ''
-  let promotingId = null, deletingId = null
+  let promotingId = null, deletingId = null, activeTogglingId = null
   // Child-row actions: the kebab whose popover is open, the child being deleted, and the child
   // being edited (null = no dialog).
   let openChildActionsId = null, deletingChildId = null, editChild = null
@@ -96,6 +96,7 @@
     { key: 'severity',   label: $t('projects.columns.severity'),     sortable: true, width: '170px' },
     { key: 'latest',     label: $t('projects.detail.columns.latest'), sortable: true, width: '140px' },
     { key: 'policy',     label: $t('projects.detail.columns.policy'), sortable: true, width: '110px' },
+    { key: 'active',     label: $t('projects.detail.columns.active'), sortable: true, width: '100px' },
     // Header-less: the kebab needs a cell, and a labelled one would read as data. §5.8 gives an
     // empty th its own width, so none is declared here.
     ...(isAdmin ? [{ key: 'actions', label: '', sortable: false }] : []),
@@ -105,6 +106,7 @@
     { key: 'version',    label: $t('projects.detail.columns.version'),    sortable: true },
     { key: 'components', label: $t('projects.detail.columns.components'), sortable: true, width: '120px', align: 'right' },
     { key: 'policy',     label: $t('projects.detail.columns.policy'),     sortable: true, width: '120px' },
+    { key: 'active',     label: $t('projects.detail.columns.active'),     sortable: true, width: '100px' },
     { key: 'uploaded',   label: $t('projects.detail.columns.uploaded'),   sortable: true, width: '170px', defaultDir: 'desc' },
     ...(isAdmin ? [{ key: 'actions', label: '', sortable: false }] : []),
   ]
@@ -113,6 +115,11 @@
   // sorts last rather than being treated as a pass it never earned.
   const POLICY_RANK = { violation: 3, warn: 2, pass: 1 }
   const rankPolicy = (status) => POLICY_RANK[status] ?? 0
+
+  // The frontend mirror of ProjectLifecycle.InServiceFilter's version half: latest is a floor, so
+  // the current release counts as in service whatever its own flag says.
+  const inService = (ver) => Boolean(ver?.isLatest || ver?.isActive)
+  const rankInService = (ver) => (inService(ver) ? 1 : 0)
 
   // Severity sorts by the worst finding present, then by how many of it — a row with one critical
   // outranks a row with nine lows, which a plain total would invert.
@@ -133,12 +140,17 @@
     severity: (a, b) => severityWeight(a.severityCounts) - severityWeight(b.severityCounts),
     latest: (a, b) => byText(a.latestVersion, b.latestVersion),
     policy: (a, b) => rankPolicy(a.policyStatus) - rankPolicy(b.policyStatus),
+    active: (a, b) => (a.isActive ? 1 : 0) - (b.isActive ? 1 : 0),
   }
 
   const versionComparators = {
     version: (a, b) => byText(a.version, b.version),
     components: (a, b) => (a.componentCount ?? 0) - (b.componentCount ?? 0),
     policy: (a, b) => rankPolicy(a.policyStatus) - rankPolicy(b.policyStatus),
+    // In-service first on a descending sort. A retired release that is still the project's latest
+    // ranks with the active ones, because that is what the blast radius counts it as — the table
+    // must not read as though it had dropped out when it has not.
+    active: (a, b) => rankInService(a) - rankInService(b),
     uploaded: (a, b) => byText(a.createdAt, b.createdAt),
   }
 
@@ -174,6 +186,25 @@
       error = e.message
     } finally {
       promotingId = null
+    }
+  }
+
+  // Retiring a release is not destructive and is immediately reversible, so it takes no
+  // confirmation — unlike deleteVersion below, which removes the row and its documents.
+  async function toggleVersionActive(ver) {
+    if (activeTogglingId) return
+    activeTogglingId = ver.id
+    error = ''
+    try {
+      const updated = await api.setProjectVersionActive(params.id, ver.id, !ver.isActive)
+      project = {
+        ...project,
+        versions: project.versions.map((v) => (v.id === ver.id ? { ...v, ...updated } : v)),
+      }
+    } catch (e) {
+      error = extractErrorMessage(e)
+    } finally {
+      activeTogglingId = null
     }
   }
 
@@ -379,6 +410,13 @@
                 <span class="text-muted">{$t('projects.policy.unscanned')}</span>
               {/if}
             </td>
+            <td>
+              {#if child.isActive}
+                <span class="badge success">{$t('projects.status.active')}</span>
+              {:else}
+                <span class="badge text-muted">{$t('projects.status.retired')}</span>
+              {/if}
+            </td>
             {#if isAdmin}
               <td class="actions-cell" on:click|stopPropagation>
                 <div class="row-actions">
@@ -431,6 +469,19 @@
                 <span class="text-muted">{$t('projects.policy.unscanned')}</span>
               {/if}
             </td>
+            <td>
+              {#if ver.isActive}
+                <span class="badge success">{$t('projects.status.active')}</span>
+              {:else if ver.isLatest}
+                <!-- Retired but still latest: the blast radius counts it anyway, so saying only
+                     "Retired" here would contradict the number on the package page. -->
+                <span class="badge" title={$t('projects.status.retiredLatestHint')}>
+                  {$t('projects.status.retiredLatest')}
+                </span>
+              {:else}
+                <span class="badge text-muted">{$t('projects.status.retired')}</span>
+              {/if}
+            </td>
             <td class="text-muted">{$formatDate(ver.createdAt)}</td>
             {#if isAdmin}
               <td class="actions-cell" on:click|stopPropagation>
@@ -441,6 +492,13 @@
                     on:click={() => promote(ver)}
                   >
                     {promotingId === ver.id ? $t('projects.detail.promoting') : $t('projects.detail.promote')}
+                  </button>
+                  <button
+                    class="btn-sm"
+                    disabled={activeTogglingId === ver.id}
+                    on:click={() => toggleVersionActive(ver)}
+                  >
+                    {ver.isActive ? $t('projects.detail.retire') : $t('projects.detail.reinstate')}
                   </button>
                   <button
                     class="danger btn-sm"
@@ -488,13 +546,11 @@
   /* .badge.has-icon is global (app.css); this page's usages also want a left margin off the
      preceding badge/title text, which the shared rule intentionally leaves to callers. */
   .badge.has-icon { margin-left: 6px; }
-  .ml-1 { margin-left: 6px; }
   /* .mb-3 is global (app.css) — reused as-is. */
   .project-description { margin: 6px 0 0; max-width: 70ch; }
   /* app.css centres .page-header, which reads fine against a lone h1 but floats the action
      halfway down a stacked breadcrumb + title + description. Pin it to the title's line. */
   .page-header { align-items: flex-start; }
-  .header-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
   /* Same popover contract the version page's export menu uses: anchored to its own button rather
      than positioned against the viewport, so it needs no measurement pass. */
   .export-menu { position: relative; display: inline-flex; }
@@ -512,7 +568,6 @@
     text-align: left;
   }
   .export-hint { margin: 4px 12px 6px; font-size: 11px; color: var(--text2); }
-  .header-actions button { display: inline-flex; align-items: center; gap: 6px; }
   /* .sev-* chips are global (app.css); the cell just must not wrap between them. */
   .vuln-cell { white-space: nowrap; }
   /* .stat-card is a flex column, so a badge child stretches to the card's full width and reads
@@ -522,7 +577,4 @@
   .actions-col { width: 48px; }
   /* Row actions live in their own wrapper div, never display:flex directly on the td. */
   .row-actions { display: flex; gap: 6px; align-items: center; justify-content: flex-end; }
-  /* .btn-sm (padding/font-size) is global (app.css); min-height brings it to the 28px hit
-     target the row-actions convention elsewhere in the app uses (e.g. Packages.svelte). */
-  .btn-sm { min-height: 28px; }
 </style>

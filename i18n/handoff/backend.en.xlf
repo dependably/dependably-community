@@ -446,6 +446,15 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
         <target>Portée du jeton insuffisante.</target>
       </segment>
     </unit>
+    <unit id="error.auth.inviteAcceptSsoOnly">
+      <notes>
+        <note category="translator">409 body when an invite is accepted on a tenant that has switched to SSO-only: the invite stays valid, but no local password can be set. &apos;SSO&apos; is the button label the sign-in page shows.</note>
+      </notes>
+      <segment state="translated">
+        <source>This organization signs in with single sign-on. Use the SSO button on the sign-in page; no password is needed.</source>
+        <target>Cette organisation se connecte par authentification unique. Utilisez le bouton SSO de la page de connexion; aucun mot de passe n&apos;est requis.</target>
+      </segment>
+    </unit>
     <unit id="error.auth.required">
       <notes>
         <note category="translator">401 body: the client must authenticate (registry token or web session).</note>

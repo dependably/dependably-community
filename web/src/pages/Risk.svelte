@@ -199,7 +199,7 @@
 
 <div class="page">
   <header class="page-header">
-    <h1>{$t('risk.title')}</h1>
+    <h1 class="page-title">{$t('risk.title')}</h1>
   </header>
 
   <div class="tabs" role="tablist">
@@ -211,7 +211,9 @@
             on:click={() => selectTab('license')}>{$t('risk.tabs.license')}</button>
   </div>
 
-  <p class="intro">{$t(`risk.intro.${activeTab}`)}</p>
+  <!-- The operational intro carries a {threshold} placeholder (the licence intro has none);
+       one values bag serves both tabs so the dynamic key never renders a raw placeholder. -->
+  <p class="intro">{$t(`risk.intro.${activeTab}`, { values: { threshold } })}</p>
 
   <!-- Enrichment coverage strip: not configured / no advisories / a measured percent, the same
        three-state discipline as the Dashboard tile this mirrors — never a fabricated 0% for an
@@ -341,25 +343,8 @@
 </div>
 
 <style>
-  .page { padding: 20px 24px; }
-  .page-header { margin-bottom: 12px; }
-  h1 { margin: 0; font-size: 20px; font-weight: 600; }
-  .intro { color: var(--text2); font-size: 13px; margin: 12px 0 16px; max-width: 780px; }
-
-  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); }
-  .tab {
-    background: none;
-    border: none;
-    border-bottom: 2px solid transparent;
-    border-radius: 0;
-    min-height: 0;
-    padding: 8px 14px;
-    font-size: 13px;
-    color: var(--text2);
-    cursor: pointer;
-  }
-  .tab:hover { color: var(--text); background: none; }
-  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  /* .page, .page-header, .page-title and the tab strip are global (app.css). */
+  .intro { color: var(--text2); font-size: 13px; margin: 0 0 16px; max-width: 780px; }
 
   .enrichment-strip {
     display: flex;

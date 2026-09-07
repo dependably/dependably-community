@@ -220,6 +220,7 @@ describe('endpoint contract', () => {
     ['getVulnReport', () => api.getVulnReport(), 'GET', '/api/v1/vuln-report?'],
     ['getVulnDetail', () => api.getVulnDetail('GHSA-xxxx'), 'GET', '/api/v1/vulnerabilities/GHSA-xxxx'],
     ['getRemediationSkills', () => api.getRemediationSkills(), 'GET', '/api/v1/remediation/skills'],
+    ['getSkills', () => api.getSkills(), 'GET', '/api/v1/skills'],
     ['rescanVersion', () => api.rescanVersion('npm', '@scope/pkg', '1.0.0'), 'POST', '/api/v1/packages/npm/@scope%2Fpkg/1.0.0/rescan'],
     ['blockVersion', () => api.blockVersion('npm', 'pkg', '1.0.0'), 'POST', '/api/v1/packages/npm/pkg/1.0.0/block'],
     ['unblockVersion', () => api.unblockVersion('npm', 'pkg', '1.0.0'), 'POST', '/api/v1/packages/npm/pkg/1.0.0/unblock'],

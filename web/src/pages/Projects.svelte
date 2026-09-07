@@ -9,7 +9,7 @@
   offers Edit (rename/re-describe/relocate) and Delete. Version-scoped mutations (promote, delete
   a version) stay on ProjectDetail.svelte. Every mutation is admin/owner-gated in-page, same
   `isAdmin` idiom as the detail page; read visibility is every member's
-  (see routes.js ADMIN_ONLY_PAGES / Sidebar.svelte).
+  (see routes.js RESTRICTED_PAGES / Sidebar.svelte).
 -->
 <script>
   import { t } from 'svelte-i18n'
@@ -107,17 +107,18 @@
   $: columns = [
     { key: 'name',        label: $t('projects.columns.name'),       sortable: true },
     { key: 'components',  label: $t('projects.columns.components'), sortable: false, width: '110px', align: 'right' },
-    { key: 'severity',    label: $t('projects.columns.severity'),   sortable: false, width: '170px' },
+    { key: 'severity',    label: $t('projects.columns.severity'),   sortable: false, width: '140px' },
     { key: 'policy',      label: $t('projects.columns.policy'),     sortable: true, width: '110px' },
     { key: 'latest',      label: $t('projects.columns.latest'),     sortable: true, width: '120px' },
-    { key: 'lastUpload',  label: $t('projects.columns.lastUpload'), sortable: false, width: '130px' },
+    { key: 'active',      label: $t('projects.columns.active'),     sortable: false, width: '100px', hideBelow: 1000 },
+    { key: 'lastUpload',  label: $t('projects.columns.lastUpload'), sortable: false, width: '100px', hideBelow: 1100 },
     // Header-less trailing column: the kebab needs a cell, and a labelled one would read as data.
     // No width — DESIGN §5.8 gives an empty th its own.
     ...(isAdmin ? [{ key: 'actions', label: '', sortable: false }] : []),
   ]
   const comparators = {
     name: NOOP_CMP, components: NOOP_CMP, severity: NOOP_CMP,
-    policy: NOOP_CMP, latest: NOOP_CMP, lastUpload: NOOP_CMP, actions: NOOP_CMP,
+    policy: NOOP_CMP, latest: NOOP_CMP, active: NOOP_CMP, lastUpload: NOOP_CMP, actions: NOOP_CMP,
   }
 
   function openProject(row) {
@@ -198,6 +199,7 @@
     initialSort={{ key: sortCol, dir: sortDir }}
     on:sortchange={onSortChange}
     let:row
+    let:hidden
   >
     {#if row.isHeader}
       <!-- Synthesized grouping header: the matched child's parent did not itself match the
@@ -241,7 +243,16 @@
           {/if}
         </td>
         <td class="mono nowrap">{row.latestVersion ?? $t('projects.noVersion')}</td>
-        <td class="nowrap text-muted">{row.lastUploadAt ? $formatDateShort(row.lastUploadAt) : $t('projects.noVersion')}</td>
+        {#if !hidden.has('active')}
+          <td class="nowrap">
+            {#if row.isActive}
+              <span class="badge success">{$t('projects.status.active')}</span>
+            {:else}
+              <span class="badge text-muted" title={$t('projects.status.retiredHint')}>{$t('projects.status.retired')}</span>
+            {/if}
+          </td>
+        {/if}
+        {#if !hidden.has('lastUpload')}<td class="nowrap text-muted">{row.lastUploadAt ? $formatDateShort(row.lastUploadAt) : $t('projects.noVersion')}</td>{/if}
         {#if isAdmin}
           <td class="actions-cell" on:click|stopPropagation>
             <div class="row-actions">
@@ -292,9 +303,10 @@
      stacked crumb + title. */
   .page-header { align-items: flex-start; }
   .vuln-cell { white-space: nowrap; }
-  .name-cell { overflow-wrap: anywhere; }
-  /* .badge.has-icon is global (app.css) — reused as-is. */
-  .ml-1 { margin-left: 6px; }
+  /* The floor holds the name column open (folder badge, indent, and a readable name) once the
+     fixed columns take the row at 1024; past it the table scrolls rather than wrapping mid-word. */
+  .name-cell { overflow-wrap: anywhere; min-width: 160px; }
+  /* .badge.has-icon and .ml-1 are global (app.css) — reused as-is. */
 
   /* Grouped/indented rows on search — no tree widget. row-indent is an empty inline spacer
      rather than padding on the cell, so the strong/badge that follows still starts flush after

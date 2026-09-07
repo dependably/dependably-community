@@ -1,7 +1,7 @@
 ---
 name: go-configure-global
 description: Point your machine-wide Go toolchain at a dependably GOPROXY via go env + ~/.netrc
-ecosystem: go
+ecosystem: golang
 scope: global
 inputs:
   - DEPENDABLY_BASE_URL

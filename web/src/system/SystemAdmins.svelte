@@ -230,9 +230,9 @@
     { key: 'email',         label: $t('system.admins.columns.email'),         sortable: true },
     { key: 'status',        label: $t('system.admins.columns.status'),        sortable: true, width: '160px' },
     { key: 'mfa',           label: $t('system.admins.columns.mfa'),           sortable: true, width: '60px' },
-    { key: 'lastLogin',     label: $t('system.admins.columns.lastLogin'),     sortable: true, width: '180px' },
-    { key: 'passwordReset', label: $t('system.admins.columns.passwordReset'), sortable: true, width: '180px' },
-    { key: 'created',       label: $t('system.admins.columns.created'),       sortable: true, width: '180px' },
+    { key: 'lastLogin',     label: $t('system.admins.columns.lastLogin'),     sortable: true, width: '130px' },
+    { key: 'passwordReset', label: $t('system.admins.columns.passwordReset'), sortable: true, width: '130px' },
+    { key: 'created',       label: $t('system.admins.columns.created'),       sortable: true, width: '130px', hideBelow: 1100 },
     { key: 'actions',       label: $t('system.admins.columns.actions'),       sortable: false, width: '220px' },
   ]
 
@@ -282,6 +282,7 @@
     emptyText={$t('system.admins.empty')}
     tableClass="table-auto admins-table"
     let:row={admin}
+    let:hidden
   >
     {@const isSelf = admin.id === meId}
     <tr class:disabled-row={admin.accountStatus === 'disabled'}>
@@ -314,7 +315,7 @@
       </td>
       <td>{$formatDate(admin.lastLoginAt)}</td>
       <td>{$formatDate(admin.passwordResetIssuedAt)}</td>
-      <td>{$formatDate(admin.createdAt)}</td>
+      {#if !hidden.has('created')}<td>{$formatDate(admin.createdAt)}</td>{/if}
       <td>
         <div class="row-actions">
           {#if isSelf}
@@ -453,10 +454,6 @@
     color: var(--text);
     font-size: 13px;
   }
-  /* Override the global table-layout: fixed so the email column can size to its
-     content (email + YOU badge) instead of being clipped under a 6-way equal split. */
-  table { width: 100%; border-collapse: collapse; table-layout: auto; }
-  th, td { padding: 8px; text-align: left; border-bottom: 1px solid var(--border); }
   /* Keep the email and YOU badge on one line — the badge is inline-only chrome,
      wrapping it below the address reads as a layout glitch. */
   td.email-cell { white-space: nowrap; }
@@ -484,20 +481,6 @@
   .status-pill.status-active { color: var(--success); }
   .status-pill.status-locked { color: var(--warning); }
   .status-pill.status-disabled { color: var(--text2); }
-  .modal-backdrop {
-    position: fixed; inset: 0;
-    background: var(--overlay-scrim);
-    display: flex; align-items: center; justify-content: center;
-    z-index: 100;
-  }
-  .modal {
-    background: var(--bg2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 20px;
-    width: 440px;
-    max-width: 90vw;
-  }
   .modal-error {
     background: var(--bg);
     border: 1px solid var(--danger);
@@ -507,16 +490,6 @@
     margin-bottom: 12px;
     font-size: 13px;
   }
-  .form-row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
-  .form-row label { font-size: 13px; color: var(--text2); }
-  .form-row input {
-    padding: 6px 8px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    background: var(--bg);
-    color: var(--text);
-  }
-  .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
   dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; }
   dt { font-weight: 600; }
   code { background: var(--bg); padding: 2px 6px; border-radius: 3px; word-break: break-all; }

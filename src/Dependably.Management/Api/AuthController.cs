@@ -75,10 +75,7 @@ public sealed class AuthController : ControllerBase
         }
 
         var cfg = await samlConfig.GetAsync(ctx.TenantId!, ct);
-        bool samlReady = cfg is { Enabled: true }
-            && !string.IsNullOrWhiteSpace(cfg.IdpSsoUrl)
-            && !string.IsNullOrWhiteSpace(cfg.IdpEntityId)
-            && !string.IsNullOrWhiteSpace(cfg.IdpSigningCert);
+        bool samlReady = IsSamlReady(cfg);
         bool formsEnabled = cfg is null || cfg.FormsLoginEnabled || !samlReady;
 
         return Ok(new
@@ -89,6 +86,26 @@ public sealed class AuthController : ControllerBase
         });
     }
 
+    // True when the tenant's IdP metadata is complete enough for a SAML login to actually
+    // succeed — mirrors the readiness check the pre-login probe (Methods) exposes to the SPA,
+    // so the enforcement below never blocks a tenant into a corner it cannot escape (e.g. a
+    // config row with forms_login_enabled=0 but no IdP metadata configured). Delegates the
+    // metadata-completeness half to SamlController.IsSamlConfigured — the same predicate the
+    // ACS callback uses to decide whether an assertion can be validated at all — so an
+    // admin-pinned idp_signing_cert_override with no metadata cert (the supported
+    // certless-metadata-plus-override configuration) reads as ready here exactly like it does
+    // when a real SAML login is attempted, instead of a narrower local copy silently disagreeing.
+    private static bool IsSamlReady(TenantSamlConfig? cfg) =>
+        cfg is { Enabled: true } && SamlController.IsSamlConfigured(cfg);
+
+    // True when the tenant has switched to SAML-only and the IdP is actually reachable — the
+    // server-side enforcement of forms_login_enabled=false. The pre-login probe (Methods) only
+    // tells the SPA which form to render; without this check the password grant stays live
+    // underneath, so a phished/stuffed local credential (or one orphaned by IdP deprovisioning)
+    // bypasses every control the IdP enforces, including its own MFA and conditional access.
+    private static bool IsFormsLoginBlocked(TenantSamlConfig? cfg) =>
+        cfg is not null && !cfg.FormsLoginEnabled && IsSamlReady(cfg);
+
     /// <summary>POST /api/v1/auth/login</summary>
     [HttpPost("login")]
     // authz-ok: first-factor login — the endpoint that mints the session, so it cannot require one.
@@ -97,6 +114,7 @@ public sealed class AuthController : ControllerBase
     public async Task<IActionResult> Login(
         [FromBody] LoginRequest req,
         [FromServices] TrustedDeviceService trustedDevices,
+        [FromServices] SamlConfigRepository samlConfig,
         CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(req.Email) || string.IsNullOrWhiteSpace(req.Password))
@@ -116,7 +134,7 @@ public sealed class AuthController : ControllerBase
 
         if (ctx is not null && ctx.IsTenant && ctx.TenantId is not null)
         {
-            return await HandleTenantLoginAsync(req, trustedDevices, ctx.TenantId, sourceIp, ct);
+            return await HandleTenantLoginAsync(req, trustedDevices, samlConfig, ctx.TenantId, sourceIp, ct);
         }
 
         // Uninitialized — first-boot has not run, or unknown subdomain in multi mode.
@@ -181,8 +199,31 @@ public sealed class AuthController : ControllerBase
 
     // Tenant login (subdomain or single-mode host).
     private async Task<IActionResult> HandleTenantLoginAsync(
-        LoginRequest req, TrustedDeviceService trustedDevices, string tenantId, string? sourceIp, CancellationToken ct)
+        LoginRequest req, TrustedDeviceService trustedDevices, SamlConfigRepository samlConfig,
+        string tenantId, string? sourceIp, CancellationToken ct)
     {
+        // Server-side enforcement of forms_login_enabled=false: refused before any password
+        // work, with the same generic 401 the invalid-credential path returns below, so a
+        // caller cannot distinguish "wrong password" from "this tenant is SAML-only" — that
+        // distinction is already public via GET /api/v1/auth/methods, so refusing this early
+        // discloses nothing new. The refusal is recorded (hashed email, source IP, and the
+        // shared lockout budget) exactly as an invalid credential would be, so switching a
+        // tenant to SSO-only never turns password spraying against it into a blind spot — and
+        // once that budget locks, the answer is the same 429 a locked password-backed account
+        // gets, so the lockout is observable here too rather than buried under more 401s.
+        var samlCfg = await samlConfig.GetAsync(tenantId, ct);
+        if (IsFormsLoginBlocked(samlCfg))
+        {
+            int? lockedRetryAfter = await _login.RecordTenantFormsLoginBlockedAsync(req.Email!, tenantId, sourceIp, ct);
+            if (lockedRetryAfter.HasValue)
+            {
+                Response.Headers.RetryAfter = lockedRetryAfter.Value.ToString();
+                return StatusCode(StatusCodes.Status429TooManyRequests, new { detail = LoginService.LockedAccountError });
+            }
+
+            return Unauthorized(new { detail = "Invalid credentials." });
+        }
+
         // see HandleSystemLoginAsync — HashEmail
         // is applied before audit; raw email is not logged.
         var ff = await _login.BeginTenantLoginAsync(req.Email, req.Password, tenantId, sourceIp, ct);
@@ -442,7 +483,9 @@ public sealed class AuthController : ControllerBase
     [AllowAnonymous]
     [EnableRateLimiting("login")]
     public async Task<IActionResult> AcceptInvite([FromBody] AcceptInviteRequest req,
-        [FromServices] InviteRepository invites, CancellationToken ct)
+        [FromServices] InviteRepository invites,
+        [FromServices] SamlConfigRepository samlConfig,
+        [FromServices] ProblemResults problems, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(req.Token))
         {
@@ -453,6 +496,29 @@ public sealed class AuthController : ControllerBase
         // use. The invite's email and tenant slug feed the context-dictionary check and the
         // zxcvbn user-inputs list — an empty context only ever blocks the literal product name.
         var pending = await invites.PeekPendingAsync(req.Token, ct);
+
+        // Same enforcement of forms_login_enabled=false the password grant applies: accepting an
+        // invite stores a local BCrypt password and mints a session, so an unguarded accept is
+        // the password grant by another route — and it is the normal onboarding path, not an
+        // edge case. An SSO-only tenant provisions members through SAML JIT on first sign-in, so
+        // there is nothing this flow needs to create. The peek above has not consumed the
+        // invite, so it stays usable if the tenant re-enables forms login. The refusal is
+        // explicit rather than the login endpoint's generic 401 because the holder of a valid
+        // invite is a legitimate user who needs to be told to use the SSO button; it discloses
+        // nothing beyond what GET /api/v1/auth/methods already returns anonymously for this
+        // tenant, and it takes a valid unused invite token to reach at all. The detail is a
+        // localized problem (the Join page renders it verbatim) with a machine-readable reason
+        // so a client can branch without parsing prose.
+        if (pending is not null && IsFormsLoginBlocked(await samlConfig.GetAsync(pending.OrgId, ct)))
+        {
+            await _audit.LogAsync("invite_accept_blocked", orgId: pending.OrgId,
+                detail: System.Text.Json.JsonSerializer.Serialize(
+                    new { reason = "forms_login_disabled", email_hash = LoginService.HashEmail(pending.Email) },
+                    EventJsonOptions.Detail),
+                sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+            return problems.ConflictActionKey("error.auth.inviteAcceptSsoOnly", reason: "forms_login_disabled");
+        }
+
         var pendingOrg = pending is not null ? await _orgs.GetByIdAsync(pending.OrgId, ct) : null;
         var verdict = PasswordPolicy.Evaluate(req.Password, new PasswordContext(pending?.Email, pendingOrg?.Slug));
         if (!verdict.IsOk)

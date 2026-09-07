@@ -139,6 +139,7 @@ public sealed class ProjectsController : OrgScopedControllerBase
                 classifier = r.Classifier,
                 parentId = r.ParentId,
                 parentName = r.ParentName,
+                isActive = r.IsActive,
                 latestVersion = r.LatestVersion,
                 componentCount = r.ComponentCount,
                 severityCounts = SeverityPayload(r.SeverityCounts),
@@ -226,6 +227,7 @@ public sealed class ProjectsController : OrgScopedControllerBase
             classifier = project.Classifier,
             description = project.Description,
             parentId = project.ParentId,
+            isActive = project.IsActive,
             ancestors = ancestors.Select(a => new { id = a.Id, name = a.Name }),
             createdAt = project.CreatedAt,
             rollup = rollup is null ? null : new
@@ -243,6 +245,7 @@ public sealed class ProjectsController : OrgScopedControllerBase
                 id = c.Id,
                 name = c.Name,
                 kind = c.Kind,
+                isActive = c.IsActive,
                 latestVersion = c.LatestVersion,
                 policyStatus = c.PolicyStatus,
                 componentCount = c.ComponentCount,
@@ -356,6 +359,13 @@ public sealed class ProjectsController : OrgScopedControllerBase
     /// <c>kind</c> is deliberately not editable. Flipping a project to a collection would strand
     /// its versions (collections hold none) and flipping a collection to a project would strand its
     /// children (a project contains none); either is a data migration, not a field edit.
+    ///
+    /// <c>isActive</c> is a plain <c>bool?</c> rather than an <see cref="Optional{T}"/> because
+    /// null is not a value the column can hold — the flag is on or off, and absent means leave it.
+    /// Retiring a collection retires everything beneath it for blast-radius purposes without
+    /// touching a single descendant row: the filter joins each version to its own project, so a
+    /// child of a retired collection is still <c>is_active = 1</c> on its own row and comes back
+    /// the moment the parent does.
     /// </summary>
     [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [HttpPatch("api/v1/projects/{projectId}")]
@@ -389,7 +399,8 @@ public sealed class ProjectsController : OrgScopedControllerBase
         try
         {
             updated = await _projects.UpdateAsync(
-                orgId, projectId, edit.Name, edit.Classifier, edit.Description, edit.ParentId, ct);
+                orgId, projectId, edit.Name, edit.Classifier, edit.Description, edit.ParentId,
+                edit.IsActive, ct);
         }
         catch (ProjectResolutionException ex)
         {
@@ -414,17 +425,18 @@ public sealed class ProjectsController : OrgScopedControllerBase
             classifier = updated.Classifier,
             description = updated.Description,
             parentId = updated.ParentId,
+            isActive = updated.IsActive,
             createdAt = updated.CreatedAt,
         });
     }
 
-    /// <summary>The four editable columns, already folded to their final values.</summary>
+    /// <summary>The five editable columns, already folded to their final values.</summary>
     private readonly record struct ProjectEdit(
-        string Name, string Classifier, string? Description, string? ParentId);
+        string Name, string Classifier, string? Description, string? ParentId, bool IsActive);
 
     /// <summary>
     /// Folds "leave unchanged" into the row's current value for each editable field and validates
-    /// what the caller did send, so <see cref="ProjectRepository.UpdateAsync"/> always writes four
+    /// what the caller did send, so <see cref="ProjectRepository.UpdateAsync"/> always writes five
     /// resolved values. Returns the refusal to send, or null when <paramref name="edit"/> is good.
     /// </summary>
     private IActionResult? ResolveEdit(UpdateProjectRequest req, Project current, out ProjectEdit edit)
@@ -450,7 +462,8 @@ public sealed class ProjectsController : OrgScopedControllerBase
             return invalid;
         }
 
-        edit = new ProjectEdit(name, classifier, description, ResolveParentId(req, current));
+        edit = new ProjectEdit(
+            name, classifier, description, ResolveParentId(req, current), req.IsActive ?? current.IsActive);
         return null;
     }
 
@@ -523,6 +536,12 @@ public sealed class ProjectsController : OrgScopedControllerBase
                 movedFrom = string.Equals(current.ParentId, updated.ParentId, StringComparison.Ordinal)
                     ? null : current.ParentId ?? "",
                 parentId = updated.ParentId,
+                isActive = updated.IsActive,
+                // Present only on the transition, so a reader scanning the audit trail for "when
+                // was this application retired" matches on this key rather than reading every
+                // project.updated row to diff a flag that usually did not move.
+                activeChangedFrom = current.IsActive == updated.IsActive
+                    ? (bool?)null : current.IsActive,
             },
             Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
 
@@ -618,6 +637,76 @@ public sealed class ProjectsController : OrgScopedControllerBase
     }
 
     /// <summary>
+    /// PATCH /api/v1/projects/{projectId}/versions/{versionId}
+    /// Retires or reinstates one release. Absent <c>isActive</c> is a no-op that still answers 200,
+    /// matching the leave-unchanged-on-absent posture of the project PATCH beside it.
+    ///
+    /// <para>Separate from <c>promote-latest</c> on purpose. Promotion is a two-row transaction
+    /// that moves a flag no two versions may hold at once; this is a single-row write with no
+    /// cross-row invariant at all. Folding them into one endpoint would put a contended
+    /// clear-then-set behind a field that never needs it.</para>
+    ///
+    /// <para><c>versionId</c> accepts the <c>latest</c> alias like every other version route, so a
+    /// caller can retire the current release without first resolving its id.</para>
+    /// </summary>
+    [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
+    [HttpPatch("api/v1/projects/{projectId}/versions/{versionId}")]
+    public async Task<IActionResult> UpdateVersion(
+        string projectId, string versionId, [FromBody] UpdateProjectVersionRequest req,
+        CancellationToken ct = default)
+    {
+        var authResult = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
+        if (authResult is not null)
+        {
+            return authResult;
+        }
+
+        string orgId = CurrentTenantId();
+        string? resolvedId = await _projects.ResolveVersionIdAsync(orgId, projectId, versionId, ct);
+        if (resolvedId is null)
+        {
+            return NotFound();
+        }
+
+        // Read before the write so the audit row can name the transition rather than only the
+        // landing state, and so an absent isActive resolves to the value already stored.
+        var current = await _projects.GetVersionAsync(orgId, projectId, resolvedId, ct);
+        if (current is null)
+        {
+            return NotFound();
+        }
+
+        bool isActive = req.IsActive ?? current.IsActive;
+        var updated = await _projects.SetVersionActiveAsync(orgId, projectId, resolvedId, isActive, ct);
+        if (updated is null)
+        {
+            return NotFound();
+        }
+
+        if (current.IsActive != updated.IsActive)
+        {
+            string detail = JsonSerializer.Serialize(
+                new
+                {
+                    projectId,
+                    projectVersionId = resolvedId,
+                    version = updated.Version,
+                    isActive = updated.IsActive,
+                },
+                Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
+            var actor = await ResolveActorAsync(orgId, ct);
+            await _audit.LogAsync(
+                updated.IsActive ? "project.version_reinstated" : "project.version_retired",
+                orgId, actor.Id, actor.Kind, null, null, detail,
+                sourceIp: HttpContext.GetNormalizedRemoteIp(), actorLabel: actor.Label, ct: ct);
+        }
+
+        var versions = await _projects.ListVersionsAsync(orgId, projectId, ct);
+        var summary = versions.FirstOrDefault(v => string.Equals(v.Id, resolvedId, StringComparison.Ordinal));
+        return summary is null ? NotFound() : Ok(VersionPayload(summary));
+    }
+
+    /// <summary>
     /// POST /api/v1/projects/{projectId}/versions/{versionId}/promote-latest
     /// Makes this version the project's latest, clearing the flag from whichever version held it.
     /// Promoting the version that is already latest is a no-op that still answers 200.
@@ -691,6 +780,7 @@ public sealed class ProjectsController : OrgScopedControllerBase
         id = v.Id,
         version = v.Version,
         isLatest = v.IsLatest,
+        isActive = v.IsActive,
         policyStatus = v.PolicyStatus,
         componentCount = v.ComponentCount,
         createdAt = v.CreatedAt,
@@ -793,4 +883,22 @@ public sealed record UpdateProjectRequest
     /// is <see cref="Optional{T}"/> and not a plain nullable.
     /// </summary>
     public Optional<string> ParentId { get; init; }
+
+    /// <summary>
+    /// Whether the application is still in service. Absent leaves it unchanged; false retires it,
+    /// which empties its blast radius and stops the nightly sweep re-evaluating its versions.
+    /// </summary>
+    public bool? IsActive { get; init; }
+}
+
+/// <summary>
+/// Body of <c>PATCH /api/v1/projects/{projectId}/versions/{versionId}</c>. <c>isActive</c> is the
+/// only editable field on a release: <c>version</c> is the row's identity, <c>isLatest</c> has its
+/// own endpoint because promotion is a two-row transaction rather than a field write, and
+/// <c>policyStatus</c> is materialized by evaluation and never set by hand.
+/// </summary>
+public sealed record UpdateProjectVersionRequest
+{
+    /// <summary>Whether this release is still deployed. Absent leaves it unchanged.</summary>
+    public bool? IsActive { get; init; }
 }

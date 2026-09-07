@@ -46,9 +46,9 @@ public sealed class RetentionProjectVersionLimitTests : IAsyncLifetime
     public async Task Cap_DeletesTheOldestVersionsAndKeepsTheNewest()
     {
         string projectId = await SeedProjectAsync("billing-api");
-        string v1 = await SeedVersionAsync(projectId, "1.0.0", ageDays: 40);
-        string v2 = await SeedVersionAsync(projectId, "2.0.0", ageDays: 30);
-        string v3 = await SeedVersionAsync(projectId, "3.0.0", ageDays: 20);
+        string v1 = await SeedVersionAsync(projectId, "1.0.0", ageDays: 40, isActive: false);
+        string v2 = await SeedVersionAsync(projectId, "2.0.0", ageDays: 30, isActive: false);
+        string v3 = await SeedVersionAsync(projectId, "3.0.0", ageDays: 20, isActive: false);
         string v4 = await SeedVersionAsync(projectId, "4.0.0", ageDays: 10, isLatest: true);
 
         await RunSweepAsync(keepProjectVersions: 2);
@@ -70,8 +70,8 @@ public sealed class RetentionProjectVersionLimitTests : IAsyncLifetime
     {
         string projectId = await SeedProjectAsync("legacy-service");
         string oldLatest = await SeedVersionAsync(projectId, "1.0.0", ageDays: 90, isLatest: true);
-        string newer1 = await SeedVersionAsync(projectId, "2.0.0", ageDays: 20);
-        string newer2 = await SeedVersionAsync(projectId, "3.0.0", ageDays: 10);
+        string newer1 = await SeedVersionAsync(projectId, "2.0.0", ageDays: 20, isActive: false);
+        string newer2 = await SeedVersionAsync(projectId, "3.0.0", ageDays: 10, isActive: false);
 
         await RunSweepAsync(keepProjectVersions: 1);
 
@@ -84,7 +84,7 @@ public sealed class RetentionProjectVersionLimitTests : IAsyncLifetime
     public async Task Cap_ReleasesTheDocumentBlobsOfEveryVersionItDeletes()
     {
         string projectId = await SeedProjectAsync("docs-heavy");
-        string old = await SeedVersionAsync(projectId, "1.0.0", ageDays: 40);
+        string old = await SeedVersionAsync(projectId, "1.0.0", ageDays: 40, isActive: false);
         string kept = await SeedVersionAsync(projectId, "2.0.0", ageDays: 10, isLatest: true);
 
         string oldSbom = await SeedDocumentAsync(projectId, old, "sbom", "cyclonedx-json");
@@ -109,8 +109,8 @@ public sealed class RetentionProjectVersionLimitTests : IAsyncLifetime
     public async Task NullCap_DeletesNothing()
     {
         string projectId = await SeedProjectAsync("untouched");
-        string v1 = await SeedVersionAsync(projectId, "1.0.0", ageDays: 400);
-        string v2 = await SeedVersionAsync(projectId, "2.0.0", ageDays: 300);
+        string v1 = await SeedVersionAsync(projectId, "1.0.0", ageDays: 400, isActive: false);
+        string v2 = await SeedVersionAsync(projectId, "2.0.0", ageDays: 300, isActive: false);
         string v3 = await SeedVersionAsync(projectId, "3.0.0", ageDays: 10, isLatest: true);
         string blobKey = await SeedDocumentAsync(projectId, v1, "sbom", "cyclonedx-json");
 
@@ -140,12 +140,12 @@ public sealed class RetentionProjectVersionLimitTests : IAsyncLifetime
     public async Task Cap_RanksPerProject_NotPerOrg()
     {
         string busy = await SeedProjectAsync("busy");
-        string busyOldest = await SeedVersionAsync(busy, "1.0.0", ageDays: 40);
-        string busyMiddle = await SeedVersionAsync(busy, "2.0.0", ageDays: 30);
+        string busyOldest = await SeedVersionAsync(busy, "1.0.0", ageDays: 40, isActive: false);
+        string busyMiddle = await SeedVersionAsync(busy, "2.0.0", ageDays: 30, isActive: false);
         string busyLatest = await SeedVersionAsync(busy, "3.0.0", ageDays: 10, isLatest: true);
 
         string quiet = await SeedProjectAsync("quiet");
-        string quietOld = await SeedVersionAsync(quiet, "9.0.0", ageDays: 200);
+        string quietOld = await SeedVersionAsync(quiet, "9.0.0", ageDays: 200, isActive: false);
         string quietLatest = await SeedVersionAsync(quiet, "9.1.0", ageDays: 150, isLatest: true);
 
         await RunSweepAsync(keepProjectVersions: 2);
@@ -179,8 +179,8 @@ public sealed class RetentionProjectVersionLimitTests : IAsyncLifetime
     public async Task Cap_RowPromotedBetweenSelectAndDelete_IsNotDeleted()
     {
         string projectId = await SeedProjectAsync("raced-promotion");
-        string oldest = await SeedVersionAsync(projectId, "1.0.0", ageDays: 40);
-        string middle = await SeedVersionAsync(projectId, "2.0.0", ageDays: 30);
+        string oldest = await SeedVersionAsync(projectId, "1.0.0", ageDays: 40, isActive: false);
+        string middle = await SeedVersionAsync(projectId, "2.0.0", ageDays: 30, isActive: false);
         string latest = await SeedVersionAsync(projectId, "3.0.0", ageDays: 10, isLatest: true);
         string oldestBlob = await SeedDocumentAsync(projectId, oldest, "sbom", "cyclonedx-json");
 
@@ -221,6 +221,71 @@ public sealed class RetentionProjectVersionLimitTests : IAsyncLifetime
         Assert.Equal(1, await LatestCountAsync(projectId));
     }
 
+    /// <summary>
+    /// An active superseded release survives the cap. Marking a release active is an operator
+    /// saying "this is still running" — the blast radius then counts it and the nightly sweep then
+    /// re-evaluates it, so a cap that deleted it anyway would shrink a security count with no
+    /// event, no alert, and nothing on the surface distinguishing "no longer affected" from "no
+    /// longer tracked".
+    /// </summary>
+    [Fact]
+    public async Task Cap_NeverDeletesAnActiveVersion_EvenWhenItIsTheOldest()
+    {
+        string projectId = await SeedProjectAsync("partial-rollout");
+        string stillDeployed = await SeedVersionAsync(projectId, "1.0.0", ageDays: 90, isActive: true);
+        string retired = await SeedVersionAsync(projectId, "2.0.0", ageDays: 20, isActive: false);
+        string latest = await SeedVersionAsync(projectId, "3.0.0", ageDays: 10, isLatest: true);
+
+        await RunSweepAsync(keepProjectVersions: 1);
+
+        Assert.True(await VersionExistsAsync(stillDeployed));
+        Assert.True(await VersionExistsAsync(latest));
+        // The discriminating half: the cap still works. A guard that spared everything would
+        // satisfy the two assertions above while quietly disabling the whole feature.
+        Assert.False(await VersionExistsAsync(retired));
+    }
+
+    /// <summary>
+    /// The reinstatement analogue of <see cref="Cap_RowPromotedBetweenSelectAndDelete_IsNotDeleted"/>.
+    /// The SELECT and the DELETE run on one connection with no transaction between them, so an
+    /// operator reinstating a release in that window must not lose it — the DELETE re-asserts
+    /// is_active = 0 rather than trusting the id the SELECT chose.
+    /// </summary>
+    [Fact]
+    public async Task Cap_RowReinstatedBetweenSelectAndDelete_IsNotDeleted()
+    {
+        string projectId = await SeedProjectAsync("raced-reinstatement");
+        string oldest = await SeedVersionAsync(projectId, "1.0.0", ageDays: 40, isActive: false);
+        string middle = await SeedVersionAsync(projectId, "2.0.0", ageDays: 30, isActive: false);
+        string latest = await SeedVersionAsync(projectId, "3.0.0", ageDays: 10, isLatest: true);
+        string oldestBlob = await SeedDocumentAsync(projectId, oldest, "sbom", "cyclonedx-json");
+
+        var hookStore = new AfterDbReadHookStore(_db)
+        {
+            AfterRead = async () =>
+            {
+                await using var racer = await _db.OpenAsync();
+                await racer.ExecuteAsync(
+                    "UPDATE project_versions SET is_active = 1 WHERE id = @id", new { id = oldest });
+            },
+        };
+
+        await using (var conn = await hookStore.OpenAsync())
+        {
+            await Build().EnforceProjectVersionLimitAsync(conn, OrgId, 1, CancellationToken.None);
+        }
+
+        Assert.True(await VersionExistsAsync(oldest));
+        // Its documents are still referenced by a live version, so the bytes stay put — the same
+        // ordering rule the promotion race depends on.
+        Assert.True(await _blobs.ExistsAsync(BlobKeys.StoreKey(oldestBlob)));
+
+        // The row nobody reinstated is still swept: the guard is a predicate, not a bail-out that
+        // stops the sweep the moment anything moves.
+        Assert.False(await VersionExistsAsync(middle));
+        Assert.True(await VersionExistsAsync(latest));
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private async Task RunSweepAsync(int keepProjectVersions)
@@ -242,15 +307,20 @@ public sealed class RetentionProjectVersionLimitTests : IAsyncLifetime
         return id;
     }
 
+    // isActive defaults to true, matching the column default rather than what these tests mostly
+    // want: a fixture whose default silently differed from production would be the wrong thing to
+    // measure the cap against. Callers seeding a deletion candidate say `isActive: false`
+    // explicitly, which is also what makes the sparing tests below legible beside them.
     private async Task<string> SeedVersionAsync(
-        string projectId, string version, int ageDays, bool isLatest = false)
+        string projectId, string version, int ageDays, bool isLatest = false, bool isActive = true)
     {
         string id = Guid.NewGuid().ToString("N");
         await using var conn = await _db.OpenAsync();
         await conn.ExecuteAsync(
             """
-            INSERT INTO project_versions (id, org_id, project_id, version, is_latest, created_at)
-            VALUES (@id, @OrgId, @projectId, @version, @isLatest, @createdAt)
+            INSERT INTO project_versions
+                (id, org_id, project_id, version, is_latest, is_active, created_at)
+            VALUES (@id, @OrgId, @projectId, @version, @isLatest, @isActive, @createdAt)
             """,
             new
             {
@@ -259,6 +329,7 @@ public sealed class RetentionProjectVersionLimitTests : IAsyncLifetime
                 projectId,
                 version,
                 isLatest = isLatest ? 1 : 0,
+                isActive = isActive ? 1 : 0,
                 createdAt = TestTime.KnownNow.AddDays(-ageDays).ToUtcIso(),
             });
         return id;

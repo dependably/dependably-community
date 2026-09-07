@@ -144,5 +144,6 @@
     gap: 6px;
   }
   .pagination-size label { white-space: nowrap; }
-  .pagination-size .size-select { width: auto; }
+  /* Same 32px as .page-btn so the whole row shares one height. */
+  .pagination-size .size-select { width: auto; min-height: 32px; height: 32px; padding: 0 8px; font-size: 13px; }
 </style>

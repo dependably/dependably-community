@@ -2550,6 +2550,12 @@ CREATE TABLE IF NOT EXISTS projects (
     -- CycloneDX component.type vocabulary.
     classifier  TEXT NOT NULL DEFAULT 'application',
     description TEXT,
+    -- Whether this application is still in service. Active is the state every project starts in
+    -- and only an operator leaves; retiring one is the statement "we no longer run this", which
+    -- drops it and everything beneath it out of the blast radius. Nothing derives this from
+    -- activity — a decommissioned application still holds its documents, and an application
+    -- nobody has uploaded to this quarter is not decommissioned.
+    is_active   INTEGER NOT NULL DEFAULT 1,
     created_by  TEXT,
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
@@ -2578,6 +2584,12 @@ CREATE TABLE IF NOT EXISTS project_versions (
     -- Opaque label; never parsed for an ordering.
     version       TEXT NOT NULL,
     is_latest     INTEGER NOT NULL DEFAULT 0,
+    -- Whether this release is still deployed somewhere. Independent of is_latest: a release an
+    -- operator has not yet superseded is latest AND active, a release still running in one region
+    -- after a partial rollout is active and not latest, and a release nobody runs any more is
+    -- neither. Every version starts active, so a release is counted until someone says otherwise
+    -- rather than silently dropping out the moment a newer one lands.
+    is_active     INTEGER NOT NULL DEFAULT 1,
     -- NULL = never evaluated, which is not the same as 'pass'.
     policy_status TEXT CHECK (policy_status IN ('pass','warn','violation')),
     created_by    TEXT,

@@ -949,4 +949,51 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
     // fully valid assertion signed by an expired cert. It cannot be pinned here: a unit test can
     // only post a garbage SAMLResponse, which fails inside ITfoxtec's Unbind with a 401 whether or
     // not the expiry gate exists, so such a test would pass against the unfixed code and pin nothing.
+
+    // ── IdpMetadataParser: SingleSignOnService Location must be a usable URL ───
+
+    private static string MetadataWithSsoLocation(string location) => $"""
+        <?xml version="1.0"?>
+        <EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" entityID="https://idp.example.com/entity">
+          <IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
+            <KeyDescriptor use="signing">
+              <KeyInfo xmlns="http://www.w3.org/2000/09/xmldsig#">
+                <X509Data>
+                  <X509Certificate>{SampleIdpCertBase64}</X509Certificate>
+                </X509Data>
+              </KeyInfo>
+            </KeyDescriptor>
+            <SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="{location}"/>
+          </IDPSSODescriptor>
+        </EntityDescriptor>
+        """;
+
+    /// <summary>
+    /// An empty Location parsed clean and was persisted as idp_sso_url='' — metadata that looks
+    /// uploaded but can never serve a login, because the sign-in redirect is built with
+    /// new Uri(IdpSsoUrl). That mismatch between "stored" and "usable" is what let an admin turn
+    /// on SSO-only against a config no SAML login could complete, leaving the password grant
+    /// live underneath. The upload has to reject it.
+    /// </summary>
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("/sso")]
+    [InlineData("not a url")]
+    [InlineData("javascript:alert(1)")]
+    public void IdpMetadataParser_NonAbsoluteHttpSsoLocation_Throws(string location)
+    {
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => IdpMetadataParser.Parse(MetadataWithSsoLocation(location)));
+        Assert.Contains("Location", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("https://idp.example.com/sso")]
+    [InlineData("http://idp.example.com/sso")]
+    public void IdpMetadataParser_AbsoluteHttpSsoLocation_Parses(string location)
+    {
+        var parsed = IdpMetadataParser.Parse(MetadataWithSsoLocation(location));
+        Assert.Equal(location, parsed.SsoUrl);
+    }
 }

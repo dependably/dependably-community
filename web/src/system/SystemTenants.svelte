@@ -293,13 +293,13 @@
     { key: 'expand',  label: '',                                                 sortable: false, width: '28px' },
     { key: 'slug',    label: $t('system.tenants.columns.slug'),    sortable: true },
     { key: 'status',  label: $t('system.tenants.columns.status'),  sortable: true },
-    { key: 'health',  label: $t('system.tenants.columns.health'),  sortable: true, width: '90px' },
+    { key: 'health',  label: $t('system.tenants.columns.health'),  sortable: true, width: '70px' },
     { key: 'enrichment', label: $t('system.tenants.columns.enrichment'), sortable: true, width: '100px' },
-    { key: 'users',   label: $t('system.tenants.columns.users'),   sortable: true, width: '90px' },
-    { key: 'storage', label: $t('system.tenants.columns.storage'), sortable: true, width: '110px' },
-    { key: 'quota',   label: $t('system.tenants.columns.quota'),   sortable: false, width: '140px' },
-    { key: 'created', label: $t('system.tenants.columns.created'), sortable: true, width: '120px' },
-    { key: 'deleted', label: $t('system.tenants.columns.deleted'), sortable: true, width: '120px' },
+    { key: 'users',   label: $t('system.tenants.columns.users'),   sortable: true, width: '80px' },
+    { key: 'storage', label: $t('system.tenants.columns.storage'), sortable: true, width: '100px' },
+    { key: 'quota',   label: $t('system.tenants.columns.quota'),   sortable: false, width: '110px' },
+    { key: 'created', label: $t('system.tenants.columns.created'), sortable: true, width: '110px' },
+    { key: 'deleted', label: $t('system.tenants.columns.deleted'), sortable: true, width: '110px' },
     { key: 'actions', label: '', sortable: false, width: '52px' },
   ]
 
@@ -697,7 +697,6 @@
 
   /* Expandable row interaction */
   .expandable-row { cursor: pointer; }
-  .expandable-row:hover { background: var(--bg); }
   .expandable-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
   .chevron-cell { padding-right: 2px; }
@@ -708,8 +707,7 @@
   }
   .chevron-icon.open { transform: rotate(180deg); }
 
-  /* Detail expansion row */
-  .detail-row { background: var(--bg); }
+  /* Detail expansion row — the global tr.detail-row td rule supplies the surface tint. */
   .detail-row td { padding: 0; border-bottom: 1px solid var(--border); }
   .detail-panel {
     padding: 12px 20px 16px 36px;
@@ -795,32 +793,9 @@
   .health-dot.health-dot-warn { background: var(--warning); }
   .health-dot.health-dot-critical { background: var(--danger); }
 
-  .modal-backdrop {
-    position: fixed; inset: 0;
-    background: var(--overlay-scrim);
-    display: flex; align-items: center; justify-content: center;
-    z-index: 100;
-  }
-  .modal {
-    background: var(--bg2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 20px;
-    width: 400px;
-  }
-  .form-row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
-  .form-row label { font-size: 13px; color: var(--text2); }
-  .form-row input {
-    padding: 6px 8px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    background: var(--bg);
-    color: var(--text);
-  }
   .quota-inputs { display: flex; gap: 6px; align-items: stretch; }
   .quota-inputs input { flex: 1 1 auto; width: auto; min-width: 0; }
   .quota-inputs select { flex: 0 0 auto; width: 90px; }
-  .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
   dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; }
   dt { font-weight: 600; }
   code { background: var(--bg); padding: 2px 6px; border-radius: 3px; }

@@ -52,7 +52,7 @@ public sealed class SbomExportFidelityTests : IClassFixture<InMemoryDbFixture>
     // ── seeding helpers ──────────────────────────────────────────────────────
 
     private async Task<(string ProjectId, string VersionId)> SeedProjectVersionAsync(
-        string orgId, string name, bool isLatest = true)
+        string orgId, string name, bool isLatest = true, bool isActive = true)
     {
         string projectId = Guid.NewGuid().ToString("N");
         string versionId = Guid.NewGuid().ToString("N");
@@ -65,10 +65,19 @@ public sealed class SbomExportFidelityTests : IClassFixture<InMemoryDbFixture>
             new { projectId, orgId, name, now = _clock.GetUtcNow().ToUtcIso() });
         await conn.ExecuteAsync(
             """
-            INSERT INTO project_versions (id, org_id, project_id, version, is_latest, created_at)
-            VALUES (@versionId, @orgId, @projectId, '1.0.0', @isLatest, @now)
+            INSERT INTO project_versions
+                (id, org_id, project_id, version, is_latest, is_active, created_at)
+            VALUES (@versionId, @orgId, @projectId, '1.0.0', @isLatest, @isActive, @now)
             """,
-            new { versionId, orgId, projectId, isLatest = isLatest ? 1 : 0, now = _clock.GetUtcNow().ToUtcIso() });
+            new
+            {
+                versionId,
+                orgId,
+                projectId,
+                isLatest = isLatest ? 1 : 0,
+                isActive = isActive ? 1 : 0,
+                now = _clock.GetUtcNow().ToUtcIso(),
+            });
         return (projectId, versionId);
     }
 
@@ -551,34 +560,44 @@ public sealed class SbomExportFidelityTests : IClassFixture<InMemoryDbFixture>
     // ── affected-applications: multi-project, latest-version-scoped ──────────
 
     [Fact]
-    public async Task AffectedApplications_CountsDistinctLatestProjects_ExcludesNonLatestVersions()
+    public async Task AffectedApplications_CountsInServiceProjects_ExcludesRetiredSupersededVersions()
     {
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"blast-{Guid.NewGuid():N}"[..20]);
         var (projectA, versionA) = await SeedProjectVersionAsync(orgId, "app-a", isLatest: true);
         var (_, versionB) = await SeedProjectVersionAsync(orgId, "app-b", isLatest: true);
-        var (_, versionC) = await SeedProjectVersionAsync(orgId, "app-c", isLatest: false);
+        var (_, versionC) = await SeedProjectVersionAsync(
+            orgId, "app-c", isLatest: false, isActive: false);
+        // A fourth application still running a superseded release. It counts, and the assertion
+        // below is what keeps this exported number in step with the dashboard the customer
+        // receiving the VEX document can also see.
+        var (_, versionD) = await SeedProjectVersionAsync(
+            orgId, "app-d", isLatest: false, isActive: true);
 
         string vulnId = await InsertVulnerabilityAsync("CVE-2100-8001", cvssScore: 5.0);
         string compA = await InsertComponentAsync(orgId, versionA, "pkg:npm/shared@1.0.0", "npm", "shared", "shared");
         string compB = await InsertComponentAsync(orgId, versionB, "pkg:npm/shared@1.0.0", "npm", "shared", "shared");
         string compC = await InsertComponentAsync(orgId, versionC, "pkg:npm/shared@1.0.0", "npm", "shared", "shared");
+        string compD = await InsertComponentAsync(orgId, versionD, "pkg:npm/shared@1.0.0", "npm", "shared", "shared");
         await LinkAsync(compA, vulnId);
         await LinkAsync(compB, vulnId);
         await LinkAsync(compC, vulnId);
+        await LinkAsync(compD, vulnId);
 
         var entry = await ExportSingleVulnAsync(orgId, projectA, versionA);
         var props = PropsOf(entry);
 
-        // app-a and app-b are latest; app-c's version does not count, per the documented
-        // latest-version-scoping decision (matches SbomBlastRadiusRepository's own dashboard rule).
-        Assert.Equal("2", props[DependablyExportProperties.AffectedApplications]);
+        // app-a and app-b are latest and app-d is a superseded release still marked active;
+        // app-c is superseded AND retired, so it is the only one that does not count. The rule is
+        // ProjectLifecycle.InServiceFilter, matching SbomBlastRadiusRepository exactly.
+        Assert.Equal("3", props[DependablyExportProperties.AffectedApplications]);
     }
 
     [Fact]
     public async Task AffectedApplications_ZeroIsARealAnswer_AlwaysPresent()
     {
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"blast-zero-{Guid.NewGuid():N}"[..16]);
-        var (projectA, versionA) = await SeedProjectVersionAsync(orgId, "app-a", isLatest: false);
+        var (projectA, versionA) = await SeedProjectVersionAsync(
+            orgId, "app-a", isLatest: false, isActive: false);
         string vulnId = await InsertVulnerabilityAsync("CVE-2100-8002", cvssScore: 5.0);
         string compA = await InsertComponentAsync(orgId, versionA, "pkg:npm/solo@1.0.0", "npm", "solo", "solo");
         await LinkAsync(compA, vulnId);

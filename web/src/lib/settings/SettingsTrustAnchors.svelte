@@ -363,7 +363,6 @@
   }
 
   .row-actions { display: flex; gap: 4px; }
-  .btn-sm { padding: 4px 8px; font-size: 12px; min-height: 0; }
 
   .list-header { margin-bottom: 4px; }
   .mt-4 { margin-top: 24px; }

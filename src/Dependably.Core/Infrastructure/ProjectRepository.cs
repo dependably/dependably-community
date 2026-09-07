@@ -153,7 +153,7 @@ public sealed partial class ProjectRepository
             new CommandDefinition(
                 $"""
                 SELECT p.id AS Id, p.name AS Name, p.kind AS Kind, p.classifier AS Classifier,
-                       p.parent_id AS ParentId, parent.name AS ParentName,
+                       p.parent_id AS ParentId, parent.name AS ParentName, p.is_active AS IsActive,
                        lv.id AS LatestVersionId, lv.version AS LatestVersion,
                        lv.policy_status AS PolicyStatus
                 FROM projects p
@@ -263,6 +263,7 @@ public sealed partial class ProjectRepository
             new CommandDefinition(
                 """
                 SELECT v.id AS Id, v.version AS Version, v.is_latest AS IsLatest,
+                       v.is_active AS IsActive,
                        v.policy_status AS PolicyStatus, v.created_at AS CreatedAt
                 FROM project_versions v
                 WHERE v.org_id = @orgId AND v.project_id = @projectId
@@ -297,7 +298,7 @@ public sealed partial class ProjectRepository
         var rows = (await conn.QueryAsync<ProjectChildSummary>(
             new CommandDefinition(
                 """
-                SELECT c.id AS Id, c.name AS Name, c.kind AS Kind,
+                SELECT c.id AS Id, c.name AS Name, c.kind AS Kind, c.is_active AS IsActive,
                        lv.id AS LatestVersionId, lv.version AS LatestVersion,
                        lv.policy_status AS PolicyStatus
                 FROM projects c
@@ -577,6 +578,7 @@ public sealed partial class ProjectRepository
             """
             SELECT p.id AS Id, p.org_id AS OrgId, p.parent_id AS ParentId, p.kind AS Kind,
                    p.name AS Name, p.classifier AS Classifier, p.description AS Description,
+                   p.is_active AS IsActive,
                    p.created_by AS CreatedBy, p.created_at AS CreatedAt
             FROM projects p
             WHERE p.org_id = @orgId AND p.id = @projectId
@@ -593,6 +595,7 @@ public sealed partial class ProjectRepository
                 """
                 SELECT p.id AS Id, p.org_id AS OrgId, p.parent_id AS ParentId, p.kind AS Kind,
                        p.name AS Name, p.classifier AS Classifier, p.description AS Description,
+                       p.is_active AS IsActive,
                        p.created_by AS CreatedBy, p.created_at AS CreatedAt
                 FROM projects p
                 WHERE p.org_id = @orgId AND p.parent_id IS NULL AND p.name = @name
@@ -602,6 +605,7 @@ public sealed partial class ProjectRepository
                 """
                 SELECT p.id AS Id, p.org_id AS OrgId, p.parent_id AS ParentId, p.kind AS Kind,
                        p.name AS Name, p.classifier AS Classifier, p.description AS Description,
+                       p.is_active AS IsActive,
                        p.created_by AS CreatedBy, p.created_at AS CreatedAt
                 FROM projects p
                 WHERE p.org_id = @orgId AND p.parent_id = @parentId AND p.name = @name
@@ -613,7 +617,7 @@ public sealed partial class ProjectRepository
         => await conn.QuerySingleOrDefaultAsync<ProjectVersion>(
             """
             SELECT v.id AS Id, v.org_id AS OrgId, v.project_id AS ProjectId, v.version AS Version,
-                   v.is_latest AS IsLatest, v.policy_status AS PolicyStatus,
+                   v.is_latest AS IsLatest, v.is_active AS IsActive, v.policy_status AS PolicyStatus,
                    v.created_by AS CreatedBy, v.created_at AS CreatedAt
             FROM project_versions v
             WHERE v.org_id = @orgId AND v.project_id = @projectId AND v.id = @versionId

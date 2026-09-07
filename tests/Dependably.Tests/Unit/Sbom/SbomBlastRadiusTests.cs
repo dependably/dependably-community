@@ -118,17 +118,112 @@ public sealed class SbomBlastRadiusTests
     }
 
     [Fact]
-    public async Task ByPackage_ASupersededReleaseIsNotCountedAsShipping()
+    public async Task ByPackage_ARetiredSupersededReleaseIsNotCountedAsShipping()
     {
-        // Latest versions only. An older release is neither what the tenant ships nor something
-        // the nightly scan keeps current, so counting it mixes a live answer with a stale one.
+        // A release that is neither latest nor active is not something the tenant runs, and the
+        // nightly sweep does not keep it current either — counting it would mix a live answer
+        // with a stale one under a single number.
         await using var world = await World.CreateAsync();
-        await world.SeedAppAsync("storefront", "1.0.0", isLatest: false, componentVersion: "1.2.5");
+        await world.SeedAppAsync(
+            "storefront", "1.0.0", isLatest: false, componentVersion: "1.2.5", versionActive: false);
 
         using var body = await world.ByPackageAsync("npm", "left-pad");
 
         Assert.Equal(0, body.RootElement.GetProperty("total").GetInt32());
         Assert.Empty(body.RootElement.GetProperty("items").EnumerateArray());
+    }
+
+    [Fact]
+    public async Task ByPackage_AnActiveSupersededReleaseIsCountedAsShipping()
+    {
+        // The discriminating twin for the case above: identical seed but for the one flag. If the
+        // predicate had stayed `is_latest = 1`, this row would be invisible and an operator would
+        // read "0 applications" for a package still running in production.
+        await using var world = await World.CreateAsync();
+        await world.SeedAppAsync(
+            "storefront", "1.0.0", isLatest: false, componentVersion: "1.2.5", versionActive: true);
+
+        using var body = await world.ByPackageAsync("npm", "left-pad");
+
+        Assert.Equal(1, body.RootElement.GetProperty("total").GetInt32());
+        Assert.Equal(1, body.RootElement.GetProperty("projectCount").GetInt32());
+        Assert.Equal(
+            "storefront",
+            body.RootElement.GetProperty("items")[0].GetProperty("projectName").GetString());
+    }
+
+    [Fact]
+    public async Task ByPackage_ARetiredProjectIsExcludedEvenWithAnActiveLatestRelease()
+    {
+        // The project flag overrides both version flags. A decommissioned application is not
+        // something an operator remediates, however current its last build was — and this is the
+        // arm that fails silently if the projects join is dropped from a query, because every
+        // other assertion in this file passes without it.
+        await using var world = await World.CreateAsync();
+        await world.SeedAppAsync(
+            "legacy-portal", "4.0.0", isLatest: true, componentVersion: "1.2.5", projectActive: false);
+
+        using var body = await world.ByPackageAsync("npm", "left-pad");
+
+        Assert.Equal(0, body.RootElement.GetProperty("total").GetInt32());
+        Assert.Equal(0, body.RootElement.GetProperty("projectCount").GetInt32());
+    }
+
+    [Fact]
+    public async Task ByPackage_RetiringTheLatestReleaseDoesNotRemoveItFromTheCount()
+    {
+        // Latest is a floor. An operator who cuts a release and marks it not-yet-deployed has not
+        // said the application stopped shipping the package — and a count that dropped to zero
+        // here would tell them a quarantined package is unused when it is the current build.
+        await using var world = await World.CreateAsync();
+        await world.SeedAppAsync(
+            "storefront", "2.1.0", isLatest: true, componentVersion: "1.2.5", versionActive: false);
+
+        using var body = await world.ByPackageAsync("npm", "left-pad");
+
+        Assert.Equal(1, body.RootElement.GetProperty("projectCount").GetInt32());
+    }
+
+    [Fact]
+    public async Task ByAdvisory_CountsAnActiveSupersededReleaseAndSkipsARetiredOne()
+    {
+        // The advisory arm and the counts arm are separate SQL statements from the coordinate arm
+        // above, so they get their own discriminating pair rather than inheriting its coverage.
+        await using var world = await World.CreateAsync();
+        await world.SeedAppAsync(
+            "storefront", "1.0.0", isLatest: false, componentVersion: "1.2.5",
+            advisory: Osv, versionActive: true);
+        await world.SeedAppAsync(
+            "billing", "0.9.0", isLatest: false, componentVersion: "1.1.0",
+            advisory: Osv, versionActive: false);
+
+        using var body = await world.ByAdvisoryAsync(Osv);
+        Assert.Equal(1, body.RootElement.GetProperty("projectCount").GetInt32());
+        Assert.Equal(
+            "storefront",
+            body.RootElement.GetProperty("items")[0].GetProperty("projectName").GetString());
+
+        using var counts = await world.CountsAsync("advisory", Osv);
+        Assert.Equal(1, counts.RootElement.GetProperty("counts").GetProperty(Osv).GetInt32());
+    }
+
+    [Fact]
+    public async Task Counts_ByCoordinateHonoursBothLifecycleFlags()
+    {
+        // The batch-count statement is a fourth independent query. Seeding one of each state and
+        // asserting the single surviving row is what stops it from silently keeping the old
+        // is_latest-only predicate while the three read paths moved on.
+        await using var world = await World.CreateAsync();
+        await world.SeedAppAsync(
+            "shipped", "1.0.0", isLatest: false, componentVersion: "1.2.5", versionActive: true);
+        await world.SeedAppAsync(
+            "retired-release", "1.0.0", isLatest: false, componentVersion: "1.2.5", versionActive: false);
+        await world.SeedAppAsync(
+            "retired-app", "1.0.0", isLatest: true, componentVersion: "1.2.5", projectActive: false);
+
+        using var counts = await world.CountsAsync("package", "npm/left-pad");
+
+        Assert.Equal(1, counts.RootElement.GetProperty("counts").GetProperty("npm/left-pad").GetInt32());
     }
 
     [Fact]
@@ -309,11 +404,18 @@ public sealed class SbomBlastRadiusTests
             return Serialize(Assert.IsType<OkObjectResult>(result).Value);
         }
 
-        /// <summary>One application version whose SBOM lists the coordinate.</summary>
+        /// <summary>
+        /// One application version whose SBOM lists the coordinate. Both lifecycle flags default
+        /// to active, matching the column defaults — a caller that says nothing about them is
+        /// seeding the state every real row starts in.
+        /// </summary>
         public async Task SeedAppAsync(
             string projectName, string version, bool isLatest, string componentVersion,
-            string? advisory = null, string ecosystem = "npm", string purlName = "left-pad") =>
-            await SeedAppInOrgAsync(OrgId, projectName, version, isLatest, componentVersion, advisory, ecosystem, purlName);
+            string? advisory = null, string ecosystem = "npm", string purlName = "left-pad",
+            bool projectActive = true, bool versionActive = true) =>
+            await SeedAppInOrgAsync(
+                OrgId, projectName, version, isLatest, componentVersion, advisory, ecosystem, purlName,
+                projectActive, versionActive);
 
         /// <summary>The same shape, in a tenant the caller is not a member of.</summary>
         public async Task SeedForeignAppAsync(
@@ -321,7 +423,8 @@ public sealed class SbomBlastRadiusTests
         {
             string foreignOrg = await OrgSeeder.InsertAsync(Store, OtherOrgSlug);
             await SeedAppInOrgAsync(
-                foreignOrg, projectName, "1.0.0", isLatest: true, componentVersion, advisory, "npm", "left-pad");
+                foreignOrg, projectName, "1.0.0", isLatest: true, componentVersion, advisory, "npm", "left-pad",
+                projectActive: true, versionActive: true);
         }
 
         /// <summary>A second row for the same coordinate on an application already seeded.</summary>
@@ -340,23 +443,32 @@ public sealed class SbomBlastRadiusTests
 
         private async Task SeedAppInOrgAsync(
             string orgId, string projectName, string version, bool isLatest, string componentVersion,
-            string? advisory, string ecosystem, string purlName)
+            string? advisory, string ecosystem, string purlName, bool projectActive, bool versionActive)
         {
             string projectId = Guid.NewGuid().ToString("N");
             string versionId = Guid.NewGuid().ToString("N");
             await using var conn = await Store.OpenAsync();
             await conn.ExecuteAsync(
                 """
-                INSERT INTO projects (id, org_id, kind, name, classifier)
-                VALUES (@projectId, @orgId, 'project', @projectName, 'application')
+                INSERT INTO projects (id, org_id, kind, name, classifier, is_active)
+                VALUES (@projectId, @orgId, 'project', @projectName, 'application', @projectActive)
                 """,
-                new { projectId, orgId, projectName });
+                new { projectId, orgId, projectName, projectActive = projectActive ? 1 : 0 });
             await conn.ExecuteAsync(
                 """
-                INSERT INTO project_versions (id, org_id, project_id, version, is_latest, policy_status)
-                VALUES (@versionId, @orgId, @projectId, @version, @isLatest, 'pass')
+                INSERT INTO project_versions
+                    (id, org_id, project_id, version, is_latest, is_active, policy_status)
+                VALUES (@versionId, @orgId, @projectId, @version, @isLatest, @versionActive, 'pass')
                 """,
-                new { versionId, orgId, projectId, version, isLatest = isLatest ? 1 : 0 });
+                new
+                {
+                    versionId,
+                    orgId,
+                    projectId,
+                    version,
+                    isLatest = isLatest ? 1 : 0,
+                    versionActive = versionActive ? 1 : 0,
+                });
             string componentId = await InsertComponentAsync(
                 conn, orgId, versionId, ecosystem, purlName, componentVersion);
 

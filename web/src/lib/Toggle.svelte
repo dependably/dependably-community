@@ -62,7 +62,8 @@
     border-color: var(--accent);
   }
   .toggle input:checked + .track::after {
-    left: calc(100% - 18px);
+    /* 16px knob + 1px border each side + 2px inset: mirrors the 2px left offset of the off state. */
+    left: calc(100% - 20px);
     background: var(--on-accent);
     border-color: var(--on-accent);
   }

@@ -77,6 +77,10 @@
     <value>Insufficient token scope.</value>
     <comment>403 body when an API token lacks the capability required for the operation. Here 'scope' means the token's permission set, not OAuth.</comment>
   </data>
+  <data name="error.auth.inviteAcceptSsoOnly" xml:space="preserve">
+    <value>This organization signs in with single sign-on. Use the SSO button on the sign-in page; no password is needed.</value>
+    <comment>409 body when an invite is accepted on a tenant that has switched to SSO-only: the invite stays valid, but no local password can be set. 'SSO' is the button label the sign-in page shows.</comment>
+  </data>
   <data name="error.org.slugInvalid" xml:space="preserve">
     <value>Slug is missing, reserved, or contains invalid characters.</value>
     <comment>Rejects a new tenant's slug (the URL/subdomain identifier). 'Slug' may be rendered with a local term for identifier.</comment>

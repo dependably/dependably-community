@@ -9,7 +9,7 @@ namespace Dependably.Infrastructure;
 /// Enforces per-org retention policies:
 ///   - keep_versions: delete oldest versions beyond the limit per package (opt-in; NULL = off)
 ///   - keep_project_versions: delete oldest project versions beyond the limit per project, never
-///     the is_latest row (opt-in; NULL = off)
+///     an in-service row — the is_latest one or one marked is_active (opt-in; NULL = off)
 ///   - keep_days: evict proxy blobs unused beyond this many days (opt-in; NULL = off)
 ///   - purge_unlisted_after_days: hard-delete long-unlisted versions (opt-in; NULL = off)
 ///   - activity_retention_days: delete old activity rows; NULL resolves to the
@@ -701,6 +701,16 @@ public sealed class RetentionService : ScheduledBackgroundService
     /// is also its newest sees the cap honoured exactly; a project whose operator promoted an older
     /// version keeps one extra row, which is the safe direction to be wrong in.</para>
     ///
+    /// <para><b>An <c>is_active</c> row is spared on the same terms, and for a sharper reason.</b>
+    /// Marking a release active is an operator saying "this is still running"; the blast radius
+    /// then counts it and the nightly sweep then rescans it. A cap that deleted it anyway would
+    /// silently shrink a security count — the affected-application number would simply drop, with
+    /// no event, no alert and nothing on the surface saying a release stopped being tracked rather
+    /// than stopped being affected. A cap is a storage control, and it must not be able to
+    /// overrule a decision made about what the tenant runs. Both flags are spared, so the rows
+    /// this leaves behind are exactly the rows the other two passes act on. Retiring a release is
+    /// how an operator hands it back to the cap.</para>
+    ///
     /// <para>Blob keys are enumerated BEFORE the delete, the same ordering the interactive delete
     /// path uses: <c>project_documents.blob_key</c> is the blob's only reference, so once the FK
     /// cascade has removed the metadata row there is nothing left to read the key from and the bytes
@@ -721,6 +731,7 @@ public sealed class RetentionService : ScheduledBackgroundService
             FROM project_versions pv
             WHERE pv.org_id = @orgId
               AND pv.is_latest = 0
+              AND pv.is_active = 0
               AND pv.id NOT IN (
                   SELECT pv2.id FROM project_versions pv2
                   WHERE pv2.org_id = @orgId AND pv2.project_id = pv.project_id
@@ -742,14 +753,18 @@ public sealed class RetentionService : ScheduledBackgroundService
                 """,
                 new { orgId, versionId = VersionId })).AsList();
 
-            // The DELETE re-asserts is_latest = 0 rather than trusting the id the SELECT chose.
-            // The two run on one connection with no transaction between them, and a promotion —
-            // interactive, or the auto-latest a new upload takes — can land in that window and
-            // make this row the project's latest. Deleting it then manufactures exactly the
-            // zero-latest state this cap exists not to manufacture. Re-asserting the predicate
-            // costs nothing and makes the race a no-op instead of a broken project.
+            // The DELETE re-asserts both flags rather than trusting the id the SELECT chose. The
+            // two run on one connection with no transaction between them, so a promotion —
+            // interactive, or the auto-latest a new upload takes — or an operator reinstating the
+            // release can land in that window. Deleting it then manufactures exactly the
+            // zero-latest state this cap exists not to manufacture, or drops a version an operator
+            // has just said is still running. Re-asserting the predicate costs nothing and makes
+            // either race a no-op instead of a broken project or a silently shrunk count.
             int affected = await conn.ExecuteAsync(
-                "DELETE FROM project_versions WHERE org_id = @orgId AND id = @versionId AND is_latest = 0",
+                """
+                DELETE FROM project_versions
+                WHERE org_id = @orgId AND id = @versionId AND is_latest = 0 AND is_active = 0
+                """,
                 new { orgId, versionId = VersionId });
 
             if (affected == 0)
@@ -758,7 +773,7 @@ public sealed class RetentionService : ScheduledBackgroundService
                 // referenced by a live version, so releasing the bytes enumerated above would
                 // strand the surviving metadata rows pointing at deleted blobs.
                 _logger.LogDebug(
-                    "GC: skipped project version {VersionId} (project {ProjectId}, version {Version}); it was promoted to latest after the sweep selected it.",
+                    "GC: skipped project version {VersionId} (project {ProjectId}, version {Version}); it was promoted to latest or reinstated as active after the sweep selected it.",
                     VersionId, ProjectId, Version);
                 continue;
             }

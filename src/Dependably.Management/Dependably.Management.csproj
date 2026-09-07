@@ -16,6 +16,23 @@
   </ItemGroup>
 
   <ItemGroup>
+    <EmbeddedResource Include="../../skills/npm-configure-project/SKILL.md" LogicalName="skills.npm-configure-project.SKILL.md" />
+    <EmbeddedResource Include="../../skills/npm-configure-global/SKILL.md" LogicalName="skills.npm-configure-global.SKILL.md" />
+    <EmbeddedResource Include="../../skills/pypi-configure-project/SKILL.md" LogicalName="skills.pypi-configure-project.SKILL.md" />
+    <EmbeddedResource Include="../../skills/pypi-configure-global/SKILL.md" LogicalName="skills.pypi-configure-global.SKILL.md" />
+    <EmbeddedResource Include="../../skills/nuget-configure-project/SKILL.md" LogicalName="skills.nuget-configure-project.SKILL.md" />
+    <EmbeddedResource Include="../../skills/nuget-configure-global/SKILL.md" LogicalName="skills.nuget-configure-global.SKILL.md" />
+    <EmbeddedResource Include="../../skills/maven-configure-project/SKILL.md" LogicalName="skills.maven-configure-project.SKILL.md" />
+    <EmbeddedResource Include="../../skills/maven-configure-global/SKILL.md" LogicalName="skills.maven-configure-global.SKILL.md" />
+    <EmbeddedResource Include="../../skills/go-configure-project/SKILL.md" LogicalName="skills.go-configure-project.SKILL.md" />
+    <EmbeddedResource Include="../../skills/go-configure-global/SKILL.md" LogicalName="skills.go-configure-global.SKILL.md" />
+    <EmbeddedResource Include="../../skills/cargo-configure-project/SKILL.md" LogicalName="skills.cargo-configure-project.SKILL.md" />
+    <EmbeddedResource Include="../../skills/cargo-configure-global/SKILL.md" LogicalName="skills.cargo-configure-global.SKILL.md" />
+    <EmbeddedResource Include="../../skills/docker-configure-global/SKILL.md" LogicalName="skills.docker-configure-global.SKILL.md" />
+    <EmbeddedResource Include="../../skills/rpm-configure-global/SKILL.md" LogicalName="skills.rpm-configure-global.SKILL.md" />
+    <EmbeddedResource Include="../../skills/apk-configure-global/SKILL.md" LogicalName="skills.apk-configure-global.SKILL.md" />
+    <EmbeddedResource Include="../../skills/terraform-configure-global/SKILL.md" LogicalName="skills.terraform-configure-global.SKILL.md" />
+    <EmbeddedResource Include="../../skills/hex-configure-global/SKILL.md" LogicalName="skills.hex-configure-global.SKILL.md" />
     <EmbeddedResource Include="../../skills/remediation/fix-vulnerable-dependency/SKILL.md" LogicalName="skills.remediation.fix-vulnerable-dependency.SKILL.md" />
     <EmbeddedResource Include="../../skills/remediation/fix-injection/SKILL.md" LogicalName="skills.remediation.fix-injection.SKILL.md" />
     <EmbeddedResource Include="../../skills/remediation/fix-xss/SKILL.md" LogicalName="skills.remediation.fix-xss.SKILL.md" />

@@ -331,8 +331,8 @@ public sealed class OrgAuthConfigControllerTests
         {
             await conn.ExecuteAsync(
                 "INSERT INTO tenant_saml_config (org_id, enabled, forms_login_enabled, " +
-                "idp_entity_id, idp_signing_cert, name_id_format, last_test_at) " +
-                "VALUES (@o, 1, 1, 'idp', 'cert', 'fmt', @t)",
+                "idp_entity_id, idp_sso_url, idp_signing_cert, name_id_format, last_test_at) " +
+                "VALUES (@o, 1, 1, 'idp', 'https://idp.example.com/sso', 'cert', 'fmt', @t)",
                 new { o = b.PrimaryOrgId, t = recent });
         }
 
@@ -344,6 +344,50 @@ public sealed class OrgAuthConfigControllerTests
                 RoleAttribute: null, RoleMapping: null, DefaultRole: "member"),
             CancellationToken.None);
         Assert.IsType<NoContentResult>(result);
+    }
+
+    /// <summary>
+    /// Entity id + signing cert + a recent successful test, but no idp_sso_url — the state a
+    /// metadata upload carrying an unusable SingleSignOnService Location left behind. SAML login
+    /// cannot complete against it, so AuthController leaves the password grant open; letting the
+    /// switch succeed would report SSO-only to the admin while password login keeps working.
+    /// The guard reads SamlController.IsSamlConfigured so the two answers cannot diverge.
+    /// </summary>
+    [Fact]
+    public async Task Put_DisableFormsLogin_NoSsoUrl_Returns422()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        string recent = s.Clock.GetUtcNow().AddMinutes(-1).ToUtcIso();
+        await using (var conn = await b.Db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO tenant_saml_config (org_id, enabled, forms_login_enabled, " +
+                "idp_entity_id, idp_sso_url, idp_signing_cert, name_id_format, last_test_at) " +
+                "VALUES (@o, 1, 1, 'idp', '', 'cert', 'fmt', @t)",
+                new { o = b.PrimaryOrgId, t = recent });
+        }
+
+        var result = await b.OrgAuthConfigController.Put(
+            new UpdateAuthConfigRequest(
+                Enabled: true, FormsLoginEnabled: false,
+                SpEntityId: null, NameIdFormat: "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
+                EmailAttribute: null, ButtonLabel: null,
+                RoleAttribute: null, RoleMapping: null, DefaultRole: "member"),
+            CancellationToken.None);
+        var obj = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(422, obj.StatusCode);
+
+        // And the switch really did not land — a 422 that still wrote the column would be the
+        // same silent inert-SSO-only state by a different route.
+        await using var check = await b.Db.OpenAsync();
+        long formsEnabled = await check.ExecuteScalarAsync<long>(
+            "SELECT forms_login_enabled FROM tenant_saml_config WHERE org_id = @o",
+            new { o = b.PrimaryOrgId });
+        Assert.Equal(1, formsEnabled);
     }
 
     // ── POST /api/v1/auth-config/metadata ─────────────────────────────────────
