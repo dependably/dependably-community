@@ -360,9 +360,9 @@ public sealed class SiemControllerExtendedTests
         string[] actions =
         {
             "login.success", "login.failure", "lockout.triggered",
-            "token.created", "token.revoked",
-            "rbac.role_changed", "rbac.member_added", "rbac.member_removed",
-            "rbac.unmapped_arm", // default branch of both switches
+            "token_created", "token_revoked",
+            "member_role_changed", "member_removed", "checksum_failure",
+            "user.data_exported", // in the default feed, in neither CEF switch
         };
         for (int i = 0; i < actions.Length; i++)
         {
@@ -396,6 +396,9 @@ public sealed class SiemControllerExtendedTests
         Assert.Contains("Token Created", body);
         Assert.Contains("Token Revoked", body);
         Assert.Contains("Role Changed", body);
+        Assert.Contains("Checksum Verification Failed", body);
+        // The default arm of both switches: an action with no entry renders verbatim.
+        Assert.Contains("|user.data_exported|user.data_exported|3|", body);
         // Escaped pipe + equals + backslash + newline from actor id.
         Assert.Contains("\\|", body);
         Assert.Contains("\\=", body);
@@ -405,6 +408,7 @@ public sealed class SiemControllerExtendedTests
         Assert.Contains("cs1Label=OrgId", body);
         Assert.Contains("cs2Label=Ecosystem", body);
         Assert.Contains("cs3Label=Purl", body);
+        Assert.Contains("cs4Label=OrgSlug", body);
         Assert.Contains("msg=", body);
         // Pagination footer.
         Assert.Contains("# next_cursor=", body);

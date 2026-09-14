@@ -1783,7 +1783,7 @@ sbom-publish:
     # 26B MoE (a4b => ~4B active params): same per-call latency as the 12B dense
     # model on this host but stronger review quality. The earlier no-content failure
     # at this size was the reasoning-budget bug now fixed by AI_REVIEW_THINK=false.
-    OLLAMA_MODEL: "gemma4-unsloth:26b-a4b-it-qat"
+    OLLAMA_MODEL: "gemma4-unsloth-novision:26b-a4b-it-qat"
     GIT_DEPTH: "20"
     # Sized by measured recall, not by the context ceiling. NUM_CTX below would allow
     # ~719000 (ci/ai-review.sh keeps NUM_CTX >= MAX_DIFF_BYTES/3 + 6000), but a
@@ -1795,13 +1795,21 @@ sbom-publish:
     # truncate, and the note discloses the percentage actually reviewed.
     AI_REVIEW_MAX_DIFF_BYTES: "200000"
     # ci/ai-review.sh sends options.num_ctx on every request, and a request-time
-    # option overrides whatever the model bakes in — so this value, not the
-    # Modelfile, is the window every lens actually runs in, and it has to be kept
-    # in step with OLLAMA_MODEL rather than inherited from it. 245760 is what the
-    # model carries, and it stays 100% GPU-resident at that size on the review host
-    # (size_vram == size), so the context window is not the binding constraint on
-    # coverage; MAX_DIFF_BYTES is, and it is set by recall above.
-    AI_REVIEW_NUM_CTX: "245760"
+    # option outranks both the Modelfile's baked num_ctx and the host's
+    # OLLAMA_CONTEXT_LENGTH — so this value, not the model tag, is the window every
+    # lens actually runs in. It is sized to what a review pass needs rather than to
+    # what the model can carry: the peak turn is the verify-filter pass (persona +
+    # the capped diff + the carried candidates + NUM_PREDICT), ~62000 tokens at the
+    # cap above, and ci/ai-review.sh holds a floor of MAX_DIFF_BYTES/3 + 6000
+    # (~72700). 98304 clears both with slack.
+    #
+    # Asking for more is not free. Ollama sizes its allocation per slot, so this
+    # number multiplies by the review host's parallel-slot count, and a request that
+    # disagrees with the loaded size forces a full model reload — so naming the
+    # model's ceiling here spends KV that buys the review nothing and forecloses
+    # parallel slots for every other consumer of that host. The window is not the
+    # binding constraint on coverage; MAX_DIFF_BYTES is, and it is set by recall above.
+    AI_REVIEW_NUM_CTX: "98304"
     # Every gemma4 build is a reasoning model; thinking burns the generation budget before any
     # answer is written. Off => the model writes the review straight to content.
     AI_REVIEW_THINK: "false"

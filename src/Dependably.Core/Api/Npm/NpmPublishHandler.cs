@@ -111,6 +111,7 @@ public sealed class NpmPublishHandler(
         var token = await httpContext.Request.ResolveTokenAsync(tokens, ct);
         if (token is null || token.OrgId != orgId)
         {
+            AuthDenialRecorder.RecordTenantMismatch(httpContext, token, orgId, ecosystem: "npm");
             httpContext.Response.Headers.WWWAuthenticate = "Bearer realm=\"dependably\"";
             return new UnauthorizedResult();
         }
@@ -527,6 +528,7 @@ public sealed class NpmPublishHandler(
         var token = await httpContext.Request.ResolveTokenAsync(tokens, ct);
         if (token is null || token.OrgId != orgId)
         {
+            AuthDenialRecorder.RecordTenantMismatch(httpContext, token, orgId, ecosystem: "npm");
             httpContext.Response.Headers.WWWAuthenticate = "Bearer realm=\"dependably\"";
             return new UnauthorizedResult();
         }
@@ -592,6 +594,7 @@ public sealed class NpmPublishHandler(
         var token = await httpContext.Request.ResolveTokenAsync(tokens, ct);
         if (token is null || token.OrgId != orgId)
         {
+            AuthDenialRecorder.RecordTenantMismatch(httpContext, token, orgId, ecosystem: "npm");
             return UnauthorizedBearer(httpContext);
         }
 
@@ -667,6 +670,7 @@ public sealed class NpmPublishHandler(
         var token = await httpContext.Request.ResolveTokenAsync(tokens, ct);
         if (token is null || token.OrgId != orgId)
         {
+            AuthDenialRecorder.RecordTenantMismatch(httpContext, token, orgId, ecosystem: "npm");
             return UnauthorizedBearer(httpContext);
         }
 

@@ -643,7 +643,9 @@ public sealed partial class CargoController
 
         var bareToken = await _tokens.ResolveAsync(raw, ct);
         // Reject tokens that belong to a different org — same coerce-to-null behaviour as
-        // the org-scoped overload so AnonymousPull governs cross-tenant requests.
+        // the org-scoped overload so AnonymousPull governs cross-tenant requests, and the same
+        // denial record, so this bespoke resolution is not a hole in the family.
+        AuthDenialRecorder.RecordTenantMismatch(HttpContext, bareToken, orgId, ecosystem: "cargo");
         return bareToken?.OrgId == orgId ? bareToken : null;
     }
 

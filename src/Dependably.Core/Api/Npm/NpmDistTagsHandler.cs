@@ -118,6 +118,7 @@ public sealed class NpmDistTagsHandler(
         var token = await httpContext.Request.ResolveTokenAsync(tokens, ct);
         if (token is null || token.OrgId != orgId)
         {
+            AuthDenialRecorder.RecordTenantMismatch(httpContext, token, orgId, ecosystem: "npm");
             httpContext.Response.Headers.WWWAuthenticate = "Bearer realm=\"dependably\"";
             return new UnauthorizedResult();
         }
@@ -204,6 +205,7 @@ public sealed class NpmDistTagsHandler(
         var token = await httpContext.Request.ResolveTokenAsync(tokens, ct);
         if (token is null || token.OrgId != orgId)
         {
+            AuthDenialRecorder.RecordTenantMismatch(httpContext, token, orgId, ecosystem: "npm");
             httpContext.Response.Headers.WWWAuthenticate = "Bearer realm=\"dependably\"";
             return new UnauthorizedResult();
         }

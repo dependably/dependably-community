@@ -7,7 +7,7 @@ namespace Dependably.Security;
 /// NIST SP 800-63B + OWASP ASVS v4.0.3 §V2.1: length floor, byte ceiling,
 /// no composition rules, entropy gate via zxcvbn, context-dictionary block.
 /// Breach-corpus check is deferred — see the encryption gap analysis in
-/// dependably-enterprise/docs/encryption.md.
+/// dependably-community.spec/specs/architecture/ARCH-encryption.md#open-questions.
 /// </summary>
 public static class PasswordPolicy
 {

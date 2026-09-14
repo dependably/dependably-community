@@ -245,7 +245,7 @@ The endpoint and tuning knobs are job variables on the `.ai-review` template in 
 | `OLLAMA_MODEL` | `gemma4:26b-a4b-it-qat` | Model name — must be pulled on the Ollama host |
 | `AI_REVIEW_MAX_DIFF_BYTES` | `200000` | Diff is truncated to this many bytes before review; truncation is disclosed in the posted note (see above), not just the job log |
 | `AI_REVIEW_DIFF_CONTEXT` | `10` | `git diff -U` context lines — more lets the model verify a hunk instead of speculating, but grows the diff toward the byte/context caps |
-| `AI_REVIEW_NUM_CTX` | `131072` | Model context window — must hold the persona + capped diff (~3.45 bytes/token, so a 200000-byte diff ≈ 58K tokens) **and** leave room to generate; too small and the prompt fills the window, leaving no room for output (empty/near-empty review). Keep `NUM_CTX` ≳ `MAX_DIFF_BYTES`/3 + 6000. This window would allow a ~375000-byte cap, but `AI_REVIEW_MAX_DIFF_BYTES` is deliberately set far below that — see its row |
+| `AI_REVIEW_NUM_CTX` | `131072` | Model context window — must hold the persona + capped diff (~3.45 bytes/token, so a 200000-byte diff ≈ 58K tokens) **and** leave room to generate; too small and the prompt fills the window, leaving no room for output (empty/near-empty review). The floor `MAX_DIFF_BYTES`/3 + 6000 is **enforced at startup**: a window below it, or a value that is not a positive integer, refuses the lens as `(misconfigured)` and fails the job rather than letting the misconfiguration surface as an empty `(no content)` note. It is refused rather than clamped — the value is also sized against the review host's per-slot KV budget (Ollama allocates it per parallel slot, and a request that disagrees with the loaded size forces a full model reload), so running at a size nobody chose trades a visible error for an invisible one. This window would allow a ~375000-byte cap, but `AI_REVIEW_MAX_DIFF_BYTES` is deliberately set far below that — see its row |
 | `AI_REVIEW_NUM_PREDICT` | `1500` | Hard cap on response length (backstops runaway generation) |
 | `AI_REVIEW_THINK` | `false` | Model "thinking". Reasoning models split output into `thinking` + `content`, and thinking burns the `NUM_PREDICT` budget — on a real diff it exhausts the budget before writing any `content`, which we read as "no content". Kept off; set `true` only with a much larger `NUM_PREDICT` |
 | `AI_REVIEW_TEMPERATURE` | `0.3` | Sampling temperature — a small non-zero value avoids greedy repetition loops |
@@ -888,6 +888,222 @@ Dependably can forward audit events to an external SIEM collector in real time. 
 | `SIEM_SYSLOG_PROTO` | `tls` | Transport: `udp`, `tcp`, or `tls`. Defaults to `tls` because the stream carries personal data; `udp`/`tcp` stay selectable and log a startup warning naming the exposure. Over UDP the events can also be forged, not merely read. |
 | `SIEM_SYSLOG_FORMAT` | `cef` | Message format: `cef` (ArcSight Common Event Format) or `rfc5424`. |
 | `SIEM_QUEUE_CAPACITY` | `1024` | In-memory queue depth for outbound SIEM events. Events are dropped (with a metric) when the queue is full. Increase for high-audit-volume deployments or a slow collector. |
+| `SIEM_ACTIVITY_DOWNLOAD_EVENTS` | `false` | Adds `download` to the event types `/api/v1/siem/events/activity` will serve. Off by default: a download row per artefact pull is the highest-volume event the registry emits, and an authorized pull is not something a SOC can triage. While it is off, a collector that asks for `event=download` gets a 400 naming this variable — never a silently short response. |
+| `SIEM_ACTIVITY_LAG_SECONDS` | `30` | Write-lag cap on `/api/v1/siem/events/activity`: the feed never serves past `now − N`, and reports the window it served. Activity rows are timestamped when they are enqueued and inserted up to a flush interval later, so a collector that read up to "now" and advanced its watermark there would permanently miss every row whose timestamp precedes the watermark but whose INSERT landed after the read. Raise it on an instance whose activity writer runs backlogged (watch `dependably.activity_writer.dropped`); under a saturated queue the true lag is unbounded, so the cap bounds the common case rather than guaranteeing the worst one. |
+
+#### Auth pull feed (`/api/v1/siem/events/auth`)
+
+Serves the audit plane (`audit_log`). Block-gate refusals are not on it — those are the activity
+feed below.
+
+- **`action=` matches an exact name or a dotted family.** `action=checksum_failure` selects that
+  one action; `action=login.` (or `action=login`) selects the whole `login.*` family; a trailing
+  separator is optional and ignored. Repeatable, OR'd, deduplicated, and a row matched by several
+  values is returned once. An unrecognized value is not an error — it matches nothing, so a
+  collector written against a newer instance keeps working against an older one. An unrecognized
+  value does count against `max_family_filters` (the instance cannot know whether the newer release
+  writes it as a leaf or a family root, so it is treated as a family), and that is **one shared
+  budget** with the dotted families you name deliberately — eleven family prefixes plus fifteen
+  names an older instance does not recognize is twenty-six, and is refused.
+- **The default set is the security vocabulary.** With no `action=` parameter the feed serves every
+  action marked `security_relevant` by the catalogue endpoint below: authentication and MFA, credential
+  lifecycle, privilege and membership change, identity-provider trust, refusals (credential,
+  capability, rate limit, scope, allowlist), supply-chain integrity failures, tenant lifecycle, and
+  bulk personal-data export. Configuration changes — allowlists, licence policy, retention, proxy
+  and webhook settings, user preferences — are *not* in it; they are compliance-audit material
+  rather than something a SOC alerts on, and they are one `action=` value away.
+- **Naming declared actions is free; naming families is what is bounded.** A filter that names a
+  declared action becomes one entry in an `IN` list, and — because no declared action sits under
+  another — carries no family `LIKE` term at all. A filter that names a dotted family, or an action
+  this release does not declare, adds one unindexable `LIKE` evaluated against every candidate row
+  of the window. So there are two limits rather than one: `max_action_filters` (every action the
+  instance declares *plus* a full complement of families — the two sets are disjoint and a
+  collector can legitimately want both) and `max_family_filters` (the number of families the
+  vocabulary implies). Exceeding either is a `400` naming which one; in practice the family limit
+  is the one that answers, because only declared actions are free and there are only so many of
+  those. **Pinning the exact action set your collector understands, instead
+  of inheriting `default_actions` and letting it widen under you on an upgrade, is both the safer
+  subscription and the cheaper query.**
+- **Discovery: `GET /api/v1/siem/actions`.** Returns `actions` (`[{action, security_relevant}]`
+  for the whole declared vocabulary), `default_actions` (what the no-filter feed serves),
+  `family_prefixes` (the dotted families the vocabulary implies — the values that count against
+  the family limit, along with undeclared names), and `max_action_filters` / `max_family_filters`
+  (the two limits above). Same auth as the feeds. It is the *declared* vocabulary, not a `SELECT DISTINCT` over the tenant's rows, because
+  the question worth answering is "what am I **not** receiving?" — and a distinct-values query can
+  only ever report what has already happened. Diff it against your subscription list when you
+  upgrade; an action family added in a release is otherwise invisible until the day it fires.
+- **Formats.** `application/json` (default), `application/x-ndjson`, `application/x-cef` — the
+  `Accept` header negotiates. CEF carries the tenant slug as `cs4Label=OrgSlug`.
+- **`orgSlug` is served beside `orgId`.** A platform-admin caller reads every tenant, and a
+  read:audit credential has no tenant-lookup route, so an alert carrying only the 32-hex id cannot
+  be resolved to a customer at all.
+- **`actorEmail` is intentionally always null, for every user actor.** It is not a bug and it will
+  not be populated. `audit_log.actor_label` denormalizes a display name for **service** actors
+  only: a user's display name *is* their email, and the member-removal and retention scrubs cover a
+  fixed column list, so a denormalized copy would be personal data outside the reach of both
+  sweeps — an Art. 17 erasure that leaves the address behind in the audit trail. The consequence is
+  a real asymmetry: a service-token action is attributable from the feed alone, a human action is
+  not. Resolve an `actorId` through the management API (`GET /api/v1/users`, which is
+  tenant-scoped and needs a management credential, not a read:audit one) and keep that mapping on
+  the collector's side.
+- **`sourceIp` is the immediate TCP peer, not necessarily the client.** With `TRUSTED_PROXIES`
+  unset (the fail-closed default), forwarded headers are ignored and every row records the
+  socket peer — a reverse proxy's or container bridge's address, identical across every request
+  it forwards. A live instance behind an unconfigured proxy has shown every auth event over 90
+  days carrying the Docker bridge gateway address. Per-source brute-force/password-spray
+  correlation, geo-IP/ASN enrichment, IP blocklisting, and `same_source_ip`-style correlation
+  rules all silently stop working — a frequency rule still fires on request volume, so the
+  detection looks intact. Set `TRUSTED_PROXIES` to the proxy's address(es) to restore client
+  attribution.
+- **Action names are a declared vocabulary** (`AuditActions`), pinned by
+  `AuditActionVocabularyComplianceTests`: a name a writer emits but does not declare fails the
+  build, as does a declared name nothing writes and a CEF mapping for a name nothing writes.
+  Rows written before this change carry `project.create` for what is now uniformly
+  `project.created`; query the old spelling explicitly to read that history.
+
+#### Auth pull feed response envelope
+
+The JSON response from `/api/v1/siem/events/auth` carries three fields beyond `items` and
+`next_cursor`. **NDJSON and CEF do not carry them** — those formats are one record per line and
+their shape is fixed for existing collectors.
+
+| Field | Meaning |
+|---|---|
+| `latest_event_at` | Millisecond-precision timestamp of the most recent `audit_log` row visible to this caller **ignoring the action filter**. This is what separates "my filter matched nothing" from "the registry is quiet" from "the audit writer is broken" — all three otherwise look identical: HTTP 200 with an empty `items`. |
+| `matched` | Rows matching the filter across the whole `since`/`until` window, independent of page size. |
+| `matched_capped` | `true` when `matched` was probed against a cap rather than counted to completion, in which case `matched` is a floor rather than an exact count. The cap exists because the action predicate is unindexable and an unscoped count over a wide window would scan the table. |
+
+A collector should alert when `latest_event_at` keeps advancing while `matched` stays zero: that is
+the registry being busy while this collector's filter selects nothing, which is a configuration
+fault on the collector's side and is otherwise silent.
+
+#### Activity pull feed (`/api/v1/siem/events/activity`)
+
+`/api/v1/siem/events/auth` serves the audit plane (`audit_log`). Block-gate refusals are not on
+that plane: they are `activity` rows, and the two planes are disjoint and never dual-written — so
+this second pull endpoint is how a refusal reaches a collector at all.
+
+- **Allowlist, not a filter.** `event=blocked` (the default) selects the whole block-gate family —
+  `blocked` plus every `blocked_<gate>` arm, matched as a range so an arm added in a later release
+  is carried without a config change. `event=blocked_<gate>` selects one arm. `event=download`
+  needs `SIEM_ACTIVITY_DOWNLOAD_EVENTS=true`. Any other value is refused with a 400.
+- **Tenant scope.** A token or tenant-session caller is pinned to its own tenant and `?org=` is
+  inert for it. A platform admin (`platform:*`) reads any tenant, but must name one: the underlying
+  query takes a non-nullable org id, so "every tenant at once" is not expressible on this feed.
+- **Paging and the watermark.** Keyset-paged on `(created_at, id)`, newest first, via `cursor`;
+  `limit` is 1–500. `until` — the instant a collector advances its watermark to, never its own
+  clock — is served **only on the last page** (`next_cursor` null) and is `null` on a truncated
+  one. Rows come newest-first, so a truncated page has served only the newest slice of the window
+  and every older row is still behind the cursor; advancing there would step over them
+  permanently. Page to the end, then advance. NDJSON carries `since`/`until`/`lag_seconds`/
+  `next_cursor` in a trailer object on every page; CEF emits `# window_until=` only on the last
+  one. Both window bounds are inclusive, so an event on exactly the served `until` millisecond is
+  delivered again on the next poll — dedupe on event id.
+- **Formats.** `application/json` (default), `application/x-ndjson`, `application/x-cef` — the same
+  `Accept` negotiation as the auth feed.
+- **Edge posture.** An edge replica writes activity rows to its local store but ships no management
+  plane, so this endpoint exists only on the origin; edge-written rows are local forensics until
+  edge→origin forwarding lands.
+- **Index.** `idx_activity_org_event` serves this feed on Postgres while blocked events are a
+  small fraction of `activity` (the normal shape). Above that fraction Postgres prefers
+  `idx_activity_org` with a filter, and SQLite's planner takes `idx_activity_org` for this query
+  regardless — a SQLite deployment carries the index's write cost without a read benefit. Adding
+  it is a non-`CONCURRENTLY` build at boot under the migration lock on the HA Postgres topology.
+- **Retention.** The rows behind this feed are *deleted* at the tenant's `activity_retention_days`
+  (instance default `ACTIVITY_RETENTION_DAYS`, 90 days) — unlike `audit_log`, there is no
+  pseudonymized tail left behind. A collector that stops polling for longer than that window loses
+  those events outright.
+
+
+#### Protocol-plane denial events
+
+All three families below are in the auth feed's default set, so a collector that sends no
+`action=` parameter receives them without configuring anything.
+
+| Action | Fires when | `detail` fields |
+|---|---|---|
+| `auth.token.rejected` | A credential was presented and did not resolve to a usable token for the tenant it was aimed at. `reason=invalid` covers an unknown, revoked, expired or malformed secret and a disabled owner — the token lookup folds all of them into one predicate, so they are genuinely indistinguishable and no `expired` reason is emitted. `reason=tenant_mismatch` is a live credential from another tenant. | `reason`, `partition`, `route`, `ecosystem`, `count`, `window_start`, `window_end`, `replica` |
+| `auth.capability.denied` | A resolved credential lacked the capability the route demanded. **Not every plane gates** — see the coverage note below. OCI additionally keeps writing its per-credential `oci.scope_denied` row. | the same fields plus `required` and `granted` |
+| `ratelimit.rejected` | A request was refused by the rate limiter (`429`), on any plane. `partition` is the limiter's own subject, and it uses **more namespaces than the `auth.*` events do** (see the coverage note below) — and `policy` names the `[EnableRateLimiting("…")]` policy that refused it. | the same fields plus `policy` |
+
+#### Coverage note: what `auth.capability.denied` does and does not see
+
+Only the planes with an inline capability gate emit it. As of the current tree those are
+**npm, PyPI, Maven, Cargo, Hex and OCI**. **NuGet, RPM, Go, APK and Terraform have no inline
+capability check**, so a credential lacking the capability is never refused there and no denial is
+recorded — the absence of rows for those planes means "not gated", not "nothing was attempted".
+
+Two further limits worth stating rather than leaving to be discovered:
+
+- **The gates are `token is not null && !token.HasCapability(…)`.** An anonymous request is not
+  gated at all, by design, so with `AnonymousPull` on a read proceeds without a capability check and
+  produces no denial. The event is about credentials that fall short, not about unauthenticated
+  access.
+- **Proxy and cache-serve branches are largely ungated** even on the six planes that do gate; the
+  checks sit on the hosted-artifact branches. A denied *proxied* read is therefore rare to
+  non-existent today.
+
+Do not write a detection that treats "no `auth.capability.denied` for plane X" as evidence that
+nothing was refused there.
+
+#### Coverage note: `partition` namespaces
+
+`partition` identifies who was refused, and **it is not one namespace — branch on the prefix,
+never parse it as an address**:
+
+| Form | Written by |
+|---|---|
+| `ip:<address-or-/64>` | `auth.*` events with no resolved credential, and limiter partitions that use the IP form |
+| `user:<subject>` | limiter partitions for an authenticated caller |
+| `token:<reference>` | `auth.*` inline capability gates (a truncated token **id**) and `ratelimit.rejected` (a hash prefix of the **presented secret**) — the same prefix, two different meanings |
+| `proto:<address>` | the protocol-plane default limiter |
+| `<address>:<policy>` | Redis-backed per-IP limiters |
+| `overflow` | an accumulator fold — the denial is counted, but its partition is no longer resolvable |
+
+Where each reason can originate:
+
+| Reason | Protocol planes (`/npm/`, `/simple/`, `/v2/`, `/maven/`, `/cargo/`, `/hex/`, `/nuget/`, …) | Management plane (`/api/v1/…`) |
+|---|---|---|
+| `invalid` | Yes — every inline credential resolution, read and write. | Yes — this is the only plane whose routes are gated by the `ApiToken` `[Authorize]` scheme, and the record is written on challenge, not on scheme failure (see below). |
+| `tenant_mismatch` | Yes — read paths, the hosted-write plane (npm publish and dist-tags, PyPI publish, NuGet push/symbols/unlist), and the whole Hex plane. | No — a management route has one tenant by construction. |
+| `insufficient_capability` (`auth.capability.denied`) | Yes. | Yes. |
+
+Five properties an operator writing rules on these needs to know:
+
+- **A rejection is not a 401.** With anonymous pull enabled, an unresolved credential is served
+  `200` as an anonymous caller; the event still fires. That is the leaked-token case — a revoked
+  credential still being retried by somebody's CI job produces no error status at all.
+- **They are coalesced, and the count is the signal.** Each key accumulates over a one-minute
+  window and writes one row carrying `count`, so an unauthenticated caller cannot choose the audit
+  write rate. Counts are **per replica**: the true total for a key is the SUM of the rows sharing
+  `(org, partition, reason, window_start)`, and `replica` names which one wrote each. That SUM is
+  computable because the window is **aligned to the wall clock**, not to a replica's uptime:
+  `window_start`/`window_end` are the start and end of the UTC minute the counted denials fell in,
+  so replicas started at unrelated instants label the same denial identically and the grouping
+  joins across them. A burst spanning a minute boundary is therefore two rows per replica, one per
+  minute, rather than one row straddling both. An open window is held in memory, so a `SIGKILL`
+  loses up to one window; `SIGTERM` drains it.
+- **`route` is the endpoint route template, never the request path.** Under sustained key spray
+  the partition and route fold to the literal `overflow` while the count is preserved — a row
+  reading `partition=overflow` has a real count and no attribution.
+- **`partition` carries two namespaces; branch on the prefix, never parse it as an address.**
+  `ip:<address>` is the rate-limit form of the source (IPv4 in full, IPv6 collapsed to its `/64`,
+  so one routed allocation is one subject) and is what every `auth.token.rejected` row and every
+  denial from the `[Authorize]`-gated management routes carries. `token:<8 hex>` is a truncated
+  credential id and comes from the inline capability gates, which hold the resolved token. The
+  management path cannot emit the `token:` form: its principal carries `sub`, which for a personal
+  access token is the token *owner's* user id, so using it would name a person rather than a
+  credential and would fold two of one user's tokens into a single key.
+- **Tenant scope.** A cross-tenant presentation is recorded under the **target** tenant and is
+  actor-less: the presenting tenant's token id and token name never appear in the target tenant's
+  audit trail or SIEM feed. A denial with no resolvable tenant is written system-scope. The edge
+  runs the same seams and writes the same rows, but ships no pull endpoint, so on an edge node they
+  are local forensics only until edge→origin forwarding exists.
+- **A failed `ApiToken` scheme is not a rejection.** Management routes accept either a JWT session
+  or an API token, and ASP.NET runs both schemes against the same `Authorization: Bearer` header —
+  so the token scheme fails on every ordinary dashboard request while the request itself succeeds
+  on the JWT. The record is written when the request actually ends unauthorized, never at the
+  scheme failure, and a dashboard session therefore produces none of these events.
 
 ### Webhook subscriptions (package events)
 

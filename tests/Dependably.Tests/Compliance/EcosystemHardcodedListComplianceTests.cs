@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using Dependably.Security;
 
 namespace Dependably.Tests.Compliance;
 
@@ -82,6 +83,40 @@ public sealed partial class EcosystemHardcodedListComplianceTests
             $"src/Dependably/Program.cs: [{string.Join(", ", missing)}]. A GET under that prefix " +
             "that matches no protocol route falls through to the SPA fallback and returns 200 " +
             "index.html instead of 404.");
+    }
+
+    /// <summary>
+    /// Every ecosystem in <c>ECOSYSTEMS</c> resolves, from the route prefix this test already
+    /// maintains, back to ITSELF through <see cref="EcosystemPathResolver.ForPath"/> — the shared
+    /// table the rate-limit denial audit and <c>UploadSizeLimitMiddleware</c> both key ecosystem
+    /// off of. This is what would have caught golang's route prefix (<c>/go/</c>) resolving to the
+    /// wrong id: <c>EcosystemPathResolver</c> must produce the backend id (<c>"golang"</c>), never
+    /// the route segment (<c>"go"</c>) — a value that is present but wrong fails exactly like a
+    /// value that is absent, because both leave the audit row's <c>ecosystem</c> column unusable
+    /// for a `golang`-keyed filter, search, or dashboard grouping.
+    /// </summary>
+    [Fact]
+    public void EveryEcosystemResolvesFromItsRoutePrefixToTheBackendId()
+    {
+        var ecosystems = ParseEcosystemVocabulary();
+
+        var mismatches = new List<string>();
+        foreach (string eco in ecosystems.OrderBy(e => e, StringComparer.Ordinal))
+        {
+            string prefix = EcosystemToRoutePrefix[eco];
+            string samplePath = prefix + "some/sample/path";
+            string? resolved = EcosystemPathResolver.ForPath(samplePath);
+            if (resolved != eco)
+            {
+                mismatches.Add($"{eco}: EcosystemPathResolver.ForPath(\"{samplePath}\") = " +
+                    (resolved is null ? "null" : $"\"{resolved}\""));
+            }
+        }
+
+        Assert.True(mismatches.Count == 0,
+            $"{mismatches.Count} ecosystem(s) do not round-trip through EcosystemPathResolver to " +
+            $"their own backend id: [{string.Join("; ", mismatches)}]. Add or fix the corresponding " +
+            "entry in EcosystemPathResolver.PathPrefixes.");
     }
 
     [Fact]

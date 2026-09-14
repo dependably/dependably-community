@@ -82,6 +82,12 @@ public static class UtcTimestamp
     public static string? ToUtcIsoOrNull(this DateTimeOffset? instant) =>
         instant?.ToUtcIso();
 
+    /// <summary>Millisecond-precision form of <see cref="ToUtcIsoOrNull(DateTimeOffset?)"/>. Use for an
+    /// optional value read from a column documented on <see cref="MillisecondFormat"/> (audit_log's
+    /// created_at is the case) — the second-precision form would silently truncate it.</summary>
+    public static string? ToUtcIsoMillisOrNull(this DateTimeOffset? instant) =>
+        instant?.ToUtcIsoMillis();
+
     /// <summary>
     /// Formats an instant at microsecond precision, converting from any offset. Use only for
     /// the columns documented on <see cref="PreciseFormat"/>.

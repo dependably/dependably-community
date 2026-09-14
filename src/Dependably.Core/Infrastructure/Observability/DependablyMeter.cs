@@ -7,7 +7,7 @@ namespace Dependably.Infrastructure.Observability;
 /// Single OpenTelemetry <see cref="Meter"/> for every dependably-emitted
 /// instrument. Names follow the canonical taxonomy
 /// (<c>dependably.&lt;subsystem&gt;.&lt;noun&gt;[.&lt;unit&gt;]</c>) — see
-/// <c>dependably-enterprise/docs/observability/taxonomy.md#metric-naming</c>.
+/// <c>dependably-community.spec/specs/design/DESIGN-observability-taxonomy.md#metric-naming</c>.
 ///
 /// Cardinality rule: instruments never carry <c>tenant_id</c>, <c>org_id</c>,
 /// <c>email</c>, <c>user_id</c>, <c>purl</c>, <c>sha256</c>, or

@@ -54,6 +54,7 @@ public sealed class ControllerScenario : IAsyncDisposable
     private string? _actorOrgOverride;
     private bool _masterKeyConfigured;
     private bool _allowInsecureUpstreams;
+    private readonly Dictionary<string, string?> _settings = new(StringComparer.OrdinalIgnoreCase);
     private bool _built;
 
     private ControllerScenario() { }
@@ -94,6 +95,19 @@ public sealed class ControllerScenario : IAsyncDisposable
     {
         EnsureNotBuilt();
         _masterKeyConfigured = true;
+        return this;
+    }
+
+    /// <summary>
+    /// Sets one instance configuration value (env-var spelling, e.g.
+    /// <c>SIEM_ACTIVITY_DOWNLOAD_EVENTS</c>) on the configuration the built
+    /// <see cref="SiemController"/> reads. Controllers wired against their own purpose-built
+    /// configuration are unaffected.
+    /// </summary>
+    public ControllerScenario WithSetting(string key, string? value)
+    {
+        EnsureNotBuilt();
+        _settings[key] = value;
         return this;
     }
 
@@ -499,7 +513,7 @@ public sealed class ControllerScenario : IAsyncDisposable
         var claims = new ClaimsController(claimSvc) { ControllerContext = ctx };
 
         var siem = new SiemController(audit, vulns, orgs, tokens,
-            new ConfigurationBuilder().Build(), Clock)
+            new ConfigurationBuilder().AddInMemoryCollection(_settings).Build(), Clock)
         { ControllerContext = ctx };
 
         // ImportController: the heavy publish pipeline (IPackagePublishService) gets mocked

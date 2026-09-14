@@ -35,18 +35,43 @@ public sealed class CefFormatTests
 
     // ── FriendlyName ─────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// The names are the ones writers emit. The credential and RBAC rows are flat
+    /// (<c>token_created</c>, <c>member_role_changed</c>) — the dotted <c>token.created</c> /
+    /// <c>rbac.role_changed</c> spellings this table carried for releases were never written by
+    /// anything, so the real events fell through to the raw action name and the lowest severity.
+    /// </summary>
     [Theory]
     [InlineData("login.success", "Login Success")]
     [InlineData("login.failure", "Login Failure")]
+    [InlineData("auth.login.failure", "Login Failure")]
     [InlineData("lockout.triggered", "Account Lockout")]
-    [InlineData("token.created", "Token Created")]
-    [InlineData("token.revoked", "Token Revoked")]
-    [InlineData("rbac.role_changed", "Role Changed")]
-    [InlineData("rbac.member_added", "Member Added")]
-    [InlineData("rbac.member_removed", "Member Removed")]
+    [InlineData("token_created", "Token Created")]
+    [InlineData("token_revoked", "Token Revoked")]
+    [InlineData("service_token_created", "Service Token Created")]
+    [InlineData("member_role_changed", "Role Changed")]
+    [InlineData("member_removed", "Member Removed")]
+    [InlineData("checksum_failure", "Checksum Verification Failed")]
+    [InlineData("auth.token.rejected", "Credential Rejected")]
     public void FriendlyName_MappedActions_ReturnHumanReadableName(string action, string expected)
     {
         Assert.Equal(expected, CefFormat.FriendlyName(action));
+    }
+
+    /// <summary>
+    /// The adversarial twin of the table above: the names that were mapped but never written must
+    /// now fall through, so a table re-acquiring one fails here rather than reading as coverage.
+    /// </summary>
+    [Theory]
+    [InlineData("token.created")]
+    [InlineData("token.revoked")]
+    [InlineData("rbac.role_changed")]
+    [InlineData("rbac.member_added")]
+    [InlineData("rbac.member_removed")]
+    public void FriendlyName_PhantomActionsNothingEverWrote_FallThrough(string action)
+    {
+        Assert.Equal(action, CefFormat.FriendlyName(action));
+        Assert.Equal(CefFormat.SeverityLow, CefFormat.Severity(action));
     }
 
     [Fact]
@@ -59,10 +84,11 @@ public sealed class CefFormatTests
 
     [Theory]
     [InlineData("lockout.triggered", CefFormat.SeverityHigh)]
+    [InlineData("checksum_failure", CefFormat.SeverityHigh)]
     [InlineData("login.failure", CefFormat.SeverityMedium)]
     [InlineData("login.success", CefFormat.SeverityLow)]
-    [InlineData("token.revoked", CefFormat.SeverityMediumLow)]
-    [InlineData("rbac.role_changed", CefFormat.SeverityMediumHigh)]
+    [InlineData("token_revoked", CefFormat.SeverityMediumLow)]
+    [InlineData("member_role_changed", CefFormat.SeverityMediumHigh)]
     public void Severity_MappedActions_ReturnExpectedLevel(string action, int expected)
     {
         Assert.Equal(expected, CefFormat.Severity(action));

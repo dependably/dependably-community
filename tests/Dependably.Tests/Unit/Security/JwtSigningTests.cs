@@ -7,7 +7,7 @@ using Microsoft.IdentityModel.Tokens;
 namespace Dependably.Tests.Unit.Security;
 
 /// <summary>
-/// Enforces the JWT crypto invariants declared in encryption.md §2: algorithm is
+/// Enforces the JWT crypto invariants declared in dependably-community.spec/specs/architecture/ARCH-encryption.md#model: algorithm is
 /// HS256, signing key has 256 bits of entropy, and validation rejects tampered,
 /// re-signed, expired, or alg=none tokens under the production
 /// <see cref="TokenValidationParameters"/>.

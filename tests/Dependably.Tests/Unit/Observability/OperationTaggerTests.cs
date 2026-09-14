@@ -5,7 +5,7 @@ namespace Dependably.Tests.Unit.Observability;
 /// <summary>
 /// Covers the route → <c>dependably.operation</c> mapping table in
 /// <see cref="OperationTagger"/>. Each documented operation in
-/// <c>taxonomy.md#operation-vocabulary</c> should have at least one
+/// <c>dependably-community.spec/specs/design/DESIGN-observability-taxonomy.md#operation-vocabulary</c> should have at least one
 /// representative route that maps to it.
 ///
 /// <para>

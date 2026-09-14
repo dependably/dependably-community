@@ -384,7 +384,7 @@ public partial class Program
         // UseSerilogRequestLogging's completion summary — carries them. Must sit after
         // SubdomainTenantMiddleware (which populates TenantContext) and before
         // UseSerilogRequestLogging (which is registered below).
-        // See dependably-enterprise/docs/observability/taxonomy.md for property names.
+        // See dependably-community.spec/specs/design/DESIGN-observability-taxonomy.md#log-property-names for property names.
         app.UseMiddleware<Dependably.Infrastructure.Observability.TenantEnrichmentMiddleware>();
 
         // Transparent intercept. Gated on a non-empty HOST_ROUTING map: when the inbound Host

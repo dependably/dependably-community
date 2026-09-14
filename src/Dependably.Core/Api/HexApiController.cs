@@ -54,6 +54,8 @@ public sealed partial class HexApiController : OrgScopedControllerBase
 
         if (!token.HasCapability(Capabilities.ReadMetadata))
         {
+            AuthDenialRecorder.RecordCapabilityDenied(
+                HttpContext, token, required: Capabilities.ReadMetadata, ecosystem: Ecosystem, orgId: orgId);
             return Error(StatusCodes.Status403Forbidden, "read:metadata capability required.");
         }
 
@@ -145,6 +147,8 @@ public sealed partial class HexApiController : OrgScopedControllerBase
 
         if (!token.HasCapability(Capabilities.PublishHex))
         {
+            AuthDenialRecorder.RecordCapabilityDenied(
+                HttpContext, token, required: Capabilities.PublishHex, ecosystem: Ecosystem, orgId: orgId);
             return Error(StatusCodes.Status403Forbidden, "publish:hex capability required.");
         }
 
@@ -291,6 +295,8 @@ public sealed partial class HexApiController : OrgScopedControllerBase
 
         if (!token.HasCapability(Capabilities.YankHex))
         {
+            AuthDenialRecorder.RecordCapabilityDenied(
+                HttpContext, token, required: Capabilities.YankHex, ecosystem: Ecosystem, orgId: orgId);
             return Error(StatusCodes.Status403Forbidden, "yank:hex capability required.");
         }
 

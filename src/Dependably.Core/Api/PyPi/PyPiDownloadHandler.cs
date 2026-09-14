@@ -452,7 +452,15 @@ public sealed class PyPiDownloadHandler(
             httpContext.Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
             return new UnauthorizedResult();
         }
-        return token is not null && !token.HasCapability(Capabilities.ReadMetadata) ? new ForbidResult() : (IActionResult?)null;
+
+        if (token is not null && !token.HasCapability(Capabilities.ReadMetadata))
+        {
+            AuthDenialRecorder.RecordCapabilityDenied(
+                httpContext, token, required: Capabilities.ReadMetadata, ecosystem: "pypi");
+            return new ForbidResult();
+        }
+
+        return null;
     }
 
     private async Task<IActionResult?> TryServeCachedBlobAsync(

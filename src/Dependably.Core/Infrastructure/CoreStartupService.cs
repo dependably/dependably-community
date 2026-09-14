@@ -506,10 +506,13 @@ public sealed class CoreStartupService : IHostedService
         _logger.LogWarning(
             "TRUSTED_PROXIES is not set. X-Forwarded-For, X-Forwarded-Proto, and " +
             "X-Forwarded-Host are ignored (fail-closed). Connection.RemoteIpAddress, " +
-            "Request.Host, and Request.Scheme reflect the real socket peer. " +
-            "If a TLS-terminating reverse proxy is in front, set TRUSTED_PROXIES to the " +
-            "proxy's IP(s)/CIDR(s) so forwarded headers from that proxy are trusted and the " +
-            "client-facing scheme and source IP are visible to the application.");
+            "Request.Host, and Request.Scheme reflect the real socket peer — audit and SIEM " +
+            "source_ip will record that immediate peer (e.g. a reverse proxy or container " +
+            "bridge), not the client, so per-source brute-force detection and IP-based " +
+            "enrichment will not work. If a TLS-terminating reverse proxy is in front, set " +
+            "TRUSTED_PROXIES to the proxy's IP(s)/CIDR(s) so forwarded headers from that proxy " +
+            "are trusted and the client-facing scheme and source IP are visible to the " +
+            "application.");
 
         // Header tenancy rides on the same trust boundary: the tenant header decides which org's
         // packages a request is served, including on the unauthenticated protocol surfaces, so it

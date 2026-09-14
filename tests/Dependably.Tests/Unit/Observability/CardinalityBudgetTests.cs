@@ -5,7 +5,7 @@ namespace Dependably.Tests.Unit.Observability;
 
 /// <summary>
 /// Enforces the cardinality budget documented in
-/// <c>dependably-enterprise/docs/observability/metrics.md#cardinality-budget</c>:
+/// <c>dependably-community.spec/specs/design/DESIGN-observability-taxonomy.md#cardinality-budget</c>:
 /// no metric instrument carries an attribute named <c>tenant_id</c>,
 /// <c>org_id</c>, <c>user_id</c>, <c>email</c>, <c>purl</c>, <c>sha256</c>,
 /// or <c>ip_address</c>.
@@ -90,7 +90,7 @@ public sealed partial class CardinalityBudgetTests
             "from a bounded vocabulary; tenant, package, principal, digest, version and address " +
             "attribution belongs on spans / logs, not on metrics. Add a genuinely bounded new " +
             "attribute to AllowedAttributeNames in CardinalityBudgetTests, stating its value set. " +
-            "See dependably-enterprise/docs/observability/metrics.md#cardinality-budget.\n  " +
+            "See dependably-community.spec/specs/design/DESIGN-observability-taxonomy.md#cardinality-budget.\n  " +
             string.Join("\n  ", violations));
     }
 

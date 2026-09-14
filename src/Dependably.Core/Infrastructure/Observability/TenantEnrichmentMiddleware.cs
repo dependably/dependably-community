@@ -11,7 +11,7 @@ namespace Dependably.Infrastructure.Observability;
 /// completion summary — carries them.
 ///
 /// Canonical property names are defined in
-/// <c>dependably-enterprise/docs/observability/taxonomy.md</c>.
+/// <c>dependably-community.spec/specs/design/DESIGN-observability-taxonomy.md#log-property-names</c>.
 /// </summary>
 public sealed class TenantEnrichmentMiddleware
 {

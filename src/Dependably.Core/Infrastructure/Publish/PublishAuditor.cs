@@ -56,6 +56,8 @@ public sealed class PublishAuditor
         // Imports are per-version operator events and belong in `activity` only —
         // `audit_log` is the tenant-level config/security sink. Never dual-write.
         // `push` still dual-writes pending the separate sweep.
+        // audit-action-ok: PublishRequest.AuditAction is the declared "push" on every publish
+        // path (its own default) and "import" on the import path, which is excluded here.
         if (request.AuditAction != "import")
         {
             await _audit.LogAsync(request.AuditAction, request.OrgId, actorId,

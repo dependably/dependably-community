@@ -4,7 +4,7 @@ namespace Dependably.Tests.Unit.Observability;
 
 /// <summary>
 /// Locks the canonical Serilog message-template property names documented in
-/// <c>dependably-enterprise/docs/observability/taxonomy.md</c>. Any banned
+/// <c>dependably-community.spec/specs/design/DESIGN-observability-taxonomy.md#log-property-names</c>. Any banned
 /// synonym in a <c>{Token}</c> message-template form fails the build with a
 /// pointer to the canonical replacement.
 ///
@@ -87,7 +87,7 @@ public sealed class LogPropertyDriftTests
         Assert.True(
             violations.Count == 0,
             "Log-property drift detected. Canonical names live in " +
-            "dependably-enterprise/docs/observability/taxonomy.md.\n  " +
+            "dependably-community.spec/specs/design/DESIGN-observability-taxonomy.md#log-property-names.\n  " +
             string.Join("\n  ", violations));
     }
 

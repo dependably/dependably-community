@@ -60,6 +60,14 @@ public static partial class ServiceCollectionExtensions
         services.AddSingleton<DownloadCountWriterHostedService>();
         services.AddHostedService(sp => sp.GetRequiredService<DownloadCountWriterHostedService>());
         services.AddSingleton<AuditRepository>();
+        // Denial coalescing + its window flusher. The coalescer is a singleton because its whole
+        // value is process-wide state: the suppress map that keeps a retrying client from writing
+        // one audit row per request, and the counting maps the flusher turns into one counted row
+        // per key per window. Registered together so a composition root cannot end up with the
+        // accumulator and no flusher — which would accumulate counts nobody ever writes.
+        services.AddSingleton<Dependably.Security.AuthDenialAuditCoalescer>();
+        services.AddSingleton<Dependably.Security.AuthDenialAuditFlushService>();
+        services.AddHostedService(sp => sp.GetRequiredService<Dependably.Security.AuthDenialAuditFlushService>());
         services.AddSingleton<AuditEventRepository>();
         services.AddSingleton<Privacy.PersonalDataExportRepository>();
         services.AddSingleton<BackgroundJobRunRepository>();

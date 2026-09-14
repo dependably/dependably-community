@@ -739,12 +739,28 @@ STUB_QUEUE_CONTENT=()
 STUB_QUEUE_DONE_REASON=()
 STUB_CALL_COUNT=0
 
-reset_stub() { STUB_QUEUE_RC=(); STUB_QUEUE_CONTENT=(); STUB_QUEUE_DONE_REASON=(); STUB_CALL_COUNT=0; }
+# STUB_CALL_COUNT is only readable by an assertion in the SAME shell as the call
+# it counts. Every `main` scenario runs as `( main )`, and a subshell's variable
+# updates never reach the parent — so a "the model was not called" assertion
+# written against the counter passes whether or not the code under test called
+# it. The marker file survives the subshell, so stub_calls() is what such an
+# assertion must read; the counter stays for the direct (non-subshell) callers.
+STUB_CALL_FILE=""
+reset_stub() {
+  STUB_QUEUE_RC=(); STUB_QUEUE_CONTENT=(); STUB_QUEUE_DONE_REASON=(); STUB_CALL_COUNT=0
+  STUB_CALL_FILE="$TMP_DIR/stub-calls"
+  : > "$STUB_CALL_FILE"
+}
+stub_calls() {  # model calls made since the last reset_stub, subshells included
+  [ -n "$STUB_CALL_FILE" ] && [ -f "$STUB_CALL_FILE" ] || { printf '0'; return 0; }
+  wc -l < "$STUB_CALL_FILE" | tr -d ' '
+}
 queue_response() { STUB_QUEUE_RC+=("$1"); STUB_QUEUE_CONTENT+=("$2"); STUB_QUEUE_DONE_REASON+=("${3:-stop}"); }
 
 run_turn() {  # overrides the real one for the rest of this process
   local idx=$STUB_CALL_COUNT
   STUB_CALL_COUNT=$((STUB_CALL_COUNT + 1))
+  if [ -n "$STUB_CALL_FILE" ]; then printf 'call\n' >> "$STUB_CALL_FILE"; fi
   local rc="${STUB_QUEUE_RC[$idx]:-1}"
   # shellcheck disable=SC2034  # consumed by looks_degenerate/confirm_clean in the sourced ai-review.sh
   LAST_DONE_REASON="${STUB_QUEUE_DONE_REASON[$idx]:-stop}"
@@ -1187,6 +1203,71 @@ assert_not_contains "$REPORT_FILE" "(unverifiable response)" \
   "a token-bearing pass-1 reply that asserted nothing must not post as no-signal"
 assert_contains "$TMP_DIR/log-headed-clean.txt" "state=clean" \
   "it posts as a clean result instead"
+
+
+echo "== context_config_state: the context floor is enforced, and its boundary is exact =="
+# An undersized window is the one misconfiguration ai-review.sh cannot recognise
+# downstream: the prompt fills the window, Ollama truncates it to fit, the model
+# is left ~0 tokens to generate and stops after one, and the lens posts an empty
+# `(no content)` note. That state also occurs for real model reasons, so without
+# this check a wrong number in CI config is indistinguishable from a flaky host
+# — on every lens at once, while nothing was reviewed.
+assert_eq "ok" "$(context_config_state 98304 200000)" \
+  "the shipped window clears the floor its own diff cap requires"
+assert_eq "ok" "$(context_config_state 72666 200000)" \
+  "a window exactly at the floor is acceptable -- the bound is >=, not >"
+assert_eq "undersized" "$(context_config_state 72665 200000)" \
+  "ADVERSARIAL TWIN: one token below the floor must be rejected, or the boundary is decorative"
+assert_eq "undersized" "$(context_config_state 49152 200000)" \
+  "a window sized for another consumer of the review host does not fit a review turn"
+assert_eq "ok" "$(context_config_state 49152 120000)" \
+  "the floor tracks the diff cap: the same window fits once less diff is sent"
+
+echo "== context_config_state: a non-numeric window is a misconfiguration, never coerced =="
+# A CI/CD variable is free text. Bash arithmetic would happily evaluate a padded
+# value and `set -u`-abort or silently zero others, so each of these is named as
+# a config error rather than coerced into a number nobody chose.
+assert_eq "invalid" "$(context_config_state "98304 " 200000)" \
+  "a trailing space is a misconfigured variable, not a number to trim"
+assert_eq "invalid" "$(context_config_state "98k" 200000)" \
+  "a unit suffix is not a token count"
+assert_eq "invalid" "$(context_config_state "" 200000)" \
+  "an empty window is a misconfiguration"
+assert_eq "invalid" "$(context_config_state 0 200000)" \
+  "zero is not a usable window"
+assert_eq "invalid" "$(context_config_state 98304 "")" \
+  "an empty diff cap is a misconfiguration too -- the floor cannot be computed from it"
+
+echo "== the committed .gitlab-ci.yml values clear their own floor =="
+# Pins what actually ships, not just the predicate. An edit that lowers
+# AI_REVIEW_NUM_CTX or raises AI_REVIEW_MAX_DIFF_BYTES past the floor fails here,
+# rather than in a pipeline where every lens posts an empty note. Read straight
+# out of the repo's own CI file so the two cannot drift; a value this cannot find
+# reads as "invalid" and fails, so a renamed key does not silently skip the check.
+yml_ctx="$(sed -n 's/^ *AI_REVIEW_NUM_CTX: *"\([0-9]*\)".*/\1/p' .gitlab-ci.yml | head -1)"
+yml_cap="$(sed -n 's/^ *AI_REVIEW_MAX_DIFF_BYTES: *"\([0-9]*\)".*/\1/p' .gitlab-ci.yml | head -1)"
+assert_eq "ok" "$(context_config_state "$yml_ctx" "$yml_cap")" \
+  "committed AI_REVIEW_NUM_CTX=$yml_ctx must clear the floor AI_REVIEW_MAX_DIFF_BYTES=$yml_cap sets"
+
+echo "== main(): an undersized window refuses the lens BEFORE any model call =="
+REPORT_FILE="$TMP_DIR/report-misconfigured.md"
+reset_stub
+queue_response 0 "> + var x = 1;
+**High:** a finding this lens must never get far enough to report."
+saved_num_ctx="$NUM_CTX"
+NUM_CTX=40960
+( main ) > "$TMP_DIR/log-misconfigured.txt" 2>&1 || true
+NUM_CTX="$saved_num_ctx"
+assert_contains "$REPORT_FILE" "(misconfigured)" \
+  "an undersized window posts its own distinct state, not one a reviewer could read as a real review"
+assert_not_contains "$REPORT_FILE" "(no content)" \
+  "the config error must not masquerade as the empty-reply state it would otherwise cause"
+assert_contains "$TMP_DIR/log-misconfigured.txt" "state=misconfigured" \
+  "the machine-readable outcome carries the same state as the posted title"
+assert_eq "0" "$(stub_calls)" \
+  "ADVERSARIAL TWIN: the refusal lands before the model is called, not after a wasted turn"
+assert_not_contains "$TMP_DIR/log-headed-clean.txt" "state=misconfigured" \
+  "ADVERSARIAL TWIN: a correctly sized window does not trip the guard"
 
 
 echo "== filter_findings: evidence and its claim are ONE finding, and evidence alone is none =="

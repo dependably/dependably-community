@@ -83,30 +83,14 @@ public sealed class UploadSizeLimitMiddleware
         if (ctx.Items.TryGetValue(TenantContext.HttpItemsKey, out object? item)
             && item is TenantContext { IsTenant: true, TenantId: { } orgId })
         {
-            return (orgId, EcosystemForPath(ctx.Request.Path.Value ?? string.Empty));
+            // Protocol routes are host-relative (tenancy is host-resolved, not path-resolved), so
+            // the ecosystem is keyed off the first path segment. TransparentInterceptMiddleware
+            // has already prepended the prefix for bare-host (transparent intercept) deployments.
+            // EcosystemPathResolver is the single shared table this and the rate-limit denial
+            // audit wiring both key off of.
+            return (orgId, EcosystemPathResolver.ForPath(ctx.Request.Path.Value));
         }
 
         return (null, null);
     }
-
-    // Protocol routes are host-relative (tenancy is host-resolved, not path-resolved), so the
-    // ecosystem is keyed off the first path segment. TransparentInterceptMiddleware has already
-    // prepended the prefix for bare-host (transparent intercept) deployments.
-    private static string? EcosystemForPath(string path) => path switch
-    {
-        _ when StartsWithSegment(path, "/pypi") || StartsWithSegment(path, "/simple") => "pypi",
-        _ when StartsWithSegment(path, "/npm") => "npm",
-        _ when StartsWithSegment(path, "/nuget") => "nuget",
-        _ when StartsWithSegment(path, "/maven") => "maven",
-        _ when StartsWithSegment(path, "/rpm") => "rpm",
-        _ when StartsWithSegment(path, "/cargo") => "cargo",
-        _ when StartsWithSegment(path, "/hex") => "hex",
-        // OCI Distribution Spec mandates /v2/ — the path differs from the ecosystem key.
-        _ when StartsWithSegment(path, "/v2") => "oci",
-        _ => null,
-    };
-
-    private static bool StartsWithSegment(string path, string prefix) =>
-        path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
-        && (path.Length == prefix.Length || path[prefix.Length] == '/');
 }

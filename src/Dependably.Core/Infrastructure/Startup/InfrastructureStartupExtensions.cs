@@ -122,7 +122,6 @@ internal static partial class InfrastructureStartupExtensions
                 sp.GetRequiredService<TimeProvider>());
         });
         builder.Services.AddSingleton<ScrapeDiagnostics>();
-        builder.Services.AddSingleton<Dependably.Security.AuthDenialAuditCoalescer>();
         builder.Services.AddSingleton<MetricsSnapshotProvider>();
     }
 }

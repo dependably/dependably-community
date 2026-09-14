@@ -5,7 +5,7 @@ using Xunit.Abstractions;
 namespace Dependably.Tests.Unit.Security;
 
 /// <summary>
-/// Enforces the BCrypt cost-factor invariant declared in encryption.md §1: every
+/// Enforces the BCrypt cost-factor invariant declared in dependably-community.spec/specs/architecture/ARCH-encryption.md#model: every
 /// password hash produced by dependably must use work factor ≥ 12. The cost is
 /// hardcoded at ~10 call sites today; this test fails if any call site drifts
 /// below the floor or omits the parameter (default is 11, which is below floor).
@@ -75,7 +75,7 @@ public sealed partial class BCryptCostTests
             }
 
             Assert.Fail($"{violations.Count} BCrypt.HashPassword call(s) violate the cost floor. " +
-                        $"encryption.md §1 mandates workFactor ≥ {MinCostFactor}.");
+                        $"dependably-community.spec/specs/architecture/ARCH-encryption.md#model mandates workFactor ≥ {MinCostFactor}.");
         }
     }
 

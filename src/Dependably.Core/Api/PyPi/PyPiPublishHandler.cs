@@ -127,6 +127,7 @@ public sealed class PyPiPublishHandler(
         var token = await httpContext.Request.ResolveTokenAsync(tokens, ct);
         if (token is null || token.OrgId != orgId)
         {
+            AuthDenialRecorder.RecordTenantMismatch(httpContext, token, orgId, ecosystem: "pypi");
             httpContext.Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
             return new UnauthorizedResult();
         }

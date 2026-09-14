@@ -9,7 +9,7 @@ namespace Dependably.Infrastructure.Observability;
 /// <c>.WithTracing(t =&gt; t.AddSource(DependablyActivitySource.SourceName))</c>.
 ///
 /// Span name and attribute conventions live in
-/// <c>dependably-enterprise/docs/observability/taxonomy.md</c>.
+/// <c>dependably-community.spec/specs/design/DESIGN-observability-taxonomy.md#span-attributes</c>.
 /// </summary>
 public static class DependablyActivitySource
 {

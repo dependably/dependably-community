@@ -16,7 +16,7 @@ namespace Dependably.Tests.Integration;
 
 /// <summary>
 /// Asserts the observability story documented in
-/// <c>dependably-enterprise/docs/observability.md#air-gap-posture-exporters-are-opt-in</c>:
+/// <c>dependably-community.spec/specs/architecture/ARCH-observability.md#invariants</c>:
 /// in <c>AIR_GAPPED=true</c> mode with <c>OTEL_EXPORTER_OTLP_ENDPOINT</c>
 /// unset, the app must boot cleanly, <c>/health</c> + <c>/ready</c> +
 /// <c>/metrics</c> must all succeed, and any proxy-fetch attempt must

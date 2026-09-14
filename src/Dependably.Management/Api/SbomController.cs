@@ -861,8 +861,11 @@ public sealed class SbomController : ControllerBase
 
         if (projectCreated)
         {
+            // One name for one event: ProjectsController writes the same creation as
+            // project.created, and a consumer filtering on either spelling silently missed the
+            // rows written by the other surface.
             await _svc.Audit.LogAsync(
-                "project.create", orgId: orgId, actorId: actorId, actorKind: kind,
+                "project.created", orgId: orgId, actorId: actorId, actorKind: kind,
                 detail: detail, sourceIp: HttpContext.GetNormalizedRemoteIp(), actorLabel: label, ct: ct);
         }
     }

@@ -1404,6 +1404,26 @@
         }
       }
     },
+    "/api/v1/siem/actions": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/siem/events/activity": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/api/v1/siem/events/auth": {
       "operations": {
         "get": {

@@ -5,13 +5,13 @@ namespace Dependably.Tests.Unit.Observability;
 
 /// <summary>
 /// Enforces the closed outcome vocabulary documented in
-/// <c>dependably-enterprise/docs/observability/taxonomy.md#outcome-vocabulary</c>.
+/// <c>dependably-community.spec/specs/design/DESIGN-observability-taxonomy.md#outcome-vocabulary</c>.
 /// Scans source for the two emission idioms — attribute tagging
 /// (<c>KeyValuePair&lt;string, object?&gt;("outcome", "value")</c>) and
 /// local-variable assignment (<c>outcome = "value"</c>) — and fails the
 /// build on any value not in the documented enum.
 ///
-/// New outcome value? Add it to <c>taxonomy.md</c> and to <see cref="Allowed"/>.
+/// New outcome value? Add it to <c>dependably-community.spec/specs/design/DESIGN-observability-taxonomy.md#outcome-vocabulary</c> and to <see cref="Allowed"/>.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed partial class OutcomeValueTests
@@ -72,7 +72,7 @@ public sealed partial class OutcomeValueTests
 
         Assert.True(
             violations.Count == 0,
-            "Outcome-vocabulary violation. See taxonomy.md#outcome-vocabulary.\n  " +
+            "Outcome-vocabulary violation. See dependably-community.spec/specs/design/DESIGN-observability-taxonomy.md#outcome-vocabulary.\n  " +
             string.Join("\n  ", violations));
     }
 }

@@ -73,11 +73,13 @@ public sealed class SyslogSiemForwarderExtendedTests
 
     [Theory]
     [InlineData("login.failure", "Login Failure", 5)]
-    [InlineData("token.created", "Token Created", 3)]  // unknown sev defaults to 3
-    [InlineData("token.revoked", "Token Revoked", 4)]
-    [InlineData("rbac.role_changed", "Role Changed", 6)]
-    [InlineData("rbac.member_added", "Member Added", 3)]  // unknown sev defaults to 3
-    [InlineData("rbac.member_removed", "Member Removed", 3)]
+    [InlineData("token_created", "Token Created", 4)]
+    [InlineData("token_revoked", "Token Revoked", 4)]
+    [InlineData("member_role_changed", "Role Changed", 6)]
+    [InlineData("member_removed", "Member Removed", 5)]
+    [InlineData("checksum_failure", "Checksum Verification Failed", 7)]
+    [InlineData("mfa.enrolled", "MFA Enrolled", 3)]  // mapped name, unmapped sev defaults to 3
+    [InlineData("token.created", "token.created", 3)]  // never written; falls through
     [InlineData("unmapped.event", "unmapped.event", 3)]  // fallback uses action verbatim
     public void FormatCef_FriendlyNameAndSeverity_FollowMap(string action, string friendly, int sev)
     {

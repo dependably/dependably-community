@@ -28,8 +28,8 @@ public sealed partial class SchemaIndexParityComplianceTests
     private readonly ITestOutputHelper _output;
     public SchemaIndexParityComplianceTests(ITestOutputHelper output) => _output = output;
 
-    // Index names allowed to differ between SQLite and Postgres. Empty today — all 66 indexes
-    // are structurally identical across providers. Any future deliberate divergence (different
+    // Index names allowed to differ between SQLite and Postgres. Empty today — every index the
+    // two files declare is structurally identical. Any future deliberate divergence (different
     // collation, provider-specific expression index syntax, etc.) must be documented here with
     // a clear reason rather than left as silent drift.
     private static readonly HashSet<string> KnownIndexExceptions = new(StringComparer.OrdinalIgnoreCase)

@@ -41,6 +41,8 @@ public static class TemporalCheckPredicate
     /// these columns are nullable, and the predicate is uniform across both nullable and NOT NULL
     /// columns rather than special-cased per column.
     /// </summary>
+    // sqlonly-ok: GLOB is SQLite-only by design — this method IS the SQLite arm of an explicit
+    // provider pair, and ForPostgres below emits the `~` regex equivalent for the other engine.
     public static string ForSqlite(string column) =>
         $"CHECK ({column} IS NULL OR {column} GLOB '{GlobBase}Z' " +
         $"OR {column} GLOB '{GlobBase}.{DigitGroup3}Z' " +

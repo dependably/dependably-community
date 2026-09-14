@@ -1,3 +1,5 @@
+using Dependably.Infrastructure;
+using Dependably.Infrastructure.Audit;
 using Dependably.Tests.Infrastructure;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -81,6 +83,82 @@ public sealed class SiemControllerUnitTests
             since: "2026-12-31T00:00:00Z", until: "2026-01-01T00:00:00Z",
             org: null, action: null, limit: 100, cursor: null);
         Assert.IsType<BadRequestObjectResult>(result);
+    }
+
+    [Fact]
+    public async Task GetAuthEvents_AtTheTotalCap_IsServedAndOneValuePastItIs400()
+    {
+        // Every filter costs one bind parameter, so the repeatable action= filter is bounded.
+        // A rejection is the honest answer — dropping the overflow would return a feed quietly
+        // missing events the caller asked for. The largest legitimate subscription is every
+        // declared action plus every implied family, which is exactly the published total cap.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        string[] atTheCap = [.. AuditActions.All, .. AuditActions.ImpliedFamilyPrefixes];
+        Assert.Equal(AuditRepository.MaxAuthEventActionFilters, atTheCap.Length);
+
+        var served = await b.SiemController.GetAuthEvents(
+            since: null, until: null, org: null, action: atTheCap, limit: 100, cursor: null);
+        Assert.IsType<OkObjectResult>(served);
+
+        var refused = await b.SiemController.GetAuthEvents(
+            since: null, until: null, org: null,
+            action: [.. atTheCap, "zzz_one_past_the_composition"], limit: 100, cursor: null);
+        Assert.IsType<BadRequestObjectResult>(refused);
+    }
+
+    [Fact]
+    public async Task GetAuthEvents_MoreFamilyFiltersThanTheFamilyCap_Returns400()
+    {
+        // The half with a cost: one unindexable LIKE per family or undeclared name, evaluated
+        // against every candidate row of the window. Well under the total cap, so this is the
+        // family bound answering and not the other one.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        string[] filters = [.. Enumerable
+            .Range(0, AuditRepository.MaxAuthEventFamilyFilters + 1)
+            .Select(i => $"family{i}")];
+        Assert.True(filters.Length <= AuditRepository.MaxAuthEventActionFilters);
+
+        var result = await b.SiemController.GetAuthEvents(
+            since: null, until: null, org: null, action: filters, limit: 100, cursor: null);
+        Assert.IsType<BadRequestObjectResult>(result);
+    }
+
+    [Fact]
+    public async Task GetAuthEvents_EveryDeclaredActionNamedExplicitly_IsServed()
+    {
+        // A collector that pins the vocabulary it understands rather than inheriting a widening
+        // default sends exactly this. It must not read as abuse — declared names cost an IN entry
+        // each and no LIKE at all.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var result = await b.SiemController.GetAuthEvents(
+            since: null, until: null, org: null, action: [.. AuditActions.All],
+            limit: 100, cursor: null);
+        Assert.IsType<OkObjectResult>(result);
+    }
+
+    [Fact]
+    public async Task GetAuthEvents_RepeatedIdenticalActionPrefixesPastTheCap_AreFoldedAndServed()
+    {
+        // The bound is on distinct prefixes: a client repeating one filter is not asking for more
+        // parameters than the statement can carry, so it must not read as abuse.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        string[] prefixes = [.. Enumerable.Repeat("login", AuditRepository.MaxAuthEventActionFilters + 50)];
+
+        var result = await b.SiemController.GetAuthEvents(
+            since: null, until: null, org: null, action: prefixes, limit: 100, cursor: null);
+        Assert.IsType<OkObjectResult>(result);
     }
 
     [Fact]

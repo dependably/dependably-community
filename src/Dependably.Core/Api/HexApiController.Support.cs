@@ -27,6 +27,7 @@ public sealed partial class HexApiController
     private async Task<TokenRecord?> ResolveHexTokenAsync(string orgId, CancellationToken ct)
     {
         var token = await Request.ResolveTokenAsync(_svc.Tokens, ct);
+        AuthDenialRecorder.RecordTenantMismatch(HttpContext, token, orgId, ecosystem: Ecosystem);
         return token is not null && token.OrgId == orgId ? token : null;
     }
 
@@ -40,9 +41,14 @@ public sealed partial class HexApiController
             return new ReadGate(orgId, null, Unauthorized());
         }
 
-        return token is not null && !token.HasCapability(Capabilities.ReadMetadata)
-            ? new ReadGate(orgId, token, Error(StatusCodes.Status403Forbidden, "read:metadata capability required."))
-            : new ReadGate(orgId, token, null);
+        if (token is not null && !token.HasCapability(Capabilities.ReadMetadata))
+        {
+            AuthDenialRecorder.RecordCapabilityDenied(
+                HttpContext, token, required: Capabilities.ReadMetadata, ecosystem: Ecosystem, orgId: orgId);
+            return new ReadGate(orgId, token, Error(StatusCodes.Status403Forbidden, "read:metadata capability required."));
+        }
+
+        return new ReadGate(orgId, token, null);
     }
 
     // Token, capability, and a hosted (not proxied) version of a valid coordinate, in that order,
@@ -65,6 +71,8 @@ public sealed partial class HexApiController
 
         if (!token.HasCapability(capability))
         {
+            AuthDenialRecorder.RecordCapabilityDenied(
+                HttpContext, token, required: capability, ecosystem: Ecosystem, orgId: orgId);
             return new HostedWriteGate(orgId, token, null, null, Error(StatusCodes.Status403Forbidden, $"{capability} capability required."));
         }
 

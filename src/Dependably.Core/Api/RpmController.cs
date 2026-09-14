@@ -294,7 +294,7 @@ public sealed partial class RpmController : OrgScopedControllerBase
                  requires_json, provides_json, conflicts_json, obsoletes_json,
                  files_json, changelogs_json, rpm_license)
             VALUES
-                (lower(hex(randomblob(16))), @pvId, 'package_version',
+                (@id, @pvId, 'package_version',
                  @name, @epoch, @ver, @rel, @arch,
                  @summary, @description, @buildHost, @buildTime, @packager, @vendor,
                  @rpmGroup, @sourceRpm, @url, @installedSize, @archiveSize,
@@ -312,6 +312,10 @@ public sealed partial class RpmController : OrgScopedControllerBase
             """,
             new
             {
+                // The row id is generated here rather than in SQL: the SQLite-only
+                // lower(hex(randomblob(16))) idiom has no Postgres equivalent, and a 32-character
+                // lowercase hex GUID is the same shape every other id in this schema carries.
+                id = Guid.NewGuid().ToString("N"),
                 pvId = versionId,
                 name = header.Name,
                 epoch = header.Epoch ?? 0,
@@ -600,12 +604,14 @@ public sealed partial class RpmController : OrgScopedControllerBase
                     (id, cache_artifact_id, owner_kind,
                      rpm_name, epoch, rpm_version, rpm_release, arch,
                      summary, description, rpm_license)
-                VALUES (lower(hex(randomblob(16))), @caId, 'cache_artifact',
+                VALUES (@id, @caId, 'cache_artifact',
                         @name, @epoch, @ver, @rel, @arch, @summary, @desc, @license)
                 ON CONFLICT(cache_artifact_id) WHERE owner_kind = 'cache_artifact' DO NOTHING
                 """,
                 new
                 {
+                    // Generated here, not in SQL: see UpsertRpmMetadataAsync.
+                    id = Guid.NewGuid().ToString("N"),
                     caId = cacheArtifactId,
                     name = p.Nevra.Name,
                     epoch = p.Nevra.Epoch,

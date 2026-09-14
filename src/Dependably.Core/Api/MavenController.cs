@@ -408,6 +408,8 @@ public sealed partial class MavenController : OrgScopedControllerBase
             }
             if (token is not null && !token.HasCapability(Capabilities.ReadArtifact))
             {
+                AuthDenialRecorder.RecordCapabilityDenied(
+                    HttpContext, token, required: Capabilities.ReadArtifact, ecosystem: "maven", orgId: orgId);
                 return Forbid();
             }
         }

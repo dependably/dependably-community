@@ -89,7 +89,7 @@ internal static class ObservabilityStartupExtensions
                     ["deployment.environment"] = builder.Configuration["DEPLOYMENT_ENVIRONMENT"] ?? "unknown",
                     ["dependably.instance.role"] = builder.Configuration["DEPENDABLY_INSTANCE_ROLE"] ?? "single",
                     // OTel .NET's default resource detector doesn't add these; set explicitly
-                    // so taxonomy.md's commitment to host.name / process.runtime.name holds.
+                    // so the resource-attribute commitment in DESIGN-observability-taxonomy holds.
                     ["host.name"] = Environment.MachineName,
                     ["process.runtime.name"] = "dotnet",
                     ["process.runtime.version"] = Environment.Version.ToString(),

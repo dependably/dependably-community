@@ -25,6 +25,8 @@ public sealed class MigrationTablePlan
     /// <c>sqlite_sequence</c> is a SQLite engine table with no Postgres counterpart; the Postgres
     /// side of that concern is the identity sequences, reset explicitly after the copy.
     /// </summary>
+    // sqlonly-ok: naming the SQLite engine table is the point — it is the source-side table this
+    // migration excludes, not a construct sent to the Postgres target.
     public static readonly IReadOnlySet<string> ExcludedTables =
         new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "_applied_migrations", "sqlite_sequence" };
 
@@ -78,6 +80,8 @@ public sealed class MigrationTablePlan
     private static async Task<List<string>> LoadTableNamesAsync(DbConnection sqlite, CancellationToken ct)
     {
         // xtenant: whole-database migration — this reads the SQLite catalogue, which has no tenant column.
+        // sqlonly-ok: sqlite_master is the source engine's own catalogue — this statement runs
+        // against the SQLite side of a SQLite-to-Postgres migration and never against the target.
         var tables = (await sqlite.QueryAsync<string>(
                 new CommandDefinition(
                     "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",

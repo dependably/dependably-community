@@ -360,6 +360,39 @@ public sealed class StartupServiceTests : IAsyncLifetime
         Assert.Contains("DEPENDABLY_MASTER_KEY", thrown.Message);
     }
 
+    // ── TRUSTED_PROXIES unset: audit/SIEM source_ip attribution warning ─────────────────────
+    //
+    // Unset TRUSTED_PROXIES means every audit_log/activity row records the immediate socket
+    // peer instead of the client — a reverse proxy or container bridge address, identical
+    // across every request it forwards. The base startup warning names that consequence
+    // directly (rather than adding a second warning) so an operator wiring up a SIEM does not
+    // discover it only after finding every auth event sharing one IP.
+
+    private const string SourceIpAttributionWarningMarker =
+        "brute-force detection and IP-based enrichment will not work";
+
+    [Fact]
+    public async Task StartAsync_TrustedProxiesUnset_WarnsAboutSourceIpAttribution()
+    {
+        var config = new ConfigurationBuilder().Build();
+
+        var warnings = await StartAndCaptureWarningsAsync(config);
+
+        Assert.Contains(warnings, w => w.Contains(SourceIpAttributionWarningMarker, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task StartAsync_TrustedProxiesSet_NoSourceIpAttributionWarning()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["TRUSTED_PROXIES"] = "10.0.0.5" })
+            .Build();
+
+        var warnings = await StartAndCaptureWarningsAsync(config);
+
+        Assert.DoesNotContain(warnings, w => w.Contains(SourceIpAttributionWarningMarker, StringComparison.Ordinal));
+    }
+
     // ── TRUSTED_PROXIES unset + default metrics allowlist: co-located-proxy warning ────────
     //
     // When TRUSTED_PROXIES is unset, X-Forwarded-For is discarded (fail-closed) and

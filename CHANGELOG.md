@@ -7,6 +7,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-13
+
+### Added
+
+- **The SIEM auth feed can reach every audit action, and now says which ones exist.** Its
+  `action=` filter appended the family separator unconditionally, so every pattern was
+  `<value>.%` — an action name with no dot in it could not be matched by any value a caller was
+  able to send. 60 of the 138 action names this instance writes are flat, and 25 of those are
+  security-relevant: `checksum_failure`, `ssrf_blocked`, `provenance_verification_failed`,
+  `upstream_source_pin_violation`, `token_created`/`token_revoked`,
+  `service_token_created`/`service_token_revoked`, `member_role_changed`, `member_removed`,
+  `trust_anchor_added`/`trust_anchor_removed`, `quarantine_decision`, `allowlist_blocked`,
+  `conflict_resolved` and `invite_accept_blocked` among them.
+  None of them could reach a collector, and nothing surfaced it: the query ran, the
+  endpoint returned 200, and the events were simply absent. A filter value now matches the action
+  of exactly that name **plus** every action in its dotted family, so `action=checksum_failure`
+  works and `action=login.` keeps meaning what it meant.
+- **`GET /api/v1/siem/actions`** returns the declared action vocabulary — every name, which of them
+  the no-filter feed serves, the dotted families the vocabulary implies (`family_prefixes`), and the
+  two per-request filter limits (`max_action_filters`, `max_family_filters`). A collector previously
+  had to hardcode the vocabulary from the source, and could not tell what it was *not* receiving; a
+  distinct-values query over the rows cannot answer that either, since an event family nobody
+  subscribed to leaves no row to find. Same auth as the feeds.
+- **Naming declared actions on the auth feed is free, and the filter limit that remains is measured.**
+  A filter naming a declared action now binds only an equality term; the family `LIKE` is emitted
+  just for filters that name a dotted family or an action the release does not declare, since no
+  declared action sits under another and the term could only ever match outside the vocabulary. So
+  pinning the exact action set a collector understands — instead of inheriting the default set and
+  letting it widen on upgrade — costs what the default feed costs. The single chosen cap of 100 is
+  replaced by two derived ones: `max_action_filters` (every declared action plus a full complement
+  of families) and `max_family_filters` (the families the vocabulary implies). **Action required (SIEM collectors only):**
+  a request naming more than `max_family_filters` unrecognized-or-family values is now a `400`
+  naming the limit, where it previously succeeded; the limits are published by the catalogue
+  endpoint above so a collector can check its subscription against them.
+- **Auth-feed events name their tenant.** `orgSlug` is projected beside `orgId` (and rendered as
+  `cs4Label=OrgSlug` in CEF), so an alert reads as a customer rather than as a 32-hex id — a
+  read:audit credential has no tenant-lookup route to resolve one with. `actorEmail` remains
+  intentionally null for user actors; CONTRIBUTING.md now documents that as the deliberate GDPR
+  decision it is, rather than leaving it to read as a bug.
+
+### Changed
+
+- **The auth feed's default action set no longer advertises coverage it does not have.** It was
+  `login.` `lockout.` `token.` `rbac.` `auth.` `ratelimit.`, of which `token.` and `rbac.` matched
+  nothing whatsoever — no writer has ever emitted a dotted `token.*` or `rbac.*` action, so a
+  collector trusting the default believed it had credential and RBAC coverage and had neither. The
+  default is now the declared security vocabulary by exact name: everything the old prefixes really
+  matched, plus the credential, privilege, identity-provider-trust, refusal and supply-chain
+  integrity events the two dead prefixes implied. Configuration changes (allowlists, licence
+  policy, retention, proxy and webhook settings, preferences) are deliberately not in it and are
+  one `action=` value away. No collector loses an event it receives today.
+- **One name per event.** `POST /api/v1/sbom` wrote `project.create` for the project creation that
+  `ProjectsController` writes as `project.created`, so a consumer filtering either spelling
+  silently missed the other's rows. Both surfaces now write `project.created`. Rows written before
+  this release keep the old spelling; query it explicitly to read that history.
+- **The CEF name/severity table matches what writers emit.** It mapped `token.created`,
+  `token.revoked`, `rbac.role_changed`, `rbac.member_added` and `rbac.member_removed` — five names
+  nothing has ever written — so the real events fell through to the raw action string and the
+  lowest severity. The table now names the emitted actions and covers the supply-chain integrity
+  failures and refusals, which rank above authentication noise.
+- **Audit action names are a declared vocabulary** (`AuditActions`), enforced by the new
+  `Category=Compliance` gate `AuditActionVocabularyComplianceTests`: a writer naming an undeclared
+  action fails the build, as does a declared name no writer emits, a CEF mapping for a name nothing
+  writes, and a default-set entry that is not a declared action. A call site whose action is not a
+  literal or a constant carries an `// audit-action-ok: <reason>` marker, bare markers rejected.
+
+- **Block-gate refusals can now reach a SIEM.** `GET /api/v1/siem/events/activity` serves the
+  `activity` plane over an allowlist — the whole `blocked*` block-gate family by default, matched
+  as a range so an arm added later is carried without a config change. Until now the only pull feed
+  was `/api/v1/siem/events/auth`, which reads `audit_log`; the two planes are disjoint and never
+  dual-written, so a refusal reached no collector at all. Same auth tier as its sibling: a token or
+  tenant-session caller is pinned to its own tenant and `?org=` is inert for it, and the query takes
+  a non-nullable org id, so a platform admin reads one named tenant per poll rather than every
+  tenant at once. `download` is available behind `SIEM_ACTIVITY_DOWNLOAD_EVENTS` (default off); a
+  collector that asks for it while it is off gets a 400 naming the variable instead of a response
+  that is quietly short. The feed never serves past `now − SIEM_ACTIVITY_LAG_SECONDS` (default 30)
+  and reports the window it served on the last page of a read, because activity rows are
+  timestamped when they are enqueued and inserted later — reading up to "now" would permanently
+  skip every row whose INSERT landed after the poll that already moved the watermark past its
+  timestamp, and advancing on a truncated newest-first page would skip the older rows still behind
+  the cursor. JSON, NDJSON, and CEF as before, and
+  a new `idx_activity_org_event` index serves the event-type-scoped read.
+
 ## [0.10.0] - 2026-09-07
 
 ### Security

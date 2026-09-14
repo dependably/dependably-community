@@ -521,6 +521,13 @@ public sealed partial class OciController : OrgScopedControllerBase
         string tokenRef = TokenReference(token.Id);
         string? traceId = System.Diagnostics.Activity.Current?.TraceId.ToString();
 
+        // The cross-ecosystem counted family, which every capability gate now feeds so one SOC
+        // rule covers all ten planes. The detailed oci.scope_denied row below stays as it is:
+        // it carries the attributed actor and the trace ref a client was handed, which the
+        // coalesced row deliberately does not, and existing rules match on its name.
+        Dependably.Security.AuthDenialRecorder.RecordCapabilityDenied(
+            HttpContext, token, required: requiredLabel, ecosystem: "oci", orgId: token.OrgId);
+
         // Always logged, at most once per cooldown window audited. The log line is per-request
         // because log volume is already bounded by retention and rotation; the audit row is not.
         _logger.LogWarning(

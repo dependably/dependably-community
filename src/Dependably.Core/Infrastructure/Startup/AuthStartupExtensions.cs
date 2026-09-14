@@ -1,6 +1,8 @@
 using System.Threading.RateLimiting;
+using Dependably.Infrastructure;
 using Dependably.Security;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Dependably.Infrastructure.Startup;
@@ -134,6 +136,8 @@ internal static class AuthStartupExtensions
                 Dependably.Infrastructure.Observability.DependablyMeter.RateLimitRejected.Add(1,
                     new KeyValuePair<string, object?>("policy", policy),
                     new KeyValuePair<string, object?>("partition", partition));
+
+                RateLimitDenialAuditRecorder.Record(ctx.HttpContext, policy, ipv6Prefix, useRedis);
 
                 return ValueTask.CompletedTask;
             };
@@ -446,4 +450,117 @@ internal static class AuthStartupExtensions
         });
     }
 
+}
+
+/// <summary>
+/// Folds a rate-limit rejection into <see cref="AuthDenialAuditCoalescer"/> on behalf of the
+/// <c>RateLimiterOptions.OnRejected</c> callback <see cref="AuthStartupExtensions"/> registers.
+/// A free-standing class rather than a member of <see cref="AuthStartupExtensions"/> so a test can
+/// name it unambiguously — <c>Dependably.Management</c> declares its own internal
+/// <c>AuthStartupExtensions</c> in the same namespace for the Redis/JWT wiring, and
+/// <c>InternalsVisibleTo</c> exposes both to the test assembly at once.
+/// </summary>
+internal static class RateLimitDenialAuditRecorder
+{
+    /// <summary>
+    /// Folds one rate-limit rejection into <see cref="AuthDenialAuditCoalescer"/> — writes nothing
+    /// itself, so the audit cost stays bounded by the accumulator's window rather than by the
+    /// request rate a pre-auth caller controls. Resolved via <c>RequestServices</c> because this
+    /// delegate is registered once at startup on a static <see cref="RateLimiterOptions"/>, with no
+    /// DI container of its own to be constructed against.
+    ///
+    /// <para>
+    /// <c>source_ip</c> passed to <see cref="AuthDenialAuditCoalescer.Record"/> is the request's
+    /// full remote address, never the partition form — the coalescer keeps only the first one seen
+    /// per key per window, which is what ends up on the flushed row's <c>source_ip</c> column.
+    /// <c>ecosystem</c> (via <see cref="EcosystemPathResolver"/>) is written to the audit row's own
+    /// column (via <see cref="AuthDenialKey"/>), not only into the JSON detail payload the
+    /// personal-data sweep nulls at the configured retention horizon — after which the count,
+    /// reason, policy, and window would otherwise be unrecoverable.
+    /// </para>
+    /// </summary>
+    internal static void Record(HttpContext ctx, string policy, int ipv6Prefix, bool useRedis)
+    {
+        var coalescer = ctx.RequestServices.GetService<AuthDenialAuditCoalescer>();
+        if (coalescer is null)
+        {
+            return;
+        }
+
+        // One route spelling across every denial writer: the credential/capability seams resolve
+        // the same way, and a raw RoutePattern.RawText read here would disagree with them on the
+        // leading slash whenever the action declared its route without one — two accumulator
+        // keys, two audit rows, and a SOC rule that matches one of them.
+        string route = AuthDenialRecorder.RouteTemplate(ctx);
+
+        // An apex/system-scope request (no resolved tenant) leaves OrgId null and flushes through
+        // LogSystemAsync, as SubdomainTenantMiddleware's stashed context is the same one
+        // MetricsAccessMiddleware reads for its own denial audit.
+        var tenantCtx = ctx.Items[TenantContext.HttpItemsKey] as TenantContext;
+        string? orgId = tenantCtx is { IsTenant: true } ? tenantCtx.TenantId : null;
+
+        var key = new AuthDenialKey
+        {
+            Action = "ratelimit.rejected",
+            OrgId = orgId,
+            Partition = ResolvePartition(ctx, policy, ipv6Prefix, useRedis),
+            Ecosystem = EcosystemPathResolver.ForPath(ctx.Request.Path.Value),
+            Policy = policy,
+            Reason = "rate_limited",
+            Route = route,
+        };
+
+        coalescer.Record(key, ctx.GetNormalizedRemoteIp());
+    }
+
+    /// <summary>
+    /// Reproduces the EXACT partition-key derivation the limiter that actually rejected this
+    /// request used to bucket it — not a generic guess. Every <c>AddPolicy(name, …)</c> closure
+    /// in <c>AuthStartupExtensions</c> is keyed here by that same policy name; recomputing with a
+    /// different function (e.g. branching only on path shape) would name a partition that was
+    /// never actually throttled — a management-plane path prefix does not imply a
+    /// management-partitioned policy, and <c>import</c>/<c>sbom-upload</c> both route under
+    /// <c>/api/v1/</c> while still keying on <see cref="RateLimitPartitions.GetPartitionKey"/>.
+    /// </summary>
+    private static string ResolvePartition(HttpContext ctx, string policy, int ipv6Prefix, bool useRedis)
+    {
+        switch (policy)
+        {
+            // AddDownloadPushLimiters: download/push/import/sbom-upload all key on the validated
+            // sub claim, falling back to IP — never the raw Authorization header.
+            case "download":
+            case "push":
+            case "import":
+            case "sbom-upload":
+                return RateLimitPartitions.GetPartitionKey(ctx, ipv6Prefix);
+
+            // AddRescanLimiter deliberately keys like the management GlobalLimiter — token hash,
+            // then user sub, then IP.
+            case "rescan":
+                return RateLimitPartitions.GetManagementPartitionKey(ctx, ipv6Prefix);
+
+            // AddMetadataLimiter and AddAnonymousProbeLimiter are always in-process, keyed on the
+            // bare source IP with no "ip:" prefix — authentication never changes their bucket.
+            case "metadata":
+            case "anon":
+                return ctx.GetRateLimitPartitionIp(ipv6Prefix) ?? "unknown";
+
+            // AddInProcessLimiters buckets login/invite/token-create on the bare source IP, same
+            // shape as metadata/anon — UNLESS REDIS_CONNECTION_STRING is configured, in which case
+            // RedisRateLimitPolicy.GetPartition takes over and keys on "{ip}:{policyName}".
+            case "login":
+            case "invite":
+            case "token-create":
+                return useRedis
+                    ? $"{ctx.GetRateLimitPartitionIp(ipv6Prefix) ?? "unknown"}:{policy}"
+                    : ctx.GetRateLimitPartitionIp(ipv6Prefix) ?? "unknown";
+
+            // No named [EnableRateLimiting] policy rejected this request (policy reads "unknown")
+            // — the GlobalLimiter did, via AddManagementApiLimiter's own two live branches.
+            default:
+                return RateLimitPartitions.ClassifyGlobalScope(ctx) == RateLimitPartitions.GlobalScope.ManagementApi
+                    ? RateLimitPartitions.GetManagementPartitionKey(ctx, ipv6Prefix)
+                    : "proto:" + (ctx.GetRateLimitPartitionIp(ipv6Prefix) ?? "unknown");
+        }
+    }
 }

@@ -154,4 +154,105 @@ public sealed class SiemControllerSecurityTests : IClassFixture<DependablyFactor
             _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
         }
     }
+
+    /// <summary>
+    /// The discovery surface exists because a collector otherwise has to hardcode the vocabulary
+    /// and cannot tell what it is not receiving — the failure that cost real events on a live
+    /// deployment. It carries the same auth as the feeds it describes: the action list names every
+    /// event family the instance can emit, which is reconnaissance for an unauthenticated caller.
+    /// </summary>
+    [Fact]
+    public async Task GetActionCatalogue_Anonymous_Returns401()
+    {
+        using var c = _factory.CreateClient();
+        var resp = await c.GetAsync("/api/v1/siem/actions");
+        Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetActionCatalogue_ReadAuditJwt_ListsTheVocabularyAndTheDefaultSet()
+    {
+        string email = $"siem-catalogue-{Guid.NewGuid():N}@example.com";
+        string userId = await _factory.CreateUser(email, "pw", role: "auditor");
+        string jwt = await _factory.CreateUserJwt(userId, "auditor");
+
+        using var c = _factory.CreateClient();
+        c.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
+        var resp = await c.GetAsync("/api/v1/siem/actions");
+        resp.EnsureSuccessStatusCode();
+
+        using var doc = System.Text.Json.JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        var root = doc.RootElement;
+
+        var actions = root.GetProperty("actions").EnumerateArray()
+            .ToDictionary(
+                e => e.GetProperty("action").GetString()!,
+                e => e.GetProperty("security_relevant").GetBoolean(),
+                StringComparer.Ordinal);
+
+        Assert.Equal(Dependably.Infrastructure.Audit.AuditActions.All.Length, actions.Count);
+
+        // A flat security action and a dotted operational one — the catalogue is what tells a
+        // collector the first exists at all, and that the second is not in its default feed.
+        Assert.True(actions["checksum_failure"]);
+        Assert.False(actions["proxy_settings_updated"]);
+
+        string[] defaults = [.. root.GetProperty("default_actions").EnumerateArray()
+            .Select(e => e.GetString()!)];
+        Assert.Contains("token_created", defaults);
+        Assert.DoesNotContain("proxy_settings_updated", defaults);
+        Assert.All(defaults, d => Assert.True(actions[d]));
+
+        Assert.Equal(
+            AuditRepository.MaxAuthEventActionFilters,
+            root.GetProperty("max_action_filters").GetInt32());
+        Assert.Equal(
+            AuditRepository.MaxAuthEventFamilyFilters,
+            root.GetProperty("max_family_filters").GetInt32());
+
+        // The families are what count against the family limit, so a collector cannot check its
+        // own subscription against that number without also being told which values it covers.
+        string[] families = [.. root.GetProperty("family_prefixes").EnumerateArray()
+            .Select(e => e.GetString()!)];
+        Assert.Equal(AuditRepository.MaxAuthEventFamilyFilters, families.Length);
+        Assert.Contains("auth", families);
+        Assert.Contains("system_admin", families);
+        // A family is never itself a declared action — the two lists partition what a filter can
+        // name, which is what makes the two limits compose rather than overlap.
+        Assert.All(families, f => Assert.False(actions.ContainsKey(f)));
+    }
+
+    /// <summary>
+    /// End-to-end shape of a served event: the tenant is named, and the actor's email is not. Both
+    /// halves are deliberate — the slug makes an alert actionable, while a denormalized user email
+    /// would be personal data outside the member-removal and retention scrubs' fixed column list.
+    /// </summary>
+    [Fact]
+    public async Task GetAuthEvents_ServedRowsNameTheTenantSlugAndNeverTheActorEmail()
+    {
+        var db = _factory.Services.GetRequiredService<IMetadataStore>();
+        string createdAt = _factory.Services.GetRequiredService<TimeProvider>().GetUtcNow().ToUtcIsoMillis();
+        await using (var conn = await db.OpenAsync())
+        {
+            string? defaultOrgId = await conn.ExecuteScalarAsync<string>(
+                "SELECT id FROM orgs WHERE slug = 'default'");
+            await conn.ExecuteAsync(
+                "INSERT INTO audit_log (id, scope, org_id, action, actor_id, detail, created_at) " +
+                "VALUES (@id, 'tenant', @orgId, 'checksum_failure', 'slug-probe-user', '{}', @createdAt)",
+                new { id = Guid.NewGuid().ToString("N"), orgId = defaultOrgId, createdAt });
+        }
+
+        string jwt = await _factory.CreateAdminJwt();
+        using var c = _factory.CreateClient();
+        c.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
+        var resp = await c.GetAsync("/api/v1/siem/events/auth?action=checksum_failure");
+        resp.EnsureSuccessStatusCode();
+
+        using var doc = System.Text.Json.JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        var row = doc.RootElement.GetProperty("items").EnumerateArray()
+            .Single(e => e.GetProperty("actorId").GetString() == "slug-probe-user");
+
+        Assert.Equal("default", row.GetProperty("orgSlug").GetString());
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, row.GetProperty("actorEmail").ValueKind);
+    }
 }

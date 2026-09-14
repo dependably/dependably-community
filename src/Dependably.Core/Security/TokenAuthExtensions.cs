@@ -25,7 +25,21 @@ public static class TokenAuthExtensions
         CancellationToken ct = default)
     {
         var token = await request.ResolveTokenAsync(tokens, ct);
-        return token is null ? null : token.OrgId == expectedOrgId ? token : null;
+        if (token is null)
+        {
+            // The inner overload already counted this as a rejection — a second record here
+            // would double-count the same refusal under two reasons.
+            return null;
+        }
+
+        // A live credential aimed at somebody else's tenant. The denial is recorded under the
+        // TARGET org, because that is the tenant being probed and the one whose SOC needs to see
+        // it — and it is recorded actor-less, with an IP partition rather than a token reference,
+        // so the presenting tenant's token id and service-token name never appear in this
+        // tenant's audit trail or SIEM feed. Same call the hosted-write paths make from their own
+        // inline org checks, so the two shapes cannot drift apart.
+        AuthDenialRecorder.RecordTenantMismatch(request.HttpContext, token, expectedOrgId);
+        return token.OrgId == expectedOrgId ? token : null;
     }
 
     /// <summary>
@@ -71,6 +85,7 @@ public static class TokenAuthExtensions
             {
                 Dependably.Infrastructure.Observability.DependablyMeter.TokenAuthRequests.Add(
                     1, new KeyValuePair<string, object?>("outcome", "invalid"));
+                RecordRejection(request);
                 return null;
             }
         }
@@ -88,12 +103,18 @@ public static class TokenAuthExtensions
         {
             Dependably.Infrastructure.Observability.DependablyMeter.TokenAuthRequests.Add(
                 1, new KeyValuePair<string, object?>("outcome", "invalid"));
+            RecordRejection(request);
             return null;
         }
 
         var resolved = await tokens.ResolveAsync(raw, ct);
         Dependably.Infrastructure.Observability.DependablyMeter.TokenAuthRequests.Add(
             1, new KeyValuePair<string, object?>("outcome", resolved is null ? "invalid" : "success"));
+        if (resolved is null)
+        {
+            RecordRejection(request);
+        }
+
         if (resolved is not null && tokens.ShouldTouchLastUsed(resolved.LastUsedAt))
         {
             // Update last_used_at only when the value carried on the resolved record is stale
@@ -106,6 +127,17 @@ public static class TokenAuthExtensions
         }
         return resolved;
     }
+
+    /// <summary>
+    /// Folds one unresolved-credential rejection into the denial accumulator. The counterpart to
+    /// the <c>outcome=invalid</c> metric increment beside every call: the meter says how many, and
+    /// this says from where and against which route, which is the part a leaked-token
+    /// investigation needs. The metric stays — it is the cheap aggregate, and the per-source
+    /// record is deliberately the coalesced one.
+    /// </summary>
+    private static void RecordRejection(HttpRequest request) =>
+        AuthDenialRecorder.RecordTokenRejected(
+            request.HttpContext, reason: AuthDenialRecorder.ReasonInvalid);
 
     /// <summary>
     /// Capability-style permission check. Reads the JSON

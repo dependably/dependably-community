@@ -115,6 +115,8 @@ public sealed class NpmTarballHandler(
         }
         if (token is not null && !token.HasCapability(Capabilities.ReadArtifact))
         {
+            AuthDenialRecorder.RecordCapabilityDenied(
+                httpContext, token, required: Capabilities.ReadArtifact, ecosystem: "npm", orgId: orgId);
             return new ForbidResult();
         }
 
@@ -422,6 +424,8 @@ public sealed class NpmTarballHandler(
         }
         if (token is not null && !token.HasCapability(Capabilities.ReadArtifact))
         {
+            AuthDenialRecorder.RecordCapabilityDenied(
+                httpContext, token, required: Capabilities.ReadArtifact, ecosystem: "npm", orgId: orgId);
             return new ForbidResult();
         }
 

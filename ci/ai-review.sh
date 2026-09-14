@@ -3,7 +3,8 @@
 # Args: <persona_file> <report_file>. Invoked by the ai-review-* jobs in
 # .gitlab-ci.yml. Signal-only: any infra/LLM hiccup writes an explanatory
 # report and exits 0 so the pipeline never goes red on a flaky LAN host or
-# model. Only a genuine config bug (missing arg / persona file) exits non-zero.
+# model. Only a genuine config bug (missing arg / persona file / a context window
+# too small to hold a review turn) exits non-zero.
 set -euo pipefail
 
 PERSONA_FILE="${1:?usage: ai-review.sh <persona_file> <report_file>}"
@@ -102,6 +103,23 @@ REVIEW_LABEL="${AI_REVIEW_LABEL:-${REPORT_FILE%.md}}"
 # diff has been observed to carry.
 BACKTICKS7="$(printf '`%.0s' 1 2 3 4 5 6 7)"
 
+# Whether the configured context window can actually hold a review turn:
+# "ok" clears the floor, "undersized" does not, and "invalid" is a value that is
+# not a positive integer (a CI variable carrying a stray space or a unit suffix).
+#
+# The floor is the MAX_DIFF_BYTES/3 + 6000 documented beside NUM_CTX above: the
+# capped diff at a conservative 3 bytes/token, plus the persona, the candidates
+# the verify-filter pass carries back alongside the diff, and NUM_PREDICT.
+#
+# Pure and side-effect-free, so the refusal it drives can live in main() while
+# the classification itself stays directly testable.
+context_config_state() {  # <num_ctx> <max_diff_bytes>
+  case "$1" in ''|*[!0-9]*) printf '%s' invalid; return 0 ;; esac
+  case "$2" in ''|*[!0-9]*) printf '%s' invalid; return 0 ;; esac
+  if [ "$1" -le 0 ] || [ "$2" -le 0 ]; then printf '%s' invalid; return 0; fi
+  if [ "$1" -ge "$(( $2 / 3 + 6000 ))" ]; then printf '%s' ok; else printf '%s' undersized; fi
+}
+
 # One enumerated set of lens-run outcomes, used for BOTH the posted report's
 # title suffix and the machine-readable AI_REVIEW_OUTCOME line — so the two can
 # never drift apart into different vocabularies for the same state. "clean" and
@@ -125,6 +143,7 @@ state_suffix() {  # <state>
     ambiguous)         printf '%s' " (unverifiable response)" ;;
     clean-unconfirmed) printf '%s' " (clean, unconfirmed)" ;;
     clean-filtered)    printf '%s' " (clean, filtered)" ;;
+    misconfigured)     printf '%s' " (misconfigured)" ;;
     clean|findings)    ;;  # a healthy report reads like one: no suffix
     *)                 ;;  # unknown state carries no suffix, as the map's `-}` did
   esac
@@ -1117,6 +1136,42 @@ generate_fence_tag() {
 
 main() {
   RUN_START=$(date +%s)
+
+  # Checked before anything else this lens does, because an undersized context
+  # window is the one misconfiguration that does not announce itself. Ollama
+  # truncates the prompt to fit the window, which leaves ~0 tokens to generate:
+  # the model emits one token and stops (done_reason=length), and the lens posts
+  # an empty `(no content)` note. That state occurs for real model reasons too,
+  # so it reads as a flaky host rather than as a wrong number in CI config, and
+  # every lens on the box reports it at once while nothing was reviewed.
+  #
+  # Refused, not clamped. Silently raising NUM_CTX to the floor would run the
+  # lens at a size the operator did not choose, and this number is sized against
+  # the review host's per-slot KV budget: Ollama allocates it per parallel slot,
+  # and a request that disagrees with the loaded size forces a full model reload.
+  # A clamp would trade a visible config error here for an invisible one there.
+  #
+  # The note is posted BEFORE the non-zero exit. A genuine config bug is the one
+  # class this script goes red on, but of every degraded state a lens can reach a
+  # MISSING note is the one a reviewer is least likely to notice or count, so the
+  # lens first says why it refused and then fails the job.
+  local ctx_state ctx_detail
+  ctx_state="$(context_config_state "$NUM_CTX" "$MAX_DIFF_BYTES")"
+  if [ "$ctx_state" != "ok" ]; then
+    if [ "$ctx_state" = "invalid" ]; then
+      ctx_detail="AI_REVIEW_NUM_CTX (\`$NUM_CTX\`) and AI_REVIEW_MAX_DIFF_BYTES (\`$MAX_DIFF_BYTES\`) must both be positive integers."
+    else
+      ctx_detail="AI_REVIEW_NUM_CTX is $NUM_CTX, below the floor of $(( MAX_DIFF_BYTES / 3 + 6000 )) that AI_REVIEW_MAX_DIFF_BYTES=$MAX_DIFF_BYTES requires. A window that small is filled by the prompt alone, leaving no room to generate."
+    fi
+    echo "ERROR: refusing to run this lens — $ctx_detail" >&2
+    write_report "misconfigured" \
+      "This lens did not run: its context window is misconfigured. $ctx_detail
+
+No review was performed, rather than one whose verdict would be an artifact of the window size. This check is advisory and does not block the merge — but it is **no signal**, not a pass."
+    record_outcome "misconfigured"
+    exit 1
+  fi
+
   # Per-run anti-forgery token: injected into every system prompt this run
   # (review + both verify passes) and disclosed nowhere else. The diff is the
   # entire user turn, so an attacker who controls it can make the model SAY

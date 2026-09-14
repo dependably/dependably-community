@@ -4,9 +4,9 @@ namespace Dependably.Tests.Unit.Security;
 
 /// <summary>
 /// Covers the password-strength gate adopted per NIST 800-63B + ASVS V2.1
-/// (encryption.md §10): length floor, UTF-8 byte ceiling for BCrypt, zxcvbn
+/// (dependably-community.spec/specs/architecture/ARCH-encryption.md#model): length floor, UTF-8 byte ceiling for BCrypt, zxcvbn
 /// entropy floor, context-dictionary block. Breach-corpus check is out of
-/// scope here; see the deferred GitLab issue referenced in encryption.md §6.
+/// scope here; see the deferred GitLab issue referenced in dependably-community.spec/specs/architecture/ARCH-encryption.md#open-questions.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class PasswordPolicyTests

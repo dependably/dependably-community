@@ -21,7 +21,7 @@ namespace Dependably.Infrastructure.Observability;
 /// disposal; default is <c>cancelled</c> if neither is called).
 ///
 /// Pattern documented in
-/// <c>dependably-enterprise/docs/observability/logs.md#background-jobs</c>.
+/// <c>dependably-community.spec/specs/design/DESIGN-observability-signal-pipelines.md#background-job-scope</c>.
 /// </summary>
 public sealed class BackgroundJobScope : IDisposable
 {

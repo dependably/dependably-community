@@ -376,8 +376,14 @@ public sealed class SbomIngestTests : IAsyncLifetime
         Assert.Equal("user", actorKind);
         Assert.False(string.IsNullOrWhiteSpace(sourceIp));
 
-        // Creating a project is a tenant-configuration change, so it also lands in the audit log.
+        // Creating a project is a tenant-configuration change, so it also lands in the audit log —
+        // under the one name ProjectsController also writes. This surface used to write
+        // `project.create` for the same event, so a consumer filtering either spelling missed the
+        // other's rows; the old name is asserted absent rather than merely unasserted.
         Assert.Equal(1, await QueryAsync<int>(
+            "SELECT COUNT(*) FROM audit_log WHERE action = 'project.created' AND detail LIKE @like",
+            new { like = $"%{project}%" }));
+        Assert.Equal(0, await QueryAsync<int>(
             "SELECT COUNT(*) FROM audit_log WHERE action = 'project.create' AND detail LIKE @like",
             new { like = $"%{project}%" }));
     }

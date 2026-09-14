@@ -95,7 +95,7 @@ public sealed class AuthAuditOrgScopingTests : IClassFixture<DependablyFactory>,
 
         // The SIEM auth export is org-filtered (AND (@orgId IS NULL OR org_id = @orgId)), so a
         // NULL-org row would be silently dropped — a security feed blind to successful logins.
-        var (events, _) = await Audit.ListAuthEventsAsync(
+        var (events, _, _, _, _) = await Audit.ListAuthEventsAsync(
             since: DateTimeOffset.UnixEpoch,
             until: _factory.Services.GetRequiredService<TimeProvider>().GetUtcNow().AddDays(1),
             orgId: orgId,

@@ -440,6 +440,8 @@ public sealed partial class CargoController : OrgScopedControllerBase
         }
         if (!token.HasCapability(Capabilities.PublishCargo))
         {
+            AuthDenialRecorder.RecordCapabilityDenied(
+                HttpContext, token, required: Capabilities.PublishCargo, ecosystem: "cargo", orgId: orgId);
             return Forbidden("publish:cargo capability required.");
         }
 
@@ -646,6 +648,8 @@ public sealed partial class CargoController : OrgScopedControllerBase
         }
         if (!token.HasCapability(Capabilities.YankCargo))
         {
+            AuthDenialRecorder.RecordCapabilityDenied(
+                HttpContext, token, required: Capabilities.YankCargo, ecosystem: "cargo", orgId: orgId);
             return Forbidden("yank:cargo capability required.");
         }
 

@@ -123,6 +123,7 @@ public sealed class NuGetPublishHandler(
 
         if (token is null || token.OrgId != orgId)
         {
+            AuthDenialRecorder.RecordTenantMismatch(httpContext, token, orgId, ecosystem: "nuget");
             httpContext.Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
             return new UnauthorizedResult();
         }
@@ -529,6 +530,7 @@ public sealed class NuGetPublishHandler(
 
         if (token is null || token.OrgId != orgId)
         {
+            AuthDenialRecorder.RecordTenantMismatch(httpContext, token, orgId, ecosystem: "nuget");
             httpContext.Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
             return (null, new UnauthorizedResult());
         }

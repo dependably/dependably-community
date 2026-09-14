@@ -6,7 +6,7 @@ namespace Dependably.Infrastructure.Observability;
 /// Maps an ASP.NET Core route template (the value of the <c>http.route</c>
 /// activity tag) and HTTP method to the canonical
 /// <c>dependably.operation</c> name documented in
-/// <c>dependably-enterprise/docs/observability/taxonomy.md#operation-vocabulary</c>.
+/// <c>dependably-community.spec/specs/design/DESIGN-observability-taxonomy.md#operation-vocabulary</c>.
 ///
 /// Wired in <see cref="Program.ConfigureOpenTelemetry"/> via the
 /// <c>AddAspNetCoreInstrumentation</c> <c>EnrichWithHttpResponse</c> hook

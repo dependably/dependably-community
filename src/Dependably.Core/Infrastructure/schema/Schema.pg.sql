@@ -831,6 +831,24 @@ CREATE INDEX IF NOT EXISTS idx_package_versions_package ON package_versions(pack
 CREATE INDEX IF NOT EXISTS idx_package_versions_filename ON package_versions(filename);
 CREATE INDEX IF NOT EXISTS idx_audit_log_org ON audit_log(org_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_activity_org ON activity(org_id, created_at DESC);
+-- Event-type-scoped reads of the activity feed (the SIEM activity pull surface). What it buys,
+-- measured at 200k rows after ANALYZE rather than assumed:
+--   * Postgres with blocked events a small fraction of the table — the normal shape, one refusal
+--     against many downloads — is an Index Scan with org_id, the event_type range AND the
+--     created_at window all in the Index Cond. That case is why this index exists.
+--   * Postgres with blocked events a large fraction falls back to idx_activity_org plus a
+--     Filter, because that index is already ordered by created_at.
+--   * SQLite does not use it at all: the planner takes idx_activity_org for both the range and
+--     the exact-IN form, since it already satisfies most of ORDER BY created_at DESC. A SQLite
+--     deployment carries this index's write cost and gets nothing back.
+-- Readers match the blocked* family as a half-open range (>= 'blocked' AND < 'blockee'), never
+-- LIKE 'blocked%': a prefix LIKE needs a text_pattern_ops opclass on Postgres before it can use
+-- an index at all, and the mechanical successor bound ('blocked' || chr(96)) drops every
+-- underscored arm under a linguistic collation.
+-- Cutover cost: this build is not CONCURRENTLY, so on the multi-replica Postgres topology it runs
+-- at boot under the migration lock and holds a write lock on activity for the build — sized by
+-- the retained activity history, not by the size of the deploy.
+CREATE INDEX IF NOT EXISTS idx_activity_org_event ON activity(org_id, event_type, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_user_tokens_hash ON user_tokens(token_hash);
 CREATE INDEX IF NOT EXISTS idx_service_tokens_hash ON service_tokens(token_hash);
 -- FK-column indexes: Postgres does not auto-index foreign key columns; without these,

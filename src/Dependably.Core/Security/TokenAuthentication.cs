@@ -80,6 +80,14 @@ public sealed class TokenAuthenticationHandler : AuthenticationHandler<TokenAuth
         var token = await _tokens.ResolveAsync(raw, Context.RequestAborted);
         if (token is null)
         {
+            // Flag, do not audit. On a management route carrying
+            // [Authorize(AuthenticationSchemes = "Bearer,ApiToken")] ASP.NET runs both schemes,
+            // ExtractRawToken reads the very same `Authorization: Bearer <jwt>` header, and this
+            // resolve returns null for every JWT-session request — while the request succeeds on
+            // the Bearer scheme. Recording a rejection here would write one on each of those.
+            // The challenge handler, which runs only when the request really does end
+            // unauthorized, turns the flag into a counted denial.
+            AuthDenialRecorder.FlagUnresolvedCredential(Context);
             return AuthenticateResult.Fail("Invalid or expired API token.");
         }
 
@@ -87,6 +95,35 @@ public sealed class TokenAuthenticationHandler : AuthenticationHandler<TokenAuth
         var identity = new ClaimsIdentity(BuildClaims(token, role), Scheme.Name);
         var ticket = new AuthenticationTicket(new ClaimsPrincipal(identity), Scheme.Name);
         return AuthenticateResult.Success(ticket);
+    }
+
+    /// <summary>
+    /// The request ended unauthorized. If it presented a credential this scheme could not
+    /// resolve, that refusal is counted here — the one point in the handler reached only when no
+    /// other scheme rescued the request, so a JWT-session caller on a dual-scheme route never
+    /// arrives with the flag still set.
+    /// </summary>
+    protected override Task HandleChallengeAsync(AuthenticationProperties properties)
+    {
+        if (AuthDenialRecorder.ConsumeUnresolvedCredential(Context))
+        {
+            AuthDenialRecorder.RecordTokenRejected(
+                Context, reason: AuthDenialRecorder.ReasonInvalid);
+        }
+
+        return base.HandleChallengeAsync(properties);
+    }
+
+    /// <summary>
+    /// The request authenticated and was refused on authorization. Counted only for principals
+    /// this scheme issued: the dual-scheme management routes forbid every scheme in their policy,
+    /// so a JWT-session caller reaches this handler too, and its refusals belong to the
+    /// management plane's own audit surface rather than to the protocol-plane token family.
+    /// </summary>
+    protected override Task HandleForbiddenAsync(AuthenticationProperties properties)
+    {
+        AuthDenialRecorder.RecordCapabilityDeniedForScheme(Context, Scheme.Name);
+        return base.HandleForbiddenAsync(properties);
     }
 
     /// <summary>

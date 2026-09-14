@@ -61,6 +61,7 @@ public sealed partial class HexController : OrgScopedControllerBase
         string orgId = CurrentTenantId();
         var settings = await _svc.Orgs.GetSettingsAsync(orgId, ct);
         var token = await Request.ResolveTokenAsync(_svc.Tokens, ct);
+        AuthDenialRecorder.RecordTenantMismatch(HttpContext, token, orgId, ecosystem: Ecosystem);
         if (token is not null && token.OrgId != orgId)
         {
             token = null;
@@ -84,9 +85,14 @@ public sealed partial class HexController : OrgScopedControllerBase
         string required = request.Kind is ResourceKind.Tarball or ResourceKind.Docs
             ? Capabilities.ReadArtifact
             : Capabilities.ReadMetadata;
-        return token is not null && !token.HasCapability(required)
-            ? StatusCode(StatusCodes.Status403Forbidden, $"{required} capability required.")
-            : await DispatchAsync(request, orgId, settings, token, ct);
+        if (token is not null && !token.HasCapability(required))
+        {
+            AuthDenialRecorder.RecordCapabilityDenied(
+                HttpContext, token, required: required, ecosystem: Ecosystem, orgId: orgId);
+            return StatusCode(StatusCodes.Status403Forbidden, $"{required} capability required.");
+        }
+
+        return await DispatchAsync(request, orgId, settings, token, ct);
     }
 
     private enum ResourceKind

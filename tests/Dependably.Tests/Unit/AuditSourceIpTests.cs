@@ -64,7 +64,7 @@ public sealed class AuditSourceIpTests : IAsyncLifetime
         await repo.LogAsync("login.failure", orgId: "o1", sourceIp: "203.0.113.7");
         await repo.LogAsync("lockout.triggered", orgId: "o1", sourceIp: "203.0.113.7");
 
-        var (items, _) = await repo.ListAuthEventsAsync(
+        var (items, _, _, _, _) = await repo.ListAuthEventsAsync(
             since: DateTimeOffset.UnixEpoch,
             until: DateTimeOffset.UnixEpoch.AddYears(200),
             orgId: "o1",
@@ -86,10 +86,13 @@ public sealed class AuditSourceIpTests : IAsyncLifetime
     {
         var repo = new AuditRepository(_db);
 
+        // saml.signing_cert_expiring is written by the scheduled cert-expiry sweep, which has no
+        // inbound request and therefore no address to record — a real background row, not a
+        // stand-in.
         await repo.LogAsync("login.failure", orgId: "o1", sourceIp: "203.0.113.7");
-        await repo.LogAsync("token.expired", orgId: "o1", sourceIp: null);
+        await repo.LogAsync("saml.signing_cert_expiring", orgId: "o1", sourceIp: null);
 
-        var (items, _) = await repo.ListAuthEventsAsync(
+        var (items, _, _, _, _) = await repo.ListAuthEventsAsync(
             since: DateTimeOffset.UnixEpoch,
             until: DateTimeOffset.UnixEpoch.AddYears(200),
             orgId: "o1",
@@ -98,6 +101,6 @@ public sealed class AuditSourceIpTests : IAsyncLifetime
             afterCursor: null);
 
         Assert.Equal("203.0.113.7", items.Single(i => i.Action == "login.failure").SourceIp);
-        Assert.Null(items.Single(i => i.Action == "token.expired").SourceIp);
+        Assert.Null(items.Single(i => i.Action == "saml.signing_cert_expiring").SourceIp);
     }
 }

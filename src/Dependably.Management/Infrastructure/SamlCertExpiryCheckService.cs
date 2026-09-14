@@ -350,6 +350,8 @@ public sealed class SamlCertExpiryCheckService : BackgroundService
 
         // audit-attribution-ok: scheduled SAML cert-expiry sweep — runs off a background
         // timer with no inbound request, so there is no actor or source IP to record.
+        // audit-action-ok: the declared saml.signing_cert_expired / saml.signing_cert_expiring
+        // pair, selected by the stage ternary a dozen lines above.
         await _audit.LogAsync(action, orgId: row.OrgId, detail: detail, ct: ct);
         await _samlConfig.SetCertExpiryAlertStageAsync(row.OrgId, targetStage, ct);
 
