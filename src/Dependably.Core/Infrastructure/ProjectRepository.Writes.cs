@@ -13,6 +13,14 @@ namespace Dependably.Infrastructure;
 /// is latest — is enforced inside one transaction here, and a loser retries against the
 /// committed state rather than reporting a conflict.
 /// </summary>
+/// <summary>
+/// The mutable fields of a project, as one value. Threaded together rather than spelled out
+/// parameter by parameter because four of the five are same-typed and adjacent — a transposed
+/// name and classifier compiles clean and writes the wrong row.
+/// </summary>
+public readonly record struct ProjectFields(
+    string Name, string Classifier, string? Description, string? ParentId, bool IsActive);
+
 public sealed partial class ProjectRepository
 {
     // ── Writes ───────────────────────────────────────────────────────────────────────────────
@@ -64,13 +72,10 @@ public sealed partial class ProjectRepository
     public async Task<Project?> UpdateAsync(
         string orgId,
         string projectId,
-        string name,
-        string classifier,
-        string? description,
-        string? parentId,
-        bool isActive,
+        ProjectFields fields,
         CancellationToken ct = default)
     {
+        var (name, classifier, description, parentId, isActive) = fields;
         int attempt = 0;
         while (true)
         {
@@ -96,7 +101,12 @@ public sealed partial class ProjectRepository
                            is_active = @isActive
                      WHERE org_id = @orgId AND id = @projectId
                     """,
-                    new { orgId, projectId, name, classifier, description, parentId, isActive },
+                    // projects.is_active is INTEGER (0/1) on both providers, never Postgres
+                    // boolean — Npgsql maps a raw bool straight to `boolean`, which has no
+                    // implicit cast to `integer` and throws 42804 on every write. Coerced
+                    // explicitly, the same pattern CacheArtifactRepository.hasInstallScript
+                    // already uses.
+                    new { orgId, projectId, name, classifier, description, parentId, isActive = isActive ? 1 : 0 },
                     tx, cancellationToken: ct));
 
                 if (affected == 0)
@@ -289,7 +299,9 @@ public sealed partial class ProjectRepository
             UPDATE project_versions SET is_active = @isActive
             WHERE org_id = @orgId AND project_id = @projectId AND id = @versionId
             """,
-            new { orgId, projectId, versionId, isActive }, cancellationToken: ct));
+            // project_versions.is_active is INTEGER (0/1), never Postgres boolean — same coercion
+            // as ProjectRepository.UpdateAsync's own is_active write above.
+            new { orgId, projectId, versionId, isActive = isActive ? 1 : 0 }, cancellationToken: ct));
 
         return affected == 0 ? null : await GetVersionAsync(conn, null, orgId, projectId, versionId);
     }

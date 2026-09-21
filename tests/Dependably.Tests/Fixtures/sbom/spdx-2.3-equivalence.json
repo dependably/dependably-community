@@ -1,0 +1,55 @@
+{
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "demo-app",
+  "documentNamespace": "https://example.com/spdx/demo-app-2.0.0",
+  "creationInfo": {
+    "creators": ["Tool: example-generator-1.0.0"],
+    "created": "2026-08-01T10:10:00Z"
+  },
+  "documentDescribes": ["SPDXRef-Package-demo-app"],
+  "packages": [
+    {
+      "name": "demo-app",
+      "SPDXID": "SPDXRef-Package-demo-app",
+      "versionInfo": "2.0.0",
+      "downloadLocation": "NOASSERTION"
+    },
+    {
+      "name": "left-pad",
+      "SPDXID": "SPDXRef-Package-left-pad",
+      "versionInfo": "1.3.0",
+      "downloadLocation": "https://example.com/dist/left-pad-1.3.0.tgz",
+      "homepage": "https://example.com/left-pad",
+      "description": "String padding to a specified length.",
+      "copyrightText": "Copyright (c) 2014-2018 Ada Lovelace",
+      "licenseConcluded": "MIT",
+      "supplier": "Organization: Example Org (ops@example.com)",
+      "originator": "Person: Ada Lovelace",
+      "primaryPackagePurpose": "LIBRARY",
+      "checksums": [
+        { "algorithm": "SHA256", "checksumValue": "aaaabbbbccccddddeeeeffff0000111122223333444455556666777788889999" }
+      ],
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:npm/left-pad@1.3.0"
+        }
+      ]
+    }
+  ],
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relatedSpdxElement": "SPDXRef-Package-demo-app",
+      "relationshipType": "DESCRIBES"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-demo-app",
+      "relatedSpdxElement": "SPDXRef-Package-left-pad",
+      "relationshipType": "DEPENDS_ON"
+    }
+  ]
+}

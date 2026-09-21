@@ -64,6 +64,13 @@ public static class ManagementServiceCollectionExtensions
         services.AddSingleton<SbomIngestRepository>();
         services.AddSingleton<Sbom.SbomMergeService>();
         services.AddSingleton<Sbom.SbomDocumentStore>();
+
+        // SBOM author signature (ADR-sbom-author-signature). Management-only, like the rest of
+        // the projects plane: the export/upload surfaces that use these do not exist on edge.
+        services.AddSingleton<Sbom.SbomSigningKeyRepository>();
+        services.AddSingleton<Sbom.SbomAuthorSigner>();
+        services.AddSingleton<Dependably.Protocol.Provenance.SbomSignatureKeyStore>();
+        services.AddSingleton<Sbom.SbomSignatureVerifier>();
         return services;
     }
 

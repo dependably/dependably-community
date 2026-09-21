@@ -1,9 +1,11 @@
 using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
+using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Dapper;
+using Dependably.Api;
 using Dependably.Infrastructure.Sbom;
 using Dependably.Infrastructure.VulnTracker;
 using Dependably.Protocol;
@@ -12,11 +14,14 @@ namespace Dependably.Infrastructure;
 
 /// <summary>
 /// Renders a project version's component inventory, vulnerability disclosure and effective VEX
-/// state as fresh CycloneDX 1.7 JSON, and resolves an uploaded document's original blob coordinate
-/// for verbatim download. Built directly against <c>System.Text.Json</c> — CONTRACT D2 forbids a
-/// new NuGet dependency on the CycloneDX serializer, so a re-render is a re-render: it is not
-/// byte-identical to whatever was originally uploaded, only spec-valid CycloneDX 1.7 covering the
-/// same components, licences, dependency graph and vulnerability analysis the database holds.
+/// state as fresh CycloneDX JSON under the caller's chosen <see cref="SbomExportOptions"/>
+/// (spec version 1.6 or 1.7, optionally narrowed by <see cref="SbomComponentFilter"/>), and
+/// resolves an uploaded document's original blob coordinate for verbatim download. Built directly
+/// against <c>System.Text.Json</c> — CONTRACT D2 forbids a new NuGet dependency on the CycloneDX
+/// serializer, so a re-render is a re-render: it is not byte-identical to whatever was originally
+/// uploaded, only spec-valid CycloneDX covering the same components, licences, dependency graph
+/// and vulnerability analysis the database holds (or the subset <c>SbomExportOptions.Filter</c>
+/// selected from it).
 ///
 /// Every query here is written directly against the schema rather than through another agent's
 /// repository, per the fleet contract's "repositories are not shared" rule — a little query
@@ -32,19 +37,54 @@ public sealed partial class SbomExportService
     /// </summary>
     public const string LatestPerProjectSelection = "latest-per-project";
 
+    /// <summary>
+    /// dependably's own SBOM Tool identity (D7/D8) — the entity <c>metadata.tools</c> must name
+    /// when this service is the producer, not the ingested document's own tool (which
+    /// <c>project_documents.tool_name</c>/<c>tool_version</c> already hold separately). The name
+    /// matches the fixed literal <c>VulnTrackerEnrichmentClient</c> already announces at its own
+    /// handshake — one identity string for the product, not a second spelling invented here — and
+    /// the version is read at runtime from the assembly's informational version (falling back to
+    /// its plain version, then to a literal), the same three-step precedence
+    /// <c>CoreStartupService</c> and <c>VulnTrackerEnrichmentClient</c> already use, so it never
+    /// drifts from <c>Directory.Build.props</c>' <c>&lt;Version&gt;</c>.
+    /// </summary>
+    private static class DependablyToolIdentity
+    {
+        public const string Name = "dependably-community";
+
+        public static readonly string Version =
+            typeof(DependablyToolIdentity).Assembly
+                .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+            ?? typeof(DependablyToolIdentity).Assembly.GetName().Version?.ToString()
+            // vocab-ok: dependably's own reflection-read version, not a P4/X4 "indicate
+            // unknown" duty about an absent author-asserted field — a defensive fallback for
+            // a read that cannot itself fail under a real build.
+            ?? "unknown";
+    }
+
     private readonly IMetadataStore _db;
     private readonly TimeProvider _time;
     private readonly ProjectRepository _projects;
     private readonly InstanceVulnTrackerConfig _tracker;
+    private readonly Sbom.SbomAuthorSigner _signer;
 
     public SbomExportService(
-        IMetadataStore db, TimeProvider time, ProjectRepository projects, InstanceVulnTrackerConfig tracker)
+        IMetadataStore db, TimeProvider time, ProjectRepository projects, InstanceVulnTrackerConfig tracker,
+        Sbom.SbomAuthorSigner signer)
     {
         _db = db;
         _time = time;
         _projects = projects;
         _tracker = tracker;
+        _signer = signer;
     }
+
+    // Appends the signature-state property to an already-built metadata.properties array. Must
+    // run BEFORE the array is assigned to metadata (the property is itself covered by the
+    // signature that gets attached last), never after. See DependablyExportProperties.SignatureState
+    // for the property's own doc comment and its closed value vocabulary.
+    private static void AddSignatureStateProperty(JsonArray properties, string state) =>
+        properties.Add(new JsonObject { ["name"] = DependablyExportProperties.SignatureState, ["value"] = state });
 
     /// <summary>
     /// Whether the operator's optional vulnerability-tracker connection is enabled and dialable —
@@ -56,11 +96,95 @@ public sealed partial class SbomExportService
         => (await _tracker.ResolveAsync(ct)).IsActive;
 
     /// <summary>
-    /// Renders CycloneDX 1.7 JSON for <paramref name="variant"/> (<c>inventory</c> or <c>vdr</c>),
-    /// or <c>null</c> when the project or version does not resolve for this org.
+    /// D1 (SBOM Author): the entity OPERATING the tool, not the tool itself. This data model has
+    /// no per-tenant display name — <c>orgs</c> carries only <c>slug</c>, which is therefore the
+    /// only tenant-derivable answer without inventing a configuration knob nothing else in this
+    /// data model can answer. It may fall short of "full name, not an acronym" for a tenant
+    /// whose slug is abbreviated, which is a data-quality limit of the one string this model
+    /// holds, not a choice this method makes.
+    ///
+    /// <para>Every export renders the SAME value regardless of whether the document is a fresh
+    /// synthesis (a collection, built from no single ingested original) or is amending an
+    /// uploaded SBOM (a per-project export) — dependably is the author of the SBOM DATA being
+    /// emitted right now either way. The uploaded document's own author, when it named one, is a
+    /// different entity's claim this parser does not capture yet; until it does, this method's
+    /// value is what an amending export honestly states, with the gap left here rather than the
+    /// field silently omitted.</para>
+    /// </summary>
+    private static JsonArray BuildAuthorsMetadata(string orgSlug) =>
+        new(new JsonObject { ["name"] = orgSlug });
+
+    /// <summary>
+    /// D7/D8 (SBOM Tool Name/Version): dependably's OWN identity, read at runtime rather than a
+    /// string that drifts from <c>Directory.Build.props</c> — see
+    /// <see cref="DependablyToolIdentity"/>. CISA's element covers a tool used to "generate OR
+    /// AMEND" the SBOM: <paramref name="originalToolName"/> (when a document named one) is
+    /// emitted FIRST — the tool that generated the components this document still describes —
+    /// and dependably second, as the amending tool. A collection document passes no original: it
+    /// is synthesized from many projects' data rather than amending any single upload, so only
+    /// dependably belongs in the chain.
+    /// </summary>
+    private static JsonObject BuildToolsMetadata(string? originalToolName, string? originalToolVersion)
+    {
+        var components = new JsonArray();
+        if (originalToolName is not null)
+        {
+            var original = new JsonObject { ["type"] = "application", ["name"] = originalToolName };
+            if (originalToolVersion is not null)
+            {
+                original["version"] = originalToolVersion;
+            }
+            else
+            {
+                // X4/D8b: a document named this tool but not its version — indicate unknown
+                // rather than leaving the field silently absent.
+                original["properties"] = new JsonArray(
+                    Prop(DependablyExportProperties.ToolVersionStatus, DependablyExportProperties.AbsenceReason()));
+            }
+
+            components.Add(original);
+        }
+
+        components.Add(new JsonObject
+        {
+            ["type"] = "application",
+            ["name"] = DependablyToolIdentity.Name,
+            ["version"] = DependablyToolIdentity.Version,
+        });
+
+        return new JsonObject { ["components"] = components };
+    }
+
+    /// <summary>
+    /// D5 (SBOM Generation Context): dependably's own honest phase claim for EVERY document this
+    /// service renders, regardless of variant or aggregation — the claim describes what this
+    /// EXPORT is, not what any one uploaded document was. A bare <c>build</c> phase would be a
+    /// false provenance claim: this registry never observes a build, only what a producer already
+    /// uploaded plus its own scan. <c>post-build</c> is the defined CycloneDX phase that fits
+    /// best, and a second, named entry carries the nuance the defined vocabulary alone cannot —
+    /// "and data available at the time" is explicitly part of what this element covers, and a
+    /// document whose component set came from an upload but whose vulnerability data came from
+    /// dependably's own scan is exactly the case that sentence exists to describe.
+    /// </summary>
+    private static JsonArray BuildLifecyclesMetadata() => new(
+        new JsonObject { ["phase"] = "post-build" },
+        new JsonObject
+        {
+            ["name"] = "dependably-merged-observation",
+            ["description"] =
+                "Observed at a registry: merges a component inventory carried by an uploaded "
+                + "SBOM (or a re-scan of previously uploaded components) with dependably's own "
+                + "vulnerability scan and policy evaluation.",
+        });
+
+    /// <summary>
+    /// Renders CycloneDX JSON under <paramref name="options"/> (<c>Variant</c> is <c>inventory</c>
+    /// or <c>vdr</c>; <c>SpecVersion</c> is <c>1.6</c> or <c>1.7</c>; <c>Filter</c> optionally
+    /// narrows the component set — see <see cref="SbomComponentFilter"/>), or <c>null</c> when the
+    /// project or version does not resolve for this org.
     /// </summary>
     public async Task<string?> BuildSbomDocumentAsync(
-        string orgId, string projectId, string versionId, string variant, CancellationToken ct)
+        string orgId, string projectId, string versionId, SbomExportOptions options, CancellationToken ct)
     {
         await using var conn = await _db.OpenAsync(ct);
         var resolved = await ResolveProjectVersionAsync(conn, orgId, projectId, versionId, ct);
@@ -69,21 +193,81 @@ public sealed partial class SbomExportService
             return null;
         }
 
-        var components = await LoadComponentsAsync(conn, orgId, resolved.ProjectVersionId, ct);
-        var installScriptFacts = await LoadInstallScriptFactsAsync(conn, orgId, resolved.ProjectVersionId, ct);
-        bool trackerConfigured = await IsTrackerConfiguredAsync(ct);
+        var (components, filteredOutCount, installScriptFacts, ownHashFacts, trackerConfigured,
+             orgSlug, sbomTool, vulnRows, analysisRows, affectedApps) =
+            await LoadExportStateAsync(conn, orgId, resolved, options, ct);
+
+        // Resolved before the content fingerprint (below): the rendered signature-state is
+        // itself an asserted fact the fingerprint must cover — see this partial class' Revision
+        // file for the "signature identity" decision. Resolving here also satisfies the older
+        // requirement that this run before metadata.properties is built: the signature-state
+        // property it decides is itself part of what gets signed, so it must exist before the
+        // signature is attached at the very end of this method.
+        var (resolvedSigningKey, signatureState, orgHasActiveKey) = await _signer.ResolveAsync(orgId, ct);
+        using var signingKey = resolvedSigningKey;
+
+        bool isVdr = options.Variant == DocKindVdr;
+        string contentFingerprint = ComputeContentFingerprint(
+            resolved,
+            new ComponentFingerprintInputs(
+                Components: components,
+                InstallScriptByComponentId: installScriptFacts,
+                OwnHashByComponentId: ownHashFacts,
+                IncludePurlIdentity: isVdr),
+            new ProvenanceIdentity(
+                OrgSlug: orgSlug,
+                OriginalToolName: sbomTool?.ToolName,
+                OriginalToolVersion: sbomTool?.ToolVersion),
+            isVdr ? VdrVulnFingerprintFacts(vulnRows, analysisRows, installScriptFacts) : null,
+            orgHasActiveKey);
+        // D6a: derived from the data the fingerprint just hashed, never from the render clock.
+        string derivedChangedAtIso =
+            DeriveDocumentChangedAt(resolved, components, vulnRows, analysisRows);
+        var revision = await ResolveRevisionAsync(
+            conn,
+            new RevisionKey(
+                OrgId: orgId,
+                ProjectVersionId: resolved.ProjectVersionId,
+                DocKind: options.Variant,
+                Format: options.Format,
+                ScopeFilter: ScopeFilterValue(options.Filter)),
+            contentFingerprint, derivedChangedAtIso, ct);
 
         string rootRef = $"{resolved.ProjectName}@{resolved.VersionLabel}";
+
+        var properties = BuildCoverageProperties(
+            components, trackerConfigured, options.Filter, filteredOutCount, documentCarriesInventory: true);
+        AddSignatureStateProperty(properties, signatureState);
 
         var doc = new JsonObject
         {
             ["bomFormat"] = "CycloneDX",
-            ["specVersion"] = "1.7",
-            ["serialNumber"] = $"urn:uuid:{Guid.NewGuid()}",
-            ["version"] = 1,
+            ["specVersion"] = options.SpecVersion,
+            // D9d (RFC 9562): stable per document shape — see this partial class' Revision file
+            // for the full serial/version decision.
+            ["serialNumber"] = revision.SerialNumber,
+            // D9c: an integer, not a SemVer string — see the Revision file's class doc comment.
+            ["version"] = revision.Revision,
             ["metadata"] = new JsonObject
             {
-                ["timestamp"] = _time.GetUtcNow().ToUtcIso(),
+                // D6a/b: the last time the DATA changed, not render time — see ResolveRevisionAsync.
+                ["timestamp"] = revision.ChangedAtIso,
+                // D1 (SBOM Author): the entity operating this deployment for this tenant — see
+                // BuildAuthorsMetadata for why the org slug is the value.
+                ["authors"] = BuildAuthorsMetadata(orgSlug),
+                // D7/D8 (SBOM Tool Name/Version): this is an AMENDING export — the version's
+                // components came from an uploaded SBOM, so the original producing tool (when the
+                // document named one) is emitted first, dependably second. See BuildToolsMetadata.
+                ["tools"] = BuildToolsMetadata(sbomTool?.ToolName, sbomTool?.ToolVersion),
+                // D5 (SBOM Generation Context): see BuildLifecyclesMetadata for the exact claim.
+                ["lifecycles"] = BuildLifecyclesMetadata(),
+                // X3: Component Data elements apply to the target component too. This registry's
+                // data model has no producer, hash, licence or identifier for a PROJECT as a
+                // whole — those are facts about a built artefact, and a project describes an
+                // application, not a single downloadable blob — so there is nothing more to add
+                // here than what is already emitted. A dedicated unknown/withheld vocabulary
+                // would let this state that explicitly; until one exists this stays silent
+                // rather than inventing one.
                 ["component"] = new JsonObject
                 {
                     ["type"] = resolved.Classifier,
@@ -91,27 +275,33 @@ public sealed partial class SbomExportService
                     ["name"] = resolved.ProjectName,
                     ["version"] = resolved.VersionLabel,
                 },
-                ["properties"] = BuildCoverageProperties(components, trackerConfigured),
+                ["properties"] = properties,
             },
-            ["components"] = BuildComponentsArray(components, installScriptByComponentId: installScriptFacts),
+            ["components"] = BuildComponentsArray(
+                components, installScriptByComponentId: installScriptFacts, specVersion: options.SpecVersion,
+                ownHashByComponentId: ownHashFacts),
             ["dependencies"] = BuildDependenciesArray(rootRef, components),
         };
 
-        if (variant == "vdr")
+        if (options.Variant == DocKindVdr)
         {
-            var vulnRows = await LoadComponentVulnsAsync(conn, orgId, resolved.ProjectVersionId, ct);
-            var analysisRows = await LoadAnalysisAsync(conn, orgId, resolved.ProjectVersionId, ct);
-            var affectedApps = await CountAffectedApplicationsAsync(
-                conn, orgId, vulnRows.Select(v => v.OsvId).Distinct(StringComparer.Ordinal).ToList(), ct);
             doc["vulnerabilities"] = BuildVulnerabilitiesArray(vulnRows, analysisRows, installScriptFacts, affectedApps);
+        }
+
+        // Last: everything above is what gets signed. See SbomAuthorSigner's own doc comment for
+        // why attach/resolve are split rather than one "sign the document" call.
+        if (signingKey is not null)
+        {
+            Sbom.SbomAuthorSigner.Attach(doc, signingKey);
         }
 
         return doc.ToJsonString();
     }
 
     /// <summary>
-    /// Renders one CycloneDX 1.7 document covering every project beneath a collection, or
-    /// <c>null</c> when the id is not a collection this org holds.
+    /// Renders one CycloneDX document, under the caller's chosen <see cref="SbomExportOptions"/>,
+    /// covering every project beneath a collection, or <c>null</c> when the id is not a collection
+    /// this org holds.
     ///
     /// <para><b>Shape.</b> Each project is a top-level <c>components[]</c> entry of its own
     /// classifier type, carrying its libraries in a nested <c>components[]</c>. A flat merge was
@@ -147,8 +337,63 @@ public sealed partial class SbomExportService
     /// <para>The walk is not transactional, so a concurrent upload can land in the middle of it and
     /// produce a mixed snapshot — the same property the rollup counts have.</para>
     /// </summary>
+    /// <summary>
+    /// Everything one render reads from the database before it builds anything. Loaded in one
+    /// place so the revision fingerprint, D6a's derived changed_at and the rendered document are
+    /// guaranteed to see the same state — computing any of them from a later read would work from
+    /// data the document does not describe.
+    /// </summary>
+    private readonly record struct ExportState(
+        List<ComponentRow> Components,
+        int FilteredOutCount,
+        Dictionary<string, bool> InstallScriptFacts,
+        Dictionary<string, string> OwnHashFacts,
+        bool TrackerConfigured,
+        string OrgSlug,
+        ToolRow? SbomTool,
+        List<ComponentVulnRow> VulnRows,
+        List<AnalysisRow> AnalysisRows,
+        Dictionary<string, int> AffectedApps);
+
+    /// <summary>
+    /// Loads <see cref="ExportState"/>. The vulnerability and analysis rows are read up front
+    /// rather than inside the caller's <c>vdr</c> branch, because the revision fingerprint and the
+    /// derived changed_at both need the SAME state the rendered document carries.
+    /// </summary>
+    private async Task<ExportState> LoadExportStateAsync(
+        DbConnection conn, string orgId, ResolvedVersion resolved, SbomExportOptions options,
+        CancellationToken ct)
+    {
+        var loaded = await LoadComponentsAsync(conn, orgId, resolved.ProjectVersionId, ct);
+        var (components, filteredOutCount) = ApplyComponentFilter(loaded, options.Filter);
+
+        List<ComponentVulnRow> vulnRows = [];
+        List<AnalysisRow> analysisRows = [];
+        Dictionary<string, int> affectedApps = new(StringComparer.Ordinal);
+        if (options.Variant == DocKindVdr)
+        {
+            vulnRows = FilterVulnsToKeptComponents(
+                await LoadComponentVulnsAsync(conn, orgId, resolved.ProjectVersionId, ct), components);
+            analysisRows = await LoadAnalysisAsync(conn, orgId, resolved.ProjectVersionId, ct);
+            affectedApps = await CountAffectedApplicationsAsync(
+                conn, orgId, vulnRows.Select(v => v.OsvId).Distinct(StringComparer.Ordinal).ToList(), ct);
+        }
+
+        return new ExportState(
+            components,
+            filteredOutCount,
+            await LoadInstallScriptFactsAsync(conn, orgId, resolved.ProjectVersionId, ct),
+            await LoadOwnHashFactsAsync(conn, orgId, resolved.ProjectVersionId, ct),
+            await IsTrackerConfiguredAsync(ct),
+            await LoadOrgSlugAsync(conn, orgId, ct),
+            await LoadDocumentToolAsync(conn, orgId, resolved.ProjectVersionId, "sbom", ct),
+            vulnRows,
+            analysisRows,
+            affectedApps);
+    }
+
     public async Task<string?> BuildCollectionSbomDocumentAsync(
-        string orgId, string collectionId, string variant, CancellationToken ct)
+        string orgId, string collectionId, SbomExportOptions options, CancellationToken ct)
     {
         var subtree = await _projects.ListSubtreeProjectsAsync(orgId, collectionId, ct);
         if (subtree is null)
@@ -172,6 +417,7 @@ public sealed partial class SbomExportService
         int withoutSbom = 0;
         var coverage = new CoverageAccumulator();
         bool trackerConfigured = await IsTrackerConfiguredAsync(ct);
+        string orgSlug = await LoadOrgSlugAsync(conn, orgId, ct);
 
         var buffers = new CollectionBuffers(projectEntries, dependencies, vulnerabilities);
         foreach (var project in subtree)
@@ -180,7 +426,7 @@ public sealed partial class SbomExportService
             rootDependsOn.Add(projectRef);
 
             if (!await AppendCollectionProjectAsync(
-                    conn, new CollectionProjectExport(orgId, variant, projectRef),
+                    conn, new CollectionProjectExport(orgId, options, projectRef),
                     project, buffers, coverage, ct))
             {
                 withoutSbom++;
@@ -190,19 +436,46 @@ public sealed partial class SbomExportService
         dependencies.Insert(0, new JsonObject { ["ref"] = rootRef, ["dependsOn"] = rootDependsOn });
 
         var metadataProperties = BuildCollectionMetadataProperties(
-            subtree.Count, withoutSbom, coverage, trackerConfigured);
+            subtree.Count, withoutSbom, coverage, trackerConfigured, options.Filter);
 
+        // Resolved before metadataProperties is finalized below, for the same reason
+        // BuildSbomDocumentAsync resolves it early — see SbomAuthorSigner's doc comment.
+        var (resolvedSigningKey, resolvedSignatureState, _) = await _signer.ResolveAsync(orgId, ct);
+        using var signingKey = resolvedSigningKey;
+        AddSignatureStateProperty(metadataProperties, resolvedSignatureState);
+
+        // A collection document does NOT carry D6/D9 revision identity: serialNumber is a fresh
+        // random value and version is always 1, on every render, regardless of whether the
+        // subtree's data changed. This document therefore FAILS D6 and D9 as currently
+        // implemented — this is not a principled exclusion, it is an unresolved gap. The obstacle
+        // is a column-shape one, not a semantic one: sbom_export_revisions is keyed by a single
+        // project_version_id, and a collection's subject is a subtree of many projects' own
+        // is_latest versions rather than one project_version_id — the same kind of change
+        // (subtree membership moving) that a project version's own component set already handles
+        // correctly by fingerprinting and bumping. Each per-project export nested inside this
+        // document still carries its own correct revision identity when exported on its own.
         var doc = new JsonObject
         {
             ["bomFormat"] = "CycloneDX",
-            ["specVersion"] = "1.7",
+            ["specVersion"] = options.SpecVersion,
             ["serialNumber"] = $"urn:uuid:{Guid.NewGuid()}",
             ["version"] = 1,
             ["metadata"] = new JsonObject
             {
                 ["timestamp"] = _time.GetUtcNow().ToUtcIso(),
+                // D1: same tenant identity as a per-project export — see BuildAuthorsMetadata.
+                ["authors"] = BuildAuthorsMetadata(orgSlug),
+                // D7/D8: a collection document is synthesized from many projects' own data, not
+                // amending any single upload, so only dependably belongs in the chain — see
+                // BuildToolsMetadata.
+                ["tools"] = BuildToolsMetadata(originalToolName: null, originalToolVersion: null),
+                // D5: same generation-context claim as a per-project export.
+                ["lifecycles"] = BuildLifecyclesMetadata(),
                 // No version: a collection has none, and CycloneDX permits omitting it. Inventing
-                // one would be the document asserting something the model does not hold.
+                // one would be the document asserting something the model does not hold. X3
+                // (producer/hash/licence/identifiers): the same reasoning as a per-project
+                // export's target component applies — a collection describes a folder, not a
+                // built artefact, so there is nothing more to add.
                 ["component"] = new JsonObject
                 {
                     ["type"] = "application",
@@ -215,9 +488,15 @@ public sealed partial class SbomExportService
             ["dependencies"] = dependencies,
         };
 
-        if (variant == "vdr")
+        if (options.Variant == "vdr")
         {
             doc["vulnerabilities"] = vulnerabilities;
+        }
+
+        // Last: everything above is what gets signed.
+        if (signingKey is not null)
+        {
+            Sbom.SbomAuthorSigner.Attach(doc, signingKey);
         }
 
         return doc.ToJsonString();
@@ -258,7 +537,7 @@ public sealed partial class SbomExportService
 
         await AppendProjectAsync(
             conn,
-            new ProjectExport(export.OrgId, project.ProjectVersionId, export.ProjectRef, export.Variant),
+            new ProjectExport(export.OrgId, project.ProjectVersionId, export.ProjectRef, export.Options),
             entry,
             buffers,
             coverage,
@@ -268,7 +547,7 @@ public sealed partial class SbomExportService
 
     /// <summary>The collection document's metadata properties: the aggregate facts plus coverage.</summary>
     private static JsonArray BuildCollectionMetadataProperties(
-        int projectCount, int withoutSbom, CoverageAccumulator coverage, bool trackerConfigured)
+        int projectCount, int withoutSbom, CoverageAccumulator coverage, bool trackerConfigured, SbomComponentFilter filter)
     {
         var metadataProperties = new JsonArray(
             new JsonObject { ["name"] = "dependably:aggregate", ["value"] = "collection" },
@@ -278,7 +557,7 @@ public sealed partial class SbomExportService
         // DeepClone: a JsonNode can only ever have one parent, and coverage.ToProperties() returns
         // an array whose own entries are already parented to it — appending the nodes themselves
         // (rather than clones) throws the moment the second entry is added.
-        foreach (var prop in coverage.ToProperties(trackerConfigured))
+        foreach (var prop in coverage.ToProperties(trackerConfigured, filter, withoutSbom))
         {
             metadataProperties.Add(prop!.DeepClone());
         }
@@ -319,8 +598,12 @@ public sealed partial class SbomExportService
 
     // ── Project/version resolution ──────────────────────────────────────────
 
+    // CreatedAt (D6a) is the floor DeriveChangedAt starts from — the earliest a document's data
+    // could have "last changed" is when the project_version itself was created, which matters for
+    // a version carrying no component/vuln/analysis rows at all.
     private sealed record ResolvedVersion(
-        string ProjectVersionId, string ProjectName, string VersionLabel, string Classifier);
+        string ProjectVersionId, string ProjectName, string VersionLabel, string Classifier,
+        DateTimeOffset CreatedAt);
 
     // {versionId} accepts the literal "latest", resolved with a one-line query per the fleet
     // contract — B0's helper is not imported here.
@@ -337,11 +620,11 @@ public sealed partial class SbomExportService
 
         string versionSql = versionId == "latest"
             ? """
-              SELECT id AS Id, version AS Version FROM project_versions
+              SELECT id AS Id, version AS Version, created_at AS CreatedAt FROM project_versions
               WHERE project_id = @projectId AND org_id = @orgId AND is_latest = 1
               """
             : """
-              SELECT id AS Id, version AS Version FROM project_versions
+              SELECT id AS Id, version AS Version, created_at AS CreatedAt FROM project_versions
               WHERE id = @versionId AND project_id = @projectId AND org_id = @orgId
               """;
 
@@ -350,7 +633,7 @@ public sealed partial class SbomExportService
 
         return version is null
             ? null
-            : new ResolvedVersion(version.Id, project.Name, version.Version, project.Classifier);
+            : new ResolvedVersion(version.Id, project.Name, version.Version, project.Classifier, version.CreatedAt);
     }
 
     private static async Task<List<ComponentRow>> LoadComponentsAsync(
@@ -362,8 +645,11 @@ public sealed partial class SbomExportService
                    component_type AS ComponentType, sbom_scope AS SbomScope,
                    dependency_kind AS DependencyKind, dependency_scope AS DependencyScope,
                    dependency_path AS DependencyPath, license_spdx AS LicenseSpdx,
+                   license_url AS LicenseUrl, license_is_named AS LicenseNamed,
                    version_range AS VersionRange, is_external AS IsExternal,
-                   vuln_checked_at AS VulnCheckedAt
+                   vuln_checked_at AS VulnCheckedAt, component_producer AS ComponentProducer,
+                   component_hashes AS ComponentHashes, additional_identifiers AS AdditionalIdentifiers,
+                   created_at AS CreatedAt
             FROM sbom_components
             WHERE project_version_id = @pvId AND org_id = @orgId
             ORDER BY name, version
@@ -387,7 +673,7 @@ public sealed partial class SbomExportService
                    v.ssvc_exploitation AS SsvcExploitation, v.ssvc_automatable AS SsvcAutomatable,
                    v.ssvc_technical_impact AS SsvcTechnicalImpact,
                    v.ssvc_checked_at AS SsvcCheckedAt, v.ssvc_asserted_at AS SsvcAssertedAt,
-                   v.osv_id LIKE 'MAL-%' AS IsMalicious
+                   v.osv_id LIKE 'MAL-%' AS IsMalicious, scv.checked_at AS LinkCheckedAt
             FROM sbom_component_vulns scv
             JOIN sbom_components sc ON sc.id = scv.component_id
             JOIN vulnerabilities v ON v.id = scv.vuln_id
@@ -403,7 +689,7 @@ public sealed partial class SbomExportService
             """
             SELECT purl_key AS PurlKey, vuln_key AS VulnKey, vex_state AS VexState,
                    vex_justification AS VexJustification, vex_response AS VexResponse,
-                   vex_detail AS VexDetail, reachability AS Reachability
+                   vex_detail AS VexDetail, reachability AS Reachability, updated_at AS UpdatedAt
             FROM project_vuln_analysis
             WHERE project_version_id = @projectVersionId AND org_id = @orgId
             """,
@@ -467,404 +753,130 @@ public sealed partial class SbomExportService
         return result;
     }
 
-    private static JsonArray BuildComponentsArray(
-        IReadOnlyList<ComponentRow> components, string? refPrefix = null,
-        IReadOnlyDictionary<string, bool>? installScriptByComponentId = null)
-    {
-        var arr = new JsonArray();
-        foreach (var c in components)
-        {
-            arr.Add(BuildComponentObject(c, refPrefix, installScriptByComponentId));
-        }
-
-        return arr;
-    }
-
-    /// <summary>One CycloneDX component object.</summary>
-    private static JsonObject BuildComponentObject(
-        ComponentRow c, string? refPrefix,
-        IReadOnlyDictionary<string, bool>? installScriptByComponentId)
-    {
-        var obj = new JsonObject
-        {
-            ["type"] = c.ComponentType ?? "library",
-            ["bom-ref"] = RefOf(c, refPrefix),
-            ["name"] = c.Name,
-        };
-        // versionRange is what a component declares INSTEAD of a version; the specification
-        // forbids both on one component, so the two arms exclude each other rather than both
-        // being written.
-        if (c.Version is not null)
-        {
-            obj["version"] = c.Version;
-        }
-        else if (c.VersionRange is not null)
-        {
-            obj["versionRange"] = c.VersionRange;
-        }
-
-        if (c.IsExternal is bool isExternal)
-        {
-            obj["isExternal"] = isExternal;
-        }
-
-        if (c.Purl is not null)
-        {
-            obj["purl"] = c.Purl;
-        }
-
-        // CONTRACT D1: component scope is written ONLY from sbom_scope (raw CycloneDX
-        // scope, display-only) — never from dependency_scope, the SARIF-owned dev/prod
-        // signal CycloneDX has no vocabulary for. Conflating them here is exactly what the
-        // producer split exists to prevent.
-        if (c.SbomScope is not null)
-        {
-            obj["scope"] = c.SbomScope;
-        }
-
-        if (c.LicenseSpdx is not null)
-        {
-            obj["licenses"] = new JsonArray(new JsonObject { ["expression"] = c.LicenseSpdx });
-        }
-
-        var properties = BuildComponentProperties(c, installScriptByComponentId);
-        if (properties.Count > 0)
-        {
-            obj["properties"] = properties;
-        }
-
-        return obj;
-    }
-
-    /// <summary>The dependably: namespaced properties a component carries, if any.</summary>
-    private static JsonArray BuildComponentProperties(
-        ComponentRow c, IReadOnlyDictionary<string, bool>? installScriptByComponentId)
-    {
-        var properties = new JsonArray();
-        if (c.DependencyKind is not null)
-        {
-            properties.Add(Prop(DependablyExportProperties.DependencyKind, c.DependencyKind));
-        }
-
-        if (c.DependencyScope is not null)
-        {
-            properties.Add(Prop(DependablyExportProperties.DependencyScope, c.DependencyScope));
-        }
-
-        // Positive-only: a miss (no dictionary, or a false/absent entry) means "unknown to
-        // this registry", never "verified clean" — see DependablyExportProperties.InstallScript.
-        if (installScriptByComponentId is not null && installScriptByComponentId.GetValueOrDefault(c.Id))
-        {
-            properties.Add(Prop(DependablyExportProperties.InstallScript, DependablyExportProperties.TrueValue));
-        }
-
-        return properties;
-    }
-
     /// <summary>
-    /// Reconstructs a closed <c>dependencies[]</c> adjacency graph from each component's own
-    /// <see cref="ComponentRow.DependencyPath"/> — the JSON array of purls from the dependency
-    /// root to the component itself (inclusive of its own ref). Consecutive elements of one
-    /// component's path are direct edges; the root is the implicit ancestor of every path's first
-    /// element. A component with no stored path is treated as a direct child of the root. Every
-    /// ref that is ever named — root, every component, and any ancestor a path mentions without
-    /// itself being an uploaded component — gets its own <c>dependencies[]</c> entry, so the graph
-    /// has no dangling edges.
+    /// dependably's own ingest-time SHA-256 for a component we can attribute to the SPECIFIC
+    /// artefact this component names, keyed by <c>sbom_components.id</c> — the stronger claim
+    /// D14's hash-emission precedence prefers over a third-party document's assertion. A
+    /// component matching neither plane below, or matching one only ambiguously, has no digest
+    /// to prefer, and its document-asserted hash, if any, is emitted natively instead — see
+    /// <see cref="BuildComponentHashes"/>. Never asserting a digest we cannot attribute to a
+    /// specific artefact is the governing rule for both planes: a wrong or unattributable digest
+    /// is worse than none, because the consumer's own verification then fails with no way to
+    /// tell why.
+    ///
+    /// <para><b>Hosted plane.</b> <c>package_versions</c> is <c>UNIQUE (package_id, version)</c> —
+    /// one row per version, enforced by the schema, so an ecosystem shipping multiple artefacts
+    /// per version (a wheel and an sdist) still resolves to exactly one row here and there is no
+    /// analogous ambiguity to guard against.</para>
+    ///
+    /// <para><b>Proxy plane.</b> <c>cache_artifact</c> is <c>UNIQUE (ecosystem, name, version,
+    /// filename)</c> — Maven routinely maps one purl coordinate to several filenames (a POM and a
+    /// JAR), and an SBOM component names the coordinate, not the file, so when this org's own
+    /// bindings resolve MORE THAN ONE filename for a component's coordinate there is no principled
+    /// way to choose between their digests; the component is excluded from the result entirely
+    /// rather than picking one arbitrarily. Even the single-match case reads the digest from
+    /// <c>tenant_artifact_access.content_hash</c> ONLY, never <c>cache_artifact.content_hash</c>
+    /// — a bound-but-unhashed tenant row (<c>CacheAccessOrigin.FirstFetchUnidentified</c>, see
+    /// <c>CacheAccessRecorder.BindingFor</c>) means this org's own bytes were never hashed, and
+    /// the shared row's hash may describe a different tenant's bytes entirely; NULL there is "we
+    /// do not know", not "ask the shared row instead" (see
+    /// <c>CacheArtifactServeFacts.ContentDivergesFromSharedFacts</c>, which documents the same
+    /// invariant for the serve path).</para>
     /// </summary>
-    private static JsonArray BuildDependenciesArray(
-        string rootRef, IReadOnlyList<ComponentRow> components, string? refPrefix = null)
+    private static async Task<Dictionary<string, string>> LoadOwnHashFactsAsync(
+        System.Data.Common.DbConnection conn, string orgId, string projectVersionId, CancellationToken ct)
     {
-        var order = new List<string> { rootRef };
-        var childrenOf = new Dictionary<string, List<string>>(StringComparer.Ordinal) { [rootRef] = [] };
+        // plane-ok: this is the hosted half of a deliberate two-statement read; the proxy plane is
+        // resolved by the cached-plane query immediately below and merged into one map.
+        var hosted = await conn.QueryAsync<OwnHashRow>(new CommandDefinition(
+            """
+            SELECT c.id AS ComponentId, pv.checksum_sha256 AS Sha256
+            FROM sbom_components c
+            JOIN packages p ON p.org_id = c.org_id AND p.ecosystem = c.ecosystem AND p.purl_name = c.purl_name
+            JOIN package_versions pv ON pv.package_id = p.id AND pv.version = c.version
+            WHERE c.org_id = @orgId AND c.project_version_id = @projectVersionId
+              AND pv.checksum_sha256 IS NOT NULL
+            """,
+            new { orgId, projectVersionId }, cancellationToken: ct));
 
-        void EnsureNode(string r)
+        // xtenant: cache_artifact is the global proxy catalogue; the org filter is on the
+        // tenant_artifact_access binding joined below, and on sbom_components driving the read.
+        // One row per (component, filename) this org has its own binding for — never resolved
+        // through the shared cache_artifact.content_hash — so a component whose coordinate
+        // matches more than one filename surfaces as more than one row here, which the grouping
+        // below turns into exclusion rather than an arbitrary pick.
+        var cached = await conn.QueryAsync<OwnHashRow>(new CommandDefinition(
+            """
+            SELECT c.id AS ComponentId, ca.filename AS Filename, taa.content_hash AS Sha256
+            FROM sbom_components c
+            JOIN cache_artifact ca ON ca.ecosystem = c.ecosystem AND ca.name = c.purl_name AND ca.version = c.version
+            JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id AND taa.org_id = c.org_id
+            WHERE c.org_id = @orgId AND c.project_version_id = @projectVersionId
+              AND taa.content_hash IS NOT NULL
+            """,
+            new { orgId, projectVersionId }, cancellationToken: ct));
+
+        // Indexer assignment, not ToDictionary: a duplicate ComponentId here is a schema-invariant
+        // violation this read should absorb as last-wins, not turn into a hard throw partway
+        // through an SBOM export.
+#pragma warning disable S3267
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var row in hosted)
         {
-            if (!childrenOf.ContainsKey(r))
+            if (row.Sha256 is not null)
             {
-                childrenOf[r] = [];
-                order.Add(r);
+                result[row.ComponentId] = row.Sha256;
             }
         }
+#pragma warning restore S3267
 
-        void AddEdge(string parent, string child)
+        foreach (var group in cached.GroupBy(r => r.ComponentId, StringComparer.Ordinal))
         {
-            EnsureNode(parent);
-            EnsureNode(child);
-            if (!childrenOf[parent].Contains(child))
+            var rows = group.ToList();
+            // More than one filename resolves for this coordinate: the component names a
+            // coordinate, not a file, so there is no principled way to pick one artefact's digest
+            // over the other's — exclude rather than misattribute.
+            string? sha256 = rows.Count == 1 ? rows[0].Sha256 : null;
+            if (sha256 is null)
             {
-                childrenOf[parent].Add(child);
-            }
-        }
-
-        // Path elements are stored as bare purls, so an aggregate has to namespace them the same
-        // way the component bom-refs are — otherwise the graph names refs no component declares,
-        // and two projects sharing a transitive dependency merge into one node.
-        string Namespaced(string bareRef) => refPrefix is null ? bareRef : $"{refPrefix}/{bareRef}";
-
-        foreach (var c in components)
-        {
-            string selfRef = RefOf(c, refPrefix);
-            EnsureNode(selfRef);
-
-            var path = ParseStringArray(c.DependencyPath);
-            if (path.Count == 0)
-            {
-                AddEdge(rootRef, selfRef);
                 continue;
             }
 
-            AddEdge(rootRef, Namespaced(path[0]));
-            for (int i = 0; i < path.Count - 1; i++)
-            {
-                AddEdge(Namespaced(path[i]), Namespaced(path[i + 1]));
-            }
+            result.TryAdd(group.Key, sha256);
         }
 
-        var arr = new JsonArray();
-        foreach (string r in order)
-        {
-            var dependsOn = new JsonArray();
-            foreach (string child in childrenOf[r])
-            {
-                dependsOn.Add(JsonValue.Create(child));
-            }
-
-            arr.Add(new JsonObject { ["ref"] = r, ["dependsOn"] = dependsOn });
-        }
-
-        return arr;
+        return result;
     }
 
-    private static JsonArray BuildVulnerabilitiesArray(
-        IReadOnlyList<ComponentVulnRow> vulnRows, IReadOnlyList<AnalysisRow> analysisRows,
-        IReadOnlyDictionary<string, bool> installScriptByComponentId,
-        IReadOnlyDictionary<string, int> affectedAppsByOsvId,
-        string? refPrefix = null)
-    {
-        // Keyed with the same SbomVulnKeyComparer SbomPolicyRepository.ResolveVexState uses — one
-        // comparison rule for vuln_key so an analysis block suppressed in the analysis view is
-        // suppressed in the exported document too, never the reverse — without rewriting the
-        // stored spelling of an advisory id.
-        var analysisByKey = analysisRows.ToDictionary(
-            a => (a.PurlKey, a.VulnKey), SbomVulnKeyComparer.Instance);
-
-        var arr = new JsonArray();
-        foreach (var v in vulnRows)
-        {
-            // The analysis rows are keyed by SbomPurlKey on the way in; re-deriving the key any
-            // other way here drops the suppressing analysis block off exactly the scoped,
-            // mixed-case and underscored coordinates canonicalization exists for.
-            string? purlKey = SbomPurlKey.ForComponent(v.Ecosystem, v.PurlName, v.ComponentPurl);
-            var analysis = purlKey is null
-                ? null
-                : FindAnalysis(analysisByKey, purlKey, v.OsvId, v.Aliases);
-
-            var entry = new JsonObject
-            {
-                ["bom-ref"] = $"vuln-{v.OsvId}-{v.ComponentId}",
-                ["id"] = v.OsvId,
-                ["source"] = BuildSource(v.OsvId),
-            };
-
-            var ratings = BuildRatings(v.Severity, v.CvssScore);
-            if (ratings is not null)
-            {
-                entry["ratings"] = ratings;
-            }
-
-            var analysisObj = BuildAnalysis(analysis);
-            if (analysisObj is not null)
-            {
-                entry["analysis"] = analysisObj;
-            }
-
-            // Points at the component's bom-ref, which in an aggregate is the namespaced one —
-            // an un-prefixed affects ref would resolve to whichever project's copy came first.
-            entry["affects"] = new JsonArray(new JsonObject
-            {
-                ["ref"] = refPrefix is null ? v.ComponentPurl : $"{refPrefix}/{v.ComponentPurl}",
-            });
-
-            entry["properties"] = BuildVulnProperties(
-                new VulnSignalFacts(
-                    v.CvssScore,
-                    v.NvdScore,
-                    v.NvdCheckedAt,
-                    v.NvdAssertedAt,
-                    v.IsKev,
-                    v.IsKevRansomware,
-                    v.KevDueDate,
-                    v.KevDateAdded,
-                    v.KevRequiredAction,
-                    v.KevCwes,
-                    v.KevNotes,
-                    v.EpssScore,
-                    v.EpssPercentile,
-                    v.SsvcExploitation,
-                    v.SsvcAutomatable,
-                    v.SsvcTechnicalImpact,
-                    v.SsvcCheckedAt,
-                    v.SsvcAssertedAt,
-                    v.DependencyKind,
-                    v.DependencyScope,
-                    installScriptByComponentId.GetValueOrDefault(v.ComponentId),
-                    affectedAppsByOsvId.GetValueOrDefault(v.OsvId),
-                    v.IsMalicious),
-                analysis?.VexState,
-                analysis?.Reachability);
-
-            arr.Add(entry);
-        }
-
-        return arr;
-    }
-
-    // ── Signal-property assembly, shared by every producer ───────────────────
+    /// <summary>The tenant identity D1 (SBOM Author) names — the only per-tenant human-readable
+    /// string this data model holds; see <see cref="BuildAuthorsMetadata"/> for why.</summary>
+    private static async Task<string> LoadOrgSlugAsync(
+        System.Data.Common.DbConnection conn, string orgId, CancellationToken ct) =>
+        await conn.ExecuteScalarAsync<string?>(new CommandDefinition(
+            "SELECT slug FROM orgs WHERE id = @orgId", new { orgId }, cancellationToken: ct))
+        // Defensive only: the caller already resolved a project through this org id, so the row
+        // exists. Falling back to the id itself keeps the document author-bearing rather than
+        // throwing over a fact this method cannot make any truer.
+        ?? orgId;
 
     /// <summary>
-    /// Every input <see cref="EffectivePriority.Derive"/> and the per-vulnerability property
-    /// vocabulary need for one (component, advisory) pair, gathered from whichever producer's own
-    /// row shapes so <see cref="BuildVulnProperties"/> has exactly one implementation shared by the
-    /// VDR, collection, and standalone-VEX producers — the thing the fixture set that pairs them
-    /// pins.
+    /// One uploaded document's own recorded tool — D7/D8's "generate or amend" original half.
+    /// <paramref name="docType"/> names which document kind is the original this export is
+    /// amending: <c>sbom</c> for an inventory/VDR export (whose components came from the
+    /// uploaded SBOM), <c>vex</c> for a standalone VEX export (whose analysis rows may equally
+    /// have come from manual triage or an uploaded SARIF, in which case there is no single
+    /// original tool to name and this returns null).
     /// </summary>
-    private readonly record struct VulnSignalFacts(
-        double? Cvss,
-        double? NvdScore,
-        string? NvdCheckedAt,
-        string? NvdAssertedAt,
-        bool IsKev,
-        bool? IsKevRansomware,
-        string? KevDueDate,
-        string? KevDateAdded,
-        string? KevRequiredAction,
-        string? KevCwes,
-        string? KevNotes,
-        double? Epss,
-        double? EpssPercentile,
-        string? SsvcExploitation,
-        string? SsvcAutomatable,
-        string? SsvcTechnicalImpact,
-        string? SsvcCheckedAt,
-        string? SsvcAssertedAt,
-        string? DependencyKind,
-        string? DependencyScope,
-        bool HasInstallScript,
-        int AffectedApplications,
-        bool IsMalicious);
-
-    /// <summary>
-    /// Builds the <c>properties[]</c> array for one vulnerability entry: the derived priority
-    /// bucket (computed fresh here, per <see cref="EffectivePriority"/>'s never-materialize
-    /// invariant) plus every exploitation/decision-support signal the platform holds for it.
-    /// Fail-closed throughout: an absent signal is emitted as an explicit "unknown"/omitted
-    /// property, never a value a consumer could mistake for verified-benign.
-    /// </summary>
-    private static JsonArray BuildVulnProperties(VulnSignalFacts f, string? vexState, string? reachability)
-    {
-        // HasStaleEnrichment is unused by Derive's rule text (see EffectivePriority's own doc
-        // comment), so it stays at VulnFacts' unknown default here — the same posture
-        // SbomAnalysisProjection.BuildAdvisory takes for the live analysis surface.
-        var vulnFacts = VulnFacts.None with
-        {
-            Cvss = f.Cvss,
-            NvdScore = f.NvdScore,
-            IsKev = f.IsKev,
-            IsKevRansomware = f.IsKevRansomware,
-            IsMalicious = f.IsMalicious,
-            Epss = f.Epss,
-            EpssPercentile = f.EpssPercentile,
-            SsvcExploitation = f.SsvcExploitation,
-        };
-        var verdict = EffectivePriority.Derive(PriorityFacts.ForProjectsPlane(
-            vulnFacts, vexState, reachability, f.DependencyKind, f.DependencyScope, f.HasInstallScript));
-
-        var props = new JsonArray
-        {
-            Prop(DependablyExportProperties.Priority, verdict.Bucket),
-            Prop(DependablyExportProperties.Unscored, BoolValue(verdict.Unscored)),
-            Prop(DependablyExportProperties.Kev, BoolValue(f.IsKev)),
-            Prop(DependablyExportProperties.KevRansomware, TriStateValue(f.IsKevRansomware)),
-            Prop(DependablyExportProperties.SsvcExploitation, f.SsvcExploitation ?? DependablyExportProperties.UnknownValue),
-            Prop(DependablyExportProperties.AffectedApplications, f.AffectedApplications.ToString(CultureInfo.InvariantCulture)),
-        };
-
-        if (f.KevDueDate is not null)
-        {
-            props.Add(Prop(DependablyExportProperties.CisaKevDueDate, f.KevDueDate));
-        }
-
-        if (f.KevDateAdded is not null)
-        {
-            props.Add(Prop(DependablyExportProperties.CisaKevDateAdded, f.KevDateAdded));
-        }
-
-        if (f.KevRequiredAction is not null)
-        {
-            props.Add(Prop(DependablyExportProperties.CisaKevRequiredAction, f.KevRequiredAction));
-        }
-
-        if (f.KevCwes is not null)
-        {
-            props.Add(Prop(DependablyExportProperties.CisaKevCwes, f.KevCwes));
-        }
-
-        if (f.KevNotes is not null)
-        {
-            props.Add(Prop(DependablyExportProperties.CisaKevNotes, f.KevNotes));
-        }
-
-        if (f.EpssPercentile is not null)
-        {
-            props.Add(Prop(DependablyExportProperties.EpssPercentile, f.EpssPercentile.Value.ToString(CultureInfo.InvariantCulture)));
-        }
-
-        if (f.SsvcAutomatable is not null)
-        {
-            props.Add(Prop(DependablyExportProperties.SsvcAutomatable, f.SsvcAutomatable));
-        }
-
-        if (f.SsvcTechnicalImpact is not null)
-        {
-            props.Add(Prop(DependablyExportProperties.SsvcTechnicalImpact, f.SsvcTechnicalImpact));
-        }
-
-        if (f.NvdScore is not null)
-        {
-            props.Add(Prop(DependablyExportProperties.NvdScore, f.NvdScore.Value.ToString(CultureInfo.InvariantCulture)));
-        }
-
-        // Raw freshness timestamps, never a computed stale/fresh boolean — the operator's staleness
-        // horizon is a policy judgment this export surface does not own; the consumer compares the
-        // timestamp to its own cutoff. A stale reading is exported as-is (never suppressed just
-        // because it is old), the same "stale input is not absent input" posture ARCH-block-gate
-        // states for the gate itself. Omitted only when there is no signal at all to date.
-        string? nvdCheckedAt = EffectiveFreshness(f.NvdCheckedAt, f.NvdAssertedAt);
-        if (nvdCheckedAt is not null)
-        {
-            props.Add(Prop(DependablyExportProperties.NvdCheckedAt, nvdCheckedAt));
-        }
-
-        string? ssvcCheckedAt = EffectiveFreshness(f.SsvcCheckedAt, f.SsvcAssertedAt);
-        if (ssvcCheckedAt is not null)
-        {
-            props.Add(Prop(DependablyExportProperties.SsvcCheckedAt, ssvcCheckedAt));
-        }
-
-        return props;
-    }
-
-    /// <summary>
-    /// <c>COALESCE(assertedAt, checkedAt)</c> — the same left-operand shape
-    /// <c>VulnerabilityRepository</c>'s own gate-signal freshness queries evaluate against the
-    /// operator's staleness cutoff, mirrored here (not reused — this file writes its own queries
-    /// per the fleet contract) because the export boundary needs the same "as-of" preference
-    /// without needing the cutoff comparison itself. Null when <paramref name="checkedAt"/> is
-    /// null: no signal was ever checked, which is a different, unambiguous absence, not a
-    /// staleness question <paramref name="assertedAt"/> alone could answer.
-    /// </summary>
-    private static string? EffectiveFreshness(string? checkedAt, string? assertedAt) =>
-        checkedAt is null ? null : (assertedAt ?? checkedAt);
+    private static async Task<ToolRow?> LoadDocumentToolAsync(
+        System.Data.Common.DbConnection conn, string orgId, string projectVersionId, string docType,
+        CancellationToken ct) =>
+        await conn.QuerySingleOrDefaultAsync<ToolRow>(new CommandDefinition(
+            """
+            SELECT tool_name AS ToolName, tool_version AS ToolVersion
+            FROM project_documents
+            WHERE org_id = @orgId AND project_version_id = @projectVersionId AND doc_type = @docType
+            """,
+            new { orgId, projectVersionId, docType }, cancellationToken: ct));
 
     private static JsonObject Prop(string name, string value) => new() { ["name"] = name, ["value"] = value };
 
@@ -884,7 +896,14 @@ public sealed partial class SbomExportService
     /// (<see cref="SbomScannableComponents"/>), and every caller here already holds the full
     /// component list for the document it is building.
     /// </summary>
-    private static (int Scanned, int Unscanned, int Unscannable, DateTimeOffset? LastScanAt) SummarizeCoverage(
+    /// <summary>
+    /// The scan-coverage tally a document reports: how many of its components this registry
+    /// scanned, left unscanned and cannot scan, plus when the newest of those scans ran.
+    /// </summary>
+    private readonly record struct ScanCoverage(
+        int Scanned, int Unscanned, int Unscannable, DateTimeOffset? LastScanAt);
+
+    private static ScanCoverage SummarizeCoverage(
         IReadOnlyList<ComponentRow> components)
     {
         int scanned = 0, unscanned = 0, unscannable = 0;
@@ -911,24 +930,46 @@ public sealed partial class SbomExportService
             }
         }
 
-        return (scanned, unscanned, unscannable, lastScanAt);
+        return new ScanCoverage(scanned, unscanned, unscannable, lastScanAt);
     }
 
-    private static JsonArray BuildCoverageProperties(IReadOnlyList<ComponentRow> components, bool trackerConfigured)
+    /// <summary>
+    /// <paramref name="documentCarriesInventory"/> has NO default — the exact shape
+    /// <c>DependablyExportProperties.FullInventoryRendered</c>'s own doc comment calls out as the
+    /// failure mode a sibling property (<c>FilteredOutCount</c>) already warns against: a
+    /// parameter that silently defaults to the affirmative claim is a silent hole, not a
+    /// convenience. <c>false</c> only ever comes from <see cref="BuildVexDocumentAsync"/>'s call
+    /// site — a standalone VEX document carries no <c>components[]</c> array of its own,
+    /// structurally, so it can never truthfully make this claim regardless of how many components
+    /// <paramref name="components"/> happens to hold for the underlying project version.
+    /// </summary>
+    private static JsonArray BuildCoverageProperties(
+        IReadOnlyList<ComponentRow> components, bool trackerConfigured, SbomComponentFilter filter,
+        int filteredOutCount, bool documentCarriesInventory)
     {
-        var (scanned, unscanned, unscannable, lastScanAt) = SummarizeCoverage(components);
-        return CoverageProperties(scanned, unscanned, unscannable, lastScanAt, trackerConfigured);
+        bool fullInventoryRendered =
+            documentCarriesInventory && filter == SbomComponentFilter.All && components.Count > 0;
+        return CoverageProperties(
+            SummarizeCoverage(components), trackerConfigured, filter, filteredOutCount,
+            fullInventoryRendered);
     }
 
     private static JsonArray CoverageProperties(
-        int scanned, int unscanned, int unscannable, DateTimeOffset? lastScanAt, bool trackerConfigured)
+        ScanCoverage coverage, bool trackerConfigured, SbomComponentFilter filter,
+        int filteredOutCount, bool fullInventoryRendered)
     {
+        var (scanned, unscanned, unscannable, lastScanAt) = coverage;
         var arr = new JsonArray
         {
             Prop(DependablyExportProperties.ScannedCount, scanned.ToString(CultureInfo.InvariantCulture)),
             Prop(DependablyExportProperties.UnscannedCount, unscanned.ToString(CultureInfo.InvariantCulture)),
             Prop(DependablyExportProperties.UnscannableCount, unscannable.ToString(CultureInfo.InvariantCulture)),
             Prop(DependablyExportProperties.TrackerConfigured, BoolValue(trackerConfigured)),
+            Prop(DependablyExportProperties.ComponentFilter, ScopeFilterValue(filter)),
+            Prop(DependablyExportProperties.FilteredOutCount, filteredOutCount.ToString(CultureInfo.InvariantCulture)),
+            // P2/P2f (Coverage): distinct from the scan-coverage counts above. See the property's
+            // own doc comment for exactly what this states and does not.
+            Prop(DependablyExportProperties.FullInventoryRendered, BoolValue(fullInventoryRendered)),
         };
         string? lastScanAtIso = lastScanAt.ToUtcIsoOrNull();
         if (lastScanAtIso is not null)
@@ -950,21 +991,38 @@ public sealed partial class SbomExportService
         private int _unscanned;
         private int _unscannable;
         private DateTimeOffset? _lastScanAt;
+        private int _filteredOutCount;
 
-        public void Add(IReadOnlyList<ComponentRow> components)
+        // filteredOutCount has no default: a call site that forgets it would otherwise report a
+        // truthful-looking "0" on a document that actually filtered something out — the same
+        // silent-hole class BlockGateRequestConstructionComplianceTests exists to prevent for its
+        // own record type.
+        public void Add(IReadOnlyList<ComponentRow> components, int filteredOutCount)
         {
             var (scanned, unscanned, unscannable, lastScanAt) = SummarizeCoverage(components);
             _scanned += scanned;
             _unscanned += unscanned;
             _unscannable += unscannable;
+            _filteredOutCount += filteredOutCount;
             if (lastScanAt is not null && (_lastScanAt is null || lastScanAt > _lastScanAt))
             {
                 _lastScanAt = lastScanAt;
             }
         }
 
-        public JsonArray ToProperties(bool trackerConfigured) =>
-            CoverageProperties(_scanned, _unscanned, _unscannable, _lastScanAt, trackerConfigured);
+        // P2e: a collection linking to a project with no SBOM at all is the collection-level
+        // analogue of a linked SBOM the recipient cannot access — withoutSbom > 0 sinks
+        // dependably:full-inventory-rendered to "false" even under an unfiltered (all) render.
+        // The empty-set guard (zero components across the WHOLE subtree) applies here exactly as
+        // it does for a single project's own document — see BuildCoverageProperties.
+        public JsonArray ToProperties(bool trackerConfigured, SbomComponentFilter filter, int withoutSbom)
+        {
+            bool fullInventoryRendered = filter == SbomComponentFilter.All && withoutSbom == 0
+                && (_scanned + _unscanned + _unscannable) > 0;
+            return CoverageProperties(
+                new ScanCoverage(_scanned, _unscanned, _unscannable, _lastScanAt),
+                trackerConfigured, filter, _filteredOutCount, fullInventoryRendered);
+        }
     }
 
     private static AnalysisRow? FindAnalysis(
@@ -996,7 +1054,7 @@ public sealed partial class SbomExportService
     /// </summary>
     /// <summary>One subtree project's export coordinates.</summary>
     private readonly record struct ProjectExport(
-        string OrgId, string ProjectVersionId, string ProjectRef, string Variant);
+        string OrgId, string ProjectVersionId, string ProjectRef, SbomExportOptions Options);
 
     /// <summary>The three arrays the collection document is assembled into.</summary>
     private readonly record struct CollectionBuffers(
@@ -1004,18 +1062,21 @@ public sealed partial class SbomExportService
 
     /// <summary>The loop-invariant half of one subtree project's export coordinates.</summary>
     private readonly record struct CollectionProjectExport(
-        string OrgId, string Variant, string ProjectRef);
+        string OrgId, SbomExportOptions Options, string ProjectRef);
 
     private static async Task AppendProjectAsync(
         DbConnection conn, ProjectExport export, JsonObject entry, CollectionBuffers buffers,
         CoverageAccumulator coverage, CancellationToken ct)
     {
-        var (orgId, projectVersionId, projectRef, variant) = export;
+        var (orgId, projectVersionId, projectRef, options) = export;
 
-        var components = await LoadComponentsAsync(conn, orgId, projectVersionId, ct);
+        var loaded = await LoadComponentsAsync(conn, orgId, projectVersionId, ct);
+        var (components, filteredOutCount) = ApplyComponentFilter(loaded, options.Filter);
         var installScriptFacts = await LoadInstallScriptFactsAsync(conn, orgId, projectVersionId, ct);
-        coverage.Add(components);
-        entry["components"] = BuildComponentsArray(components, projectRef, installScriptFacts);
+        var ownHashFacts = await LoadOwnHashFactsAsync(conn, orgId, projectVersionId, ct);
+        coverage.Add(components, filteredOutCount);
+        entry["components"] = BuildComponentsArray(
+            components, projectRef, installScriptFacts, options.SpecVersion, ownHashFacts);
         buffers.Projects.Add(entry);
 
         foreach (var node in BuildDependenciesArray(projectRef, components, projectRef))
@@ -1023,12 +1084,13 @@ public sealed partial class SbomExportService
             buffers.Dependencies.Add(node!.DeepClone());
         }
 
-        if (variant != "vdr")
+        if (options.Variant != "vdr")
         {
             return;
         }
 
         var vulnRows = await LoadComponentVulnsAsync(conn, orgId, projectVersionId, ct);
+        vulnRows = FilterVulnsToKeptComponents(vulnRows, components);
         // Loaded per project and never shared: a purl-keyed lookup spanning the subtree would
         // bleed one project's VEX suppression onto another project's finding.
         var analysisRows = await LoadAnalysisAsync(conn, orgId, projectVersionId, ct);
@@ -1149,10 +1211,14 @@ public sealed partial class SbomExportService
         public string Classifier { get; set; } = "";
     }
 
+    // Internal DTO for raw DB rows. Dapper sets props by reflection.
+    [SuppressMessage("Minor Code Smell", "S3459:Unassigned members should be removed", Justification = "Dapper sets these props by reflection; not statically visible as assigned.")]
+    [SuppressMessage("Major Code Smell", "S1144:Unused private types or members should be removed", Justification = "Dapper sets these props by reflection; not statically visible as used.")]
     private sealed class VersionRow
     {
         public string Id { get; set; } = "";
         public string Version { get; set; } = "";
+        public DateTimeOffset CreatedAt { get; set; }
     }
 
     // Internal DTO for raw DB rows. Dapper sets props by reflection.
@@ -1172,9 +1238,15 @@ public sealed partial class SbomExportService
         public string? DependencyScope { get; set; }
         public string? DependencyPath { get; set; }
         public string? LicenseSpdx { get; set; }
+        public string? LicenseUrl { get; set; }
+        public bool? LicenseNamed { get; set; }
         public string? VersionRange { get; set; }
         public bool? IsExternal { get; set; }
         public DateTimeOffset? VulnCheckedAt { get; set; }
+        public string? ComponentProducer { get; set; }
+        public string? ComponentHashes { get; set; }
+        public string? AdditionalIdentifiers { get; set; }
+        public DateTimeOffset CreatedAt { get; set; }
     }
 
     // Internal DTO for raw DB rows. Dapper sets props by reflection.
@@ -1188,6 +1260,7 @@ public sealed partial class SbomExportService
         public string? PurlName { get; set; }
         public string? DependencyKind { get; set; }
         public string? DependencyScope { get; set; }
+        public DateTimeOffset LinkCheckedAt { get; set; }
         public string OsvId { get; set; } = "";
         public string? Aliases { get; set; }
         public string? Severity { get; set; }
@@ -1224,6 +1297,7 @@ public sealed partial class SbomExportService
         public string? VexResponse { get; set; }
         public string? VexDetail { get; set; }
         public string? Reachability { get; set; }
+        public DateTimeOffset UpdatedAt { get; set; }
     }
 
     // Internal DTO for raw DB rows. Dapper sets props by reflection.
@@ -1261,6 +1335,29 @@ public sealed partial class SbomExportService
     {
         public string ComponentId { get; set; } = "";
         public bool HasInstallScript { get; set; }
+    }
+
+    // Internal DTO for raw DB rows. Dapper sets props by reflection.
+    [SuppressMessage("Minor Code Smell", "S3459:Unassigned members should be removed", Justification = "Dapper sets these props by reflection; not statically visible as assigned.")]
+    [SuppressMessage("Major Code Smell", "S1144:Unused private types or members should be removed", Justification = "Dapper sets these props by reflection; not statically visible as used.")]
+    private sealed class OwnHashRow
+    {
+        public string ComponentId { get; set; } = "";
+        // Only ever populated by the proxy-plane query; the hosted-plane query never selects it,
+        // and Dapper leaves an unselected property at its default. It exists solely so more than
+        // one row can be told apart per component (see LoadOwnHashFactsAsync's grouping) — its
+        // value itself is never read.
+        public string? Filename { get; set; }
+        public string? Sha256 { get; set; }
+    }
+
+    // Internal DTO for raw DB rows. Dapper sets props by reflection.
+    [SuppressMessage("Minor Code Smell", "S3459:Unassigned members should be removed", Justification = "Dapper sets these props by reflection; not statically visible as assigned.")]
+    [SuppressMessage("Major Code Smell", "S1144:Unused private types or members should be removed", Justification = "Dapper sets these props by reflection; not statically visible as used.")]
+    private sealed class ToolRow
+    {
+        public string? ToolName { get; set; }
+        public string? ToolVersion { get; set; }
     }
 
     // Internal DTO for raw DB rows. Dapper sets props by reflection.

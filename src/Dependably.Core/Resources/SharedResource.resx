@@ -365,6 +365,14 @@
     <value>Must be 'inventory' or 'vdr'.</value>
     <comment>422 detail for the SBOM export endpoint's variant query parameter. The quoted values are API literals.</comment>
   </data>
+  <data name="error.sbom.export.invalidFormat" xml:space="preserve">
+    <value>Must be 'cyclonedx-json'.</value>
+    <comment>422 detail for the SBOM export endpoint's format query parameter. The quoted value is an API literal.</comment>
+  </data>
+  <data name="error.sbom.export.invalidSpecVersion" xml:space="preserve">
+    <value>Must be '1.6' or '1.7'.</value>
+    <comment>422 detail for the SBOM export endpoint's specVersion query parameter. The quoted values are API literals.</comment>
+  </data>
   <data name="error.quarantine.decisionInvalid" xml:space="preserve">
     <value>Must be 'approved', 'denied', or 'pending'.</value>
     <comment>422 detail for a quarantine decision. The quoted values are API literals.</comment>
@@ -889,6 +897,10 @@ If you did not make this change, contact your administrator immediately — your
     <value>The triage decision could not be read back after being saved.</value>
     <comment>404 detail for the rare case where the manual-triage row cannot be re-read immediately after the write.</comment>
   </data>
+  <data name="error.sbom.documentNotFound" xml:space="preserve">
+    <value>This project version has no SBOM document to score.</value>
+    <comment>404 detail when a project version exists but carries no doc_type='sbom' row (a VEX- or SARIF-only upload, or no upload at all) for the CISA conformance scorecard endpoint.</comment>
+  </data>
   <data name="error.sbom.scopeInvalid" xml:space="preserve">
     <value>Must be 'all', 'prod' or 'dev'.</value>
     <comment>422 detail for the analysis dependency-scope filter. The quoted values are API literals.</comment>
@@ -984,6 +996,10 @@ If you did not make this change, contact your administrator immediately — your
   <data name="error.sbom.tooManyComponents" xml:space="preserve">
     <value>The document declares more than {0} components.</value>
     <comment>Validation error returned when an SBOM exceeds the per-upload component ceiling. {0} is the ceiling.</comment>
+  </data>
+  <data name="error.sbom.signatureRejected" xml:space="preserve">
+    <value>This organization requires a verified SBOM author signature, and this document's signature did not verify. See the "reason" field for why.</value>
+    <comment>403 returned by PUT /api/v1/sbom under verify_sbom_signatures=block when the document is unsigned, its signature failed verification, or no trust anchor is configured to check it against.</comment>
   </data>
   <data name="error.sbom.tooManyStatements" xml:space="preserve">
     <value>The document declares more than {0} analysis statements against components.</value>

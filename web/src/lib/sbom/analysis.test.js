@@ -363,6 +363,32 @@ describe('exportFilename', () => {
       .toBe('checkout-api-__1.4.0__-vdr.cdx.json')
     expect(exportFilename('///', '- -', 'vex')).toBe('vex.cdx.json')
   })
+
+  // Issue #684 / SPEC-610: the spec-version and scope choices must be encoded, but only when
+  // they diverge from the server's own defaults — the default export keeps today's filename
+  // exactly, and each non-default choice gets a name that cannot collide with it. scope uses the
+  // same all|prod|dev vocabulary the component table's own scope filter does.
+  it('encodes a non-default spec version and a prod/dev scope, leaves the default filename untouched', () => {
+    expect(exportFilename('checkout-api', '1.4.0', 'vdr', { specVersion: '1.7', scope: 'all' }))
+      .toBe('checkout-api-1.4.0-vdr.cdx.json')
+    expect(exportFilename('checkout-api', '1.4.0', 'vdr', { specVersion: '1.6' }))
+      .toBe('checkout-api-1.4.0-vdr-1.6.cdx.json')
+    expect(exportFilename('checkout-api', '1.4.0', 'vdr', { scope: 'prod' }))
+      .toBe('checkout-api-1.4.0-vdr-prod.cdx.json')
+    expect(exportFilename('checkout-api', '1.4.0', 'vdr', { scope: 'dev' }))
+      .toBe('checkout-api-1.4.0-vdr-dev.cdx.json')
+    expect(exportFilename('checkout-api', '1.4.0', 'vdr', { specVersion: '1.6', scope: 'prod' }))
+      .toBe('checkout-api-1.4.0-vdr-1.6-prod.cdx.json')
+  })
+
+  it('never collides two exports of one version under different options', () => {
+    const bare = exportFilename('checkout-api', '1.4.0', 'vdr')
+    const downgraded = exportFilename('checkout-api', '1.4.0', 'vdr', { specVersion: '1.6' })
+    const prod = exportFilename('checkout-api', '1.4.0', 'vdr', { scope: 'prod' })
+    const dev = exportFilename('checkout-api', '1.4.0', 'vdr', { scope: 'dev' })
+    const both = exportFilename('checkout-api', '1.4.0', 'vdr', { specVersion: '1.6', scope: 'prod' })
+    expect(new Set([bare, downgraded, prod, dev, both]).size).toBe(5)
+  })
 })
 
 describe('shortSha', () => {

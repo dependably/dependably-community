@@ -192,7 +192,7 @@ fleet is reported as degradation rather than deregistering every replica at once
 503 during graceful shutdown, so it carries the drain signal `/health` does not. The strict view
 demands everything green and is what deployment gating and alerting should poll. Classification
 is configurable — see
-[CONTRIBUTING.md → Health probes](CONTRIBUTING.md#health-probes-health-ready).
+[OPERATIONS.md → Health probes](OPERATIONS.md#health-probes-health-ready).
 
 ---
 
@@ -200,7 +200,8 @@ is configurable — see
 
 - [DESIGN.md](DESIGN.md) — product and UI design system, layout, and visual language
 - [CLAUDE.md](CLAUDE.md) — project structure, key architectural rules and invariants, tech stack
-- [CONTRIBUTING.md](CONTRIBUTING.md) — build instructions, environment variable reference, security model
+- [CONTRIBUTING.md](CONTRIBUTING.md) — build instructions, testing, and how to ship a change
+- [OPERATIONS.md](OPERATIONS.md) — environment variable reference, deployment topology, security model
 
 ## API
 
@@ -231,7 +232,9 @@ documents above. Prose documentation lives in repositories of its own:
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for build instructions, environment variable reference, architecture notes, and the security model.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for build instructions, testing, and how to ship a
+change. See [OPERATIONS.md](OPERATIONS.md) for the environment variable reference,
+architecture notes, and the security model.
 
 See [SECURITY.md](SECURITY.md) for vulnerability reporting.
 

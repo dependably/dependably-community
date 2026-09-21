@@ -81,6 +81,7 @@ public sealed class TrustAnchorController : OrgScopedControllerBase
             [("pypi", "trusted_publisher")] = ValidatePyPiTrustedPublisherMaterial,
             [("pypi", "rekor_key")] = ValidatePyPiRekorKeyMaterial,
             [("apk", "rsa")] = ValidateApkRsaMaterial,
+            [("sbom", "spki")] = ValidateSbomSpkiMaterial,
         };
 
     // Per-ecosystem material normalizers. Called before validation to transform the raw material
@@ -231,6 +232,24 @@ public sealed class TrustAnchorController : OrgScopedControllerBase
             return (null, "material could not be parsed as an RSA public key. " +
                          "Paste a PEM block (-----BEGIN PUBLIC KEY-----) with SPKI-encoded RSA key material — " +
                          "the key named in the .SIGN.RSA.<keyname> entry inside a signed APKINDEX.tar.gz.");
+        }
+
+        return (keyId, null);
+    }
+
+    // sbom SPKI validator: parses the material as a base64 ECDSA SPKI DER blob (a supplier's
+    // CycloneDX author-signature public key) and derives key_id as the SHA-256 fingerprint of
+    // the DER bytes, lower-case hex — the same fingerprint spelling this registry's own
+    // SbomSigningKeyRepository uses, so a supplier's pinned anchor and the keyId a real signature
+    // carries are directly comparable without a second identifier convention.
+    private static (string? KeyId, string? Error) ValidateSbomSpkiMaterial(string material, ILogger logger)
+    {
+        string? keyId = Protocol.Provenance.SbomSignatureKeyStore.DeriveKeyId(material, logger);
+        if (keyId is null)
+        {
+            return (null, "material could not be parsed as a base64 ECDSA SPKI public key. " +
+                         "Paste the base64-encoded SubjectPublicKeyInfo (SPKI) DER from the " +
+                         "supplier's GET /api/v1/sbom-signing-keys response.");
         }
 
         return (keyId, null);

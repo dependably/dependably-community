@@ -36,7 +36,7 @@ public sealed class SbomExportFidelityTests : IClassFixture<InMemoryDbFixture>
         _fixture = fixture;
         _tracker = new InstanceVulnTrackerConfig(
             (key, _) => Task.FromResult(_instanceSettings.GetValueOrDefault(key)), _clock);
-        _export = new SbomExportService(_fixture.Store, _clock, new ProjectRepository(_fixture.Store, _clock), _tracker);
+        _export = new SbomExportService(_fixture.Store, _clock, new ProjectRepository(_fixture.Store, _clock), _tracker, Dependably.Tests.Infrastructure.TestSbomAuthorSigner.Unconfigured(_fixture.Store, _clock));
     }
 
     // InstanceVulnTrackerConfig caches its resolved connection for a short TTL against a frozen
@@ -84,7 +84,8 @@ public sealed class SbomExportFidelityTests : IClassFixture<InMemoryDbFixture>
     private async Task<string> InsertComponentAsync(
         string orgId, string versionId, string purl, string ecosystem, string purlName, string name,
         string version = "1.0.0", string? dependencyKind = null, string dependencyScope = "unknown",
-        DateTimeOffset? vulnCheckedAt = null)
+        DateTimeOffset? vulnCheckedAt = null, string? componentAuthor = null, string? componentProducer = null,
+        string? componentHashes = null)
     {
         string id = Guid.NewGuid().ToString("N");
         await using var conn = await _fixture.Store.OpenAsync();
@@ -92,10 +93,12 @@ public sealed class SbomExportFidelityTests : IClassFixture<InMemoryDbFixture>
             """
             INSERT INTO sbom_components
                 (id, org_id, project_version_id, purl, ecosystem, purl_name, version, name,
-                 component_type, dependency_kind, dependency_scope, vuln_checked_at, created_at)
+                 component_type, dependency_kind, dependency_scope, vuln_checked_at,
+                 component_author, component_producer, component_hashes, created_at)
             VALUES
                 (@id, @orgId, @versionId, @purl, @ecosystem, @purlName, @version, @name,
-                 'library', @dependencyKind, @dependencyScope, @vulnCheckedAt, @now)
+                 'library', @dependencyKind, @dependencyScope, @vulnCheckedAt,
+                 @componentAuthor, @componentProducer, @componentHashes, @now)
             """,
             new
             {
@@ -110,9 +113,90 @@ public sealed class SbomExportFidelityTests : IClassFixture<InMemoryDbFixture>
                 dependencyKind,
                 dependencyScope,
                 vulnCheckedAt = vulnCheckedAt?.ToUtcIso(),
+                componentAuthor,
+                componentProducer,
+                componentHashes,
                 now = _clock.GetUtcNow().ToUtcIso(),
             });
         return id;
+    }
+
+    /// <summary>
+    /// Seeds a hosted (uploaded, origin='uploaded') package version carrying dependably's own
+    /// ingest-time SHA-256 — the stronger claim D14's hash precedence prefers.
+    /// </summary>
+    private async Task InsertHostedChecksumAsync(
+        string orgId, string ecosystem, string purlName, string version, string checksumSha256)
+    {
+        string packageId = Guid.NewGuid().ToString("N");
+        string versionId = Guid.NewGuid().ToString("N");
+        await using var conn = await _fixture.Store.OpenAsync();
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO packages (id, org_id, ecosystem, name, purl_name, created_at)
+            VALUES (@packageId, @orgId, @ecosystem, @purlName, @purlName, @now)
+            """,
+            new { packageId, orgId, ecosystem, purlName, now = _clock.GetUtcNow().ToUtcIso() });
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO package_versions
+                (id, package_id, version, purl, blob_key, checksum_sha256, origin, created_at)
+            VALUES
+                (@versionId, @packageId, @version, @purl, @blobKey, @checksumSha256, 'uploaded', @now)
+            """,
+            new
+            {
+                versionId,
+                packageId,
+                version,
+                purl = $"pkg:{ecosystem}/{purlName}@{version}",
+                blobKey = $"registry/{ecosystem}/{purlName}/{version}",
+                checksumSha256,
+                now = _clock.GetUtcNow().ToUtcIso(),
+            });
+    }
+
+    /// <summary>
+    /// Seeds one proxy-plane <c>cache_artifact</c> row and this org's own
+    /// <c>tenant_artifact_access</c> binding to it. <paramref name="tenantContentHash"/> null
+    /// seeds a bound-but-unhashed binding (<c>CacheAccessOrigin.FirstFetchUnidentified</c>'s
+    /// shape) — a real key with no hash, distinct from no binding at all.
+    /// </summary>
+    private async Task InsertCacheArtifactBindingAsync(
+        string orgId, string ecosystem, string name, string version, string filename,
+        string sharedContentHash, string? tenantContentHash)
+    {
+        string cacheArtifactId = Guid.NewGuid().ToString("N");
+        await using var conn = await _fixture.Store.OpenAsync();
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash, first_cached_at, last_accessed_at)
+            VALUES (@cacheArtifactId, @ecosystem, @name, @version, @filename, @blobKey, @sharedContentHash, @now, @now)
+            """,
+            new
+            {
+                cacheArtifactId,
+                ecosystem,
+                name,
+                version,
+                filename,
+                blobKey = $"proxy/{sharedContentHash}",
+                sharedContentHash,
+                now = _clock.GetUtcNow().ToUtcIso(),
+            });
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO tenant_artifact_access (org_id, cache_artifact_id, first_accessed_at, last_accessed_at, content_hash, blob_key)
+            VALUES (@orgId, @cacheArtifactId, @now, @now, @tenantContentHash, @tenantBlobKey)
+            """,
+            new
+            {
+                orgId,
+                cacheArtifactId,
+                tenantContentHash,
+                tenantBlobKey = tenantContentHash is not null ? $"proxy/{tenantContentHash}" : $"go/{orgId}/{name}/{version}",
+                now = _clock.GetUtcNow().ToUtcIso(),
+            });
     }
 
     private async Task<string> InsertVulnerabilityAsync(
@@ -485,7 +569,7 @@ public sealed class SbomExportFidelityTests : IClassFixture<InMemoryDbFixture>
         await LinkAsync(compId, vulnId);
 
         EnableTracker();
-        string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, "vdr", CancellationToken.None))!;
+        string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, SbomExportOptions.Default with { Variant = "vdr" }, CancellationToken.None))!;
         using var doc = JsonDocument.Parse(json);
         var entry = doc.RootElement.GetProperty("vulnerabilities").EnumerateArray().Single();
         var props = PropsOf(entry);
@@ -513,7 +597,7 @@ public sealed class SbomExportFidelityTests : IClassFixture<InMemoryDbFixture>
             orgId, versionId, "pkg:npm/unknown@1.0.0", "npm", "unknown-pkg", "unknown-pkg",
             dependencyKind: null, dependencyScope: "unknown");
 
-        string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, "inventory", CancellationToken.None))!;
+        string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, SbomExportOptions.Default, CancellationToken.None))!;
         using var doc = JsonDocument.Parse(json);
         var components = doc.RootElement.GetProperty("components").EnumerateArray().ToList();
 
@@ -540,7 +624,7 @@ public sealed class SbomExportFidelityTests : IClassFixture<InMemoryDbFixture>
         await InsertComponentAsync(orgId, versionId, "pkg:npm/no-registry-hit@1.0.0", "npm", "no-registry-hit", "no-registry-hit", version: "1.0.0");
         await InsertHostedInstallScriptAsync(orgId, "npm", "has-script", "1.0.0");
 
-        string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, "inventory", CancellationToken.None))!;
+        string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, SbomExportOptions.Default, CancellationToken.None))!;
         using var doc = JsonDocument.Parse(json);
         var components = doc.RootElement.GetProperty("components").EnumerateArray().ToList();
 
@@ -624,7 +708,7 @@ public sealed class SbomExportFidelityTests : IClassFixture<InMemoryDbFixture>
         // Unscannable: OSV publishes no feed for OCI.
         await InsertComponentAsync(orgId, versionId, "pkg:oci/image@1.0.0", "oci", "image", "image");
 
-        string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, "inventory", CancellationToken.None))!;
+        string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, SbomExportOptions.Default, CancellationToken.None))!;
         using var doc = JsonDocument.Parse(json);
         var props = doc.RootElement.GetProperty("metadata").GetProperty("properties").EnumerateArray()
             .ToDictionary(p => p.GetProperty("name").GetString()!, p => p.GetProperty("value").GetString()!, StringComparer.Ordinal);
@@ -643,14 +727,14 @@ public sealed class SbomExportFidelityTests : IClassFixture<InMemoryDbFixture>
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"tracker-{Guid.NewGuid():N}"[..20]);
         var (projectId, versionId) = await SeedProjectVersionAsync(orgId, "app");
 
-        string offJson = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, "inventory", CancellationToken.None))!;
+        string offJson = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, SbomExportOptions.Default, CancellationToken.None))!;
         using var offDoc = JsonDocument.Parse(offJson);
         var offProps = offDoc.RootElement.GetProperty("metadata").GetProperty("properties").EnumerateArray()
             .ToDictionary(p => p.GetProperty("name").GetString()!, p => p.GetProperty("value").GetString()!, StringComparer.Ordinal);
         Assert.Equal("false", offProps[DependablyExportProperties.TrackerConfigured]);
 
         EnableTracker();
-        string onJson = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, "inventory", CancellationToken.None))!;
+        string onJson = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, SbomExportOptions.Default, CancellationToken.None))!;
         using var onDoc = JsonDocument.Parse(onJson);
         var onProps = onDoc.RootElement.GetProperty("metadata").GetProperty("properties").EnumerateArray()
             .ToDictionary(p => p.GetProperty("name").GetString()!, p => p.GetProperty("value").GetString()!, StringComparer.Ordinal);
@@ -695,12 +779,12 @@ public sealed class SbomExportFidelityTests : IClassFixture<InMemoryDbFixture>
                 });
         }
 
-        string vdrJson = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, "vdr", CancellationToken.None))!;
+        string vdrJson = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, SbomExportOptions.Default with { Variant = "vdr" }, CancellationToken.None))!;
         using var vdrDoc = JsonDocument.Parse(vdrJson);
         var vdrEntry = vdrDoc.RootElement.GetProperty("vulnerabilities").EnumerateArray().Single();
         var vdrProps = PropsOf(vdrEntry);
 
-        string vexJson = (await _export.BuildVexDocumentAsync(orgId, projectId, versionId, CancellationToken.None))!;
+        string vexJson = (await _export.BuildVexDocumentAsync(orgId, projectId, versionId, "1.7", CancellationToken.None))!;
         using var vexDoc = JsonDocument.Parse(vexJson);
         var vexEntry = vexDoc.RootElement.GetProperty("vulnerabilities").EnumerateArray().Single();
         var vexProps = PropsOf(vexEntry);
@@ -709,6 +793,417 @@ public sealed class SbomExportFidelityTests : IClassFixture<InMemoryDbFixture>
         // Sanity-check the shared computation actually ran, not two empty sets agreeing vacuously.
         Assert.Equal(EffectivePriority.Act, vdrProps[DependablyExportProperties.Priority]);
         Assert.Equal("true", vdrProps[DependablyExportProperties.KevRansomware]);
+    }
+
+    // ── CISA 2026 minimum elements (#685) ─────────────────────────────────────
+
+    private static JsonElement ComponentsOf(string json) =>
+        JsonDocument.Parse(json).RootElement.GetProperty("components").Clone();
+
+    [Fact]
+    public async Task SbomAuthor_EmitsTheOrgSlug_AsMetadataAuthors()
+    {
+        string slug = $"author-org-{Guid.NewGuid():N}"[..20];
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, slug);
+        var (projectId, versionId) = await SeedProjectVersionAsync(orgId, "app");
+
+        string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, SbomExportOptions.Default, CancellationToken.None))!;
+        var authors = JsonDocument.Parse(json).RootElement.GetProperty("metadata").GetProperty("authors");
+
+        Assert.Equal(slug, Assert.Single(authors.EnumerateArray()).GetProperty("name").GetString());
+    }
+
+    [Fact]
+    public async Task GenerationContext_EmitsPostBuildPhase_PlusANamedObservationEntry()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"lifecycle-{Guid.NewGuid():N}"[..20]);
+        var (projectId, versionId) = await SeedProjectVersionAsync(orgId, "app");
+
+        string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, SbomExportOptions.Default, CancellationToken.None))!;
+        var lifecycles = JsonDocument.Parse(json).RootElement.GetProperty("metadata").GetProperty("lifecycles")
+            .EnumerateArray().ToList();
+
+        Assert.Contains(lifecycles, e => e.TryGetProperty("phase", out var p) && p.GetString() == "post-build");
+        // A bare "build" phase would be a false provenance claim — this registry never observes
+        // a build, only what a producer uploaded plus its own scan.
+        Assert.DoesNotContain(lifecycles, e => e.TryGetProperty("phase", out var p) && p.GetString() == "build");
+        Assert.Contains(lifecycles, e => e.TryGetProperty("name", out _));
+    }
+
+    [Fact]
+    public async Task Tools_NoOriginalSbomRecorded_EmitsDependablyOnly()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"tool-none-{Guid.NewGuid():N}"[..20]);
+        var (projectId, versionId) = await SeedProjectVersionAsync(orgId, "app");
+
+        string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, SbomExportOptions.Default, CancellationToken.None))!;
+        var tools = JsonDocument.Parse(json).RootElement.GetProperty("metadata").GetProperty("tools")
+            .GetProperty("components").EnumerateArray().ToList();
+
+        var only = Assert.Single(tools);
+        Assert.Equal("dependably-community", only.GetProperty("name").GetString());
+    }
+
+    [Fact]
+    public async Task Tools_WithOriginalSbomRecorded_EmitsOriginalFirst_ThenDependably()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"tool-amend-{Guid.NewGuid():N}"[..20]);
+        var (projectId, versionId) = await SeedProjectVersionAsync(orgId, "app");
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO project_documents
+                    (id, org_id, project_version_id, doc_type, format, tool_name, tool_version,
+                     sha256, blob_key, uploaded_at)
+                VALUES (@id, @orgId, @versionId, 'sbom', 'cyclonedx-json', 'cyclonedx-npm', '1.2.3',
+                        'deadbeef', 'blob-key', @now)
+                """,
+                new { id = Guid.NewGuid().ToString("N"), orgId, versionId, now = _clock.GetUtcNow().ToUtcIso() });
+        }
+
+        string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, SbomExportOptions.Default, CancellationToken.None))!;
+        var tools = JsonDocument.Parse(json).RootElement.GetProperty("metadata").GetProperty("tools")
+            .GetProperty("components").EnumerateArray().ToList();
+
+        Assert.Equal(2, tools.Count);
+        Assert.Equal("cyclonedx-npm", tools[0].GetProperty("name").GetString());
+        Assert.Equal("1.2.3", tools[0].GetProperty("version").GetString());
+        Assert.Equal("dependably-community", tools[1].GetProperty("name").GetString());
+    }
+
+    [Fact]
+    public async Task TargetComponent_CarriesNoAdditionalFields_WhenTheDataModelHoldsNone()
+    {
+        // X3: pins the deliberate decision that metadata.component stays exactly
+        // type/bom-ref/name/version — this data model has no producer, hash, licence or
+        // identifier for a project as a whole, so there is nothing more to add.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"x3-{Guid.NewGuid():N}"[..20]);
+        var (projectId, versionId) = await SeedProjectVersionAsync(orgId, "app");
+
+        string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, SbomExportOptions.Default, CancellationToken.None))!;
+        var component = JsonDocument.Parse(json).RootElement.GetProperty("metadata").GetProperty("component");
+
+        var keys = component.EnumerateObject().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal).ToList();
+        Assert.Equal(new[] { "bom-ref", "name", "type", "version" }, keys);
+    }
+
+    [Fact]
+    public async Task Producer_EmitsAsNativePublisherField_DistinctFromAuthor()
+    {
+        // Adversarial twin for the producer/author split: the two columns are seeded with
+        // DIFFERENT values, so a fixture where they happened to agree could not tell an export
+        // that accidentally reads component_author apart from one that correctly reads
+        // component_producer. The exported publisher must be the producer's value, never the
+        // author's.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"producer-{Guid.NewGuid():N}"[..20]);
+        var (projectId, versionId) = await SeedProjectVersionAsync(orgId, "app");
+        await InsertComponentAsync(
+            orgId, versionId, "pkg:npm/left-pad@1.0.0", "npm", "left-pad", "left-pad",
+            componentAuthor: "Ada Lovelace", componentProducer: "Acme Corp");
+
+        string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, SbomExportOptions.Default, CancellationToken.None))!;
+        var component = Assert.Single(ComponentsOf(json).EnumerateArray());
+
+        Assert.Equal("Acme Corp", component.GetProperty("publisher").GetString());
+        // Component Author is not one of the 17 minimum elements at the component level — it is
+        // never emitted, so it cannot be confused for the producer downstream.
+        Assert.False(component.TryGetProperty("author", out _));
+    }
+
+    [Fact]
+    public async Task Producer_Absent_NoPublisherFieldEmitted()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"producer-none-{Guid.NewGuid():N}"[..20]);
+        var (projectId, versionId) = await SeedProjectVersionAsync(orgId, "app");
+        await InsertComponentAsync(orgId, versionId, "pkg:npm/left-pad@1.0.0", "npm", "left-pad", "left-pad");
+
+        string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, SbomExportOptions.Default, CancellationToken.None))!;
+        var component = Assert.Single(ComponentsOf(json).EnumerateArray());
+
+        Assert.False(component.TryGetProperty("publisher", out _));
+    }
+
+    [Fact]
+    public async Task Hashes_AssertedOnly_EmitsNatively_AlgorithmSpellingUnchanged()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"hash-asserted-{Guid.NewGuid():N}"[..20]);
+        var (projectId, versionId) = await SeedProjectVersionAsync(orgId, "app");
+        await InsertComponentAsync(
+            orgId, versionId, "pkg:npm/third-party@1.0.0", "npm", "third-party", "third-party",
+            componentHashes: """[{"alg":"SHA-256","content":"deadbeefcafebabe0011223344556677"}]""");
+
+        string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, SbomExportOptions.Default, CancellationToken.None))!;
+        var component = Assert.Single(ComponentsOf(json).EnumerateArray());
+        var hash = Assert.Single(component.GetProperty("hashes").EnumerateArray());
+
+        // hash-alg is a CLOSED CycloneDX enum. The document's own spelling ("SHA-256") is emitted
+        // byte-for-byte — never rewritten to a different vocabulary's spelling (e.g. IANA's
+        // lowercase "sha-256"), which is not a member of the enum and would make the document
+        // invalid CycloneDX.
+        Assert.Equal("SHA-256", hash.GetProperty("alg").GetString());
+        Assert.Equal("deadbeefcafebabe0011223344556677", hash.GetProperty("content").GetString());
+        // Nothing was displaced, so there is nothing to disclose separately.
+        bool hasProps = component.TryGetProperty("properties", out var props);
+        if (hasProps)
+        {
+            Assert.DoesNotContain(
+                props.EnumerateArray(), p => p.GetProperty("name").GetString() == DependablyExportProperties.AssertedHashes);
+        }
+    }
+
+    [Fact]
+    public async Task Hashes_DeprecatedAlgorithm_PassesThroughVerbatim()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"hash-md5-{Guid.NewGuid():N}"[..20]);
+        var (projectId, versionId) = await SeedProjectVersionAsync(orgId, "app");
+        await InsertComponentAsync(
+            orgId, versionId, "pkg:npm/old-hash@1.0.0", "npm", "old-hash", "old-hash",
+            componentHashes: """[{"alg":"MD5","content":"aabbccddeeff00112233445566778899"}]""");
+
+        string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, SbomExportOptions.Default, CancellationToken.None))!;
+        var component = Assert.Single(ComponentsOf(json).EnumerateArray());
+        var hash = Assert.Single(component.GetProperty("hashes").EnumerateArray());
+
+        // MD5 is deprecated for integrity use but is still a hash-alg enum member, so it round
+        // trips unchanged — this export surface validates hex content, not algorithm strength.
+        Assert.Equal("MD5", hash.GetProperty("alg").GetString());
+    }
+
+    [Fact]
+    public async Task Hashes_NonHexContent_IsDroppedRatherThanExported()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"hash-invalid-{Guid.NewGuid():N}"[..20]);
+        var (projectId, versionId) = await SeedProjectVersionAsync(orgId, "app");
+        await InsertComponentAsync(
+            orgId, versionId, "pkg:npm/bad-hash@1.0.0", "npm", "bad-hash", "bad-hash",
+            componentHashes: """[{"alg":"SHA-256","content":"not-ascii-hex!!"}]""");
+
+        string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, SbomExportOptions.Default, CancellationToken.None))!;
+        var component = Assert.Single(ComponentsOf(json).EnumerateArray());
+
+        Assert.False(component.TryGetProperty("hashes", out _));
+    }
+
+    [Fact]
+    public async Task Hashes_HostedArtifactWithBothOwnAndAssertedDigest_OwnWinsNatively_AssertedDisclosedSeparately()
+    {
+        // The precedence rule this test pins: dependably's own ingest-time SHA-256 is a stronger
+        // claim than a third-party document's assertion (it is computed by this registry over
+        // the actual bytes it serves), so it is the sole entry in the native hashes[] field. The
+        // document's own asserted hash is not dropped — it is disclosed separately, so it is
+        // never mistaken for dependably's claim, and so a future mismatch check has something to
+        // compare against.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"hash-precedence-{Guid.NewGuid():N}"[..20]);
+        var (projectId, versionId) = await SeedProjectVersionAsync(orgId, "app");
+        await InsertComponentAsync(
+            orgId, versionId, "pkg:npm/hosted-pkg@1.0.0", "npm", "hosted-pkg", "hosted-pkg",
+            componentHashes: """[{"alg":"SHA-256","content":"deadbeefcafebabe0011223344556677"}]""");
+        await InsertHostedChecksumAsync(orgId, "npm", "hosted-pkg", "1.0.0", "0123456789abcdef0123456789abcdef");
+
+        string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, SbomExportOptions.Default, CancellationToken.None))!;
+        var component = Assert.Single(ComponentsOf(json).EnumerateArray());
+        var hash = Assert.Single(component.GetProperty("hashes").EnumerateArray());
+
+        // Dependably's own claim uses the CycloneDX enum spelling, same as an asserted one.
+        Assert.Equal("SHA-256", hash.GetProperty("alg").GetString());
+        Assert.Equal("0123456789abcdef0123456789abcdef", hash.GetProperty("content").GetString());
+
+        var props = component.GetProperty("properties").EnumerateArray()
+            .ToDictionary(p => p.GetProperty("name").GetString()!, p => p.GetProperty("value").GetString()!, StringComparer.Ordinal);
+        string disclosed = props[DependablyExportProperties.AssertedHashes];
+        Assert.Contains("SHA-256", disclosed, StringComparison.Ordinal);
+        Assert.Contains("deadbeefcafebabe0011223344556677", disclosed, StringComparison.Ordinal);
+        // The two claims must stay distinguishable: dependably's digest and the document's
+        // asserted digest are DIFFERENT bytes in this fixture, and both survive somewhere in the
+        // document, but never in the same place.
+        Assert.DoesNotContain("0123456789abcdef0123456789abcdef", disclosed, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Hashes_MixedDocument_HostedAndThirdPartyComponentsGetDifferentPrecedence()
+    {
+        // A hosted artefact and a third-party component in the same document — the precedence
+        // rule must apply per-component, not document-wide.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"hash-mixed-{Guid.NewGuid():N}"[..20]);
+        var (projectId, versionId) = await SeedProjectVersionAsync(orgId, "app");
+        await InsertComponentAsync(
+            orgId, versionId, "pkg:npm/hosted-pkg@1.0.0", "npm", "hosted-pkg", "hosted-pkg",
+            componentHashes: """[{"alg":"SHA-256","content":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]""");
+        await InsertHostedChecksumAsync(orgId, "npm", "hosted-pkg", "1.0.0", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        await InsertComponentAsync(
+            orgId, versionId, "pkg:npm/third-party@2.0.0", "npm", "third-party", "third-party",
+            version: "2.0.0",
+            componentHashes: """[{"alg":"SHA-256","content":"cccccccccccccccccccccccccccccccc"}]""");
+
+        string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, SbomExportOptions.Default, CancellationToken.None))!;
+        var components = ComponentsOf(json).EnumerateArray().ToList();
+
+        var hosted = components.Single(c => c.GetProperty("name").GetString() == "hosted-pkg");
+        Assert.Equal("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            Assert.Single(hosted.GetProperty("hashes").EnumerateArray()).GetProperty("content").GetString());
+
+        var thirdParty = components.Single(c => c.GetProperty("name").GetString() == "third-party");
+        Assert.Equal("cccccccccccccccccccccccccccccccc",
+            Assert.Single(thirdParty.GetProperty("hashes").EnumerateArray()).GetProperty("content").GetString());
+        // The third-party component held no digest of dependably's own, so nothing was displaced
+        // and no disclosure property applies to it.
+        bool hasProps = thirdParty.TryGetProperty("properties", out var props);
+        if (hasProps)
+        {
+            Assert.DoesNotContain(
+                props.EnumerateArray(), p => p.GetProperty("name").GetString() == DependablyExportProperties.AssertedHashes);
+        }
+    }
+
+    [Fact]
+    public async Task Hashes_OwnDigestEmptyString_TreatedAsAbsent_AssertedEmittedNativelyInstead()
+    {
+        // A hosted row's checksum_sha256 is nullable but not guaranteed non-empty by any CHECK —
+        // an empty string reaching this method unvalidated would both produce an invalid
+        // "content":"" and wrongly displace the component's genuine asserted hash into the
+        // disclosure property. It must be treated exactly as "no own digest".
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"hash-empty-own-{Guid.NewGuid():N}"[..16]);
+        var (projectId, versionId) = await SeedProjectVersionAsync(orgId, "app");
+        await InsertComponentAsync(
+            orgId, versionId, "pkg:npm/hosted-pkg@1.0.0", "npm", "hosted-pkg", "hosted-pkg",
+            componentHashes: """[{"alg":"SHA-256","content":"deadbeefcafebabe0011223344556677"}]""");
+        await InsertHostedChecksumAsync(orgId, "npm", "hosted-pkg", "1.0.0", "");
+
+        string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, SbomExportOptions.Default, CancellationToken.None))!;
+        var component = Assert.Single(ComponentsOf(json).EnumerateArray());
+        var hash = Assert.Single(component.GetProperty("hashes").EnumerateArray());
+
+        Assert.Equal("deadbeefcafebabe0011223344556677", hash.GetProperty("content").GetString());
+        Assert.NotEqual(string.Empty, hash.GetProperty("content").GetString());
+    }
+
+    [Fact]
+    public async Task Hashes_ProxyPlaneSingleFilename_OwnDigestWinsNatively_AssertedDisclosedSeparately()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"hash-proxy-{Guid.NewGuid():N}"[..20]);
+        var (projectId, versionId) = await SeedProjectVersionAsync(orgId, "app");
+        await InsertComponentAsync(
+            orgId, versionId, "pkg:npm/proxied-pkg@1.0.0", "npm", "proxied-pkg", "proxied-pkg",
+            componentHashes: """[{"alg":"SHA-256","content":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]""");
+        await InsertCacheArtifactBindingAsync(
+            orgId, "npm", "proxied-pkg", "1.0.0", "proxied-pkg-1.0.0.tgz",
+            sharedContentHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            tenantContentHash: "cccccccccccccccccccccccccccccccc");
+
+        string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, SbomExportOptions.Default, CancellationToken.None))!;
+        var component = Assert.Single(ComponentsOf(json).EnumerateArray());
+        var hash = Assert.Single(component.GetProperty("hashes").EnumerateArray());
+
+        // This org's own tenant_artifact_access binding wins — never the shared cache_artifact
+        // row, even though nothing here diverges (see the unhashed-binding test below for the
+        // case where trusting the shared row would misattribute another tenant's digest).
+        Assert.Equal("cccccccccccccccccccccccccccccccc", hash.GetProperty("content").GetString());
+    }
+
+    [Fact]
+    public async Task Hashes_ProxyPlaneMultipleFilenamesForOneCoordinate_EmitsNoOwnDigest()
+    {
+        // cache_artifact is UNIQUE(ecosystem, name, version, filename): Maven maps one purl
+        // coordinate to several filenames (a POM and a JAR), and an SBOM component names the
+        // coordinate, not the file. Two artefacts under this org's own bindings for the SAME
+        // coordinate means there is no principled way to attribute a digest to the component —
+        // the export must emit no own digest, falling back to the document's own assertion.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"hash-multi-{Guid.NewGuid():N}"[..18]);
+        var (projectId, versionId) = await SeedProjectVersionAsync(orgId, "app");
+        await InsertComponentAsync(
+            orgId, versionId, "pkg:maven/com.example/lib@1.0.0", "maven", "com.example:lib", "lib",
+            componentHashes: """[{"alg":"SHA-256","content":"deadbeefcafebabe0011223344556677"}]""");
+        await InsertCacheArtifactBindingAsync(
+            orgId, "maven", "com.example:lib", "1.0.0", "lib-1.0.0.pom",
+            sharedContentHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", tenantContentHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        await InsertCacheArtifactBindingAsync(
+            orgId, "maven", "com.example:lib", "1.0.0", "lib-1.0.0.jar",
+            sharedContentHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", tenantContentHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+
+        string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, SbomExportOptions.Default, CancellationToken.None))!;
+        var component = Assert.Single(ComponentsOf(json).EnumerateArray());
+        var hash = Assert.Single(component.GetProperty("hashes").EnumerateArray());
+
+        // Neither the POM's nor the JAR's digest — the document's own asserted hash, because
+        // dependably could not attribute either artefact to this component.
+        Assert.Equal("deadbeefcafebabe0011223344556677", hash.GetProperty("content").GetString());
+    }
+
+    [Fact]
+    public async Task Hashes_ProxyPlaneUnhashedTenantBinding_TreatedAsNoOwnDigest_NeverReadsSharedRow()
+    {
+        // CacheAccessOrigin.FirstFetchUnidentified binds this org's own blob_key without a hash
+        // (CacheAccessRecorder.BindingFor). The shared cache_artifact row may hold a DIFFERENT
+        // tenant's digest for the coordinate — "unknown" must not read as "same as the shared
+        // row" here any more than an outright mismatch would (CacheArtifactServeFacts.
+        // ContentDivergesFromSharedFacts documents the identical invariant for the serve path).
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"hash-unhashed-{Guid.NewGuid():N}"[..16]);
+        var (projectId, versionId) = await SeedProjectVersionAsync(orgId, "app");
+        await InsertComponentAsync(
+            orgId, versionId, "pkg:golang/example.com/mod@1.0.0", "golang", "example.com/mod", "mod",
+            componentHashes: """[{"alg":"SHA-256","content":"deadbeefcafebabe0011223344556677"}]""");
+        await InsertCacheArtifactBindingAsync(
+            orgId, "golang", "example.com/mod", "1.0.0", "1.0.0.zip",
+            sharedContentHash: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", tenantContentHash: null);
+
+        string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, SbomExportOptions.Default, CancellationToken.None))!;
+        var component = Assert.Single(ComponentsOf(json).EnumerateArray());
+        var hash = Assert.Single(component.GetProperty("hashes").EnumerateArray());
+
+        Assert.Equal("deadbeefcafebabe0011223344556677", hash.GetProperty("content").GetString());
+        Assert.NotEqual("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", hash.GetProperty("content").GetString());
+    }
+
+    [Fact]
+    public async Task Hashes_AssertedAlgNotEnumMemberForSpecVersion_ExcludedFromNative_StillDisclosed()
+    {
+        // Streebog-256 is a hash-alg enum member under 1.7 but NOT under 1.6. No own digest here,
+        // so under 1.6 the asserted entry cannot go native at all — components[].hashes is
+        // omitted rather than carrying a value invalid for this document's own spec version — and
+        // the assertion survives in the disclosure property rather than being silently lost.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"hash-enum16-{Guid.NewGuid():N}"[..16]);
+        var (projectId, versionId) = await SeedProjectVersionAsync(orgId, "app");
+        await InsertComponentAsync(
+            orgId, versionId, "pkg:npm/streebog-pkg@1.0.0", "npm", "streebog-pkg", "streebog-pkg",
+            componentHashes: """[{"alg":"Streebog-256","content":"deadbeefcafebabe0011223344556677"}]""");
+
+        string json16 = (await _export.BuildSbomDocumentAsync(
+            orgId, projectId, versionId, SbomExportOptions.Default with { SpecVersion = "1.6" }, CancellationToken.None))!;
+        var component16 = Assert.Single(ComponentsOf(json16).EnumerateArray());
+        Assert.False(component16.TryGetProperty("hashes", out _));
+        var props16 = component16.GetProperty("properties").EnumerateArray()
+            .ToDictionary(p => p.GetProperty("name").GetString()!, p => p.GetProperty("value").GetString()!, StringComparer.Ordinal);
+        Assert.Contains("Streebog-256", props16[DependablyExportProperties.AssertedHashes], StringComparison.Ordinal);
+
+        string json17 = (await _export.BuildSbomDocumentAsync(
+            orgId, projectId, versionId, SbomExportOptions.Default with { SpecVersion = "1.7" }, CancellationToken.None))!;
+        var component17 = Assert.Single(ComponentsOf(json17).EnumerateArray());
+        var hash17 = Assert.Single(component17.GetProperty("hashes").EnumerateArray());
+        Assert.Equal("Streebog-256", hash17.GetProperty("alg").GetString());
+    }
+
+    [Fact]
+    public async Task Spec16Export_StillCarriesProducerAndHashes_NotGatedBehindSpecVersion()
+    {
+        // #684 branches versionRange/isExternal on specVersion because those two are genuinely
+        // 1.7-only fields. Producer (publisher) and hashes are NOT 1.7-only — they exist since
+        // CycloneDX 1.0 — so a 1.6 export must still carry them; tying them to the 1.7 branch
+        // would be a regression invisible without this test.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"spec16-{Guid.NewGuid():N}"[..20]);
+        var (projectId, versionId) = await SeedProjectVersionAsync(orgId, "app");
+        await InsertComponentAsync(
+            orgId, versionId, "pkg:npm/left-pad@1.0.0", "npm", "left-pad", "left-pad",
+            componentProducer: "Acme Corp",
+            componentHashes: """[{"alg":"SHA-256","content":"deadbeefcafebabe0011223344556677"}]""");
+
+        string json = (await _export.BuildSbomDocumentAsync(
+            orgId, projectId, versionId, SbomExportOptions.Default with { SpecVersion = "1.6" }, CancellationToken.None))!;
+        var component = Assert.Single(ComponentsOf(json).EnumerateArray());
+
+        Assert.Equal("Acme Corp", component.GetProperty("publisher").GetString());
+        Assert.Equal("deadbeefcafebabe0011223344556677",
+            Assert.Single(component.GetProperty("hashes").EnumerateArray()).GetProperty("content").GetString());
     }
 
     // ── Fail-closed discipline, collected ─────────────────────────────────────
@@ -727,7 +1222,9 @@ public sealed class SbomExportFidelityTests : IClassFixture<InMemoryDbFixture>
         {
             _fixture = fixture;
             var tracker = new InstanceVulnTrackerConfig((_, _) => Task.FromResult<string?>(null), _clock);
-            _export = new SbomExportService(_fixture.Store, _clock, new ProjectRepository(_fixture.Store, _clock), tracker);
+            _export = new SbomExportService(
+                _fixture.Store, _clock, new ProjectRepository(_fixture.Store, _clock), tracker,
+                Dependably.Tests.Infrastructure.TestSbomAuthorSigner.Unconfigured(_fixture.Store, _clock));
         }
 
         [Fact]
@@ -770,7 +1267,7 @@ public sealed class SbomExportFidelityTests : IClassFixture<InMemoryDbFixture>
                     new { id = Guid.NewGuid().ToString("N"), compId, vulnId });
             }
 
-            string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, "vdr", CancellationToken.None))!;
+            string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, SbomExportOptions.Default with { Variant = "vdr" }, CancellationToken.None))!;
             using var doc = JsonDocument.Parse(json);
             var entry = doc.RootElement.GetProperty("vulnerabilities").EnumerateArray().Single();
             var props = entry.GetProperty("properties").EnumerateArray()
@@ -822,7 +1319,7 @@ public sealed class SbomExportFidelityTests : IClassFixture<InMemoryDbFixture>
                 """,
                 new { compId, orgId, versionId, now = _clock.GetUtcNow().ToUtcIso() });
 
-            string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, "inventory", CancellationToken.None))!;
+            string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, SbomExportOptions.Default, CancellationToken.None))!;
             using var doc = JsonDocument.Parse(json);
             var component = doc.RootElement.GetProperty("components").EnumerateArray().Single();
 
@@ -839,7 +1336,7 @@ public sealed class SbomExportFidelityTests : IClassFixture<InMemoryDbFixture>
 
     private async Task<JsonElement> ExportSingleVulnAsync(string orgId, string projectId, string versionId)
     {
-        string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, "vdr", CancellationToken.None))!;
+        string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, SbomExportOptions.Default with { Variant = "vdr" }, CancellationToken.None))!;
         using var doc = JsonDocument.Parse(json);
         return doc.RootElement.GetProperty("vulnerabilities").EnumerateArray().Single().Clone();
     }

@@ -36,6 +36,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
     private readonly Dependably.Protocol.Provenance.RpmProvenanceVerifier _rpmProvenance;
     private readonly Dependably.Protocol.Provenance.MavenProvenanceVerifier _mavenProvenance;
     private readonly Dependably.Protocol.Provenance.TerraformProvenanceVerifier _terraformProvenance;
+    private readonly Dependably.Infrastructure.Sbom.SbomSignatureVerifier _sbomSignature;
     private readonly OrgCacheEpochStore _cacheEpoch;
 
     // Dependency-injection constructor; the parameter list is the controller's declared
@@ -57,6 +58,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         Dependably.Protocol.Provenance.RpmProvenanceVerifier rpmProvenance,
         Dependably.Protocol.Provenance.MavenProvenanceVerifier mavenProvenance,
         Dependably.Protocol.Provenance.TerraformProvenanceVerifier terraformProvenance,
+        Dependably.Infrastructure.Sbom.SbomSignatureVerifier sbomSignature,
         OrgCacheEpochStore cacheEpoch)
 #pragma warning restore S107
     {
@@ -74,6 +76,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         _rpmProvenance = rpmProvenance;
         _mavenProvenance = mavenProvenance;
         _terraformProvenance = terraformProvenance;
+        _sbomSignature = sbomSignature;
         _cacheEpoch = cacheEpoch;
     }
 
@@ -399,6 +402,11 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
             // the UI can disable the verify control and explain why when enabling it would be a
             // fail-closed error.
             terraform_signature_keys_configured = await _terraformProvenance.IsConfiguredForAsync(orgId, ct),
+            verify_sbom_signatures = settings?.VerifySbomSignatures ?? "off",
+            // Surfaces whether this org has at least one ('sbom','spki') trust anchor configured
+            // (a supplier's pinned author-signature key), so the UI can disable the verify
+            // control and explain why when enabling it would be a fail-closed error.
+            sbom_signature_keys_configured = await _sbomSignature.IsConfiguredForAsync(orgId, ct),
         });
     }
 
@@ -454,7 +462,8 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                 BlockKevRansomware: blockPolicy.BlockKevRansomware,
                 MaxEpssPercentileTolerance: req.MaxEpssPercentileTolerance,
                 BlockSsvcExploitation: blockPolicy.BlockSsvcExploitation,
-                BlockMaliciousLive: blockPolicy.BlockMaliciousLive),
+                BlockMaliciousLive: blockPolicy.BlockMaliciousLive,
+                VerifySbomSignatures: sigVerify.VerifySbomSignatures),
             ct);
 
         // The block/verify gates and thresholds just persisted can flip the advertised state of
@@ -495,6 +504,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                 verify_rpm_signatures = sigVerify.VerifyRpmSignatures,
                 verify_maven_signatures = sigVerify.VerifyMavenSignatures,
                 verify_terraform_signatures = sigVerify.VerifyTerraformSignatures,
+                verify_sbom_signatures = sigVerify.VerifySbomSignatures,
             }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             actorKind: ActorKinds.User, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
@@ -668,6 +678,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         string? verifyRpmSignatures = req.VerifyRpmSignatures;
         string? verifyMavenSignatures = req.VerifyMavenSignatures;
         string? verifyTerraformSignatures = req.VerifyTerraformSignatures;
+        string? verifySbomSignatures = req.VerifySbomSignatures;
 
         bool npmConfigured = await _npmProvenance.IsConfiguredForAsync(orgId, ct);
         bool nugetConfigured = await _nugetProvenance.IsConfiguredForAsync(orgId, ct);
@@ -675,6 +686,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         bool rpmConfigured = await _rpmProvenance.IsConfiguredForAsync(orgId, ct);
         bool mavenConfigured = await _mavenProvenance.IsConfiguredForAsync(orgId, ct);
         bool terraformConfigured = await _terraformProvenance.IsConfiguredForAsync(orgId, ct);
+        bool sbomConfigured = await _sbomSignature.IsConfiguredForAsync(orgId, ct);
 
         var error = ValidateOneSigVerifyField(verifyNpmSignatures, "verify_npm_signatures",
                         npmConfigured,
@@ -699,11 +711,16 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                     ?? ValidateOneSigVerifyField(verifyTerraformSignatures, "verify_terraform_signatures",
                         terraformConfigured,
                         "Cannot enable Terraform signature verification: no trust anchors are configured. "
-                        + "Add a Terraform PGP trust anchor for this org first.");
+                        + "Add a Terraform PGP trust anchor for this org first.")
+                    ?? ValidateOneSigVerifyField(verifySbomSignatures, "verify_sbom_signatures",
+                        sbomConfigured,
+                        "Cannot enable SBOM author-signature verification: no trust anchors are configured. "
+                        + "Add an sbom SPKI trust anchor for this org first.");
 
         return new SigVerifyResult(
             error, verifyNpmSignatures, verifyNuGetSignatures,
-            verifyPyPiAttestations, verifyRpmSignatures, verifyMavenSignatures, verifyTerraformSignatures);
+            verifyPyPiAttestations, verifyRpmSignatures, verifyMavenSignatures, verifyTerraformSignatures,
+            verifySbomSignatures);
     }
 
     // Return type for ValidateSignatureVerificationFieldsAsync. Bundles the validation error
@@ -728,7 +745,8 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         string? VerifyPyPiAttestations,
         string? VerifyRpmSignatures,
         string? VerifyMavenSignatures,
-        string? VerifyTerraformSignatures);
+        string? VerifyTerraformSignatures,
+        string? VerifySbomSignatures);
 
     // Validates one sig-verify field: rejects values outside the allowed enum and, when
     // the value is non-off, rejects if the operator trust anchor is not configured. An omitted

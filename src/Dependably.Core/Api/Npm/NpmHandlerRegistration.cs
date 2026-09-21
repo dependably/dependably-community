@@ -18,6 +18,7 @@ internal static class NpmHandlerRegistration
     internal static void AddNpmHandlers(this IServiceCollection services)
     {
         services.AddScoped<NpmPackumentHandler>();
+        services.AddScoped<NpmFirstFetchMetadataReader>();
         services.AddScoped<NpmTarballHandler>();
         services.AddScoped<NpmDistTagsHandler>();
         services.AddScoped<NpmAuditHandler>();

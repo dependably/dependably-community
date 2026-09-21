@@ -27,7 +27,7 @@ public sealed class TrustAnchorPairsTests
     }
 
     [Fact]
-    public void RegisteredSet_IsTheNineKnownPairs()
+    public void RegisteredSet_IsTheTenKnownPairs()
     {
         // Spelled out rather than derived, so widening the accepted surface is a deliberate edit
         // to a test that names every pair, not a silently-passing list length.
@@ -43,6 +43,9 @@ public sealed class TrustAnchorPairsTests
                 ("pypi", "trusted_publisher"),
                 ("pypi", "rekor_key"),
                 ("apk", "rsa"),
+                // "sbom" is a trust namespace (a supplier's CycloneDX author-signature key), not
+                // a proxyable ecosystem — ADR-sbom-author-signature.
+                ("sbom", "spki"),
             },
             TrustAnchorPairs.Registered.ToHashSet());
     }

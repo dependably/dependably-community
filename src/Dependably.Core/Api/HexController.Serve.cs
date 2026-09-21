@@ -39,38 +39,42 @@ public sealed partial class HexController
         // same rule the index applies.
         var pkg = await _svc.Packages.GetByPurlNameAsync(orgId, Ecosystem, name, ct);
         var hosted = pkg is null ? null : await _svc.Packages.GetVersionAsync(pkg.Id, version, ct);
-        if (hosted is not null && hosted.Origin != "proxy")
-        {
-            return await ServeHostedTarballAsync(ctx, hosted, ct);
-        }
+        return hosted is not null && hosted.Origin != "proxy"
+            ? await ServeHostedTarballAsync(ctx, hosted, ct)
+            : (await ServeCachedPlaneAsync(ctx, ct) ?? await ServeMissPlaneAsync(ctx, settings, ct));
+    }
 
-        // Cache hit on the global plane.
-        var cached = await _svc.CacheArtifacts.GetServeFactsByCoordinateAsync(orgId, Ecosystem, name, version, ctx.Filename, ct);
-        if (cached is not null)
-        {
-            if (!await _svc.ClaimResolver.IsProxyFetchAllowedAsync(orgId, "hex", name, ct))
-            {
-                return NotFound();
-            }
+    /// <summary>
+    /// The cache plane's arm, or null when the caller should fall through to the miss path —
+    /// either this coordinate has no cache row, or it has one whose blob is gone, which is
+    /// re-fetched rather than served as a 404 for an artifact this org is entitled to.
+    /// </summary>
+    private async Task<IActionResult?> ServeCachedPlaneAsync(HexServeContext ctx, CancellationToken ct)
+    {
+        var cached = await _svc.CacheArtifacts.GetServeFactsByCoordinateAsync(
+            ctx.OrgId, Ecosystem, ctx.Name, ctx.Version, ctx.Filename, ct);
+        return cached is null
+            ? null
+            : await _svc.ClaimResolver.IsProxyFetchAllowedAsync(ctx.OrgId, "hex", ctx.Name, ct)
+                ? await ServeCachedTarballAsync(ctx, cached, ct)
+                : NotFound();
+    }
 
-            // A null result is a cache row whose blob is gone: fall through to the miss path and
-            // re-fetch rather than serving a 404 for an artifact this org is entitled to.
-            if (await ServeCachedTarballAsync(ctx, cached, ct) is { } hit)
-            {
-                return hit;
-            }
-        }
-
-        // Cache miss: the same admission rules the index applies decide whether the upstream is
-        // consulted at all.
+    /// <summary>
+    /// The miss path: the same admission rules the index applies decide whether the upstream is
+    /// consulted at all, then the named release is resolved and proxied.
+    /// </summary>
+    private async Task<IActionResult> ServeMissPlaneAsync(
+        HexServeContext ctx, OrgSettings? settings, CancellationToken ct)
+    {
         if (settings is null or { ProxyPassthroughEffective: false }
-            || await _svc.Reserved.IsReservedAsync(orgId, Ecosystem, name, ct)
-            || !await _svc.ClaimResolver.IsProxyFetchAllowedAsync(orgId, "hex", name, ct))
+            || await _svc.Reserved.IsReservedAsync(ctx.OrgId, Ecosystem, ctx.Name, ct)
+            || !await _svc.ClaimResolver.IsProxyFetchAllowedAsync(ctx.OrgId, "hex", ctx.Name, ct))
         {
             return NotFound();
         }
 
-        var upstream = await FetchUpstreamPackageAsync(orgId, name, ct);
+        var upstream = await FetchUpstreamPackageAsync(ctx.OrgId, ctx.Name, ct);
         if (upstream.Package is null || upstream.Source is null)
         {
             return upstream.Outcome == UpstreamOutcome.Fault
@@ -78,7 +82,7 @@ public sealed partial class HexController
                 : NotFound();
         }
 
-        var release = upstream.Package.Releases.FirstOrDefault(r => r.Version == version);
+        var release = upstream.Package.Releases.FirstOrDefault(r => r.Version == ctx.Version);
         return release is null
             ? NotFound()
             : await ProxyTarballAsync(ctx, release, upstream.Source, settings, ct);
@@ -156,7 +160,8 @@ public sealed partial class HexController
             return fetchFailure;
         }
 
-        var (result, recordFailure) = await RecordProxyFetchAsync(ctx, release, source, settings, fetched!, downloadUrl, checksum, ct);
+        var (result, recordFailure) = await RecordProxyFetchAsync(
+            ctx, release, source, settings, fetched!, new HexTarballFetchTarget(downloadUrl, checksum), ct);
         if (recordFailure is not null)
         {
             return recordFailure;
@@ -211,10 +216,18 @@ public sealed partial class HexController
     /// blob is deleted on every refusal and on every throw, so a blob never outlives the catalogue
     /// row that would have made it discoverable.
     /// </summary>
+    /// <summary>
+    /// Where one tarball's bytes were fetched from, and the checksum out of the upstream's signed
+    /// index that admits them — the pair every arm of the fetch path carries together.
+    /// </summary>
+    private readonly record struct HexTarballFetchTarget(string DownloadUrl, ChecksumSpec Checksum);
+
     private async Task<(ProxyFetchResult? Result, IActionResult? Failure)> RecordProxyFetchAsync(
         HexServeContext ctx, HexRelease release, UpstreamSource source, OrgSettings settings,
-        UpstreamFetchResult fetched, string downloadUrl, ChecksumSpec checksum, CancellationToken ct)
+        UpstreamFetchResult fetched, HexTarballFetchTarget target, CancellationToken ct)
     {
+        var (downloadUrl, checksum) = target;
+
         var blob = new BlobHandle(fetched.BlobKey, fetched.Sha256Hex, fetched.SizeBytes,
             async openCt => await _svc.Blobs.GetAsync(BlobKeys.StoreKey(fetched.BlobKey), openCt)
                 ?? throw new InvalidOperationException($"Blob {fetched.BlobKey} vanished between fetch and serve."));

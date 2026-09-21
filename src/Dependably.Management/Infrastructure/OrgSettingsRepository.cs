@@ -197,7 +197,7 @@ public sealed class OrgSettingsRepository
                 block_kev_ransomware, max_epss_percentile_tolerance,
                 block_install_scripts, verify_npm_signatures, verify_nuget_signatures,
                 verify_pypi_attestations, verify_rpm_signatures, verify_maven_signatures,
-                verify_terraform_signatures, block_revoked, block_ssvc_exploitation)
+                verify_terraform_signatures, block_revoked, block_ssvc_exploitation, verify_sbom_signatures)
             VALUES (
                 @orgId, COALESCE(@proxyEnabled, 1), COALESCE(@maxScore, 10.0), @minAgeHours,
                 COALESCE(@blockDeprecated, 'off'), COALESCE(@blockMalicious, 'block'),
@@ -208,7 +208,8 @@ public sealed class OrgSettingsRepository
                 COALESCE(@verifyNpmSignatures, 'off'), COALESCE(@verifyNuGetSignatures, 'off'),
                 COALESCE(@verifyPyPiAttestations, 'off'), COALESCE(@verifyRpmSignatures, 'off'),
                 COALESCE(@verifyMavenSignatures, 'off'), COALESCE(@verifyTerraformSignatures, 'off'),
-                COALESCE(@blockRevoked, 'warn'), COALESCE(@blockSsvcExploitation, 'off'))
+                COALESCE(@blockRevoked, 'warn'), COALESCE(@blockSsvcExploitation, 'off'),
+                COALESCE(@verifySbomSignatures, 'off'))
             ON CONFLICT(org_id) DO UPDATE SET
                 proxy_passthrough_enabled = COALESCE(@proxyEnabled, proxy_passthrough_enabled),
                 max_osv_score_tolerance   = COALESCE(@maxScore, max_osv_score_tolerance),
@@ -229,7 +230,8 @@ public sealed class OrgSettingsRepository
                 verify_pypi_attestations  = COALESCE(@verifyPyPiAttestations, verify_pypi_attestations),
                 verify_rpm_signatures     = COALESCE(@verifyRpmSignatures, verify_rpm_signatures),
                 verify_maven_signatures   = COALESCE(@verifyMavenSignatures, verify_maven_signatures),
-                verify_terraform_signatures = COALESCE(@verifyTerraformSignatures, verify_terraform_signatures)
+                verify_terraform_signatures = COALESCE(@verifyTerraformSignatures, verify_terraform_signatures),
+                verify_sbom_signatures    = COALESCE(@verifySbomSignatures, verify_sbom_signatures)
             """,
             new
             {
@@ -257,6 +259,7 @@ public sealed class OrgSettingsRepository
                 verifyRpmSignatures = policy.VerifyRpmSignatures,
                 verifyMavenSignatures = policy.VerifyMavenSignatures,
                 verifyTerraformSignatures = policy.VerifyTerraformSignatures,
+                verifySbomSignatures = policy.VerifySbomSignatures,
             });
         _orgs?.InvalidateSettingsCache(orgId);
     }
@@ -341,4 +344,9 @@ public sealed record ProxyPolicySettings(
     Optional<double?> MaxEpssPercentileTolerance = default,
     string? BlockSsvcExploitation = null,
     // Appended for the same reason as BlockKevRansomware above.
-    string? BlockMaliciousLive = null);
+    string? BlockMaliciousLive = null,
+    // Appended for the same reason as BlockKevRansomware above. Not an artefact-provenance gate
+    // like its six siblings — it governs SBOM upload admission, not a proxy fetch — but it is
+    // wired through this same endpoint/record because ADR-sbom-author-signature says to reuse
+    // the verify_*_signatures fail-closed-enablement mechanism this controller already applies.
+    string? VerifySbomSignatures = null);

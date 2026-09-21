@@ -583,7 +583,9 @@ public static class ErlangTermText
         }
 
         [SuppressMessage("Major Code Smell", "S3776:Cognitive Complexity of methods should not be too high",
-            Justification = "A hand-written recursive-descent scanner: the branches are the grammar's own alternatives over a shared _position cursor, and every extraction would either thread that cursor through a helper or split one production across two methods.")]
+            Justification = "A hand-written recursive-descent scanner: the branches are the grammar's own alternatives over a shared "
+                + "_position cursor, and every extraction would either thread that cursor through a helper or split one "
+                + "production across two methods.")]
         private IReadOnlyDictionary<object, object?> ParseMap(int depth)
         {
             Advance('#');
@@ -703,7 +705,9 @@ public static class ErlangTermText
             _position + 1 < _text.Length && _text[_position] == '>' && _text[_position + 1] == '>';
 
         [SuppressMessage("Major Code Smell", "S3776:Cognitive Complexity of methods should not be too high",
-            Justification = "A hand-written recursive-descent scanner: the branches are the grammar's own alternatives over a shared _position cursor, and every extraction would either thread that cursor through a helper or split one production across two methods.")]
+            Justification = "A hand-written recursive-descent scanner: the branches are the grammar's own alternatives over a shared "
+                + "_position cursor, and every extraction would either thread that cursor through a helper or split one "
+                + "production across two methods.")]
         private void ParseBinarySegment(List<byte> bytes)
         {
             if (AtEnd)
@@ -1057,7 +1061,9 @@ public static class ErlangTermText
         }
 
         [SuppressMessage("Major Code Smell", "S3776:Cognitive Complexity of methods should not be too high",
-            Justification = "A hand-written recursive-descent scanner: the branches are the grammar's own alternatives over a shared _position cursor, and every extraction would either thread that cursor through a helper or split one production across two methods.")]
+            Justification = "A hand-written recursive-descent scanner: the branches are the grammar's own alternatives over a shared "
+                + "_position cursor, and every extraction would either thread that cursor through a helper or split one "
+                + "production across two methods.")]
         private object ParseFloat(int start)
         {
             _position++;

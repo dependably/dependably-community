@@ -21,8 +21,10 @@ public sealed class TrustAnchorRepository
     }
 
     /// <summary>The set of ecosystems that support per-org trust anchors.</summary>
+    // "sbom" is a trust namespace (a supplier's CycloneDX author-signature key), not a
+    // proxyable package ecosystem — see TrustAnchorPairs for why the distinction is safe.
     public static readonly IReadOnlyList<string> SupportedEcosystems =
-        ["rpm", "npm", "nuget", "pypi", "maven", "apk", "terraform"];
+        ["rpm", "npm", "nuget", "pypi", "maven", "apk", "terraform", "sbom"];
 
     /// <summary>Allowed anchor_kind discriminator values.</summary>
     public static readonly IReadOnlyList<string> AllowedAnchorKinds =

@@ -358,6 +358,42 @@ public sealed class OciProtocolExtendedTests : IClassFixture<DependablyFactory>,
         Assert.Equal(HttpStatusCode.NotFound, del.StatusCode);
     }
 
+    /// <summary>
+    /// A tag delete records the mapping it removed — the digest the tag pointed at — as a
+    /// canonical PURL. There is no valid tag-only PURL, so the audit row has to resolve the
+    /// digest; and it must resolve the digest of the row actually deleted, which is why the
+    /// handler deletes and captures in one `DELETE … RETURNING` rather than reading first.
+    /// </summary>
+    [Fact]
+    public async Task DeleteManifest_ByTag_AuditRowNamesTheDigestCanonically()
+    {
+        string token = await _factory.CreateToken("push");
+        using var client = _factory.CreateClientWithBearer(token);
+
+        string repo = $"team/audtag-{Guid.NewGuid():N}"[..20];
+        (string digest, _) = await PushImageToRepoReturnDigestAsync(client, repo, "gone-soon");
+
+        using (var del = await client.SendAsync(
+            new HttpRequestMessage(HttpMethod.Delete, $"/v2/{repo}/manifests/gone-soon")))
+        {
+            Assert.Equal(HttpStatusCode.NoContent, del.StatusCode);
+        }
+
+        // Activity rows go through the async batching writer — drain before asserting.
+        await _factory.Services.GetRequiredService<ActivityWriterHostedService>().WaitForIdleAsync();
+
+        string expected = Dependably.Protocol.PurlNormalizer.Oci(repo, digest);
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        var purls = (await Dapper.SqlMapper.QueryAsync<string>(conn,
+            "SELECT purl FROM activity WHERE event_type = 'delete' AND ecosystem = 'oci'")).ToList();
+
+        // The canonical spelling, not the tag-coordinate string the handler used to write, and
+        // not a purl naming the tag instead of the digest.
+        Assert.Contains(expected, purls);
+        Assert.DoesNotContain(purls, p => p.Contains(":gone-soon", StringComparison.Ordinal));
+    }
+
     // ── DELETE blob → 405 ─────────────────────────────────────────────────────
 
     [Fact]

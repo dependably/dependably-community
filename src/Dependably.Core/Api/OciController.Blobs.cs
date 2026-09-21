@@ -65,7 +65,9 @@ public sealed partial class OciController
             return null;
         }
 
-        string purl = $"pkg:oci/{name}@{digest}";
+        // Canonical purl-spec form via PurlNormalizer — the single source of package identity.
+        // No tag: this route is digest-addressed by definition.
+        string purl = PurlNormalizer.Oci(name, digest);
 
         // Block gate before any bytes and before any URL. A manifest is reachable by its digest
         // through this route too, so the license arm runs here on exactly the same terms it runs
@@ -222,7 +224,7 @@ public sealed partial class OciController
                 return StatusCode(StatusCodes.Status416RangeNotSatisfiable);
             }
 
-            await RecordBlobDownloadAsync(orgId, $"pkg:oci/{name}@{digest}", token, ct);
+            await RecordBlobDownloadAsync(orgId, PurlNormalizer.Oci(name, digest), token, ct);
 
             Response.Headers.ContentRange = $"bytes {ranged.From}-{ranged.To}/{ranged.TotalLength}";
             Response.Headers["Content-Length"] = (ranged.To - ranged.From + 1).ToString();
@@ -260,6 +262,10 @@ public sealed partial class OciController
             {
                 return AirGappedBlobMiss(name, digest);
             }
+            catch (OciBlobRefusedException ex)
+            {
+                return BlobRefused(ex, name, digest, token);
+            }
             catch (Exception ex) when (IsUpstreamFailure(ex, ct))
             {
                 return UpstreamUnreachable(ex, name, digest);
@@ -288,6 +294,10 @@ public sealed partial class OciController
         {
             return AirGappedBlobMiss(name, digest);
         }
+        catch (OciBlobRefusedException ex)
+        {
+            return BlobRefused(ex, name, digest, token);
+        }
         catch (Exception ex) when (IsUpstreamFailure(ex, ct))
         {
             return UpstreamUnreachable(ex, name, digest);
@@ -304,9 +314,66 @@ public sealed partial class OciController
         Response.ContentType = upstreamResult.MediaType;
         Response.Headers.ETag = $"\"{digest}\"";
         Response.Headers.CacheControl = "private, max-age=31536000, immutable";
-        await _svc.Audit.LogActivityAsync(orgId, "oci", $"pkg:oci/{name}@{digest}", "download",
+        await _svc.Audit.LogActivityAsync(orgId, "oci", PurlNormalizer.Oci(name, digest), "download",
             actorId: token?.AuditActorId, actorKind: token?.ActorKind, actorLabel: token?.AuditActorLabel, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         return File(upstreamResult.Content, upstreamResult.MediaType);
+    }
+
+    /// <summary>
+    /// The answer for a blob this registry declines to proxy, as distinct from one it does not have.
+    ///
+    /// <para>
+    /// The status is the substance of the fix. Both refusals — a layer over
+    /// <c>Oci:MaxBlobProxyBytes</c>, and bytes that did not hash to the digest they were
+    /// requested under — used to arrive as <c>404 BLOB_UNKNOWN</c>, which asserts the content
+    /// does not exist. It does exist; upstream was handing it over. A client acts on that and
+    /// stops, and an operator reads "blob unknown" and concludes the cache is corrupt, which is
+    /// the wrong place to look for either fault. 5xx is the honest class: the content is real and
+    /// this registry did not deliver it. <see cref="OciErrorCode.UNAVAILABLE"/> with 502 is the
+    /// posture this controller already takes for an upstream it could not reach
+    /// (<c>UpstreamUnreachable</c>), so a refusal reuses it rather than minting a second
+    /// vocabulary for the same "not delivered, not absent" claim.
+    /// </para>
+    ///
+    /// <para>
+    /// The status is unconditional; the explanation is not. <c>/v2/</c> blob reads are reachable
+    /// without a credential whenever the org enables anonymous pull, and the upstream host is
+    /// supply-chain topology — the same reason <c>ManifestUnknownAsync</c> withholds it. So an
+    /// anonymous caller gets the class of answer and nothing that names where this org fetches
+    /// from, while a caller holding a token for the org gets the fault, the host, and the
+    /// setting to change. Returning 502 to everyone discloses nothing new: the unreachable-upstream
+    /// path on this same route already answers 502 anonymously, so the status was never the
+    /// signal that a route exists.
+    /// </para>
+    /// </summary>
+    private ObjectResult BlobRefused(
+        OciBlobRefusedException ex, string name, string digest, TokenRecord? token)
+    {
+        bool authenticated = token is not null;
+
+        _logger.LogWarning(
+            "OCI blob refused for {Repository}/{Digest}: {Fault}. {Reason}",
+            name, digest, ex.Fault, ex.Message);
+
+        string message = $"Blob {digest} could not be served for repository '{name}'.";
+        if (authenticated)
+        {
+            message += " " + ex.OperatorMessage;
+        }
+
+        // Structured form for tooling, authenticated callers only — the shape itself would
+        // otherwise separate the two faults that the anonymous prose deliberately does not.
+        object? detail = authenticated
+            ? new Dictionary<string, object?>
+            {
+                ["repository"] = name,
+                ["digest"] = digest,
+                ["upstream"] = ex.UpstreamHost,
+                ["fault"] = ex.Fault,
+            }
+            : null;
+
+        return OciError(StatusCodes.Status502BadGateway, OciErrorCode.UNAVAILABLE, message, detail);
     }
 
     /// <summary>The blob counterpart of <c>AirGappedManifestMiss</c> — see that method for why 404.</summary>

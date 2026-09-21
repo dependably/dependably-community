@@ -86,7 +86,7 @@ public sealed class SiemController : ControllerBase
     ///
     /// Item fields: orgSlug is projected beside orgId so an alert names the tenant rather than a
     /// 32-hex id. actorEmail is intentionally always null on this surface — see the GDPR note in
-    /// CONTRIBUTING.md → "Auth pull feed".
+    /// OPERATIONS.md → "Auth pull feed".
     ///
     /// JSON envelope fields beyond items/next_cursor:
     ///   latest_event_at — millisecond-precision timestamp of the most recent audit_log row
@@ -545,9 +545,9 @@ public sealed class SiemController : ControllerBase
             {
                 items,
                 next_cursor = nextCursor,
-                since = window.since,
-                until = window.until,
-                lag_seconds = window.lag_seconds,
+                window.since,
+                window.until,
+                window.lag_seconds,
             });
     }
 
@@ -719,10 +719,27 @@ public sealed class SiemController : ControllerBase
         }
 
         // Token path — Bearer carrying read:audit.
+        //
+        // Three states, not two. Folding "no token" and "valid token without read:audit" into
+        // one 401 cost more than tidiness: a resolved credential refused here wrote no audit
+        // row at all, because RecordCapabilityDenied is what every other capability gate calls
+        // (Hex, Cargo, OCI, Maven, npm, PyPI) and this branch called nothing. The audit feed
+        // was the one surface blind to a credential probing the audit feed.
         var token = await Request.ResolveTokenAsync(_tokens, ct);
-        return token is not null && token.HasCapability(Capabilities.ReadAudit)
-            ? new SiemAuthResult(false, token.OrgId, null)
-            : new SiemAuthResult(false, null, Unauthorized(new { detail = "Authentication required. Provide a JWT or a Bearer token with read:audit capability." }));
+        if (token is null)
+        {
+            return new SiemAuthResult(false, null, Unauthorized(new { detail = "Authentication required. Provide a JWT or a Bearer token with read:audit capability." }));
+        }
+
+        if (!token.HasCapability(Capabilities.ReadAudit))
+        {
+            AuthDenialRecorder.RecordCapabilityDenied(HttpContext, token, Capabilities.ReadAudit, orgId: token.OrgId);
+            return new SiemAuthResult(false, null,
+                new ObjectResult(new { detail = "read:audit capability required." })
+                { StatusCode = StatusCodes.Status403Forbidden });
+        }
+
+        return new SiemAuthResult(false, token.OrgId, null);
     }
 
     // ── Output formatters ────────────────────────────────────────────────────
@@ -784,52 +801,12 @@ public sealed class SiemController : ControllerBase
     private ContentResult CefResult(
         IReadOnlyList<SiemCefRow> items, string? nextCursor, DateTimeOffset? windowUntil = null)
     {
-        // CEF:Version|Device Vendor|Device Product|Device Version|SignatureID|Name|Severity|Extension
         var sb = new StringBuilder();
         foreach (var item in items)
         {
-            string sig = CefFormat.Escape(item.Action);
-            string name = CefFormat.FriendlyName(item.Action);
-            int sev = CefFormat.Severity(item.Action);
-            var ext = new StringBuilder();
-            ext.Append($"rt={item.CreatedAt:yyyyMMddHHmmss.fffZ}");
-            if (item.ActorId is not null)
-            {
-                ext.Append($" suid={CefFormat.Escape(item.ActorId)}");
-            }
-
-            if (item.SourceIp is not null)
-            {
-                ext.Append($" src={CefFormat.Escape(item.SourceIp)}");
-            }
-
-            if (item.OrgId is not null)
-            {
-                ext.Append($" cs1={CefFormat.Escape(item.OrgId)} cs1Label=OrgId");
-            }
-
-            if (item.Ecosystem is not null)
-            {
-                ext.Append($" cs2={CefFormat.Escape(item.Ecosystem)} cs2Label=Ecosystem");
-            }
-
-            if (item.Purl is not null)
-            {
-                ext.Append($" cs3={CefFormat.Escape(item.Purl)} cs3Label=Purl");
-            }
-
-            if (item.OrgSlug is not null)
-            {
-                ext.Append($" cs4={CefFormat.Escape(item.OrgSlug)} cs4Label=OrgSlug");
-            }
-
-            if (item.Detail is not null)
-            {
-                ext.Append($" msg={CefFormat.Escape(item.Detail)}");
-            }
-
-            sb.AppendLine($"CEF:0|Dependably|dependably|1.0|{sig}|{name}|{sev}|{ext}");
+            sb.AppendLine(CefLine(item));
         }
+
         if (windowUntil is not null)
         {
             sb.AppendLine($"# window_until={windowUntil.Value.ToUtcIsoMillis()}");
@@ -841,5 +818,43 @@ public sealed class SiemController : ControllerBase
         }
 
         return Content(sb.ToString(), "application/x-cef", Encoding.UTF8);
+    }
+
+    // CEF:Version|Device Vendor|Device Product|Device Version|SignatureID|Name|Severity|Extension
+    private static string CefLine(SiemCefRow item) =>
+        $"CEF:0|Dependably|dependably|1.0|{CefFormat.Escape(item.Action)}"
+        + $"|{CefFormat.FriendlyName(item.Action)}|{CefFormat.Severity(item.Action)}|{CefExtension(item)}";
+
+    /// <summary>
+    /// The CEF extension field. Every optional column is omitted outright when null rather than
+    /// written empty, which is what keeps a collector's field-presence checks meaningful; the
+    /// cs1-cs4 slots and their Label pairs are positional and must stay in this order.
+    /// </summary>
+    private static string CefExtension(SiemCefRow item)
+    {
+        var ext = new StringBuilder();
+        ext.Append($"rt={item.CreatedAt:yyyyMMddHHmmss.fffZ}");
+        AppendIfPresent(ext, " suid=", item.ActorId);
+        AppendIfPresent(ext, " src=", item.SourceIp);
+        AppendIfPresent(ext, " cs1=", item.OrgId, " cs1Label=OrgId");
+        AppendIfPresent(ext, " cs2=", item.Ecosystem, " cs2Label=Ecosystem");
+        AppendIfPresent(ext, " cs3=", item.Purl, " cs3Label=Purl");
+        AppendIfPresent(ext, " cs4=", item.OrgSlug, " cs4Label=OrgSlug");
+        AppendIfPresent(ext, " msg=", item.Detail);
+        return ext.ToString();
+    }
+
+    private static void AppendIfPresent(StringBuilder ext, string prefix, string? value, string? suffix = null)
+    {
+        if (value is null)
+        {
+            return;
+        }
+
+        ext.Append(prefix).Append(CefFormat.Escape(value));
+        if (suffix is not null)
+        {
+            ext.Append(suffix);
+        }
     }
 }

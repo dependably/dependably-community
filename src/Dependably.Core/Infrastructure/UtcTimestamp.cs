@@ -49,7 +49,18 @@ public static class UtcTimestamp
     /// </summary>
     public const string MillisecondFormat = "yyyy-MM-ddTHH:mm:ss.fffZ";
 
-    /// <summary>Formats an instant as canonical UTC ISO-8601, converting from any offset.</summary>
+    /// <summary>
+    /// Formats an instant as canonical UTC ISO-8601, converting from any offset.
+    ///
+    /// <para>CISA D6c: this shape (<c>2026-07-25T12:00:00Z</c>) already conforms to RFC 9557.
+    /// RFC 9557 extends RFC 3339's <c>date-time</c> with an OPTIONAL bracketed suffix
+    /// (<c>[America/New_York]</c>, <c>[u-ca=hebrew]</c>); it does not require one, and a bare
+    /// RFC 3339 UTC instant with a <c>Z</c> offset — exactly what this method emits — is a
+    /// syntactically valid RFC 9557 timestamp on its own. No format change is needed; adding a
+    /// bracketed suffix would only be meaningful if this codebase tracked a non-UTC IANA zone per
+    /// timestamp, which — per this type's own class doc comment — it deliberately does not: every
+    /// stored instant is normalized to UTC first.</para>
+    /// </summary>
     public static string ToUtcIso(this DateTimeOffset instant) =>
         instant.ToUniversalTime().ToString(Format, CultureInfo.InvariantCulture);
 

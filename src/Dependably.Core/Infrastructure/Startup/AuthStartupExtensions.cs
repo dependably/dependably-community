@@ -522,45 +522,33 @@ internal static class RateLimitDenialAuditRecorder
     /// management-partitioned policy, and <c>import</c>/<c>sbom-upload</c> both route under
     /// <c>/api/v1/</c> while still keying on <see cref="RateLimitPartitions.GetPartitionKey"/>.
     /// </summary>
-    private static string ResolvePartition(HttpContext ctx, string policy, int ipv6Prefix, bool useRedis)
-    {
-        switch (policy)
+    private static string ResolvePartition(HttpContext ctx, string policy, int ipv6Prefix, bool useRedis) =>
+        policy switch
         {
             // AddDownloadPushLimiters: download/push/import/sbom-upload all key on the validated
             // sub claim, falling back to IP — never the raw Authorization header.
-            case "download":
-            case "push":
-            case "import":
-            case "sbom-upload":
-                return RateLimitPartitions.GetPartitionKey(ctx, ipv6Prefix);
+            "download" or "push" or "import" or "sbom-upload" =>
+                RateLimitPartitions.GetPartitionKey(ctx, ipv6Prefix),
 
             // AddRescanLimiter deliberately keys like the management GlobalLimiter — token hash,
             // then user sub, then IP.
-            case "rescan":
-                return RateLimitPartitions.GetManagementPartitionKey(ctx, ipv6Prefix);
+            "rescan" => RateLimitPartitions.GetManagementPartitionKey(ctx, ipv6Prefix),
 
             // AddMetadataLimiter and AddAnonymousProbeLimiter are always in-process, keyed on the
             // bare source IP with no "ip:" prefix — authentication never changes their bucket.
-            case "metadata":
-            case "anon":
-                return ctx.GetRateLimitPartitionIp(ipv6Prefix) ?? "unknown";
+            "metadata" or "anon" => ctx.GetRateLimitPartitionIp(ipv6Prefix) ?? "unknown",
 
             // AddInProcessLimiters buckets login/invite/token-create on the bare source IP, same
             // shape as metadata/anon — UNLESS REDIS_CONNECTION_STRING is configured, in which case
             // RedisRateLimitPolicy.GetPartition takes over and keys on "{ip}:{policyName}".
-            case "login":
-            case "invite":
-            case "token-create":
-                return useRedis
-                    ? $"{ctx.GetRateLimitPartitionIp(ipv6Prefix) ?? "unknown"}:{policy}"
-                    : ctx.GetRateLimitPartitionIp(ipv6Prefix) ?? "unknown";
+            "login" or "invite" or "token-create" => useRedis
+                ? $"{ctx.GetRateLimitPartitionIp(ipv6Prefix) ?? "unknown"}:{policy}"
+                : ctx.GetRateLimitPartitionIp(ipv6Prefix) ?? "unknown",
 
             // No named [EnableRateLimiting] policy rejected this request (policy reads "unknown")
             // — the GlobalLimiter did, via AddManagementApiLimiter's own two live branches.
-            default:
-                return RateLimitPartitions.ClassifyGlobalScope(ctx) == RateLimitPartitions.GlobalScope.ManagementApi
-                    ? RateLimitPartitions.GetManagementPartitionKey(ctx, ipv6Prefix)
-                    : "proto:" + (ctx.GetRateLimitPartitionIp(ipv6Prefix) ?? "unknown");
-        }
-    }
+            _ => RateLimitPartitions.ClassifyGlobalScope(ctx) == RateLimitPartitions.GlobalScope.ManagementApi
+                ? RateLimitPartitions.GetManagementPartitionKey(ctx, ipv6Prefix)
+                : "proto:" + (ctx.GetRateLimitPartitionIp(ipv6Prefix) ?? "unknown"),
+        };
 }

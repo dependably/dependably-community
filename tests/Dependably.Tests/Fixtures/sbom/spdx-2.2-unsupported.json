@@ -1,0 +1,28 @@
+{
+  "spdxVersion": "SPDX-2.2",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "legacy-portal",
+  "documentNamespace": "https://example.com/spdx/legacy-portal-5.1.0",
+  "creationInfo": {
+    "creators": ["Tool: legacy-spdx-generator-1.0.0"],
+    "created": "2026-08-01T10:10:00Z"
+  },
+  "packages": [
+    {
+      "name": "express",
+      "SPDXID": "SPDXRef-Package-express",
+      "versionInfo": "4.17.1",
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "downloadLocation": "NOASSERTION",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:npm/express@4.17.1"
+        }
+      ]
+    }
+  ]
+}

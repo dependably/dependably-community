@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Dapper;
 using Dependably.Infrastructure;
+using Dependably.Protocol;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -61,7 +62,7 @@ public sealed class OciPushActorAttributionTests : IClassFixture<DependablyFacto
             "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1"))!;
 
         var (items, _, _) = await audit.ListActivityAsync(orgId, limit: 50, offset: 0, eventType: "push");
-        var row = Assert.Single(items, i => i.Purl == $"pkg:oci/{Repo}@{digest}");
+        var row = Assert.Single(items, i => i.Purl == PurlNormalizer.Oci(Repo, digest));
 
         Assert.Equal(tokenId, row.ActorId);
         Assert.Equal(ActorKinds.Service, await ActorKindOfAsync(conn, row.Id));
@@ -124,7 +125,7 @@ public sealed class OciPushActorAttributionTests : IClassFixture<DependablyFacto
             "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1"))!;
         var audit = _factory.Services.GetRequiredService<AuditRepository>();
         var (items, _, _) = await audit.ListActivityAsync(orgId, limit: 50, offset: 0, eventType: "push");
-        var row = Assert.Single(items, i => i.Purl == $"pkg:oci/{Repo}@{digest}");
+        var row = Assert.Single(items, i => i.Purl == PurlNormalizer.Oci(Repo, digest));
 
         // The join can no longer resolve anything; the stored label is the only remaining source.
         Assert.Equal($"service:{tokenName}", row.ActorEmail);

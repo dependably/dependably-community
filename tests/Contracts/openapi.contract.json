@@ -468,6 +468,16 @@
         }
       }
     },
+    "/api/v1/ecosystems": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/api/v1/hex/signing-key": {
       "operations": {
         "get": {
@@ -1120,6 +1130,19 @@
         }
       }
     },
+    "/api/v1/projects/{projectId}/versions/{versionId}/documents/sbom/conformance": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "projectId",
+            "versionId"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/api/v1/projects/{projectId}/versions/{versionId}/export/sbom": {
       "operations": {
         "get": {
@@ -1332,6 +1355,36 @@
           "requiredParams": [
             "documentId"
           ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/sbom-signing-key": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/sbom-signing-key/rotate": {
+      "operations": {
+        "post": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/sbom-signing-keys": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
           "responseCodes": [
             "200"
           ]

@@ -14,6 +14,19 @@ public static class FixtureManifest
     public static string SbomFixturesRoot { get; } =
         Path.Combine(AppContext.BaseDirectory, "Fixtures", "sbom");
 
+    /// <summary>Absolute path to the Fixtures/cyclonedx-schema/ directory of official CycloneDX JSON schemas.</summary>
+    public static string CycloneDxSchemaFixturesRoot { get; } =
+        Path.Combine(AppContext.BaseDirectory, "Fixtures", "cyclonedx-schema");
+
+    /// <summary>
+    /// Absolute path to the Fixtures/rfc8785-vectors/ directory — RFC 8785's own published
+    /// canonicalization test vectors (input/ and output/ subdirectories), vendored verbatim from
+    /// github.com/cyberphone/json-canonicalization/testdata. Ground truth for
+    /// <c>CanonicalJsonVectorTests</c>, independent of anything this codebase generated.
+    /// </summary>
+    public static string Rfc8785VectorsRoot { get; } =
+        Path.Combine(AppContext.BaseDirectory, "Fixtures", "rfc8785-vectors");
+
     // PyPI
     public const string MypyExtensionsWheelSha256 =
         "4392f6c0eb8a5668a69e23d168ffa70f0be9ccfd32b5cc2d26a34ae5b844552d";

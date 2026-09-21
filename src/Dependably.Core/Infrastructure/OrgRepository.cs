@@ -112,6 +112,7 @@ public sealed class OrgRepository
                COALESCE(verify_rpm_signatures, 'off') as VerifyRpmSignatures,
                COALESCE(verify_maven_signatures, 'off') as VerifyMavenSignatures,
                COALESCE(verify_terraform_signatures, 'off') as VerifyTerraformSignatures,
+               COALESCE(verify_sbom_signatures, 'off') as VerifySbomSignatures,
                rpm_upstream_mode as RpmUpstreamMode
         FROM org_settings WHERE org_id = @orgId
         """;

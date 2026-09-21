@@ -469,7 +469,7 @@ public sealed class MetadataRebuildCachingTests : IAsyncLifetime
             Allowlist: null!,
             Blocklist: null!,
             Audit: new AuditRepository(_db),
-            Guard: new OrgAccessGuard(_db),
+            Guard: new OrgAccessGuard(_db, TestProblems.Create()),
             Blobs: _blobs,
             BlobStorage: null!,
             OrphanBlobs: new OciOrphanBlobDeleter(_db, new TieredBlobStorage(_blobs, _blobs), new OciBlobKeyLock()),

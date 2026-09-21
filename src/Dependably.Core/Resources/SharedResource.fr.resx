@@ -280,6 +280,12 @@
   <data name="error.sbom.export.invalidVariant" xml:space="preserve">
     <value>Doit être « inventory » ou « vdr ».</value>
   </data>
+  <data name="error.sbom.export.invalidFormat" xml:space="preserve">
+    <value>Doit être « cyclonedx-json ».</value>
+  </data>
+  <data name="error.sbom.export.invalidSpecVersion" xml:space="preserve">
+    <value>Doit être « 1.6 » ou « 1.7 ».</value>
+  </data>
   <data name="error.quarantine.stateInvalid" xml:space="preserve">
     <value>Doit être « pending », « approved » ou « denied ».</value>
   </data>
@@ -690,6 +696,9 @@ Si vous n'êtes pas à l'origine de ce changement, contactez immédiatement votr
   <data name="error.sbom.analysisRowNotFound" xml:space="preserve">
     <value>La décision de tri n'a pas pu être relue après son enregistrement.</value>
   </data>
+  <data name="error.sbom.documentNotFound" xml:space="preserve">
+    <value>Cette version de projet ne comporte aucun document SBOM à évaluer.</value>
+  </data>
   <data name="error.sbom.scopeInvalid" xml:space="preserve">
     <value>Doit être « all », « prod » ou « dev ».</value>
   </data>
@@ -768,6 +777,10 @@ Si vous n'êtes pas à l'origine de ce changement, contactez immédiatement votr
   <data name="error.sbom.tooManyComponents" xml:space="preserve">
     <value>Le document déclare plus de {0} composants.</value>
     <comment>Validation error returned when an SBOM exceeds the per-upload component ceiling. {0} is the ceiling.</comment>
+  </data>
+  <data name="error.sbom.signatureRejected" xml:space="preserve">
+    <value>Cette organisation exige une signature d'auteur SBOM vérifiée, et la signature de ce document n'a pas été vérifiée. Voir le champ « reason » pour en connaître la raison.</value>
+    <comment>403 returned by PUT /api/v1/sbom under verify_sbom_signatures=block when the document is unsigned, its signature failed verification, or no trust anchor is configured to check it against.</comment>
   </data>
   <data name="error.sbom.tooManyStatements" xml:space="preserve">
     <value>Le document déclare plus de {0} énoncés d'analyse visant des composants.</value>

@@ -471,8 +471,8 @@ public partial class Program
         // loopback, so local `curl /version` checks keep working. Like /metrics and
         // /edge/status it stays out of both OpenAPI documents: the protocol document is
         // fully public, and advertising an IP-allowlisted operator endpoint's route and
-        // schema there contradicts the allowlist's purpose. CONTRIBUTING.md (Versioning,
-        // Security model) is its inventory record.
+        // schema there contradicts the allowlist's purpose. CONTRIBUTING.md (Versioning) and
+        // OPERATIONS.md (Security model) are its inventory record.
         app.MapGet("/version", async (HttpContext ctx, MetricsAccessConfig metricsAccess, ScrapeDiagnostics scrapeDiag) =>
         {
             var resolved = await metricsAccess.ResolveAsync(ctx.RequestAborted);

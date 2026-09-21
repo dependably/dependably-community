@@ -59,7 +59,7 @@ public static class RateLimitFailureMode
         throw new InvalidOperationException(
             $"{ConfigKey}='{cfg[ConfigKey]}' is not a recognized rate-limit failure posture. "
             + $"Use '{Open}' (grant requests when Redis is unreachable — the default) or "
-            + $"'{Closed}' (deny them). See CONTRIBUTING.md -> Rate limiting.");
+            + $"'{Closed}' (deny them). See OPERATIONS.md -> Rate limiting.");
     }
 
     private static string? Normalize(string? value)

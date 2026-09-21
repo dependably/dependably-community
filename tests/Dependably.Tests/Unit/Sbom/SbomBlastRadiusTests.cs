@@ -533,7 +533,7 @@ public sealed class SbomBlastRadiusTests
 
             Controller = new BlastRadiusController(
                 new SbomBlastRadiusRepository(Store),
-                new OrgAccessGuard(Store),
+                new OrgAccessGuard(Store, TestProblems.Create()),
                 new ProblemResults(new EchoLocalizer()))
             {
                 ControllerContext = new ControllerContext { HttpContext = http },

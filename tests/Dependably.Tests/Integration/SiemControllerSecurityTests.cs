@@ -28,6 +28,53 @@ public sealed class SiemControllerSecurityTests : IClassFixture<DependablyFactor
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
     }
 
+    // ── The Bearer-token branch ─────────────────────────────────────────────
+    //
+    // Untested until now: the `siem:read` token kind existed in DependablyFactory with no
+    // usages, so the token path's 200, its 401 and its 403 were all unpinned. The three
+    // below are a positive control plus both negatives, so neither negative can pass by
+    // accident of the other's cause.
+
+    [Fact]
+    public async Task GetAuthEvents_TokenWithReadAudit_Returns200()
+    {
+        string token = await _factory.CreateToken("siem:read");
+
+        using var c = _factory.CreateClient();
+        c.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var resp = await c.GetAsync("/api/v1/siem/events/auth");
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetAuthEvents_ValidTokenWithoutReadAudit_Returns403NamingTheCapability()
+    {
+        // The distinction that was missing: a token that resolves but is under-scoped is a
+        // 403, not a 401. Answering 401 told the operator to re-mint a credential that was
+        // working, and hid the refusal from the audit feed (see AuthDenialAuditSeamTests).
+        string token = await _factory.CreateToken("publish-only");
+
+        using var c = _factory.CreateClient();
+        c.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var resp = await c.GetAsync("/api/v1/siem/events/auth");
+
+        Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
+        Assert.Contains("read:audit", await resp.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GetAuthEvents_UnresolvableToken_StillReturns401()
+    {
+        // The other half of the split: an unknown token is an authentication failure, and
+        // must not drift into 403 alongside the change above.
+        using var c = _factory.CreateClient();
+        c.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "dpb_not_a_real_token");
+        var resp = await c.GetAsync("/api/v1/siem/events/auth");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
+    }
+
     [Fact]
     public async Task GetAuthEvents_TenantMemberJwt_Returns403()
     {

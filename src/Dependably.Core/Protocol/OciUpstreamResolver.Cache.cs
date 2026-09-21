@@ -366,12 +366,14 @@ public sealed partial class OciUpstreamResolver
         // every other ecosystem's upstream-fetch path (UpstreamClient.FetchAndStageCoreAsync).
         // OciDigestVerifyStream below still enforces the same cap for chunked transfers that
         // arrive with no Content-Length header at all.
-        if (resp.Content.Headers.ContentLength > UpstreamClient.MaxUpstreamResponseBytes)
+        long maxBlobBytes = _options.Value.MaxBlobProxyBytes;
+        if (resp.Content.Headers.ContentLength > maxBlobBytes)
         {
             _logger.LogWarning(
-                "OCI blob {Repository}/{Digest} from {Host} declared Content-Length {ContentLength} exceeding the {MaxBytes}-byte upstream cap; refusing.",
-                repository, digest, upstream.Host, resp.Content.Headers.ContentLength, UpstreamClient.MaxUpstreamResponseBytes);
-            return null;
+                "OCI blob {Repository}/{Digest} from {Host} declared Content-Length {ContentLength} exceeding the {MaxBytes}-byte blob proxy cap; refusing.",
+                repository, digest, upstream.Host, resp.Content.Headers.ContentLength, maxBlobBytes);
+            throw new OciBlobTooLargeException(
+                digest, upstream.Host, maxBlobBytes, resp.Content.Headers.ContentLength);
         }
 
         // Verify-then-commit: stream upstream bytes into an ephemeral staging key so
@@ -384,7 +386,7 @@ public sealed partial class OciUpstreamResolver
         try
         {
             await using var contentStream = await resp.Content.ReadAsStreamAsync(ct);
-            await using var verifyStream = new OciDigestVerifyStream(contentStream, UpstreamClient.MaxUpstreamResponseBytes);
+            await using var verifyStream = new OciDigestVerifyStream(contentStream, maxBlobBytes);
 
             await _blobs.Cache.PutAsync(stagingKey, verifyStream, ct);
             bytesWritten = verifyStream.BytesWritten;
@@ -396,7 +398,7 @@ public sealed partial class OciUpstreamResolver
                     "OCI blob digest mismatch for {Repository}/{Digest}: expected sha256:{Expected}, computed {Computed}",
                     repository, digest, expectedHex, computedDigest);
                 await _blobs.Cache.DeleteAsync(stagingKey, ct);
-                return null;
+                throw new OciBlobDigestMismatchException(digest, upstream.Host, computedDigest);
             }
         }
         catch (UpstreamResponseTooLargeException)
@@ -404,10 +406,14 @@ public sealed partial class OciUpstreamResolver
             // Delete-on-refuse: a coordinate-addressed staging entry left behind here would be a
             // permanent bypass of this cap for every future request that races the same digest.
             _logger.LogWarning(
-                "OCI blob {Repository}/{Digest} from {Host} exceeded the {MaxBytes}-byte upstream cap mid-stream; refusing.",
-                repository, digest, upstream.Host, UpstreamClient.MaxUpstreamResponseBytes);
+                "OCI blob {Repository}/{Digest} from {Host} exceeded the {MaxBytes}-byte blob proxy cap mid-stream; refusing.",
+                repository, digest, upstream.Host, maxBlobBytes);
             await _blobs.Cache.DeleteAsync(stagingKey, ct);
-            return null;
+
+            // Rethrown as the OCI-plane refusal rather than surfaced as a null: a chunked
+            // upstream reaches the cap here with no declared length to have caught it above, and
+            // the caller cannot tell that case from a miss unless it is told.
+            throw new OciBlobTooLargeException(digest, upstream.Host, maxBlobBytes, declaredBytes: null);
         }
 
         // Digest verified — promote staging entry to the content-addressed key, then

@@ -266,7 +266,9 @@ public sealed class OciBlobPresignRedirectTests : IAsyncLifetime
     {
         byte[] bytes = RandomBytes();
         string digest = await SeedBlobAsync(bytes, _orgId);
-        string purl = $"pkg:oci/library/ubuntu@{digest}";
+        // Derived, not spelled out: the controller records the canonical PurlNormalizer form, and
+        // a literal here would pin this lookup to whatever spelling was current when it was written.
+        string purl = PurlNormalizer.Oci("library/ubuntu", digest);
 
         var streamed = BuildController(_orgId, presignEnabled: false);
         _ = Assert.IsType<FileStreamResult>(await streamed.Get($"library/ubuntu/blobs/{digest}", default));

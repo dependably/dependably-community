@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using Dapper;
+using Dependably.Api;
 using Dependably.Infrastructure;
 using Microsoft.AspNetCore.Mvc;
 
@@ -8,7 +9,11 @@ namespace Dependably.Security;
 /// <summary>
 /// BOLA (Broken Object-Level Authorization) guard — OWASP API1:2023.
 /// Returns 404 (not 403) for orgs the principal is not a member of, to prevent slug enumeration.
-/// Returns 403 if the principal lacks the required role within a valid org.
+/// Returns a localized 403 problem response if the principal lacks the required capability
+/// within a valid org. Naming the shortfall is safe here precisely because of the line above:
+/// a non-member is answered 404 before any capability is compared, so a 403 only ever reaches
+/// a principal already proven to belong to the tenant it addressed. It learns nothing about
+/// the tenant — only that its own token is short a capability, which it can see on the token.
 ///
 /// Phase 2: the legacy <c>instance_admin</c> bypass has been removed. system_admin tokens
 /// (multi-mode operator identity) carry <c>scope=system</c> and are blocked from tenant routes
@@ -19,10 +24,12 @@ namespace Dependably.Security;
 public sealed class OrgAccessGuard
 {
     private readonly IMetadataStore _db;
+    private readonly ProblemResults _problems;
 
-    public OrgAccessGuard(IMetadataStore db)
+    public OrgAccessGuard(IMetadataStore db, ProblemResults problems)
     {
         _db = db;
+        _problems = problems;
     }
 
     public enum AccessResult { Allowed, NotFound, Forbidden }
@@ -121,7 +128,15 @@ public sealed class OrgAccessGuard
         return result switch
         {
             AccessResult.NotFound => new NotFoundResult(),
-            AccessResult.Forbidden => new ForbidResult(),
+            // A bare ForbidResult delegates to the authentication scheme, and the framework's
+            // forbid handlers deliberately do not start the response — so the caller received a
+            // 403 with no body and no content-type, and no way to tell which capability was
+            // missing. The SPA renders that as an empty error banner (it falls back to
+            // Response.statusText, which is "" over HTTP/2). Writing the problem here rather
+            // than in a scheme's OnForbidden is deliberate: routes authorized against both
+            // Bearer and ApiToken forbid every scheme in sequence, so a body written by the
+            // first handler would leave the second writing a status onto a started response.
+            AccessResult.Forbidden => _problems.ForbiddenActionKey("error.auth.forbidden"),
             _ => null,
         };
     }

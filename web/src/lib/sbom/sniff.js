@@ -32,9 +32,12 @@ export function sniffDocumentText(text) {
 /**
  * Classify an already-parsed JSON document. Detection order mirrors the epic's documented
  * contract: SARIF's `runs[]` is checked first because a SARIF log has no
- * `bomFormat`/`@context` to collide with; OpenVEX's `@context` next; CycloneDX (SBOM or VEX)
+ * `bomFormat`/`@context`/`spdxVersion` to collide with; OpenVEX's `@context` next; SPDX's
+ * `spdxVersion` next (unambiguous — CycloneDX never carries that key); CycloneDX (SBOM or VEX)
  * last, since both wire formats share `bomFormat: 'CycloneDX'` and are told apart only by
- * whether the document carries components or is vulnerabilities-only.
+ * whether the document carries components or is vulnerabilities-only. SPDX has no
+ * vulnerabilities-only shape of its own — every SPDX document this preview recognises goes to
+ * `sbom`, matching the server, which only ever accepts SPDX on the `/sbom` route.
  *
  * @param {any} doc
  * @returns {DocumentKind}
@@ -47,6 +50,8 @@ export function detectDocumentKind(doc) {
   const context = doc['@context']
   const contextText = Array.isArray(context) ? context.join(' ') : String(context ?? '')
   if (contextText.toLowerCase().includes('openvex')) return 'vex'
+
+  if (typeof doc.spdxVersion === 'string' && doc.spdxVersion.startsWith('SPDX-')) return 'sbom'
 
   if (doc.bomFormat === 'CycloneDX') {
     const hasComponents = Array.isArray(doc.components) && doc.components.length > 0

@@ -44,7 +44,7 @@ public sealed class SbomVulnKeyParityTests : IClassFixture<InMemoryDbFixture>
         _merge = new SbomMergeService(_ingest);
         var tracker = new Dependably.Infrastructure.VulnTracker.InstanceVulnTrackerConfig(
             (_, _) => Task.FromResult<string?>(null), time);
-        _export = new SbomExportService(db, time, new ProjectRepository(db, time), tracker);
+        _export = new SbomExportService(db, time, new ProjectRepository(db, time), tracker, Dependably.Tests.Infrastructure.TestSbomAuthorSigner.Unconfigured(db, time));
 
         var licenses = new LicenseRepository(db, time, new LicenseNormalizer(db, NullLogger<LicenseNormalizer>.Instance));
         var alerts = new AlertService(
@@ -191,7 +191,7 @@ public sealed class SbomVulnKeyParityTests : IClassFixture<InMemoryDbFixture>
         await _merge.ApplyCycloneDxStatementsAsync(
             orgId, versionId, Parse(LowercaseVexJson("cve-2100-0010")).Statements, actorId: null, now);
 
-        string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, "vdr", CancellationToken.None))!;
+        string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, SbomExportOptions.Default with { Variant = "vdr" }, CancellationToken.None))!;
         using var doc = JsonDocument.Parse(json);
         var entry = doc.RootElement.GetProperty("vulnerabilities").EnumerateArray()
             .Single(v => string.Equals(v.GetProperty("id").GetString(), "CVE-2100-0010", StringComparison.Ordinal));
@@ -217,7 +217,7 @@ public sealed class SbomVulnKeyParityTests : IClassFixture<InMemoryDbFixture>
         Assert.Equal("violation", result.PolicyStatus);
         Assert.Equal(1, result.FindingCount);
 
-        string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, "vdr", CancellationToken.None))!;
+        string json = (await _export.BuildSbomDocumentAsync(orgId, projectId, versionId, SbomExportOptions.Default with { Variant = "vdr" }, CancellationToken.None))!;
         using var doc = JsonDocument.Parse(json);
         var entry = doc.RootElement.GetProperty("vulnerabilities").EnumerateArray()
             .Single(v => string.Equals(v.GetProperty("id").GetString(), "CVE-2100-0011", StringComparison.Ordinal));

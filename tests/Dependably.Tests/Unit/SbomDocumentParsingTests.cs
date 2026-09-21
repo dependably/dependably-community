@@ -172,6 +172,120 @@ public sealed class SbomDocumentParsingTests
         Assert.Equal("3.11.7", arrayForm.ToolVersion);
     }
 
+    // #706: dependably:tool-version-status=unknown is written on the ORIGINAL producing tool's own
+    // metadata.tools entry (SbomExportService.BuildToolsMetadata), never on dependably's own — a
+    // dependably export re-ingested here must read the marker back rather than scoring D8 as a
+    // silent gap.
+
+    [Fact]
+    public void CycloneDx_ReadsToolVersionExplicitlyUnknown_FromTheArrayFormToolEntry()
+    {
+        var document = CycloneDxParser.Parse(Json("""
+            {
+              "bomFormat": "CycloneDX", "specVersion": "1.4",
+              "metadata": {
+                "tools": [
+                  {
+                    "name": "cyclonedx-python",
+                    "properties": [ { "name": "dependably:tool-version-status", "value": "unknown" } ]
+                  }
+                ]
+              },
+              "components": []
+            }
+            """));
+
+        Assert.Equal("cyclonedx-python", document.ToolName);
+        Assert.Null(document.ToolVersion);
+        Assert.True(document.ToolVersionExplicitlyUnknown);
+    }
+
+    [Fact]
+    public void CycloneDx_ReadsToolVersionExplicitlyUnknown_FromTheObjectFormToolEntry()
+    {
+        var document = CycloneDxParser.Parse(Json("""
+            {
+              "bomFormat": "CycloneDX", "specVersion": "1.6",
+              "metadata": {
+                "tools": {
+                  "components": [
+                    {
+                      "name": "syft",
+                      "properties": [ { "name": "dependably:tool-version-status", "value": "unknown" } ]
+                    }
+                  ]
+                }
+              },
+              "components": []
+            }
+            """));
+
+        Assert.Equal("syft", document.ToolName);
+        Assert.Null(document.ToolVersion);
+        Assert.True(document.ToolVersionExplicitlyUnknown);
+    }
+
+    [Fact]
+    public void CycloneDx_LeavesToolVersionExplicitlyUnknownFalse_WhenTheToolSimplyOmittedAVersion()
+    {
+        // The ordinary, unambiguous silent-absence case: no dependably:tool-version-status
+        // property at all — a third-party document that never demonstrated the vocabulary.
+        var document = CycloneDxParser.Parse(Json("""
+            {
+              "bomFormat": "CycloneDX", "specVersion": "1.6",
+              "metadata": { "tools": { "components": [ { "name": "syft" } ] } },
+              "components": []
+            }
+            """));
+
+        Assert.Equal("syft", document.ToolName);
+        Assert.Null(document.ToolVersion);
+        Assert.False(document.ToolVersionExplicitlyUnknown);
+    }
+
+    [Fact]
+    public void CycloneDx_LeavesToolVersionExplicitlyUnknownFalse_WhenAVersionIsActuallyNamed()
+    {
+        // MinimalBom's tool entry carries no properties[] at all — the ordinary, unambiguous case
+        // (no marker, a real version) that leaves ToolVersionExplicitlyUnknown at its default.
+        var document = CycloneDxParser.Parse(Json(MinimalBom));
+
+        Assert.False(document.ToolVersionExplicitlyUnknown);
+    }
+
+    [Fact]
+    public void CycloneDx_ExtractsBothToolVersionAndTheMarker_WhenADocumentAsymmetricallyCarriesBoth()
+    {
+        // The marker and a real version are mutually exclusive on export (BuildToolsMetadata), so
+        // a document carrying both is malformed input a real producer should not emit — but this
+        // parser reads defensively, and D8's actual real-version-wins precedence is enforced at
+        // the SCORER (SbomConformanceScorer.ScoreToolVersion checks document.ToolVersion before
+        // ToolVersionExplicitlyUnknown), not here. This pins only what THIS layer must still do
+        // correctly: extract both facts as the document literally states them, verbatim, so the
+        // scorer has the real values to arbitrate between.
+        var document = CycloneDxParser.Parse(Json("""
+            {
+              "bomFormat": "CycloneDX", "specVersion": "1.6",
+              "metadata": {
+                "tools": {
+                  "components": [
+                    {
+                      "name": "syft",
+                      "version": "1.46.0",
+                      "properties": [ { "name": "dependably:tool-version-status", "value": "unknown" } ]
+                    }
+                  ]
+                }
+              },
+              "components": []
+            }
+            """));
+
+        Assert.Equal("syft", document.ToolName);
+        Assert.Equal("1.46.0", document.ToolVersion);
+        Assert.True(document.ToolVersionExplicitlyUnknown);
+    }
+
     [Theory]
     [InlineData("1.4")]
     [InlineData("1.5")]

@@ -1361,6 +1361,25 @@
         "rotate": "Faire pivoter la clé",
         "rotateConfirm": "Faire pivoter la clé de signature Hex? Chaque client Mix et Rebar3 ayant enregistré ce dépôt échouera à la vérification jusqu'à ce qu'il réenregistre le dépôt avec la nouvelle clé publique."
       },
+      "sbomSigningKey": {
+        "title": "Clé de signature SBOM",
+        "hint": "Chaque SBOM exporté par cette organisation est signé avec cette clé, afin qu'un destinataire puisse vérifier l'auteur du document et qu'il n'a pas été modifié après la signature. La clé publique ci-dessous est celle qu'un consommateur épingle pour vérifier une signature.",
+        "noMasterKey": "Aucune clé de signature n'a été créée pour cette organisation : DEPENDABLY_MASTER_KEY n'est pas configuré sur cette instance, donc les documents SBOM exportés ne sont pas signés.",
+        "keyUnavailable": "Cette organisation possède une clé de signature active, mais ce nœud ne peut pas la lire actuellement — sa propre clé maîtresse n'est pas configurée, ou il s'agit d'un nœud en périphérie (edge). Les exportations traitées par un nœud entièrement configuré restent signées normalement.",
+        "keyId": "ID de clé (empreinte)",
+        "algorithm": "Algorithme",
+        "createdAt": "Créée le",
+        "retiredAt": "Retirée le",
+        "retired": "Retirée",
+        "revoked": "Révoquée",
+        "publicKey": "Clé publique (PEM)",
+        "copy": "Copier la clé publique",
+        "copied": "Copié",
+        "rotate": "Faire pivoter la clé",
+        "rotateConfirm": "Faire pivoter la clé de signature SBOM? La clé actuelle est retirée, et non supprimée — sa moitié publique reste publiée, donc les documents déjà signés avec elle restent vérifiables. Les nouvelles exportations seront signées avec la clé nouvellement générée.",
+        "historyTitle": "Historique des clés",
+        "historyHint": "Les clés retirées et révoquées restent répertoriées ici et sur le point de terminaison de vérification public, car un document signé avec l'une d'elles doit rester vérifiable."
+      },
       "upstreamRegistries": {
         "section": "Registres en amont",
         "hint": "Par écosystème, les registres interrogés par ce proxy, par ordre de priorité. La première entrée est essayée en premier; en cas d'échec ou d'indisponibilité, la suivante est tentée. Faites glisser une ligne par sa poignée pour réordonner. Sans registre configuré, le proxy est désactivé pour cet écosystème — seuls les paquets déjà en cache sont servis.",
@@ -2876,6 +2895,55 @@
       "download": "Télécharger l'original",
       "copyDigest": "Copier l'empreinte"
     },
+    "conformance": {
+      "title": "Conformité CISA 2026",
+      "show": "Afficher la conformité CISA",
+      "hide": "Masquer la conformité CISA",
+      "help": "Comment le document SBOM stocké de cette version se compare aux éléments minimaux CISA 2026. Un élément entièrement absent et un élément que le document déclare explicitement inconnu sont affichés séparément - le second est un comportement honnête du fournisseur, pas un échec.",
+      "noDocument": "Cette version ne comporte aucun document SBOM à évaluer.",
+      "loadError": "Impossible de charger le tableau de conformité.",
+      "componentTotal": "{count, plural, one {# composant} other {# composants}}",
+      "category": {
+        "metadata": "Métadonnées du SBOM",
+        "component": "Données de composant",
+        "practice": "Pratiques"
+      },
+      "state": {
+        "present": "Présent",
+        "absent": "Absent",
+        "explicitlyUnknown": "Explicitement inconnu",
+        "notApplicable": "Non applicable",
+        "notAssessed": "Non évalué"
+      },
+      "reason": {
+        "notApplicable": "Le format de ce document ne permet pas de porter cet élément.",
+        "notAssessed": "dependably ne lit pas encore cet élément dans un document téléversé."
+      },
+      "counts": "{present} présents · {explicitUnknown} explicitement inconnus · {notAssessed} non évalués · {absent} absents (sur {total})",
+      "element": {
+        "D1": "Auteur du SBOM",
+        "D2": "Signature de l'auteur du SBOM",
+        "D3": "Nom du format de données du SBOM",
+        "D4": "Version du format de données du SBOM",
+        "D5": "Contexte de génération du SBOM",
+        "D6": "Horodatage du SBOM",
+        "D7": "Nom de l'outil du SBOM",
+        "D8": "Version de l'outil du SBOM",
+        "D9": "Version du SBOM",
+        "D10": "Producteur du composant",
+        "D11": "Nom du composant",
+        "D12": "Version du composant",
+        "D13": "Identifiants du composant",
+        "D14": "Valeur de hachage du composant",
+        "D15": "Algorithme de hachage du composant",
+        "D16": "Licence du composant",
+        "D17": "Relation de dépendance du composant",
+        "P2": "Couverture",
+        "P4": "Inconnus explicites",
+        "P5": "Fréquence",
+        "P6": "Données lisibles par machine"
+      }
+    },
     "orphans": {
       "title": "Analyses non appariées",
       "help": "Déclarations VEX et résultats SARIF dont l'identifiant de paquet ne correspond à aucun composant du SBOM de cette version. Affichés plutôt que rejetés — une déclaration que personne ne voit est une déclaration que personne ne corrige.",
@@ -3003,6 +3071,38 @@
       "latestKnownHelp": "Votre registre connaît la version {latest} en amont. Cet écosystème n'a pas d'ordonnancement de versions ici : savoir si la version livrée est en retard est inconnu — et non confirmé à jour.",
       "notInRegistry": "absent de votre registre",
       "notInRegistryHelp": "Votre registre n'a jamais servi cette coordonnée : rien de ce qu'il applique — état de blocage, politique de licence, provenance, analyse des avis de sécurité — n'a jamais porté sur ces octets."
+    }
+  },
+  "sbomExport": {
+    "title": "Options d'exportation",
+    "submit": "Exporter",
+    "exporting": "Exportation en cours…",
+    "variant": {
+      "label": "Document",
+      "inventory": "Inventaire (CycloneDX)",
+      "inventoryHelp": "Chaque composant que cette version livre, avec les licences et le graphe de dépendances. Aucune donnée de vulnérabilité.",
+      "vdr": "Avec vulnérabilités (VDR)",
+      "vdrHelp": "L'inventaire, plus chaque avis porté par les composants de cette version, avec l'état VEX et de priorité actuel.",
+      "vex": "VEX seulement",
+      "vexHelp": "Déclarations de vulnérabilité seulement — sans liste de composants. Pour un destinataire qui possède déjà l'inventaire et ne veut que l'état de triage."
+    },
+    "format": {
+      "label": "Format",
+      "cyclonedxJson": "CycloneDX JSON",
+      "cyclonedxJsonHelp": "Le seul format offert aujourd'hui. SPDX apparaîtra ici une fois livré."
+    },
+    "specVersion": {
+      "label": "Version de la spécification CycloneDX",
+      "v17": "1.7 (par défaut)",
+      "v17Help": "La version actuelle de la spécification CycloneDX.",
+      "v16": "1.6",
+      "v16Help": "Choisissez cette version pour un destinataire qui rejette la 1.7 — l'analyse des dépendances de GitLab, ou Dependency-Track avant la 5.1.0."
+    },
+    "scope": {
+      "label": "Portée des dépendances",
+      "allHelp": "Rien n'est exclu.",
+      "prodHelp": "Exclut les dépendances de développement et tout composant que le SBOM lui-même a marqué exclu. Les composants de portée inconnue sont conservés — une dépendance non classée peut fort bien être livrée.",
+      "devHelp": "Seulement les composants de portée dev."
     }
   }
 }

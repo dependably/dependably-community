@@ -22,7 +22,8 @@ namespace Dependably.Infrastructure;
 public sealed partial class SbomExportService
 {
     /// <summary>
-    /// Renders a vulnerabilities-only CycloneDX 1.7 VEX document of the current effective
+    /// Renders a vulnerabilities-only CycloneDX VEX document, under the caller's chosen
+    /// <paramref name="specVersion"/> (<c>1.6</c> or <c>1.7</c>), of the current effective
     /// analysis state — both upload-sourced and manually triaged rows — or <c>null</c> when the
     /// project or version does not resolve for this org.
     /// </summary>
@@ -34,7 +35,7 @@ public sealed partial class SbomExportService
                         + "cannot be used (it binds a Postgres connection's enumerable as one native "
                         + "array parameter, valid only after = ANY(...), never after IN).")]
     public async Task<string?> BuildVexDocumentAsync(
-        string orgId, string projectId, string versionId, CancellationToken ct)
+        string orgId, string projectId, string versionId, string specVersion, CancellationToken ct)
     {
         await using var conn = await _db.OpenAsync(ct);
         var resolved = await ResolveProjectVersionAsync(conn, orgId, projectId, versionId, ct);
@@ -50,6 +51,8 @@ public sealed partial class SbomExportService
 
         var components = await LoadComponentsAsync(conn, orgId, resolved.ProjectVersionId, ct);
         bool trackerConfigured = await IsTrackerConfiguredAsync(ct);
+        string orgSlug = await LoadOrgSlugAsync(conn, orgId, ct);
+        var vexTool = await LoadDocumentToolAsync(conn, orgId, resolved.ProjectVersionId, "vex", ct);
 
         // A standalone VEX document is keyed by (purl_key, vuln_key), not by sbom_components.id, so
         // dependency-graph position and install-script presence — both component facts — are
@@ -60,30 +63,99 @@ public sealed partial class SbomExportService
 
         var installScriptFacts = await LoadInstallScriptFactsAsync(conn, orgId, resolved.ProjectVersionId, ct);
 
-        var vulns = await BuildVexVulnerabilitiesAsync(
-            conn, orgId, withState, componentByPurlKey, installScriptFacts, ct);
+        var known = await LoadVexAdvisoryLookupAsync(conn, withState, ct);
+        var vulns = BuildVexVulnerabilitiesArray(
+            withState, known, componentByPurlKey, installScriptFacts,
+            await CountAffectedApplicationsAsync(
+                conn, orgId, withState.Select(a => a.VulnKey).Distinct(StringComparer.Ordinal).ToList(), ct));
+
+        // Resolved before the content fingerprint (below), for the same reason the SBOM renderer
+        // resolves it early — see SbomExportService.Revision.cs' "signature identity" decision
+        // and BuildSbomDocumentAsync. A VEX export makes the SAME ["authors"] = org-slug claim a
+        // signed SBOM export does, so it owes a reader the same "signed, or not — and here is
+        // why" statement; leaving it off would let a consumer who has only ever seen a signed
+        // SBOM read a bare VEX export as unsigned-because-refused rather than
+        // unsigned-because-this-document-type-was-never-signed-in-the-first-place.
+        var (resolvedSigningKey, signatureState, orgHasActiveKey) = await _signer.ResolveAsync(orgId, ct);
+        using var signingKey = resolvedSigningKey;
+
+        var vulnFingerprintFacts = VexVulnFingerprintFacts(withState, known, componentByPurlKey, installScriptFacts).ToList();
+        string contentFingerprint = ComputeVexContentFingerprint(
+            new ProvenanceIdentity(
+                OrgSlug: orgSlug,
+                OriginalToolName: vexTool?.ToolName,
+                OriginalToolVersion: vexTool?.ToolVersion),
+            vulnFingerprintFacts,
+            orgHasActiveKey);
+
+        // D6a: derived from the data the fingerprint just hashed (the analysis rows this document
+        // renders, plus each one's resolved component, when it has one), never from the render
+        // clock — see SbomExportService.Revision.cs' DeriveChangedAt.
+        string derivedChangedAtIso = DeriveChangedAt(
+            resolved.CreatedAt,
+            withState.Select(a => (DateTimeOffset?)a.UpdatedAt),
+            withState
+                .Select(a => componentByPurlKey.GetValueOrDefault(a.PurlKey))
+                .Where(c => c is not null)
+                .Select(c => (DateTimeOffset?)c!.CreatedAt)).ToUtcIso();
+
+        var revision = await ResolveRevisionAsync(
+            conn,
+            new RevisionKey(
+                OrgId: orgId,
+                ProjectVersionId: resolved.ProjectVersionId,
+                DocKind: DocKindVex,
+                Format: SbomExportOptions.Default.Format,
+                ScopeFilter: ScopeFilterValue(SbomComponentFilter.All)),
+            contentFingerprint, derivedChangedAtIso, ct);
+
+        var properties = BuildCoverageProperties(
+            components, trackerConfigured, SbomComponentFilter.All, filteredOutCount: 0,
+            documentCarriesInventory: false);
+        AddSignatureStateProperty(properties, signatureState);
 
         var doc = new JsonObject
         {
             ["bomFormat"] = "CycloneDX",
-            ["specVersion"] = "1.7",
-            ["serialNumber"] = $"urn:uuid:{Guid.NewGuid()}",
-            ["version"] = 1,
+            ["specVersion"] = specVersion,
+            ["serialNumber"] = revision.SerialNumber,
+            ["version"] = revision.Revision,
             ["metadata"] = new JsonObject
             {
-                ["timestamp"] = _time.GetUtcNow().ToUtcIso(),
-                ["properties"] = BuildCoverageProperties(components, trackerConfigured),
+                ["timestamp"] = revision.ChangedAtIso,
+                // D1/D5/D7/D8: the same provenance claims a per-project SBOM export carries — see
+                // BuildAuthorsMetadata/BuildToolsMetadata/BuildLifecyclesMetadata.
+                ["authors"] = BuildAuthorsMetadata(orgSlug),
+                ["tools"] = BuildToolsMetadata(vexTool?.ToolName, vexTool?.ToolVersion),
+                ["lifecycles"] = BuildLifecyclesMetadata(),
+                // A VEX document carries no component filter of its own — always "all"/"0". It
+                // also asserts no components[] array of its own at all, so it can never
+                // truthfully claim dependably:full-inventory-rendered regardless of how many
+                // components `components` holds for the underlying project version —
+                // documentCarriesInventory: false says so explicitly rather than defaulting to
+                // the affirmative claim (see BuildCoverageProperties' own doc comment for why
+                // this parameter has no default at all).
+                ["properties"] = properties,
             },
             ["vulnerabilities"] = vulns,
         };
+
+        // Last: everything above is what gets signed.
+        if (signingKey is not null)
+        {
+            Sbom.SbomAuthorSigner.Attach(doc, signingKey);
+        }
 
         return doc.ToJsonString();
     }
 
     /// <summary>
-    /// The VEX document's <c>vulnerabilities</c> array. Empty when no row carries an analysis
-    /// state — the advisory lookup and the affected-application count are both skipped in that
-    /// case rather than issuing two queries whose result nothing reads.
+    /// The advisory rows for every OSV id <paramref name="withState"/> cites — a separate query
+    /// method so the revision fingerprint (<see cref="VexVulnFingerprintFacts"/>) and the rendered
+    /// <c>vulnerabilities[]</c> array (<see cref="BuildVexVulnerabilitiesArray"/>) both read the
+    /// SAME resolved lookup rather than querying it twice and risking the two disagree. Empty when
+    /// no row carries an analysis state — the query is skipped in that case rather than issuing
+    /// one whose result nothing reads.
     /// </summary>
     [SuppressMessage("Security", "S2077:Formatting SQL queries is security-sensitive",
         Justification = "The spliced fragment is DapperInClause.Expand's own parenthesized, "
@@ -92,18 +164,12 @@ public sealed partial class SbomExportService
                         + "DapperInClause's doc comment for why Dapper's own IN @list auto-expansion "
                         + "cannot be used (it binds a Postgres connection's enumerable as one native "
                         + "array parameter, valid only after = ANY(...), never after IN).")]
-    private static async Task<JsonArray> BuildVexVulnerabilitiesAsync(
-        DbConnection conn,
-        string orgId,
-        IReadOnlyList<AnalysisRow> withState,
-        IReadOnlyDictionary<string, ComponentRow> componentByPurlKey,
-        IReadOnlyDictionary<string, bool> installScriptFacts,
-        CancellationToken ct)
+    private static async Task<Dictionary<string, VulnLookupRow>> LoadVexAdvisoryLookupAsync(
+        DbConnection conn, IReadOnlyList<AnalysisRow> withState, CancellationToken ct)
     {
-        var vulns = new JsonArray();
         if (withState.Count == 0)
         {
-            return vulns;
+            return new Dictionary<string, VulnLookupRow>(StringComparer.Ordinal);
         }
 
         var osvIds = withState.Select(a => a.VulnKey).Distinct(StringComparer.Ordinal).ToList();
@@ -111,7 +177,7 @@ public sealed partial class SbomExportService
         // rawsql: osvIdsClause is a parameterized IN (@osv0, @osv1, …) list built in C#, not user text.
         // xtenant: vulnerabilities is the global OSV advisory cache, not a tenant table —
         // resolved by advisory id only, for best-effort source/rating/enrichment lookup.
-        var known = (await conn.QueryAsync<VulnLookupRow>(new CommandDefinition(
+        return (await conn.QueryAsync<VulnLookupRow>(new CommandDefinition(
             """
             SELECT osv_id AS OsvId, severity AS Severity, cvss_score AS CvssScore,
                    nvd_score AS NvdScore, nvd_checked_at AS NvdCheckedAt, nvd_asserted_at AS NvdAssertedAt,
@@ -127,7 +193,17 @@ public sealed partial class SbomExportService
             """ + " " + osvIdsClause,
             osvIdsParameters, cancellationToken: ct)))
             .ToDictionary(v => v.OsvId, StringComparer.Ordinal);
-        var affectedApps = await CountAffectedApplicationsAsync(conn, orgId, osvIds, ct);
+    }
+
+    /// <summary>The VEX document's <c>vulnerabilities</c> array, built from already-loaded rows.</summary>
+    private static JsonArray BuildVexVulnerabilitiesArray(
+        IReadOnlyList<AnalysisRow> withState,
+        IReadOnlyDictionary<string, VulnLookupRow> known,
+        IReadOnlyDictionary<string, ComponentRow> componentByPurlKey,
+        IReadOnlyDictionary<string, bool> installScriptFacts,
+        IReadOnlyDictionary<string, int> affectedApps)
+    {
+        var vulns = new JsonArray();
         foreach (var a in withState)
         {
             vulns.Add(BuildVexEntry(a, known, componentByPurlKey, installScriptFacts, affectedApps));

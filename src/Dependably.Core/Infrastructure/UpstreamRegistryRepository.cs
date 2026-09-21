@@ -9,6 +9,13 @@ using Dependably.Protocol;
 namespace Dependably.Infrastructure;
 
 /// <summary>
+/// One row of an org's OCI routing table, carrying only what routing decides on — the upstream
+/// host and its prefix list. Deliberately holds no credential material; see
+/// <see cref="UpstreamRegistryRepository.ListOciUpstreamRoutesAsync"/>.
+/// </summary>
+public sealed record OciUpstreamRoute(string Host, IReadOnlyList<string> Prefixes);
+
+/// <summary>
 /// Per-org upstream proxy registries. Each (org, ecosystem) owns a priority-ordered list
 /// (ascending <c>position</c>, lowest tried first). The proxy fetch path walks the list and
 /// falls through to the next entry on miss/unreachable; an empty list disables proxying for
@@ -369,6 +376,33 @@ public sealed class UpstreamRegistryRepository
             TokenEndpoint = r.TokenEndpoint,
             Prefixes = ParsePrefixes(r.PrefixesJson),
         }).ToList();
+    }
+
+    /// <summary>
+    /// The ordered OCI routing table for one org — host and prefixes only, with no credential
+    /// material selected or decrypted.
+    ///
+    /// <para>
+    /// This exists so the manifest-404 diagnostic can say which upstream claimed a repository
+    /// without <see cref="BuildOciUpstreamsForOrgAsync"/>'s secret read: a diagnostic on an
+    /// anonymously reachable protocol path has no business handling a decrypted password, and
+    /// selecting the column at all is the part worth avoiding, not just declining to print it.
+    /// </para>
+    /// </summary>
+    public async Task<IReadOnlyList<OciUpstreamRoute>> ListOciUpstreamRoutesAsync(
+        string orgId, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        var rows = await conn.QueryAsync<(string? Url, string? PrefixesJson)>(new CommandDefinition(
+            """
+            SELECT url AS Url, prefixes AS PrefixesJson
+            FROM upstream_registry
+            WHERE org_id = @orgId AND ecosystem = 'oci'
+            ORDER BY position, created_at
+            """,
+            new { orgId }, cancellationToken: ct));
+
+        return rows.Select(r => new OciUpstreamRoute(r.Url ?? "", ParsePrefixes(r.PrefixesJson))).ToList();
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────

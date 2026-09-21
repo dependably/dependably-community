@@ -119,7 +119,7 @@ public sealed class BannerControllerAuthTests : IAsyncLifetime
 
     private BannersController BuildControllerWithContext(DefaultHttpContext http)
     {
-        var guard = new OrgAccessGuard(_db);
+        var guard = new OrgAccessGuard(_db, TestProblems.Create());
         var audit = new AuditRepository(_db);
         var banners = new BannerRepository(_db, TestTime.Frozen(KnownNow));
         var problems = new ProblemResults(new EchoLocalizer());
@@ -327,7 +327,9 @@ public sealed class BannerControllerAuthTests : IAsyncLifetime
         var ctrl = BuildController(_userIds["auditor"], "auditor");
         var result = await ctrl.List(CancellationToken.None);
         // Auditor lacks read:tenant — must 403, not 200.
-        Assert.IsType<ForbidResult>(result);
+        // The guard answers a capability shortfall with a localized problem body now, not a
+        // bare ForbidResult — a scheme-delegated forbid wrote no body at all.
+        Assert.Equal(StatusCodes.Status403Forbidden, Assert.IsType<ObjectResult>(result).StatusCode);
     }
 
     [Fact]
@@ -340,7 +342,9 @@ public sealed class BannerControllerAuthTests : IAsyncLifetime
             StartsAt: KnownNow.AddDays(-1).ToUtcIso(),
             EndsAt: KnownNow.AddDays(30).ToUtcIso(),
             Enabled: true), CancellationToken.None);
-        Assert.IsType<ForbidResult>(result);
+        // The guard answers a capability shortfall with a localized problem body now, not a
+        // bare ForbidResult — a scheme-delegated forbid wrote no body at all.
+        Assert.Equal(StatusCodes.Status403Forbidden, Assert.IsType<ObjectResult>(result).StatusCode);
     }
 
     // ── Create: owner can create, invalid payloads are rejected ────────────────────────────
@@ -447,7 +451,9 @@ public sealed class BannerControllerAuthTests : IAsyncLifetime
             StartsAt: KnownNow.AddDays(-1).ToUtcIso(),
             EndsAt: KnownNow.AddDays(30).ToUtcIso(),
             Enabled: true), CancellationToken.None);
-        Assert.IsType<ForbidResult>(result);
+        // The guard answers a capability shortfall with a localized problem body now, not a
+        // bare ForbidResult — a scheme-delegated forbid wrote no body at all.
+        Assert.Equal(StatusCodes.Status403Forbidden, Assert.IsType<ObjectResult>(result).StatusCode);
     }
 
     // ── Delete: owner can delete an existing tenant banner ─────────────────────────────────
@@ -477,7 +483,9 @@ public sealed class BannerControllerAuthTests : IAsyncLifetime
     {
         var ctrl = BuildController(_userIds["auditor"], "auditor");
         var result = await ctrl.Delete(_sharedBannerId, CancellationToken.None);
-        Assert.IsType<ForbidResult>(result);
+        // The guard answers a capability shortfall with a localized problem body now, not a
+        // bare ForbidResult — a scheme-delegated forbid wrote no body at all.
+        Assert.Equal(StatusCodes.Status403Forbidden, Assert.IsType<ObjectResult>(result).StatusCode);
     }
 
     private sealed class EchoLocalizer : IStringLocalizer<SharedResource>

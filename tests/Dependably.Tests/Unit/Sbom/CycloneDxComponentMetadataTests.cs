@@ -68,19 +68,91 @@ public sealed class CycloneDxComponentMetadataTests
     /// <summary>
     /// cyclonedx-npm writes the 1.4-era <c>author</c> string while the .NET generator writes
     /// <c>authors[]</c>. Both producers publish into the same instance, so a parser that read
-    /// only one shape would leave half of a real inventory attributed to nobody.
+    /// only one shape would leave half of a real inventory attributed to nobody. manufacturer is
+    /// the last fallback, per CycloneDX's own schema documenting it as authors[]'s
+    /// automated-creation analogue.
     /// </summary>
     [Theory]
     [InlineData("""{ "name": "x", "author": "Ada" }""", "Ada")]
     [InlineData("""{ "name": "x", "authors": [ { "name": "Ada" } ] }""", "Ada")]
-    [InlineData("""{ "name": "x", "publisher": "Acme" }""", "Acme")]
-    // authors[] outranks both: it is the current shape, and a document carrying it alongside a
-    // legacy string means the string is the stale copy.
+    // publisher/supplier are a distinct CISA element (Component Producer) from Component Author,
+    // so neither is EVER a fallback for Author — a component naming only an organization as its
+    // supplier has no author.
+    [InlineData("""{ "name": "x", "publisher": "Acme" }""", null)]
+    [InlineData("""{ "name": "x", "supplier": { "name": "Acme" } }""", null)]
+    // authors[] outranks the legacy string: it is the current shape, and a document carrying it
+    // alongside a legacy string means the string is the stale copy.
     [InlineData("""{ "name": "x", "authors": [ { "name": "Ada" } ], "author": "stale" }""", "Ada")]
-    // publisher is the organization, so it answers only when no person is named.
     [InlineData("""{ "name": "x", "author": "Ada", "publisher": "Acme" }""", "Ada")]
-    public void ResolvesAuthorAcrossProducerShapes(string componentJson, string expected) =>
+    // manufacturer.name is read ONLY when neither authors[] nor author named anyone.
+    [InlineData("""{ "name": "x", "manufacturer": { "name": "Automated Builders Inc" } }""", "Automated Builders Inc")]
+    [InlineData("""{ "name": "x", "author": "Ada", "manufacturer": { "name": "Automated Builders Inc" } }""", "Ada")]
+    [InlineData(
+        """{ "name": "x", "authors": [ { "name": "Ada" } ], "manufacturer": { "name": "Automated Builders Inc" } }""",
+        "Ada")]
+    public void ResolvesAuthorAcrossProducerShapes(string componentJson, string? expected) =>
         Assert.Equal(expected, ParseOne(componentJson).Author);
+
+    /// <summary>
+    /// D10 (Component Producer): <c>supplier.name</c> (present in the schema since CycloneDX 1.2)
+    /// is preferred, falling back to the older <c>publisher</c> string for a producer that still
+    /// only emits that; neither is ever derived from authors[]/author — a component naming a
+    /// person has no producer — and <c>manufacturer</c> is NEVER read here (see
+    /// <see cref="ManufacturerFeedsAuthorNeverProducer"/>).
+    /// </summary>
+    [Theory]
+    [InlineData("""{ "name": "x", "publisher": "Acme" }""", "Acme")]
+    [InlineData("""{ "name": "x", "supplier": { "name": "Acme" } }""", "Acme")]
+    // supplier wins when a document carries both — the awkward, adversarial case, not the
+    // representative one: the two name DIFFERENT organizations, so a fixture that just happened
+    // to agree would prove nothing about precedence.
+    [InlineData(
+        """{ "name": "x", "supplier": { "name": "Modern Supplier Co" }, "publisher": "Legacy Publisher Inc" }""",
+        "Modern Supplier Co")]
+    [InlineData("""{ "name": "x", "author": "Ada" }""", null)]
+    [InlineData("""{ "name": "x", "authors": [ { "name": "Ada" } ] }""", null)]
+    [InlineData("""{ "name": "x", "manufacturer": { "name": "Acme" } }""", null)]
+    public void ResolvesProducerAcrossSupplierAndPublisherShapes(string componentJson, string? expected) =>
+        Assert.Equal(expected, ParseOne(componentJson).Producer);
+
+    /// <summary>
+    /// Adversarial twin for the producer/author split: a component whose supplier and authors[]
+    /// NAME DIFFERENT ENTITIES must resolve a producer distinct from its author. A fixture where
+    /// the two happen to be equal proves nothing — that is the exact shape the old collapsed
+    /// column would also have satisfied.
+    /// </summary>
+    [Fact]
+    public void ProducerAndAuthorAreIndependentWhenTheDocumentNamesDifferentEntities()
+    {
+        var component = ParseOne("""
+            { "name": "x", "authors": [ { "name": "Ada Lovelace" } ], "supplier": { "name": "Acme Corp" } }
+            """);
+
+        Assert.Equal("Ada Lovelace", component.Author);
+        Assert.Equal("Acme Corp", component.Producer);
+        Assert.NotEqual(component.Author, component.Producer);
+    }
+
+    /// <summary>
+    /// manufacturer and supplier are DIFFERENT CISA-recognized concepts (who created it vs. who
+    /// supplied it) and CycloneDX keeps them apart the same way — this pins that a component
+    /// naming BOTH, with different organizations, resolves manufacturer into Author and supplier
+    /// into Producer rather than either bleeding into the other.
+    /// </summary>
+    [Fact]
+    public void ManufacturerFeedsAuthorNeverProducer()
+    {
+        var component = ParseOne("""
+            {
+              "name": "x",
+              "manufacturer": { "name": "Automated Builders Inc" },
+              "supplier": { "name": "Modern Supplier Co" }
+            }
+            """);
+
+        Assert.Equal("Automated Builders Inc", component.Author);
+        Assert.Equal("Modern Supplier Co", component.Producer);
+    }
 
     [Fact]
     public void DropsExternalReferencesThatAreNotHttpUrls()
@@ -237,11 +309,147 @@ public sealed class CycloneDxComponentMetadataTests
 
         Assert.Null(component.Description);
         Assert.Null(component.Author);
+        Assert.Null(component.Producer);
         Assert.Null(component.Copyright);
         Assert.Null(component.Group);
         Assert.Null(component.WebsiteUrl);
         Assert.Null(component.HashesJson);
         Assert.Null(component.VersionRange);
         Assert.Null(component.IsExternal);
+        Assert.Null(component.ExplicitUnknownFieldsJson);
+    }
+
+    // ── CISA X4/P4a read-back: a dependably-exported document, re-uploaded ─────────────────────
+
+    [Fact]
+    public void ReadsDependablyProducerStatusBackAsAnExplicitUnknownMarker()
+    {
+        var component = ParseOne("""
+            {
+              "name": "x",
+              "properties": [ { "name": "dependably:producer-status", "value": "unknown" } ]
+            }
+            """);
+
+        Assert.Equal("""["producer"]""", component.ExplicitUnknownFieldsJson);
+    }
+
+    [Fact]
+    public void ReadsBothDependablyStatusPropertiesBackTogether()
+    {
+        var component = ParseOne("""
+            {
+              "name": "x",
+              "properties": [
+                { "name": "dependably:producer-status", "value": "unknown" },
+                { "name": "dependably:license-status", "value": "unknown" }
+              ]
+            }
+            """);
+
+        Assert.Equal("""["producer","license"]""", component.ExplicitUnknownFieldsJson);
+    }
+
+    // #706: two of the six dependably:*-status duty-field properties an export ever writes were
+    // read back before this fix (producer/license); version-status/identifier-status were emitted
+    // but silently dropped, so a dependably-exported document re-uploaded to another dependably
+    // instance scored D12/D13 as silent gaps rather than the explicitly-unknown practice it
+    // actually demonstrated.
+
+    [Fact]
+    public void ReadsDependablyVersionStatusBackAsAnExplicitUnknownMarker()
+    {
+        var component = ParseOne("""
+            {
+              "name": "x",
+              "properties": [ { "name": "dependably:version-status", "value": "unknown" } ]
+            }
+            """);
+
+        Assert.Equal("""["version"]""", component.ExplicitUnknownFieldsJson);
+    }
+
+    [Fact]
+    public void ReadsDependablyIdentifierStatusBackAsAnExplicitUnknownMarker()
+    {
+        var component = ParseOne("""
+            {
+              "name": "x",
+              "properties": [ { "name": "dependably:identifier-status", "value": "unknown" } ]
+            }
+            """);
+
+        Assert.Equal("""["identifier"]""", component.ExplicitUnknownFieldsJson);
+    }
+
+    [Fact]
+    public void ReadsAllFourDependablyStatusPropertiesBackTogether_InDeclarationOrder()
+    {
+        var component = ParseOne("""
+            {
+              "name": "x",
+              "properties": [
+                { "name": "dependably:producer-status", "value": "unknown" },
+                { "name": "dependably:license-status", "value": "unknown" },
+                { "name": "dependably:version-status", "value": "unknown" },
+                { "name": "dependably:identifier-status", "value": "unknown" }
+              ]
+            }
+            """);
+
+        Assert.Equal(
+            """["producer","license","version","identifier"]""", component.ExplicitUnknownFieldsJson);
+    }
+
+    [Fact]
+    public void DoesNotReadDependablyHashOrToolVersionStatusBackAsAComponentExplicitUnknownMarker()
+    {
+        // hash-status is deliberately not tracked in this component-scoped vocabulary at all (see
+        // SbomExplicitUnknownFields's class doc comment); tool-version-status is a document-level
+        // property carried on the metadata.tools entry, not a component's own properties[] — see
+        // CycloneDxDocumentToolVersionTests. Neither is a member of
+        // CycloneDxParser.ExplicitUnknownPropertyNames, so a component-level occurrence of either
+        // (a malformed document, or a producer misusing the name) must never be mistaken for one.
+        var component = ParseOne("""
+            {
+              "name": "x",
+              "properties": [
+                { "name": "dependably:hash-status", "value": "unknown" },
+                { "name": "dependably:tool-version-status", "value": "unknown" }
+              ]
+            }
+            """);
+
+        Assert.Null(component.ExplicitUnknownFieldsJson);
+    }
+
+    [Fact]
+    public void IgnoresAnUnrecognisedPropertyValue_ForADependablyStatusProperty()
+    {
+        // Only "unknown"/"withheld" — DependablyExportProperties.AbsenceReason's own vocabulary —
+        // are ever written by the exporter; anything else is not this registry's own marker.
+        var component = ParseOne("""
+            {
+              "name": "x",
+              "properties": [ { "name": "dependably:producer-status", "value": "maybe" } ]
+            }
+            """);
+
+        Assert.Null(component.ExplicitUnknownFieldsJson);
+    }
+
+    [Fact]
+    public void IgnoresAnyOtherProducersPropertyNames_NeverInventingAMechanismForPlainCycloneDx()
+    {
+        // A third-party property that happens to carry the string "unknown" must never be
+        // mistaken for this registry's own vocabulary — only the two exact property names count.
+        var component = ParseOne("""
+            {
+              "name": "x",
+              "properties": [ { "name": "cdx:some-other-tool:status", "value": "unknown" } ]
+            }
+            """);
+
+        Assert.Null(component.ExplicitUnknownFieldsJson);
     }
 }

@@ -476,6 +476,17 @@ public sealed class SiemActivityEventsTests
         Assert.StartsWith("application/x-cef", content.ContentType, StringComparison.Ordinal);
         Assert.Contains("CEF:0|Dependably|dependably|1.0|blocked_license|", content.Content!, StringComparison.Ordinal);
         Assert.Contains("src=203.0.113.7", content.Content!, StringComparison.Ordinal);
+        Assert.Contains("suid=tok-1", content.Content!, StringComparison.Ordinal);
+        // The cs1-cs4 slots are positional and each carries its own Label pair: a value written
+        // without its label is a field the collector has no name for, which is indistinguishable
+        // from a custom-string slot this product never populated.
+        Assert.Contains($"cs1={b.PrimaryOrgId} cs1Label=OrgId", content.Content!, StringComparison.Ordinal);
+        Assert.Contains("cs2=npm cs2Label=Ecosystem", content.Content!, StringComparison.Ordinal);
+        Assert.Contains("cs3=pkg:npm/a@1 cs3Label=Purl", content.Content!, StringComparison.Ordinal);
+        // The tenant feed resolves no slug, and this row carries no detail. Both slots are omitted
+        // outright rather than written empty — an empty cs4=/msg= reads as a known-blank value.
+        Assert.DoesNotContain(" cs4=", content.Content!, StringComparison.Ordinal);
+        Assert.DoesNotContain(" msg=", content.Content!, StringComparison.Ordinal);
         Assert.Contains("# window_until=", content.Content!, StringComparison.Ordinal);
     }
 }

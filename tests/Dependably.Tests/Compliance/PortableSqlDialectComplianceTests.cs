@@ -129,7 +129,7 @@ public sealed partial class PortableSqlDialectComplianceTests
             {
                 string trimmed = lines[i].TrimStart();
                 if (trimmed.StartsWith("//", StringComparison.Ordinal)
-                    || trimmed.StartsWith("*", StringComparison.Ordinal))
+                    || trimmed.StartsWith('*'))
                 {
                     continue;
                 }

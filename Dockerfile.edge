@@ -129,16 +129,17 @@ COPY --from=build /app/publish/*.pdb /
 FROM build AS publish-no-symbols
 RUN rm -f /app/publish/*.pdb
 
-# Notices stage — turns the edge CycloneDX SBOM into a curated attribution file.
-# The edge has no frontend SBOM, so extract-notices.mjs runs over the single
-# backend SBOM (the script accepts one-or-more inputs). Pinned to the build
+# Notices stage — turns the edge CycloneDX SBOM, plus the curated fragment for source
+# vendored directly from an upstream repository (dotnet-CycloneDX only scans the NuGet
+# dependency graph and never sees it — the edge image links Dependably.Core, which is
+# where that source lives), into a curated attribution file. Pinned to the build
 # platform: it runs node over architecture-independent JSON, so emulation buys
 # nothing and risks SIGILL.
 FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS notices
 WORKDIR /work
-COPY build/extract-notices.mjs ./
+COPY build/extract-notices.mjs build/sbom-vendored.json ./
 COPY --from=build /sboms/sbom-edge.json ./
-RUN node extract-notices.mjs sbom-edge.json > notices.json
+RUN node extract-notices.mjs sbom-edge.json sbom-vendored.json > notices.json
 
 # Runtime stage — minimal native deps image
 FROM ${RUNTIME_IMAGE} AS final

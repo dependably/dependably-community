@@ -228,7 +228,7 @@ public sealed partial class AuditActionVocabularyComplianceTests
         // answers correctly either way — it checks for declared children rather than assuming there
         // are none — but the day someone declares both `saml.config` and `saml.config.updated`,
         // `action=saml.config` stops serving `saml.config.updated` through the IN half and starts
-        // needing the LIKE half back, and the two caps stop meaning what CONTRIBUTING.md says they
+        // needing the LIKE half back, and the two caps stop meaning what OPERATIONS.md says they
         // mean. That is a conversation to have deliberately, not a behaviour to discover from a
         // collector's missing events, so it fails here first.
         var problems = new List<string>();

@@ -78,6 +78,86 @@ public sealed class SbomExportControllerTests : IClassFixture<DependablyFactory>
             new { id, orgId, versionId, purl, name, version, sbomScope, dependencyScope, dependencyPath, licenseSpdx });
     }
 
+    /// <summary>
+    /// Seeds one component with control over the fields the export-options tests need:
+    /// <c>dependency_scope</c> and <c>sbom_scope</c> (the two columns <c>scope=all|prod|dev</c>
+    /// reads — <see cref="Dependably.Api.SbomAnalysisProjection.IsProdScope"/>), <c>version_range</c>
+    /// (present only when <paramref name="version"/> is null, the same exclusivity the exporter
+    /// itself enforces), and <c>is_external</c> — the two CycloneDX 1.7-only facts a 1.6 export
+    /// must downgrade rather than silently drop.
+    /// </summary>
+    private static async Task<string> InsertComponentWithFacetsAsync(
+        System.Data.IDbConnection conn, string orgId, string versionId,
+        string purl, string name, string? version, string dependencyScope,
+        string? versionRange = null, bool? isExternal = null, string? sbomScope = null)
+    {
+        string id = Guid.NewGuid().ToString("N");
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO sbom_components
+                (id, org_id, project_version_id, purl, ecosystem, purl_name, version, name,
+                 component_type, sbom_scope, dependency_scope, dependency_kind, version_range, is_external, created_at)
+            VALUES
+                (@id, @orgId, @versionId, @purl, 'npm', @name, @version, @name,
+                 'library', @sbomScope, @dependencyScope, 'direct', @versionRange, @isExternal, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            """,
+            new { id, orgId, versionId, purl, name, version, dependencyScope, versionRange, isExternal, sbomScope });
+        return id;
+    }
+
+    /// <summary>Links one advisory to one component, the minimal shape a VDR export needs to carry it.</summary>
+    private static async Task InsertVulnForComponentAsync(
+        System.Data.IDbConnection conn, string componentId, string osvId, string ecosystem, string packageName)
+    {
+        string vulnId = Guid.NewGuid().ToString("N");
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO vulnerabilities (id, osv_id, ecosystem, package_name, severity, cvss_score, fetched_at)
+            VALUES (@vulnId, @osvId, @ecosystem, @packageName, 'HIGH', 7.5, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            """,
+            new { vulnId, osvId, ecosystem, packageName });
+        await conn.ExecuteAsync(
+            "INSERT INTO sbom_component_vulns (id, component_id, vuln_id, checked_at) VALUES (@id, @componentId, @vulnId, strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
+            new { id = Guid.NewGuid().ToString("N"), componentId, vulnId });
+    }
+
+    private static async Task<string> SeedCollectionAsync(
+        System.Data.IDbConnection conn, string orgId, string name)
+    {
+        string id = Guid.NewGuid().ToString("N");
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO projects (id, org_id, kind, name, classifier, created_at)
+            VALUES (@id, @orgId, 'collection', @name, 'application', strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            """,
+            new { id, orgId, name });
+        return id;
+    }
+
+    private static async Task<(string ProjectId, string VersionId)> SeedChildProjectVersionAsync(
+        System.Data.IDbConnection conn, string orgId, string parentId, string projectName, string versionLabel = "1.0.0")
+    {
+        string projectId = Guid.NewGuid().ToString("N");
+        string versionId = Guid.NewGuid().ToString("N");
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO projects (id, org_id, parent_id, kind, name, classifier, created_at)
+            VALUES (@projectId, @orgId, @parentId, 'project', @projectName, 'application', strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            """,
+            new { projectId, orgId, parentId, projectName });
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO project_versions (id, org_id, project_id, version, is_latest, created_at)
+            VALUES (@versionId, @orgId, @projectId, @versionLabel, 1, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            """,
+            new { versionId, orgId, projectId, versionLabel });
+        return (projectId, versionId);
+    }
+
+    private static Dictionary<string, string> PropertiesByName(JsonElement propertiesArray) =>
+        propertiesArray.EnumerateArray()
+            .ToDictionary(p => p.GetProperty("name").GetString()!, p => p.GetProperty("value").GetString()!);
+
     private async Task<string> CreateOtherOrgReadTokenAsync()
     {
         var orgRepo = _factory.Services.GetRequiredService<OrgRepository>();
@@ -184,6 +264,352 @@ public sealed class SbomExportControllerTests : IClassFixture<DependablyFactory>
         Assert.Equal((HttpStatusCode)422, resp.StatusCode);
     }
 
+    // ── export/sbom?scope=prod|dev ────────────────────────────────────────────────
+    // Spec review (SPEC-610): the export's scope option reads the identical three-state
+    // vocabulary and IsProdScope/IsDevScope predicate the component table's own scope=all|prod|dev
+    // filter reads (SbomAnalysisProjection), not a parallel dependencyScope=exclude-dev spelling.
+    // prod excludes dependency_scope='dev' AND sbom_scope='excluded' — the exclude-dev shape this
+    // replaces never dropped an sbom_scope='excluded' component that wasn't also dependency_scope
+    // dev, which is exactly the drift a spec review caught.
+
+    /// <summary>
+    /// Issue #684 / SPEC-610: <c>scope=prod</c> excludes both the <c>dev</c>-scoped component and
+    /// the one the SBOM itself declared <c>excluded</c> (even though its dependency scope is
+    /// <c>runtime</c>) — the semantic the old <c>exclude-dev</c> spelling missed. The
+    /// <c>unknown</c>-scoped component is kept — the whole point of the filter, since excluding
+    /// <c>unknown</c> too would silently drop every component nothing has classified — and the
+    /// document declares what it did via <c>dependably:component-filter</c> and
+    /// <c>dependably:filtered-out-count</c>.
+    /// </summary>
+    [Fact]
+    public async Task ExportSbom_ScopeProd_ExcludesDevAndSbomExcluded_KeepsUnknown_AndDeclaresFilter()
+    {
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        string orgId = await DefaultOrgIdAsync(conn);
+        var (projectId, versionId, _, _) = await SeedProjectVersionAsync(conn, orgId, "scope-filter", "1.0.0");
+
+        await InsertComponentWithFacetsAsync(conn, orgId, versionId, "pkg:npm/dev-only@1.0.0", "dev-only", "1.0.0", "dev");
+        await InsertComponentWithFacetsAsync(conn, orgId, versionId, "pkg:npm/runtime-pkg@1.0.0", "runtime-pkg", "1.0.0", "runtime");
+        await InsertComponentWithFacetsAsync(conn, orgId, versionId, "pkg:npm/unknown-pkg@1.0.0", "unknown-pkg", "1.0.0", "unknown");
+        // dependency_scope=runtime but sbom_scope=excluded: exclude-dev never dropped this one.
+        await InsertComponentWithFacetsAsync(
+            conn, orgId, versionId, "pkg:npm/sbom-excluded-pkg@1.0.0", "sbom-excluded-pkg", "1.0.0", "runtime",
+            sbomScope: "excluded");
+
+        using var c = await AdminClient();
+        var resp = await c.GetAsync(
+            $"/api/v1/projects/{projectId}/versions/{versionId}/export/sbom?variant=inventory&scope=prod");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+
+        var doc = await JsonDocument.ParseAsync(await resp.Content.ReadAsStreamAsync());
+        var names = doc.RootElement.GetProperty("components").EnumerateArray()
+            .Select(x => x.GetProperty("name").GetString()).ToList();
+        Assert.DoesNotContain("dev-only", names);
+        Assert.DoesNotContain("sbom-excluded-pkg", names);
+        Assert.Contains("runtime-pkg", names);
+        Assert.Contains("unknown-pkg", names);
+        Assert.Equal(2, names.Count);
+
+        var props = PropertiesByName(doc.RootElement.GetProperty("metadata").GetProperty("properties"));
+        Assert.Equal("prod", props["dependably:component-filter"]);
+        Assert.Equal("2", props["dependably:filtered-out-count"]);
+    }
+
+    /// <summary>
+    /// Adversarial twin of <see cref="ExportSbom_ScopeProd_ExcludesDevAndSbomExcluded_KeepsUnknown_AndDeclaresFilter"/>:
+    /// the identical four-component fixture, exported with no <c>scope</c> query parameter, omits
+    /// nothing and declares <c>component-filter=all</c>/<c>filtered-out-count=0</c>.
+    /// </summary>
+    [Fact]
+    public async Task ExportSbom_DefaultScope_OmitsNothing_AndDeclaresNoFilter()
+    {
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        string orgId = await DefaultOrgIdAsync(conn);
+        var (projectId, versionId, _, _) = await SeedProjectVersionAsync(conn, orgId, "scope-filter-default", "1.0.0");
+
+        await InsertComponentWithFacetsAsync(conn, orgId, versionId, "pkg:npm/dev-only@1.0.0", "dev-only", "1.0.0", "dev");
+        await InsertComponentWithFacetsAsync(conn, orgId, versionId, "pkg:npm/runtime-pkg@1.0.0", "runtime-pkg", "1.0.0", "runtime");
+        await InsertComponentWithFacetsAsync(conn, orgId, versionId, "pkg:npm/unknown-pkg@1.0.0", "unknown-pkg", "1.0.0", "unknown");
+        await InsertComponentWithFacetsAsync(
+            conn, orgId, versionId, "pkg:npm/sbom-excluded-pkg@1.0.0", "sbom-excluded-pkg", "1.0.0", "runtime",
+            sbomScope: "excluded");
+
+        using var c = await AdminClient();
+        var resp = await c.GetAsync(
+            $"/api/v1/projects/{projectId}/versions/{versionId}/export/sbom?variant=inventory");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+
+        var doc = await JsonDocument.ParseAsync(await resp.Content.ReadAsStreamAsync());
+        var names = doc.RootElement.GetProperty("components").EnumerateArray()
+            .Select(x => x.GetProperty("name").GetString()).ToList();
+        Assert.Contains("dev-only", names);
+        Assert.Contains("runtime-pkg", names);
+        Assert.Contains("unknown-pkg", names);
+        Assert.Contains("sbom-excluded-pkg", names);
+        Assert.Equal(4, names.Count);
+
+        var props = PropertiesByName(doc.RootElement.GetProperty("metadata").GetProperty("properties"));
+        Assert.Equal("all", props["dependably:component-filter"]);
+        Assert.Equal("0", props["dependably:filtered-out-count"]);
+    }
+
+    /// <summary>
+    /// Issue #684 acceptance criterion: refusing <c>dev</c> once the vocabulary is shared would be
+    /// a third semantic, and a dev-only export is a legitimate question. <c>scope=dev</c> keeps
+    /// only the components whose <c>dependency_scope</c> is exactly <c>dev</c> —
+    /// <c>SbomAnalysisProjection.IsDevScope</c> — regardless of <c>sbom_scope</c>.
+    /// </summary>
+    [Fact]
+    public async Task ExportSbom_ScopeDev_KeepsOnlyDevComponents_AndDeclaresFilter()
+    {
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        string orgId = await DefaultOrgIdAsync(conn);
+        var (projectId, versionId, _, _) = await SeedProjectVersionAsync(conn, orgId, "scope-dev-filter", "1.0.0");
+
+        await InsertComponentWithFacetsAsync(conn, orgId, versionId, "pkg:npm/dev-only@1.0.0", "dev-only", "1.0.0", "dev");
+        await InsertComponentWithFacetsAsync(conn, orgId, versionId, "pkg:npm/runtime-pkg@1.0.0", "runtime-pkg", "1.0.0", "runtime");
+        await InsertComponentWithFacetsAsync(conn, orgId, versionId, "pkg:npm/unknown-pkg@1.0.0", "unknown-pkg", "1.0.0", "unknown");
+
+        using var c = await AdminClient();
+        var resp = await c.GetAsync(
+            $"/api/v1/projects/{projectId}/versions/{versionId}/export/sbom?variant=inventory&scope=dev");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+
+        var doc = await JsonDocument.ParseAsync(await resp.Content.ReadAsStreamAsync());
+        var names = doc.RootElement.GetProperty("components").EnumerateArray()
+            .Select(x => x.GetProperty("name").GetString()).ToList();
+        Assert.Equal(["dev-only"], names);
+
+        var props = PropertiesByName(doc.RootElement.GetProperty("metadata").GetProperty("properties"));
+        Assert.Equal("dev", props["dependably:component-filter"]);
+        Assert.Equal("2", props["dependably:filtered-out-count"]);
+    }
+
+    /// <summary>
+    /// Spec review fix: the scope filter must mean the same thing on every surface that offers it.
+    /// Seeds all four scope combinations (dev; plain runtime; unknown; and the case the old
+    /// <c>exclude-dev</c> shape missed — <c>sbom_scope='excluded'</c> on a <c>runtime</c>
+    /// component) and asserts the component-version analysis endpoint's own <c>scope=prod</c>
+    /// filter and the export's <c>scope=prod</c> option resolve to the identical purl set. This is
+    /// the assertion whose absence let the two surfaces drift in the first place: an operator
+    /// filtering the table to prod and exporting under prod must see the same components, not two
+    /// answers to one apparent question.
+    /// </summary>
+    [Fact]
+    public async Task ExportSbom_ScopeProd_MatchesAnalysisEndpointsProdFilter_OnComponentIdentity()
+    {
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        string orgId = await DefaultOrgIdAsync(conn);
+        var (projectId, versionId, _, _) = await SeedProjectVersionAsync(conn, orgId, "scope-parity", "1.0.0");
+
+        await InsertComponentWithFacetsAsync(conn, orgId, versionId, "pkg:npm/parity-dev@1.0.0", "parity-dev", "1.0.0", "dev");
+        await InsertComponentWithFacetsAsync(conn, orgId, versionId, "pkg:npm/parity-runtime@1.0.0", "parity-runtime", "1.0.0", "runtime");
+        await InsertComponentWithFacetsAsync(conn, orgId, versionId, "pkg:npm/parity-unknown@1.0.0", "parity-unknown", "1.0.0", "unknown");
+        await InsertComponentWithFacetsAsync(
+            conn, orgId, versionId, "pkg:npm/parity-sbom-excluded@1.0.0", "parity-sbom-excluded", "1.0.0", "runtime",
+            sbomScope: "excluded");
+
+        using var c = await AdminClient();
+
+        var analysisResp = await c.GetAsync(
+            $"/api/v1/projects/{projectId}/versions/{versionId}/analysis?scope=prod&limit=200");
+        Assert.Equal(HttpStatusCode.OK, analysisResp.StatusCode);
+        var analysisDoc = await JsonDocument.ParseAsync(await analysisResp.Content.ReadAsStreamAsync());
+        var analysisPurls = analysisDoc.RootElement.GetProperty("items").EnumerateArray()
+            .Select(i => i.GetProperty("purl").GetString()).ToHashSet();
+
+        var exportResp = await c.GetAsync(
+            $"/api/v1/projects/{projectId}/versions/{versionId}/export/sbom?variant=inventory&scope=prod");
+        Assert.Equal(HttpStatusCode.OK, exportResp.StatusCode);
+        var exportDoc = await JsonDocument.ParseAsync(await exportResp.Content.ReadAsStreamAsync());
+        var exportPurls = exportDoc.RootElement.GetProperty("components").EnumerateArray()
+            .Select(x => x.GetProperty("purl").GetString()).ToHashSet();
+
+        // Exactly the two prod survivors — proves both fixtures resolved the same way, not that
+        // two empty sets happened to match.
+        Assert.Equal(["pkg:npm/parity-runtime@1.0.0", "pkg:npm/parity-unknown@1.0.0"], analysisPurls.OrderBy(x => x, StringComparer.Ordinal));
+        Assert.Equal(analysisPurls, exportPurls);
+    }
+
+    /// <summary>
+    /// Fix for issue #684: <c>variant=vdr&amp;scope=prod</c> must not leave a dangling
+    /// <c>vulnerabilities[]</c> entry for a component <c>components[]</c> just excluded.
+    /// <c>sbom_component_vulns</c> is loaded straight from the database by
+    /// <c>project_version_id</c>, independent of the component filter, so without filtering the
+    /// vulnerability rows too, the dev component's own advisory would still ship — an
+    /// <c>affects[].ref</c> naming a component the same document declares it removed, which
+    /// neither Dependency-Track nor GitLab can attach to anything, and which a human reads as an
+    /// advisory against a component the inventory denies shipping. The kept runtime and unknown
+    /// components' advisories must still ship undisturbed.
+    /// </summary>
+    [Fact]
+    public async Task ExportSbom_Vdr_ScopeProd_OmitsVulnerabilitiesForFilteredOutComponents()
+    {
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        string orgId = await DefaultOrgIdAsync(conn);
+        var (projectId, versionId, _, _) = await SeedProjectVersionAsync(conn, orgId, "vdr-scope-filter", "1.0.0");
+
+        string devId = await InsertComponentWithFacetsAsync(
+            conn, orgId, versionId, "pkg:npm/dev-vuln@1.0.0", "dev-vuln", "1.0.0", "dev");
+        string runtimeId = await InsertComponentWithFacetsAsync(
+            conn, orgId, versionId, "pkg:npm/runtime-vuln@1.0.0", "runtime-vuln", "1.0.0", "runtime");
+        string unknownId = await InsertComponentWithFacetsAsync(
+            conn, orgId, versionId, "pkg:npm/unknown-vuln@1.0.0", "unknown-vuln", "1.0.0", "unknown");
+
+        await InsertVulnForComponentAsync(conn, devId, "CVE-2100-9001", "npm", "dev-vuln");
+        await InsertVulnForComponentAsync(conn, runtimeId, "CVE-2100-9002", "npm", "runtime-vuln");
+        await InsertVulnForComponentAsync(conn, unknownId, "CVE-2100-9003", "npm", "unknown-vuln");
+
+        using var c = await AdminClient();
+        var resp = await c.GetAsync(
+            $"/api/v1/projects/{projectId}/versions/{versionId}/export/sbom?variant=vdr&scope=prod");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+
+        var doc = await JsonDocument.ParseAsync(await resp.Content.ReadAsStreamAsync());
+        var components = doc.RootElement.GetProperty("components").EnumerateArray().ToList();
+        var componentNames = components.Select(x => x.GetProperty("name").GetString()).ToList();
+        Assert.DoesNotContain("dev-vuln", componentNames);
+        Assert.Equal(2, componentNames.Count);
+
+        var vulns = doc.RootElement.GetProperty("vulnerabilities").EnumerateArray().ToList();
+        var vulnIds = vulns.Select(v => v.GetProperty("id").GetString()).ToList();
+        Assert.DoesNotContain("CVE-2100-9001", vulnIds);
+        Assert.Contains("CVE-2100-9002", vulnIds);
+        Assert.Contains("CVE-2100-9003", vulnIds);
+        Assert.Equal(2, vulnIds.Count);
+
+        // No dangling affects[].ref: every surviving vulnerability's affects[0].ref names a
+        // component components[] actually declares.
+        var componentPurls = components.Select(x => x.GetProperty("purl").GetString()).ToHashSet();
+        foreach (var vuln in vulns)
+        {
+            string affectsRef = vuln.GetProperty("affects")[0].GetProperty("ref").GetString()!;
+            Assert.Contains(affectsRef, componentPurls);
+        }
+
+        var props = PropertiesByName(doc.RootElement.GetProperty("metadata").GetProperty("properties"));
+        Assert.Equal("prod", props["dependably:component-filter"]);
+        Assert.Equal("1", props["dependably:filtered-out-count"]);
+    }
+
+    // ── export/sbom?specVersion=1.6 ───────────────────────────────────────────────
+
+    /// <summary>
+    /// Issue #684: under <c>specVersion=1.6</c> the document's own <c>specVersion</c> field and
+    /// response Content-Type agree, the 1.7-only <c>isExternal</c> field is omitted, and a
+    /// versionRange-only component (no fixed version) does not simply lose its only
+    /// version-shaped fact — the value survives as the <c>dependably:version-range</c> property.
+    /// </summary>
+    [Fact]
+    public async Task ExportSbom_SpecVersion16_DowngradesShape()
+    {
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        string orgId = await DefaultOrgIdAsync(conn);
+        var (projectId, versionId, _, _) = await SeedProjectVersionAsync(conn, orgId, "spec16-check", "1.0.0");
+
+        await InsertComponentWithFacetsAsync(
+            conn, orgId, versionId, "pkg:npm/ranged-pkg", "ranged-pkg", version: null,
+            dependencyScope: "runtime", versionRange: ">=1.0.0 <2.0.0", isExternal: true);
+
+        using var c = await AdminClient();
+        var resp = await c.GetAsync(
+            $"/api/v1/projects/{projectId}/versions/{versionId}/export/sbom?variant=inventory&specVersion=1.6");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        Assert.Equal("application/vnd.cyclonedx+json; version=1.6", resp.Content.Headers.ContentType!.ToString());
+
+        var doc = await JsonDocument.ParseAsync(await resp.Content.ReadAsStreamAsync());
+        Assert.Equal("1.6", doc.RootElement.GetProperty("specVersion").GetString());
+
+        var comp = Assert.Single(doc.RootElement.GetProperty("components").EnumerateArray());
+        Assert.False(comp.TryGetProperty("version", out _), "a versionRange-only component must not gain a version field");
+        Assert.False(comp.TryGetProperty("versionRange", out _), "versionRange is a 1.7 field; a 1.6 document must omit it");
+        Assert.False(comp.TryGetProperty("isExternal", out _), "isExternal is a 1.7 field; a 1.6 document must omit it");
+
+        var props = PropertiesByName(comp.GetProperty("properties"));
+        Assert.Equal(">=1.0.0 <2.0.0", props["dependably:version-range"]);
+    }
+
+    /// <summary>
+    /// Adversarial twin of <see cref="ExportSbom_SpecVersion16_DowngradesShape"/>: the identical
+    /// fixture, exported with no <c>specVersion</c> query parameter, still emits <c>isExternal</c>
+    /// and the native <c>versionRange</c> field exactly as it did before this option existed.
+    /// </summary>
+    [Fact]
+    public async Task ExportSbom_DefaultSpecVersion_KeepsIsExternalAndVersionRange()
+    {
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        string orgId = await DefaultOrgIdAsync(conn);
+        var (projectId, versionId, _, _) = await SeedProjectVersionAsync(conn, orgId, "spec17-default", "1.0.0");
+
+        await InsertComponentWithFacetsAsync(
+            conn, orgId, versionId, "pkg:npm/ranged-pkg", "ranged-pkg", version: null,
+            dependencyScope: "runtime", versionRange: ">=1.0.0 <2.0.0", isExternal: true);
+
+        using var c = await AdminClient();
+        var resp = await c.GetAsync(
+            $"/api/v1/projects/{projectId}/versions/{versionId}/export/sbom?variant=inventory");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        Assert.Equal("application/vnd.cyclonedx+json; version=1.7", resp.Content.Headers.ContentType!.ToString());
+
+        var doc = await JsonDocument.ParseAsync(await resp.Content.ReadAsStreamAsync());
+        Assert.Equal("1.7", doc.RootElement.GetProperty("specVersion").GetString());
+
+        var comp = Assert.Single(doc.RootElement.GetProperty("components").EnumerateArray());
+        Assert.Equal(">=1.0.0 <2.0.0", comp.GetProperty("versionRange").GetString());
+        Assert.True(comp.GetProperty("isExternal").GetBoolean());
+        bool hasVersionRangeProperty = comp.TryGetProperty("properties", out var propsEl)
+            && propsEl.EnumerateArray().Any(p => p.GetProperty("name").GetString() == "dependably:version-range");
+        Assert.False(hasVersionRangeProperty, "the native versionRange field already carries the value under 1.7");
+    }
+
+    // ── export/sbom invalid format/specVersion/scope ──────────────────────────────
+
+    [Theory]
+    [InlineData("format", "not-a-real-format", "Must be 'cyclonedx-json'.")]
+    [InlineData("specVersion", "9.9", "Must be '1.6' or '1.7'.")]
+    [InlineData("scope", "not-a-real-scope", "Must be 'all', 'prod' or 'dev'.")]
+    public async Task ExportSbom_InvalidNewParams_Returns422WithLocalizedDetail(
+        string paramName, string paramValue, string expectedDetail)
+    {
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        string orgId = await DefaultOrgIdAsync(conn);
+        var (projectId, versionId, _, _) = await SeedProjectVersionAsync(conn, orgId, $"invalid-{paramName}", "1.0.0");
+
+        using var c = await AdminClient();
+        var resp = await c.GetAsync(
+            $"/api/v1/projects/{projectId}/versions/{versionId}/export/sbom?variant=inventory&{paramName}={paramValue}");
+        Assert.Equal((HttpStatusCode)422, resp.StatusCode);
+
+        var doc = await JsonDocument.ParseAsync(await resp.Content.ReadAsStreamAsync());
+        Assert.Equal(expectedDetail, doc.RootElement.GetProperty("detail").GetString());
+        Assert.Equal(paramName, doc.RootElement.GetProperty("field").GetString());
+    }
+
+    [Fact]
+    public async Task ExportVex_InvalidSpecVersion_Returns422WithLocalizedDetail()
+    {
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        string orgId = await DefaultOrgIdAsync(conn);
+        var (projectId, versionId, _, _) = await SeedProjectVersionAsync(conn, orgId, "vex-invalid-spec", "1.0.0");
+
+        using var c = await AdminClient();
+        var resp = await c.GetAsync(
+            $"/api/v1/projects/{projectId}/versions/{versionId}/export/vex?specVersion=9.9");
+        Assert.Equal((HttpStatusCode)422, resp.StatusCode);
+
+        var doc = await JsonDocument.ParseAsync(await resp.Content.ReadAsStreamAsync());
+        Assert.Equal("Must be '1.6' or '1.7'.", doc.RootElement.GetProperty("detail").GetString());
+    }
+
     [Fact]
     public async Task ExportSbom_LatestLiteral_ResolvesTheLatestVersion()
     {
@@ -221,6 +647,91 @@ public sealed class SbomExportControllerTests : IClassFixture<DependablyFactory>
         c.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", crossToken);
         var resp = await c.GetAsync($"/api/v1/projects/{projectId}/versions/{versionId}/export/sbom?variant=inventory");
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+    }
+
+    // ── export/sbom (collection) ─────────────────────────────────────────────────
+    // BuildSbomDocumentAsync (single project) and AppendProjectAsync (one subtree project inside
+    // a collection document) are two separate renderers; neither compliance test nor the suite
+    // above exercises the collection route at all, so an option applied only to the former would
+    // have shipped silently unfiltered here.
+
+    /// <summary>
+    /// Fix for issue #684: the collection renderer applies the same in-memory component filter
+    /// per subtree project as the single-project renderer, and <c>CoverageAccumulator</c> sums
+    /// each project's own <c>filtered-out-count</c> into one document-level answer — two subtree
+    /// projects, one dev component each, must report <c>filtered-out-count=2</c>, not the count
+    /// from whichever project happened to run last.
+    /// </summary>
+    [Fact]
+    public async Task ExportCollectionSbom_ScopeProd_SumsFilteredOutCountAcrossSubtreeProjects()
+    {
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        string orgId = await DefaultOrgIdAsync(conn);
+        string collectionId = await SeedCollectionAsync(conn, orgId, "collection-scope-filter");
+
+        var (projectAId, versionAId) = await SeedChildProjectVersionAsync(conn, orgId, collectionId, "child-a");
+        await InsertComponentWithFacetsAsync(conn, orgId, versionAId, "pkg:npm/a-dev@1.0.0", "a-dev", "1.0.0", "dev");
+        await InsertComponentWithFacetsAsync(conn, orgId, versionAId, "pkg:npm/a-runtime@1.0.0", "a-runtime", "1.0.0", "runtime");
+        await InsertComponentWithFacetsAsync(conn, orgId, versionAId, "pkg:npm/a-unknown@1.0.0", "a-unknown", "1.0.0", "unknown");
+
+        var (projectBId, versionBId) = await SeedChildProjectVersionAsync(conn, orgId, collectionId, "child-b");
+        await InsertComponentWithFacetsAsync(conn, orgId, versionBId, "pkg:npm/b-dev@1.0.0", "b-dev", "1.0.0", "dev");
+        await InsertComponentWithFacetsAsync(conn, orgId, versionBId, "pkg:npm/b-runtime@1.0.0", "b-runtime", "1.0.0", "runtime");
+        await InsertComponentWithFacetsAsync(conn, orgId, versionBId, "pkg:npm/b-unknown@1.0.0", "b-unknown", "1.0.0", "unknown");
+
+        using var c = await AdminClient();
+        var resp = await c.GetAsync(
+            $"/api/v1/projects/{collectionId}/export/sbom?variant=inventory&scope=prod");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+
+        var doc = await JsonDocument.ParseAsync(await resp.Content.ReadAsStreamAsync());
+        var projectEntries = doc.RootElement.GetProperty("components").EnumerateArray().ToList();
+        Assert.Equal(2, projectEntries.Count);
+        foreach (var entry in projectEntries)
+        {
+            var names = entry.GetProperty("components").EnumerateArray()
+                .Select(x => x.GetProperty("name").GetString()).ToList();
+            Assert.Equal(2, names.Count);
+            Assert.DoesNotContain(names, n => n!.EndsWith("-dev", StringComparison.Ordinal));
+        }
+
+        var props = PropertiesByName(doc.RootElement.GetProperty("metadata").GetProperty("properties"));
+        Assert.Equal("prod", props["dependably:component-filter"]);
+        Assert.Equal("2", props["dependably:filtered-out-count"]);
+    }
+
+    /// <summary>
+    /// Fix for issue #684: <c>specVersion=1.6</c> downgrades the shape of every subtree project's
+    /// own nested <c>components[]</c>, not just a lone top-level document — <c>isExternal</c> is
+    /// omitted from the collection's per-project entries exactly as it is from a single-project
+    /// export.
+    /// </summary>
+    [Fact]
+    public async Task ExportCollectionSbom_SpecVersion16_OmitsIsExternalAcrossSubtreeProjects()
+    {
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        string orgId = await DefaultOrgIdAsync(conn);
+        string collectionId = await SeedCollectionAsync(conn, orgId, "collection-spec16");
+
+        var (projectId, versionId) = await SeedChildProjectVersionAsync(conn, orgId, collectionId, "child-external");
+        await InsertComponentWithFacetsAsync(
+            conn, orgId, versionId, "pkg:npm/external-pkg@1.0.0", "external-pkg", "1.0.0",
+            dependencyScope: "runtime", isExternal: true);
+
+        using var c = await AdminClient();
+        var resp = await c.GetAsync(
+            $"/api/v1/projects/{collectionId}/export/sbom?variant=inventory&specVersion=1.6");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        Assert.Equal("application/vnd.cyclonedx+json; version=1.6", resp.Content.Headers.ContentType!.ToString());
+
+        var doc = await JsonDocument.ParseAsync(await resp.Content.ReadAsStreamAsync());
+        Assert.Equal("1.6", doc.RootElement.GetProperty("specVersion").GetString());
+
+        var projectEntry = Assert.Single(doc.RootElement.GetProperty("components").EnumerateArray());
+        var component = Assert.Single(projectEntry.GetProperty("components").EnumerateArray());
+        Assert.False(component.TryGetProperty("isExternal", out _), "isExternal is a 1.7 field; a 1.6 collection export must omit it");
     }
 
     // ── export/sbom?variant=vdr ──────────────────────────────────────────────────

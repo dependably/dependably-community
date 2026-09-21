@@ -63,6 +63,16 @@ public interface IPerOrgTrustAnchorStore
         string orgId, CancellationToken ct = default);
 
     /// <summary>
+    /// Builds a keyid-to-SPKI-bytes map from the org's sbom SPKI trust anchors
+    /// (<c>ecosystem='sbom', anchor_kind='spki'</c>) — a supplier's pinned CycloneDX
+    /// author-signature key(s). Returns an empty dictionary when no anchors are configured or
+    /// all anchors fail to parse. Cached through the same hot cache as <see cref="ListAsync"/>;
+    /// invalidated by <see cref="InvalidateTrustAnchorCache"/>.
+    /// </summary>
+    Task<IReadOnlyDictionary<string, byte[]>> GetSbomKeysAsync(
+        string orgId, CancellationToken ct = default);
+
+    /// <summary>
     /// Builds an <see cref="X509Certificate2Collection"/> from the org's NuGet X.509 trust
     /// anchors (<c>ecosystem='nuget', anchor_kind='x509'</c>). Returns an empty collection
     /// when no anchors are configured or all anchors fail to parse. Cached through the same
@@ -174,6 +184,13 @@ public sealed class PerOrgTrustAnchorStore : IPerOrgTrustAnchorStore
     {
         var anchors = await ListAsync(orgId, "npm", ct);
         return Protocol.Provenance.NpmSignatureKeyStore.BuildSpkiMap(anchors, _logger);
+    }
+
+    public async Task<IReadOnlyDictionary<string, byte[]>> GetSbomKeysAsync(
+        string orgId, CancellationToken ct = default)
+    {
+        var anchors = await ListAsync(orgId, "sbom", ct);
+        return Protocol.Provenance.SbomSignatureKeyStore.BuildSpkiMap(anchors, _logger);
     }
 
     public async Task<X509Certificate2Collection> GetNuGetAnchorsAsync(

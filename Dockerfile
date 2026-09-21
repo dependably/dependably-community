@@ -161,15 +161,18 @@ COPY --from=build /app/publish/*.pdb /
 FROM build AS publish-no-symbols
 RUN rm -f /app/publish/*.pdb
 
-# Notices stage — combines both CycloneDX SBOMs into a curated attribution file.
-# Pinned to the build platform for the same reason as the frontend stage: it runs
-# node over architecture-independent JSON, so emulation buys nothing and risks SIGILL.
+# Notices stage — combines both CycloneDX SBOMs, plus the curated fragment for source
+# vendored directly from an upstream repository (dotnet-CycloneDX only scans the NuGet
+# dependency graph and never sees it — see sbom-vendored.json's own metadata.component
+# description), into a curated attribution file. Pinned to the build platform for the
+# same reason as the frontend stage: it runs node over architecture-independent JSON,
+# so emulation buys nothing and risks SIGILL.
 FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS notices
 WORKDIR /work
-COPY build/extract-notices.mjs ./
+COPY build/extract-notices.mjs build/sbom-vendored.json ./
 COPY --from=frontend /web/sbom-frontend-prod.json ./
 COPY --from=build /sboms/sbom-backend.json ./
-RUN node extract-notices.mjs sbom-backend.json sbom-frontend-prod.json > notices.json
+RUN node extract-notices.mjs sbom-backend.json sbom-frontend-prod.json sbom-vendored.json > notices.json
 
 # Runtime stage — minimal native deps image
 FROM ${RUNTIME_IMAGE} AS final

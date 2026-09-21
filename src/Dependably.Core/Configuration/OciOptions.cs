@@ -40,6 +40,29 @@ public sealed class OciOptions
     /// <summary>Total HTTP timeout for upstream calls (default 30 minutes for large layers).</summary>
     public TimeSpan UpstreamHttpTimeout { get; set; } = TimeSpan.FromMinutes(30);
 
+    /// <summary>
+    /// Largest single blob this registry will proxy from an upstream (default 10 GiB).
+    ///
+    /// <para>
+    /// The OCI plane needs its own bound because it is the one ecosystem whose unit of transfer
+    /// is an image layer: a CUDA or ML base image routinely ships a single layer several
+    /// gigabytes wide, where a metadata document or an npm tarball does not. Sizing it here
+    /// rather than raising <c>UpstreamClient.MaxUpstreamResponseBytes</c> keeps every other
+    /// ecosystem's fetch bound tight — that constant is shared, so raising it would widen paths
+    /// that have no reason to accept a gigabyte.
+    /// </para>
+    ///
+    /// <para>
+    /// This is a disk bound, not a memory one: the blob proxy streams upstream bytes straight
+    /// into the cache-tier blob store through <see cref="Dependably.Protocol.OciDigestVerifyStream"/>
+    /// and never buffers a whole layer. Raising it commits cache-tier storage
+    /// (<c>LOCAL_STORAGE_PATH_CACHE</c> and the eviction settings that govern it), not process
+    /// memory. It is deliberately still bounded rather than unlimited, so a hostile or
+    /// misreporting upstream cannot stream without end into the cache volume.
+    /// </para>
+    /// </summary>
+    public long MaxBlobProxyBytes { get; set; } = 10L * 1024 * 1024 * 1024;
+
 }
 
 /// <summary>
@@ -106,6 +129,10 @@ public enum OciAuthType
 /// </summary>
 public sealed class OciOptionsValidator : IValidateOptions<OciOptions>
 {
+    /// <summary>Smallest accepted <see cref="OciOptions.MaxBlobProxyBytes"/> (1 MiB).</summary>
+    internal const long MinBlobProxyBytes = 1024L * 1024;
+
+
     public ValidateOptionsResult Validate(string? name, OciOptions options)
     {
         var errors = new List<string>();
@@ -135,6 +162,15 @@ public sealed class OciOptionsValidator : IValidateOptions<OciOptions>
         if (options.UpstreamHttpTimeout <= TimeSpan.Zero)
         {
             errors.Add("Oci:UpstreamHttpTimeout must be positive.");
+        }
+
+        // A floor, not just a positivity check: a value below one layer's worth of bytes turns
+        // the blob proxy into something that refuses every real image, and it fails at pull time
+        // on the operator's users rather than here at startup. 1 MiB is far below any plausible
+        // deliberate setting and far above the typo range (a value meant as MiB or GiB).
+        if (options.MaxBlobProxyBytes < MinBlobProxyBytes)
+        {
+            errors.Add($"Oci:MaxBlobProxyBytes must be at least {MinBlobProxyBytes} bytes.");
         }
     }
 }

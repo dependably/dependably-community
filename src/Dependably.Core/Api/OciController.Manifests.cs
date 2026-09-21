@@ -103,7 +103,20 @@ public sealed partial class OciController
 
         // License-arm enforcement: when this manifest carries a captured SPDX expression and the
         // tenant enforces licenses in 'block' mode, deny both GET and HEAD before serving.
-        if (await EvaluateLicenseBlockAsync(orgId, $"pkg:oci/{name}@{resolved}", LicenseSpdx, token, ct) is { } blocked)
+        // Canonical purl-spec form via PurlNormalizer, which is the single source of package
+        // identity: the hand-built string this replaces folded the namespace into the name and
+        // left the digest's colon unencoded, so the same image was recorded under a different
+        // identity here than in the catalogue.
+        //
+        // Deliberately WITHOUT the tag qualifier. The gate reads an approved quarantine row back
+        // by this exact string ("an approved review row on the purl is the unblock signal",
+        // BlockGateService), so a tag-qualified identity would narrow an operator's approval to
+        // the tag it was granted under — approving an image at :3.20 would stop covering the
+        // identical digest at :latest. The artefact is the digest; the tag is how a caller asked
+        // for it. Catalogue writers qualify by tag because their rows ARE per-tag versions.
+        string purl = PurlNormalizer.Oci(name, resolved);
+
+        if (await EvaluateLicenseBlockAsync(orgId, purl, LicenseSpdx, token, ct) is { } blocked)
         {
             return blocked;
         }
@@ -140,7 +153,7 @@ public sealed partial class OciController
         // would multi-count a single pull), and the bare digest PURL logged here doesn't
         // match the version row's canonical PURL (which carries ?repository_url=…&tag=…).
         // OCI download volume is still tracked org-wide via these activity rows.
-        await _svc.Audit.LogActivityAsync(orgId, "oci", $"pkg:oci/{name}@{resolved}", "download",
+        await _svc.Audit.LogActivityAsync(orgId, "oci", purl, "download",
             actorId: token?.AuditActorId, actorKind: token?.ActorKind, actorLabel: token?.AuditActorLabel, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         return File(stream, MediaType!);
     }
@@ -189,8 +202,7 @@ public sealed partial class OciController
 
             if (meta is null)
             {
-                return OciError(StatusCodes.Status404NotFound, OciErrorCode.MANIFEST_UNKNOWN,
-                    $"Manifest unknown: {reference}");
+                return await ManifestUnknownAsync(orgId, name, reference, isDigest, token, ct);
             }
 
             // HEAD answers the licence arm exactly as GET does. A HEAD that revalidates a stale
@@ -200,7 +212,7 @@ public sealed partial class OciController
             // downloads no config blob — and an unstamped digest is the empty-licence case OCI
             // passes through, the same answer it gets on the GET path.
             if (await EvaluateLicenseBlockAsync(
-                    orgId, $"pkg:oci/{name}@{meta.Digest}",
+                    orgId, PurlNormalizer.Oci(name, meta.Digest),
                     await ReadStampedLicenseAsync(orgId, meta.Digest, ct), token, ct) is { } headBlocked)
             {
                 return headBlocked;
@@ -226,8 +238,7 @@ public sealed partial class OciController
 
         if (upstreamResult is null)
         {
-            return OciError(StatusCodes.Status404NotFound, OciErrorCode.MANIFEST_UNKNOWN,
-                $"Manifest unknown: {reference}");
+            return await ManifestUnknownAsync(orgId, name, reference, isDigest, token, ct);
         }
 
         // The fetch above catalogued the manifest and stamped its license facts
@@ -240,17 +251,108 @@ public sealed partial class OciController
         // time it changed. A label-less image still stamps NULL and still passes — OCI keeps the
         // empty-licence pass-through, so this denies only an expression the tenant blocks.
         string? upstreamLicense = await ReadStampedLicenseAsync(orgId, upstreamResult.Digest, ct);
+        string upstreamPurl = PurlNormalizer.Oci(name, upstreamResult.Digest);
         if (await EvaluateLicenseBlockAsync(
-                orgId, $"pkg:oci/{name}@{upstreamResult.Digest}", upstreamLicense, token, ct) is { } blocked)
+                orgId, upstreamPurl, upstreamLicense, token, ct) is { } blocked)
         {
             await upstreamResult.Content.DisposeAsync();
             return blocked;
         }
 
         SetManifestHeaders(upstreamResult.Digest, upstreamResult.SizeBytes, upstreamResult.MediaType, "MISS", isDigest);
-        await _svc.Audit.LogActivityAsync(orgId, "oci", $"pkg:oci/{name}@{upstreamResult.Digest}", "download",
+        await _svc.Audit.LogActivityAsync(orgId, "oci", upstreamPurl, "download",
             actorId: token?.AuditActorId, actorKind: token?.ActorKind, actorLabel: token?.AuditActorLabel, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         return File(upstreamResult.Content, upstreamResult.MediaType);
+    }
+
+    /// <summary>
+    /// The 404 for a manifest that is neither held locally nor obtainable upstream.
+    ///
+    /// <para>
+    /// Three unrelated faults reach this point as the same null result: no upstream in this org
+    /// claims the repository name (an operator's routing gap), an upstream claimed it and
+    /// answered 404 (a wrong tag, or a wrong name), and a structurally wrong repository path —
+    /// a group/namespace segment borrowed from some other registry's convention — which matches
+    /// a catch-all prefix and is then forwarded verbatim to an upstream that has never heard of
+    /// it. A bare "Manifest unknown" tells none of them apart, so the caller's only move is to
+    /// repeat the request and get the same non-answer. The air-gap miss below already takes the
+    /// opposite position for its own case; this extends it to the ordinary one.
+    /// </para>
+    ///
+    /// <para>
+    /// What may be said depends on who is asking. <c>/v2/</c> is reachable anonymously whenever
+    /// the org enables anonymous pull, and its error bodies outlive the request — into CI logs,
+    /// screenshots, support tickets — which is why <see cref="DenyInsufficientScopeAsync"/> keeps a
+    /// token's grants off the wire. An org's upstream list is the same kind of secret: it is
+    /// supply-chain topology, and naming a private mirror to an unauthenticated prober discloses
+    /// infrastructure that the pull itself never would. So the fault class and the upstream host
+    /// are added only for a caller holding a token for this org. What every caller gets is the
+    /// part that is not topology at all — how this registry spells repository names, which is
+    /// public by construction and is the fact the failing caller is usually missing.
+    /// </para>
+    /// </summary>
+    private async Task<ObjectResult> ManifestUnknownAsync(
+        string orgId, string name, string reference, bool isDigest, TokenRecord? token, CancellationToken ct)
+    {
+        bool authenticated = token is not null;
+
+        // Routing is read only for a caller entitled to hear about it. Skipping it outright for
+        // an anonymous caller is stronger than computing it and declining to print it: nothing
+        // about this org's upstream configuration can reach an anonymous response through any
+        // channel, including how long it took to produce. It also keeps an unauthenticated
+        // 404 probe from costing a query. On the authenticated path this is one extra read on
+        // the 404 path only, never on a serve.
+        string? upstreamHost = authenticated
+            ? await _svc.Upstream.MatchUpstreamHostAsync(orgId, name, ct)
+            : null;
+
+        var message = new List<string>
+        {
+            $"Manifest unknown: {(isDigest ? $"{name}@{reference}" : $"{name}:{reference}")}.",
+        };
+
+        if (authenticated)
+        {
+            message.Add(upstreamHost is null
+                ? $"No upstream registry configured for this organization claims the repository name '{name}', "
+                  + "so the manifest was not requested from any upstream. Review the prefixes under "
+                  + "Settings → Proxy → Upstream registries."
+                : $"Upstream '{upstreamHost}' was asked for repository '{name}' and does not have it.");
+        }
+
+        // A single-segment name is the one shape a client reliably gets wrong against a private
+        // registry: Docker expands the implicit library/ namespace for docker.io alone, so
+        // `docker pull alpine` resolves and `docker pull <this-host>/alpine` does not. Stated
+        // conditionally, because whether a single-segment name here routes to Docker Hub at all
+        // is exactly the org topology this message will not disclose.
+        if (!name.Contains('/', StringComparison.Ordinal))
+        {
+            message.Add("Repository names are forwarded to the upstream verbatim and a single-segment "
+                + $"name is not expanded; if you meant a Docker Hub official image, request 'library/{name}'.");
+        }
+
+        // A relative path, never an absolute URL: building one would mean trusting Request.Host,
+        // which is caller-controlled unless TRUSTED_PROXIES is set. Skipped in edge mode, where
+        // the management plane — and so this route — is not mapped at all.
+        if (!_svc.EdgeGuard.IsEdge)
+        {
+            message.Add("This registry's naming and login conventions: /api/v1/skills/docker-configure-global.");
+        }
+
+        // Structured form for tooling, authenticated callers only — the shape itself would
+        // otherwise distinguish the two faults that the prose deliberately does not.
+        object? detail = authenticated
+            ? new Dictionary<string, object?>
+            {
+                ["repository"] = name,
+                ["reference"] = reference,
+                ["upstream"] = upstreamHost,
+                ["fault"] = upstreamHost is null ? "no_upstream_route" : "upstream_miss",
+            }
+            : null;
+
+        return OciError(StatusCodes.Status404NotFound, OciErrorCode.MANIFEST_UNKNOWN,
+            string.Join(" ", message), detail);
     }
 
     /// <summary>
@@ -347,7 +449,9 @@ public sealed partial class OciController
             return null;
         }
 
-        if (await EvaluateLicenseBlockAsync(orgId, $"pkg:oci/{name}@{Digest}", LicenseSpdx, token, ct) is { } blocked)
+        string stalePurl = PurlNormalizer.Oci(name, Digest);
+
+        if (await EvaluateLicenseBlockAsync(orgId, stalePurl, LicenseSpdx, token, ct) is { } blocked)
         {
             return blocked;
         }
@@ -370,7 +474,7 @@ public sealed partial class OciController
         }
 
         SetManifestHeaders(Digest, SizeBytes, MediaType, "STALE", isDigest: false);
-        await _svc.Audit.LogActivityAsync(orgId, "oci", $"pkg:oci/{name}@{Digest}", "download",
+        await _svc.Audit.LogActivityAsync(orgId, "oci", stalePurl, "download",
             actorId: token?.AuditActorId, actorKind: token?.ActorKind, actorLabel: token?.AuditActorLabel,
             detail: "stale serve: upstream unavailable during tag revalidation; last accepted digest served within Oci:ManifestTagStaleGrace",
             sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
@@ -647,7 +751,7 @@ public sealed partial class OciController
                 await _svc.OrphanBlobs.DeleteIfUnreferencedAsync(blobKey, ct);
             }
 
-            await _svc.Audit.LogActivityAsync(orgId, "oci", $"pkg:oci/{name}@{reference}", "delete",
+            await _svc.Audit.LogActivityAsync(orgId, "oci", PurlNormalizer.Oci(name, reference), "delete",
                 actorId: token?.AuditActorId, actorKind: token?.ActorKind, actorLabel: token?.AuditActorLabel, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
             return NoContent();
@@ -657,18 +761,35 @@ public sealed partial class OciController
             // Tag delete: remove only the tag record. Manifest blob and its digest record
             // remain intact so digest-addressed pulls still work (spec: tag deletion
             // removes the name→digest mapping, not the manifest content).
+            //
+            // The digest is captured so the audit row can name the artefact canonically: a PURL is
+            // digest-addressed, there is no valid tag-only spelling, and the row this replaces used
+            // `pkg:oci/{name}:{tag}`, which is not a PURL at all. What is recorded is the mapping
+            // that was removed — this digest, under this tag.
+            //
+            // DELETE … RETURNING rather than SELECT-then-DELETE, so the digest is necessarily the
+            // one this statement removed. Read separately, the two can disagree: a concurrent PUT
+            // landing between them makes the SELECT miss a row the DELETE then removes, and the
+            // request answers "Tag unknown" for a mapping it has just deleted, with no audit row
+            // for the deletion. A single statement has no such window, and `null` now means
+            // exactly one thing — nothing was deleted. RETURNING yields the affected row on both
+            // providers (see AlertSettingsRepository).
             // xtenant: (org_id, repository, tag) PK.
-            int deleted = await conn.ExecuteAsync(
-                "DELETE FROM oci_tags WHERE org_id = @orgId AND repository = @repo AND tag = @tag",
+            string? taggedDigest = await conn.ExecuteScalarAsync<string?>(
+                """
+                DELETE FROM oci_tags
+                WHERE org_id = @orgId AND repository = @repo AND tag = @tag
+                RETURNING digest
+                """,
                 new { orgId, repo = name, tag = reference });
 
-            if (deleted == 0)
+            if (taggedDigest is null)
             {
                 return OciError(StatusCodes.Status404NotFound, OciErrorCode.MANIFEST_UNKNOWN,
                     $"Tag unknown: {reference}");
             }
 
-            await _svc.Audit.LogActivityAsync(orgId, "oci", $"pkg:oci/{name}:{reference}", "delete",
+            await _svc.Audit.LogActivityAsync(orgId, "oci", PurlNormalizer.Oci(name, taggedDigest), "delete",
                 actorId: token?.AuditActorId, actorKind: token?.ActorKind, actorLabel: token?.AuditActorLabel, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
             return NoContent();
@@ -787,7 +908,7 @@ public sealed partial class OciController
                 {
                     await ownerGate.RecordOwnershipAsync(orgId, "oci", name, namePrincipal, ct);
                 }
-                await _svc.Audit.LogActivityAsync(orgId, "oci", $"pkg:oci/{name}@{result.Digest}", "push",
+                await _svc.Audit.LogActivityAsync(orgId, "oci", PurlNormalizer.Oci(name, result.Digest!), "push",
                     actorId: token?.AuditActorId, actorKind: token?.ActorKind, actorLabel: token?.AuditActorLabel, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
                 Response.Headers.Location = $"/v2/{name}/manifests/{result.Digest}";
                 Response.Headers["Docker-Content-Digest"] = result.Digest!;

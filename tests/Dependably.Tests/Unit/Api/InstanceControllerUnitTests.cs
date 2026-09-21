@@ -159,7 +159,7 @@ public sealed class InstanceControllerModePredicateTests : IAsyncLifetime
         var ctrl = new InstanceController(
             new OrgRepository(_db.Store),
             new AuditRepository(_db.Store),
-            new OrgAccessGuard(_db.Store),
+            new OrgAccessGuard(_db.Store, TestProblems.Create()),
             airGap,
             new BackgroundJobRunRepository(_db.Store),
             Microsoft.Extensions.Logging.Abstractions.NullLogger<InstanceController>.Instance,

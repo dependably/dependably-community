@@ -113,6 +113,10 @@ public sealed class SbomCollectionExportTests : IClassFixture<DependablyFactory>
         Assert.Equal("latest-per-project", props["dependably:selection"]);
         Assert.Equal("2", props["dependably:projectCount"]);
         Assert.Equal("1", props["dependably:projectsWithoutSbom"]);
+        // P2e: a linked project with no SBOM at all is a linked SBOM the recipient cannot
+        // access — full-inventory-rendered cannot be claimed even though the render itself is
+        // unfiltered.
+        Assert.Equal("false", props["dependably:full-inventory-rendered"]);
 
         // The empty project is present and marked, not dropped — dropping it is what would make
         // the count above a lie.
@@ -122,6 +126,28 @@ public sealed class SbomCollectionExportTests : IClassFixture<DependablyFactory>
         Assert.Contains(
             emptyEntry.GetProperty("properties").EnumerateArray(),
             p => p.GetProperty("name").GetString() == "dependably:noSbom");
+    }
+
+    /// <summary>
+    /// P2/P2f (Coverage): distinct from vulnerability-scan coverage — see
+    /// <see cref="Export_AggregatesScanCoverageAcrossTheWholeSubtree"/> for that claim. This one
+    /// is "true" only when every subtree project contributed an SBOM AND the render is unfiltered;
+    /// the sibling test above pins the "false" arm when a project has none at all.
+    /// </summary>
+    [Fact]
+    public async Task Export_EveryProjectHasAnSbom_FullInventoryRenderedIsTrue()
+    {
+        using var client = await AdminClient();
+        string folder = await CreateFolderAsync(client, Unique("platform"));
+        await UploadAsync(client, Unique("has-sbom-a"), "1.0.0", folder);
+        await UploadAsync(client, Unique("has-sbom-b"), "1.0.0", folder);
+
+        var doc = await ExportAsync(client, folder, "inventory");
+        var props = doc.GetProperty("metadata").GetProperty("properties").EnumerateArray()
+            .ToDictionary(p => p.GetProperty("name").GetString()!, p => p.GetProperty("value").GetString()!);
+
+        Assert.Equal("0", props["dependably:projectsWithoutSbom"]);
+        Assert.Equal("true", props["dependably:full-inventory-rendered"]);
     }
 
     /// <summary>

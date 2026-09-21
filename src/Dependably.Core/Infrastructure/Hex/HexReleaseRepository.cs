@@ -47,7 +47,8 @@ public sealed class HexReleaseRepository
     // put that mutation inside a lazily-evaluated Where predicate, where the shadowing depends on
     // enumeration order and timing rather than on the statement order written here.
     [SuppressMessage("Minor Code Smell", "S3267:Loops should be simplified with LINQ expressions",
-        Justification = "The loop body mutates the dedup set shared with the following loop; a Where predicate with that side effect would make hosted-shadows-cached depend on lazy enumeration order.")]
+        Justification = "The loop body mutates the dedup set shared with the following loop; a Where predicate with that side "
+            + "effect would make hosted-shadows-cached depend on lazy enumeration order.")]
     public async Task<IReadOnlyList<HexIndexedRelease>> ListForPackageAsync(string orgId, string name, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
@@ -115,7 +116,8 @@ public sealed class HexReleaseRepository
     // put that mutation inside a lazily-evaluated Where predicate, where the shadowing depends on
     // enumeration order and timing rather than on the statement order written here.
     [SuppressMessage("Minor Code Smell", "S3267:Loops should be simplified with LINQ expressions",
-        Justification = "The loop body mutates the dedup set shared with the following loop; a Where predicate with that side effect would make hosted-shadows-cached depend on lazy enumeration order.")]
+        Justification = "The loop body mutates the dedup set shared with the following loop; a Where predicate with that side "
+            + "effect would make hosted-shadows-cached depend on lazy enumeration order.")]
     public async Task<IReadOnlyList<(string Name, HexIndexedRelease Release)>> ListAllAsync(string orgId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);

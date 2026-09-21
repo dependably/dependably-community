@@ -3,6 +3,20 @@ using NuGet.Versioning;
 
 namespace Dependably.Protocol;
 
+/// <summary>
+/// The canonical package-URL (purl) identity code for this registry — used by push handlers,
+/// proxy handlers, the simple-index generator and the npm metadata rewriter, and the single source
+/// of truth every other purl-shaped identity in this codebase defers to rather than re-deriving.
+/// purl is standardized as <b>ECMA-427</b> (<see href="https://ecma-international.org/publications-and-standards/standards/ecma-427/"/>);
+/// this class implements the ecosystem-specific normalization rules the specification leaves to
+/// each package type's own convention (case-folding, separator collapsing) on top of the generic
+/// <c>pkg:type/namespace/name@version?qualifiers#subpath</c> grammar. CISA's 2026 SBOM Minimum
+/// Elements D13 (Component Identifiers) names purl as one of the "common software identifiers" a
+/// component should carry — this remains the one place a purl is minted or compared, even as other
+/// identifier kinds (CPE, SWHID, OmniBOR, commit hashes, UUIDs) are carried alongside it rather
+/// than through it; see <c>SbomExportService</c> and the ingest parsers under
+/// <c>Dependably.Infrastructure.Sbom</c> for those.
+/// </summary>
 public static partial class PurlNormalizer
 {
     [GeneratedRegex(@"[-_.]+")]

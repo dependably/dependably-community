@@ -44,7 +44,9 @@ public static class HexTarball
     /// reading a stored blob is bounded too). Throws <see cref="HexProtocolException"/> on any refusal.
     /// </summary>
     [SuppressMessage("Major Code Smell", "S3776:Cognitive Complexity of methods should not be too high",
-        Justification = "One pass over the tar entries filling four required slots, then the completeness and checksum checks over those slots. Splitting the pass from the checks would hand the checker four nullable buffers and lose the single place that decides an entry set is admissible.")]
+        Justification = "One pass over the tar entries filling four required slots, then the completeness and checksum checks over "
+            + "those slots. Splitting the pass from the checks would hand the checker four nullable buffers and lose the "
+            + "single place that decides an entry set is admissible.")]
     public static HexTarballParsed Parse(byte[] tarball, long maxContentsBytes)
     {
         byte[]? version = null, checksum = null, metadata = null, contents = null;

@@ -604,40 +604,7 @@ public sealed class AuditRepository
     {
         await using var conn = await _db.OpenAsync(ct);
 
-        // A caller-supplied filter matches by AuditActions.Matches's rule — the action of exactly
-        // that name, plus every action in its dotted family. With no filter the feed serves the
-        // declared security vocabulary (AuditActions.DefaultFilters), which is exact names rather
-        // than family prefixes: a prefix with nothing writing under it reads as coverage and
-        // matches nothing, which is precisely how the previous default shipped `token.` and
-        // `rbac.` families for events actually written as `token_created` and
-        // `member_role_changed`.
-        bool callerSupplied = actionFilter?.Count > 0;
-        string[] filters = callerSupplied
-            ? [.. actionFilter!.Select(AuditActions.NormalizeFilter).Distinct(StringComparer.Ordinal)]
-            : [.. AuditActions.DefaultFilters];
-
-        // Duplicates are folded above: OR-ing a repeated filter matches exactly the same rows, so
-        // collapsing them only spends fewer bind parameters. The remaining count is bounded for
-        // caller input only — the default set is code, and is held under the same figure by its
-        // own compliance gate rather than by a runtime throw nobody could act on.
-        if (callerSupplied && filters.Length > MaxAuthEventActionFilters)
-        {
-            throw new ArgumentException(
-                $"At most {MaxAuthEventActionFilters} distinct action filters may be supplied; " +
-                $"got {filters.Length}.",
-                nameof(actionFilter));
-        }
-
-        // The family half is bounded separately because it is the half that costs: one
-        // unindexable LIKE per filter, evaluated against every candidate row of the window.
-        int familyFilters = filters.Count(f => !AuditActions.IsDeclaredLeaf(f));
-        if (callerSupplied && familyFilters > MaxAuthEventFamilyFilters)
-        {
-            throw new ArgumentException(
-                $"At most {MaxAuthEventFamilyFilters} action filters may name a dotted family or " +
-                $"an action outside the declared vocabulary; got {familyFilters}.",
-                nameof(actionFilter));
-        }
+        string[] filters = ResolveAuthEventFilters(actionFilter);
 
         var (cursorTs, cursorId) = DecodeEventCursor(afterCursor);
 
@@ -658,7 +625,7 @@ public sealed class AuditRepository
         // personal data. `actor_email` is deliberately NOT joined here and is always null on this
         // surface — a user's display name is an email, and audit_log.actor_label is written for
         // service actors only precisely so the member-removal and retention scrubs' fixed column
-        // list stays complete. See the SIEM reference in CONTRIBUTING.md.
+        // list stays complete. See the SIEM reference in OPERATIONS.md.
         //
         // rawsql: actionPredicate is DapperInClause-built — a parenthesized list and disjunction of
         // (@actionName0, @actionFamily0, ...) bound parameters over a constant column name, not user text.
@@ -727,16 +694,83 @@ public sealed class AuditRepository
         bool matchedCapped = probedMatched > ListTotalCap;
         int matched = matchedCapped ? ListTotalCap : probedMatched;
 
-        // Deliberately ignores actionFilter and since — an indexed MAX bounded only by the same
-        // org scope and the until upper bound, so it answers "did anything land at all" rather
-        // than re-running the filtered question. `(@orgId IS NULL OR org_id = @orgId)` is NOT
-        // sargable: SQLite's planner won't use idx_audit_log_org through an OR'd bind parameter,
-        // so a quiet tenant on a busy instance — exactly who this field exists to serve — would
-        // fall back to a created_at-only index scan across every org's rows. The tenant-scoped
-        // and unscoped (platform-admin) cases are therefore two literal SQL bodies: the
-        // tenant-scoped one binds org_id = @orgId directly, so idx_audit_log_org(org_id,
-        // created_at DESC) serves it as a covering index; the unscoped one omits org_id and
-        // uses idx_audit_log_created_at.
+        var latestEventAt = await ResolveLatestEventAtAsync(conn, orgId, until);
+
+        return (rows, nextCursor, latestEventAt, matched, matchedCapped);
+    }
+
+    /// <summary>
+    /// The normalized, bounded action-filter set backing <see cref="ListAuthEventsAsync"/>.
+    ///
+    /// <para>A caller-supplied filter matches by AuditActions.Matches's rule — the action of
+    /// exactly that name, plus every action in its dotted family. With no filter the feed serves
+    /// the declared security vocabulary (<c>AuditActions.DefaultFilters</c>), which is exact names
+    /// rather than family prefixes: a prefix with nothing writing under it reads as coverage and
+    /// matches nothing, the shape that ships a `token.` family for events actually written as
+    /// `token_created`.</para>
+    ///
+    /// <para>Duplicates are folded: OR-ing a repeated filter matches exactly the same rows, so
+    /// collapsing them only spends fewer bind parameters. Both counts are bounded for caller input
+    /// only — the default set is code, and is held under the same figures by its own compliance
+    /// gate rather than by a runtime throw nobody could act on. The family half is bounded
+    /// separately because it is the half that costs: one unindexable LIKE per filter, evaluated
+    /// against every candidate row of the window.</para>
+    /// </summary>
+    private static string[] ResolveAuthEventFilters(IReadOnlyList<string>? actionFilter)
+    {
+        bool callerSupplied = actionFilter?.Count > 0;
+        string[] filters = callerSupplied
+            ? [.. actionFilter!.Select(AuditActions.NormalizeFilter).Distinct(StringComparer.Ordinal)]
+            : [.. AuditActions.DefaultFilters];
+
+        if (callerSupplied)
+        {
+            ValidateAuthEventFilterBounds(filters, nameof(actionFilter));
+        }
+
+        return filters;
+    }
+
+    /// <summary>
+    /// Both bounds apply to caller input only — the default set is code, held under the same
+    /// figures by its own compliance gate rather than by a runtime throw nobody could act on.
+    /// </summary>
+    private static void ValidateAuthEventFilterBounds(string[] filters, string paramName)
+    {
+        if (filters.Length > MaxAuthEventActionFilters)
+        {
+            throw new ArgumentException(
+                $"At most {MaxAuthEventActionFilters} distinct action filters may be supplied; " +
+                $"got {filters.Length}.",
+                paramName);
+        }
+
+        int familyFilters = filters.Count(f => !AuditActions.IsDeclaredLeaf(f));
+        if (familyFilters > MaxAuthEventFamilyFilters)
+        {
+            throw new ArgumentException(
+                $"At most {MaxAuthEventFamilyFilters} action filters may name a dotted family or " +
+                $"an action outside the declared vocabulary; got {familyFilters}.",
+                paramName);
+        }
+    }
+
+    /// <summary>
+    /// <see cref="ListAuthEventsAsync"/>'s <c>LatestEventAt</c>: deliberately ignores actionFilter
+    /// and since — an indexed MAX bounded only by the same org scope and the until upper bound, so
+    /// it answers "did anything land at all" rather than re-running the filtered question.
+    ///
+    /// <para><c>(@orgId IS NULL OR org_id = @orgId)</c> is NOT sargable: SQLite's planner won't use
+    /// idx_audit_log_org through an OR'd bind parameter, so a quiet tenant on a busy instance —
+    /// exactly who this field exists to serve — falls back to a created_at-only index scan across
+    /// every org's rows. The tenant-scoped and unscoped (platform-admin) cases are therefore two
+    /// literal SQL bodies: the tenant-scoped one binds org_id = @orgId directly, so
+    /// idx_audit_log_org(org_id, created_at DESC) serves it as a covering index; the unscoped one
+    /// omits org_id and uses idx_audit_log_created_at.</para>
+    /// </summary>
+    private static async Task<DateTimeOffset?> ResolveLatestEventAtAsync(
+        DbConnection conn, string? orgId, DateTimeOffset until)
+    {
         // xtenant: platform-admin unscoped read — orgId is null only when AuthenticateAsync
         // resolved a platform:* principal, mirroring ListAuthEventsAsync's own main query.
         const string latestSqlUnscoped = """
@@ -751,13 +785,11 @@ public sealed class AuditRepository
               AND created_at <= @until
             """;
         string latestSql = orgId is null ? latestSqlUnscoped : latestSqlTenantScoped;
-        var latestEventAt = await conn.ExecuteScalarAsync<DateTimeOffset?>(latestSql, new
+        return await conn.ExecuteScalarAsync<DateTimeOffset?>(latestSql, new
         {
             until = until.ToUtcIsoMillis(),
             orgId,
         });
-
-        return (rows, nextCursor, latestEventAt, matched, matchedCapped);
     }
 
     /// <summary>
@@ -873,6 +905,12 @@ public sealed class AuditRepository
             + "DapperInClause.Expand's own parenthesized, individually-parameterized (@evt0, "
             + "@evt1, ...) list - no caller text reaches the SQL. See DapperInClause for why "
             + "Dapper's own IN @list expansion cannot be used on Postgres.")]
+    // S107: the one cohesive grouping here is the (since, until) window, and ListAuthEventsAsync
+    // takes that same pair in the same shape. Bundling it on this method alone would split one
+    // concept across two spellings of it; bundling it on both rewrites 61 call sites to come in one
+    // parameter under the threshold. The rest are the feed's own scope, filter and paging
+    // arguments, which share no concept with each other.
+#pragma warning disable S107
     public async Task<(IReadOnlyList<ActivityEntry> Items, string? NextCursor)> ListActivityEventsAsync(
         DateTimeOffset since,
         DateTimeOffset until,
@@ -882,6 +920,7 @@ public sealed class AuditRepository
         int limit,
         string? afterCursor,
         CancellationToken ct = default)
+#pragma warning restore S107
     {
         // An empty allowlist selects nothing. Reaching SQL with it would either mean an
         // `IN ()` syntax error or, worse, a predicate that matched everything.

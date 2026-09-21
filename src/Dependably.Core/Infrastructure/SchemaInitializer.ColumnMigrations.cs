@@ -1232,6 +1232,68 @@ public sealed partial class SchemaInitializer
             // retires anything. Fresh installs are covered too — this pass runs unconditionally.
             // It moves into the schema files a release after is_active ships.
             "CREATE INDEX IF NOT EXISTS idx_project_versions_active ON project_versions (project_id) WHERE is_active = 1",
+            // CISA's 2026 minimum elements separate Component Producer from Component Author,
+            // which component_author previously collapsed publisher into. Nullable and
+            // display/export-only — no gate reads it. Existing rows stay NULL until their
+            // document re-merges, which the SbomIngestVersion bump forces exactly once.
+            "ALTER TABLE sbom_components ADD COLUMN component_producer TEXT",
+            // metadata.lifecycles, captured on ingest and previously dropped. Nullable JSON
+            // array text; existing rows stay NULL until their document re-merges, same as above.
+            "ALTER TABLE project_documents ADD COLUMN lifecycles TEXT",
+            // CISA D16c's discriminator (does license_spdx hold a free-text name rather than a
+            // genuine SPDX identifier/expression?) and its URL fallback. Both nullable and
+            // display/export-only — no gate reads either. No CHECK on license_is_named here
+            // (SQLite ALTER cannot add one); fresh installs get it from Schema.sql, and upgraded
+            // databases rely on the write path, which only ever binds 0, 1 or NULL. Existing rows
+            // stay NULL until their document re-merges, same as component_producer above.
+            "ALTER TABLE sbom_components ADD COLUMN license_is_named INTEGER",
+            "ALTER TABLE sbom_components ADD COLUMN license_url TEXT",
+            // CISA D13c/D13d: identifiers a document asserts beside purl (CPE/SWHID/OmniBOR/a
+            // commit hash/a UUID), as a JSON array of {"kind","value"} pairs. Nullable and
+            // display/export-only — no gate reads it. Existing rows stay NULL until their
+            // document re-merges, which the SbomIngestVersion bump forces exactly once.
+            "ALTER TABLE sbom_components ADD COLUMN additional_identifiers TEXT",
+            // CISA X4/P4a's explicit-unknown-vs-silent-absence signal (SPDX's NOASSERTION/NONE
+            // for producer/license), captured only by SpdxParser. Nullable JSON array text and
+            // display/scoring-only — no gate reads it. Existing rows stay NULL until their
+            // document re-merges, which the SbomIngestVersion bump forces exactly once.
+            "ALTER TABLE sbom_components ADD COLUMN explicit_unknown_fields TEXT",
+            // CISA D17, SPDX-only: true when this component was the relatedSpdxElement of a
+            // CONTAINS relationship — never fed into dependency_kind/dependency_path (see
+            // Schema.sql for the full rationale). NOT NULL DEFAULT so both providers accept the
+            // same additive ALTER; existing rows read false until their document re-merges,
+            // which the SbomIngestVersion bump forces exactly once.
+            "ALTER TABLE sbom_components ADD COLUMN containment_declared INTEGER NOT NULL DEFAULT 0",
+            // CISA D2 (SBOM Author Signature): the verdict from verifying an ingested CycloneDX
+            // document's enveloped JSF signature against the org's ('sbom','spki') trust anchors.
+            // 'verified'/'unsigned' are ProvenanceStatuses' shared vocabulary; 'failed' is
+            // cryptographically invalid; 'unanchored' is SBOM-specific (this registry holds no
+            // pinned anchor for the claimed keyId — its own trust-store gap, never the supplier's
+            // failure). Never 'unverifiable', which is synthesized at admission time and never
+            // persisted. NULL for a document doc_type/format this policy does not cover (VEX,
+            // SARIF, SPDX) or one uploaded while verify_sbom_signatures was 'off'. Existing rows
+            // stay NULL until their document re-uploads, which the SbomIngestVersion bump forces
+            // exactly once.
+            "ALTER TABLE project_documents ADD COLUMN signature_status TEXT",
+            // The signing key's fingerprint (SHA-256 over its DER SubjectPublicKeyInfo, lower-case
+            // hex), set only when signature_status = 'verified'. Display-only — lets an operator
+            // see which of an org's rotated ('sbom','spki') anchors actually verified.
+            "ALTER TABLE project_documents ADD COLUMN signature_key_id TEXT",
+            // Per-tenant CycloneDX SBOM author-signature verification gate: 'off' (default) /
+            // 'warn' / 'block'. Enabling requires at least one ('sbom','spki') trust anchor in
+            // signature_trust_anchor; without one the check has nothing to verify against and
+            // denies under 'block' rather than no-opping. Added without a CHECK (SQLite ALTER
+            // can't add one); upgraded DBs rely on controller validation, fresh installs get the
+            // CHECK from Schema.sql.
+            "ALTER TABLE org_settings ADD COLUMN verify_sbom_signatures TEXT NOT NULL DEFAULT 'off'",
+            // X4/D8b (SBOM Tool Version) read back: true only when the original producing tool's
+            // own metadata.tools entry carried dependably's own dependably:tool-version-status
+            // property — a dependably export re-ingested here, which demonstrates the practice
+            // rather than reading as a silent D8 gap. NOT NULL DEFAULT so both providers accept
+            // the same additive ALTER; existing rows read false (the correct answer for a document
+            // that predates this column, same as a document this build never re-parsed) until
+            // their document re-uploads, which the SbomIngestVersion bump forces exactly once.
+            "ALTER TABLE project_documents ADD COLUMN tool_version_explicit_unknown INTEGER NOT NULL DEFAULT 0",
     };
 
     private async Task RunAdditiveMigrationsAsync(DbConnection conn)

@@ -859,14 +859,14 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
     }
 
     [Fact]
-    public void ContributingMd_DocumentsPrimaryMapCacheSizeLimitEnvVar()
+    public void OperationsMd_DocumentsPrimaryMapCacheSizeLimitEnvVar()
     {
         // Rpm:PrimaryMapCacheSizeLimitBytes (RpmUpstreamProxy.cs) tunes the RPM primary.xml
         // map cache bound; every other Section:Key read in code (Maven:NegativeCacheTtl,
-        // Go:SumDb, Apk:*) is documented in CONTRIBUTING.md's environment-variable reference —
+        // Go:SumDb, Apk:*) is documented in OPERATIONS.md's environment-variable reference —
         // this key must be too, or operators of large RPM mirrors have no way to discover it.
-        string contributingPath = Path.Combine(SourceRoots.RepoRoot(), "CONTRIBUTING.md");
-        string contents = File.ReadAllText(contributingPath);
+        string operationsPath = Path.Combine(SourceRoots.RepoRoot(), "OPERATIONS.md");
+        string contents = File.ReadAllText(operationsPath);
 
         Assert.Contains("Rpm__PrimaryMapCacheSizeLimitBytes", contents);
     }

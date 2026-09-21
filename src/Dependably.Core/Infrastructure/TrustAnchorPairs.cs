@@ -48,6 +48,12 @@ public static class TrustAnchorPairs
         ("pypi", "trusted_publisher"),
         ("pypi", "rekor_key"),
         ("apk", "rsa"),
+        // "sbom" is a trust NAMESPACE, not an ecosystem — it pins a supplier's CycloneDX
+        // author-signature key, never an artifact proxy source. The npm, nuget and apk material
+        // builders read rows by ecosystem alone, so an sbom row is invisible to them; the SBOM
+        // key builder filters on both ecosystem AND anchor_kind so a future pair in this
+        // namespace cannot land unparsed in its key map.
+        ("sbom", "spki"),
     ];
 
     private static readonly HashSet<(string Ecosystem, string AnchorKind)> Lookup = [.. Registered];

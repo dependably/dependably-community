@@ -256,10 +256,15 @@ public sealed class AuthDenialRecorderTests
             RequestServices = new ServiceCollection().BuildServiceProvider(),
         };
 
-        AuthDenialRecorder.RecordTokenRejected(bare, reason: AuthDenialRecorder.ReasonInvalid);
-        AuthDenialRecorder.RecordTokenRejected(null, reason: AuthDenialRecorder.ReasonInvalid);
-        AuthDenialRecorder.RecordCapabilityDenied(null, null, required: Capabilities.PullOci);
-        AuthDenialRecorder.RecordCapabilityDeniedForScheme(null, TokenAuthenticationDefaults.Scheme);
+        // The contract under test is "does not throw", asserted explicitly so a regression fails
+        // the test rather than passing vacuously on an empty body.
+        Assert.Null(Record.Exception(() =>
+        {
+            AuthDenialRecorder.RecordTokenRejected(bare, reason: AuthDenialRecorder.ReasonInvalid);
+            AuthDenialRecorder.RecordTokenRejected(null, reason: AuthDenialRecorder.ReasonInvalid);
+            AuthDenialRecorder.RecordCapabilityDenied(null, null, required: Capabilities.PullOci);
+            AuthDenialRecorder.RecordCapabilityDeniedForScheme(null, TokenAuthenticationDefaults.Scheme);
+        }));
     }
 
     /// <summary>

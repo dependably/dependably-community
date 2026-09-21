@@ -191,19 +191,40 @@ public sealed partial class OciUpstreamResolver
         string orgId, string repository, CancellationToken ct)
     {
         var upstreams = await _upstreamRepo.BuildOciUpstreamsForOrgAsync(orgId, ct);
-        foreach (var u in upstreams)
-        {
-            foreach (string prefix in u.Prefixes)
-            {
-                if (string.IsNullOrEmpty(prefix) ||
-                    repository.StartsWith(prefix, StringComparison.Ordinal))
-                {
-                    return u;
-                }
-            }
-        }
-        return null;
+        return upstreams.FirstOrDefault(u => ClaimsRepository(u.Prefixes, repository));
     }
+
+    /// <summary>
+    /// The host of the first upstream whose prefix list claims <paramref name="repository"/>, or
+    /// null when none does — the same decision <see cref="MatchUpstreamAsync"/> makes, read from
+    /// the credential-free routing table.
+    ///
+    /// <para>
+    /// Answers "was there anywhere to go and look" for the manifest-404 diagnostic, which has to
+    /// separate an org with no route for a name from an upstream that was asked and said no.
+    /// Both reach the controller as a null result, and the two are different faults with
+    /// different owners. Routing is re-read rather than threaded back out of the fetch because
+    /// this runs only on the 404 path, where one small query costs nothing.
+    /// </para>
+    /// </summary>
+    public async Task<string?> MatchUpstreamHostAsync(
+        string orgId, string repository, CancellationToken ct)
+    {
+        var routes = await _upstreamRepo.ListOciUpstreamRoutesAsync(orgId, ct);
+        return routes.FirstOrDefault(r => ClaimsRepository(r.Prefixes, repository))?.Host;
+    }
+
+    /// <summary>
+    /// Whether an upstream declaring <paramref name="prefixes"/> claims
+    /// <paramref name="repository"/>. An empty-string prefix is the catch-all.
+    /// </summary>
+    /// <remarks>
+    /// Shared by <see cref="MatchUpstreamAsync"/> and <see cref="MatchUpstreamHostAsync"/> so the
+    /// diagnostic cannot drift from the routing it reports on — a diagnostic that disagrees with
+    /// the router is worse than none, because it is believed.
+    /// </remarks>
+    private static bool ClaimsRepository(IReadOnlyList<string> prefixes, string repository) =>
+        prefixes.Any(p => string.IsNullOrEmpty(p) || repository.StartsWith(p, StringComparison.Ordinal));
 
     /// <summary>
     /// Fetches only the header metadata (digest, size, media type) for a manifest from the
@@ -501,6 +522,22 @@ public sealed partial class OciUpstreamResolver
             return null;
         }
 
+        // HEAD answers the cap exactly as GET does. Docker HEADs a layer before pulling it, so a
+        // HEAD that returns 200 for a blob the GET will refuse sends the client to fetch
+        // something this registry has already decided it will not carry — and the refusal then
+        // arrives mid-pull instead of before it. The declared length is all HEAD has (there is
+        // no body to measure), which is also all it needs: the same header the GET path
+        // fail-fasts on.
+        long maxBlobBytes = _options.Value.MaxBlobProxyBytes;
+        if (resp.Content.Headers.ContentLength > maxBlobBytes)
+        {
+            _logger.LogWarning(
+                "OCI blob HEAD {Repository}/{Digest} from {Host} declared Content-Length {ContentLength} exceeding the {MaxBytes}-byte blob proxy cap; refusing.",
+                repository, digest, upstream.Host, resp.Content.Headers.ContentLength, maxBlobBytes);
+            throw new OciBlobTooLargeException(
+                digest, upstream.Host, maxBlobBytes, resp.Content.Headers.ContentLength);
+        }
+
         string mediaType = resp.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
         return new OciBlobMetadata(mediaType);
     }
@@ -634,6 +671,13 @@ public sealed partial class OciUpstreamResolver
                 // Bounds _blobInflightArrivals to the same lifecycle as _blobInflight — otherwise
                 // every distinct digest ever fetched would leak an entry for the life of the process.
                 _blobInflightArrivals.TryRemove(inflightKey, out int _);
+
+                // Observe a faulted shared fetch. The work item now throws on a refusal (over-cap,
+                // digest mismatch) where it once returned null, and every waiter reaches it
+                // through WaitAsync(ct) — so a caller that disconnects before the fetch completes
+                // can leave the fault with no observer at all. Reading Exception here marks it
+                // observed; the waiters still receive it.
+                _ = completedTask.Exception;
             },
             CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously,

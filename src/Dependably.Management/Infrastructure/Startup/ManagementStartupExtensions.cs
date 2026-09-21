@@ -78,7 +78,9 @@ public static class ManagementStartupExtensions
                 Options: Dependably.Infrastructure.Sbom.SbomOptions.Resolve(
                     sp.GetRequiredService<IConfiguration>()),
                 StagingPath: stagingPath,
-                Logger: sp.GetRequiredService<ILogger<Dependably.Api.SbomController>>());
+                Logger: sp.GetRequiredService<ILogger<Dependably.Api.SbomController>>(),
+                SignatureVerifier: sp.GetRequiredService<Dependably.Infrastructure.Sbom.SbomSignatureVerifier>(),
+                Settings: sp.GetRequiredService<OrgSettingsRepository>());
         });
 
         // Claim REST surface. State machine + repository are registered by the Core wiring; the

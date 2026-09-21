@@ -323,7 +323,7 @@ public sealed class ControllerScenario : IAsyncDisposable
         var db = _fixture.Store;
         var orgs = new OrgRepository(db);
         var audit = new AuditRepository(db);
-        var guard = new OrgAccessGuard(db);
+        var guard = new OrgAccessGuard(db, TestProblems.Create());
         var licenses = new LicenseRepository(db, Clock, TestNormalizers.License(db));
         var packages = new PackageRepository(db);
         var vulns = new VulnerabilityRepository(db, Clock);
@@ -475,6 +475,8 @@ public sealed class ControllerScenario : IAsyncDisposable
             new Dependably.Protocol.Provenance.TerraformProvenanceVerifier(
                 scenarioTrustStore,
                 Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.TerraformProvenanceVerifier>.Instance),
+            new Dependably.Infrastructure.Sbom.SbomSignatureVerifier(
+                new Dependably.Protocol.Provenance.SbomSignatureKeyStore(scenarioTrustStore)),
             new Dependably.Infrastructure.Caching.OrgCacheEpochStore())
         { ControllerContext = ctx };
         var orgTokens = new OrgTokensController(

@@ -60,6 +60,21 @@ public static partial class SbomAnalysisProjection
     public static readonly IReadOnlySet<string> ScopeFilters =
         new HashSet<string>(StringComparer.Ordinal) { "all", "prod", "dev" };
 
+    /// <summary>
+    /// The <c>prod</c> classification <see cref="ScopeFilters"/> reads: excludes
+    /// <c>dependency_scope = 'dev'</c> <b>and</b> <c>sbom_scope = 'excluded'</c>, and keeps
+    /// <c>unknown</c>-scoped components — excluding those too would silently drop every
+    /// component nothing has classified. The single definition, so a second surface reading the
+    /// same three-state vocabulary (the SBOM export's scope option) cannot derive a different
+    /// answer to "what does prod mean" than the component table does.
+    /// </summary>
+    public static bool IsProdScope(string? dependencyScope, string? sbomScope) =>
+        !IsDevScope(dependencyScope) && !string.Equals(sbomScope, "excluded", StringComparison.Ordinal);
+
+    /// <summary>The <c>dev</c> classification <see cref="ScopeFilters"/> reads: <c>dependency_scope = 'dev'</c>.</summary>
+    public static bool IsDevScope(string? dependencyScope) =>
+        string.Equals(dependencyScope, "dev", StringComparison.Ordinal);
+
     /// <summary>Severity buckets the endpoint accepts as a filter, matching the rollup's own buckets.</summary>
     public static readonly IReadOnlySet<string> SeverityBuckets =
         new HashSet<string>(StringComparer.Ordinal) { "critical", "high", "medium", "low", "unscored" };
@@ -195,9 +210,6 @@ public static partial class SbomAnalysisProjection
             return byPriority != 0 ? byPriority : string.CompareOrdinal(x.VulnKey, y.VulnKey);
         });
 
-        bool isDev = string.Equals(component.DependencyScope, "dev", StringComparison.Ordinal);
-        bool isExcluded = string.Equals(component.SbomScope, "excluded", StringComparison.Ordinal);
-
         var resolvedMetadata = ComponentMetadataResolver.Resolve(component, registryFacts);
 
         return new AnalysisComponentView
@@ -212,8 +224,8 @@ public static partial class SbomAnalysisProjection
             ComponentType = component.ComponentType,
             SbomScope = component.SbomScope,
             DependencyScope = component.DependencyScope,
-            IsProd = !isDev && !isExcluded,
-            IsDev = isDev,
+            IsProd = IsProdScope(component.DependencyScope, component.SbomScope),
+            IsDev = IsDevScope(component.DependencyScope),
             DependencyKind = component.DependencyKind,
             DependencyPath = ParseJsonArray(component.DependencyPath),
             LicenseSpdx = component.LicenseSpdx,

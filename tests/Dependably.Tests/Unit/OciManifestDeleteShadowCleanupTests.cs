@@ -185,7 +185,7 @@ public sealed class OciManifestDeleteShadowCleanupTests : IAsyncLifetime
 
         string packageId = await PackageSeeder.InsertAsync(_db, _orgId, "oci", Repository);
         await PackageSeeder.InsertVersionAsync(
-            _db, packageId, digest, $"pkg:oci/{Repository}@{digest}", origin: "uploaded", blobKey: blobKey);
+            _db, packageId, digest, PurlNormalizer.Oci(Repository, digest), origin: "uploaded", blobKey: blobKey);
         return packageId;
     }
 

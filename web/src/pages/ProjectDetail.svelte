@@ -21,6 +21,7 @@
   import DataTable from '../lib/DataTable.svelte'
   import ProjectEditModal from '../lib/ProjectEditModal.svelte'
   import RowActionsMenu from '../lib/RowActionsMenu.svelte'
+  import SbomExportDialog from '../lib/SbomExportDialog.svelte'
   import SbomUploadModal from '../lib/sbom/SbomUploadModal.svelte'
   import { exportFilename } from '../lib/sbom/analysis.js'
 
@@ -36,24 +37,30 @@
   // being edited (null = no dialog).
   let openChildActionsId = null, deletingChildId = null, editChild = null
   let uploadOpen = false
-  let exportOpen = false, exportError = ''
+  let exportOpen = false, exportBusy = false, exportError = ''
 
   // One document for the whole folder: every descendant project's latest version, nested so each
   // library still says which project shipped it. Offered only on a collection — a plain project's
   // export is version-scoped and lives on the version page, where the version is chosen.
-  async function runCollectionExport(variant) {
-    exportOpen = false
+  async function runCollectionExport(e) {
+    const { variant, format, specVersion, scope } = e.detail
+    exportBusy = true
     exportError = ''
     try {
       await api.exportCollectionSbom(
-        params.id, variant, exportFilename(project?.name ?? 'collection', 'all', variant))
+        params.id,
+        { variant, format, specVersion, scope },
+        exportFilename(project?.name ?? 'collection', 'all', variant, { specVersion, scope }))
+      exportOpen = false
     } catch (e) {
       exportError = extractErrorMessage(e)
+    } finally {
+      exportBusy = false
     }
   }
 
-  function closeExport(e) {
-    if (e.target?.closest && e.target.closest('.export-menu')) return
+  function closeExport() {
+    if (exportBusy) return
     exportOpen = false
   }
 
@@ -261,8 +268,6 @@
   }
 </script>
 
-<svelte:window on:click={closeExport} />
-
 <div class="page">
   <div class="page-header">
     <div>
@@ -286,19 +291,10 @@
     {#if isAdmin && project}
       <div class="header-actions">
         {#if isCollection}
-          <span class="export-menu">
-            <button type="button" on:click|stopPropagation={() => (exportOpen = !exportOpen)} aria-haspopup="true" aria-expanded={exportOpen}>
-              <svg width="13" height="13" aria-hidden="true"><use href="/icons.svg#icon-download"/></svg>
-              {$t('sbomAnalysis.export.button')}
-            </button>
-            {#if exportOpen}
-              <div class="export-popover" role="menu">
-                <p class="export-hint">{$t('projects.detail.exportHint')}</p>
-                <button class="popover-item" on:click|stopPropagation={() => runCollectionExport('inventory')}>{$t('sbomAnalysis.export.inventory')}</button>
-                <button class="popover-item" on:click|stopPropagation={() => runCollectionExport('vdr')}>{$t('sbomAnalysis.export.vdr')}</button>
-              </div>
-            {/if}
-          </span>
+          <button type="button" data-testid="export" on:click={() => { exportError = ''; exportOpen = true }}>
+            <svg width="13" height="13" aria-hidden="true"><use href="/icons.svg#icon-download"/></svg>
+            {$t('sbomAnalysis.export.button')}
+          </button>
         {/if}
         <!-- data-testid for the same reason as new-folder: the label is localized, and this
              header now holds more than one button, so "the header button" no longer identifies
@@ -313,6 +309,16 @@
 
   <ErrorBanner message={error} />
   <ErrorBanner message={exportError} />
+
+  {#if isCollection}
+    <SbomExportDialog
+      open={exportOpen}
+      surface="collection"
+      busy={exportBusy}
+      on:export={runCollectionExport}
+      on:close={closeExport}
+    />
+  {/if}
 
   {#if !loading && project}
     <div class="stat-grid mb-3">
@@ -551,23 +557,6 @@
   /* app.css centres .page-header, which reads fine against a lone h1 but floats the action
      halfway down a stacked breadcrumb + title + description. Pin it to the title's line. */
   .page-header { align-items: flex-start; }
-  /* Same popover contract the version page's export menu uses: anchored to its own button rather
-     than positioned against the viewport, so it needs no measurement pass. */
-  .export-menu { position: relative; display: inline-flex; }
-  .export-popover {
-    position: absolute;
-    top: calc(100% + 4px);
-    right: 0;
-    z-index: 1000;
-    min-width: 260px;
-    background: var(--bg2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    box-shadow: var(--shadow);
-    padding: 4px 0;
-    text-align: left;
-  }
-  .export-hint { margin: 4px 12px 6px; font-size: 11px; color: var(--text2); }
   /* .sev-* chips are global (app.css); the cell just must not wrap between them. */
   .vuln-cell { white-space: nowrap; }
   /* .stat-card is a flex column, so a badge child stretches to the card's full width and reads

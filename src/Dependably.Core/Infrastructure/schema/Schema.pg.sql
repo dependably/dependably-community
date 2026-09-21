@@ -185,7 +185,10 @@ CREATE TABLE IF NOT EXISTS org_settings (
     -- Per-tenant RPM hosted-publishing posture override. NULL (default) inherits the instance
     -- Rpm:UpstreamMode env value; an explicit value overrides the env value in EITHER direction.
     -- See Schema.sql.
-    rpm_upstream_mode         TEXT    CHECK (rpm_upstream_mode IS NULL OR rpm_upstream_mode IN ('passthrough','merged'))
+    rpm_upstream_mode         TEXT    CHECK (rpm_upstream_mode IS NULL OR rpm_upstream_mode IN ('passthrough','merged')),
+    -- Policy for verifying the enveloped JSF signature on an ingested CycloneDX SBOM document.
+    -- See Schema.sql.
+    verify_sbom_signatures    TEXT    NOT NULL DEFAULT 'off' CHECK (verify_sbom_signatures IN ('off', 'warn', 'block'))
 );
 
 CREATE TABLE IF NOT EXISTS instance_settings (
@@ -1903,6 +1906,24 @@ CREATE TABLE IF NOT EXISTS hex_signing_key (
         CHECK (created_at IS NULL OR created_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$')
 );
 
+-- SBOM author signature. See Schema.sql. retired_at carries COLLATE "C" because it is
+-- referenced in the partial unique index's WHERE predicate below.
+CREATE TABLE IF NOT EXISTS sbom_signing_key (
+    id              TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    algorithm       TEXT NOT NULL DEFAULT 'ES256',
+    private_key     TEXT NOT NULL,
+    public_key_pem  TEXT NOT NULL,
+    created_at      TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
+        CHECK (created_at IS NULL OR created_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    retired_at      TEXT COLLATE "C"
+        CHECK (retired_at IS NULL OR retired_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    revoked_at      TEXT
+        CHECK (revoked_at IS NULL OR revoked_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$')
+);
+CREATE INDEX IF NOT EXISTS idx_sbom_signing_key_org ON sbom_signing_key(org_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sbom_signing_key_active ON sbom_signing_key(org_id) WHERE retired_at IS NULL;
+
 -- Hex: the per-release facts the registry index needs that no other table carries — the inner
 -- checksum every client's tarball unpacker re-verifies, the dependency requirements the resolver
 -- reads, and the retirement state. Same polymorphic owner shape as cargo_metadata: a hosted
@@ -2175,7 +2196,7 @@ CREATE TABLE IF NOT EXISTS project_documents (
     org_id             TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
     project_version_id TEXT NOT NULL REFERENCES project_versions(id) ON DELETE CASCADE,
     doc_type           TEXT NOT NULL CHECK (doc_type IN ('sbom','vex','sarif')),
-    format             TEXT NOT NULL CHECK (format IN ('cyclonedx-json','openvex-json','sarif-json')),
+    format             TEXT NOT NULL CHECK (format IN ('cyclonedx-json','openvex-json','sarif-json','spdx-json')),
     spec_version       TEXT,
     tool_name          TEXT,
     tool_version       TEXT,
@@ -2185,11 +2206,39 @@ CREATE TABLE IF NOT EXISTS project_documents (
     uploaded_by        TEXT,
     -- Ingest projection revision. See Schema.sql for the full rationale.
     ingest_version     INTEGER NOT NULL DEFAULT 0,
+    -- metadata.lifecycles as a JSON array of {"phase"} or {"name","description"} entries. See
+    -- Schema.sql for the full rationale.
+    lifecycles         TEXT,
+    -- CISA D2 signature-verification verdict, including the 'unanchored' arm. See Schema.sql for
+    -- the full rationale.
+    signature_status   TEXT CHECK (signature_status IS NULL OR signature_status IN ('verified','failed','unsigned','unanchored')),
+    signature_key_id   TEXT,
+    -- X4/D8b read-back flag. See Schema.sql for the full rationale.
+    tool_version_explicit_unknown INTEGER NOT NULL DEFAULT 0 CHECK (tool_version_explicit_unknown IN (0,1)),
     uploaded_at        TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
         CHECK (uploaded_at IS NULL OR uploaded_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
     UNIQUE (project_version_id, doc_type)
 );
 CREATE INDEX IF NOT EXISTS idx_project_documents_org ON project_documents(org_id);
+
+-- Revision identity for a RENDERED (not uploaded) CycloneDX export — CISA D6/D9. See Schema.sql
+-- for the full rationale (serial minted once and stored, revision bumped only on a
+-- content_fingerprint change, changed_at stamped only then).
+CREATE TABLE IF NOT EXISTS sbom_export_revisions (
+    id                   TEXT PRIMARY KEY,
+    org_id               TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    project_version_id   TEXT NOT NULL REFERENCES project_versions(id) ON DELETE CASCADE,
+    doc_kind             TEXT NOT NULL CHECK (doc_kind IN ('inventory','vdr','vex')),
+    format               TEXT NOT NULL DEFAULT 'cyclonedx-json' CHECK (format IN ('cyclonedx-json')),
+    scope_filter         TEXT NOT NULL DEFAULT 'all' CHECK (scope_filter IN ('all','prod','dev')),
+    serial_number        TEXT NOT NULL,
+    revision             INTEGER NOT NULL DEFAULT 1,
+    content_fingerprint  TEXT NOT NULL,
+    changed_at           TEXT NOT NULL
+        CHECK (changed_at IS NULL OR changed_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    UNIQUE (project_version_id, doc_kind, format, scope_filter)
+);
+CREATE INDEX IF NOT EXISTS idx_sbom_export_revisions_org ON sbom_export_revisions(org_id);
 
 -- One component of one project version's SBOM, with the parsed purl triple beside the verbatim
 -- purl. sbom_scope is raw CycloneDX, drives no UI ranking, and is read by policy for its
@@ -2211,8 +2260,19 @@ CREATE TABLE IF NOT EXISTS sbom_components (
     dependency_kind    TEXT CHECK (dependency_kind IN ('direct','transitive','root','graph-unknown')),
     dependency_path    TEXT,
     license_spdx       TEXT,
+    -- CISA D16c's discriminator: TRUE when license_spdx is a free-text licences[].license.name
+    -- rather than a genuine SPDX identifier/expression. See Schema.sql for the full rationale.
+    license_is_named   INTEGER CHECK (license_is_named IN (0,1)),
+    -- CISA D16c's URL fallback: populated only when license_is_named AND the document also
+    -- carried a licenses[].license.url. See Schema.sql for the full rationale.
+    license_url        TEXT,
     description        TEXT,
+    -- The person(s)/entity who wrote the component's code. See Schema.sql for the full rationale
+    -- and its distinction from component_producer below.
     component_author   TEXT,
+    -- components[].publisher: the ONE organization that produces/ships this component. See
+    -- Schema.sql for the full rationale, including why this is never dependably's own name.
+    component_producer TEXT,
     copyright          TEXT,
     component_group    TEXT,
     website_url        TEXT,
@@ -2222,6 +2282,17 @@ CREATE TABLE IF NOT EXISTS sbom_components (
     component_hashes   TEXT,
     version_range      TEXT,
     is_external        INTEGER CHECK (is_external IN (0,1)),
+    -- CISA D13c/D13d: identifiers a document asserts beside purl — CPE, SWHID, OmniBOR, a commit
+    -- hash, a UUID — as a JSON array of {"kind","value"} pairs. See Schema.sql for the full
+    -- rationale, including why this is a JSON column rather than a child table.
+    additional_identifiers TEXT,
+    -- CISA X4/P4a's explicit-unknown-vs-silent-absence signal, ingest side: which "indicate
+    -- unknown" duty fields (producer, license) THIS document explicitly asserted SPDX's
+    -- NOASSERTION/NONE for, as a JSON array of strings. See Schema.sql for the full rationale,
+    -- including why this is never populated for a CycloneDX-sourced row.
+    explicit_unknown_fields TEXT,
+    -- CISA D17, SPDX-only. See Schema.sql for the full rationale.
+    containment_declared INTEGER NOT NULL DEFAULT 0 CHECK (containment_declared IN (0,1)),
     vuln_checked_at    TEXT
         CHECK (vuln_checked_at IS NULL OR vuln_checked_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
     created_at         TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))

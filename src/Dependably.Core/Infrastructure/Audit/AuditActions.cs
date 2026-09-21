@@ -86,6 +86,7 @@ public static class AuditActions
         "service_token_created",
         "service_token_revoked",
         "hex_signing_key_rotated",
+        "sbom_signing_key_rotated",
         "system_admin.jwt_secret_rotated",
         "user.password_changed",
         "user.password_reset",
@@ -123,6 +124,7 @@ public static class AuditActions
         "checksum_failure",
         "ssrf_blocked",
         "provenance_verification_failed",
+        "sbom_signature_blocked",
         "upstream_source_pin_violation",
         "upstream_response_too_large",
         "proxy_serve_facts_unreadable",
@@ -164,6 +166,10 @@ public static class AuditActions
         "project.version_reinstated",
         "project.version_deleted",
         "sbom.analysis.triage",
+        // Recorded under 'warn' — the verdict this policy would have refused under 'block',
+        // logged without refusing the upload. The 'block' refusal itself is
+        // sbom_signature_blocked, in the security set above.
+        "sbom_signature_warn",
         "claim.create",
         "claim.transition",
         "claim.release",

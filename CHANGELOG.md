@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The OCI blob proxy refused any layer over a hard-coded 600 MB and reported the refusal as
+  `404 BLOB_UNKNOWN`** — "this blob does not exist" — for content the upstream was in the middle
+  of handing over. The cap was `UpstreamClient.MaxUpstreamResponseBytes`, a constant shared with
+  every other ecosystem's metadata and tarball fetches and never sized for an image layer, so
+  `docker pull` of any ML/CUDA image failed deterministically on the same layer every time. Being
+  deterministic and reported as absence, it read as a corrupted cache entry rather than as a
+  configured limit, and sent operators looking in the wrong place.
+
+  The blob path now has its own bound, `Oci__MaxBlobProxyBytes`, defaulting to 10 GiB — a disk
+  bound on the cache tier, not a memory one, since blobs stream through without being buffered.
+  Sized per-ecosystem rather than by raising the shared constant, which would have widened every
+  other ecosystem's fetch at the same time. Values below 1 MiB are refused at startup.
+
+  Both refusals that used to collapse into that 404 are now **502 `UNAVAILABLE`**, matching the
+  posture this controller already takes for an upstream it cannot reach, and they are
+  distinguishable from each other: `blob_too_large` is a number the operator chose,
+  `blob_digest_mismatch` is an integrity event worth alerting on. The upstream host, the fault,
+  and the setting to change are disclosed only to a caller holding a token for the org — a
+  `/v2/` blob read is anonymously reachable under `anonymous_pull`, and an org's upstream list is
+  supply-chain topology. The status itself is unconditional. Blob `HEAD` applies the same cap as
+  `GET`, so a client is refused before it starts a pull rather than part-way through one.
+
+## [0.12.0] - 2026-09-20
+
+### Added
+
+- **`GET /api/v1/ecosystems`** publishes the server's ecosystem vocabulary and per-plane support
+  matrix (`registry`, `lookup`, `setup`), read from the same three source-of-truth constants the
+  server itself enforces (`UpstreamRegistryRepository.SupportedEcosystems`,
+  `PackageLookupService.SupportedEcosystems`, `SetupRecipeCatalog.Ecosystems`) rather than a
+  hand-maintained copy. Lets a client — the MCP server, the web UI, a future integration — ask the
+  server which ecosystems it supports instead of hardcoding a list that can drift from it.
+  Authorized on `read:packages`, org-guarded like the rest of the read-only inventory surfaces.
+
+### Fixed
+
+- **A signed and an unsigned export of identical data published under the same `serialNumber`
+  and `version`**, so a consumer caching an SBOM/VDR/VEX export by that pair never re-fetched the
+  newly-signed document, and two recipients holding "revision 1" disagreed about whether the
+  author signed. The revision fingerprint now covers the org's signing posture (whether it has an
+  active signing key at all — never the per-replica rendered `signed`/`unsigned-*` state, which a
+  mixed fleet can answer two different ways for identical data) and the `dependably:signature-state`
+  metadata property; the signature itself (`value`, `keyId`, `algorithm`, `publicKey`) stays out
+  of the fingerprint, so rotating a signing key does not move the revision. Two narrower gaps in
+  the same fingerprint closed alongside it: a component's asserted hashes and additional
+  identifiers were fingerprinted from the raw stored column rather than the filtered, ordered set
+  the export actually renders, so a future ingest change or a reordered stored array could bump
+  `version` with nothing rendered differently, or (for a purl-less component carrying an
+  unrecognised identifier kind) miss a real change to the `dependably:identifier-status` property.
+
+  **Action required:** the fingerprint's inputs changed, so the FIRST export of every
+  already-persisted document after upgrading to this release bumps its `version` by exactly one —
+  `serialNumber` and `metadata.timestamp` are unchanged, and no document content is different; it
+  is the one-time cost of computing revision identity correctly. During a blue-green cutover, a
+  replica still running the previous build computes the OLD fingerprint and one running this
+  release computes the NEW one, so an export alternating between the two bumps `version` on every
+  request that lands on a different replica than the last — it settles back to one bump per
+  document once every replica runs this release.
+
 ## [0.11.0] - 2026-09-13
 
 ### Added

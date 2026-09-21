@@ -188,12 +188,14 @@ public sealed class NpmTarballHandlerProxyTests : IAsyncLifetime
             _db, new MemoryCache(new MemoryCacheOptions()), TimeProvider.System);
         var registries = new UpstreamRegistryResolver(
             new UpstreamRegistryRepository(_db, TimeProvider.System, TestEnvelope.Unconfigured()));
-        var provenance = new NpmProvenanceVerifier(new NpmSignatureKeyStore(new StubPerOrgTrustAnchorStore()));
+        var firstFetch = new NpmFirstFetchMetadataReader(
+            upstreamClient,
+            new NpmProvenanceVerifier(new NpmSignatureKeyStore(new StubPerOrgTrustAnchorStore())));
 
         return new NpmTarballHandler(
             _orgs, _packages, cacheArtifact, tenantAccess, _tokens, _audit, serveStoreOverride ?? tiered.Cache,
             upstreamClient, allowlist, blocklist, blockGate, claimResolver, reserved,
-            proxyFetch, registries, provenance, TimeProvider.System, NullLogger<NpmTarballHandler>.Instance);
+            proxyFetch, registries, firstFetch, TimeProvider.System, NullLogger<NpmTarballHandler>.Instance);
     }
 
     private static DefaultHttpContext BuildHttpContext(string orgId)

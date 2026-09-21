@@ -233,7 +233,9 @@ public sealed class SbomScanControllerTests : IAsyncLifetime
 
         var result = await controller.Rescan(projectId, versionId, CancellationToken.None);
 
-        Assert.IsType<ForbidResult>(result);
+        // The guard answers a capability shortfall with a localized problem body now, not a
+        // bare ForbidResult — a scheme-delegated forbid wrote no body at all.
+        Assert.Equal(StatusCodes.Status403Forbidden, Assert.IsType<ObjectResult>(result).StatusCode);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -277,7 +279,7 @@ public sealed class SbomScanControllerTests : IAsyncLifetime
     private SbomScanController BuildController(
         string orgId, string userId, out SbomScanWorker worker, string? serviceTokenId = null)
     {
-        var guard = new OrgAccessGuard(_db);
+        var guard = new OrgAccessGuard(_db, TestProblems.Create());
         var audit = new AuditRepository(_db);
         var vulns = new VulnerabilityRepository(_db, _clock);
         var sbomVulns = new SbomComponentVulnRepository(_db, _clock);

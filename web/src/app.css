@@ -394,6 +394,20 @@ tr.expanded-row td, tr.detail-row td { background: var(--surface2); }
 .badge.policy-pass      { background: var(--success-soft); color: var(--success); }
 .badge.policy-warn      { background: var(--warning-soft); color: var(--warning); }
 .badge.policy-violation { background: var(--danger-soft);  color: var(--danger); }
+/* CISA 2026 conformance scorecard states (SbomConformancePanel). Present reuses the same
+   success tint every other "satisfied" badge on this page uses. Absent is warning-tinted, not
+   danger — a missing field on a third-party document is an actionable gap, not the same class
+   of alarm as a KEV or a malicious verdict. Explicitly-unknown is deliberately NOT warning-tinted
+   despite also being an absence: CISA scores an honest "I don't know" as conformant supplier
+   behaviour, so it gets the same informational sky tint as the other neutral capability badges.
+   Not-applicable and not-assessed are both muted/neutral — neither is a claim about the supplier
+   — but kept visually distinct (bg3/text2 vs purple) so a reader can tell "this format cannot
+   carry this element" apart from "dependably has not built this yet". */
+.badge.conformance-present          { background: var(--success-soft);     color: var(--success); }
+.badge.conformance-absent           { background: var(--warning-soft);     color: var(--warning); }
+.badge.conformance-explicit-unknown { background: var(--badge-sky-bg);     color: var(--badge-sky-text); }
+.badge.conformance-not-applicable   { background: var(--bg3);              color: var(--text2); }
+.badge.conformance-not-assessed     { background: var(--badge-purple-bg);  color: var(--badge-purple-text); }
 /* License attribute badges */
 .badge.osi { background: var(--badge-sky-bg);    color: var(--badge-sky-text); }
 .badge.fsf { background: var(--badge-hosted-bg); color: var(--badge-hosted-text); }

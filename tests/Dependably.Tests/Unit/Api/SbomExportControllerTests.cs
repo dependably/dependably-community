@@ -153,8 +153,8 @@ public sealed class SbomExportControllerTests : IAsyncLifetime
         var tracker = new Dependably.Infrastructure.VulnTracker.InstanceVulnTrackerConfig(
             (_, _) => Task.FromResult<string?>(null), _clock);
         var controller = new SbomExportController(
-            new SbomExportService(_fixture.Store, _clock, new ProjectRepository(_fixture.Store, _clock), tracker),
-            new OrgAccessGuard(_fixture.Store),
+            new SbomExportService(_fixture.Store, _clock, new ProjectRepository(_fixture.Store, _clock), tracker, Dependably.Tests.Infrastructure.TestSbomAuthorSigner.Unconfigured(_fixture.Store, _clock)),
+            new OrgAccessGuard(_fixture.Store, TestProblems.Create()),
             new ProblemResults(new EchoLocalizer()),
             documents)
         {

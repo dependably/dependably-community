@@ -84,11 +84,13 @@ public static class SkillCatalog
     /// <summary>Every curated skill, config family first — served by GET /api/v1/skills.</summary>
     public static IReadOnlyList<SkillSummary> Index => IndexLazy.Value;
 
-    /// <summary>The remediation family alone — served by GET /api/v1/remediation/skills.</summary>
-    public static IReadOnlyList<RemediationSkillSummary> RemediationIndex =>
+    private static readonly Lazy<IReadOnlyList<RemediationSkillSummary>> RemediationIndexLazy = new(() =>
         Index.Where(s => s.Family == SkillFamilies.Remediation)
              .Select(s => new RemediationSkillSummary(s.Id, s.Name, s.Description))
-             .ToList();
+             .ToList());
+
+    /// <summary>The remediation family alone — served by GET /api/v1/remediation/skills.</summary>
+    public static IReadOnlyList<RemediationSkillSummary> RemediationIndex => RemediationIndexLazy.Value;
 
     /// <summary>Raw SKILL.md markdown for any known skill id, or null when the id isn't a known one.</summary>
     public static string? TryGetSkillMarkdown(string skillId) =>

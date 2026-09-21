@@ -32,6 +32,17 @@ namespace Dependably.Api.Setup;
 public static partial class SetupRecipeCatalog
 {
     /// <summary>
+    /// Every ecosystem id the <see cref="Build(string, string, HexSetupContext?)"/> switch
+    /// handles, in the switch's own order. Read by <c>GET /api/v1/ecosystems</c> to answer
+    /// which ecosystems have setup recipes at all, without duplicating the switch's arm list
+    /// by hand — <c>Dependably.Tests.Unit.Api.SetupRecipeCatalogTests.Ecosystems_MatchTheBuildSwitchExactly</c>
+    /// reads the switch back out of this file and asserts it matches this list exactly (set and
+    /// order), which is what keeps the two from drifting apart in either direction.
+    /// </summary>
+    public static readonly IReadOnlyList<string> Ecosystems =
+        ["npm", "pypi", "nuget", "maven", "cargo", "oci", "golang", "rpm", "apk", "terraform", "hex"];
+
+    /// <summary>
     /// The recipes for one ecosystem, or null when the ecosystem is unknown.
     /// </summary>
     /// <param name="ecosystem">Ecosystem key, matching <c>web/src/lib/ecosystems.js</c>.</param>

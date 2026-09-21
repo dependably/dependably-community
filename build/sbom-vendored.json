@@ -1,0 +1,67 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:9c8e6b3a-4f2d-4e11-9a7c-2d5b8f1c0a33",
+  "version": 1,
+  "metadata": {
+    "component": {
+      "type": "application",
+      "name": "dependably-vendored-source",
+      "description": "Curated SBOM fragment for source vendored directly from an upstream repository rather than resolved through a package manager, so it still reaches build/extract-notices.mjs and the /api/v1/licenses attribution endpoint. dotnet-CycloneDX only scans the NuGet dependency graph and cannot see a vendored .cs file, which has no purl of its own to be discovered by."
+    }
+  },
+  "components": [
+    {
+      "type": "library",
+      "name": "json-canonicalization",
+      "group": "cyberphone",
+      "version": "19d51d7fe467d4706a3ff08adf8a748f29fc21e0",
+      "description": "RFC 8785 (JSON Canonicalization Scheme) reference implementation for .NET, by the RFC's own author. Vendored unmodified (two corrections to untrusted-input handling excepted — see the file header) under src/Dependably.Core/Infrastructure/Canonicalization/Webpki/, rather than depended on as a package: the only NuGet listings found for this exact code (jsoncanonicalizer/es6numberserializer, published by an unrelated third party) declare no license in their own package metadata, which this product's own license-enforcement policy treats as unknown and blocks under a strict setting — a worse provenance story than vendoring the author's own source with its license header intact.",
+      "purl": "pkg:github/cyberphone/json-canonicalization@19d51d7fe467d4706a3ff08adf8a748f29fc21e0",
+      "copyright": "Copyright 2006-2019 WebPKI.org (http://webpki.org)",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0",
+            "url": "https://www.apache.org/licenses/LICENSE-2.0"
+          }
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/cyberphone/json-canonicalization"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "json-canonicalization-es6numberserializer",
+      "group": "cyberphone",
+      "version": "19d51d7fe467d4706a3ff08adf8a748f29fc21e0",
+      "description": "The ES6/ECMA-262 number-serialization component of the same vendored reference implementation (dotnet/es6numberserializer), ported to C# from the Mozilla Rhino project's port of V8's dtoa — the one part of RFC 8785 canonicalization a naive from-scratch port is most likely to get wrong (see ADR-sbom-author-signature).",
+      "purl": "pkg:github/cyberphone/json-canonicalization@19d51d7fe467d4706a3ff08adf8a748f29fc21e0#dotnet/es6numberserializer",
+      "copyright": "Copyright 2010 the V8 project authors; Copyright 2006-2018 WebPKI.org (http://webpki.org)",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0",
+            "url": "https://www.apache.org/licenses/LICENSE-2.0"
+          }
+        },
+        {
+          "license": {
+            "id": "BSD-3-Clause",
+            "url": "https://opensource.org/license/bsd-3-clause"
+          }
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/cyberphone/json-canonicalization/tree/master/dotnet/es6numberserializer"
+        }
+      ]
+    }
+  ]
+}

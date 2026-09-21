@@ -76,7 +76,7 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
         var audit = new AuditRepository(_fixture.Store);
         var external = new ExternalIdentityRepository(_fixture.Store, _clock);
         var lockout = new SqliteLockoutStore(_fixture.Store, _clock);
-        var guard = new OrgAccessGuard(_fixture.Store);
+        var guard = new OrgAccessGuard(_fixture.Store, TestProblems.Create());
         var login = new LoginService(new LoginService.Dependencies(_fixture.Store, orgs, systemAdmins, lockout, audit, external, _auditEmitter, _clock, Substitute.For<IMfaEnrollmentService>(), Substitute.For<ISystemMfaEnrollmentService>()));
         var urls = new RequestPublicUrlBuilder(new ConfigurationBuilder().Build());
 
@@ -129,7 +129,7 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
         var audit = new AuditRepository(_fixture.Store);
         var external = new ExternalIdentityRepository(_fixture.Store, _clock);
         var lockout = new SqliteLockoutStore(_fixture.Store, _clock);
-        var guard = new OrgAccessGuard(_fixture.Store);
+        var guard = new OrgAccessGuard(_fixture.Store, TestProblems.Create());
         var login = new LoginService(new LoginService.Dependencies(_fixture.Store, orgs, systemAdmins, lockout, audit, external, _auditEmitter, _clock, Substitute.For<IMfaEnrollmentService>(), Substitute.For<ISystemMfaEnrollmentService>()));
         var urls = new RequestPublicUrlBuilder(new ConfigurationBuilder().Build());
 
@@ -417,7 +417,9 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
             user: BuildPrincipal(userId, orgId, role: "member"));
 
         var result = await sut.Login(test: "1", ct: CancellationToken.None);
-        Assert.IsType<ForbidResult>(result);
+        // The guard answers a capability shortfall with a localized problem body now, not a
+        // bare ForbidResult — a scheme-delegated forbid wrote no body at all.
+        Assert.Equal(StatusCodes.Status403Forbidden, Assert.IsType<ObjectResult>(result).StatusCode);
     }
 
     [Fact]

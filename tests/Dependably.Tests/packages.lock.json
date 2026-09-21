@@ -47,6 +47,16 @@
         "resolved": "2.7.5",
         "contentHash": "0FA67RSnRM4tcBKqiqVu/HPdZ9+QOKbmeRjxRUGTCjPU4C0bmUhd97Dso7Yild5P7nOV6GxJ2xrK0Kv/O9xp0w=="
       },
+      "NJsonSchema": {
+        "type": "Direct",
+        "requested": "[10.9.0, )",
+        "resolved": "10.9.0",
+        "contentHash": "IBPo6Srxn2MEcIFM3HdM4QImrJbsIeujENQyzHL2Pv6wLsKSYAyAEilecRqaLOhoy3snEiPLx7hhv7opbhOxKQ==",
+        "dependencies": {
+          "Namotion.Reflection": "2.1.2",
+          "Newtonsoft.Json": "9.0.1"
+        }
+      },
       "NSubstitute": {
         "type": "Direct",
         "requested": "[5.3.0, )",
@@ -1401,15 +1411,6 @@
         "resolved": "13.0.4",
         "contentHash": "pdgNNMai3zv51W5aq268sujXUyx7SNdE2bj1wZcWjAQrKMFZV260lbqYop1d2GM67JI1huLRwxo9ZqnfF/lC6A=="
       },
-      "NJsonSchema": {
-        "type": "Transitive",
-        "resolved": "10.9.0",
-        "contentHash": "IBPo6Srxn2MEcIFM3HdM4QImrJbsIeujENQyzHL2Pv6wLsKSYAyAEilecRqaLOhoy3snEiPLx7hhv7opbhOxKQ==",
-        "dependencies": {
-          "Namotion.Reflection": "2.1.2",
-          "Newtonsoft.Json": "9.0.1"
-        }
-      },
       "NJsonSchema.Extensions": {
         "type": "Transitive",
         "resolved": "0.2.0",
@@ -1933,8 +1934,8 @@
       "dependably": {
         "type": "Project",
         "dependencies": {
-          "Dependably.Core": "[0.4.2, )",
-          "Dependably.Management": "[0.4.2, )",
+          "Dependably.Core": "[0.12.0, )",
+          "Dependably.Management": "[0.12.0, )",
           "Serilog.AspNetCore": "[10.0.0, )"
         }
       },
@@ -1967,7 +1968,7 @@
       "dependably.edge": {
         "type": "Project",
         "dependencies": {
-          "Dependably.Core": "[0.4.2, )",
+          "Dependably.Core": "[0.12.0, )",
           "Serilog.AspNetCore": "[10.0.0, )"
         }
       },
@@ -1976,7 +1977,7 @@
         "dependencies": {
           "BCrypt.Net-Next": "[4.1.0, )",
           "Dapper": "[2.1.72, )",
-          "Dependably.Core": "[0.4.2, )",
+          "Dependably.Core": "[0.12.0, )",
           "IPAddressRange": "[6.3.0, )",
           "ITfoxtec.Identity.Saml2.MvcCore": "[4.17.0, )",
           "MailKit": "[4.17.0, )",

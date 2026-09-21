@@ -35,7 +35,7 @@ public sealed class SpdxLicenseControllerUnitTests
     {
         // Reuse the ControllerContext (tenant + principal) from a sibling controller.
         var repo = new SpdxLicenseRepository(b.Db);
-        var guard = new Dependably.Security.OrgAccessGuard(b.Db);
+        var guard = new Dependably.Security.OrgAccessGuard(b.Db, TestProblems.Create());
         return new SpdxLicenseController(repo, guard)
         {
             ControllerContext = b.LicenseController.ControllerContext

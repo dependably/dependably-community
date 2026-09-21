@@ -18,6 +18,8 @@ namespace Dependably.Api;
 ///   triage decision, written as <c>vex_source='manual'</c>, returning the refreshed row.</item>
 ///   <item><c>GET  /api/v1/projects/{projectId}/versions/{versionId}/documents</c> — the receipts
 ///   list of documents uploaded against the version.</item>
+///   <item><c>GET  /api/v1/projects/{projectId}/versions/{versionId}/documents/sbom/conformance</c>
+///   — the CISA 2026 minimum-elements scorecard for the version's stored SBOM document.</item>
 /// </list>
 ///
 /// <para><b>The server owns the security judgement.</b> Priority bucketing, the prod/dev predicate,
@@ -40,19 +42,25 @@ public sealed class SbomAnalysisController : OrgScopedControllerBase
     private readonly ProblemResults _problems;
     private readonly AuditRepository _audit;
     private readonly ISbomPolicyReevaluator _reevaluator;
+    private readonly ProjectDocumentRepository _documentRows;
+    private readonly SbomIngestRepository _ingest;
 
     public SbomAnalysisController(
         SbomAnalysisRepository analysis,
         OrgAccessGuard guard,
         ProblemResults problems,
         AuditRepository audit,
-        ISbomPolicyReevaluator reevaluator)
+        ISbomPolicyReevaluator reevaluator,
+        ProjectDocumentRepository documentRows,
+        SbomIngestRepository ingest)
     {
         _analysis = analysis;
         _guard = guard;
         _problems = problems;
         _audit = audit;
         _reevaluator = reevaluator;
+        _documentRows = documentRows;
+        _ingest = ingest;
     }
 
     /// <summary>
@@ -233,6 +241,41 @@ public sealed class SbomAnalysisController : OrgScopedControllerBase
                 fileName = ProjectDocumentNaming.FileName(version.ProjectName, version.VersionLabel, d.DocType),
             }),
         });
+    }
+
+    /// <summary>
+    /// GET /api/v1/projects/{projectId}/versions/{versionId}/documents/sbom/conformance — the
+    /// CISA 2026 minimum-elements scorecard for this version's stored SBOM document. 404 when the
+    /// version exists but carries no <c>sbom</c> document (a VEX- or SARIF-only upload has nothing
+    /// to score).
+    /// </summary>
+    // Read-only: accepts a PAT/service token carrying read:packages.
+    [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
+    [HttpGet("api/v1/projects/{projectId}/versions/{versionId}/documents/sbom/conformance")]
+    public async Task<IActionResult> Conformance(string projectId, string versionId, CancellationToken ct = default)
+    {
+        var denied = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.ReadPackages, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        string orgId = CurrentTenantId();
+        var version = await _analysis.ResolveVersionAsync(orgId, projectId, versionId, ct);
+        if (version is null)
+        {
+            return _problems.NotFoundActionKey("error.sbom.versionNotFound");
+        }
+
+        var document = await _documentRows.GetAsync(orgId, version.VersionId, "sbom", ct);
+        if (document is null)
+        {
+            return _problems.NotFoundActionKey("error.sbom.documentNotFound");
+        }
+
+        var components = await _ingest.ListComponentsAsync(orgId, version.VersionId, ct);
+        var scorecard = SbomConformanceScorer.Score(document, components);
+        return Ok(ScorecardPayload(scorecard));
     }
 
     // ── Validation ───────────────────────────────────────────────────────────
@@ -545,6 +588,34 @@ public sealed class SbomAnalysisController : OrgScopedControllerBase
         latestVersion = registry.LatestVersion,
         outdated = registry.Outdated,
     };
+
+    private static object ScorecardPayload(SbomConformanceScorecard scorecard) => new
+    {
+        documentId = scorecard.DocumentId,
+        format = scorecard.Format,
+        specVersion = scorecard.SpecVersion,
+        componentTotal = scorecard.ComponentTotal,
+        elements = scorecard.Elements.Select(ElementVerdictPayload),
+    };
+
+    private static object ElementVerdictPayload(SbomElementVerdict verdict) => new
+    {
+        elementId = verdict.ElementId,
+        category = verdict.Category.ToString().ToLowerInvariant(),
+        state = ToCamelCase(verdict.State.ToString()),
+        total = verdict.Total,
+        presentCount = verdict.PresentCount,
+        explicitUnknownCount = verdict.ExplicitUnknownCount,
+        notAssessedCount = verdict.NotAssessedCount,
+        absentCount = verdict.AbsentCount,
+    };
+
+    // System.Text.Json's camelCase policy only reaches C# property names on a serialized object,
+    // never a string VALUE such as an enum rendered through ToString() — this mirrors that policy
+    // by hand for the one field (state) whose wire form must match it, so the frontend's naming
+    // convention is uniform regardless of which layer produced a given key or value.
+    private static string ToCamelCase(string value) =>
+        value.Length == 0 ? value : char.ToLowerInvariant(value[0]) + value[1..];
 
     private static object ViolationPayload(AnalysisPolicyViolationView violation) => new
     {

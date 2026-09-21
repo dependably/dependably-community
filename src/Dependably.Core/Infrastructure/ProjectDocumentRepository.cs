@@ -38,7 +38,10 @@ public sealed class ProjectDocumentRepository
                    doc_type AS DocType, format AS Format, spec_version AS SpecVersion,
                    tool_name AS ToolName, tool_version AS ToolVersion, sha256 AS Sha256,
                    size_bytes AS SizeBytes, blob_key AS BlobKey, uploaded_by AS UploadedBy,
-                   ingest_version AS IngestVersion, uploaded_at AS UploadedAt
+                   ingest_version AS IngestVersion, uploaded_at AS UploadedAt,
+                   lifecycles AS Lifecycles, signature_status AS SignatureStatus,
+                   signature_key_id AS SignatureKeyId,
+                   tool_version_explicit_unknown AS ToolVersionExplicitlyUnknown
             FROM project_documents
             WHERE org_id = @orgId AND project_version_id = @projectVersionId AND doc_type = @docType
             """,
@@ -57,7 +60,10 @@ public sealed class ProjectDocumentRepository
                    doc_type AS DocType, format AS Format, spec_version AS SpecVersion,
                    tool_name AS ToolName, tool_version AS ToolVersion, sha256 AS Sha256,
                    size_bytes AS SizeBytes, blob_key AS BlobKey, uploaded_by AS UploadedBy,
-                   ingest_version AS IngestVersion, uploaded_at AS UploadedAt
+                   ingest_version AS IngestVersion, uploaded_at AS UploadedAt,
+                   lifecycles AS Lifecycles, signature_status AS SignatureStatus,
+                   signature_key_id AS SignatureKeyId,
+                   tool_version_explicit_unknown AS ToolVersionExplicitlyUnknown
             FROM project_documents
             WHERE org_id = @orgId AND project_version_id = @projectVersionId
             ORDER BY doc_type
@@ -128,11 +134,13 @@ public sealed class ProjectDocumentRepository
             INSERT INTO project_documents (
                 id, org_id, project_version_id, doc_type, format, spec_version,
                 tool_name, tool_version, sha256, size_bytes, blob_key, uploaded_by,
-                ingest_version, uploaded_at)
+                ingest_version, lifecycles, signature_status, signature_key_id,
+                tool_version_explicit_unknown, uploaded_at)
             VALUES (
                 @id, @orgId, @projectVersionId, @docType, @format, @specVersion,
                 @toolName, @toolVersion, @sha256, @sizeBytes, @blobKey, @uploadedBy,
-                @ingestVersion, @uploadedAt)
+                @ingestVersion, @lifecycles, @signatureStatus, @signatureKeyId,
+                @toolVersionExplicitlyUnknown, @uploadedAt)
             ON CONFLICT (project_version_id, doc_type) DO UPDATE SET
                 format = excluded.format,
                 spec_version = excluded.spec_version,
@@ -143,6 +151,10 @@ public sealed class ProjectDocumentRepository
                 blob_key = excluded.blob_key,
                 uploaded_by = excluded.uploaded_by,
                 ingest_version = excluded.ingest_version,
+                lifecycles = excluded.lifecycles,
+                signature_status = excluded.signature_status,
+                signature_key_id = excluded.signature_key_id,
+                tool_version_explicit_unknown = excluded.tool_version_explicit_unknown,
                 uploaded_at = excluded.uploaded_at
             """,
             new
@@ -160,6 +172,14 @@ public sealed class ProjectDocumentRepository
                 blobKey = document.BlobKey,
                 uploadedBy = document.UploadedBy,
                 ingestVersion = document.IngestVersion,
+                lifecycles = document.Lifecycles,
+                signatureStatus = document.SignatureStatus,
+                signatureKeyId = document.SignatureKeyId,
+                // tool_version_explicit_unknown is INTEGER (0/1), never Postgres boolean — Npgsql
+                // maps a raw C# bool to `boolean`, which has no implicit cast to `integer` and
+                // throws 42804 on every write. Coerced explicitly, the same pattern
+                // CacheArtifactRepository.hasInstallScript already uses for the same column shape.
+                toolVersionExplicitlyUnknown = document.ToolVersionExplicitlyUnknown ? 1 : 0,
                 uploadedAt = document.UploadedAt.ToUtcIso(),
             },
             dbTx,

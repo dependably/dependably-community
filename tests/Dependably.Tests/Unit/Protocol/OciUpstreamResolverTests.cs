@@ -102,11 +102,18 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
             TimeProvider.System, NullLogger<OciImageLicenseRecorder>.Instance,
             new LicenseRepository(_db, TimeProvider.System, TestNormalizers.License(_db)));
 
+    // The blob proxy cap is pinned here rather than inherited from OciOptions' production
+    // default: the over-cap tests below express their premise as a declared length above this
+    // number, so a change to the shipped default would otherwise silently stop them testing a
+    // refusal at all — they would pass by fetching successfully.
+    private const long TestBlobProxyCapBytes = 600L * 1024 * 1024;
+
     private static OciOptions DefaultOptions()
         => new()
         {
             ManifestTagTtl = TimeSpan.FromMinutes(5),
             TokenCacheDuration = TimeSpan.FromMinutes(55),
+            MaxBlobProxyBytes = TestBlobProxyCapBytes,
         };
 
     /// <summary>
@@ -908,7 +915,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task FetchBlobAsync_DigestMismatch_ReturnsNull()
+    public async Task FetchBlobAsync_DigestMismatch_ThrowsIntegrityRefusal()
     {
         // Upstream returns bytes that don't match the requested digest.
         byte[] blobBytes = RandomBytes(64);
@@ -929,9 +936,12 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         var resolver = new OciUpstreamResolver(http, authSvc, opts, blobs, _db, new StubAirGap(false),
             NewRecorder(), _cacheRecorder, _cacheArtifacts, NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
-        var result = await resolver.FetchBlobAsync(_orgId, "library/ubuntu", wrongDigest, default);
+        // A refusal, not an absence: the bytes exist upstream, they just did not verify. A null
+        // here would reach the controller as 404 BLOB_UNKNOWN and assert the blob does not exist.
+        var ex = await Assert.ThrowsAsync<OciBlobDigestMismatchException>(
+            () => resolver.FetchBlobAsync(_orgId, "library/ubuntu", wrongDigest, default));
 
-        Assert.Null(result);
+        Assert.Equal("blob_digest_mismatch", ex.Fault);
     }
 
     [Fact]
@@ -975,9 +985,9 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         var resolver = new OciUpstreamResolver(http, authSvc, opts, blobs, _db, new StubAirGap(false),
             NewRecorder(), _cacheRecorder, _cacheArtifacts, NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
-        var result = await resolver.FetchBlobAsync(_orgId, "library/ubuntu", wrongDigest, default);
+        await Assert.ThrowsAsync<OciBlobDigestMismatchException>(
+            () => resolver.FetchBlobAsync(_orgId, "library/ubuntu", wrongDigest, default));
 
-        Assert.Null(result);
         // Content-addressed key must never have been written.
         Assert.False(await cacheBlobs.ExistsAsync(contentAddressedKey, default));
         // Staging key must also be cleaned up — no oci/_staging/* entries persist.
@@ -1000,7 +1010,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
     // alternative.
 
     [Fact]
-    public async Task FetchBlobAsync_DeclaredContentLengthExceedsCap_ReturnsNull_NothingCached()
+    public async Task FetchBlobAsync_DeclaredContentLengthExceedsCap_Refuses_NothingCached()
     {
         byte[] blobBytes = RandomBytes(64);
         string sha256 = Sha256Hex(blobBytes);
@@ -1014,7 +1024,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         upstreamResp.Content.Headers.ContentType =
             new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
         // Lies: the real body above is 64 bytes, but the declared length is over the cap.
-        upstreamResp.Content.Headers.ContentLength = 601L * 1024 * 1024;
+        upstreamResp.Content.Headers.ContentLength = TestBlobProxyCapBytes + 1;
 
         var http = new SingleResponseFactory(upstreamResp);
         var opts = Options.Create(DefaultOptions());
@@ -1025,9 +1035,13 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         var resolver = new OciUpstreamResolver(http, authSvc, opts, blobs, _db, new StubAirGap(false),
             NewRecorder(), _cacheRecorder, _cacheArtifacts, NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
-        var result = await resolver.FetchBlobAsync(_orgId, "library/ubuntu", digest, default);
+        var ex = await Assert.ThrowsAsync<OciBlobTooLargeException>(
+            () => resolver.FetchBlobAsync(_orgId, "library/ubuntu", digest, default));
 
-        Assert.Null(result);
+        // The cap it was measured against travels with the refusal, so the controller can name
+        // the number the operator has to change rather than just reporting that something failed.
+        Assert.Equal(TestBlobProxyCapBytes, ex.CapBytes);
+        Assert.Equal(TestBlobProxyCapBytes + 1, ex.DeclaredBytes);
         Assert.False(await cacheBlobs.ExistsAsync(contentAddressedKey, default));
         var stagingKeys = await cacheBlobs.ListAsync("oci/_staging/", default).ToListAsync();
         Assert.Empty(stagingKeys);
@@ -1056,7 +1070,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
 
         var routing = new DigestRoutingFactory(
             (goodDigest, BuildOkResponse(goodBytes, declaredContentLength: null)),
-            (hugeDigest, BuildOkResponse(hugeDeclaredBytes, declaredContentLength: 601L * 1024 * 1024)));
+            (hugeDigest, BuildOkResponse(hugeDeclaredBytes, declaredContentLength: TestBlobProxyCapBytes + 1)));
 
         var opts = Options.Create(DefaultOptions());
         var authSvc = new OciUpstreamAuthService(routing, opts, new StubAirGap(false),
@@ -1071,10 +1085,13 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
 
         var goodTask = resolver.FetchBlobAsync(orgId, "library/ubuntu", goodDigest, default);
         var hugeTask = resolver.FetchBlobAsync(orgId, "library/ubuntu", hugeDigest, default);
-        var results = await Task.WhenAll(goodTask, hugeTask);
 
-        Assert.NotNull(results[0]);
-        Assert.Null(results[1]);
+        // Awaited separately: the refusal now faults its task, and Task.WhenAll would surface
+        // that fault before the successful fetch could be asserted at all.
+        var goodResult = await goodTask;
+        await Assert.ThrowsAsync<OciBlobTooLargeException>(() => hugeTask);
+
+        Assert.NotNull(goodResult);
         Assert.True(await cacheBlobs.ExistsAsync(BlobKeys.OciBlob("sha256", Sha256Hex(goodBytes)), default));
         Assert.False(await cacheBlobs.ExistsAsync(BlobKeys.OciBlob("sha256", Sha256Hex(hugeDeclaredBytes)), default));
     }
@@ -1375,14 +1392,15 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         var badResolver = new OciUpstreamResolver(badHttp, badAuthSvc, opts, badBlobs, _db,
             new StubAirGap(false), NewRecorder(), _cacheRecorder, _cacheArtifacts, NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
-        var badResult = await badResolver.FetchBlobAsync(orgId, "library/ubuntu", wrongDigest, default);
+        var badRefusal = await Assert.ThrowsAsync<OciBlobDigestMismatchException>(
+            () => badResolver.FetchBlobAsync(orgId, "library/ubuntu", wrongDigest, default));
 
         // Good blob: present at content-addressed key.
         Assert.NotNull(goodResult);
         Assert.True(await cacheBlobs.ExistsAsync(BlobKeys.OciBlob("sha256", goodHex), default));
 
         // Bad blob: rejected; neither the content-addressed key nor any staging key persists.
-        Assert.Null(badResult);
+        Assert.Equal("blob_digest_mismatch", badRefusal.Fault);
         Assert.False(await cacheBlobs.ExistsAsync(BlobKeys.OciBlob("sha256", wrongHex), default));
         var stagingKeys = await cacheBlobs.ListAsync("oci/_staging/", default).ToListAsync();
         Assert.Empty(stagingKeys);
@@ -1505,9 +1523,8 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         var resolver = new OciUpstreamResolver(http, authSvc, opts, blobs, _db, new StubAirGap(false),
             NewRecorder(), _cacheRecorder, _cacheArtifacts, NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
-        var result = await resolver.FetchBlobAsync(_orgId, "library/ubuntu", wrongDigest, default);
-
-        Assert.Null(result);
+        await Assert.ThrowsAsync<OciBlobDigestMismatchException>(
+            () => resolver.FetchBlobAsync(_orgId, "library/ubuntu", wrongDigest, default));
 
         // The content-addressed key must never have been passed to PutAsync.
         // Old code called PutAsync(blobKey, ...) BEFORE verifying the digest, so this

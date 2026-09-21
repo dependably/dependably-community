@@ -112,6 +112,28 @@ public sealed class OciReadMissStatusTests
     }
 
     /// <summary>
+    /// The air-gap miss carries its own explanation, and keeps it. It is the one 404 whose cause
+    /// is a deliberate policy rather than a routing or naming fault, so it must not be absorbed
+    /// into the general upstream-miss diagnostic: "no upstream was asked because this instance
+    /// has none by design" and "an upstream was asked and said no" are different answers to the
+    /// operator's actual question.
+    /// </summary>
+    [Fact]
+    public async Task ManifestGet_LocalMissWhileAirGapped_StillNamesAirGapInTheBody()
+    {
+        await using var factory = new AirGappedOciFactory();
+        await factory.InitializeAsync();
+        await factory.EnableAnonymousPullAsync();
+
+        using var client = factory.CreateClient();
+        var resp = await client.GetAsync($"/v2/library/nothing/manifests/{AbsentDigest}");
+        string body = await resp.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+        Assert.Contains("air-gapped", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The same miss on a NON-air-gapped instance with no upstream configured already answered 404
     /// before this change. Pinning it guards the fix from being written as "air-gap returns 404"
     /// when the property is "a local miss with no reachable upstream returns 404".

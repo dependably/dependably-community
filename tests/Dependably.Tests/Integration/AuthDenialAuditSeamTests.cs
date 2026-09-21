@@ -271,6 +271,31 @@ public sealed class AuthDenialAuditSeamTests : IClassFixture<DependablyFactory>,
         Assert.StartsWith("token:", tally.Key.Partition, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The SIEM feed refusing an under-scoped token must land in the denial family like every
+    /// other capability gate. It did not: the token branch folded "no token" and "token without
+    /// read:audit" into one 401 and recorded nothing, so the one surface an investigator would
+    /// ask "which credential probed the audit feed?" was the surface that could not answer.
+    /// </summary>
+    [Fact]
+    public async Task TheSiemFeedRecordsACapabilityRefusalLikeEveryOtherGate()
+    {
+        string publishOnly = await _factory.CreateToken("publish-only");
+        ResetWindow();
+
+        using var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", publishOnly);
+        var resp = await client.GetAsync("/api/v1/siem/events/auth");
+
+        Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
+        var tally = Assert.Single(
+            Accumulator.DrainWindow().Entries,
+            t => t.Key.Action == AuthDenialRecorder.CapabilityDeniedAction);
+        Assert.Equal(Capabilities.ReadAudit, tally.Key.Required);
+        Assert.Equal("publish:*", tally.Key.Granted);
+        Assert.StartsWith("token:", tally.Key.Partition, StringComparison.Ordinal);
+    }
+
     // ── The hosted-write plane ───────────────────────────────────────────────
     //
     // These paths resolve the credential WITHOUT a tenant and then make their own

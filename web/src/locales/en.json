@@ -1361,6 +1361,25 @@
         "rotate": "Rotate key",
         "rotateConfirm": "Rotate the Hex signing key? Every Mix and Rebar3 client that registered this repository will fail verification until it re-registers with the new public key."
       },
+      "sbomSigningKey": {
+        "title": "SBOM signing key",
+        "hint": "Every SBOM this org exports is signed with this key, so a recipient can verify the document's author and that it was not modified after signing. The public key below is what a consumer pins to verify a signature.",
+        "noMasterKey": "No signing key has been created for this organization: DEPENDABLY_MASTER_KEY is not configured on this instance, so exported SBOM documents are unsigned.",
+        "keyUnavailable": "This organization has an active signing key, but this node cannot read it right now — its own master key is unconfigured, or it is an edge node. Exports answered by a fully configured node are still signed normally.",
+        "keyId": "Key ID (fingerprint)",
+        "algorithm": "Algorithm",
+        "createdAt": "Created",
+        "retiredAt": "Retired",
+        "retired": "Retired",
+        "revoked": "Revoked",
+        "publicKey": "Public key (PEM)",
+        "copy": "Copy public key",
+        "copied": "Copied",
+        "rotate": "Rotate key",
+        "rotateConfirm": "Rotate the SBOM signing key? The current key is retired, not deleted — its public half stays published, so documents already signed with it remain verifiable. New exports will be signed with the freshly generated key.",
+        "historyTitle": "Key history",
+        "historyHint": "Retired and revoked keys stay listed here and at the public verification endpoint, because a document signed with one of them must stay verifiable."
+      },
       "upstreamRegistries": {
         "section": "Upstream registries",
         "hint": "Per ecosystem, the registries this proxy fetches from, in priority order. The top entry is tried first; on a miss or unreachable upstream the next is tried. Drag a row by its handle to reorder. With no registries configured, proxying is disabled for that ecosystem — only already-cached packages are served.",
@@ -2876,6 +2895,55 @@
       "download": "Download original",
       "copyDigest": "Copy digest"
     },
+    "conformance": {
+      "title": "CISA 2026 conformance",
+      "show": "Show CISA conformance",
+      "hide": "Hide CISA conformance",
+      "help": "How this version's stored SBOM document scores against the CISA 2026 minimum elements. An element missing entirely and one the document explicitly marks unknown are shown separately - the second is honest supplier behaviour, not a failure.",
+      "noDocument": "This version has no SBOM document to score.",
+      "loadError": "Could not load the conformance scorecard.",
+      "componentTotal": "{count, plural, one {# component} other {# components}}",
+      "category": {
+        "metadata": "SBOM metadata",
+        "component": "Component data",
+        "practice": "Practices"
+      },
+      "state": {
+        "present": "Present",
+        "absent": "Absent",
+        "explicitlyUnknown": "Explicitly unknown",
+        "notApplicable": "Not applicable",
+        "notAssessed": "Not assessed"
+      },
+      "reason": {
+        "notApplicable": "This document's format has no way to carry this element.",
+        "notAssessed": "dependably does not read this element from an uploaded document yet."
+      },
+      "counts": "{present} present · {explicitUnknown} explicitly unknown · {notAssessed} not assessed · {absent} absent (of {total})",
+      "element": {
+        "D1": "SBOM Author",
+        "D2": "SBOM Author Signature",
+        "D3": "SBOM Data Format Name",
+        "D4": "SBOM Data Format Version",
+        "D5": "SBOM Generation Context",
+        "D6": "SBOM Timestamp",
+        "D7": "SBOM Tool Name",
+        "D8": "SBOM Tool Version",
+        "D9": "SBOM Version",
+        "D10": "Component Producer",
+        "D11": "Component Name",
+        "D12": "Component Version",
+        "D13": "Component Identifiers",
+        "D14": "Component Hash Value",
+        "D15": "Component Hash Algorithm",
+        "D16": "Component Licence",
+        "D17": "Component Dependency Relationship",
+        "P2": "Coverage",
+        "P4": "Explicit Unknowns",
+        "P5": "Frequency",
+        "P6": "Machine-Processable Data"
+      }
+    },
     "orphans": {
       "title": "Unmatched analysis",
       "help": "VEX statements and SARIF results whose package identifier matches no component in this version's SBOM. Shown rather than dropped — a statement nobody can see is a statement nobody can correct.",
@@ -3003,6 +3071,38 @@
       "latestKnownHelp": "Your registry knows of {latest} upstream. This ecosystem has no version ordering here, so whether the shipped version is behind it is unknown — not confirmed current.",
       "notInRegistry": "not in your registry",
       "notInRegistryHelp": "Your registry has never served this coordinate, so nothing it enforces — block state, licence policy, provenance, the advisory scan — has ever applied to these bytes."
+    }
+  },
+  "sbomExport": {
+    "title": "Export options",
+    "submit": "Export",
+    "exporting": "Exporting…",
+    "variant": {
+      "label": "Document",
+      "inventory": "Inventory (CycloneDX)",
+      "inventoryHelp": "Every component this version ships, with licences and the dependency graph. No vulnerability data.",
+      "vdr": "With vulnerabilities (VDR)",
+      "vdrHelp": "The inventory plus every advisory this version's components carry, with the current VEX and priority state.",
+      "vex": "VEX only",
+      "vexHelp": "Vulnerability statements only — no component list. For a recipient who already has the inventory and wants just the triage state."
+    },
+    "format": {
+      "label": "Format",
+      "cyclonedxJson": "CycloneDX JSON",
+      "cyclonedxJsonHelp": "The only format offered today. SPDX will appear here once it ships."
+    },
+    "specVersion": {
+      "label": "CycloneDX spec version",
+      "v17": "1.7 (default)",
+      "v17Help": "The current CycloneDX spec version.",
+      "v16": "1.6",
+      "v16Help": "Choose this for a consumer that rejects 1.7 — GitLab dependency scanning, or Dependency-Track before 5.1.0."
+    },
+    "scope": {
+      "label": "Dependency scope",
+      "allHelp": "Nothing is excluded.",
+      "prodHelp": "Excludes dev dependencies and any component the SBOM itself marked excluded. Components with an unknown scope are kept — an unclassified dependency may well ship.",
+      "devHelp": "Only components scoped dev."
     }
   }
 }

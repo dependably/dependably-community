@@ -223,7 +223,7 @@ public static class AuthStartupExtensions
                 + $"'{(string.IsNullOrWhiteSpace(dbProvider) ? "sqlite (default)" : dbProvider)}'). "
                 + "SQLite does not support multi-instance access — sharing one database file across "
                 + "replicas causes write-lock corruption, WAL divergence, and silent data loss. "
-                + "See CONTRIBUTING.md -> High-availability deployment.");
+                + "See OPERATIONS.md -> High-availability deployment.");
         }
 
         if (string.IsNullOrWhiteSpace(redisConnStr))

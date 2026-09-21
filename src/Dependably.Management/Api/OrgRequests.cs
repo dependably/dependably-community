@@ -111,7 +111,12 @@ public sealed record UpdateProxySettingsRequest(
     /// leave the stored value unchanged, like every other field on this PUT. See
     /// <c>OrgSettings.BlockMaliciousLive</c> for the full rationale.
     /// </summary>
-    string? BlockMaliciousLive = null)
+    string? BlockMaliciousLive = null,
+    /// <summary>
+    /// CISA D2 SBOM author-signature admission gate: 'off' | 'warn' | 'block'. Absent = leave
+    /// the stored value unchanged. See <c>OrgSettings.VerifySbomSignatures</c>.
+    /// </summary>
+    string? VerifySbomSignatures = null)
 {
     public Optional<int?> MinReleaseAgeHours { get; init; }
     public Optional<double?> MaxEpssTolerance { get; init; }

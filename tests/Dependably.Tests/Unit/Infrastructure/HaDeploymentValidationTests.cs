@@ -7,7 +7,7 @@ namespace Dependably.Tests.Unit.Infrastructure;
 /// <summary>
 /// Pins the HA-over-SQLite fail-closed guard: <c>DEPENDABLY_DEPLOYMENT_MODE=ha</c> validated
 /// Redis but not the metadata store, so the documented-forbidden combination (HA + SQLite —
-/// write-lock corruption, WAL divergence, silent data loss per CONTRIBUTING.md) used to boot
+/// write-lock corruption, WAL divergence, silent data loss per OPERATIONS.md) used to boot
 /// with no error or warning. <see cref="AuthStartupExtensions.AddDependablyRedisAndDataProtection"/>
 /// now throws before registering any Redis/DB services when ha mode is combined with a
 /// non-Postgres provider, mirroring the pre-existing Redis-connection-string check.

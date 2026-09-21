@@ -202,10 +202,12 @@ public sealed class SbomManualTriagePurlKeyTests : IAsyncLifetime
 
         _controller = new SbomAnalysisController(
             new SbomAnalysisRepository(_db, clock),
-            new OrgAccessGuard(_db),
+            new OrgAccessGuard(_db, TestProblems.Create()),
             new ProblemResults(new EchoLocalizer()),
             new AuditRepository(_db, time: clock),
-            new NoOpReevaluator())
+            new NoOpReevaluator(),
+            new ProjectDocumentRepository(_db),
+            new SbomIngestRepository(_db))
         {
             ControllerContext = new ControllerContext { HttpContext = http },
         };

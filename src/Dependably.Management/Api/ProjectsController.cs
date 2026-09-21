@@ -399,8 +399,14 @@ public sealed class ProjectsController : OrgScopedControllerBase
         try
         {
             updated = await _projects.UpdateAsync(
-                orgId, projectId, edit.Name, edit.Classifier, edit.Description, edit.ParentId,
-                edit.IsActive, ct);
+                orgId, projectId,
+                new ProjectFields(
+                    Name: edit.Name,
+                    Classifier: edit.Classifier,
+                    Description: edit.Description,
+                    ParentId: edit.ParentId,
+                    IsActive: edit.IsActive),
+                ct);
         }
         catch (ProjectResolutionException ex)
         {

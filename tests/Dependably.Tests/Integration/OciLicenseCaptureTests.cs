@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using Dapper;
 using Dependably.Infrastructure;
+using Dependably.Protocol;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Time.Testing;
@@ -92,7 +93,7 @@ public sealed class OciLicenseCaptureTests : IAsyncLifetime
 
         // The license block records a pending quarantine review row (written synchronously,
         // unlike the batched activity feed) under the 'license' gate for the image PURL.
-        string purl = $"pkg:oci/{repo}@{manifestDigest}";
+        string purl = PurlNormalizer.Oci(repo, manifestDigest);
         Assert.Equal("license", await QuarantineGateAsync(orgId, purl));
     }
 

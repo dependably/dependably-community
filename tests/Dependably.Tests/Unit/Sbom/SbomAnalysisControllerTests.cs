@@ -562,6 +562,70 @@ public sealed class SbomAnalysisControllerTests
         Assert.Equal(StatusCodes.Status404NotFound, Assert.IsType<ObjectResult>(result).StatusCode);
     }
 
+    // ── CISA conformance scorecard ──────────────────────────────────────────────
+
+    [Fact]
+    public async Task Conformance_ScoresTheSeededDocumentAgainstStoredComponents()
+    {
+        // World seeds a cyclonedx-json document (no tool name, no lifecycles) with three direct
+        // components: minimist (dev, MIT), qs (no licence), requests (Apache-2.0). No component
+        // carries a producer.
+        await using var world = await World.CreateAsync();
+        var result = await world.Controller.Conformance(world.ProjectId, "latest");
+        using var body = Serialize(Assert.IsType<OkObjectResult>(result).Value);
+        var root = body.RootElement;
+
+        Assert.Equal("cyclonedx-json", root.GetProperty("format").GetString());
+        Assert.Equal(3, root.GetProperty("componentTotal").GetInt32());
+
+        var elements = root.GetProperty("elements").EnumerateArray()
+            .ToDictionary(e => e.GetProperty("elementId").GetString()!, e => e);
+
+        // D16 Component Licence: mixed present/silent-absent, no explicit-unknown (CycloneDX has
+        // no NOASSERTION mechanism).
+        var license = elements["D16"];
+        Assert.Equal(3, license.GetProperty("total").GetInt32());
+        Assert.Equal(2, license.GetProperty("presentCount").GetInt32());
+        Assert.Equal(0, license.GetProperty("explicitUnknownCount").GetInt32());
+        Assert.Equal(1, license.GetProperty("absentCount").GetInt32());
+        Assert.Equal("absent", license.GetProperty("state").GetString());
+
+        // D10 Component Producer: none of the seeded rows carry one.
+        var producer = elements["D10"];
+        Assert.Equal(0, producer.GetProperty("presentCount").GetInt32());
+        Assert.Equal(3, producer.GetProperty("absentCount").GetInt32());
+
+        // D17: every seeded component is dependency_kind='direct'.
+        Assert.Equal("present", elements["D17"].GetProperty("state").GetString());
+
+        // P4 Explicit Unknowns: CycloneDX cannot demonstrate this practice at all.
+        Assert.Equal("notApplicable", elements["P4"].GetProperty("state").GetString());
+
+        // D7/D8: no tool named on the seeded document.
+        Assert.Equal("absent", elements["D7"].GetProperty("state").GetString());
+        Assert.Equal("notApplicable", elements["D8"].GetProperty("state").GetString());
+    }
+
+    [Fact]
+    public async Task Conformance_CrossOrgProjectIs404()
+    {
+        await using var world = await World.CreateAsync();
+        string foreignProject = await world.SeedForeignProjectAsync();
+
+        var result = await world.Controller.Conformance(foreignProject, "latest");
+        Assert.Equal(StatusCodes.Status404NotFound, Assert.IsType<ObjectResult>(result).StatusCode);
+    }
+
+    [Fact]
+    public async Task Conformance_WhenTheVersionHasNoSbomDocument_Is404()
+    {
+        await using var world = await World.CreateAsync();
+        string versionWithNoDocument = await world.SeedVersionWithNoDocumentAsync();
+
+        var result = await world.Controller.Conformance(world.ProjectId, versionWithNoDocument);
+        Assert.Equal(StatusCodes.Status404NotFound, Assert.IsType<ObjectResult>(result).StatusCode);
+    }
+
     // ── Manual triage ────────────────────────────────────────────────────────
 
     [Fact]
@@ -943,6 +1007,24 @@ public sealed class SbomAnalysisControllerTests
             return projectId;
         }
 
+        /// <summary>
+        /// A second version of the seeded project, in the same tenant, with no <c>project_documents</c>
+        /// row at all — a version an operator created but never uploaded an SBOM against, distinct
+        /// from the cross-org 404 <see cref="SeedForeignProjectAsync"/> exercises.
+        /// </summary>
+        public async Task<string> SeedVersionWithNoDocumentAsync()
+        {
+            string versionId = Guid.NewGuid().ToString("N");
+            await using var conn = await Store.OpenAsync();
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO project_versions (id, org_id, project_id, version, is_latest)
+                VALUES (@versionId, @OrgId, @ProjectId, '1.5.0', 0)
+                """,
+                new { versionId, OrgId, ProjectId });
+            return versionId;
+        }
+
         public async Task SeedHostedPackageAsync(
             string ecosystem, string purlName, string? upstreamLatestVersion = null)
         {
@@ -1272,10 +1354,12 @@ public sealed class SbomAnalysisControllerTests
 
             Controller = new SbomAnalysisController(
                 new SbomAnalysisRepository(Store, clock),
-                new OrgAccessGuard(Store),
+                new OrgAccessGuard(Store, TestProblems.Create()),
                 new ProblemResults(new EchoLocalizer()),
                 new AuditRepository(Store, time: clock),
-                Reevaluator)
+                Reevaluator,
+                new ProjectDocumentRepository(Store),
+                new SbomIngestRepository(Store))
             {
                 ControllerContext = new ControllerContext { HttpContext = http },
             };

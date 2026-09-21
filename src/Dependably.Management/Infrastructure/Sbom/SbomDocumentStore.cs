@@ -9,6 +9,20 @@ namespace Dependably.Infrastructure.Sbom;
 #pragma warning disable SCS0018
 
 /// <summary>One document to persist: the staged bytes plus what the metadata row records.</summary>
+/// <param name="Lifecycles">
+/// metadata.lifecycles as a JSON array, when the caller parsed one — an SBOM upload's own
+/// document. Null for VEX/SARIF uploads, which carry no lifecycle claim of their own.
+/// </param>
+/// <param name="SignatureStatus">
+/// CISA D2's verdict, from <see cref="SbomSignatureVerifier"/>. Null when this upload's
+/// doc_type/format is outside that policy's scope, or verification was off.
+/// </param>
+/// <param name="SignatureKeyId">The signing key's fingerprint, set only when <paramref name="SignatureStatus"/> is <c>verified</c>.</param>
+/// <param name="ToolVersionExplicitlyUnknown">
+/// X4/D8b read back: true when the parsed document's named tool entry explicitly carried
+/// dependably's own <c>dependably:tool-version-status</c> property. False for VEX/SARIF uploads
+/// and every document that never demonstrated the vocabulary.
+/// </param>
 public sealed record SbomDocumentWrite(
     string OrgId,
     string ProjectId,
@@ -22,7 +36,11 @@ public sealed record SbomDocumentWrite(
     long SizeBytes,
     string TempPath,
     string? UploadedBy,
-    DateTimeOffset UploadedAt);
+    DateTimeOffset UploadedAt,
+    string? Lifecycles = null,
+    string? SignatureStatus = null,
+    string? SignatureKeyId = null,
+    bool ToolVersionExplicitlyUnknown = false);
 
 /// <summary>
 /// Puts an uploaded document's bytes in the registry blob tier and its metadata in
@@ -121,6 +139,10 @@ public sealed class SbomDocumentStore
                 // Stamped by the build that actually applied the document, so the dedup arm can
                 // tell rows written by this projection from rows written by an older one.
                 IngestVersion = SbomIngestVersion.Current,
+                Lifecycles = write.Lifecycles,
+                SignatureStatus = write.SignatureStatus,
+                SignatureKeyId = write.SignatureKeyId,
+                ToolVersionExplicitlyUnknown = write.ToolVersionExplicitlyUnknown,
                 UploadedAt = write.UploadedAt,
             },
             ct);

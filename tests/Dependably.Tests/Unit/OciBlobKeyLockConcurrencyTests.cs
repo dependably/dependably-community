@@ -342,7 +342,7 @@ public sealed class OciBlobKeyLockConcurrencyTests : IAsyncLifetime
     {
         string packageId = await PackageSeeder.InsertAsync(_db, orgId, "oci", Repository);
         await PackageSeeder.InsertVersionAsync(
-            _db, packageId, digest, $"pkg:oci/{Repository}@{digest}", blobKey: blobKey);
+            _db, packageId, digest, PurlNormalizer.Oci(Repository, digest), blobKey: blobKey);
     }
 
     private async Task<string> SeedOwnerAsync(string orgId)
@@ -431,7 +431,7 @@ public sealed class OciBlobKeyLockConcurrencyTests : IAsyncLifetime
             Allowlist: null!,
             Blocklist: null!,
             Audit: _audit,
-            Guard: new OrgAccessGuard(_db),
+            Guard: new OrgAccessGuard(_db, TestProblems.Create()),
             Blobs: _registry,
             BlobStorage: new TieredBlobStorage(_cache, _registry),
             OrphanBlobs: new OciOrphanBlobDeleter(_db, new TieredBlobStorage(_cache, _registry), sharedLock),

@@ -12,10 +12,12 @@
   import ErrorBanner from '../lib/ErrorBanner.svelte'
   import Pagination from '../lib/Pagination.svelte'
   import RiskPillars from '../lib/RiskPillars.svelte'
+  import SbomExportDialog from '../lib/SbomExportDialog.svelte'
   import SearchInput from '../lib/SearchInput.svelte'
   import Toggle from '../lib/Toggle.svelte'
   import SbomUploadModal from '../lib/sbom/SbomUploadModal.svelte'
   import ComponentAdvisoryPanel from '../lib/sbom/ComponentAdvisoryPanel.svelte'
+  import SbomConformancePanel from '../lib/sbom/SbomConformancePanel.svelte'
   import VexAnalysisEditor from '../lib/sbom/VexAnalysisEditor.svelte'
   import {
     DEFAULT_TABLE_STATE,
@@ -89,6 +91,7 @@
   let licenseBlocklist = new Set()
   let expandedId = null
   let exportOpen = false
+  let exportBusy = false
   let exportError = ''
   let copiedKey = ''
   // `savingKey` is the advisory whose PUT is in flight; `saveErrorKey` is the advisory a
@@ -282,19 +285,24 @@
     reload()
   }
 
-  // ── Export menu (normalized re-renders) ─────────────────────────────────────
-  // Distinct from the documents card below, which serves the verbatim uploads back. The menu
-  // renders the version's current state into a fresh CycloneDX document; the card hands back
-  // the exact bytes someone uploaded, digest and all.
-  async function runExport(kind) {
-    exportOpen = false
+  // ── Export dialog (normalized re-renders) ────────────────────────────────────
+  // Distinct from the documents card below, which serves the verbatim uploads back. The dialog
+  // renders the version's current state into a fresh CycloneDX document under the chosen options;
+  // the card hands back the exact bytes someone uploaded, digest and all.
+  async function runExport(e) {
+    const { variant, format, specVersion, scope } = e.detail
+    exportBusy = true
     exportError = ''
     try {
-      const name = exportFilename(project?.name ?? 'project', versionLabel || versionId, kind)
-      if (kind === 'vex') await api.exportProjectVersionVex(projectId, versionId, name)
-      else await api.exportProjectVersionSbom(projectId, versionId, kind, name)
-    } catch (e) {
-      exportError = e.message
+      const name = exportFilename(
+        project?.name ?? 'project', versionLabel || versionId, variant, { specVersion, scope })
+      if (variant === 'vex') await api.exportProjectVersionVex(projectId, versionId, specVersion, name)
+      else await api.exportProjectVersionSbom(projectId, versionId, { variant, format, specVersion, scope }, name)
+      exportOpen = false
+    } catch (err) {
+      exportError = err.message
+    } finally {
+      exportBusy = false
     }
   }
 
@@ -307,8 +315,8 @@
     }
   }
 
-  function closeExport(e) {
-    if (e.target?.closest && e.target.closest('.export-menu')) return
+  function closeExport() {
+    if (exportBusy) return
     exportOpen = false
   }
 
@@ -419,8 +427,6 @@
   ]
 </script>
 
-<svelte:window on:click={closeExport} />
-
 <div class="page">
   <div class="page-header">
     <div class="header-id-block">
@@ -431,21 +437,10 @@
       </div>
     </div>
     <div class="header-actions">
-      <span class="export-menu">
-        <button type="button" on:click|stopPropagation={() => exportOpen = !exportOpen} aria-haspopup="true" aria-expanded={exportOpen}>
-          <svg width="13" height="13" aria-hidden="true"><use href="/icons.svg#icon-download"/></svg>
-          {$t('sbomAnalysis.export.button')}
-        </button>
-        {#if exportOpen}
-          <div class="export-popover" role="menu">
-            <p class="export-hint">{$t('sbomAnalysis.export.hint')}</p>
-            <button class="popover-item" on:click|stopPropagation={() => runExport('inventory')}>{$t('sbomAnalysis.export.inventory')}</button>
-            <button class="popover-item" on:click|stopPropagation={() => runExport('vdr')}>{$t('sbomAnalysis.export.vdr')}</button>
-            <div class="popover-divider"></div>
-            <button class="popover-item" on:click|stopPropagation={() => runExport('vex')}>{$t('sbomAnalysis.export.vex')}</button>
-          </div>
-        {/if}
-      </span>
+      <button type="button" data-testid="export" on:click={() => { exportError = ''; exportOpen = true }}>
+        <svg width="13" height="13" aria-hidden="true"><use href="/icons.svg#icon-download"/></svg>
+        {$t('sbomAnalysis.export.button')}
+      </button>
       {#if isAdmin}
         <button type="button" class="primary" data-testid="upload" on:click={() => uploadOpen = true}>
           <svg width="13" height="13" aria-hidden="true"><use href="/icons.svg#icon-upload"/></svg>
@@ -454,6 +449,14 @@
       {/if}
     </div>
   </div>
+
+  <SbomExportDialog
+    open={exportOpen}
+    surface="version"
+    busy={exportBusy}
+    on:export={runExport}
+    on:close={closeExport}
+  />
 
   <div class="title-row">
     <!-- The ribbon is a control only when it has somewhere to take you: with violations it
@@ -925,6 +928,9 @@
         </tbody>
       </table>
     {/if}
+    {#if documents.some((d) => d.docType === 'sbom')}
+      <SbomConformancePanel {projectId} {versionId} />
+    {/if}
   </div>
 
   <!-- Guarded on `project`, not on `uploadOpen` alone: the modal reads its parent target once, at
@@ -947,29 +953,6 @@
   .header-id-block { min-width: 0; }
   .header-id { display: flex; align-items: center; gap: 10px; }
   .version-badge { font-size: 12px; }
-
-  /* Export menu — the popover contract the row-actions menu established, anchored to the
-     button rather than positioned against the viewport. */
-  .export-menu { position: relative; display: inline-flex; }
-  .export-popover {
-    position: absolute;
-    top: calc(100% + 4px);
-    right: 0;
-    z-index: 1000;
-    min-width: 240px;
-    background: var(--bg2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    box-shadow: var(--shadow);
-    padding: 4px 0;
-    text-align: left;
-  }
-  .export-hint {
-    margin: 0;
-    padding: 4px 12px 6px;
-    font-size: 11px;
-    color: var(--text2);
-  }
 
   .title-row { flex-wrap: wrap; }
   .ribbon-static { cursor: default; }

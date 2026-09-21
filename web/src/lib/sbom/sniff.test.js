@@ -39,6 +39,19 @@ describe('detectDocumentKind', () => {
     expect(detectDocumentKind({ bomFormat: 'CycloneDX', specVersion: '1.6' })).toBe('sbom')
   })
 
+  it('classifies an SPDX document by spdxVersion as sbom', () => {
+    expect(detectDocumentKind({ spdxVersion: 'SPDX-2.3', SPDXID: 'SPDXRef-DOCUMENT', packages: [] })).toBe('sbom')
+    // Server-side ingest accepts SPDX-2.3 only, but the client preview only needs to recognise
+    // the format family — an unsupported version still routes to /sbom, where the server's own
+    // 422 is authoritative, matching how this preview treats every other server-side refusal.
+    expect(detectDocumentKind({ spdxVersion: 'SPDX-2.2', packages: [] })).toBe('sbom')
+  })
+
+  it('does not classify a non-string or malformed spdxVersion as SPDX', () => {
+    expect(detectDocumentKind({ spdxVersion: 2.3 })).toBe('unknown')
+    expect(detectDocumentKind({ spdxVersion: 'not-spdx' })).toBe('unknown')
+  })
+
   it('returns unknown for unrecognised shapes, null, and non-objects', () => {
     expect(detectDocumentKind({ foo: 'bar' })).toBe('unknown')
     expect(detectDocumentKind(null)).toBe('unknown')

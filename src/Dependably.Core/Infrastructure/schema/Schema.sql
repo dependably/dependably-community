@@ -266,7 +266,15 @@ CREATE TABLE IF NOT EXISTS org_settings (
     -- resolution); 'merged' serves local ∪ upstream repodata (local shadows on NEVRA collision)
     -- and allows hosted publish. Resolved in RpmController.IsRpmPassthroughEffective, settable
     -- from Settings → Proxy without an instance restart.
-    rpm_upstream_mode         TEXT    CHECK (rpm_upstream_mode IS NULL OR rpm_upstream_mode IN ('passthrough','merged'))
+    rpm_upstream_mode         TEXT    CHECK (rpm_upstream_mode IS NULL OR rpm_upstream_mode IN ('passthrough','merged')),
+    -- Policy for verifying the enveloped JSF signature on an ingested CycloneDX SBOM document
+    -- (project_documents.signature_status). 'off' (default) = do not verify; 'warn' = verify and
+    -- record the verdict without refusing the upload; 'block' = fail closed (a document whose
+    -- signature fails verification, or that carries none, is refused). Enabling 'warn'/'block'
+    -- requires at least one ('sbom','spki') trust anchor in signature_trust_anchor; without one
+    -- the check has nothing to verify against and denies under 'block' rather than no-opping.
+    -- OpenVEX and SARIF documents carry no signature and are never subject to this policy.
+    verify_sbom_signatures    TEXT    NOT NULL DEFAULT 'off' CHECK (verify_sbom_signatures IN ('off', 'warn', 'block'))
 );
 
 CREATE TABLE IF NOT EXISTS instance_settings (
@@ -2289,6 +2297,35 @@ CREATE TABLE IF NOT EXISTS hex_signing_key (
         CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
 );
 
+-- SBOM author signature: the per-org ECDSA P-256 keypair that signs an exported CycloneDX
+-- document's enveloped JSF signature. A second, distinct key from hex_signing_key — the two
+-- lifecycles (Hex registry rotation vs. SBOM export signing) move independently and must not
+-- share a key. Unlike hex_signing_key, rows accumulate: rotation retires the current row
+-- (stamps retired_at) rather than deleting it, and inserts a fresh one, so a document signed
+-- under a retired key stays verifiable indefinitely — an SBOM is a file someone saved, not a
+-- resource re-fetched on every poll. id is the fingerprint and the signature's keyId.
+CREATE TABLE IF NOT EXISTS sbom_signing_key (
+    id              TEXT PRIMARY KEY,           -- SHA-256 of the DER public key, lower-case hex
+    org_id          TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    algorithm       TEXT NOT NULL DEFAULT 'ES256',
+    private_key     TEXT NOT NULL,              -- PKCS#8 PEM, envelope ciphertext
+    public_key_pem  TEXT NOT NULL,              -- SubjectPublicKeyInfo PEM, served at /api/v1/sbom-signing-keys
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    -- Set by an explicit RotateAsync call. The public half stays served indefinitely afterwards.
+    retired_at      TEXT
+        CHECK (retired_at IS NULL OR retired_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR retired_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR retired_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    -- Set on an explicit compromise announcement. Distinct from retired_at: a consumer treats
+    -- signatures under a revoked key as untrusted from this instant, with no CRL/OCSP/log behind
+    -- the announcement — see ADR-sbom-author-signature.
+    revoked_at      TEXT
+        CHECK (revoked_at IS NULL OR revoked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR revoked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR revoked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
+);
+CREATE INDEX IF NOT EXISTS idx_sbom_signing_key_org ON sbom_signing_key(org_id);
+-- One active (non-retired) key per org — what makes two replicas minting an org's first key at
+-- once converge on one row via INSERT ... ON CONFLICT DO NOTHING against this constraint.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sbom_signing_key_active ON sbom_signing_key(org_id) WHERE retired_at IS NULL;
+
 -- Hex: the per-release facts the registry index needs that no other table carries — the inner
 -- checksum every client's tarball unpacker re-verifies, the dependency requirements the resolver
 -- reads, and the retirement state. Same polymorphic owner shape as cargo_metadata: a hosted
@@ -2639,7 +2676,7 @@ CREATE TABLE IF NOT EXISTS project_documents (
     org_id             TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
     project_version_id TEXT NOT NULL REFERENCES project_versions(id) ON DELETE CASCADE,
     doc_type           TEXT NOT NULL CHECK (doc_type IN ('sbom','vex','sarif')),
-    format             TEXT NOT NULL CHECK (format IN ('cyclonedx-json','openvex-json','sarif-json')),
+    format             TEXT NOT NULL CHECK (format IN ('cyclonedx-json','openvex-json','sarif-json','spdx-json')),
     -- '1.6' for CycloneDX, '2.1.0' for SARIF, and so on.
     spec_version       TEXT,
     -- CycloneDX metadata.tools / SARIF tool.driver.
@@ -2656,11 +2693,77 @@ CREATE TABLE IF NOT EXISTS project_documents (
     -- short-circuited into keeping columns the build that stored it never populated. 0 is the
     -- value an upgraded row backfills to, which is deliberately below every real revision.
     ingest_version     INTEGER NOT NULL DEFAULT 0,
+    -- metadata.lifecycles as a JSON array of {"phase"} or {"name","description"} entries, in
+    -- document order. NULL when the uploaded document declared none. A source-phase SBOM
+    -- legitimately carries no component hashes, so this is what lets a later reader tell that
+    -- case apart from a hash-deficient one rather than scoring both the same way.
+    lifecycles         TEXT,
+    -- CISA D2: the verdict from verifying this document's enveloped JSF signature. 'verified' and
+    -- 'unsigned' are ProvenanceStatuses' shared vocabulary; 'failed' is cryptographically invalid
+    -- (SbomSignatureVerifier's own arms above the trust-anchor lookup) — the supplier's failure.
+    -- 'unanchored' is SBOM-specific and never appears in ProvenanceStatuses: this registry holds
+    -- no pinned ('sbom','spki') anchor for the keyId the document claimed, which is THIS
+    -- REGISTRY's trust-store gap, not a claim the signature itself is invalid. Never
+    -- 'unverifiable' (synthesized at admission time, never persisted). NULL for a doc_type/format
+    -- this policy does not cover, or one uploaded while verify_sbom_signatures was 'off'.
+    signature_status   TEXT CHECK (signature_status IS NULL OR signature_status IN ('verified','failed','unsigned','unanchored')),
+    -- The signing key's fingerprint, set only when signature_status = 'verified'.
+    signature_key_id   TEXT,
+    -- X4/D8b (SBOM Tool Version), read back: true only when the original producing tool's own
+    -- metadata.tools entry (the one tool_name/tool_version above already came from) carried
+    -- dependably's own dependably:tool-version-status=unknown property — a dependably export
+    -- re-ingested here, demonstrating P4b rather than reading as a silent D8 gap. False (the
+    -- default) covers both "no such property" and "no tool named at all"; either way tool_version
+    -- being NULL keeps its ordinary meaning.
+    tool_version_explicit_unknown INTEGER NOT NULL DEFAULT 0 CHECK (tool_version_explicit_unknown IN (0,1)),
     uploaded_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         CHECK (uploaded_at IS NULL OR uploaded_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR uploaded_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR uploaded_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     UNIQUE (project_version_id, doc_type)
 );
 CREATE INDEX IF NOT EXISTS idx_project_documents_org ON project_documents(org_id);
+
+-- Revision identity for a RENDERED (not uploaded) CycloneDX export — CISA D6/D9's "SBOM
+-- Version"/"SBOM Timestamp" elements. One row per distinct document a render of this project
+-- version can produce: doc_kind ('inventory'|'vdr'|'vex') and scope_filter ('all'|'prod'|'dev')
+-- each name a genuinely different set of assertions, so each gets its own serial/revision line
+-- rather than sharing one across documents that disagree on content. format does not appear in
+-- the key today (only 'cyclonedx-json' is ever exported) but is carried so a second export
+-- format, when one ships, does not have to widen this table's key.
+--
+-- serial_number is minted once, at first render, and never changes — RFC 9562 (a v4 UUID,
+-- Guid.NewGuid()'s own scheme), stored so it survives the render that minted it rather than
+-- regenerated every time. revision starts at 1 and increments only when content_fingerprint
+-- changes between one render and the next: a render of unchanged data is not a new revision,
+-- and this is an integer field (CycloneDX's "version" is defined as an integer), not SemVer —
+-- do not rewrite it to a "1.0.0"-shaped string.
+--
+-- content_fingerprint is a SHA-256 over exactly the facts the rendered document asserts about
+-- the target component: components[], their dependency graph, and (doc_kind='vdr' or 'vex'
+-- only) the vulnerability findings and their analysis state. It deliberately excludes every
+-- render-time or freshness-only value (the render's own timestamp, vuln/NVD/SSVC
+-- last-checked-at stamps, coverage counts, the affected-application count) — those change on a
+-- schedule independent of whether the data ABOUT this component changed, and folding them in
+-- would turn revision into a render counter, which is the exact defect this table exists to
+-- fix. changed_at is stamped from the injected TimeProvider only when content_fingerprint
+-- changes, so it always answers "when did the data last change", never "when was this last
+-- rendered".
+-- personal-data: excluded — no column here names a person; content_fingerprint is a hash of
+-- component/vulnerability facts already stored, unscoped-by-user, elsewhere in this schema.
+CREATE TABLE IF NOT EXISTS sbom_export_revisions (
+    id                   TEXT PRIMARY KEY,
+    org_id               TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    project_version_id   TEXT NOT NULL REFERENCES project_versions(id) ON DELETE CASCADE,
+    doc_kind             TEXT NOT NULL CHECK (doc_kind IN ('inventory','vdr','vex')),
+    format               TEXT NOT NULL DEFAULT 'cyclonedx-json' CHECK (format IN ('cyclonedx-json')),
+    scope_filter         TEXT NOT NULL DEFAULT 'all' CHECK (scope_filter IN ('all','prod','dev')),
+    serial_number        TEXT NOT NULL,
+    revision             INTEGER NOT NULL DEFAULT 1,
+    content_fingerprint  TEXT NOT NULL,
+    changed_at           TEXT NOT NULL
+        CHECK (changed_at IS NULL OR changed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR changed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR changed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    UNIQUE (project_version_id, doc_kind, format, scope_filter)
+);
+CREATE INDEX IF NOT EXISTS idx_sbom_export_revisions_org ON sbom_export_revisions(org_id);
 
 -- One component of one project version's SBOM. The verbatim purl is kept alongside the parsed
 -- ecosystem/purl_name/version triple so registry cross-links and advisory scan batching are
@@ -2720,16 +2823,44 @@ CREATE TABLE IF NOT EXISTS sbom_components (
     dependency_kind    TEXT CHECK (dependency_kind IN ('direct','transitive','root','graph-unknown')),
     -- JSON array of purls from the dependency root to this component.
     dependency_path    TEXT,
-    -- SPDX expression declared by the component's licences.
+    -- SPDX expression declared by the component's licences, OR (when license_is_named = 1) a
+    -- free-text licences[].license.name the document carried instead of an SPDX identifier.
     license_spdx       TEXT,
+    -- CISA D16c's discriminator: 1 when license_spdx above was resolved from a
+    -- licenses[].license.name entry (no SPDX id, no expression) rather than a genuine SPDX
+    -- identifier/expression; NULL/0 otherwise. This is the ONLY signal the export boundary can
+    -- use to render license_spdx as a native CycloneDX "expression" (an id/expression) versus a
+    -- native "license.name" object (a free-text name) — license_url alone cannot serve as that
+    -- signal, because CycloneDX's license.name is legal with NO url at all, and treating "no url"
+    -- as "must be an expression" would put free text into a field the schema defines as a valid
+    -- SPDX license expression. No CHECK here (SQLite ALTER cannot add one); fresh installs get
+    -- CHECK (license_is_named IN (0,1)) below, and upgraded databases rely on the write path,
+    -- which only ever binds 0, 1 or NULL.
+    license_is_named   INTEGER CHECK (license_is_named IN (0,1)),
+    -- CISA D16c's URL fallback: a licence with no SPDX identifier still benefits from a way for a
+    -- recipient to find the full licence text, when the document offered one. Populated ONLY when
+    -- license_is_named = 1 AND the document's licenses[].license entry also carried a url — a
+    -- name-only licence with no url leaves this NULL and still renders as a native
+    -- license.name-only object (see license_is_named's own comment), never falls back to
+    -- license_spdx's expression shape.
+    license_url        TEXT,
     -- Presentation metadata carried by the component entry itself, all display-only: no gate
     -- branches on any of them. Captured because a component the registry has never seen is
     -- otherwise a bare name and version, and the producing SBOM already carries what it is and
     -- where it came from. Clipped at ingest so one document cannot turn a 50k-component
     -- inventory into unbounded row width.
     description        TEXT,
-    -- components[].authors[].name joined, else the 1.4-era author string, else publisher.
+    -- components[].authors[].name joined, else the 1.4-era author string. The person(s)/entity
+    -- who wrote the component's code — distinct from component_producer below, which CISA's
+    -- 2026 baseline separates from it explicitly (this column collapsed publisher into it until
+    -- that split; see component_producer's own comment).
     component_author   TEXT,
+    -- components[].publisher: the ONE organization that produces/ships this component, kept
+    -- apart from component_author because CISA's Component Producer element is distinct from
+    -- Component Author. Never dependably's own name for a proxied artefact — this registry is a
+    -- distributor for those, not the producer, and Supplier Name was retired in the 2021→2026
+    -- baseline precisely because distributors muddied it.
+    component_producer TEXT,
     -- components[].copyright.
     copyright          TEXT,
     -- components[].group: the namespace half of a coordinate (npm scope, Maven groupId).
@@ -2753,6 +2884,31 @@ CREATE TABLE IF NOT EXISTS sbom_components (
     -- document below 1.7 is — absence is a weaker claim than a declared false, and collapsing
     -- the two would assert "not external" about rows nothing ever examined.
     is_external        INTEGER CHECK (is_external IN (0,1)),
+    -- CISA D13c/D13d: identifiers a document asserts BESIDE purl — CPE, SWHID, OmniBOR, a commit
+    -- hash (CycloneDX components[].pedigree.commits[].uid), a UUID (an externalReferences entry
+    -- whose url is a urn:uuid: URN) — as a JSON array of {"kind","value"} pairs, one entry per
+    -- asserted identifier so D13d ("include all of them") has somewhere to put more than one. A
+    -- JSON column, not a child table: nothing ever queries a component BY one of these
+    -- identifiers (the reverse of purl_name/ecosystem, which the registry cross-link and blast
+    -- radius both join on) — every reader only renders the set alongside the component it
+    -- belongs to, the same access pattern component_hashes and dependency_path already have.
+    -- Never synthesized: an identifier lands here only when the source document supplied it.
+    additional_identifiers TEXT,
+    -- CISA X4/P4a's explicit-unknown-vs-silent-absence signal, ingest side: which of the
+    -- "indicate unknown" duty fields (producer, license) THIS document explicitly asserted
+    -- SPDX's NOASSERTION/NONE for, rather than simply never mentioning — a JSON array of
+    -- strings drawn from a closed vocabulary (SbomExplicitUnknownFields). Populated only by
+    -- SpdxParser: CycloneDX defines no equivalent token for any field, so a CycloneDx-sourced
+    -- row's absences are always silent and this column stays NULL for every one of them —
+    -- SbomConformanceScorer reads that format asymmetry rather than scoring the two formats as
+    -- if a silent CycloneDX absence and a silent SPDX absence were the same claim.
+    explicit_unknown_fields TEXT,
+    -- CISA D17 (Component Dependency Relationship), SPDX-only: true when this component was the
+    -- relatedSpdxElement of a CONTAINS relationship. Never feeds dependency_kind/dependency_path
+    -- — CISA's Relationship attribute is defined as inclusion, not depth, so this satisfies D17's
+    -- "a relationship is asserted" duty on its own, without minting a false direct/transitive
+    -- claim a containment edge never made. See SpdxParser.ReadContainedRefs / SbomConformanceScorer.
+    containment_declared INTEGER NOT NULL DEFAULT 0 CHECK (containment_declared IN (0,1)),
     -- Scan-pass stamp. NULL keeps the row in the unscanned bucket.
     vuln_checked_at    TEXT
         CHECK (vuln_checked_at IS NULL OR vuln_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR vuln_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR vuln_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),

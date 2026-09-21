@@ -190,6 +190,12 @@ public sealed partial class SchemaInitializer
         // See SchemaInitializer.VulnAnalysisPurlKeys.cs.
         await NormalizeVulnAnalysisPurlKeysAsync(conn);
 
+        // Folds stored quarantine.purl values for OCI onto the canonical form the block gate
+        // derives, so an approval recorded against the old interpolated spelling keeps unblocking
+        // after the controllers started asking under the canonical one. See
+        // SchemaInitializer.OciPurlCanonicalization.cs.
+        await CanonicalizeOciQuarantinePurlsAsync(conn);
+
         // Collapses case-variant duplicate project_vuln_analysis rows onto the one row every reader
         // already resolves to, merging both arms. Unledgered for a third reason again: the
         // remaining duplicate-producing race is a runtime one under Postgres, so the repair has to
@@ -466,6 +472,32 @@ public sealed partial class SchemaInitializer
         // between package_versions and cache_artifact, and a sweep placed ahead of them would read
         // a mid-migration package as empty and delete a row whose versions were about to land.
         await RunOnceAsync(conn, "delete_empty_package_rows", DeleteEmptyPackageRowsAsync);
+
+        // Widen project_documents.format's closed CHECK to admit 'spdx-json', the second SBOM
+        // ingest front end alongside 'cyclonedx-json'. Fresh installs get the wider set from the
+        // CREATE TABLE blocks; this brings existing databases in line. Same shape and reasoning as
+        // expand_alert_type_check_sbom_policy above.
+        await RunOnceAsync(
+            conn, "expand_project_documents_format_check_spdx", ExpandProjectDocumentsFormatCheckAsync,
+            transactional: false);
+
+        // Widen project_documents.signature_status's CHECK to admit 'unanchored' (SbomSignatureVerdict
+        // .UnanchoredStatus — "this registry holds no pinned trust anchor for the document's claimed
+        // keyId", distinct from a cryptographically invalid signature). Most existing databases gained
+        // this column via a plain ALTER ADD COLUMN with no CHECK at all (see the additive migration's
+        // own comment), so this rewrite is a no-op for them — allowMissingCheck: true covers exactly
+        // that genuine-absence case. Unlike expand_block_deprecated_check, this column's clause is the
+        // NULLABLE shape (CHECK (col IS NULL OR col IN (...))), not the bare one every other
+        // Expand*CheckAsync migration above widens — VerifyCheckAdmitsAsync tries both clause shapes
+        // before concluding the check is genuinely absent, specifically so this migration's rewrite is
+        // still verified rather than silently tolerated by allowMissingCheck. The gap this closes is
+        // narrower than the additive-ALTER case: a database initialized via CREATE TABLE while this
+        // column's CHECK still admitted only the original three values DOES carry that narrow CHECK
+        // baked in at CREATE TABLE time — and CREATE TABLE IF NOT EXISTS never re-runs against an
+        // existing table, so upgrading the binary alone never widens it.
+        await RunOnceAsync(
+            conn, "expand_signature_status_check_unanchored", ExpandSignatureStatusCheckAsync,
+            transactional: false);
     }
 
     // Phase 3 — the views (which need every table and column to exist) and the convergence sweeps
@@ -1005,8 +1037,25 @@ public sealed partial class SchemaInitializer
         // on its meaning rather than its layout; the comparison is lowercased because a CHECK's
         // value list is not case-normalized (vulnerabilities.severity holds upper-case literals).
         string flat = Flatten(storedSql);
-        string marker = "check(" + Flatten(column) + "in(";
-        int open = flat.IndexOf(marker, StringComparison.Ordinal);
+        string col = Flatten(column);
+        // Two clause shapes exist in this schema: the bare `CHECK (col IN (...))` (role,
+        // block_deprecated, alert.type, project_documents.format) and the nullable
+        // `CHECK (col IS NULL OR col IN (...))` (project_documents.signature_status, and every
+        // other column whose absence is a real, distinct third state). Trying only the bare
+        // marker against a nullable clause never matches — "check(col" is immediately followed
+        // by "isnullor...", not "in(" — so `open < 0` unconditionally, and allowMissingCheck then
+        // swallows a rewrite that actually failed exactly as silently as the "no CHECK at all"
+        // case it exists to tolerate. Both shapes are tried; whichever one is actually present
+        // in this database's stored text wins.
+        string nullableMarker = "check(" + col + "isnullor" + col + "in(";
+        string bareMarker = "check(" + col + "in(";
+        int open = flat.IndexOf(nullableMarker, StringComparison.Ordinal);
+        string marker = nullableMarker;
+        if (open < 0)
+        {
+            open = flat.IndexOf(bareMarker, StringComparison.Ordinal);
+            marker = bareMarker;
+        }
 
         if (open < 0)
         {
@@ -1460,6 +1509,119 @@ public sealed partial class SchemaInitializer
             await conn.ExecuteAsync("PRAGMA writable_schema = RESET");
         }
         await VerifyCheckAdmitsAsync(conn, "alert", "type", "vuln_kev");
+    }
+
+    // Widen project_documents.format's closed CHECK to admit 'spdx-json' — SPDX ingest is a
+    // second front end onto the same sbom_components projection CycloneDX ingest already writes,
+    // not a second document kind, so only the format enum widens; doc_type stays 'sbom'. Fresh
+    // installs get the wider set from the CREATE TABLE blocks; this brings existing databases in
+    // line. Same shape and reasoning as the alert.type widenings above.
+    //
+    // Postgres: drop + re-add the auto-named CHECK constraint. IF EXISTS covers an install that
+    // never carried one.
+    //
+    // SQLite: rewrite the stored CREATE TABLE text in place via the writable_schema pattern. The
+    // literal REPLACE is exact because the stored text is verbatim what Schema.sql emitted, and it
+    // is a no-op on any database whose project_documents table does not carry the narrower clause.
+    private Task ExpandProjectDocumentsFormatCheckAsync(DbConnection conn)
+    {
+        return _db.Provider == DbProvider.Postgres
+            ? conn.ExecuteAsync("""
+                ALTER TABLE project_documents DROP CONSTRAINT IF EXISTS project_documents_format_check;
+                ALTER TABLE project_documents ADD  CONSTRAINT project_documents_format_check
+                    CHECK (format IN ('cyclonedx-json', 'openvex-json', 'sarif-json', 'spdx-json'));
+                """)
+            : ExpandProjectDocumentsFormatCheckSqliteAsync(conn);
+    }
+
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "S2077:Formatted SQL queries should be reviewed",
+        Justification = "PRAGMA schema_version cannot be parameter-bound — SQLite's PRAGMA grammar does not " +
+                        "accept ? / @name placeholders for the right-hand side. The interpolated value is a " +
+                        "long we just read from PRAGMA schema_version itself; it never touches user input.")]
+    private static async Task ExpandProjectDocumentsFormatCheckSqliteAsync(DbConnection conn)
+    {
+        const string oldCheck = "CHECK (format IN ('cyclonedx-json','openvex-json','sarif-json'))";
+        const string newCheck = "CHECK (format IN ('cyclonedx-json','openvex-json','sarif-json','spdx-json'))";
+
+        // Bumping schema_version forces SQLite to reload the schema on the next read so existing
+        // connections stop enforcing the old CHECK; writable_schema = RESET both disables write
+        // mode and forces the reload. See ExpandRoleCheckSqliteAsync for the full rationale.
+        await conn.ExecuteAsync("PRAGMA writable_schema = ON");
+        try
+        {
+            await conn.ExecuteAsync("""
+                UPDATE sqlite_schema
+                SET sql = REPLACE(sql, @old, @new)
+                WHERE type = 'table' AND name = 'project_documents'
+                """, new { old = oldCheck, @new = newCheck });
+            long version = await conn.ExecuteScalarAsync<long>("PRAGMA schema_version");
+            await conn.ExecuteAsync(
+                "PRAGMA schema_version = " + (version + 1).ToString(CultureInfo.InvariantCulture));
+        }
+        finally
+        {
+            await conn.ExecuteAsync("PRAGMA writable_schema = RESET");
+        }
+        await VerifyCheckAdmitsAsync(conn, "project_documents", "format", "spdx-json");
+    }
+
+    // Widen project_documents.signature_status's CHECK to admit 'unanchored'. See the RunOnceAsync
+    // call site's own comment for why this is narrower in scope than the other Expand*CheckAsync
+    // migrations: most databases never carry a CHECK on this column at all.
+    //
+    // Postgres: drop + re-add the auto-named CHECK constraint. IF EXISTS covers both an upgraded
+    // database that added the column via ALTER (no constraint) and a fresh install (constraint
+    // present, named project_documents_signature_status_check by default).
+    //
+    // SQLite: rewrite the stored CREATE TABLE text in place via the writable_schema pattern. The
+    // literal REPLACE is a no-op on any database whose project_documents does not carry the exact
+    // original 3-value clause a fresh CREATE TABLE run before this widen would have baked in.
+    private Task ExpandSignatureStatusCheckAsync(DbConnection conn)
+    {
+        return _db.Provider == DbProvider.Postgres
+            ? conn.ExecuteAsync("""
+                ALTER TABLE project_documents DROP CONSTRAINT IF EXISTS project_documents_signature_status_check;
+                ALTER TABLE project_documents ADD  CONSTRAINT project_documents_signature_status_check
+                    CHECK (signature_status IS NULL OR signature_status IN ('verified','failed','unsigned','unanchored'));
+                """)
+            : ExpandSignatureStatusCheckSqliteAsync(conn);
+    }
+
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "S2077:Formatted SQL queries should be reviewed",
+        Justification = "PRAGMA schema_version cannot be parameter-bound — SQLite's PRAGMA grammar does not " +
+                        "accept ? / @name placeholders for the right-hand side. The interpolated value is a " +
+                        "long we just read from PRAGMA schema_version itself; it never touches user input.")]
+    private static async Task ExpandSignatureStatusCheckSqliteAsync(DbConnection conn)
+    {
+        const string oldCheck =
+            "CHECK (signature_status IS NULL OR signature_status IN ('verified','failed','unsigned'))";
+        const string newCheck =
+            "CHECK (signature_status IS NULL OR signature_status IN ('verified','failed','unsigned','unanchored'))";
+
+        // Bumping schema_version forces SQLite to reload the schema on the next read so existing
+        // connections stop enforcing the old CHECK; writable_schema = RESET both disables write
+        // mode and forces the reload. See ExpandRoleCheckSqliteAsync for the full rationale.
+        await conn.ExecuteAsync("PRAGMA writable_schema = ON");
+        try
+        {
+            await conn.ExecuteAsync("""
+                UPDATE sqlite_schema
+                SET sql = REPLACE(sql, @old, @new)
+                WHERE type = 'table' AND name = 'project_documents'
+                """, new { old = oldCheck, @new = newCheck });
+            long version = await conn.ExecuteScalarAsync<long>("PRAGMA schema_version");
+            await conn.ExecuteAsync(
+                "PRAGMA schema_version = " + (version + 1).ToString(CultureInfo.InvariantCulture));
+        }
+        finally
+        {
+            await conn.ExecuteAsync("PRAGMA writable_schema = RESET");
+        }
+        // allowMissingCheck: most databases gained signature_status via a plain ALTER ADD COLUMN
+        // with no CHECK at all (see the additive migration's own comment) — this rewrite no-ops by
+        // design for every one of them.
+        await VerifyCheckAdmitsAsync(
+            conn, "project_documents", "signature_status", "unanchored", allowMissingCheck: true);
     }
 
     // Rewrite legacy 'block' policy rows to 'block_all'. The old single 'block' value denied

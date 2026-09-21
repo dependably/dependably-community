@@ -4,6 +4,7 @@ using Dependably.Infrastructure;
 using Dependably.Infrastructure.Observability;
 using Dependably.Infrastructure.Sbom;
 using Dependably.Protocol;
+using Dependably.Protocol.Provenance;
 using Dependably.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -79,7 +80,11 @@ public sealed record SbomControllerServices(
     TimeProvider Time,
     SbomOptions Options,
     string StagingPath,
-    ILogger<SbomController> Logger);
+    ILogger<SbomController> Logger,
+    // CISA D2 (SBOM Author Signature) admission check — appended rather than inserted, per the
+    // positional-record-args convention every other field here already follows.
+    Dependably.Infrastructure.Sbom.SbomSignatureVerifier SignatureVerifier,
+    OrgSettingsRepository Settings);
 
 /// <summary>
 /// The three document-upload surfaces for the projects plane:
@@ -152,8 +157,12 @@ public sealed class SbomController : ControllerBase
     private readonly string _stagingPath;
 
     /// <summary>
-    /// PUT /api/v1/sbom — ingest a CycloneDX 1.4–1.7 inventory for one project version, replacing
-    /// whatever inventory that version held and re-applying its stored VEX and SARIF afterwards.
+    /// PUT /api/v1/sbom — ingest a CycloneDX 1.4–1.7 or SPDX 2.3 inventory for one project
+    /// version, replacing whatever inventory that version held and re-applying its stored VEX and
+    /// SARIF afterwards. Which format a document is is detected from its own content (an
+    /// unambiguous top-level marker either way — <c>bomFormat</c> or <c>spdxVersion</c>), never
+    /// from a query parameter or header, so no client-side format declaration can desync from the
+    /// bytes it actually sent.
     /// </summary>
     [HttpPut("api/v1/sbom")]
     [RequestSizeLimit(RequestCeilingBytes)]
@@ -284,8 +293,27 @@ public sealed class SbomController : ControllerBase
     private async Task<IActionResult> IngestSbomAsync(
         string orgId, string? actorId, SbomUploadQuery query, RequestBodyStager.StagedBody staged, CancellationToken ct)
     {
+        var settings = await _svc.Settings.GetSettingsAsync(orgId, ct);
+        string sbomSignatureMode = settings?.VerifySbomSignatures ?? "off";
+
+        // A dedup hit is a 200 that does no work — including no signature check — which is
+        // correct only while the policy that check answers to is unchanged. An operator who
+        // enables 'warn'/'block' after a supplier's unsigned bytes already landed under 'off'
+        // must have the NEXT upload of those exact bytes re-checked, not waved through on the
+        // hash match: without this, the SbomIngestVersion bump that exists precisely to force
+        // one re-merge past a stale dedup hit fires before any operator ever turns the policy
+        // on, so it never actually re-checks anything, and the supplier holds a permanent free
+        // pass for those bytes. Scoped to a stored NULL signature_status — a row that already
+        // carries a real verdict (verified/failed/unsigned) from a previous check is not stale.
         var duplicate = await TryDedupAsync(
-            orgId, query.ProjectName!, query.ProjectVersion!, "sbom", query.ParentId, staged, ct);
+            new DedupTarget(
+                OrgId: orgId,
+                ProjectName: query.ProjectName!,
+                ProjectVersion: query.ProjectVersion!,
+                DocType: "sbom",
+                ParentId: query.ParentId),
+            staged, ct,
+            forceMiss: doc => sbomSignatureMode != "off" && doc.SignatureStatus is null);
         if (duplicate is not null)
         {
             // The dedup short-circuit skips the merge, but not a promotion the caller explicitly
@@ -318,7 +346,14 @@ public sealed class SbomController : ControllerBase
         }
 
         using var json = await ReadJsonAsync(staged.Path, ct);
-        var document = CycloneDxParser.Parse(json.RootElement);
+        var (document, format) = ParseSbomDocument(json.RootElement);
+
+        var (signatureError, signatureStatus, signatureKeyId) =
+            await ApplySbomSignaturePolicyAsync(orgId, actorId, format, sbomSignatureMode, json.RootElement, ct);
+        if (signatureError is not null)
+        {
+            return signatureError;
+        }
 
         var (resolveError, resolved, projectCreated) = await ResolveAsync(orgId, query, document, actorId, ct);
         if (resolveError is not null)
@@ -329,9 +364,11 @@ public sealed class SbomController : ControllerBase
         var target = resolved!;
         var now = _svc.Time.GetUtcNow();
         var documentWrite = new SbomDocumentWrite(
-            orgId, target.ProjectId, target.ProjectVersionId, "sbom", "cyclonedx-json",
+            orgId, target.ProjectId, target.ProjectVersionId, "sbom", format,
             document.SpecVersion, document.ToolName, document.ToolVersion,
-            staged.Sha256, staged.Size, staged.Path, actorId, now);
+            staged.Sha256, staged.Size, staged.Path, actorId, now, document.LifecyclesJson,
+            signatureStatus, signatureKeyId,
+            ToolVersionExplicitlyUnknown: document.ToolVersionExplicitlyUnknown);
         string blobKey = await _svc.Documents.StageBlobAsync(documentWrite, ct);
 
         var counts = await _svc.Merge.MergeComponentsAsync(orgId, target.ProjectVersionId, document, now, ct);
@@ -366,7 +403,13 @@ public sealed class SbomController : ControllerBase
         string orgId, string? actorId, ProjectTargetQuery query, RequestBodyStager.StagedBody staged, CancellationToken ct)
     {
         var duplicate = await TryDedupAsync(
-            orgId, query.ProjectName!, query.ProjectVersion!, "vex", query.ParentId, staged, ct);
+            new DedupTarget(
+                OrgId: orgId,
+                ProjectName: query.ProjectName!,
+                ProjectVersion: query.ProjectVersion!,
+                DocType: "vex",
+                ParentId: query.ParentId),
+            staged, ct);
         if (duplicate is not null)
         {
             return VexResponse(duplicate.DocumentId, AsTarget(orgId, duplicate.Version), new SbomBindingCounts(0, 0, 0), scanQueued: false);
@@ -419,7 +462,13 @@ public sealed class SbomController : ControllerBase
         string orgId, string? actorId, ProjectTargetQuery query, RequestBodyStager.StagedBody staged, CancellationToken ct)
     {
         var duplicate = await TryDedupAsync(
-            orgId, query.ProjectName!, query.ProjectVersion!, "sarif", query.ParentId, staged, ct);
+            new DedupTarget(
+                OrgId: orgId,
+                ProjectName: query.ProjectName!,
+                ProjectVersion: query.ProjectVersion!,
+                DocType: "sarif",
+                ParentId: query.ParentId),
+            staged, ct);
         if (duplicate is not null)
         {
             return SarifResponse(duplicate.DocumentId, AsTarget(orgId, duplicate.Version), new SbomBindingCounts(0, 0, 0), scanQueued: false);
@@ -506,6 +555,103 @@ public sealed class SbomController : ControllerBase
     private IActionResult TooLarge(long cap) =>
         _svc.Problems.PayloadTooLargeActionKey("error.sbom.tooLarge", cap);
 
+    /// <summary>
+    /// CISA D2 (SBOM Author Signature) admission check, over the raw staged bytes, before the
+    /// merge and before the document row commits (ADR-sbom-author-signature). An admission
+    /// check on this endpoint, not a <see cref="Protocol.BlockGateService"/> arm: a document has
+    /// no purl coordinate for that gate to key on.
+    ///
+    /// <para>Scope is CycloneDX SBOM documents for the actual cryptographic check —
+    /// <paramref name="format"/> <c>spdx-json</c> defines no signature carrier this policy
+    /// covers — but SPDX is NOT exempt from the policy itself: it is scored exactly as an
+    /// unsigned CycloneDX document would be, so switching format is never a way to evade
+    /// <c>block</c>. Only <c>verify_sbom_signatures = 'off'</c> exempts a document from this
+    /// check entirely.</para>
+    ///
+    /// <para>Returns a non-null <c>Error</c> only when <c>verify_sbom_signatures = 'block'</c>
+    /// and the document does not verify — <c>warn</c> always returns null Error and still
+    /// returns the computed status/keyId to persist, which is what makes <c>warn</c> a real
+    /// recorded decision rather than a no-op. The unbacked-enforcement case (<c>block</c> with
+    /// zero <c>('sbom','spki')</c> anchors) synthesizes <see cref="ProvenanceStatuses.Unverifiable"/>
+    /// for the refusal decision only — it is never one of the two persisted values returned here,
+    /// matching <see cref="Protocol.BlockGateService.IsProvenanceEnforcementUnbackedAsync"/>'s own
+    /// posture for artefacts.</para>
+    /// </summary>
+    private async Task<(IActionResult? Error, string? Status, string? KeyId)> ApplySbomSignaturePolicyAsync(
+        string orgId, string? actorId, string format, string mode, JsonElement root, CancellationToken ct)
+    {
+        if (mode == "off")
+        {
+            return (null, null, null);
+        }
+
+        var verdict = string.Equals(format, "cyclonedx-json", StringComparison.Ordinal)
+            ? await _svc.SignatureVerifier.VerifyAsync(orgId, root.GetRawText(), ct)
+            : SbomSignatureVerdict.Unsigned;
+
+        // Enablement is checked at settings-write time (OrgSettingsController), but anchors are
+        // runtime-editable, so enforcement is checked again here, independently, on every
+        // upload — the same fail-closed-twice posture BlockGateService already holds to.
+        bool unbacked = mode == "block" && !await _svc.SignatureVerifier.IsConfiguredForAsync(orgId, ct);
+        string effectiveStatus = unbacked ? ProvenanceStatuses.Unverifiable : verdict.Status;
+
+        // The gate is keyed on Capabilities.SbomUpload, which a service token satisfies as
+        // readily as a user session — a build pipeline is the common caller, not the exception.
+        // ResolveActorAsync is the same lookup RecordUploadAsync already uses for the (non-
+        // security) sbom_uploaded event; a security-relevant refusal or warning gets the same
+        // real kind and denormalized service-token label, never a fabricated ActorKinds.User.
+        (string? actorKind, string? actorLabel) = actorId is null
+            ? (null, null)
+            : await _svc.Ingest.ResolveActorAsync(orgId, actorId, ct);
+
+        if (mode == "block" && effectiveStatus != ProvenanceStatuses.Verified)
+        {
+            await _svc.Audit.LogAsync(
+                "sbom_signature_blocked", orgId, actorId,
+                actorKind: actorKind,
+                ecosystem: "sbom",
+                detail: JsonSerializer.Serialize(new { reason = effectiveStatus },
+                    Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+                sourceIp: HttpContext.GetNormalizedRemoteIp(), actorLabel: actorLabel, ct: ct);
+            return (_svc.Problems.ForbiddenActionKey("error.sbom.signatureRejected", effectiveStatus), null, null);
+        }
+
+        if (mode == "warn")
+        {
+            await _svc.Audit.LogAsync(
+                "sbom_signature_warn", orgId, actorId,
+                actorKind: actorKind,
+                ecosystem: "sbom",
+                detail: JsonSerializer.Serialize(new { status = verdict.Status },
+                    Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+                sourceIp: HttpContext.GetNormalizedRemoteIp(), actorLabel: actorLabel, ct: ct);
+        }
+
+        // Never persists Unverifiable: that value is a fact about live policy (an anchor set that
+        // is empty right now), not about the document, and it is recomputed at evaluation time
+        // exactly as BlockGateService's own synthesis is never written to provenance_status.
+        //
+        // signature_key_id is persisted ONLY when the status is 'verified' — Schema.sql,
+        // Models.cs and SbomDocumentStore.cs all document that as the column's contract, and a
+        // 'failed'/'unsigned' verdict's keyId is an unauthenticated claim the document itself
+        // made (read straight off signature.keyId before any anchor matched it), not a fact this
+        // registry vouches for. Capped defensively to the real value's shape (a SHA-256 hex
+        // fingerprint is 64 characters) with generous headroom, independently of the column
+        // being unbounded TEXT — nothing upstream limits what a document can put in that field.
+        bool isVerified = string.Equals(verdict.Status, ProvenanceStatuses.Verified, StringComparison.Ordinal);
+        string? persistedKeyId = isVerified ? Truncate(verdict.KeyId, MaxPersistedSignatureKeyIdLength) : null;
+        return (null, verdict.Status, persistedKeyId);
+    }
+
+    /// <summary>
+    /// Generous headroom over a real SHA-256 hex fingerprint (64 characters) — see
+    /// <see cref="ApplySbomSignaturePolicyAsync"/>'s <c>signature_key_id</c> persistence comment.
+    /// </summary>
+    private const int MaxPersistedSignatureKeyIdLength = 128;
+
+    private static string? Truncate(string? value, int maxLength) =>
+        value is null ? null : value.Length <= maxLength ? value : value[..maxLength];
+
     /// <summary>What a dedup hit resolved to, so the no-op response can name it.</summary>
     private sealed record DedupHit(string DocumentId, ProjectVersionRef Version);
 
@@ -513,10 +659,20 @@ public sealed class SbomController : ControllerBase
     // because a CI job re-running an unchanged build should cost a hash and two indexed reads.
     // The lookup is deliberately the read-only one: a re-upload of an unchanged document must
     // not be what creates a project.
+    /// <summary>
+    /// The coordinate a dedup probe is keyed on: which project version is being targeted, and
+    /// which document kind of it. Threaded as one value so a call site cannot transpose two of the
+    /// four same-typed strings unnoticed.
+    /// </summary>
+    private readonly record struct DedupTarget(
+        string OrgId, string ProjectName, string ProjectVersion, string DocType, string? ParentId);
+
     private async Task<DedupHit?> TryDedupAsync(
-        string orgId, string projectName, string projectVersion, string docType,
-        string? parentId, RequestBodyStager.StagedBody staged, CancellationToken ct)
+        DedupTarget target, RequestBodyStager.StagedBody staged, CancellationToken ct,
+        Func<ProjectDocument, bool>? forceMiss = null)
     {
+        var (orgId, projectName, projectVersion, docType, parentId) = target;
+
         var candidates = await _svc.Ingest.ResolveVersionCandidatesAsync(
             orgId, projectName, projectVersion, parentId, ct);
         // Exactly one, or nothing. An ambiguous name is not a dedup hit: short-circuiting on a
@@ -535,9 +691,14 @@ public sealed class SbomController : ControllerBase
         // document, so a hash-only match would report "already applied" about rows this build
         // would not have produced — and nothing would ever correct them, because the next upload
         // of an unchanged document takes this same branch. The stored revision is the tiebreak.
+        // forceMiss is the same idea applied to an admission POLICY rather than a projection: the
+        // SBOM signature check needs the identical "re-run once against unchanged bytes" escape
+        // hatch a widened ingest_version already gets, for the same reason — see the SBOM call
+        // site.
         return current is not null
             && string.Equals(current.Sha256, staged.Sha256, StringComparison.Ordinal)
             && current.IngestVersion == SbomIngestVersion.Current
+            && (forceMiss is null || !forceMiss(current))
             ? new DedupHit(current.Id, version)
             : null;
     }
@@ -628,6 +789,35 @@ public sealed class SbomController : ControllerBase
             "body", "error.sbom.wrongDocumentKind"),
         _ => _svc.Problems.ValidationErrorActionKey("body", "error.sbom.malformed"),
     };
+
+    // A document carrying BOTH an SPDX spdxVersion marker and a CycloneDX bomFormat marker is
+    // refused outright rather than resolved by precedence. The two parsers are not a fallback
+    // chain over one document — merge is defined as "replace this version's whole inventory with
+    // what the chosen parser found", so parsing an ambiguous document under the wrong parser does
+    // not fail loudly: it finds none of the fields it is looking for, yields zero components, and
+    // the merge then deletes every component the version already held. A gate never degrades
+    // because its own input is ambiguous — the same posture every other block-gate in this
+    // codebase takes — so an ambiguous document gets a 422 before either parser ever runs, not a
+    // 200 that silently wiped the version. A document carrying NEITHER marker still reaches
+    // CycloneDxParser.Parse below and gets the same WrongDocumentKind refusal it always has.
+    private static (CycloneDxDocument Document, string Format) ParseSbomDocument(JsonElement root)
+    {
+        bool looksLikeSpdx = SpdxParser.IsSpdx(root);
+        bool looksLikeCycloneDx = CycloneDxParser.IsCycloneDx(root);
+        if (looksLikeSpdx && looksLikeCycloneDx)
+        {
+            throw new SbomParseException(SbomParseFailure.WrongDocumentKind);
+        }
+
+        // Both parsers land the same CycloneDxDocument shape — see SpdxParser's own doc comment
+        // for why that is the whole point of the design — so nothing downstream of this call needs
+        // to know which format was on the wire. CycloneDxParser.Parse owns every CycloneDX-specific
+        // refusal (missing bomFormat, an out-of-range specVersion) exactly as it did before SPDX
+        // ingest existed.
+        return looksLikeSpdx
+            ? (SpdxParser.Parse(root), "spdx-json")
+            : (CycloneDxParser.Parse(root), "cyclonedx-json");
+    }
 
     private static async Task<JsonDocument> ReadJsonAsync(string tempPath, CancellationToken ct)
     {

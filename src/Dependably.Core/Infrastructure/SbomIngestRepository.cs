@@ -39,7 +39,13 @@ public sealed record SbomComponentUpsert(
     string? ComponentHashes = null,
     string? VersionRange = null,
     bool? IsExternal = null,
-    bool? ManifestDevDeclared = null);
+    bool? ManifestDevDeclared = null,
+    string? ComponentProducer = null,
+    string? LicenseUrl = null,
+    bool? LicenseNamed = null,
+    string? AdditionalIdentifiers = null,
+    string? ExplicitUnknownFields = null,
+    bool ContainmentDeclared = false);
 
 /// <summary>What one merge did, for the upload response.</summary>
 public sealed record SbomComponentMergeCounts(int Total, int Added, int Removed, int Unchanged);
@@ -58,8 +64,11 @@ public sealed class SbomComponentRow
     public string? DependencyKind { get; set; }
     public string? DependencyPath { get; set; }
     public string? LicenseSpdx { get; set; }
+    public string? LicenseUrl { get; set; }
+    public bool? LicenseNamed { get; set; }
     public string? Description { get; set; }
     public string? ComponentAuthor { get; set; }
+    public string? ComponentProducer { get; set; }
     public string? Copyright { get; set; }
     public string? ComponentGroup { get; set; }
     public string? WebsiteUrl { get; set; }
@@ -69,6 +78,14 @@ public sealed class SbomComponentRow
     public string? ComponentHashes { get; set; }
     public string? VersionRange { get; set; }
     public bool? IsExternal { get; set; }
+    public string? AdditionalIdentifiers { get; set; }
+    public string? ExplicitUnknownFields { get; set; }
+    /// <summary>
+    /// SPDX-only D17 signal: true when this component was the <c>relatedSpdxElement</c> of a
+    /// <c>CONTAINS</c> relationship — see <see cref="CycloneDxComponent.ContainmentDeclared"/>'s
+    /// own doc comment. Never feeds <see cref="DependencyKind"/>/<see cref="DependencyPath"/>.
+    /// </summary>
+    public bool ContainmentDeclared { get; set; }
     /// <summary>The reachability scanner's current answer ('dev'/'runtime'/'unknown') — read so the
     /// merge can tell whether a manifest-declared value would fill silence or downgrade evidence.</summary>
     public string DependencyScope { get; set; } = "unknown";
@@ -198,13 +215,18 @@ public sealed class SbomIngestRepository
                version AS Version, name AS Name, component_type AS ComponentType,
                sbom_scope AS SbomScope, dependency_kind AS DependencyKind,
                dependency_path AS DependencyPath, license_spdx AS LicenseSpdx,
+               license_url AS LicenseUrl, license_is_named AS LicenseNamed,
                dependency_scope AS DependencyScope,
                description AS Description, component_author AS ComponentAuthor,
+               component_producer AS ComponentProducer,
                copyright AS Copyright, component_group AS ComponentGroup,
                website_url AS WebsiteUrl, vcs_url AS VcsUrl,
                issue_tracker_url AS IssueTrackerUrl, distribution_url AS DistributionUrl,
                component_hashes AS ComponentHashes,
-               version_range AS VersionRange, is_external AS IsExternal
+               version_range AS VersionRange, is_external AS IsExternal,
+               additional_identifiers AS AdditionalIdentifiers,
+               explicit_unknown_fields AS ExplicitUnknownFields,
+               containment_declared AS ContainmentDeclared
         FROM sbom_components
         WHERE org_id = @orgId AND project_version_id = @projectVersionId
         """;
@@ -317,12 +339,15 @@ public sealed class SbomIngestRepository
         && row.DependencyKind == component.DependencyKind
         && row.DependencyPath == component.DependencyPath
         && row.LicenseSpdx == component.LicenseSpdx
+        && row.LicenseUrl == component.LicenseUrl
+        && row.LicenseNamed == component.LicenseNamed
         // Every column the update writes has to be compared here. A field compared nowhere is a
         // field that never updates on a row that already exists: the merge would report the
         // component unchanged and skip the write, so widening the projection would appear to do
         // nothing for every component whose identity happens to be stable.
         && row.Description == component.Description
         && row.ComponentAuthor == component.ComponentAuthor
+        && row.ComponentProducer == component.ComponentProducer
         && row.Copyright == component.Copyright
         && row.ComponentGroup == component.ComponentGroup
         && row.WebsiteUrl == component.WebsiteUrl
@@ -332,6 +357,9 @@ public sealed class SbomIngestRepository
         && row.ComponentHashes == component.ComponentHashes
         && row.VersionRange == component.VersionRange
         && row.IsExternal == component.IsExternal
+        && row.AdditionalIdentifiers == component.AdditionalIdentifiers
+        && row.ExplicitUnknownFields == component.ExplicitUnknownFields
+        && row.ContainmentDeclared == component.ContainmentDeclared
         // A manifest declaration that would fill 'unknown' is a real write even though no column
         // compared above changed — so it must not read as unchanged, or the fill never happens on
         // a component whose other facts are already stable.
@@ -342,6 +370,25 @@ public sealed class SbomIngestRepository
     // 'unknown' default. Once a reachability scanner has asserted 'dev' or 'runtime' the SBOM side
     // never touches the column again — see the class doc comment and UpdateComponentAsync's own
     // CASE WHEN for why a re-uploaded SBOM can never downgrade a scanner verdict.
+
+    // license_is_named, is_external and containment_declared are INTEGER (0/1) columns on both
+    // providers, never Postgres boolean — Npgsql maps a raw bool/bool? straight to `boolean`,
+    // which has no implicit cast to `integer` and throws 42804 on every write. Every bool-shaped
+    // Dapper parameter this repository binds against an INTEGER column goes through this
+    // coercion, the same pattern CacheArtifactRepository.hasInstallScript already uses for a
+    // non-nullable bool.
+    private static int? ToIntFlag(bool? value) => value switch
+    {
+        true => 1,
+        false => 0,
+        null => null,
+    };
+
+    // containment_declared is non-nullable, so this overload never has a null arm to fall
+    // through — kept beside the nullable one rather than routing a non-nullable bool through it
+    // via an implicit lift, which would read as tolerating a state this column cannot hold.
+    private static int ToIntFlag(bool value) => value ? 1 : 0;
+
     private static Task InsertComponentAsync(
         DbConnection conn,
         DbTransaction dbTx,
@@ -355,18 +402,22 @@ public sealed class SbomIngestRepository
             INSERT INTO sbom_components (
                 id, org_id, project_version_id, purl, ecosystem, purl_name, version, name,
                 component_type, sbom_scope, dependency_kind, dependency_path, license_spdx,
+                license_url, license_is_named,
                 dependency_scope, dependency_scope_source,
-                description, component_author, copyright, component_group,
+                description, component_author, component_producer, copyright, component_group,
                 website_url, vcs_url, issue_tracker_url, distribution_url, component_hashes,
-                version_range, is_external,
+                version_range, is_external, additional_identifiers, explicit_unknown_fields,
+                containment_declared,
                 created_at)
             VALUES (
                 @id, @orgId, @projectVersionId, @purl, @ecosystem, @purlName, @version, @name,
                 @componentType, @sbomScope, @dependencyKind, @dependencyPath, @licenseSpdx,
+                @licenseUrl, @licenseNamed,
                 @dependencyScope, @dependencyScopeSource,
-                @description, @componentAuthor, @copyright, @componentGroup,
+                @description, @componentAuthor, @componentProducer, @copyright, @componentGroup,
                 @websiteUrl, @vcsUrl, @issueTrackerUrl, @distributionUrl, @componentHashes,
-                @versionRange, @isExternal,
+                @versionRange, @isExternal, @additionalIdentifiers, @explicitUnknownFields,
+                @containmentDeclared,
                 @now)
             """,
             new
@@ -384,6 +435,8 @@ public sealed class SbomIngestRepository
                 dependencyKind = component.DependencyKind,
                 dependencyPath = component.DependencyPath,
                 licenseSpdx = component.LicenseSpdx,
+                licenseUrl = component.LicenseUrl,
+                licenseNamed = ToIntFlag(component.LicenseNamed),
                 // A brand-new row has no scanner verdict to protect, so a manifest declaration
                 // fills the column outright; NOT NULL means the unmapped case must still be a
                 // string, never a null parameter.
@@ -396,6 +449,7 @@ public sealed class SbomIngestRepository
                 dependencyScopeSource = component.ManifestDevDeclared is null ? null : "manifest",
                 description = component.Description,
                 componentAuthor = component.ComponentAuthor,
+                componentProducer = component.ComponentProducer,
                 copyright = component.Copyright,
                 componentGroup = component.ComponentGroup,
                 websiteUrl = component.WebsiteUrl,
@@ -404,7 +458,10 @@ public sealed class SbomIngestRepository
                 distributionUrl = component.DistributionUrl,
                 componentHashes = component.ComponentHashes,
                 versionRange = component.VersionRange,
-                isExternal = component.IsExternal,
+                isExternal = ToIntFlag(component.IsExternal),
+                additionalIdentifiers = component.AdditionalIdentifiers,
+                explicitUnknownFields = component.ExplicitUnknownFields,
+                containmentDeclared = ToIntFlag(component.ContainmentDeclared),
                 now = now.ToUtcIso(),
             },
             dbTx,
@@ -429,6 +486,8 @@ public sealed class SbomIngestRepository
                 dependency_kind = @dependencyKind,
                 dependency_path = @dependencyPath,
                 license_spdx = @licenseSpdx,
+                license_url = @licenseUrl,
+                license_is_named = @licenseNamed,
                 dependency_scope = CASE
                     WHEN dependency_scope = 'unknown' AND @manifestDependencyScope IS NOT NULL
                     THEN @manifestDependencyScope
@@ -441,6 +500,7 @@ public sealed class SbomIngestRepository
                 END,
                 description = @description,
                 component_author = @componentAuthor,
+                component_producer = @componentProducer,
                 copyright = @copyright,
                 component_group = @componentGroup,
                 website_url = @websiteUrl,
@@ -449,7 +509,10 @@ public sealed class SbomIngestRepository
                 distribution_url = @distributionUrl,
                 component_hashes = @componentHashes,
                 version_range = @versionRange,
-                is_external = @isExternal
+                is_external = @isExternal,
+                additional_identifiers = @additionalIdentifiers,
+                explicit_unknown_fields = @explicitUnknownFields,
+                containment_declared = @containmentDeclared
             WHERE id = @componentId AND org_id = @orgId
             """,
             new
@@ -465,6 +528,8 @@ public sealed class SbomIngestRepository
                 dependencyKind = component.DependencyKind,
                 dependencyPath = component.DependencyPath,
                 licenseSpdx = component.LicenseSpdx,
+                licenseUrl = component.LicenseUrl,
+                licenseNamed = ToIntFlag(component.LicenseNamed),
                 // Unlike the insert, an existing row may already carry a scanner verdict, so the
                 // fill has to be conditional in the SQL itself (CASE WHEN ... = 'unknown') rather
                 // than resolved here — the read that decides "unknown" and the write that would
@@ -478,6 +543,7 @@ public sealed class SbomIngestRepository
                 },
                 description = component.Description,
                 componentAuthor = component.ComponentAuthor,
+                componentProducer = component.ComponentProducer,
                 copyright = component.Copyright,
                 componentGroup = component.ComponentGroup,
                 websiteUrl = component.WebsiteUrl,
@@ -486,7 +552,10 @@ public sealed class SbomIngestRepository
                 distributionUrl = component.DistributionUrl,
                 componentHashes = component.ComponentHashes,
                 versionRange = component.VersionRange,
-                isExternal = component.IsExternal,
+                isExternal = ToIntFlag(component.IsExternal),
+                additionalIdentifiers = component.AdditionalIdentifiers,
+                explicitUnknownFields = component.ExplicitUnknownFields,
+                containmentDeclared = ToIntFlag(component.ContainmentDeclared),
             },
             dbTx,
             cancellationToken: ct));

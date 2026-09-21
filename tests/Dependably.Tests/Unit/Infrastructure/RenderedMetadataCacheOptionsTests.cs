@@ -6,7 +6,7 @@ namespace Dependably.Tests.Unit.Infrastructure;
 /// <summary>
 /// Pins the configurable-TTL fix for the rendered-metadata response caches (npm packument,
 /// NuGet registration, PyPI simple index, Maven metadata): those TTLs used to be compile-time
-/// constants with no env-var knob, making CONTRIBUTING.md's documented HA mitigation ("keep
+/// constants with no env-var knob, making OPERATIONS.md's documented HA mitigation ("keep
 /// metadata TTLs short in multi-instance deployments") impossible to apply. This is what an
 /// operator sets to shorten the post-publish staleness window on non-publishing replicas.
 /// </summary>

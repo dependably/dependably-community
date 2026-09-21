@@ -23,7 +23,7 @@ public sealed class OrgAccessGuardTests : IAsyncLifetime
     public async Task InitializeAsync()
     {
         await new SchemaInitializer(_db).InitializeAsync();
-        _guard = new OrgAccessGuard(_db);
+        _guard = new OrgAccessGuard(_db, TestProblems.Create());
 
         await using var conn = await _db.OpenAsync();
         await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o1','acme'), ('o2','other')");
@@ -302,7 +302,28 @@ public sealed class OrgAccessGuardTests : IAsyncLifetime
         var http = HttpContextFor("o1");
         var result = await _guard.AuthorizeCapAsync(
             Principal("u-member"), http, Capabilities.TenantConfigure);
-        Assert.IsType<ForbidResult>(result);
+        // The guard answers a capability shortfall with a localized problem body now, not a
+        // bare ForbidResult — a scheme-delegated forbid wrote no body at all.
+        Assert.Equal(StatusCodes.Status403Forbidden, Assert.IsType<ObjectResult>(result).StatusCode);
+    }
+
+    [Fact]
+    public async Task AuthorizeCapAsync_Forbidden_CarriesALocalizedProblemBody()
+    {
+        // Status alone is not the fix — the old ForbidResult was already a 403. What was
+        // missing is a body: the scheme's forbid handler writes none, so an API caller got a
+        // bare 403 with no content-type and the SPA rendered an empty banner (it falls back
+        // to Response.statusText, which is "" over HTTP/2). Pin the body, or a regression to
+        // a bodyless forbid passes a status-only assertion.
+        var http = HttpContextFor("o1");
+        var result = await _guard.AuthorizeCapAsync(
+            Principal("u-member"), http, Capabilities.TenantConfigure);
+
+        var obj = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status403Forbidden, obj.StatusCode);
+        var problem = Assert.IsType<ProblemDetails>(obj.Value);
+        // EchoLocalizer returns the key verbatim, so this pins the key rather than the copy.
+        Assert.Equal("error.auth.forbidden", problem.Detail);
     }
 
     [Fact]
@@ -355,7 +376,9 @@ public sealed class OrgAccessGuardTests : IAsyncLifetime
         var http = HttpContextFor("o1");
         var result = await _guard.AuthorizeCapAsync(
             Principal("u-admin"), http, Capabilities.TenantAdmin);
-        Assert.IsType<ForbidResult>(result);
+        // The guard answers a capability shortfall with a localized problem body now, not a
+        // bare ForbidResult — a scheme-delegated forbid wrote no body at all.
+        Assert.Equal(StatusCodes.Status403Forbidden, Assert.IsType<ObjectResult>(result).StatusCode);
     }
 
     [Fact]

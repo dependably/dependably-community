@@ -4525,6 +4525,240 @@
         <target>Vulnérabilités</target>
       </segment>
     </unit>
+    <unit id="sbomAnalysis.conformance.category.component">
+      <segment state="translated">
+        <source>Component data</source>
+        <target>Données de composant</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.category.metadata">
+      <segment state="translated">
+        <source>SBOM metadata</source>
+        <target>Métadonnées du SBOM</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.category.practice">
+      <segment state="translated">
+        <source>Practices</source>
+        <target>Pratiques</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.componentTotal">
+      <segment state="translated">
+        <source>{count, plural, one {# component} other {# components}}</source>
+        <target>{count, plural, one {# composant} other {# composants}}</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.counts">
+      <segment state="translated">
+        <source>{present} present · {explicitUnknown} explicitly unknown · {notAssessed} not assessed · {absent} absent (of {total})</source>
+        <target>{present} présents · {explicitUnknown} explicitement inconnus · {notAssessed} non évalués · {absent} absents (sur {total})</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.element.D1">
+      <segment state="translated">
+        <source>SBOM Author</source>
+        <target>Auteur du SBOM</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.element.D10">
+      <segment state="translated">
+        <source>Component Producer</source>
+        <target>Producteur du composant</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.element.D11">
+      <segment state="translated">
+        <source>Component Name</source>
+        <target>Nom du composant</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.element.D12">
+      <segment state="translated">
+        <source>Component Version</source>
+        <target>Version du composant</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.element.D13">
+      <segment state="translated">
+        <source>Component Identifiers</source>
+        <target>Identifiants du composant</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.element.D14">
+      <segment state="translated">
+        <source>Component Hash Value</source>
+        <target>Valeur de hachage du composant</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.element.D15">
+      <segment state="translated">
+        <source>Component Hash Algorithm</source>
+        <target>Algorithme de hachage du composant</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.element.D16">
+      <segment state="translated">
+        <source>Component Licence</source>
+        <target>Licence du composant</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.element.D17">
+      <segment state="translated">
+        <source>Component Dependency Relationship</source>
+        <target>Relation de dépendance du composant</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.element.D2">
+      <segment state="translated">
+        <source>SBOM Author Signature</source>
+        <target>Signature de l&apos;auteur du SBOM</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.element.D3">
+      <segment state="translated">
+        <source>SBOM Data Format Name</source>
+        <target>Nom du format de données du SBOM</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.element.D4">
+      <segment state="translated">
+        <source>SBOM Data Format Version</source>
+        <target>Version du format de données du SBOM</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.element.D5">
+      <segment state="translated">
+        <source>SBOM Generation Context</source>
+        <target>Contexte de génération du SBOM</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.element.D6">
+      <segment state="translated">
+        <source>SBOM Timestamp</source>
+        <target>Horodatage du SBOM</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.element.D7">
+      <segment state="translated">
+        <source>SBOM Tool Name</source>
+        <target>Nom de l&apos;outil du SBOM</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.element.D8">
+      <segment state="translated">
+        <source>SBOM Tool Version</source>
+        <target>Version de l&apos;outil du SBOM</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.element.D9">
+      <segment state="translated">
+        <source>SBOM Version</source>
+        <target>Version du SBOM</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.element.P2">
+      <segment state="translated">
+        <source>Coverage</source>
+        <target>Couverture</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.element.P4">
+      <segment state="translated">
+        <source>Explicit Unknowns</source>
+        <target>Inconnus explicites</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.element.P5">
+      <segment state="translated">
+        <source>Frequency</source>
+        <target>Fréquence</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.element.P6">
+      <segment state="translated">
+        <source>Machine-Processable Data</source>
+        <target>Données lisibles par machine</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.help">
+      <segment state="translated">
+        <source>How this version&apos;s stored SBOM document scores against the CISA 2026 minimum elements. An element missing entirely and one the document explicitly marks unknown are shown separately - the second is honest supplier behaviour, not a failure.</source>
+        <target>Comment le document SBOM stocké de cette version se compare aux éléments minimaux CISA 2026. Un élément entièrement absent et un élément que le document déclare explicitement inconnu sont affichés séparément - le second est un comportement honnête du fournisseur, pas un échec.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.hide">
+      <segment state="translated">
+        <source>Hide CISA conformance</source>
+        <target>Masquer la conformité CISA</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.loadError">
+      <segment state="translated">
+        <source>Could not load the conformance scorecard.</source>
+        <target>Impossible de charger le tableau de conformité.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.noDocument">
+      <segment state="translated">
+        <source>This version has no SBOM document to score.</source>
+        <target>Cette version ne comporte aucun document SBOM à évaluer.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.reason.notApplicable">
+      <segment state="translated">
+        <source>This document&apos;s format has no way to carry this element.</source>
+        <target>Le format de ce document ne permet pas de porter cet élément.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.reason.notAssessed">
+      <segment state="translated">
+        <source>dependably does not read this element from an uploaded document yet.</source>
+        <target>dependably ne lit pas encore cet élément dans un document téléversé.</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.show">
+      <segment state="translated">
+        <source>Show CISA conformance</source>
+        <target>Afficher la conformité CISA</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.state.absent">
+      <segment state="translated">
+        <source>Absent</source>
+        <target>Absent</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.state.explicitlyUnknown">
+      <segment state="translated">
+        <source>Explicitly unknown</source>
+        <target>Explicitement inconnu</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.state.notApplicable">
+      <segment state="translated">
+        <source>Not applicable</source>
+        <target>Non applicable</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.state.notAssessed">
+      <segment state="translated">
+        <source>Not assessed</source>
+        <target>Non évalué</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.state.present">
+      <segment state="translated">
+        <source>Present</source>
+        <target>Présent</target>
+      </segment>
+    </unit>
+    <unit id="sbomAnalysis.conformance.title">
+      <segment state="translated">
+        <source>CISA 2026 conformance</source>
+        <target>Conformité CISA 2026</target>
+      </segment>
+    </unit>
     <unit id="sbomAnalysis.copyPurl">
       <segment state="translated">
         <source>Copy PURL</source>
@@ -5729,6 +5963,138 @@
       <segment state="translated">
         <source>Policy violations only</source>
         <target>Violations de politique seulement</target>
+      </segment>
+    </unit>
+    <unit id="sbomExport.exporting">
+      <segment state="translated">
+        <source>Exporting…</source>
+        <target>Exportation en cours…</target>
+      </segment>
+    </unit>
+    <unit id="sbomExport.format.cyclonedxJson">
+      <segment state="translated">
+        <source>CycloneDX JSON</source>
+        <target>CycloneDX JSON</target>
+      </segment>
+    </unit>
+    <unit id="sbomExport.format.cyclonedxJsonHelp">
+      <segment state="translated">
+        <source>The only format offered today. SPDX will appear here once it ships.</source>
+        <target>Le seul format offert aujourd&apos;hui. SPDX apparaîtra ici une fois livré.</target>
+      </segment>
+    </unit>
+    <unit id="sbomExport.format.label">
+      <segment state="translated">
+        <source>Format</source>
+        <target>Format</target>
+      </segment>
+    </unit>
+    <unit id="sbomExport.scope.allHelp">
+      <segment state="translated">
+        <source>Nothing is excluded.</source>
+        <target>Rien n&apos;est exclu.</target>
+      </segment>
+    </unit>
+    <unit id="sbomExport.scope.devHelp">
+      <segment state="translated">
+        <source>Only components scoped dev.</source>
+        <target>Seulement les composants de portée dev.</target>
+      </segment>
+    </unit>
+    <unit id="sbomExport.scope.label">
+      <segment state="translated">
+        <source>Dependency scope</source>
+        <target>Portée des dépendances</target>
+      </segment>
+    </unit>
+    <unit id="sbomExport.scope.prodHelp">
+      <segment state="translated">
+        <source>Excludes dev dependencies and any component the SBOM itself marked excluded. Components with an unknown scope are kept — an unclassified dependency may well ship.</source>
+        <target>Exclut les dépendances de développement et tout composant que le SBOM lui-même a marqué exclu. Les composants de portée inconnue sont conservés — une dépendance non classée peut fort bien être livrée.</target>
+      </segment>
+    </unit>
+    <unit id="sbomExport.specVersion.label">
+      <segment state="translated">
+        <source>CycloneDX spec version</source>
+        <target>Version de la spécification CycloneDX</target>
+      </segment>
+    </unit>
+    <unit id="sbomExport.specVersion.v16">
+      <segment state="translated">
+        <source>1.6</source>
+        <target>1.6</target>
+      </segment>
+    </unit>
+    <unit id="sbomExport.specVersion.v16Help">
+      <segment state="translated">
+        <source>Choose this for a consumer that rejects 1.7 — GitLab dependency scanning, or Dependency-Track before 5.1.0.</source>
+        <target>Choisissez cette version pour un destinataire qui rejette la 1.7 — l&apos;analyse des dépendances de GitLab, ou Dependency-Track avant la 5.1.0.</target>
+      </segment>
+    </unit>
+    <unit id="sbomExport.specVersion.v17">
+      <segment state="translated">
+        <source>1.7 (default)</source>
+        <target>1.7 (par défaut)</target>
+      </segment>
+    </unit>
+    <unit id="sbomExport.specVersion.v17Help">
+      <segment state="translated">
+        <source>The current CycloneDX spec version.</source>
+        <target>La version actuelle de la spécification CycloneDX.</target>
+      </segment>
+    </unit>
+    <unit id="sbomExport.submit">
+      <segment state="translated">
+        <source>Export</source>
+        <target>Exporter</target>
+      </segment>
+    </unit>
+    <unit id="sbomExport.title">
+      <segment state="translated">
+        <source>Export options</source>
+        <target>Options d&apos;exportation</target>
+      </segment>
+    </unit>
+    <unit id="sbomExport.variant.inventory">
+      <segment state="translated">
+        <source>Inventory (CycloneDX)</source>
+        <target>Inventaire (CycloneDX)</target>
+      </segment>
+    </unit>
+    <unit id="sbomExport.variant.inventoryHelp">
+      <segment state="translated">
+        <source>Every component this version ships, with licences and the dependency graph. No vulnerability data.</source>
+        <target>Chaque composant que cette version livre, avec les licences et le graphe de dépendances. Aucune donnée de vulnérabilité.</target>
+      </segment>
+    </unit>
+    <unit id="sbomExport.variant.label">
+      <segment state="translated">
+        <source>Document</source>
+        <target>Document</target>
+      </segment>
+    </unit>
+    <unit id="sbomExport.variant.vdr">
+      <segment state="translated">
+        <source>With vulnerabilities (VDR)</source>
+        <target>Avec vulnérabilités (VDR)</target>
+      </segment>
+    </unit>
+    <unit id="sbomExport.variant.vdrHelp">
+      <segment state="translated">
+        <source>The inventory plus every advisory this version&apos;s components carry, with the current VEX and priority state.</source>
+        <target>L&apos;inventaire, plus chaque avis porté par les composants de cette version, avec l&apos;état VEX et de priorité actuel.</target>
+      </segment>
+    </unit>
+    <unit id="sbomExport.variant.vex">
+      <segment state="translated">
+        <source>VEX only</source>
+        <target>VEX seulement</target>
+      </segment>
+    </unit>
+    <unit id="sbomExport.variant.vexHelp">
+      <segment state="translated">
+        <source>Vulnerability statements only — no component list. For a recipient who already has the inventory and wants just the triage state.</source>
+        <target>Déclarations de vulnérabilité seulement — sans liste de composants. Pour un destinataire qui possède déjà l&apos;inventaire et ne veut que l&apos;état de triage.</target>
       </segment>
     </unit>
     <unit id="sbomUpload.autoCreate">
@@ -8061,6 +8427,108 @@
       <segment state="translated">
         <source>Proxy settings saved.</source>
         <target>Paramètres proxy enregistrés.</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.sbomSigningKey.algorithm">
+      <segment state="translated">
+        <source>Algorithm</source>
+        <target>Algorithme</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.sbomSigningKey.copied">
+      <segment state="translated">
+        <source>Copied</source>
+        <target>Copié</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.sbomSigningKey.copy">
+      <segment state="translated">
+        <source>Copy public key</source>
+        <target>Copier la clé publique</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.sbomSigningKey.createdAt">
+      <segment state="translated">
+        <source>Created</source>
+        <target>Créée le</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.sbomSigningKey.hint">
+      <segment state="translated">
+        <source>Every SBOM this org exports is signed with this key, so a recipient can verify the document&apos;s author and that it was not modified after signing. The public key below is what a consumer pins to verify a signature.</source>
+        <target>Chaque SBOM exporté par cette organisation est signé avec cette clé, afin qu&apos;un destinataire puisse vérifier l&apos;auteur du document et qu&apos;il n&apos;a pas été modifié après la signature. La clé publique ci-dessous est celle qu&apos;un consommateur épingle pour vérifier une signature.</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.sbomSigningKey.historyHint">
+      <segment state="translated">
+        <source>Retired and revoked keys stay listed here and at the public verification endpoint, because a document signed with one of them must stay verifiable.</source>
+        <target>Les clés retirées et révoquées restent répertoriées ici et sur le point de terminaison de vérification public, car un document signé avec l&apos;une d&apos;elles doit rester vérifiable.</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.sbomSigningKey.historyTitle">
+      <segment state="translated">
+        <source>Key history</source>
+        <target>Historique des clés</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.sbomSigningKey.keyId">
+      <segment state="translated">
+        <source>Key ID (fingerprint)</source>
+        <target>ID de clé (empreinte)</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.sbomSigningKey.keyUnavailable">
+      <segment state="translated">
+        <source>This organization has an active signing key, but this node cannot read it right now — its own master key is unconfigured, or it is an edge node. Exports answered by a fully configured node are still signed normally.</source>
+        <target>Cette organisation possède une clé de signature active, mais ce nœud ne peut pas la lire actuellement — sa propre clé maîtresse n&apos;est pas configurée, ou il s&apos;agit d&apos;un nœud en périphérie (edge). Les exportations traitées par un nœud entièrement configuré restent signées normalement.</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.sbomSigningKey.noMasterKey">
+      <segment state="translated">
+        <source>No signing key has been created for this organization: DEPENDABLY_MASTER_KEY is not configured on this instance, so exported SBOM documents are unsigned.</source>
+        <target>Aucune clé de signature n&apos;a été créée pour cette organisation : DEPENDABLY_MASTER_KEY n&apos;est pas configuré sur cette instance, donc les documents SBOM exportés ne sont pas signés.</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.sbomSigningKey.publicKey">
+      <segment state="translated">
+        <source>Public key (PEM)</source>
+        <target>Clé publique (PEM)</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.sbomSigningKey.retired">
+      <segment state="translated">
+        <source>Retired</source>
+        <target>Retirée</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.sbomSigningKey.retiredAt">
+      <segment state="translated">
+        <source>Retired</source>
+        <target>Retirée le</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.sbomSigningKey.revoked">
+      <segment state="translated">
+        <source>Revoked</source>
+        <target>Révoquée</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.sbomSigningKey.rotate">
+      <segment state="translated">
+        <source>Rotate key</source>
+        <target>Faire pivoter la clé</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.sbomSigningKey.rotateConfirm">
+      <segment state="translated">
+        <source>Rotate the SBOM signing key? The current key is retired, not deleted — its public half stays published, so documents already signed with it remain verifiable. New exports will be signed with the freshly generated key.</source>
+        <target>Faire pivoter la clé de signature SBOM? La clé actuelle est retirée, et non supprimée — sa moitié publique reste publiée, donc les documents déjà signés avec elle restent vérifiables. Les nouvelles exportations seront signées avec la clé nouvellement générée.</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.sbomSigningKey.title">
+      <segment state="translated">
+        <source>SBOM signing key</source>
+        <target>Clé de signature SBOM</target>
       </segment>
     </unit>
     <unit id="settings.proxy.upstreamRegistries.add">

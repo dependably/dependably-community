@@ -455,7 +455,7 @@ public sealed class ProjectsControllerTests : IAsyncLifetime
         var blobs = new InMemoryBlobStore();
         var controller = new ProjectsController(
             Repo(),
-            new OrgAccessGuard(_fixture.Store),
+            new OrgAccessGuard(_fixture.Store, TestProblems.Create()),
             new AuditRepository(_fixture.Store, null, _clock),
             new SbomIngestRepository(_fixture.Store),
             new ProblemResults(new EchoLocalizer()),

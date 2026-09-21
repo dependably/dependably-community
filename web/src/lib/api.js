@@ -468,6 +468,14 @@ export const api = {
   // Signature trust anchors — per-org public key material for signature verification.
   getHexSigningKey: () => req('GET', '/hex/signing-key'),
   rotateHexSigningKey: () => req('POST', '/hex/signing-key/rotate'),
+  // SBOM author-signing key (ADR-sbom-author-signature). getSbomSigningKey returns the active
+  // key plus a `state` string (signed / unsigned-no-master-key / unsigned-key-unavailable);
+  // getSbomSigningKeys is the full history — active, retired and revoked — the same
+  // unauthenticated list a document's consumer fetches to verify a signature, reused here so
+  // Settings can show retired keys without a second, admin-only endpoint.
+  getSbomSigningKey: () => req('GET', '/sbom-signing-key'),
+  rotateSbomSigningKey: () => req('POST', '/sbom-signing-key/rotate'),
+  getSbomSigningKeys: () => req('GET', '/sbom-signing-keys'),
   getTrustAnchors: () => req('GET', '/trust-anchors'),
   addTrustAnchor: ({ ecosystem, anchorKind, material, label, keyId }) =>
     req('POST', '/trust-anchors', { ecosystem, anchorKind, material, label: label || null, keyId: keyId || null }),
@@ -649,6 +657,11 @@ export const api = {
   listProjectVersionDocuments: (projectId, versionId) =>
     req('GET', `/projects/${encodeURIComponent(projectId)}/versions/${encodeURIComponent(versionId)}/documents`),
 
+  // The CISA 2026 minimum-elements scorecard for the version's stored SBOM document. 404 when
+  // the version carries no doc_type='sbom' row (a VEX- or SARIF-only upload has nothing to score).
+  getSbomConformance: (projectId, versionId) =>
+    req('GET', `/projects/${encodeURIComponent(projectId)}/versions/${encodeURIComponent(versionId)}/documents/sbom/conformance`),
+
   // On-demand component vulnerability rescan for one project version. 1-hour cooldown,
   // enforced server-side and reported back as a 429 + Retry-After the caller reads off
   // ApiError.retryAfter, the same shape as the package-plane rescanVersion above.
@@ -657,24 +670,30 @@ export const api = {
 
   // Exports are normalized re-renders of the version's current state, produced fresh on each
   // request. `downloadBlob` is content-type agnostic and prefers the server's own filename.
+  // `options` is the SbomExportDialog `export` event detail — { variant, format, specVersion,
+  // scope } — forwarded verbatim as query params; the server treats every one of them as
+  // optional and absent/default values reproduce the pre-dialog behaviour exactly. `scope` is
+  // the same all|prod|dev vocabulary the component table's own scope filter sends.
   // Collection-scoped: one document covering every project beneath the folder, each contributing
   // its latest version. Collections only — a plain project id is 404 here, because it has its own
   // version-scoped export and answering a different question would ship the wrong document.
-  exportCollectionSbom: (collectionId, variant, fallbackFilename) =>
+  exportCollectionSbom: (collectionId, options, fallbackFilename) =>
     downloadBlob(
       `/projects/${encodeURIComponent(collectionId)}/export/sbom`,
-      { variant },
+      options,
       fallbackFilename,
     ),
-  exportProjectVersionSbom: (projectId, versionId, variant, fallbackFilename) =>
+  exportProjectVersionSbom: (projectId, versionId, options, fallbackFilename) =>
     downloadBlob(
       `/projects/${encodeURIComponent(projectId)}/versions/${encodeURIComponent(versionId)}/export/sbom`,
-      { variant },
+      options,
       fallbackFilename),
-  exportProjectVersionVex: (projectId, versionId, fallbackFilename) =>
+  // A VEX document has no components, so only specVersion applies — variant/format/scope are
+  // not query parameters this route accepts.
+  exportProjectVersionVex: (projectId, versionId, specVersion, fallbackFilename) =>
     downloadBlob(
       `/projects/${encodeURIComponent(projectId)}/versions/${encodeURIComponent(versionId)}/export/vex`,
-      {},
+      { specVersion },
       fallbackFilename),
 
   // The receipt: the uploaded document's own bytes, not a re-render of them.

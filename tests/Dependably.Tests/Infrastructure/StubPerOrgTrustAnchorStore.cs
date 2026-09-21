@@ -121,6 +121,20 @@ public sealed class StubPerOrgTrustAnchorStore : IPerOrgTrustAnchorStore
         return Task.FromResult(material);
     }
 
+    public Task<IReadOnlyDictionary<string, byte[]>> GetSbomKeysAsync(
+        string orgId, CancellationToken ct = default)
+    {
+        var anchors = _anchors
+            .Where(a => a.OrgId == orgId &&
+                        string.Equals(a.Ecosystem, "sbom", StringComparison.Ordinal))
+            .Select(a => a.Material)
+            .ToList();
+
+        var logger = Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
+        var map = Dependably.Protocol.Provenance.SbomSignatureKeyStore.BuildSpkiMap(anchors, logger);
+        return Task.FromResult(map);
+    }
+
     public Task<IReadOnlyList<RSA>> GetApkKeysAsync(
         string orgId, CancellationToken ct = default)
     {

@@ -94,7 +94,13 @@ public sealed class ProjectRepositoryTests : IAsyncLifetime
         var api = await repo.CreateAsync(OrgA, new NewProject("api", ProjectKinds.Project), "u1");
 
         var moved = await repo.UpdateAsync(
-            OrgA, api.Id, "api", ProjectClassifiers.Default, null, folder.Id, isActive: true);
+            OrgA, api.Id,
+            new ProjectFields(
+                Name: "api",
+                Classifier: ProjectClassifiers.Default,
+                Description: null,
+                ParentId: folder.Id,
+                IsActive: true));
 
         Assert.Equal(folder.Id, moved!.ParentId);
         Assert.Equal([folder.Id], (await repo.ListAncestorsAsync(OrgA, api.Id)).Select(c => c.Id));
@@ -107,7 +113,13 @@ public sealed class ProjectRepositoryTests : IAsyncLifetime
         var folder = await repo.CreateAsync(OrgA, new NewProject("platform", ProjectKinds.Collection), "u1");
         var api = await repo.CreateAsync(OrgA, new NewProject("api", ProjectKinds.Project, ParentId: folder.Id), "u1");
 
-        var moved = await repo.UpdateAsync(OrgA, api.Id, "api", ProjectClassifiers.Default, null, null, isActive: true);
+        var moved = await repo.UpdateAsync(OrgA, api.Id,
+            new ProjectFields(
+                Name: "api",
+                Classifier: ProjectClassifiers.Default,
+                Description: null,
+                ParentId: null,
+                IsActive: true));
 
         Assert.Null(moved!.ParentId);
         Assert.Empty(await repo.ListAncestorsAsync(OrgA, api.Id));
@@ -124,7 +136,13 @@ public sealed class ProjectRepositoryTests : IAsyncLifetime
             OrgA, new NewProject("inner", ProjectKinds.Collection, ParentId: middle.Id), "u1");
 
         var ex = await Assert.ThrowsAsync<ProjectResolutionException>(() => repo.UpdateAsync(
-            OrgA, outer.Id, "outer", ProjectClassifiers.Default, null, inner.Id, isActive: true));
+            OrgA, outer.Id,
+            new ProjectFields(
+                Name: "outer",
+                Classifier: ProjectClassifiers.Default,
+                Description: null,
+                ParentId: inner.Id,
+                IsActive: true)));
 
         Assert.Equal(ProjectResolutionReason.ParentIsDescendant, ex.Reason);
         // The adversarial half: a refusal that still wrote would leave outer/middle/inner in a
@@ -140,7 +158,13 @@ public sealed class ProjectRepositoryTests : IAsyncLifetime
         var folder = await repo.CreateAsync(OrgA, new NewProject("platform", ProjectKinds.Collection), "u1");
 
         var ex = await Assert.ThrowsAsync<ProjectResolutionException>(() => repo.UpdateAsync(
-            OrgA, folder.Id, "platform", ProjectClassifiers.Default, null, folder.Id, isActive: true));
+            OrgA, folder.Id,
+            new ProjectFields(
+                Name: "platform",
+                Classifier: ProjectClassifiers.Default,
+                Description: null,
+                ParentId: folder.Id,
+                IsActive: true)));
 
         Assert.Equal(ProjectResolutionReason.ParentIsSelf, ex.Reason);
         Assert.Null((await repo.GetAsync(OrgA, folder.Id))!.ParentId);
@@ -154,7 +178,13 @@ public sealed class ProjectRepositoryTests : IAsyncLifetime
         var api = await repo.CreateAsync(OrgA, new NewProject("api", ProjectKinds.Project), "u1");
 
         var ex = await Assert.ThrowsAsync<ProjectResolutionException>(() => repo.UpdateAsync(
-            OrgA, api.Id, "api", ProjectClassifiers.Default, null, host.Id, isActive: true));
+            OrgA, api.Id,
+            new ProjectFields(
+                Name: "api",
+                Classifier: ProjectClassifiers.Default,
+                Description: null,
+                ParentId: host.Id,
+                IsActive: true)));
 
         Assert.Equal(ProjectResolutionReason.ParentNotACollection, ex.Reason);
     }
@@ -167,7 +197,13 @@ public sealed class ProjectRepositoryTests : IAsyncLifetime
         var api = await repo.CreateAsync(OrgA, new NewProject("api", ProjectKinds.Project), "u1");
 
         var ex = await Assert.ThrowsAsync<ProjectResolutionException>(() => repo.UpdateAsync(
-            OrgA, api.Id, "api", ProjectClassifiers.Default, null, foreign.Id, isActive: true));
+            OrgA, api.Id,
+            new ProjectFields(
+                Name: "api",
+                Classifier: ProjectClassifiers.Default,
+                Description: null,
+                ParentId: foreign.Id,
+                IsActive: true)));
 
         Assert.Equal(ProjectResolutionReason.ParentNotFound, ex.Reason);
         Assert.Null((await repo.GetAsync(OrgA, api.Id))!.ParentId);
@@ -181,7 +217,13 @@ public sealed class ProjectRepositoryTests : IAsyncLifetime
         var api = await repo.CreateAsync(OrgA, new NewProject("api", ProjectKinds.Project), "u1");
 
         var ex = await Assert.ThrowsAsync<ProjectResolutionException>(() => repo.UpdateAsync(
-            OrgA, api.Id, "billing", ProjectClassifiers.Default, null, null, isActive: true));
+            OrgA, api.Id,
+            new ProjectFields(
+                Name: "billing",
+                Classifier: ProjectClassifiers.Default,
+                Description: null,
+                ParentId: null,
+                IsActive: true)));
 
         Assert.Equal(ProjectResolutionReason.NameTaken, ex.Reason);
         Assert.Equal("api", (await repo.GetAsync(OrgA, api.Id))!.Name);
@@ -198,7 +240,13 @@ public sealed class ProjectRepositoryTests : IAsyncLifetime
         // Each collection is its own name namespace, so "api" at the root is free even though the
         // folder already holds one.
         var renamed = await repo.UpdateAsync(
-            OrgA, rootApi.Id, "api", ProjectClassifiers.Default, null, null, isActive: true);
+            OrgA, rootApi.Id,
+            new ProjectFields(
+                Name: "api",
+                Classifier: ProjectClassifiers.Default,
+                Description: null,
+                ParentId: null,
+                IsActive: true));
 
         Assert.Equal("api", renamed!.Name);
     }
@@ -210,7 +258,13 @@ public sealed class ProjectRepositoryTests : IAsyncLifetime
         var api = await repo.CreateAsync(OrgA, new NewProject("api", ProjectKinds.Project, Description: "notes"), "u1");
 
         var updated = await repo.UpdateAsync(
-            OrgA, api.Id, "api", ProjectClassifiers.Default, "notes", null, isActive: true);
+            OrgA, api.Id,
+            new ProjectFields(
+                Name: "api",
+                Classifier: ProjectClassifiers.Default,
+                Description: "notes",
+                ParentId: null,
+                IsActive: true));
 
         Assert.Equal("api", updated!.Name);
         Assert.Equal("notes", updated.Description);
@@ -223,7 +277,13 @@ public sealed class ProjectRepositoryTests : IAsyncLifetime
         var foreign = await repo.CreateAsync(OrgB, new NewProject("api", ProjectKinds.Project), "u2");
 
         Assert.Null(await repo.UpdateAsync(
-            OrgA, foreign.Id, "hijacked", ProjectClassifiers.Default, null, null, isActive: true));
+            OrgA, foreign.Id,
+            new ProjectFields(
+                Name: "hijacked",
+                Classifier: ProjectClassifiers.Default,
+                Description: null,
+                ParentId: null,
+                IsActive: true)));
         Assert.Equal("api", (await repo.GetAsync(OrgB, foreign.Id))!.Name);
     }
 
@@ -236,7 +296,13 @@ public sealed class ProjectRepositoryTests : IAsyncLifetime
         var leaf = await repo.CreateAsync(
             OrgA, new NewProject("leaf", ProjectKinds.Project, ParentId: moving.Id), "u1");
 
-        await repo.UpdateAsync(OrgA, moving.Id, "moving", ProjectClassifiers.Default, null, outer.Id, isActive: true);
+        await repo.UpdateAsync(OrgA, moving.Id,
+            new ProjectFields(
+                Name: "moving",
+                Classifier: ProjectClassifiers.Default,
+                Description: null,
+                ParentId: outer.Id,
+                IsActive: true));
 
         Assert.Equal(
             [outer.Id, moving.Id],

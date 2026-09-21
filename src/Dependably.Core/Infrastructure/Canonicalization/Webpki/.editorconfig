@@ -1,0 +1,18 @@
+# Vendored, unmodified third-party source (github.com/cyberphone/json-canonicalization,
+# Apache License 2.0) — see JsonCanonicalizer.cs for the provenance note. Kept byte-faithful to
+# upstream so a future re-sync is a clean diff, rather than reformatted to this repo's house
+# style. Disables IDE code-style analysis for this subtree only; functional analyzers (compiler
+# errors, security rules) still apply.
+
+[*.cs]
+# Tells `dotnet format` (whitespace and style passes alike) to leave this vendored tree's own
+# formatting conventions alone, the same way it already skips *.designer.cs — re-flowing
+# upstream's indentation would make every future re-sync from the origin repo a full-file diff
+# instead of a real one.
+generated_code = true
+dotnet_analyzer_diagnostic.category-Style.severity = none
+
+# Upstream is not nullable-annotated; every possibly-null warning here is intentional slack in
+# code this repo does not maintain, not a defect this repo introduced.
+dotnet_diagnostic.CS8602.severity = none
+dotnet_diagnostic.CS8603.severity = none

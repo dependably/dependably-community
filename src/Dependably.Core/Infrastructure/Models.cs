@@ -308,6 +308,19 @@ public class OrgSettings
     /// allow override still wins.
     /// </summary>
     public string VerifyTerraformSignatures { get; set; } = "off";
+    /// <summary>
+    /// Admission gate for an ingested CycloneDX document's enveloped JSF signature
+    /// (CISA D2, <c>project_documents.signature_status</c>). 'off' (default) = do not verify;
+    /// 'warn' = verify and record the verdict without refusing the upload; 'block' = fail closed
+    /// (a document whose signature fails verification, or that carries none, is refused).
+    /// Enabling 'warn'/'block' requires at least one <c>('sbom','spki')</c> trust anchor in
+    /// <c>signature_trust_anchor</c>; without one the check has nothing to verify against and
+    /// denies under 'block' rather than no-opping — see <c>SbomController</c>'s admission check.
+    /// This is deliberately NOT dispatched by <see cref="VerifyProvenanceMode"/>: it governs an
+    /// upload admission decision, not a <c>BlockGateService</c> artefact-provenance arm — a
+    /// document has no coordinate for that gate to key on (ADR-sbom-author-signature).
+    /// </summary>
+    public string VerifySbomSignatures { get; set; } = "off";
 
     /// <summary>
     /// Per-tenant RPM hosted-publishing posture override: NULL (unset), 'passthrough', or 'merged'.
@@ -1345,7 +1358,7 @@ public class ProjectDocument
     public string ProjectVersionId { get; set; } = "";
     /// <summary><c>sbom</c>, <c>vex</c> or <c>sarif</c>.</summary>
     public string DocType { get; set; } = "";
-    /// <summary><c>cyclonedx-json</c>, <c>openvex-json</c> or <c>sarif-json</c>.</summary>
+    /// <summary><c>cyclonedx-json</c>, <c>spdx-json</c>, <c>openvex-json</c> or <c>sarif-json</c>.</summary>
     public string Format { get; set; } = "";
     /// <summary>The document's own spec version, e.g. <c>1.6</c> or <c>2.1.0</c>.</summary>
     public string? SpecVersion { get; set; }
@@ -1357,11 +1370,33 @@ public class ProjectDocument
     public string BlobKey { get; set; } = "";
     public string? UploadedBy { get; set; }
     /// <summary>
+    /// metadata.lifecycles as a JSON array of <c>{"phase"}</c> or <c>{"name","description"}</c>
+    /// entries, or null when the uploaded document declared none.
+    /// </summary>
+    public string? Lifecycles { get; set; }
+    /// <summary>
     /// The ingest projection revision that wrote this document's derived rows. Compared against
     /// <see cref="Sbom.SbomIngestVersion.Current"/> by the dedup arm, so a widened projection
     /// re-merges an unchanged document once instead of short-circuiting on the hash alone.
     /// </summary>
     public int IngestVersion { get; set; }
+    /// <summary>
+    /// CISA D2's verdict from verifying this document's enveloped JSF signature —
+    /// <c>ProvenanceStatuses.Verified</c>/<c>Unsigned</c>, <c>SbomSignatureVerdict.FailedStatus</c>
+    /// (cryptographically invalid), <c>SbomSignatureVerdict.UnanchoredStatus</c> (this registry
+    /// holds no pinned anchor for the claimed keyId), or null for a doc_type/format this policy
+    /// does not cover, or a document uploaded while <c>verify_sbom_signatures</c> was 'off'.
+    /// </summary>
+    public string? SignatureStatus { get; set; }
+    /// <summary>The signing key's fingerprint, set only when <see cref="SignatureStatus"/> is <c>verified</c>.</summary>
+    public string? SignatureKeyId { get; set; }
+    /// <summary>
+    /// X4/D8b (SBOM Tool Version) read back: true only when the original producing tool's own
+    /// entry (the one <see cref="ToolName"/>/<see cref="ToolVersion"/> came from) carried
+    /// dependably's own <c>dependably:tool-version-status</c> property — a dependably export
+    /// re-ingested here. False for every other document, including one that names no tool at all.
+    /// </summary>
+    public bool ToolVersionExplicitlyUnknown { get; set; }
     public DateTimeOffset UploadedAt { get; set; }
 }
 

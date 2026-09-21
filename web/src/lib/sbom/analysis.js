@@ -353,11 +353,18 @@ export function dependencyPathLabels(path) {
  * Fallback download name for an export. `downloadBlob` prefers the server's
  * Content-Disposition and sanitizes whatever it ends up with to `[\w.-]`, so this is only the
  * name used when the server sends none.
+ *
+ * The spec-version and scope segments are appended only when they diverge from the server's own
+ * defaults (1.7, scope=all) — so the common export keeps today's filename exactly, and a
+ * non-default choice gets a name that cannot collide with it. Two exports of one version with
+ * different options never overwrite each other on disk. `scope` is the same all|prod|dev
+ * vocabulary the component table's own scope filter uses (SCOPE_CHIPS), not a separate one.
  * @param {string} project
  * @param {string} version
  * @param {'inventory'|'vdr'|'vex'} variant
+ * @param {{ specVersion?: string, scope?: string }} [options]
  */
-export function exportFilename(project, version, variant) {
+export function exportFilename(project, version, variant, options = {}) {
   // Rebuilt from its surviving segments rather than trimmed with `/^-+|-+$/`: that alternation
   // anchors each branch separately, and `-+$` backtracks quadratically over a run of dashes.
   const slug = (s) =>
@@ -366,8 +373,11 @@ export function exportFilename(project, version, variant) {
       .flatMap(part => part.split('-'))
       .filter(Boolean)
       .join('-')
-  const parts = [slug(project), slug(version), variant].filter(Boolean)
-  return `${parts.join('-') || 'export'}.cdx.json`
+  const { specVersion, scope } = options
+  const parts = [slug(project), slug(version), variant]
+  if (specVersion && specVersion !== '1.7') parts.push(slug(specVersion))
+  if (scope === 'prod' || scope === 'dev') parts.push(scope)
+  return `${parts.filter(Boolean).join('-') || 'export'}.cdx.json`
 }
 
 /** Short display form of a sha256 — enough to eyeball against a CI log line. */

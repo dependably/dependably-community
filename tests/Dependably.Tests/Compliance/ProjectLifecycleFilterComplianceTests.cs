@@ -41,7 +41,7 @@ namespace Dependably.Tests.Compliance;
 /// <c>Unit/Sbom/SbomBlastRadiusTests.cs</c> are what pin the semantics.</para>
 /// </summary>
 [Trait("Category", "Compliance")]
-public sealed class ProjectLifecycleFilterComplianceTests
+public sealed partial class ProjectLifecycleFilterComplianceTests
 {
     /// <summary>
     /// Each file that must apply the in-service predicate, and how many SQL statements in it must
@@ -176,10 +176,13 @@ public sealed class ProjectLifecycleFilterComplianceTests
     /// Collapses runs of whitespace so a predicate wrapped across lines counts the same as one
     /// written inline.
     /// </summary>
+    [GeneratedRegex(@"\s+")]
+    private static partial Regex WhitespaceRun();
+
     private static int CountNormalized(string haystack, string needle)
     {
-        string flatHaystack = Regex.Replace(haystack, @"\s+", " ");
-        string flatNeedle = Regex.Replace(needle, @"\s+", " ");
+        string flatHaystack = WhitespaceRun().Replace(haystack, " ");
+        string flatNeedle = WhitespaceRun().Replace(needle, " ");
 
         int count = 0;
         int index = 0;

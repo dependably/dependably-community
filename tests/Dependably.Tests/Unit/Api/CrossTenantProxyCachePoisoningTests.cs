@@ -338,7 +338,9 @@ public sealed class CrossTenantProxyCachePoisoningTests : IAsyncLifetime
             proxyFetch,
             new UpstreamRegistryResolver(
                 new UpstreamRegistryRepository(_db, TimeProvider.System, TestEnvelope.Unconfigured())),
-            new NpmProvenanceVerifier(new NpmSignatureKeyStore(new StubPerOrgTrustAnchorStore())),
+            new NpmFirstFetchMetadataReader(
+                upstreamClient,
+                new NpmProvenanceVerifier(new NpmSignatureKeyStore(new StubPerOrgTrustAnchorStore()))),
             TimeProvider.System, NullLogger<NpmTarballHandler>.Instance);
     }
 

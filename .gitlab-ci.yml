@@ -1367,6 +1367,15 @@ sonarqube-check:
     # never ran and "Zero Coverage Sensor" stamped every file at 0/N. OpenCover is the
     # historically-preferred C# format for SonarQube and the sensor for it (sonar.cs.
     # opencover.reportsPaths) is rock-solid. ReportGenerator converts cobertura → OpenCover.
+    # Vendored third-party source under Infrastructure/Canonicalization/Webpki/ is held
+    # byte-faithful to upstream so a re-sync stays a clean diff (its own .editorconfig makes
+    # the same carve-out for dotnet format and the IDE style analyzers, which Sonar does not
+    # read). Es6NumberSerialization/ — David M. Gay's dtoa by way of Rhino — is excluded
+    # outright: it is ported C whose goto//long-method/unused-constant shape IS the algorithm,
+    # and it carries no untrusted-input surface of its own. JsonCanonicalizer.cs stays in
+    # analysis because it parses untrusted document bytes on the SBOM signature-verification
+    # path; only its five maintainability rules are ignored, named one by one (e2-e6) rather
+    # than by a csharpsquid:S* wildcard, so every security rule keeps firing on that file.
     - >
       dotnet sonarscanner begin
       /k:"$SONAR_PROJECT_KEY"
@@ -1376,11 +1385,21 @@ sonarqube-check:
       /d:sonar.cs.vstest.reportsPaths="test-results/tests.trx"
       /d:sonar.javascript.lcov.reportPaths="web/coverage/lcov.info"
       /d:sonar.coverage.exclusions="src/**/Program.cs,src/**/schema/Schema*.sql,src/**/Infrastructure/Redis/**/*.cs,src/**/Infrastructure/RedisLockoutStore.cs,src/**/Infrastructure/NpgsqlMetadataStore.cs,src/**/Storage/AzureBlobContainerAdapter.cs,src/**/Infrastructure/SpdxLicenseRepository.cs,web/src/main.js,web/src/App.svelte,web/src/locales/**,web/.stylelintrc.cjs,web/svelte.config.js,web/vite.config.js,web/vitest.config.js,web/eslint.config.js,build/extract-notices.mjs,i18n/scripts/i18n-validate.js"
-      /d:sonar.exclusions="web/e2e/**"
+      /d:sonar.exclusions="web/e2e/**,src/**/Canonicalization/Webpki/Es6NumberSerialization/**"
       /d:sonar.test.inclusions="**/*Tests.cs,**/*.test.js,**/*.spec.js,**/*.spec.ts"
-      /d:sonar.issue.ignore.multicriteria="e1"
+      /d:sonar.issue.ignore.multicriteria="e1,e2,e3,e4,e5,e6"
       /d:sonar.issue.ignore.multicriteria.e1.ruleKey="csharpsquid:S5332"
       /d:sonar.issue.ignore.multicriteria.e1.resourceKey="**/RpmRepodataService.cs"
+      /d:sonar.issue.ignore.multicriteria.e2.ruleKey="csharpsquid:S2933"
+      /d:sonar.issue.ignore.multicriteria.e2.resourceKey="**/Canonicalization/Webpki/JsonCanonicalizer.cs"
+      /d:sonar.issue.ignore.multicriteria.e3.ruleKey="csharpsquid:S3776"
+      /d:sonar.issue.ignore.multicriteria.e3.resourceKey="**/Canonicalization/Webpki/JsonCanonicalizer.cs"
+      /d:sonar.issue.ignore.multicriteria.e4.ruleKey="csharpsquid:S3247"
+      /d:sonar.issue.ignore.multicriteria.e4.resourceKey="**/Canonicalization/Webpki/JsonCanonicalizer.cs"
+      /d:sonar.issue.ignore.multicriteria.e5.ruleKey="csharpsquid:S1121"
+      /d:sonar.issue.ignore.multicriteria.e5.resourceKey="**/Canonicalization/Webpki/JsonCanonicalizer.cs"
+      /d:sonar.issue.ignore.multicriteria.e6.ruleKey="csharpsquid:S134"
+      /d:sonar.issue.ignore.multicriteria.e6.resourceKey="**/Canonicalization/Webpki/JsonCanonicalizer.cs"
     - dotnet build
     # Integration tests are included in the coverage collection on purpose: they are
     # self-contained (in-memory blob + SQLite, no external services) and are the only
