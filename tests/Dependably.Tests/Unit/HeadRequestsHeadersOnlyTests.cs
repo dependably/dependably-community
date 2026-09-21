@@ -360,9 +360,12 @@ public sealed class HeadRequestsHeadersOnlyTests : IAsyncLifetime
         Assert.Equal(HttpMethod.Head, methodRecorder.LastMethod);
         Assert.Equal(getsBefore, _cacheBlobs.GetAsyncCallCount);
 
-        // GET: full upstream fetch, body served.
+        // GET: full upstream fetch, body streamed through to the response as it is cached.
+        using var body = new MemoryStream();
+        ctl.Response.Body = body;
         var getResult = await ctl.Get($"library/ubuntu/blobs/{digest}", default);
-        Assert.IsType<FileStreamResult>(getResult);
+        Assert.IsType<EmptyResult>(getResult);
+        Assert.Equal(blobBytes, body.ToArray());
         Assert.Equal(HttpMethod.Get, methodRecorder.LastMethod);
 
         // Two upstream calls: one HEAD, one GET.

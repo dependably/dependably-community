@@ -830,6 +830,24 @@ On a cache miss, Dependably fetches from the configured upstream, verifies the S
 
 Upstreams are per-org and DB-backed (the `upstream_registry` table) — the resolver is deliberately DB-only, with no `IConfiguration` fallback. They are managed per org from Settings → Proxy. The `<Eco>__Upstream` environment variables (below) only **seed the initial row** for newly created orgs; changing one on an existing install has no effect on that org's already-seeded upstream — update the row from Settings → Proxy instead.
 
+### Large OCI layers behind a reverse proxy
+
+The OCI blob proxy streams through: on a cache miss it mirrors upstream bytes to the pulling
+client by the same pass that hashes and caches them, so the client starts receiving data at the
+upstream's own time-to-first-byte rather than after the whole layer has landed. A reverse proxy in
+front of Dependably therefore needs a read timeout that covers the **gap between bytes**, not the
+duration of the whole transfer — `proxy_read_timeout`'s 60 s default is fine for a multi-gigabyte
+layer that takes twenty minutes, because bytes keep arriving throughout.
+
+Two bounds still apply to the transfer as a whole. `Oci__UpstreamHttpTimeout` (default 30 min)
+caps the upstream fetch end to end — raise it if your link cannot pull your largest layer inside
+it. And the cache tier needs transient room for roughly **twice** the layer, because the verified
+staging entry is copied to its content-addressed key before being deleted.
+
+A client that hangs up mid-layer does not cancel the fetch; the caching pass finishes, so its
+retry is a cache hit. Such a request is logged at `Information` and answered `504`, not `500` —
+if you see `500`s on `/v2/…/blobs/…`, they are not disconnects.
+
 ### NuGet symbol servers
 
 A NuGet upstream can carry a **symbol-server base URL** (`upstream_registry.symbol_server_url`), which is what an SSQP miss falls through to. It is a separate field because a symbol server is a different host from the v3 index and cannot be derived from it: nuget.org's index is `https://api.nuget.org/v3/index.json`, its symbol server `https://symbols.nuget.org/download/symbols`.

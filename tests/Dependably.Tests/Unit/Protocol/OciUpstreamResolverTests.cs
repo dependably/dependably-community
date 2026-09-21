@@ -665,7 +665,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
 
         Assert.NotNull(result);
         using var ms = new MemoryStream();
-        await result!.Content.CopyToAsync(ms);
+        await result!.Blob!.Content.CopyToAsync(ms);
         Assert.Equal(blobBytes, ms.ToArray());
     }
 
@@ -872,7 +872,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         // bytes, no upstream round-trip needed.
         Assert.NotNull(served);
         using var ms = new MemoryStream();
-        await served!.Content.CopyToAsync(ms);
+        await served!.Blob!.Content.CopyToAsync(ms);
         Assert.Equal(ownBytes, ms.ToArray());
 
         // Neither refusal minted a piggybacked row for B; only its own digest is recorded.
@@ -994,6 +994,600 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         var allKeys = await cacheBlobs.ListAsync("oci/_staging/", default)
             .ToListAsync();
         Assert.Empty(allKeys);
+    }
+
+    // ── FetchBlobAsync — stream-through to the pulling client ────────────────
+    //
+    // The property these pin is time-to-first-byte. Store-and-forward gives a client its first
+    // byte only once the whole layer is downloaded, verified and promoted, so TTFB grows with
+    // layer size while the read timeout of any reverse proxy in front stays fixed — past some
+    // size the pull can never complete, however healthy the blob is. None of that is visible on
+    // a small blob, which is why a test that only checks the bytes arrive would pass on the
+    // broken shape too; each test below gates the upstream body so "arrived early" and "arrived
+    // at the end" are distinguishable outcomes.
+
+    [Fact]
+    public async Task FetchBlobAsync_WithSink_ClientReceivesBytesBeforeTheFetchCompletes()
+    {
+        byte[] blobBytes = RandomBytes(200_000);
+        string sha256 = Sha256Hex(blobBytes);
+        string digest = "sha256:" + sha256;
+
+        using var gate = new ManualResetEventSlim(false);
+        var upstreamBody = new GatedReadStream(blobBytes, releaseAfterBytes: 50_000, gate);
+        var upstreamResp = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(upstreamBody),
+        };
+        upstreamResp.Content.Headers.ContentType =
+            new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+        // Declared explicitly: StreamContent only computes a length for a seekable body, and the
+        // gate above is not seekable. A body with no declared length is deliberately not streamed
+        // (see the companion test below), so without this the mirror would never open and the
+        // test would be asserting the opposite of what it names.
+        upstreamResp.Content.Headers.ContentLength = blobBytes.Length;
+
+        var cacheBlobs = new InMemoryBlobStore();
+        var resolver = BuildStreamingResolver(new SingleResponseFactory(upstreamResp), cacheBlobs);
+
+        var client = new RecordingSinkStream();
+        var sink = new OciBlobStreamSink(
+            BeginAsync: (_, _, _) => Task.FromResult<Stream>(client),
+            AbortAsync: () => Task.CompletedTask,
+            AllowSynchronousWrites: () => { });
+
+        // Off the test thread: the in-memory blob store copies synchronously, so an inline run
+        // would block here on the gate this test is about to open.
+        var fetch = Task.Run(() => resolver.FetchBlobAsync(_orgId, "library/ubuntu", digest, default, sink));
+
+        // The client has bytes while the upstream body is still held open — the whole point.
+        Assert.True(client.FirstWrite.Wait(TimeSpan.FromSeconds(30)),
+            "the client received no bytes while the upstream body was still open — the proxy is store-and-forward");
+        Assert.False(fetch.IsCompleted, "the fetch completed before the gate opened; the body was not actually held");
+
+        gate.Set();
+        var result = await fetch;
+
+        Assert.NotNull(result);
+        Assert.True(result!.Streamed);
+        Assert.Null(result.Blob);
+        Assert.Equal(blobBytes, client.Written);
+        Assert.True(await cacheBlobs.ExistsAsync(BlobKeys.OciBlob("sha256", sha256), default));
+        Assert.Empty(await cacheBlobs.ListAsync("oci/_staging/", default).ToListAsync());
+    }
+
+    [Fact]
+    public async Task FetchBlobAsync_WithSink_AsyncCopyingStore_NeverAsksToPermitSynchronousWrites()
+    {
+        // Permission to write the response body synchronously is asked for only when the blob
+        // store forces it, never granted up front. A store that copies with CopyToAsync — which
+        // the local-disk store, the default backend, does — never reaches the synchronous mirror
+        // path, so the common deployment never permits synchronous writes on a response body at
+        // all. Its twin below is the same test against a synchronously-copying store.
+        byte[] blobBytes = RandomBytes(8192);
+        string digest = "sha256:" + Sha256Hex(blobBytes);
+
+        var upstreamResp = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(new MemoryStream(blobBytes)),
+        };
+        upstreamResp.Content.Headers.ContentType =
+            new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+
+        var backing = new InMemoryBlobStore();
+        var resolver = BuildStreamingResolver(
+            new SingleResponseFactory(upstreamResp), new AsyncCopyBlobStore(backing));
+
+        int permitsAsked = 0;
+        var client = new RecordingSinkStream();
+        var sink = new OciBlobStreamSink(
+            BeginAsync: (_, _, _) => Task.FromResult<Stream>(client),
+            AbortAsync: () => Task.CompletedTask,
+            AllowSynchronousWrites: () => permitsAsked++);
+
+        var result = await resolver.FetchBlobAsync(_orgId, "library/ubuntu", digest, default, sink);
+
+        Assert.NotNull(result);
+        Assert.True(result!.Streamed);
+        Assert.Equal(blobBytes, client.Written);
+        Assert.Equal(0, permitsAsked);
+    }
+
+    [Fact]
+    public async Task FetchBlobAsync_WithSink_SynchronouslyCopyingStore_AsksOnceToPermitSynchronousWrites()
+    {
+        // The twin. A store that copies with Stream.CopyTo drives the synchronous mirror path,
+        // where a response body rejects the write unless permitted — so the permission is asked
+        // for, exactly once however many chunks follow. Without both halves this pair proves
+        // nothing: "never asked" passes trivially if the grant were simply dead code.
+        byte[] blobBytes = RandomBytes(300_000);
+        string digest = "sha256:" + Sha256Hex(blobBytes);
+
+        var upstreamResp = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(new MemoryStream(blobBytes)),
+        };
+        upstreamResp.Content.Headers.ContentType =
+            new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+
+        // InMemoryBlobStore copies synchronously.
+        var cacheBlobs = new InMemoryBlobStore();
+        var resolver = BuildStreamingResolver(new SingleResponseFactory(upstreamResp), cacheBlobs);
+
+        int permitsAsked = 0;
+        var client = new RecordingSinkStream();
+        var sink = new OciBlobStreamSink(
+            BeginAsync: (_, _, _) => Task.FromResult<Stream>(client),
+            AbortAsync: () => Task.CompletedTask,
+            AllowSynchronousWrites: () => permitsAsked++);
+
+        var result = await resolver.FetchBlobAsync(_orgId, "library/ubuntu", digest, default, sink);
+
+        Assert.NotNull(result);
+        Assert.Equal(blobBytes, client.Written);
+        // 300 KB at CopyTo's 80 KiB buffer is four chunks; the permission is asked for once.
+        Assert.Equal(1, permitsAsked);
+    }
+
+    [Fact]
+    public async Task FetchBlobAsync_WithSink_NoDeclaredLength_IsNotStreamed()
+    {
+        // The deliberate carve-out. A body that declares no length can only have the size cap
+        // checked mid-transfer, and a mid-transfer refusal cannot be a status once bytes have
+        // gone — only a reset. Declining to stream this one case is what lets the over-cap
+        // refusal keep answering 502 in every case, so the sink must stay untouched here.
+        byte[] blobBytes = RandomBytes(4096);
+        string sha256 = Sha256Hex(blobBytes);
+        string digest = "sha256:" + sha256;
+
+        // A non-seekable body, so StreamContent computes no Content-Length.
+        var upstreamResp = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(new NonSeekableStream(blobBytes)),
+        };
+        upstreamResp.Content.Headers.ContentType =
+            new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+        Assert.Null(upstreamResp.Content.Headers.ContentLength);
+
+        var cacheBlobs = new InMemoryBlobStore();
+        var resolver = BuildStreamingResolver(new SingleResponseFactory(upstreamResp), cacheBlobs);
+
+        bool sinkOpened = false;
+        var sink = new OciBlobStreamSink(
+            BeginAsync: (_, _, _) => { sinkOpened = true; return Task.FromResult<Stream>(new RecordingSinkStream()); },
+            AbortAsync: () => Task.CompletedTask,
+            AllowSynchronousWrites: () => { });
+
+        var result = await resolver.FetchBlobAsync(_orgId, "library/ubuntu", digest, default, sink);
+
+        Assert.False(sinkOpened, "a body with no declared length was streamed; an over-cap refusal on it could then only be a reset");
+        Assert.NotNull(result);
+        Assert.False(result!.Streamed);
+        Assert.NotNull(result.Blob);
+        Assert.True(await cacheBlobs.ExistsAsync(BlobKeys.OciBlob("sha256", sha256), default));
+    }
+
+    [Fact]
+    public async Task FetchBlobAsync_WithSink_ClientHangsUpMidLayer_CachingStillCompletes()
+    {
+        // The client's retry is only cheap if the interrupted fetch finished anyway. A mirror
+        // write failure is an ordinary disconnect, never a reason to abandon the cache write.
+        byte[] blobBytes = RandomBytes(200_000);
+        string sha256 = Sha256Hex(blobBytes);
+        string digest = "sha256:" + sha256;
+
+        var upstreamResp = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(new MemoryStream(blobBytes)),
+        };
+        upstreamResp.Content.Headers.ContentType =
+            new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+
+        var cacheBlobs = new InMemoryBlobStore();
+        var resolver = BuildStreamingResolver(new SingleResponseFactory(upstreamResp), cacheBlobs);
+
+        var client = new BrokenSinkStream();
+        var sink = new OciBlobStreamSink(
+            BeginAsync: (_, _, _) => Task.FromResult<Stream>(client),
+            AbortAsync: () => Task.CompletedTask,
+            AllowSynchronousWrites: () => { });
+
+        var result = await resolver.FetchBlobAsync(_orgId, "library/ubuntu", digest, default, sink);
+
+        Assert.NotNull(result);
+        Assert.True(client.WriteAttempted);
+        // The disconnect is not an error: the blob is cached and the next pull is a hit.
+        Assert.True(await cacheBlobs.ExistsAsync(BlobKeys.OciBlob("sha256", sha256), default));
+        Assert.Empty(await cacheBlobs.ListAsync("oci/_staging/", default).ToListAsync());
+    }
+
+    [Fact]
+    public async Task FetchBlobAsync_WithSink_MirrorFaultThatIsNotADisconnect_IsNotSwallowed()
+    {
+        // The twin of the hang-up test above, and the reason the mirror's catch is narrow rather
+        // than a catch-all. A catch-all also absorbs faults that are this proxy's own — the one
+        // that shipped in review was a response body rejecting a synchronous write, which under
+        // a catch-all became a 200 carrying zero bytes. No test writing to a MemoryStream can see
+        // that, because a MemoryStream accepts synchronous writes; only refusing to swallow it
+        // can. An IOException still drops the mirror and completes (see the hang-up test) — the
+        // two tests differ only in which exception the sink throws.
+        byte[] blobBytes = RandomBytes(4096);
+        string sha256 = Sha256Hex(blobBytes);
+        string digest = "sha256:" + sha256;
+
+        var upstreamResp = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(new MemoryStream(blobBytes)),
+        };
+        upstreamResp.Content.Headers.ContentType =
+            new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+
+        var cacheBlobs = new InMemoryBlobStore();
+        var resolver = BuildStreamingResolver(new SingleResponseFactory(upstreamResp), cacheBlobs);
+
+        var sink = new OciBlobStreamSink(
+            BeginAsync: (_, _, _) => Task.FromResult<Stream>(new HostileSinkStream()),
+            AbortAsync: () => Task.CompletedTask,
+            AllowSynchronousWrites: () => { });
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => resolver.FetchBlobAsync(_orgId, "library/ubuntu", digest, default, sink));
+
+        // And the staging entry still goes, because the cleanup is in a finally.
+        Assert.Empty(await cacheBlobs.ListAsync("oci/_staging/", default).ToListAsync());
+    }
+
+    [Fact]
+    public async Task FetchBlobAsync_WithSink_DigestMismatch_ResetsTheClientInsteadOfCompleting()
+    {
+        // Stream-through necessarily sends bytes before the digest over the whole layer is known.
+        // The guarantee is therefore expressed twice: the content-addressed key stays unwritten,
+        // and the client's connection is reset so a truncated transfer — not a clean 200 — is
+        // what it acts on.
+        byte[] blobBytes = RandomBytes(4096);
+        string wrongHex = new('0', 64);
+        string wrongDigest = "sha256:" + wrongHex;
+
+        var upstreamResp = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(new MemoryStream(blobBytes)),
+        };
+        upstreamResp.Content.Headers.ContentType =
+            new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+
+        var cacheBlobs = new InMemoryBlobStore();
+        var resolver = BuildStreamingResolver(new SingleResponseFactory(upstreamResp), cacheBlobs);
+
+        bool aborted = false;
+        var client = new RecordingSinkStream();
+        var sink = new OciBlobStreamSink(
+            BeginAsync: (_, _, _) => Task.FromResult<Stream>(client),
+            AbortAsync: () => { aborted = true; return Task.CompletedTask; },
+            AllowSynchronousWrites: () => { });
+
+        await Assert.ThrowsAsync<OciBlobDigestMismatchException>(
+            () => resolver.FetchBlobAsync(_orgId, "library/ubuntu", wrongDigest, default, sink));
+
+        Assert.True(aborted, "a client that received unverified bytes was left to complete normally");
+        Assert.False(await cacheBlobs.ExistsAsync(BlobKeys.OciBlob("sha256", wrongHex), default));
+        Assert.Empty(await cacheBlobs.ListAsync("oci/_staging/", default).ToListAsync());
+    }
+
+    [Fact]
+    public async Task FetchBlobAsync_PromoteFails_StagingEntryStillDeleted()
+    {
+        // The staging leak this pins is narrow and permanent. Once the staged bytes are written,
+        // any failure before the promote's own delete used to strand them: nothing else reclaims
+        // an oci/_staging entry — the OCI staging janitor sweeps the PROXY_STAGING_PATH
+        // filesystem for a different filename shape, and cache eviction is row-driven while a
+        // staging entry never had a row. A retrying client minted a fresh multi-gigabyte orphan
+        // per attempt, on the same volume whose exhaustion is the likeliest reason the promote
+        // failed in the first place.
+        byte[] blobBytes = RandomBytes(4096);
+        string sha256 = Sha256Hex(blobBytes);
+        string digest = "sha256:" + sha256;
+        string contentKey = BlobKeys.OciBlob("sha256", sha256);
+
+        var upstreamResp = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(new MemoryStream(blobBytes)),
+        };
+        upstreamResp.Content.Headers.ContentType =
+            new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+
+        // Staging writes succeed; the promote to the content-addressed key does not — a full
+        // cache volume, which is exactly the state a leak produces and then worsens.
+        var cacheBlobs = new InMemoryBlobStore();
+        var failingPromote = new FailingPutBlobStore(cacheBlobs, key => key == contentKey);
+        var resolver = BuildStreamingResolver(new SingleResponseFactory(upstreamResp), failingPromote);
+
+        await Assert.ThrowsAsync<IOException>(
+            () => resolver.FetchBlobAsync(_orgId, "library/ubuntu", digest, default));
+
+        Assert.False(await cacheBlobs.ExistsAsync(contentKey, default));
+        Assert.Empty(await cacheBlobs.ListAsync("oci/_staging/", default).ToListAsync());
+    }
+
+    [Fact]
+    public async Task FetchBlobAsync_WithoutSink_ReturnsTheBlobRatherThanReportingStreamed()
+    {
+        // A caller that joins a fetch already in flight cannot be mirrored — the bytes are past —
+        // so it must be served from the cache, and must never be told its response is complete.
+        byte[] blobBytes = RandomBytes(4096);
+        string sha256 = Sha256Hex(blobBytes);
+        string digest = "sha256:" + sha256;
+
+        var upstreamResp = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(new MemoryStream(blobBytes)),
+        };
+        upstreamResp.Content.Headers.ContentType =
+            new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+
+        var cacheBlobs = new InMemoryBlobStore();
+        var resolver = BuildStreamingResolver(new SingleResponseFactory(upstreamResp), cacheBlobs);
+
+        var result = await resolver.FetchBlobAsync(_orgId, "library/ubuntu", digest, default);
+
+        Assert.NotNull(result);
+        Assert.False(result!.Streamed);
+        Assert.NotNull(result.Blob);
+        using var ms = new MemoryStream();
+        await result.Blob!.Content.CopyToAsync(ms);
+        Assert.Equal(blobBytes, ms.ToArray());
+    }
+
+    private OciUpstreamResolver BuildStreamingResolver(SingleResponseFactory http, IBlobStore cacheBlobs)
+    {
+        var opts = Options.Create(DefaultOptions());
+        var authSvc = new OciUpstreamAuthService(http, opts, new StubAirGap(false),
+            NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
+        var blobs = new TieredBlobStorage(cacheBlobs, new InMemoryBlobStore());
+        return new OciUpstreamResolver(http, authSvc, opts, blobs, _db, new StubAirGap(false),
+            NewRecorder(), _cacheRecorder, _cacheArtifacts, NullLogger<OciUpstreamResolver>.Instance,
+            TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+    }
+
+    /// <summary>
+    /// An upstream body that hands over a prefix and then blocks, so "the client got bytes before
+    /// the fetch finished" is an observable state rather than a race the test hopes to win.
+    /// </summary>
+    private sealed class GatedReadStream : Stream
+    {
+        private readonly byte[] _bytes;
+        private readonly int _releaseAfterBytes;
+        private readonly ManualResetEventSlim _gate;
+        private int _position;
+
+        public GatedReadStream(byte[] bytes, int releaseAfterBytes, ManualResetEventSlim gate)
+        {
+            _bytes = bytes;
+            _releaseAfterBytes = releaseAfterBytes;
+            _gate = gate;
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            if (_position >= _releaseAfterBytes)
+            {
+                Assert.True(_gate.Wait(TimeSpan.FromSeconds(30)), "the gate was never opened");
+            }
+
+            int remaining = _bytes.Length - _position;
+            if (remaining == 0)
+            {
+                return 0;
+            }
+
+            int take = Math.Min(count, Math.Min(remaining, _releaseAfterBytes - _position > 0
+                ? _releaseAfterBytes - _position
+                : remaining));
+            Array.Copy(_bytes, _position, buffer, offset, take);
+            _position += take;
+            return take;
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => _bytes.Length;
+        public override long Position { get => _position; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    /// <summary>A body StreamContent cannot measure, so the response declares no Content-Length.</summary>
+    private sealed class NonSeekableStream : Stream
+    {
+        private readonly MemoryStream _inner;
+
+        public NonSeekableStream(byte[] bytes) => _inner = new MemoryStream(bytes);
+
+        public override int Read(byte[] buffer, int offset, int count) => _inner.Read(buffer, offset, count);
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => _inner.Position; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _inner.Dispose();
+            }
+
+            base.Dispose(disposing);
+        }
+    }
+
+    /// <summary>A client response body that records what it was handed and when it first got anything.</summary>
+    private sealed class RecordingSinkStream : Stream
+    {
+        private readonly MemoryStream _buffer = new();
+
+        public ManualResetEventSlim FirstWrite { get; } = new(false);
+        public byte[] Written => _buffer.ToArray();
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            _buffer.Write(buffer, offset, count);
+            FirstWrite.Set();
+        }
+
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            _buffer.Write(buffer);
+            FirstWrite.Set();
+        }
+
+        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken ct = default)
+        {
+            _buffer.Write(buffer.Span);
+            FirstWrite.Set();
+            return ValueTask.CompletedTask;
+        }
+
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => _buffer.Length;
+        public override long Position { get => _buffer.Position; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                FirstWrite.Dispose();
+                _buffer.Dispose();
+            }
+
+            base.Dispose(disposing);
+        }
+    }
+
+    /// <summary>A sink whose failure is this proxy's fault, not a disconnect — must not be swallowed.</summary>
+    private sealed class HostileSinkStream : Stream
+    {
+        private static InvalidOperationException Fault()
+            => new("Synchronous operations are disallowed. Call WriteAsync or set AllowSynchronousIO to true.");
+
+        public override void Write(byte[] buffer, int offset, int count) => throw Fault();
+        public override void Write(ReadOnlySpan<byte> buffer) => throw Fault();
+        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken ct = default)
+            => throw Fault();
+        public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken ct)
+            => throw Fault();
+
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => 0; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+    }
+
+    /// <summary>A client that has gone: every write fails.</summary>
+    private sealed class BrokenSinkStream : Stream
+    {
+        public bool WriteAttempted { get; private set; }
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            WriteAttempted = true;
+            throw new IOException("the client is gone");
+        }
+
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            WriteAttempted = true;
+            throw new IOException("the client is gone");
+        }
+
+        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken ct = default)
+        {
+            WriteAttempted = true;
+            throw new IOException("the client is gone");
+        }
+
+        public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken ct)
+        {
+            WriteAttempted = true;
+            throw new IOException("the client is gone");
+        }
+
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => 0; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+    }
+
+    /// <summary>A store that copies asynchronously, as the local-disk store does.</summary>
+    private sealed class AsyncCopyBlobStore : IBlobStore
+    {
+        private readonly InMemoryBlobStore _inner;
+
+        public AsyncCopyBlobStore(InMemoryBlobStore inner) => _inner = inner;
+
+        public async Task PutAsync(string key, Stream data, CancellationToken ct = default)
+        {
+            using var ms = new MemoryStream();
+            await data.CopyToAsync(ms, ct);
+            ms.Position = 0;
+            await _inner.PutAsync(key, ms, ct);
+        }
+
+        public Task<Stream?> GetAsync(string key, CancellationToken ct = default) => _inner.GetAsync(key, ct);
+        public Task<RangedStream?> GetRangeAsync(string key, long from, long to, CancellationToken ct = default)
+            => _inner.GetRangeAsync(key, from, to, ct);
+        public Task<bool> ExistsAsync(string key, CancellationToken ct = default) => _inner.ExistsAsync(key, ct);
+        public Task DeleteAsync(string key, CancellationToken ct = default) => _inner.DeleteAsync(key, ct);
+        public IAsyncEnumerable<BlobInfo> ListAsync(string prefix, CancellationToken ct = default)
+            => _inner.ListAsync(prefix, ct);
+        public Task<long> GetTotalSizeAsync(CancellationToken ct = default) => _inner.GetTotalSizeAsync(ct);
+    }
+
+    /// <summary>Delegating store whose writes fail for the keys a test names — a full volume.</summary>
+    private sealed class FailingPutBlobStore : IBlobStore
+    {
+        private readonly IBlobStore _inner;
+        private readonly Func<string, bool> _failFor;
+
+        public FailingPutBlobStore(IBlobStore inner, Func<string, bool> failFor)
+        {
+            _inner = inner;
+            _failFor = failFor;
+        }
+
+        public Task PutAsync(string key, Stream data, CancellationToken ct = default)
+            => _failFor(key) ? throw new IOException("No space left on device") : _inner.PutAsync(key, data, ct);
+
+        public Task<Stream?> GetAsync(string key, CancellationToken ct = default) => _inner.GetAsync(key, ct);
+        public Task<RangedStream?> GetRangeAsync(string key, long from, long to, CancellationToken ct = default)
+            => _inner.GetRangeAsync(key, from, to, ct);
+        public Task<bool> ExistsAsync(string key, CancellationToken ct = default) => _inner.ExistsAsync(key, ct);
+        public Task DeleteAsync(string key, CancellationToken ct = default) => _inner.DeleteAsync(key, ct);
+        public IAsyncEnumerable<BlobInfo> ListAsync(string prefix, CancellationToken ct = default)
+            => _inner.ListAsync(prefix, ct);
+        public Task<long> GetTotalSizeAsync(CancellationToken ct = default) => _inner.GetTotalSizeAsync(ct);
     }
 
     // ── FetchBlobAsync — declared Content-Length above the upstream cap refuses the fetch ──
@@ -2204,7 +2798,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
             Assert.NotNull(result);
 
             using var ms = new MemoryStream();
-            await result!.Content.CopyToAsync(ms);
+            await result!.Blob!.Content.CopyToAsync(ms);
             Assert.Equal(blobBytes, ms.ToArray());
         }
     }
@@ -2255,7 +2849,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         Assert.Equal(1, gate.CallCount);
         Assert.NotNull(result);
         using var ms = new MemoryStream();
-        await result!.Content.CopyToAsync(ms);
+        await result!.Blob!.Content.CopyToAsync(ms);
         Assert.Equal(blobBytes, ms.ToArray());
     }
 
@@ -2377,7 +2971,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         {
             Assert.NotNull(results[i]);
             using var ms = new MemoryStream();
-            await results[i]!.Content.CopyToAsync(ms);
+            await results[i]!.Blob!.Content.CopyToAsync(ms);
             Assert.Equal(sharedBytes, ms.ToArray());
         }
 
@@ -2385,11 +2979,11 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         Assert.NotNull(results[2]);
         Assert.NotNull(results[3]);
         using var msB = new MemoryStream();
-        await results[2]!.Content.CopyToAsync(msB);
+        await results[2]!.Blob!.Content.CopyToAsync(msB);
         Assert.Equal(bytesB, msB.ToArray());
 
         using var msC = new MemoryStream();
-        await results[3]!.Content.CopyToAsync(msC);
+        await results[3]!.Blob!.Content.CopyToAsync(msC);
         Assert.Equal(bytesC, msC.ToArray());
     }
 
@@ -2443,10 +3037,10 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         Assert.NotNull(resultB);
 
         using var msA = new MemoryStream();
-        await resultA!.Content.CopyToAsync(msA);
+        await resultA!.Blob!.Content.CopyToAsync(msA);
         Assert.Equal(blobBytes, msA.ToArray());
         using var msB = new MemoryStream();
-        await resultB!.Content.CopyToAsync(msB);
+        await resultB!.Blob!.Content.CopyToAsync(msB);
         Assert.Equal(blobBytes, msB.ToArray());
 
         // Each org owns its per-org oci_blobs row with the real size.
@@ -2522,7 +3116,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         var resultA = await taskA;
         Assert.NotNull(resultA);
         using var msA = new MemoryStream();
-        await resultA!.Content.CopyToAsync(msA);
+        await resultA!.Blob!.Content.CopyToAsync(msA);
         Assert.Equal(privateBytes, msA.ToArray());
 
         // Two upstream requests: A's to its private registry, B's to its own.
@@ -2594,10 +3188,10 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         Assert.Null(resultB);
 
         using var ms1 = new MemoryStream();
-        await resultA1!.Content.CopyToAsync(ms1);
+        await resultA1!.Blob!.Content.CopyToAsync(ms1);
         Assert.Equal(privateBytes, ms1.ToArray());
         using var ms2 = new MemoryStream();
-        await resultA2!.Content.CopyToAsync(ms2);
+        await resultA2!.Blob!.Content.CopyToAsync(ms2);
         Assert.Equal(privateBytes, ms2.ToArray());
 
         await using var conn = await _db.OpenAsync(default);

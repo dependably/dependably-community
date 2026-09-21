@@ -581,14 +581,21 @@ public sealed partial class OciUpstreamResolver
     /// per process and a caller may only await a fetch made with its own org's credentials.
     /// Each waiter re-opens the cached blob independently after the shared fetch completes.
     ///
+    /// When <paramref name="sink"/> is supplied and this call is the one that starts the upstream
+    /// fetch, the bytes are mirrored to that sink as they are cached and the result reports
+    /// <c>Streamed</c> — the caller has nothing left to send. A caller that instead joins a fetch
+    /// already in flight cannot be mirrored (the bytes are past), so it waits and is served from
+    /// the cache exactly as before; its sink is never touched.
+    ///
     /// Returns null when no upstream matches or the upstream returns 404.
     /// Throws <see cref="AirGappedException"/> in air-gap mode.
     /// </summary>
-    public async Task<OciBlobResult?> FetchBlobAsync(
+    public async Task<OciBlobServeResult?> FetchBlobAsync(
         string orgId,
         string repository,
         string digest,
-        CancellationToken ct)
+        CancellationToken ct,
+        OciBlobStreamSink? sink = null)
     {
         if (_airGap.IsEnabled)
         {
@@ -620,7 +627,7 @@ public sealed partial class OciUpstreamResolver
         {
             if (await CanServeSharedBlobAsync(orgId, digest, ct))
             {
-                return new OciBlobResult(existing, "application/octet-stream");
+                return OciBlobServeResult.FromBlob(new OciBlobResult(existing, "application/octet-stream"));
             }
 
             await existing.DisposeAsync();
@@ -651,9 +658,17 @@ public sealed partial class OciUpstreamResolver
         // fault the shared Lazy and cancel all other waiters. Blob writes are idempotent
         // (content-addressed key).
         var inflightKey = new OciBlobInflightKey(orgId, blobKey);
-        var lazy = _blobInflight.GetOrAdd(inflightKey, _ => new Lazy<Task<OciBlobFetchMetadata?>>(
-            () => FetchAndCacheBlobAsync(orgId, upstream, repository, digest, blobKey, CancellationToken.None),
-            LazyThreadSafetyMode.ExecutionAndPublication));
+
+        // GetOrAdd with a pre-built value rather than a factory, so "did I start this fetch?" has
+        // a definite answer: either this instance went into the dictionary or an existing one came
+        // back, and reference equality says which. The factory overload cannot answer it — it may
+        // run and then lose the race — and the answer decides whether this caller's sink is the
+        // one being mirrored into, which must never be a guess.
+        var ownEntry = new Lazy<Task<OciBlobFetchMetadata?>>(
+            () => FetchAndCacheBlobAsync(orgId, upstream, repository, digest, blobKey, sink, CancellationToken.None),
+            LazyThreadSafetyMode.ExecutionAndPublication);
+        var lazy = _blobInflight.GetOrAdd(inflightKey, ownEntry);
+        bool startedThisFetch = ReferenceEquals(lazy, ownEntry);
         _blobInflightArrivals.AddOrUpdate(inflightKey, 1, (_, count) => count + 1);
 
         // Removes exactly this (inflightKey, lazy) pair once the shared fetch genuinely
@@ -691,6 +706,14 @@ public sealed partial class OciUpstreamResolver
             return null;
         }
 
+        // Mirrored is only this caller's truth when this caller is the one whose sink the work
+        // item was built with; a waiter reading another request's flag would report a response it
+        // never sent.
+        if (startedThisFetch && meta.Mirrored)
+        {
+            return OciBlobServeResult.FromStream();
+        }
+
         // No per-caller oci_blobs row is written here: the in-flight entry is org-keyed, so the
         // work item that resolved it ran for THIS org and already persisted that org's row (with
         // the real media type and size) plus, on first insert, the config-blob arrival hook.
@@ -699,7 +722,7 @@ public sealed partial class OciUpstreamResolver
         //
         // Each waiter opens an INDEPENDENT stream from the cache store — never shared.
         var stream = await _blobs.Cache.GetAsync(meta.BlobKey, ct);
-        return stream is null ? null : new OciBlobResult(stream, meta.MediaType);
+        return stream is null ? null : OciBlobServeResult.FromBlob(new OciBlobResult(stream, meta.MediaType));
     }
 
     /// <summary>
@@ -987,6 +1010,44 @@ public sealed record OciManifestMetadata(string Digest, string MediaType, long S
 public sealed record OciBlobResult(Stream Content, string MediaType);
 
 /// <summary>
+/// The client side of a stream-through blob pull: how the proxy hands a pulling client its
+/// bytes while the same pass caches and verifies them.
+///
+/// <para>
+/// <see cref="BeginAsync"/> is called once, after the upstream response headers have arrived and
+/// passed the size pre-check but before any body byte is read, and returns the stream to mirror
+/// into. Supplying it is what turns the blob proxy from store-and-forward into stream-through;
+/// the caller uses the call as its cue to commit response headers, because after it the bytes
+/// start flowing.
+/// </para>
+///
+/// <para>
+/// <see cref="AbortAsync"/> is the fail-closed half. Bytes reach the client before the digest
+/// over the whole layer can be known, which is unavoidable in any stream-through proxy — so the
+/// integrity guarantee is expressed twice instead: the content-addressed cache key is still
+/// written only after verification (a mismatch poisons nothing), and a mismatch discovered at
+/// the end resets the connection through this callback so no client can mistake the bytes it
+/// received for a complete, verified layer. A truncated transfer is a failure the client acts
+/// on; a clean 200 over unverified bytes would not be.
+/// </para>
+/// </summary>
+public sealed record OciBlobStreamSink(
+    Func<string, long?, CancellationToken, Task<Stream>> BeginAsync,
+    Func<Task> AbortAsync,
+    Action AllowSynchronousWrites);
+
+/// <summary>
+/// How a blob pull was answered. <see cref="Streamed"/> means the bytes already went to the
+/// caller's sink and the response is complete; <see cref="Blob"/> carries a stream the caller
+/// must still send (a cache hit, or a waiter served after another request's fetch landed).
+/// </summary>
+public sealed record OciBlobServeResult(OciBlobResult? Blob, bool Streamed)
+{
+    public static OciBlobServeResult FromStream() => new(null, Streamed: true);
+    public static OciBlobServeResult FromBlob(OciBlobResult blob) => new(blob, Streamed: false);
+}
+
+/// <summary>
 /// Blob header metadata returned by a HEAD-only upstream fetch: media type only.
 /// The digest and size are already known from the request (digest is the request parameter;
 /// size is not needed for OCI blob HEAD — <c>Content-Length</c> is set from the DB row or
@@ -1000,20 +1061,40 @@ public sealed record OciBlobMetadata(string MediaType);
 /// Each concurrent waiter opens its own stream from the cache store after the Lazy resolves,
 /// preventing use-after-dispose when multiple callers race on the same digest.
 /// </summary>
-internal sealed record OciBlobFetchMetadata(string BlobKey, string MediaType);
+internal sealed record OciBlobFetchMetadata(string BlobKey, string MediaType, bool Mirrored);
 
 // ── Digest-verifying pass-through stream ─────────────────────────────────────
 
 /// <summary>
-/// A read-only pass-through stream that computes a running SHA-256 digest over all bytes read.
-/// Used by <see cref="OciUpstreamResolver"/> to verify OCI blob integrity while streaming to
-/// the blob store — avoids buffering large layer blobs in memory.
+/// A read-only pass-through stream that computes a running SHA-256 digest over all bytes read,
+/// and optionally mirrors every byte to a second sink as it goes. Used by
+/// <see cref="OciUpstreamResolver"/> to verify OCI blob integrity while streaming to the blob
+/// store — avoids buffering large layer blobs in memory.
+///
+/// <para>
+/// The mirror is what makes the blob proxy stream-through rather than store-and-forward. Without
+/// it, a pulling client receives its first byte only after the whole layer has been downloaded,
+/// verified and promoted, so time-to-first-byte scales with layer size; a multi-gigabyte layer
+/// then exceeds any fixed read timeout on a reverse proxy in front of this registry and the pull
+/// fails for a blob that is perfectly healthy upstream. Mirroring here rather than in the caller
+/// keeps one pass over the bytes: the same read that feeds the hasher and the blob store feeds
+/// the client.
+/// </para>
 /// </summary>
 internal sealed class OciDigestVerifyStream : Stream
 {
+    // Bytes between forced flushes of the mirror. The blob store pulls in CopyToAsync-sized
+    // chunks (80 KiB), so without a periodic flush a client can sit behind Kestrel's buffer long
+    // enough to re-create the stall this mirror exists to prevent. A byte counter rather than a
+    // timer keeps the behaviour deterministic and clock-free.
+    private const long MirrorFlushIntervalBytes = 4L * 1024 * 1024;
+
     private readonly Stream _inner;
     private readonly IncrementalHash _hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
     private readonly long _maxBytes;
+    private Stream? _mirror;
+    private long _sinceMirrorFlush;
+    private Action? _onSynchronousMirrorWrite;
 
     /// <param name="inner">The upstream response body to hash and pass through.</param>
     /// <param name="maxBytes">
@@ -1023,13 +1104,108 @@ internal sealed class OciDigestVerifyStream : Stream
     /// without ever buffering the whole body. Catches a Content-Length-less (chunked) response
     /// that a fixed pre-check on the header alone would miss.
     /// </param>
-    public OciDigestVerifyStream(Stream inner, long maxBytes)
+    /// <param name="mirror">
+    /// Optional second destination for every byte read — the pulling client's response body.
+    /// A write failure here abandons the mirror and is <b>not</b> propagated: the caching pass
+    /// must run to completion even when the client has gone, because that completed cache entry
+    /// is what makes the client's own retry a hit. <see cref="MirrorFaulted"/> reports whether
+    /// that happened.
+    /// </param>
+    /// <param name="onSynchronousMirrorWrite">
+    /// Invoked at most once, immediately before the first synchronous write to the mirror, so the
+    /// caller can permit synchronous writes on its response body only if that actually turns out
+    /// to be necessary. Whether it is depends entirely on the blob store: one that copies with
+    /// <c>CopyToAsync</c> never reaches the synchronous path and never fires this.
+    /// </param>
+    public OciDigestVerifyStream(
+        Stream inner, long maxBytes, Stream? mirror = null, Action? onSynchronousMirrorWrite = null)
     {
         _inner = inner;
         _maxBytes = maxBytes;
+        _mirror = mirror;
+        _onSynchronousMirrorWrite = onSynchronousMirrorWrite;
     }
 
     public long BytesWritten { get; private set; }
+
+    /// <summary>True once a mirror write failed and the mirror was abandoned.</summary>
+    public bool MirrorFaulted { get; private set; }
+
+    /// <summary>True while bytes are still being handed to the client.</summary>
+    public bool MirrorActive => _mirror is not null;
+
+    // A client going away is an ordinary event and only drops the mirror; anything else is a
+    // fault in this proxy and must surface. The distinction is the whole difference between a
+    // disconnect and a bug: a catch-all here turns "the response body rejected this write" into
+    // a 200 carrying zero bytes, which no test that writes to a MemoryStream can see.
+    private static bool IsClientGone(Exception ex)
+        => ex is IOException or ObjectDisposedException or OperationCanceledException;
+
+    // Mirrors one chunk on the synchronous read path, which a blob store reaches whenever it
+    // copies with Stream.CopyTo (the in-memory one does; an SDK-backed one may). The write is
+    // genuinely synchronous rather than a blocking wait on an async one: sync-over-async here
+    // occupies a pool thread while waiting for a pool thread, which starves under load and is
+    // the kind of stall that only shows up in a full suite or in production. The caller opts the
+    // response body into synchronous writes for the duration of the transfer instead. Blocking
+    // this thread costs nothing extra — the store's own synchronous copy already owns it.
+    private void MirrorWrite(ReadOnlySpan<byte> chunk)
+    {
+        if (_mirror is null)
+        {
+            return;
+        }
+
+        // Asked for only on the first synchronous write, and only ever on this path — a store
+        // that copies asynchronously never gets here, so the common deployment never permits
+        // synchronous writes on a response body at all.
+        if (_onSynchronousMirrorWrite is { } permit)
+        {
+            _onSynchronousMirrorWrite = null;
+            permit();
+        }
+
+        try
+        {
+            _mirror.Write(chunk);
+            _sinceMirrorFlush += chunk.Length;
+            if (_sinceMirrorFlush >= MirrorFlushIntervalBytes || BytesWritten == chunk.Length)
+            {
+                _mirror.Flush();
+                _sinceMirrorFlush = 0;
+            }
+        }
+        catch (Exception ex) when (IsClientGone(ex))
+        {
+            _mirror = null;
+            MirrorFaulted = true;
+        }
+    }
+
+    private async ValueTask MirrorWriteAsync(ReadOnlyMemory<byte> chunk, CancellationToken ct)
+    {
+        if (_mirror is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _mirror.WriteAsync(chunk, ct);
+            _sinceMirrorFlush += chunk.Length;
+            // The first chunk always flushes: it is what commits the response headers and
+            // starts the client's clock ticking on received bytes rather than on silence.
+            if (_sinceMirrorFlush >= MirrorFlushIntervalBytes || BytesWritten == chunk.Length)
+            {
+                await _mirror.FlushAsync(ct);
+                _sinceMirrorFlush = 0;
+            }
+        }
+        catch (Exception ex) when (IsClientGone(ex))
+        {
+            _mirror = null;
+            MirrorFaulted = true;
+        }
+    }
 
     /// <summary>Returns <c>sha256:{lowercaseHex}</c> of all bytes read so far.</summary>
     public string ComputedDigest
@@ -1061,6 +1237,7 @@ internal sealed class OciDigestVerifyStream : Stream
             _hasher.AppendData(buffer, offset, read);
             BytesWritten += read;
             CheckCap();
+            MirrorWrite(buffer.AsSpan(offset, read));
         }
         return read;
     }
@@ -1073,6 +1250,7 @@ internal sealed class OciDigestVerifyStream : Stream
             _hasher.AppendData(buffer, offset, read);
             BytesWritten += read;
             CheckCap();
+            await MirrorWriteAsync(buffer.AsMemory(offset, read), cancellationToken);
         }
         return read;
     }
@@ -1085,6 +1263,7 @@ internal sealed class OciDigestVerifyStream : Stream
             _hasher.AppendData(buffer.Span[..read]);
             BytesWritten += read;
             CheckCap();
+            await MirrorWriteAsync(buffer[..read], cancellationToken);
         }
         return read;
     }
@@ -1094,6 +1273,9 @@ internal sealed class OciDigestVerifyStream : Stream
     public override void SetLength(long value) => throw new NotSupportedException();
     public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
 
+    // The mirror is deliberately NOT disposed: it is the caller's response body, owned by the
+    // request pipeline, and closing it here would truncate the response before the controller
+    // has decided whether the transfer completed honestly.
     protected override void Dispose(bool disposing)
     {
         if (disposing)

@@ -7,7 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-09-21
+
 ### Fixed
+
+- **The OCI blob proxy was store-and-forward, so a large layer could never be pulled through a
+  reverse proxy.** A cache-miss blob `GET` downloaded the entire layer, verified it and promoted
+  it into the cache before writing the first byte to the client — time-to-first-byte scaled with
+  layer size while every reverse proxy in front of the registry enforces a fixed read timeout
+  (nginx defaults to 60 s). Past roughly a minute's worth of transfer the pull could not complete
+  at any size of blob, however healthy that blob was upstream: the proxy hung up, the request's
+  cancellation surfaced as an unhandled `TaskCanceledException` — **`500`, with a stack trace at
+  Error level** — and the client read that as a broken server and retried from byte zero into the
+  same wall. A 5.8 GiB layer needing about twenty minutes against a sixty-second budget failed
+  identically on every attempt, which read as one poisoned object in the cache rather than as a
+  structural limit; the same wall was being hit and survived by luck on layers a tenth the size,
+  where a retry happened to land after the background fetch had finished.
+
+  The blob proxy now **streams through**: upstream bytes are mirrored to the client by the same
+  pass that hashes and caches them, so time-to-first-byte is the upstream's own regardless of
+  layer size. Verify-then-commit is unchanged — the content-addressed key is still written only
+  after the digest is confirmed. A client that hangs up mid-layer no longer aborts the fetch: the
+  caching pass runs to completion, which is what makes that client's retry a cache hit. A caller
+  that joins a fetch already in flight cannot be mirrored and is served from the cache as before.
+
+  Two refusals interact with this, and they are treated differently because only one of them has
+  to. **An over-cap body is never streamed into a reset**: a response arriving with no declared
+  `Content-Length` can only have its cap checked mid-transfer, so that one case deliberately does
+  not stream at all and keeps answering `502 blob_too_large` with nothing yet sent. It costs
+  nothing in practice — a registry serving a layer declares its length — and it means the size
+  refusal introduced in the previous release keeps its status contract intact. **A digest
+  mismatch on a streamed blob can only be a reset**, because a whole-layer digest is not knowable
+  until the last byte, by which time the response is committed; the connection is reset so a
+  truncated transfer rather than a clean `200` is what the client acts on, and nothing is written
+  to the cache, so a retry is not served the bad bytes either. On the non-streamed path the
+  mismatch still answers `502 blob_digest_mismatch` in full.
+
+- **A caller disconnecting mid-pull was reported as a server fault.** An `OperationCanceledException`
+  raised by the caller's own request token now answers **`504 UNAVAILABLE`** and logs one line
+  without a stack trace, instead of a `500` that told the puller this registry had broken and
+  filled the log with traces for the most ordinary event a long transfer has. Where the response
+  has already started, the connection is reset rather than a status invented for bytes already
+  sent.
+
+- **The OCI blob proxy leaked its staging entry on any failure after the staged write.** Cleanup
+  ran only on the two refusals that were named explicitly (over-cap, digest mismatch), so a
+  promote that failed — a full cache volume, the likeliest cause when writing a multi-gigabyte
+  layer twice — stranded the staged bytes permanently. Nothing else reclaims them: the OCI
+  staging janitor sweeps the `PROXY_STAGING_PATH` filesystem for a different filename shape, and
+  cache eviction is row-driven while a staging entry never had a row, so a retrying client minted
+  a fresh orphan per attempt on the volume whose exhaustion caused the failure. The delete is now
+  unconditional and runs on `CancellationToken.None`, and the staged stream is disposed before
+  the slot is unlinked — leaving it open held a file handle on an unlinked multi-gigabyte inode
+  until a finalizer ran, so the space the delete appeared to reclaim was still spent.
 
 - **The OCI blob proxy refused any layer over a hard-coded 600 MB and reported the refusal as
   `404 BLOB_UNKNOWN`** — "this blob does not exist" — for content the upstream was in the middle

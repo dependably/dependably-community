@@ -1934,8 +1934,8 @@
       "dependably": {
         "type": "Project",
         "dependencies": {
-          "Dependably.Core": "[0.12.0, )",
-          "Dependably.Management": "[0.12.0, )",
+          "Dependably.Core": "[0.12.1, )",
+          "Dependably.Management": "[0.12.1, )",
           "Serilog.AspNetCore": "[10.0.0, )"
         }
       },
@@ -1968,7 +1968,7 @@
       "dependably.edge": {
         "type": "Project",
         "dependencies": {
-          "Dependably.Core": "[0.12.0, )",
+          "Dependably.Core": "[0.12.1, )",
           "Serilog.AspNetCore": "[10.0.0, )"
         }
       },
@@ -1977,7 +1977,7 @@
         "dependencies": {
           "BCrypt.Net-Next": "[4.1.0, )",
           "Dapper": "[2.1.72, )",
-          "Dependably.Core": "[0.12.0, )",
+          "Dependably.Core": "[0.12.1, )",
           "IPAddressRange": "[6.3.0, )",
           "ITfoxtec.Identity.Saml2.MvcCore": "[4.17.0, )",
           "MailKit": "[4.17.0, )",

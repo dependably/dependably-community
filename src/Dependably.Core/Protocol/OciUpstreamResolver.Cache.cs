@@ -333,13 +333,35 @@ public sealed partial class OciUpstreamResolver
         }
     }
 
-    [SuppressMessage("Major Code Smell", "S125:Sections of code should not be commented out", Justification = "Descriptive documentation comment, not commented-out code.")]
+    /// <summary>
+    /// Fetches one blob from upstream, verifies it against the digest it was requested under, and
+    /// commits it to the content-addressed cache key — mirroring the bytes to
+    /// <paramref name="sink"/> as they pass, when one is supplied.
+    ///
+    /// <para>
+    /// The mirror is the difference between stream-through and store-and-forward, and it matters
+    /// most for exactly the blobs least able to survive without it. Store-and-forward gives the
+    /// client its first byte only after the entire layer has been downloaded, hashed and
+    /// promoted, so time-to-first-byte scales with layer size while every reverse proxy in front
+    /// of this registry enforces a fixed read timeout: past some size no pull can ever complete,
+    /// however healthy the blob is upstream, and the client's retries restart from zero into the
+    /// same wall. Mirroring collapses time-to-first-byte to the upstream's own.
+    /// </para>
+    ///
+    /// <para>
+    /// A client that disappears mid-layer does <b>not</b> abort the fetch: the mirror is dropped
+    /// and the caching pass runs to completion, because a finished cache entry is what turns that
+    /// client's next attempt into a hit. This is also why the work item is invoked with
+    /// <see cref="CancellationToken.None"/> by its caller.
+    /// </para>
+    /// </summary>
     private async Task<OciBlobFetchMetadata?> FetchAndCacheBlobAsync(
         string orgId,
         OciUpstreamRegistryOptions upstream,
         string repository,
         string digest,
         string blobKey,
+        OciBlobStreamSink? sink,
         CancellationToken ct)
     {
         var client = _http.CreateClient("OciUpstream");
@@ -360,7 +382,6 @@ public sealed partial class OciUpstreamResolver
         }
 
         string mediaType = resp.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
-        long bytesWritten;
 
         // Cheap fail-fast on a declared Content-Length before streaming a single byte, mirroring
         // every other ecosystem's upstream-fetch path (UpstreamClient.FetchAndStageCoreAsync).
@@ -376,55 +397,111 @@ public sealed partial class OciUpstreamResolver
                 digest, upstream.Host, maxBlobBytes, resp.Content.Headers.ContentLength);
         }
 
+        // Open the client mirror only here: after the upstream has been reached and the declared
+        // size has been checked, so neither a 404 nor an over-cap blob can commit response
+        // headers the caller then has to contradict. Everything from this point on is a transfer
+        // the client is watching.
+        //
+        // A body arriving with NO declared length deliberately does not stream. Its cap can only
+        // be enforced mid-transfer, and a mid-transfer refusal cannot be a status once bytes have
+        // gone — it can only be a reset. Declining to mirror that one case keeps the over-cap
+        // refusal answerable as the 502 it is supposed to be, and costs nothing in practice: a
+        // registry serving a layer declares its length. Streaming is for the case that has a
+        // number to check first.
+        long? declaredLength = resp.Content.Headers.ContentLength;
+        var mirror = declaredLength is null
+            ? null
+            : await TryBeginMirrorAsync(sink, mediaType, declaredLength, repository, digest, ct);
+
         // Verify-then-commit: stream upstream bytes into an ephemeral staging key so
         // the content-addressed blobKey is never written until the digest is confirmed.
         // A concurrent cache-first reader (FetchBlobAsync) checks blobKey directly;
         // because blobKey is only populated after a successful verification here, a
-        // cache-first branch can only ever serve verified bytes.
+        // cache-first branch can only ever serve verified bytes — and mirroring to the
+        // client does not weaken that, because a mismatch resets the client's connection
+        // rather than completing it.
         string stagingKey = BlobKeys.OciStaging(Guid.NewGuid().ToString("N"));
+        long bytesWritten;
+        bool mirrored;
 
         try
         {
-            await using var contentStream = await resp.Content.ReadAsStreamAsync(ct);
-            await using var verifyStream = new OciDigestVerifyStream(contentStream, maxBlobBytes);
+            try
+            {
+                await using var contentStream = await resp.Content.ReadAsStreamAsync(ct);
+                await using var verifyStream = new OciDigestVerifyStream(
+                    contentStream, maxBlobBytes, mirror,
+                    onSynchronousMirrorWrite: mirror is null ? null : sink!.AllowSynchronousWrites);
 
-            await _blobs.Cache.PutAsync(stagingKey, verifyStream, ct);
-            bytesWritten = verifyStream.BytesWritten;
+                await _blobs.Cache.PutAsync(stagingKey, verifyStream, ct);
+                bytesWritten = verifyStream.BytesWritten;
+                mirrored = mirror is not null;
 
-            string computedDigest = verifyStream.ComputedDigest;
-            if (!string.Equals(computedDigest, $"sha256:{expectedHex}", StringComparison.OrdinalIgnoreCase))
+                if (verifyStream.MirrorFaulted)
+                {
+                    // Ordinary: the client hung up mid-layer. Worth one line, because it explains
+                    // why a completed cache write has no matching download in the audit trail.
+                    _logger.LogInformation(
+                        "OCI blob {Repository}/{Digest}: client stopped reading after {Bytes} B; caching continued.",
+                        repository, digest, bytesWritten);
+                }
+
+                string computedDigest = verifyStream.ComputedDigest;
+                if (!string.Equals(computedDigest, $"sha256:{expectedHex}", StringComparison.OrdinalIgnoreCase))
+                {
+                    _logger.LogWarning(
+                        "OCI blob digest mismatch for {Repository}/{Digest}: expected sha256:{Expected}, computed {Computed}",
+                        repository, digest, expectedHex, computedDigest);
+                    await AbortMirrorAsync(sink, mirror, repository, digest);
+                    throw new OciBlobDigestMismatchException(digest, upstream.Host, computedDigest);
+                }
+            }
+            catch (UpstreamResponseTooLargeException)
             {
                 _logger.LogWarning(
-                    "OCI blob digest mismatch for {Repository}/{Digest}: expected sha256:{Expected}, computed {Computed}",
-                    repository, digest, expectedHex, computedDigest);
-                await _blobs.Cache.DeleteAsync(stagingKey, ct);
-                throw new OciBlobDigestMismatchException(digest, upstream.Host, computedDigest);
+                    "OCI blob {Repository}/{Digest} from {Host} exceeded the {MaxBytes}-byte blob proxy cap mid-stream; refusing.",
+                    repository, digest, upstream.Host, maxBlobBytes);
+                await AbortMirrorAsync(sink, mirror, repository, digest);
+
+                // Rethrown as the OCI-plane refusal rather than surfaced as a null: a chunked
+                // upstream reaches the cap here with no declared length to have caught it above, and
+                // the caller cannot tell that case from a miss unless it is told.
+                throw new OciBlobTooLargeException(digest, upstream.Host, maxBlobBytes, declaredBytes: null);
+            }
+
+            // Digest verified — promote the staging entry to the content-addressed key. The
+            // staged stream is disposed before the slot is deleted; leaving it open held a file
+            // handle on an unlinked multi-gigabyte inode until a finalizer ran, so the space a
+            // delete appeared to reclaim was still spent.
+            // Scoped to this try block, so the staged stream is disposed before the finally
+            // below unlinks the slot it reads from.
+            await using var stagedStream = await _blobs.Cache.GetAsync(stagingKey, ct);
+            if (stagedStream is not null)
+            {
+                await _blobs.Cache.PutAsync(blobKey, stagedStream, ct);
             }
         }
-        catch (UpstreamResponseTooLargeException)
+        finally
         {
-            // Delete-on-refuse: a coordinate-addressed staging entry left behind here would be a
-            // permanent bypass of this cap for every future request that races the same digest.
-            _logger.LogWarning(
-                "OCI blob {Repository}/{Digest} from {Host} exceeded the {MaxBytes}-byte blob proxy cap mid-stream; refusing.",
-                repository, digest, upstream.Host, maxBlobBytes);
-            await _blobs.Cache.DeleteAsync(stagingKey, ct);
-
-            // Rethrown as the OCI-plane refusal rather than surfaced as a null: a chunked
-            // upstream reaches the cap here with no declared length to have caught it above, and
-            // the caller cannot tell that case from a miss unless it is told.
-            throw new OciBlobTooLargeException(digest, upstream.Host, maxBlobBytes, declaredBytes: null);
+            // Delete-on-every-exit, not delete-on-known-refusal. A staging key is coordinate-
+            // addressed and nothing else reclaims it: the OCI staging janitor sweeps the
+            // PROXY_STAGING_PATH filesystem for a different filename shape, and cache eviction is
+            // row-driven while a staging entry never had a row. So any exit that skipped the
+            // delete — a reset upstream, a full disk, the HTTP timeout on a slow multi-gigabyte
+            // layer — orphaned those bytes permanently, and a retrying client minted a fresh
+            // orphan each time. Unconditionally, and on CancellationToken.None so a cancelled
+            // fetch still cleans up after itself.
+            try
+            {
+                await _blobs.Cache.DeleteAsync(stagingKey, CancellationToken.None);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(
+                    "{ExceptionType} deleting OCI staging entry {StagingKey} for {Repository}/{Digest}; bytes may be orphaned. {Message}",
+                    ex.GetType().Name, stagingKey, repository, digest, ex.Message);
+            }
         }
-
-        // Digest verified — promote staging entry to the content-addressed key, then
-        // clean up the staging slot so it never persists beyond this request.
-        var stagedStream = await _blobs.Cache.GetAsync(stagingKey, ct);
-        if (stagedStream is not null)
-        {
-            await _blobs.Cache.PutAsync(blobKey, stagedStream, ct);
-        }
-
-        await _blobs.Cache.DeleteAsync(stagingKey, ct);
 
         // Persist DB row for this org.
         bool inserted = await EnsureBlobDbRowAsync(orgId, digest, mediaType, bytesWritten, blobKey, ct);
@@ -441,7 +518,55 @@ public sealed partial class OciUpstreamResolver
 
         // Return only metadata — each waiter opens its own stream independently in
         // FetchBlobAsync, so the single shared result never carries a shared stream.
-        return new OciBlobFetchMetadata(blobKey, mediaType);
+        return new OciBlobFetchMetadata(blobKey, mediaType, mirrored);
+    }
+
+    // Opens the caller's mirror, or returns null when there is none or it could not be opened.
+    // A sink that throws here (the client is already gone, the response could not be started) is
+    // not a fetch failure: the fetch carries on unmirrored and still populates the cache.
+    private async Task<Stream?> TryBeginMirrorAsync(
+        OciBlobStreamSink? sink, string mediaType, long? contentLength,
+        string repository, string digest, CancellationToken ct)
+    {
+        if (sink is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return await sink.BeginAsync(mediaType, contentLength, ct);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            _logger.LogInformation(
+                "{ExceptionType} starting the client stream for OCI blob {Repository}/{Digest}; caching without a mirror. {Message}",
+                ex.GetType().Name, repository, digest, ex.Message);
+            return null;
+        }
+    }
+
+    // Resets a client connection that has already received bytes this registry will not stand
+    // behind. Only meaningful when a mirror was actually opened; a refusal with no mirror is
+    // answered by the controller with a status, because nothing has been sent yet.
+    private async Task AbortMirrorAsync(
+        OciBlobStreamSink? sink, Stream? mirror, string repository, string digest)
+    {
+        if (sink is null || mirror is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await sink.AbortAsync();
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            _logger.LogWarning(
+                "{ExceptionType} aborting the client stream for refused OCI blob {Repository}/{Digest}. {Message}",
+                ex.GetType().Name, repository, digest, ex.Message);
+        }
     }
 
     // Decides whether a bare hit on the shared content-addressed blob store may be served to

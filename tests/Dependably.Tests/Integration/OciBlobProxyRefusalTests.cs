@@ -139,13 +139,18 @@ public sealed class OciBlobProxyRefusalTests
         Assert.DoesNotContain(MismatchMarker, message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A body with no declared length does not stream (its cap is only checkable mid-transfer),
+    /// so nothing has been sent when the digest check fails and the refusal is still deliverable
+    /// as a status. This is where the integrity fault keeps its full vocabulary.
+    /// </summary>
     [Fact]
-    public async Task DigestMismatch_IsReportedAsIntegrity_AndNotAsTheCap()
+    public async Task DigestMismatch_WithNoDeclaredLength_IsReportedAsIntegrity_AndNotAsTheCap()
     {
         byte[] served = "these are not the bytes you asked for"u8.ToArray();
         byte[] requested = "the bytes that were actually requested"u8.ToArray();
 
-        await using var factory = UpstreamServing(served);
+        await using var factory = UpstreamServing(served, declareLength: false);
         await factory.InitializeAsync();
         await RouteAllToAsync(factory, PrivateUpstreamHost);
 
@@ -161,6 +166,35 @@ public sealed class OciBlobProxyRefusalTests
         Assert.Equal("blob_digest_mismatch", await ReadFaultAsync(resp));
 
         Assert.DoesNotContain(TooLargeMarker, message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The streamed counterpart, and the one case a stream-through proxy cannot answer with a
+    /// status: a whole-layer digest is not knowable until the last byte, by which time the
+    /// response is long committed. The refusal becomes a reset — which is the point, because the
+    /// alternative is completing a 200 over bytes this registry has just decided not to vouch
+    /// for. What must survive is that the client cannot mistake the transfer for a success and
+    /// that nothing was committed to the cache, so a retry is not served the bad bytes either.
+    /// </summary>
+    [Fact]
+    public async Task DigestMismatch_OnAStreamedBlob_ResetsTheTransfer_AndCachesNothing()
+    {
+        byte[] served = "these are not the bytes you asked for"u8.ToArray();
+        byte[] requested = "the bytes that were actually requested"u8.ToArray();
+
+        await using var factory = UpstreamServing(served);
+        await factory.InitializeAsync();
+        await RouteAllToAsync(factory, PrivateUpstreamHost);
+
+        string token = await factory.CreateToken("pull");
+        using var client = factory.CreateClientWithBearer(token);
+        string url = $"/v2/{Repo}/blobs/{DigestOf(requested)}";
+
+        await Assert.ThrowsAnyAsync<HttpRequestException>(() => client.GetAsync(url));
+
+        // And again: a poisoned cache entry would turn the second attempt into a clean 200
+        // carrying the wrong bytes, which is the outcome verify-then-commit exists to prevent.
+        await Assert.ThrowsAnyAsync<HttpRequestException>(() => client.GetAsync(url));
     }
 
     // ── The happy path still works ────────────────────────────────────────────

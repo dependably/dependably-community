@@ -3,6 +3,7 @@ using Dependably.Infrastructure;
 using Dependably.Protocol;
 using Dependably.Security;
 using Dependably.Storage;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Mvc;
 
 namespace Dependably.Api;
@@ -262,6 +263,10 @@ public sealed partial class OciController
             {
                 return AirGappedBlobMiss(name, digest);
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                return ClientWentAway(name, digest);
+            }
             catch (OciBlobRefusedException ex)
             {
                 return BlobRefused(ex, name, digest, token);
@@ -285,38 +290,152 @@ public sealed partial class OciController
             return Ok();
         }
 
-        OciBlobResult? upstreamResult;
+        // Stream-through: hand the resolver somewhere to mirror the layer into, and it commits
+        // these headers and starts the body as soon as upstream answers, instead of after the
+        // whole layer has landed. The distinction is invisible on a small blob and decisive on a
+        // large one — a store-and-forward pull of a multi-gigabyte layer sends nothing for
+        // minutes, which no reverse proxy's read timeout tolerates.
+        var sink = new OciBlobStreamSink(
+            BeginAsync: async (mediaType, contentLength, beginCt) =>
+            {
+                SetUpstreamBlobHeaders(digest, mediaType);
+                if (contentLength is { } declared)
+                {
+                    // Declared up front so the client can size the transfer and, more to the
+                    // point, can tell a reset mid-layer from an honest end.
+                    Response.ContentLength = declared;
+                }
+
+                await Response.StartAsync(beginCt);
+                return Response.Body;
+            },
+            AbortAsync: () =>
+            {
+                // Reset rather than complete: the bytes already sent are ones this registry has
+                // just decided it will not vouch for.
+                HttpContext.Abort();
+                return Task.CompletedTask;
+            },
+            AllowSynchronousWrites: () =>
+            {
+                // Requested only if the blob store turns out to copy the upstream body
+                // synchronously, which Kestrel otherwise refuses on a response body. Granting it
+                // up front would permit synchronous writes on every streamed blob response; asked
+                // for on demand, the common deployment — a store that copies with CopyToAsync —
+                // never grants it at all. Where it is granted, the thread it blocks is the one
+                // the store's own synchronous copy already owns, so no additional worker is
+                // consumed; the alternative, awaiting an async write from inside a synchronous
+                // read, waits on a pool thread while holding one, which is the starvation this
+                // avoids rather than causes.
+                if (HttpContext.Features.Get<IHttpBodyControlFeature>() is { } bodyControl)
+                {
+                    bodyControl.AllowSynchronousIO = true;
+                }
+            });
+
+        OciBlobServeResult? upstreamResult;
         try
         {
-            upstreamResult = await _svc.Upstream.FetchBlobAsync(orgId, name, digest, ct);
+            upstreamResult = await _svc.Upstream.FetchBlobAsync(orgId, name, digest, ct, sink);
         }
         catch (AirGappedException)
         {
-            return AirGappedBlobMiss(name, digest);
+            return OrAbortIfStarted(AirGappedBlobMiss(name, digest));
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            return OrAbortIfStarted(ClientWentAway(name, digest));
         }
         catch (OciBlobRefusedException ex)
         {
-            return BlobRefused(ex, name, digest, token);
+            return OrAbortIfStarted(BlobRefused(ex, name, digest, token));
         }
         catch (Exception ex) when (IsUpstreamFailure(ex, ct))
         {
-            return UpstreamUnreachable(ex, name, digest);
+            return OrAbortIfStarted(UpstreamUnreachable(ex, name, digest));
         }
 
         if (upstreamResult is null)
         {
-            return OciError(StatusCodes.Status404NotFound, OciErrorCode.BLOB_UNKNOWN, $"Blob unknown: {digest}");
+            return OrAbortIfStarted(
+                OciError(StatusCodes.Status404NotFound, OciErrorCode.BLOB_UNKNOWN, $"Blob unknown: {digest}"));
         }
 
+        await _svc.Audit.LogActivityAsync(orgId, "oci", PurlNormalizer.Oci(name, digest), "download",
+            actorId: token?.AuditActorId, actorKind: token?.ActorKind, actorLabel: token?.AuditActorLabel, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+
+        if (upstreamResult.Streamed)
+        {
+            // The sink already carried every byte; the response is complete.
+            return new EmptyResult();
+        }
+
+        var blob = upstreamResult.Blob!;
+
+        // Not streamed, so the response should not have begun. If it somehow did — a sink that
+        // committed the response and then failed — sending a second body would be worse than
+        // sending none, so reset instead.
+        if (Response.HasStarted)
+        {
+            await blob.Content.DisposeAsync();
+            HttpContext.Abort();
+            return new EmptyResult();
+        }
+
+        SetUpstreamBlobHeaders(digest, blob.MediaType);
+        return File(blob.Content, blob.MediaType);
+    }
+
+    /// <summary>Response headers common to every cache-miss blob answer, streamed or not.</summary>
+    private void SetUpstreamBlobHeaders(string digest, string mediaType)
+    {
         Response.Headers.AcceptRanges = "bytes";
         Response.Headers["Docker-Content-Digest"] = digest;
         Response.Headers["X-Cache"] = "MISS";
-        Response.ContentType = upstreamResult.MediaType;
+        Response.ContentType = mediaType;
         Response.Headers.ETag = $"\"{digest}\"";
         Response.Headers.CacheControl = "private, max-age=31536000, immutable";
-        await _svc.Audit.LogActivityAsync(orgId, "oci", PurlNormalizer.Oci(name, digest), "download",
-            actorId: token?.AuditActorId, actorKind: token?.ActorKind, actorLabel: token?.AuditActorLabel, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
-        return File(upstreamResult.Content, upstreamResult.MediaType);
+    }
+
+    /// <summary>
+    /// Substitutes an abort for a status once the response is already on the wire. A status is a
+    /// promise made at the start of a response; after the first byte there is no way to retract
+    /// it, so the only honest signal left is to reset the connection.
+    /// </summary>
+    private IActionResult OrAbortIfStarted(IActionResult result)
+    {
+        if (!Response.HasStarted)
+        {
+            return result;
+        }
+
+        HttpContext.Abort();
+        return new EmptyResult();
+    }
+
+    /// <summary>
+    /// The answer when the caller's own request was cancelled — nearly always the client, or a
+    /// proxy in front of it, hanging up before the pull finished.
+    ///
+    /// <para>
+    /// This is not a server fault and must not be reported as one. Left unhandled it surfaced as
+    /// <c>500</c> with a full stack trace at Error level, which is wrong twice over: it tells a
+    /// puller that this registry broke, so the puller retries from byte zero into whatever
+    /// deadline just cut it off, and it fills the log with stack traces for the most ordinary
+    /// event a byte-range-free multi-gigabyte transfer has. 504 says what happened — the transfer
+    /// did not finish in the time available — and the fetch it interrupted keeps running in the
+    /// background, so the next attempt can be a cache hit.
+    /// </para>
+    /// </summary>
+    private ObjectResult ClientWentAway(string name, string digest)
+    {
+        _logger.LogInformation(
+            "OCI blob {Repository}/{Digest}: the caller went away before the pull completed; the upstream fetch continues.",
+            name, digest);
+
+        return OciError(
+            StatusCodes.Status504GatewayTimeout, OciErrorCode.UNAVAILABLE,
+            $"Blob {digest} did not transfer completely for repository '{name}'; the fetch is continuing and a retry may be served from cache.");
     }
 
     /// <summary>

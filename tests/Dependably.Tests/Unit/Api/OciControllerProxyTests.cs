@@ -443,10 +443,19 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
         var http = new SingleResponseFactory(upstreamResp);
         var ctl = BuildController(BuildResolver(http));
 
+        // A cache-miss GET streams the layer through as it caches it, so the bytes arrive on the
+        // response body rather than in a result the framework serialises afterwards. Asserting
+        // the body is the stronger check anyway: the old FileStreamResult assertion passed
+        // without ever proving a byte reached the client.
+        using var body = new MemoryStream();
+        ctl.Response.Body = body;
+
         var result = await ctl.Get($"library/ubuntu/blobs/{digest}", default);
 
-        Assert.IsType<FileStreamResult>(result);
+        Assert.IsType<EmptyResult>(result);
+        Assert.Equal(blobBytes, body.ToArray());
         Assert.Equal("MISS", ctl.Response.Headers["X-Cache"].ToString());
+        Assert.Equal(digest, ctl.Response.Headers["Docker-Content-Digest"].ToString());
     }
 
     // ── GET blob — no upstream ────────────────────────────────────────────────
