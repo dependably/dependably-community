@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Xunit.Abstractions;
 
 namespace Dependably.Tests.Compliance;
@@ -136,6 +137,56 @@ public sealed class BlockGateRequestConstructionComplianceTests
             string signature = source[start..bodyStart];
             Assert.Contains("CacheArtifactServeFacts", signature, StringComparison.Ordinal);
         }
+    }
+
+    /// <summary>
+    /// Both proxy factories must set the SAME set of <c>*Mode</c>/<c>*Tolerance</c> policy fields
+    /// on the record — the behavioural half of first-fetch/cache-hit symmetry that
+    /// <see cref="BothProxyFactories_ReadTheSameCacheArtifactFactsType"/> does not reach (that test
+    /// only checks the input facts TYPE, not which record fields the factory body actually
+    /// populates). A named argument left off one factory's <c>new(...)</c> call compiles fine and
+    /// defaults to null — every arm reads that as "policy off" for every first fetch of that
+    /// ecosystem, no matter what the org configured — so only a field-set comparison, not a compile
+    /// error, catches a factory that drifts out of sync with its sibling.
+    /// </summary>
+    [Fact]
+    public void BothProxyFactories_SetTheSameModeAndToleranceFields()
+    {
+        string factoryPath = SourceRoots.AllCSharpFiles()
+            .First(f => Path.GetFileName(f).Equals(FactoryFile, StringComparison.Ordinal));
+        string source = File.ReadAllText(factoryPath);
+
+        var cacheFactsFields = ExtractModeAndToleranceFields(source, "ForProxyCacheFacts(");
+        var firstFetchFields = ExtractModeAndToleranceFields(source, "ForProxyFirstFetch(");
+
+        var onlyInCacheFacts = cacheFactsFields.Except(firstFetchFields).OrderBy(f => f, StringComparer.Ordinal).ToList();
+        var onlyInFirstFetch = firstFetchFields.Except(cacheFactsFields).OrderBy(f => f, StringComparer.Ordinal).ToList();
+
+        Assert.True(cacheFactsFields.Count > 0, "ForProxyCacheFacts body yielded no *Mode/*Tolerance fields — extraction likely broken.");
+        Assert.True(firstFetchFields.Count > 0, "ForProxyFirstFetch body yielded no *Mode/*Tolerance fields — extraction likely broken.");
+        Assert.True(onlyInCacheFacts.Count == 0 && onlyInFirstFetch.Count == 0,
+            "The two proxy BlockGateRequest factories set different *Mode/*Tolerance field sets — "
+            + "a policy configured for one gate path silently does not apply on the other.\n"
+            + $"Only in ForProxyCacheFacts: {string.Join(", ", onlyInCacheFacts)}\n"
+            + $"Only in ForProxyFirstFetch: {string.Join(", ", onlyInFirstFetch)}");
+    }
+
+    /// <summary>
+    /// Extracts the set of distinct <c>SomeFieldMode:</c>/<c>SomeFieldTolerance:</c> named-argument
+    /// tokens inside one factory's body — from its declaration up to the next
+    /// <c>public static BlockGateRequest</c> declaration (or end of file).
+    /// </summary>
+    private static HashSet<string> ExtractModeAndToleranceFields(string source, string factoryMarker)
+    {
+        int start = source.IndexOf("public static BlockGateRequest " + factoryMarker, StringComparison.Ordinal);
+        Assert.True(start >= 0, $"{factoryMarker} declaration not found in {FactoryFile}");
+
+        int next = source.IndexOf("public static BlockGateRequest ", start + 1, StringComparison.Ordinal);
+        string body = next > start ? source[start..next] : source[start..];
+
+        return Regex.Matches(body, @"\b([A-Za-z]\w*(?:Mode|Tolerance)):")
+            .Select(m => m.Groups[1].Value)
+            .ToHashSet(StringComparer.Ordinal);
     }
 
     /// <summary>

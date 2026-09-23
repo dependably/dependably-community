@@ -28,7 +28,7 @@
     "settings": "Settings",
     "vulnerabilities": "Vulnerabilities",
     "quarantine": "Quarantine",
-    "licensePolicy": "Licences",
+    "policies": "Policies",
     "lookup": "Lookup",
     "setup": "Setup",
     "admin": "Admin",
@@ -2083,6 +2083,101 @@
       "empty": "No licences are marked conditional.",
       "intro": "These licences are permitted, but your organization recorded a condition on each. Read the condition before depending on a package that carries one.",
       "noCondition": "No condition recorded — ask an administrator."
+    }
+  },
+  "policies": {
+    "title": "Policies",
+    "tabs": {
+      "licences": "Licences",
+      "controls": "Controls"
+    },
+    "blockReasonValue": "Block reason header: {token}.",
+    "offBadge": "Off",
+    "allowlistMode": {
+      "what": "Restricts installs and publishes to packages on your organization's PURL allowlist — a separate control from the licence lists on the Licences tab."
+    },
+    "columns": {
+      "control": "Control",
+      "setting": "Setting",
+      "what": "What it does"
+    },
+    "groups": {
+      "vulnerability": "Vulnerabilities & malware",
+      "lifecycle": "Package lifecycle",
+      "provenance": "Signatures & provenance",
+      "access": "Access & licence"
+    },
+    "warnings": {
+      "inactive": "Not refreshing — still enforces on data already recorded.",
+      "unbackedSignature": "Set to Block with no trust anchor configured — this blocks every package of this ecosystem."
+    },
+    "glossary": {
+      "ssvc": "CISA's Stakeholder-Specific Vulnerability Categorization — an exploitation assessment (active/none/unknown) that grades far more CVEs than the KEV catalogue.",
+      "cvss": "Common Vulnerability Scoring System — a 0–10 severity score. A ceiling at 10 accepts every score, so the gate reads as Off.",
+      "epssPercentile": "Where this version's highest EPSS score ranks among every CVE FIRST.org scores — a relative position, not a probability."
+    },
+    "controls": {
+      "malicious": {
+        "name": "Malicious package",
+        "what": "Keeps third-party components identified as malicious out of your supply chain. Covers confirmed malware, not ordinary vulnerabilities."
+      },
+      "malicious_live": {
+        "name": "Malicious (live)",
+        "what": "A stricter malware check: refuses a version only when continuous monitoring confirms the malicious code is present in that exact release."
+      },
+      "kev": {
+        "name": "KEV",
+        "what": "Refuses components with a vulnerability confirmed as exploited in the wild, so known-exploited risk is dealt with before the component is used."
+      },
+      "kev_ransomware": {
+        "name": "KEV ransomware",
+        "what": "A narrower known-exploited check: refuses components whose vulnerability has been used in ransomware campaigns."
+      },
+      "deprecated": {
+        "name": "Deprecated",
+        "what": "Keeps components their maintainers have deprecated out of your builds. 'Block new' refuses only versions not yet cached; 'Block all' also refuses cached ones."
+      },
+      "revoked": {
+        "name": "Revoked",
+        "what": "Refuses a version its upstream source has withdrawn since it was cached, so retracted releases don't linger in your builds."
+      },
+      "install_script": {
+        "name": "Install script",
+        "what": "Refuses components that run code during install, a common route to compromising build and developer environments."
+      },
+      "ssvc_exploitation": {
+        "name": "Active exploitation (SSVC)",
+        "what": "Refuses components whose vulnerability is assessed as under active exploitation. Covers more than the known-exploited list. Requires the vulnerability tracker."
+      },
+      "release_age": {
+        "name": "Release age",
+        "what": "Holds newly published versions for a set period before they can be consumed, leaving time for a malicious or faulty release to be caught."
+      },
+      "vuln_score": {
+        "name": "CVSS score",
+        "what": "Sets the highest vulnerability severity a component may carry and still enter your environment."
+      },
+      "epss": {
+        "name": "EPSS probability",
+        "what": "Sets a risk threshold on how likely a component's vulnerabilities are to be exploited."
+      },
+      "epss_percentile": {
+        "name": "EPSS percentile",
+        "what": "Sets the exploitation-likelihood threshold as a relative rank, so it stays consistent when the scoring model is recalibrated."
+      },
+      "provenance": {
+        "name": "Signature & provenance",
+        "what": "Verifies each component's signature or build attestation against your organization's trusted keys before it is served, per ecosystem."
+      },
+      "license": {
+        "name": "Licence",
+        "what": "Enforces your approved-licence policy: refuses components whose declared licence is blocked, or missing where the ecosystem always declares one."
+      }
+    },
+    "thresholds": {
+      "above": "Blocks above {value}",
+      "releaseAge": "Holds new versions for {value}",
+      "percentile": "Blocks above the {value} percentile"
     }
   },
   "licenseClassification": {

@@ -6,6 +6,7 @@
   import { user, bootstrapInfo } from '../lib/store.js'
   import { applyUserContext } from '../lib/userContext.js'
   import { reportPageLoad } from '../lib/pageLoad.js'
+  import { readQuery, writeQuery } from '../lib/tableState.js'
   import ErrorBanner from '../lib/ErrorBanner.svelte'
   import Skeleton from '../lib/Skeleton.svelte'
   import { formatDateShort } from '../lib/format.js'
@@ -31,6 +32,16 @@
 
   /** The route transition this page was mounted for, supplied by RouteView. @type {number | null} */
   export let pageToken = null
+
+  // Deep-link support: Policies' "Change in Settings" link (and any other caller) can land
+  // directly on a tab via ?tab=. Every switchTab() call writes the current tab back through the
+  // same defaults (Risk.svelte's tab-in-URL pattern), so ?tab= always names the tab actually on
+  // screen instead of freezing at whatever a deep link first requested — a reload after manually
+  // clicking to a different tab must land back on THAT tab, not silently return to the one the
+  // page was opened on.
+  const TAB_DEFAULTS = { tab: 'general' }
+  const requestedTab = readQuery(TAB_DEFAULTS).tab
+  let appliedRequestedTab = false
 
   let tab = 'general'
   let settings = null, retention = null, instanceMax = null, proxySettings = null
@@ -122,6 +133,7 @@
 
   async function switchTab(key) {
     tab = key
+    writeQuery({ tab: key }, TAB_DEFAULTS)
     error = ''; success = ''
     if (key === 'gates') {
       if (!allowlistLoaded) loadAllowlist()
@@ -498,6 +510,22 @@
       { key: 'metrics',  label: 'settings.tabs.metrics' },
     ] : []),
   ]
+
+  // Applies the ?tab= deep link once tabKeys has resolved enough to validate it — a requested
+  // tab this role/mode cannot see (an admin-only or instance-only tab requested by a member, or
+  // before $user/$bootstrapInfo have loaded) falls back to the 'general' default rather than
+  // switching to a tab whose form would then error. One-shot: only ever runs once, so a later
+  // manual tab click is never overridden back to the URL's original value.
+  $: if (!appliedRequestedTab && tabKeys.length > 0) {
+    // The read that makes this assignment meaningful is the `!appliedRequestedTab` guard
+    // above, on this reactive statement's NEXT re-run — eslint's single-pass analysis can't see
+    // across Svelte's reactive re-execution, so it reads as dead within this one invocation.
+    // eslint-disable-next-line no-useless-assignment
+    appliedRequestedTab = true
+    if (requestedTab !== 'general' && tabKeys.some(k => k.key === requestedTab)) {
+      switchTab(requestedTab)
+    }
+  }
 
   let banners = [], bannersLoaded = false, bannerError = ''
   let newBanner = { severity: 'info', body: '', linkUrl: '', linkLabel: '', targetRole: 'all', startsAt: '', endsAt: '', enabled: true }

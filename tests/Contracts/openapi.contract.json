@@ -1007,6 +1007,16 @@
         }
       }
     },
+    "/api/v1/policies": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/api/v1/projects": {
       "operations": {
         "get": {

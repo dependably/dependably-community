@@ -211,6 +211,7 @@ describe('endpoint contract', () => {
     ['removeUser', () => api.removeUser('u1'), 'DELETE', '/api/v1/users/u1'],
     ['updateUserRole', () => api.updateUserRole('u1', 'admin'), 'PATCH', '/api/v1/users/u1/role'],
     ['getSetup', () => api.getSetup('npm'), 'GET', '/api/v1/setup/npm'],
+    ['getPolicies', () => api.getPolicies(), 'GET', '/api/v1/policies'],
     ['getLicensePolicy', () => api.getLicensePolicy(), 'GET', '/api/v1/license-policy'],
     ['setLicenseMode', () => api.setLicenseMode('block'), 'PUT', '/api/v1/license-policy/mode'],
     ['addLicenseAllow', () => api.addLicenseAllow('MIT'), 'POST', '/api/v1/license-policy/allowlist'],

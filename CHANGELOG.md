@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-09-23
+
+### Added
+
+- **Policies page.** A new sidebar page, visible to every role that can browse packages, shows the
+  organization's policies read-only. The **Licences** tab lists the licence enforcement mode and
+  the allowed, conditional, and blocked licences. The **Controls** tab lists each control that
+  can refuse a download (malicious packages, known-exploited and actively exploited
+  vulnerabilities, CVSS and EPSS thresholds, deprecation, revocation, release age, install
+  scripts, signature and provenance, licence) with its current setting. Each control's hover tip
+  names the `X-Dependably-Block-Reason` value a refused request carries, so a developer who hits
+  a 403 can find the control that refused it. Backed by `GET /api/v1/policies`, which requires
+  `read:packages`. It is a narrower projection than the settings endpoints and carries no upstream
+  URLs, credentials, trust-anchor material, or allowlist patterns.
+
+### Changed
+
+- **`APEX_HOST` sets the apex hostname again, as an optional override.** The apex (the host that
+  serves the system administrator in `DEPLOYMENT_MODE=multi`, whose subdomains are the tenants,
+  and which host-header filtering admits) is still the host portion of `BASE_URL` by default, and
+  a deployment that sets only `BASE_URL` sees no change. When `APEX_HOST` is set to a non-blank
+  value it takes precedence, for tenant resolution, the `AllowedHosts` allowlist, and the apex
+  reported by the bootstrap endpoint alike. It was previously read, warned about as deprecated,
+  and ignored; that startup warning is gone. A blank value falls back to `BASE_URL`. Setting it to
+  a loopback name (`localhost`) is taken literally and leaves no usable apex, which fails host
+  filtering closed to loopback the same way an unset `BASE_URL` does.
+
+### Fixed
+
+- **Action required — three controls were not enforced on a proxy first fetch.** `kev_ransomware`,
+  `ssvc_exploitation`, and `epss_percentile` were enforced when a cached version was served, but
+  not when a version was fetched from upstream for the first time, so the first download of a
+  version those controls should refuse went through. All three are now enforced on first fetch
+  as well. An organization with any of them enabled may see downloads refused
+  that previously succeeded; the refusals carry the matching `X-Dependably-Block-Reason`.
+- **Info tips inside tables showed nothing.** The hover bubble was drawn inside its table cell,
+  which clips overflow, so a tip in a table row was cut off. The bubble is now positioned against
+  the viewport, flips below the icon when there is no room above, and stays inside the window.
+
 ## [0.12.1] - 2026-09-21
 
 ### Fixed

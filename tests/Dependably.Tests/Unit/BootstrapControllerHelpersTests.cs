@@ -35,8 +35,7 @@ public sealed class BootstrapControllerHelpersTests
     }
 
     // ── ResolveApexHost ───────────────────────────────────────────────────────
-    // The apex hostname is derived solely from BASE_URL (host portion only).
-    // APEX_HOST is no longer read; these tests cover the BASE_URL derivation paths.
+    // The apex hostname is APEX_HOST when set, otherwise the host portion of BASE_URL.
 
     [Fact]
     public void ResolveApexHost_DerivesHostFromFullBaseUrl()
@@ -78,9 +77,29 @@ public sealed class BootstrapControllerHelpersTests
     [Fact]
     public void ResolveApexHost_BaseUrlOnly_NoApexHostKey()
     {
-        // BASE_URL is the single source of truth; APEX_HOST is not consulted.
+        // Without APEX_HOST the apex is the BASE_URL host, which is how most deployments run.
         string? apex = BootstrapController.ResolveApexHost(Cfg(
             ("BASE_URL", "https://real.example.com")));
+        Assert.Equal("real.example.com", apex);
+    }
+
+    [Fact]
+    public void ResolveApexHost_ApexHostSet_OverridesBaseUrl()
+    {
+        string? apex = BootstrapController.ResolveApexHost(Cfg(
+            ("BASE_URL", "https://www.example.com"),
+            ("APEX_HOST", "tenants.example.com")));
+        Assert.Equal("tenants.example.com", apex);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ResolveApexHost_ApexHostBlank_FallsBackToBaseUrl(string apexHost)
+    {
+        string? apex = BootstrapController.ResolveApexHost(Cfg(
+            ("BASE_URL", "https://real.example.com"),
+            ("APEX_HOST", apexHost)));
         Assert.Equal("real.example.com", apex);
     }
 }

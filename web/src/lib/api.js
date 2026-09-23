@@ -544,6 +544,13 @@ export const api = {
   // Setup snippets
   getSetup: (ecosystem) => req('GET', `/setup/${ecosystem}`),
 
+  // Member-visible policy summary: licence policy plus every serve-path block-gate control,
+  // keyed by the same reason token the 403 X-Dependably-Block-Reason header carries. read:packages
+  // (member and above, or a pull-scoped token) — a narrower disclosure than /proxy-settings or
+  // /settings (read:tenant), which also carry upstream URLs, credentials, and anchor material
+  // this endpoint deliberately omits.
+  getPolicies: () => req('GET', '/policies'),
+
   // License policy. Mode is one of 'off' | 'warn' | 'block'. Allow/block lists are
   // SPDX identifiers; DELETE keys on the SPDX itself (not an opaque id).
   //

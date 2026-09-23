@@ -29,7 +29,7 @@
   import Vulnerabilities from './pages/Vulnerabilities.svelte'
   import Quarantine from './pages/Quarantine.svelte'
   import Risk from './pages/Risk.svelte'
-  import LicensePolicy from './pages/LicensePolicy.svelte'
+  import Policies from './pages/Policies.svelte'
   import Lookup from './pages/Lookup.svelte'
   import Dashboard from './pages/Dashboard.svelte'
   import Profile from './pages/Profile.svelte'
@@ -276,8 +276,8 @@
           <Quarantine pageToken={token} />
         {:else if page === 'risk'}
           <Risk pageToken={token} />
-        {:else if page === 'license-policy'}
-          <LicensePolicy pageToken={token} />
+        {:else if page === 'policies'}
+          <Policies pageToken={token} />
         {:else if page === 'lookup'}
           <Lookup />
         {:else if page === 'profile'}

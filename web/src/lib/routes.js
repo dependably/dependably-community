@@ -25,7 +25,8 @@ const TENANT_STATIC = [
   ['vulnerabilities',   '/vulnerabilities'],
   ['quarantine',        '/quarantine'],
   ['risk',              '/risk'],
-  ['license-policy',    '/license-policy'],
+  ['policies',          '/policies'],
+  ['policies',          '/license-policy'], // alias — canonical is '/policies'
   ['lookup',            '/lookup'],
   ['profile',           '/profile'],
   ['join',              '/join'],

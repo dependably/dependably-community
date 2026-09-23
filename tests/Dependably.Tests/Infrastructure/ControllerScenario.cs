@@ -454,11 +454,7 @@ public sealed class ControllerScenario : IAsyncDisposable
         var scenarioTrustStore = new StubPerOrgTrustAnchorStore();
         var npmKeyStore = new Dependably.Protocol.Provenance.NpmSignatureKeyStore(scenarioTrustStore);
         var nugetTrustStore = new Dependably.Protocol.Provenance.NuGetSignatureTrustStore(scenarioTrustStore);
-        var orgSettings = new OrgSettingsController(
-            orgSettingsRepo, guard, audit, orgAuditEmitter,
-            new ConfigurationBuilder().Build(), problems,
-            new AirGapMode(new ConfigurationBuilder().Build()),
-            new RequireMfaMode(new ConfigurationBuilder().Build()),
+        var anchorStatusResolver = new Dependably.Protocol.Provenance.ProvenanceAnchorStatusResolver(
             new Dependably.Protocol.Provenance.NpmProvenanceVerifier(npmKeyStore),
             new Dependably.Protocol.Provenance.NuGetProvenanceVerifier(
                 nugetTrustStore,
@@ -474,10 +470,27 @@ public sealed class ControllerScenario : IAsyncDisposable
                 Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.MavenProvenanceVerifier>.Instance),
             new Dependably.Protocol.Provenance.TerraformProvenanceVerifier(
                 scenarioTrustStore,
-                Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.TerraformProvenanceVerifier>.Instance),
-            new Dependably.Infrastructure.Sbom.SbomSignatureVerifier(
-                new Dependably.Protocol.Provenance.SbomSignatureKeyStore(scenarioTrustStore)),
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.TerraformProvenanceVerifier>.Instance));
+        var sbomSignatureVerifier = new Dependably.Infrastructure.Sbom.SbomSignatureVerifier(
+            new Dependably.Protocol.Provenance.SbomSignatureKeyStore(scenarioTrustStore));
+        // Shared between OrgSettingsController and PolicyController below — both read the same
+        // instance-level air-gap/disabled-jobs posture (empty config: nothing disabled).
+        var airGapMode = new AirGapMode(new ConfigurationBuilder().Build());
+        var orgSettings = new OrgSettingsController(
+            orgSettingsRepo, guard, audit, orgAuditEmitter,
+            new ConfigurationBuilder().Build(), problems,
+            airGapMode,
+            new RequireMfaMode(new ConfigurationBuilder().Build()),
+            anchorStatusResolver,
+            sbomSignatureVerifier,
             new Dependably.Infrastructure.Caching.OrgCacheEpochStore())
+        { ControllerContext = ctx };
+        var policy = new PolicyController(
+            orgSettingsRepo, licenses, guard,
+            new Dependably.Infrastructure.VulnTracker.InstanceVulnTrackerConfig(
+                (_, _) => Task.FromResult<string?>(null), Clock),
+            anchorStatusResolver,
+            airGapMode)
         { ControllerContext = ctx };
         var orgTokens = new OrgTokensController(
             tokens, guard, audit, orgAuditEmitter, problems)
@@ -575,7 +588,8 @@ public sealed class ControllerScenario : IAsyncDisposable
             quarantine,
             cacheArtifacts,
             tenantAccess,
-            blobs);
+            blobs,
+            policy);
     }
 
     /// <summary>NSubstitute mock for the publish pipeline. Override return values on a test to exercise rejection paths.</summary>
@@ -629,7 +643,9 @@ public sealed record ControllerScenarioResult(
     // Backing store for OrgControllerServices' Blobs/BlobStorage (both tiers point at this same
     // instance unless a test constructs its own tiering — see BuildAsync). Exposed so tests can
     // assert directly on physical blob presence/absence rather than only DB-row state.
-    Dependably.Storage.InMemoryBlobStore Blobs) : IAsyncDisposable
+    Dependably.Storage.InMemoryBlobStore Blobs,
+    // Appended last — same positional-record convention as every field above it.
+    PolicyController PolicyController) : IAsyncDisposable
 {
     public IMetadataStore Db => Fixture.Store;
 

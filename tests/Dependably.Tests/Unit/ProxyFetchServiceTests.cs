@@ -5,6 +5,7 @@ using Dependably.Infrastructure.Webhooks;
 using Dependably.Protocol;
 using Dependably.Storage;
 using Dependably.Tests.Infrastructure;
+using Dependably.Tests.Infrastructure.Seeding;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
@@ -921,6 +922,141 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
 
         Assert.Equal(BlockDecision.Allowed, (await svc.RecordAndScanAsync(Request())).Decision);
         Assert.Equal(BlockDecision.Allowed, (await svc.RecordAndScanAsync(Request())).Decision);
+    }
+
+    // ── First-fetch parity for the three sharper exploitation arms ───────────
+    //
+    // BlockGateRequest.ForProxyFirstFetch carries BlockKevRansomwareMode, BlockSsvcExploitationMode,
+    // and MaxEpssPercentileTolerance alongside every other policy field, so a proxy first-fetch
+    // (cache miss) evaluates all three arms exactly like a later cache-HIT (which builds its
+    // request via ForProxyCacheFacts) does. The three tests below each seed the matching advisory
+    // signal directly on the cache_artifact's linked vulnerability row, evict the blob so the next
+    // request re-enters the first-fetch path, and assert the re-fetch is refused — mirroring the
+    // manual-block and revoked-artifact symmetry tests above.
+
+    [Fact]
+    public async Task RecordAndScanAsync_honours_block_kev_ransomware_when_the_blob_was_evicted()
+    {
+        var svc = Build();
+        byte[] bytes = "kev-ransomware-refetch"u8.ToArray();
+        var blob = await SeedBlobAsync(_blobs, bytes);
+
+        ProxyFetchRequest Request() => new(
+            OrgId: "o1", Ecosystem: "npm",
+            PackageName: "ransomed", PurlName: "ransomed",
+            Version: "1.0.0", Purl: "pkg:npm/ransomed@1.0.0",
+            File: "ransomed-1.0.0.tgz", Blob: blob,
+            ExtractLicenses: null,
+            AuditActorId: null, ActorKind: null, SourceIp: "127.0.0.1",
+            MaxOsvScoreTolerance: 10.0,
+            CacheAccess: new CacheAccess("o1", "npm", "ransomed", "1.0.0", "ransomed-1.0.0.tgz",
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact", Origin: CacheAccessOrigin.FirstFetch),
+            BlockKevRansomwareMode: "block");
+
+        // First fetch: no advisory linked yet, so it serves and the cache-plane row appears.
+        Assert.Equal(BlockDecision.Allowed, (await svc.RecordAndScanAsync(Request())).Decision);
+
+        // A ransomware-flagged KEV entry lands against this coordinate afterwards (the
+        // operator's threat-feed refresh), the same timing as the manual-block and revocation
+        // tests above.
+        await using (var conn = await _db.OpenAsync())
+        {
+            string cacheArtifactId = (await conn.ExecuteScalarAsync<string?>(
+                "SELECT id FROM cache_artifact WHERE ecosystem = 'npm' AND name = 'ransomed' AND version = '1.0.0'"))!;
+            string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
+                _db, $"CVE-2026-{Guid.NewGuid():N}", ecosystem: "npm", packageName: "ransomed", isKev: true);
+            await conn.ExecuteAsync(
+                "UPDATE vulnerabilities SET kev_known_ransomware = 1 WHERE id = @vulnId", new { vulnId });
+            await VulnerabilitySeeder.LinkToCacheArtifactAsync(_db, cacheArtifactId, vulnId);
+        }
+
+        // Blob evicted → the next request is a MISS and re-enters the first-fetch path, where
+        // ForProxyFirstFetch's BlockKevRansomwareMode parameter carries the policy through.
+        var second = await svc.RecordAndScanAsync(Request());
+        Assert.Equal(BlockDecision.Blocked, second.Decision);
+    }
+
+    [Fact]
+    public async Task RecordAndScanAsync_honours_block_ssvc_exploitation_when_the_blob_was_evicted()
+    {
+        var svc = Build();
+        byte[] bytes = "ssvc-active-refetch"u8.ToArray();
+        var blob = await SeedBlobAsync(_blobs, bytes);
+
+        ProxyFetchRequest Request() => new(
+            OrgId: "o1", Ecosystem: "npm",
+            PackageName: "actively-exploited", PurlName: "actively-exploited",
+            Version: "1.0.0", Purl: "pkg:npm/actively-exploited@1.0.0",
+            File: "actively-exploited-1.0.0.tgz", Blob: blob,
+            ExtractLicenses: null,
+            AuditActorId: null, ActorKind: null, SourceIp: "127.0.0.1",
+            MaxOsvScoreTolerance: 10.0,
+            CacheAccess: new CacheAccess("o1", "npm", "actively-exploited", "1.0.0", "actively-exploited-1.0.0.tgz",
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact", Origin: CacheAccessOrigin.FirstFetch),
+            BlockSsvcExploitationMode: "block");
+
+        Assert.Equal(BlockDecision.Allowed, (await svc.RecordAndScanAsync(Request())).Decision);
+
+        await using (var conn = await _db.OpenAsync())
+        {
+            string cacheArtifactId = (await conn.ExecuteScalarAsync<string?>(
+                "SELECT id FROM cache_artifact WHERE ecosystem = 'npm' AND name = 'actively-exploited' AND version = '1.0.0'"))!;
+            string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
+                _db, $"CVE-2026-{Guid.NewGuid():N}", ecosystem: "npm", packageName: "actively-exploited");
+            // No tracker connection is configured for this fixture, so FreshnessCutoffAsync
+            // resolves to DateTimeOffset.MinValue and any valid timestamp here reads as fresh.
+            await conn.ExecuteAsync(
+                """
+                UPDATE vulnerabilities
+                SET ssvc_exploitation = 'active', ssvc_checked_at = '2026-01-01T00:00:00Z', ssvc_asserted_at = '2026-01-01T00:00:00Z'
+                WHERE id = @vulnId
+                """,
+                new { vulnId });
+            await VulnerabilitySeeder.LinkToCacheArtifactAsync(_db, cacheArtifactId, vulnId);
+        }
+
+        // Blob evicted → re-enters the first-fetch path, where ForProxyFirstFetch's
+        // BlockSsvcExploitationMode parameter carries the policy through.
+        var second = await svc.RecordAndScanAsync(Request());
+        Assert.Equal(BlockDecision.Blocked, second.Decision);
+    }
+
+    [Fact]
+    public async Task RecordAndScanAsync_honours_max_epss_percentile_tolerance_when_the_blob_was_evicted()
+    {
+        var svc = Build();
+        byte[] bytes = "epss-percentile-refetch"u8.ToArray();
+        var blob = await SeedBlobAsync(_blobs, bytes);
+
+        ProxyFetchRequest Request() => new(
+            OrgId: "o1", Ecosystem: "npm",
+            PackageName: "high-rank", PurlName: "high-rank",
+            Version: "1.0.0", Purl: "pkg:npm/high-rank@1.0.0",
+            File: "high-rank-1.0.0.tgz", Blob: blob,
+            ExtractLicenses: null,
+            AuditActorId: null, ActorKind: null, SourceIp: "127.0.0.1",
+            MaxOsvScoreTolerance: 10.0,
+            CacheAccess: new CacheAccess("o1", "npm", "high-rank", "1.0.0", "high-rank-1.0.0.tgz",
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: "https://upstream.test/artifact", Origin: CacheAccessOrigin.FirstFetch),
+            MaxEpssPercentileTolerance: 0.5);
+
+        Assert.Equal(BlockDecision.Allowed, (await svc.RecordAndScanAsync(Request())).Decision);
+
+        await using (var conn = await _db.OpenAsync())
+        {
+            string cacheArtifactId = (await conn.ExecuteScalarAsync<string?>(
+                "SELECT id FROM cache_artifact WHERE ecosystem = 'npm' AND name = 'high-rank' AND version = '1.0.0'"))!;
+            string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
+                _db, $"CVE-2026-{Guid.NewGuid():N}", ecosystem: "npm", packageName: "high-rank");
+            await conn.ExecuteAsync(
+                "UPDATE vulnerabilities SET epss_percentile = 0.98 WHERE id = @vulnId", new { vulnId });
+            await VulnerabilitySeeder.LinkToCacheArtifactAsync(_db, cacheArtifactId, vulnId);
+        }
+
+        // Blob evicted → re-enters the first-fetch path, where ForProxyFirstFetch's
+        // MaxEpssPercentileTolerance parameter carries the policy through.
+        var second = await svc.RecordAndScanAsync(Request());
+        Assert.Equal(BlockDecision.Blocked, second.Decision);
     }
 
     // ── SHA-1 npm shasum acceptance ──────────────────────────────────────────────

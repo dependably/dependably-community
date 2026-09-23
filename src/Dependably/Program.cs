@@ -197,18 +197,6 @@ public partial class Program
                 "Configuration key Maven:MetadataTtl is deprecated and ignored (configured value: {ConfiguredValue}). Maven metadata caching is now handled by UpstreamClient (single-flight, no TTL).",
                 mavenMetadataTtl);
         }
-
-        // APEX_HOST is no longer read. The apex hostname is derived solely from the host
-        // portion of BASE_URL. Operators who set APEX_HOST need to know it has no effect.
-        string? apexHost = configuration["APEX_HOST"];
-        if (!string.IsNullOrWhiteSpace(apexHost))
-        {
-            Log.Warning(
-                "Configuration key APEX_HOST is deprecated and ignored (configured value: {ConfiguredValue}). " +
-                "The apex hostname is now derived from BASE_URL. Set BASE_URL to your public URL " +
-                "(e.g. https://repo.example.com) — the host portion is used as the apex.",
-                apexHost);
-        }
     }
 
     private static void WarnOnAirGapContradictions(IConfiguration configuration)

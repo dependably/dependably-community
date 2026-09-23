@@ -1703,7 +1703,10 @@ public sealed record BlockGateRequest(
         string? blockRevokedMode,
         string? licenseEnforcementMode,
         string? ownProvenanceStatus = null,
-        string? blockMaliciousLiveMode = null) =>
+        string? blockMaliciousLiveMode = null,
+        string? blockKevRansomwareMode = null,
+        string? blockSsvcExploitationMode = null,
+        double? maxEpssPercentileTolerance = null) =>
         new(orgId, ecosystem, caFacts.Purl ?? string.Empty, string.Empty,
             // OSV findings are keyed by package coordinate, not by bytes — see EvaluateAsync's
             // remark on VulnCheckedAt — so this is the shared row's real stamp, unmasked.
@@ -1719,6 +1722,9 @@ public sealed record BlockGateRequest(
             BlockMaliciousLiveMode: blockMaliciousLiveMode,
             BlockKevMode: blockKevMode,
             MaxEpssTolerance: maxEpssTolerance,
+            BlockKevRansomwareMode: blockKevRansomwareMode,
+            BlockSsvcExploitationMode: blockSsvcExploitationMode,
+            MaxEpssPercentileTolerance: maxEpssPercentileTolerance,
             Origin: "proxy",
             HasInstallScript: caFacts.EffectiveHasInstallScript,
             InstallScriptKind: caFacts.EffectiveInstallScriptKind,

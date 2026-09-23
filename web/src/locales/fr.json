@@ -28,7 +28,7 @@
     "settings": "Paramètres",
     "vulnerabilities": "Vulnérabilités",
     "quarantine": "Quarantaine",
-    "licensePolicy": "Licences",
+    "policies": "Politiques",
     "lookup": "Vérification",
     "setup": "Configuration",
     "admin": "Administration",
@@ -2083,6 +2083,101 @@
       "empty": "Aucune licence marquée conditionnelle.",
       "intro": "Ces licences sont autorisées, mais votre organisation a consigné une condition pour chacune. Lisez la condition avant de dépendre d'un paquet qui en porte une.",
       "noCondition": "Aucune condition enregistrée — contactez un administrateur."
+    }
+  },
+  "policies": {
+    "title": "Politiques",
+    "tabs": {
+      "licences": "Licences",
+      "controls": "Contrôles"
+    },
+    "blockReasonValue": "En-tête de motif de blocage : {token}.",
+    "offBadge": "Désactivé",
+    "allowlistMode": {
+      "what": "Restreint les installations et publications aux paquets sur la liste d'autorisation PURL de votre organisation — un contrôle distinct des listes de licences de l'onglet Licences."
+    },
+    "columns": {
+      "control": "Contrôle",
+      "setting": "Paramètre",
+      "what": "Ce que ça fait"
+    },
+    "groups": {
+      "vulnerability": "Vulnérabilités et logiciels malveillants",
+      "lifecycle": "Cycle de vie du paquet",
+      "provenance": "Signatures et provenance",
+      "access": "Accès et licence"
+    },
+    "warnings": {
+      "inactive": "Ne se rafraîchit plus — s'applique toujours aux données déjà enregistrées.",
+      "unbackedSignature": "Réglé sur Bloquer sans ancre de confiance configurée — cela bloque tous les paquets de cet écosystème."
+    },
+    "glossary": {
+      "ssvc": "La catégorisation de vulnérabilité propre aux parties prenantes (SSVC) de la CISA — une évaluation d'exploitation (active/none/unknown) qui couvre bien plus de CVE que le catalogue KEV.",
+      "cvss": "Le Common Vulnerability Scoring System — un score de gravité de 0 à 10. Un plafond à 10 accepte tous les scores, donc le contrôle se lit comme Désactivé.",
+      "epssPercentile": "Le rang du score EPSS le plus élevé de cette version parmi tous les CVE notés par FIRST.org — une position relative, pas une probabilité."
+    },
+    "controls": {
+      "malicious": {
+        "name": "Paquet malveillant",
+        "what": "Empêche les composants tiers identifiés comme malveillants d'entrer dans votre chaîne d'approvisionnement. Couvre les logiciels malveillants confirmés, pas les vulnérabilités ordinaires."
+      },
+      "malicious_live": {
+        "name": "Malveillance active",
+        "what": "Un contrôle plus strict des logiciels malveillants : refuse une version seulement lorsque la surveillance continue confirme que le code malveillant est présent dans cette version exacte."
+      },
+      "kev": {
+        "name": "KEV",
+        "what": "Refuse les composants ayant une vulnérabilité dont l'exploitation en conditions réelles est confirmée, afin de traiter ce risque avant l'utilisation du composant."
+      },
+      "kev_ransomware": {
+        "name": "KEV rançongiciel",
+        "what": "Un contrôle plus restreint des vulnérabilités exploitées : refuse les composants dont la vulnérabilité a servi dans des campagnes de rançongiciel."
+      },
+      "deprecated": {
+        "name": "Obsolescence",
+        "what": "Tient à l'écart de vos builds les composants que leurs responsables ont rendus obsolètes. « Bloquer les nouveaux » ne refuse que les versions pas encore en cache; « Tout bloquer » refuse aussi celles en cache."
+      },
+      "revoked": {
+        "name": "Révocation",
+        "what": "Refuse une version que sa source en amont a retirée depuis sa mise en cache, afin que les versions retirées ne persistent pas dans vos builds."
+      },
+      "install_script": {
+        "name": "Script d'installation",
+        "what": "Refuse les composants qui exécutent du code pendant l'installation, une voie courante de compromission des environnements de build et de développement."
+      },
+      "ssvc_exploitation": {
+        "name": "Exploitation active (SSVC)",
+        "what": "Refuse les composants dont la vulnérabilité est évaluée comme activement exploitée. Couvre davantage que la liste des vulnérabilités exploitées connues. Nécessite le suivi des vulnérabilités."
+      },
+      "release_age": {
+        "name": "Âge de publication",
+        "what": "Retient les versions nouvellement publiées pendant une période définie avant qu'elles puissent être utilisées, le temps de repérer une version malveillante ou défectueuse."
+      },
+      "vuln_score": {
+        "name": "Score CVSS",
+        "what": "Fixe la gravité de vulnérabilité maximale qu'un composant peut présenter pour entrer dans votre environnement."
+      },
+      "epss": {
+        "name": "Probabilité EPSS",
+        "what": "Fixe un seuil de risque sur la probabilité que les vulnérabilités d'un composant soient exploitées."
+      },
+      "epss_percentile": {
+        "name": "Percentile EPSS",
+        "what": "Fixe le seuil de probabilité d'exploitation sous forme de rang relatif, afin qu'il reste cohérent lorsque le modèle de notation est recalibré."
+      },
+      "provenance": {
+        "name": "Signature et provenance",
+        "what": "Vérifie la signature ou l'attestation de build de chaque composant par rapport aux clés de confiance de votre organisation avant de le servir, par écosystème."
+      },
+      "license": {
+        "name": "Licence",
+        "what": "Applique votre politique de licences approuvées : refuse les composants dont la licence déclarée est bloquée, ou absente pour un écosystème qui en déclare toujours une."
+      }
+    },
+    "thresholds": {
+      "above": "Bloque au-dessus de {value}",
+      "releaseAge": "Retient les nouvelles versions pendant {value}",
+      "percentile": "Bloque au-delà du {value} centile"
     }
   },
   "licenseClassification": {

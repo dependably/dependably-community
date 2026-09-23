@@ -60,8 +60,8 @@ public sealed class SubdomainTenantResolver : ITenantResolver, ITenantSlugCacheI
         _db = db;
         _cache = cache;
 
-        // Apex hostname is derived exclusively from BASE_URL (host portion only).
-        string? apex = BaseUrlHostHelper.ExtractHost(config["BASE_URL"]);
+        // APEX_HOST when set, otherwise the host portion of BASE_URL.
+        string? apex = BaseUrlHostHelper.ResolveApexHost(config);
 
         _apexHost = (apex ?? "")
             .TrimEnd('.');

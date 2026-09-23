@@ -1,4 +1,6 @@
+using System.Reflection;
 using System.Text;
+using Dependably.Storage;
 using Xunit.Abstractions;
 
 namespace Dependably.Tests.Compliance;
@@ -175,15 +177,15 @@ public sealed class ProxyServePostureComplianceTests
                 continue;
             }
 
-            foreach (string arguments in requests)
+            foreach (var site in requests)
             {
                 // A parse that landed somewhere other than a real argument list would silently
                 // report "no UpstreamUrl" for every ecosystem, which is the failure mode this gate
                 // exists to prevent in the code it inspects.
-                Assert.Contains("OrgId:", arguments, StringComparison.Ordinal);
+                Assert.Contains("OrgId:", site.Arguments, StringComparison.Ordinal);
             }
 
-            bool actual = requests.All(a => a.Contains(PinField, StringComparison.Ordinal));
+            bool actual = requests.All(s => s.Arguments.Contains(PinField, StringComparison.Ordinal));
             if (actual != entry.PinsSourceAuthority)
             {
                 drift.Add(
@@ -197,6 +199,233 @@ public sealed class ProxyServePostureComplianceTests
 
         Report(drift, "drifted from the recorded source-pin posture");
     }
+
+    /// <summary>
+    /// The policy fields <c>BlockGateRequest.ForProxyCacheFacts</c> supplies from
+    /// <c>OrgSettings</c> on the cache-hit path — every <c>*Mode</c>/<c>*Tolerance</c> field plus
+    /// <c>MinReleaseAgeHours</c>. <c>ProxyFetchRequest</c> carries the identical set of optional
+    /// parameters so <c>ForProxyFirstFetch</c> can thread them onto the first-fetch gate request
+    /// symmetrically, but "optional" is exactly the trap: a handler that never sets one still
+    /// compiles, and the missing field reaches the gate as null — read as "policy off" — for every
+    /// first fetch, no matter what the org configured.
+    ///
+    /// <para>
+    /// Derived by reflection over <see cref="ProxyFetchRequest"/>'s constructor rather than
+    /// hand-written, so a new defaulted <c>*Mode</c>/<c>*Tolerance</c> parameter is covered the
+    /// moment it lands, instead of silently passing every site until someone remembers to add it
+    /// here too — the exact hand-maintained-list failure mode <c>SourceRoots</c> and
+    /// <c>CardinalityBudgetTests.AllowedAttributeNames</c> exist to avoid elsewhere in this
+    /// codebase. <c>MinReleaseAgeHours</c> is the one field the naming convention cannot catch and
+    /// is appended by hand. Fact fields (<c>PublishedAt</c>, <c>Deprecated</c>, …) and the
+    /// always-required <c>MaxOsvScoreTolerance</c> are excluded: they are either positional-required
+    /// (so a missing one fails to compile) or not policy at all — the <c>HasDefaultValue</c> filter
+    /// is what keeps them out without naming them.
+    /// </para>
+    /// </summary>
+    private static readonly string[] RequiredPolicyFields = DeriveRequiredPolicyFields();
+
+    private static string[] DeriveRequiredPolicyFields()
+    {
+        var ctor = typeof(ProxyFetchRequest).GetConstructors().Single();
+        var modeOrTolerance = ctor.GetParameters()
+            .Where(p => p.HasDefaultValue
+                && (p.Name!.EndsWith("Mode", StringComparison.Ordinal)
+                    || p.Name!.EndsWith("Tolerance", StringComparison.Ordinal)))
+            .Select(p => p.Name!);
+
+        return modeOrTolerance.Append("MinReleaseAgeHours").OrderBy(f => f, StringComparer.Ordinal).ToArray();
+    }
+
+    /// <summary>
+    /// Pins the reflected set against today's known 13 fields, by name, so a change to
+    /// <see cref="ProxyFetchRequest"/>'s naming convention (or an unrelated refactor that happens to
+    /// rename a parameter out of the <c>*Mode</c>/<c>*Tolerance</c> pattern) is caught here rather
+    /// than silently shrinking what <see cref="EachProxyFetchRequestConstruction_SuppliesEveryPolicyFieldTheCacheHitPathReads"/>
+    /// enforces.
+    /// </summary>
+    [Fact]
+    public void DerivedRequiredPolicyFields_MatchesTheKnownFieldSet()
+    {
+        string[] expected =
+        [
+            "BlockDeprecatedMode",
+            "BlockInstallScriptsMode",
+            "BlockKevMode",
+            "BlockKevRansomwareMode",
+            "BlockMaliciousLiveMode",
+            "BlockMaliciousMode",
+            "BlockRevokedMode",
+            "BlockSsvcExploitationMode",
+            "LicenseEnforcementMode",
+            "MaxEpssPercentileTolerance",
+            "MaxEpssTolerance",
+            "MinReleaseAgeHours",
+            "VerifyProvenanceMode",
+        ];
+
+        Assert.Equal(expected.OrderBy(f => f, StringComparer.Ordinal), RequiredPolicyFields);
+    }
+
+    private const string PolicyFieldOptOut = "proxy-request-ok:";
+    private const int PolicyFieldOptOutWindow = 5;
+
+    /// <summary>
+    /// Every <c>new ProxyFetchRequest(</c> construction anywhere in the source tree must supply
+    /// every field in <see cref="RequiredPolicyFields"/>. A field left off compiles fine and defaults
+    /// to null — the same silent-hole shape <c>BlockGateRequestConstructionComplianceTests</c>
+    /// polices one layer further in, at the <c>BlockGateRequest</c> construction itself; this gate
+    /// covers the layer that one cannot see, because a <c>ProxyFetchRequest</c> missing a field is a
+    /// well-formed construction, not a factory-bypass violation.
+    ///
+    /// <para>
+    /// Scanned directly against every C# file rather than routed through the <see cref="Posture"/>
+    /// table's <c>RequestBuilder</c>/<c>Handler</c> entries: <c>nuget-symbols</c> (debug-symbol
+    /// packages, <c>NuGetSymbolProxyFetcher.cs</c>) is a distinct ecosystem discriminator that
+    /// constructs its own <c>ProxyFetchRequest</c> but has no <see cref="Posture"/> row of its own —
+    /// going through the table would silently skip it, and would skip any future request builder
+    /// the same way until someone remembered to add a posture entry too.
+    /// </para>
+    ///
+    /// <para>
+    /// A genuine per-ecosystem inapplicability (the ecosystem structurally never computes the fact
+    /// that field gates on — an install-script signal, a provenance verdict, a deprecation flag)
+    /// opts out with <c>// proxy-request-ok: &lt;FieldName&gt; — &lt;reason&gt;</c> in the 5 lines
+    /// above the construction. A marker naming a field but giving no reason is rejected, same as
+    /// every other opt-out gate in this codebase.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Blind spots.</b> The scan matches the literal text <c>new ProxyFetchRequest(</c>, so a
+    /// target-typed <c>new(...)</c> (legal wherever the assignment target's type is already known,
+    /// e.g. a <c>ProxyFetchRequest</c>-typed local or return) or a <c>with { }</c> copy of an
+    /// existing request escapes it entirely — every construction site in this codebase today uses
+    /// the explicit form, but a future one need not. And the check is presence, not value: a site
+    /// that writes <c>BlockKevMode: null</c> explicitly satisfies the gate exactly as a site that
+    /// reads the real setting does, because both are indistinguishable from source text alone — the
+    /// gate proves a field was threaded, not that it carries the tenant's actual policy.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void EachProxyFetchRequestConstruction_SuppliesEveryPolicyFieldTheCacheHitPathReads()
+    {
+        var files = SourceRoots.AllCSharpFiles().ToList();
+        Assert.True(files.Count >= 50, $"only {files.Count} C# files scanned — the source-root walk likely regressed.");
+
+        var drift = new List<string>();
+        int sitesScanned = 0;
+
+        foreach (string path in files)
+        {
+            string source = File.ReadAllText(path);
+            if (!source.Contains(RequestMarker, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            string[] lines = source.Split('\n');
+            string rel = Path.GetRelativePath(SourceRoots.OwningRoot(path), path);
+
+            foreach (var site in TopLevelProxyFetchRequestArguments(source))
+            {
+                sitesScanned++;
+                // A parse that landed somewhere other than a real argument list would silently
+                // report every field missing at a location that is not really a construction site.
+                Assert.Contains("OrgId:", site.Arguments, StringComparison.Ordinal);
+
+                foreach (string field in RequiredPolicyFields)
+                {
+                    if (site.Arguments.Contains(field + ":", StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    if (HasReasonedOptOutForField(lines, site.LineIndex, field))
+                    {
+                        continue;
+                    }
+
+                    drift.Add(
+                        $"{rel}:{site.LineIndex + 1}: ProxyFetchRequest omits {field} — a proxy first fetch "
+                        + "at this site never evaluates that arm, even when the org has it configured. Pass "
+                        + $"it, or opt out with `// {PolicyFieldOptOut} {field} — <reason>` in the 5 lines "
+                        + "above if this construction site genuinely never carries the signal that field "
+                        + "gates on.");
+                }
+            }
+        }
+
+        // Green-but-blind guard: the codebase has 7 known ProxyFetchRequest construction sites today
+        // (npm, pypi, nuget nupkg, nuget-symbols, maven, terraform, hex). A regressed scan that found
+        // none of them would report zero drift and read as a clean pass.
+        Assert.True(sitesScanned >= 7, $"only {sitesScanned} ProxyFetchRequest construction site(s) found — the scan likely regressed.");
+
+        Report(drift, "omit a first-fetch policy field the cache-hit path reads");
+    }
+
+    /// <summary>Looks for a reasoned <c>// proxy-request-ok: &lt;fieldName&gt; — …</c> opt-out naming
+    /// <paramref name="fieldName"/> exactly, in the <see cref="PolicyFieldOptOutWindow"/> lines above
+    /// <paramref name="siteLineIndex"/>.</summary>
+    private static bool HasReasonedOptOutForField(string[] lines, int siteLineIndex, string fieldName)
+    {
+        for (int i = Math.Max(0, siteLineIndex - PolicyFieldOptOutWindow); i < siteLineIndex && i < lines.Length; i++)
+        {
+            if (TryParsePolicyFieldOptOut(lines[i], out string namedField, out string reason)
+                && string.Equals(namedField, fieldName, StringComparison.Ordinal)
+                && HasReason(reason))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// True when <paramref name="reason"/> carries actual reason text rather than only the
+    /// separator punctuation a marker's author typed and forgot to follow with words — <c>—</c>,
+    /// <c>-</c>, <c>:</c>, or a trailing <c>.</c> all trim away to nothing. Matches the precedent at
+    /// <c>AlertSettingsRetiredSmtpTransportComplianceTests.HasReason</c>.
+    /// </summary>
+    private static bool HasReason(string reason) => reason.Trim(' ', '—', '-', ':', '.').Length > 0;
+
+    /// <summary>
+    /// Parses a <c>// proxy-request-ok: &lt;FieldName&gt; [reason text]</c> line. The first
+    /// whitespace-delimited token after the marker is the field name; everything after that is the
+    /// reason, trimmed. A marker with no field name, or no reason, still parses (returns
+    /// <see langword="true"/>) — an empty reason is what makes the marker unreasoned, not a parse
+    /// failure, so the caller can reject it explicitly rather than silently ignoring it.
+    /// </summary>
+    private static bool TryParsePolicyFieldOptOut(string line, out string field, out string reason)
+    {
+        field = "";
+        reason = "";
+        int idx = line.IndexOf(PolicyFieldOptOut, StringComparison.Ordinal);
+        if (idx < 0)
+        {
+            return false;
+        }
+
+        string rest = line[(idx + PolicyFieldOptOut.Length)..].Trim();
+        int spaceIdx = rest.IndexOfAny([' ', '\t']);
+        field = spaceIdx >= 0 ? rest[..spaceIdx] : rest;
+        reason = spaceIdx >= 0 ? rest[(spaceIdx + 1)..].Trim() : "";
+        return true;
+    }
+
+    /// <summary>
+    /// Scanner self-test: a marker must name the field it opts out AND carry a reason, or it does
+    /// not count. Mirrors the shape of every other opt-out gate's own self-test in this codebase.
+    /// </summary>
+    [Theory]
+    [InlineData("// proxy-request-ok: BlockInstallScriptsMode — Terraform carries no install-script concept.", "BlockInstallScriptsMode", true)]
+    [InlineData("// proxy-request-ok: BlockInstallScriptsMode", "BlockInstallScriptsMode", false)]
+    [InlineData("// proxy-request-ok: BlockInstallScriptsMode   ", "BlockInstallScriptsMode", false)]
+    [InlineData("// proxy-request-ok: BlockInstallScriptsMode —", "BlockInstallScriptsMode", false)]
+    [InlineData("// proxy-request-ok: BlockInstallScriptsMode .", "BlockInstallScriptsMode", false)]
+    [InlineData("// proxy-request-ok: VerifyProvenanceMode — some other field's reason", "BlockInstallScriptsMode", false)]
+    [InlineData("var x = 1;", "BlockInstallScriptsMode", false)]
+    public void PolicyFieldOptOutParser_RequiresTheNamedFieldAndAReason(string line, string field, bool expected) =>
+        Assert.Equal(expected, HasReasonedOptOutForField([line], 1, field));
 
     private static string? Locate(IEnumerable<string> files, string suffix) =>
         files.FirstOrDefault(f => f.Replace('\\', '/').EndsWith(suffix, StringComparison.Ordinal));
@@ -217,15 +446,22 @@ public sealed class ProxyServePostureComplianceTests
     }
 
     /// <summary>
+    /// One <c>new ProxyFetchRequest(</c> construction: its top-level argument text (see
+    /// <see cref="TopLevelProxyFetchRequestArguments"/>) and the zero-based line index the
+    /// construction starts on, so a caller can look for an opt-out marker in the lines above it.
+    /// </summary>
+    internal readonly record struct ProxyFetchRequestSite(string Arguments, int LineIndex);
+
+    /// <summary>
     /// The top-level argument text of every <c>new ProxyFetchRequest(</c> in a source file, with
     /// nested parenthesised groups, comments and string literals elided. Eliding the nesting is the
     /// point: <c>CacheAccess(… UpstreamUrl: …)</c> is an argument of the request and a plain
     /// substring search over the file would let it stand in for the top-level field that source
     /// pinning actually reads.
     /// </summary>
-    internal static IReadOnlyList<string> TopLevelProxyFetchRequestArguments(string source)
+    internal static IReadOnlyList<ProxyFetchRequestSite> TopLevelProxyFetchRequestArguments(string source)
     {
-        var results = new List<string>();
+        var results = new List<ProxyFetchRequestSite>();
         int search = 0;
 
         while (true)
@@ -236,6 +472,7 @@ public sealed class ProxyServePostureComplianceTests
                 return results;
             }
 
+            int lineIndex = CountNewlines(source, start);
             int i = start + RequestMarker.Length;
             var topLevel = new StringBuilder();
             int depth = 1;
@@ -278,9 +515,23 @@ public sealed class ProxyServePostureComplianceTests
                 i++;
             }
 
-            results.Add(topLevel.ToString());
+            results.Add(new ProxyFetchRequestSite(topLevel.ToString(), lineIndex));
             search = i > start ? i : start + RequestMarker.Length;
         }
+    }
+
+    private static int CountNewlines(string source, int upto)
+    {
+        int count = 0;
+        for (int k = 0; k < upto && k < source.Length; k++)
+        {
+            if (source[k] == '\n')
+            {
+                count++;
+            }
+        }
+
+        return count;
     }
 
     // Advances past a string or char literal starting at `open`, honouring backslash escapes.

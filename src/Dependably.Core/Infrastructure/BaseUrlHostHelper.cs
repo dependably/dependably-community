@@ -1,9 +1,16 @@
+using Microsoft.Extensions.Configuration;
+
 namespace Dependably.Infrastructure;
 
 /// <summary>
-/// Derives the apex hostname from <c>BASE_URL</c>. Single source of truth for host
-/// extraction used by tenant resolution, host-header filtering, and the bootstrap endpoint.
+/// Resolves the apex hostname. Single source of truth for the apex used by tenant resolution,
+/// host-header filtering, and the bootstrap endpoint.
 ///
+/// The apex is <c>APEX_HOST</c> when that is set, and otherwise the host portion of
+/// <c>BASE_URL</c>. Most deployments set only <c>BASE_URL</c>; <c>APEX_HOST</c> is an optional
+/// override for a deployment whose tenant apex is not the host it publishes as its base URL.
+///
+/// Both values go through the same parsing rules (string-based to tolerate scheme-less values):
 /// Parsing rules (string-based to tolerate scheme-less values):
 /// 1. Trim; return null if empty.
 /// 2. Strip a leading scheme: if the value contains <c>://</c>, drop everything up to and
@@ -74,15 +81,33 @@ internal static class BaseUrlHostHelper
     }
 
     /// <summary>
+    /// Returns the apex hostname: the host portion of <c>APEX_HOST</c> when that key is set to a
+    /// non-blank value, otherwise the host portion of <c>BASE_URL</c>. Null when neither yields a
+    /// host.
+    /// </summary>
+    internal static string? ResolveApexHost(IConfiguration config)
+        => ExtractHost(config["APEX_HOST"]) ?? ExtractHost(config["BASE_URL"]);
+
+    /// <summary>
+    /// Returns the apex hostname from <see cref="ResolveApexHost"/> when it is a real,
+    /// non-localhost host, otherwise null. Loopback names are not an apex for host filtering or
+    /// subdomain tenancy.
+    /// </summary>
+    internal static string? ResolveUsableApexHost(IConfiguration config)
+    {
+        string? host = ResolveApexHost(config);
+        return IsUsableHost(host) ? host : null;
+    }
+
+    /// <summary>
     /// Returns <c>true</c> when <paramref name="baseUrl"/> contains a non-localhost hostname
     /// suitable for use as a real apex in multi-tenant deployments (i.e. not a local/dev URL).
     /// </summary>
-    internal static bool IsUsableApexHost(string? baseUrl)
-    {
-        string? host = ExtractHost(baseUrl);
-        return host is not null
+    internal static bool IsUsableApexHost(string? baseUrl) => IsUsableHost(ExtractHost(baseUrl));
+
+    private static bool IsUsableHost(string? host) =>
+        host is not null
             and not "localhost"
             and not "127.0.0.1"
             and not "[::1]";
-    }
 }

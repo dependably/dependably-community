@@ -1,4 +1,5 @@
 using Dependably.Infrastructure;
+using Microsoft.Extensions.Configuration;
 
 namespace Dependably.Tests.Unit;
 
@@ -109,5 +110,41 @@ public sealed class BaseUrlHostHelperTests
         }
 
         Assert.Empty(failures);
+    }
+
+    // ── ResolveApexHost / ResolveUsableApexHost: APEX_HOST overrides, BASE_URL is the default ──
+
+    private static IConfiguration Cfg(params (string Key, string? Value)[] entries) =>
+        new ConfigurationBuilder()
+            .AddInMemoryCollection(entries.Select(e => new KeyValuePair<string, string?>(e.Key, e.Value)))
+            .Build();
+
+    [Theory]
+    [InlineData(null, "https://repo.example.com", "repo.example.com")]
+    [InlineData("", "https://repo.example.com", "repo.example.com")]
+    [InlineData("tenants.example.com", "https://repo.example.com", "tenants.example.com")]
+    [InlineData("https://Tenants.Example.com:8443/", "https://repo.example.com", "tenants.example.com")]
+    [InlineData("tenants.example.com", null, "tenants.example.com")]
+    [InlineData(null, null, null)]
+    public void ResolveApexHost_PrefersApexHostOverBaseUrl(string? apexHost, string? baseUrl, string? expected)
+    {
+        Assert.Equal(expected, BaseUrlHostHelper.ResolveApexHost(Cfg(("APEX_HOST", apexHost), ("BASE_URL", baseUrl))));
+    }
+
+    [Fact]
+    public void ResolveUsableApexHost_LocalhostBaseUrl_ApexHostSet_ReturnsApexHost()
+    {
+        Assert.Equal("tenants.example.com", BaseUrlHostHelper.ResolveUsableApexHost(Cfg(
+            ("APEX_HOST", "tenants.example.com"),
+            ("BASE_URL", "http://localhost:8080"))));
+    }
+
+    [Fact]
+    public void ResolveUsableApexHost_LocalhostApexHost_ReturnsNull()
+    {
+        // An explicit override wins even when it names loopback, and loopback is not an apex.
+        Assert.Null(BaseUrlHostHelper.ResolveUsableApexHost(Cfg(
+            ("APEX_HOST", "localhost"),
+            ("BASE_URL", "https://repo.example.com"))));
     }
 }

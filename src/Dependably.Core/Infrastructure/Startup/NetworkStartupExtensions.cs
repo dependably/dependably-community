@@ -97,20 +97,20 @@ public static class NetworkStartupExtensions
     [SuppressMessage("Major Code Smell", "S125:Sections of code should not be commented out", Justification = "Descriptive documentation comment, not commented-out code.")]
     public static void ConfigureDependablyHostFiltering(this WebApplicationBuilder builder)
     {
-        string? apex = ResolveApexHostName(builder.Configuration);
+        string? apex = BaseUrlHostHelper.ResolveUsableApexHost(builder.Configuration);
         string? deploymentMode = (builder.Configuration["DEPLOYMENT_MODE"] ?? "single").Trim().ToLowerInvariant();
 
         List<string> allowed;
         if (string.IsNullOrEmpty(apex))
         {
             // No usable apex — fail closed to the loopback hostnames only. StartupService logs a
-            // warning at startup pointing the operator at BASE_URL.
+            // warning at startup pointing the operator at BASE_URL (or APEX_HOST).
             allowed = ["localhost", "127.0.0.1", "[::1]"];
 
             if (deploymentMode == "multi")
             {
                 // Local multi-tenant dev loop: subdomains of the loopback hostname route by tenant
-                // slug the same way *.apex does once BASE_URL names a real domain.
+                // slug the same way *.apex does once the apex is a real domain.
                 allowed.Add("*.localhost");
             }
         }
@@ -133,19 +133,6 @@ public static class NetworkStartupExtensions
         builder.Configuration["AllowedHosts"] = string.Join(";", allowed);
         builder.Services.PostConfigure<Microsoft.AspNetCore.HostFiltering.HostFilteringOptions>(
             options => options.AllowEmptyHosts = false);
-    }
-
-    // Resolves the apex hostname from the host portion of BASE_URL, excluding localhost variants
-    // which are not a real apex for filtering purposes. Returns null when no non-localhost apex
-    // is available (dev/unconfigured deployments).
-    private static string? ResolveApexHostName(ConfigurationManager configuration)
-    {
-        string? host = BaseUrlHostHelper.ExtractHost(configuration["BASE_URL"]);
-        return host is not null
-            and not "localhost"
-            and not "127.0.0.1"
-            and not "[::1]"
-            ? host : null;
     }
 
     // Extracts just the host keys out of HOST_ROUTING ("host=ecosystem" pairs) for the host-filter

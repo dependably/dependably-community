@@ -878,6 +878,8 @@ public sealed class TerraformController : OrgScopedControllerBase
         OrgSettings? settings, TokenRecord? token)
     {
         var (orgId, providerName, version, _, filename, _) = coordinate;
+        // proxy-request-ok: BlockInstallScriptsMode — provider archives carry no install-script
+        // concept; ScriptDetectionService never computes this signal for terraform.
         return new ProxyFetchRequest(
             OrgId: orgId, Ecosystem: Ecosystem,
             PackageName: providerName, PurlName: providerName,
@@ -907,6 +909,9 @@ public sealed class TerraformController : OrgScopedControllerBase
             BlockKevMode: settings?.BlockKev,
             BlockRevokedMode: settings?.BlockRevoked,
             MaxEpssTolerance: settings?.MaxEpssTolerance,
+            BlockKevRansomwareMode: settings?.BlockKevRansomware,
+            BlockSsvcExploitationMode: settings?.BlockSsvcExploitation,
+            MaxEpssPercentileTolerance: settings?.MaxEpssPercentileTolerance,
             // The upstream-supplied digest re-verified at the trust boundary: the registry
             // protocol's per-platform shasum, or a chained mirror's zh: hash. Null when the upstream
             // published neither, in which case the recorded SHA-256 is an observed fact rather than

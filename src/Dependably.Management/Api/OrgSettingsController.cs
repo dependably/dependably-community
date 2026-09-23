@@ -30,12 +30,11 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
     private readonly ProblemResults _problems;
     private readonly IAirGapMode _airGap;
     private readonly IRequireMfaMode _requireMfa;
-    private readonly Dependably.Protocol.Provenance.NpmProvenanceVerifier _npmProvenance;
-    private readonly Dependably.Protocol.Provenance.NuGetProvenanceVerifier _nugetProvenance;
-    private readonly Dependably.Protocol.Provenance.PyPiProvenanceVerifier _pypiProvenance;
-    private readonly Dependably.Protocol.Provenance.RpmProvenanceVerifier _rpmProvenance;
-    private readonly Dependably.Protocol.Provenance.MavenProvenanceVerifier _mavenProvenance;
-    private readonly Dependably.Protocol.Provenance.TerraformProvenanceVerifier _terraformProvenance;
+    // Shared per-org anchor-configuration snapshot over the six BlockGateService-dispatched
+    // verifiers (npm/nuget/pypi/rpm/maven/terraform) — see ProvenanceAnchorStatusResolver's doc
+    // comment. PolicyController shares this same resolver so both endpoints report anchor
+    // configuration from one source of truth.
+    private readonly Dependably.Protocol.Provenance.ProvenanceAnchorStatusResolver _anchors;
     private readonly Dependably.Infrastructure.Sbom.SbomSignatureVerifier _sbomSignature;
     private readonly OrgCacheEpochStore _cacheEpoch;
 
@@ -52,12 +51,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         ProblemResults problems,
         IAirGapMode airGap,
         IRequireMfaMode requireMfa,
-        Dependably.Protocol.Provenance.NpmProvenanceVerifier npmProvenance,
-        Dependably.Protocol.Provenance.NuGetProvenanceVerifier nugetProvenance,
-        Dependably.Protocol.Provenance.PyPiProvenanceVerifier pypiProvenance,
-        Dependably.Protocol.Provenance.RpmProvenanceVerifier rpmProvenance,
-        Dependably.Protocol.Provenance.MavenProvenanceVerifier mavenProvenance,
-        Dependably.Protocol.Provenance.TerraformProvenanceVerifier terraformProvenance,
+        Dependably.Protocol.Provenance.ProvenanceAnchorStatusResolver anchors,
         Dependably.Infrastructure.Sbom.SbomSignatureVerifier sbomSignature,
         OrgCacheEpochStore cacheEpoch)
 #pragma warning restore S107
@@ -70,12 +64,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         _problems = problems;
         _airGap = airGap;
         _requireMfa = requireMfa;
-        _npmProvenance = npmProvenance;
-        _nugetProvenance = nugetProvenance;
-        _pypiProvenance = pypiProvenance;
-        _rpmProvenance = rpmProvenance;
-        _mavenProvenance = mavenProvenance;
-        _terraformProvenance = terraformProvenance;
+        _anchors = anchors;
         _sbomSignature = sbomSignature;
         _cacheEpoch = cacheEpoch;
     }
@@ -357,6 +346,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
 
         string orgId = CurrentTenantId();
         var settings = await _settings.GetSettingsAsync(orgId, ct);
+        var anchors = await _anchors.ResolveAsync(orgId, ct);
         return Ok(new
         {
             proxy_passthrough_enabled = settings?.ProxyPassthroughEnabled ?? true,
@@ -376,32 +366,32 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
             // Surfaces whether this org has at least one npm SPKI trust anchor configured, so the UI
             // can disable the verify control and explain why when enabling it would be a fail-closed
             // error.
-            npm_signature_keys_configured = await _npmProvenance.IsConfiguredForAsync(orgId, ct),
+            npm_signature_keys_configured = anchors.Npm,
             verify_nuget_signatures = settings?.VerifyNuGetSignatures ?? "off",
             // Surfaces whether this org has at least one NuGet X.509 trust anchor configured, so
             // the UI can disable the verify control and explain why when enabling it would be a
             // fail-closed error.
-            nuget_signature_certs_configured = await _nugetProvenance.IsConfiguredForAsync(orgId, ct),
+            nuget_signature_certs_configured = anchors.NuGet,
             verify_pypi_attestations = settings?.VerifyPyPiAttestations ?? "off",
             // Surfaces whether this org has at least one sigstore_root anchor AND at least one
             // trusted_publisher anchor configured, so the UI can disable the verify control when
             // enabling it would be a fail-closed error.
-            pypi_sigstore_roots_configured = await _pypiProvenance.IsConfiguredForAsync(orgId, ct),
+            pypi_sigstore_roots_configured = anchors.PyPi,
             verify_rpm_signatures = settings?.VerifyRpmSignatures ?? "off",
             // Surfaces whether this org has at least one RPM PGP trust anchor configured, so the UI
             // can disable the verify control and explain why when enabling it would be a fail-closed
             // error.
-            rpm_gpg_key_configured = await _rpmProvenance.IsConfiguredForAsync(orgId, ct),
+            rpm_gpg_key_configured = anchors.Rpm,
             verify_maven_signatures = settings?.VerifyMavenSignatures ?? "off",
             // Surfaces whether this org has at least one Maven PGP trust anchor configured, so the
             // UI can disable the verify control and explain why when enabling it would be a
             // fail-closed error.
-            maven_signature_keys_configured = await _mavenProvenance.IsConfiguredForAsync(orgId, ct),
+            maven_signature_keys_configured = anchors.Maven,
             verify_terraform_signatures = settings?.VerifyTerraformSignatures ?? "off",
             // Surfaces whether this org has at least one Terraform PGP trust anchor configured, so
             // the UI can disable the verify control and explain why when enabling it would be a
             // fail-closed error.
-            terraform_signature_keys_configured = await _terraformProvenance.IsConfiguredForAsync(orgId, ct),
+            terraform_signature_keys_configured = anchors.Terraform,
             verify_sbom_signatures = settings?.VerifySbomSignatures ?? "off",
             // Surfaces whether this org has at least one ('sbom','spki') trust anchor configured
             // (a supplier's pinned author-signature key), so the UI can disable the verify
@@ -680,12 +670,13 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         string? verifyTerraformSignatures = req.VerifyTerraformSignatures;
         string? verifySbomSignatures = req.VerifySbomSignatures;
 
-        bool npmConfigured = await _npmProvenance.IsConfiguredForAsync(orgId, ct);
-        bool nugetConfigured = await _nugetProvenance.IsConfiguredForAsync(orgId, ct);
-        bool pypiConfigured = await _pypiProvenance.IsConfiguredForAsync(orgId, ct);
-        bool rpmConfigured = await _rpmProvenance.IsConfiguredForAsync(orgId, ct);
-        bool mavenConfigured = await _mavenProvenance.IsConfiguredForAsync(orgId, ct);
-        bool terraformConfigured = await _terraformProvenance.IsConfiguredForAsync(orgId, ct);
+        var anchors = await _anchors.ResolveAsync(orgId, ct);
+        bool npmConfigured = anchors.Npm;
+        bool nugetConfigured = anchors.NuGet;
+        bool pypiConfigured = anchors.PyPi;
+        bool rpmConfigured = anchors.Rpm;
+        bool mavenConfigured = anchors.Maven;
+        bool terraformConfigured = anchors.Terraform;
         bool sbomConfigured = await _sbomSignature.IsConfiguredForAsync(orgId, ct);
 
         var error = ValidateOneSigVerifyField(verifyNpmSignatures, "verify_npm_signatures",

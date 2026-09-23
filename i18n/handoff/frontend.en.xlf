@@ -2785,12 +2785,6 @@
         <target>Les témoins de session ne sont pas sécurisés. Pour les déploiements accessibles depuis Internet, configurez un proxy inverse avec TLS et définissez BASE_URL=https://...</target>
       </segment>
     </unit>
-    <unit id="nav.licensePolicy">
-      <segment state="translated">
-        <source>Licences</source>
-        <target>Licences</target>
-      </segment>
-    </unit>
     <unit id="nav.lookup">
       <segment state="translated">
         <source>Lookup</source>
@@ -2819,6 +2813,12 @@
       <segment state="translated">
         <source>Packages</source>
         <target>Paquets</target>
+      </segment>
+    </unit>
+    <unit id="nav.policies">
+      <segment state="translated">
+        <source>Policies</source>
+        <target>Politiques</target>
       </segment>
     </unit>
     <unit id="nav.profile">
@@ -3107,6 +3107,300 @@
       <segment state="translated">
         <source>Use at least {min} characters.</source>
         <target>Utilisez au moins {min} caractères.</target>
+      </segment>
+    </unit>
+    <unit id="policies.allowlistMode.what">
+      <segment state="translated">
+        <source>Restricts installs and publishes to packages on your organization&apos;s PURL allowlist — a separate control from the licence lists on the Licences tab.</source>
+        <target>Restreint les installations et publications aux paquets sur la liste d&apos;autorisation PURL de votre organisation — un contrôle distinct des listes de licences de l&apos;onglet Licences.</target>
+      </segment>
+    </unit>
+    <unit id="policies.blockReasonValue">
+      <segment state="translated">
+        <source>Block reason header: {token}.</source>
+        <target>En-tête de motif de blocage : {token}.</target>
+      </segment>
+    </unit>
+    <unit id="policies.columns.control">
+      <segment state="translated">
+        <source>Control</source>
+        <target>Contrôle</target>
+      </segment>
+    </unit>
+    <unit id="policies.columns.setting">
+      <segment state="translated">
+        <source>Setting</source>
+        <target>Paramètre</target>
+      </segment>
+    </unit>
+    <unit id="policies.columns.what">
+      <segment state="translated">
+        <source>What it does</source>
+        <target>Ce que ça fait</target>
+      </segment>
+    </unit>
+    <unit id="policies.controls.deprecated.name">
+      <segment state="translated">
+        <source>Deprecated</source>
+        <target>Obsolescence</target>
+      </segment>
+    </unit>
+    <unit id="policies.controls.deprecated.what">
+      <segment state="translated">
+        <source>Keeps components their maintainers have deprecated out of your builds. &apos;Block new&apos; refuses only versions not yet cached; &apos;Block all&apos; also refuses cached ones.</source>
+        <target>Tient à l&apos;écart de vos builds les composants que leurs responsables ont rendus obsolètes. « Bloquer les nouveaux » ne refuse que les versions pas encore en cache; « Tout bloquer » refuse aussi celles en cache.</target>
+      </segment>
+    </unit>
+    <unit id="policies.controls.epss_percentile.name">
+      <segment state="translated">
+        <source>EPSS percentile</source>
+        <target>Percentile EPSS</target>
+      </segment>
+    </unit>
+    <unit id="policies.controls.epss_percentile.what">
+      <segment state="translated">
+        <source>Sets the exploitation-likelihood threshold as a relative rank, so it stays consistent when the scoring model is recalibrated.</source>
+        <target>Fixe le seuil de probabilité d&apos;exploitation sous forme de rang relatif, afin qu&apos;il reste cohérent lorsque le modèle de notation est recalibré.</target>
+      </segment>
+    </unit>
+    <unit id="policies.controls.epss.name">
+      <segment state="translated">
+        <source>EPSS probability</source>
+        <target>Probabilité EPSS</target>
+      </segment>
+    </unit>
+    <unit id="policies.controls.epss.what">
+      <segment state="translated">
+        <source>Sets a risk threshold on how likely a component&apos;s vulnerabilities are to be exploited.</source>
+        <target>Fixe un seuil de risque sur la probabilité que les vulnérabilités d&apos;un composant soient exploitées.</target>
+      </segment>
+    </unit>
+    <unit id="policies.controls.install_script.name">
+      <segment state="translated">
+        <source>Install script</source>
+        <target>Script d&apos;installation</target>
+      </segment>
+    </unit>
+    <unit id="policies.controls.install_script.what">
+      <segment state="translated">
+        <source>Refuses components that run code during install, a common route to compromising build and developer environments.</source>
+        <target>Refuse les composants qui exécutent du code pendant l&apos;installation, une voie courante de compromission des environnements de build et de développement.</target>
+      </segment>
+    </unit>
+    <unit id="policies.controls.kev_ransomware.name">
+      <segment state="translated">
+        <source>KEV ransomware</source>
+        <target>KEV rançongiciel</target>
+      </segment>
+    </unit>
+    <unit id="policies.controls.kev_ransomware.what">
+      <segment state="translated">
+        <source>A narrower known-exploited check: refuses components whose vulnerability has been used in ransomware campaigns.</source>
+        <target>Un contrôle plus restreint des vulnérabilités exploitées : refuse les composants dont la vulnérabilité a servi dans des campagnes de rançongiciel.</target>
+      </segment>
+    </unit>
+    <unit id="policies.controls.kev.name">
+      <segment state="translated">
+        <source>KEV</source>
+        <target>KEV</target>
+      </segment>
+    </unit>
+    <unit id="policies.controls.kev.what">
+      <segment state="translated">
+        <source>Refuses components with a vulnerability confirmed as exploited in the wild, so known-exploited risk is dealt with before the component is used.</source>
+        <target>Refuse les composants ayant une vulnérabilité dont l&apos;exploitation en conditions réelles est confirmée, afin de traiter ce risque avant l&apos;utilisation du composant.</target>
+      </segment>
+    </unit>
+    <unit id="policies.controls.license.name">
+      <segment state="translated">
+        <source>Licence</source>
+        <target>Licence</target>
+      </segment>
+    </unit>
+    <unit id="policies.controls.license.what">
+      <segment state="translated">
+        <source>Enforces your approved-licence policy: refuses components whose declared licence is blocked, or missing where the ecosystem always declares one.</source>
+        <target>Applique votre politique de licences approuvées : refuse les composants dont la licence déclarée est bloquée, ou absente pour un écosystème qui en déclare toujours une.</target>
+      </segment>
+    </unit>
+    <unit id="policies.controls.malicious_live.name">
+      <segment state="translated">
+        <source>Malicious (live)</source>
+        <target>Malveillance active</target>
+      </segment>
+    </unit>
+    <unit id="policies.controls.malicious_live.what">
+      <segment state="translated">
+        <source>A stricter malware check: refuses a version only when continuous monitoring confirms the malicious code is present in that exact release.</source>
+        <target>Un contrôle plus strict des logiciels malveillants : refuse une version seulement lorsque la surveillance continue confirme que le code malveillant est présent dans cette version exacte.</target>
+      </segment>
+    </unit>
+    <unit id="policies.controls.malicious.name">
+      <segment state="translated">
+        <source>Malicious package</source>
+        <target>Paquet malveillant</target>
+      </segment>
+    </unit>
+    <unit id="policies.controls.malicious.what">
+      <segment state="translated">
+        <source>Keeps third-party components identified as malicious out of your supply chain. Covers confirmed malware, not ordinary vulnerabilities.</source>
+        <target>Empêche les composants tiers identifiés comme malveillants d&apos;entrer dans votre chaîne d&apos;approvisionnement. Couvre les logiciels malveillants confirmés, pas les vulnérabilités ordinaires.</target>
+      </segment>
+    </unit>
+    <unit id="policies.controls.provenance.name">
+      <segment state="translated">
+        <source>Signature &amp; provenance</source>
+        <target>Signature et provenance</target>
+      </segment>
+    </unit>
+    <unit id="policies.controls.provenance.what">
+      <segment state="translated">
+        <source>Verifies each component&apos;s signature or build attestation against your organization&apos;s trusted keys before it is served, per ecosystem.</source>
+        <target>Vérifie la signature ou l&apos;attestation de build de chaque composant par rapport aux clés de confiance de votre organisation avant de le servir, par écosystème.</target>
+      </segment>
+    </unit>
+    <unit id="policies.controls.release_age.name">
+      <segment state="translated">
+        <source>Release age</source>
+        <target>Âge de publication</target>
+      </segment>
+    </unit>
+    <unit id="policies.controls.release_age.what">
+      <segment state="translated">
+        <source>Holds newly published versions for a set period before they can be consumed, leaving time for a malicious or faulty release to be caught.</source>
+        <target>Retient les versions nouvellement publiées pendant une période définie avant qu&apos;elles puissent être utilisées, le temps de repérer une version malveillante ou défectueuse.</target>
+      </segment>
+    </unit>
+    <unit id="policies.controls.revoked.name">
+      <segment state="translated">
+        <source>Revoked</source>
+        <target>Révocation</target>
+      </segment>
+    </unit>
+    <unit id="policies.controls.revoked.what">
+      <segment state="translated">
+        <source>Refuses a version its upstream source has withdrawn since it was cached, so retracted releases don&apos;t linger in your builds.</source>
+        <target>Refuse une version que sa source en amont a retirée depuis sa mise en cache, afin que les versions retirées ne persistent pas dans vos builds.</target>
+      </segment>
+    </unit>
+    <unit id="policies.controls.ssvc_exploitation.name">
+      <segment state="translated">
+        <source>Active exploitation (SSVC)</source>
+        <target>Exploitation active (SSVC)</target>
+      </segment>
+    </unit>
+    <unit id="policies.controls.ssvc_exploitation.what">
+      <segment state="translated">
+        <source>Refuses components whose vulnerability is assessed as under active exploitation. Covers more than the known-exploited list. Requires the vulnerability tracker.</source>
+        <target>Refuse les composants dont la vulnérabilité est évaluée comme activement exploitée. Couvre davantage que la liste des vulnérabilités exploitées connues. Nécessite le suivi des vulnérabilités.</target>
+      </segment>
+    </unit>
+    <unit id="policies.controls.vuln_score.name">
+      <segment state="translated">
+        <source>CVSS score</source>
+        <target>Score CVSS</target>
+      </segment>
+    </unit>
+    <unit id="policies.controls.vuln_score.what">
+      <segment state="translated">
+        <source>Sets the highest vulnerability severity a component may carry and still enter your environment.</source>
+        <target>Fixe la gravité de vulnérabilité maximale qu&apos;un composant peut présenter pour entrer dans votre environnement.</target>
+      </segment>
+    </unit>
+    <unit id="policies.glossary.cvss">
+      <segment state="translated">
+        <source>Common Vulnerability Scoring System — a 0–10 severity score. A ceiling at 10 accepts every score, so the gate reads as Off.</source>
+        <target>Le Common Vulnerability Scoring System — un score de gravité de 0 à 10. Un plafond à 10 accepte tous les scores, donc le contrôle se lit comme Désactivé.</target>
+      </segment>
+    </unit>
+    <unit id="policies.glossary.epssPercentile">
+      <segment state="translated">
+        <source>Where this version&apos;s highest EPSS score ranks among every CVE FIRST.org scores — a relative position, not a probability.</source>
+        <target>Le rang du score EPSS le plus élevé de cette version parmi tous les CVE notés par FIRST.org — une position relative, pas une probabilité.</target>
+      </segment>
+    </unit>
+    <unit id="policies.glossary.ssvc">
+      <segment state="translated">
+        <source>CISA&apos;s Stakeholder-Specific Vulnerability Categorization — an exploitation assessment (active/none/unknown) that grades far more CVEs than the KEV catalogue.</source>
+        <target>La catégorisation de vulnérabilité propre aux parties prenantes (SSVC) de la CISA — une évaluation d&apos;exploitation (active/none/unknown) qui couvre bien plus de CVE que le catalogue KEV.</target>
+      </segment>
+    </unit>
+    <unit id="policies.groups.access">
+      <segment state="translated">
+        <source>Access &amp; licence</source>
+        <target>Accès et licence</target>
+      </segment>
+    </unit>
+    <unit id="policies.groups.lifecycle">
+      <segment state="translated">
+        <source>Package lifecycle</source>
+        <target>Cycle de vie du paquet</target>
+      </segment>
+    </unit>
+    <unit id="policies.groups.provenance">
+      <segment state="translated">
+        <source>Signatures &amp; provenance</source>
+        <target>Signatures et provenance</target>
+      </segment>
+    </unit>
+    <unit id="policies.groups.vulnerability">
+      <segment state="translated">
+        <source>Vulnerabilities &amp; malware</source>
+        <target>Vulnérabilités et logiciels malveillants</target>
+      </segment>
+    </unit>
+    <unit id="policies.offBadge">
+      <segment state="translated">
+        <source>Off</source>
+        <target>Désactivé</target>
+      </segment>
+    </unit>
+    <unit id="policies.tabs.controls">
+      <segment state="translated">
+        <source>Controls</source>
+        <target>Contrôles</target>
+      </segment>
+    </unit>
+    <unit id="policies.tabs.licences">
+      <segment state="translated">
+        <source>Licences</source>
+        <target>Licences</target>
+      </segment>
+    </unit>
+    <unit id="policies.thresholds.above">
+      <segment state="translated">
+        <source>Blocks above {value}</source>
+        <target>Bloque au-dessus de {value}</target>
+      </segment>
+    </unit>
+    <unit id="policies.thresholds.percentile">
+      <segment state="translated">
+        <source>Blocks above the {value} percentile</source>
+        <target>Bloque au-delà du {value} centile</target>
+      </segment>
+    </unit>
+    <unit id="policies.thresholds.releaseAge">
+      <segment state="translated">
+        <source>Holds new versions for {value}</source>
+        <target>Retient les nouvelles versions pendant {value}</target>
+      </segment>
+    </unit>
+    <unit id="policies.title">
+      <segment state="translated">
+        <source>Policies</source>
+        <target>Politiques</target>
+      </segment>
+    </unit>
+    <unit id="policies.warnings.inactive">
+      <segment state="translated">
+        <source>Not refreshing — still enforces on data already recorded.</source>
+        <target>Ne se rafraîchit plus — s&apos;applique toujours aux données déjà enregistrées.</target>
+      </segment>
+    </unit>
+    <unit id="policies.warnings.unbackedSignature">
+      <segment state="translated">
+        <source>Set to Block with no trust anchor configured — this blocks every package of this ecosystem.</source>
+        <target>Réglé sur Bloquer sans ancre de confiance configurée — cela bloque tous les paquets de cet écosystème.</target>
       </segment>
     </unit>
     <unit id="profile.changePasswordButton">

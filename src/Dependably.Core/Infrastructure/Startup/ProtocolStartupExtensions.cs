@@ -80,6 +80,10 @@ internal static class ProtocolStartupExtensions
         builder.Services.AddSingleton<Dependably.Protocol.Provenance.RpmProvenanceVerifier>();
         builder.Services.AddSingleton<Dependably.Protocol.Provenance.MavenProvenanceVerifier>();
         builder.Services.AddSingleton<Dependably.Protocol.Provenance.TerraformProvenanceVerifier>();
+        // Shared per-org anchor-configuration snapshot over the six verifiers above — see
+        // ProvenanceAnchorStatusResolver's doc comment for which endpoints share it and why SBOM
+        // is out of scope.
+        builder.Services.AddSingleton<Dependably.Protocol.Provenance.ProvenanceAnchorStatusResolver>();
 
         // Maven upstream proxy
         builder.Services.AddSingleton<MavenUpstreamFetcher>();

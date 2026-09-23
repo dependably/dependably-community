@@ -59,14 +59,14 @@ internal static class AuthStartupExtensions
                 // resolver mints, not a second copy of them.
                 builder.Services.AddSingleton<ITenantSlugCacheInvalidator>(
                     sp => (SubdomainTenantResolver)sp.GetRequiredService<ITenantResolver>());
-                // Multi mode resolves tenants by subdomain under an apex host derived from BASE_URL.
-                // Without a real (non-localhost) BASE_URL host, every bare/IP/non-subdomain request
+                // Multi mode resolves tenants by subdomain under the apex host (APEX_HOST, else the
+                // host of BASE_URL). Without a real (non-localhost) apex, every bare/IP/non-subdomain request
                 // falls to apex/uninitialized and per-tenant login methods (forms, SAML) never render.
                 // Warn so the misconfig is visible instead of silently hiding the login page.
-                if (!BaseUrlHostHelper.IsUsableApexHost(builder.Configuration["BASE_URL"]))
+                if (BaseUrlHostHelper.ResolveUsableApexHost(builder.Configuration) is null)
                 {
                     Serilog.Log.Warning(
-                        "DEPLOYMENT_MODE=multi but BASE_URL is unset or contains a localhost host. "
+                        "DEPLOYMENT_MODE=multi but neither APEX_HOST nor BASE_URL names a non-localhost host. "
                         + "Tenants are reached at slug.apexhost; non-subdomain hosts resolve to apex/uninitialized "
                         + "and per-tenant login methods such as SAML will not appear. Set BASE_URL to a "
                         + "non-localhost URL (e.g. https://repo.example.com), or use "

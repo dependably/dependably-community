@@ -979,7 +979,7 @@ public sealed class CacheArtifactServeFacts
     /// install-script is: <c>OrgSettings.VerifyProvenanceMode</c> already returns 'off' for every
     /// ecosystem that does not support signature verification, so the arm this feeds never fires
     /// for them regardless of this value.
-    /// <see cref="Protocol.BlockGateService.ForProxyFirstFetch"/> prefers the tenant's own
+    /// <see cref="Protocol.BlockGateRequest.ForProxyFirstFetch"/> prefers the tenant's own
     /// just-computed verdict over this masked one when it has one (see its
     /// <c>ownProvenanceStatus</c> parameter) — this projection only ever describes the shared row.
     /// </summary>

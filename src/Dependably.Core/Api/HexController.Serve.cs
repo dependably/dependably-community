@@ -234,6 +234,10 @@ public sealed partial class HexController
 
         try
         {
+            // proxy-request-ok: BlockInstallScriptsMode — Hex tarballs carry no install-script
+            // concept; ScriptDetectionService never computes this signal for hex.
+            // proxy-request-ok: VerifyProvenanceMode — no signature/provenance verification is
+            // implemented for Hex; ProvenanceStatus is never computed for this ecosystem.
             return (await _svc.ProxyFetch.RecordAndScanAsync(new ProxyFetchRequest(
                 OrgId: ctx.OrgId, Ecosystem: Ecosystem, PackageName: ctx.Name, PurlName: ctx.Name,
                 Version: ctx.Version, Purl: PurlNormalizer.Hex(ctx.Name, ctx.Version), File: ctx.Filename, Blob: blob,
@@ -254,6 +258,9 @@ public sealed partial class HexController
                 BlockKevMode: settings.BlockKev,
                 BlockRevokedMode: settings.BlockRevoked,
                 MaxEpssTolerance: settings.MaxEpssTolerance,
+                BlockKevRansomwareMode: settings.BlockKevRansomware,
+                BlockSsvcExploitationMode: settings.BlockSsvcExploitation,
+                MaxEpssPercentileTolerance: settings.MaxEpssPercentileTolerance,
                 UpstreamChecksum: checksum,
                 UpstreamUrl: source.Url,
                 LicenseEnforcementMode: settings.LicenseEnforcementMode,

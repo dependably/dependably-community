@@ -98,5 +98,5 @@ public sealed class BootstrapController : ControllerBase
     }
 
     internal static string? ResolveApexHost(IConfiguration config)
-        => BaseUrlHostHelper.ExtractHost(config["BASE_URL"]);
+        => BaseUrlHostHelper.ResolveApexHost(config);
 }

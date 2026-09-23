@@ -22,6 +22,21 @@ describe('routes — tenant table', () => {
       .toBe('?tab=lifecycle&type=blocked&since=30d')
   })
 
+  it('round-trips the policies page, and /license-policy aliases to it', () => {
+    expect(pathFor('policies')).toBe('/policies')
+    expect(routeFor('/policies')).toEqual({ page: 'policies', params: {} })
+    expect(routeFor('/license-policy')).toEqual({ page: 'policies', params: {} })
+  })
+
+  it('policies is not role-restricted — both tabs gate on read:packages', () => {
+    expect(RESTRICTED_PAGES.has('policies')).toBe(false)
+    expect(canAccessPage('policies', 'member')).toBe(true)
+  })
+
+  it('deep-links the policies Controls tab', () => {
+    expect(searchFor('policies', { tab: 'controls' })).toBe('?tab=controls')
+  })
+
   it('pathFor returns the canonical path for a tenant page', () => {
     expect(pathFor('dashboard')).toBe('/')
     expect(pathFor('packages')).toBe('/packages')

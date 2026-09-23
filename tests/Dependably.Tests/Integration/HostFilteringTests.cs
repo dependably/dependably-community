@@ -149,6 +149,32 @@ public sealed class HostFilteringTests
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
     }
 
+    // ── APEX_HOST overrides the apex BASE_URL would give ──────────────────────
+
+    [Fact]
+    public async Task MultiMode_ApexHostOverride_SubdomainOfOverrideAccepted_BaseUrlSubdomainRejected()
+    {
+        await using var factory = new HostFilterFactory(new Dictionary<string, string>
+        {
+            ["BASE_URL"] = $"https://{ApexHost}",
+            ["APEX_HOST"] = "tenants.example.test",
+            ["DEPLOYMENT_MODE"] = "multi",
+        });
+        await factory.InitializeAsync();
+        using var client = factory.CreateClient();
+
+        var overrideReq = new HttpRequestMessage(HttpMethod.Get, "/health");
+        overrideReq.Headers.Host = "myorg.tenants.example.test";
+        var overrideResp = await client.SendAsync(overrideReq);
+
+        var baseUrlReq = new HttpRequestMessage(HttpMethod.Get, "/health");
+        baseUrlReq.Headers.Host = $"myorg.{ApexHost}";
+        var baseUrlResp = await client.SendAsync(baseUrlReq);
+
+        Assert.NotEqual(HttpStatusCode.BadRequest, overrideResp.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, baseUrlResp.StatusCode);
+    }
+
     // ── No apex configured: fails closed to loopback hosts only ───────────────
 
     /// <summary>

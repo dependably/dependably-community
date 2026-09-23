@@ -638,13 +638,14 @@ public sealed class CoreStartupService : IHostedService
 
     private void LogApexHostWarning()
     {
-        if (!BaseUrlHostHelper.IsUsableApexHost(_config["BASE_URL"]))
+        if (BaseUrlHostHelper.ResolveUsableApexHost(_config) is null)
         {
             _logger.LogWarning(
-                "BASE_URL is not set or contains a localhost host. Host header " +
+                "No apex host is configured: APEX_HOST is unset and BASE_URL is not set or contains " +
+                "a localhost host (or APEX_HOST itself names one). Host header " +
                 "filtering falls back to loopback hostnames only (localhost/127.0.0.1/[::1]); any " +
                 "request arriving through a reverse proxy under a real domain is rejected (400) " +
-                "until BASE_URL is configured. Set BASE_URL to your public domain " +
+                "until an apex is configured. Set BASE_URL to your public domain " +
                 "(e.g. https://repo.example.com) so that domain's Host headers are accepted and " +
                 "unknown ones are still rejected before reaching tenant resolution.");
         }

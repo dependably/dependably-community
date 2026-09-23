@@ -19,7 +19,7 @@
     // Risk is deliberately not in restrictedItems: its endpoints gate on read:packages (the same
     // capability that serves the dashboard tiles), so every role can open it.
     { page: 'risk', icon: 'icon-shield', label: 'nav.risk' },
-    { page: 'license-policy', icon: 'icon-license', label: 'nav.licensePolicy' },
+    { page: 'policies', icon: 'icon-license', label: 'nav.policies' },
     { page: 'tokens', icon: 'icon-key', label: 'nav.tokens' },
   ]
   // Role-restricted section. Each link renders only for the roles RESTRICTED_PAGES (routes.js)

@@ -431,7 +431,10 @@ public sealed class ProxyFetchService
                 // evidence than the shared row's (possibly another tenant's, possibly masked)
                 // stored value when this ecosystem computes one at all.
                 ownProvenanceStatus: request.ProvenanceStatus,
-                blockMaliciousLiveMode: request.BlockMaliciousLiveMode), ct);
+                blockMaliciousLiveMode: request.BlockMaliciousLiveMode,
+                blockKevRansomwareMode: request.BlockKevRansomwareMode,
+                blockSsvcExploitationMode: request.BlockSsvcExploitationMode,
+                maxEpssPercentileTolerance: request.MaxEpssPercentileTolerance), ct);
 
         return new ProxyFetchResult(caDecision, sha256, blobKey, caDecision.Arm);
     }
@@ -575,6 +578,16 @@ public sealed record ProxyFetchRequest(
     /// <summary>Tenant policy from <c>org_settings.block_kev</c>: 'off' | 'warn' | 'block'.</summary>
     string? BlockKevMode = null,
     /// <summary>
+    /// Narrower companion to <see cref="BlockKevMode"/>: tenant policy from
+    /// <c>org_settings.block_kev_ransomware</c>: 'off' | 'warn' | 'block'. Independent of
+    /// <see cref="BlockKevMode"/> the same way the cache-hit gate treats the two arms.
+    /// </summary>
+    string? BlockKevRansomwareMode = null,
+    /// <summary>Tenant policy from <c>org_settings.block_ssvc_exploitation</c>: 'off' | 'warn' | 'block'.</summary>
+    string? BlockSsvcExploitationMode = null,
+    /// <summary>Tenant ceiling from <c>org_settings.max_epss_percentile_tolerance</c> (0.0–1.0); null = off.</summary>
+    double? MaxEpssPercentileTolerance = null,
+    /// <summary>
     /// Tenant policy from <c>org_settings.block_revoked</c>: 'off' | 'warn' | 'block'. Only 'block'
     /// denies a version withdrawn upstream. This reaches the first-fetch gate for the same reason
     /// every other mode does: the fetch path is re-entered whenever the cached blob has been
@@ -610,10 +623,9 @@ public sealed record ProxyFetchRequest(
     string? UpstreamUrl = null,
     /// <summary>
     /// Tenant policy from <c>org_settings.license_enforcement_mode</c>: 'off' | 'warn' | 'block'.
-    /// Threaded through to <see cref="Protocol.BlockGateService"/> so a blocklisted-license artifact
-    /// is refused on its FIRST fetch (the proxy first-fetch path builds the block-gate request
-    /// field-by-field here rather than via the factories, so it must carry this explicitly). Only
-    /// 'block' denies; 'warn'/'off'/null keep the license signal advisory.
+    /// Threaded through <see cref="Protocol.BlockGateRequest.ForProxyFirstFetch"/> so a
+    /// blocklisted-license artifact is refused on its FIRST fetch. Only 'block' denies;
+    /// 'warn'/'off'/null keep the license signal advisory.
     /// </summary>
     string? LicenseEnforcementMode = null,
     /// <summary>

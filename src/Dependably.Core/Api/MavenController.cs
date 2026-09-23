@@ -811,6 +811,8 @@ public sealed partial class MavenController : OrgScopedControllerBase
                 ?? throw new InvalidOperationException(
                     $"Blob {result.BlobKey} vanished between fetch and serve."));
 
+        // proxy-request-ok: BlockInstallScriptsMode — Maven artifacts carry no install-script
+        // concept; ScriptDetectionService never computes this signal for maven.
         var fetch = await _svc.ProxyFetch.RecordAndScanAsync(new ProxyFetchRequest(
             OrgId: orgId, Ecosystem: "maven",
             PackageName: resolvedCoords.PackageName, PurlName: resolvedCoords.PackageName,
@@ -866,6 +868,9 @@ public sealed partial class MavenController : OrgScopedControllerBase
             BlockKevMode: settings?.BlockKev,
             BlockRevokedMode: settings?.BlockRevoked,
             MaxEpssTolerance: settings?.MaxEpssTolerance,
+            BlockKevRansomwareMode: settings?.BlockKevRansomware,
+            BlockSsvcExploitationMode: settings?.BlockSsvcExploitation,
+            MaxEpssPercentileTolerance: settings?.MaxEpssPercentileTolerance,
             ProvenanceStatus: provenanceStatus,
             ProvenanceSigner: provenanceSigner,
             VerifyProvenanceMode: verifyProvenanceMode,
